@@ -1,0 +1,245 @@
+name: ci-security
+
+# codecalc is a remote code execution service by design — running untrusted code in 31 languages is
+# its product, which puts it in the highest-risk category of software there is. AUDIT.md found and
+# fixed 2 critical and 3 high vulnerabilities before the first commit. This workflow is what stops
+# them coming back, and it splits into two kinds of job:
+#
+#   STRUCTURAL gates (parity / no-eval / claims) GATE. They are static assertions about files in the
+#   repo with no external feed, so they cannot start failing overnight for reasons outside a PR.
+#
+#   ADVISORY scans (cargo-audit, osv-scanner) are continue-on-error. A transitive CVE disclosed on a
+#   Tuesday should surface, not wall off an unrelated feature PR. gitleaks is the exception: a
+#   committed secret must block, and pattern matching does not depend on anyone else's uptime.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * 1'  # weekly: catch newly disclosed advisories against a static tree
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  zero-eval:
+    # AUDIT.md CRITICAL-01. `truth_table()` used eval() with a restricted globals dict, which is not
+    # a sandbox: `().__class__.__base__.__subclasses__()` reaches subprocess.Popen and executes
+    # commands in the MCP server process — the process holding every API key.
+    #
+    # This runs SEPARATELY from tests/test_security.py, which also checks it. That suite needs a
+    # built binary and a working sandbox, so it cannot run on a bare checkout; a security invariant
+    # that only holds where the toolchain is installed is not an invariant. This needs nothing but
+    # a Python interpreter.
+    name: zero eval/exec (the CRITICAL-01 invariant)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - run: python scripts/check_no_eval.py
+
+  parity:
+    # codecalc keeps the SAME three security-critical constants in two languages: the env allowlist
+    # (the CRITICAL-02 fix), RUNTIME_PATH, and the language registry. Nothing links the Rust copy to
+    # the Python one. Add a variable to the Rust allowlist alone and the Python fallback keeps
+    # leaking it — on precisely the machines where the binary was never built, which is where the
+    # fallback runs.
+    name: python/rust constant parity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - run: python scripts/check_parity.py
+
+  claims:
+    # The README's headline numbers are counts, and counts rot. The first commit shipped README,
+    # AUDIT.md and the registry claiming 31, 33 and 32 languages, and a Cargo.toml declaring MIT
+    # against an Apache-2.0 LICENSE — all simultaneously, all reviewed.
+    name: README claims match the code
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - run: python scripts/check_claims.py
+
+  actionlint:
+    # Expression-level type and ARITY checking plus shellcheck over every embedded `run:` block
+    # (ubuntu-latest ships shellcheck). This workflow set is heavy on inline bash, and a `set -euo
+    # pipefail` script with a subtle quoting bug fails open — it is the failure mode where a gate
+    # reports success having skipped its own check.
+    #
+    # GATES: static analysis of files in this repo, no external feed.
+    name: actionlint (workflow lint + shell + expressions)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: install actionlint v1.7.12 (pinned binary + checksum)
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/actionlint-bin"
+          curl -sSL --fail -o "$RUNNER_TEMP/actionlint.tar.gz" \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $RUNNER_TEMP/actionlint.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP/actionlint-bin" actionlint
+          echo "$RUNNER_TEMP/actionlint-bin" >> "$GITHUB_PATH"
+      - name: actionlint
+        run: actionlint -color
+
+  gitleaks:
+    # GATES. A committed credential must block the PR, and pattern matching needs no network, so
+    # this is the fail-CLOSED half of the secret-scanning pair (trufflehog below is fail-open by
+    # construction). Scans the working tree rather than history: the question on a PR is what
+    # SHIPS, and this repo has one commit anyway.
+    name: gitleaks (committed secrets)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: gitleaks
+        # Image pinned to an immutable digest, not :latest. Refresh with
+        # `docker manifest inspect ghcr.io/gitleaks/gitleaks:latest | grep -m1 digest`.
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:/repo" \
+            ghcr.io/gitleaks/gitleaks@sha256:b109bc5f8f76a38196a3e413704fc5b9e3c32360bce4e4b603bd6f45b3721dbb \
+            detect --no-git --source /repo --no-banner --redact --exit-code 1
+
+  trufflehog:
+    # Complements gitleaks rather than duplicating it: gitleaks asks "does this look like a
+    # credential" from patterns; trufflehog --only-verified asks "is this credential LIVE" by
+    # calling the issuing provider.
+    #
+    # HONEST LIMITATION: verification is a network call, so this FAILS OPEN. If a provider endpoint
+    # is unreachable a live credential degrades to "unverified" and this job stays green. That is
+    # the deliberate trade — a gate that fails closed on someone else's outage trains people to
+    # ignore it. gitleaks above is the fail-closed half and runs on every PR regardless.
+    #
+    # --no-update: the binary is checksum-pinned; letting it self-update at runtime would replace
+    #   the thing that was verified.
+    # --fail: trufflehog exits 0 WITH FINDINGS unless this is passed.
+    # --fail-on-scan-errors: a scan that errors part-way otherwise prints "0 verified", which is
+    #   byte-identical to a clean repo.
+    name: trufflehog (verified live secrets)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: install trufflehog v3.96.0 (pinned binary + checksum)
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/th-bin"
+          curl -sSL --fail -o "$RUNNER_TEMP/th.tar.gz" \
+            https://github.com/trufflesecurity/trufflehog/releases/download/v3.96.0/trufflehog_3.96.0_linux_amd64.tar.gz
+          echo "7105f1cd6577f058a9e39d0578f1a99c8a1e481e4d3512cd8a09acfe22a0fdc0  $RUNNER_TEMP/th.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/th.tar.gz" -C "$RUNNER_TEMP/th-bin" trufflehog
+          echo "$RUNNER_TEMP/th-bin" >> "$GITHUB_PATH"
+      - name: trufflehog
+        run: trufflehog filesystem . --only-verified --no-update --fail --fail-on-scan-errors
+
+  osv-scanner:
+    # Cross-ecosystem dependency scan over EVERY lockfile in the tree.
+    #
+    # This job is the reason uv.lock is committed. Before it existed, osv-scanner found exactly one
+    # lockfile — executor/Cargo.lock, 13 crates — and reported "No issues found". The Python side
+    # (fastmcp, sympy, z3-solver and 75 transitive packages) was not scanned at all, and a scan that
+    # covers 13 of 91 packages produces output indistinguishable from a clean one. With the lockfile
+    # committed the same command reports 91 packages across 2 ecosystems.
+    #
+    # continue-on-error: a newly disclosed transitive advisory should surface, not block an
+    # unrelated PR.
+    name: osv-scanner (every lockfile)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: install osv-scanner v2.4.0 (pinned binary + checksum)
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/osv-bin"
+          curl -sSL --fail -o "$RUNNER_TEMP/osv-bin/osv-scanner" \
+            https://github.com/google/osv-scanner/releases/download/v2.4.0/osv-scanner_linux_amd64
+          echo "15314940c10d26af9c6649f150b8a47c1262e8fc7e17b1d1029b0e479e8ed8a0  $RUNNER_TEMP/osv-bin/osv-scanner" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/osv-bin/osv-scanner"
+          echo "$RUNNER_TEMP/osv-bin" >> "$GITHUB_PATH"
+      - name: osv-scanner
+        # FLOORED. `osv-scanner` over a tree with no lockfiles prints "No issues found" and exits 0
+        # — the exact output of a clean scan. Assert both lockfiles are present first, so deleting
+        # or renaming one fails the job instead of silently shrinking its coverage to nothing.
+        run: |
+          set -euo pipefail
+          for f in uv.lock executor/Cargo.lock; do
+            [ -f "$f" ] || { echo "::error::$f is missing — osv-scanner would report a clean tree it never scanned."; exit 1; }
+          done
+          osv-scanner scan source --recursive .
+
+  cargo-deny:
+    # Licence, ban and registry-source policy for the executor's dependency graph. The crate
+    # compiles into a binary this project DISTRIBUTES (the static musl artifacts), so a copyleft
+    # dependency arriving transitively would be a real distribution problem found at the worst
+    # possible moment. cargo-audit answers a different question and says nothing about licences.
+    #
+    # GATES, unlike cargo-audit below: executor/deny.toml is a static assertion about the graph, so
+    # it cannot start failing overnight the way an advisory feed can. Its own [advisories] section
+    # is left non-fatal so the two jobs do not both hard-fail on the same disclosure.
+    name: cargo-deny (licences, bans, sources)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: ./.github/actions/setup-rust
+      - uses: taiki-e/install-action@ed67fa35ac944f3a9b33f12c4dd43b6f31a47e20 # v2
+        with:
+          tool: cargo-deny
+      - name: cargo deny check
+        working-directory: executor
+        run: cargo deny check
+
+  cargo-audit:
+    name: cargo-audit (RustSec advisories)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: ./.github/actions/setup-rust
+      - uses: taiki-e/install-action@ed67fa35ac944f3a9b33f12c4dd43b6f31a47e20 # v2
+        with:
+          tool: cargo-audit
+      - name: cargo audit
+        working-directory: executor
+        run: cargo audit
+
+  opengrep:
+    # Full-tree SAST on a schedule rather than per-PR: a `--config auto` pass takes minutes and this
+    # repo is 7k lines, so per-PR it would mostly re-report the same known-and-reviewed findings.
+    #
+    # Baseline at wiring time: 5 findings, all `audit` severity, all reviewed —
+    #   1x exec-detected      _worker_bootstrap.py, the documented REPL-subprocess exec
+    #   4x dynamic-urllib-use llm.py / context7.py / complexity.py. Verified NOT exploitable: every
+    #                         URL is a module-level constant plus urlencode()d params, so the
+    #                         file:// scheme this rule guards against is unreachable.
+    # continue-on-error to match: a scheduled scan against a static tree has no PR to block.
+    name: opengrep (scheduled full-tree SAST)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: install opengrep v1.25.0 (pinned binary + checksum)
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/opengrep-bin"
+          curl -sSL --fail -o "$RUNNER_TEMP/opengrep-bin/opengrep" \
+            https://github.com/opengrep/opengrep/releases/download/v1.25.0/opengrep_manylinux_x86
+          echo "9ac4aebb47ba3f7b0d8fc641ac8749cb6c2f253f616131a67d9631e00d4bea33  $RUNNER_TEMP/opengrep-bin/opengrep" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/opengrep-bin/opengrep"
+          echo "$RUNNER_TEMP/opengrep-bin" >> "$GITHUB_PATH"
+      - name: opengrep scan
+        run: opengrep scan --config auto --error .

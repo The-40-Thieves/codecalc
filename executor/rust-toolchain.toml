@@ -1,0 +1,15 @@
+# Single source of truth for the Rust toolchain, read by rustup AND by
+# .github/actions/setup-rust (which parses `channel` out of this file and hands
+# it to dtolnay/rust-toolchain).
+#
+# That indirection is deliberate: dtolnay/rust-toolchain does NOT read this file
+# — it installs the literal string "stable" unless told otherwise. Pin the file
+# without telling the action and you get two different rustup toolchain
+# directories: cargo resolves one, the cross-compilation targets were installed
+# on the other, and every musl build fails with `can't find crate for std`.
+#
+# The version matches what the README requires (Rust 1.97+) and what the
+# committed Cargo.lock was resolved against.
+[toolchain]
+channel = "1.97.1"
+components = ["rustfmt", "clippy"]

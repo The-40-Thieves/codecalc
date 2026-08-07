@@ -1,0 +1,67 @@
+# cargo-deny policy for the sandbox executor.
+#
+# cargo-audit answers one question — "is a dependency subject to a published
+# advisory?" — and says nothing about LICENCES. This crate compiles into
+# bin/codecalc-exec, which is DISTRIBUTED (README documents shipping the static
+# musl builds), and codecalc is Apache-2.0. A dependency arriving
+# transitively under an incompatible licence would be a real distribution
+# problem discovered at the worst possible moment.
+#
+# The allow-list below is derived from the ACTUAL graph, not guessed:
+#
+#   MIT OR Apache-2.0                     itoa, libc, proc-macro2, quote, serde,
+#                                         serde_core, serde_derive, serde_json, syn
+#   Unlicense OR MIT                      memchr
+#   (MIT OR Apache-2.0) AND Unicode-3.0   unicode-ident
+#   MIT                                   zmij
+#   Apache-2.0                            codecalc-exec itself
+#
+# 13 crates total. Adding a dependency whose licence is not listed here fails
+# the gate, which is the point — the diff that adds it is where the licence
+# decision should be made.
+
+[graph]
+# The targets this binary is actually built for: the native host plus the two
+# static musl artifacts in bin/. Restricting the graph keeps windows-only and
+# darwin-only transitive deps out of the licence audit entirely.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+]
+all-features = true
+
+[licenses]
+# High confidence when inferring a licence from text rather than metadata.
+confidence-threshold = 0.93
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "Unicode-3.0",     # unicode-ident's data tables
+    "Unlicense",       # memchr dual-licences under this
+]
+
+[bans]
+# A second copy of a crate at a different version is usually an unnoticed
+# duplicate pulled in by a transitive bump. This graph has 13 crates and no
+# duplicates today, so `deny` is achievable rather than aspirational.
+multiple-versions = "deny"
+# A wildcard version ("*") means the build is not reproducible from Cargo.toml.
+wildcards = "deny"
+
+[advisories]
+# Left at the default (deny) for vulnerabilities but NOT hard-failing the same
+# CVE twice: ci-security runs cargo-audit as a separate, continue-on-error job
+# against the same advisory feed. This job's value is the licence/ban/source
+# policy above, which is a static assertion about the graph and therefore cannot
+# start failing overnight on someone else's disclosure.
+unmaintained = "workspace"
+yanked = "deny"
+ignore = []
+
+[sources]
+# crates.io only. A git dependency would mean shipping code from a mutable ref
+# inside a binary that executes untrusted programs.
+unknown-registry = "deny"
+unknown-git = "deny"

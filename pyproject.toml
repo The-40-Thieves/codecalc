@@ -1,14 +1,10 @@
 [project]
 name = "codecalc"
 version = "0.1.0"
-description = "Universal code + logic calculator for AI models: execute 30 languages, evaluate logic, analyze complexity. Exposed via MCP."
-license = "AGPL-3.0-only"
+description = "Universal code + logic calculator for AI models: execute 31 languages, evaluate logic, analyze complexity. Exposed via MCP."
+license = "Apache-2.0"
 requires-python = ">=3.11"
-dependencies = [
-    "fastmcp>=2.0",
-    "sympy>=1.13",
-    "z3-solver>=4.13",
-]
+dependencies = ["fastmcp>=2.0", "sympy>=1.13", "z3-solver>=4.13"]
 
 [project.scripts]
 codecalc = "codecalc.server:main"
@@ -16,3 +12,87 @@ codecalc = "codecalc.server:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["codecalc"]
+
+# ── ruff ────────────────────────────────────────────────────────────────────
+# This config exists so `ruff check` is a GATE rather than a report. Before it,
+# an unconfigured run produced 65 findings on correct code and AUDIT.md recorded
+# "0 non-policy findings" — a judgement that lived only in prose, so nobody
+# cloning the repo could tell which findings were reviewed and which were new.
+#
+# Every entry in `ignore` below was derived by reading the actual findings, and
+# each carries the reason. The residual on codecalc/ and tests/ is a genuine 0,
+# so a NEW finding of any selected rule fails CI.
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+# Deliberately broader than ruff's default (E4,E7,E9,F). The default would not
+# have caught a single one of the security-relevant rules below.
+#
+# NOT selected: the PLR complexity family (PLR0911/0912/0913/0915/0917/2004).
+# Those are opinions about shape — 31 magic-value comparisons and 8 "too many
+# arguments" on an MCP server whose tools ARE wide keyword APIs. Reaching zero
+# would mean restructuring working code to satisfy a metric, so gating on them
+# would buy churn, not correctness.
+select = [
+    "E", "W",    # pycodestyle
+    "F",         # pyflakes
+    "I",         # import sorting
+    "UP",        # pyupgrade — already at zero, keeps it there
+    "B",         # bugbear
+    "C4",        # comprehensions
+    "SIM",       # simplify
+    "S",         # bandit — the security family; see the per-rule notes below
+    "RUF",       # ruff-specific
+    "PTH",       # pathlib over os.path
+    "ISC", "ICN", "PIE", "TID",
+    "ASYNC",     # async correctness (the streaming tool is async)
+    "PLE",       # pylint ERRORS only, not the complexity metrics
+]
+ignore = [
+    # ── style, not correctness ──────────────────────────────────────────────
+    "E501",     # line length: prose comments and doc tables are deliberately long
+    "E741",     # `l` as a loop var over a list of languages, 4 sites
+    "B905",     # zip(strict=) — every zip here is over equal-length sequences
+    "SIM105",   # contextlib.suppress over try/except/pass — see S110 below
+    "SIM108",   # ternary instead of if/else — hurts readability at these sites
+    "RUF001",   # "ambiguous" unicode: the em dashes and arrows in docstrings are intentional
+    "RUF005",   # list concat over unpacking — 2 sites building argv incrementally
+    "ASYNC109", # `timeout` param on an async def: execute_code_stream's timeout is
+                # part of its MCP tool SCHEMA (the model passes it), not an internal
+                # deadline, so it cannot be replaced with asyncio.timeout()
+    "ASYNC240", # blocking Path method in an async def: ONE site, unlinking a small
+                # stdin temp file after the child exits. Satisfying it means taking
+                # a trio/anyio dependency for a single syscall, in a coroutine that
+                # already does blocking json.loads on the child's output.
+
+    # ── bandit rules that are this project's PURPOSE, not a defect ──────────
+    # codecalc is a code EXECUTION service. Spawning subprocesses is the product.
+    # S602 (shell=True) is NOT ignored and stays armed — that is the rule that
+    # actually matters here, and the codebase has zero of them.
+    "S603",     # subprocess call without shell=True — every call site is argv, by design
+    "S607",     # partial executable path — resolution is via registry.RUNTIME_PATH on purpose
+
+    # ── reviewed in AUDIT.md LOW-08, kept with reasons ─────────────────────
+    "S110",     # try/except/pass: best-effort sandbox hardening (setrlimit, unlink,
+                # probe). Each site was reviewed; none swallows an actionable error.
+    "S112",     # try/except/continue: same, in the tempdir-nonce retry loop
+    "S102",     # exec(): ONE site, codecalc/_worker_bootstrap.py, running user code
+                # inside the isolated REPL subprocess. Documented in AUDIT.md item 1.
+                # scripts/check_no_eval.py is the real gate on this — it allows exec
+                # ONLY in that file, where a blanket ruff ignore cannot express that.
+    "S310",     # urllib with a non-literal URL: verified — llm.py and context7.py
+                # build every URL from a module-level constant plus urlencode()d
+                # params, so the scheme is never caller-controlled and the file://
+                # read this rule guards against is unreachable.
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests deliberately assign results they only assert on indirectly, print
+# progress, and import after a sys.path insert.
+"tests/*" = ["S101", "T201", "F841", "E402"]
+"scripts/*" = ["T201"]

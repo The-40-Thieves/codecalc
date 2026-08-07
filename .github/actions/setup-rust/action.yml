@@ -1,0 +1,72 @@
+name: setup-rust
+description: >-
+  Install the Rust toolchain pinned by executor/rust-toolchain.toml (single source of truth), with
+  this job's targets, then assert those targets actually landed on the toolchain cargo resolves.
+
+# Why derive the channel instead of writing `toolchain: stable`:
+#
+# dtolnay/rust-toolchain does NOT read rust-toolchain.toml. It runs
+# `rustup toolchain install <toolchain>` where <toolchain> defaults to the literal "stable", then
+# `rustup default <toolchain>`. rustup, meanwhile, resolves cargo inside executor/ VIA the toolchain
+# file. Pin the file without telling the action and you get two different rustup directories: cargo
+# uses one, the cross-compilation targets were installed on the other, and every musl build fails
+# with `error[E0463]: can't find crate for std`. Nothing reconciles them.
+#
+# codecalc ships two static musl binaries as its portability story, so the cross-build path is not
+# incidental here — it is the feature.
+
+inputs:
+  targets:
+    description: Comma-separated target triples this job needs installed.
+    required: false
+    default: ''
+  components:
+    description: Comma-separated extra components beyond the toolchain file's.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    # Absolute path via github.workspace, not a relative one: callers may set a job-level
+    # defaults.run.working-directory, so this step's cwd is not necessarily the repo root.
+    - name: read pinned channel
+      id: pin
+      shell: bash
+      run: |
+        set -euo pipefail
+        f="${{ github.workspace }}/executor/rust-toolchain.toml"
+        ch=$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$f" | head -n1)
+        # Fail loudly rather than falling through to an empty `toolchain:`, which the action would
+        # silently treat as its "stable" default — i.e. exactly the bug this action exists to stop.
+        [ -n "$ch" ] || { echo "::error::no [toolchain] channel found in $f"; exit 1; }
+        echo "channel=$ch" >> "$GITHUB_OUTPUT"
+        echo "pinned channel: $ch"
+
+    - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable (pinned by SHA)
+      with:
+        toolchain: ${{ steps.pin.outputs.channel }}
+        targets: ${{ inputs.targets }}
+        components: ${{ inputs.components }}
+
+    # The guard. Runs FROM executor/ so rustup answers for the file-resolved toolchain rather than
+    # the global default, turning a downstream E0463 at link time into a named failure at setup time.
+    - name: assert toolchain coherence
+      shell: bash
+      working-directory: executor
+      env:
+        INPUT_TARGETS: ${{ inputs.targets }}
+      run: |
+        set -euo pipefail
+        echo "active: $(rustup show active-toolchain)"
+        rustc --version
+        installed=$(rustup target list --installed)
+        for t in ${INPUT_TARGETS//,/ }; do
+          if ! grep -qx "$t" <<<"$installed"; then
+            echo "::error::target '$t' is NOT installed on the toolchain cargo resolves in executor/"
+            echo "active: $(rustup show active-toolchain)"
+            echo "installed targets:"; echo "$installed"
+            exit 1
+          fi
+          echo "ok: $t installed on the resolved toolchain"
+        done

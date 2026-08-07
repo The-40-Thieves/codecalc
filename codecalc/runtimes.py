@@ -258,7 +258,7 @@ def status(languages: str | list[str] | None = None) -> dict:
             if want is None or lang in want or info.get("tool") in want:
                 results[lang] = info
 
-    for lang, info in results.items():
+    for info in results.values():
         mgr = info.get("manager")
         cmd = list(UPDATE_COMMANDS.get(mgr, []))
         if mgr == "apt" and info.get("packages"):

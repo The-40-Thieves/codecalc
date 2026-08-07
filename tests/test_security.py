@@ -1,9 +1,11 @@
 """Security regression tests: the two confirmed exploits must stay dead,
 plus sandbox guarantees (env isolation, fork-bomb, output caps, var caps)."""
 import os
+import pathlib
 import sys
 
-sys.path.insert(0, "/home/ubuntu/codecalc")
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
 from codecalc import executor, logic, tools
 
 FAILS = []
@@ -63,10 +65,9 @@ check("output capped at 64KiB", len(r.get("stdout", "")) < 70_000)
 # isolated REPL subprocess (allowlisted env, separate process group) — the
 # same threat model as the Rust executor, never in the server process.
 import ast
-import pathlib
 
 bad = []
-for p in pathlib.Path("/home/ubuntu/codecalc/codecalc").rglob("*.py"):
+for p in (REPO_ROOT / "codecalc").rglob("*.py"):
     if p.name == "_worker_bootstrap.py":
         continue  # documented: exec in the isolated worker subprocess only
     tree = ast.parse(p.read_text())

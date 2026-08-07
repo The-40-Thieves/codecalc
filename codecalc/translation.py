@@ -192,7 +192,7 @@ def compare_edge_cases(snippets: dict[str, str],
         # divergence = outputs differ, or error-status differs
         if len(row["runs"]) > 1:
             behaviors = set()
-            for lang, r in row["runs"].items():
+            for r in row["runs"].values():
                 behaviors.add((r["ok"], tuple(sorted(r["stdout"].splitlines()))))
             if len(behaviors) > 1:
                 divergences.append({"input": stdin[:60],
