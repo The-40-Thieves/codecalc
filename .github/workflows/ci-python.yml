@@ -148,29 +148,6 @@ jobs:
           backend=$(uv run --no-sync python -c 'from codecalc import executor; print(executor.backend())')
           echo "backend: $backend"
           [ "$backend" = "rust" ] || { echo "::error::backend is '$backend', expected 'rust' — the suite would be testing the fallback."; exit 1; }
-      - name: security regressions
-        shell: bash
-        run: |
-          set -euo pipefail
-          uv run --no-sync python tests/test_security.py | tee /tmp/sec.out
-          # The fork-bomb tests run last and are destructive by nature. Give the
-          # runner a moment to reap before this step's own shell needs to fork,
-          # or the post-processing below dies with "resource temporarily
-          # unavailable" after a suite that passed.
-          sleep 5
-          # FLOOR. This suite is a flat script of `check(...)` calls with
-          # `sys.exit(1 if FAILS else 0)` at the end — delete a section and it still exits 0, having
-          # asserted less. Pin the count so silent shrinkage is a failure, not a faster green run.
-          passed=$(grep -c '^PASS' /tmp/sec.out || true)
-          echo "security assertions passed: $passed"
-          # 13 on macOS, 14 on Linux: the tight fork-bomb headroom assertion only
-          # applies where the ambient task count is measurable, and the suite
-          # prints SKIP with the reason otherwise. Flooring at 13 keeps the guard
-          # against silent shrinkage without asserting a Linux-only count.
-          if [ "$passed" -lt 13 ]; then
-            echo "::error::only $passed security assertions ran (expected >= 13). Assertions were removed or the suite aborted early."
-            exit 1
-          fi
       # The MCP surface is how every consumer reaches this code. A tool that raises on import, or a
       # schema fastmcp rejects, is invisible to every test above — they all call the functions
       # directly. This spawns the real server over stdio and round-trips it.
@@ -200,3 +177,35 @@ jobs:
             exit 1
           fi
           echo "ok: all $served tools round-tripped over stdio"
+      # LAST STEP IN THE JOB, deliberately. The fork-bomb assertions are the only
+      # destructive thing here: they drive the process count to the limit, and on
+      # a 3-core macOS runner the reaping is slow enough that the NEXT step's
+      # shell could not fork — the suite printed ALL TESTS PASS and the job died
+      # at `fork: Resource temporarily unavailable` in the step after it.
+      #
+      # The same principle as the test file's internal ordering, applied one
+      # level up: whatever exhausts a shared resource goes last. Do not move a
+      # new step below this one.
+      - name: security regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --no-sync python tests/test_security.py | tee /tmp/sec.out
+          # The fork-bomb tests run last and are destructive by nature. Give the
+          # runner a moment to reap before this step's own shell needs to fork,
+          # or the post-processing below dies with "resource temporarily
+          # unavailable" after a suite that passed.
+          sleep 5
+          # FLOOR. This suite is a flat script of `check(...)` calls with
+          # `sys.exit(1 if FAILS else 0)` at the end — delete a section and it still exits 0, having
+          # asserted less. Pin the count so silent shrinkage is a failure, not a faster green run.
+          passed=$(grep -c '^PASS' /tmp/sec.out || true)
+          echo "security assertions passed: $passed"
+          # 13 on macOS, 14 on Linux: the tight fork-bomb headroom assertion only
+          # applies where the ambient task count is measurable, and the suite
+          # prints SKIP with the reason otherwise. Flooring at 13 keeps the guard
+          # against silent shrinkage without asserting a Linux-only count.
+          if [ "$passed" -lt 13 ]; then
+            echo "::error::only $passed security assertions ran (expected >= 13). Assertions were removed or the suite aborted early."
+            exit 1
+          fi
