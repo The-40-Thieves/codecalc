@@ -47,7 +47,51 @@ check("executed code sees NO host secrets", "CLEAN" in r.get("stdout", ""), f"->
 r = executor.execute("python3", "import os; print('PATH' in os.environ, bool(os.environ.get('HOME')))")
 check("allowlist keeps PATH+HOME functional", "True True" in r.get("stdout", ""))
 
-# 6. fork-bomb BOUND. This runs BEFORE the recursive bomb in 6b, and the order
+# 6. infinite loop killed by timeout
+r = executor.execute("python3", "while True: pass", timeout=3)
+check("infinite loop killed by timeout", r.get("timed_out") is True)
+
+# 7. output cap
+r = executor.execute("python3", "print('x' * 200000)")
+check("output capped at 64KiB", len(r.get("stdout", "")) < 70_000)
+
+# 8. no eval/exec/shell=True anywhere in the package (excluding docstrings).
+# Exception: _worker_bootstrap.py's `exec()` runs user code inside the
+# isolated REPL subprocess (allowlisted env, separate process group) — the
+# same threat model as the Rust executor, never in the server process.
+import ast
+
+bad = []
+for p in (REPO_ROOT / "codecalc").rglob("*.py"):
+    if p.name == "_worker_bootstrap.py":
+        continue  # documented: exec in the isolated worker subprocess only
+    tree = ast.parse(p.read_text())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                and node.func.id in ("eval", "exec"):
+            bad.append(f"{p.name}:{node.lineno}")
+check("zero eval/exec/shell=True in codebase", not bad, f"-> {bad}")
+
+# 9. benchmark fit still works (no eval regression). Empirical timing is
+# noisy at small sizes — the security-relevant property is that it detects
+# polynomial growth (not O(1)/O(log n)); exact degree may wobble.
+r = tools.benchmark("import sys\nn=int(sys.stdin.readline())\ns=0\nfor i in range(n):\n    for j in range(n): s+=i*j\nprint(s)",
+                    sizes="500,1000,2000,4000,8000", timeout=15)
+est = r.get("estimate", "")
+check("benchmark detects polynomial growth (no eval regression)",
+      "O(n" in est and est not in ("O(1)", "O(log n)"),
+      f"-> {est}")
+
+# 10. fork-bomb guard. LAST IN THE FILE, and that placement is load-bearing.
+#
+# These two tests are DESTRUCTIVE: between them they spawn up to the process
+# limit and those children take time to drain. Anything running afterwards
+# competes for the same budget. On a macOS runner the bomb reached 1012
+# processes and the benchmark two tests later came back with an empty estimate —
+# a real failure caused entirely by test order. The same shape bit this suite
+# once already, between the two fork-bomb tests themselves.
+#
+# Within the pair, the counter runs BEFORE the recursive bomb, and that order
 # is load-bearing. RLIMIT_NPROC is now computed per execution as (ambient uid
 # tasks + headroom), measured once at spawn. Run this after a recursive bomb and
 # its children are still draining, so the ambient figure it was sized against
@@ -98,46 +142,11 @@ else:
     print(f"SKIP fork-bomb headroom bound — ambient task count is not measurable "
           f"on {sys.platform}; the fixed ceiling of {_limit} applies instead")
 
-# 6b. And the runaway case still terminates rather than hanging.
+# 10b. And the runaway case still terminates rather than hanging.
 r = executor.execute("python3", "import os\nwhile True: os.fork()", timeout=10)
 check("fork-bomb stopped by RLIMIT_NPROC",
       not r.get("ok") or r.get("exit_code", 0) != 0 or r.get("timed_out"),
       f"exit={r.get('exit_code')} timed_out={r.get('timed_out')}")
-
-# 7. infinite loop killed by timeout
-r = executor.execute("python3", "while True: pass", timeout=3)
-check("infinite loop killed by timeout", r.get("timed_out") is True)
-
-# 8. output cap
-r = executor.execute("python3", "print('x' * 200000)")
-check("output capped at 64KiB", len(r.get("stdout", "")) < 70_000)
-
-# 9. no eval/exec/shell=True anywhere in the package (excluding docstrings).
-# Exception: _worker_bootstrap.py's `exec()` runs user code inside the
-# isolated REPL subprocess (allowlisted env, separate process group) — the
-# same threat model as the Rust executor, never in the server process.
-import ast
-
-bad = []
-for p in (REPO_ROOT / "codecalc").rglob("*.py"):
-    if p.name == "_worker_bootstrap.py":
-        continue  # documented: exec in the isolated worker subprocess only
-    tree = ast.parse(p.read_text())
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
-                and node.func.id in ("eval", "exec"):
-            bad.append(f"{p.name}:{node.lineno}")
-check("zero eval/exec/shell=True in codebase", not bad, f"-> {bad}")
-
-# 10. benchmark fit still works (no eval regression). Empirical timing is
-# noisy at small sizes — the security-relevant property is that it detects
-# polynomial growth (not O(1)/O(log n)); exact degree may wobble.
-r = tools.benchmark("import sys\nn=int(sys.stdin.readline())\ns=0\nfor i in range(n):\n    for j in range(n): s+=i*j\nprint(s)",
-                    sizes="500,1000,2000,4000,8000", timeout=15)
-est = r.get("estimate", "")
-check("benchmark detects polynomial growth (no eval regression)",
-      "O(n" in est and est not in ("O(1)", "O(log n)"),
-      f"-> {est}")
 
 print(f"\n=== {len(FAILS)} failures ===" if FAILS else "\n=== ALL SECURITY TESTS PASS ===")
 sys.exit(1 if FAILS else 0)
