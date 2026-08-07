@@ -1,4 +1,4 @@
-"""Language registry: every runtime on Cave -> execution plan.
+"""Language registry: language -> execution plan (compile + run argv).
 
 Each entry maps a language name to file extension and optional compile/run
 argv templates. Placeholders:
@@ -10,19 +10,36 @@ argv templates. Placeholders:
 
 from __future__ import annotations
 
+import os
 import shlex
 
-#: PATH additions so every runtime resolves (mise shims first, then user CLIs,
-#: Swift toolchain, cargo, and system dirs).
-RUNTIME_PATH = (
-    "/data/tools/mise/shims:"
-    "/home/ubuntu/.local/bin:"
-    "/home/ubuntu/.npm-global/bin:"
-    "/home/ubuntu/.local/share/swiftly/bin:"
-    "/home/ubuntu/.cargo/bin:"
-    "/nix/var/nix/profiles/default/bin:"   # nix-shell for on-demand runtimes
-    "/usr/local/bin:/usr/bin:/bin"
-)
+#: Env var an operator sets to pin the PATH executed code resolves runtimes on.
+#: Mirrored in executor/src/main.rs; scripts/check_parity.py gates that they match.
+RUNTIME_PATH_ENV = "CODECALC_RUNTIME_PATH"
+
+#: Last-resort PATH. Deliberately minimal and machine-neutral.
+#:
+#: This used to be a hardcoded list of one developer's home directory and mise
+#: shims, in a PUBLIC repo. On any other machine it resolved almost nothing.
+DEFAULT_RUNTIME_PATH = "/usr/local/bin:/usr/bin:/bin"
+
+
+def runtime_path() -> str:
+    """PATH handed to executed code.
+
+    Precedence: CODECALC_RUNTIME_PATH, then this process's own PATH, then the
+    minimal default. Inheriting the caller's PATH is the right default because
+    the caller is the codecalc server, launched by the operator — not the
+    untrusted program.
+
+    Pin it explicitly when the server is spawned by an MCP client with a
+    stripped environment: an inherited PATH can miss a toolchain manager's shims
+    entirely. `list_languages` probes each runtime, so that surfaces as
+    `available: false` rather than silently.
+    """
+    return (os.environ.get(RUNTIME_PATH_ENV)
+            or os.environ.get("PATH")
+            or DEFAULT_RUNTIME_PATH)
 
 
 def _c(compile_: str | None, run: str) -> dict:

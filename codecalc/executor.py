@@ -72,7 +72,7 @@ _ENV_ALLOWLIST = {
 
 def _env() -> dict:
     env = {k: v for k, v in os.environ.items() if k in _ENV_ALLOWLIST}
-    env["PATH"] = registry.RUNTIME_PATH
+    env["PATH"] = registry.runtime_path()
     env["PYTHONUNBUFFERED"] = "1"
     return env
 

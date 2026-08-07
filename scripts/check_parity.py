@@ -82,17 +82,37 @@ if floor("rust ENV_ALLOWLIST", rust_env, 5) and floor("python _ENV_ALLOWLIST", p
     else:
         print(f"ok   env allowlist: {len(py_env)} vars, identical in both backends")
 
-# ── 3. runtime PATH ─────────────────────────────────────────────────────────
-m = re.search(r'RUNTIME_PATH:\s*&str\s*=\s*"([^"]+)"', RUST)
-rust_path = m.group(1) if m else ""
+# ── 3. runtime PATH resolution ──────────────────────────────────────────────
+# Both backends resolve the sandbox PATH the same way: CODECALC_RUNTIME_PATH,
+# then the process's own PATH, then a minimal default. What must match is the
+# ENV VAR NAME and the DEFAULT — if they drift, `CODECALC_RUNTIME_PATH=...`
+# silently configures only one of the two backends, and which one answers
+# depends on whether the Rust binary happens to be built.
+m = re.search(r'RUNTIME_PATH_ENV:\s*&str\s*=\s*"([^"]+)"', RUST)
+rust_env_name = m.group(1) if m else ""
+m = re.search(r'DEFAULT_RUNTIME_PATH:\s*&str\s*=\s*"([^"]+)"', RUST)
+rust_default = m.group(1) if m else ""
 
-if floor("rust RUNTIME_PATH", rust_path, 10) and floor("python RUNTIME_PATH", registry.RUNTIME_PATH, 10):
-    if rust_path != registry.RUNTIME_PATH:
-        rs, py = rust_path.split(":"), registry.RUNTIME_PATH.split(":")
-        fail("RUNTIME_PATH drift — "
+if floor("rust RUNTIME_PATH_ENV", rust_env_name, 5) and floor("python RUNTIME_PATH_ENV", registry.RUNTIME_PATH_ENV, 5):
+    if rust_env_name != registry.RUNTIME_PATH_ENV:
+        fail(f"runtime-path env var drift — python: {registry.RUNTIME_PATH_ENV!r}, rust: {rust_env_name!r}")
+    else:
+        print(f"ok   runtime-path env var: {rust_env_name} in both backends")
+
+if floor("rust DEFAULT_RUNTIME_PATH", rust_default, 10) and floor("python DEFAULT_RUNTIME_PATH", registry.DEFAULT_RUNTIME_PATH, 10):
+    if rust_default != registry.DEFAULT_RUNTIME_PATH:
+        rs, py = rust_default.split(":"), registry.DEFAULT_RUNTIME_PATH.split(":")
+        fail("DEFAULT_RUNTIME_PATH drift — "
              f"python-only: {sorted(set(py) - set(rs))}, rust-only: {sorted(set(rs) - set(py))}")
     else:
-        print(f"ok   RUNTIME_PATH: {len(rust_path.split(':'))} entries, identical in both backends")
+        print(f"ok   default runtime PATH: {len(rust_default.split(':'))} entries, identical in both backends")
+
+# A machine-specific absolute path baked into either backend is what this whole
+# section exists to prevent recurring; the repo is public and the binary ships.
+for label, value in (("rust", rust_default), ("python", registry.DEFAULT_RUNTIME_PATH)):
+    if "/home/" in value or "/Users/" in value:
+        fail(f"{label} DEFAULT_RUNTIME_PATH contains a home directory: {value!r}. "
+             "The default must be machine-neutral; use CODECALC_RUNTIME_PATH to pin a toolchain.")
 
 if failures:
     print(f"\n=== {len(failures)} parity failure(s) ===")

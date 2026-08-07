@@ -40,7 +40,34 @@ const ENV_ALLOWLIST: &[&str] = &[
     "JAVA_HOME", "CARGO_HOME", "RUSTUP_HOME", "GOPATH", "GOMODCACHE",
 ];
 
-const RUNTIME_PATH: &str = "/data/tools/mise/shims:/home/ubuntu/.local/bin:/home/ubuntu/.npm-global/bin:/home/ubuntu/.local/share/swiftly/bin:/home/ubuntu/.cargo/bin:/nix/var/nix/profiles/default/bin:/usr/local/bin:/usr/bin:/bin";
+/// Env var an operator sets to pin the PATH executed code resolves runtimes on.
+/// Kept identical to the Python fallback's; scripts/check_parity.py gates that.
+const RUNTIME_PATH_ENV: &str = "CODECALC_RUNTIME_PATH";
+
+/// Last-resort PATH. Deliberately minimal and machine-neutral.
+///
+/// This used to be a hardcoded list of one developer's home directory and mise
+/// shims, compiled into a binary shipped from a PUBLIC repo. On any other
+/// machine it resolved almost nothing, which sat badly next to a README
+/// promising static musl builds that "run on any Linux".
+const DEFAULT_RUNTIME_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
+
+/// PATH handed to executed code.
+///
+/// Precedence: CODECALC_RUNTIME_PATH, then this process's own PATH, then the
+/// minimal default. Inheriting the caller's PATH is the right default because
+/// the caller is the codecalc server, launched by the operator — not the
+/// untrusted program. Pinning it explicitly matters when the server is spawned
+/// by an MCP client with a stripped environment, where an inherited PATH can
+/// miss a toolchain manager's shims entirely; `list_languages` reports each
+/// runtime's availability, so that shows up as unavailable rather than silently.
+fn runtime_path() -> String {
+    env::var(RUNTIME_PATH_ENV)
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| env::var("PATH").ok().filter(|s| !s.is_empty()))
+        .unwrap_or_else(|| DEFAULT_RUNTIME_PATH.to_string())
+}
 
 /// A language entry: optional compile step + run step. `{file}` `{exe}` `{work}` are placeholders.
 struct Lang {
@@ -271,7 +298,7 @@ fn run_step(argv: &[String], work: &Path, tag: &str, stdin_data: &[u8], limits: 
                 cmd.env(key, val);
             }
         }
-        cmd.env("PATH", RUNTIME_PATH)  // always the sandbox PATH, not host's
+        cmd.env("PATH", runtime_path())  // always the sandbox PATH, not host's
             .env("PYTHONUNBUFFERED", "1")
             .stdin(Stdio::from(in_f))
             .stdout(Stdio::from(out_f))

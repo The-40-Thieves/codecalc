@@ -44,8 +44,7 @@ Every session file is also exposed as an MCP resource:
 `codecalc://session/<session_id>/files/<path>` — images render inline for the
 model, text returns as text, other files download.
 
-**Exact arithmetic & programmer-mode** (ported from the Claude calc skill —
-`~/.claude/skills/calc/calc.py`): exact rationals, threshold checks, bit
+**Exact arithmetic & programmer-mode**: exact rationals, threshold checks, bit
 analysis, binary64 introspection.
 
 | Tool | Description |
@@ -123,22 +122,44 @@ that owns each language (never the Rust sandbox, which has no update powers).
 ## Run the server
 
 ```bash
-cd ~/codecalc && .venv/bin/python -m codecalc.server
+cd /path/to/codecalc && .venv/bin/python -m codecalc.server
 # stdio transport — register with any MCP client
 ```
 
 Point an MCP client at it:
 
 ```json
-{ "mcpServers": { "codecalc": { "command": "/home/ubuntu/codecalc/.venv/bin/python",
+{ "mcpServers": { "codecalc": { "command": "/path/to/codecalc/.venv/bin/python",
                                 "args": ["-m", "codecalc.server"],
-                                "env": { "PYTHONPATH": "/home/ubuntu/codecalc" } } } }
+                                "env": {
+                                  "PYTHONPATH": "/path/to/codecalc",
+                                  "CODECALC_RUNTIME_PATH": "/path/to/mise/shims:/usr/local/bin:/usr/bin:/bin"
+                                } } } }
 ```
+
+## Configuration
+
+All optional. codecalc runs with none of these set.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `CODECALC_RUNTIME_PATH` | the server's own `PATH`, else `/usr/local/bin:/usr/bin:/bin` | The `PATH` executed code resolves runtimes on. **Set this when an MCP client spawns the server**: clients often launch with a stripped environment, so an inherited `PATH` can miss a toolchain manager's shims entirely and most languages silently become unavailable. `list_languages` reports what actually resolved. |
+| `CODECALC_EXEC_BIN` | `bin/codecalc-exec` (arch-matched) | Override the sandbox binary. Without one, codecalc falls back to a pure-Python executor — `list_languages` and `execute_code` still work, but the Rust path is the production one. |
+| `CODECALC_SESSION_ROOT` | `~/.codecalc/sessions` | Where session workspaces live. |
+| `CODECALC_LLM_GATEWAY` | *(unset — the two LLM tools report themselves unconfigured)* | An OpenAI-compatible `/v1/chat/completions` endpoint. Only `translate_code` and `optimize_code` need it; the other 46 tools work without it. There is deliberately no default: sending your source to a third party nobody configured would be a worse failure than a clear error. |
+| `CODECALC_LLM_API_KEY` | *(unset)* | Bearer token for that gateway, if it needs one. |
+| `CODECALC_LLM_MODEL` | `gpt-4o-mini` | Model name passed to the gateway. |
+| `CODECALC_COMPLEXITY_LLM` | *(unset)* | Opt in to an LLM second opinion on `analyze_complexity`. Off by default, and a separate variable from the gateway on purpose — configuring `translate_code` should not silently add a network round-trip to every complexity analysis. |
+
+Both backends resolve `CODECALC_RUNTIME_PATH` identically, and
+`scripts/check_parity.py` fails CI if the Rust and Python copies of that
+contract ever drift — including if a machine-specific home directory finds its
+way back into the default.
 
 ## Test
 
 ```bash
-cd ~/codecalc
+cd /path/to/codecalc
 PYTHONPATH=. .venv/bin/python tests/test_smoke.py    # 31 languages via Rust executor
 PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py  # all 9 tools over MCP stdio
 ```
@@ -156,8 +177,12 @@ PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py  # all 9 tools over MCP stdi
 
 python3, node, bun, deno, typescript, ruby, php, perl, lua, tcl, r, elixir,
 erlang, bash, zsh, mojo, swift, c, cpp/c++, rust, go, fortran, zig, java,
-kotlin, csharp, gleam, haskell, sqlite, jq, awk — 31 runtimes, all local to
-Cave (mise + apt + rustup + swiftly + nix).
+kotlin, csharp, gleam, haskell, sqlite, jq, awk — 31 runtimes.
+
+codecalc does not install any of them. It runs whatever is already on
+`CODECALC_RUNTIME_PATH`, and `list_languages` probes each one and reports which
+actually resolved, so a minimal machine degrades to the subset it has rather
+than failing opaquely.
 
 ## Notes
 

@@ -8,7 +8,16 @@ name: ci-quality
 # Measured before wiring:
 #   typos      0 findings, no config needed. No _typos.toml is committed BECAUSE there is nothing
 #              to except; adding an empty one would imply exceptions exist.
-#   shellcheck 0 findings on the one shell script in the repo.
+#   shellcheck 0 findings on the one shell script in the repo — and that script has since been
+#              deleted, so the job is gone too. See below.
+#
+# Deliberately NOT here: shellcheck, as of the removal of executor/zig-cc.sh. That was the repo's
+# only shell script, it was referenced by nothing, and it hardcoded one machine's mise shim path.
+# With it gone the job's own floor fires — "shellcheck matched 0 scripts, the gate is scanning
+# nothing" — which is the floor working, not a reason to weaken it to `-lt 0`. Shell coverage is not
+# lost: actionlint in ci-security runs shellcheck over every embedded `run:` block, and it is where
+# the repo's shell actually lives now. It caught a real SC2015 there on its first PR. Restore this
+# job the moment a .sh file comes back.
 #
 # Deliberately NOT here: lychee. It was written, run, and then removed. README.md and AUDIT.md
 # between them contain exactly ONE link — https://github.com/rust-cross/cargo-zigbuild — and it is
@@ -53,27 +62,3 @@ jobs:
           echo "$RUNNER_TEMP/typos-bin" >> "$GITHUB_PATH"
       - name: typos
         run: typos
-
-  shellcheck:
-    name: shellcheck (shell scripts)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      # FLOORED. `shellcheck` with no file arguments prints usage and — depending on how the glob
-      # expanded — can exit 0, which is indistinguishable from a clean scan. Count the files first
-      # so a rename or a move fails the job rather than quietly disabling it.
-      #
-      # -print0/xargs -0 rather than word-splitting `find` output: a path containing a space would
-      # otherwise be passed as two filenames and shellcheck would error on both.
-      - name: shellcheck
-        run: |
-          set -euo pipefail
-          find . -name '*.sh' -not -path './.git/*' -not -path './.venv/*' \
-                 -not -path './executor/target/*' -print0 > /tmp/sh.z
-          count=$(tr -cd '\0' < /tmp/sh.z | wc -c)
-          echo "shell scripts found: $count"
-          if [ "$count" -lt 1 ]; then
-            echo "::error::shellcheck matched 0 scripts — the gate is scanning nothing."
-            exit 1
-          fi
-          xargs -0 shellcheck < /tmp/sh.z

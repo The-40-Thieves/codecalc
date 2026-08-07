@@ -54,7 +54,7 @@ def install(language: str, package: str, session_id: str | None = None,
     if installer is None:
         return {"ok": False, "error": f"no installer defined for '{name}'"}
     bin_, tmpl, env_hint = installer
-    if shutil.which(bin_, path=executor.registry.RUNTIME_PATH) is None and \
+    if shutil.which(bin_, path=executor.registry.runtime_path()) is None and \
             shutil.which(bin_) is None:
         return {"ok": False, "error": f"package manager '{bin_}' not found"}
 
