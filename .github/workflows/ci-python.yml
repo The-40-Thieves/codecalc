@@ -74,6 +74,10 @@ jobs:
       # running two programs, so the trust boundary of translate_code was never tested anywhere.
       - name: translation verification gate
         run: uv run --no-sync python tests/test_translation_verify.py
+      # Session workspace confinement. Also sandbox-free: _jail() is path logic over a tempdir, so
+      # the boundary can be checked on any runner rather than only where a session can be started.
+      - name: session jail
+        run: uv run --no-sync python tests/test_session_jail.py
 
   sandbox:
     # The security suite. Split out from `tests` because it needs the Rust binary built first, and

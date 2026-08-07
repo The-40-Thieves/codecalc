@@ -151,11 +151,25 @@ verdicts, per-call limits, streaming, translation, context7 docs, and a
 network-blocking shim. Each has a security-relevant design decision:
 
 1. **Sessions** (`sessions.py`): workspaces live under `~/.codecalc/sessions`
-   and every path is jailed via `resolve()` prefix check — `..` escapes are
-   rejected. Stateful REPL workers (python3/node) execute user code in a
-   **separate subprocess** with the same env allowlist as the executor; their
-   `exec()` is the documented exception to the zero-eval rule (it never runs
-   in the server process).
+   and every path is jailed via `resolve()` + `Path.is_relative_to()` — `..`,
+   absolute paths and symlinks out of the workspace are all rejected. Stateful
+   REPL workers (python3/node) execute user code in a **separate subprocess**
+   with the same env allowlist as the executor; their `exec()` is the
+   documented exception to the zero-eval rule (it never runs in the server
+   process).
+
+   **CORRECTION 2026-08-07.** This previously read "jailed via `resolve()`
+   prefix check", and that is what the code did: `str(p).startswith(str(d))`.
+   A string prefix is not a path boundary. A SIBLING directory whose name
+   merely extends the session id satisfied it —
+   `_jail(<root>/python3-deadbeef, '../python3-deadbeefEVIL/x')` was accepted —
+   and `session_write_file` mkdir -p's the result, so one session could write
+   outside its own workspace. Bounded (the path still had to begin with the
+   session dir's string, so it could not leave the session root) but real. The
+   `..` case the claim was written against always worked; the boundary in
+   general did not. Now component-wise via `is_relative_to`, in `_jail` and
+   `_session_dir` both, with `tests/test_session_jail.py` covering the sibling,
+   the symlink, and the legitimate paths that must keep working.
 2. **File tools**: read/write are strictly confined to the session root; no
    absolute or escaping paths.
 3. **Package install** (`packages.py`): package strings are passed as argv
