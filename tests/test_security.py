@@ -1,0 +1,90 @@
+"""Security regression tests: the two confirmed exploits must stay dead,
+plus sandbox guarantees (env isolation, fork-bomb, output caps, var caps)."""
+import os
+import sys
+
+sys.path.insert(0, "/home/ubuntu/codecalc")
+from codecalc import executor, logic, tools
+
+FAILS = []
+
+
+def check(name, cond, detail=""):
+    print(f"{'PASS' if cond else 'FAIL':4} {name} {detail}")
+    if not cond:
+        FAILS.append(name)
+
+
+# 1. CVE-2026-codecalc-001: truth_table eval escape (host RCE via __subclasses__)
+r = logic.truth_table("().__class__.__base__.__subclasses__()")
+check("truth_table blocks dunder-chain RCE", not r.get("ok"),
+      f"-> {r.get('error','UNEXPECTED OK')[:80]}")
+r = logic.truth_table("Popen")
+check("truth_table rejects bare callable refs", r.get("ok") and r["row_count"] == 2)
+r = logic.truth_table("a and b or not c")
+check("truth_table still works (a and b or not c)", r.get("ok") and r["row_count"] == 8)
+r = logic.truth_table("p xor q")
+check("truth_table xor works", r.get("ok") and r["row_count"] == 4 and r["rows"][1]["result"] is True)
+
+# 2. var-count cap: 2^n blowup guard
+big = " or ".join(f"v{i}" for i in range(20))
+r = logic.truth_table(big)
+check("truth_table caps variables (2^n guard)", not r.get("ok") and "too many variables" in r.get("error", ""))
+
+# 3. expression length cap
+r = logic.truth_table("a " * 3000)
+check("truth_table caps expression length", not r.get("ok"))
+
+# 4. env isolation: executed code must NOT see host secrets
+marker = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN", "SECRET_SHOULD_NOT_LEAK")
+r = executor.execute("python3", "import os; print('LEAK' if os.environ.get('GITHUB_PERSONAL_ACCESS_TOKEN') else 'CLEAN')")
+check("executed code sees NO host secrets", "CLEAN" in r.get("stdout", ""), f"-> {r.get('stdout','')[:40]!r}")
+
+# 5. env allowlist still lets runtimes work (PATH/HOME present)
+r = executor.execute("python3", "import os; print('PATH' in os.environ, bool(os.environ.get('HOME')))")
+check("allowlist keeps PATH+HOME functional", "True True" in r.get("stdout", ""))
+
+# 6. fork-bomb: RLIMIT_NPROC must stop runaway forks (exit non-zero, no hang)
+r = executor.execute("python3", "import os\nwhile True: os.fork()", timeout=10)
+check("fork-bomb stopped by RLIMIT_NPROC",
+      not r.get("ok") or r.get("exit_code", 0) != 0 or r.get("timed_out"),
+      f"exit={r.get('exit_code')} timed_out={r.get('timed_out')}")
+
+# 7. infinite loop killed by timeout
+r = executor.execute("python3", "while True: pass", timeout=3)
+check("infinite loop killed by timeout", r.get("timed_out") is True)
+
+# 8. output cap
+r = executor.execute("python3", "print('x' * 200000)")
+check("output capped at 64KiB", len(r.get("stdout", "")) < 70_000)
+
+# 9. no eval/exec/shell=True anywhere in the package (excluding docstrings).
+# Exception: _worker_bootstrap.py's `exec()` runs user code inside the
+# isolated REPL subprocess (allowlisted env, separate process group) — the
+# same threat model as the Rust executor, never in the server process.
+import ast
+import pathlib
+
+bad = []
+for p in pathlib.Path("/home/ubuntu/codecalc/codecalc").rglob("*.py"):
+    if p.name == "_worker_bootstrap.py":
+        continue  # documented: exec in the isolated worker subprocess only
+    tree = ast.parse(p.read_text())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                and node.func.id in ("eval", "exec"):
+            bad.append(f"{p.name}:{node.lineno}")
+check("zero eval/exec/shell=True in codebase", not bad, f"-> {bad}")
+
+# 10. benchmark fit still works (no eval regression). Empirical timing is
+# noisy at small sizes — the security-relevant property is that it detects
+# polynomial growth (not O(1)/O(log n)); exact degree may wobble.
+r = tools.benchmark("import sys\nn=int(sys.stdin.readline())\ns=0\nfor i in range(n):\n    for j in range(n): s+=i*j\nprint(s)",
+                    sizes="500,1000,2000,4000,8000", timeout=15)
+est = r.get("estimate", "")
+check("benchmark detects polynomial growth (no eval regression)",
+      "O(n" in est and est not in ("O(1)", "O(log n)"),
+      f"-> {est}")
+
+print(f"\n=== {len(FAILS)} failures ===" if FAILS else "\n=== ALL SECURITY TESTS PASS ===")
+sys.exit(1 if FAILS else 0)

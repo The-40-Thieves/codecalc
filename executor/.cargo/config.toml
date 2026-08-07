@@ -1,0 +1,8 @@
+# Cross-compile x86_64 static musl using the locally installed Zig as linker
+# via cargo-zigbuild (cave has no x86_64 GCC; zig links musl self-contained).
+#
+# NOTE: no `-C target-cpu=generic` here — rustc already defaults to generic
+# CPU, and passing it explicitly makes zig's clang reject it on x86 targets
+# ("unknown target CPU 'generic'").
+[target.x86_64-unknown-linux-musl]
+linker = "zig"

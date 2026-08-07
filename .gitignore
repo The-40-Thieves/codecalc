@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Rust
+executor/target/
+**/target/
+
+# Binaries (built artifacts — build from source via cargo-zigbuild)
+bin/codecalc-exec*
+bin/blocknet.so
+
+# Sessions & data
+.codecalc/
+sessions/
+
+# Tooling
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+
+# Editor/OS
+.DS_Store
+*.swp
+.idea/
+.vscode/

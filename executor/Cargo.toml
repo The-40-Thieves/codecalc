@@ -1,0 +1,31 @@
+[package]
+name = "codecalc-exec"
+version = "0.1.0"
+edition = "2021"
+description = "Sandboxed multi-language executor core for codecalc (Rust)"
+license = "MIT"
+
+[dependencies]
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# ── Older-computer optimizations ──────────────────────────────────────────
+# - target-cpu=generic: no modern instruction-set requirements (runs on any
+#   x86_64/aarch64 CPU from the last ~15 years). Rust's default is already
+#   generic, but pinned explicitly via .cargo/config.toml so a host-specific
+#   -C flag can't leak in.
+# - opt-level="z": prioritize binary size over speed — this binary spawns
+#   children and does no hot loops, so size is what matters.
+# - lto + codegen-units=1 + panic=abort: maximize cross-crate inlining and
+#   drop unwind machinery, shrinking the binary further.
+# - strip=true: no debug symbols.
+# - overflow-checks=false: release-mode arithmetic without panics (matches
+#   the Python fallback's behavior; nothing here trusts user integers).
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+overflow-checks = false

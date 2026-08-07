@@ -1,0 +1,18 @@
+[project]
+name = "codecalc"
+version = "0.1.0"
+description = "Universal code + logic calculator for AI models: execute 30 languages, evaluate logic, analyze complexity. Exposed via MCP."
+license = "AGPL-3.0-only"
+requires-python = ">=3.11"
+dependencies = [
+    "fastmcp>=2.0",
+    "sympy>=1.13",
+    "z3-solver>=4.13",
+]
+
+[project.scripts]
+codecalc = "codecalc.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
