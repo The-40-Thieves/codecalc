@@ -180,6 +180,31 @@ network-blocking shim. Each has a security-relevant design decision:
    strict compilers (e.g. Go unused imports) that even retry-with-error
    feedback cannot fix; the tool reports this honestly rather than fabricating
    a pass.
+
+   **CORRECTION 2026-08-07 — the trust boundary above did not hold as written.**
+   `verify_translation()` scored "both programs failed" as a MATCH, on the
+   reasoning that they were in the same behaviour class. They are not: a Python
+   `ZeroDivisionError` and a Go nil-map panic are both a non-zero exit with
+   empty stdout, and so is a program that was never a translation of anything.
+   Confirmed by running it — `verify_translation('python3', 'sys.exit(1)',
+   'node', 'process.exit(1)', ['', '0', '1'])` returned `passed: True, 3/3
+   matched` for two unrelated programs. The failure was worst exactly where the
+   gate mattered most: if the source language's runtime is absent the source
+   fails on every input, so every case "matched" and ANY model output was
+   certified. `optimize_code` calls the same function and inherited it.
+
+   Fixed by giving a case three outcomes instead of two — match, mismatch, and
+   **inconclusive** — and requiring real evidence to pass: no mismatch AND at
+   least one input where both programs actually ran and agreed. A wholly
+   inconclusive run now fails with "could not verify: nothing was actually
+   compared", because "we could not check" and "we checked and it was fine" are
+   different answers. A translation that fails to COMPILE is now always a
+   mismatch; it was previously a match whenever the source also errored.
+
+   The decision logic was split into pure functions (`classify_case`,
+   `aggregate`) so it can be tested without a sandbox or two runtimes — the old
+   version could only be reached by actually running two programs, which is why
+   it had no tests at all. See `tests/test_translation_verify.py`.
 9. **context7_docs**: third-party documentation content returned as data to
    the caller; the server never executes or follows instructions found in it.
    Only the requesting model decides how to use the snippets.
@@ -189,7 +214,11 @@ network-blocking shim. Each has a security-relevant design decision:
     baseline-subtracted), never the LLM's claim. Already-optimal code is
     honestly rejected ("no accepted optimization after retry" with the
     measured ratio) rather than fabricating a pass. Sub-noise-floor baselines
-    are accepted on correctness with an explicit warning.
+    are accepted on correctness with an explicit warning — which is why the
+    correctness half has to be sound, and why the `verify_translation` defect
+    corrected under item 8 applied here too: a sub-noise-floor optimization
+    whose only gate was correctness could be accepted on the strength of both
+    versions crashing. Same fix, same tests.
 12. **extract_function**: python3 extraction is ast-exact (no regex on code);
     the generated runner only reads stdin and prints the function result —
     no eval of user strings beyond the already-sandboxed execution path. The
