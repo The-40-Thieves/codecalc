@@ -151,7 +151,23 @@ else:
           f"on {sys.platform}; the fixed ceiling of {_limit} applies instead")
 
 # 10b. And the runaway case still terminates rather than hanging.
-r = executor.execute("python3", "import os\nwhile True: os.fork()", timeout=10)
+# Self-cleaning, for the same reason as the counter above. A bare
+# `while True: os.fork()` leaves its children behind: on Linux each child
+# continues the loop, hits OSError and exits, so the tree drains on its own —
+# but on a 3-core macOS runner with a 4096 ceiling the reaping is slow enough
+# that the NEXT SHELL COMMAND could not fork, and the job died at
+# `fork: Resource temporarily unavailable` AFTER the suite printed ALL PASS.
+# Whichever process first hits the limit kills the whole group, so the tree goes
+# down at once instead of draining.
+_BOMB = """import os, signal
+try:
+    while True:
+        os.fork()
+except OSError:
+    pass
+os.killpg(os.getpgrp(), signal.SIGKILL)
+"""
+r = executor.execute("python3", _BOMB, timeout=10)
 check("fork-bomb stopped by RLIMIT_NPROC",
       not r.get("ok") or r.get("exit_code", 0) != 0 or r.get("timed_out"),
       f"exit={r.get('exit_code')} timed_out={r.get('timed_out')}")
