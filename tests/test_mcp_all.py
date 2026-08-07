@@ -1,4 +1,4 @@
-"""Verify all 9 MCP tools round-trip over stdio, including the new ones."""
+"""Verify every MCP tool round-trips over stdio, including the new ones."""
 import sys
 
 from fastmcp import Client
