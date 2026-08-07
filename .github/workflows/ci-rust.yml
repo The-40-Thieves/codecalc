@@ -175,22 +175,55 @@ jobs:
           echo "ok: overrides socket+connect, leaves socketpair alone"
       - name: assert it actually blocks an outbound connection
         shell: bash
+        # The probe is a C program compiled HERE, not the runner's python3.
+        #
+        # macOS SIP strips DYLD_INSERT_LIBRARIES for protected and hardened-runtime
+        # binaries, and the hosted python3 is signed that way — so preloading
+        # against it silently does nothing and the job reported CONNECTED with the
+        # shim applied. That is a true statement about macOS, but it tests Apple's
+        # code signing rather than this shim. A locally built, unsigned binary is
+        # the subject we actually care about, and it removes the dependency on how
+        # a given runner's interpreter happens to be signed.
+        #
+        # The real-world caveat this does NOT paper over is recorded in
+        # AUDIT.md and README: on macOS `--no-net` is best-effort and does not
+        # apply to SIP-protected or hardened binaries.
         run: |
           set -euo pipefail
-          cat > /tmp/net.py <<'PY'
-          import socket, sys
-          try:
-              socket.create_connection(("1.1.1.1", 80), timeout=5)
-              print("CONNECTED")
-          except OSError as e:
-              print("BLOCKED", e.errno)
-          PY
-          echo "without the shim:"; python3 /tmp/net.py
-          echo "with the shim:"
+          cat > /tmp/netprobe.c <<'EOF'
+          #include <stdio.h>
+          #include <string.h>
+          #include <sys/socket.h>
+          #include <netinet/in.h>
+          #include <arpa/inet.h>
+          int main(void) {
+              int fd = socket(AF_INET, SOCK_STREAM, 0);
+              if (fd < 0) { printf("BLOCKED socket\n"); return 0; }
+              struct sockaddr_in a;
+              memset(&a, 0, sizeof a);
+              a.sin_family = AF_INET;
+              a.sin_port = htons(80);
+              a.sin_addr.s_addr = inet_addr("1.1.1.1");
+              if (connect(fd, (struct sockaddr *)&a, sizeof a) != 0) {
+                  printf("BLOCKED connect\n");
+                  return 0;
+              }
+              printf("CONNECTED\n");
+              return 0;
+          }
+          EOF
+          cc -O2 -o /tmp/netprobe /tmp/netprobe.c
+
+          echo -n "without the shim: "; /tmp/netprobe
           if [ "${{ runner.os }}" = "macOS" ]; then
-            out=$(DYLD_INSERT_LIBRARIES=$PWD/executor/${{ matrix.lib }} python3 /tmp/net.py)
+            preload_var=DYLD_INSERT_LIBRARIES
           else
-            out=$(LD_PRELOAD=$PWD/executor/${{ matrix.lib }} python3 /tmp/net.py)
+            preload_var=LD_PRELOAD
           fi
+          echo -n "with the shim:    "
+          out=$(env "$preload_var=$PWD/executor/${{ matrix.lib }}" /tmp/netprobe)
           echo "$out"
-          grep -q BLOCKED <<<"$out" || { echo "::error::${{ matrix.lib }} did not block the connection"; exit 1; }
+          case "$out" in
+            BLOCKED*) echo "ok: ${{ matrix.lib }} blocked the connection" ;;
+            *) echo "::error::${{ matrix.lib }} did not block the connection (got: $out)"; exit 1 ;;
+          esac

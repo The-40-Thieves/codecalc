@@ -44,7 +44,12 @@ def rejects(d, path) -> bool:
     return False
 
 
-tmp = pathlib.Path(tempfile.mkdtemp(prefix="codecalc-jail-test-"))
+# .resolve() the temp root up front. On Windows `mkdtemp` can hand back a short
+# 8.3 path (C:\Users\RUNNER~1\...) while `_jail` returns the resolved long form,
+# so comparing its output against an UNRESOLVED expected path failed for every
+# legitimate path — a bad assertion in this file, not a bug in the jail. macOS
+# has the same shape via /var -> /private/var.
+tmp = pathlib.Path(tempfile.mkdtemp(prefix="codecalc-jail-test-")).resolve()
 session = tmp / "python3-deadbeef"
 session.mkdir()
 # A sibling whose name EXTENDS the session id — the string-prefix blind spot.
@@ -69,28 +74,28 @@ check("symlink pointing outside is rejected", rejects(session, "escape/pwned.txt
 # ── legitimate paths still work ─────────────────────────────────────────────
 try:
     p = sessions._jail(session, "data/input.csv")
-    ok_nested = p == (session / "data" / "input.csv")
+    ok_nested = p == (session / "data" / "input.csv").resolve()
 except ValueError:
     ok_nested = False
 check("nested path inside the workspace is allowed", ok_nested)
 
 try:
     p = sessions._jail(session, "main.py")
-    ok_flat = p == (session / "main.py")
+    ok_flat = p == (session / "main.py").resolve()
 except ValueError:
     ok_flat = False
 check("plain filename is allowed", ok_flat)
 
 try:
     p = sessions._jail(session, "")
-    ok_root = p == session
+    ok_root = p == session.resolve()
 except ValueError:
     ok_root = False
 check("empty path resolves to the workspace root", ok_root)
 
 try:
     p = sessions._jail(session, "sub/../main.py")
-    ok_inner = p == (session / "main.py")
+    ok_inner = p == (session / "main.py").resolve()
 except ValueError:
     ok_inner = False
 check("traversal that stays INSIDE is allowed", ok_inner)

@@ -206,21 +206,41 @@ fn canonical(name: &str) -> Option<&'static Lang> {
 /// Does `cmd` resolve on PATH? Used by --probe to report which runtimes an
 /// older/minimal machine actually has.
 fn on_path(cmd: &str) -> bool {
-    // absolute or contains a slash: just check executability
-    if cmd.contains('/') {
-        return std::fs::metadata(cmd).map(|m| m.is_file()).unwrap_or(false);
+    // absolute or contains a separator: just check it exists
+    if cmd.contains('/') || cmd.contains('\\') {
+        return Path::new(cmd).is_file();
     }
-    let paths = env::var("PATH").unwrap_or_default();
-    for dir in paths.split(':') {
-        if dir.is_empty() {
+    let path_var = env::var_os("PATH").unwrap_or_default();
+    // split_paths, NOT split(':'). Windows separates with ';' and its entries
+    // contain a drive-letter colon, so splitting on ':' there produced garbage
+    // fragments that matched nothing — `--probe` reported ZERO available
+    // runtimes on Windows, and the contract check could not execute anything.
+    for dir in env::split_paths(&path_var) {
+        if dir.as_os_str().is_empty() {
             continue;
         }
-        let candidate = Path::new(dir).join(cmd);
-        if candidate.is_file() && is_executable(&candidate) {
-            return true;
+        for candidate in executable_names(cmd) {
+            let p = dir.join(&candidate);
+            if p.is_file() && is_executable(&p) {
+                return true;
+            }
         }
     }
     false
+}
+
+/// Names to try for `cmd` on this platform. Unix uses the bare name; Windows
+/// resolves through PATHEXT, so `python3` on disk is really `python3.exe`.
+fn executable_names(cmd: &str) -> Vec<String> {
+    if !cfg!(windows) {
+        return vec![cmd.to_string()];
+    }
+    let mut names = vec![cmd.to_string()];
+    let pathext = env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+    for ext in pathext.split(';').filter(|e| !e.is_empty()) {
+        names.push(format!("{cmd}{}", ext.to_lowercase()));
+    }
+    names
 }
 
 /// Is this file executable? Windows has no execute bit — presence on PATH with

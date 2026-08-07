@@ -188,7 +188,9 @@ every result rather than letting a caller assume they all held.
 way Linux does, so setting it would buy an illusion.
 ² Dynamically-linked programs only — a statically linked binary (Go, by default)
 ignores it.
-³ Weaker still on macOS: SIP strips `DYLD_INSERT_LIBRARIES` for protected binaries.
+³ Weaker still on macOS: SIP strips `DYLD_INSERT_LIBRARIES` for protected and
+hardened-runtime binaries — which includes most signed interpreters, so treat
+`no_net` there as best-effort only.
 
 Windows' `ActiveProcessLimit` is scoped to the **job**, which makes it a
 genuinely better fork-bomb guard than `RLIMIT_NPROC`'s uid-wide budget — the

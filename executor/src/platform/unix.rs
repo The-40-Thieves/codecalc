@@ -26,12 +26,14 @@ pub struct Rlimits {
     nproc: u64,
 }
 
-/// The first argument of get/setrlimit is a glibc-specific enum on Linux and a
-/// plain c_int everywhere else. Naming the glibc type unconditionally does not
-/// compile on macOS.
-#[cfg(target_os = "linux")]
+/// The first argument of get/setrlimit is a glibc-specific enum and a plain
+/// c_int everywhere else. The gate is target_ENV, not target_os: musl is also
+/// `target_os = "linux"` but has no `__rlimit_resource_t`, so keying on the OS
+/// compiled fine for gnu and broke both static musl builds — which are the
+/// artifacts the README tells people to use on older machines.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 type RlimitResource = libc::__rlimit_resource_t;
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
 type RlimitResource = libc::c_int;
 
 fn hard_limit(resource: RlimitResource) -> Option<u64> {
