@@ -65,7 +65,17 @@ pub fn resolve(limits: &ResolvedLimits) -> (Rlimits, Vec<&'static str>) {
         unenforced.push("file_size_limit_clamped_to_hard_rlimit");
     }
     let (nofile, _) = clamp(libc::RLIMIT_NOFILE, limits.nofile);
-    let (nproc, _) = clamp(libc::RLIMIT_NPROC, limits.max_processes);
+    let (nproc, nproc_clamped) = clamp(libc::RLIMIT_NPROC, limits.max_processes);
+    if nproc_clamped {
+        unenforced.push("process_limit_clamped_to_hard_rlimit");
+    }
+    // The fork-bomb guard is sized from the MEASURED ambient task count on
+    // Linux. Elsewhere there is no cheap equivalent, so it falls back to a fixed
+    // ceiling — a weaker guarantee, and one a caller should be told about rather
+    // than left to infer from the platform.
+    if current_uid_tasks().is_none() {
+        unenforced.push("process_limit_is_a_fixed_ceiling_not_measured");
+    }
 
     // RLIMIT_AS on macOS: Darwin accepts the call but does not enforce address
     // space the way Linux does, and a large soft value can be rejected outright.

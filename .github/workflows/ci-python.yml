@@ -158,6 +158,10 @@ jobs:
           # asserted less. Pin the count so silent shrinkage is a failure, not a faster green run.
           passed=$(grep -c '^PASS' /tmp/sec.out || true)
           echo "security assertions passed: $passed"
+          # 13 on macOS, 14 on Linux: the tight fork-bomb headroom assertion only
+          # applies where the ambient task count is measurable, and the suite
+          # prints SKIP with the reason otherwise. Flooring at 13 keeps the guard
+          # against silent shrinkage without asserting a Linux-only count.
           if [ "$passed" -lt 13 ]; then
             echo "::error::only $passed security assertions ran (expected >= 13). Assertions were removed or the suite aborted early."
             exit 1

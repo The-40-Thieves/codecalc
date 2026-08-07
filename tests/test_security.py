@@ -72,12 +72,31 @@ except OSError as e:
 r = executor.execute("python3", _COUNTER, timeout=30)
 _m = re.search(r"EAGAIN_AFTER (\d+)", r.get("stdout", "") or "")
 _children = int(_m.group(1)) if _m else None
+
+# The bound to expect depends on which path computed the limit, and asserting
+# the Linux one everywhere is how a correct sandbox looks broken. On Linux the
+# ambient task count is measurable, so the limit is ambient+headroom and the
+# ambient tasks consume nearly all of it — the bomb gets ~headroom. On macOS
+# there is no cheap /proc equivalent, so nproc_limit() falls back to a FIXED
+# ceiling and the (small) ambient count leaves most of it available: measured at
+# 1080 children on a macOS runner against a headroom of 512, which is the
+# fallback working exactly as designed, not a breach.
+_measured = executor.current_uid_tasks() is not None
+_limit = executor.nproc_limit()
 _headroom = executor.DEFAULT_PROCESS_HEADROOM
-# +64 tolerates ordinary ambient churn between the measurement and the forks;
-# the point is that the bound is ~headroom, not that it is exactly headroom.
-check("fork-bomb bounded at the configured headroom",
-      _children is not None and _children <= _headroom + 64,
-      f"-> {_children} children (headroom {_headroom})")
+# True on every platform: whatever the limit was, it held.
+check("fork-bomb bounded by the process limit",
+      _children is not None and _children <= _limit,
+      f"-> {_children} children (limit {_limit}, measured={_measured})")
+if _measured:
+    # +64 tolerates ambient churn between the measurement and the forks; the
+    # point is that the bound is ~headroom, not exactly headroom.
+    check("fork-bomb bounded at the configured headroom (measured path)",
+          _children is not None and _children <= _headroom + 64,
+          f"-> {_children} children (headroom {_headroom})")
+else:
+    print(f"SKIP fork-bomb headroom bound — ambient task count is not measurable "
+          f"on {sys.platform}; the fixed ceiling of {_limit} applies instead")
 
 # 6b. And the runaway case still terminates rather than hanging.
 r = executor.execute("python3", "import os\nwhile True: os.fork()", timeout=10)
