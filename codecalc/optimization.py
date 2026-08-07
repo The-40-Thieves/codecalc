@@ -18,7 +18,12 @@ import ast
 import re
 
 from . import executor, llm, tools
-from .translation import DEFAULT_EDGE_INPUTS, _extract_code, verify_translation
+from .translation import (
+    DEFAULT_EDGE_INPUTS,
+    _extract_code,
+    _worst_case,
+    verify_translation,
+)
 
 _OPTIMIZE_SYSTEM = (
     "You optimize code for speed. Preserve behavior EXACTLY: same stdin "
@@ -108,20 +113,32 @@ def optimize_code(code: str, language: str,
             return {"ok": False, "error": "LLM did not return code",
                     "llm_available": True, "raw": text[:500]}
 
-        # correctness: both versions, same inputs, stdout must match
+        # Correctness gate. Both versions, same inputs, and stdout must match on
+        # at least one input where BOTH actually ran — see translation.aggregate.
+        # An optimization is not "correct because both versions crashed".
         ver = verify_translation(language, code, language, optimized, inputs)
         if not ver["passed"]:
             last = {"stage": "correctness", "verification": ver}
-            mismatch = next((c for c in ver["cases"] if not c["match"]), None)
-            if attempt == 1 and mismatch:
-                prompt += (
-                    "\n\nVERIFICATION FAILED on input "
-                    f"{mismatch['input']!r}:\n"
-                    f"original stdout: {mismatch['source']['stdout'][:300]!r}\n"
-                    f"optimized stdout: {mismatch['target']['stdout'][:300]!r}\n"
-                    f"optimized stderr: {mismatch['target']['stderr'][:300]!r}\n"
-                    "Fix the optimization so behavior is identical."
-                )
+            worst = _worst_case(ver["cases"])
+            if attempt == 1 and worst:
+                if worst["outcome"] == "mismatch":
+                    prompt += (
+                        "\n\nVERIFICATION FAILED on input "
+                        f"{worst['input']!r} ({worst['reason']}):\n"
+                        f"original stdout: {worst['source']['stdout'][:300]!r}\n"
+                        f"optimized stdout: {worst['target']['stdout'][:300]!r}\n"
+                        f"optimized stderr: {worst['target']['stderr'][:300]!r}\n"
+                        "Fix the optimization so behavior is identical."
+                    )
+                else:
+                    prompt += (
+                        "\n\nCOULD NOT VERIFY on input "
+                        f"{worst['input']!r} ({worst['reason']}).\n"
+                        f"original stderr: {worst['source']['stderr'][:300]!r}\n"
+                        f"optimized stderr: {worst['target']['stderr'][:300]!r}\n"
+                        "Both versions failed, so correctness could not be "
+                        "established. Emit an optimization that RUNS."
+                    )
             continue
 
         # speedup: measured, not claimed

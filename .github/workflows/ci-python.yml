@@ -68,6 +68,12 @@ jobs:
       # cheapest signal that the arithmetic core did not regress.
       - name: calc parity
         run: uv run --no-sync python tests/test_calc_port.py
+      # The translate/optimize correctness gate. Also pure: classify_case and aggregate take
+      # executor result dicts, so the decision logic runs here without a sandbox or two runtimes.
+      # That split is why this suite exists at all — the old logic could only be reached by actually
+      # running two programs, so the trust boundary of translate_code was never tested anywhere.
+      - name: translation verification gate
+        run: uv run --no-sync python tests/test_translation_verify.py
 
   sandbox:
     # The security suite. Split out from `tests` because it needs the Rust binary built first, and
