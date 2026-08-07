@@ -155,24 +155,39 @@ jobs:
         # -shared works for both; macOS produces a Mach-O dylib from the same
         # source because the shim only overrides socket()/connect().
         run: cc -shared -fPIC -O2 -Wall -Wextra -Werror -o ${{ matrix.lib }} blocknet.c
-      - name: assert it exports the symbols it overrides
+      # The two platforms use different mechanisms, so the static check differs
+      # too. Linux: the shim DEFINES socket/connect and they must be exported.
+      # macOS: two-level namespace means defining them does nothing, so the
+      # replacements are static and dyld applies a __DATA,__interpose section —
+      # which is what must be present there.
+      - name: assert the override mechanism is actually in the artifact
         shell: bash
         run: |
           set -euo pipefail
-          # nm -D is GNU; macOS nm has no --defined-only in the same form, so
-          # take the portable subset and filter for defined text symbols.
-          syms=$(nm -g executor/${{ matrix.lib }} | awk '$2 ~ /^[TtDd]$/ {print $3}' | sed 's/^_//')
-          echo "$syms"
+          lib=executor/${{ matrix.lib }}
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            sect=$(otool -s __DATA __interpose "$lib" | tail -n +3 || true)
+            echo "$sect"
+            [ -n "$sect" ] || { echo "::error::$lib has no __DATA,__interpose section; dyld would ignore it."; exit 1; }
+            # Two 8-byte pointer pairs = 2 interposed functions, 32 bytes total.
+            words=$(echo "$sect" | awk '{for(i=2;i<=NF;i++) print $i}' | wc -l)
+            echo "interpose words: $words"
+            [ "$words" -ge 8 ] || { echo "::error::__interpose section too small for 2 entries."; exit 1; }
+            refs=$(nm -u "$lib" | sed 's/^_//' | sort -u)
+          else
+            refs=$(nm -g --defined-only "$lib" | awk '{print $3}')
+          fi
+          echo "$refs"
           for s in socket connect; do
-            grep -qx "$s" <<<"$syms" || { echo "::error::${{ matrix.lib }} does not define $s"; exit 1; }
+            grep -qx "$s" <<<"$refs" || { echo "::error::${{ matrix.lib }} does not reference $s"; exit 1; }
           done
-          # socketpair must NOT be overridden — tokio/libuv use it for internal signal plumbing and
-          # blocking it crashes the runtime rather than the network call. AUDIT.md item 4.
-          if grep -qx socketpair <<<"$syms"; then
-            echo "::error::${{ matrix.lib }} overrides socketpair(); this breaks tokio/libuv runtimes."
+          # socketpair must NOT be touched — tokio/libuv use it for internal
+          # signal plumbing and blocking it crashes the runtime. AUDIT.md item 4.
+          if grep -qx socketpair <<<"$refs"; then
+            echo "::error::${{ matrix.lib }} touches socketpair(); this breaks tokio/libuv runtimes."
             exit 1
           fi
-          echo "ok: overrides socket+connect, leaves socketpair alone"
+          echo "ok: socket+connect covered, socketpair untouched"
       - name: assert it actually blocks an outbound connection
         shell: bash
         # The probe is a C program compiled HERE, not the runner's python3.
