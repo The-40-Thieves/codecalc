@@ -153,6 +153,11 @@ jobs:
         run: |
           set -euo pipefail
           uv run --no-sync python tests/test_security.py | tee /tmp/sec.out
+          # The fork-bomb tests run last and are destructive by nature. Give the
+          # runner a moment to reap before this step's own shell needs to fork,
+          # or the post-processing below dies with "resource temporarily
+          # unavailable" after a suite that passed.
+          sleep 5
           # FLOOR. This suite is a flat script of `check(...)` calls with
           # `sys.exit(1 if FAILS else 0)` at the end — delete a section and it still exits 0, having
           # asserted less. Pin the count so silent shrinkage is a failure, not a faster green run.

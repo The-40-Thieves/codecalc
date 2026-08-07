@@ -102,15 +102,23 @@ check("benchmark detects polynomial growth (no eval regression)",
 # The recursive bomb in 6b can only tell you the run STOPPED, which the wall
 # clock also does. This forks non-recursively and reports how many children it
 # got before EAGAIN, which is the number that says the limit actually held.
-_COUNTER = """import os, sys
+# The children park so they hold their slot while the parent counts, then the
+# parent KILLS THE WHOLE GROUP once it has the number. Without that they are
+# orphaned and keep holding process slots after the run: on a macOS runner this
+# left ~1080 parked processes, and the CI step's own shell could not fork
+# afterwards — the suite printed ALL TESTS PASS and the step exited 128.
+# The count is flushed to stdout (a file, from the executor's side) before the
+# signal, so killing ourselves does not lose it.
+_COUNTER = """import os, signal, sys
 n = 0
 try:
     while True:
         if os.fork() == 0:
             os.pause()      # child parks; only the parent counts
         n += 1
-except OSError as e:
+except OSError:
     print(f"EAGAIN_AFTER {n}", flush=True)
+    os.killpg(os.getpgrp(), signal.SIGKILL)   # take the parked children with us
     sys.exit(3)
 """
 r = executor.execute("python3", _COUNTER, timeout=30)
