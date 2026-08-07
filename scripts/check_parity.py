@@ -114,6 +114,33 @@ for label, value in (("rust", rust_default), ("python", registry.DEFAULT_RUNTIME
         fail(f"{label} DEFAULT_RUNTIME_PATH contains a home directory: {value!r}. "
              "The default must be machine-neutral; use CODECALC_RUNTIME_PATH to pin a toolchain.")
 
+# ── 4. fork-bomb guard ──────────────────────────────────────────────────────
+# RLIMIT_NPROC is now measured (ambient uid tasks + headroom) rather than fixed.
+# Both backends must agree on the env vars and the numbers, or an operator who
+# sets CODECALC_PROCESS_HEADROOM configures only whichever backend answered.
+NPROC_CONSTANTS = [
+    ("MAX_PROCESSES_ENV", r'MAX_PROCESSES_ENV:\s*&str\s*=\s*"([^"]+)"', executor.MAX_PROCESSES_ENV, str),
+    ("PROCESS_HEADROOM_ENV", r'PROCESS_HEADROOM_ENV:\s*&str\s*=\s*"([^"]+)"', executor.PROCESS_HEADROOM_ENV, str),
+    ("DEFAULT_PROCESS_HEADROOM", r"DEFAULT_PROCESS_HEADROOM:\s*u64\s*=\s*(\d+)", executor.DEFAULT_PROCESS_HEADROOM, int),
+    ("FALLBACK_NPROC_LIMIT", r"FALLBACK_NPROC_LIMIT:\s*u64\s*=\s*(\d+)", executor.FALLBACK_NPROC_LIMIT, int),
+]
+for name, pattern, py_value, cast in NPROC_CONSTANTS:
+    m = re.search(pattern, RUST)
+    if not m:
+        fail(f"{name}: not found in main.rs — the extractor is broken, so this check proves nothing")
+        continue
+    rs_value = cast(m.group(1))
+    if rs_value != py_value:
+        fail(f"{name} drift — python: {py_value!r}, rust: {rs_value!r}")
+    else:
+        print(f"ok   {name}: {py_value!r} in both backends")
+
+# The old bug in one line: a FIXED limit is a bet on the ambient task count.
+if isinstance(getattr(executor, "NPROC_LIMIT", None), int):
+    fail("executor.NPROC_LIMIT is back as a fixed constant. RLIMIT_NPROC is a uid-wide "
+         "TASK budget, so a constant is a bet on how busy the box is — that bet is what "
+         "broke 14 of 31 runtimes. Use nproc_limit().")
+
 if failures:
     print(f"\n=== {len(failures)} parity failure(s) ===")
     sys.exit(1)

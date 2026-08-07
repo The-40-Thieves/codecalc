@@ -146,6 +146,8 @@ All optional. codecalc runs with none of these set.
 | `CODECALC_RUNTIME_PATH` | the server's own `PATH`, else `/usr/local/bin:/usr/bin:/bin` | The `PATH` executed code resolves runtimes on. **Set this when an MCP client spawns the server**: clients often launch with a stripped environment, so an inherited `PATH` can miss a toolchain manager's shims entirely and most languages silently become unavailable. `list_languages` reports what actually resolved. |
 | `CODECALC_EXEC_BIN` | `bin/codecalc-exec` (arch-matched) | Override the sandbox binary. Without one, codecalc falls back to a pure-Python executor — `list_languages` and `execute_code` still work, but the Rust path is the production one. |
 | `CODECALC_SESSION_ROOT` | `~/.codecalc/sessions` | Where session workspaces live. |
+| `CODECALC_PROCESS_HEADROOM` | `512` | Fork-bomb guard. `RLIMIT_NPROC` is a **uid-wide task budget**, not a per-sandbox one — the kernel compares it against every thread your user owns, machine-wide. So codecalc measures the ambient count per execution and sets the limit to *ambient + headroom*: a bomb can add at most this many tasks, while a runtime wanting a few threads always has room however busy the box is. |
+| `CODECALC_MAX_PROCESSES` | *(unset)* | Escape hatch: pin `RLIMIT_NPROC` to an absolute value and skip the measurement. |
 | `CODECALC_LLM_GATEWAY` | *(unset — the two LLM tools report themselves unconfigured)* | An OpenAI-compatible `/v1/chat/completions` endpoint. Only `translate_code` and `optimize_code` need it; the other 46 tools work without it. There is deliberately no default: sending your source to a third party nobody configured would be a worse failure than a clear error. |
 | `CODECALC_LLM_API_KEY` | *(unset)* | Bearer token for that gateway, if it needs one. |
 | `CODECALC_LLM_MODEL` | `gpt-4o-mini` | Model name passed to the gateway. |
@@ -171,6 +173,12 @@ PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py  # all 9 tools over MCP stdi
   file size 256MiB, 256 FDs, core dumps off
 - Wall-clock timeout kills the whole process group (SIGKILL)
 - Output capped at 64KiB per stream
+- Fork-bomb guard via `RLIMIT_NPROC`, sized from the **measured** ambient task
+  count plus headroom rather than a fixed number. This is a mitigation, not
+  isolation: the budget is shared with every other process your user owns, so
+  concurrent executions draw on the same pool. cgroup v2 `pids.max` is the real
+  per-sandbox answer and needs delegated cgroup access a stdio MCP server cannot
+  assume — reach for it when this moves behind a container.
 - No network namespace isolation (single-host tool; containerize for untrusted code)
 
 ## Language list

@@ -2,6 +2,7 @@
 plus sandbox guarantees (env isolation, fork-bomb, output caps, var caps)."""
 import os
 import pathlib
+import re
 import sys
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -46,7 +47,39 @@ check("executed code sees NO host secrets", "CLEAN" in r.get("stdout", ""), f"->
 r = executor.execute("python3", "import os; print('PATH' in os.environ, bool(os.environ.get('HOME')))")
 check("allowlist keeps PATH+HOME functional", "True True" in r.get("stdout", ""))
 
-# 6. fork-bomb: RLIMIT_NPROC must stop runaway forks (exit non-zero, no hang)
+# 6. fork-bomb BOUND. This runs BEFORE the recursive bomb in 6b, and the order
+# is load-bearing. RLIMIT_NPROC is now computed per execution as (ambient uid
+# tasks + headroom), measured once at spawn. Run this after a recursive bomb and
+# its children are still draining, so the ambient figure it was sized against
+# has since dropped and the counter gets MORE room than the headroom — measured
+# at 721 children against a headroom of 512 in exactly that order. Quiet box
+# first, then the messy test.
+#
+# The recursive bomb in 6b can only tell you the run STOPPED, which the wall
+# clock also does. This forks non-recursively and reports how many children it
+# got before EAGAIN, which is the number that says the limit actually held.
+_COUNTER = """import os, sys
+n = 0
+try:
+    while True:
+        if os.fork() == 0:
+            os.pause()      # child parks; only the parent counts
+        n += 1
+except OSError as e:
+    print(f"EAGAIN_AFTER {n}", flush=True)
+    sys.exit(3)
+"""
+r = executor.execute("python3", _COUNTER, timeout=30)
+_m = re.search(r"EAGAIN_AFTER (\d+)", r.get("stdout", "") or "")
+_children = int(_m.group(1)) if _m else None
+_headroom = executor.DEFAULT_PROCESS_HEADROOM
+# +64 tolerates ordinary ambient churn between the measurement and the forks;
+# the point is that the bound is ~headroom, not that it is exactly headroom.
+check("fork-bomb bounded at the configured headroom",
+      _children is not None and _children <= _headroom + 64,
+      f"-> {_children} children (headroom {_headroom})")
+
+# 6b. And the runaway case still terminates rather than hanging.
 r = executor.execute("python3", "import os\nwhile True: os.fork()", timeout=10)
 check("fork-bomb stopped by RLIMIT_NPROC",
       not r.get("ok") or r.get("exit_code", 0) != 0 or r.get("timed_out"),

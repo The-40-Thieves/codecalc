@@ -28,9 +28,19 @@ MAX_OUTPUT_BYTES = 64 * 1024
 AS_LIMIT_BYTES = 2048 * 1024**3      # 2 TiB VA — V8/JVM/tcmalloc reserve huge VA
 FSIZE_LIMIT_BYTES = 256 * 1024**2    # 256 MiB output files
 NFILE_LIMIT = 256
-# RLIMIT_NPROC counts ALL processes of this uid, not just sandbox children —
-# this host runs ~120 ubuntu processes already, so 128 would break everything.
-NPROC_LIMIT = 1024
+# ── fork-bomb guard ─────────────────────────────────────────────────────────
+# RLIMIT_NPROC is not a per-sandbox limit: the kernel compares it against the
+# real uid's TOTAL task count, machine-wide, and it counts THREADS. Any fixed
+# constant is therefore a bet on how busy the rest of the box is, and this one
+# lost — 1024 was picked from a process count of ~120 while the kernel was
+# counting 1009 tasks, leaving ~15 threads of headroom and killing every
+# runtime with a thread pool. Measured per execution instead; see
+# executor/src/main.rs for the full note. scripts/check_parity.py gates that
+# the two backends keep the same env vars and defaults.
+DEFAULT_PROCESS_HEADROOM = 512
+FALLBACK_NPROC_LIMIT = 4096
+MAX_PROCESSES_ENV = "CODECALC_MAX_PROCESSES"
+PROCESS_HEADROOM_ENV = "CODECALC_PROCESS_HEADROOM"
 CPU_GRACE_SECONDS = 8
 
 
@@ -77,14 +87,71 @@ def _env() -> dict:
     return env
 
 
+def current_uid_tasks() -> int | None:
+    """Total tasks (THREADS, not processes) owned by this real uid, machine-wide
+    — the number the kernel actually compares RLIMIT_NPROC against.
+
+    Returns None when it cannot be measured (no /proc), which the caller treats
+    as "unknown" rather than zero.
+    """
+    proc = Path("/proc")
+    if not proc.is_dir():
+        return None
+    uid = os.getuid()
+    total = 0
+    seen_any = False
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            status = (entry / "status").read_text()
+        except OSError:
+            continue  # exited between listing and reading
+        this_uid = threads = None
+        for line in status.splitlines():
+            if line.startswith("Uid:"):
+                parts = line.split()
+                this_uid = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
+            elif line.startswith("Threads:"):
+                val = line.split()[-1]
+                threads = int(val) if val.isdigit() else None
+            if this_uid is not None and threads is not None:
+                break
+        if this_uid == uid:
+            seen_any = True
+            total += threads if threads is not None else 1
+    # This process is itself a task owned by this uid, so a zero total means the
+    # walk found nothing usable.
+    return total if seen_any else None
+
+
+def nproc_limit() -> int:
+    """RLIMIT_NPROC for one execution: measured ambient tasks + headroom.
+
+    CODECALC_MAX_PROCESSES pins an absolute value and skips the measurement.
+    """
+    override = os.environ.get(MAX_PROCESSES_ENV)
+    if override and override.isdigit():
+        return int(override)
+    headroom_env = os.environ.get(PROCESS_HEADROOM_ENV)
+    headroom = int(headroom_env) if headroom_env and headroom_env.isdigit() \
+        else DEFAULT_PROCESS_HEADROOM
+    tasks = current_uid_tasks()
+    return tasks + headroom if tasks is not None else FALLBACK_NPROC_LIMIT
+
+
 def _limits(timeout: int):
+    # Measured in the PARENT, before fork: _apply runs after fork in the child
+    # via preexec_fn, where walking /proc is not something to be doing.
+    nproc = nproc_limit()
+
     def _apply():
         try:
             resource.setrlimit(resource.RLIMIT_CPU, (timeout + CPU_GRACE_SECONDS,) * 2)
             resource.setrlimit(resource.RLIMIT_AS, (AS_LIMIT_BYTES,) * 2)
             resource.setrlimit(resource.RLIMIT_FSIZE, (FSIZE_LIMIT_BYTES,) * 2)
             resource.setrlimit(resource.RLIMIT_NOFILE, (NFILE_LIMIT, NFILE_LIMIT))
-            resource.setrlimit(resource.RLIMIT_NPROC, (NPROC_LIMIT, NPROC_LIMIT))
+            resource.setrlimit(resource.RLIMIT_NPROC, (nproc, nproc))
             resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
         except (ValueError, OSError):
             pass

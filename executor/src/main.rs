@@ -27,10 +27,45 @@ const MAX_OUTPUT_BYTES: u64 = 64 * 1024;
 const AS_LIMIT_BYTES: u64 = 2048 * 1024 * 1024 * 1024; // 2 TiB VA (V8/JVM need huge VA)
 const FSIZE_LIMIT_BYTES: u64 = 256 * 1024 * 1024;
 const NFILE_LIMIT: u64 = 256;
-// RLIMIT_NPROC counts ALL processes of this uid (not just sandbox children) —
-// this host already runs ~120 ubuntu processes, so the limit must leave
-// headroom for the host while still stopping a fork bomb cold.
-const NPROC_LIMIT: u64 = 1024;
+// ── fork-bomb guard ─────────────────────────────────────────────────────────
+//
+// RLIMIT_NPROC is not a per-sandbox limit. The kernel compares it against the
+// real uid's TOTAL task count, machine-wide, and it counts THREADS: every
+// clone() is checked, CLONE_THREAD included. So any fixed constant is a bet on
+// how busy the rest of the box is.
+//
+// The previous value, 1024, was chosen from a process count — "this host runs
+// ~120 ubuntu processes, so 1024 leaves headroom". The kernel was counting
+// 1009 tasks for the same uid at the same moment. Real headroom was ~15
+// threads, not ~900, so every runtime with a thread pool died at startup:
+//
+//     go:      failed to create new OS thread (have 5 already; errno=11)
+//     erlang:  Failed to create dirty cpu scheduler thread 2, error = 11
+//     node/deno/ruby/python3: tokio "OS can't spawn worker thread" (mise shim)
+//
+// 14 of 31 languages, load-dependent, on the machine the project was built for.
+// A `print("ok")` probe spawns no threads and does not reproduce it.
+//
+// The fix is to stop guessing the ambient count and measure it: the limit is
+// (current tasks for this uid) + headroom, computed fresh per execution. A fork
+// bomb can then add at most `headroom` tasks before EAGAIN, while a legitimate
+// runtime that wants a handful of threads always has room no matter how busy
+// the box is.
+//
+// This is a mitigation, not isolation. The budget is still shared with every
+// other process owned by this uid — two concurrent executions draw on the same
+// pool. cgroup v2 `pids.max` is the real answer because it is scoped to the
+// cgroup rather than the uid, but it needs delegated cgroup write access that a
+// stdio MCP server launched by an arbitrary client cannot assume. Reach for it
+// when codecalc moves behind a container, which is also when the other residual
+// risks in AUDIT.md stop being acceptable.
+const DEFAULT_PROCESS_HEADROOM: u64 = 512;
+/// Used when the ambient task count cannot be read (non-Linux, /proc not
+/// mounted). Generous on purpose: failing OPEN here degrades the fork-bomb
+/// guard, while failing closed would break every execution on that host.
+const FALLBACK_NPROC_LIMIT: u64 = 4096;
+const MAX_PROCESSES_ENV: &str = "CODECALC_MAX_PROCESSES";
+const PROCESS_HEADROOM_ENV: &str = "CODECALC_PROCESS_HEADROOM";
 const CPU_GRACE_SECONDS: u64 = 8;
 
 /// Env allowlist: executed code must NEVER inherit secrets (API keys, tokens).
@@ -68,6 +103,65 @@ fn runtime_path() -> String {
         .or_else(|| env::var("PATH").ok().filter(|s| !s.is_empty()))
         .unwrap_or_else(|| DEFAULT_RUNTIME_PATH.to_string())
 }
+
+/// Total tasks (threads, not processes) owned by this real uid, machine-wide —
+/// the number the kernel actually compares RLIMIT_NPROC against.
+///
+/// Walks /proc once: ~200 status files, single-digit milliseconds. Returns None
+/// off Linux or if /proc is unreadable, which the caller treats as "cannot
+/// measure" rather than "zero".
+fn current_uid_tasks() -> Option<u64> {
+    let uid = unsafe { libc::getuid() };
+    let mut total: u64 = 0;
+    let mut seen_any = false;
+    for entry in fs::read_dir("/proc").ok()?.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.is_empty() || !name.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        // A process can exit between readdir and read; skip it rather than fail.
+        let Ok(status) = fs::read_to_string(format!("/proc/{name}/status")) else {
+            continue;
+        };
+        let mut this_uid: Option<u32> = None;
+        let mut threads: Option<u64> = None;
+        for line in status.lines() {
+            if let Some(rest) = line.strip_prefix("Uid:") {
+                this_uid = rest.split_whitespace().next().and_then(|v| v.parse().ok());
+            } else if let Some(rest) = line.strip_prefix("Threads:") {
+                threads = rest.trim().parse().ok();
+            }
+            if this_uid.is_some() && threads.is_some() {
+                break;
+            }
+        }
+        if this_uid == Some(uid) {
+            seen_any = true;
+            total += threads.unwrap_or(1);
+        }
+    }
+    // We are ourselves a task owned by this uid, so a zero total means the walk
+    // found nothing usable — report that rather than a limit of `headroom`.
+    if seen_any { Some(total) } else { None }
+}
+
+/// RLIMIT_NPROC for this execution. See the constants above for why it is
+/// measured rather than fixed.
+fn nproc_limit() -> u64 {
+    if let Some(v) = env::var(MAX_PROCESSES_ENV).ok().and_then(|s| s.parse::<u64>().ok()) {
+        return v; // operator override: an absolute cap, measurement skipped
+    }
+    let headroom = env::var(PROCESS_HEADROOM_ENV)
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_PROCESS_HEADROOM);
+    match current_uid_tasks() {
+        Some(n) => n.saturating_add(headroom),
+        None => FALLBACK_NPROC_LIMIT,
+    }
+}
+
 
 /// A language entry: optional compile step + run step. `{file}` `{exe}` `{work}` are placeholders.
 struct Lang {
@@ -214,6 +308,9 @@ struct Limits {
     max_memory_mb: u64,// RLIMIT_AS, 0 = 2 TiB default
     max_output_kb: u64,// stdout/stderr cap + FSIZE, 0 = 64 KiB
     no_net: bool,      // LD_PRELOAD a socket-blocking shim
+    // Precomputed in main() BEFORE any fork. apply_limits runs inside pre_exec,
+    // which must be async-signal-safe — it cannot walk /proc or allocate there.
+    nproc: u64,        // RLIMIT_NPROC: measured ambient tasks + headroom
 }
 
 impl Default for Limits {
@@ -224,6 +321,7 @@ impl Default for Limits {
             max_memory_mb: 0,
             max_output_kb: 0,
             no_net: false,
+            nproc: FALLBACK_NPROC_LIMIT,
         }
     }
 }
@@ -254,7 +352,7 @@ fn apply_limits(limits: &Limits) {
         let nfile = libc::rlimit { rlim_cur: NFILE_LIMIT, rlim_max: NFILE_LIMIT };
         libc::setrlimit(libc::RLIMIT_NOFILE, &nfile);
         // fork-bomb guard: cap child processes for this user
-        let nproc = libc::rlimit { rlim_cur: NPROC_LIMIT, rlim_max: NPROC_LIMIT };
+        let nproc = libc::rlimit { rlim_cur: limits.nproc, rlim_max: limits.nproc };
         libc::setrlimit(libc::RLIMIT_NPROC, &nproc);
         let core = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
         libc::setrlimit(libc::RLIMIT_CORE, &core);
@@ -550,7 +648,9 @@ fn main() {
     let mut stdin_data = String::new();
     let mut stdin_file: Option<String> = None;
     let mut workdir: Option<String> = None;
-    let mut limits = Limits::default();
+    // nproc is measured once per invocation, before any child exists — see
+    // nproc_limit(); apply_limits() runs in pre_exec and cannot walk /proc.
+    let mut limits = Limits { nproc: nproc_limit(), ..Default::default() };
 
     let mut i = 0;
     while i < args.len() {

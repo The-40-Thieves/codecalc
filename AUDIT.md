@@ -78,6 +78,48 @@ runs ~120 ubuntu processes. **1024** is the value Red Hat's own fork-bomb
 guidance recommends, leaves host headroom, and still stops a bomb cold.
 Verified: fork-bomb exits non-zero; host unaffected.
 
+**CORRECTION 2026-08-07 — the reasoning above used the wrong unit, and 1024
+broke the host too, quietly.** The kernel does not count processes. It counts
+**tasks**, threads included: every `clone()` is checked against the limit,
+`CLONE_THREAD` among them. At the moment "~120 ubuntu processes" was measured,
+`ps -u ubuntu -L` reported **1009 tasks for the same uid**. Real headroom was
+~15 threads, not ~900.
+
+Consequence, measured: **14 of 31 languages failed** on this host, every one of
+them a runtime with a thread pool.
+
+```
+go:      runtime: failed to create new OS thread (have 5 already; errno=11)
+erlang:  Failed to create dirty cpu scheduler thread 2, error = 11
+node/deno/ruby/python3: tokio "OS can't spawn worker thread" (the mise shim)
+tests/test_smoke.py: 17 passed, 14 failed   (8 passed under load)
+```
+
+while this document recorded `test_smoke.py → 31 passed, 0 failed`. It is
+load-dependent, so it reads as flakiness, and a `print("ok")` probe spawns no
+threads and does not reproduce it. The discriminating test is a program that
+spawns threads: under `ulimit -u 512` it fails, under 1024 it succeeds, with
+1009 ambient tasks.
+
+**Fix:** stop guessing the ambient count and measure it. `RLIMIT_NPROC` is now
+`(current tasks for this uid) + CODECALC_PROCESS_HEADROOM` (default 512),
+computed fresh per execution in the parent before any fork — `apply_limits`
+runs inside `pre_exec` and cannot walk `/proc`. A bomb can add at most the
+headroom; a legitimate runtime always has room however busy the box is.
+`CODECALC_MAX_PROCESSES` pins an absolute value for operators who want one.
+
+Verified after the fix, same host: **`test_smoke.py` → 31 passed, 0 failed**,
+and a non-recursive fork counter reports `EAGAIN after 514 children` against a
+headroom of 512. `tests/test_security.py` now asserts that BOUND rather than
+only that the run stopped — the recursive bomb can be killed by the wall clock,
+which says nothing about whether the limit held.
+
+**Residual:** this is a mitigation, not isolation. The budget is still uid-wide,
+so two concurrent executions draw on the same pool. cgroup v2 `pids.max` is the
+real per-sandbox answer; it needs delegated cgroup write access that a stdio MCP
+server launched by an arbitrary client cannot assume, so it belongs with the
+containerisation in residual risk 1 rather than before it.
+
 ### HIGH-05 — In-process resource blowups (no caps/timeouts)
 
 **Vulnerability:** `truth_table` with 30 variables → 2^30 rows → OOM in the
