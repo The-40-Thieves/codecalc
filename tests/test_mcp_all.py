@@ -22,7 +22,7 @@ async def main():
         r = await client.call_tool("list_languages", {})
         data = r.data if hasattr(r, "data") else r
         print("list_languages: entries =", len(data), "| c available =",
-              [l for l in data if l["name"] == "c"][0]["available"])
+              next(l for l in data if l["name"] == "c")["available"])
 
         r = await client.call_tool("execute_code", {"language": "python3", "code": "print('mcp ok', 6*7)"})
         print("execute_code:", r.data["stdout"].strip())

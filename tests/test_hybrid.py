@@ -1,9 +1,11 @@
 """Verify: Rust backend in use, startup speed, new tools, MCP round-trip."""
 import json
+import pathlib
 import sys
 import time
 
-sys.path.insert(0, "/home/ubuntu/codecalc")
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
 
 t0 = time.monotonic()
 from codecalc import executor, logic, tools

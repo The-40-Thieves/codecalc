@@ -1,6 +1,7 @@
 """Verify items 1-4: MCP resources, inline images, session_run, units."""
 import asyncio
 import json
+import pathlib
 import sys
 
 from fastmcp import Client
@@ -10,7 +11,7 @@ CONFIG = {
         "codecalc": {
             "command": sys.executable,
             "args": ["-m", "codecalc.server"],
-            "env": {"PYTHONPATH": "/home/ubuntu/codecalc"},
+            "env": {"PYTHONPATH": str(pathlib.Path(__file__).resolve().parents[1])},
         }
     }
 }

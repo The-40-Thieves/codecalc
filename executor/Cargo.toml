@@ -3,7 +3,10 @@ name = "codecalc-exec"
 version = "0.1.0"
 edition = "2021"
 description = "Sandboxed multi-language executor core for codecalc (Rust)"
-license = "MIT"
+# Must match pyproject.toml and LICENSE — scripts/check_claims.py gates this.
+# Was "MIT" while the repo LICENSE and pyproject disagreed: the crate
+# compiles into bin/codecalc-exec, which is distributed, so the two cannot differ.
+license = "Apache-2.0"
 
 [dependencies]
 libc = "0.2"

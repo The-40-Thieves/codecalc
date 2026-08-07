@@ -116,7 +116,7 @@ def _run_step(argv: list[str], cwd: str, timeout: int, stdin: str) -> tuple[int,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
-            preexec_fn=_limits(timeout),  # noqa: PLW1509 — documented above
+            preexec_fn=_limits(timeout),
         )
         try:
             out, err = proc.communicate(input=stdin.encode(), timeout=timeout)
@@ -226,10 +226,7 @@ def execute(language: str, code: str, stdin: str = "", timeout: int = 10,
             return {"ok": False, "error": f"executor failed: {exc}"}
         finally:
             if stdin_path:
-                try:
-                    os.unlink(stdin_path)
-                except OSError:
-                    pass
+                Path(stdin_path).unlink(missing_ok=True)
     return _execute_python(language, code, stdin=stdin, timeout=timeout)
 
 

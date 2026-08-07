@@ -1,0 +1,58 @@
+name: dco
+
+# Every commit must carry a Developer Certificate of Origin sign-off. codecalc is Apache-2.0 and
+# public; a sign-off trailer is the record that each contributor had the right to submit what they
+# submitted. Checked per-commit rather than per-PR because that is the granularity the DCO is
+# written at.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  dco-check:
+    name: Signed-off-by on every commit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          # Need the full PR commit range, not just the merge ref's tip.
+          fetch-depth: 0
+      - name: verify Signed-off-by on every non-merge PR commit
+        # BASE_SHA/HEAD_SHA go through `env:` rather than being interpolated into the script text.
+        # `${{ }}` is expanded into the shell source BEFORE bash parses it, so any context value
+        # carrying a quote plus metacharacters would execute on the runner with this job's token.
+        # These two are SHAs and safe today; the pattern is what keeps it that way.
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          range="$BASE_SHA..$HEAD_SHA"
+          commits=$(git rev-list --no-merges "$range")
+          if [ -z "$commits" ]; then
+            echo "No non-merge commits in $range; nothing to check."
+            exit 0
+          fi
+          fail=0
+          for sha in $commits; do
+            subject=$(git show -s --format='%s' "$sha")
+            if git show -s --format='%B' "$sha" | grep -Eiq '^Signed-off-by: .+ <.+@.+>$'; then
+              echo "ok   $sha  $subject"
+            else
+              echo "FAIL $sha  $subject"
+              echo "       missing a 'Signed-off-by: Name <email>' trailer"
+              fail=1
+            fi
+          done
+          if [ "$fail" -ne 0 ]; then
+            echo
+            echo "::error::One or more commits are missing a DCO Signed-off-by trailer."
+            echo "Fix: git rebase --signoff ${BASE_SHA} && git push --force-with-lease"
+            echo "(or add '-s' to future commits: git commit -s)"
+            exit 1
+          fi
+          echo
+          echo "All non-merge PR commits are signed off."

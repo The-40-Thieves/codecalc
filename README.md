@@ -164,3 +164,31 @@ Cave (mise + apt + rustup + swiftly + nix).
 - Java uses single-file source launch (JEP 330). Kotlin compiles to a jar.
 - csharp/gleam/haskell scaffold a temp project (dotnet new / gleam new / nix-shell).
 - `benchmark` uses the stdin-N contract: code reads N from stdin, work sized by N.
+
+## CI
+
+Five workflows, each documented inline with what it gates and — where a tool was
+considered and rejected — why it is not there.
+
+| Workflow | Gates |
+|---|---|
+| `ci-rust` | clippy `-D warnings`; the executor's **JSON contract**, asserted by running the built binary (OK/TLE/OLE/unknown-language) and confirming a canary secret in the executor's own env does not reach executed code; both **static musl** cross-builds, checked with `file` for static linkage; `blocknet.so` built `-Werror`, symbol-checked, and confirmed to actually block an outbound connection |
+| `ci-python` | `ruff` at a genuine zero residual (ruleset and every exception in `pyproject.toml`, each with a reason); calc parity on 3.11 and 3.14; the security suite against the **Rust** backend, with an assertion that the Rust backend is the one under test; MCP stdio round-trip |
+| `ci-security` | `scripts/check_no_eval.py` (the CRITICAL-01 invariant), `scripts/check_parity.py` (the three security constants duplicated in Rust and Python must match), `scripts/check_claims.py` (README counts and licence), `actionlint`, `gitleaks`, `trufflehog`, `osv-scanner`, `cargo-deny`, `cargo-audit`, and `opengrep` on a schedule |
+| `ci-quality` | `typos`, `shellcheck` |
+| `dco` | `Signed-off-by` on every non-merge commit |
+
+Two conventions run through all of them, both borrowed from harder-won experience:
+
+- **Actions are pinned by commit SHA and downloaded tools by SHA-256.** A tag is
+  mutable; a digest is not.
+- **Every scan asserts it scanned something.** A linter pointed at a renamed
+  directory, a dependency scanner with no lockfile to read, and a clean repo all
+  produce the same output — exit 0. Each gate counts its inputs first and fails
+  if the count is implausible.
+
+## Licence
+
+Apache-2.0. See [LICENSE](LICENSE).
+
+Contributions require a DCO sign-off (`git commit -s`); `dco.yml` enforces it.

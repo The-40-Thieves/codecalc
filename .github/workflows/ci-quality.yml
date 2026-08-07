@@ -1,0 +1,79 @@
+name: ci-quality
+
+# Source and documentation hygiene that is neither a security gate (ci-security) nor a build
+# (ci-python / ci-rust). Every job here GATES, and each earned that by being run against the repo
+# first and confirmed to reach a genuine zero — an unconfigured scanner that fails on correct code
+# gets muted within a week, which is worse than not having it.
+#
+# Measured before wiring:
+#   typos      0 findings, no config needed. No _typos.toml is committed BECAUSE there is nothing
+#              to except; adding an empty one would imply exceptions exist.
+#   shellcheck 0 findings on the one shell script in the repo.
+#
+# Deliberately NOT here: lychee. It was written, run, and then removed. README.md and AUDIT.md
+# between them contain exactly ONE link — https://github.com/rust-cross/cargo-zigbuild — and it is
+# external, so `lychee --offline` reports "1 Total, 0 OK, 1 Excluded": a green job that checked
+# nothing. Running it online instead would gate this repo's PRs on GitHub's availability to verify a
+# single URL. Add it back when there are internal cross-links worth checking.
+#
+# Deliberately NOT here: taplo and `cargo fmt --check`. Both are formatters over hand-authored files
+# and neither can reach zero without making the files worse. taplo wants pyproject.toml's
+# `dependencies` array collapsed onto one line; `cargo fmt` wants executor/src/main.rs's
+# ENV_ALLOWLIST — a deliberately columnar 2-line block — exploded to one string per line, which
+# makes the single most security-relevant constant in the repo harder to diff. clippy already gates
+# the Rust for correctness; these two would gate only style, at the cost of reformatting layout that
+# was chosen on purpose.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  typos:
+    name: typos (source + docs spelling)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: install typos v1.48.0 (pinned binary + checksum)
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/typos-bin"
+          curl -sSL --fail -o "$RUNNER_TEMP/typos.tar.gz" \
+            https://github.com/crate-ci/typos/releases/download/v1.48.0/typos-v1.48.0-x86_64-unknown-linux-musl.tar.gz
+          echo "72a930c9a94fc3914aa56835c5b859c892a797d40c1c42638b98d93f16ff519c  $RUNNER_TEMP/typos.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/typos.tar.gz" -C "$RUNNER_TEMP/typos-bin" ./typos
+          echo "$RUNNER_TEMP/typos-bin" >> "$GITHUB_PATH"
+      - name: typos
+        run: typos
+
+  shellcheck:
+    name: shellcheck (shell scripts)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      # FLOORED. `shellcheck` with no file arguments prints usage and — depending on how the glob
+      # expanded — can exit 0, which is indistinguishable from a clean scan. Count the files first
+      # so a rename or a move fails the job rather than quietly disabling it.
+      #
+      # -print0/xargs -0 rather than word-splitting `find` output: a path containing a space would
+      # otherwise be passed as two filenames and shellcheck would error on both.
+      - name: shellcheck
+        run: |
+          set -euo pipefail
+          find . -name '*.sh' -not -path './.git/*' -not -path './.venv/*' \
+                 -not -path './executor/target/*' -print0 > /tmp/sh.z
+          count=$(tr -cd '\0' < /tmp/sh.z | wc -c)
+          echo "shell scripts found: $count"
+          if [ "$count" -lt 1 ]; then
+            echo "::error::shellcheck matched 0 scripts — the gate is scanning nothing."
+            exit 1
+          fi
+          xargs -0 shellcheck < /tmp/sh.z

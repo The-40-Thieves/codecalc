@@ -1,0 +1,127 @@
+name: ci-python
+
+# Lint + the parts of the test suite that can run anywhere.
+#
+# What CANNOT run here, stated explicitly so nobody mistakes this for full coverage:
+# tests/test_smoke.py exercises all 31 runtimes and needs mise, rustup, swiftly, nix and a dozen apt
+# toolchains. A hosted runner has a handful of them, so the job would be red for reasons that have
+# nothing to do with the PR. The `sandbox` job below covers the python3 path — which is the one every
+# security assertion in AUDIT.md is written against — and ci-rust.yml covers the executor binary's
+# contract directly.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ruff:
+    name: ruff (lint, zero residual)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: '0.12.1'
+      # The ruleset and every exception live in pyproject.toml with a written reason each. The
+      # residual on codecalc/ and tests/ is a genuine 0, so this GATES: any new finding is red.
+      - name: ruff check
+        run: uvx --from 'ruff==0.16.1' ruff check codecalc/ tests/ scripts/
+      # A `ruff check` over a path that matches nothing exits 0, which is indistinguishable from a
+      # clean tree — the same shape as every other source-scan gate in this repo. Assert the file
+      # count so a package rename fails the job rather than silently disabling it.
+      - name: floor — the linter actually saw the package
+        run: |
+          set -euo pipefail
+          n=$(find codecalc tests scripts -name '*.py' | wc -l)
+          echo "python files linted: $n"
+          [ "$n" -ge 20 ] || { echo "::error::only $n python files found; the lint path is wrong."; exit 1; }
+
+  tests:
+    name: tests (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 is the floor declared in pyproject (requires-python); 3.14 is what the dev box runs.
+        # Both ends matter — the codebase uses `X | None` unions and tomllib, which bound it below.
+        python: ['3.11', '3.14']
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: '0.12.1'
+          python-version: ${{ matrix.python }}
+      # --frozen: install exactly what uv.lock pins. Without it uv would re-resolve, and a CI run
+      # that silently upgrades fastmcp is not testing what a user gets.
+      - name: install (locked)
+        run: uv sync --frozen
+      # Pure-python parity suite: 19 ported calc features against known-good values. No sandbox, no
+      # runtimes, no network — it should pass identically everywhere, which is exactly why it is the
+      # cheapest signal that the arithmetic core did not regress.
+      - name: calc parity
+        run: uv run --no-sync python tests/test_calc_port.py
+
+  sandbox:
+    # The security suite. Split out from `tests` because it needs the Rust binary built first, and
+    # because its assertions are the ones AUDIT.md's verdict rests on.
+    name: sandbox + security regressions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: executor
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: '0.12.1'
+          python-version: '3.12'
+      - name: install (locked)
+        run: uv sync --frozen
+      # codecalc/executor.py picks the binary out of bin/ by architecture. Build it into place so
+      # the suite exercises the RUST path — the production one. Without this step every executor
+      # assertion below would silently run against the pure-Python fallback instead, testing the
+      # code path that only runs when the binary is missing.
+      - name: build the executor into bin/
+        run: |
+          set -euo pipefail
+          cargo build --release --manifest-path executor/Cargo.toml
+          mkdir -p bin
+          cp executor/target/release/codecalc-exec bin/
+          gcc -shared -fPIC -O2 -o bin/blocknet.so executor/blocknet.c
+      - name: assert the RUST backend is the one under test
+        run: |
+          set -euo pipefail
+          backend=$(uv run --no-sync python -c 'from codecalc import executor; print(executor.backend())')
+          echo "backend: $backend"
+          [ "$backend" = "rust" ] || { echo "::error::backend is '$backend', expected 'rust' — the suite would be testing the fallback."; exit 1; }
+      - name: security regressions
+        run: |
+          set -euo pipefail
+          uv run --no-sync python tests/test_security.py | tee /tmp/sec.out
+          # FLOOR. This suite is a flat script of `check(...)` calls with
+          # `sys.exit(1 if FAILS else 0)` at the end — delete a section and it still exits 0, having
+          # asserted less. Pin the count so silent shrinkage is a failure, not a faster green run.
+          passed=$(grep -c '^PASS' /tmp/sec.out || true)
+          echo "security assertions passed: $passed"
+          if [ "$passed" -lt 13 ]; then
+            echo "::error::only $passed security assertions ran (expected >= 13). Assertions were removed or the suite aborted early."
+            exit 1
+          fi
+      # The MCP surface is how every consumer reaches this code. A tool that raises on import, or a
+      # schema fastmcp rejects, is invisible to every test above — they all call the functions
+      # directly. This spawns the real server over stdio and round-trips it.
+      - name: MCP stdio round-trip
+        run: |
+          set -euo pipefail
+          uv run --no-sync python tests/test_mcp_all.py | tee /tmp/mcp.out
+          grep -qiE 'fail|error' /tmp/mcp.out && { echo "::error::MCP round-trip reported a failure."; exit 1; } || true
+          echo "ok: MCP stdio round-trip clean"

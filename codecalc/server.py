@@ -7,8 +7,8 @@ spawns). Run:  python -m codecalc.server
 from __future__ import annotations
 
 import json
-import os
 import shutil
+from pathlib import Path
 
 from fastmcp import Context, FastMCP
 
@@ -161,7 +161,6 @@ async def execute_code_stream(
     """
     import asyncio
     import tempfile
-    from pathlib import Path
 
     timeout = min(timeout, 300)
     workdir = Path(tempfile.mkdtemp(prefix="codecalc-stream-"))
@@ -215,10 +214,7 @@ async def execute_code_stream(
 
         stdout_b, stderr_b = await proc.communicate()
         if sf:
-            try:
-                os.unlink(sf)
-            except OSError:
-                pass
+            Path(sf).unlink(missing_ok=True)
         try:
             result = json.loads(stdout_b.decode(errors="replace"))
             if isinstance(result, dict) and "ok" in result:
