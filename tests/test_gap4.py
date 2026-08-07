@@ -1,20 +1,11 @@
 """Verify items 1-4: MCP resources, inline images, session_run, units."""
 import asyncio
 import json
-import pathlib
 import sys
+from pathlib import Path
 
-from fastmcp import Client
-
-CONFIG = {
-    "mcpServers": {
-        "codecalc": {
-            "command": sys.executable,
-            "args": ["-m", "codecalc.server"],
-            "env": {"PYTHONPATH": str(pathlib.Path(__file__).resolve().parents[1])},
-        }
-    }
-}
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _mcp_client import over_stdio
 
 FAILS = []
 
@@ -34,8 +25,8 @@ async def _txt(r) -> str:
 
 
 async def main():
-    async with Client(CONFIG) as client:
-        tools = await client.list_tools()
+    async with over_stdio() as client:
+        tools = (await client.list_tools()).tools
         names = sorted(t.name for t in tools)
         print("tools:", len(names))
         for w in ["session_run", "convert_units", "physical_constants", "list_units"]:
@@ -80,7 +71,7 @@ async def main():
         check("inline image content type", is_img)
 
         # 3. MCP resource read
-        res = await client.read_resource(f"codecalc://session/{sid}/files/helper.py")
+        res = (await client.read_resource(f"codecalc://session/{sid}/files/helper.py")).contents
         check("MCP resource read", "double" in (res[0].text if res else ""), f"-> {str(res)[:60]}")
 
         # 4. units

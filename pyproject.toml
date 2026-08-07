@@ -4,7 +4,16 @@ version = "0.1.0"
 description = "Universal code + logic calculator for AI models: execute 31 languages, evaluate logic, analyze complexity. Exposed via MCP."
 license = "Apache-2.0"
 requires-python = ">=3.11"
-dependencies = ["fastmcp>=2.0", "sympy>=1.13", "z3-solver>=4.13"]
+dependencies = [
+    # The official SDK, NOT fastmcp. fastmcp 3.x pins mcp>=1.24,<2.0 and so
+    # cannot reach protocol 2026-07-28 — the resolver is explicit about it.
+    # Bounded on both ends: `fastmcp>=2.0` with no ceiling had already carried
+    # this project from 2.x to 3.4.6, a major bump nobody chose.
+    "mcp>=2.0,<3",
+    "sympy>=1.13,<2",
+    "z3-solver>=4.13,<6",   # <6 not <5: the tree already resolved 5.0.0.0, and a
+                            # ceiling that DOWNGRADES a working dep is a regression, not a guard.
+]
 
 [project.scripts]
 codecalc = "codecalc.server:main"

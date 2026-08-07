@@ -2,20 +2,11 @@
 verdicts, limits, streaming, compact mode."""
 import asyncio
 import json
-import pathlib
 import sys
+from pathlib import Path
 
-from fastmcp import Client
-
-CONFIG = {
-    "mcpServers": {
-        "codecalc": {
-            "command": sys.executable,
-            "args": ["-m", "codecalc.server"],
-            "env": {"PYTHONPATH": str(pathlib.Path(__file__).resolve().parents[1])},
-        }
-    }
-}
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _mcp_client import over_stdio
 
 FAILS = []
 
@@ -36,8 +27,8 @@ async def _txt(r) -> str:
 
 
 async def main():
-    async with Client(CONFIG) as client:
-        tools = await client.list_tools()
+    async with over_stdio() as client:
+        tools = (await client.list_tools()).tools
         names = sorted(t.name for t in tools)
         print("tools:", len(names), names)
         for want in ["session_start", "session_stop", "session_list",
