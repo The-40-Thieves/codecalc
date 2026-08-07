@@ -2,6 +2,7 @@
 plus sandbox guarantees (env isolation, fork-bomb, output caps, var caps)."""
 import os
 import pathlib
+import re
 import sys
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -46,21 +47,15 @@ check("executed code sees NO host secrets", "CLEAN" in r.get("stdout", ""), f"->
 r = executor.execute("python3", "import os; print('PATH' in os.environ, bool(os.environ.get('HOME')))")
 check("allowlist keeps PATH+HOME functional", "True True" in r.get("stdout", ""))
 
-# 6. fork-bomb: RLIMIT_NPROC must stop runaway forks (exit non-zero, no hang)
-r = executor.execute("python3", "import os\nwhile True: os.fork()", timeout=10)
-check("fork-bomb stopped by RLIMIT_NPROC",
-      not r.get("ok") or r.get("exit_code", 0) != 0 or r.get("timed_out"),
-      f"exit={r.get('exit_code')} timed_out={r.get('timed_out')}")
-
-# 7. infinite loop killed by timeout
+# 6. infinite loop killed by timeout
 r = executor.execute("python3", "while True: pass", timeout=3)
 check("infinite loop killed by timeout", r.get("timed_out") is True)
 
-# 8. output cap
+# 7. output cap
 r = executor.execute("python3", "print('x' * 200000)")
 check("output capped at 64KiB", len(r.get("stdout", "")) < 70_000)
 
-# 9. no eval/exec/shell=True anywhere in the package (excluding docstrings).
+# 8. no eval/exec/shell=True anywhere in the package (excluding docstrings).
 # Exception: _worker_bootstrap.py's `exec()` runs user code inside the
 # isolated REPL subprocess (allowlisted env, separate process group) — the
 # same threat model as the Rust executor, never in the server process.
@@ -77,7 +72,7 @@ for p in (REPO_ROOT / "codecalc").rglob("*.py"):
             bad.append(f"{p.name}:{node.lineno}")
 check("zero eval/exec/shell=True in codebase", not bad, f"-> {bad}")
 
-# 10. benchmark fit still works (no eval regression). Empirical timing is
+# 9. benchmark fit still works (no eval regression). Empirical timing is
 # noisy at small sizes — the security-relevant property is that it detects
 # polynomial growth (not O(1)/O(log n)); exact degree may wobble.
 r = tools.benchmark("import sys\nn=int(sys.stdin.readline())\ns=0\nfor i in range(n):\n    for j in range(n): s+=i*j\nprint(s)",
@@ -86,6 +81,80 @@ est = r.get("estimate", "")
 check("benchmark detects polynomial growth (no eval regression)",
       "O(n" in est and est not in ("O(1)", "O(log n)"),
       f"-> {est}")
+
+# 10. fork-bomb guard. LAST IN THE FILE, and that placement is load-bearing.
+#
+# These two tests are DESTRUCTIVE: between them they spawn up to the process
+# limit and those children take time to drain. Anything running afterwards
+# competes for the same budget. On a macOS runner the bomb reached 1012
+# processes and the benchmark two tests later came back with an empty estimate —
+# a real failure caused entirely by test order. The same shape bit this suite
+# once already, between the two fork-bomb tests themselves.
+#
+# Within the pair, the counter runs BEFORE the recursive bomb, and that order
+# is load-bearing. RLIMIT_NPROC is now computed per execution as (ambient uid
+# tasks + headroom), measured once at spawn. Run this after a recursive bomb and
+# its children are still draining, so the ambient figure it was sized against
+# has since dropped and the counter gets MORE room than the headroom — measured
+# at 721 children against a headroom of 512 in exactly that order. Quiet box
+# first, then the messy test.
+#
+# The recursive bomb in 6b can only tell you the run STOPPED, which the wall
+# clock also does. This forks non-recursively and reports how many children it
+# got before EAGAIN, which is the number that says the limit actually held.
+# The children park so they hold their slot while the parent counts, then the
+# parent KILLS THE WHOLE GROUP once it has the number. Without that they are
+# orphaned and keep holding process slots after the run: on a macOS runner this
+# left ~1080 parked processes, and the CI step's own shell could not fork
+# afterwards — the suite printed ALL TESTS PASS and the step exited 128.
+# The count is flushed to stdout (a file, from the executor's side) before the
+# signal, so killing ourselves does not lose it.
+_COUNTER = """import os, signal, sys
+n = 0
+try:
+    while True:
+        if os.fork() == 0:
+            os.pause()      # child parks; only the parent counts
+        n += 1
+except OSError:
+    print(f"EAGAIN_AFTER {n}", flush=True)
+    os.killpg(os.getpgrp(), signal.SIGKILL)   # take the parked children with us
+    sys.exit(3)
+"""
+r = executor.execute("python3", _COUNTER, timeout=30)
+_m = re.search(r"EAGAIN_AFTER (\d+)", r.get("stdout", "") or "")
+_children = int(_m.group(1)) if _m else None
+
+# The bound to expect depends on which path computed the limit, and asserting
+# the Linux one everywhere is how a correct sandbox looks broken. On Linux the
+# ambient task count is measurable, so the limit is ambient+headroom and the
+# ambient tasks consume nearly all of it — the bomb gets ~headroom. On macOS
+# there is no cheap /proc equivalent, so nproc_limit() falls back to a FIXED
+# ceiling and the (small) ambient count leaves most of it available: measured at
+# 1080 children on a macOS runner against a headroom of 512, which is the
+# fallback working exactly as designed, not a breach.
+_measured = executor.current_uid_tasks() is not None
+_limit = executor.nproc_limit()
+_headroom = executor.DEFAULT_PROCESS_HEADROOM
+# True on every platform: whatever the limit was, it held.
+check("fork-bomb bounded by the process limit",
+      _children is not None and _children <= _limit,
+      f"-> {_children} children (limit {_limit}, measured={_measured})")
+if _measured:
+    # +64 tolerates ambient churn between the measurement and the forks; the
+    # point is that the bound is ~headroom, not exactly headroom.
+    check("fork-bomb bounded at the configured headroom (measured path)",
+          _children is not None and _children <= _headroom + 64,
+          f"-> {_children} children (headroom {_headroom})")
+else:
+    print(f"SKIP fork-bomb headroom bound — ambient task count is not measurable "
+          f"on {sys.platform}; the fixed ceiling of {_limit} applies instead")
+
+# 10b. And the runaway case still terminates rather than hanging.
+r = executor.execute("python3", "import os\nwhile True: os.fork()", timeout=10)
+check("fork-bomb stopped by RLIMIT_NPROC",
+      not r.get("ok") or r.get("exit_code", 0) != 0 or r.get("timed_out"),
+      f"exit={r.get('exit_code')} timed_out={r.get('timed_out')}")
 
 print(f"\n=== {len(FAILS)} failures ===" if FAILS else "\n=== ALL SECURITY TESTS PASS ===")
 sys.exit(1 if FAILS else 0)

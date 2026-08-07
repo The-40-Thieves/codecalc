@@ -74,6 +74,21 @@ jobs:
           python-version: '3.12'
       - run: python scripts/check_claims.py
 
+  portability:
+    # The repo is PUBLIC and the executor binary ships. It was written against one machine and it
+    # showed: RUNTIME_PATH hardcoded a home directory in BOTH backends, llm.py defaulted to a private
+    # tailnet address, complexity.py carried a SECOND copy of that address, and five test files
+    # hardcoded an absolute checkout path. None of it is wrong as Python or Rust — it is only wrong
+    # as a published artifact, which is why no linter flagged any of it.
+    name: no machine-specific paths or private addresses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - run: python scripts/check_portability.py
+
   actionlint:
     # Expression-level type and ARITY checking plus shellcheck over every embedded `run:` block
     # (ubuntu-latest ships shellcheck). This workflow set is heavy on inline bash, and a `set -euo

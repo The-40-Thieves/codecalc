@@ -13,7 +13,6 @@ from __future__ import annotations
 import json
 import os
 import platform
-import resource
 import shutil
 import signal
 import subprocess
@@ -24,13 +23,31 @@ from pathlib import Path
 
 from . import registry
 
+#: POSIX-only stdlib. `resource` does not exist on Windows at all, so importing
+#: it unconditionally made `import codecalc` fail there before any code ran.
+IS_WINDOWS = os.name == "nt"
+if not IS_WINDOWS:
+    import resource
+else:  # pragma: no cover - exercised on the Windows CI runner
+    resource = None
+
 MAX_OUTPUT_BYTES = 64 * 1024
 AS_LIMIT_BYTES = 2048 * 1024**3      # 2 TiB VA — V8/JVM/tcmalloc reserve huge VA
 FSIZE_LIMIT_BYTES = 256 * 1024**2    # 256 MiB output files
 NFILE_LIMIT = 256
-# RLIMIT_NPROC counts ALL processes of this uid, not just sandbox children —
-# this host runs ~120 ubuntu processes already, so 128 would break everything.
-NPROC_LIMIT = 1024
+# ── fork-bomb guard ─────────────────────────────────────────────────────────
+# RLIMIT_NPROC is not a per-sandbox limit: the kernel compares it against the
+# real uid's TOTAL task count, machine-wide, and it counts THREADS. Any fixed
+# constant is therefore a bet on how busy the rest of the box is, and this one
+# lost — 1024 was picked from a process count of ~120 while the kernel was
+# counting 1009 tasks, leaving ~15 threads of headroom and killing every
+# runtime with a thread pool. Measured per execution instead; see
+# executor/src/main.rs for the full note. scripts/check_parity.py gates that
+# the two backends keep the same env vars and defaults.
+DEFAULT_PROCESS_HEADROOM = 512
+FALLBACK_NPROC_LIMIT = 4096
+MAX_PROCESSES_ENV = "CODECALC_MAX_PROCESSES"
+PROCESS_HEADROOM_ENV = "CODECALC_PROCESS_HEADROOM"
 CPU_GRACE_SECONDS = 8
 
 
@@ -72,19 +89,87 @@ _ENV_ALLOWLIST = {
 
 def _env() -> dict:
     env = {k: v for k, v in os.environ.items() if k in _ENV_ALLOWLIST}
-    env["PATH"] = registry.RUNTIME_PATH
+    env["PATH"] = registry.runtime_path()
     env["PYTHONUNBUFFERED"] = "1"
     return env
 
 
+def current_uid_tasks() -> int | None:
+    """Total tasks (THREADS, not processes) owned by this real uid, machine-wide
+    — the number the kernel actually compares RLIMIT_NPROC against.
+
+    Linux only. Returns None where it cannot be measured (Windows has no uid and
+    no RLIMIT_NPROC; macOS has no cheap /proc equivalent), which the caller
+    treats as "unknown" rather than zero.
+    """
+    proc = Path("/proc")
+    if IS_WINDOWS or not proc.is_dir() or not hasattr(os, "getuid"):
+        return None
+    uid = os.getuid()
+    total = 0
+    seen_any = False
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            status = (entry / "status").read_text()
+        except OSError:
+            continue  # exited between listing and reading
+        this_uid = threads = None
+        for line in status.splitlines():
+            if line.startswith("Uid:"):
+                parts = line.split()
+                this_uid = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
+            elif line.startswith("Threads:"):
+                val = line.split()[-1]
+                threads = int(val) if val.isdigit() else None
+            if this_uid is not None and threads is not None:
+                break
+        if this_uid == uid:
+            seen_any = True
+            total += threads if threads is not None else 1
+    # This process is itself a task owned by this uid, so a zero total means the
+    # walk found nothing usable.
+    return total if seen_any else None
+
+
+def nproc_limit() -> int:
+    """RLIMIT_NPROC for one execution: measured ambient tasks + headroom.
+
+    CODECALC_MAX_PROCESSES pins an absolute value and skips the measurement.
+    """
+    override = os.environ.get(MAX_PROCESSES_ENV)
+    if override and override.isdigit():
+        return int(override)
+    headroom_env = os.environ.get(PROCESS_HEADROOM_ENV)
+    headroom = int(headroom_env) if headroom_env and headroom_env.isdigit() \
+        else DEFAULT_PROCESS_HEADROOM
+    tasks = current_uid_tasks()
+    return tasks + headroom if tasks is not None else FALLBACK_NPROC_LIMIT
+
+
 def _limits(timeout: int):
+    """preexec_fn applying rlimits, or None where there are no rlimits to apply.
+
+    Windows has no setrlimit and no fork, so there is nothing to hook: the
+    fallback executor there gets a wall-clock timeout and a process-tree kill
+    and nothing else. The Rust executor is the one that carries real limits on
+    Windows (a Job Object), which is why `backend()` matters more there.
+    """
+    if IS_WINDOWS:
+        return None
+
+    # Measured in the PARENT, before fork: _apply runs after fork in the child
+    # via preexec_fn, where walking /proc is not something to be doing.
+    nproc = nproc_limit()
+
     def _apply():
         try:
             resource.setrlimit(resource.RLIMIT_CPU, (timeout + CPU_GRACE_SECONDS,) * 2)
             resource.setrlimit(resource.RLIMIT_AS, (AS_LIMIT_BYTES,) * 2)
             resource.setrlimit(resource.RLIMIT_FSIZE, (FSIZE_LIMIT_BYTES,) * 2)
             resource.setrlimit(resource.RLIMIT_NOFILE, (NFILE_LIMIT, NFILE_LIMIT))
-            resource.setrlimit(resource.RLIMIT_NPROC, (NPROC_LIMIT, NPROC_LIMIT))
+            resource.setrlimit(resource.RLIMIT_NPROC, (nproc, nproc))
             resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
         except (ValueError, OSError):
             pass
@@ -93,6 +178,25 @@ def _limits(timeout: int):
 
 
 def _kill_group(proc: subprocess.Popen) -> None:
+    """Kill the child AND anything it spawned.
+
+    Killing only the direct child orphans its tree, which is how a "timed out"
+    run leaves work running on the host. There is no portable primitive for
+    this: POSIX has process groups, Windows has `taskkill /T`.
+    """
+    if IS_WINDOWS:
+        # /T kills the tree, /F forces it. Spawned with CREATE_NEW_PROCESS_GROUP
+        # so the child is the root of its own tree rather than ours.
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True, timeout=15, check=False)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        return
     try:
         os.killpg(proc.pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
@@ -146,7 +250,9 @@ def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10
     try:
         src = Path(workdir) / f"main.{ext}"
         src.write_text(code)
-        fmt = {"file": str(src), "exe": str(Path(workdir) / "a.out"), "work": workdir}
+        # Windows needs the .exe extension on the compiled artifact.
+        exe_name = "a.exe" if IS_WINDOWS else "a.out"
+        fmt = {"file": str(src), "exe": str(Path(workdir) / exe_name), "work": workdir}
 
         if entry["compile"]:
             argv = [a.format(**fmt) for a in entry["compile"]]

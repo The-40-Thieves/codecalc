@@ -44,8 +44,7 @@ Every session file is also exposed as an MCP resource:
 `codecalc://session/<session_id>/files/<path>` — images render inline for the
 model, text returns as text, other files download.
 
-**Exact arithmetic & programmer-mode** (ported from the Claude calc skill —
-`~/.claude/skills/calc/calc.py`): exact rationals, threshold checks, bit
+**Exact arithmetic & programmer-mode**: exact rationals, threshold checks, bit
 analysis, binary64 introspection.
 
 | Tool | Description |
@@ -123,25 +122,87 @@ that owns each language (never the Rust sandbox, which has no update powers).
 ## Run the server
 
 ```bash
-cd ~/codecalc && .venv/bin/python -m codecalc.server
+cd /path/to/codecalc && .venv/bin/python -m codecalc.server
 # stdio transport — register with any MCP client
 ```
 
 Point an MCP client at it:
 
 ```json
-{ "mcpServers": { "codecalc": { "command": "/home/ubuntu/codecalc/.venv/bin/python",
+{ "mcpServers": { "codecalc": { "command": "/path/to/codecalc/.venv/bin/python",
                                 "args": ["-m", "codecalc.server"],
-                                "env": { "PYTHONPATH": "/home/ubuntu/codecalc" } } } }
+                                "env": {
+                                  "PYTHONPATH": "/path/to/codecalc",
+                                  "CODECALC_RUNTIME_PATH": "/path/to/mise/shims:/usr/local/bin:/usr/bin:/bin"
+                                } } } }
 ```
+
+## Configuration
+
+All optional. codecalc runs with none of these set.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `CODECALC_RUNTIME_PATH` | the server's own `PATH`, else `/usr/local/bin:/usr/bin:/bin` | The `PATH` executed code resolves runtimes on. **Set this when an MCP client spawns the server**: clients often launch with a stripped environment, so an inherited `PATH` can miss a toolchain manager's shims entirely and most languages silently become unavailable. `list_languages` reports what actually resolved. |
+| `CODECALC_EXEC_BIN` | `bin/codecalc-exec` (arch-matched) | Override the sandbox binary. Without one, codecalc falls back to a pure-Python executor — `list_languages` and `execute_code` still work, but the Rust path is the production one. |
+| `CODECALC_SESSION_ROOT` | `~/.codecalc/sessions` | Where session workspaces live. |
+| `CODECALC_PROCESS_HEADROOM` | `512` | Fork-bomb guard. `RLIMIT_NPROC` is a **uid-wide task budget**, not a per-sandbox one — the kernel compares it against every thread your user owns, machine-wide. So codecalc measures the ambient count per execution and sets the limit to *ambient + headroom*: a bomb can add at most this many tasks, while a runtime wanting a few threads always has room however busy the box is. |
+| `CODECALC_MAX_PROCESSES` | *(unset)* | Escape hatch: pin `RLIMIT_NPROC` to an absolute value and skip the measurement. |
+| `CODECALC_LLM_GATEWAY` | *(unset — the two LLM tools report themselves unconfigured)* | An OpenAI-compatible `/v1/chat/completions` endpoint. Only `translate_code` and `optimize_code` need it; the other 46 tools work without it. There is deliberately no default: sending your source to a third party nobody configured would be a worse failure than a clear error. |
+| `CODECALC_LLM_API_KEY` | *(unset)* | Bearer token for that gateway, if it needs one. |
+| `CODECALC_LLM_MODEL` | `gpt-4o-mini` | Model name passed to the gateway. |
+| `CODECALC_COMPLEXITY_LLM` | *(unset)* | Opt in to an LLM second opinion on `analyze_complexity`. Off by default, and a separate variable from the gateway on purpose — configuring `translate_code` should not silently add a network round-trip to every complexity analysis. |
+
+Both backends resolve `CODECALC_RUNTIME_PATH` identically, and
+`scripts/check_parity.py` fails CI if the Rust and Python copies of that
+contract ever drift — including if a machine-specific home directory finds its
+way back into the default.
 
 ## Test
 
 ```bash
-cd ~/codecalc
+cd /path/to/codecalc
 PYTHONPATH=. .venv/bin/python tests/test_smoke.py    # 31 languages via Rust executor
 PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py  # all 9 tools over MCP stdio
 ```
+
+## Platform support
+
+Linux, macOS and Windows. The three do not offer the same primitives, and the
+executor reports which ones it could **not** apply in an `unenforced` array on
+every result rather than letting a caller assume they all held.
+
+| Guarantee | Linux | macOS | Windows |
+|---|---|---|---|
+| Wall-clock timeout | yes | yes | yes |
+| Kill the whole process tree | `killpg` | `killpg` | `TerminateJobObject` |
+| Fork-bomb guard | `RLIMIT_NPROC` (uid-wide) | `RLIMIT_NPROC` (uid-wide) | Job `ActiveProcessLimit` (**job-scoped**) |
+| Memory ceiling | `RLIMIT_AS` | reported unenforced¹ | Job `ProcessMemoryLimit` |
+| CPU-time ceiling | `RLIMIT_CPU` | `RLIMIT_CPU` | reported unenforced |
+| Open-file ceiling | `RLIMIT_NOFILE` | `RLIMIT_NOFILE` | reported unenforced |
+| Output cap | yes | yes | yes (on read) |
+| `no_net` | `LD_PRELOAD` shim² | `DYLD_INSERT_LIBRARIES`²˒³ | reported unenforced |
+| Stateful sessions | yes | yes | yes |
+
+¹ Darwin accepts `setrlimit(RLIMIT_AS)` but does not enforce address space the
+way Linux does, so setting it would buy an illusion.
+² Dynamically-linked programs only — a statically linked binary (Go, by default)
+ignores it.
+³ Weaker still on macOS, in two ways. SIP and the hardened runtime strip
+`DYLD_INSERT_LIBRARIES` for protected and hardened-signed binaries (most signed
+interpreters), and dyld interposing does not reach calls made *inside* the
+shared cache where libSystem lives — a program's own `connect()` is intercepted,
+a system framework opening a connection internally is not. Treat macOS `no_net`
+as a speed bump, never as isolation.
+
+Windows' `ActiveProcessLimit` is scoped to the **job**, which makes it a
+genuinely better fork-bomb guard than `RLIMIT_NPROC`'s uid-wide budget — the
+failure mode that broke 14 of 31 runtimes on Linux cannot occur there.
+
+Two things degrade rather than fail on a given platform: languages whose runtime
+is absent (`list_languages` reports `available: false`), and the shell-wrapper
+languages — `bash`, `zsh`, `csharp`, `gleam`, `haskell` — which need a POSIX
+shell and so are unavailable on Windows unless one is installed.
 
 ## Sandbox guarantees
 
@@ -150,14 +211,24 @@ PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py  # all 9 tools over MCP stdi
   file size 256MiB, 256 FDs, core dumps off
 - Wall-clock timeout kills the whole process group (SIGKILL)
 - Output capped at 64KiB per stream
+- Fork-bomb guard via `RLIMIT_NPROC`, sized from the **measured** ambient task
+  count plus headroom rather than a fixed number. This is a mitigation, not
+  isolation: the budget is shared with every other process your user owns, so
+  concurrent executions draw on the same pool. cgroup v2 `pids.max` is the real
+  per-sandbox answer and needs delegated cgroup access a stdio MCP server cannot
+  assume — reach for it when this moves behind a container.
 - No network namespace isolation (single-host tool; containerize for untrusted code)
 
 ## Language list
 
 python3, node, bun, deno, typescript, ruby, php, perl, lua, tcl, r, elixir,
 erlang, bash, zsh, mojo, swift, c, cpp/c++, rust, go, fortran, zig, java,
-kotlin, csharp, gleam, haskell, sqlite, jq, awk — 31 runtimes, all local to
-Cave (mise + apt + rustup + swiftly + nix).
+kotlin, csharp, gleam, haskell, sqlite, jq, awk — 31 runtimes.
+
+codecalc does not install any of them. It runs whatever is already on
+`CODECALC_RUNTIME_PATH`, and `list_languages` probes each one and reports which
+actually resolved, so a minimal machine degrades to the subset it has rather
+than failing opaquely.
 
 ## Notes
 

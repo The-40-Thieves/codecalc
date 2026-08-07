@@ -6,8 +6,9 @@ Language-agnostic structural scan:
   - linear-scan builtins (sort etc.)   -> n log n adjustments
   - hash/constant-time ops             -> n^1 stays n
 
-Optionally refined by an LLM via the local LiteLLM gateway when
-CODECALC_LLM_MODEL is set (off by default — deterministic heuristic first).
+Optionally refined by an LLM when CODECALC_COMPLEXITY_LLM is set AND a gateway
+is configured. Off by default: the deterministic heuristic is the product, and
+a static analyzer that quietly makes a network call per invocation is not.
 """
 
 from __future__ import annotations
@@ -15,7 +16,14 @@ from __future__ import annotations
 import json
 import os
 import re
-import urllib.request
+
+from . import llm
+
+#: Opt-in flag for the LLM second opinion. Deliberately its OWN variable rather
+#: than "a gateway is configured": CODECALC_LLM_GATEWAY exists for translate_code
+#: and optimize_code, and reusing it here would mean configuring those two tools
+#: silently added a network round-trip to every analyze_complexity call.
+REFINE_ENV = "CODECALC_COMPLEXITY_LLM"
 
 LOOP_RE = re.compile(
     r"\b(for|while|foreach|until|loop|repeat)\b"
@@ -111,36 +119,38 @@ def analyze(code: str, language: str = "python3") -> dict:
         "notes": notes,
     }
 
-    # optional LLM refinement through the local LiteLLM gateway
-    model = os.environ.get("CODECALC_LLM_MODEL")
-    gateway = os.environ.get("CODECALC_LLM_GATEWAY", "http://100.78.123.100:4001/v1/chat/completions")
-    if model:
-        refined = _llm_refine(code, language, result, model, gateway)
+    # Optional LLM refinement — opt-in, and only if a gateway exists to ask.
+    # The structural estimate above is always what you get by default.
+    if os.environ.get(REFINE_ENV) and llm.GATEWAY:
+        refined = _llm_refine(code, language, result)
         if refined:
             result["llm_refinement"] = refined
     return result
 
 
-def _llm_refine(code: str, language: str, heuristic: dict, model: str, gateway: str) -> dict | None:
+def _llm_refine(code: str, language: str, heuristic: dict) -> dict | None:
+    """Ask the configured gateway to second-guess the structural estimate.
+
+    Goes through llm.chat rather than its own urllib call. It previously carried
+    a duplicate of the gateway plumbing, including a second hardcoded private
+    address and — because it built the request by hand — no Authorization
+    header at all, so it could never have worked against a gateway that
+    required auth.
+    """
     prompt = (
         f"Analyze the asymptotic time complexity of this {language} code. "
         f"Structural heuristic says: {heuristic['estimate']} ({heuristic['basis']}).\n"
         "Give your verdict as strict JSON: {\"estimate\": \"O(...)\", "
-        "\"reason\": \"<2 sentences>\"}. Code:\n```\n" + code[:2000] + "\n```"
-    )
-    body = json.dumps({
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0,
-        "response_format": {"type": "json_object"},
-    }).encode()
-    req = urllib.request.Request(
-        gateway, data=body, headers={"Content-Type": "application/json"}
+        "\"reason\": \"<2 sentences>\"}. Reply with the JSON object only, no "
+        "markdown fence. Code:\n```\n" + code[:2000] + "\n```"
     )
     try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            data = json.loads(resp.read())
-        content = data["choices"][0]["message"]["content"]
+        content = llm.chat(prompt, timeout=20, max_tokens=512).strip()
+        # Tolerate a fenced reply: response_format=json_object is not portable
+        # across OpenAI-compatible gateways, so the format is requested in the
+        # prompt and the fence stripped here rather than relied upon.
+        if content.startswith("```"):
+            content = content.split("\n", 1)[1].rsplit("```", 1)[0]
         return json.loads(content)
     except Exception as exc:
         return {"error": f"LLM refinement unavailable: {exc}"}

@@ -203,8 +203,8 @@ def _check_npm() -> dict[str, dict]:
 
 
 def _check_uv() -> dict[str, dict]:
-    """mojo lives under /data/tools/uv-tools but `uv tool list` in this shell
-    doesn't see it (tool dir configured elsewhere); report its version directly."""
+    """`uv tool list` does not reliably see mojo when UV_TOOL_DIR is configured
+    outside the invoking shell's environment, so ask the binary directly."""
     out = _run(["mojo", "--version"], timeout=30)
     m = re.search(r"(\d+\.\d+\.\d+(?:\.\d+)?)", out)
     return {"mojo": {

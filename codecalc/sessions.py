@@ -38,9 +38,13 @@ _workers: dict[str, Worker] = {}
 def _session_dir(session_id: str) -> Path:
     if not _SAFE_NAME.match(session_id):
         raise ValueError("invalid session id")
-    d = (SESSION_ROOT / session_id).resolve()
-    # jail: must stay under SESSION_ROOT
-    if not str(d).startswith(str(SESSION_ROOT.resolve())):
+    root = SESSION_ROOT.resolve()
+    d = (root / session_id).resolve()
+    # Defence in depth: _SAFE_NAME already forbids '/' and '.', so this cannot
+    # currently fire. Component-wise rather than string-prefix for the same
+    # reason as _jail — if the id charset is ever widened, the weaker check
+    # would have silently become the hole.
+    if not d.is_relative_to(root):
         raise ValueError("session path escapes session root")
     return d
 
@@ -194,9 +198,20 @@ def _list(d: Path) -> list[dict]:
 
 
 def _jail(d: Path, path: str) -> Path:
-    """Resolve path under session dir; refuse escapes (.., absolute)."""
-    p = (d / path).resolve()
-    if not str(p).startswith(str(d.resolve())):
+    """Resolve `path` under the session dir; refuse anything outside it.
+
+    `is_relative_to` compares path COMPONENTS. The previous check was
+    `str(p).startswith(str(d))`, and a string prefix is not a path boundary: a
+    sibling directory whose name merely extends the session id satisfied it, so
+    `../python3-deadbeefEVIL/pwned.txt` resolved out of the workspace and
+    `session_write_file` would mkdir it into existence.
+
+    resolve() first, so a symlink planted inside the workspace by executed code
+    is followed BEFORE the comparison and cannot be used as a write primitive.
+    """
+    base = d.resolve()
+    p = (base / path).resolve()
+    if not p.is_relative_to(base):
         raise ValueError("path escapes session workspace")
     return p
 
@@ -204,23 +219,42 @@ def _jail(d: Path, path: str) -> Path:
 # ── REPL workers ───────────────────────────────────────────────────────────
 
 def _readline_timeout(stream, timeout: float) -> str | None:
-    """Read one line from a buffered reader with a wall-clock timeout.
-    Returns None on timeout. Works on Unix (select on the fd)."""
-    import select
-    import time as _t
-    deadline = _t.monotonic() + timeout
-    buf = b""
-    while _t.monotonic() < deadline:
-        r, _, _ = select.select([stream], [], [], 0.1)
-        if r:
-            chunk = stream.read1(4096) if hasattr(stream, "read1") else stream.read(4096)
-            if not chunk:
-                return buf.decode(errors="replace") if buf else ""
-            buf += chunk
-            if b"\n" in buf:
-                line, _rest = buf.split(b"\n", 1)
-                return line.decode(errors="replace")
-    return None
+    """Read one line from a pipe with a wall-clock timeout. None on timeout.
+
+    Uses a reader THREAD rather than select(). On Windows `select.select` is
+    provided by WinSock and accepts sockets only — handing it a subprocess pipe
+    raises, so the previous implementation made every stateful session
+    (session_start on python3/node) fail there outright. A blocking readline on
+    a daemon thread is the portable primitive: it behaves identically on all
+    three platforms and needs no non-blocking pipe support.
+
+    The thread is a daemon and the queue is bounded to one line, so a worker that
+    never answers leaks one parked thread rather than blocking interpreter exit.
+    """
+    import queue
+    import threading as _th
+
+    q: queue.Queue = queue.Queue(maxsize=1)
+
+    def _read():
+        try:
+            line = stream.readline()
+        except Exception:
+            line = b""
+        try:
+            q.put_nowait(line)
+        except queue.Full:  # pragma: no cover — caller already timed out
+            pass
+
+    t = _th.Thread(target=_read, daemon=True)
+    t.start()
+    try:
+        line = q.get(timeout=timeout)
+    except queue.Empty:
+        return None
+    if not line:
+        return ""  # EOF: the worker closed its stdout
+    return line.decode(errors="replace").rstrip("\r\n")
 
 
 class Worker:

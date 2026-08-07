@@ -78,6 +78,48 @@ runs ~120 ubuntu processes. **1024** is the value Red Hat's own fork-bomb
 guidance recommends, leaves host headroom, and still stops a bomb cold.
 Verified: fork-bomb exits non-zero; host unaffected.
 
+**CORRECTION 2026-08-07 — the reasoning above used the wrong unit, and 1024
+broke the host too, quietly.** The kernel does not count processes. It counts
+**tasks**, threads included: every `clone()` is checked against the limit,
+`CLONE_THREAD` among them. At the moment "~120 ubuntu processes" was measured,
+`ps -u ubuntu -L` reported **1009 tasks for the same uid**. Real headroom was
+~15 threads, not ~900.
+
+Consequence, measured: **14 of 31 languages failed** on this host, every one of
+them a runtime with a thread pool.
+
+```
+go:      runtime: failed to create new OS thread (have 5 already; errno=11)
+erlang:  Failed to create dirty cpu scheduler thread 2, error = 11
+node/deno/ruby/python3: tokio "OS can't spawn worker thread" (the mise shim)
+tests/test_smoke.py: 17 passed, 14 failed   (8 passed under load)
+```
+
+while this document recorded `test_smoke.py → 31 passed, 0 failed`. It is
+load-dependent, so it reads as flakiness, and a `print("ok")` probe spawns no
+threads and does not reproduce it. The discriminating test is a program that
+spawns threads: under `ulimit -u 512` it fails, under 1024 it succeeds, with
+1009 ambient tasks.
+
+**Fix:** stop guessing the ambient count and measure it. `RLIMIT_NPROC` is now
+`(current tasks for this uid) + CODECALC_PROCESS_HEADROOM` (default 512),
+computed fresh per execution in the parent before any fork — `apply_limits`
+runs inside `pre_exec` and cannot walk `/proc`. A bomb can add at most the
+headroom; a legitimate runtime always has room however busy the box is.
+`CODECALC_MAX_PROCESSES` pins an absolute value for operators who want one.
+
+Verified after the fix, same host: **`test_smoke.py` → 31 passed, 0 failed**,
+and a non-recursive fork counter reports `EAGAIN after 514 children` against a
+headroom of 512. `tests/test_security.py` now asserts that BOUND rather than
+only that the run stopped — the recursive bomb can be killed by the wall clock,
+which says nothing about whether the limit held.
+
+**Residual:** this is a mitigation, not isolation. The budget is still uid-wide,
+so two concurrent executions draw on the same pool. cgroup v2 `pids.max` is the
+real per-sandbox answer; it needs delegated cgroup write access that a stdio MCP
+server launched by an arbitrary client cannot assume, so it belongs with the
+containerisation in residual risk 1 rather than before it.
+
 ### HIGH-05 — In-process resource blowups (no caps/timeouts)
 
 **Vulnerability:** `truth_table` with 30 variables → 2^30 rows → OOM in the
@@ -151,11 +193,25 @@ verdicts, per-call limits, streaming, translation, context7 docs, and a
 network-blocking shim. Each has a security-relevant design decision:
 
 1. **Sessions** (`sessions.py`): workspaces live under `~/.codecalc/sessions`
-   and every path is jailed via `resolve()` prefix check — `..` escapes are
-   rejected. Stateful REPL workers (python3/node) execute user code in a
-   **separate subprocess** with the same env allowlist as the executor; their
-   `exec()` is the documented exception to the zero-eval rule (it never runs
-   in the server process).
+   and every path is jailed via `resolve()` + `Path.is_relative_to()` — `..`,
+   absolute paths and symlinks out of the workspace are all rejected. Stateful
+   REPL workers (python3/node) execute user code in a **separate subprocess**
+   with the same env allowlist as the executor; their `exec()` is the
+   documented exception to the zero-eval rule (it never runs in the server
+   process).
+
+   **CORRECTION 2026-08-07.** This previously read "jailed via `resolve()`
+   prefix check", and that is what the code did: `str(p).startswith(str(d))`.
+   A string prefix is not a path boundary. A SIBLING directory whose name
+   merely extends the session id satisfied it —
+   `_jail(<root>/python3-deadbeef, '../python3-deadbeefEVIL/x')` was accepted —
+   and `session_write_file` mkdir -p's the result, so one session could write
+   outside its own workspace. Bounded (the path still had to begin with the
+   session dir's string, so it could not leave the session root) but real. The
+   `..` case the claim was written against always worked; the boundary in
+   general did not. Now component-wise via `is_relative_to`, in `_jail` and
+   `_session_dir` both, with `tests/test_session_jail.py` covering the sibling,
+   the symlink, and the legitimate paths that must keep working.
 2. **File tools**: read/write are strictly confined to the session root; no
    absolute or escaping paths.
 3. **Package install** (`packages.py`): package strings are passed as argv
@@ -285,3 +341,94 @@ Re-run `tests/test_security.py` after any change to `logic.py`, `executor.py`,
 `tools.py`, or `executor/src/main.rs`, and after any runtime update
 (`update_runtimes apply=True`) — a new language added to the registry or a
 package-manager format change can regress the parsers.
+
+## Cross-platform port (2026-08-07) — security notes
+
+codecalc was written for one Linux box and claimed no more than that. Making it
+run on macOS and Windows surfaced defects that no amount of reading the Linux
+build would have found, because most of them are type or unit differences that
+only appear when you compile for the target.
+
+1. **`ru_maxrss` is KiB on Linux and BYTES on macOS/BSD.** The field was reported
+   as `peak_memory_kb` unconditionally — a 1024x error. It is not only cosmetic:
+   the MLE verdict compares peak memory against the configured cap, so on macOS
+   *every* signalled exit would have been classified as a memory kill. Normalised
+   in `platform::unix::maxrss_to_kb`, and the contract check asserts a
+   hello-world's peak is a plausible KiB figure rather than an absurd one.
+
+2. **`suseconds_t` is `i32` on macOS and `i64` on Linux.** The CPU-time
+   arithmetic did not type-check on Darwin at all. Found by `cargo clippy
+   --target aarch64-apple-darwin`, which is now a CI job on all three OSes.
+
+3. **`libc::__rlimit_resource_t` is glibc-only**; macOS wants a plain `c_int`.
+
+4. **Every `setrlimit` return value was discarded.** A limit that fails —
+   exactly what happens when the soft value exceeds an inherited hard ceiling,
+   e.g. a 2 TiB `RLIMIT_AS` under a restrictive `ulimit -v` — left the sandbox
+   running with NO limit for that resource while reporting success. Limits are
+   now resolved in the parent and clamped to the hard ceiling we actually hold,
+   so the calls cannot EINVAL, and anything that had to be clamped or skipped is
+   reported in a new `unenforced` array on the result.
+
+5. **`select.select` accepts sockets only on Windows.** `_readline_timeout` used
+   it against a subprocess pipe, so every stateful session (`session_start` on
+   python3/node) failed there. Replaced with a reader thread, which behaves
+   identically on all three platforms.
+
+6. **`import resource` at module scope** made `import codecalc` fail on Windows
+   before any code ran. CI now imports the package on all three OSes as its
+   cheapest possible regression test.
+
+7. **Windows sandboxing is a Job Object**, not rlimits: `KILL_ON_JOB_CLOSE` for
+   the tree kill, `ActiveProcessLimit` for the fork-bomb guard (job-scoped, so
+   strictly better than `RLIMIT_NPROC`'s uid-wide budget), `ProcessMemoryLimit`
+   for memory, and job accounting for CPU and peak memory. What Windows does NOT
+   give is a CPU-time limit, an open-file limit or a `no_net` shim; all three are
+   reported through `unenforced` rather than assumed.
+
+   **Honest caveat, recorded rather than buried:** the child is assigned to the
+   job immediately after spawn rather than being created suspended and assigned
+   before its first instruction, because `std::process::Command` does not expose
+   the initial thread handle. The window is microseconds and any process the
+   child creates after assignment inherits the job, but a process spawned inside
+   that window would escape the limits. Closing it means dropping
+   `std::process::Command` for a raw `CreateProcessW`.
+
+8. **`{exe}` needed a `.exe` extension on Windows**, and `sqlite` was invoked
+   through `bash -c ... < file`. The redirect was the only shell dependency that
+   was not actually necessary — `sqlite3 :memory: ".read {file}"` does the same
+   thing with no shell, so sqlite now works on Windows too.
+
+9. **The macOS shim was inert, and had been since it was written.** Defining
+   `socket()` in a preloaded dylib does nothing on macOS: the two-level
+   namespace binds every call site to the library it was linked against, so an
+   identically-named function in an inserted image is never consulted. Found by
+   CI — the macOS job built the dylib, preloaded it against an unsigned probe,
+   and watched the probe connect. Fixed with a `__DATA,__interpose` section,
+   which dyld applies to the images it loads.
+
+   The static check needed fixing twice, and both failures are the same class.
+   First it asserted the artifact EXPORTS socket/connect — true on Linux, but on
+   macOS the replacements are static, so that check would have passed on a dylib
+   with no interpose section at all. Then it looked for the section in `__DATA`
+   by name, and modern `ld` puts it in `__DATA_CONST` because the pointers are
+   write-once, so a present and working section read as absent. A static check
+   that cannot see the mechanism it verifies is worse than none.
+
+   **Two macOS limits remain, neither detectable at runtime** (confirmed against
+   Apple's dyld documentation and the interposing literature):
+   - SIP and the hardened runtime strip `DYLD_INSERT_LIBRARIES` for protected
+     and hardened-signed binaries; AMFI can refuse interposing outright.
+   - Interposing operates between the process and dyld-loaded images. It does
+     **not** reach calls made inside the dyld shared cache, where libSystem
+     lives — a program's own `connect()` is intercepted, a system framework
+     opening a connection internally is not.
+
+   So `--no-net` on macOS is a speed bump, not isolation, and the executor
+   cannot tell you when it has been defeated. Documented in blocknet.c and the
+   README rather than left for someone to discover.
+
+Residual risk 2 (same-uid sandbox) applies equally on all three platforms, and
+residual risk 1 (no network isolation) is *worse* off Linux: best-effort on
+macOS for the reasons above, and absent entirely on Windows. Neither changes the
+verdict: single-operator, local, stdio-only.

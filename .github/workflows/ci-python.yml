@@ -45,11 +45,17 @@ jobs:
           [ "$n" -ge 20 ] || { echo "::error::only $n python files found; the lint path is wrong."; exit 1; }
 
   tests:
-    name: tests (py${{ matrix.python }})
-    runs-on: ubuntu-latest
+    # OS matrix, not just a Python-version matrix. Everything in this job is pure
+    # logic over dicts and paths, so it should behave identically everywhere —
+    # which is exactly why running it on Windows is worth doing: `codecalc`
+    # previously failed at IMPORT there, because executor.py did an unconditional
+    # `import resource` and that module does not exist on Windows.
+    name: tests (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
         # 3.11 is the floor declared in pyproject (requires-python); 3.14 is what the dev box runs.
         # Both ends matter — the codebase uses `X | None` unions and tomllib, which bound it below.
         python: ['3.11', '3.14']
@@ -66,20 +72,45 @@ jobs:
       # Pure-python parity suite: 19 ported calc features against known-good values. No sandbox, no
       # runtimes, no network — it should pass identically everywhere, which is exactly why it is the
       # cheapest signal that the arithmetic core did not regress.
+      - name: import codecalc at all
+        shell: bash
+        # The cheapest possible Windows regression test. Before the platform
+        # split this raised ModuleNotFoundError: no module named 'resource'.
+        run: uv run --no-sync python -c "import codecalc, codecalc.executor, codecalc.sessions, codecalc.server; print('import ok on', __import__('sys').platform)"
       - name: calc parity
+        shell: bash
         run: uv run --no-sync python tests/test_calc_port.py
       # The translate/optimize correctness gate. Also pure: classify_case and aggregate take
       # executor result dicts, so the decision logic runs here without a sandbox or two runtimes.
       # That split is why this suite exists at all — the old logic could only be reached by actually
       # running two programs, so the trust boundary of translate_code was never tested anywhere.
       - name: translation verification gate
+        shell: bash
         run: uv run --no-sync python tests/test_translation_verify.py
+      # Session workspace confinement. Also sandbox-free: _jail() is path logic over a tempdir, so
+      # the boundary can be checked on any runner rather than only where a session can be started.
+      - name: session jail
+        shell: bash
+        # Path confinement is where platforms differ most: Windows has drive
+        # letters, case-insensitive paths and a different separator, and the
+        # boundary check must hold under all of them.
+        run: uv run --no-sync python tests/test_session_jail.py
 
   sandbox:
     # The security suite. Split out from `tests` because it needs the Rust binary built first, and
     # because its assertions are the ones AUDIT.md's verdict rests on.
-    name: sandbox + security regressions
-    runs-on: ubuntu-latest
+    #
+    # POSIX only, and deliberately so: the suite's fork-bomb assertions call
+    # os.fork(), which does not exist on Windows. Rather than skip half the file
+    # there and call the result a pass, Windows sandbox coverage comes from
+    # ci-rust's `executor contract` job, which exercises the Job Object path
+    # against the real binary.
+    name: sandbox + security (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: ./.github/actions/setup-rust
@@ -97,35 +128,31 @@ jobs:
       # assertion below would silently run against the pure-Python fallback instead, testing the
       # code path that only runs when the binary is missing.
       - name: build the executor into bin/
+        shell: bash
         run: |
           set -euo pipefail
           cargo build --release --manifest-path executor/Cargo.toml
           mkdir -p bin
           cp executor/target/release/codecalc-exec bin/
-          gcc -shared -fPIC -O2 -o bin/blocknet.so executor/blocknet.c
+          # cc, not gcc: on macOS runners gcc is a clang shim and the shim name
+          # differs by platform (see platform::no_net_shim).
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            cc -shared -fPIC -O2 -o bin/blocknet.dylib executor/blocknet.c
+          else
+            cc -shared -fPIC -O2 -o bin/blocknet.so executor/blocknet.c
+          fi
       - name: assert the RUST backend is the one under test
+        shell: bash
         run: |
           set -euo pipefail
           backend=$(uv run --no-sync python -c 'from codecalc import executor; print(executor.backend())')
           echo "backend: $backend"
           [ "$backend" = "rust" ] || { echo "::error::backend is '$backend', expected 'rust' — the suite would be testing the fallback."; exit 1; }
-      - name: security regressions
-        run: |
-          set -euo pipefail
-          uv run --no-sync python tests/test_security.py | tee /tmp/sec.out
-          # FLOOR. This suite is a flat script of `check(...)` calls with
-          # `sys.exit(1 if FAILS else 0)` at the end — delete a section and it still exits 0, having
-          # asserted less. Pin the count so silent shrinkage is a failure, not a faster green run.
-          passed=$(grep -c '^PASS' /tmp/sec.out || true)
-          echo "security assertions passed: $passed"
-          if [ "$passed" -lt 13 ]; then
-            echo "::error::only $passed security assertions ran (expected >= 13). Assertions were removed or the suite aborted early."
-            exit 1
-          fi
       # The MCP surface is how every consumer reaches this code. A tool that raises on import, or a
       # schema fastmcp rejects, is invisible to every test above — they all call the functions
       # directly. This spawns the real server over stdio and round-trips it.
       - name: MCP stdio round-trip
+        shell: bash
         run: |
           set -euo pipefail
           uv run --no-sync python tests/test_mcp_all.py | tee /tmp/mcp.out
@@ -150,3 +177,35 @@ jobs:
             exit 1
           fi
           echo "ok: all $served tools round-tripped over stdio"
+      # LAST STEP IN THE JOB, deliberately. The fork-bomb assertions are the only
+      # destructive thing here: they drive the process count to the limit, and on
+      # a 3-core macOS runner the reaping is slow enough that the NEXT step's
+      # shell could not fork — the suite printed ALL TESTS PASS and the job died
+      # at `fork: Resource temporarily unavailable` in the step after it.
+      #
+      # The same principle as the test file's internal ordering, applied one
+      # level up: whatever exhausts a shared resource goes last. Do not move a
+      # new step below this one.
+      - name: security regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --no-sync python tests/test_security.py | tee /tmp/sec.out
+          # The fork-bomb tests run last and are destructive by nature. Give the
+          # runner a moment to reap before this step's own shell needs to fork,
+          # or the post-processing below dies with "resource temporarily
+          # unavailable" after a suite that passed.
+          sleep 5
+          # FLOOR. This suite is a flat script of `check(...)` calls with
+          # `sys.exit(1 if FAILS else 0)` at the end — delete a section and it still exits 0, having
+          # asserted less. Pin the count so silent shrinkage is a failure, not a faster green run.
+          passed=$(grep -c '^PASS' /tmp/sec.out || true)
+          echo "security assertions passed: $passed"
+          # 13 on macOS, 14 on Linux: the tight fork-bomb headroom assertion only
+          # applies where the ambient task count is measurable, and the suite
+          # prints SKIP with the reason otherwise. Flooring at 13 keeps the guard
+          # against silent shrinkage without asserting a Linux-only count.
+          if [ "$passed" -lt 13 ]; then
+            echo "::error::only $passed security assertions ran (expected >= 13). Assertions were removed or the suite aborted early."
+            exit 1
+          fi
