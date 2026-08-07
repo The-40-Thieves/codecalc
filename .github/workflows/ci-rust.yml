@@ -166,13 +166,23 @@ jobs:
           set -euo pipefail
           lib=executor/${{ matrix.lib }}
           if [ "${{ runner.os }}" = "macOS" ]; then
-            sect=$(otool -s __DATA __interpose "$lib" | tail -n +3 || true)
-            echo "$sect"
-            [ -n "$sect" ] || { echo "::error::$lib has no __DATA,__interpose section; dyld would ignore it."; exit 1; }
-            # Two 8-byte pointer pairs = 2 interposed functions, 32 bytes total.
-            words=$(echo "$sect" | awk '{for(i=2;i<=NF;i++) print $i}' | wc -l)
-            echo "interpose words: $words"
-            [ "$words" -ge 8 ] || { echo "::error::__interpose section too small for 2 entries."; exit 1; }
+            # Segment-AGNOSTIC on purpose. The first version of this check asked
+            # otool for `__DATA __interpose` specifically and got nothing, because
+            # modern ld places the section in __DATA_CONST — the pointers are
+            # write-once. Naming the segment made a present, working section look
+            # absent. `size -m` lists every segment with its sections, so this
+            # finds it wherever the linker put it.
+            size -m "$lib" | sed -n '/Segment/,$p'
+            bytes=$(size -m "$lib" | awk '/Section __interpose/ {print $NF; exit}')
+            echo "__interpose section: ${bytes:-absent} bytes"
+            if [ -z "${bytes:-}" ]; then
+              echo "::error::$lib has no __interpose section in ANY segment; dyld would ignore it."
+              exit 1
+            fi
+            # Each entry is a {replacement, replacee} pair of 8-byte pointers, so
+            # two interposed functions is 32 bytes. Fewer means one silently
+            # dropped, which is how half a shim ships.
+            [ "$bytes" -ge 32 ] || { echo "::error::__interpose is $bytes bytes; expected >= 32 for 2 entries."; exit 1; }
             refs=$(nm -u "$lib" | sed 's/^_//' | sort -u)
           else
             refs=$(nm -g --defined-only "$lib" | awk '{print $3}')
