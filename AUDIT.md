@@ -399,6 +399,36 @@ only appear when you compile for the target.
    was not actually necessary — `sqlite3 :memory: ".read {file}"` does the same
    thing with no shell, so sqlite now works on Windows too.
 
+9. **The macOS shim was inert, and had been since it was written.** Defining
+   `socket()` in a preloaded dylib does nothing on macOS: the two-level
+   namespace binds every call site to the library it was linked against, so an
+   identically-named function in an inserted image is never consulted. Found by
+   CI — the macOS job built the dylib, preloaded it against an unsigned probe,
+   and watched the probe connect. Fixed with a `__DATA,__interpose` section,
+   which dyld applies to the images it loads.
+
+   The static check needed fixing twice, and both failures are the same class.
+   First it asserted the artifact EXPORTS socket/connect — true on Linux, but on
+   macOS the replacements are static, so that check would have passed on a dylib
+   with no interpose section at all. Then it looked for the section in `__DATA`
+   by name, and modern `ld` puts it in `__DATA_CONST` because the pointers are
+   write-once, so a present and working section read as absent. A static check
+   that cannot see the mechanism it verifies is worse than none.
+
+   **Two macOS limits remain, neither detectable at runtime** (confirmed against
+   Apple's dyld documentation and the interposing literature):
+   - SIP and the hardened runtime strip `DYLD_INSERT_LIBRARIES` for protected
+     and hardened-signed binaries; AMFI can refuse interposing outright.
+   - Interposing operates between the process and dyld-loaded images. It does
+     **not** reach calls made inside the dyld shared cache, where libSystem
+     lives — a program's own `connect()` is intercepted, a system framework
+     opening a connection internally is not.
+
+   So `--no-net` on macOS is a speed bump, not isolation, and the executor
+   cannot tell you when it has been defeated. Documented in blocknet.c and the
+   README rather than left for someone to discover.
+
 Residual risk 2 (same-uid sandbox) applies equally on all three platforms, and
-residual risk 1 (no network isolation) is *worse* on Windows, where there is no
-shim at all. Neither changes the verdict: single-operator, local, stdio-only.
+residual risk 1 (no network isolation) is *worse* off Linux: best-effort on
+macOS for the reasons above, and absent entirely on Windows. Neither changes the
+verdict: single-operator, local, stdio-only.

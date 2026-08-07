@@ -24,10 +24,21 @@
  * That difference was found by CI, not by reading: the macOS job built the
  * dylib, preloaded it, and watched the probe connect anyway.
  *
- * macOS caveat that remains regardless: SIP strips DYLD_INSERT_LIBRARIES for
- * protected and hardened-runtime binaries, which includes most signed
- * interpreters. `--no-net` is weaker on macOS than on Linux and the executor
- * reports it as such.
+ * Two macOS caveats remain regardless of the mechanism, and both make --no-net
+ * weaker there than on Linux:
+ *
+ *   1. SIP and the hardened runtime strip DYLD_INSERT_LIBRARIES for protected
+ *      and hardened-signed binaries, which includes most signed interpreters.
+ *      AMFI can refuse interposing outright.
+ *   2. Interposing applies between the process and the images dyld loads. It
+ *      does NOT reach calls made INSIDE the dyld shared cache, where libSystem
+ *      lives — so a program's own socket()/connect() is intercepted, but a
+ *      system framework that opens a connection internally is not.
+ *
+ * The executor reports --no-net as unenforced when no shim is applied, but it
+ * cannot detect either of these at runtime. Treat macOS --no-net as a
+ * best-effort speed bump, never as isolation. Containers are the answer for
+ * anything stronger, on every platform.
  */
 #define _GNU_SOURCE
 #include <errno.h>

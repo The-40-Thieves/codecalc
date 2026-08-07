@@ -188,9 +188,12 @@ every result rather than letting a caller assume they all held.
 way Linux does, so setting it would buy an illusion.
 ² Dynamically-linked programs only — a statically linked binary (Go, by default)
 ignores it.
-³ Weaker still on macOS: SIP strips `DYLD_INSERT_LIBRARIES` for protected and
-hardened-runtime binaries — which includes most signed interpreters, so treat
-`no_net` there as best-effort only.
+³ Weaker still on macOS, in two ways. SIP and the hardened runtime strip
+`DYLD_INSERT_LIBRARIES` for protected and hardened-signed binaries (most signed
+interpreters), and dyld interposing does not reach calls made *inside* the
+shared cache where libSystem lives — a program's own `connect()` is intercepted,
+a system framework opening a connection internally is not. Treat macOS `no_net`
+as a speed bump, never as isolation.
 
 Windows' `ActiveProcessLimit` is scoped to the **job**, which makes it a
 genuinely better fork-bomb guard than `RLIMIT_NPROC`'s uid-wide budget — the
