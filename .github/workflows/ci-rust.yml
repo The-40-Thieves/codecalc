@@ -24,8 +24,18 @@ concurrency:
 
 jobs:
   clippy:
-    name: clippy (-D warnings)
-    runs-on: ubuntu-latest
+    # Runs on all three OSes, not just Linux. The platform backends are behind
+    # #[cfg], so a Linux-only clippy compiles NONE of the Windows code and half
+    # of the macOS-relevant code — the first cross-check of this port found that
+    # `libc::__rlimit_resource_t` is glibc-only and that `suseconds_t` is i32 on
+    # macOS against i64 on Linux, so the CPU-time arithmetic did not even
+    # type-check there. Neither is visible from an ubuntu runner.
+    name: clippy (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: ./.github/actions/setup-rust
@@ -34,101 +44,46 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: executor
+          key: ${{ matrix.os }}
       # --all-targets/--all-features so a lint cannot hide in a cfg'd branch; -D warnings so a new
       # lint in a toolchain bump lands as a red PR rather than scrollback nobody reads. The crate is
       # at a genuine zero today, which is what makes -D affordable.
       - name: cargo clippy
         working-directory: executor
+        shell: bash
         run: cargo clippy --all-targets --all-features -- -D warnings
 
   contract:
-    name: executor binary contract (build + run)
-    runs-on: ubuntu-latest
+    # The claim is that codecalc works on Linux, macOS and Windows. That claim is
+    # only worth what it is tested against, so the contract runs on all three.
+    name: executor contract (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: executor
+          key: ${{ matrix.os }}
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
       - name: build release
         working-directory: executor
+        shell: bash
         run: cargo build --release
-      # Every assertion below is on OBSERVED output of the real binary, not on the source. These are
-      # the four properties codecalc/executor.py parses out of it; if any changes shape, the Python
-      # side silently degrades to `{"ok": false, "error": "executor produced invalid output"}`.
-      - name: assert the JSON contract
-        run: |
-          set -euo pipefail
-          BIN=executor/target/release/codecalc-exec
-
-          echo "— --languages returns a non-empty JSON array"
-          langs=$("$BIN" --languages)
-          count=$(echo "$langs" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
-          echo "languages: $count"
-          [ "$count" -ge 30 ] || { echo "::error::--languages returned $count entries, expected >= 30"; exit 1; }
-
-          echo "— a successful run reports ok/verdict OK/stdout"
-          out=$(echo 'print("hello")' | "$BIN" --lang python3 --timeout 20)
-          echo "$out"
-          python3 - "$out" <<'PY'
-          import json, sys
-          d = json.loads(sys.argv[1])
-          assert d["ok"] is True, d
-          assert d["verdict"] == "OK", d
-          assert d["stdout"].strip() == "hello", d
-          for k in ("exit_code", "duration_ms", "cpu_ms", "peak_memory_kb", "timed_out"):
-              assert k in d, f"missing key {k}: {d}"
-          print("ok: success shape")
-          PY
-
-          echo "— a wall-clock overrun is killed and reported as TLE"
-          out=$(echo 'while True: pass' | "$BIN" --lang python3 --timeout 3)
-          python3 - "$out" <<'PY'
-          import json, sys
-          d = json.loads(sys.argv[1])
-          assert d["timed_out"] is True, d
-          assert d["verdict"] == "TLE", d
-          print("ok: TLE")
-          PY
-
-          echo "— output over the cap is truncated and reported as OLE"
-          out=$(echo 'print("x" * 200000)' | "$BIN" --lang python3 --timeout 20)
-          python3 - "$out" <<'PY'
-          import json, sys
-          d = json.loads(sys.argv[1])
-          assert len(d["stdout"]) < 70_000, len(d["stdout"])
-          assert d["verdict"] == "OLE", d
-          print("ok: OLE")
-          PY
-
-          echo "— an unknown language is a structured error, not a crash"
-          out=$(echo 'x' | "$BIN" --lang notalanguage --timeout 5)
-          python3 - "$out" <<'PY'
-          import json, sys
-          d = json.loads(sys.argv[1])
-          assert d["ok"] is False and "unknown language" in d["error"], d
-          print("ok: unknown language")
-          PY
-
-      # AUDIT.md CRITICAL-02. The env allowlist is the fix for secrets leaking into executed code,
-      # and it is enforced in the Rust binary at spawn time — so it can only be verified by running
-      # the binary with a secret in its own environment and checking the child cannot see it.
-      # scripts/check_parity.py checks the two allowlists MATCH; this checks the Rust one WORKS.
-      - name: assert executed code cannot read the executor's environment
-        env:
-          FAKE_API_KEY: codecalc-ci-canary-do-not-leak
-        run: |
-          set -euo pipefail
-          out=$(echo 'import os; print(os.environ.get("FAKE_API_KEY", "CLEAN"))' \
-                | executor/target/release/codecalc-exec --lang python3 --timeout 20)
-          echo "$out"
-          python3 - "$out" <<'PY'
-          import json, sys
-          d = json.loads(sys.argv[1])
-          got = d["stdout"].strip()
-          assert got == "CLEAN", f"SECRET LEAKED TO EXECUTED CODE: {got!r}"
-          print("ok: env allowlist holds — the canary did not reach the child")
-          PY
+      # Every assertion is on OBSERVED output of the real binary, not on source.
+      # The checker is Python rather than a bash heredoc: the previous version
+      # could only run on a POSIX shell, which is a poor way to test a
+      # cross-platform claim. It probes which runtimes the runner actually has
+      # and FAILS if none — "nothing was executable" must not read as "passed".
+      - name: executor JSON contract
+        shell: bash
+        run: python scripts/contract_check.py executor/target/release/codecalc-exec${{ runner.os == 'Windows' && '.exe' || '' }}
 
   musl-cross-build:
     # codecalc's portability claim is the two static musl binaries in bin/ ("run on any Linux
@@ -178,29 +133,48 @@ jobs:
     # still compiles, and a broken shim degrades silently — the executor checks `shim.is_file()` and
     # just skips LD_PRELOAD if it is missing, so `no_net: true` would report success while doing
     # nothing at all.
-    name: blocknet.so (--no-net shim)
-    runs-on: ubuntu-latest
+    #
+    # Linux and macOS only. Windows has no LD_PRELOAD equivalent to hang a socket
+    # shim on, so `--no-net` is reported through the executor's `unenforced` field
+    # there rather than silently doing nothing — see src/platform/mod.rs.
+    name: blocknet shim (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            lib: blocknet.so
+          - os: macos-latest
+            lib: blocknet.dylib
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: build the shim
         working-directory: executor
-        run: gcc -shared -fPIC -O2 -Wall -Wextra -Werror -o blocknet.so blocknet.c
+        shell: bash
+        # -shared works for both; macOS produces a Mach-O dylib from the same
+        # source because the shim only overrides socket()/connect().
+        run: cc -shared -fPIC -O2 -Wall -Wextra -Werror -o ${{ matrix.lib }} blocknet.c
       - name: assert it exports the symbols it overrides
+        shell: bash
         run: |
           set -euo pipefail
-          syms=$(nm -D --defined-only executor/blocknet.so | awk '{print $3}')
+          # nm -D is GNU; macOS nm has no --defined-only in the same form, so
+          # take the portable subset and filter for defined text symbols.
+          syms=$(nm -g executor/${{ matrix.lib }} | awk '$2 ~ /^[TtDd]$/ {print $3}' | sed 's/^_//')
           echo "$syms"
           for s in socket connect; do
-            grep -qx "$s" <<<"$syms" || { echo "::error::blocknet.so does not define $s"; exit 1; }
+            grep -qx "$s" <<<"$syms" || { echo "::error::${{ matrix.lib }} does not define $s"; exit 1; }
           done
           # socketpair must NOT be overridden — tokio/libuv use it for internal signal plumbing and
           # blocking it crashes the runtime rather than the network call. AUDIT.md item 4.
           if grep -qx socketpair <<<"$syms"; then
-            echo "::error::blocknet.so overrides socketpair(); this breaks tokio/libuv runtimes."
+            echo "::error::${{ matrix.lib }} overrides socketpair(); this breaks tokio/libuv runtimes."
             exit 1
           fi
           echo "ok: overrides socket+connect, leaves socketpair alone"
       - name: assert it actually blocks an outbound connection
+        shell: bash
         run: |
           set -euo pipefail
           cat > /tmp/net.py <<'PY'
@@ -213,6 +187,10 @@ jobs:
           PY
           echo "without the shim:"; python3 /tmp/net.py
           echo "with the shim:"
-          out=$(LD_PRELOAD=$PWD/executor/blocknet.so python3 /tmp/net.py)
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            out=$(DYLD_INSERT_LIBRARIES=$PWD/executor/${{ matrix.lib }} python3 /tmp/net.py)
+          else
+            out=$(LD_PRELOAD=$PWD/executor/${{ matrix.lib }} python3 /tmp/net.py)
+          fi
           echo "$out"
-          grep -q BLOCKED <<<"$out" || { echo "::error::blocknet.so did not block the connection"; exit 1; }
+          grep -q BLOCKED <<<"$out" || { echo "::error::${{ matrix.lib }} did not block the connection"; exit 1; }

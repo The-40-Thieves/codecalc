@@ -101,7 +101,9 @@ LANGUAGES: dict[str, dict] = {
         "bash -c 'nix-shell -p ghc --run \"ghc -O2 -o {exe} {file} && {exe}\"'",
     ),
     # ── data / query DSLs ─────────────────────────────────────────────────
-    "sqlite": _c(None, "bash -c 'sqlite3 :memory: < {file}'"),
+    # `.read` as a SQL argument rather than a shell redirect: the only wrapper
+    # language that did not need a shell, so it works on Windows too.
+    "sqlite": _c(None, 'sqlite3 :memory: ".read {file}"'),
     "jq":     _c(None, "jq -n -f {file}"),
     "awk":    _c(None, "awk -f {file}"),
 }

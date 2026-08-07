@@ -166,6 +166,39 @@ PYTHONPATH=. .venv/bin/python tests/test_smoke.py    # 31 languages via Rust exe
 PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py  # all 9 tools over MCP stdio
 ```
 
+## Platform support
+
+Linux, macOS and Windows. The three do not offer the same primitives, and the
+executor reports which ones it could **not** apply in an `unenforced` array on
+every result rather than letting a caller assume they all held.
+
+| Guarantee | Linux | macOS | Windows |
+|---|---|---|---|
+| Wall-clock timeout | yes | yes | yes |
+| Kill the whole process tree | `killpg` | `killpg` | `TerminateJobObject` |
+| Fork-bomb guard | `RLIMIT_NPROC` (uid-wide) | `RLIMIT_NPROC` (uid-wide) | Job `ActiveProcessLimit` (**job-scoped**) |
+| Memory ceiling | `RLIMIT_AS` | reported unenforced¹ | Job `ProcessMemoryLimit` |
+| CPU-time ceiling | `RLIMIT_CPU` | `RLIMIT_CPU` | reported unenforced |
+| Open-file ceiling | `RLIMIT_NOFILE` | `RLIMIT_NOFILE` | reported unenforced |
+| Output cap | yes | yes | yes (on read) |
+| `no_net` | `LD_PRELOAD` shim² | `DYLD_INSERT_LIBRARIES`²˒³ | reported unenforced |
+| Stateful sessions | yes | yes | yes |
+
+¹ Darwin accepts `setrlimit(RLIMIT_AS)` but does not enforce address space the
+way Linux does, so setting it would buy an illusion.
+² Dynamically-linked programs only — a statically linked binary (Go, by default)
+ignores it.
+³ Weaker still on macOS: SIP strips `DYLD_INSERT_LIBRARIES` for protected binaries.
+
+Windows' `ActiveProcessLimit` is scoped to the **job**, which makes it a
+genuinely better fork-bomb guard than `RLIMIT_NPROC`'s uid-wide budget — the
+failure mode that broke 14 of 31 runtimes on Linux cannot occur there.
+
+Two things degrade rather than fail on a given platform: languages whose runtime
+is absent (`list_languages` reports `available: false`), and the shell-wrapper
+languages — `bash`, `zsh`, `csharp`, `gleam`, `haskell` — which need a POSIX
+shell and so are unavailable on Windows unless one is installed.
+
 ## Sandbox guarantees
 
 - Fresh temp dir per run, deleted on exit (source + binaries + outputs)

@@ -13,7 +13,6 @@ from __future__ import annotations
 import json
 import os
 import platform
-import resource
 import shutil
 import signal
 import subprocess
@@ -23,6 +22,14 @@ import time
 from pathlib import Path
 
 from . import registry
+
+#: POSIX-only stdlib. `resource` does not exist on Windows at all, so importing
+#: it unconditionally made `import codecalc` fail there before any code ran.
+IS_WINDOWS = os.name == "nt"
+if not IS_WINDOWS:
+    import resource
+else:  # pragma: no cover - exercised on the Windows CI runner
+    resource = None
 
 MAX_OUTPUT_BYTES = 64 * 1024
 AS_LIMIT_BYTES = 2048 * 1024**3      # 2 TiB VA — V8/JVM/tcmalloc reserve huge VA
@@ -91,11 +98,12 @@ def current_uid_tasks() -> int | None:
     """Total tasks (THREADS, not processes) owned by this real uid, machine-wide
     — the number the kernel actually compares RLIMIT_NPROC against.
 
-    Returns None when it cannot be measured (no /proc), which the caller treats
-    as "unknown" rather than zero.
+    Linux only. Returns None where it cannot be measured (Windows has no uid and
+    no RLIMIT_NPROC; macOS has no cheap /proc equivalent), which the caller
+    treats as "unknown" rather than zero.
     """
     proc = Path("/proc")
-    if not proc.is_dir():
+    if IS_WINDOWS or not proc.is_dir() or not hasattr(os, "getuid"):
         return None
     uid = os.getuid()
     total = 0
@@ -141,6 +149,16 @@ def nproc_limit() -> int:
 
 
 def _limits(timeout: int):
+    """preexec_fn applying rlimits, or None where there are no rlimits to apply.
+
+    Windows has no setrlimit and no fork, so there is nothing to hook: the
+    fallback executor there gets a wall-clock timeout and a process-tree kill
+    and nothing else. The Rust executor is the one that carries real limits on
+    Windows (a Job Object), which is why `backend()` matters more there.
+    """
+    if IS_WINDOWS:
+        return None
+
     # Measured in the PARENT, before fork: _apply runs after fork in the child
     # via preexec_fn, where walking /proc is not something to be doing.
     nproc = nproc_limit()
@@ -160,6 +178,25 @@ def _limits(timeout: int):
 
 
 def _kill_group(proc: subprocess.Popen) -> None:
+    """Kill the child AND anything it spawned.
+
+    Killing only the direct child orphans its tree, which is how a "timed out"
+    run leaves work running on the host. There is no portable primitive for
+    this: POSIX has process groups, Windows has `taskkill /T`.
+    """
+    if IS_WINDOWS:
+        # /T kills the tree, /F forces it. Spawned with CREATE_NEW_PROCESS_GROUP
+        # so the child is the root of its own tree rather than ours.
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True, timeout=15, check=False)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        return
     try:
         os.killpg(proc.pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
@@ -213,7 +250,9 @@ def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10
     try:
         src = Path(workdir) / f"main.{ext}"
         src.write_text(code)
-        fmt = {"file": str(src), "exe": str(Path(workdir) / "a.out"), "work": workdir}
+        # Windows needs the .exe extension on the compiled artifact.
+        exe_name = "a.exe" if IS_WINDOWS else "a.out"
+        fmt = {"file": str(src), "exe": str(Path(workdir) / exe_name), "work": workdir}
 
         if entry["compile"]:
             argv = [a.format(**fmt) for a in entry["compile"]]

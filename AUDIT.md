@@ -341,3 +341,64 @@ Re-run `tests/test_security.py` after any change to `logic.py`, `executor.py`,
 `tools.py`, or `executor/src/main.rs`, and after any runtime update
 (`update_runtimes apply=True`) — a new language added to the registry or a
 package-manager format change can regress the parsers.
+
+## Cross-platform port (2026-08-07) — security notes
+
+codecalc was written for one Linux box and claimed no more than that. Making it
+run on macOS and Windows surfaced defects that no amount of reading the Linux
+build would have found, because most of them are type or unit differences that
+only appear when you compile for the target.
+
+1. **`ru_maxrss` is KiB on Linux and BYTES on macOS/BSD.** The field was reported
+   as `peak_memory_kb` unconditionally — a 1024x error. It is not only cosmetic:
+   the MLE verdict compares peak memory against the configured cap, so on macOS
+   *every* signalled exit would have been classified as a memory kill. Normalised
+   in `platform::unix::maxrss_to_kb`, and the contract check asserts a
+   hello-world's peak is a plausible KiB figure rather than an absurd one.
+
+2. **`suseconds_t` is `i32` on macOS and `i64` on Linux.** The CPU-time
+   arithmetic did not type-check on Darwin at all. Found by `cargo clippy
+   --target aarch64-apple-darwin`, which is now a CI job on all three OSes.
+
+3. **`libc::__rlimit_resource_t` is glibc-only**; macOS wants a plain `c_int`.
+
+4. **Every `setrlimit` return value was discarded.** A limit that fails —
+   exactly what happens when the soft value exceeds an inherited hard ceiling,
+   e.g. a 2 TiB `RLIMIT_AS` under a restrictive `ulimit -v` — left the sandbox
+   running with NO limit for that resource while reporting success. Limits are
+   now resolved in the parent and clamped to the hard ceiling we actually hold,
+   so the calls cannot EINVAL, and anything that had to be clamped or skipped is
+   reported in a new `unenforced` array on the result.
+
+5. **`select.select` accepts sockets only on Windows.** `_readline_timeout` used
+   it against a subprocess pipe, so every stateful session (`session_start` on
+   python3/node) failed there. Replaced with a reader thread, which behaves
+   identically on all three platforms.
+
+6. **`import resource` at module scope** made `import codecalc` fail on Windows
+   before any code ran. CI now imports the package on all three OSes as its
+   cheapest possible regression test.
+
+7. **Windows sandboxing is a Job Object**, not rlimits: `KILL_ON_JOB_CLOSE` for
+   the tree kill, `ActiveProcessLimit` for the fork-bomb guard (job-scoped, so
+   strictly better than `RLIMIT_NPROC`'s uid-wide budget), `ProcessMemoryLimit`
+   for memory, and job accounting for CPU and peak memory. What Windows does NOT
+   give is a CPU-time limit, an open-file limit or a `no_net` shim; all three are
+   reported through `unenforced` rather than assumed.
+
+   **Honest caveat, recorded rather than buried:** the child is assigned to the
+   job immediately after spawn rather than being created suspended and assigned
+   before its first instruction, because `std::process::Command` does not expose
+   the initial thread handle. The window is microseconds and any process the
+   child creates after assignment inherits the job, but a process spawned inside
+   that window would escape the limits. Closing it means dropping
+   `std::process::Command` for a raw `CreateProcessW`.
+
+8. **`{exe}` needed a `.exe` extension on Windows**, and `sqlite` was invoked
+   through `bash -c ... < file`. The redirect was the only shell dependency that
+   was not actually necessary — `sqlite3 :memory: ".read {file}"` does the same
+   thing with no shell, so sqlite now works on Windows too.
+
+Residual risk 2 (same-uid sandbox) applies equally on all three platforms, and
+residual risk 1 (no network isolation) is *worse* on Windows, where there is no
+shim at all. Neither changes the verdict: single-operator, local, stdio-only.

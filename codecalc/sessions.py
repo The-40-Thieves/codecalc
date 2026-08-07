@@ -219,23 +219,42 @@ def _jail(d: Path, path: str) -> Path:
 # ── REPL workers ───────────────────────────────────────────────────────────
 
 def _readline_timeout(stream, timeout: float) -> str | None:
-    """Read one line from a buffered reader with a wall-clock timeout.
-    Returns None on timeout. Works on Unix (select on the fd)."""
-    import select
-    import time as _t
-    deadline = _t.monotonic() + timeout
-    buf = b""
-    while _t.monotonic() < deadline:
-        r, _, _ = select.select([stream], [], [], 0.1)
-        if r:
-            chunk = stream.read1(4096) if hasattr(stream, "read1") else stream.read(4096)
-            if not chunk:
-                return buf.decode(errors="replace") if buf else ""
-            buf += chunk
-            if b"\n" in buf:
-                line, _rest = buf.split(b"\n", 1)
-                return line.decode(errors="replace")
-    return None
+    """Read one line from a pipe with a wall-clock timeout. None on timeout.
+
+    Uses a reader THREAD rather than select(). On Windows `select.select` is
+    provided by WinSock and accepts sockets only — handing it a subprocess pipe
+    raises, so the previous implementation made every stateful session
+    (session_start on python3/node) fail there outright. A blocking readline on
+    a daemon thread is the portable primitive: it behaves identically on all
+    three platforms and needs no non-blocking pipe support.
+
+    The thread is a daemon and the queue is bounded to one line, so a worker that
+    never answers leaks one parked thread rather than blocking interpreter exit.
+    """
+    import queue
+    import threading as _th
+
+    q: queue.Queue = queue.Queue(maxsize=1)
+
+    def _read():
+        try:
+            line = stream.readline()
+        except Exception:
+            line = b""
+        try:
+            q.put_nowait(line)
+        except queue.Full:  # pragma: no cover — caller already timed out
+            pass
+
+    t = _th.Thread(target=_read, daemon=True)
+    t.start()
+    try:
+        line = q.get(timeout=timeout)
+    except queue.Empty:
+        return None
+    if not line:
+        return ""  # EOF: the worker closed its stdout
+    return line.decode(errors="replace").rstrip("\r\n")
 
 
 class Worker:

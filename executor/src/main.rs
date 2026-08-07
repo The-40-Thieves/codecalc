@@ -15,13 +15,15 @@
 use std::env;
 use std::fs;
 use std::io::Read;
-use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use serde_json::json;
+
+mod platform;
+use platform::ResolvedLimits;
 
 const MAX_OUTPUT_BYTES: u64 = 64 * 1024;
 const AS_LIMIT_BYTES: u64 = 2048 * 1024 * 1024 * 1024; // 2 TiB VA (V8/JVM need huge VA)
@@ -104,48 +106,6 @@ fn runtime_path() -> String {
         .unwrap_or_else(|| DEFAULT_RUNTIME_PATH.to_string())
 }
 
-/// Total tasks (threads, not processes) owned by this real uid, machine-wide —
-/// the number the kernel actually compares RLIMIT_NPROC against.
-///
-/// Walks /proc once: ~200 status files, single-digit milliseconds. Returns None
-/// off Linux or if /proc is unreadable, which the caller treats as "cannot
-/// measure" rather than "zero".
-fn current_uid_tasks() -> Option<u64> {
-    let uid = unsafe { libc::getuid() };
-    let mut total: u64 = 0;
-    let mut seen_any = false;
-    for entry in fs::read_dir("/proc").ok()?.flatten() {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.is_empty() || !name.bytes().all(|b| b.is_ascii_digit()) {
-            continue;
-        }
-        // A process can exit between readdir and read; skip it rather than fail.
-        let Ok(status) = fs::read_to_string(format!("/proc/{name}/status")) else {
-            continue;
-        };
-        let mut this_uid: Option<u32> = None;
-        let mut threads: Option<u64> = None;
-        for line in status.lines() {
-            if let Some(rest) = line.strip_prefix("Uid:") {
-                this_uid = rest.split_whitespace().next().and_then(|v| v.parse().ok());
-            } else if let Some(rest) = line.strip_prefix("Threads:") {
-                threads = rest.trim().parse().ok();
-            }
-            if this_uid.is_some() && threads.is_some() {
-                break;
-            }
-        }
-        if this_uid == Some(uid) {
-            seen_any = true;
-            total += threads.unwrap_or(1);
-        }
-    }
-    // We are ourselves a task owned by this uid, so a zero total means the walk
-    // found nothing usable — report that rather than a limit of `headroom`.
-    if seen_any { Some(total) } else { None }
-}
-
 /// RLIMIT_NPROC for this execution. See the constants above for why it is
 /// measured rather than fixed.
 fn nproc_limit() -> u64 {
@@ -156,7 +116,7 @@ fn nproc_limit() -> u64 {
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(DEFAULT_PROCESS_HEADROOM);
-    match current_uid_tasks() {
+    match platform::current_uid_tasks() {
         Some(n) => n.saturating_add(headroom),
         None => FALLBACK_NPROC_LIMIT,
     }
@@ -220,7 +180,10 @@ const LANGS: &[Lang] = &[
         run: &["bash", "-c", "nix-shell -p ghc --run \"ghc -O2 -o {exe} {file} && {exe}\""],
     },
     // data / query DSLs
-    Lang { name: "sqlite", ext: "sql", compile: None, run: &["bash", "-c", "sqlite3 :memory: < {file}"] },
+    // `.read` as a SQL argument rather than a shell redirect: this is the only
+    // wrapper language that did not actually need a shell, and dropping bash
+    // makes sqlite work on Windows too.
+    Lang { name: "sqlite", ext: "sql", compile: None, run: &["sqlite3", ":memory:", ".read {file}"] },
     Lang { name: "jq", ext: "jq", compile: None, run: &["jq", "-n", "-f", "{file}"] },
     Lang { name: "awk", ext: "awk", compile: None, run: &["awk", "-f", "{file}"] },
 ];
@@ -253,18 +216,27 @@ fn on_path(cmd: &str) -> bool {
             continue;
         }
         let candidate = Path::new(dir).join(cmd);
-        if candidate.is_file() {
-            // cheap executable check: readable + (any) execute bit
-            use std::os::unix::fs::PermissionsExt;
-            if let Ok(meta) = std::fs::metadata(&candidate) {
-                let mode = meta.permissions().mode();
-                if mode & 0o111 != 0 {
-                    return true;
-                }
-            }
+        if candidate.is_file() && is_executable(&candidate) {
+            return true;
         }
     }
     false
+}
+
+/// Is this file executable? Windows has no execute bit — presence on PATH with
+/// an executable extension is the closest equivalent, and PATHEXT is how the
+/// shell itself decides, so `python3` there is really `python3.exe`.
+#[cfg(unix)]
+fn is_executable(p: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(p)
+        .map(|m| m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn is_executable(p: &Path) -> bool {
+    p.is_file()
 }
 
 /// First non-placeholder command in a run/compile template (the runtime binary).
@@ -326,39 +298,6 @@ impl Default for Limits {
     }
 }
 
-fn apply_limits(limits: &Limits) {
-    let cpu_limit = if limits.max_cpu > 0 {
-        limits.max_cpu
-    } else {
-        limits.timeout + CPU_GRACE_SECONDS
-    };
-    let as_bytes = if limits.max_memory_mb > 0 {
-        limits.max_memory_mb * 1024 * 1024
-    } else {
-        AS_LIMIT_BYTES
-    };
-    let fsize_bytes = if limits.max_output_kb > 0 {
-        limits.max_output_kb * 1024
-    } else {
-        FSIZE_LIMIT_BYTES
-    };
-    unsafe {
-        let cpu = libc::rlimit { rlim_cur: cpu_limit, rlim_max: cpu_limit };
-        libc::setrlimit(libc::RLIMIT_CPU, &cpu);
-        let as_ = libc::rlimit { rlim_cur: as_bytes, rlim_max: as_bytes };
-        libc::setrlimit(libc::RLIMIT_AS, &as_);
-        let fsize = libc::rlimit { rlim_cur: fsize_bytes, rlim_max: fsize_bytes };
-        libc::setrlimit(libc::RLIMIT_FSIZE, &fsize);
-        let nfile = libc::rlimit { rlim_cur: NFILE_LIMIT, rlim_max: NFILE_LIMIT };
-        libc::setrlimit(libc::RLIMIT_NOFILE, &nfile);
-        // fork-bomb guard: cap child processes for this user
-        let nproc = libc::rlimit { rlim_cur: limits.nproc, rlim_max: limits.nproc };
-        libc::setrlimit(libc::RLIMIT_NPROC, &nproc);
-        let core = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
-        libc::setrlimit(libc::RLIMIT_CORE, &core);
-    }
-}
-
 /// Result of one exec step, including resource usage (wait4 rusage).
 struct StepResult {
     exit_code: i64,
@@ -369,130 +308,118 @@ struct StepResult {
     cpu_ms: u64,
     peak_memory_kb: u64,
     output_truncated: bool,
+    /// Guarantees this platform could not apply. Carried into the JSON so a
+    /// caller can distinguish "the limit held" from "there was no limit".
+    unenforced: Vec<&'static str>,
 }
 
-/// Run one argv step, redirecting stdout/stderr to files in `work` (avoids pipe
-/// deadlock), killing the whole process group on timeout. Uses wait4 to also
-/// harvest CPU time + peak RSS for verdicts.
+/// Run one argv step, redirecting stdout/stderr to FILES in `work` rather than
+/// pipes — a pipe fills at 64 KiB and deadlocks any program that writes more
+/// before we read. Limits, the timeout kill and resource accounting are all
+/// delegated to platform::spawn_and_wait; see platform/mod.rs for what each OS
+/// can actually enforce.
 fn run_step(argv: &[String], work: &Path, tag: &str, stdin_data: &[u8], limits: &Limits) -> StepResult {
     let out_path = work.join(format!("{tag}.out"));
     let err_path = work.join(format!("{tag}.err"));
     let in_path = work.join(format!("{tag}.in"));
     let _ = fs::write(&in_path, stdin_data);
 
-    let out_f = fs::File::create(&out_path).expect("create out file");
-    let err_f = fs::File::create(&err_path).expect("create err file");
-    let in_f = fs::File::open(&in_path).expect("open in file");
-
-    let child = unsafe {
-        let mut cmd = Command::new(&argv[0]);
-        cmd.args(&argv[1..])
-            .current_dir(work)
-            // SECURITY: clear env, then re-add ONLY the allowlist. User code
-            // must never see API keys / tokens from the host environment.
-            .env_clear();
-        for key in ENV_ALLOWLIST {
-            if let Ok(val) = std::env::var(key) {
-                cmd.env(key, val);
-            }
+    // Previously `.expect(...)` — a panic here produced NO JSON on stdout, so the
+    // Python caller saw only "executor produced invalid output" with the real
+    // cause (an unwritable workdir) nowhere to be found.
+    let (out_f, err_f, in_f) = match (
+        fs::File::create(&out_path),
+        fs::File::create(&err_path),
+        fs::File::open(&in_path),
+    ) {
+        (Ok(o), Ok(e), Ok(i)) => (o, e, i),
+        _ => {
+            return StepResult {
+                exit_code: -2, signal: None, stdout: String::new(),
+                stderr: format!("cannot create I/O files in {}", work.display()),
+                timed_out: false, cpu_ms: 0, peak_memory_kb: 0,
+                output_truncated: false, unenforced: Vec::new(),
+            };
         }
-        cmd.env("PATH", runtime_path())  // always the sandbox PATH, not host's
-            .env("PYTHONUNBUFFERED", "1")
-            .stdin(Stdio::from(in_f))
-            .stdout(Stdio::from(out_f))
-            .stderr(Stdio::from(err_f))
-            .process_group(0);
-        if limits.no_net {
-            // Block network egress by preloading a socket-blocking shim.
-            // Best-effort: dynamic binaries only (static ones ignore LD_PRELOAD).
-            if let Ok(exe_path) = env::current_exe() {
-                let shim = exe_path.parent().unwrap_or(Path::new(".")).join("blocknet.so");
-                if shim.is_file() {
-                    cmd.env("LD_PRELOAD", shim.to_string_lossy().into_owned());
-                }
-            }
-        }
-        cmd.pre_exec({
-            let limits_owned = *limits; // Copy — closure must be 'static
-            move || {
-                apply_limits(&limits_owned);
-                Ok(())
-            }
-        })
-        .spawn()
     };
 
-    let mut child = match child {
-        Ok(c) => c,
+    let mut cmd = Command::new(&argv[0]);
+    cmd.args(&argv[1..])
+        .current_dir(work)
+        // SECURITY: clear env, then re-add ONLY the allowlist. User code must
+        // never see API keys / tokens from the host environment.
+        .env_clear();
+    for key in ENV_ALLOWLIST {
+        if let Ok(val) = std::env::var(key) {
+            cmd.env(key, val);
+        }
+    }
+    cmd.env("PATH", runtime_path()) // always the sandbox PATH, not the host's
+        .env("PYTHONUNBUFFERED", "1")
+        .stdin(Stdio::from(in_f))
+        .stdout(Stdio::from(out_f))
+        .stderr(Stdio::from(err_f));
+
+    let mut no_net_applied = true;
+    if limits.no_net {
+        let exe_dir = env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            .unwrap_or_else(|| Path::new(".").to_path_buf());
+        no_net_applied = platform::apply_no_net(&mut cmd, &exe_dir);
+    }
+
+    let resolved = resolve_limits(limits);
+    let waited = match platform::spawn_and_wait(cmd, &resolved) {
+        Ok(w) => w,
         Err(e) => {
             return StepResult {
                 exit_code: -2, signal: None, stdout: String::new(),
                 stderr: format!("spawn failed: {e}"), timed_out: false,
                 cpu_ms: 0, peak_memory_kb: 0, output_truncated: false,
+                unenforced: Vec::new(),
             };
         }
     };
 
-    let start = Instant::now();
-    let mut status: libc::c_int = 0;
-    let mut rusage: libc::rusage = unsafe { std::mem::zeroed() };
-    let mut timed_out = false;
-    loop {
-        let r = unsafe { libc::wait4(child.id() as libc::pid_t, &mut status, libc::WNOHANG, &mut rusage) };
-        if r == child.id() as libc::pid_t {
-            break; // reaped with rusage
-        } else if r == -1 {
-            // EINTR: retry; anything else: report
-            let e = std::io::Error::last_os_error();
-            if e.raw_os_error() != Some(libc::EINTR) {
-                child.kill().ok();
-                let _ = child.wait();
-                return StepResult {
-                    exit_code: -2, signal: None, stdout: String::new(),
-                    stderr: format!("wait failed: {e}"), timed_out: false,
-                    cpu_ms: 0, peak_memory_kb: 0, output_truncated: false,
-                };
-            }
-        } else {
-            // still running
-            if start.elapsed() >= Duration::from_secs(limits.timeout) {
-                unsafe { libc::killpg(child.id() as i32, libc::SIGKILL); }
-                // reap with rusage (blocking — it is dying)
-                let _ = unsafe { libc::wait4(child.id() as libc::pid_t, &mut status, 0, &mut rusage) };
-                timed_out = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
+    let mut unenforced = waited.unenforced;
+    if limits.no_net && !no_net_applied {
+        // The shim is missing or the platform has none. Saying nothing here
+        // would let `no_net: true` read as "network blocked" when nothing was.
+        unenforced.push("no_net_requested_but_no_shim_available");
     }
-
-    let (exit_code, signal) = if libc::WIFEXITED(status) {
-        (libc::WEXITSTATUS(status) as i64, None)
-    } else if libc::WIFSIGNALED(status) {
-        (0, Some(libc::WTERMSIG(status)))
-    } else {
-        (status as i64, None)
-    };
-
-    let cpu_ms = ((rusage.ru_utime.tv_sec + rusage.ru_stime.tv_sec) * 1000
-        + (rusage.ru_utime.tv_usec + rusage.ru_stime.tv_usec) / 1000) as u64;
-    let peak_memory_kb = rusage.ru_maxrss as u64; // KiB on Linux
 
     let (stdout, out_trunc) = read_capped(&out_path, limits.max_output_kb);
     let (stderr, err_trunc) = read_capped(&err_path, limits.max_output_kb);
-    if timed_out && stderr.is_empty() {
-        StepResult {
-            exit_code, signal, stdout,
-            stderr: "<killed: exceeded wall-clock timeout>".into(),
-            timed_out, cpu_ms, peak_memory_kb,
-            output_truncated: out_trunc || err_trunc,
-        }
+    let stderr = if waited.timed_out && stderr.is_empty() {
+        "<killed: exceeded wall-clock timeout>".to_string()
     } else {
-        StepResult {
-            exit_code, signal, stdout, stderr,
-            timed_out, cpu_ms, peak_memory_kb,
-            output_truncated: out_trunc || err_trunc,
-        }
+        stderr
+    };
+
+    StepResult {
+        exit_code: waited.exit_code,
+        signal: waited.signal,
+        stdout,
+        stderr,
+        timed_out: waited.timed_out,
+        cpu_ms: waited.cpu_ms,
+        peak_memory_kb: waited.peak_memory_kb,
+        output_truncated: out_trunc || err_trunc,
+        unenforced,
+    }
+}
+
+/// Turn the per-call knobs into concrete ceilings for the platform layer.
+fn resolve_limits(limits: &Limits) -> ResolvedLimits {
+    ResolvedLimits {
+        timeout_secs: limits.timeout,
+        cpu_secs: if limits.max_cpu > 0 { limits.max_cpu } else { limits.timeout + CPU_GRACE_SECONDS },
+        memory_bytes: if limits.max_memory_mb > 0 { limits.max_memory_mb * 1024 * 1024 } else { AS_LIMIT_BYTES },
+        fsize_bytes: if limits.max_output_kb > 0 { limits.max_output_kb * 1024 } else { FSIZE_LIMIT_BYTES },
+        nofile: NFILE_LIMIT,
+        max_processes: limits.nproc,
+        no_net: limits.no_net,
     }
 }
 
@@ -571,7 +498,9 @@ fn execute(lang_name: &str, code: &str, stdin_data: &str, limits: &Limits, workd
     };
 
     let file = work.join(format!("main.{ext}", ext = lang.ext));
-    let exe = work.join("a.out");
+    // Windows needs the .exe extension for the compiled artifact; CreateProcess
+    // will not treat an extensionless PE as executable the way exec() does.
+    let exe = work.join(if cfg!(windows) { "a.exe" } else { "a.out" });
     if fs::write(&file, code).is_err() {
         let _ = fs::remove_dir_all(&work);
         return json!({ "ok": false, "error": "failed to write source" });
@@ -594,6 +523,7 @@ fn execute(lang_name: &str, code: &str, stdin_data: &str, limits: &Limits, workd
                 "duration_ms": started.elapsed().as_millis() as u64,
                 "cpu_ms": sr.cpu_ms, "peak_memory_kb": sr.peak_memory_kb,
                 "timed_out": sr.timed_out, "verdict": verdict(&sr, limits),
+                "unenforced": sr.unenforced,
             });
             if workdir.is_none() {
                 let _ = fs::remove_dir_all(&work);
@@ -622,6 +552,11 @@ fn execute(lang_name: &str, code: &str, stdin_data: &str, limits: &Limits, workd
         "peak_memory_kb": sr.peak_memory_kb,
         "timed_out": sr.timed_out,
         "verdict": verdict(&sr, limits),
+        // Which guarantees this OS could not apply. Empty on a full-featured
+        // Linux run; non-empty is not an error, it is the sandbox declining to
+        // claim something it did not do.
+        "unenforced": sr.unenforced,
+        "platform": std::env::consts::OS,
         "workdir": work_s,
     });
     if workdir.is_none() {
