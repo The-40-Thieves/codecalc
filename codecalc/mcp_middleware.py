@@ -59,9 +59,10 @@ TOOL_TIMEOUTS: dict[str, float] = {
     "z3_check": 30,
     "solve_linear": 20,
     "analyze_complexity": 20,
-    # LLM round-trips with an executor verification loop behind them
-    "translate_code": 120,
-    "optimize_code": 120,
+    # Verification gates: they run BOTH programs, and verify_optimization
+    # additionally times each at four sizes. No network, but real execution.
+    "verify_translation": 120,
+    "verify_optimization": 180,
 }
 
 #: Applied to any tool not named above. Generous on purpose: `execute_code` and

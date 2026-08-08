@@ -1,9 +1,12 @@
 """Context7 integration: up-to-date library documentation for any language.
 
 Context7 (context7.com) indexes public library docs and serves LLM-reranked
-snippets via a public API (keyless for basic use). This lets translate_code
-hand the translating model *current* API knowledge for the target language
-instead of relying on training-data memory of library APIs.
+snippets via a public API (keyless for basic use). It is exposed as the
+`context7_docs` tool so a caller can pull current API knowledge for a library
+instead of relying on its own training-data memory.
+
+This is a documentation fetch, not a model call — the reranking happens on
+context7's side. It is the only outbound request the package makes.
 
 Library IDs follow /owner/repo (or /<source>/<id> for non-GitHub sources).
 """
@@ -312,9 +315,10 @@ def docs_for_code(code: str, language: str, query: str | None = None,
     # `timeout` is the budget for the WHOLE call, divided across the requests.
     # Fetching every library was the fix for max_libs doing nothing, but giving
     # each request the full timeout turned a 25s worst case into 75s — and the
-    # only caller, translate_code, already spends another 25s on language docs
-    # and then has to fit an LLM round-trip inside a 120s MCP deadline. A fix
-    # that blows the caller's budget is not a fix.
+    # caller is an agent waiting on a tool result inside a 120s MCP deadline.
+    # A fix that blows the caller's budget is not a fix. (This previously read
+    # "its only caller, translate_code" — that caller no longer exists; the tool
+    # is now invoked directly.)
     chosen = libs[:max_libs]
     deadline = time.monotonic() + timeout
     results = []

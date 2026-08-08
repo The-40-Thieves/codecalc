@@ -644,17 +644,23 @@ def simplify_expression(expr: str) -> dict:
 
 
 @mcp.tool()
-def translate_code(code: str, source: str, target: str,
-                   test_inputs: list[str] | None = None) -> dict:
-    """Port `code` from `source` language to `target`, then VERIFY equivalence.
+def verify_translation(source_code: str, source_language: str,
+                       target_code: str, target_language: str,
+                       test_inputs: list[str] | None = None) -> dict:
+    """PROVE that a port is equivalent: run both programs, compare their output.
 
-    An LLM translates; the executor runs BOTH versions on the same test inputs
-    and compares stdout. Accepted only if outputs match (one retry feeding the
-    diff back). Returns translated_code + per-input verification. Example:
-    source='python3', target='go', code='import sys\nn=int(sys.stdin.readline())\nprint(n*2)'.
+    You write the translation — you are the language model. This runs your
+    source and your port on the same inputs and reports, per input, whether
+    they matched, diverged, or could not be compared (a runtime that is missing
+    or a program that failed on both sides is INCONCLUSIVE, never a pass).
+
+    Use it after porting anything: python3 -> go, node -> rust, a rewritten
+    function against the original. Pair with compare_edge_cases to find the
+    inputs worth testing.
     """
-    return translation.translate_code(code, source, target,
-                                      test_inputs=test_inputs)
+    return translation.verify_translation(
+        source_language, source_code, target_language, target_code,
+        test_inputs if test_inputs else translation.DEFAULT_EDGE_INPUTS[:4])
 
 
 @mcp.tool()
@@ -663,7 +669,7 @@ def compare_edge_cases(snippets: dict[str, str],
     """Run the same logic in N languages on edge-case inputs and flag divergence.
 
     `snippets` maps language -> code (provide a correct snippet per language;
-    use translate_code first if you only have one). Default inputs cover empty,
+    write one per language). Default inputs cover empty,
     zero, negative, and float-precision cases: ['', '0', '1', '-1', '10',
     '100', '0.1\\n0.2']. Returns a per-input matrix plus a divergences list
     where languages disagree on identical input.
@@ -683,21 +689,24 @@ def context7_docs(library_id: str, query: str, fast: bool = True) -> dict:
 
 
 @mcp.tool()
-def optimize_code(code: str, language: str,
-                  test_inputs: list[str] | None = None,
-                  sizes: list[int] | None = None,
-                  min_speedup: float = 1.15) -> dict:
-    """Optimize code and PROVE the improvement.
+def verify_optimization(original: str, candidate: str, language: str,
+                        test_inputs: list[str] | None = None,
+                        sizes: list[int] | None = None,
+                        min_speedup: float = 1.15) -> dict:
+    """PROVE an optimisation: same outputs, and measurably faster.
 
-    An LLM proposes an optimized version; the executor verifies correctness
-    (identical stdout on test inputs) AND measures speedup (same sizes,
-    min-of-repeats, baseline-subtracted). Accepted only if correct AND
-    measurably faster (default 1.15x); retried once with the failure reason.
-    Returns optimized_code, speedup_ratio, before/after timings.
+    You write the optimised version. This runs both against the same inputs to
+    confirm they still agree, then TIMES both at increasing sizes and compares.
+    Accepted only if equivalent AND at least `min_speedup` faster.
+
+    A rejection tells you which gate failed and by how much — "correct but only
+    1.09x" is the answer an optimiser that fabricates wins cannot give. A
+    candidate that is faster but wrong fails the first gate, and its speed is
+    never measured, because a faster wrong answer is not an optimisation.
     """
-    return optimization.optimize_code(code, language,
-                                      test_inputs=test_inputs, sizes=sizes,
-                                      min_speedup=min_speedup)
+    return optimization.verify_optimization(
+        original, candidate, language, test_inputs=test_inputs,
+        sizes=sizes, min_speedup=min_speedup)
 
 
 @mcp.tool()

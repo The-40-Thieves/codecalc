@@ -1,15 +1,15 @@
-"""Code optimization with proof, and function extraction.
+"""Optimisation verification and function extraction. No LLM in this module.
 
-optimize_code: an LLM proposes an optimized version; the executor VERIFIES
-correctness (identical stdout on test inputs) AND measures speedup (same
-sizes, min-of-repeats, baseline-subtracted). Accepted only when correct AND
-measurably faster; otherwise retried once with the failure reason. The LLM
-can claim O(n²) -> O(n); the executor proves it.
+verify_optimization: given an original and a candidate the caller already has,
+prove the candidate is a genuine improvement — same outputs, and measurably
+faster at the same sizes. Both gates are measured; neither is an opinion.
 
-extract_function: pull a named function out of a program with its dependency
-closure (imports + referenced helpers), synthesize a standalone runner, and
-execute it in the sandbox. Python uses ast for exact extraction; other
-languages use best-effort brace/paren matching.
+extract_function: pull a named function plus its dependency closure into a
+standalone program and run it (ast-exact for python3, best-effort elsewhere).
+
+This module used to generate the candidate by calling a separately configured
+model. The generation was never the differentiated part — the measurement was —
+and requiring a second model made the measurement unreachable without one.
 """
 
 from __future__ import annotations
@@ -17,21 +17,8 @@ from __future__ import annotations
 import ast
 import re
 
-from . import executor, llm, tools
-from .translation import (
-    DEFAULT_EDGE_INPUTS,
-    _extract_code,
-    _worst_case,
-    verify_translation,
-)
-
-_OPTIMIZE_SYSTEM = (
-    "You optimize code for speed. Preserve behavior EXACTLY: same stdin "
-    "handling, same stdout format, same edge cases. Prefer algorithmic "
-    "improvements (better complexity) over micro-tuning. Output ONLY valid "
-    "JSON: {\"code\": \"<the optimized program>\", \"notes\": \"<what you "
-    "changed and why>\"}. Never wrap in markdown, never explain outside JSON."
-)
+from . import executor, tools
+from .translation import DEFAULT_EDGE_INPUTS, verify_translation
 
 
 def _timed(code: str, language: str, sizes: list[int], timeout: int = 30) -> dict:
@@ -90,123 +77,63 @@ def _speedup(before: dict, after: dict) -> dict:
     }
 
 
-def optimize_code(code: str, language: str,
-                  test_inputs: list[str] | None = None,
-                  sizes: list[int] | None = None,
-                  min_speedup: float = 1.15,
-                  model: str | None = None, timeout: int = 30) -> dict:
-    """Optimize `code`; accept only if correct AND measurably faster."""
+def verify_optimization(original: str, candidate: str, language: str,
+                        test_inputs: list[str] | None = None,
+                        sizes: list[int] | None = None,
+                        min_speedup: float = 1.15,
+                        timeout: int = 30) -> dict:
+    """Decide whether `candidate` is a genuine optimisation of `original`.
+
+    Two gates, both measured, neither of them an opinion:
+
+      correctness  both programs run on the same inputs and must agree
+      speed        both are timed at the same sizes; the ratio must clear
+                   `min_speedup`
+
+    An accepted result means the executor watched it happen. A rejected one
+    says which gate failed and by how much — "correct but only 1.09x" is a
+    useful answer, and it is the one an optimiser that fabricates wins cannot
+    give.
+
+    The caller supplies both versions. This module used to generate the
+    candidate by calling a second, separately configured model, which put the
+    weakest link in the loop in charge of the creative half and left the
+    measurement half unreachable on its own.
+    """
     language = executor.registry.canonical(language) or language
     inputs = test_inputs if test_inputs else DEFAULT_EDGE_INPUTS[:4]
     size_list = sizes or [2000, 5000, 10000, 20000]
 
-    before = _timed(code, language, size_list)
+    ver = verify_translation(language, original, language, candidate, inputs,
+                             timeout=timeout)
+    if not ver.get("passed"):
+        return {"ok": True, "accepted": False, "reason": "not equivalent",
+                "verification": ver,
+                "detail": "the candidate does not reproduce the original's "
+                          "output; speed was not measured, because a faster "
+                          "wrong answer is not an optimisation"}
+
+    before = _timed(original, language, size_list, timeout=timeout)
     if not before.get("ok"):
         return {"ok": False, "error": f"baseline measurement failed: {before.get('error')}"}
+    after = _timed(candidate, language, size_list, timeout=timeout)
+    if not after.get("ok"):
+        return {"ok": False, "error": f"candidate measurement failed: {after.get('error')}"}
 
-    prompt = (
-        f"Optimize this {language} program for speed. It reads input from stdin "
-        f"(first line is an integer N unless noted) and must keep EXACTLY the "
-        f"same stdout. Prefer algorithmic improvements.\n\n"
-        f"Source ({language}):\n```\n{code[:8000]}\n```"
-    )
-
-    last = None
-    for attempt in (1, 2):
-        try:
-            text = llm.chat(prompt, system=_OPTIMIZE_SYSTEM, model=model,
-                            timeout=timeout)
-        except Exception as exc:
-            return {"ok": False, "error": f"LLM unavailable: {exc}",
-                    "llm_available": False}
-        optimized = _extract_code(text)
-        if not optimized:
-            return {"ok": False, "error": "LLM did not return code",
-                    "llm_available": True, "raw": text[:500]}
-
-        # Correctness gate. Both versions, same inputs, and stdout must match on
-        # at least one input where BOTH actually ran — see translation.aggregate.
-        # An optimization is not "correct because both versions crashed".
-        ver = verify_translation(language, code, language, optimized, inputs)
-        if not ver["passed"]:
-            last = {"stage": "correctness", "verification": ver}
-            worst = _worst_case(ver["cases"])
-            if attempt == 1 and worst:
-                if worst["outcome"] == "mismatch":
-                    prompt += (
-                        "\n\nVERIFICATION FAILED on input "
-                        f"{worst['input']!r} ({worst['reason']}):\n"
-                        f"original stdout: {worst['source']['stdout'][:300]!r}\n"
-                        f"optimized stdout: {worst['target']['stdout'][:300]!r}\n"
-                        f"optimized stderr: {worst['target']['stderr'][:300]!r}\n"
-                        "Fix the optimization so behavior is identical."
-                    )
-                else:
-                    prompt += (
-                        "\n\nCOULD NOT VERIFY on input "
-                        f"{worst['input']!r} ({worst['reason']}).\n"
-                        f"original stderr: {worst['source']['stderr'][:300]!r}\n"
-                        f"optimized stderr: {worst['target']['stderr'][:300]!r}\n"
-                        "Both versions failed, so correctness could not be "
-                        "established. Emit an optimization that RUNS."
-                    )
-            continue
-
-        # speedup: measured, not claimed
-        after = _timed(optimized, language, before["sizes"])
-        if not after.get("ok"):
-            last = {"stage": "measurement", "error": after.get("error")}
-            continue
-        sp = _speedup(before, after)
-        if sp["measurable"] and sp["ratio"] is not None and sp["ratio"] >= min_speedup:
-            return {
-                "ok": True, "language": language,
-                "optimized_code": optimized,
-                "speedup_ratio": sp["ratio"],
-                "notes": _llm_notes(text),
-                "before": before, "after": after, "speedup": sp,
-                "verification": ver, "attempts": attempt, "llm_available": True,
-            }
-        if not sp["measurable"]:
-            # baseline too small to measure: correctness alone is the gate
-            return {
-                "ok": True, "language": language,
-                "optimized_code": optimized,
-                "speedup_ratio": None,
-                "notes": _llm_notes(text),
-                "speedup": sp,
-                "verification": ver, "attempts": attempt, "llm_available": True,
-                "warning": "baseline below noise floor; accepted on correctness only",
-            }
-        last = {"stage": "speedup", "speedup": sp}
-        if attempt == 1:
-            prompt += (
-                f"\n\nOPTIMIZATION NOT FASTER: measured speedup ratio is "
-                f"{sp['ratio']}x (need >= {min_speedup}x). The code may have "
-                "changed complexity but got slower, or the change was "
-                "cosmetic. Find a real algorithmic improvement."
-            )
-
+    sp = _speedup(before, after)
+    ratio = sp.get("ratio")
+    accepted = bool(sp.get("measurable")) and ratio is not None and ratio >= min_speedup
     return {
-        "ok": False, "language": language,
-        "error": "no accepted optimization after retry",
-        "stage": (last or {}).get("stage"), "detail": last,
-        "attempts": 2, "llm_available": True,
+        "ok": True,
+        "accepted": accepted,
+        "reason": ("verified faster" if accepted else
+                   "equivalent but not measurably faster"),
+        "speedup": sp,
+        "min_speedup": min_speedup,
+        "verification": ver,
+        "language": language,
     }
 
-
-def _llm_notes(text: str) -> str:
-    m = re.search(r'"notes"\s*:\s*"((?:[^"\\]|\\.)*)"', text)
-    if m:
-        try:
-            import json
-            return json.loads('"' + m.group(1) + '"')
-        except Exception:
-            return m.group(1)[:300]
-    return ""
-
-
-# ── function extraction ────────────────────────────────────────────────────
 
 def _py_extract(code: str, name: str) -> dict | None:
     """ast-based extraction for python: imports + referenced helpers + target."""

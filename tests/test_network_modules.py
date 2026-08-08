@@ -15,7 +15,6 @@ rejected our request" must not look the same, which is exactly the bug that let
 from __future__ import annotations
 
 import json
-import os
 import pathlib
 import re
 import socket
@@ -29,7 +28,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from codecalc import context7, llm
+from codecalc import context7
 
 FAILS: list[str] = []
 SKIPS: list[str] = []
@@ -278,128 +277,32 @@ else:
               and d.get("content_chars") == context7.MAX_CONTENT_CHARS,
               f"-> truncated={d.get('truncated')} chars={d.get('content_chars')}")
 
-# ═══ llm: the endpoint was frozen at import ═══════════════════════════════
-# CODECALC_LLM_MODEL was re-read per call and CODECALC_LLM_GATEWAY was not, so
-# the two halves of one configuration disagreed about when they were read.
-saved = os.environ.get("CODECALC_LLM_GATEWAY")
+# ═══ the llm client is GONE, and must stay gone ═══════════════════════════
+# codecalc no longer calls a language model anywhere. Its caller IS one, so a
+# calculator that needed a second, separately configured model to run its two
+# most distinctive tools had the dependency backwards — and those were the only
+# two tools that did not work on a fresh install.
+#
+# The value was never the generation; it was the executor proving the result.
+# That half is now callable directly as verify_translation / verify_optimization.
+check("codecalc.llm no longer exists",
+      not (REPO_ROOT / "codecalc" / "llm.py").exists())
 try:
-    os.environ.pop("CODECALC_LLM_GATEWAY", None)
-    check("no gateway configured -> configured() is False", llm.configured() is False)
-    os.environ["CODECALC_LLM_GATEWAY"] = "http://127.0.0.1:9/v1/chat/completions"
-    check("a gateway set AFTER import is picked up", llm.configured() is True)
+    from codecalc import llm  # noqa: F401
+    check("importing codecalc.llm fails", False, "-> it imported")
+except ImportError:
+    check("importing codecalc.llm fails", True)
 
-    # ═══ llm: urlopen speaks file:, ftp: and data: too ════════════════════
-    # Verified before the fix: a gateway of file:///etc/hostname was opened and
-    # read, returning the machine's hostname as the "model response".
-    for bad in ("file:///etc/hostname", "ftp://example.com/x", "data:,hello", "/etc/hostname"):
-        os.environ["CODECALC_LLM_GATEWAY"] = bad
-        try:
-            llm.chat("hi", timeout=5)
-            ok = False
-            detail = "*** the call went through"
-        except RuntimeError as exc:
-            ok = "refusing to use" in str(exc)
-            detail = str(exc)[:60]
-        except Exception as exc:
-            ok = False
-            detail = f"{type(exc).__name__}: {exc}"
-        check(f"gateway {bad!r} is refused", ok, f"-> {detail}")
-        check(f"  ...and configured() agrees about {bad!r}", llm.configured() is False)
+_src = " ".join(
+    p.read_text(encoding="utf-8") for p in (REPO_ROOT / "codecalc").glob("*.py"))
+for gone in ("CODECALC_LLM_GATEWAY", "CODECALC_LLM_API_KEY", "CODECALC_COMPLEXITY_LLM"):
+    check(f"{gone} is not read anywhere", f'"{gone}"' not in _src and f"'{gone}'" not in _src)
 
-    # An allowlist checked only at the configured endpoint is one HTTP 302 away
-    # from irrelevant: urllib follows an http:// redirect to ftp:// happily.
-    class Redirector(BaseHTTPRequestHandler):
-        def do_POST(self):
-            self.send_response(302)
-            self.send_header("Location", "ftp://example.com/x")
-            self.send_header("Content-Length", "0")
-            self.end_headers()
-
-        def log_message(self, *a):
-            pass
-
-    rsrv = HTTPServer(("127.0.0.1", 0), Redirector)
-    threading.Thread(target=rsrv.serve_forever, daemon=True).start()
-    os.environ["CODECALC_LLM_GATEWAY"] = f"http://127.0.0.1:{rsrv.server_address[1]}/v1"
-    try:
-        llm.chat("hi", timeout=8)
-        ok, detail = False, "followed it"
-    except Exception as exc:
-        ok, detail = "refusing to follow a redirect" in str(exc), str(exc)[:70]
-    check("a redirect to a disallowed scheme is refused", ok, f"-> {detail}")
-    rsrv.shutdown()
-
-    # ═══ llm: a 200 carrying an error object raised KeyError('choices') ═══
-    # LiteLLM answers this way for budget and rate-limit conditions, so the
-    # message that mattered was the one being discarded.
-    CASES = [
-        ("error object", {"error": {"message": "budget exceeded", "type": "billing"}},
-         "budget exceeded"),
-        ("no choices", {"id": "x", "model": "m"}, "no usable choices"),
-        ("null content",
-         {"choices": [{"message": {"content": None}, "finish_reason": "tool_calls"}]},
-         "no text content"),
-    ]
-    # A gateway is a third party: every level of the response is type-checked.
-    # `choices` as a dict raised KeyError(0), `[1]` raised AttributeError, and a
-    # numeric content was returned as-is from a function annotated `-> str`.
-    MALFORMED = [
-        ("choices is a list of ints", {"choices": [1]}, "not an object"),
-        ("choices is a string", {"choices": "x"}, "no usable choices"),
-        ("choices is a dict", {"choices": {"0": {}}}, "no usable choices"),
-        ("message is a string", {"choices": [{"message": "x"}]}, "not an object"),
-        ("content is a number", {"choices": [{"message": {"content": 3}}]}, "not a string"),
-    ]
-    for label, payload, expect in MALFORMED:
-        try:
-            llm._content(payload, "m")
-            ok, detail = False, "returned normally"
-        except RuntimeError as exc:
-            ok, detail = expect in str(exc), str(exc)[:70]
-        except Exception as exc:
-            ok, detail = False, f"*** {type(exc).__name__}: {exc}"
-        check(f"malformed response: {label}", ok, f"-> {detail}")
-
-    for label, payload, expect in CASES:
-        srv = stub_gateway(payload)
-        os.environ["CODECALC_LLM_GATEWAY"] = f"http://127.0.0.1:{srv.server_address[1]}/v1/chat/completions"
-        try:
-            llm.chat("hi", timeout=5)
-            ok, detail = False, "returned normally"
-        except RuntimeError as exc:
-            ok, detail = expect in str(exc), str(exc)[:80]
-        except Exception as exc:
-            ok, detail = False, f"{type(exc).__name__}: {exc}"
-        check(f"{label}: the gateway's own message survives", ok, f"-> {detail}")
-        srv.shutdown()
-
-    srv = stub_gateway({"choices": [{"message": {"content": "hello"}}]})
-    os.environ["CODECALC_LLM_GATEWAY"] = f"http://127.0.0.1:{srv.server_address[1]}/v1/chat/completions"
-    check("a normal completion still works", llm.chat("hi", timeout=5) == "hello")
-    srv.shutdown()
-
-    # ═══ llm: available() billed for inference and called itself cheap ════
-    os.environ["CODECALC_LLM_GATEWAY"] = "http://127.0.0.1:9/v1/chat/completions"
-    asrc = inspect.getsource(llm.available)
-    check("available() does not call the model by default", "probe" in asrc)
-    check("available() is a config check unless asked otherwise",
-          llm.available() is True, "-> nothing listening on port 9, yet True")
-    check("available(probe=True) really tries", llm.available(probe=True) is False)
-
-    # Fixing gateway() was not enough: complexity.py still gated LLM refinement
-    # on the frozen module constant, so a gateway configured after import left
-    # refinement silently off with the variable plainly set.
-    from codecalc import complexity
-
-    csrc = inspect.getsource(complexity)
-    check("complexity.py gates on llm.configured(), not the frozen constant",
-          "llm.GATEWAY" not in csrc.replace("# llm.configured(), not llm.GATEWAY", ""),
-          "-> a stale read of the import-time constant remains")
-finally:
-    if saved is None:
-        os.environ.pop("CODECALC_LLM_GATEWAY", None)
-    else:
-        os.environ["CODECALC_LLM_GATEWAY"] = saved
+# The one remaining network call is context7, which is a documentation API and
+# not a model. Nothing else in the package opens a socket.
+_net = [p.name for p in (REPO_ROOT / "codecalc").glob("*.py")
+        if "urllib.request" in p.read_text(encoding="utf-8")]
+check("only context7 makes network calls", _net == ["context7.py"], f"-> {_net}")
 
 print(f"\n=== {len(FAILS)} FAILURE(S), {len(SKIPS)} skipped ===" if FAILS else
       f"\n=== NETWORK-MODULE REGRESSIONS FIXED ({len(SKIPS)} skipped) ===")
