@@ -274,12 +274,20 @@ def _kill_group(proc: subprocess.Popen) -> None:
 
 
 def _run_step(argv: list[str], cwd: str, timeout: int, stdin: str,
-              max_memory_mb: int = 0, max_cpu: int = 0) -> tuple[int, bytes, bytes, bool]:
+              max_memory_mb: int = 0, max_cpu: int = 0) -> tuple[int, bytes, bytes, bool, int]:
     # NOTE: preexec_fn is unsafe under threads (PLW1509) — this is the PYTHON
     # FALLBACK path only, used when the Rust binary is absent. It serializes
     # spawns with a lock to avoid concurrent fork+preexec races; the production
     # path (Rust executor) never uses preexec_fn.
     with _FALLBACK_SPAWN_LOCK:
+        # Both rusage samples are taken INSIDE the lock. Taking the first one at
+        # the call site meant another fallback thread could reap its child in
+        # the window before this one read the end value, charging its CPU to
+        # this run. Still not exact — RUSAGE_CHILDREN is process-global, so a
+        # child reaped elsewhere in the host process during this window is
+        # counted here too — which is why the docstring says approximate rather
+        # than claiming a per-process measurement this path cannot make.
+        cpu_before = _children_cpu_seconds()
         proc = subprocess.Popen(
             argv,
             cwd=cwd,
@@ -292,11 +300,13 @@ def _run_step(argv: list[str], cwd: str, timeout: int, stdin: str,
         )
         try:
             out, err = proc.communicate(input=stdin.encode(), timeout=timeout)
-            return proc.returncode, out, err, False
+            return (proc.returncode, out, err, False,
+                    _children_cpu_ms_since(cpu_before))
         except subprocess.TimeoutExpired:
             _kill_group(proc)
             proc.wait()
-            return -1, b"", b"<killed: exceeded wall-clock timeout>", True
+            return (-1, b"", b"<killed: exceeded wall-clock timeout>", True,
+                    _children_cpu_ms_since(cpu_before))
 
 
 def _trim(b: bytes, cap: int = MAX_OUTPUT_BYTES) -> str:
@@ -339,11 +349,14 @@ def _children_cpu_seconds() -> float:
 
 
 def _children_cpu_ms_since(before: float) -> int:
-    """CPU consumed since `before`.
+    """CPU consumed since `before`. APPROXIMATE.
 
-    Correct only because _run_step serialises spawns under _FALLBACK_SPAWN_LOCK
-    and communicate() reaps the child, so the delta is attributable to this run.
-    Unlike ru_maxrss, CPU time is additive, so differencing it is meaningful.
+    Sampled inside _FALLBACK_SPAWN_LOCK, so no other run through this path can
+    reap a child inside the window. RUSAGE_CHILDREN is process-global, though,
+    so a child reaped elsewhere in the host process during the same window is
+    counted here as well. Unlike ru_maxrss it is at least additive, which is why
+    differencing it is meaningful at all — but it is an upper bound, not a
+    per-process measurement.
     """
     if IS_WINDOWS:
         return 0
@@ -365,7 +378,10 @@ def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10
     # and never deleted. This path ignored it entirely: a workspace session
     # running on the fallback backend wrote its files into a throwaway tempdir
     # that was then removed, so the session looked successful and stayed empty.
-    caller_workdir = workdir is not None
+    # Truthiness, not `is not None`: workdir="" falls through to a fresh
+    # tempdir on the next line, so treating it as caller-supplied would leave
+    # that tempdir undeleted. The two tests must agree on what "supplied" means.
+    caller_workdir = bool(workdir)
     workdir = workdir or tempfile.mkdtemp(prefix="codecalc-")
     cap = max_output_kb * 1024 if max_output_kb > 0 else MAX_OUTPUT_BYTES
     started = time.monotonic()
@@ -379,8 +395,8 @@ def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10
         compile_ms = 0
         if entry["compile"]:
             argv = [a.format(**fmt) for a in entry["compile"]]
-            rc, out, err, to = _run_step(argv, workdir, timeout, "",
-                                         max_memory_mb, max_cpu)
+            rc, out, err, to, _ = _run_step(argv, workdir, timeout, "",
+                                            max_memory_mb, max_cpu)
             if to:
                 return {"ok": False, "language": name, "phase": "compile",
                         "stdout": "", "stderr": _trim(err), "exit_code": None,
@@ -394,9 +410,8 @@ def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10
 
         argv = [a.format(**fmt) for a in entry["run"]]
         run_started = time.monotonic()
-        cpu_before = _children_cpu_seconds()
-        rc, out, err, to = _run_step(argv, workdir, timeout, stdin,
-                                     max_memory_mb, max_cpu)
+        rc, out, err, to, cpu_ms = _run_step(argv, workdir, timeout, stdin,
+                                             max_memory_mb, max_cpu)
         duration_ms = int((time.monotonic() - run_started) * 1000)
         truncated = len(out) > cap or len(err) > cap
         # The documented return shape is the SAME on both backends. It was not:
@@ -413,7 +428,7 @@ def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10
                 "timed_out": to,
                 "output_truncated": truncated,
                 "verdict": _fallback_verdict(rc, to, truncated),
-                "cpu_ms": _children_cpu_ms_since(cpu_before),
+                "cpu_ms": cpu_ms,
                 # A high-water mark across every child this process has reaped,
                 # not this run's peak — ru_maxrss is a maximum, so it cannot be
                 # differenced. None means "not measured", never zero, because a

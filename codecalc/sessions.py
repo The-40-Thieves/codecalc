@@ -305,6 +305,8 @@ class Worker:
         #: impossible.
         self._proto = proto if proto is not None else proc.stdout
         self._wlock = threading.Lock()
+        self._close_lock = threading.Lock()
+        self._closed = False
         self._seq = 0
         self._stderr_log: list[str] = []
         # drain stderr so a full pipe can never deadlock the worker
@@ -388,14 +390,42 @@ class Worker:
         return out
 
     def close(self):
+        """Stop the worker and everything it started, then release its fds.
+
+        Three things this did not do, all found in review after the fix above
+        was already written:
+
+        * It signalled only the worker. The worker is spawned with
+          `start_new_session=True`, so anything it forked lives in ITS process
+          group and simply carried on — the same one-hop mistake the native
+          executor had, where killing the parent reaped the direct child and
+          left the grandchild running against no clock at all.
+        * After falling through to `kill()` it never reaped, leaving a zombie.
+        * It closed no descriptors, so every dead session held on to its pipes
+          until the server exited.
+
+        Idempotent: `stop()` calls it, the timeout path calls it, and a protocol
+        error calls it, so it must tolerate being called on an already-dead
+        worker.
+        """
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
         try:
-            self.proc.terminate()
-            self.proc.wait(timeout=3)
+            executor._kill_group(self.proc)
         except Exception:
-            try:
+            with contextlib.suppress(Exception):
                 self.proc.kill()
-            except Exception:
-                pass
+        with contextlib.suppress(Exception):
+            self.proc.wait(timeout=3)
+        # Close the streams AFTER the process is gone: closing the read end of
+        # a pipe a live worker is writing to would hand it SIGPIPE instead of a
+        # clean exit.
+        for stream in (self._proto, self.proc.stdin, self.proc.stdout, self.proc.stderr):
+            if stream is not None:
+                with contextlib.suppress(Exception):
+                    stream.close()
 
 
 _WORKER_BOOTSTRAP = r'''
@@ -489,14 +519,17 @@ def _spawn_worker(language: str, workdir: Path) -> Worker | None:
                 proto = os.fdopen(read_fd, "rb")
                 pipe = None          # ownership transferred to `proto`
         w = Worker(language, proc, proto=proto)
-        # warm up: verify the worker answers before returning
+        # warm up: verify the worker answers before returning. Both failure
+        # paths go through w.close(), which reaps the process group and closes
+        # the protocol pipe — `proc.kill()` alone left the read end open on
+        # every failed start, and nothing else was going to close it.
         try:
             r = w.run("", timeout=10)
         except Exception:
-            proc.kill()
+            w.close()
             return None
         if not r.get("ok") and r.get("stderr"):
-            proc.kill()
+            w.close()
             return None
         return w
     except Exception:
@@ -515,11 +548,13 @@ const readline = require('readline');
 const vm = require('vm');
 const fs = require('fs');
 
-// The protocol channel. fd 3 is a pipe the parent hands us that executed code
-// has no reason to touch; responses used to go to fd 1 via console.log, which
-// any child process spawned with stdio:'inherit' writes to as well. When the
-// parent cannot provide fd 3 (Windows), PROTO_FD is 1 and the echoed request id
-// is what keeps a corrupted stream from being answered with a stale result.
+// The protocol channel: an inherited pipe whose NUMBER the parent passes in the
+// environment. Responses used to go to fd 1 via console.log, which any child
+// spawned with stdio:'inherit' writes to as well. The number is not fixed at 3
+// on purpose — subprocess runs preexec_fn before closing inherited descriptors,
+// so a dup2 to a fixed number there is undone a moment later. When the parent
+// cannot pass one at all (Windows), PROTO_FD is 1 and the echoed request id is
+// what keeps a corrupted stream from being answered with a stale result.
 const PROTO_FD = Number(process.env.CODECALC_PROTO_FD || 1);
 // The Buffer form with an EXPLICIT null position. `fs.writeSync(fd, string)`
 // throws EINVAL on a pipe, because the string overload supplies a file position

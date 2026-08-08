@@ -269,6 +269,73 @@ try:
 finally:
     executor._rust = saved_rust
 
+# ═══ 11. stopping a session must reap what the session STARTED ═══════════
+# Found in review, after the fixes above were written. Worker.close() signalled
+# only the worker, which is spawned with start_new_session=True — so anything it
+# forked lived in the worker's own process group and simply carried on. The
+# identical one-hop mistake the native executor had, on the other side of the
+# same codebase.
+if os.name != "nt" and "python3" in WORKER_LANGS:
+    import time
+
+    marker = pathlib.Path(tempfile.gettempdir()) / f"cc-session-orphan-{os.getpid()}"
+    marker.unlink(missing_ok=True)
+    s = sessions.start("python3")["session_id"]
+    sessions.execute(s, "import subprocess, sys\n"
+                        "subprocess.Popen([sys.executable, '-c', "
+                        f"\"import time,pathlib; time.sleep(6); "
+                        f"pathlib.Path({str(marker)!r}).write_text('orphan')\"])\n")
+    sessions.stop(s)
+    time.sleep(8)                        # past when the descendant would fire
+    check("stopping a session reaps its descendants", not marker.exists(),
+          f"-> {'survived' if marker.exists() else 'reaped'}")
+    marker.unlink(missing_ok=True)
+
+    # close() is called from stop(), from the timeout path and from the protocol
+    # error path, so it has to tolerate running twice.
+    s = sessions.start("python3")["session_id"]
+    w = sessions._workers[s]
+    try:
+        w.close()
+        w.close()
+        check("Worker.close() is idempotent", True)
+    except Exception as exc:
+        check("Worker.close() is idempotent", False, f"-> {type(exc).__name__}: {exc}")
+    sessions.stop(s)
+
+    # Every failed or finished session used to keep its pipes until the server
+    # exited: close() released no descriptors, and a worker that failed its
+    # warm-up leaked the protocol pipe outright.
+    _FD_DIR = pathlib.Path(f"/proc/{os.getpid()}/fd")
+
+    def _open_fds() -> int:
+        return sum(1 for _ in _FD_DIR.iterdir())
+
+    if _FD_DIR.is_dir():
+        for lang in WORKER_LANGS:
+            base = _open_fds()
+            for _ in range(5):
+                sessions.stop(sessions.start(lang)["session_id"])
+            check(f"{lang}: start/stop cycles do not leak descriptors",
+                  _open_fds() <= base + 1, f"-> {base} -> {_open_fds()}")
+else:
+    skip("session descendant reaping", "needs POSIX and a python3 worker")
+
+# A caller-supplied workdir is one that is TRUE, not one that is non-None:
+# workdir="" falls through to a fresh tempdir, so treating it as caller-owned
+# would leave that tempdir behind on every call.
+saved_rust = executor._rust
+try:
+    executor._rust = None
+    tmp = pathlib.Path(tempfile.gettempdir())
+    before = {p.name for p in tmp.glob("codecalc-*")}
+    executor._execute_python("python3", "print(1)", timeout=20, workdir="")
+    after = {p.name for p in tmp.glob("codecalc-*")}
+    check('workdir="" does not leak a tempdir', after <= before,
+          f"-> leaked {sorted(after - before)[:3]}")
+finally:
+    executor._rust = saved_rust
+
 # ═══ 9. a comment must not cite a gate that does not exist ═══════════════
 mw = (REPO_ROOT / "codecalc" / "mcp_middleware.py").read_text()
 import re
