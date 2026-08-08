@@ -121,9 +121,20 @@ except OSError:
     os.killpg(os.getpgrp(), signal.SIGKILL)   # take the parked children with us
     sys.exit(3)
 """
-r = executor.execute("python3", _COUNTER, timeout=30)
-_m = re.search(r"EAGAIN_AFTER (\d+)", r.get("stdout", "") or "")
-_children = int(_m.group(1)) if _m else None
+# The probe uses os.fork/os.pause/os.killpg, none of which exist on Windows, so
+# it produces no count there and the assertion below read that as a breach. The
+# guarantee on Windows is a different primitive entirely — a job object's
+# ActiveProcessLimit, which is JOB-scoped and therefore stronger than
+# RLIMIT_NPROC's uid-wide budget — and verifying it needs a probe that spawns
+# processes rather than forking. Not written blind: skipped, and named as an
+# unverified gap rather than passed over quietly.
+_POSIX = os.name != "nt"
+if _POSIX:
+    r = executor.execute("python3", _COUNTER, timeout=30)
+    _m = re.search(r"EAGAIN_AFTER (\d+)", r.get("stdout", "") or "")
+    _children = int(_m.group(1)) if _m else None
+else:
+    _children = None
 
 # The bound to expect depends on which path computed the limit, and asserting
 # the Linux one everywhere is how a correct sandbox looks broken. On Linux the
@@ -136,17 +147,22 @@ _children = int(_m.group(1)) if _m else None
 _measured = executor.current_uid_tasks() is not None
 _limit = executor.nproc_limit()
 _headroom = executor.DEFAULT_PROCESS_HEADROOM
-# True on every platform: whatever the limit was, it held.
-check("fork-bomb bounded by the process limit",
-      _children is not None and _children <= _limit,
-      f"-> {_children} children (limit {_limit}, measured={_measured})")
-if _measured:
+# Whatever the limit was, it held.
+if not _POSIX:
+    print("SKIP fork-bomb probe — os.fork() does not exist on Windows; the job "
+          "object's ActiveProcessLimit is the guarantee there and is NOT "
+          "verified by this suite")
+else:
+    check("fork-bomb bounded by the process limit",
+          _children is not None and _children <= _limit,
+          f"-> {_children} children (limit {_limit}, measured={_measured})")
+if _POSIX and _measured:
     # +64 tolerates ambient churn between the measurement and the forks; the
     # point is that the bound is ~headroom, not exactly headroom.
     check("fork-bomb bounded at the configured headroom (measured path)",
           _children is not None and _children <= _headroom + 64,
           f"-> {_children} children (headroom {_headroom})")
-else:
+elif _POSIX:
     print(f"SKIP fork-bomb headroom bound — ambient task count is not measurable "
           f"on {sys.platform}; the fixed ceiling of {_limit} applies instead")
 

@@ -98,13 +98,30 @@ for lang in WORKER_LANGS:
         # Writing to fd 1 used to inject raw bytes into the response stream:
         # `sys.stdout = StringIO()` is a Python-level rebind and a child process
         # inherits the DESCRIPTOR. The output is now captured instead.
-        check(f"{lang}: a subprocess writing to fd 1 does not break the protocol",
-              r2.get("ok") is True, f"-> {str(r2.get('error'))[:70]}")
+        # POSIX gets an out-of-band pipe, so fd 1 cannot reach the protocol at
+        # all. Windows has neither preexec_fn nor pass_fds, so the node worker's
+        # protocol shares fd 1 there and a child CAN corrupt it — which is why
+        # the echoed request id exists. The guarantee differs by platform and so
+        # does the assertion: prevented where possible, DETECTED everywhere.
+        out_of_band = os.name != "nt" or lang == "python3"
+        if out_of_band:
+            check(f"{lang}: a subprocess writing to fd 1 does not break the protocol",
+                  r2.get("ok") is True, f"-> {str(r2.get('error'))[:70]}")
+        else:
+            check(f"{lang}: fd-1 corruption is DETECTED, never answered with a stale result",
+                  r2.get("ok") is False and "protocol error" in str(r2.get("error", "")),
+                  f"-> {str(r2.get('error'))[:80]}")
         if lang == "python3":
             check("python3: that subprocess output is CAPTURED, not lost",
                   "FROM_FD1" in (r2.get("stdout") or ""), f"-> {r2.get('stdout')!r}")
 
         # The off-by-one: these two calls used to return each other's answers.
+        # Where corruption killed the session (Windows node), a fresh one is
+        # needed — the point being that it DIED rather than silently desynced.
+        if not out_of_band:
+            sessions.stop(s)
+            s = sessions.start(lang)["session_id"]
+            sessions.execute(s, SET_STATE[lang])
         r3 = sessions.execute(s, USE_STATE[lang])
         r4 = sessions.execute(s, MARKER[lang])
         check(f"{lang}: a call returns ITS OWN result (state)",
