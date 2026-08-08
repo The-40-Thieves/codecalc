@@ -17,8 +17,10 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import socket
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -103,6 +105,24 @@ check("rust: use declarations are found",
 check("node: a plain function call is not an import",
       "compute" not in context7._extract_imports('const x = compute("lodash");\n', "node"))
 
+# ═══ aliased and from-imports: found in review, both plainly wrong ════════
+# `import numpy as np` wraps the name in an `aliased_import`, which a scan of an
+# import node's DIRECT children walks straight past — the single most common way
+# anyone imports numpy returned nothing at all.
+check("aliased imports are found",
+      context7._extract_imports("import numpy as np\n", "python3") == ["numpy"],
+      f"-> {context7._extract_imports('import numpy as np', 'python3')}")
+
+# `from myapp import numpy` has two dotted_name children and only the module is
+# the dependency. Counting both made numpy a dependency of a program with none —
+# and a false hit can fill the max_libs budget and crowd out a real library.
+frm = context7._extract_imports("from myapp import numpy\n", "python3")
+check("from-imports count the MODULE, not the imported names",
+      "numpy" not in frm and "myapp" in frm, f"-> {frm}")
+check("  ...and a dotted module keeps its root",
+      set(context7._extract_imports("from a.b import c\n", "python3")) == {"a.b", "a"},
+      f"-> {context7._extract_imports('from a.b import c', 'python3')}")
+
 # ═══ context7: max_libs bounded a list whose [0] was the only one used ═════
 import inspect
 
@@ -110,6 +130,33 @@ src = inspect.getsource(context7.docs_for_code)
 check("docs_for_code no longer fetches only libs[0]", "libs[0]" not in src)
 check("  ...and reports which libraries it used", '"libraries"' in src)
 check("  ...and which ones failed", '"failed"' in src)
+
+# Fetching every library was the fix for max_libs doing nothing — but giving
+# each request the full timeout turned a 25s worst case into 75s, inside a
+# caller with a 120s deadline that still has an LLM round-trip to make. The
+# budget is shared, and libraries it cannot afford are REPORTED as skipped.
+# A local socket that LISTENS but never replies. Better than pointing at an
+# unroutable address: no external dependency, deterministic, and it does not put
+# a hardcoded IP in the tree for scripts/check_portability.py to flag (it caught
+# the first attempt, which used a 10/8 address).
+_sink = socket.socket()
+_sink.bind(("127.0.0.1", 0))
+_sink.listen(8)
+_api = context7.API
+try:
+    context7.API = f"http://127.0.0.1:{_sink.getsockname()[1]}/api/v2/context"
+    _t0 = time.monotonic()
+    r = context7.docs_for_code("import numpy\nimport pandas\nimport scipy\n",
+                               "python3", max_libs=3, timeout=12)
+    _elapsed = time.monotonic() - _t0
+finally:
+    context7.API = _api
+    _sink.close()
+check("docs_for_code shares one budget across libraries",
+      _elapsed < 24, f"-> {_elapsed:.1f}s for 3 libraries at timeout=12")
+check("  ...and says which ones it skipped",
+      any("budget spent" in str(f) for f in (r.get("failed") or [])),
+      f"-> {[str(f)[:40] for f in (r.get('failed') or [])]}")
 
 # ═══ context7: docs() truncates, so it has to say so ══════════════════════
 check("docs() reports truncation", "truncated" in inspect.getsource(context7.docs))
@@ -167,17 +214,60 @@ try:
         check(f"gateway {bad!r} is refused", ok, f"-> {detail}")
         check(f"  ...and configured() agrees about {bad!r}", llm.configured() is False)
 
+    # An allowlist checked only at the configured endpoint is one HTTP 302 away
+    # from irrelevant: urllib follows an http:// redirect to ftp:// happily.
+    class Redirector(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.send_response(302)
+            self.send_header("Location", "ftp://example.com/x")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    rsrv = HTTPServer(("127.0.0.1", 0), Redirector)
+    threading.Thread(target=rsrv.serve_forever, daemon=True).start()
+    os.environ["CODECALC_LLM_GATEWAY"] = f"http://127.0.0.1:{rsrv.server_address[1]}/v1"
+    try:
+        llm.chat("hi", timeout=8)
+        ok, detail = False, "followed it"
+    except Exception as exc:
+        ok, detail = "refusing to follow a redirect" in str(exc), str(exc)[:70]
+    check("a redirect to a disallowed scheme is refused", ok, f"-> {detail}")
+    rsrv.shutdown()
+
     # ═══ llm: a 200 carrying an error object raised KeyError('choices') ═══
     # LiteLLM answers this way for budget and rate-limit conditions, so the
     # message that mattered was the one being discarded.
     CASES = [
         ("error object", {"error": {"message": "budget exceeded", "type": "billing"}},
          "budget exceeded"),
-        ("no choices", {"id": "x", "model": "m"}, "no choices"),
+        ("no choices", {"id": "x", "model": "m"}, "no usable choices"),
         ("null content",
          {"choices": [{"message": {"content": None}, "finish_reason": "tool_calls"}]},
          "no text content"),
     ]
+    # A gateway is a third party: every level of the response is type-checked.
+    # `choices` as a dict raised KeyError(0), `[1]` raised AttributeError, and a
+    # numeric content was returned as-is from a function annotated `-> str`.
+    MALFORMED = [
+        ("choices is a list of ints", {"choices": [1]}, "not an object"),
+        ("choices is a string", {"choices": "x"}, "no usable choices"),
+        ("choices is a dict", {"choices": {"0": {}}}, "no usable choices"),
+        ("message is a string", {"choices": [{"message": "x"}]}, "not an object"),
+        ("content is a number", {"choices": [{"message": {"content": 3}}]}, "not a string"),
+    ]
+    for label, payload, expect in MALFORMED:
+        try:
+            llm._content(payload, "m")
+            ok, detail = False, "returned normally"
+        except RuntimeError as exc:
+            ok, detail = expect in str(exc), str(exc)[:70]
+        except Exception as exc:
+            ok, detail = False, f"*** {type(exc).__name__}: {exc}"
+        check(f"malformed response: {label}", ok, f"-> {detail}")
+
     for label, payload, expect in CASES:
         srv = stub_gateway(payload)
         os.environ["CODECALC_LLM_GATEWAY"] = f"http://127.0.0.1:{srv.server_address[1]}/v1/chat/completions"
@@ -203,6 +293,16 @@ try:
     check("available() is a config check unless asked otherwise",
           llm.available() is True, "-> nothing listening on port 9, yet True")
     check("available(probe=True) really tries", llm.available(probe=True) is False)
+
+    # Fixing gateway() was not enough: complexity.py still gated LLM refinement
+    # on the frozen module constant, so a gateway configured after import left
+    # refinement silently off with the variable plainly set.
+    from codecalc import complexity
+
+    csrc = inspect.getsource(complexity)
+    check("complexity.py gates on llm.configured(), not the frozen constant",
+          "llm.GATEWAY" not in csrc.replace("# llm.configured(), not llm.GATEWAY", ""),
+          "-> a stale read of the import-time constant remains")
 finally:
     if saved is None:
         os.environ.pop("CODECALC_LLM_GATEWAY", None)

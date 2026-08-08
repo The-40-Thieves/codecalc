@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -32,6 +33,27 @@ DEFAULT_MODEL = os.environ.get("CODECALC_LLM_MODEL", "gpt-4o-mini")
 #: configuration, and configuration is exactly the thing that gets typo'd,
 #: templated, or pasted from the wrong place.
 _ALLOWED_SCHEMES = ("http", "https")
+
+
+class _RefuseForeignRedirect(urllib.request.HTTPRedirectHandler):
+    """Apply the scheme allowlist to redirect TARGETS as well.
+
+    Checking only the configured endpoint left the policy one HTTP 302 away
+    from irrelevant: urllib will happily follow an http:// gateway's redirect
+    to ftp://, which is precisely what the allowlist exists to prevent.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        scheme = urllib.parse.urlparse(newurl).scheme.lower()
+        if scheme not in _ALLOWED_SCHEMES:
+            raise urllib.error.HTTPError(
+                newurl, code,
+                f"refusing to follow a redirect to scheme {scheme or '(none)'!r}",
+                headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_OPENER = urllib.request.build_opener(_RefuseForeignRedirect)
 
 
 def gateway() -> str:
@@ -90,7 +112,7 @@ def chat(prompt: str, system: str | None = None, model: str | None = None,
     if key:
         headers["Authorization"] = f"Bearer {key}"
     req = urllib.request.Request(endpoint, data=body, headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with _OPENER.open(req, timeout=timeout) as resp:
         data = json.loads(resp.read())
     return _content(data, model)
 
@@ -111,12 +133,30 @@ def _content(data: object, model: str) -> str:
         msg = err.get("message") if isinstance(err, dict) else str(err)
         raise RuntimeError(f"gateway rejected the request for model {model!r}: {msg}")
     choices = data.get("choices")
-    if not choices:
+    if not isinstance(choices, list) or not choices:
         raise RuntimeError(
-            f"gateway returned no choices for model {model!r}; "
-            f"keys present: {sorted(data)}"
+            f"gateway returned no usable choices for model {model!r} "
+            f"(got {type(choices).__name__}); keys present: {sorted(data)}"
         )
-    content = (choices[0].get("message") or {}).get("content")
+    # Every level is type-checked. A gateway is a third party: `choices` as a
+    # dict raised KeyError(0), `[1]` raised AttributeError, and a numeric
+    # `content` was returned as-is from a function annotated `-> str`, pushing
+    # the failure into the caller's string handling several frames from here.
+    first = choices[0]
+    if not isinstance(first, dict):
+        raise RuntimeError(
+            f"gateway returned a {type(first).__name__} choice for model {model!r}, "
+            f"not an object")
+    message = first.get("message")
+    if message is not None and not isinstance(message, dict):
+        raise RuntimeError(
+            f"gateway returned a {type(message).__name__} message for model "
+            f"{model!r}, not an object")
+    content = (message or {}).get("content")
+    if content is not None and not isinstance(content, str):
+        raise RuntimeError(
+            f"gateway returned {type(content).__name__} content for model "
+            f"{model!r}, not a string")
     if content is None:
         # A tool-call-only or filtered response has no text. Returning None from
         # a function annotated `-> str` pushes the failure into the caller's

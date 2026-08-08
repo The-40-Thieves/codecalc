@@ -155,7 +155,11 @@ def analyze(code: str, language: str = "python3") -> dict:
 
     # Optional LLM refinement — opt-in, and only if a gateway exists to ask.
     # The structural estimate above is always what you get by default.
-    if os.environ.get(REFINE_ENV) and llm.GATEWAY:
+    # llm.configured(), not llm.GATEWAY: the constant is captured at import, so
+    # a gateway configured afterwards left refinement silently disabled with the
+    # variable plainly set. Fixing gateway() alone was not enough — the stale
+    # read had to be swept everywhere it appeared.
+    if os.environ.get(REFINE_ENV) and llm.configured():
         refined = _llm_refine(code, language, result)
         if refined:
             result["llm_refinement"] = refined
