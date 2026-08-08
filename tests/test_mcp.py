@@ -33,14 +33,27 @@ def check(name: str, cond: bool, detail: str = "") -> None:
         FAILS.append(name)
 
 
+def declared_tool_count() -> int:
+    """Tools declared in server.py, counted the same way ci-python.yml does.
+
+    Derived rather than hardcoded so this tracks scripts/check_claims.py instead
+    of becoming a third number to keep in sync.
+    """
+    src = (REPO_ROOT / "codecalc" / "server.py").read_text()
+    return sum(1 for line in src.splitlines() if line.startswith("@mcp.tool"))
+
+
+
 async def main():
     async with over_stdio() as client:
-        tools = (await client.list_tools()).tools
-        names = {t.name for t in tools}
-        # A floor, not a snapshot: adding a tool should not fail this, losing
-        # one should. scripts/check_claims.py pins the exact count against the
-        # README; this asserts the server really serves them over the wire.
-        check("stdio server lists its tools", len(names) >= 48, f"-> {len(names)}")
+        names = sorted(t.name for t in (await client.list_tools()).tools)
+        print(f"tools ({len(names)}): {names}")
+        # Exact, and DERIVED from server.py rather than pinned to a literal:
+        # scripts/check_claims.py already pins the count against the README, and
+        # a third hardcoded number would be a third thing to keep in sync.
+        declared = declared_tool_count()
+        check("every tool declared in server.py reaches the client",
+              len(names) == declared, f"-> {declared} declared, {len(names)} served")
         for required in ("execute_code", "truth_table", "z3_check", "analyze_complexity",
                          "list_languages"):
             check(f"tool {required!r} is served", required in names)

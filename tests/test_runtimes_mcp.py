@@ -42,7 +42,8 @@ def check(name: str, cond: bool, detail: str = "") -> None:
 
 async def main():
     async with over_stdio() as client:
-        names = {t.name for t in (await client.list_tools()).tools}
+        names = sorted(t.name for t in (await client.list_tools()).tools)
+        print(f"tools ({len(names)}): {names}")
         for required in ("runtimes_status", "update_runtimes"):
             check(f"tool {required!r} is served", required in names)
 

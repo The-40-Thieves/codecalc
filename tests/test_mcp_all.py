@@ -26,6 +26,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _mcp_client import data, over_stdio
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
 FAILS: list[str] = []
 
 #: What the structural analyser is allowed to conclude. Membership is asserted
@@ -40,10 +42,29 @@ def check(name: str, cond: bool, detail: str = "") -> None:
         FAILS.append(name)
 
 
+def declared_tool_count() -> int:
+    """Tools declared in server.py, counted the same way ci-python.yml does.
+
+    Derived rather than hardcoded so this tracks scripts/check_claims.py instead
+    of becoming a third number to keep in sync.
+    """
+    src = (REPO_ROOT / "codecalc" / "server.py").read_text()
+    return sum(1 for line in src.splitlines() if line.startswith("@mcp.tool"))
+
+
 async def main():
     async with over_stdio() as client:
-        names = {t.name for t in (await client.list_tools()).tools}
-        check("the server serves its full tool surface", len(names) >= 48, f"-> {len(names)}")
+        names = sorted(t.name for t in (await client.list_tools()).tools)
+        # This exact line is parsed by ci-python.yml's round-trip step. Removing
+        # it did not make that gate fail open — it reported that it had nothing
+        # to assert on and failed the build, which is the behaviour it was
+        # written for. Kept, and the assertion it protects is now made here too.
+        print(f"tools ({len(names)}): {names}")
+        declared = declared_tool_count()
+        check("every tool declared in server.py reaches the client",
+              len(names) == declared,
+              f"-> {declared} declared, {len(names)} served; a tool whose type hints "
+              f"the SDK cannot turn into a schema is dropped at registration, silently")
 
         # ── list_languages ────────────────────────────────────────────────
         langs = data(await client.call_tool("list_languages", {}))
