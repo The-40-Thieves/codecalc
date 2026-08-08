@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
 import socket
 import sys
 import threading
@@ -65,12 +66,42 @@ def stub_gateway(payload: dict) -> HTTPServer:
     return srv
 
 
-def online() -> bool:
+#: HTTP statuses that mean "the service answered, but not now" — our problem or
+#: a passing server-side one, either way not something to fail a build over.
+_TRY_AGAIN_LATER = {429, 500, 502, 503, 504}
+
+
+def classify(exc: BaseException | None) -> str | None:
+    """Why context7 is unusable, or None when it is usable.
+
+    Split out as a pure function of the exception so the SUBCLASS TRAP below can
+    be tested without a network. `HTTPError` is a subclass of `URLError`, so a
+    single `except (URLError, OSError)` swallows a perfectly healthy server
+    answering 429 and reports it as "no network" — which is what this suite did,
+    while the service was replying in 91ms. A skip reason that misattributes the
+    cause is how a rate limit gets read as an outage.
+    """
+    if exc is None:
+        return None
+    if isinstance(exc, urllib.error.HTTPError):
+        # Reached it. The service is up; it declined.
+        if exc.code in _TRY_AGAIN_LATER:
+            return f"context7 answered HTTP {exc.code} (reachable, try again later)"
+        return f"context7 answered HTTP {exc.code}"
+    if isinstance(exc, (urllib.error.URLError, OSError)):
+        return f"context7 unreachable: {exc}"
+    return f"context7 probe failed: {type(exc).__name__}: {exc}"
+
+
+def unusable() -> str | None:
+    """Probe context7; None when the live checks can run."""
     try:
         urllib.request.urlopen("https://context7.com/api/v2/search?query=numpy", timeout=10)
-    except (urllib.error.URLError, OSError):
-        return False
-    return True
+    except Exception as exc:
+        # Broad on purpose: classify() decides what it was, and a probe that
+        # only catches the exceptions it expects is how the 429 got mislabelled.
+        return classify(exc)
+    return None
 
 
 # ═══ context7: imports came from a regex, in a repo that has a parser ══════
@@ -180,17 +211,57 @@ check('discover() sends "query", the name the API requires',
 #: failure between online() succeeding and the call being made.
 UNREACHABLE = ("timed out", "temporary failure", "name resolution",
                "connection refused", "connection reset", "unreachable",
-               "ssl", "eof occurred", "502", "503", "504")
+               "ssl", "eof occurred", "429", "too many requests",
+               "500", "502", "503", "504")
 
 
 def transient(err: object) -> bool:
     return any(s in str(err).lower() for s in UNREACHABLE)
 
 
-if online():
+def why(err: object) -> str:
+    """The same distinction classify() makes, for an error that arrived as text.
+
+    The probe was fixed to stop calling a 429 "no network" and these two skips
+    were left saying `context7 unreachable: ... HTTP Error 429` — the identical
+    misattribution one layer down. Fixing the first occurrence and not sweeping
+    for the rest is how a corrected message survives as a wrong one.
+    """
+    m = re.search(r"HTTP Error (\d+)", str(err))
+    if m:
+        return f"context7 answered HTTP {m.group(1)} (reachable, try again later)"
+    return f"context7 unreachable: {str(err)[:60]}"
+
+
+# ── the probe must not call a rate limit an outage ────────────────────────
+# Synthetic exceptions, so this pins the subclass trap with no network at all —
+# the case that produced the wrong message needs a 429, which is not something
+# to arrange on demand.
+_fake_429 = urllib.error.HTTPError("https://context7.com/", 429, "Too Many Requests", {}, None)
+_fake_down = urllib.error.URLError("Temporary failure in name resolution")
+check("a 429 is reported as reachable, not as no network",
+      "reachable" in (classify(_fake_429) or "") and "unreachable" not in (classify(_fake_429) or ""),
+      f"-> {classify(_fake_429)}")
+check("a real connection failure is reported as unreachable",
+      "unreachable" in (classify(_fake_down) or ""), f"-> {classify(_fake_down)}")
+check("a healthy probe classifies as usable", classify(None) is None)
+check("HTTPError really is a URLError subclass (the trap this guards)",
+      issubclass(urllib.error.HTTPError, urllib.error.URLError))
+# The SAME distinction has to hold for errors that arrive as text from the
+# context7 helpers, not just for exceptions from the probe.
+check("a 429 in an error STRING is not called unreachable either",
+      "unreachable" not in why("context7 search unavailable: HTTP Error 429: Too Many Requests"),
+      f"-> {why('context7 search unavailable: HTTP Error 429: Too Many Requests')}")
+check("a genuine connection error string still says unreachable",
+      "unreachable" in why("context7 unavailable: <urlopen error [Errno -3] Temporary failure>"))
+
+_why = unusable()
+if _why:
+    skip("live context7 checks", _why)
+else:
     r = context7.discover("numpy")
     if not r.get("ok") and transient(r.get("error")):
-        skip("discover() live check", f"context7 unreachable: {str(r.get('error'))[:60]}")
+        skip("discover() live check", why(r.get("error")))
         r = None
     else:
         check("discover() actually returns results", r.get("ok") is True,
@@ -200,14 +271,12 @@ if online():
               f"-> {str(r.get('results'))[:70]}")
     d = context7.docs("/numpy/numpy", "array creation")
     if not d.get("ok") and transient(d.get("error")):
-        skip("docs() live check", f"context7 unreachable: {str(d.get('error'))[:60]}")
+        skip("docs() live check", why(d.get("error")))
     else:
         check("docs() flags a clipped answer",
               d.get("ok") and d.get("truncated") is True
               and d.get("content_chars") == context7.MAX_CONTENT_CHARS,
               f"-> truncated={d.get('truncated')} chars={d.get('content_chars')}")
-else:
-    skip("live context7 checks", "no network")
 
 # ═══ llm: the endpoint was frozen at import ═══════════════════════════════
 # CODECALC_LLM_MODEL was re-read per call and CODECALC_LLM_GATEWAY was not, so
