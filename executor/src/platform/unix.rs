@@ -6,6 +6,7 @@ use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
 use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::OnceLock;
 
 use super::{ResolvedLimits, Wait};
 
@@ -314,7 +315,23 @@ pub fn spawn_and_wait(mut cmd: Command, limits: &ResolvedLimits) -> io::Result<W
 /// kernel compares RLIMIT_NPROC against. Linux only: /proc is where that lives,
 /// and macOS has no equivalent that is cheap to read, so it returns None there
 /// and the caller falls back to a fixed ceiling.
+/// Measured once per process. The walk reads /proc/<pid>/status for every
+/// process on the machine — 590 of them on the box this was measured on — and
+/// it was being repeated: once eagerly at startup, then again inside `resolve`
+/// for EVERY step, plus a third time by the `is_none()` check below which threw
+/// the count away. A single C compile-and-run opened 1767 status files to
+/// answer one question three times.
+///
+/// Once per invocation is also what main.rs already claimed in a comment. The
+/// executor is short-lived and spawns one child tree, so a snapshot taken at
+/// the first request is the same snapshot every later caller wanted.
+static UID_TASKS: OnceLock<Option<u64>> = OnceLock::new();
+
 pub fn current_uid_tasks() -> Option<u64> {
+    *UID_TASKS.get_or_init(measure_uid_tasks)
+}
+
+fn measure_uid_tasks() -> Option<u64> {
     if !cfg!(target_os = "linux") {
         return None;
     }

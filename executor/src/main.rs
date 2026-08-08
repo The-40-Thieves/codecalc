@@ -348,7 +348,6 @@ struct Limits {
     no_net: bool,      // LD_PRELOAD a socket-blocking shim
     // Precomputed in main() BEFORE any fork. apply_limits runs inside pre_exec,
     // which must be async-signal-safe — it cannot walk /proc or allocate there.
-    nproc: u64,        // RLIMIT_NPROC: measured ambient tasks + headroom
 }
 
 impl Default for Limits {
@@ -359,7 +358,6 @@ impl Default for Limits {
             max_memory_mb: 0,
             max_output_kb: 0,
             no_net: false,
-            nproc: FALLBACK_NPROC_LIMIT,
         }
     }
 }
@@ -500,7 +498,10 @@ fn resolve_limits(limits: &Limits) -> ResolvedLimits {
             FSIZE_LIMIT_BYTES
         },
         nofile: NFILE_LIMIT,
-        max_processes: limits.nproc,
+        // Measured on first use, then cached: resolve_limits runs once per STEP,
+        // so a compiled language asked the same question for compile and again
+        // for run.
+        max_processes: nproc_limit(),
         no_net: limits.no_net,
     }
 }
@@ -730,9 +731,15 @@ fn main() {
     let mut stdin_data = String::new();
     let mut stdin_file: Option<String> = None;
     let mut workdir: Option<String> = None;
-    // nproc is measured once per invocation, before any child exists — see
-    // nproc_limit(); apply_limits() runs in pre_exec and cannot walk /proc.
-    let mut limits = Limits { nproc: nproc_limit(), ..Default::default() };
+    // NOT measured here. Sizing RLIMIT_NPROC means walking /proc for every
+    // process on the machine, and doing it during argument parsing charged that
+    // cost to invocations that never spawn anything: `--lang notalanguage`
+    // performed 6379 syscalls to produce a one-line error, ~11ms of it system
+    // time on a box with 590 processes. It is measured lazily instead, at the
+    // point a step is actually about to run, and cached for the rest of the
+    // invocation. apply_limits() still cannot walk /proc — it runs in pre_exec —
+    // so the measurement remains a parent-side one.
+    let mut limits = Limits::default();
 
     let mut i = 0;
     while i < args.len() {

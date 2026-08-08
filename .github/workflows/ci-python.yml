@@ -120,6 +120,14 @@ jobs:
         # letters, case-insensitive paths and a different separator, and the
         # boundary check must hold under all of them.
         run: uv run --no-sync python tests/test_session_jail.py
+      # The sweeps below were written on Linux and gated only there. Both carry
+      # POSIX-only sections that skip themselves, and both are the kind of thing
+      # a platform difference breaks quietly — session workers, file
+      # descriptors, subprocess semantics — so they run on all three.
+      - name: session + worker regressions
+        run: uv run --no-sync python tests/test_python_sweep.py
+      - name: context7 + llm client regressions
+        run: uv run --no-sync python tests/test_network_modules.py
 
   sandbox:
     # The security suite. Split out from `tests` because it needs the Rust binary built first, and
@@ -135,7 +143,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # Windows was absent, so the platform whose sandbox is built on a
+        # completely different primitive — job objects rather than rlimits —
+        # was the one never exercised. The shim build step below is skipped
+        # there because Windows has no LD_PRELOAD equivalent; the executor
+        # reports `no_net_unavailable_on_windows` and the contract test asserts
+        # that it does.
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: ./.github/actions/setup-rust
@@ -158,11 +172,19 @@ jobs:
           set -euo pipefail
           cargo build --release --manifest-path executor/Cargo.toml
           mkdir -p bin
-          cp executor/target/release/codecalc-exec bin/
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp executor/target/release/codecalc-exec.exe bin/
+          else
+            cp executor/target/release/codecalc-exec bin/
+          fi
           # cc, not gcc: on macOS runners gcc is a clang shim and the shim name
-          # differs by platform (see platform::no_net_shim).
+          # differs by platform (see platform::no_net_shim). Windows has no
+          # LD_PRELOAD equivalent at all, so there is nothing to build — the
+          # executor reports --no-net as unenforced there instead of pretending.
           if [ "${{ runner.os }}" = "macOS" ]; then
             cc -shared -fPIC -O2 -o bin/blocknet.dylib executor/blocknet.c
+          elif [ "${{ runner.os }}" = "Windows" ]; then
+            echo "windows: no shim to build (--no-net is reported unenforced)"
           else
             cc -shared -fPIC -O2 -o bin/blocknet.so executor/blocknet.c
           fi
@@ -176,6 +198,20 @@ jobs:
       # The MCP surface is how every consumer reaches this code. A tool that raises on import, or a
       # schema the SDK rejects, is invisible to every test above — they all call the functions
       # directly. This spawns the real server over stdio and round-trips it.
+      # These need the built binary, which is why they live here rather than in
+      # the matrix job above. Neither ran in CI before: together they are the
+      # sandbox's own regression suite and its cross-platform contract, and they
+      # were gated on one developer's machine.
+      - name: executor regressions
+        run: uv run --no-sync python tests/test_executor_sweep.py
+      # Asserts that every ceiling NOT named in `unenforced` actually bites on
+      # THIS platform — the half of the promise that cannot be checked by
+      # reading the code, because a limit that is set but ignored looks exactly
+      # like one that is enforced until something exceeds it.
+      - name: platform contract (unenforced tells the truth)
+        run: uv run --no-sync python tests/test_platform_contract.py
+      - name: runtime self-update tools
+        run: uv run --no-sync python tests/test_runtimes_mcp.py
       - name: MCP stdio round-trip
         shell: bash
         run: |
