@@ -22,6 +22,7 @@ use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicAccountingInformation,
     JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
+    JOB_OBJECT_LIMIT_PROCESS_TIME,
     TerminateJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
     JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
@@ -57,7 +58,25 @@ fn create_job(limits: &ResolvedLimits) -> io::Result<Job> {
     info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
         | JOB_OBJECT_LIMIT_ACTIVE_PROCESS
         | JOB_OBJECT_LIMIT_PROCESS_MEMORY
-        | JOB_OBJECT_LIMIT_JOB_MEMORY;
+        | JOB_OBJECT_LIMIT_JOB_MEMORY
+        | JOB_OBJECT_LIMIT_PROCESS_TIME;
+
+    // CPU ceiling. This was reported as `cpu_limit_unavailable_on_windows`,
+    // which was simply wrong: JOB_OBJECT_LIMIT_PROCESS_TIME has existed since
+    // Windows XP, and the documented behaviour is that the system periodically
+    // checks each process in the job and TERMINATES one that has exceeded
+    // PerProcessUserTimeLimit.
+    //
+    // It is not identical to RLIMIT_CPU and the difference is reported rather
+    // than glossed: this counts USER-mode time only, so a process burning
+    // kernel time is not capped by it, and the check is periodic rather than
+    // immediate. Per-process, like RLIMIT_CPU — JOB_OBJECT_LIMIT_JOB_TIME would
+    // cap the tree as a whole, which is a different guarantee.
+    //
+    // The field is a LARGE_INTEGER in 100-nanosecond ticks.
+    const TICKS_PER_SECOND: i64 = 10_000_000;
+    info.BasicLimitInformation.PerProcessUserTimeLimit =
+        limits.cpu_secs.saturating_mul(TICKS_PER_SECOND as u64).min(i64::MAX as u64) as i64;
     // Job-scoped, unlike RLIMIT_NPROC. Clamped to u32 because that is the field.
     info.BasicLimitInformation.ActiveProcessLimit =
         limits.max_processes.min(u32::MAX as u64) as u32;
@@ -79,8 +98,11 @@ fn create_job(limits: &ResolvedLimits) -> io::Result<Job> {
 }
 
 pub fn spawn_and_wait(mut cmd: Command, limits: &ResolvedLimits) -> io::Result<Wait> {
+    // The CPU ceiling IS applied here (JOB_OBJECT_LIMIT_PROCESS_TIME, see
+    // create_job) but it counts user-mode time only, so a caller comparing it
+    // to RLIMIT_CPU is told what it does not cover rather than left to assume.
     let mut unenforced = vec![
-        "cpu_limit_unavailable_on_windows",
+        "cpu_limit_counts_user_time_only_on_windows",
         "open_file_limit_unavailable_on_windows",
         "file_size_limit_unavailable_on_windows",
     ];

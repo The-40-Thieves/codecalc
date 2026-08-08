@@ -72,9 +72,26 @@ const CPU_GRACE_SECONDS: u64 = 8;
 
 /// Env allowlist: executed code must NEVER inherit secrets (API keys, tokens).
 /// Only the vars a runtime needs to function. Everything else is dropped.
+/// Environment variables executed code may see. Everything else is dropped —
+/// the CRITICAL-02 fix against secret leakage. Kept identical to the Python
+/// fallback's; scripts/check_parity.py gates that.
+///
+/// The Windows names are here because their absence made Windows a second-class
+/// platform rather than a secured one: a process started without SystemRoot
+/// fails inside winsock and crypto initialisation, and `node` returned empty
+/// output with ok=false through the sandbox on Windows while probing as
+/// available. These are OS plumbing, not credentials — SystemRoot and windir
+/// locate the OS itself, COMSPEC and PATHEXT are how Windows resolves a command
+/// at all, and USERPROFILE/APPDATA are the Windows spelling of HOME, which this
+/// list has always allowed. A name absent from the environment is simply not
+/// copied, so these are inert on POSIX.
 const ENV_ALLOWLIST: &[&str] = &[
     "PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "PYTHONUNBUFFERED",
     "JAVA_HOME", "CARGO_HOME", "RUSTUP_HOME", "GOPATH", "GOMODCACHE",
+    // Windows
+    "SystemRoot", "SYSTEMROOT", "windir", "COMSPEC", "PATHEXT",
+    "TEMP", "TMP", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
+    "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE",
 ];
 
 /// Env var an operator sets to pin the PATH executed code resolves runtimes on.
@@ -348,7 +365,6 @@ struct Limits {
     no_net: bool,      // LD_PRELOAD a socket-blocking shim
     // Precomputed in main() BEFORE any fork. apply_limits runs inside pre_exec,
     // which must be async-signal-safe — it cannot walk /proc or allocate there.
-    nproc: u64,        // RLIMIT_NPROC: measured ambient tasks + headroom
 }
 
 impl Default for Limits {
@@ -359,7 +375,6 @@ impl Default for Limits {
             max_memory_mb: 0,
             max_output_kb: 0,
             no_net: false,
-            nproc: FALLBACK_NPROC_LIMIT,
         }
     }
 }
@@ -500,7 +515,10 @@ fn resolve_limits(limits: &Limits) -> ResolvedLimits {
             FSIZE_LIMIT_BYTES
         },
         nofile: NFILE_LIMIT,
-        max_processes: limits.nproc,
+        // Measured on first use, then cached: resolve_limits runs once per STEP,
+        // so a compiled language asked the same question for compile and again
+        // for run.
+        max_processes: nproc_limit(),
         no_net: limits.no_net,
     }
 }
@@ -730,9 +748,15 @@ fn main() {
     let mut stdin_data = String::new();
     let mut stdin_file: Option<String> = None;
     let mut workdir: Option<String> = None;
-    // nproc is measured once per invocation, before any child exists — see
-    // nproc_limit(); apply_limits() runs in pre_exec and cannot walk /proc.
-    let mut limits = Limits { nproc: nproc_limit(), ..Default::default() };
+    // NOT measured here. Sizing RLIMIT_NPROC means walking /proc for every
+    // process on the machine, and doing it during argument parsing charged that
+    // cost to invocations that never spawn anything: `--lang notalanguage`
+    // performed 6379 syscalls to produce a one-line error, ~11ms of it system
+    // time on a box with 590 processes. It is measured lazily instead, at the
+    // point a step is actually about to run, and cached for the rest of the
+    // invocation. apply_limits() still cannot walk /proc — it runs in pre_exec —
+    // so the measurement remains a parent-side one.
+    let mut limits = Limits::default();
 
     let mut i = 0;
     while i < args.len() {

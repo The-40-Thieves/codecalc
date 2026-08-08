@@ -30,8 +30,8 @@ sys.path.insert(0, str(REPO))
 
 from codecalc import registry  # noqa: E402 — needs the path above
 
-README = (REPO / "README.md").read_text()
-SERVER = (REPO / "codecalc" / "server.py").read_text()
+README = (REPO / "README.md").read_text(encoding="utf-8")
+SERVER = (REPO / "codecalc" / "server.py").read_text(encoding="utf-8")
 
 #: Registry keys that are aliases of another entry, which the README lists as a
 #: single item ("cpp/c++"). Kept explicit so widening it is a reviewable diff
@@ -79,8 +79,8 @@ else:
 # The crate shipped `license = "MIT"` while the repo LICENSE and pyproject were
 # Apache-2.0. A compiled artifact distributed under the wrong licence is the
 # kind of thing found at the worst possible moment.
-py_license = tomllib.loads((REPO / "pyproject.toml").read_text())["project"]["license"]
-cargo = tomllib.loads((REPO / "executor" / "Cargo.toml").read_text())
+py_license = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))["project"]["license"]
+cargo = tomllib.loads((REPO / "executor" / "Cargo.toml").read_text(encoding="utf-8"))
 rs_license = cargo["package"].get("license", "")
 if not rs_license:
     fail("executor/Cargo.toml declares no license")

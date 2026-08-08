@@ -48,7 +48,7 @@ def declared_tool_count() -> int:
     Derived rather than hardcoded so this tracks scripts/check_claims.py instead
     of becoming a third number to keep in sync.
     """
-    src = (REPO_ROOT / "codecalc" / "server.py").read_text()
+    src = (REPO_ROOT / "codecalc" / "server.py").read_text(encoding="utf-8")
     return sum(1 for line in src.splitlines() if line.startswith("@mcp.tool"))
 
 
@@ -164,7 +164,15 @@ async def main():
               f"-> {ratios}")
 
         # ── compare_execution — TIMING, so structure only ─────────────────
-        snippets = {"python3": "print(6*7)", "node": "console.log(6*7)", "ruby": "puts 6*7"}
+        # Only languages this machine actually HAS. A runner without ruby or
+        # node is an environment fact, not a defect, and asserting "every
+        # language produced 42" against a missing runtime tests the runner
+        # rather than the tool.
+        candidates = {"python3": "print(6*7)", "node": "console.log(6*7)", "ruby": "puts 6*7"}
+        snippets = {k: v for k, v in candidates.items()
+                    if by_name.get(k, {}).get("available")}
+        check("at least two languages are available to compare",
+              len(snippets) >= 2, f"-> available: {sorted(snippets)}")
         r = data(await client.call_tool("compare_execution", {"snippets": snippets}))
         check("compare_execution ran every snippet", r.get("count") == len(snippets),
               f"-> {r.get('count')}")

@@ -82,9 +82,29 @@ _FALLBACK_SPAWN_LOCK = threading.Lock()
 
 #: env allowlist for executed code. SECURITY: user code must NEVER inherit API
 #: keys/tokens from the host env — only what a runtime needs to function.
+#: Environment variables executed code is allowed to see. Everything else is
+#: dropped — the CRITICAL-02 fix against secret leakage.
+#:
+#: The Windows names are here because their absence made Windows a second-class
+#: platform rather than a secured one: a process started without SystemRoot
+#: fails inside winsock and crypto initialisation, and `node` returned empty
+#: output with ok=false through the sandbox on Windows while probing as
+#: available. These are OS plumbing, not credentials — SystemRoot and windir
+#: locate the OS itself, COMSPEC and PATHEXT are how Windows resolves a command
+#: at all, and USERPROFILE/APPDATA are the Windows spelling of HOME, which this
+#: list has always allowed.
+#:
+#: The list is shared by both platforms rather than branched: a name that does
+#: not exist in the environment is simply not copied, so the Windows entries are
+#: inert on POSIX and scripts/check_parity.py can keep comparing the two
+#: backends as one set.
 _ENV_ALLOWLIST = {
     "PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "PYTHONUNBUFFERED",
     "JAVA_HOME", "CARGO_HOME", "RUSTUP_HOME", "GOPATH", "GOMODCACHE",
+    # Windows
+    "SystemRoot", "SYSTEMROOT", "windir", "COMSPEC", "PATHEXT",
+    "TEMP", "TMP", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
+    "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE",
 }
 
 

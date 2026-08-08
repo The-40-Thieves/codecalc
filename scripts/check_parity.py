@@ -39,7 +39,7 @@ sys.path.insert(0, str(REPO))
 
 from codecalc import executor, registry  # noqa: E402 — needs the path above
 
-RUST = (REPO / "executor" / "src" / "main.rs").read_text()
+RUST = (REPO / "executor" / "src" / "main.rs").read_text(encoding="utf-8")
 
 failures: list[str] = []
 

@@ -56,7 +56,7 @@ async def main() -> None:
         listed = await c.list_tools()
         names = [t.name for t in listed.tools]
         declared = len([ln for ln in (REPO_ROOT / "codecalc" / "server.py")
-                        .read_text().splitlines() if ln.startswith("@mcp.tool")])
+                        .read_text(encoding="utf-8").splitlines() if ln.startswith("@mcp.tool")])
         check("every declared tool reached the client",
               len(names) == declared, f"-> {len(names)} served / {declared} declared")
         check("no duplicate tool names", len(names) == len(set(names)))

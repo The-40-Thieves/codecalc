@@ -39,7 +39,7 @@ def declared_tool_count() -> int:
     Derived rather than hardcoded so this tracks scripts/check_claims.py instead
     of becoming a third number to keep in sync.
     """
-    src = (REPO_ROOT / "codecalc" / "server.py").read_text()
+    src = (REPO_ROOT / "codecalc" / "server.py").read_text(encoding="utf-8")
     return sum(1 for line in src.splitlines() if line.startswith("@mcp.tool"))
 
 

@@ -20,8 +20,20 @@ the fallback if the binary is missing.
 - `target-cpu=generic` — no modern instruction-set requirements
 - **Static musl builds** run on any Linux regardless of glibc version:
   `bin/codecalc-exec-x86_64-musl` (421K), `bin/codecalc-exec-aarch64-musl` (453K)
-- Size-optimized profile (`opt-level="z"`, LTO, panic=abort, stripped)
+- Size-optimized profile (`opt-level="z"`, LTO, panic=abort, stripped) —
+  **measured, not assumed**: against an otherwise identical `opt-level=3` build,
+  `z` came out 1.02 ± 0.26 times faster on the executor's own path (i.e. no
+  detectable difference) while being 16% smaller. The executor spends its time
+  in syscalls, not arithmetic, so there was nothing for a higher optimisation
+  level to speed up.
 - **Lazy sympy/z3 imports**: server starts in ~40ms, not ~600ms
+- **The fork-bomb measurement is taken once, and only when it is needed.**
+  Sizing `RLIMIT_NPROC` means reading `/proc/<pid>/status` for every process on
+  the machine. That walk used to run during argument parsing and again for every
+  step: a C compile-and-run opened 1767 status files on a 590-process box to
+  answer one question three times, and `--lang notalanguage` paid the full cost
+  to produce a one-line error. Measured lazily and cached, an error costs 1.1ms
+  instead of 13.3ms and a compiled run 78ms instead of 104ms.
 - `list_languages` probes runtime availability and reports which languages
   actually work on the machine (graceful degradation on minimal installs)
 
@@ -237,7 +249,7 @@ every result rather than letting a caller assume they all held.
 | Kill the whole process tree | `killpg` + `PDEATHSIG` | `killpg` | `TerminateJobObject` |
 | Fork-bomb guard | `RLIMIT_NPROC` (uid-wide) | `RLIMIT_NPROC` (uid-wide) | Job `ActiveProcessLimit` (**job-scoped**) |
 | Memory ceiling | `RLIMIT_AS` | reported unenforced¹ | Job `ProcessMemoryLimit` |
-| CPU-time ceiling | `RLIMIT_CPU` | `RLIMIT_CPU` | reported unenforced |
+| CPU-time ceiling | `RLIMIT_CPU` | `RLIMIT_CPU` | Job `PerProcessUserTimeLimit`⁴ |
 | Open-file ceiling | `RLIMIT_NOFILE` | `RLIMIT_NOFILE` | reported unenforced |
 | Output cap | yes | yes | yes (on read) |
 | `no_net` | `LD_PRELOAD` shim² | `DYLD_INSERT_LIBRARIES`²˒³ | reported unenforced |
@@ -247,6 +259,15 @@ every result rather than letting a caller assume they all held.
 way Linux does, so setting it would buy an illusion.
 ² Dynamically-linked programs only — a statically linked binary (Go, by default)
 ignores it.
+⁴ Applied via `JOB_OBJECT_LIMIT_PROCESS_TIME`, which Windows has supported
+since XP — this was reported as `cpu_limit_unavailable_on_windows` until
+2026-08-08, and the table said the same, so code and docs agreed with each other
+and disagreed with Windows. It is not identical to `RLIMIT_CPU` and the
+difference is reported rather than glossed: it counts **user-mode time only**, so
+a process burning kernel time is not capped by it, and the system checks
+periodically rather than immediately. Runs on Windows carry
+`cpu_limit_counts_user_time_only_on_windows` in `unenforced` to say so.
+
 ³ Weaker still on macOS, in two ways. SIP and the hardened runtime strip
 `DYLD_INSERT_LIBRARIES` for protected and hardened-signed binaries (most signed
 interpreters), and dyld interposing does not reach calls made *inside* the
