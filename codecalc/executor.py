@@ -16,6 +16,7 @@ import platform
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -148,7 +149,7 @@ def nproc_limit() -> int:
     return tasks + headroom if tasks is not None else FALLBACK_NPROC_LIMIT
 
 
-def _limits(timeout: int):
+def _limits(timeout: int, max_memory_mb: int = 0, max_cpu: int = 0):
     """preexec_fn applying rlimits, or None where there are no rlimits to apply.
 
     Windows has no setrlimit and no fork, so there is nothing to hook: the
@@ -163,9 +164,45 @@ def _limits(timeout: int):
     # via preexec_fn, where walking /proc is not something to be doing.
     nproc = nproc_limit()
 
+    cpu = max_cpu if max_cpu > 0 else timeout + CPU_GRACE_SECONDS
+    mem = max_memory_mb * 1024 * 1024 if max_memory_mb > 0 else AS_LIMIT_BYTES
+
     def _apply():
         try:
-            resource.setrlimit(resource.RLIMIT_CPU, (timeout + CPU_GRACE_SECONDS,) * 2)
+            resource.setrlimit(resource.RLIMIT_CPU, (cpu,) * 2)
+            resource.setrlimit(resource.RLIMIT_AS, (mem,) * 2)
+            resource.setrlimit(resource.RLIMIT_FSIZE, (FSIZE_LIMIT_BYTES,) * 2)
+            resource.setrlimit(resource.RLIMIT_NOFILE, (NFILE_LIMIT, NFILE_LIMIT))
+            resource.setrlimit(resource.RLIMIT_NPROC, (nproc, nproc))
+            resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+        except (ValueError, OSError):
+            pass
+
+    return _apply
+
+
+def session_worker_limits():
+    """preexec_fn for a LONG-LIVED session worker, or None on Windows.
+
+    Deliberately not `_limits()`: RLIMIT_CPU is CUMULATIVE, so a per-call
+    ceiling applied to a worker that lives for hours would kill the session
+    partway through an unrelated call. Wall-clock is enforced per call by
+    `Worker.run`'s read deadline instead, and the worker is killed if it blows
+    it.
+
+    Everything that IS meaningful for a long-lived process is applied. It was
+    applying none of them: measured, a worker session ran with RLIMIT_AS,
+    RLIMIT_CPU and RLIMIT_FSIZE all unlimited and RLIMIT_NPROC at the system
+    default of 95498, against 1559 on the sandboxed path. Passing `session_id=`
+    to the same tool dropped every resource ceiling it documents.
+    """
+    if IS_WINDOWS:
+        return None
+
+    nproc = nproc_limit()
+
+    def _apply():
+        try:
             resource.setrlimit(resource.RLIMIT_AS, (AS_LIMIT_BYTES,) * 2)
             resource.setrlimit(resource.RLIMIT_FSIZE, (FSIZE_LIMIT_BYTES,) * 2)
             resource.setrlimit(resource.RLIMIT_NOFILE, (NFILE_LIMIT, NFILE_LIMIT))
@@ -236,7 +273,8 @@ def _kill_group(proc: subprocess.Popen) -> None:
             pass
 
 
-def _run_step(argv: list[str], cwd: str, timeout: int, stdin: str) -> tuple[int, bytes, bytes, bool]:
+def _run_step(argv: list[str], cwd: str, timeout: int, stdin: str,
+              max_memory_mb: int = 0, max_cpu: int = 0) -> tuple[int, bytes, bytes, bool]:
     # NOTE: preexec_fn is unsafe under threads (PLW1509) — this is the PYTHON
     # FALLBACK path only, used when the Rust binary is absent. It serializes
     # spawns with a lock to avoid concurrent fork+preexec races; the production
@@ -250,7 +288,7 @@ def _run_step(argv: list[str], cwd: str, timeout: int, stdin: str) -> tuple[int,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
-            preexec_fn=_limits(timeout),
+            preexec_fn=_limits(timeout, max_memory_mb, max_cpu),
         )
         try:
             out, err = proc.communicate(input=stdin.encode(), timeout=timeout)
@@ -261,13 +299,61 @@ def _run_step(argv: list[str], cwd: str, timeout: int, stdin: str) -> tuple[int,
             return -1, b"", b"<killed: exceeded wall-clock timeout>", True
 
 
-def _trim(b: bytes) -> str:
-    if len(b) > MAX_OUTPUT_BYTES:
-        return b[:MAX_OUTPUT_BYTES].decode(errors="replace") + "\n…[truncated]"
+def _trim(b: bytes, cap: int = MAX_OUTPUT_BYTES) -> str:
+    if len(b) > cap:
+        return b[:cap].decode(errors="replace") + "\n…[truncated]"
     return b.decode(errors="replace")
 
 
-def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10) -> dict:
+def _fallback_verdict(rc: int, timed_out: bool, truncated: bool) -> str:
+    """Same classification the Rust executor applies, in the same order.
+
+    MLE is deliberately absent: the Rust path infers it from a signal plus an
+    RSS reading near the cap, and this path has neither, so claiming it would be
+    a guess. An OOM here lands in RTE, which is at least true.
+    """
+    if timed_out:
+        return "TLE"
+    if truncated:
+        return "OLE"
+    if rc != 0:
+        return "RTE"
+    return "OK"
+
+
+#: Sandbox features the pure-Python fallback cannot provide, reported rather
+#: than left for a caller to discover. `--no-net` needs the LD_PRELOAD shim the
+#: Rust executor applies, and peak RSS needs per-child rusage this path has no
+#: way to attribute.
+_FALLBACK_UNMEASURED: list[str] = [
+    "peak_memory_kb: ru_maxrss is a high-water mark and cannot be attributed to one run",
+]
+
+
+def _children_cpu_seconds() -> float:
+    """Cumulative CPU of reaped children, or 0.0 where rusage is unavailable."""
+    if IS_WINDOWS:
+        return 0.0
+    ru = resource.getrusage(resource.RUSAGE_CHILDREN)
+    return ru.ru_utime + ru.ru_stime
+
+
+def _children_cpu_ms_since(before: float) -> int:
+    """CPU consumed since `before`.
+
+    Correct only because _run_step serialises spawns under _FALLBACK_SPAWN_LOCK
+    and communicate() reaps the child, so the delta is attributable to this run.
+    Unlike ru_maxrss, CPU time is additive, so differencing it is meaningful.
+    """
+    if IS_WINDOWS:
+        return 0
+    return max(0, int((_children_cpu_seconds() - before) * 1000))
+
+
+def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10,
+                    workdir: str | None = None, max_memory_mb: int = 0,
+                    max_output_kb: int = 0, max_cpu: int = 0,
+                    no_net: bool = False) -> dict:
     name = registry.canonical(language)
     if name is None:
         known = ", ".join(sorted(registry.LANGUAGES))
@@ -275,7 +361,13 @@ def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10
 
     entry = registry.LANGUAGES[name]
     ext = registry.EXTENSIONS[name]
-    workdir = tempfile.mkdtemp(prefix="codecalc-")
+    # A caller-supplied workdir is a SESSION directory and must be used as-is,
+    # and never deleted. This path ignored it entirely: a workspace session
+    # running on the fallback backend wrote its files into a throwaway tempdir
+    # that was then removed, so the session looked successful and stayed empty.
+    caller_workdir = workdir is not None
+    workdir = workdir or tempfile.mkdtemp(prefix="codecalc-")
+    cap = max_output_kb * 1024 if max_output_kb > 0 else MAX_OUTPUT_BYTES
     started = time.monotonic()
     try:
         src = Path(workdir) / f"main.{ext}"
@@ -284,13 +376,16 @@ def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10
         exe_name = "a.exe" if IS_WINDOWS else "a.out"
         fmt = {"file": str(src), "exe": str(Path(workdir) / exe_name), "work": workdir}
 
+        compile_ms = 0
         if entry["compile"]:
             argv = [a.format(**fmt) for a in entry["compile"]]
-            rc, out, err, to = _run_step(argv, workdir, timeout, "")
+            rc, out, err, to = _run_step(argv, workdir, timeout, "",
+                                         max_memory_mb, max_cpu)
             if to:
                 return {"ok": False, "language": name, "phase": "compile",
                         "stdout": "", "stderr": _trim(err), "exit_code": None,
                         "duration_ms": 0, "timed_out": True}
+            compile_ms = int((time.monotonic() - started) * 1000)
             if rc != 0:
                 return {"ok": False, "language": name, "phase": "compile",
                         "stdout": _trim(out), "stderr": _trim(err), "exit_code": rc,
@@ -298,13 +393,41 @@ def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10
                         "timed_out": False}
 
         argv = [a.format(**fmt) for a in entry["run"]]
-        rc, out, err, to = _run_step(argv, workdir, timeout, stdin)
+        run_started = time.monotonic()
+        cpu_before = _children_cpu_seconds()
+        rc, out, err, to = _run_step(argv, workdir, timeout, stdin,
+                                     max_memory_mb, max_cpu)
+        duration_ms = int((time.monotonic() - run_started) * 1000)
+        truncated = len(out) > cap or len(err) > cap
+        # The documented return shape is the SAME on both backends. It was not:
+        # this path omitted verdict, cpu_ms, peak_memory_kb, output_truncated,
+        # unenforced, total_ms, compile_ms and platform — eight fields, one of
+        # them (`verdict`) named in execute_code's own docstring. A caller
+        # switching on verdict could not tell a timeout from a crash here, and
+        # CI never noticed because contract_check only exercises the binary.
         return {"ok": rc == 0, "language": name, "phase": "run",
-                "stdout": _trim(out), "stderr": _trim(err), "exit_code": rc,
-                "duration_ms": int((time.monotonic() - started) * 1000),
-                "timed_out": to}
+                "stdout": _trim(out, cap), "stderr": _trim(err, cap), "exit_code": rc,
+                "duration_ms": duration_ms, "workdir": workdir,
+                "compile_ms": compile_ms,
+                "total_ms": int((time.monotonic() - started) * 1000),
+                "timed_out": to,
+                "output_truncated": truncated,
+                "verdict": _fallback_verdict(rc, to, truncated),
+                "cpu_ms": _children_cpu_ms_since(cpu_before),
+                # A high-water mark across every child this process has reaped,
+                # not this run's peak — ru_maxrss is a maximum, so it cannot be
+                # differenced. None means "not measured", never zero, because a
+                # zero here would read as "used no memory".
+                "peak_memory_kb": None,
+                "platform": sys.platform,
+                "unenforced": (["no_net: needs the native executor's LD_PRELOAD shim"]
+                               if no_net else []) + _FALLBACK_UNMEASURED,
+                "backend": "python"}
     finally:
-        shutil.rmtree(workdir, ignore_errors=True)
+        # Only a directory this function created. Same rule as the Rust
+        # executor: a caller-supplied workdir belongs to the caller.
+        if not caller_workdir:
+            shutil.rmtree(workdir, ignore_errors=True)
 
 
 # ── public API ─────────────────────────────────────────────────────────────
@@ -372,7 +495,10 @@ def execute(language: str, code: str, stdin: str = "", timeout: int = 10,
         finally:
             if stdin_path:
                 Path(stdin_path).unlink(missing_ok=True)
-    return _execute_python(language, code, stdin=stdin, timeout=timeout)
+    return _execute_python(language, code, stdin=stdin, timeout=timeout,
+                           workdir=workdir, max_memory_mb=max_memory_mb,
+                           max_output_kb=max_output_kb, max_cpu=max_cpu,
+                           no_net=no_net)
 
 
 def probe() -> dict:

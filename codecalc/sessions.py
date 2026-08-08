@@ -13,6 +13,7 @@ file tools (list/read/write) are strictly confined to that root.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -99,10 +100,34 @@ def list_sessions() -> dict:
     return {"ok": True, "sessions": out}
 
 
+#: Per-call ceilings a STATEFUL worker cannot honour, and why.
+#:
+#: The worker is one long-lived process shared by every call in the session, so
+#: a per-call rlimit cannot be applied to it after the fact, and `--no-net` is
+#: an LD_PRELOAD decision taken at exec time. These used to be accepted and
+#: silently dropped: `no_net=True` with a session_id reached the network, and
+#: `max_memory_mb=32` allocated 300 MB. Reported through `unenforced` — the same
+#: field the Rust executor already uses to say "asked for, not applied" —
+#: instead of being discarded.
+_WORKER_CANNOT_ENFORCE = {
+    "max_memory_mb": "fixed at worker start; use a workspace session or omit session_id",
+    "max_cpu": "cumulative across a long-lived worker; the per-call wall clock applies instead",
+    "no_net": "LD_PRELOAD is applied at exec; start the session without a worker to use it",
+    "max_output_kb": "the worker caps at 64 KiB; a custom cap needs a fresh process",
+}
+
+
 def execute(session_id: str, code: str, language: str | None = None,
-            stdin: str = "", timeout: int = 30) -> dict:
+            stdin: str = "", timeout: int = 30, max_memory_mb: int = 0,
+            max_output_kb: int = 0, max_cpu: int = 0, no_net: bool = False) -> dict:
     """Run code in a session. Stateful langs go to the REPL worker; the rest
-    run as fresh processes in the session workdir."""
+    run as fresh processes in the session workdir.
+
+    Per-call ceilings are passed through to the workspace path, which runs a
+    fresh sandboxed process and can honour all of them. A stateful worker
+    cannot, so anything it cannot apply comes back in `unenforced` rather than
+    being dropped on the floor.
+    """
     d = _session_dir(session_id)
     if not d.is_dir():
         return {"ok": False, "error": f"unknown session '{session_id}'"}
@@ -111,10 +136,18 @@ def execute(session_id: str, code: str, language: str | None = None,
     if w is not None:
         if language and registry.canonical(language) != w.language:
             return {"ok": False, "error": f"session is {w.language}, not {language}"}
-        return w.run(code, stdin=stdin, timeout=timeout)
-    # workspace-only session: fresh process in the session dir
+        asked = {"max_memory_mb": max_memory_mb, "max_cpu": max_cpu,
+                 "no_net": no_net, "max_output_kb": max_output_kb}
+        out = w.run(code, stdin=stdin, timeout=timeout)
+        unenforced = [f"{k}: {_WORKER_CANNOT_ENFORCE[k]}" for k, v in asked.items() if v]
+        if unenforced:
+            out.setdefault("unenforced", []).extend(unenforced)
+        return out
+    # workspace-only session: fresh process in the session dir, fully sandboxed
     lang = registry.canonical(language) if language else "python3"
-    return executor.execute(lang, code, stdin=stdin, timeout=timeout, workdir=str(d))
+    return executor.execute(lang, code, stdin=stdin, timeout=timeout, workdir=str(d),
+                            max_memory_mb=max_memory_mb, max_output_kb=max_output_kb,
+                            max_cpu=max_cpu, no_net=no_net)
 
 
 def write_file(session_id: str, path: str, content: str) -> dict:
@@ -261,14 +294,29 @@ class Worker:
     """Stateful interpreter: JSON-lines protocol on stdin/stdout. Globals
     persist across run() calls because exec() reuses one dict."""
 
-    def __init__(self, language: str, proc: subprocess.Popen):
+    def __init__(self, language: str, proc: subprocess.Popen, proto=None):
         self.language = language
         self.proc = proc
+        #: Where RESPONSES arrive. A dedicated pipe where the platform allows
+        #: one, so that output written to fd 1 by a child process cannot land in
+        #: the protocol stream. Falls back to the child's stdout on Windows,
+        #: where there is no preexec_fn to place the descriptor — there the
+        #: echoed request id still makes corruption detectable, just not
+        #: impossible.
+        self._proto = proto if proto is not None else proc.stdout
         self._wlock = threading.Lock()
+        self._seq = 0
         self._stderr_log: list[str] = []
         # drain stderr so a full pipe can never deadlock the worker
         self._drain = threading.Thread(target=self._drain_stderr, daemon=True)
         self._drain.start()
+        # When the protocol has its own pipe, the worker's stdout carries only
+        # whatever executed code wrote to fd 1 directly, and NOTHING reads it.
+        # A session that writes enough there would fill the pipe and block the
+        # worker forever — the same deadlock the stderr drain exists to prevent.
+        if self._proto is not proc.stdout and proc.stdout is not None:
+            self._raw = threading.Thread(target=self._drain_stdout, daemon=True)
+            self._raw.start()
 
     def _drain_stderr(self):
         try:
@@ -276,6 +324,16 @@ class Worker:
                 self._stderr_log.append(line.decode(errors="replace").rstrip())
                 if len(self._stderr_log) > 200:
                     self._stderr_log.pop(0)
+        except Exception:
+            pass
+
+    def _drain_stdout(self):
+        """Discard fd-1 output. It cannot be attributed to a call — it may be
+        written by a background process started several calls earlier — so it is
+        dropped rather than reported against whichever request is in flight."""
+        try:
+            for _ in self.proc.stdout:
+                pass
         except Exception:
             pass
 
@@ -289,12 +347,15 @@ class Worker:
         if not self.alive():
             return {"ok": False, "error": f"{self.language} worker died",
                     "verdict": "RTE"}
-        req = json.dumps({"code": code, "stdin": stdin})
         with self._wlock:
+            self._seq += 1
+            req_id = self._seq
+            req = json.dumps({"id": req_id, "code": code, "stdin": stdin,
+                              "timeout_ms": int(max(1, timeout) * 1000)})
             try:
                 self.proc.stdin.write((req + "\n").encode())
                 self.proc.stdin.flush()
-                line = _readline_timeout(self.proc.stdout, timeout)
+                line = _readline_timeout(self._proto, timeout)
                 if line is None:
                     # worker hung — kill it; the session is unusable
                     self.close()
@@ -304,8 +365,25 @@ class Worker:
                     return {"ok": False, "error": "worker closed", "verdict": "RTE"}
                 out = json.loads(line)
             except (BrokenPipeError, json.JSONDecodeError, ValueError) as exc:
-                return {"ok": False, "error": f"worker protocol error: {exc}",
-                        "verdict": "RTE"}
+                # KILL the worker. Returning an error while leaving the stream
+                # desynced was far worse than the corruption itself: the real
+                # reply stayed queued, so every later call returned the PREVIOUS
+                # call's result with ok=True. Measured — a call asking for
+                # `marker-4` came back with the output of the call before it.
+                # A dead session is honest; an off-by-one session is not.
+                self.close()
+                return {"ok": False, "verdict": "RTE",
+                        "error": f"worker protocol error, session terminated: {exc}"}
+            # The worker echoes the id it answered. Without this, ANY future
+            # desync silently returns a well-formed answer to a different
+            # question, which no caller can detect.
+            if out.get("id") != req_id:
+                self.close()
+                return {"ok": False, "verdict": "RTE",
+                        "error": (f"worker replied to request {out.get('id')!r} while "
+                                  f"{req_id!r} was outstanding; session terminated "
+                                  f"rather than return another call's result")}
+            out.pop("id", None)
         out.setdefault("session", True)
         return out
 
@@ -351,8 +429,30 @@ for line in sys.stdin:
 '''
 
 
+def _proto_pipe() -> tuple[int, int] | None:
+    """A pipe the child inherits for protocol responses, or None if impossible.
+
+    The child is told the descriptor NUMBER through the environment rather than
+    having it dup2'd to a fixed 3. subprocess calls preexec_fn BEFORE closing
+    inherited descriptors, so a dup2 there is undone a moment later —
+    verified: fd 3 came back EBADF in the child. `pass_fds` keeps the original
+    number open and inheritable, which is the supported way to do this.
+
+    Windows has neither preexec_fn nor pass_fds, so there the protocol stays on
+    stdout and the echoed request id is the only guard.
+    """
+    if os.name == "nt":
+        return None
+    return os.pipe()
+
+
 def _spawn_worker(language: str, workdir: Path) -> Worker | None:
     bootstrap = Path(__file__).resolve().with_name("_worker_bootstrap.py")
+    # Only node needs an out-of-band pipe. The python worker keeps a private dup
+    # of the original fd 1 taken before anything is redirected, which gives it
+    # the same guarantee without an extra descriptor.
+    pipe = _proto_pipe() if language != "python3" else None
+    proto = None
     try:
         if language == "python3":
             proc = subprocess.Popen(
@@ -361,16 +461,34 @@ def _spawn_worker(language: str, workdir: Path) -> Worker | None:
                 env=executor._env(),
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                start_new_session=True,
+                preexec_fn=executor.session_worker_limits(),
             )
         else:  # node
+            env = executor._env()
+            limits = executor.session_worker_limits()
+            if pipe is not None:
+                read_fd, write_fd = pipe
+                env["CODECALC_PROTO_FD"] = str(write_fd)
+                extra = {"pass_fds": (write_fd,)}
+                if limits:
+                    extra["preexec_fn"] = limits
+            else:
+                extra = {"preexec_fn": limits} if limits else {}
             proc = subprocess.Popen(
                 ["node", "-e", _WORKER_BOOTSTRAP_NODE],
                 cwd=str(workdir),
-                env=executor._env(),
+                env=env,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                start_new_session=True,
+                **extra,
             )
-        w = Worker(language, proc)
+            if pipe is not None:
+                os.close(write_fd)
+                proto = os.fdopen(read_fd, "rb")
+                pipe = None          # ownership transferred to `proto`
+        w = Worker(language, proc, proto=proto)
         # warm up: verify the worker answers before returning
         try:
             r = w.run("", timeout=10)
@@ -383,11 +501,37 @@ def _spawn_worker(language: str, workdir: Path) -> Worker | None:
         return w
     except Exception:
         return None
+    finally:
+        # If the pipe was created but never handed to a Worker, neither end has
+        # an owner: leaking a read end here would eventually exhaust NOFILE.
+        if pipe is not None:
+            for fd in pipe:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
 
 
 _WORKER_BOOTSTRAP_NODE = r'''
 const readline = require('readline');
 const vm = require('vm');
+const fs = require('fs');
+
+// The protocol channel. fd 3 is a pipe the parent hands us that executed code
+// has no reason to touch; responses used to go to fd 1 via console.log, which
+// any child process spawned with stdio:'inherit' writes to as well. When the
+// parent cannot provide fd 3 (Windows), PROTO_FD is 1 and the echoed request id
+// is what keeps a corrupted stream from being answered with a stale result.
+const PROTO_FD = Number(process.env.CODECALC_PROTO_FD || 1);
+// The Buffer form with an EXPLICIT null position. `fs.writeSync(fd, string)`
+// throws EINVAL on a pipe, because the string overload supplies a file position
+// and a pipe is not seekable — verified, it killed the worker on the first
+// response. The loop is because a pipe write can be partial.
+function respond(obj) {
+  const buf = Buffer.from(JSON.stringify(obj) + '\n', 'utf8');
+  let off = 0;
+  while (off < buf.length) {
+    off += fs.writeSync(PROTO_FD, buf, off, buf.length - off, null);
+  }
+}
 const rl = readline.createInterface({ input: process.stdin });
 
 // Persistent context: top-level let/const/var and globals survive across
@@ -408,6 +552,14 @@ const sb = {
 sb.globalThis = sb;
 const context = vm.createContext(sb);
 
+// Same cap as the Rust executor and the python worker. A stateful session is
+// not exempt from the output limit just because it keeps state.
+const MAX_OUTPUT_BYTES = 64 * 1024;
+function cap(s) {
+  if (s.length <= MAX_OUTPUT_BYTES) return [s, false];
+  return [s.slice(0, MAX_OUTPUT_BYTES) + '\n...[truncated]', true];
+}
+
 rl.on('line', (line) => {
   line = line.trim();
   if (!line) return;
@@ -417,11 +569,25 @@ rl.on('line', (line) => {
   holder.stderr = '';
   let ok = true, err = '';
   try {
-    vm.runInContext(req.code, context, { timeout: 30000 });
+    // The caller's deadline, not a hardcoded 30s. `timeout: 30000` ignored the
+    // timeout argument entirely, so a session call asking for 5s could burn 30
+    // and one asking for 120s was cut off at 30.
+    vm.runInContext(req.code, context, { timeout: Math.max(1, (req.timeout_ms | 0) || 30000) });
   } catch (e) {
     ok = false;
     err = (e && e.stack) ? e.stack : String(e);
   }
-  console.log(JSON.stringify({ ok, stdout: holder.stdout, stderr: holder.stderr || err, exit_code: ok ? 0 : 1 }));
+  const [out, outTrunc] = cap(holder.stdout);
+  const [errOut, errTrunc] = cap(holder.stderr || err);
+  // `id` is echoed so the reader can tell an answer to THIS request from a
+  // stale one left in the pipe by an earlier corruption. Without it a desynced
+  // stream returns a well-formed answer to a different question and no caller
+  // can detect it.
+  respond({
+    id: req.id, ok, stdout: out, stderr: errOut,
+    exit_code: ok ? 0 : 1,
+    output_truncated: outTrunc || errTrunc,
+    verdict: (outTrunc || errTrunc) ? 'OLE' : (ok ? 'OK' : 'RTE'),
+  });
 });
 '''
