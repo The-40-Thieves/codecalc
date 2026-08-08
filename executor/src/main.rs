@@ -72,9 +72,26 @@ const CPU_GRACE_SECONDS: u64 = 8;
 
 /// Env allowlist: executed code must NEVER inherit secrets (API keys, tokens).
 /// Only the vars a runtime needs to function. Everything else is dropped.
+/// Environment variables executed code may see. Everything else is dropped —
+/// the CRITICAL-02 fix against secret leakage. Kept identical to the Python
+/// fallback's; scripts/check_parity.py gates that.
+///
+/// The Windows names are here because their absence made Windows a second-class
+/// platform rather than a secured one: a process started without SystemRoot
+/// fails inside winsock and crypto initialisation, and `node` returned empty
+/// output with ok=false through the sandbox on Windows while probing as
+/// available. These are OS plumbing, not credentials — SystemRoot and windir
+/// locate the OS itself, COMSPEC and PATHEXT are how Windows resolves a command
+/// at all, and USERPROFILE/APPDATA are the Windows spelling of HOME, which this
+/// list has always allowed. A name absent from the environment is simply not
+/// copied, so these are inert on POSIX.
 const ENV_ALLOWLIST: &[&str] = &[
     "PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "PYTHONUNBUFFERED",
     "JAVA_HOME", "CARGO_HOME", "RUSTUP_HOME", "GOPATH", "GOMODCACHE",
+    // Windows
+    "SystemRoot", "SYSTEMROOT", "windir", "COMSPEC", "PATHEXT",
+    "TEMP", "TMP", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
+    "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE",
 ];
 
 /// Env var an operator sets to pin the PATH executed code resolves runtimes on.

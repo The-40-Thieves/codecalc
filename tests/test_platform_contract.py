@@ -170,6 +170,19 @@ else:
               "EGRESS REACHED" not in (net.get("stdout") or ""),
               f"-> {(net.get('stdout') or '').strip()[:60]!r}")
 
+    # ── the env allowlist must not make one platform second-class ──────────
+    # It held 11 POSIX-oriented names and no Windows plumbing, so a process
+    # started there had no SystemRoot — which winsock and crypto initialisation
+    # need. `node` probed as available and returned empty output with ok=false
+    # through the sandbox. Dropping a variable is a security decision; dropping
+    # the ones that make the OS work is just a broken platform.
+    allow = executor._ENV_ALLOWLIST
+    for var in ("SystemRoot", "COMSPEC", "PATHEXT", "USERPROFILE"):
+        check(f"the env allowlist carries {var} for Windows", var in allow)
+    # And the things it exists to keep OUT are still out.
+    for secret in ("GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY", "PYTHONPATH", "GEM_HOME"):
+        check(f"the env allowlist still excludes {secret}", secret not in allow)
+
     # ── the README's platform table describes the same executor ────────────
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
     check("the README documents a per-platform support table",
