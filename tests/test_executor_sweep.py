@@ -153,7 +153,7 @@ if EXE.exists() and os.name != "nt":
     proc.wait(timeout=30)
     time.sleep(6)                          # past when the grandchild would fire
     check("no descendant survives the executor being killed", not marker.exists(),
-          f"-> {marker.read_text(encoding="utf-8") if marker.exists() else 'reaped'}")
+          f"-> {marker.read_text(encoding='utf-8') if marker.exists() else 'reaped'}")
     marker.unlink(missing_ok=True)
 else:
     skip("orphan-reaping regression", "needs a POSIX host and a built binary")
@@ -466,7 +466,7 @@ for lang, tool in TOOLCHAIN.items():
     pwned.unlink(missing_ok=True)
     run_exec(SNIPPET[lang], lang=lang, timeout=420, workdir=str(hostile))
     check(f"{lang}: a workdir containing $(...) is NOT executed", not pwned.exists(),
-          f"-> {pwned.read_text(encoding="utf-8")[:60] if pwned.exists() else 'inert'}")
+          f"-> {pwned.read_text(encoding='utf-8')[:60] if pwned.exists() else 'inert'}")
     shutil.rmtree(hostile.parent, ignore_errors=True)
 
 print(f"\n=== {len(FAILS)} FAILURE(S), {len(SKIPS)} skipped ===" if FAILS else
