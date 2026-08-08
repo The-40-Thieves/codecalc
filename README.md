@@ -178,7 +178,7 @@ All optional. codecalc runs with none of these set.
 | `CODECALC_SESSION_ROOT` | `~/.codecalc/sessions` | Where session workspaces live. |
 | `CODECALC_PROCESS_HEADROOM` | `512` | Fork-bomb guard. `RLIMIT_NPROC` is a **uid-wide task budget**, not a per-sandbox one — the kernel compares it against every thread your user owns, machine-wide. So codecalc measures the ambient count per execution and sets the limit to *ambient + headroom*: a bomb can add at most this many tasks, while a runtime wanting a few threads always has room however busy the box is. |
 | `CODECALC_MAX_PROCESSES` | *(unset)* | Escape hatch: pin `RLIMIT_NPROC` to an absolute value and skip the measurement. |
-| `CODECALC_LLM_GATEWAY` | *(unset — the two LLM tools report themselves unconfigured)* | An OpenAI-compatible `/v1/chat/completions` endpoint. Only `translate_code` and `optimize_code` need it; the other 46 tools work without it. There is deliberately no default: sending your source to a third party nobody configured would be a worse failure than a clear error. |
+| `CODECALC_LLM_GATEWAY` | *(unset — the two LLM tools report themselves unconfigured)* | An OpenAI-compatible `/v1/chat/completions` endpoint. Only `translate_code` and `optimize_code` need it; the other 46 tools work without it. There is deliberately no default: sending your source to a third party nobody configured would be a worse failure than a clear error. Must be `http`/`https` — `urlopen` also speaks `file:`, and a gateway of `file:///etc/hostname` was read as if it were a model response. Read per call, so setting it after the server starts takes effect. |
 | `CODECALC_LLM_API_KEY` | *(unset)* | Bearer token for that gateway, if it needs one. |
 | `CODECALC_LLM_MODEL` | `gpt-4o-mini` | Model name passed to the gateway. |
 | `CODECALC_COMPLEXITY_LLM` | *(unset)* | Opt in to an LLM second opinion on `analyze_complexity`. Off by default, and a separate variable from the gateway on purpose — configuring `translate_code` should not silently add a network round-trip to every complexity analysis. |
@@ -190,11 +190,40 @@ way back into the default.
 
 ## Test
 
+Each file is a standalone script that prints one `PASS`/`FAIL` line per
+assertion and exits non-zero if any failed — no test runner, no plugins.
+
 ```bash
 cd /path/to/codecalc
-PYTHONPATH=. .venv/bin/python tests/test_smoke.py    # 31 languages via Rust executor
-PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py  # all 9 tools over MCP stdio
+
+# everything
+for f in tests/test_*.py; do PYTHONPATH=. .venv/bin/python "$f" || break; done
+for f in scripts/*.py;    do PYTHONPATH=. .venv/bin/python "$f" || break; done
+
+# or individually
+PYTHONPATH=. .venv/bin/python tests/test_smoke.py           # every language, via the Rust executor
+PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py         # every tool over MCP stdio, answers checked
+PYTHONPATH=. .venv/bin/python tests/test_executor_sweep.py  # sandbox regressions
 ```
+
+18 test files and 5 gate scripts, **689 assertions**, none skipped on a machine
+with the full toolchain. Four of the files are regression suites named after the
+sweep that produced them — `test_bug_sweep`, `test_executor_sweep`,
+`test_python_sweep`, `test_network_modules` — and each one's docstring states
+the defect it locks out and how it was reproduced, because a regression test
+whose reason has been forgotten is the first one deleted.
+
+Two rules the suite holds itself to, learned from breaking both:
+
+- **Assert the value, not the shape.** Three of these files once had no
+  assertions at all: they called tools, printed the output and exited 0. They
+  caught a crash and never a wrong answer — a `runtimes_status` total replaced
+  with `-999` passed, printing `total = -999`.
+- **Don't pin what varies.** `benchmark` and `compare_execution` rank by
+  measured time, so their winner moves under load; their structure is asserted
+  and their timing is not. `runtimes_status` is checked against itself — the
+  summary must agree with the data it summarises — so it holds on any machine
+  rather than describing this one.
 
 ## Platform support
 
@@ -205,7 +234,7 @@ every result rather than letting a caller assume they all held.
 | Guarantee | Linux | macOS | Windows |
 |---|---|---|---|
 | Wall-clock timeout | yes | yes | yes |
-| Kill the whole process tree | `killpg` | `killpg` | `TerminateJobObject` |
+| Kill the whole process tree | `killpg` + `PDEATHSIG` | `killpg` | `TerminateJobObject` |
 | Fork-bomb guard | `RLIMIT_NPROC` (uid-wide) | `RLIMIT_NPROC` (uid-wide) | Job `ActiveProcessLimit` (**job-scoped**) |
 | Memory ceiling | `RLIMIT_AS` | reported unenforced¹ | Job `ProcessMemoryLimit` |
 | CPU-time ceiling | `RLIMIT_CPU` | `RLIMIT_CPU` | reported unenforced |
@@ -236,18 +265,59 @@ shell and so are unavailable on Windows unless one is installed.
 
 ## Sandbox guarantees
 
-- Fresh temp dir per run, deleted on exit (source + binaries + outputs)
+- Fresh temp dir per run, deleted on exit (source + binaries + outputs). The
+  deletion is **identity-checked**: the directory's device and inode are
+  recorded at creation and re-checked before removal, because executed code runs
+  with that directory as its cwd and can rename another one into its place. A
+  caller-supplied `--workdir` is a session workspace and is never deleted.
 - rlimits: CPU (timeout+8s), address space 2TiB (V8/JVM need huge VA),
   file size 256MiB, 256 FDs, core dumps off
-- Wall-clock timeout kills the whole process group (SIGKILL)
-- Output capped at 64KiB per stream
+- The **timeout is a total budget**: compile and run share it, so `--timeout 10`
+  cannot take twenty seconds. `duration_ms` is the run alone; `compile_ms` and
+  `total_ms` are reported separately.
+- Wall-clock timeout kills the whole process **group** (SIGKILL). So does
+  SIGTERM to the executor — `PR_SET_PDEATHSIG` reaches only the direct child, so
+  a group kill is what covers its descendants, and the executor is the only
+  participant that knows the group id.
+- Output capped at 64KiB per stream, on every path including stateful sessions.
+  Exceeding it is reported as `OLE`, and the file-size rlimit is kept strictly
+  above the cap so that overflow stays *detectable* — tying the two together
+  turned a truncated 4MB output into a silent `verdict: OK`.
 - Fork-bomb guard via `RLIMIT_NPROC`, sized from the **measured** ambient task
   count plus headroom rather than a fixed number. This is a mitigation, not
   isolation: the budget is shared with every other process your user owns, so
   concurrent executions draw on the same pool. cgroup v2 `pids.max` is the real
   per-sandbox answer and needs delegated cgroup access a stdio MCP server cannot
   assume — reach for it when this moves behind a container.
+- `no_net` blocks the **network**, not every socket: it refuses `AF_INET` and
+  `AF_INET6` and forwards everything else, so `AF_UNIX` local IPC keeps working.
 - No network namespace isolation (single-host tool; containerize for untrusted code)
+
+### Sessions
+
+A session is a persistent workspace; `python3` and `node` additionally get a
+long-lived REPL worker so variables and imports survive between calls. What that
+does and does not buy you:
+
+| | workspace session | stateful worker |
+|---|---|---|
+| Fresh sandboxed process per call | yes | no — one worker serves every call |
+| `max_memory_mb` / `max_cpu` / `no_net` | applied | **reported in `unenforced`** |
+| `RLIMIT_AS` / `NPROC` / `FSIZE` / `NOFILE` | per call | applied once, at worker start |
+| Output cap + `OLE` | yes | yes |
+| Per-call wall clock | yes | yes — a worker that blows it is killed |
+
+A worker cannot take a per-call rlimit after the fact, and `--no-net` is decided
+at exec time. Rather than accept those arguments and drop them, the result lists
+them in `unenforced` — the same field the executor already uses to say "asked
+for, not applied". Omit `session_id`, or use a workspace session, when a ceiling
+has to be real.
+
+The worker protocol does not share a file descriptor with executed code, and
+every response carries the id of the request it answers. Both matter: `sys.stdout`
+is a Python-level rebind that a subprocess writes straight past, and a corrupted
+stream that is not resynchronised returns every later call the *previous* call's
+result — a well-formed answer to a different question.
 
 ## Language list
 
