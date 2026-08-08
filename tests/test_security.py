@@ -156,13 +156,25 @@ _headroom = executor.DEFAULT_PROCESS_HEADROOM
 # ceiling low through CODECALC_MAX_PROCESSES so it costs two dozen short-lived
 # processes instead of walking up to a 4096 fallback on a CI runner.
 #
-# The limit has to be platform-appropriate or the probe tests nothing:
-# RLIMIT_NPROC is uid-wide, so an absolute 24 on Linux is below the ambient
-# count and the sandboxed program cannot start at all. Job objects are
-# job-scoped, so 24 there means 24.
+# The ceiling has to be platform-appropriate or the probe tests nothing, and the
+# property that decides it is whether the limit is UID-WIDE or JOB-SCOPED — not,
+# as a first version assumed, whether the ambient count is measurable:
+#
+#   Windows   job-scoped ActiveProcessLimit   -> a flat 24 means 24
+#   Linux     uid-wide RLIMIT_NPROC, ambient measurable -> ambient + 24
+#   macOS     uid-wide RLIMIT_NPROC, ambient NOT measurable -> no safe low
+#             ceiling exists; a flat 24 sits far below the ambient count and the
+#             sandboxed program cannot spawn at all. Measured: 0 children, which
+#             the "did it actually run" assertion below caught as the vacuous
+#             pass it was.
+#
+# So macOS is skipped here and covered by the fork probe, which measures the
+# boundary precisely and needs no ceiling of its own.
 _SPAWN_HEADROOM = 24
 _ambient = executor.current_uid_tasks()
-_spawn_limit = (_ambient + _SPAWN_HEADROOM) if _ambient is not None else _SPAWN_HEADROOM
+_JOB_SCOPED = os.name == "nt"
+_spawn_limit = _SPAWN_HEADROOM if _JOB_SCOPED else (
+    (_ambient + _SPAWN_HEADROOM) if _ambient is not None else None)
 
 _SPAWNER = """import subprocess, sys
 kids = []
@@ -176,7 +188,11 @@ for k in kids:
     k.kill()
 """
 _exe = executor._rust
-if _exe:
+if _exe and _spawn_limit is None:
+    print(f"SKIP portable process-limit probe — {sys.platform} has a uid-wide "
+          f"RLIMIT_NPROC and no measurable ambient count, so no low ceiling can "
+          f"be set safely; the fork probe below covers this platform")
+elif _exe:
     _p = subprocess.run(
         [str(_exe), "--lang", "python3", "--timeout", "90"],
         input=_SPAWNER, capture_output=True, text=True, encoding="utf-8",
