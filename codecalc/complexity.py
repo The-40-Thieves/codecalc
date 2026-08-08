@@ -17,7 +17,7 @@ import json
 import os
 import re
 
-from . import llm
+from . import llm, parsing
 
 #: Opt-in flag for the LLM second opinion. Deliberately its OWN variable rather
 #: than "a gateway is configured": CODECALC_LLM_GATEWAY exists for translate_code
@@ -79,8 +79,34 @@ def _detect_recursion(code: str) -> tuple[bool, str]:
 
 
 def analyze(code: str, language: str = "python3") -> dict:
-    loops, depth = _count_loops(code)
-    recursive, fn = _detect_recursion(code)
+    """Estimate asymptotic complexity from the code's STRUCTURE.
+
+    Loop counting and recursion detection come from a real parser
+    (`codecalc.parsing`). They used to come from regexes, which counted the word
+    "for" inside strings, comments and identifiers like `format()`, read a
+    chained `.map().filter().reduce()` as three loops, and called a docstring
+    mentioning a function's own name "recursion". tests/test_parsing_vs_regex.py
+    holds the divergent cases with the correct answer for each.
+
+    `analysis` in the result says which path produced the numbers, so a caller
+    can tell a parse from a fallback instead of assuming.
+    """
+    facts = parsing.analyse(code, language)
+    if facts.parsed:
+        loops, depth = facts.loops, facts.max_loop_depth
+        recursive = bool(facts.recursive_functions)
+        fn = facts.recursive_functions[0] if recursive else ""
+        analysis = "tree-sitter"
+    else:
+        # No grammar for this language, or the parser rejected the input. Say so
+        # rather than reporting a heuristic as though it were a parse.
+        loops, depth = _count_loops(code)
+        recursive, fn = _detect_recursion(code)
+        analysis = "regex-fallback"
+
+    # These two stay textual: "does this call a sort" and "does this use a hash
+    # map" are library questions, not grammar ones, and a parser has no more
+    # authority over them than a regex does.
     has_sort = bool(SORT_RE.search(code))
     has_hash = bool(HASH_RE.search(code))
 
@@ -109,6 +135,11 @@ def analyze(code: str, language: str = "python3") -> dict:
     if loops == 0 and not recursive and not has_sort:
         notes.append("constant-time surface; may hide loops in library calls")
 
+    if analysis == "regex-fallback" and facts.reason:
+        notes.append(f"structural heuristic only ({facts.reason})")
+    if facts.parsed and facts.has_error:
+        notes.append("source has syntax errors; the parse is partial")
+
     result = {
         "ok": True,
         "estimate": estimate,
@@ -116,6 +147,9 @@ def analyze(code: str, language: str = "python3") -> dict:
         "loops": loops,
         "max_nesting": depth,
         "recursion": recursive,
+        "analysis": analysis,
+        "grammar": facts.grammar,
+        "functions": facts.functions if facts.parsed else [],
         "notes": notes,
     }
 

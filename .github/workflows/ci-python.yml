@@ -96,6 +96,12 @@ jobs:
       - name: MCP protocol conformance (2026-07-28)
         shell: bash
         run: uv run --no-sync python tests/test_mcp_protocol.py
+      # tree-sitter vs the regex heuristic it replaced. Pure: parsing only, no
+      # sandbox, so it runs on all three OSes — which also proves the
+      # pre-compiled grammar wheels resolve on each of them.
+      - name: tree-sitter analyser (differential vs regex)
+        shell: bash
+        run: uv run --no-sync python tests/test_parsing_vs_regex.py
       - name: session jail
         shell: bash
         # Path confinement is where platforms differ most: Windows has drive
