@@ -5,7 +5,41 @@ use std::os::unix::process::CommandExt;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
+use std::sync::atomic::{AtomicI32, Ordering};
+
 use super::{ResolvedLimits, Wait};
+
+/// PGID of the child currently running, or 0. Read by the signal handler.
+///
+/// PR_SET_PDEATHSIG (below) kills the direct child when this executor dies, but
+/// NOT its descendants: verified — killing the executor reaped `python3` and
+/// left its `sleep` grandchild reparented to init with no wall clock on it.
+/// The grandchild IS in the child's process group, so killing that group covers
+/// the whole tree — but only this process knows the pgid, so it has to do it.
+static CHILD_PGID: AtomicI32 = AtomicI32::new(0);
+
+/// Async-signal-safe: `killpg` and `_exit` are both on the POSIX safe list.
+extern "C" fn terminate_child_group(sig: libc::c_int) {
+    let pgid = CHILD_PGID.load(Ordering::SeqCst);
+    if pgid > 0 {
+        unsafe { libc::killpg(pgid, libc::SIGKILL) };
+    }
+    unsafe { libc::_exit(128 + sig) };
+}
+
+/// Kill the child's whole group if we are asked to stop. SIGKILL cannot be
+/// caught, which is why PR_SET_PDEATHSIG stays as the backstop for that case.
+fn install_termination_handler() {
+    // Cast through a fn pointer, not the fn item: `fn_item as sighandler_t` is
+    // a direct function-item-to-integer cast, which clippy rejects.
+    let handler = terminate_child_group as extern "C" fn(libc::c_int);
+    let h = handler as usize as libc::sighandler_t;
+    unsafe {
+        libc::signal(libc::SIGTERM, h);
+        libc::signal(libc::SIGINT, h);
+        libc::signal(libc::SIGHUP, h);
+    }
+}
 
 /// rlimits we set, paired with the value we want. Resolved in the PARENT so the
 /// setrlimit calls in pre_exec cannot fail: each desired value is clamped to the
@@ -129,14 +163,40 @@ fn maxrss_to_kb(ru_maxrss: i64) -> u64 {
 
 pub fn spawn_and_wait(mut cmd: Command, limits: &ResolvedLimits) -> io::Result<Wait> {
     let (rlimits, unenforced) = resolve(limits);
+    // Own process group, so a timeout can killpg the child's whole tree.
     cmd.process_group(0);
     unsafe {
         cmd.pre_exec(move || {
             apply(&rlimits);
+            // PR_SET_PDEATHSIG: the kernel SIGKILLs this child if its parent —
+            // this executor — dies. Without it the child is orphaned whenever
+            // the executor is killed rather than exiting on its own, and it
+            // then has NO wall clock on it at all: verified by killing the
+            // executor and watching `sleep` keep running.
+            //
+            // The parent cannot solve this from outside, because process_group(0)
+            // above deliberately puts the child in a DIFFERENT group, so a
+            // killpg aimed at the executor's group never reaches it. Asking the
+            // kernel is the only reliable answer.
+            //
+            // Linux only; other unices have no equivalent, and the caller's
+            // timeout remains the backstop there.
+            #[cfg(target_os = "linux")]
+            {
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+                // Race: if the parent died between fork and here, we are already
+                // orphaned and the signal will never come. Check and exit.
+                if libc::getppid() == 1 {
+                    libc::_exit(1);
+                }
+            }
             Ok(())
         });
     }
+    install_termination_handler();
     let mut child: Child = cmd.spawn()?;
+    // process_group(0) makes the child its own group leader, so pgid == pid.
+    CHILD_PGID.store(child.id() as i32, Ordering::SeqCst);
 
     let start = Instant::now();
     let mut status: libc::c_int = 0;
@@ -182,6 +242,7 @@ pub fn spawn_and_wait(mut cmd: Command, limits: &ResolvedLimits) -> io::Result<W
     let secs = rusage.ru_utime.tv_sec as i64 + rusage.ru_stime.tv_sec as i64;
     let usecs = rusage.ru_utime.tv_usec as i64 + rusage.ru_stime.tv_usec as i64;
     let cpu_ms = (secs * 1000 + usecs / 1000).max(0) as u64;
+    CHILD_PGID.store(0, Ordering::SeqCst);
 
     Ok(Wait {
         exit_code,

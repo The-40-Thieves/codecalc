@@ -129,10 +129,15 @@ jobs:
           echo "ok: statically linked, $(stat -c%s "$bin") bytes"
 
   blocknet:
-    # The --no-net shim. It is built by a comment in blocknet.c and by hand; nothing verifies it
-    # still compiles, and a broken shim degrades silently — the executor checks `shim.is_file()` and
-    # just skips LD_PRELOAD if it is missing, so `no_net: true` would report success while doing
-    # nothing at all.
+    # The --no-net shim. `executor/build.rs` now builds it as part of `cargo build`, so it cannot
+    # lag blocknet.c; this job is the cross-platform gate on top of that — it proves the shim still
+    # compiles -Werror on macOS as well as Linux, and that the override MECHANISM survives.
+    #
+    # A broken shim degrades silently, so both halves matter: the executor checks `shim.is_file()`
+    # and skips LD_PRELOAD if it is missing, reporting `no_net_requested_but_no_shim_available` in
+    # `unenforced` (verified). A STALE shim is the case nothing can report — the file is there, so
+    # the policy being enforced is the previous build while every presence check passes. That is
+    # what build.rs removes.
     #
     # Linux and macOS only. Windows has no LD_PRELOAD equivalent to hang a socket
     # shim on, so `--no-net` is reported through the executor's `unenforced` field
@@ -219,9 +224,18 @@ jobs:
           #include <stdio.h>
           #include <string.h>
           #include <sys/socket.h>
+          #include <sys/un.h>
           #include <netinet/in.h>
           #include <arpa/inet.h>
+          /* Two INDEPENDENT results, because "blocked the network" and "blocked
+           * every socket" are different outcomes and the shim shipped as the
+           * second one for a while. A probe that only tries AF_INET cannot tell
+           * them apart: a shim refusing every address family passes it, while
+           * taking out AF_UNIX local IPC — no network involved — under a flag
+           * that says "no net". So AF_UNIX must SUCCEED for the gate to pass. */
           int main(void) {
+              int u = socket(AF_UNIX, SOCK_STREAM, 0);
+              printf("%s ", u < 0 ? "UNIX_BLOCKED" : "UNIX_OK");
               int fd = socket(AF_INET, SOCK_STREAM, 0);
               if (fd < 0) { printf("BLOCKED socket\n"); return 0; }
               struct sockaddr_in a;
@@ -249,6 +263,10 @@ jobs:
           out=$(env "$preload_var=$PWD/executor/${{ matrix.lib }}" /tmp/netprobe)
           echo "$out"
           case "$out" in
-            BLOCKED*) echo "ok: ${{ matrix.lib }} blocked the connection" ;;
+            *BLOCKED*) ;;
             *) echo "::error::${{ matrix.lib }} did not block the connection (got: $out)"; exit 1 ;;
+          esac
+          case "$out" in
+            UNIX_OK*) echo "ok: ${{ matrix.lib }} blocked the network and left AF_UNIX alone" ;;
+            *) echo "::error::${{ matrix.lib }} blocked AF_UNIX; --no-net must block the NETWORK, not every socket (got: $out)"; exit 1 ;;
           esac

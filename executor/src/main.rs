@@ -165,19 +165,19 @@ const LANGS: &[Lang] = &[
         name: "csharp",
         ext: "cs",
         compile: None,
-        run: &["bash", "-c", "dotnet new console -o {work}/proj -n prog --force && cp {file} {work}/proj/Program.cs && dotnet run --project {work}/proj --no-launch-profile"],
+        run: &["bash", "-c", "dotnet new console -o \"$2/proj\" -n prog --force && cp \"$1\" \"$2/proj/Program.cs\" && dotnet run --project \"$2/proj\" --no-launch-profile", "codecalc", "{file}", "{work}"],
     },
     Lang {
         name: "gleam",
         ext: "gleam",
         compile: None,
-        run: &["bash", "-c", "gleam new {work}/proj --name prog --skip-git && cp {file} {work}/proj/src/prog.gleam && cd {work}/proj && gleam run"],
+        run: &["bash", "-c", "gleam new \"$2/proj\" --name prog --skip-git && cp \"$1\" \"$2/proj/src/prog.gleam\" && cd \"$2/proj\" && gleam run", "codecalc", "{file}", "{work}"],
     },
     Lang {
         name: "haskell",
         ext: "hs",
         compile: None,
-        run: &["bash", "-c", "nix-shell -p ghc --run \"ghc -O2 -o {exe} {file} && {exe}\""],
+        run: &["bash", "-c", "f=$(printf %q \"$1\"); e=$(printf %q \"$3\"); nix-shell -p ghc --run \"ghc -O2 -o $e $f && $e\"", "codecalc", "{file}", "{work}", "{exe}"],
     },
     // data / query DSLs
     // `.read` as a SQL argument rather than a shell redirect: this is the only
@@ -501,19 +501,47 @@ fn execute(lang_name: &str, code: &str, stdin_data: &str, limits: &Limits, workd
     let work = match workdir {
         Some(dir) => Path::new(dir).to_path_buf(),
         None => {
-            let dir = loop {
+            // Retry ONLY on a name collision. `Err(_) => continue` retried every
+            // error, including permanent ones — an unwritable or full temp dir
+            // (EACCES/EROFS/ENOSPC) made this spin at 100% CPU forever with no
+            // output, until something upstream killed it. Verified: TMPDIR set
+            // to a mode-500 directory hung the process indefinitely.
+            const MAX_TEMPDIR_ATTEMPTS: u32 = 64;
+            let mut last_err: Option<std::io::Error> = None;
+            let mut chosen: Option<std::path::PathBuf> = None;
+            for _ in 0..MAX_TEMPDIR_ATTEMPTS {
                 let nonce = COUNTER.fetch_add(1, Ordering::Relaxed)
                     ^ std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.subsec_nanos() as u64)
+                        .map(|d| u64::from(d.subsec_nanos()))
                         .unwrap_or(0);
                 let candidate = env::temp_dir().join(format!("codecalc-{}-{nonce:x}", std::process::id()));
                 match fs::create_dir(&candidate) {
-                    Ok(()) => break candidate,
-                    Err(_) => continue, // exists (or race) — pick a new name
+                    Ok(()) => {
+                        chosen = Some(candidate);
+                        break;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(e) => {
+                        last_err = Some(e);
+                        break;
+                    }
                 }
-            };
-            dir
+            }
+            match chosen {
+                Some(dir) => dir,
+                None => {
+                    let why = last_err.map_or_else(
+                        || format!("{MAX_TEMPDIR_ATTEMPTS} name collisions in a row"),
+                        |e| e.to_string(),
+                    );
+                    return json!({
+                        "ok": false,
+                        "error": format!("cannot create a work directory in {}: {why}",
+                                         env::temp_dir().display()),
+                    });
+                }
+            }
         }
     };
 
@@ -521,26 +549,44 @@ fn execute(lang_name: &str, code: &str, stdin_data: &str, limits: &Limits, workd
     // Windows needs the .exe extension for the compiled artifact; CreateProcess
     // will not treat an extensionless PE as executable the way exec() does.
     let exe = work.join(if cfg!(windows) { "a.exe" } else { "a.out" });
-    if fs::write(&file, code).is_err() {
-        let _ = fs::remove_dir_all(&work);
-        return json!({ "ok": false, "error": "failed to write source" });
+    if let Err(e) = fs::write(&file, code) {
+        // Only remove a directory WE created. This used to be unconditional, so
+        // a failed source write deleted a caller-supplied --workdir — i.e. the
+        // whole session workspace, user data included. And it was reachable
+        // from inside the sandbox: executed code doing
+        //     rm -f main.sh && mkdir main.sh
+        // makes the next write fail, and the next execute_code wiped the
+        // session. Verified end to end before the fix.
+        if workdir.is_none() {
+            let _ = fs::remove_dir_all(&work);
+        }
+        return json!({
+            "ok": false,
+            "error": format!("failed to write source to {}: {e}", file.display()),
+        });
     }
 
     let started = Instant::now();
     let work_s = work.to_string_lossy().into_owned();
 
+    // Compile and run SHARE the wall-clock budget. Each step used to get the
+    // full `limits.timeout`, so a compiled language could take 2x the value the
+    // caller asked for — and the Python wrapper kills the executor at
+    // timeout+30, which for a 120s request lands well inside that 240s ceiling.
+    let mut compile_ms: u64 = 0;
     if let Some(compile) = lang.compile {
         let argv: Vec<String> = compile
             .iter()
             .map(|t| substitute(t, &file.to_string_lossy(), &exe.to_string_lossy(), &work_s))
             .collect();
         let sr = run_step(&argv, &work, "compile", b"", limits);
+        compile_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         if sr.timed_out || sr.exit_code != 0 || sr.signal.is_some() {
             let result = json!({
                 "ok": false, "language": lang.name, "phase": "compile",
                 "stdout": sr.stdout, "stderr": sr.stderr,
                 "exit_code": if sr.signal.is_some() { serde_json::Value::Null } else { serde_json::Value::from(sr.exit_code) },
-                "duration_ms": started.elapsed().as_millis() as u64,
+                "duration_ms": compile_ms, "compile_ms": compile_ms,
                 "cpu_ms": sr.cpu_ms, "peak_memory_kb": sr.peak_memory_kb,
                 "timed_out": sr.timed_out, "verdict": verdict(&sr, limits),
                 "unenforced": sr.unenforced,
@@ -557,8 +603,20 @@ fn execute(lang_name: &str, code: &str, stdin_data: &str, limits: &Limits, workd
         .iter()
         .map(|t| substitute(t, &file.to_string_lossy(), &exe.to_string_lossy(), &work_s))
         .collect();
-    let sr = run_step(&argv, &work, "run", stdin_data.as_bytes(), limits);
-    let duration_ms = started.elapsed().as_millis() as u64;
+    // Budget what is LEFT after compiling, so compile+run cannot exceed the
+    // caller's timeout between them.
+    let mut run_limits = *limits;
+    if compile_ms > 0 {
+        let spent_secs = compile_ms / 1000;
+        run_limits.timeout = limits.timeout.saturating_sub(spent_secs).max(1);
+    }
+    let run_started = Instant::now();
+    let sr = run_step(&argv, &work, "run", stdin_data.as_bytes(), &run_limits);
+    // duration_ms is the RUN, not run+compile. It used to be measured from
+    // before the compile step, so `benchmark` on C/C++/Rust was timing gcc:
+    // a hello-world reported duration_ms=126 with cpu_ms=0.
+    let duration_ms = u64::try_from(run_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let total_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
     let result = json!({
         "ok": sr.exit_code == 0 && !sr.timed_out && sr.signal.is_none(),
@@ -568,10 +626,12 @@ fn execute(lang_name: &str, code: &str, stdin_data: &str, limits: &Limits, workd
         "stderr": sr.stderr,
         "exit_code": if sr.signal.is_some() { serde_json::Value::Null } else { serde_json::Value::from(sr.exit_code) },
         "duration_ms": duration_ms,
+        "compile_ms": compile_ms,
+        "total_ms": total_ms,
         "cpu_ms": sr.cpu_ms,
         "peak_memory_kb": sr.peak_memory_kb,
         "timed_out": sr.timed_out,
-        "verdict": verdict(&sr, limits),
+        "verdict": verdict(&sr, &run_limits),
         // Which guarantees this OS could not apply. Empty on a full-featured
         // Linux run; non-empty is not an error, it is the sandbox declining to
         // claim something it did not do.

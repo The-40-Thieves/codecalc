@@ -1,15 +1,30 @@
 /* blocknet.c — preloaded shim that blocks network egress for sandboxed code.
  *
- * Fails socket() and connect() with EACCES. Deliberately does NOT touch
- * socketpair(): runtimes (tokio, libuv, glibc) use it for internal signal and
- * event plumbing, and blocking it crashes the runtime rather than its network
- * call.
+ * Fails socket() and connect() with EACCES for NETWORK address families only —
+ * AF_INET and AF_INET6. Nothing else can reach a network.
+ *
+ * It used to block socket() unconditionally, which also killed AF_UNIX. A unix
+ * socket is local IPC and cannot leave the machine, so blocking it bought no
+ * security and broke things that had nothing to do with egress: multiprocessing,
+ * runtime event loops, and anything talking to a local socket file. Verified —
+ * with the old shim, AF_UNIX returned EACCES. That is the same mistake as
+ * blocking socketpair(), which the next paragraph already knew not to make.
+ *
+ * Deliberately does NOT touch socketpair(): runtimes (tokio, libuv, glibc) use
+ * it for internal signal and event plumbing, and blocking it crashes the
+ * runtime rather than its network call.
  *
  * Best-effort by construction: it only affects dynamically-linked programs.
  * A statically linked binary — Go's default — never consults the dynamic
  * loader and ignores this entirely.
  *
  * Build:
+ * Built automatically by executor/build.rs as part of `cargo build`, into the
+ * same directory as the executable (which is where it is looked up at run
+ * time). Do NOT build it by hand: a shim that lags this source enforces the
+ * OLD policy while every "is the shim present?" check still passes, which is
+ * how an AF_UNIX fix here stayed inert for an entire test run.
+ *
  *   Linux  cc -shared -fPIC -O2 -o blocknet.so    blocknet.c   (LD_PRELOAD)
  *   macOS  cc -shared -fPIC -O2 -o blocknet.dylib blocknet.c   (DYLD_INSERT_LIBRARIES)
  *
@@ -46,6 +61,24 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 
+#if !defined(__APPLE__)
+#include <dlfcn.h>
+#endif
+
+/* Only these can reach a network. AF_UNIX/AF_NETLINK/AF_ALG are local. */
+static int blocknet_is_network(int domain)
+{
+    return domain == AF_INET || domain == AF_INET6;
+}
+
+static int blocknet_addr_is_network(const struct sockaddr *addr)
+{
+    if (addr == NULL) {
+        return 0;
+    }
+    return blocknet_is_network((int)addr->sa_family);
+}
+
 #if defined(__APPLE__)
 
 /* dyld applies each {replacement, replacee} pair it finds in this section. */
@@ -58,11 +91,13 @@
         (const void *)(unsigned long)&_replacee                                \
     }
 
+/* On macOS a call made from inside this library is not itself interposed, so
+ * the real implementation is reachable by name. */
 __attribute__((used)) static int blocknet_socket(int domain, int type, int protocol)
 {
-    (void)domain;
-    (void)type;
-    (void)protocol;
+    if (!blocknet_is_network(domain)) {
+        return socket(domain, type, protocol);
+    }
     errno = EACCES;
     return -1;
 }
@@ -70,9 +105,9 @@ __attribute__((used)) static int blocknet_socket(int domain, int type, int proto
 __attribute__((used)) static int blocknet_connect(int fd, const struct sockaddr *addr,
                                                   socklen_t len)
 {
-    (void)fd;
-    (void)addr;
-    (void)len;
+    if (!blocknet_addr_is_network(addr)) {
+        return connect(fd, addr, len);
+    }
     errno = EACCES;
     return -1;
 }
@@ -82,20 +117,35 @@ DYLD_INTERPOSE(blocknet_connect, connect);
 
 #else /* Linux and other ELF platforms: definition order is enough */
 
+/* ELF: our definition shadows libc's, so reaching the real one needs
+ * dlsym(RTLD_NEXT). Calling socket() here would recurse into ourselves. */
 int socket(int domain, int type, int protocol)
 {
-    (void)domain;
-    (void)type;
-    (void)protocol;
+    if (!blocknet_is_network(domain)) {
+        static int (*real_socket)(int, int, int);
+        if (real_socket == NULL) {
+            real_socket = (int (*)(int, int, int))dlsym(RTLD_NEXT, "socket");
+        }
+        if (real_socket != NULL) {
+            return real_socket(domain, type, protocol);
+        }
+    }
     errno = EACCES;
     return -1;
 }
 
 int connect(int fd, const struct sockaddr *addr, socklen_t len)
 {
-    (void)fd;
-    (void)addr;
-    (void)len;
+    if (!blocknet_addr_is_network(addr)) {
+        static int (*real_connect)(int, const struct sockaddr *, socklen_t);
+        if (real_connect == NULL) {
+            real_connect = (int (*)(int, const struct sockaddr *, socklen_t))
+                dlsym(RTLD_NEXT, "connect");
+        }
+        if (real_connect != NULL) {
+            return real_connect(fd, addr, len);
+        }
+    }
     errno = EACCES;
     return -1;
 }
