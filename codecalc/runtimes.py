@@ -243,10 +243,22 @@ UPDATE_COMMANDS: dict[str, list[str]] = {
 
 def status(languages: str | list[str] | None = None) -> dict:
     """Non-mutating: current vs latest for each language runtime."""
-    want = {l.strip().lower() for l in languages.split(",")} if isinstance(languages, str) else (
-        set(languages) if languages else None
-    )
+    # An empty or whitespace-only filter means "no filter", exactly like None.
+    # It used to produce an empty `want` set that matched nothing, so
+    # `update("")` returned ok=true with total=0 — the same silently-did-nothing
+    # shape as the unknown-name case below.
+    if isinstance(languages, str):
+        names = {l.strip().lower() for l in languages.split(",") if l.strip()}
+        want = names or None
+    else:
+        want = set(languages) if languages else None
     results: dict[str, dict] = {}
+    #: Requested names that matched something. A name nobody recognises used to
+    #: filter everything out and return a cheerful empty result: `update
+    #: "notalanguage"` answered {"ok": true, ... "Dry run: nothing was updated"},
+    #: so a typo was indistinguishable from a no-op. The executor has always
+    #: returned a structured error for an unknown language; this now does too.
+    matched: set = set()
     for manager, checker in _CHECKERS.items():
         try:
             found = checker()
@@ -257,6 +269,7 @@ def status(languages: str | list[str] | None = None) -> dict:
                 continue  # checker failure is surfaced, not a language entry
             if want is None or lang in want or info.get("tool") in want:
                 results[lang] = info
+            matched.update({lang, info.get("tool")} & (want or set()))
 
     for info in results.values():
         mgr = info.get("manager")
@@ -267,7 +280,8 @@ def status(languages: str | list[str] | None = None) -> dict:
             cmd = [p for p in cmd if p != "<PKGS>"] + pkgs
         info["update_command"] = " ".join(cmd) if cmd else None
 
-    return {
+    unknown = sorted((want or set()) - matched)
+    out = {
         "ok": True,
         "dry_run": True,
         "languages": results,
@@ -276,6 +290,17 @@ def status(languages: str | list[str] | None = None) -> dict:
             "total": len(results),
         },
     }
+    if unknown:
+        out["unknown"] = unknown
+        # Every requested name was unrecognised, so the call did nothing at all
+        # and saying "ok" would be a lie about a typo.
+        if not results:
+            out["ok"] = False
+            out["error"] = (f"no known runtime named {', '.join(unknown)}. "
+                            f"Nothing was checked or updated.")
+        else:
+            out["note"] = f"ignored unrecognised name(s): {', '.join(unknown)}"
+    return out
 
 
 def update(languages: str | list[str] | None = None, apply: bool = False,

@@ -17,16 +17,27 @@ the fallback if the binary is missing.
 
 ## Older-computer support
 
-- `target-cpu=generic` — no modern instruction-set requirements
+- **No modern instruction-set requirements** — rustc targets a generic CPU by
+  default and nothing overrides it. (`executor/.cargo/config.toml` explains why
+  `-C target-cpu=generic` is deliberately NOT written there: it would be a
+  no-op that reads like a guarantee.)
 - **Static musl builds** run on any Linux regardless of glibc version:
-  `bin/codecalc-exec-x86_64-musl` (421K), `bin/codecalc-exec-aarch64-musl` (453K)
+  `bin/codecalc-exec-x86_64-musl`, `bin/codecalc-exec-aarch64-musl` (~430K each;
+  the exact size moves with every toolchain bump, so it is not pinned here)
 - Size-optimized profile (`opt-level="z"`, LTO, panic=abort, stripped) —
   **measured, not assumed**: against an otherwise identical `opt-level=3` build,
   `z` came out 1.02 ± 0.26 times faster on the executor's own path (i.e. no
   detectable difference) while being 16% smaller. The executor spends its time
   in syscalls, not arithmetic, so there was nothing for a higher optimisation
   level to speed up.
-- **Lazy sympy/z3 imports**: server starts in ~40ms, not ~600ms
+- **Lazy sympy/z3 imports.** Both are imported on first use, so a session that
+  only executes code never pays for them. This claimed "~40ms, not ~600ms" for a
+  long time while being wrong in both directions: the server took **1.9s** to
+  start, and sympy was not actually lazy — `units.py` imported it at module
+  scope and `server.py` imports `units`, so every start paid 437ms for it.
+  Deferring that took spawn-to-first-response from **1888ms to 1243ms**
+  (measured, median of 7). The remaining ~870ms is the `mcp` SDK's own import,
+  which is not ours to remove.
 - **The fork-bomb measurement is taken once, and only when it is needed.**
   Sizing `RLIMIT_NPROC` means reading `/proc/<pid>/status` for every process on
   the machine. That walk used to run during argument parsing and again for every
@@ -218,8 +229,11 @@ PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py         # every tool over MC
 PYTHONPATH=. .venv/bin/python tests/test_executor_sweep.py  # sandbox regressions
 ```
 
-18 test files and 5 gate scripts, **689 assertions**, none skipped on a machine
-with the full toolchain. Four of the files are regression suites named after the
+20 test files and 5 gate scripts, **752 assertions**, none skipped on a machine
+with the full toolchain. These two numbers are gated by
+`scripts/check_claims.py`: they were written by hand once and were stale within
+three pull requests, which is exactly the failure the rest of that script
+exists to prevent. Four of the files are regression suites named after the
 sweep that produced them — `test_bug_sweep`, `test_executor_sweep`,
 `test_python_sweep`, `test_network_modules` — and each one's docstring states
 the defect it locks out and how it was reproduced, because a regression test
@@ -382,7 +396,7 @@ considered and rejected — why it is not there.
 | `ci-rust` | clippy `-D warnings`; the executor's **JSON contract**, asserted by running the built binary (OK/TLE/OLE/unknown-language) and confirming a canary secret in the executor's own env does not reach executed code; both **static musl** cross-builds, checked with `file` for static linkage; `blocknet.so` built `-Werror`, symbol-checked, and confirmed to actually block an outbound connection |
 | `ci-python` | `ruff` at a genuine zero residual (ruleset and every exception in `pyproject.toml`, each with a reason); calc parity on 3.11 and 3.14; the security suite against the **Rust** backend, with an assertion that the Rust backend is the one under test; MCP stdio round-trip |
 | `ci-security` | `scripts/check_no_eval.py` (the CRITICAL-01 invariant), `scripts/check_parity.py` (the three security constants duplicated in Rust and Python must match), `scripts/check_claims.py` (README counts and licence), `actionlint`, `gitleaks`, `trufflehog`, `osv-scanner`, `cargo-deny`, `cargo-audit`, and `opengrep` on a schedule |
-| `ci-quality` | `typos`, `shellcheck` |
+| `ci-quality` | `typos`. **Not** `shellcheck` — the repo's last shell script was removed with `executor/zig-cc.sh`, so the gate would have matched zero files and reported success for scanning nothing; `actionlint` in `ci-security` shellchecks every embedded `run:` block instead. The workflow says so inline. |
 | `dco` | `Signed-off-by` on every non-merge commit |
 
 Two conventions run through all of them, both borrowed from harder-won experience:

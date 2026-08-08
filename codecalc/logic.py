@@ -268,8 +268,27 @@ def truth_table(expression: str) -> dict:
     }
 
 
+#: Comments and whitespace, which carry no assertions.
+_SMT_NOISE = re.compile(r";[^\n]*|\s+")
+
+
 def z3_check(smt2: str, timeout_ms: int = 5000) -> dict:
-    """Check satisfiability of an SMT-LIB2 script; return sat/unsat/unknown + model."""
+    """Check satisfiability of an SMT-LIB2 script; return sat/unsat/unknown + model.
+
+    An EMPTY script is not a satisfiable one. z3 answers `sat` for a script with
+    no constraints, which is vacuously true and a terrible thing to hand back:
+    empty input, whitespace, a comment, and a script missing `(check-sat)` all
+    returned `{"ok": true, "result": "sat"}`. A caller whose generator produced
+    nothing — or who forgot the check — was told YES. `truth_table` has always
+    rejected an empty expression; this now matches it.
+    """
+    if not _SMT_NOISE.sub("", smt2 or ""):
+        return {"ok": False, "error": "empty SMT-LIB2 script: nothing to check. "
+                                      "An empty script is trivially satisfiable, "
+                                      "which is not an answer to any question."}
+    if "check-sat" not in smt2:
+        return {"ok": False, "error": "script has no (check-sat); z3 would report "
+                                      "the state of an unchecked solver, not a verdict"}
     try:
         import z3
         solver = z3.Solver()
@@ -315,6 +334,18 @@ def solve_linear(system: str, variables: str | list[str]) -> dict:
             else:
                 eqs.append(sp.sympify(raw, evaluate=False))
         sol = sp.solve(eqs, list(syms), dict=True)
-        return {"ok": True, "solutions": [str(s) for s in sol], "count": len(sol)}
+        # A variable the caller ASKED for and the system does not constrain is
+        # dropped by sympy without comment: solve("x+y=10; x-y=2", "x, y, z")
+        # returned {x: 6, y: 4}, count 1, and never mentioned z. Naming the
+        # unsolved ones turns a silently partial answer into a stated one.
+        requested = [str(s) for s in (syms if isinstance(syms, (list, tuple)) else [syms])]
+        solved = {k for s in sol for k in map(str, s)}
+        unsolved = [v for v in requested if v not in solved]
+        out = {"ok": True, "solutions": [str(s) for s in sol], "count": len(sol)}
+        if unsolved and sol:
+            out["unsolved"] = unsolved
+            out["note"] = (f"the system does not determine {', '.join(unsolved)}; "
+                           f"the solution covers the remaining variable(s) only")
+        return out
     except Exception as exc:
         return {"ok": False, "error": str(exc)}

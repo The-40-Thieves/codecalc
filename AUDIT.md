@@ -52,10 +52,25 @@ live host env contained `GITHUB_PERSONAL_ACCESS_TOKEN`, `MODAL_API_KEY`,
 `CEREBRAS_API_KEY`, `LIGHTNING_API_KEY`, `LITELLM_AGENT_KEY`, `SAKANA_API_KEY`,
 `HERMES_SESSION_KEY` — all readable by any executed snippet via `os.environ`.
 
-**Fix:** Strict **env allowlist** in both executors: `PATH, HOME, LANG, LC_ALL,
-TMPDIR, PYTHONUNBUFFERED, JAVA_HOME, CARGO_HOME, RUSTUP_HOME, GOPATH,
-GOMODCACHE` only. Everything else is dropped. Verified: executed code now sees
-no secrets, and PATH/HOME still function for all 31 runtimes.
+**Fix:** Strict **env allowlist** in both executors. Everything not named is
+dropped. Verified: executed code sees no secrets, and PATH/HOME still function
+for all 31 runtimes.
+
+POSIX: `PATH, HOME, LANG, LC_ALL, TMPDIR, PYTHONUNBUFFERED, JAVA_HOME,
+CARGO_HOME, RUSTUP_HOME, GOPATH, GOMODCACHE`.
+
+Windows plumbing, added 2026-08-08: `SystemRoot, SYSTEMROOT, windir, COMSPEC,
+PATHEXT, TEMP, TMP, USERPROFILE, APPDATA, LOCALAPPDATA, NUMBER_OF_PROCESSORS,
+PROCESSOR_ARCHITECTURE`. Without `SystemRoot` a Windows process fails inside
+winsock and crypto initialisation — `node` probed as available and returned
+empty output through the sandbox. These locate the OS and resolve commands;
+`USERPROFILE`/`APPDATA` are the Windows spelling of `HOME`, which this list
+always allowed. One shared list, since a name absent from the environment is
+simply not copied.
+
+**This section said "11 vars only" for a day after the list grew to 23** — a
+security document understating what is permitted. `scripts/check_claims.py` now
+gates the count against the code so it cannot drift again.
 
 ### HIGH-03 — `eval()` on benchmark fit forms
 
@@ -174,14 +189,21 @@ before anything runs).
 
 ## Verified post-fix state
 
+A dated snapshot, not a live claim — the assertion counts move with every
+change and `runtimes_status` reports whatever is installed on the machine that
+ran it. Treat the shape as the claim and run the suite for the numbers;
+`scripts/check_claims.py` gates the ones that belong in a document.
+
 ```
-tests/test_security.py    → ALL SECURITY TESTS PASS (13/13)
+tests/test_security.py    → ALL SECURITY TESTS PASS
 tests/test_smoke.py       → 31 passed, 0 failed (all languages via Rust executor)
 tests/test_features.py    → ALL NEW-FEATURE TESTS PASS (sessions/files/artifacts/packages/verdicts/streaming/compact)
 tests/test_gap4.py        → ITEMS 1-4 ALL PASS (resources, inline images, multi-file, units)
 tests/test_calc_port.py   → ALL 19 PORTED FEATURES PASS (calc skill parity: exact, bitop, float, radix, ...)
 tests/test_mcp_all.py     → 48/48 tools round-trip over stdio + session file resources
-tests/test_runtimes_mcp.py → runtimes_status: 33 languages, 3 updatable, dry-run safe
+tests/test_runtimes_mcp.py → runtimes_status: dry-run safe, summary agrees with
+                             the per-language detail (the counts are whatever
+                             that machine has installed)
 ruff check codecalc/      → 0 non-policy findings
 cargo clippy --release    → 0 warnings
 ```
@@ -352,8 +374,13 @@ Residual-risk items 1-4 from the original audit remain; add:
 
 ## Residual risks (accepted, documented)
 
-1. **No network isolation.** Executed code can reach the network (DNS,
-   outbound HTTP). For a single-operator local tool this is acceptable and
+1. **No network isolation.** `--no-net` exists and blocks `AF_INET`/`AF_INET6`
+   via an `LD_PRELOAD`/`DYLD_INSERT_LIBRARIES` shim, leaving `AF_UNIX` alone —
+   but it is a speed bump, not isolation: it reaches dynamically-linked programs
+   only, macOS strips it for SIP-protected and hardened binaries, and Windows
+   has no equivalent (reported as `no_net_unavailable_on_windows`). Without the
+   flag, executed code reaches the network (DNS, outbound HTTP) freely. For a
+   single-operator local tool this is acceptable and
    arguably desirable; for multi-tenant or internet-facing exposure, the
    executor must move behind a container with `--network=none` or a
    gVisor/Firecracker microVM.
