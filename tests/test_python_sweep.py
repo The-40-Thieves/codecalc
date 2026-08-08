@@ -50,7 +50,33 @@ def skip(name: str, why: str) -> None:
     SKIPS.append(name)
 
 
-WORKER_LANGS = [lang for lang in ("python3", "node") if shutil.which(lang)]
+def _worker_usable(lang: str) -> bool:
+    """Can a stateful worker for `lang` actually complete a call here?
+
+    Presence on PATH is not enough. The node worker does not currently function
+    on Windows — it starts and answers its warm-up, then the first real call
+    finds it gone — so a suite that assumed `shutil.which` was sufficient
+    crashed there rather than reporting a platform limitation.
+    """
+    if not shutil.which(lang):
+        return False
+    started = sessions.start(lang)
+    sid = started.get("session_id")
+    if not started.get("ok") or not sid:
+        return False
+    try:
+        probe = sessions.execute(sid, "1" if lang == "node" else "pass")
+        return bool(probe.get("ok"))
+    except Exception:
+        return False
+    finally:
+        sessions.stop(sid)
+
+
+WORKER_LANGS = [lang for lang in ("python3", "node") if _worker_usable(lang)]
+for _lang in ("python3", "node"):
+    if _lang not in WORKER_LANGS:
+        skip(f"{_lang} worker regressions", "no working stateful worker on this platform")
 
 #: (language, code that spawns a child writing to fd 1 directly)
 FD1_ESCAPE = {

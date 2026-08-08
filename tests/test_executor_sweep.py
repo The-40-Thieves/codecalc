@@ -446,6 +446,21 @@ for lang, tool in TOOLCHAIN.items():
             skip(f"{lang} space/injection regression", f"{tool} would not warm up: {exc}")
             continue
 
+    # BASELINE first. The assertion is "a path with spaces works", which only
+    # means anything if the toolchain works at all in this sandbox. On a cold CI
+    # runner dotnet died at exit 134 doing first-run setup — the executor's env
+    # allowlist means it meets that state fresh however often it is warmed
+    # outside — and the suite reported that as a spaces failure, which it was
+    # not. Now a broken baseline is a SKIP that says so.
+    plain = pathlib.Path(tempfile.mkdtemp(prefix="codecalc-plain-"))
+    base = run_exec(SNIPPET[lang], lang=lang, timeout=420, workdir=str(plain))
+    shutil.rmtree(plain, ignore_errors=True)
+    if not (base.get("ok") and "ok" in (base.get("stdout") or "")):
+        skip(f"{lang} space/injection regression",
+             f"{tool} does not run in the sandbox here: exit={base.get('exit_code')} "
+             f"{str(base.get('stderr'))[:60]!r}")
+        continue
+
     work = pathlib.Path(tempfile.mkdtemp(prefix="codecalc sweep "))   # NOTE the spaces
     r = run_exec(SNIPPET[lang], lang=lang, timeout=420, workdir=str(work))
     check(f"{lang}: a workdir containing spaces works",

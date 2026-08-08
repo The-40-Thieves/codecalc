@@ -366,7 +366,13 @@ class Worker:
                 if line == "":
                     return {"ok": False, "error": "worker closed", "verdict": "RTE"}
                 out = json.loads(line)
-            except (BrokenPipeError, json.JSONDecodeError, ValueError) as exc:
+            except (OSError, json.JSONDecodeError, ValueError) as exc:
+                # OSError, not just BrokenPipeError. Writing to a worker that has
+                # already exited raises EPIPE on POSIX and EINVAL on Windows, and
+                # EINVAL is a plain OSError — so on Windows this escaped run()
+                # entirely and reached the MCP caller as an unhandled exception
+                # instead of the structured {"ok": false} every other failure
+                # path returns. Found the first time these tests ran there.
                 # KILL the worker. Returning an error while leaving the stream
                 # desynced was far worse than the corruption itself: the real
                 # reply stayed queued, so every later call returned the PREVIOUS
