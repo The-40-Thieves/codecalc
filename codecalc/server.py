@@ -1,18 +1,33 @@
-"""FastMCP server exposing codecalc as model-usable tools.
+"""MCP server exposing codecalc as model-usable tools.
+
+Built on the official SDK (`mcp` 2.0), protocol revision **2026-07-28**.
 
 Transport: stdio by default (what LiteLLM / Claude Desktop / any MCP client
 spawns). Run:  python -m codecalc.server
+
+A note on verifying the protocol version, because it is easy to get wrong:
+`mcp.types.LATEST_PROTOCOL_VERSION` reads "2026-07-28" regardless of what any
+given connection negotiates. A client that connects with the OLD
+`ClientSession.initialize()` handshake negotiates **2025-11-25** against this
+same server — 2026-07-28 removed that handshake in favour of a stateless core.
+Only `mcp.Client` (mode "auto" or "2026-07-28") actually gets you the new
+protocol. tests/test_mcp_protocol.py asserts the negotiated value from a real
+connection for exactly that reason.
 """
 
 from __future__ import annotations
 
+import base64
 import json
 import shutil
 from pathlib import Path
 
-from fastmcp import Context, FastMCP
+from mcp.server import CacheHint, MCPServer
+from mcp.server.mcpserver import Context
+from mcp.types import ImageContent
 
 from . import (
+    __version__,
     complexity,
     context7,
     exact,
@@ -27,9 +42,29 @@ from . import (
     translation,
     units,
 )
+from .mcp_middleware import timeout_middleware
 
-mcp = FastMCP(
-    "codecalc",
+mcp = MCPServer(
+    name="codecalc",
+    version=__version__,
+    # ttlMs/cacheScope became REQUIRED on list and read results in 2026-07-28
+    # (SEP-2549). They are a freshness hint that lets a client cache instead of
+    # re-listing; "public" is right here because this server has no per-caller
+    # authorization, so one client's tool list is every client's.
+    #
+    # These are silently dropped on a legacy (2025-11-25) connection — verified:
+    # the same server returns ttl_ms=0/private under the old handshake and
+    # 60000/public under 2026-07-28. Do not read a zero here as "not configured".
+    cache_hints={
+        "tools/list": CacheHint(ttl_ms=60_000, scope="public"),
+        "resources/list": CacheHint(ttl_ms=10_000, scope="public"),
+        "resources/templates/list": CacheHint(ttl_ms=60_000, scope="public"),
+        # resources/read is per-session workspace content and changes as
+        # executed code writes files, so it must not be cached.
+        "resources/read": CacheHint(ttl_ms=0, scope="private"),
+        "server/discover": CacheHint(ttl_ms=60_000, scope="public"),
+    },
+    middleware=[timeout_middleware],
     instructions=(
         "Universal coding & logic calculator. Tools: list_languages (available "
         "runtimes), execute_code (run code in 30+ languages, returns stdout/"
@@ -228,32 +263,32 @@ async def execute_code_stream(
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-@mcp.tool(timeout=20)
+@mcp.tool()
 def evaluate_expression(expression: str) -> dict:
     """Symbolically evaluate or simplify a math expression, e.g. 'integrate(x**2, x)' or 'sqrt(144) + 2**10'."""
     return logic.evaluate_expression(expression)
 
 
-@mcp.tool(timeout=20)
+@mcp.tool()
 def truth_table(expression: str) -> dict:
     """Build the truth table for a boolean expression: 'a and b or not c', 'p xor q', 'a implies b'."""
     return logic.truth_table(expression)
 
 
-@mcp.tool(timeout=30)
+@mcp.tool()
 def z3_check(smt2: str) -> dict:
     """Check an SMT-LIB2 formula with Z3: sat/unsat/unknown plus a model. Example: '(declare-const x Int)(assert (> x 5))(check-sat)'."""
     return logic.z3_check(smt2)
 
 
-@mcp.tool(timeout=20)
+@mcp.tool()
 def solve_linear(system: str, variables: str) -> dict:
     """Solve a system of equations; `system` is ';'-separated equations, `variables` comma-separated. Example: system='x + y = 10; x - y = 2', variables='x, y'."""
     vars_ = [v.strip() for v in variables.split(",") if v.strip()]
     return logic.solve_linear(system, vars_)
 
 
-@mcp.tool(timeout=20)
+@mcp.tool()
 def analyze_complexity(code: str, language: str = "python3") -> dict:
     """Estimate the asymptotic (Big-O) time complexity of a code snippet via structural analysis."""
     return complexity.analyze(code, language)
@@ -305,7 +340,7 @@ def update_runtimes(languages: str = "", apply: bool = False, timeout: int = 600
     return runtimes.update(languages or None, apply=apply, timeout=timeout)
 
 
-@mcp.resource("codecalc://session/{session_id}/files/{path*}",
+@mcp.resource("codecalc://session/{session_id}/files/{+path}",
               name="Session file",
               description="Any file in a codecalc session workspace. Images render inline; text returns as text; other files download.",
               mime_type="application/octet-stream")
@@ -332,7 +367,6 @@ def session_read_file(session_id: str, path: str, max_bytes: int = 65536,
     file is returned as an inline image the model can see. Use session_files
     to discover paths; session_artifacts lists what executed code produced.
     """
-    from fastmcp.utilities.types import Image
     d = sessions._session_dir(session_id)
     if not d.is_dir():
         return {"ok": False, "error": f"unknown session '{session_id}'"}
@@ -347,7 +381,16 @@ def session_read_file(session_id: str, path: str, max_bytes: int = 65536,
     if is_image or as_image:
         if target.stat().st_size > 4 * 1024 * 1024:
             return {"ok": False, "error": "image too large (>4MiB)"}
-        return Image(path=str(target))
+        # fastmcp's Image(path=...) helper has no counterpart in the official
+        # SDK; ImageContent is the protocol type and wants base64 itself.
+        # as_image=True on a non-image file is honoured deliberately: the caller
+        # is asserting it knows the bytes are renderable, so fall back to PNG
+        # rather than refusing.
+        return ImageContent(
+            type="image",
+            data=base64.b64encode(target.read_bytes()).decode("ascii"),
+            mimeType=mime if is_image else "image/png",
+        )
 
     data = target.read_bytes()
     truncated = len(data) > max_bytes
@@ -574,7 +617,7 @@ def simplify_expression(expr: str) -> dict:
     return exact.simplify_expression(expr)
 
 
-@mcp.tool(timeout=120)
+@mcp.tool()
 def translate_code(code: str, source: str, target: str,
                    test_inputs: list[str] | None = None) -> dict:
     """Port `code` from `source` language to `target`, then VERIFY equivalence.
@@ -613,7 +656,7 @@ def context7_docs(library_id: str, query: str, fast: bool = True) -> dict:
     return context7.docs(library_id, query, fast=fast)
 
 
-@mcp.tool(timeout=120)
+@mcp.tool()
 def optimize_code(code: str, language: str,
                   test_inputs: list[str] | None = None,
                   sizes: list[int] | None = None,
@@ -647,7 +690,7 @@ def extract_function(code: str, language: str, function_name: str,
 
 
 def main() -> None:
-    mcp.run()
+    mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":

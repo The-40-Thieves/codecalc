@@ -432,3 +432,67 @@ Residual risk 2 (same-uid sandbox) applies equally on all three platforms, and
 residual risk 1 (no network isolation) is *worse* off Linux: best-effort on
 macOS for the reasons above, and absent entirely on Windows. Neither changes the
 verdict: single-operator, local, stdio-only.
+
+## MCP 2.0 port (2026-07-28 protocol) — security notes
+
+Moved from fastmcp to the official `mcp` SDK 2.0, protocol revision
+**2026-07-28**. fastmcp could not come along: every 3.x release pins
+`mcp>=1.24,<2.0`.
+
+1. **`@mcp.tool(timeout=…)` does not exist on `MCPServer`.** HIGH-05 above
+   records that timeout as the backstop for in-process blowups, so porting
+   without replacing it would have deleted a documented mitigation — the
+   "declared but not enforced" shape this document keeps correcting. It is now
+   `codecalc/mcp_middleware.py`, a `ServerMiddleware` over `tools/call`, with the
+   per-tool deadlines in one table rather than scattered across decorators.
+
+   **It bounds the RESPONSE, not the CPU**, and that distinction is now written
+   down where it was previously glossed. The guarded tools are synchronous and
+   run on a worker thread; a deadline stops us *waiting* for that thread, it
+   cannot interrupt it. The load-bearing bounds remain the input caps (16
+   variables, 2,000 chars) and `z3`'s own `solver.set("timeout", 5000)` — z3 is
+   the only one of the three that actually stops computing.
+
+   It raises `MCPError(-32010, …)` rather than a bare `TimeoutError`: verified
+   that any other exception is flattened by the dispatcher to "Internal server
+   error" with no detail, which a caller cannot tell from a crash. `-32010` sits
+   in the `-32000..-32019` implementation-defined block that 2026-07-28's new
+   error-code allocation policy preserves; `-32020..-32099` is reserved for the
+   specification and must not be squatted on.
+
+2. **The session-file resource template had to change operator.** `{path*}` is
+   rejected outright by the SDK matcher (`Explode modifier … is not supported
+   for matching`) and plain `{path}` will not cross a `/` — so will not match
+   `data/out.csv`. RFC 6570 reserved expansion `{+path}` does, verified against
+   nested paths. Note the spec's own documented example, `file:///{path}`, does
+   not match nested paths either.
+
+3. **The protocol version cannot be verified from the constant.**
+   `mcp.types.LATEST_PROTOCOL_VERSION` reads `2026-07-28` even on a connection
+   that negotiated `2025-11-25`. The same server answers on either protocol
+   depending only on the client: `ClientSession.initialize()` gets the legacy
+   handshake, `Client(mode="auto")` gets the stateless core. This is not
+   cosmetic — `cache_hints` are silently DROPPED on the legacy path (measured:
+   `ttl_ms=0/private` vs `60000/public` from one server). A conformance test
+   written against `ClientSession` would have certified a server while proving
+   the opposite. `tests/test_mcp_protocol.py` asserts the negotiated value.
+
+4. **`ttlMs`/`cacheScope` are now REQUIRED** on `tools/list`, `resources/list`,
+   `resources/read` and `resources/templates/list` (SEP-2549). Configured via
+   `cache_hints`. `resources/read` is pinned to `ttl_ms=0` because it serves
+   session workspace content that executed code mutates; caching it would serve
+   a stale file.
+
+5. **Supply chain shrank.** Dropping fastmcp took the locked dependency set from
+   78 packages to 34. Fewer transitive packages is less to audit and less to be
+   surprised by, on a project whose whole purpose is executing untrusted code.
+
+6. **`fastmcp>=2.0` had no ceiling** and had already carried the project from
+   2.x to 3.4.6 — a major bump nobody chose. All three runtime dependencies are
+   now bounded on both ends. The z3 ceiling was set to `<6` rather than `<5`
+   deliberately: `<5` downgraded a working 5.0.0.0, and a ceiling that causes a
+   downgrade is a regression, not a guard.
+
+No change to the sandbox, the executor, or any tool's behaviour: this is a
+transport and registration change. The tool count, names, arguments and text
+output are identical, verified by the same round-trip suites as before.

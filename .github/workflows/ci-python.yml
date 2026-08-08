@@ -66,7 +66,7 @@ jobs:
           version: '0.12.1'
           python-version: ${{ matrix.python }}
       # --frozen: install exactly what uv.lock pins. Without it uv would re-resolve, and a CI run
-      # that silently upgrades fastmcp is not testing what a user gets.
+      # that silently upgrades the MCP SDK is not testing what a user gets.
       - name: install (locked)
         run: uv sync --frozen
       # Pure-python parity suite: 19 ported calc features against known-good values. No sandbox, no
@@ -89,6 +89,13 @@ jobs:
         run: uv run --no-sync python tests/test_translation_verify.py
       # Session workspace confinement. Also sandbox-free: _jail() is path logic over a tempdir, so
       # the boundary can be checked on any runner rather than only where a session can be started.
+      # The protocol gate. Asserts the NEGOTIATED version from a real connection,
+      # not `mcp.types.LATEST_PROTOCOL_VERSION` — that constant reads
+      # "2026-07-28" even on a connection that negotiated 2025-11-25, so reading
+      # it would be a version string mistaken for a running protocol.
+      - name: MCP protocol conformance (2026-07-28)
+        shell: bash
+        run: uv run --no-sync python tests/test_mcp_protocol.py
       - name: session jail
         shell: bash
         # Path confinement is where platforms differ most: Windows has drive
@@ -149,7 +156,7 @@ jobs:
           echo "backend: $backend"
           [ "$backend" = "rust" ] || { echo "::error::backend is '$backend', expected 'rust' — the suite would be testing the fallback."; exit 1; }
       # The MCP surface is how every consumer reaches this code. A tool that raises on import, or a
-      # schema fastmcp rejects, is invisible to every test above — they all call the functions
+      # schema the SDK rejects, is invisible to every test above — they all call the functions
       # directly. This spawns the real server over stdio and round-trips it.
       - name: MCP stdio round-trip
         shell: bash
@@ -160,7 +167,7 @@ jobs:
           # FLOOR on the TOOL COUNT, not on the absence of the word "error" in the output.
           # tests/test_mcp_all.py has no assertions — it calls tools and prints. It fails only by
           # raising, so "it exited 0" means the transport worked, and nothing more. The count is the
-          # part that can silently shrink: a tool whose type hints fastmcp cannot turn into a schema
+          # part that can silently shrink: a tool whose type hints the SDK cannot turn into a schema
           # is dropped from list_tools at registration, with no error anywhere.
           #
           # Derived from server.py rather than hardcoded, so this tracks scripts/check_claims.py
@@ -173,7 +180,7 @@ jobs:
             exit 1
           fi
           if [ "$served" -ne "$declared" ]; then
-            echo "::error::$declared tools are declared but $served reached the MCP client. A tool failed to register — most likely a type hint fastmcp cannot build a schema from."
+            echo "::error::$declared tools are declared but $served reached the MCP client. A tool failed to register — most likely a type hint the SDK cannot build a schema from."
             exit 1
           fi
           echo "ok: all $served tools round-tripped over stdio"

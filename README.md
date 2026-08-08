@@ -9,7 +9,7 @@ measure complexity — all exposed as MCP tools any AI model or agent can call.
 |---|---|---|
 | Executor core (`executor/`) | **Rust** | Sandbox + rlimits + process-group kill + JSON CLI. No `eval()` anywhere near user input; memory-safe host; single static binary |
 | Logic layer (`codecalc/logic.py`) | **Python** | sympy (symbolic math, equation solving) and z3 (SMT) have no Rust equivalents |
-| MCP server (`codecalc/server.py`) | **Python** | fastmcp auto-generates tool schemas from type hints |
+| MCP server (`codecalc/server.py`) | **Python** | the official `mcp` SDK (2.0) generates tool schemas from type hints; protocol **2026-07-28** |
 
 Python orchestrates; Rust executes; sympy/z3 reason. Each layer does what it's
 best at. The Rust binary is preferred automatically; a pure-Python executor is
@@ -136,6 +136,29 @@ Point an MCP client at it:
                                   "CODECALC_RUNTIME_PATH": "/path/to/mise/shims:/usr/local/bin:/usr/bin:/bin"
                                 } } } }
 ```
+
+## MCP protocol
+
+Protocol revision **2026-07-28**, on the official `mcp` SDK 2.0. Not fastmcp:
+fastmcp 3.x pins `mcp>=1.24,<2.0` and so cannot reach this revision at all.
+
+Verifying that is less obvious than it looks. `mcp.types.LATEST_PROTOCOL_VERSION`
+reads `2026-07-28` regardless of what a given connection negotiated, and the
+*same server* answers on either protocol depending only on how you connect:
+
+| client | negotiated | cache hints |
+|---|---|---|
+| `ClientSession.initialize()` | `2025-11-25` | dropped |
+| `Client(..., mode="auto")` | **`2026-07-28`** | applied |
+
+So `tests/test_mcp_protocol.py` asserts the negotiated value from a real
+connection. The legacy path still works — backward compatibility is a feature —
+it just must not be mistaken for the new protocol.
+
+Worth noting for anyone reading the spec's headline change: 2026-07-28 removes
+protocol-level sessions, and directs servers needing cross-call state to use
+"explicit, server-minted handles passed as ordinary tool arguments". That is
+exactly what codecalc's `session_id` already is.
 
 ## Configuration
 
