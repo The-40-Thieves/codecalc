@@ -87,9 +87,15 @@ check("epoch_time reads ns as the current year",
       f"-> {list(r.get('interpretations') or {})}")
 # ...and must not offer a 1970 reading alongside the real one.
 r = exact.epoch_time(str(ns // 1000))
+# startswith, not `"1970" in v`. The year is the first four characters of an
+# ISO timestamp; a substring search matches the MICROSECONDS too, so
+# `2026-08-08T12:09:47.331970+00:00` counted as a 1970 reading. About one run in
+# a thousand — reproduced at 1 in 4000 samples — which is exactly long enough
+# for the failure to look like an unrelated flake rather than an assertion that
+# checks something other than what it names.
 check("epoch_time suppresses 1970 wrong-unit readings",
-      all("1970" not in v for v in r["interpretations"].values()),
-      f"-> {list(r['interpretations'])}")
+      all(not v.startswith("1970") for v in r["interpretations"].values()),
+      f"-> {r['interpretations']}")
 
 # ═══ NaN is not a measurement, and is not JSON ══════════════════════════════
 r = exact.stats([-1.0, 1.0])          # mean is 0 -> CV undefined
