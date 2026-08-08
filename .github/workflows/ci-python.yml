@@ -183,10 +183,14 @@ jobs:
           uv run --no-sync python tests/test_mcp_all.py | tee /tmp/mcp.out
 
           # FLOOR on the TOOL COUNT, not on the absence of the word "error" in the output.
-          # tests/test_mcp_all.py has no assertions — it calls tools and prints. It fails only by
-          # raising, so "it exited 0" means the transport worked, and nothing more. The count is the
-          # part that can silently shrink: a tool whose type hints the SDK cannot turn into a schema
-          # is dropped from list_tools at registration, with no error anywhere.
+          # tests/test_mcp_all.py now asserts this equality itself, and asserts the ANSWERS its
+          # tools give rather than only printing them — it used to have no assertions at all, so
+          # "it exited 0" meant the transport worked and nothing more. This step is kept as the
+          # outer check: it derives the count independently of the test, so a test that stops
+          # running, stops printing, or is deleted still fails the build rather than passing
+          # vacuously. The count is the part that can silently shrink: a tool whose type hints the
+          # SDK cannot turn into a schema is dropped from list_tools at registration, with no error
+          # anywhere.
           #
           # Derived from server.py rather than hardcoded, so this tracks scripts/check_claims.py
           # instead of becoming a second number to keep in sync.
