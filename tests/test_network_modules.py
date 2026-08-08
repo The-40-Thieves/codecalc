@@ -173,16 +173,39 @@ dsrc = inspect.getsource(context7.discover)
 check('discover() sends "query", the name the API requires',
       '"query": query' in dsrc and '"q": query' not in dsrc)
 
+#: An error that means "we could not reach the service", as opposed to "the
+#: service rejected us". The whole point of the discover() bug was that those
+#: two looked identical; a test that conflates them is flaky rather than wrong,
+#: which is worse — it trains you to ignore it. Observed once as a transient
+#: failure between online() succeeding and the call being made.
+UNREACHABLE = ("timed out", "temporary failure", "name resolution",
+               "connection refused", "connection reset", "unreachable",
+               "ssl", "eof occurred", "502", "503", "504")
+
+
+def transient(err: object) -> bool:
+    return any(s in str(err).lower() for s in UNREACHABLE)
+
+
 if online():
     r = context7.discover("numpy")
-    check("discover() actually returns results", r.get("ok") is True,
-          f"-> {str(r.get('error'))[:80]}")
-    check("  ...and they look like a catalog", "results" in (r.get("results") or {}),
-          f"-> {str(r.get('results'))[:70]}")
+    if not r.get("ok") and transient(r.get("error")):
+        skip("discover() live check", f"context7 unreachable: {str(r.get('error'))[:60]}")
+        r = None
+    else:
+        check("discover() actually returns results", r.get("ok") is True,
+              f"-> {str(r.get('error'))[:80]}")
+    if r is not None:
+        check("  ...and they look like a catalog", "results" in (r.get("results") or {}),
+              f"-> {str(r.get('results'))[:70]}")
     d = context7.docs("/numpy/numpy", "array creation")
-    check("docs() flags a clipped answer",
-          d.get("ok") and d.get("truncated") is True and d.get("content_chars") == context7.MAX_CONTENT_CHARS,
-          f"-> truncated={d.get('truncated')} chars={d.get('content_chars')}")
+    if not d.get("ok") and transient(d.get("error")):
+        skip("docs() live check", f"context7 unreachable: {str(d.get('error'))[:60]}")
+    else:
+        check("docs() flags a clipped answer",
+              d.get("ok") and d.get("truncated") is True
+              and d.get("content_chars") == context7.MAX_CONTENT_CHARS,
+              f"-> truncated={d.get('truncated')} chars={d.get('content_chars')}")
 else:
     skip("live context7 checks", "no network")
 
