@@ -10,11 +10,11 @@ execution from package strings.
 
 THE INSTALL MUST NOT ESCAPE THE WORKSPACE, and this is the part that was
 wrong. python3 used `uv pip install --system`, which ignores cwd entirely and
-targets the interpreter: on this host that resolved to
-/data/tools/mise/installs/python/3.14.6 — the very interpreter the sandbox runs
-untrusted code on. One tool call therefore installed third-party code into
-every future sandboxed run, for every session, permanently, and survived
-session_stop. The docstring claimed workspace scoping the whole time.
+targets the interpreter — on a mise-managed host, the toolchain-managed
+interpreter under the mise installs root, which is the very interpreter the
+sandbox runs untrusted code on. One tool call therefore installed third-party
+code into every future sandboxed run, for every session, permanently, and
+survived session_stop. The docstring claimed workspace scoping the whole time.
 
 `--target <dir>` fixes it and needs no environment plumbing: CPython puts the
 script's own directory on sys.path[0], and executed code runs from the session
@@ -22,8 +22,9 @@ workdir, so a package installed there is importable. Verified both halves — a
 package installed with --target is importable from that directory and is NOT
 visible to the host interpreter.
 
-`ruby` and `r` had the same shape (`gem install` -> the mise gem dir,
-`install.packages` -> /usr/local/lib/R/site-library). Neither can be made
+`ruby` and `r` had the same shape (`gem install` -> the interpreter's global
+gem directory, `install.packages` -> the global R site-library). Neither can be
+made
 importable from a workspace without adding GEM_HOME/R_LIBS to the executor's
 environment allowlist, and that allowlist is the fix for AUDIT.md CRITICAL-02 —
 not something to widen for a convenience feature. They are declined instead,

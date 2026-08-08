@@ -319,8 +319,8 @@ Residual-risk items 1-4 from the original audit remain; add:
 
    **CORRECTION 2026-08-08 — the install did not stay in the sandbox at all.**
    python3 used `uv pip install --system`, which ignores cwd and targets the
-   interpreter: on this host, `/data/tools/mise/installs/python/3.14.6` — the
-   same interpreter the sandbox runs untrusted code on. A single tool call
+   interpreter — on a mise-managed host, the toolchain-managed interpreter,
+   which is the same one the sandbox runs untrusted code on. A single tool call
    installed third-party code into every future sandboxed run, for every
    session, permanently, surviving `session_stop`. Both this document and the
    module docstring claimed workspace scoping throughout.
@@ -331,8 +331,8 @@ Residual-risk items 1-4 from the original audit remain; add:
    `--target` is importable from that directory and is NOT visible to the host
    interpreter.
 
-   `ruby` (`gem install` -> the mise gem dir) and `r` (`install.packages` ->
-   `/usr/local/lib/R/site-library`) had the same shape. Both are now declined
+   `ruby` (`gem install` -> the global gem directory) and `r`
+   (`install.packages` -> the global R site-library) had the same shape. Both are now declined
    with the reason, because scoping either needs `GEM_HOME`/`R_LIBS` in the
    executor's environment allowlist — and that allowlist is the CRITICAL-02
    fix, not something to widen for a convenience feature.

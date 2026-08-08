@@ -1,17 +1,15 @@
 """install_package must not mutate the host toolchain.
 
 The bug: python3 installs used `uv pip install --system`, which ignores cwd and
-targets the interpreter. On the dev host that resolved to
-
-    /data/tools/mise/installs/python/3.14.6
-
-— the same interpreter the sandbox runs untrusted code on. So one tool call
+targets the interpreter — on a mise-managed host, the toolchain-managed
+interpreter, which is the same one the sandbox runs untrusted code on. One tool
+call
 installed third-party code into every future sandboxed run, for every session,
 permanently, and it survived session_stop. The module docstring and AUDIT.md
 both claimed the install went into the session workspace.
 
-`ruby` and `r` had the same shape (`gem install` -> the mise gem dir,
-`install.packages` -> /usr/local/lib/R/site-library) and are now declined,
+`ruby` and `r` had the same shape (`gem install` -> the global gem directory,
+`install.packages` -> the global R site-library) and are now declined,
 because scoping either one needs GEM_HOME/R_LIBS in the executor's environment
 allowlist — and that allowlist is the CRITICAL-02 fix, not something to widen
 for a convenience feature.
