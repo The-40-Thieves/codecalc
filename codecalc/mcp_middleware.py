@@ -47,8 +47,11 @@ TOOL_TIMEOUT_ERROR = -32010
 #: tool name -> response deadline in seconds. Mirrors the fastmcp
 #: `@mcp.tool(timeout=N)` values these tools carried before the port; kept in one
 #: table so a tool cannot quietly lose its deadline by someone editing a
-#: decorator. scripts/check_tool_timeouts.py asserts every name here still
-#: exists as a registered tool.
+#: decorator. tests/test_mcp_protocol.py asserts every name here still exists as
+#: a registered tool — a deadline attached to a renamed or deleted tool is a
+#: deadline that never fires. (This comment used to cite a check_tool_timeouts
+#: gate under scripts/ that has never existed. The assertion was real; the
+#: filename was not.)
 TOOL_TIMEOUTS: dict[str, float] = {
     # in-process sympy / z3 work — AUDIT.md HIGH-05
     "evaluate_expression": 20,

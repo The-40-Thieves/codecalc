@@ -114,12 +114,20 @@ def execute_code(
     """
     timeout = min(timeout, 120)
     if session_id:
-        return sessions.execute(session_id, code, language=language,
-                                stdin=stdin, timeout=timeout)
-    result = executor.execute(language, code, stdin=stdin, timeout=timeout,
-                              max_memory_mb=max_memory_mb,
-                              max_output_kb=max_output_kb,
-                              max_cpu=max_cpu, no_net=no_net)
+        # Every ceiling documented above is forwarded. They used to stop here:
+        # the session branch passed only stdin and timeout, so `no_net=True`
+        # silently reached the network and `max_memory_mb` was ignored. What a
+        # stateful worker genuinely cannot apply now comes back in `unenforced`.
+        result = sessions.execute(session_id, code, language=language,
+                                  stdin=stdin, timeout=timeout,
+                                  max_memory_mb=max_memory_mb,
+                                  max_output_kb=max_output_kb,
+                                  max_cpu=max_cpu, no_net=no_net)
+    else:
+        result = executor.execute(language, code, stdin=stdin, timeout=timeout,
+                                  max_memory_mb=max_memory_mb,
+                                  max_output_kb=max_output_kb,
+                                  max_cpu=max_cpu, no_net=no_net)
     if compact:
         return {"ok": result.get("ok"), "verdict": result.get("verdict"),
                 "stdout": result.get("stdout", ""),
@@ -268,6 +276,10 @@ async def execute_code_stream(
             result = json.loads(stdout_b.decode(errors="replace"))
             if isinstance(result, dict) and "ok" in result:
                 result["streamed_partial"] = partial
+                # The fallback path sets streamed=False; this one set nothing at
+                # all, so `if not result["streamed"]` was true on the path that
+                # DID stream. Both branches now answer the same question.
+                result["streamed"] = True
                 return result
             return {"ok": False,
                     "error": f"executor invalid output: {stderr_b[:200]!r}"}

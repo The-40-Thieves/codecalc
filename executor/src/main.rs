@@ -482,7 +482,23 @@ fn resolve_limits(limits: &Limits) -> ResolvedLimits {
         timeout_secs: limits.timeout,
         cpu_secs: if limits.max_cpu > 0 { limits.max_cpu } else { limits.timeout + CPU_GRACE_SECONDS },
         memory_bytes: if limits.max_memory_mb > 0 { limits.max_memory_mb * 1024 * 1024 } else { AS_LIMIT_BYTES },
-        fsize_bytes: if limits.max_output_kb > 0 { limits.max_output_kb * 1024 } else { FSIZE_LIMIT_BYTES },
+        // FSIZE must stay STRICTLY ABOVE the output cap. Setting it equal to
+        // the cap made overflow undetectable: the child hit EFBIG/SIGXFSZ at
+        // exactly the cap, so `read_capped` never saw a file larger than the
+        // cap, `output_truncated` was never true, and OLE could never fire.
+        // Measured: `print("x"*200000)` gives verdict=OLE at the default cap and
+        // verdict=OK with a 4 MB output silently cut to 8 KiB once the caller
+        // passed --max-output-kb 8. Passing the flag that lowers the cap
+        // disabled the detection of exceeding it.
+        //
+        // Headroom, not the 256 MiB default: FSIZE is still a disk guard, and a
+        // caller asking for a small cap should not thereby be allowed to fill
+        // the workdir.
+        fsize_bytes: if limits.max_output_kb > 0 {
+            (limits.max_output_kb * 1024 * 4).clamp(1024 * 1024, FSIZE_LIMIT_BYTES)
+        } else {
+            FSIZE_LIMIT_BYTES
+        },
         nofile: NFILE_LIMIT,
         max_processes: limits.nproc,
         no_net: limits.no_net,
