@@ -1,8 +1,10 @@
 """Security regression tests: the two confirmed exploits must stay dead,
 plus sandbox guarantees (env isolation, fork-bomb, output caps, var caps)."""
+import json
 import os
 import pathlib
 import re
+import subprocess
 import sys
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -147,11 +149,59 @@ else:
 _measured = executor.current_uid_tasks() is not None
 _limit = executor.nproc_limit()
 _headroom = executor.DEFAULT_PROCESS_HEADROOM
+# ── the process limit, on EVERY platform ──────────────────────────────────
+# The fork probe above is POSIX-only, so the Windows guarantee — a job object's
+# ActiveProcessLimit, a different primitive entirely — went unverified. This
+# probe SPAWNS rather than forks, which is the portable operation, and pins the
+# ceiling low through CODECALC_MAX_PROCESSES so it costs two dozen short-lived
+# processes instead of walking up to a 4096 fallback on a CI runner.
+#
+# The limit has to be platform-appropriate or the probe tests nothing:
+# RLIMIT_NPROC is uid-wide, so an absolute 24 on Linux is below the ambient
+# count and the sandboxed program cannot start at all. Job objects are
+# job-scoped, so 24 there means 24.
+_SPAWN_HEADROOM = 24
+_ambient = executor.current_uid_tasks()
+_spawn_limit = (_ambient + _SPAWN_HEADROOM) if _ambient is not None else _SPAWN_HEADROOM
+
+_SPAWNER = """import subprocess, sys
+kids = []
+try:
+    while len(kids) < 400:
+        kids.append(subprocess.Popen([sys.executable, "-c", "import time; time.sleep(20)"]))
+except Exception:
+    pass
+print("SPAWNED", len(kids), flush=True)
+for k in kids:
+    k.kill()
+"""
+_exe = executor._rust
+if _exe:
+    _p = subprocess.run(
+        [str(_exe), "--lang", "python3", "--timeout", "90"],
+        input=_SPAWNER, capture_output=True, text=True, encoding="utf-8",
+        errors="replace", timeout=240,
+        env={**os.environ, executor.MAX_PROCESSES_ENV: str(_spawn_limit)})
+    try:
+        _d = json.loads(_p.stdout)
+    except json.JSONDecodeError:
+        _d = {}
+    _m2 = re.search(r"SPAWNED (\d+)", _d.get("stdout") or "")
+    _spawned = int(_m2.group(1)) if _m2 else None
+    check("process limit bounds SPAWNED children too (portable probe)",
+          _spawned is not None and _spawned <= _SPAWN_HEADROOM,
+          f"-> {_spawned} children against a headroom of {_SPAWN_HEADROOM} "
+          f"(limit {_spawn_limit}, ambient {_ambient})")
+    check("  ...and the probe actually ran rather than dying early",
+          _spawned is not None and _spawned > 0,
+          f"-> {_spawned!r}; verdict={_d.get('verdict')} stderr={(_d.get('stderr') or '')[:60]!r}")
+else:
+    print("SKIP portable process-limit probe — no native executor built")
+
 # Whatever the limit was, it held.
 if not _POSIX:
-    print("SKIP fork-bomb probe — os.fork() does not exist on Windows; the job "
-          "object's ActiveProcessLimit is the guarantee there and is NOT "
-          "verified by this suite")
+    print("SKIP fork-bomb EAGAIN probe — os.fork() does not exist on Windows; "
+          "the portable spawn probe above covers the guarantee there")
 else:
     check("fork-bomb bounded by the process limit",
           _children is not None and _children <= _limit,

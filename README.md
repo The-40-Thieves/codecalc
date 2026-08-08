@@ -275,6 +275,14 @@ shared cache where libSystem lives — a program's own `connect()` is intercepte
 a system framework opening a connection internally is not. Treat macOS `no_net`
 as a speed bump, never as isolation.
 
+Both are exercised by the suite on every platform. The fork-bomb probe measures
+the EAGAIN boundary precisely but needs `os.fork`, so it is POSIX-only; a second
+probe SPAWNS processes instead, which is the portable operation, and pins the
+ceiling low through `CODECALC_MAX_PROCESSES` so it costs two dozen short-lived
+processes rather than walking up to the fallback. Verified to track the limit
+rather than something incidental: a headroom of 24 bounds it at 22 children and
+a headroom of 300 bounds it at 298.
+
 Windows' `ActiveProcessLimit` is scoped to the **job**, which makes it a
 genuinely better fork-bomb guard than `RLIMIT_NPROC`'s uid-wide budget — the
 failure mode that broke 14 of 31 runtimes on Linux cannot occur there.
@@ -339,6 +347,13 @@ every response carries the id of the request it answers. Both matter: `sys.stdou
 is a Python-level rebind that a subprocess writes straight past, and a corrupted
 stream that is not resynchronised returns every later call the *previous* call's
 result — a well-formed answer to a different question.
+
+The channel differs by platform and the guarantee does not. POSIX hands the
+worker an out-of-band pipe; Windows has neither `pass_fds` nor `preexec_fn`, so
+the worker appends responses to a file whose path arrives in the environment.
+Either way a child spawned with inherited stdio writes to fd 1 and cannot reach
+the protocol. Tests force the file-backed channel on every platform, because an
+unexercised fallback is one that works until it is needed.
 
 ## Language list
 
