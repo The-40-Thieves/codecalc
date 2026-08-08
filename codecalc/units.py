@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 
+import sympy
 from sympy.physics import units as u
 
 #: alias -> (sympy unit expression as string, is_temperature)
@@ -221,6 +222,27 @@ def convert(value: float, from_unit: str, to_unit: str) -> dict:
 
 # ── safe unit-expression parser (no eval; grammar: number|name with * / **) ─
 
+def _is_number(tok: str) -> bool:
+    """Does this token parse as a number?
+
+    Was `tok.replace(".", "", 1).isdigit()`, which rejects the scientific
+    notation the tokenizer explicitly matches — `1e3*meter` tokenised to
+    ['1e3','*','meter'] and then failed with "unknown unit name '1e3'".
+    """
+    try:
+        float(tok)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _is_unit(obj) -> bool:
+    """Is this a sympy quantity/expression usable as a unit?"""
+    if obj is None or isinstance(obj, type) or callable(obj):
+        return False
+    return isinstance(obj, (u.Quantity, sympy.Expr))
+
+
 _TOKEN_RE = re.compile(r"\s*(\d+\.?\d*(?:[eE][+-]?\d+)?|\.\d+(?:[eE][+-]?\d+)?|[A-Za-z_]\w*|\*\*|[/\*])")
 
 
@@ -240,15 +262,23 @@ def _parse_unit(expr: str):
             raise ValueError("unexpected end of unit expression")
         if t == "**":
             raise ValueError("unexpected '**'")
-        if t.replace(".", "", 1).isdigit():
+        if _is_number(t):
             pos += 1
             return float(t)
         if t in _COMPOSITES:
             pos += 1
             return _parse_unit(_COMPOSITES[t])
-        if hasattr(u, t):
+        # `hasattr(u, t)` accepted ANY attribute of sympy.physics.units, so
+        # `convert_to` resolved to a function and `Quantity` to a class. Neither
+        # is exploitable — nothing is called, and the arithmetic then raises —
+        # but the docstring says names resolve to units, so check that they do.
+        cand = getattr(u, t, None)
+        if _is_unit(cand):
             pos += 1
-            return getattr(u, t)
+            return cand
+        if cand is not None:
+            raise ValueError(f"'{t}' is not a unit (it is a "
+                             f"{type(cand).__name__} in sympy.physics.units)")
         raise ValueError(f"unknown unit name '{t}'")
 
     def power():
@@ -257,7 +287,7 @@ def _parse_unit(expr: str):
         if peek() == "**":
             pos += 1
             exp_t = peek()
-            if exp_t is None or not exp_t.replace(".", "", 1).isdigit():
+            if exp_t is None or not _is_number(exp_t):
                 raise ValueError("bad exponent")
             pos += 1
             return base ** float(exp_t)
@@ -279,28 +309,70 @@ def _parse_unit(expr: str):
     return result
 
 
+#: Symbols whose meaning depends on CASE, matched before folding. G and g are
+#: different constants — 6.674e-11 m^3/kg/s^2 versus 9.81 m/s^2 — and the README
+#: lists both, so folding case first would have silently answered one for the
+#: other. Same for K (kelvin-ish) vs k_B if that is ever added.
+_CASE_SENSITIVE_ALIASES: dict[str, str] = {
+    "G": "gravitational_constant",
+    "g": "gravity",
+}
+
+#: Standard symbols -> the full key they name. The README advertises
+#: `physical_constants` as taking "c, h, N_A, k_B, G, g, m_e, R" and NOT ONE of
+#: those resolved: the table is keyed on full names like `speed_of_light`, so
+#: every symbol in the documentation returned "unknown constant".
+_CONSTANT_ALIASES: dict[str, str] = {
+    "c": "speed_of_light", "h": "planck", "hbar": "hbar",
+    "n_a": "avogadro", "na": "avogadro", "l": "avogadro",
+    "k_b": "boltzmann", "kb": "boltzmann", "k": "boltzmann",
+    "grav": "gravitational_constant",
+    "m_e": "electron_mass", "me": "electron_mass",
+    "m_p": "proton_mass", "mp": "proton_mass",
+    "m_n": "neutron_mass", "mn": "neutron_mass",
+    "r": "gas_constant",
+    "e": "elementary_charge", "q_e": "elementary_charge",
+    "ev": "electron_volt", "f": "faraday",
+    "sigma": "stefan_boltzmann", "a_0": "bohr_radius", "a0": "bohr_radius",
+    "au": "astronomical_unit", "ly": "lightyear", "pc": "parsec",
+}
+
+
 def constants(name: str | None = None) -> dict:
     """Look up physical constants by name (or list all)."""
     if not name:
         return {"ok": True, "constants": [
             {"name": k, "value": v[1]} for k, v in sorted(_CONSTANTS.items())]}
-    key = name.strip().lower()
+    raw = name.strip()
+    # Case-sensitive first: G and g name different constants.
+    key = _CASE_SENSITIVE_ALIASES.get(raw)
+    if key is None:
+        key = _CONSTANT_ALIASES.get(raw.lower(), raw.lower())
     entry = _CONSTANTS.get(key)
     if entry is None:
         close = [k for k in _CONSTANTS if key in k]
         return {"ok": False, "error": f"unknown constant '{name}'",
                 "suggestions": close[:5]}
     sym, desc, target, fallback = entry
-    val = fallback
+    # AUDIT.md says "sympy values where resolvable, with explicit hardcoded
+    # fallbacks where sympy lacks conversion factors". The code did the
+    # opposite: the fallback won whenever one existed, so sympy was consulted
+    # only for constants that had none. Try sympy first, and say which was used.
+    val, source = None, None
+    try:
+        expr = _parse_unit(sym)
+        tgt = _parse_unit(target)
+        val = float(u.convert_to(expr, tgt).evalf(12) / tgt.evalf(12))
+        source = "sympy"
+    except Exception:
+        val = None
     if val is None:
-        try:
-            expr = _parse_unit(sym)
-            tgt = _parse_unit(target)
-            val = float(u.convert_to(expr, tgt).evalf(12) / tgt.evalf(12))
-        except Exception:
-            val = None
-    return {"ok": True, "name": key, "description": desc,
-            "value": val, "symbol": sym}
+        val, source = fallback, "hardcoded (CODATA)" if fallback is not None else None
+    out = {"ok": True, "name": key, "description": desc,
+           "value": val, "symbol": sym, "source": source}
+    if key != raw.lower():
+        out["resolved_from"] = raw
+    return out
 
 
 def _si_of(expr):

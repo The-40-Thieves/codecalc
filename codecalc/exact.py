@@ -29,6 +29,19 @@ _FUNCS = {k: getattr(math, k) for k in dir(math)
           if not k.startswith("_") and callable(getattr(math, k))}
 _FUNCS.update({"abs": abs, "min": min, "max": max, "round": round,
                "int": int, "float": float})
+
+#: Functions that are EXACT over rationals and must never see a float.
+#: math.* has to go through float — that is inherent — but these do not, and
+#: routing them through float silently destroyed exactness in the one module
+#: whose entire purpose is exactness: abs(-1/3) returned
+#: 3333333333333333/10000000000000000. Worse, the loss was data-dependent:
+#: max(1/3, 1/2) came back as exactly 1/2 because 1/2 is binary-representable,
+#: so the bug looked absent about half the time.
+_EXACT_FUNCS = {"abs", "min", "max", "int"}
+#: pi/e/tau are IRRATIONAL — no Fraction is equal to them. These are the exact
+#: rational value of the binary64 approximation, which is the best a rational
+#: evaluator can do, but a result computed from one is not exact and must not be
+#: labelled as such. `_uses_approx_const` tracks that so eval_exact can report it.
 _CONSTS = {"pi": Fraction(math.pi), "e": Fraction(math.e),
            "tau": Fraction(math.tau)}
 
@@ -68,6 +81,15 @@ def _int_op(a: Fraction, b: Fraction, op: str) -> Fraction:
                      "&": ai & bi, "|": ai | bi, "^": ai ^ bi}[op])
 
 
+#: Names consulted during the current eval_exact() call, reset per call.
+_APPROX_CONSTS_USED: list[str] = []
+#: math.* functions called during this eval. They must go through float — there
+#: is no exact rational sqrt — so a NON-INTEGER result from one is an
+#: approximation however exactly the Fraction prints. sqrt(144) -> 12 is still
+#: the true answer; sqrt(2) -> 1414.../1000... is not.
+_FLOAT_FUNCS_USED: list[str] = []
+
+
 def _ev(node):
     """Walk a closed set of AST nodes; anything else is refused."""
     if isinstance(node, ast.Expression):
@@ -78,6 +100,7 @@ def _ev(node):
         return Fraction(str(node.value))
     if isinstance(node, ast.Name):
         if node.id in _CONSTS:
+            _APPROX_CONSTS_USED.append(node.id)
             return _CONSTS[node.id]
         raise ValueError(f"unknown name {node.id!r}")
     if isinstance(node, ast.UnaryOp):
@@ -107,6 +130,10 @@ def _ev(node):
         fn = _FUNCS[node.func.id]
         if node.func.id == "round" and len(args) == 2:
             return Fraction(round(args[0] * 10 ** args[1]) / 10 ** args[1])
+        if node.func.id in _EXACT_FUNCS:
+            # Fraction supports these directly; keep the exact value.
+            return Fraction(fn(*args))
+        _FLOAT_FUNCS_USED.append(node.func.id)
         try:
             result = fn(*[float(a) for a in args])
         except (TypeError, ValueError, OverflowError):
@@ -137,10 +164,14 @@ def eval_exact(expr: str) -> dict:
         tree = ast.parse(expr, mode="eval")
     except SyntaxError as exc:
         return {"ok": False, "error": f"parse error: {exc.msg}"}
+    _APPROX_CONSTS_USED.clear()
+    _FLOAT_FUNCS_USED.clear()
     try:
         result = _ev(tree)
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
+    approx_consts = sorted(set(_APPROX_CONSTS_USED))
+    float_funcs = sorted(set(_FLOAT_FUNCS_USED))
 
     if isinstance(result, bool):
         return {"ok": True, "value": result, "type": "bool"}
@@ -148,8 +179,30 @@ def eval_exact(expr: str) -> dict:
         d = Decimal(result.numerator) / Decimal(result.denominator)
         approx = f"{d:.12f}".rstrip("0").rstrip(".")
         exact = str(result) if result.denominator != 1 else str(result.numerator)
-        return {"ok": True, "value": exact, "approx": approx,
-                "exact": exact != approx, "type": "rational"}
+        out = {"ok": True, "value": exact, "approx": approx,
+               # `exact` previously meant "the exact form differs from the
+               # 12-dp decimal", which is a different claim from the one the
+               # name makes. It now means what it says: is this value the true
+               # answer? An expression touching pi/e/tau is not, because those
+               # are irrational and were substituted with the rational value of
+               # their binary64 approximation.
+               # A float-path function that produced a non-integer gives a
+               # rational that merely PRINTS exactly. Integer results (sqrt(144))
+               # are still the true answer, so they stay exact.
+               "exact": not approx_consts and not (float_funcs and result.denominator != 1),
+               "differs_from_decimal": exact != approx,
+               "type": "rational"}
+        if float_funcs and result.denominator != 1:
+            out.setdefault("approximated", []).extend(float_funcs)
+            out["note"] = (f"{', '.join(float_funcs)} has no exact rational form; "
+                           "the value shown is the exact rational of a binary64 "
+                           "approximation, so this result is NOT exact")
+        if approx_consts:
+            out.setdefault("approximated", []).extend(approx_consts)
+            out["note"] = (f"{', '.join(approx_consts)} is irrational; the value "
+                           "used is the exact rational form of its binary64 "
+                           "approximation, so this result is NOT exact")
+        return out
     return {"ok": True, "value": str(result), "type": type(result).__name__}
 
 
@@ -210,12 +263,21 @@ def stats(nums: list[float]) -> dict:
     vals = [float(n) for n in nums]
     mean = statistics.fmean(vals)
     stdev = statistics.stdev(vals) if len(vals) > 1 else 0.0
-    cv = stdev / mean if mean else float("nan")
+    # CV is undefined when the mean is 0. It used to be float("nan"), which is
+    # (a) not valid JSON — json.dumps emits a bare NaN that strict parsers
+    # reject — and (b) silently classified as fine, because `nan > 0.2` is
+    # False, so the note read "within noise budget" for a number that does not
+    # exist. None serialises as null and says what it means.
+    cv = stdev / mean if mean else None
+    if cv is None:
+        note = "CV undefined: the mean is 0, so relative variation has no meaning"
+    elif cv > 0.2:
+        note = "run-to-run noise swamps the effect (CV > 0.2)"
+    else:
+        note = "within noise budget"
     return {"ok": True, "n": len(vals), "mean": mean,
             "median": statistics.median(vals),
-            "stdev": stdev, "cv": cv,
-            "cv_note": ("run-to-run noise swamps the effect (CV > 0.2)"
-                        if cv > 0.2 else "within noise budget")}
+            "stdev": stdev, "cv": cv, "cv_note": note}
 
 
 def percentiles(nums: list[float]) -> dict:
@@ -288,13 +350,23 @@ def epoch_time(n: str) -> dict:
         return {"ok": False, "error": "epoch must be an integer"}
     if v < 0:
         return {"ok": False, "error": "negative epoch"}
-    if v > 10 ** 17:  # too big for any sane unit
+    # 10**17 was below a real nanosecond timestamp (now ~1.8e18), so the
+    # advertised ns support was unreachable: every ns value was rejected as
+    # "implausibly large". The true ceiling is the largest value that is
+    # plausible in the COARSEST unit still accepted — nanoseconds — which is
+    # ~3e20 for the year 11000. Anything beyond that is not a timestamp.
+    if v > 10 ** 21:
         return {"ok": False, "error": "implausibly large epoch"}
     results = {}
     for name, unit in (("seconds", 10 ** 0), ("millis", 10 ** 3),
                        ("micros", 10 ** 6), ("nanos", 10 ** 9)):
         secs = v / unit
-        if 0 <= secs <= 10 ** 10:  # plausible year range ~ 1970..2286
+        # Lower bound raised off zero: interpreting a microsecond timestamp as
+        # nanoseconds put it in 1970, and that 1970 reading was reported
+        # alongside the real one. "Implausible readings suppressed" has to mean
+        # both ends. 10**8 ~ 1973-03; anything earlier is a unit mismatch, not a
+        # date someone meant.
+        if 10 ** 8 <= secs <= 10 ** 10:  # plausible range ~1973..2286
             try:
                 results[name] = datetime.fromtimestamp(secs, tz=UTC).isoformat()
             except (OverflowError, OSError, ValueError):
@@ -453,11 +525,20 @@ def float_repr(x: float) -> dict:
         value = -value
     # ULP: distance to next representable
     next_bits = bits + 1 if not (sign and bits) else bits - 1
-    next_val = struct.unpack(">d", struct.pack(">Q", next_bits))[0]
+    next_val = struct.unpack(">d", struct.pack(">Q", next_bits & 0xFFFFFFFFFFFFFFFF))[0]
     ulp = abs(next_val - x)
-    # neighbours
-    prev_bits = bits - 1 if not sign else bits + 1
-    prev_val = struct.unpack(">d", struct.pack(">Q", prev_bits))[0]
+    # neighbours. Clamped: for +0.0 the bit pattern is 0 and `bits - 1` is -1,
+    # which struct.pack(">Q") rejects — float_repr(0.0) raised struct.error, and
+    # zero is the likeliest input to a float-inspection tool. The neighbour below
+    # +0.0 is -0.0 (bit pattern 1 << 63), and above the largest finite value
+    # there is only an infinity, so both ends are named rather than computed.
+    if not sign and bits == 0:            # +0.0
+        prev_val = -0.0
+    elif sign and bits == (1 << 63):      # -0.0
+        prev_val = struct.unpack(">d", struct.pack(">Q", 1))[0]
+    else:
+        prev_bits = bits - 1 if not sign else bits + 1
+        prev_val = struct.unpack(">d", struct.pack(">Q", prev_bits & 0xFFFFFFFFFFFFFFFF))[0]
     # is the literal representable? (compare exact rational of literal vs stored)
     exact = (Decimal(str(x)) == Decimal(value.numerator) / Decimal(value.denominator))
     d = Decimal(value.numerator) / Decimal(value.denominator)
@@ -485,11 +566,19 @@ def int_widths(n: int) -> dict:
         uhi = 2 ** w - 1
         if lo <= n <= hi:
             fits.append(f"i{w}")
-        elif n <= uhi:
+            if n >= 0:
+                fits.append(f"u{w}")
+        elif 0 <= n <= uhi:
+            # Fits unsigned only. The `n >= 0` guard is the fix: the test used
+            # to be `n <= uhi`, which is true for EVERY negative number, so
+            # int_widths(-200) claimed u8 and int_widths(-2**70) claimed
+            # u8/u16/u32/u64. A negative value fits no unsigned width at all.
             fits.append(f"u{w}")
             wraps.append(f"i{w}: wraps to {n - 2 ** w}")
+        elif n < lo:
+            wraps.append(f"i{w}/u{w}: too negative (below {lo})")
         else:
-            wraps.append(f"i{w}/u{w}: out of range")
+            wraps.append(f"i{w}/u{w}: too large (above {uhi})")
     out["fits"] = fits
     out["wraps"] = wraps
     out["note"] = (">2^53 cannot round-trip through a JS number or JSON float"

@@ -108,6 +108,12 @@ jobs:
       - name: package install isolation
         shell: bash
         run: uv run --no-sync python tests/test_package_isolation.py
+      # Regressions from the 2026-08-08 bug sweep: lost exactness, wrong widths,
+      # crashes on ordinary inputs, a dead ns path, and documented constant
+      # names that resolved to nothing.
+      - name: bug-sweep regressions
+        shell: bash
+        run: uv run --no-sync python tests/test_bug_sweep.py
       - name: session jail
         shell: bash
         # Path confinement is where platforms differ most: Windows has drive

@@ -198,6 +198,20 @@ async def execute_code_stream(
     import tempfile
 
     timeout = min(timeout, 300)
+
+    # Every other tool falls back to the pure-Python executor when the Rust
+    # binary is absent — a configuration the README explicitly supports. This
+    # one used executor._rust directly, so argv[0] was None and it raised
+    # TypeError. Streaming needs the binary (it tails run.out in a --workdir),
+    # so fall back to a single non-streaming run rather than failing.
+    if executor._rust is None:
+        result = executor.execute(language, code, stdin=stdin, timeout=timeout,
+                                  max_output_kb=max_output_kb, no_net=no_net)
+        result["streamed"] = False
+        result["note"] = ("no native executor binary; ran without streaming. "
+                          "Build it (cargo build --release) for progress updates.")
+        return result
+
     workdir = Path(tempfile.mkdtemp(prefix="codecalc-stream-"))
     try:
         # run the Rust executor directly with --workdir so run.out grows live

@@ -63,11 +63,22 @@ def _speedup(before: dict, after: dict) -> dict:
     a = after.get("durations_ms") or []
     if not b or not a or len(b) != len(a):
         return {"ratio": None, "measurable": False, "reason": "no comparable timings"}
-    pairs = [(bb, aa) for bb, aa in zip(b, a) if bb and bb > 1.0 and aa is not None]
-    if not pairs:
+    # Carry the SIZE through the filter. per_size used to zip before["sizes"]
+    # against the filtered pair list, so dropping any entry shifted every row:
+    # a measurement taken at n=200 was reported as n=100.
+    #
+    # `aa > 0.0`, not `aa is not None`: a 0ms optimized run is reachable
+    # (durations can be 0) and `bb / 0` raised ZeroDivisionError straight out of
+    # the tool as an unhandled exception.
+    sizes = before.get("sizes") or list(range(len(b)))
+    triples = [(n, bb, aa) for n, bb, aa in zip(sizes, b, a)
+               if bb is not None and bb > 1.0 and aa is not None and aa > 0.0]
+    if not triples:
         return {"ratio": None, "measurable": False,
-                "reason": "baseline below noise floor (all runs < 1ms)"}
-    ratios = [bb / aa for bb, aa in pairs]
+                "reason": "no size where both runs were measurable "
+                          "(baseline below the 1ms noise floor, or the optimized "
+                          "run measured 0ms)"}
+    ratios = [bb / aa for _n, bb, aa in triples]
     import statistics
     median = statistics.median(ratios)
     return {
@@ -75,7 +86,7 @@ def _speedup(before: dict, after: dict) -> dict:
         "measurable": True,
         "per_size": [{"n": n, "before_ms": bb, "after_ms": aa,
                       "ratio": round(bb / aa, 2)}
-                     for n, (bb, aa) in zip(before["sizes"], pairs)],
+                     for n, bb, aa in triples],
     }
 
 

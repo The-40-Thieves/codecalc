@@ -28,11 +28,23 @@ def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 
             "duration_ms": r.get("duration_ms"),
             "timed_out": r.get("timed_out", False),
         })
+    # `fastest` must mean the fastest run that WORKED. It used to be the minimum
+    # duration over all results, so a language that failed instantly won: perl
+    # dying in 25ms beat a working python3 at 344ms, and the tool's headline
+    # field named a program that never ran.
+    #
+    # `x["duration_ms"] or 1e12` was a second bug in the same line — a genuine
+    # 0ms run is falsy, so the fastest possible result was treated as the
+    # slowest. Compare against None explicitly.
+    ok_runs = [r for r in results if r["ok"] and r["duration_ms"] is not None]
+    fastest = min(ok_runs, key=lambda x: x["duration_ms"])["language"] if ok_runs else None
     return {
         "ok": True,
         "count": len(results),
+        "succeeded": len(ok_runs),
         "results": results,
-        "fastest": min(results, key=lambda x: x["duration_ms"] or 1e12)["language"] if results else None,
+        "fastest": fastest,
+        "fastest_note": None if ok_runs else "no language ran successfully",
     }
 
 
@@ -104,13 +116,29 @@ def _measure(language: str, code: str, sizes: list[int], timeout: int, repeats: 
     for n in sizes:
         durations = []
         last = None
+        timed_out = False
         for _ in range(repeats):
             r = executor.execute(language, code, stdin=f"{n}\n", timeout=timeout)
             last = r
-            if not r.get("ok") and not r.get("timed_out"):
+            if r.get("timed_out"):
+                # A timeout is NOT a timing. The old guard was
+                # `if not ok and not timed_out: break`, so a timed-out run fell
+                # through and its duration — the timeout wall clock — was
+                # appended as data. The curve fit was then computed against the
+                # timeout value and reported as a complexity class.
+                timed_out = True
                 break
-            durations.append(r.get("duration_ms") or 0)
-        if last is not None and not last.get("ok") and not last.get("timed_out"):
+            if not r.get("ok"):
+                break
+            d = r.get("duration_ms")
+            if d is not None:
+                durations.append(d)
+        if timed_out:
+            return runs, {"ok": False,
+                          "error": f"program timed out at n={n} ({timeout}s); "
+                                   "no growth estimate is possible from a timeout",
+                          "detail": last}
+        if last is not None and not last.get("ok"):
             return runs, {"ok": False, "error": f"program failed at n={n}", "detail": last}
         runs.append({
             "n": n,
@@ -151,7 +179,9 @@ def benchmark(code: str, language: str = "python3", sizes: str = "100,1000,10000
     # auto-scale: work too small to measure? grow sizes and re-measure.
     # Scale until the spread (work signal) clears the subprocess-noise floor
     # (~280ms interpreter boot + scheduler jitter) or we hit the size cap.
-    measured = [r["duration_ms"] for r in runs if r.get("duration_ms")]
+    # `is not None`, not truthiness: a 0ms duration is a real measurement and
+    # was being dropped from every one of these filters.
+    measured = [r["duration_ms"] for r in runs if r.get("duration_ms") is not None]
     scale_steps = 0
     while measured and (max(measured) - min(measured)) < 50.0 and scale_steps < 5:
         if max(size_list) >= 100_000_000:
@@ -161,10 +191,10 @@ def benchmark(code: str, language: str = "python3", sizes: str = "100,1000,10000
         if error:
             error["runs"] = runs
             return error
-        measured = [r["duration_ms"] for r in runs if r.get("duration_ms")]
+        measured = [r["duration_ms"] for r in runs if r.get("duration_ms") is not None]
         scale_steps += 1
 
-    valid = [r for r in runs if r.get("duration_ms")]
+    valid = [r for r in runs if r.get("duration_ms") is not None]
     if len(valid) < 3:
         return {"ok": False, "error": "too few successful runs (timeouts or failures)", "runs": runs}
 
