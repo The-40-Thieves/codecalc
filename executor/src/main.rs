@@ -285,6 +285,52 @@ fn probe() -> serde_json::Value {
     serde_json::Value::Object(out)
 }
 
+/// Identity (device, inode) of a directory, on platforms that have one.
+///
+/// The cleanup guard used to key on how the pathname ORIGINATED — "we created
+/// it, so we may delete it". That is a claim about the past, and the executed
+/// program can invalidate it: it runs with the workdir as its cwd, so
+///
+///     os.rename(work, work + ".held")          # move ours aside
+///     os.rename("/tmp/something-i-want-gone", work)   # put a victim there
+///
+/// leaves `remove_dir_all(&work)` deleting a directory the executor never made.
+/// Recording the identity at creation and re-checking it at deletion keys on
+/// what the path IS at the moment of the delete instead.
+#[cfg(unix)]
+fn dir_identity(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    // symlink_metadata, not metadata: a symlink swapped in must not be followed
+    // to the directory it points at.
+    let md = fs::symlink_metadata(path).ok()?;
+    if !md.is_dir() {
+        return None;
+    }
+    Some((md.dev(), md.ino()))
+}
+
+#[cfg(not(unix))]
+fn dir_identity(path: &Path) -> Option<(u64, u64)> {
+    // Windows has no cheap stable (dev, ino) without opening a handle. The
+    // rename swap needs the sandboxed program to hold the directory open, which
+    // Windows makes much harder; recorded as a gap rather than faked.
+    let _ = path;
+    None
+}
+
+/// Delete a workdir the executor created, refusing if it is no longer the same
+/// directory that was created.
+fn remove_own_workdir(work: &Path, created: Option<(u64, u64)>) {
+    if created.is_some() && dir_identity(work) != created {
+        eprintln!(
+            "codecalc-exec: refusing to delete {} — it is not the directory this run created",
+            work.display()
+        );
+        return;
+    }
+    let _ = fs::remove_dir_all(work);
+}
+
 fn substitute(template: &str, file: &str, exe: &str, work: &str) -> String {
     template
         .replace("{file}", file)
@@ -545,6 +591,11 @@ fn execute(lang_name: &str, code: &str, stdin_data: &str, limits: &Limits, workd
         }
     };
 
+    // Recorded BEFORE anything runs in the directory, so cleanup compares
+    // against the directory as CREATED rather than as the program left it.
+    // None for a caller-supplied --workdir, which is never deleted anyway.
+    let created_identity = if workdir.is_none() { dir_identity(&work) } else { None };
+
     let file = work.join(format!("main.{ext}", ext = lang.ext));
     // Windows needs the .exe extension for the compiled artifact; CreateProcess
     // will not treat an extensionless PE as executable the way exec() does.
@@ -558,7 +609,7 @@ fn execute(lang_name: &str, code: &str, stdin_data: &str, limits: &Limits, workd
         // makes the next write fail, and the next execute_code wiped the
         // session. Verified end to end before the fix.
         if workdir.is_none() {
-            let _ = fs::remove_dir_all(&work);
+            remove_own_workdir(&work, created_identity);
         }
         return json!({
             "ok": false,
@@ -592,7 +643,7 @@ fn execute(lang_name: &str, code: &str, stdin_data: &str, limits: &Limits, workd
                 "unenforced": sr.unenforced,
             });
             if workdir.is_none() {
-                let _ = fs::remove_dir_all(&work);
+                remove_own_workdir(&work, created_identity);
             }
             return result;
         }
@@ -640,7 +691,7 @@ fn execute(lang_name: &str, code: &str, stdin_data: &str, limits: &Limits, workd
         "workdir": work_s,
     });
     if workdir.is_none() {
-        let _ = fs::remove_dir_all(&work);
+        remove_own_workdir(&work, created_identity);
     }
     result
 }

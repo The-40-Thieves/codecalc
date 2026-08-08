@@ -1,14 +1,25 @@
 """Regressions for the executor sweep (Rust + C + shell) of 2026-08-08.
 
-Seven defects, all reproduced on this box before being fixed. They share the
-shape that has run through this whole codebase: a guard, a limit or a number
-that was measuring something other than what it named.
+Ten defects, all reproduced on this box before being fixed. They share the shape
+that has run through this whole codebase: a guard, a limit or a number that was
+measuring something other than what it named.
+
+Three of them came from a cross-vendor review of the first eight fixes, and two
+of those were defects in the FIXES rather than in the original code — a signal
+race the process-group kill opened, and a cleanup guard that keyed on where a
+pathname came from instead of what it currently points at.
 
 The shell-injection block is deliberately BOTH static and dynamic. The dynamic
 half needs dotnet/gleam/nix and is skipped where they are absent — which is most
 CI runners, so a dynamic-only test would be a gate that silently scans nothing.
-The static half needs no toolchain and states the actual invariant, so it also
-covers languages nobody has added yet.
+
+The static half is stated over the ARGV and applied to BOTH language tables, so
+it covers languages nobody has added yet. The first version did not: it keyed on
+the argument following `-c`/`-e`/`--run` (so `bash -lc` walked past it) and named
+three languages by hand on the Rust side. It asserted three instances while its
+comment claimed a class. The Rust table is now parsed and required to be
+identical to the Python one, with a floor on the parse: recovering fewer
+languages than the registry defines is a failure, not a quiet skip.
 """
 
 from __future__ import annotations
@@ -147,6 +158,53 @@ if EXE.exists() and os.name != "nt":
 else:
     skip("orphan-reaping regression", "needs a POSIX host and a built binary")
 
+# The handler is installed before spawn(), but the pgid cannot be published
+# until spawn() returns a pid. A SIGTERM arriving in that window found pgid == 0,
+# killed nothing and exited — leaving exactly the descendants this is meant to
+# reap. Blocking the signals across spawn+publish leaves it PENDING instead.
+if unix.exists():
+    check("termination signals are blocked across spawn and pgid publication",
+          "block_term_signals" in u and "pthread_sigmask" in u)
+    check("the handler uses kill(), which POSIX lists as async-signal-safe",
+          "kill(-pgid" in u, "-> killpg() is not on that list")
+    check("the pgid is cleared on the wait4 error path too",
+          u.count("CHILD_PGID.store(0") >= 2,
+          f"-> {u.count('CHILD_PGID.store(0')} clearing stores; a stale pgid can be reused")
+
+# The block must not reach the sandboxed program: the signal mask survives
+# execve, so a child inheriting it would ignore the very signal used to stop it.
+if EXE.exists() and os.name != "nt":
+    r = run_exec("import signal\n"
+                 "blocked = signal.pthread_sigmask(signal.SIG_BLOCK, [])\n"
+                 "names = sorted(s.name for s in blocked)\n"
+                 "print('BLOCKED', names)\n")
+    out = r.get("stdout", "")
+    check("the sandboxed child does NOT inherit a blocked SIGTERM",
+          "SIGTERM" not in out and "BLOCKED" in out, f"-> {out.strip()[:90]}")
+
+# ═══ 3b. cleanup keys on WHAT the path is, not where it came from ══════════
+# The guard was "we created this path, so we may delete it" — a claim about the
+# past that the executed program can invalidate, since it runs with the workdir
+# as its cwd:
+#     os.rename(work, work + ".held")            # move ours aside
+#     os.rename("/tmp/victim", work)             # put someone else's there
+# Cleanup then deleted a directory the executor never made. It now compares
+# (device, inode) recorded at creation and refuses when they differ.
+if EXE.exists() and os.name != "nt":
+    victim = pathlib.Path(tempfile.mkdtemp(prefix="codecalc-victim-"))
+    (victim / "important.txt").write_text("caller data")
+    r = run_exec("import os\n"
+                 "work = os.getcwd()\n"
+                 f"os.rename(work, work + '.held')\n"
+                 f"os.rename({str(victim)!r}, work)\n"
+                 "print('swapped')\n")
+    swapped_to = pathlib.Path(r.get("workdir", "/nonexistent"))
+    check("a directory swapped in by rename is NOT deleted",
+          (swapped_to / "important.txt").is_file(),
+          f"-> {swapped_to} {'holds the data' if swapped_to.exists() else 'DELETED'}")
+    for leftover in (swapped_to, pathlib.Path(str(swapped_to) + ".held"), victim):
+        shutil.rmtree(leftover, ignore_errors=True)
+
 # ═══ 4/5. the timeout is a total budget, and duration is the RUN ════════════
 # Compile and run each got the FULL timeout, so `--timeout 10` could take 20s.
 # And duration_ms included compile time, which made every compiled language look
@@ -234,16 +292,40 @@ elif os.name != "nt":
 # pastes a placeholder into a `bash -c` script fails here, with no toolchain
 # needed to catch it.
 PLACEHOLDER = re.compile(r"\{(file|exe|work)\}")
-for lang, entry in registry.LANGUAGES.items():
-    for phase in ("compile", "run"):
-        argv = entry.get(phase)
-        if not argv:
-            continue
-        for i, arg in enumerate(argv):
-            # The argument AFTER `-c`/`-e`/`--run` is a script a shell parses.
-            if i and argv[i - 1] in ("-c", "-e", "--run", "-command"):
-                check(f"{lang}.{phase}: no path pasted into the shell script",
+
+#: argv[0] values that make every later element shell SYNTAX rather than data.
+SHELLS = {"bash", "sh", "zsh", "dash", "ksh", "cmd", "cmd.exe", "powershell", "pwsh"}
+
+
+def shell_invariant(table: dict, label: str) -> None:
+    """No path may reach a shell as anything but a whole argv element.
+
+    Stated over the ARGV rather than over a list of known option spellings. An
+    earlier version keyed on the argument following `-c`/`-e`/`--run`, which
+    `bash -lc`, `bash -cSCRIPT`, or any other option form walks straight past —
+    it protected three known instances while claiming to protect a class.
+
+    An element that IS exactly a placeholder is fine: that is the safe form,
+    where execve hands the path over as one argument with no parsing.
+    """
+    for lang, entry in table.items():
+        for phase in ("compile", "run"):
+            argv = entry.get(phase)
+            if not argv or pathlib.PurePath(argv[0]).name not in SHELLS:
+                continue
+            for arg in argv:
+                if PLACEHOLDER.fullmatch(arg):
+                    continue
+                check(f"{label} {lang}.{phase}: no path pasted into shell text",
                       not PLACEHOLDER.search(arg), f"-> {arg[:70]}")
+            # Re-evaluation puts the argument back through a parser, which undoes
+            # the whole point of passing it positionally.
+            for arg in argv:
+                check(f"{label} {lang}.{phase}: shell text does not eval",
+                      not re.search(r"\beval\b", arg), f"-> {arg[:70]}")
+
+
+shell_invariant(registry.LANGUAGES, "python")
 
 # Where a script IS used, the paths have to arrive as positional parameters.
 for lang in ("csharp", "gleam", "haskell"):
@@ -253,18 +335,97 @@ for lang in ("csharp", "gleam", "haskell"):
     script = argv[argv.index("-c") + 1]
     check(f"{lang}: the script reads $1/$2/$3", "$1" in script, f"-> {script[:60]}")
 
-# The Rust table has to say the same thing; it is the one that actually runs.
-for lang in ("csharp", "gleam", "haskell"):
-    m = re.search(rf'name: "{re.escape(lang)}".*?run: &\[(.*?)\],\n', src, re.S)
-    check(f"rust {lang}: no path pasted into the shell script",
-          m is not None and not PLACEHOLDER.search(m.group(1).split('", "codecalc"')[0]),
-          f"-> {(m.group(1)[:70] if m else 'ENTRY NOT FOUND')}")
+
+# ── the RUST table is the one that actually runs ───────────────────────────
+# Rather than re-implement the invariant against Rust source with a regex — the
+# previous attempt named three languages by hand and split on a literal
+# `", "codecalc"`, so it was tied to today's formatting and blind to any new
+# entry — parse the table and require it to be IDENTICAL to the Python one.
+# Then the invariant above covers both, and divergence of any kind is caught.
+#
+# The parse has a FLOOR: it must recover exactly as many languages as the
+# registry defines. A parser that stops understanding main.rs then fails loudly
+# instead of quietly checking nothing, which is the failure mode that makes a
+# gate worse than no gate.
+def _rust_strings(block: str) -> list[str]:
+    """String literals of a Rust `&[...]`, honouring backslash escapes."""
+    out, i = [], 0
+    while i < len(block):
+        if block[i] != '"':
+            i += 1
+            continue
+        i += 1
+        buf = []
+        while i < len(block) and block[i] != '"':
+            if block[i] == "\\":
+                buf.append(block[i + 1])
+                i += 2
+            else:
+                buf.append(block[i])
+                i += 1
+        out.append("".join(buf))
+        i += 1
+    return out
+
+
+def _rust_table(text: str) -> dict:
+    """Parse every `Lang { ... }` entry by brace matching, not by line shape."""
+    table: dict = {}
+    for m in re.finditer(r"\bLang\s*\{", text):
+        depth, j = 1, m.end()
+        while j < len(text) and depth:
+            depth += {"{": 1, "}": -1}.get(text[j], 0)
+            j += 1
+        body = text[m.end():j - 1]
+        name = re.search(r'name:\s*"((?:[^"\\]|\\.)*)"', body)
+        ext = re.search(r'ext:\s*"((?:[^"\\]|\\.)*)"', body)
+        if not name or not ext:
+            continue
+        entry: dict = {"ext": ext.group(1), "compile": None, "run": None}
+        for field in ("compile", "run"):
+            a = re.search(rf"{field}:\s*(?:Some\()?&\[", body)
+            if not a:
+                continue
+            depth, k = 1, a.end()
+            while k < len(body) and depth:
+                depth += {"[": 1, "]": -1}.get(body[k], 0)
+                k += 1
+            entry[field] = _rust_strings(body[a.end():k - 1])
+        table[name.group(1)] = entry
+    return table
+
+
+rust_table = _rust_table(src)
+check("the rust language table parses at all", len(rust_table) > 0, f"-> {len(rust_table)}")
+check("rust table covers every registry language",
+      set(rust_table) == set(registry.LANGUAGES),
+      f"-> rust-only {sorted(set(rust_table) - set(registry.LANGUAGES))}, "
+      f"python-only {sorted(set(registry.LANGUAGES) - set(rust_table))}")
+
+# Same invariant, now against what the Rust binary really runs.
+shell_invariant(rust_table, "rust")
+
+for lang in sorted(set(rust_table) & set(registry.LANGUAGES)):
+    py, rs = registry.LANGUAGES[lang], rust_table[lang]
+    check(f"{lang}: rust and python agree on the run argv", py["run"] == rs["run"],
+          f"-> rust {rs['run']}\n        python {py['run']}")
+    check(f"{lang}: rust and python agree on the compile argv",
+          (py["compile"] or None) == (rs["compile"] or None),
+          f"-> rust {rs['compile']} vs python {py['compile']}")
+    check(f"{lang}: rust and python agree on the extension",
+          registry.EXTENSIONS[lang] == rs["ext"],
+          f"-> rust {rs['ext']} vs python {registry.EXTENSIONS[lang]}")
 
 # ── dynamic: the two real failures, where the toolchain exists ──────────────
-TOOLCHAIN = {"csharp": "dotnet", "gleam": "gleam"}
+# haskell is here because REASONING that printf %q survives nix-shell's second
+# shell is not the same as watching it: that entry is the only one with two
+# levels of evaluation, so it is the one most worth exercising rather than
+# arguing about.
+TOOLCHAIN = {"csharp": "dotnet", "gleam": "gleam", "haskell": "nix-shell"}
 SNIPPET = {
     "csharp": 'class P { static void Main() { System.Console.WriteLine("ok"); } }',
     "gleam": 'import gleam/io\npub fn main() { io.println("ok") }\n',
+    "haskell": 'main :: IO ()\nmain = putStrLn "ok"\n',
 }
 for lang, tool in TOOLCHAIN.items():
     if not (EXE.exists() and shutil.which(tool) and os.name != "nt"):
@@ -272,7 +433,7 @@ for lang, tool in TOOLCHAIN.items():
         continue
 
     work = pathlib.Path(tempfile.mkdtemp(prefix="codecalc sweep "))   # NOTE the spaces
-    r = run_exec(SNIPPET[lang], lang=lang, timeout=180, workdir=str(work))
+    r = run_exec(SNIPPET[lang], lang=lang, timeout=420, workdir=str(work))
     check(f"{lang}: a workdir containing spaces works",
           r.get("ok") is True and "ok" in r.get("stdout", ""),
           f"-> exit={r.get('exit_code')} err={str(r.get('stderr'))[:70]}")
@@ -282,7 +443,7 @@ for lang, tool in TOOLCHAIN.items():
     pwned.unlink(missing_ok=True)
     hostile = pathlib.Path(tempfile.gettempdir()) / f"cc$(id>{pwned})x"
     hostile.mkdir(exist_ok=True)
-    run_exec(SNIPPET[lang], lang=lang, timeout=180, workdir=str(hostile))
+    run_exec(SNIPPET[lang], lang=lang, timeout=420, workdir=str(hostile))
     check(f"{lang}: a workdir containing $(...) is NOT executed", not pwned.exists(),
           f"-> {pwned.read_text()[:60] if pwned.exists() else 'inert'}")
     pwned.unlink(missing_ok=True)

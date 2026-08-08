@@ -18,13 +18,50 @@ use super::{ResolvedLimits, Wait};
 /// the whole tree — but only this process knows the pgid, so it has to do it.
 static CHILD_PGID: AtomicI32 = AtomicI32::new(0);
 
-/// Async-signal-safe: `killpg` and `_exit` are both on the POSIX safe list.
+/// Async-signal-safe. `kill` and `_exit` are on the POSIX async-signal-safe
+/// list; `killpg` is NOT, which is why the negative-pid form of `kill` is used
+/// here even though `killpg(pgid, ...)` reads better.
 extern "C" fn terminate_child_group(sig: libc::c_int) {
     let pgid = CHILD_PGID.load(Ordering::SeqCst);
     if pgid > 0 {
-        unsafe { libc::killpg(pgid, libc::SIGKILL) };
+        unsafe { libc::kill(-pgid, libc::SIGKILL) };
     }
     unsafe { libc::_exit(128 + sig) };
+}
+
+/// The three signals the handler above covers.
+fn term_signal_set() -> libc::sigset_t {
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGTERM);
+        libc::sigaddset(&mut set, libc::SIGINT);
+        libc::sigaddset(&mut set, libc::SIGHUP);
+        set
+    }
+}
+
+/// Block the termination signals and return the previous mask.
+///
+/// Without this there is a real window: the handler is installed before
+/// `spawn()`, but CHILD_PGID cannot be published until `spawn()` returns a pid.
+/// A SIGTERM landing in between finds CHILD_PGID == 0, kills nothing and exits
+/// — and PR_SET_PDEATHSIG only reaches the direct child, so a grandchild that
+/// had already been forked survives. That is precisely the leak this module
+/// exists to close, so the window has to be shut rather than narrowed.
+/// Blocking leaves the signal PENDING; it is delivered the moment the mask is
+/// restored, by which time the pgid is published.
+fn block_term_signals() -> libc::sigset_t {
+    unsafe {
+        let set = term_signal_set();
+        let mut old: libc::sigset_t = std::mem::zeroed();
+        libc::pthread_sigmask(libc::SIG_BLOCK, &set, &mut old);
+        old
+    }
+}
+
+fn restore_signal_mask(old: &libc::sigset_t) {
+    unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, old, std::ptr::null_mut()) };
 }
 
 /// Kill the child's whole group if we are asked to stop. SIGKILL cannot be
@@ -190,13 +227,29 @@ pub fn spawn_and_wait(mut cmd: Command, limits: &ResolvedLimits) -> io::Result<W
                     libc::_exit(1);
                 }
             }
+            // The signal mask survives execve, so the child would otherwise
+            // start life with SIGTERM blocked — it would ignore the very signal
+            // used to stop it. sigprocmask is async-signal-safe and this side
+            // of the fork is single-threaded.
+            let mut empty: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut empty);
+            libc::sigprocmask(libc::SIG_SETMASK, &empty, std::ptr::null_mut());
             Ok(())
         });
     }
     install_termination_handler();
-    let mut child: Child = cmd.spawn()?;
+    let saved_mask = block_term_signals();
+    let spawned = cmd.spawn();
+    let mut child: Child = match spawned {
+        Ok(c) => c,
+        Err(e) => {
+            restore_signal_mask(&saved_mask);
+            return Err(e);
+        }
+    };
     // process_group(0) makes the child its own group leader, so pgid == pid.
     CHILD_PGID.store(child.id() as i32, Ordering::SeqCst);
+    restore_signal_mask(&saved_mask);
 
     let start = Instant::now();
     let mut status: libc::c_int = 0;
@@ -211,8 +264,11 @@ pub fn spawn_and_wait(mut cmd: Command, limits: &ResolvedLimits) -> io::Result<W
         } else if r == -1 {
             let e = io::Error::last_os_error();
             if e.raw_os_error() != Some(libc::EINTR) {
-                child.kill().ok();
+                unsafe { libc::kill(-pid, libc::SIGKILL) };
                 let _ = child.wait();
+                // Clear before returning: a stale pgid here means a later
+                // SIGTERM kills whatever process group has since taken that id.
+                CHILD_PGID.store(0, Ordering::SeqCst);
                 return Err(e);
             }
         } else {
