@@ -96,6 +96,12 @@ jobs:
       - name: MCP protocol conformance (2026-07-28)
         shell: bash
         run: uv run --no-sync python tests/test_mcp_protocol.py
+      # tree-sitter vs the regex heuristic it replaced. Pure: parsing only, no
+      # sandbox, so it runs on all three OSes — which also proves the
+      # pre-compiled grammar wheels resolve on each of them.
+      - name: tree-sitter analyser (differential vs regex)
+        shell: bash
+        run: uv run --no-sync python tests/test_parsing_vs_regex.py
       - name: session jail
         shell: bash
         # Path confinement is where platforms differ most: Windows has drive
@@ -198,16 +204,24 @@ jobs:
         run: |
           set -euo pipefail
           uv run --no-sync python tests/test_security.py | tee /tmp/sec.out
-          # The fork-bomb tests run last and are destructive by nature. Give the
-          # runner a moment to reap before this step's own shell needs to fork,
-          # or the post-processing below dies with "resource temporarily
-          # unavailable" after a suite that passed.
-          sleep 5
-          # FLOOR. This suite is a flat script of `check(...)` calls with
-          # `sys.exit(1 if FAILS else 0)` at the end — delete a section and it still exits 0, having
-          # asserted less. Pin the count so silent shrinkage is a failure, not a faster green run.
-          passed=$(grep -c '^PASS' /tmp/sec.out || true)
+
+          # Count with BASH BUILTINS ONLY — no grep, no sleep, no subshell.
+          #
+          # The fork-bomb assertions drive the process count to the limit, and on
+          # a 3-core macOS runner the kernel has not finished reaping by the time
+          # this runs. Every external command here needs a fork, so `grep -c`
+          # failed with "fork: Resource temporarily unavailable" AFTER the suite
+          # had printed ALL SECURITY TESTS PASS. Adding `sleep 5` did not help:
+          # sleep is itself an external binary and could not fork either.
+          #
+          # `while read` and `case` are builtins, so this needs no process at all
+          # and cannot be starved by the thing it is measuring.
+          passed=0
+          while IFS= read -r line; do
+            case "$line" in PASS*) passed=$((passed + 1)) ;; esac
+          done < /tmp/sec.out
           echo "security assertions passed: $passed"
+
           # 13 on macOS, 14 on Linux: the tight fork-bomb headroom assertion only
           # applies where the ambient task count is measurable, and the suite
           # prints SKIP with the reason otherwise. Flooring at 13 keeps the guard

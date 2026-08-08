@@ -94,7 +94,7 @@ analysis, binary64 introspection.
 | `truth_table` | Boolean algebra: `a and b or not c`, `p xor q`, `a implies b` |
 | `z3_check` | SMT-LIB2 satisfiability + model |
 | `solve_linear` | Systems of equations: `x + y = 10; x - y = 2` |
-| `analyze_complexity` | Static Big-O estimate from code structure |
+| `analyze_complexity` | Static Big-O estimate from code structure, parsed with **tree-sitter** (every supported language). Reports `analysis: tree-sitter\|regex-fallback` so you can tell a parse from a guess |
 | `benchmark` | Empirical Big-O: runs code at increasing N, fits growth curve |
 | `compare_execution` | Same code across N languages side-by-side |
 | `runtimes_status` | **Non-mutating** update check: current vs latest for every language runtime, which package manager owns it, and the command that would run |
