@@ -1,9 +1,15 @@
 """Regressions for the Python-side sweep of 2026-08-08.
 
-Ten defects across sessions.py, the two REPL worker bootstraps, server.py and
-the pure-Python fallback executor. Same shape as every other sweep in this
+Fourteen defects across sessions.py, the two REPL worker bootstraps, server.py
+and the pure-Python fallback executor. Same shape as every other sweep in this
 repo: something that reported success while measuring, enforcing or returning
 something other than what it named.
+
+Four of them came from a cross-vendor review of the first ten, and three of
+those were defects in the FIXES rather than in the original code — a close()
+that reaped the worker but not what the worker had started, descriptors nothing
+released, and a CPU measurement sampled outside the lock that made it
+attributable.
 
 The worst of them was not the corruption but what happened AFTER it. A protocol
 error left the stream desynced, so every later call returned the PREVIOUS call's
