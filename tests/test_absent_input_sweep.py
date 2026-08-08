@@ -91,13 +91,22 @@ check("  ...and says nothing was done", "Nothing was checked" in (r.get("error")
       f"-> {(r.get('error') or '')[:70]}")
 
 # A partial match is a success WITH a note, not a failure: the known name was
-# genuinely processed.
-r = runtimes.update("gradle,notalanguage")
-check("a mix of known and unknown succeeds but reports the unknown",
-      r.get("ok") is True and r.get("unknown") == ["notalanguage"],
-      f"-> ok={r.get('ok')} unknown={r.get('unknown')}")
-check("  ...and still processed the known one", r["summary"]["total"] >= 1,
-      f"-> total={r['summary']['total']}")
+# genuinely processed. The known name is taken from what this machine ACTUALLY
+# has — a first version hardcoded `gradle`, which is not installed on the CI
+# runners, so the test asserted the properties of my laptop. That is the same
+# machine-specific claim this sweep flagged in AUDIT.md, committed by the person
+# who flagged it.
+_known = sorted(runtimes.status()["languages"])
+if _known:
+    _name = _known[0]
+    r = runtimes.update(f"{_name},notalanguage")
+    check("a mix of known and unknown succeeds but reports the unknown",
+          r.get("ok") is True and r.get("unknown") == ["notalanguage"],
+          f"-> known={_name!r} ok={r.get('ok')} unknown={r.get('unknown')}")
+    check("  ...and still processed the known one", r["summary"]["total"] >= 1,
+          f"-> total={r['summary']['total']}")
+else:
+    print("SKIP mixed known/unknown filter (no runtimes detected on this machine)")
 
 # An empty filter means "no filter", like None — it used to match nothing and
 # report success for having done nothing.
