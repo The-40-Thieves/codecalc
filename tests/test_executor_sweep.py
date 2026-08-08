@@ -60,7 +60,7 @@ def run_exec(code: str, lang: str = "python3", timeout: int = 30, **flags) -> di
     argv = [str(EXE), "--lang", lang, "--timeout", str(timeout)]
     for k, v in flags.items():
         argv += [f"--{k.replace('_', '-')}"] + ([str(v)] if v is not True else [])
-    p = subprocess.run(argv, input=code, capture_output=True, text=True, timeout=timeout + 60)
+    p = subprocess.run(argv, input=code, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout + 60)
     try:
         return json.loads(p.stdout)
     except json.JSONDecodeError:
@@ -94,7 +94,7 @@ else:
 # ═══ 2. the tempdir retry loop must terminate ═══════════════════════════════
 # It retried on ANY error, so a permanent one (an unwritable TMPDIR) spun
 # forever: the process hung until the outer timeout killed it at exit 124.
-src = (REPO_ROOT / "executor" / "src" / "main.rs").read_text()
+src = (REPO_ROOT / "executor" / "src" / "main.rs").read_text(encoding="utf-8")
 check("tempdir retry is bounded", "MAX_TEMPDIR_ATTEMPTS" in src)
 check("tempdir retry only retries a name collision",
       "AlreadyExists" in src, "-> must not retry permission errors")
@@ -106,7 +106,7 @@ if EXE.exists() and os.name != "nt":
     t0 = time.monotonic()
     try:
         p = subprocess.run([str(EXE), "--lang", "python3", "--timeout", "10"],
-                           input="print(1)", capture_output=True, text=True,
+                           input="print(1)", capture_output=True, text=True, encoding="utf-8", errors="replace",
                            env=env, timeout=25)
         hung = False
     except subprocess.TimeoutExpired:
@@ -130,7 +130,7 @@ else:
 # process_group(0) puts the child in a group the Python caller is not in.
 unix = (REPO_ROOT / "executor" / "src" / "platform" / "unix.rs")
 if unix.exists():
-    u = unix.read_text()
+    u = unix.read_text(encoding="utf-8")
     check("executor kills the child's process GROUP on termination", "killpg" in u)
     check("  ...and PDEATHSIG remains as the SIGKILL backstop", "PR_SET_PDEATHSIG" in u)
 
@@ -153,7 +153,7 @@ if EXE.exists() and os.name != "nt":
     proc.wait(timeout=30)
     time.sleep(6)                          # past when the grandchild would fire
     check("no descendant survives the executor being killed", not marker.exists(),
-          f"-> {marker.read_text() if marker.exists() else 'reaped'}")
+          f"-> {marker.read_text(encoding="utf-8") if marker.exists() else 'reaped'}")
     marker.unlink(missing_ok=True)
 else:
     skip("orphan-reaping regression", "needs a POSIX host and a built binary")
@@ -232,7 +232,7 @@ else:
 # on AF_INET/AF_INET6.
 blocknet = (REPO_ROOT / "executor" / "blocknet.c")
 if blocknet.exists():
-    b = blocknet.read_text()
+    b = blocknet.read_text(encoding="utf-8")
     check("blocknet keys on the address family", "AF_INET" in b and "AF_INET6" in b)
     check("blocknet lets non-network families through",
           "blocknet_is_network" in b, "-> needs an explicit family predicate")
@@ -427,10 +427,24 @@ SNIPPET = {
     "gleam": 'import gleam/io\npub fn main() { io.println("ok") }\n',
     "haskell": 'main :: IO ()\nmain = putStrLn "ok"\n',
 }
+#: Toolchains that do first-run setup the first time they are invoked. dotnet
+#: prints a "Welcome to .NET" banner and populates ~/.dotnet, and inside the
+#: sandbox that work died at exit 134 on a cold CI runner. Warming it OUTSIDE
+#: the sandbox first makes the assertion about what it claims to be about —
+#: whether a path containing spaces works — rather than about first-run state.
+WARMUP = {"csharp": ["dotnet", "--version"], "gleam": ["gleam", "--version"]}
+
 for lang, tool in TOOLCHAIN.items():
     if not (EXE.exists() and shutil.which(tool) and os.name != "nt"):
         skip(f"{lang} space/injection regression", f"{tool} not installed")
         continue
+    warm = WARMUP.get(lang)
+    if warm:
+        try:
+            subprocess.run(warm, capture_output=True, timeout=300, check=False)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            skip(f"{lang} space/injection regression", f"{tool} would not warm up: {exc}")
+            continue
 
     work = pathlib.Path(tempfile.mkdtemp(prefix="codecalc sweep "))   # NOTE the spaces
     r = run_exec(SNIPPET[lang], lang=lang, timeout=420, workdir=str(work))
@@ -439,15 +453,21 @@ for lang, tool in TOOLCHAIN.items():
           f"-> exit={r.get('exit_code')} err={str(r.get('stderr'))[:70]}")
     shutil.rmtree(work, ignore_errors=True)
 
-    pwned = pathlib.Path(tempfile.gettempdir()) / f"codecalc-pwned-{os.getpid()}"
+    # The marker is named RELATIVE to the hostile directory, which is also the
+    # cwd of anything the shell would run. Embedding the absolute path put
+    # SLASHES inside the directory name, so `cc$(id>/tmp/x)y` was three nested
+    # components rather than one directory — and it passed locally only because
+    # earlier manual debugging had left those parents lying around. On a clean
+    # runner it was FileNotFoundError, which is a test bug wearing the costume
+    # of a platform difference.
+    hostile = pathlib.Path(tempfile.mkdtemp(prefix="cc-hostile-")) / "cc$(id>pwned)x"
+    hostile.mkdir(parents=True, exist_ok=True)
+    pwned = hostile / "pwned"
     pwned.unlink(missing_ok=True)
-    hostile = pathlib.Path(tempfile.gettempdir()) / f"cc$(id>{pwned})x"
-    hostile.mkdir(exist_ok=True)
     run_exec(SNIPPET[lang], lang=lang, timeout=420, workdir=str(hostile))
     check(f"{lang}: a workdir containing $(...) is NOT executed", not pwned.exists(),
-          f"-> {pwned.read_text()[:60] if pwned.exists() else 'inert'}")
-    pwned.unlink(missing_ok=True)
-    shutil.rmtree(hostile, ignore_errors=True)
+          f"-> {pwned.read_text(encoding="utf-8")[:60] if pwned.exists() else 'inert'}")
+    shutil.rmtree(hostile.parent, ignore_errors=True)
 
 print(f"\n=== {len(FAILS)} FAILURE(S), {len(SKIPS)} skipped ===" if FAILS else
       f"\n=== EXECUTOR SWEEP REGRESSIONS FIXED ({len(SKIPS)} skipped) ===")

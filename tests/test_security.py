@@ -65,7 +65,7 @@ bad = []
 for p in (REPO_ROOT / "codecalc").rglob("*.py"):
     if p.name == "_worker_bootstrap.py":
         continue  # documented: exec in the isolated worker subprocess only
-    tree = ast.parse(p.read_text())
+    tree = ast.parse(p.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
                 and node.func.id in ("eval", "exec"):

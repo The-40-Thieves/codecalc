@@ -83,7 +83,7 @@ else:
     ]
     emitted: set[str] = set()
     for src in rust_sources:
-        text = src.read_text()
+        text = src.read_text(encoding="utf-8")
         # Two precise forms, not one loose one. A first draft used
         # `unenforced[^;]*?"..."` with DOTALL and swallowed whole statements
         # between an `unenforced` mention and the next string literal anywhere
@@ -171,13 +171,13 @@ else:
               f"-> {(net.get('stdout') or '').strip()[:60]!r}")
 
     # ── the README's platform table describes the same executor ────────────
-    readme = (REPO_ROOT / "README.md").read_text()
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
     check("the README documents a per-platform support table",
           "| Guarantee | Linux | macOS | Windows |" in readme)
     # The claim that broke: Windows reported the CPU ceiling as unavailable when
     # job objects have supported it since XP. Whatever the table says, it must
     # not contradict what windows.rs emits.
-    win = (REPO_ROOT / "executor" / "src" / "platform" / "windows.rs").read_text()
+    win = (REPO_ROOT / "executor" / "src" / "platform" / "windows.rs").read_text(encoding="utf-8")
     check("windows.rs applies a CPU ceiling", "JOB_OBJECT_LIMIT_PROCESS_TIME" in win)
     check("  ...and the README no longer calls it unavailable",
           "| CPU-time ceiling | `RLIMIT_CPU` | `RLIMIT_CPU` | reported unenforced |" not in readme)

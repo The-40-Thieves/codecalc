@@ -49,7 +49,7 @@ scanned = 0
 
 for path in sorted(PKG.rglob("*.py")):
     scanned += 1
-    tree = ast.parse(path.read_text(), filename=str(path))
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
