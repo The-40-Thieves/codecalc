@@ -64,7 +64,7 @@ def run_exec(code: str, lang: str = "python3", timeout: int = 30, **flags) -> di
     try:
         return json.loads(p.stdout)
     except json.JSONDecodeError:
-        return {"_unparseable": p.stdout[:400], "_stderr": p.stderr[:400]}
+        return {"_unparsable": p.stdout[:400], "_stderr": p.stderr[:400]}
 
 
 # ═══ 1. a failed source write must not delete the caller's workdir ══════════
