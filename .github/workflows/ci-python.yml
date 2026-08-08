@@ -102,6 +102,12 @@ jobs:
       - name: tree-sitter analyser (differential vs regex)
         shell: bash
         run: uv run --no-sync python tests/test_parsing_vs_regex.py
+      # install_package must not write outside the workspace. Static assertions on
+      # the installer table: a test that actually installed something would need
+      # the network and would, on regression, do the damage it checks for.
+      - name: package install isolation
+        shell: bash
+        run: uv run --no-sync python tests/test_package_isolation.py
       - name: session jail
         shell: bash
         # Path confinement is where platforms differ most: Windows has drive

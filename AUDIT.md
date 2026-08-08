@@ -317,6 +317,34 @@ Residual-risk items 1-4 from the original audit remain; add:
    sandbox means a malicious package could read user files. Acceptable for a
    single-operator tool; containerize before multi-tenant.
 
+   **CORRECTION 2026-08-08 — the install did not stay in the sandbox at all.**
+   python3 used `uv pip install --system`, which ignores cwd and targets the
+   interpreter: on this host, `/data/tools/mise/installs/python/3.14.6` — the
+   same interpreter the sandbox runs untrusted code on. A single tool call
+   installed third-party code into every future sandboxed run, for every
+   session, permanently, surviving `session_stop`. Both this document and the
+   module docstring claimed workspace scoping throughout.
+
+   Fixed with `--target <workspace>`, which needs no environment plumbing:
+   CPython puts the script's directory on `sys.path[0]` and executed code runs
+   from the session workdir. Verified both halves — a package installed with
+   `--target` is importable from that directory and is NOT visible to the host
+   interpreter.
+
+   `ruby` (`gem install` -> the mise gem dir) and `r` (`install.packages` ->
+   `/usr/local/lib/R/site-library`) had the same shape. Both are now declined
+   with the reason, because scoping either needs `GEM_HOME`/`R_LIBS` in the
+   executor's environment allowlist — and that allowlist is the CRITICAL-02
+   fix, not something to widen for a convenience feature.
+
+   An ad-hoc (no `session_id`) install now reports `importable: false`: the
+   shared cache is not on any executed program's import path, so a plain
+   success there would be a result the caller cannot use.
+
+   The claim that "--no-net sessions cannot install" was never enforced
+   anywhere and has been removed: installs do not run inside the sandbox, they
+   are a direct subprocess from the server.
+
 ## Residual risks (accepted, documented)
 
 1. **No network isolation.** Executed code can reach the network (DNS,
