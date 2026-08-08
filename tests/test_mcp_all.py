@@ -1,53 +1,165 @@
-"""Verify every MCP tool round-trips over stdio, including the new ones."""
+"""Every major MCP tool round-trips over stdio, and returns the RIGHT answer.
+
+This file used to print each tool's output and exit 0 unconditionally — no
+assertions, no conditionals. It caught a tool that crashed or changed shape and
+nothing else: a `solve_linear` returning the wrong roots, or a `z3_check`
+answering unsat for a satisfiable system, passed silently.
+
+Each answer below is pinned to a value that is checkable by hand. Two are not,
+and are treated differently rather than pinned to whatever this machine happened
+to produce:
+
+    benchmark            measures TIME, so its estimate moves under load
+    compare_execution    picks a winner by TIME, so the winner moves under load
+
+For those, the structure is asserted (every size measured, sizes doubling, a
+winner drawn from the languages actually run, every run succeeding) and the
+timing is not. A test
+that pins a duration is a test that fails on a busy machine for a reason that
+is not a defect — and one that pins nothing is what this file used to be.
+"""
+
+import asyncio
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _mcp_client import data, over_stdio
 
+FAILS: list[str] = []
+
+#: What the structural analyser is allowed to conclude. Membership is asserted
+#: rather than a specific value, for the timing-derived estimates only.
+COMPLEXITY_ESTIMATES = {"O(1)", "O(log n)", "O(n)", "O(n log n)", "O(n^2)", "O(n^3)",
+                        "O(2^n)", "O(n!)", "unknown"}
+
+
+def check(name: str, cond: bool, detail: str = "") -> None:
+    print(f"{'PASS' if cond else 'FAIL':4} {name} {detail}")
+    if not cond:
+        FAILS.append(name)
+
 
 async def main():
     async with over_stdio() as client:
-        tools = (await client.list_tools()).tools
-        print(f"tools ({len(tools)}): {[t.name for t in tools]}")
+        names = {t.name for t in (await client.list_tools()).tools}
+        check("the server serves its full tool surface", len(names) >= 48, f"-> {len(names)}")
 
-        r = await client.call_tool("list_languages", {})
-        langs = data(r)
-        print("list_languages: entries =", len(langs), "| c available =",
-              next(l for l in langs if l["name"] == "c")["available"])
+        # ── list_languages ────────────────────────────────────────────────
+        langs = data(await client.call_tool("list_languages", {}))
+        check("list_languages returns entries", isinstance(langs, list) and langs,
+              f"-> {type(langs).__name__}")
+        by_name = {entry["name"]: entry for entry in langs}
+        check("c is present and available", by_name.get("c", {}).get("available") is True,
+              f"-> {by_name.get('c')}")
+        check("every entry says whether it is available",
+              all(isinstance(e.get("available"), bool) for e in langs))
 
-        r = await client.call_tool("execute_code", {"language": "python3", "code": "print('mcp ok', 6*7)"})
-        print("execute_code:", data(r)["stdout"].strip())
+        # ── execute_code ──────────────────────────────────────────────────
+        r = data(await client.call_tool(
+            "execute_code", {"language": "python3", "code": "print('mcp ok', 6*7)"}))
+        check("execute_code returns 6*7 = 42", (r.get("stdout") or "").strip() == "mcp ok 42",
+              f"-> {(r.get('stdout') or '').strip()!r}")
 
-        r = await client.call_tool("evaluate_expression", {"expression": "integrate(x**2, x)"})
-        print("evaluate_expression:", str(data(r))[:90])
+        # ── evaluate_expression ───────────────────────────────────────────
+        r = data(await client.call_tool("evaluate_expression",
+                                        {"expression": "integrate(x**2, x)"}))
+        # sympy writes it as x**3/3; accept either spelling of the same integral.
+        result = str(r.get("result") or r.get("value") or r)
+        check("evaluate_expression integrates x^2 to x^3/3",
+              "x**3/3" in result.replace(" ", "") or "x^3/3" in result.replace(" ", ""),
+              f"-> {result[:60]}")
 
-        r = await client.call_tool("truth_table", {"expression": "a and b or not c"})
-        print("truth_table: rows =", data(r)["row_count"], "| satisfiable =", data(r)["satisfiable"])
+        # ── truth_table ───────────────────────────────────────────────────
+        r = data(await client.call_tool("truth_table", {"expression": "a and b or not c"}))
+        check("truth_table: three variables give 8 rows", r.get("row_count") == 8,
+              f"-> {r.get('row_count')}")
+        check("truth_table: the expression is satisfiable", r.get("satisfiable") is True)
+        # a·b + c̄ is true in 5 of 8 assignments. Worked by hand: all four rows
+        # with c false, plus (a,b,c) = (T,T,T).
+        rows = r.get("rows") or []
+        check("truth_table: true in exactly 5 of 8 rows",
+              sum(1 for row in rows if row.get("result")) == 5,
+              f"-> {sum(1 for row in rows if row.get('result'))}")
 
-        r = await client.call_tool("z3_check", {"smt2": "(declare-const x Int)(assert (> x 5))(assert (< x 10))(check-sat)"})
-        print("z3_check:", data(r)["result"], data(r)["model"])
+        # ── z3_check ──────────────────────────────────────────────────────
+        r = data(await client.call_tool(
+            "z3_check",
+            {"smt2": "(declare-const x Int)(assert (> x 5))(assert (< x 10))(check-sat)"}))
+        check("z3_check: sat", r.get("result") == "sat", f"-> {r.get('result')}")
+        model = r.get("model") or {}
+        check("z3_check: the model actually satisfies 5 < x < 10",
+              "x" in model and 5 < int(model["x"]) < 10, f"-> {model}")
 
-        r = await client.call_tool("solve_linear", {"system": "x + y = 10; x - y = 2", "variables": "x, y"})
-        print("solve_linear:", data(r)["solutions"])
+        # ── solve_linear ──────────────────────────────────────────────────
+        r = data(await client.call_tool(
+            "solve_linear", {"system": "x + y = 10; x - y = 2", "variables": "x, y"}))
+        solutions = str(r.get("solutions"))
+        # x + y = 10, x - y = 2  ->  x = 6, y = 4. One answer, and it is checkable.
+        check("solve_linear: x = 6", "x: 6" in solutions, f"-> {solutions[:60]}")
+        check("solve_linear: y = 4", "y: 4" in solutions, f"-> {solutions[:60]}")
+        check("solve_linear: exactly one solution", r.get("count") == 1, f"-> {r.get('count')}")
 
-        r = await client.call_tool("analyze_complexity", {"code": "for i in range(n):\n    for j in range(n):\n        pass"})
-        print("analyze_complexity:", data(r)["estimate"])
+        # ── analyze_complexity ────────────────────────────────────────────
+        r = data(await client.call_tool(
+            "analyze_complexity",
+            {"code": "for i in range(n):\n    for j in range(n):\n        pass"}))
+        check("analyze_complexity: nested loops are O(n^2)", r.get("estimate") == "O(n^2)",
+              f"-> {r.get('estimate')}")
 
-        r = await client.call_tool(
+        # ── benchmark — TIMING, so structure only ─────────────────────────
+        sizes = [5000, 10000, 20000, 40000]
+        r = data(await client.call_tool(
             "benchmark",
             {"code": "import sys\nn=int(sys.stdin.readline())\ns=0\nfor i in range(n): s+=i\nprint(s)",
-             "sizes": "5000,10000,20000,40000", "timeout": 15},
-        )
-        print("benchmark:", data(r)["estimate"], "| ratios:", data(r)["doubling_ratios"])
+             "sizes": ",".join(str(s) for s in sizes), "timeout": 15}))
+        check("benchmark returns a recognised estimate",
+              r.get("estimate") in COMPLEXITY_ESTIMATES, f"-> {r.get('estimate')!r}")
+        # Coverage is asserted on `runs`, not on the ratio count. A first draft
+        # demanded len(sizes) - 1 ratios and failed: the classifier subtracts the
+        # smallest measurement as a baseline, so the smallest size's corrected
+        # time is exactly 0 and its gap is deliberately skipped as sub-noise.
+        # At most len(sizes) - 2 ratios can ever exist. The code was right and
+        # the assertion was wrong; demanding the extra ratio would have meant
+        # "fixing" a deliberate noise correction.
+        runs = r.get("runs") or []
+        check("benchmark measured every size", len(runs) == len(sizes),
+              f"-> {len(runs)} runs for {len(sizes)} sizes")
+        check("every benchmark run succeeded", all(run.get("ok") for run in runs),
+              f"-> {[(run.get('n'), run.get('ok')) for run in runs]}")
+        check("every benchmark run has a duration",
+              all(isinstance(run.get("duration_ms"), int) for run in runs),
+              f"-> {[run.get('duration_ms') for run in runs]}")
+        # Sizes double, whether or not auto-scaling raised them first.
+        ns = [run.get("n") for run in runs]
+        check("benchmark sizes double across runs",
+              all(ns[i + 1] == 2 * ns[i] for i in range(len(ns) - 1)), f"-> {ns}")
 
-        r = await client.call_tool(
-            "compare_execution",
-            {"snippets": {"python3": "print(6*7)", "node": "console.log(6*7)", "ruby": 'puts 6*7'}},
-        )
-        print("compare_execution:", data(r)["count"], "langs | fastest:", data(r)["fastest"])
+        ratios = r.get("doubling_ratios") or []
+        check("benchmark reports no more ratios than gaps exist",
+              len(ratios) <= len(sizes) - 1, f"-> {len(ratios)} ratios for {len(sizes)} sizes")
+        check("benchmark ratios are finite and positive",
+              ratios and all(isinstance(x, (int, float)) and x > 0 for x in ratios),
+              f"-> {ratios}")
 
+        # ── compare_execution — TIMING, so structure only ─────────────────
+        snippets = {"python3": "print(6*7)", "node": "console.log(6*7)", "ruby": "puts 6*7"}
+        r = data(await client.call_tool("compare_execution", {"snippets": snippets}))
+        check("compare_execution ran every snippet", r.get("count") == len(snippets),
+              f"-> {r.get('count')}")
+        # The winner varies with load; that it is one of the languages actually
+        # run does not. A `fastest` naming something absent — or a crashed run —
+        # is the defect this can catch.
+        check("compare_execution's winner is one of the languages run",
+              r.get("fastest") in snippets, f"-> {r.get('fastest')!r}")
+        results = r.get("results") or []
+        check("every language produced 42",
+              all((res.get("stdout") or "").strip() == "42" for res in results),
+              f"-> {[(res.get('language'), (res.get('stdout') or '').strip()) for res in results]}")
+        check("every run succeeded", all(res.get("ok") for res in results),
+              f"-> {[(res.get('language'), res.get('ok')) for res in results]}")
 
-import asyncio
 
 asyncio.run(main())
+print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else "\n=== EVERY TOOL RETURNED THE RIGHT ANSWER ===")
+sys.exit(1 if FAILS else 0)
