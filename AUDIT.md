@@ -219,7 +219,12 @@ network-blocking shim. Each has a security-relevant design decision:
    network; a `--no-net` session cannot install.
 4. **`--no-net`** (`blocknet.so`): LD_PRELOAD shim overriding `socket()` and
    `connect()` only — deliberately NOT `socketpair()` (runtimes like tokio use
-   it for internal signal plumbing and crash if blocked). Best-effort: affects
+   it for internal signal plumbing and crash if blocked). It keys on the
+   ADDRESS FAMILY: `AF_INET`/`AF_INET6` are refused, everything else is
+   forwarded to the real call. It used to refuse every family, which took out
+   `AF_UNIX` local IPC — no network involved — and broke ordinary libraries
+   under a flag that says "no net". Built by `executor/build.rs` so it cannot
+   lag its source. Best-effort: affects
    dynamically-linked programs only; statically-linked binaries ignore
    LD_PRELOAD. Real isolation for multi-tenant still requires containers.
 5. **Verdicts**: MLE is a heuristic (signal + RSS ≥ 50% of memory cap); the

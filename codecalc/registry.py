@@ -86,19 +86,15 @@ LANGUAGES: dict[str, dict] = {
     # ── project-wrapper runtimes ──────────────────────────────────────────
     "csharp": _c(
         None,
-        "bash -c 'dotnet new console -o {work}/proj -n prog --force "
-        "&& cp {file} {work}/proj/Program.cs "
-        "&& dotnet run --project {work}/proj --no-launch-profile'",
+        'bash -c \'dotnet new console -o "$2/proj" -n prog --force && cp "$1" "$2/proj/Program.cs" && dotnet run --project "$2/proj" --no-launch-profile\' codecalc {file} {work}',
     ),
     "gleam": _c(
         None,
-        "bash -c 'gleam new {work}/proj --name prog --skip-git "
-        "&& cp {file} {work}/proj/src/prog.gleam "
-        "&& cd {work}/proj && gleam run'",
+        'bash -c \'gleam new "$2/proj" --name prog --skip-git && cp "$1" "$2/proj/src/prog.gleam" && cd "$2/proj" && gleam run\' codecalc {file} {work}',
     ),
     "haskell": _c(
         None,
-        "bash -c 'nix-shell -p ghc --run \"ghc -O2 -o {exe} {file} && {exe}\"'",
+        'bash -c \'f=$(printf %q "$1"); e=$(printf %q "$3"); nix-shell -p ghc --run "ghc -O2 -o $e $f && $e"\' codecalc {file} {work} {exe}',
     ),
     # ── data / query DSLs ─────────────────────────────────────────────────
     # `.read` as a SQL argument rather than a shell redirect: the only wrapper

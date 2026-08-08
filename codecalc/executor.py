@@ -177,6 +177,21 @@ def _limits(timeout: int):
     return _apply
 
 
+def _popen_group(argv: list[str]) -> subprocess.Popen:
+    """Spawn with the child at the head of its own process group/job.
+
+    So a timeout can kill the child AND its descendants. Without this, killing
+    the executor orphans every sandboxed process it started.
+    """
+    kwargs: dict = {"stdin": subprocess.PIPE, "stdout": subprocess.PIPE,
+                    "stderr": subprocess.PIPE}
+    if IS_WINDOWS:
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs["start_new_session"] = True
+    return subprocess.Popen(argv, **kwargs)
+
+
 def _kill_group(proc: subprocess.Popen) -> None:
     """Kill the child AND anything it spawned.
 
@@ -184,6 +199,21 @@ def _kill_group(proc: subprocess.Popen) -> None:
     run leaves work running on the host. There is no portable primitive for
     this: POSIX has process groups, Windows has `taskkill /T`.
     """
+    # SIGTERM first: the executor catches it and kills its child's process
+    # GROUP, which is the only way to reach grandchildren (the child is a group
+    # leader in a different group from ours, so our killpg cannot see them).
+    # SIGKILL follows as the backstop, and PR_SET_PDEATHSIG covers the child
+    # itself if we never get to send anything.
+    if not IS_WINDOWS:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            try:
+                proc.wait(timeout=3)
+                return
+            except subprocess.TimeoutExpired:
+                pass
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
     if IS_WINDOWS:
         # /T kills the tree, /F forces it. Spawned with CREATE_NEW_PROCESS_GROUP
         # so the child is the root of its own tree rather than ours.
@@ -315,19 +345,28 @@ def execute(language: str, code: str, stdin: str = "", timeout: int = 10,
                 args += ["--max-cpu", str(max_cpu)]
             if no_net:
                 args += ["--no-net"]
-            proc = subprocess.run(
-                args + stdin_args,
-                input=code.encode(),
-                capture_output=True,
-                timeout=timeout + 30,
-            )
-            result = json.loads(proc.stdout.decode(errors="replace"))
+            # Popen + kill the GROUP, not subprocess.run. On TimeoutExpired
+            # subprocess.run kills only the direct child — the executor — and
+            # the sandboxed processes it spawned are in their own process group
+            # (the executor calls process_group(0)), so they survive. Verified:
+            # killing the executor left `sleep` running with no parent to reap
+            # it and no wall clock on it at all.
+            #
+            # start_new_session puts the executor at the head of its own group so
+            # killpg here reaches the executor AND everything under it.
+            proc = _popen_group(args + stdin_args)
+            try:
+                out, err = proc.communicate(input=code.encode(), timeout=timeout + 30)
+            except subprocess.TimeoutExpired:
+                _kill_group(proc)
+                out, err = proc.communicate()
+                return {"ok": False, "error": "executor timed out",
+                        "timed_out": True, "exit_code": None,
+                        "stderr": (err or b"").decode(errors="replace")[:400]}
+            result = json.loads(out.decode(errors="replace"))
             if isinstance(result, dict) and "ok" in result:
                 return result
-            return {"ok": False, "error": f"executor produced invalid output: {proc.stderr[:200]!r}"}
-        except subprocess.TimeoutExpired:
-            return {"ok": False, "error": "executor timed out",
-                    "timed_out": True, "exit_code": None}
+            return {"ok": False, "error": f"executor produced invalid output: {err[:200]!r}"}
         except Exception as exc:
             return {"ok": False, "error": f"executor failed: {exc}"}
         finally:

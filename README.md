@@ -32,10 +32,17 @@ cd executor
 cargo build --release                          # native
 cargo zigbuild --release --target x86_64-unknown-linux-musl   # static x86_64 (uses zig)
 cargo zigbuild --release --target aarch64-unknown-linux-musl  # static arm64
-cp target/release/codecalc-exec ../bin/        # Python picks it up from ../bin
+# Copy the executable AND its --no-net shim together. build.rs rebuilds the
+# shim whenever blocknet.c changes, but the executor looks for it beside the
+# BINARY, so installing only the binary leaves the previous shim in place — and
+# a stale shim silently enforces the old policy while every "is it there?"
+# check still passes. Copy both or neither.
+cp target/release/codecalc-exec target/release/blocknet.so ../bin/
 ```
 
-Requires: Rust 1.97+, [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild)
+Requires: Rust 1.97+, a C compiler for the `--no-net` shim (the build warns and
+carries on without one; `--no-net` then reports itself in `unenforced` rather
+than pretending), and [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild)
 for the static cross-builds (zig is used as the linker; no x86_64 GCC needed).
 
 ## MCP tools (48) + MCP resources
