@@ -29,3 +29,16 @@ sessions/
 *.swp
 .idea/
 .vscode/
+
+# graphify — the knowledge graph of this repo (see graphify-out/GRAPH_REPORT.md)
+#
+# Only the REPORT is committed. Everything else here is a build artifact that
+# `/graphify .` regenerates: graph.json (488K) and graph.html (452K) are derived
+# from the source, and cache/ + manifest.json are incremental-build bookkeeping
+# that is specific to one checkout.
+#
+# Note the report is generated with the absolute scan root in its H1, which
+# scripts/check_portability.py correctly rejects. Normalise that line after a
+# rebuild — the gate catching it is the gate working, not an obstacle.
+graphify-out/*
+!graphify-out/GRAPH_REPORT.md
