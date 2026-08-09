@@ -255,45 +255,25 @@ network-blocking shim. Each has a security-relevant design decision:
    progress notifications carry byte counts only, never code.
 7. **Worker timeouts**: REPL workers are killed on hang (select-based read
    timeout); stderr is drained by a thread so a full pipe cannot deadlock.
-8. **translate_code**: LLM output is NEVER executed as-is without going
-   through the sandbox executor, and the translation is only accepted when the
-   executor verifies output equivalence on test inputs. LLM content is treated
-   as data; the verification loop is the trust boundary. Known limitation: the
-   default gateway model (gpt-4o-mini) sometimes emits non-compiling code for
-   strict compilers (e.g. Go unused imports) that even retry-with-error
-   feedback cannot fix; the tool reports this honestly rather than fabricating
-   a pass.
+8. **verify_translation / verify_optimization**: no model is called. The
+   caller supplies both programs and the executor decides — equivalence by
+   running both on the same inputs, speed by timing both at the same sizes.
+   Nothing is generated here, so there is no generated code to sanitise; the
+   programs are executed through the same sandbox as every other run.
 
-   **CORRECTION 2026-08-07 — the trust boundary above did not hold as written.**
-   `verify_translation()` scored "both programs failed" as a MATCH, on the
-   reasoning that they were in the same behaviour class. They are not: a Python
-   `ZeroDivisionError` and a Go nil-map panic are both a non-zero exit with
-   empty stdout, and so is a program that was never a translation of anything.
-   Confirmed by running it — `verify_translation('python3', 'sys.exit(1)',
-   'node', 'process.exit(1)', ['', '0', '1'])` returned `passed: True, 3/3
-   matched` for two unrelated programs. The failure was worst exactly where the
-   gate mattered most: if the source language's runtime is absent the source
-   fails on every input, so every case "matched" and ANY model output was
-   certified. `optimize_code` calls the same function and inherited it.
+   These replaced `translate_code` and `optimize_code` on 2026-08-08, which
+   called a separately configured OpenAI-compatible gateway. That removed the
+   last outbound model call from the package, and with it the last way user
+   code could leave the machine: a caller who pasted proprietary source into
+   `translate_code` was shipping it to whatever gateway the operator had set.
 
-   Fixed by giving a case three outcomes instead of two — match, mismatch, and
-   **inconclusive** — and requiring real evidence to pass: no mismatch AND at
-   least one input where both programs actually ran and agreed. A wholly
-   inconclusive run now fails with "could not verify: nothing was actually
-   compared", because "we could not check" and "we checked and it was fine" are
-   different answers. A translation that fails to COMPILE is now always a
-   mismatch; it was previously a match whenever the source also errored.
 
-   The decision logic was split into pure functions (`classify_case`,
-   `aggregate`) so it can be tested without a sandbox or two runtimes — the old
-   version could only be reached by actually running two programs, which is why
-   it had no tests at all. See `tests/test_translation_verify.py`.
 9. **context7_docs**: third-party documentation content returned as data to
    the caller; the server never executes or follows instructions found in it.
    Only the requesting model decides how to use the snippets.
 10. **compare_edge_cases**: offline-capable; snippets are provided per language
     and run through the standard sandbox. No LLM in the loop.
-11. **optimize_code**: the speedup gate is MEASURED (same sizes, min-of-repeats,
+11. **verify_optimization**: the speedup gate is MEASURED (same sizes, min-of-repeats,
     baseline-subtracted), never the LLM's claim. Already-optimal code is
     honestly rejected ("no accepted optimization after retry" with the
     measured ratio) rather than fabricating a pass. Sub-noise-floor baselines
@@ -373,6 +353,11 @@ Residual-risk items 1-4 from the original audit remain; add:
    are a direct subprocess from the server.
 
 ## Residual risks (accepted, documented)
+
+0. **Removed 2026-08-08: outbound model calls.** The package no longer contains
+   an LLM client. `context7_docs` is the only remaining outbound request and it
+   fetches public documentation; no user code is transmitted anywhere. Anything
+   below that assumed a configured gateway no longer applies.
 
 1. **No network isolation.** `--no-net` exists and blocks `AF_INET`/`AF_INET6`
    via an `LD_PRELOAD`/`DYLD_INSERT_LIBRARIES` shim, leaving `AF_UNIX` alone —

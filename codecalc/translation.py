@@ -1,18 +1,19 @@
-"""Cross-language translation with verification, and edge-case comparison.
+"""Cross-language verification. No LLM anywhere in this module.
 
-translate_code: an LLM ports code between languages; the Rust executor then
-VERIFIES the translation by running both versions against identical test
-inputs and comparing stdout. Accepted only when outputs match (one retry
-feeding the diff back). This is the "Rosetta Stone" use case with a ground
-truth check — no tool in the space does translate-then-verify.
+verify_translation: given TWO programs the caller already has — a source and a
+claimed port — run both on the same inputs and decide whether they agree.
+compare_edge_cases: run the same logic in N languages and report where they
+diverge.
 
-compare_edge_cases: runs a snippet across N languages on edge-case inputs
-(empty, zero, negative, float precision, large N) and flags behavioral
-divergence — where languages disagree on the same input.
+The tool used to generate the port itself, by calling a second, separately
+configured model. That was backwards for a calculator whose caller is already
+a language model: it made the differentiated half — the executor proving
+equivalence — reachable only through a weaker proposer, and it meant the two
+most distinctive tools were the only two that did not work on a fresh install.
 
-Both are best-effort when the LLM gateway is down: translate_code returns the
-LLM error clearly; compare_edge_cases works fully offline when given
-per-language snippets (no translation needed).
+The caller proposes. This module decides. See classify_case/aggregate for the
+rules, which are deliberately separable from the sandbox so they can be tested
+without two runtimes and a built binary.
 """
 
 from __future__ import annotations
@@ -20,17 +21,11 @@ from __future__ import annotations
 import json
 import re
 
-from . import context7, executor, llm
+from . import executor
 
 #: default edge-case inputs (each is stdin for the program)
 DEFAULT_EDGE_INPUTS = ["", "0", "1", "-1", "10", "100", "0.1\n0.2"]
 
-_TRANSLATE_SYSTEM = (
-    "You port code between programming languages. Preserve behavior EXACTLY: "
-    "same stdin handling, same output format, same edge-case behavior. "
-    "Output ONLY valid JSON: {\"code\": \"<the translated program>\"}. "
-    "Never wrap in markdown, never explain."
-)
 
 
 def _extract_code(text: str) -> str | None:
@@ -181,101 +176,6 @@ def verify_translation(source: str, source_code: str, target: str,
                        "stderr": (b.get("stderr") or "")[:200]},
         })
     return {**aggregate(outcomes), "cases": cases}
-
-
-def translate_code(code: str, source: str, target: str,
-                   test_inputs: list[str] | None = None,
-                   model: str | None = None, timeout: int = 30) -> dict:
-    """Port `code` from `source` to `target`, then verify equivalence on
-    test inputs. Retries once with the mismatch diff if verification fails."""
-    source = executor.registry.canonical(source) or source
-    target = executor.registry.canonical(target) or target
-    if source == target:
-        return {"ok": False, "error": "source and target are the same language"}
-    inputs = test_inputs if test_inputs else DEFAULT_EDGE_INPUTS[:4]
-
-    # context7: give the LLM current API knowledge for the target language
-    # and any libraries the code imports
-    docs_parts = []
-    lang_docs = context7.docs_for_language(target)
-    if lang_docs.get("ok"):
-        docs_parts.append(f"## {target} standard library reference\n{lang_docs['content'][:2500]}")
-    lib_docs = context7.docs_for_code(code, source)
-    if lib_docs.get("ok"):
-        docs_parts.append(f"## library reference\n{lib_docs['content'][:2500]}")
-    docs_block = "\n\n".join(docs_parts)
-
-    test_inputs_repr = json.dumps(inputs)
-    prompt = (
-        f"Port this {source} program to {target}. Keep behavior EXACTLY identical:\n"
-        f"- same stdin reading (first line is N unless noted)\n"
-        f"- same stdout format\n- same edge-case behavior (division by zero, negatives)\n"
-        f"- use idiomatic {target}, not a line-by-line transliteration\n\n"
-        f"{docs_block}\n\n"
-        f"Verification inputs (will be fed to both versions as stdin): "
-        f"{test_inputs_repr}\n\n"
-        f"Source code ({source}):\n```\n{code[:8000]}\n```"
-    )
-
-    last_error = None
-    for attempt in (1, 2):
-        try:
-            text = llm.chat(prompt, system=_TRANSLATE_SYSTEM, model=model,
-                            timeout=timeout)
-        except Exception as exc:
-            return {"ok": False, "error": f"LLM unavailable: {exc}",
-                    "llm_available": False}
-        translated = _extract_code(text)
-        if not translated:
-            return {"ok": False, "error": "LLM did not return code",
-                    "llm_available": True, "raw": text[:500]}
-
-        ver = verify_translation(source, code, target, translated, inputs)
-        if ver["passed"]:
-            return {
-                "ok": True, "source_language": source, "target_language": target,
-                "translated_code": translated,
-                "verification": ver,
-                "attempts": attempt,
-                "llm_available": True,
-            }
-        last_error = ver
-        # Retry feedback. Prefer a real mismatch — that is the only case with a
-        # concrete difference to show. Fall back to an inconclusive one, which
-        # needs a DIFFERENT message: telling the model to "make the outputs
-        # match" when neither program produced output sends it chasing a
-        # difference that was never observed.
-        worst = _worst_case(ver["cases"])
-        if worst and attempt == 1:
-            if worst["outcome"] == "mismatch":
-                prompt += (
-                    "\n\nVERIFICATION FAILED on input "
-                    f"{json.dumps(worst['input'])} ({worst['reason']}):\n"
-                    f"source stdout: {json.dumps(worst['source']['stdout'][:300])}\n"
-                    f"target stdout: {json.dumps(worst['target']['stdout'][:300])}\n"
-                    f"target stderr: {json.dumps(worst['target']['stderr'][:300])}\n"
-                    "Fix the translation so outputs match exactly."
-                )
-            else:
-                prompt += (
-                    "\n\nCOULD NOT VERIFY on input "
-                    f"{json.dumps(worst['input'])} ({worst['reason']}).\n"
-                    f"source stderr: {json.dumps(worst['source']['stderr'][:300])}\n"
-                    f"target stderr: {json.dumps(worst['target']['stderr'][:300])}\n"
-                    "Both programs failed, so nothing could be compared. Emit a "
-                    "translation that RUNS on these inputs."
-                )
-
-    return {
-        "ok": False, "source_language": source, "target_language": target,
-        "translated_code": translated if "translated" in locals() else None,
-        "verification": last_error,
-        # The reason is carried through rather than asserting "outputs differ",
-        # which was wrong whenever nothing had been compared in the first place.
-        "error": f"verification failed after retry: {last_error['reason']}"
-                 if last_error else "verification failed after retry",
-        "attempts": 2, "llm_available": True,
-    }
 
 
 def compare_edge_cases(snippets: dict[str, str],

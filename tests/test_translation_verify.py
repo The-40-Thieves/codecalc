@@ -1,4 +1,4 @@
-"""Verification-gate tests for translate_code / optimize_code.
+"""Verification-gate tests for verify_translation / verify_optimization.
 
 The bug these exist for: verify_translation() treated "both programs failed" as
 a MATCH ("same behavior class"). That made the gate report success for a
@@ -26,6 +26,7 @@ import sys
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
+from codecalc import executor, optimization, translation
 from codecalc.translation import aggregate, classify_case
 
 FAILS = []
@@ -110,6 +111,51 @@ check("no cases at all -> NOT passed", r["passed"] is False,
 r = aggregate([("match", ""), ("inconclusive", "x"), ("mismatch", "d")])
 check("counts are broken out", (r["matched"], r["inconclusive"], r["mismatched"]) == (1, 1, 1),
       f"-> {r['matched']}/{r['inconclusive']}/{r['mismatched']}")
+
+
+# ═══ the gates are callable on their own, with no model anywhere ═══════════
+# They used to run only as the second half of a tool that first asked a
+# separately configured model to write the candidate. The caller of this server
+# IS a language model; making it supply the candidate removes the dependency
+# and puts the strongest model in the loop in charge of the creative half.
+if executor._rust:
+    SRC = "import sys\nn=int(sys.stdin.readline())\nprint(n*2)"
+    GOOD = 'const n=+require("fs").readFileSync(0,"utf8").trim();console.log(n*2)'
+
+    r = translation.verify_translation("python3", SRC, "node", GOOD, ["3", "7", "0"])
+    check("a correct port passes", r.get("passed") is True, f"-> {r.get('summary')}")
+    r = translation.verify_translation("python3", SRC, "node", "console.log(1)", ["3", "7"])
+    check("a wrong port fails", r.get("passed") is False)
+
+    SLOW = "import sys\nn=int(sys.stdin.readline())\ns=0\nfor i in range(n): s+=i\nprint(s)"
+    FAST = "import sys\nn=int(sys.stdin.readline())\nprint(n*(n-1)//2)"
+    SIZES = [200000, 400000, 800000, 1600000]
+
+    o = optimization.verify_optimization(SLOW, FAST, "python3",
+                                         test_inputs=["10", "100", "1000"], sizes=SIZES)
+    check("a real O(n)->O(1) win is accepted", o.get("accepted") is True,
+          f"-> ratio={(o.get('speedup') or {}).get('ratio')} {o.get('reason')!r}")
+    check("  ...and equivalence was checked first",
+          (o.get("verification") or {}).get("passed") is True)
+
+    # The rejections carry what an optimiser that fabricates wins cannot: WHICH
+    # gate failed, and by how much.
+    o = optimization.verify_optimization(FAST, FAST, "python3",
+                                         test_inputs=["10", "100"], sizes=SIZES)
+    check("an unchanged candidate is rejected as not faster",
+          o.get("accepted") is False and "not measurably faster" in (o.get("reason") or ""),
+          f"-> {o.get('reason')!r}")
+
+    o = optimization.verify_optimization(SLOW, "print(999)", "python3",
+                                         test_inputs=["10", "100"])
+    check("a faster-but-wrong candidate is rejected on correctness",
+          o.get("accepted") is False and o.get("reason") == "not equivalent",
+          f"-> {o.get('reason')!r}")
+    check("  ...and its speed was never measured", "speedup" not in o,
+          "-> a faster wrong answer is not an optimisation")
+else:
+    print("SKIP live verification gates (no native executor built)")
+
 
 print(f"\n=== {len(FAILS)} FAILURES ===" if FAILS else
       "\n=== ALL TRANSLATION-VERIFICATION TESTS PASS ===")

@@ -112,8 +112,8 @@ analysis, binary64 introspection.
 | `session_run` | **Multi-file programs**: execute an entry file that imports other session files (helper.py, data/...) in the workspace |
 | `session_artifacts` | List files created by executed code (results, images, CSVs) |
 | `install_package` | Install packages (uv pip/npm/gem/go/cargo...) into a session or shared cache |
-| `translate_code` | **Port code between languages with verification**: LLM translates, executor runs both versions on the same test inputs, accepted only if outputs match (one retry with diff feedback) |
-| `optimize_code` | **Optimize code with proof**: LLM proposes, executor verifies correctness AND measures speedup (same sizes, min-of-repeats); accepted only if correct AND measurably faster, else retried or honestly rejected |
+| `verify_translation` | **Prove a port is equivalent**: you write the translation, the executor runs both versions on the same inputs and reports match / diverged / inconclusive per input |
+| `verify_optimization` | **Prove an optimisation**: you write the candidate, the executor confirms it still agrees with the original AND times both — accepted only if equivalent and measurably faster |
 | `extract_function` | Pull a named function + its dependency closure (imports, referenced helpers) into a standalone program and run it (ast-exact for python3, best-effort elsewhere) |
 | `compare_edge_cases` | Run the same logic in N languages on edge-case inputs (empty, zero, negative, float precision) and flag behavioral divergence |
 | `context7_docs` | Fetch up-to-date library docs from context7 (`/numpy/numpy`, `/golang/go`, `/Z3Prover/z3`...) — current API knowledge for any language |
@@ -201,10 +201,6 @@ All optional. codecalc runs with none of these set.
 | `CODECALC_SESSION_ROOT` | `~/.codecalc/sessions` | Where session workspaces live. |
 | `CODECALC_PROCESS_HEADROOM` | `512` | Fork-bomb guard. `RLIMIT_NPROC` is a **uid-wide task budget**, not a per-sandbox one — the kernel compares it against every thread your user owns, machine-wide. So codecalc measures the ambient count per execution and sets the limit to *ambient + headroom*: a bomb can add at most this many tasks, while a runtime wanting a few threads always has room however busy the box is. |
 | `CODECALC_MAX_PROCESSES` | *(unset)* | Escape hatch: pin `RLIMIT_NPROC` to an absolute value and skip the measurement. |
-| `CODECALC_LLM_GATEWAY` | *(unset — the two LLM tools report themselves unconfigured)* | An OpenAI-compatible `/v1/chat/completions` endpoint. Only `translate_code` and `optimize_code` need it; the other 46 tools work without it. There is deliberately no default: sending your source to a third party nobody configured would be a worse failure than a clear error. Must be `http`/`https` — `urlopen` also speaks `file:`, and a gateway of `file:///etc/hostname` was read as if it were a model response. Read per call, so setting it after the server starts takes effect. |
-| `CODECALC_LLM_API_KEY` | *(unset)* | Bearer token for that gateway, if it needs one. |
-| `CODECALC_LLM_MODEL` | `gpt-4o-mini` | Model name passed to the gateway. |
-| `CODECALC_COMPLEXITY_LLM` | *(unset)* | Opt in to an LLM second opinion on `analyze_complexity`. Off by default, and a separate variable from the gateway on purpose — configuring `translate_code` should not silently add a network round-trip to every complexity analysis. |
 
 Both backends resolve `CODECALC_RUNTIME_PATH` identically, and
 `scripts/check_parity.py` fails CI if the Rust and Python copies of that
@@ -229,7 +225,7 @@ PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py         # every tool over MC
 PYTHONPATH=. .venv/bin/python tests/test_executor_sweep.py  # sandbox regressions
 ```
 
-20 test files and 5 gate scripts, **752 assertions**, none skipped on a machine
+20 test files and 5 gate scripts, **741 assertions**, none skipped on a machine
 with the full toolchain. These two numbers are gated by
 `scripts/check_claims.py`: they were written by hand once and were stale within
 three pull requests, which is exactly the failure the rest of that script
