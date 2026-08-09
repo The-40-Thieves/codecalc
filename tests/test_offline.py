@@ -98,7 +98,7 @@ check("no outbound URL is embedded in the package", not urls, f"-> {urls[:3]}")
 # ═══ the tools that replaced them need no network ══════════════════════════
 # The verification gates run PROGRAMS, which is the point: the caller writes the
 # translation or the optimisation, and the executor decides by running it.
-from codecalc import optimization, server, translation  # noqa: E402
+from codecalc import optimization, server, translation
 
 for fn in (translation.verify_translation, optimization.verify_optimization):
     src = pathlib.Path(fn.__code__.co_filename).read_text(encoding="utf-8")
