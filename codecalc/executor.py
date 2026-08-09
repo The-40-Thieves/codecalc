@@ -320,13 +320,25 @@ def _kill_group(proc: subprocess.Popen) -> None:
 def _dir_identity(path: str | Path) -> tuple[int, int] | None:
     """Identity (device, inode) of a directory, on platforms that have one.
 
-    POSIX only, exactly like main.rs's `dir_identity`: Windows has no cheap
-    stable (dev, ino) without opening a handle, so this returns None there — a
-    recorded gap, not a faked identity. `_rmtree_checked` treats None as "no
-    identity to compare", the same as the Rust side.
+    Attempted on EVERY platform, not just POSIX. The first version of this
+    returned None on Windows outright, on the reasoning that Windows has no
+    cheap stable (dev, ino) — and CI disproved it the only way that counts: the
+    rename-swap regression ran on windows-latest and reported
+
+        FAIL a directory swapped in by rename is NOT deleted (python fallback)
+             -> C:\\Users\\...\\codecalc-r7oiykyq DELETED
+
+    A guard that returns None on a platform, feeding a caller that treats None
+    as "delete unconditionally", is not a recorded gap. It is the guard being
+    inert exactly where nobody looks, while the README states the guarantee
+    flatly.
+
+    `os.stat` on Windows does populate st_ino (the NTFS file index) and st_dev
+    (the volume serial number); the docs call st_ino "inode number or file
+    index" for precisely this reason. Where a filesystem cannot supply an index
+    it comes back as 0, which is not an identity and must not be compared as
+    one — hence the explicit rejection below rather than trusting a zero.
     """
-    if IS_WINDOWS:
-        return None
     try:
         # lstat, not stat: a symlink swapped into the path must not be
         # followed to the directory it points at.
@@ -334,6 +346,12 @@ def _dir_identity(path: str | Path) -> tuple[int, int] | None:
     except OSError:
         return None
     if not stat.S_ISDIR(st.st_mode):
+        return None
+    if not st.st_ino:
+        # 0 means the filesystem did not supply an index. Two different
+        # directories would both compare equal on it, so returning it would
+        # produce a check that always passes: the shape of defect this repo
+        # keeps finding, in the one place where passing means deleting.
         return None
     return (st.st_dev, st.st_ino)
 
@@ -343,13 +361,30 @@ def _rmtree_checked(path: str | Path, created: tuple[int, int] | None) -> bool:
     the same directory that was created.
 
     Mirrors `remove_own_workdir` in executor/src/main.rs. `created` is the
-    identity recorded at creation time (None on a platform `_dir_identity`
-    cannot measure, in which case this deletes unconditionally — the same gap
-    the Rust side has on non-POSIX). Returns whether the directory was
-    actually removed, so callers can report the real outcome instead of an
-    assumed one.
+    identity recorded at creation time.
+
+    `created is None` means no identity could be obtained, and this REFUSES
+    rather than deleting. That is the opposite of the first version, which
+    deleted unconditionally in that case, and the reversal is deliberate: this
+    is a delete path reached with executed code's cwd as its target, so
+    "I could not verify" has to mean "I do not delete". Failing open here
+    turns an unmeasurable filesystem into a silent loss of the guarantee the
+    README states flatly.
+
+    The cost is real and is stated rather than hidden: on a filesystem that
+    supplies no file index, temp directories accumulate instead of being
+    cleaned up. A visible leak is recoverable; deleting a directory someone
+    renamed into place is not.
+
+    Returns whether the directory was actually removed, so callers report the
+    real outcome instead of an assumed one.
     """
-    if created is not None and _dir_identity(path) != created:
+    if created is None:
+        print(f"codecalc: refusing to delete {path} — no directory identity "
+              "was available on this filesystem, so ownership cannot be "
+              "verified", file=sys.stderr)
+        return False
+    if _dir_identity(path) != created:
         print(f"codecalc: refusing to delete {path} — it is not the "
               "directory this run created", file=sys.stderr)
         return False
