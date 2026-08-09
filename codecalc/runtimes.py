@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+from dataclasses import dataclass
 
 #: language (registry name) -> package manager that owns its runtime
 LANGUAGE_MANAGER: dict[str, str] = {
@@ -61,20 +62,61 @@ MISE_ALIAS = {
 }
 
 
-def _run(cmd: list[str], timeout: int = 60) -> str:
+@dataclass
+class _RunResult:
+    """Structured outcome of one subprocess call, in place of the bare string
+    `_run` used to return.
+
+    `_run` collapsed a missing executable, a timeout, and any other spawn
+    failure to the SAME empty string a perfectly healthy tool returns when it
+    genuinely has nothing to report — a checker parsing "" could not tell
+    "mise is not installed" from "mise ran and found nothing outdated", and
+    several read the former as the latter, which is how `update_runtimes`
+    reported a broken package manager as up to date.
+
+    `spawned` is deliberately not "succeeded": several of the commands this
+    module runs use a nonzero exit code as SIGNAL, not failure — `npm
+    outdated` exits 1 precisely when it found something outdated. Only the
+    caller knows whether a given command's exit code means anything, so `_run`
+    reports whether the process ran at all and leaves exit-code interpretation
+    to each checker.
+    """
+    spawned: bool
+    output: str
+    exit_code: int | None
+    error: str | None = None
+
+
+def _run(cmd: list[str], timeout: int = 60) -> _RunResult:
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        return (p.stdout or "") + (p.stderr or "")
-    except Exception:
-        return ""
+        return _RunResult(True, (p.stdout or "") + (p.stderr or ""), p.returncode)
+    except FileNotFoundError as exc:
+        return _RunResult(False, "", None, f"{cmd[0]}: not found ({exc})")
+    except subprocess.TimeoutExpired:
+        return _RunResult(False, "", None, f"{cmd[0]}: timed out after {timeout}s")
+    except OSError as exc:
+        return _RunResult(False, "", None, f"{cmd[0]}: {exc}")
+
+
+def _error(manager: str, msg: str) -> dict[str, dict]:
+    """A checker's tool could not even be run. Distinct from a checker that
+    ran fine and genuinely found nothing: returning {} for both is what let a
+    broken package manager read as "up to date" downstream."""
+    return {"__error__": {"manager": manager, "error": msg}}
 
 
 def _check_mise() -> dict[str, dict]:
     """Merge `mise outdated` (outdated/missing tools) with `mise ls --installed`
     (current versions of everything installed) so every language appears."""
+    installed_r = _run(["mise", "ls", "--installed"], timeout=60)
+    outdated_r = _run(["mise", "outdated"], timeout=60)
+    if not installed_r.spawned and not outdated_r.spawned:
+        return _error("mise", installed_r.error or outdated_r.error or "mise unavailable")
+
     # installed: "<tool> <version> <config>..."  (current state)
     installed: dict[str, dict] = {}
-    for line in _run(["mise", "ls", "--installed"], timeout=60).splitlines():
+    for line in installed_r.output.splitlines():
         parts = line.split()
         if len(parts) < 2:
             continue
@@ -89,7 +131,7 @@ def _check_mise() -> dict[str, dict]:
         }
 
     # outdated: "<tool> <wanted> <current> <latest> <config>" — overlays updates
-    for line in _run(["mise", "outdated"], timeout=60).splitlines():
+    for line in outdated_r.output.splitlines():
         parts = line.split()
         if len(parts) < 4 or parts[0] in ("Tool", "Package"):
             continue
@@ -114,9 +156,11 @@ def _check_mise() -> dict[str, dict]:
 def _check_rustup() -> dict[str, dict]:
     """Parse `rustup check`: '<tc> - up to date: X' or '<tc> - update available: X -> Y'.
     Prefers the stable toolchain; ignores the rustup-binary line."""
-    out = _run(["rustup", "check"], timeout=60)
+    r = _run(["rustup", "check"], timeout=60)
+    if not r.spawned:
+        return _error("rustup", r.error)
     best: dict | None = None
-    for line in out.splitlines():
+    for line in r.output.splitlines():
         m = re.search(r"(\S+)\s*-\s*(?:up to date|update available)\s*:?\s*([^\s,]+)(?:\s*->\s*([^\s,]+))?", line)
         if not m:
             continue
@@ -135,16 +179,21 @@ def _check_rustup() -> dict[str, dict]:
 
 
 def _check_swiftly() -> dict[str, dict]:
-    current = _run(["swift", "--version"], timeout=30)
+    ver_r = _run(["swift", "--version"], timeout=30)
+    avail_r = _run(["swiftly", "list-available"], timeout=60)
+    if not ver_r.spawned and not avail_r.spawned:
+        # Neither half ran: no information at all, not "up to date". A partial
+        # gap (one of the two spawned) falls through to the existing "?"
+        # handling below, which was already honest about not knowing.
+        return _error("swiftly", ver_r.error or avail_r.error)
     cur = "?"
-    for line in current.splitlines():
+    for line in ver_r.output.splitlines():
         m = re.search(r"Swift version (\S+)", line)
         if m:
             cur = m.group(1)
             break
-    avail = _run(["swiftly", "list-available"], timeout=60).splitlines()
     versions = []
-    for line in avail:
+    for line in avail_r.output.splitlines():
         for m in re.finditer(r"\b(\d+)\.(\d+)(?:\.(\d+))?\b", line):
             versions.append((int(m.group(1)), int(m.group(2)), int(m.group(3) or "0")))
     latest = ".".join(str(x) for x in max(versions)) if versions else "?"
@@ -156,9 +205,11 @@ def _check_swiftly() -> dict[str, dict]:
 
 
 def _check_apt() -> dict[str, dict]:
-    out = _run(["apt", "list", "--upgradable"], timeout=60)
+    r = _run(["apt", "list", "--upgradable"], timeout=60)
+    if not r.spawned:
+        return _error("apt", r.error)
     upgradable = set()
-    for line in out.splitlines():
+    for line in r.output.splitlines():
         m = re.match(r"(\S+?)/(\S+)\s+(\S+)\s", line)
         if m:
             upgradable.add(m.group(1).split(":")[0])
@@ -179,9 +230,14 @@ def _check_apt() -> dict[str, dict]:
 
 
 def _check_npm() -> dict[str, dict]:
-    out = _run(["npm", "-g", "outdated", "--json"], timeout=60)
+    outdated_r = _run(["npm", "-g", "outdated", "--json"], timeout=60)
+    if not outdated_r.spawned:
+        return _error("npm", outdated_r.error)
+    # `npm outdated` exits 1 precisely when it found something outdated —
+    # that is signal, not failure, so only `spawned` (checked above) gates
+    # this, never the exit code.
     try:
-        data = json.loads(out) or {}
+        data = json.loads(outdated_r.output) or {}
     except Exception:
         data = {}
     if "typescript" in data:
@@ -191,9 +247,12 @@ def _check_npm() -> dict[str, dict]:
             "current": v.get("current"), "latest": v.get("latest"),
             "updatable": v.get("current") != v.get("latest"),
         }}
-    # typescript absent from outdated = up to date; report its installed version
-    cur = _run(["npm", "-g", "ls", "typescript", "--depth=0"], timeout=30)
-    m = re.search(r"typescript@(\S+)", cur)
+    # typescript absent from `outdated` genuinely means up to date, but only
+    # once we know npm itself ran — confirmed above.
+    cur_r = _run(["npm", "-g", "ls", "typescript", "--depth=0"], timeout=30)
+    if not cur_r.spawned:
+        return _error("npm", cur_r.error)
+    m = re.search(r"typescript@(\S+)", cur_r.output)
     return {"tsc": {
         "manager": "npm", "tool": "typescript",
         "current": m.group(1) if m else "?",
@@ -205,8 +264,10 @@ def _check_npm() -> dict[str, dict]:
 def _check_uv() -> dict[str, dict]:
     """`uv tool list` does not reliably see mojo when UV_TOOL_DIR is configured
     outside the invoking shell's environment, so ask the binary directly."""
-    out = _run(["mojo", "--version"], timeout=30)
-    m = re.search(r"(\d+\.\d+\.\d+(?:\.\d+)?)", out)
+    r = _run(["mojo", "--version"], timeout=30)
+    if not r.spawned:
+        return _error("uv", r.error)
+    m = re.search(r"(\d+\.\d+\.\d+(?:\.\d+)?)", r.output)
     return {"mojo": {
         "manager": "uv", "tool": "mojo",
         "current": m.group(1) if m else "unknown",
@@ -259,14 +320,20 @@ def status(languages: str | list[str] | None = None) -> dict:
     #: so a typo was indistinguishable from a no-op. The executor has always
     #: returned a structured error for an unknown language; this now does too.
     matched: set = set()
+    #: manager -> why its checker could not run at all. Populated either by a
+    #: checker explicitly reporting its tool is missing (_error()) or by one
+    #: raising outright.
+    manager_errors: dict[str, str] = {}
     for manager, checker in _CHECKERS.items():
         try:
             found = checker()
         except Exception as exc:
             found = {"__error__": {"manager": manager, "error": str(exc)}}
+        err = found.get("__error__")
+        if err:
+            manager_errors[err.get("manager", manager)] = err.get("error") or "check failed"
+            continue  # checker failure is surfaced via manager_errors, not a language entry
         for lang, info in found.items():
-            if lang == "__error__":
-                continue  # checker failure is surfaced, not a language entry
             if want is None or lang in want or info.get("tool") in want:
                 results[lang] = info
             matched.update({lang, info.get("tool")} & (want or set()))
@@ -280,7 +347,18 @@ def status(languages: str | list[str] | None = None) -> dict:
             cmd = [p for p in cmd if p != "<PKGS>"] + pkgs
         info["update_command"] = " ".join(cmd) if cmd else None
 
-    unknown = sorted((want or set()) - matched)
+    # A requested name that never matched is either a typo (not a recognised
+    # language at all) or a language whose MANAGER's check just failed — very
+    # different situations that used to collapse into the same "unknown" verdict,
+    # which is exactly backwards for the second case: the name is perfectly
+    # valid, the tooling to check it is what is missing.
+    unresolved = (want or set()) - matched
+    unknown = sorted(n for n in unresolved if n not in LANGUAGE_MANAGER)
+    check_failed = sorted(
+        n for n in unresolved
+        if n in LANGUAGE_MANAGER and LANGUAGE_MANAGER[n] in manager_errors
+    )
+
     out = {
         "ok": True,
         "dry_run": True,
@@ -290,16 +368,32 @@ def status(languages: str | list[str] | None = None) -> dict:
             "total": len(results),
         },
     }
+    if manager_errors:
+        out["manager_errors"] = manager_errors
     if unknown:
         out["unknown"] = unknown
-        # Every requested name was unrecognised, so the call did nothing at all
-        # and saying "ok" would be a lie about a typo.
+    if check_failed:
+        out["check_failed"] = check_failed
+    if unknown or check_failed:
+        # Nothing usable came back for anything that was asked for, so saying
+        # "ok" would claim a result this call does not have — a typo and a
+        # broken package manager are different reasons, but neither is success.
         if not results:
             out["ok"] = False
-            out["error"] = (f"no known runtime named {', '.join(unknown)}. "
-                            f"Nothing was checked or updated.")
+            reasons = []
+            if unknown:
+                reasons.append(f"no known runtime named {', '.join(unknown)}")
+            if check_failed:
+                reasons.append(f"the check failed for {', '.join(check_failed)}: "
+                               + "; ".join(manager_errors[LANGUAGE_MANAGER[n]] for n in check_failed))
+            out["error"] = ". ".join(reasons) + ". Nothing was checked or updated."
         else:
-            out["note"] = f"ignored unrecognised name(s): {', '.join(unknown)}"
+            notes = []
+            if unknown:
+                notes.append(f"ignored unrecognised name(s): {', '.join(unknown)}")
+            if check_failed:
+                notes.append(f"could not check (manager unavailable): {', '.join(check_failed)}")
+            out["note"] = "; ".join(notes)
     return out
 
 
@@ -310,6 +404,16 @@ def update(languages: str | list[str] | None = None, apply: bool = False,
     if not apply:
         st["dry_run"] = True
         st["message"] = "Dry run: nothing was updated. Call with apply=True to execute."
+        return st
+
+    if not st.get("ok"):
+        # status() already explains why — an unrecognised name, or a manager
+        # whose check itself failed. Proceeding into apply from here used to
+        # return {"ok": True, "dry_run": False, "executed": []} regardless: a
+        # typo'd language name and a broken package manager both reported
+        # success for having updated nothing, indistinguishable from a
+        # legitimate no-op.
+        st["dry_run"] = False
         return st
 
     by_manager: dict[str, list[str]] = {}
@@ -329,22 +433,28 @@ def update(languages: str | list[str] | None = None, apply: bool = False,
                 pkgs += st["languages"][l].get("packages", [])
             pkgs = list(dict.fromkeys(pkgs))
             cmd = [p for p in cmd if p != "<PKGS>"] + pkgs
-        try:
-            p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-            executed.append({
-                "manager": mgr, "languages": langs, "command": " ".join(cmd),
-                "exit_code": p.returncode,
-                "output_tail": (p.stdout + p.stderr)[-1500:],
-            })
-        except subprocess.TimeoutExpired:
-            executed.append({
-                "manager": mgr, "languages": langs, "command": " ".join(cmd),
-                "exit_code": None, "output_tail": f"timed out after {timeout}s",
-            })
-        except Exception as exc:
-            executed.append({
-                "manager": mgr, "languages": langs, "command": " ".join(cmd),
-                "exit_code": None, "output_tail": str(exc),
-            })
+        run = _run(cmd, timeout=timeout)
+        executed.append({
+            "manager": mgr, "languages": langs, "command": " ".join(cmd),
+            "exit_code": run.exit_code,
+            "output_tail": run.output[-1500:] if run.spawned else (run.error or "command did not run"),
+            # An updater that never even started (missing executable, timed
+            # out, ...) used to land here as exit_code=None while the
+            # function's TOP-LEVEL ok stayed hardcoded True — the caller had
+            # no way to learn the update it just "successfully" ran did not
+            # happen at all.
+            "ok": run.spawned and run.exit_code == 0,
+        })
 
-    return {"ok": True, "dry_run": False, "executed": executed}
+    if executed:
+        succeeded = sum(1 for e in executed if e["ok"])
+        all_ok = succeeded == len(executed)
+    else:
+        # Nothing was updatable — status() already confirmed the request was
+        # valid, so an empty executed list is a legitimate no-op, not a failure.
+        all_ok = True
+
+    result = {"ok": all_ok, "dry_run": False, "executed": executed}
+    if executed and not all_ok and succeeded > 0:
+        result["partial_failure"] = True
+    return result

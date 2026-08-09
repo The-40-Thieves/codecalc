@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import base64
 import json
-import shutil
 from pathlib import Path
 
 from mcp.server import CacheHint, MCPServer
@@ -220,6 +219,15 @@ async def execute_code_stream(
         return result
 
     workdir = Path(tempfile.mkdtemp(prefix="codecalc-stream-"))
+    # Recorded BEFORE the executed code gets this directory as its cwd (via
+    # --workdir below), exactly like executor/src/main.rs's created_identity.
+    # This dir is passed to the Rust executor as a caller-supplied --workdir,
+    # so the Rust side never deletes it — that duty is entirely ours here, and
+    # the unconditional shutil.rmtree() this used to be is exactly the gap
+    # #38 reported: identity recorded at creation, re-checked immediately
+    # before removal, so a rename-swap by the executed program is refused
+    # rather than deleting whatever now sits at this path.
+    created_identity = executor._dir_identity(workdir)
     try:
         # run the Rust executor directly with --workdir so run.out grows live
         args = [executor._rust, "--lang", language, "--timeout", str(timeout),
@@ -285,7 +293,7 @@ async def execute_code_stream(
         except Exception as exc:
             return {"ok": False, "error": f"stream failed: {exc}"}
     finally:
-        shutil.rmtree(workdir, ignore_errors=True)
+        executor._rmtree_checked(workdir, created_identity)
 
 
 @mcp.tool()

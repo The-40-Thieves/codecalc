@@ -40,6 +40,9 @@ sys.path.insert(0, str(REPO))
 from codecalc import executor, registry  # noqa: E402 — needs the path above
 
 RUST = (REPO / "executor" / "src" / "main.rs").read_text(encoding="utf-8")
+PY_EXECUTOR_SRC = (REPO / "codecalc" / "executor.py").read_text(encoding="utf-8")
+PY_SERVER_SRC = (REPO / "codecalc" / "server.py").read_text(encoding="utf-8")
+PY_SESSIONS_SRC = (REPO / "codecalc" / "sessions.py").read_text(encoding="utf-8")
 
 failures: list[str] = []
 
@@ -140,6 +143,69 @@ if isinstance(getattr(executor, "NPROC_LIMIT", None), int):
     fail("executor.NPROC_LIMIT is back as a fixed constant. RLIMIT_NPROC is a uid-wide "
          "TASK budget, so a constant is a bet on how busy the box is — that bet is what "
          "broke 14 of 31 runtimes. Use nproc_limit().")
+
+# ── 5. identity-checked workdir deletion ────────────────────────────────────
+# #38: the README states, as a flat guarantee, that workdir deletion is
+# identity-checked — device and inode recorded at creation, re-checked right
+# before removal — because executed code runs with that directory as its cwd
+# and can rename another one into its place. Rust has always enforced this
+# (dir_identity/remove_own_workdir in main.rs). Python did not, at three call
+# sites that each delete a directory they created: the pure-Python fallback
+# executor, execute_code_stream's --workdir, and session teardown. Comparing
+# env-var names and numeric constants (sections 1-4 above) could not have
+# caught this — the constants matched fine; the BEHAVIOUR of an entire
+# function was missing. This section asserts the property directly: both
+# backends' cleanup goes through an identity-checked path, not a bare
+# shutil.rmtree()/fs::remove_dir_all() on a directory the executed program had
+# as its cwd.
+
+# Rust: the guard functions exist, and are actually CALLED — not just defined
+# and left dead. Definition uses `remove_own_workdir(work: &Path`; every call
+# site passes `&work` instead, so counting `remove_own_workdir(&work`
+# occurrences counts calls, not the one definition.
+if floor("rust dir_identity fn", re.findall(r"fn\s+dir_identity", RUST), 1) and \
+   floor("rust remove_own_workdir fn", re.findall(r"fn\s+remove_own_workdir", RUST), 1):
+    print("ok   rust: dir_identity/remove_own_workdir are defined")
+rust_calls = re.findall(r"remove_own_workdir\(&work", RUST)
+if floor("rust remove_own_workdir call sites", rust_calls, 3):
+    print(f"ok   rust: remove_own_workdir is called at {len(rust_calls)} site(s), not just defined")
+
+# Python: the guard pair exists in executor.py...
+if floor("python _dir_identity fn", re.findall(r"def _dir_identity", PY_EXECUTOR_SRC), 1) and \
+   floor("python _rmtree_checked fn", re.findall(r"def _rmtree_checked", PY_EXECUTOR_SRC), 1):
+    print("ok   python: _dir_identity/_rmtree_checked are defined")
+
+# ...and each of the three sites named in #38 routes through it rather than
+# an unconditional delete. Asserted PER SITE, by name, so a fourth call site
+# added later without the guard is caught by "no bare shutil.rmtree(workdir"
+# below rather than silently passing because two of three sites got it right.
+PY_SITES = [
+    ("codecalc/executor.py: _execute_python's cleanup", PY_EXECUTOR_SRC,
+     r"if not caller_workdir:\s*\n\s*_rmtree_checked\(workdir"),
+    ("codecalc/server.py: execute_code_stream's cleanup", PY_SERVER_SRC,
+     r"executor\._rmtree_checked\(workdir"),
+    ("codecalc/sessions.py: stop()'s cleanup", PY_SESSIONS_SRC,
+     r"executor\._rmtree_checked\(d"),
+]
+for label, src, pattern in PY_SITES:
+    if re.search(pattern, src):
+        print(f"ok   {label} deletes through _rmtree_checked")
+    else:
+        fail(f"{label} does not call _rmtree_checked — deletion here is unconditional, "
+             "the exact gap #38 reported")
+
+# The regression this whole section exists to catch: a caller-created workdir
+# deleted via a BARE shutil.rmtree(), bypassing the identity check entirely.
+# Matches the call, not the import — sessions.py and server.py both import
+# shutil for other reasons unrelated to workdir cleanup on their own paths.
+BARE_RMTREE = re.compile(r"shutil\.rmtree\(\s*(workdir|d)\b")
+for label, src in (("codecalc/executor.py", PY_EXECUTOR_SRC),
+                    ("codecalc/server.py", PY_SERVER_SRC),
+                    ("codecalc/sessions.py", PY_SESSIONS_SRC)):
+    bare = BARE_RMTREE.findall(src)
+    if bare:
+        fail(f"{label}: found {len(bare)} bare shutil.rmtree() call(s) on a workdir — "
+             "identity-checked deletion (_rmtree_checked) must be used instead")
 
 if failures:
     print(f"\n=== {len(failures)} parity failure(s) ===")
