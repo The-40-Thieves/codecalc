@@ -72,14 +72,32 @@ def _binary_candidates() -> list[str]:
     """Ordered candidate paths for the Rust executor, arch-aware."""
     machine = platform.machine().lower()
     exe_name = "codecalc-exec.exe" if os.name == "nt" else "codecalc-exec"
-    base = Path(__file__).resolve().parent.parent / "bin"
+    # Two roots, package-local FIRST.
+    #
+    # An installed wheel puts the executor at `<site-packages>/codecalc/bin/`,
+    # inside the namespace this distribution owns. It used to land at
+    # `<site-packages>/bin/` — a top-level directory shared with every other
+    # distribution in the environment, which is nobody's to own and which two
+    # packages could each believe they installed. Playwright and Zig both ship
+    # their bundled binaries inside their own package directory for the same
+    # reason. See issue #59.
+    #
+    # A source checkout keeps built binaries at `<repo>/bin/`, which is where
+    # README's build instructions, .gitignore and CI all put them, so that root
+    # stays supported rather than being migrated in the same change. The two
+    # never both exist in practice: a checkout has no `codecalc/bin/`, and an
+    # installed package has no repo above it. Package-local is checked first so
+    # that if they ever DID coexist, the installed artifact wins over whatever
+    # happens to be lying in a working copy.
+    pkg = Path(__file__).resolve().parent
+    roots = [pkg / "bin", pkg.parent / "bin"]
     if machine in ("x86_64", "amd64"):
         names = [exe_name, "codecalc-exec-x86_64-musl"]
     elif machine in ("aarch64", "arm64"):
         names = [exe_name, "codecalc-exec-native-aarch64", "codecalc-exec-aarch64-musl"]
     else:
         names = [exe_name]
-    return [str(base / n) for n in names]
+    return [str(root / n) for root in roots for n in names]
 
 
 def _rust_binary() -> str | None:
