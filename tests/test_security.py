@@ -187,12 +187,36 @@ finally:
 # afterwards — the suite printed ALL TESTS PASS and the step exited 128.
 # The count is flushed to stdout (a file, from the executor's side) before the
 # signal, so killing ourselves does not lose it.
+# `signal.pause()`, not `os.pause()`. THE LATTER HAS NEVER EXISTED — the POSIX
+# pause is exposed on the signal module, and Python's os module has no such
+# attribute on any version. So every forked child raised
+#
+#     AttributeError: module 'os' has no attribute 'pause'
+#
+# printed a traceback, and died instead of parking. The probe still reported a
+# number because the parent kept forking until EAGAIN, so what it actually
+# measured was how many children can be alive while each is busy writing a
+# traceback — load-dependent, and not the parked-process ceiling it claims.
+#
+# It surfaced on macOS in #75: the tracebacks blew the 64 KiB output cap, the
+# executor killed the run for OLE (exit -15) BEFORE the parent could print, and
+# the count came back as None. Linux was winning that race and passing.
+#
+# `os._exit(0)` is belt and braces. A child that ever fell out of the park —
+# pause returning on a signal, or raising — would drop into the parent's `while
+# True` and start forking itself, turning a bounded probe into a real fork bomb.
+# The try/except keeps stderr empty so the cap is never the thing that decides
+# the result.
 _COUNTER = """import os, signal, sys
 n = 0
 try:
     while True:
         if os.fork() == 0:
-            os.pause()      # child parks; only the parent counts
+            try:
+                signal.pause()   # child parks; only the parent counts
+            except Exception:
+                pass
+            os._exit(0)          # never rejoin the parent's loop
         n += 1
 except OSError:
     print(f"EAGAIN_AFTER {n}", flush=True)
