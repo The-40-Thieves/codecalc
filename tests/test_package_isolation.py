@@ -204,6 +204,31 @@ if _ll.available():
         _f.rmdir() if _f.is_dir() else _f.unlink()
     pathlib.Path(_probe_ws).rmdir()
 
+# Every installer in the table is confined, python3 included. It was NOT for a
+# while — uv failed under the ruleset and the honest answer at the time was to
+# run it unconfined and report `install_not_confined_python3`. Both causes were
+# mine (#90): /dev/null was not granted, and restrict_self applied
+# directory-only rights to file paths, which made the whole ruleset fail to
+# apply the moment a device node was added.
+#
+# Asserted as a SET rather than per-manager: a manager added later is confined
+# by default or this fails, which is the right way round for a security list.
+_declared = set(_pkgs._INSTALLERS)
+_confinable = set(_pkgs._CONFINABLE)
+check("every declared installer is confined",
+      _declared <= _confinable, f"-> unconfined: {sorted(_declared - _confinable)}")
+
+if _ll.available():
+    _ws2 = _tf.mkdtemp()
+    _env2 = {k: v.replace("{target}", _ws2)
+             for k, v in _pkgs._INSTALLERS["python3"][2].items()}
+    _fn2, _ = _pkgs._confinement("uv", _ws2, _env2, "python3")
+    check("  ...including python3, which now gets a ruleset",
+          _fn2 is not None, f"-> {_fn2}")
+    for _f in sorted(pathlib.Path(_ws2).rglob("*"), reverse=True):
+        _f.rmdir() if _f.is_dir() else _f.unlink()
+    pathlib.Path(_ws2).rmdir()
+
 # Truthful reporting is its own requirement: the gaps are real and stated.
 _reasons = _ll.unenforced_reasons()
 check("the confinement reports what it does NOT cover",

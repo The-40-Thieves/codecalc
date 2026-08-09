@@ -122,15 +122,28 @@ _DECLINED_REASON = {
 CACHE_ROOT = Path("~/.codecalc/pkgs").expanduser()
 
 
-#: Managers VERIFIED to work under the Landlock ruleset below. Absence is not
-#: an oversight, it is a measured result: `uv` fails with "Failed to discover
-#: managed Python installations / Could not detect either glibc version nor
-#: musl libc version" under the ruleset, and the denials strace reports (/sys
-#: hugepage and cgroup cpu.max) are not the cause — allowing /sys changes
-#: nothing. Rather than ship a confinement that breaks the most-used installer,
-#: or silently retry unconfined and report a boundary that was not applied,
-#: python3 runs unconfined and SAYS SO. Tracked as its own issue.
-_CONFINABLE = {"node", "bun", "php", "go", "rust", "deno"}
+#: Managers verified to work under the Landlock ruleset below. python3 was
+#: absent for a while: `uv` failed with "Could not detect either glibc version
+#: nor musl libc version", which read like a libc problem and was not. Two of
+#: MY bugs, found by tracing to the end of the run instead of the first
+#: denials (#90):
+#:
+#:   1. /dev/null was not allowed. uv's libc detection spawns a probe with its
+#:      output redirected there; the open failed and detection reported the
+#:      only thing it could — that it had not detected a libc.
+#:   2. landlock.restrict_self applied directory-only rights to every path, so
+#:      adding a device node made landlock_add_rule return EINVAL and took the
+#:      WHOLE ruleset down with it.
+#:
+#: Both fixed, so every installer here is confined and this set is now "all of
+#: them". It stays as a set rather than being deleted: a manager added later
+#: has to be measured under the ruleset before it is claimed to be confined.
+_CONFINABLE = {"python3", "node", "bun", "php", "go", "rust", "deno"}
+
+#: Device nodes an installer legitimately needs. Granted individually rather
+#: than by allowing /dev, which would hand over every device on the host.
+#: Read-WRITE because writing to /dev/null is what a redirect does.
+_DEVICE_NODES = ("/dev/null", "/dev/zero", "/dev/urandom", "/dev/random")
 
 
 def _confinement(bin_: str, workspace: str, env: dict, language: str) -> tuple:
@@ -183,6 +196,7 @@ def _confinement(bin_: str, workspace: str, env: dict, language: str) -> tuple:
     private_tmp.mkdir(parents=True, exist_ok=True)
     writable.append(str(private_tmp))
     env.setdefault("TMPDIR", str(private_tmp))
+    writable.extend(d for d in _DEVICE_NODES if pathlib.Path(d).exists())
 
     # /run is not decoration: /etc/resolv.conf is a symlink to
     # ../run/systemd/resolve/stub-resolv.conf on systemd hosts, so without it
@@ -190,6 +204,21 @@ def _confinement(bin_: str, workspace: str, env: dict, language: str) -> tuple:
     # than a policy decision. Measured the same way.
     readable = ["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc", "/proc",
                 "/opt", "/run", "/var/lib"]
+    # uv's managed-interpreter store, READ-ONLY. It has to find an interpreter
+    # to install FOR, and denying the directory is a hard error rather than a
+    # graceful skip: "failed to read directory .../uv/python: Permission
+    # denied". An earlier probe hid this by pointing HOME at a temp dir, where
+    # the store did not exist and uv moved on.
+    #
+    # This is the one path outside the workspace the installer may read, and it
+    # is worth being exact about what that costs: reading an interpreter store
+    # is not a way out. Nothing outside the workspace is WRITABLE, which is the
+    # property the test asserts.
+    for store in (env.get("UV_PYTHON_INSTALL_DIR"),
+                  env.get("XDG_DATA_HOME") and env["XDG_DATA_HOME"] + "/uv",
+                  "~/.local/share/uv"):
+        if store:
+            readable.append(str(pathlib.Path(store).expanduser()))
     resolved = shutil.which(bin_, path=executor.registry.runtime_path()) or shutil.which(bin_)
     if resolved:
         # Two levels up from <prefix>/bin/<tool> is the toolchain root, which is
