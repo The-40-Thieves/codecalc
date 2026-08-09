@@ -28,12 +28,41 @@ sys.path.insert(0, str(REPO_ROOT))
 from codecalc import sessions
 
 FAILS = []
+SKIPS = []
 
 
 def check(name, cond, detail=""):
     print(f"{'PASS' if cond else 'FAIL':4} {name} {detail}")
     if not cond:
         FAILS.append(name)
+
+
+def skip(name: str, why: str) -> None:
+    print(f"SKIP {name} ({why})")
+    SKIPS.append(name)
+
+
+def _can_symlink(base: pathlib.Path) -> bool:
+    """Probe the capability rather than assume it.
+
+    Symlink creation needs a privilege (SeCreateSymbolicLinkPrivilege) that an
+    unprivileged Windows account does not hold by default, and attempting one
+    there raises `OSError: [WinError 1314] A required privilege is not held
+    by the client`. That is a fact about this machine, not a defect in
+    `_jail` — so it is probed and skipped explicitly rather than letting the
+    whole file abort on the first symlink call.
+    """
+    probe = base / "codecalc-symlink-probe"
+    try:
+        probe.symlink_to(base)
+        return True
+    except OSError:
+        return False
+    finally:
+        try:
+            probe.unlink()
+        except OSError:
+            pass
 
 
 def rejects(d, path) -> bool:
@@ -68,8 +97,17 @@ check("absolute path rejected", rejects(session, "/etc/passwd"))
 check("deep traversal rejected", rejects(session, "a/b/../../../../etc/passwd"))
 
 # ── a symlink out of the workspace must not become a write primitive ────────
-(session / "escape").symlink_to(tmp)
-check("symlink pointing outside is rejected", rejects(session, "escape/pwned.txt"))
+# This case alone is skippable when the account cannot create symlinks; the
+# traversal tests above (and the nested/flat/root/inner cases below) need no
+# symlink privilege at all and stay mandatory regardless — they are the
+# security-relevant checks and must never be skipped along with this one.
+if _can_symlink(tmp):
+    (session / "escape").symlink_to(tmp)
+    check("symlink pointing outside is rejected", rejects(session, "escape/pwned.txt"))
+else:
+    skip("symlink pointing outside is rejected",
+         "this account lacks symlink privilege (WinError 1314 or equivalent); "
+         "the traversal tests remain mandatory and are unaffected")
 
 # ── legitimate paths still work ─────────────────────────────────────────────
 try:
@@ -109,6 +147,6 @@ for bad in ("../evil", "a/b", "", "x" * 65, "we!rd"):
         rejected = True
     check(f"session id {bad[:14]!r} rejected", rejected)
 
-print(f"\n=== {len(FAILS)} FAILURES ===" if FAILS else
-      "\n=== ALL SESSION-JAIL TESTS PASS ===")
+print(f"\n=== {len(FAILS)} FAILURES, {len(SKIPS)} skipped ===" if FAILS else
+      f"\n=== ALL SESSION-JAIL TESTS PASS ({len(SKIPS)} skipped) ===")
 sys.exit(1 if FAILS else 0)

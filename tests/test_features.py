@@ -75,13 +75,32 @@ async def main():
         c = await client.call_tool("execute_code", {"language": "python3",
                                                     "code": "print('z')", "compact": True})
         ct = await _txt(c)
-        check("compact mode", '"stdout": "z\\n"' in ct and '"cpu_ms"' not in ct, f"-> {ct[:80]}")
+        cj = json.loads(ct)
+        # Assert the DECODED value, not the serialized spelling: Python emits
+        # CRLF line endings on Windows, so a literal '"stdout": "z\\n"' search
+        # against the raw JSON text never matches there even though the
+        # decoded stdout is the same one line of output either way.
+        check("compact mode",
+              cj.get("stdout", "").strip() == "z" and "cpu_ms" not in cj,
+              f"-> {ct[:80]}")
 
         # 6. streaming
         st = await client.call_tool("execute_code_stream", {"language": "python3",
                                                             "code": "import time\nfor i in range(3):\n print('tick', i); time.sleep(0.3)"})
         stt = await _txt(st)
-        check("streaming returns result", "tick" in stt and "streamed_partial" in stt)
+        sj = json.loads(stt)
+        if sj.get("streamed") is False:
+            # The documented no-native fallback: execute_code_stream runs
+            # non-streaming and says so via streamed=False plus a note,
+            # rather than raising or silently omitting the field. That is a
+            # supported outcome, not a failure — assert its actual content.
+            check("streaming falls back to non-streaming (documented no-native mode)",
+                  "tick" in sj.get("stdout", "") and "no native executor" in sj.get("note", ""),
+                  f"-> streamed={sj.get('streamed')} note={sj.get('note')!r}")
+        else:
+            check("streaming returns result",
+                  sj.get("streamed") is True and "tick" in stt and "streamed_partial" in sj,
+                  f"-> streamed={sj.get('streamed')}")
 
         # 7. package install (network; small pure-python pkg)
         p = await client.call_tool("install_package", {"language": "python3",

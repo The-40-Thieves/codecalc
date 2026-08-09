@@ -38,12 +38,40 @@ PROGRAMS = {
     "gleam": 'import gleam/io\npub fn main() { io.println("hello from gleam") }',
 }
 
+def _missing_runtime(r: dict) -> bool:
+    """True when this result means the interpreter/compiler for this language
+    could not be spawned on this machine at all — not that the sandboxed
+    program ran and misbehaved. That is a fact about the machine, and must
+    read as SKIP, never as a false FAIL.
+
+    Detects both backends' spawn-failure shape: the pure-Python fallback's
+    `_runtime_unavailable_result` (exit_code None, stderr says "runtime
+    unavailable") and the Rust executor's spawn failure (exit_code -2,
+    stderr says "spawn failed"). A genuine wrong-output failure always
+    carries a real exit_code from the interpreter/compiler that DID run,
+    never one of these two spawn-failure sentinels.
+    """
+    if r.get("ok") or r.get("timed_out"):
+        return False
+    stderr = r.get("stderr") or ""
+    return r.get("exit_code") in (None, -2) and (
+        "runtime unavailable" in stderr or "spawn failed" in stderr)
+
+
+def skip(name: str, why: str) -> None:
+    print(f"SKIP {name} ({why})")
+
+
 def main():
-    passed, failed = [], []
+    passed, failed, skipped = [], [], []
     for lang, code in PROGRAMS.items():
         r = executor.execute(lang, code, timeout=60)
         combined = r.get("stdout", "") + r.get("stderr", "")
         ok = r.get("ok") and "hello from" in combined
+        if not ok and _missing_runtime(r):
+            skipped.append((lang, r))
+            skip(f"{lang} smoke", (r.get("stderr") or "")[:160].replace("\n", " "))
+            continue
         (passed if ok else failed).append((lang, r))
         status = "PASS" if ok else "FAIL"
         err = (r.get("stderr") or r.get("error") or "")[:120].replace("\n", " ")
@@ -64,7 +92,8 @@ def main():
     ]:
         print(json.dumps(complexity.analyze(code, lang)))
 
-    print(f"\n=== RESULT: {len(passed)} passed, {len(failed)} failed ===")
+    print(f"\n=== RESULT: {len(passed)} passed, {len(failed)} failed, "
+          f"{len(skipped)} skipped ===")
     if failed:
         for lang, r in failed:
             print(f"  {lang}: stdout={r.get('stdout','')[:100]!r} stderr={r.get('stderr','')[:200]!r}")

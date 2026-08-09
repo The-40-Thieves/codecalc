@@ -78,6 +78,36 @@ check("target compile error vs working source -> mismatch", outcome == "mismatch
 outcome, _ = classify_case(compile_error(), ok("7"))
 check("source compile error -> inconclusive", outcome == "inconclusive")
 
+# ── the empty-output guard (#42): agreeing on NOTHING is not a match ────────
+# Observed on windows-latest: compare_execution's harness returned an empty
+# stdout for `node` on a snippet that was supposed to print, while sibling
+# languages produced the real answer from the same code. That surfaced only
+# because a sibling disagreed; the dangerous case is when nothing disagrees
+# because BOTH sides silently lost their output the same way. Two ok=True,
+# stdout="" results must not read as equivalence any more than two RTEs do.
+outcome, reason = classify_case(ok(""), ok(""))
+check("both ok but BOTH produced no output -> inconclusive, not match",
+      outcome == "inconclusive", f"-> {outcome} {reason!r}")
+check("  ...and says why", "no output" in reason.lower(), f"-> {reason!r}")
+
+outcome, _ = classify_case(ok("42"), ok(""))
+check("one side produced output, the other silently did not -> mismatch",
+      outcome == "mismatch", f"-> {outcome}")
+outcome, _ = classify_case(ok(""), ok("42"))
+check("  ...regardless of which side is the empty one -> still mismatch",
+      outcome == "mismatch", f"-> {outcome}")
+
+# the exact bug-report shape: one language ok=False/empty while siblings ok
+outcome, _ = classify_case(ok("42"), rte(stdout=""))
+check("a sibling that ran fine vs one that failed empty -> mismatch, not scored a winner",
+      outcome == "mismatch", f"-> {outcome}")
+
+# end to end: a whole verification run that only ever agreed on emptiness
+# must not pass either, for the same reason an all-inconclusive run doesn't.
+r = aggregate([classify_case(ok(""), ok("")) for _ in range(3)])
+check("an entire run of empty-vs-empty 'agreement' is NOT a pass",
+      r["passed"] is False, f"-> {r['reason']}")
+
 # ── the ordinary cases still behave ─────────────────────────────────────────
 outcome, _ = classify_case(ok("42\n"), ok("42"))
 check("both ok, same stdout (trailing ws normalised) -> match", outcome == "match")
