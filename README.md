@@ -194,6 +194,15 @@ runtimes:
 `apply=True` is passed explicitly — and it only touches the package manager
 that owns each language (never the Rust sandbox, which has no update powers).
 
+One of those managers is elevated: apt updates system packages, so its command
+starts with `sudo`. `apply=True` is an argument a connected model controls, so
+that branch takes a second key the model does not have — the host must set
+`CODECALC_ALLOW_RUNTIME_APPLY=1`. Without it the apt command is reported as
+skipped with `ok: false` and the variable named, while the unprivileged managers
+still run. `sudo -n` already fails closed where a password is required; this
+covers the passwordless-sudo rule common on developer machines and CI images,
+which is exactly where `-n` does not stop it.
+
 ## Run the server
 
 ```bash
@@ -244,6 +253,7 @@ All optional. codecalc runs with none of these set.
 | `CODECALC_RUNTIME_PATH` | the server's own `PATH`, else `/usr/local/bin:/usr/bin:/bin` | The `PATH` executed code resolves runtimes on. **Set this when an MCP client spawns the server**: clients often launch with a stripped environment, so an inherited `PATH` can miss a toolchain manager's shims entirely and most languages silently become unavailable. `list_languages` reports what actually resolved. |
 | `CODECALC_EXEC_BIN` | `bin/codecalc-exec` (arch-matched) | Override the sandbox binary. Without one, codecalc falls back to a pure-Python executor — `list_languages` and `execute_code` still work, but the Rust path is the production one. |
 | `CODECALC_REQUIRE_NATIVE` | *(unset)* | Fail-closed: refuse to start if no usable `codecalc-exec` binary was found (checked at import, so this is also a server-start check), instead of silently answering every call on the weaker Python fallback. Raises naming `CODECALC_REQUIRE_NATIVE` and the paths that were checked. |
+| `CODECALC_ALLOW_RUNTIME_APPLY` | *(unset)* | Permit `update_runtimes(apply=True)` to run the **elevated** update commands (apt, via `sudo`). Unset, they are skipped with `ok: false` naming this variable, and the unprivileged managers still run. Deliberately an environment variable rather than a tool argument: `apply` is something a connected model can flip, and this is not. Accepts `1`/`true`/`yes`/`on`; an empty value is not consent. |
 | `CODECALC_SESSION_ROOT` | `~/.codecalc/sessions` | Where session workspaces live. |
 | `CODECALC_PROCESS_HEADROOM` | `512` | Fork-bomb guard. `RLIMIT_NPROC` is a **uid-wide task budget**, not a per-sandbox one — the kernel compares it against every thread your user owns, machine-wide. So codecalc measures the ambient count per execution and sets the limit to *ambient + headroom*: a bomb can add at most this many tasks, while a runtime wanting a few threads always has room however busy the box is. |
 | `CODECALC_MAX_PROCESSES` | *(unset)* | Escape hatch: pin `RLIMIT_NPROC` to an absolute value and skip the measurement. |

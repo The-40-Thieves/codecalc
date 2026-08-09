@@ -421,6 +421,13 @@ def update_runtimes(languages: str = "", apply: bool = False, timeout: int = 600
     swiftly update, apt-get upgrade of language packages, npm -g update, uv tool
     upgrade). `languages` = comma-separated subset; empty = all.
 
+    PRIVILEGE: the apt manager updates system packages and its command begins
+    with `sudo`. Those commands do NOT run unless the HOST has set
+    CODECALC_ALLOW_RUNTIME_APPLY=1; without it they are reported as skipped
+    with `ok: false` and the variable named, and the rest still run. Every
+    entry carries an `elevated` flag either way. mise/rustup/swiftly/npm/uv
+    touch user-owned toolchains and are never gated.
+
     NETWORK: yes, on both paths. apply=False still asks each manager what the
     latest version is, which is a remote lookup; apply=True additionally
     downloads and installs. "Dry run" bounds what changes on disk, not what is

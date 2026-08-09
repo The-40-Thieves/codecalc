@@ -40,6 +40,7 @@ Stated here rather than discovered later:
 | Limitation | Effect |
 |---|---|
 | `install_package` is not sandboxed | Install-time hooks run with the server user's filesystem access ([#23](https://github.com/The-40-Thieves/codecalc/issues/23)) |
+| `update_runtimes` can update system packages | `apply=True` runs each manager's update command; the apt one is elevated. Gated on the host setting `CODECALC_ALLOW_RUNTIME_APPLY=1`, because `apply` is an argument a connected model controls ([#63](https://github.com/The-40-Thieves/codecalc/issues/63)) |
 | Python fallback lacks the `no_net` shim | `no_net` is reported in `unenforced` rather than applied |
 | Same-UID execution by default | Isolation is rlimits and process groups, not a container or VM |
 | No signed release artifacts yet | Verify what you build; there is nothing to verify against yet ([#24](https://github.com/The-40-Thieves/codecalc/issues/24)) |
