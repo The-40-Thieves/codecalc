@@ -380,11 +380,19 @@ jobs:
         run: |
           set -euo pipefail
           uv venv verify-venv
+          # ABSOLUTE, deliberately. Every assertion step below runs from
+          # $RUNNER_TEMP rather than the checkout, because `python -c`
+          # prepends cwd to sys.path and would otherwise import the source
+          # tree instead of the installed wheel. A workspace-relative
+          # interpreter path stops resolving the moment they do that, which
+          # is exactly what happened: `verify-venv/bin/python: No such file
+          # or directory`, exit 127, on all five targets.
           if [ "${{ runner.os }}" = "Windows" ]; then
-            py="verify-venv/Scripts/python.exe"
+            py="$PWD/verify-venv/Scripts/python.exe"
           else
-            py="verify-venv/bin/python"
+            py="$PWD/verify-venv/bin/python"
           fi
+          [ -x "$py" ] || { echo "::error::interpreter not executable at $py"; exit 1; }
           echo "py=$py" >> "$GITHUB_ENV"
           whl=$(ls dl/*.whl)
           echo "installing: $whl"
