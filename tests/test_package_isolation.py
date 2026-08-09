@@ -208,9 +208,19 @@ if _ll.available():
 _reasons = _ll.unenforced_reasons()
 check("the confinement reports what it does NOT cover",
       bool(_reasons), f"-> {_reasons}")
-check("  ...naming UDP where the ABI cannot restrict it",
-      _ll.abi_version() >= 10 or "install_udp_egress_unrestricted" in _reasons,
-      f"-> ABI {_ll.abi_version()} reasons={_reasons}")
+# Two different truths, and the first version conflated them. Where Landlock
+# is unavailable at all (ABI 0 — macOS, Windows) there is no confinement to
+# have gaps IN, and demanding a UDP caveat there failed the platforms that were
+# behaving correctly. Where it IS applied, the UDP gap is real below ABI 10 and
+# must be named. Asserted as the two cases they are.
+if _ll.abi_version() == 0:
+    check("  ...saying plainly that nothing was confined",
+          "package_install_not_confined_no_landlock" in _reasons,
+          f"-> {_reasons}")
+else:
+    check("  ...naming UDP where the ABI cannot restrict it",
+          _ll.abi_version() >= 10 or "install_udp_egress_unrestricted" in _reasons,
+          f"-> ABI {_ll.abi_version()} reasons={_reasons}")
 
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== PACKAGE INSTALLS ARE WORKSPACE-SCOPED ===")
