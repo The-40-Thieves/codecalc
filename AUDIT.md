@@ -268,9 +268,14 @@ network-blocking shim. Each has a security-relevant design decision:
    `translate_code` was shipping it to whatever gateway the operator had set.
 
 
-9. **context7_docs**: third-party documentation content returned as data to
-   the caller; the server never executes or follows instructions found in it.
-   Only the requesting model decides how to use the snippets.
+9. **Removed 2026-08-08: context7_docs.** It fetched public documentation and
+   executed nothing, so it was never a code-execution risk — but it was the
+   last outbound request in the package, and the caller of this server is a
+   language model that already has documentation access of its own. Removing a
+   duplicated capability to gain an unqualified property was the better trade:
+   codecalc now makes NO network calls, asserted structurally by
+   tests/test_offline.py rather than promised in prose.
+
 10. **compare_edge_cases**: offline-capable; snippets are provided per language
     and run through the standard sandbox. No LLM in the loop.
 11. **verify_optimization**: the speedup gate is MEASURED (same sizes, min-of-repeats,
@@ -314,7 +319,6 @@ network-blocking shim. Each has a security-relevant design decision:
     use sympy `solve`/`limit`/`simplify` on parsed expressions (parse-only,
     no execution), same surface as the pre-existing `evaluate_expression`.
 
-Residual-risk items 1-4 from the original audit remain; add:
 
 5. **Sessions accumulate disk**: workspaces persist until `session_stop` or
    manual cleanup. A runaway agent could fill disk. Consider a max-sessions
@@ -354,10 +358,17 @@ Residual-risk items 1-4 from the original audit remain; add:
 
 ## Residual risks (accepted, documented)
 
-0. **Removed 2026-08-08: outbound model calls.** The package no longer contains
-   an LLM client. `context7_docs` is the only remaining outbound request and it
-   fetches public documentation; no user code is transmitted anywhere. Anything
-   below that assumed a configured gateway no longer applies.
+0. **Removed 2026-08-08: ALL outbound requests.** The package contains no LLM
+   client and no documentation fetch. Nothing in `codecalc/` imports anything
+   that can open a socket, which `tests/test_offline.py` asserts per module.
+   No user code, and no telemetry, leaves the machine. Anything below that
+   assumed a configured gateway no longer applies.
+
+   Note the boundary this does NOT move: code the sandbox runs on a caller's
+   behalf still reaches the network unless `--no-net` is passed. The package
+   being offline and the executed program being offline are separate
+   guarantees, and only the second needs the shim.
+
 
 1. **No network isolation.** `--no-net` exists and blocks `AF_INET`/`AF_INET6`
    via an `LD_PRELOAD`/`DYLD_INSERT_LIBRARIES` shim, leaving `AF_UNIX` alone —

@@ -126,8 +126,10 @@ jobs:
       # descriptors, subprocess semantics — so they run on all three.
       - name: session + worker regressions
         run: uv run --no-sync python tests/test_python_sweep.py
-      - name: context7 + llm client regressions
-        run: uv run --no-sync python tests/test_network_modules.py
+      # No network needed and none permitted: this asserts the package cannot
+      # make an outbound request at all, so it cannot flake on connectivity.
+      - name: offline guarantee (no network calls anywhere)
+        run: uv run --no-sync python tests/test_offline.py
       # Pure Python and no toolchain needed, so it belongs on the matrix rather
       # than in the sandbox job.
       - name: absent-input regressions
