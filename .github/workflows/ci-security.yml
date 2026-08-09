@@ -74,6 +74,39 @@ jobs:
           python-version: '3.12'
       - run: python scripts/check_claims.py
 
+  description:
+    # The GitHub repo description is the most-read text in the project — every search result, every
+    # og:image — and the one surface no file in this tree can see. It read "48 MCP tools" for a day
+    # after the count became 47, because check_claims.py only ever reached the README. A gate that
+    # covers one surface does not make a claim true; it decides which surface rots.
+    #
+    # NOT run on pull_request, deliberately. The header above commits the structural gates to being
+    # static assertions with no external feed, so they cannot start failing overnight for reasons
+    # outside a PR. A repo description is exactly such a feed: anyone can edit it in the UI, and a
+    # gating PR job would then block unrelated work for a change nobody in that PR made. On push and
+    # on the weekly cron it catches the drift where the drift actually happens.
+    name: repo description matches the code
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: compare the description to server.py
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          desc=$(gh repo view "$GITHUB_REPOSITORY" --json description -q .description)
+          # An empty description makes every count pattern match nothing. check_claims.py's FLOOR
+          # already reports that as a failure rather than a pass, but say which of the two happened
+          # here so the log does not read as a count mismatch.
+          if [ -z "$desc" ]; then
+            echo "the repo description is empty — nothing to check, which is itself the finding"
+            exit 1
+          fi
+          python scripts/check_claims.py --description "$desc"
+
   portability:
     # The repo is PUBLIC and the executor binary ships. It was written against one machine and it
     # showed: RUNTIME_PATH hardcoded a home directory in BOTH backends, llm.py defaulted to a private
