@@ -1,0 +1,176 @@
+name: diag-node-windows
+
+# DIAGNOSTIC, not a gate. Issue #42: `node` intermittently returns ok=false with
+# an EMPTY stdout through the sandbox on windows-latest, while python3 and ruby
+# return 42 from the same harness in the same job. It surfaced only because a
+# sibling language disagreed — a node-only snippet would have been a silently
+# wrong answer rather than a red check.
+#
+# One observation is not a reproduction. This job exists to turn "it happened
+# once on PR #41 and passed on re-run" into a classified failure mode, because
+# the three plausible causes need different fixes:
+#
+#   NONZERO_EXIT   node started and failed        -> look at stderr / env
+#   TIMED_OUT      node started and hung          -> look at the kill path
+#   EMPTY_EXIT_0   node exited 0 having printed   -> look at stdout capture,
+#                  nothing                           which is the pipe/handle
+#                                                    family the session worker
+#                                                    already had on Windows
+#
+# `compare_execution` is a plain loop over `executor.execute`, so the primitive
+# is exercised directly as well as through the tool, in case ordering or the
+# preceding runs matter.
+#
+# workflow_dispatch ONLY. It burns Windows minutes and answers a question, so it
+# runs when someone asks it, not on every push.
+#
+# Exit code is the finding: NON-ZERO means it reproduced and the tally above it
+# says how. Green means N iterations without a reproduction, which is evidence
+# about the rate rather than proof of absence — say so when quoting it.
+
+on:
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: 'How many times to run each case (default 40).'
+        type: string
+        default: '40'
+
+permissions:
+  contents: read
+
+jobs:
+  repro:
+    name: node empty-stdout repro (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: executor
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: '0.12.1'
+          python-version: '3.12'
+      - name: install (locked)
+        run: uv sync --frozen
+
+      # Same as ci-python.yml's sandbox job: without this the loop below would
+      # exercise the pure-Python fallback, which is NOT where the flake was seen.
+      - name: build the executor into bin/
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release --manifest-path executor/Cargo.toml
+          mkdir -p bin
+          cp executor/target/release/codecalc-exec.exe bin/
+          # No shim on Windows: there is no LD_PRELOAD equivalent, and the
+          # executor reports --no-net as unenforced rather than pretending.
+
+      # FLOOR. A diagnostic that loops 40 times against a missing runtime, or
+      # against the fallback backend, would report "no reproduction" for reasons
+      # that have nothing to do with the question. Both are asserted before any
+      # measurement, and both fail loudly.
+      - name: assert the RUST backend and node are what we are measuring
+        shell: bash
+        run: |
+          set -euo pipefail
+          backend=$(uv run --no-sync python -c 'from codecalc import executor; print(executor.backend())')
+          echo "backend: $backend"
+          [ "$backend" = "rust" ] || { echo "::error::backend is '$backend', expected 'rust' — this would measure the fallback."; exit 1; }
+          avail=$(uv run --no-sync python -c "from codecalc import executor; print(executor.probe().get('node'))" 2>/dev/null || echo unknown)
+          echo "node available (probe): $avail"
+
+      - name: loop the node case and classify every failure
+        shell: bash
+        env:
+          ITERATIONS: ${{ inputs.iterations }}
+        run: |
+          set -euo pipefail
+          # A workflow_dispatch input is free text. Reject a non-number here
+          # rather than letting int() raise inside the driver, where the error
+          # would read as a harness fault instead of a bad argument.
+          case "$ITERATIONS" in
+            ''|*[!0-9]*) echo "::error::iterations must be a positive integer, got '$ITERATIONS'"; exit 1 ;;
+          esac
+          uv run --no-sync python - "$ITERATIONS" <<'PY'
+          import collections, json, sys
+
+          from codecalc import executor, tools
+
+          n = int(sys.argv[1])
+          SNIPPETS = {"python3": "print(6*7)", "node": "console.log(6*7)", "ruby": "puts 6*7"}
+
+          def classify(r):
+              """Which of the three candidate failure modes this result is.
+
+              EMPTY_EXIT_0 is the one worth finding: it is a wrong answer that
+              looks like a valid one, and it is the only mode that implicates
+              stdout capture rather than node itself.
+              """
+              if r.get("ok") and r.get("stdout", "").strip() == "42":
+                  return "OK"
+              if r.get("timed_out"):
+                  return "TIMED_OUT"
+              if not r.get("stdout", "").strip():
+                  return "EMPTY_EXIT_0" if r.get("exit_code") == 0 else "NONZERO_EXIT_EMPTY"
+              return "OTHER"
+
+          tally = collections.Counter()
+          samples = {}
+          ran = 0
+
+          for i in range(n):
+              # (a) the primitive, isolated
+              r = executor.execute("node", SNIPPETS["node"], timeout=15)
+              kind = classify(r)
+              tally[f"direct:{kind}"] += 1
+              ran += 1
+              if kind != "OK" and f"direct:{kind}" not in samples:
+                  samples[f"direct:{kind}"] = {
+                      "iteration": i, "ok": r.get("ok"), "exit_code": r.get("exit_code"),
+                      "verdict": r.get("verdict"), "timed_out": r.get("timed_out"),
+                      "duration_ms": r.get("duration_ms"),
+                      "stdout": r.get("stdout", "")[:120],
+                      "stderr": str(r.get("stderr", ""))[:400],
+                      "unenforced": r.get("unenforced"),
+                  }
+
+              # (b) through the tool, exactly as the failing assertion called it
+              c = tools.compare_execution(SNIPPETS, timeout=15)
+              for row in c.get("results", []):
+                  if row.get("language") != "node":
+                      continue
+                  kind = classify(row)
+                  tally[f"compare:{kind}"] += 1
+                  if kind != "OK" and f"compare:{kind}" not in samples:
+                      samples[f"compare:{kind}"] = {
+                          "iteration": i, "row": {k: str(v)[:200] for k, v in row.items()},
+                          "fastest": c.get("fastest"),
+                          "siblings": {x.get("language"): x.get("stdout", "").strip()
+                                       for x in c.get("results", [])},
+                      }
+
+          # A loop that ran fewer times than asked would make every count below
+          # mean something other than what it says.
+          if ran != n:
+              print(f"::error::loop ran {ran} times, expected {n}")
+              sys.exit(2)
+
+          print(f"\n=== {n} iterations, node on {sys.platform} ===")
+          for key in sorted(tally):
+              print(f"  {key:28} {tally[key]}")
+          if samples:
+              print("\n=== first sample of each failure mode ===")
+              print(json.dumps(samples, indent=2, default=str))
+
+          bad = sum(v for k, v in tally.items() if not k.endswith(":OK"))
+          if bad:
+              print(f"\n=== REPRODUCED: {bad} non-OK results in {n} iterations ===")
+              sys.exit(1)
+          print(f"\n=== no reproduction in {n} iterations ===")
+          print("Evidence about the RATE, not proof of absence. #41 hit it once "
+                "in a single run, so a clean pass here bounds the frequency "
+                "rather than closing the issue.")
+          PY
