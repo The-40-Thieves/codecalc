@@ -261,9 +261,14 @@ assertion and exits non-zero if any failed — no test runner, no plugins.
 ```bash
 cd /path/to/codecalc
 
-# everything
-for f in tests/test_*.py; do PYTHONPATH=. .venv/bin/python "$f" || break; done
-for f in scripts/*.py;    do PYTHONPATH=. .venv/bin/python "$f" || break; done
+# everything. `|| break` used to be `|| break` alone, which stopped at the
+# first failure AND left the loop exiting 0 — a red suite reported success to
+# anything wrapping this command. This form runs them all and carries the
+# failure out.
+fail=0
+for f in tests/test_*.py; do PYTHONPATH=. .venv/bin/python "$f" || { echo "FAILED: $f"; fail=1; }; done
+for f in scripts/*.py;    do PYTHONPATH=. .venv/bin/python "$f" || { echo "FAILED: $f"; fail=1; }; done
+[ "$fail" -eq 0 ]   # the exit status of the whole run
 
 # or individually
 PYTHONPATH=. .venv/bin/python tests/test_smoke.py           # every language, via the Rust executor
