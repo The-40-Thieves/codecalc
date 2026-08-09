@@ -45,8 +45,20 @@ uv run python scripts/check_claims.py        # stated counts match the code
 uv run python scripts/check_portability.py   # no machine-specific paths
 uv run python scripts/contract_check.py      # tool contract
 
-for t in tests/test_*.py; do uv run python "$t"; done
+# A bare `do uv run python "$t"; done` exits 0 whatever happens inside it — the
+# loop's status is its last command, so one red suite in the middle reported
+# success. Carry the failure out.
+fail=0
+for t in tests/test_*.py; do uv run python "$t" || { echo "FAILED: $t"; fail=1; }; done
+[ "$fail" -eq 0 ]
 ```
+
+**Not pytest.** These suites are standalone scripts that assert at module scope
+and `sys.exit` at the end; pytest collects by importing, so it aborts on the
+first file. `tests/conftest.py` disables collection and explains why, including
+why wrapping the exits would be worse than the current behaviour. If you add a
+suite, follow the existing shape — one script, one `sys.exit`, a printed line
+per property.
 
 The `scripts/` gates run on a bare checkout with no network, no token, and no built binary. That is deliberate: the test suites need the Rust executor and 31 language runtimes, so they cannot run everywhere, and an invariant that only holds on one machine is not an invariant. Keep new gates in that class if you can.
 
