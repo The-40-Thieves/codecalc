@@ -159,8 +159,13 @@ async def main():
         ratios = r.get("doubling_ratios") or []
         check("benchmark reports no more ratios than gaps exist",
               len(ratios) <= len(sizes) - 1, f"-> {len(ratios)} ratios for {len(sizes)} sizes")
-        check("benchmark ratios are finite and positive",
-              ratios and all(isinstance(x, (int, float)) and x > 0 for x in ratios),
+        # Finite and non-negative, NOT strictly positive. These are measured
+        # durations with a noise baseline subtracted, so a fast runner can
+        # legitimately produce 0.0 — observed on CI as [0.12, 0.0]. Requiring
+        # >0 pinned a timing value, which this file's own header says not to do.
+        check("benchmark ratios are finite and non-negative",
+              ratios and all(isinstance(x, (int, float)) and x >= 0
+                             and x == x and x != float("inf") for x in ratios),
               f"-> {ratios}")
 
         # ── compare_execution — TIMING, so structure only ─────────────────

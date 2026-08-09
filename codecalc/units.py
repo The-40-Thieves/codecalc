@@ -10,8 +10,28 @@ from __future__ import annotations
 
 import re
 
-import sympy
-from sympy.physics import units as u
+#: sympy is imported ON FIRST USE, not at module load.
+#:
+#: The README credited "lazy sympy/z3 imports" for a fast server start while
+#: this module imported sympy at the top — and server.py imports units, so every
+#: start paid for it. Measured: `import codecalc.server` took 1.9s, of which
+#: units was 437ms and sympy 318ms of that. z3 really was lazy; sympy was not.
+#:
+#: _UNITS below is plain strings, and the tables are what most callers touch, so
+#: the import is genuinely deferrable rather than merely moved.
+_SYMPY = None
+_U = None
+
+
+def _sympy():
+    """(sympy, sympy.physics.units), imported once and cached."""
+    global _SYMPY, _U
+    if _SYMPY is None:
+        import sympy as _s
+        from sympy.physics import units as _u
+
+        _SYMPY, _U = _s, _u
+    return _SYMPY, _U
 
 #: alias -> (sympy unit expression as string, is_temperature)
 _UNITS: dict[str, tuple[str, bool]] = {
@@ -212,6 +232,7 @@ def convert(value: float, from_unit: str, to_unit: str) -> dict:
     try:
         from_expr = value * _parse_unit(fsrc[0])
         to_expr = _parse_unit(tsrc[0])
+        _, u = _sympy()
         result = u.convert_to(from_expr, to_expr)
         numeric = float(result.evalf(10) / to_expr.evalf(10))
     except Exception as exc:
@@ -240,6 +261,7 @@ def _is_unit(obj) -> bool:
     """Is this a sympy quantity/expression usable as a unit?"""
     if obj is None or isinstance(obj, type) or callable(obj):
         return False
+    sympy, u = _sympy()
     return isinstance(obj, (u.Quantity, sympy.Expr))
 
 
@@ -250,6 +272,9 @@ def _parse_unit(expr: str):
     """Parse a unit expression string into a sympy quantity. Restricted
     grammar only: numbers, names, `*`, `/`, `**`. Names resolve against the
     sympy units module or the composites table — never user code."""
+    # Bound in the ENCLOSING scope so the nested `atom` closure sees it; ruff's
+    # F821 caught the first attempt, which bound it only in the outer body.
+    _, u = _sympy()
     toks, pos = _TOKEN_RE.findall(expr), 0
 
     def peek() -> str | None:
@@ -362,6 +387,7 @@ def constants(name: str | None = None) -> dict:
     try:
         expr = _parse_unit(sym)
         tgt = _parse_unit(target)
+        _, u = _sympy()
         val = float(u.convert_to(expr, tgt).evalf(12) / tgt.evalf(12))
         source = "sympy"
     except Exception:
