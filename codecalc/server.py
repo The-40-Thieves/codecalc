@@ -214,7 +214,9 @@ async def execute_code_stream(
     code: str,
     stdin: str = "",
     timeout: int = 30,
+    max_memory_mb: int = 0,
     max_output_kb: int = 0,
+    max_cpu: int = 0,
     no_net: bool = False,
     ctx: Context = None,
 ) -> dict:
@@ -223,6 +225,18 @@ async def execute_code_stream(
     Unlike execute_code (which returns only at exit), this reports progress
     notifications to the client while the program runs, so agents can see
     output before the process finishes. Returns the same result shape.
+
+    It also applies the SAME ceilings: max_memory_mb, max_output_kb and
+    max_cpu are forwarded to the executor exactly as execute_code forwards
+    them. That sentence used to say only "the same result shape", which was
+    true of the shape and false of the guarantees — this tool accepted
+    neither a memory nor a CPU bound, so a caller who set them on
+    execute_code and then switched to streaming silently lost both.
+
+    The one difference that remains, deliberately: the wall-clock cap is 300s
+    here against execute_code's 120s, because streaming exists for runs long
+    enough to want progress. That divergence is stated rather than left for a
+    reader to discover by comparing two min() calls.
     """
     import asyncio
     import tempfile
@@ -236,7 +250,9 @@ async def execute_code_stream(
     # so fall back to a single non-streaming run rather than failing.
     if executor._rust is None:
         result = executor.execute(language, code, stdin=stdin, timeout=timeout,
-                                  max_output_kb=max_output_kb, no_net=no_net)
+                                  max_memory_mb=max_memory_mb,
+                                  max_output_kb=max_output_kb,
+                                  max_cpu=max_cpu, no_net=no_net)
         result["streamed"] = False
         result["note"] = ("no native executor binary; ran without streaming. "
                           "Build it (cargo build --release) for progress updates.")
@@ -256,8 +272,15 @@ async def execute_code_stream(
         # run the Rust executor directly with --workdir so run.out grows live
         args = [executor._rust, "--lang", language, "--timeout", str(timeout),
                 "--workdir", str(workdir)]
+        # Same flags, same conditions, as codecalc/executor.py builds for the
+        # non-streaming path. The executor has always accepted --max-memory-mb
+        # and --max-cpu (main.rs); this tool simply never passed them.
+        if max_memory_mb > 0:
+            args += ["--max-memory-mb", str(max_memory_mb)]
         if max_output_kb > 0:
             args += ["--max-output-kb", str(max_output_kb)]
+        if max_cpu > 0:
+            args += ["--max-cpu", str(max_cpu)]
         if no_net:
             args += ["--no-net"]
         sf = None

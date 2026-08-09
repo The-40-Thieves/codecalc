@@ -379,6 +379,51 @@ _executor_src = inspect.getsource(executor)
 check("_require_native_or_die() is called at module scope (import time)",
       re.search(r"^_require_native_or_die\(\)", _executor_src, re.M) is not None)
 
+# ═══ the streaming tool must apply the SAME ceilings (#61) ════════════════
+# execute_code took max_memory_mb/max_output_kb/max_cpu and forwarded all
+# three. execute_code_stream took only max_output_kb, and its argv omitted
+# --max-memory-mb and --max-cpu entirely — so a caller who set a memory or
+# CPU bound on execute_code and then switched to streaming silently lost
+# both, while the docstring said "Returns the same result shape". True of the
+# shape, false of the guarantees.
+#
+# Asserted as parameter-set PARITY rather than as a list of expected names:
+# a per-tool list is what let these two diverge, since each satisfied its own.
+import asyncio as _asyncio
+import inspect as _inspect
+
+from codecalc import server as _server
+
+_CEILINGS = {"max_memory_mb", "max_output_kb", "max_cpu", "no_net"}
+_sync = set(_inspect.signature(_server.execute_code).parameters)
+_strm = set(_inspect.signature(_server.execute_code_stream).parameters)
+check("streaming accepts every ceiling the non-streaming tool does",
+      _strm >= _CEILINGS, f"-> missing {sorted(_CEILINGS - _strm)}")
+check("the two tools agree on the ceiling parameters",
+      (_CEILINGS & _sync) == (_CEILINGS & _strm),
+      f"-> sync={sorted(_CEILINGS & _sync)} stream={sorted(_CEILINGS & _strm)}")
+
+# Declared is not forwarded: the argv builder must actually pass them.
+_src = _inspect.getsource(_server.execute_code_stream)
+for _flag in ("--max-memory-mb", "--max-cpu", "--max-output-kb"):
+    check(f"streaming argv passes {_flag}", _flag in _src)
+
+# ...and forwarded is not enforced. One real bounded run, kept small so it
+# trips in about a second.
+if executor.backend() == "rust":
+    _hog = "a=[]\nwhile True:\n    a.append(b'x'*(1024*1024))\n"
+    _r = _asyncio.run(_server.execute_code_stream("python3", _hog, timeout=20,
+                                                 max_memory_mb=64))
+    check("a memory ceiling set on the STREAMING tool actually bites",
+          _r.get("ok") is False and (_r.get("peak_memory_kb") or 0) < 200_000,
+          f"-> ok={_r.get('ok')} verdict={_r.get('verdict')} peak={_r.get('peak_memory_kb')}")
+else:
+    # No skip() helper in this file, and adding one to report a single case
+    # would change how every other block reads. Named in the output instead,
+    # so "not exercised here" cannot be mistaken for "exercised and fine".
+    print("SKIP streaming memory ceiling (no native executor; the fallback "
+          "path forwards the same ceilings and is covered separately)")
+
 # ═══ the bundled binary lives INSIDE the package (#59) ═════════════════════
 # The wheel used to force_include to `bin/`, which installs to a TOP-LEVEL
 # site-packages/bin/ — a directory shared with every other distribution in the
