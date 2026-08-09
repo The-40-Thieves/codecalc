@@ -35,6 +35,15 @@ on:
         description: 'How many times to run each case (default 40).'
         type: string
         default: '40'
+      parked:
+        description: >-
+          Live processes held open THROUGHOUT the loop, as sustained
+          process-table pressure (default 16). Tunable without a code change so
+          a re-dispatch can search for the pressure level that reproduces.
+          Raising it risks exhausting the runner, which fails the job loudly
+          rather than reporting a clean sweep.
+        type: string
+        default: '16'
 
 permissions:
   contents: read
@@ -220,38 +229,57 @@ jobs:
           [ "$backend" = "rust" ] || { echo "::error::backend is '$backend'"; exit 1; }
           echo "backend: $backend"
 
-      # The load. continue-on-error because their PASS/FAIL is not what this
-      # job is asking — they are here to leave the runner in the state the
-      # original failure was observed in. A red suite here must not mask the
-      # loop's own result below.
-      - name: run the heavy suites first (the load, not the assertion)
-        continue-on-error: true
-        shell: bash
-        run: |
-          set +e
-          uv run --no-sync python tests/test_security.py
-          uv run --no-sync python tests/test_executor_sweep.py
-          uv run --no-sync python tests/test_platform_contract.py
-          echo "heavy suites finished (exit codes deliberately ignored)"
-
-      - name: NOW loop the node case
+      # THE LOAD IS HELD OPEN, and that is the whole change.
+      #
+      # The previous version ran the heavy suites and THEN looped. Sequential,
+      # not concurrent: the fork-bomb and process-limit probes were killed and
+      # reaped before the first node execution started, so whatever pressure
+      # they created was gone before anything was measured. 80 clean
+      # executions on 2026-08-09 therefore said "node is fine after a busy
+      # period" when the hypothesis is "node misbehaves during one".
+      #
+      # Now: park a set of live processes, run the heavy suites on repeat in
+      # the background, and loop node WHILE both are running.
+      #
+      # The floors matter more than the loop. A diagnostic whose load dies
+      # early reports "no reproduction" for a reason that has nothing to do
+      # with node — which is exactly the mistake this step replaces — so the
+      # load is asserted alive both before and after the measurement, and the
+      # job FAILS LOUDLY if it was not, rather than reporting a clean sweep.
+      - name: loop node WHILE the load is live
         shell: bash
         env:
           ITERATIONS: ${{ inputs.iterations }}
+          PARKED: ${{ inputs.parked }}
         run: |
           set -euo pipefail
-          case "$ITERATIONS" in
-            ''|*[!0-9]*) echo "::error::iterations must be a positive integer, got '$ITERATIONS'"; exit 1 ;;
-          esac
-          uv run --no-sync python - "$ITERATIONS" <<'PY'
-          import collections, json, sys
+          for v in ITERATIONS PARKED; do
+            eval "val=\$$v"
+            case "$val" in
+              ''|*[!0-9]*) echo "::error::$v must be a positive integer, got '$val'"; exit 1 ;;
+            esac
+          done
+          uv run --no-sync python - "$ITERATIONS" "$PARKED" <<'PY'
+          import collections, json, subprocess, sys, time
 
           from codecalc import executor, tools
 
           n = int(sys.argv[1])
+          parked_n = int(sys.argv[2])
           SNIPPETS = {"python3": "print(6*7)", "node": "console.log(6*7)", "ruby": "puts 6*7"}
+          SUITES = ["tests/test_security.py", "tests/test_executor_sweep.py",
+                    "tests/test_platform_contract.py"]
+          #: Wall-clock ceiling on the background load. Without it a hung child
+          #: would outlive the step and hold the runner.
+          LOAD_SECONDS = 1800
 
           def classify(r):
+              """Which of the three candidate failure modes this result is.
+
+              EMPTY_EXIT_0 is the one worth finding: a wrong answer that looks
+              like a valid one, and the only mode implicating stdout capture
+              rather than node itself.
+              """
               if r.get("ok") and r.get("stdout", "").strip() == "42":
                   return "OK"
               if r.get("timed_out"):
@@ -260,38 +288,113 @@ jobs:
                   return "EMPTY_EXIT_0" if r.get("exit_code") == 0 else "NONZERO_EXIT_EMPTY"
               return "OTHER"
 
-          tally, samples, ran = collections.Counter(), {}, 0
-          for i in range(n):
-              r = executor.execute("node", SNIPPETS["node"], timeout=15)
-              k = classify(r); tally[f"direct:{k}"] += 1; ran += 1
-              if k != "OK" and f"direct:{k}" not in samples:
-                  samples[f"direct:{k}"] = {"iteration": i, "exit_code": r.get("exit_code"),
-                                            "verdict": r.get("verdict"), "timed_out": r.get("timed_out"),
-                                            "stderr": str(r.get("stderr", ""))[:400]}
-              c = tools.compare_execution(SNIPPETS, timeout=15)
-              for row in c.get("results", []):
-                  if row.get("language") != "node":
-                      continue
-                  k = classify(row); tally[f"compare:{k}"] += 1
-                  if k != "OK" and f"compare:{k}" not in samples:
-                      samples[f"compare:{k}"] = {"iteration": i,
-                                                 "siblings": {x.get("language"): x.get("stdout", "").strip()
-                                                              for x in c.get("results", [])}}
-          if ran != n:
-              print(f"::error::loop ran {ran} times, expected {n}")
-              sys.exit(2)
-          print(f"\n=== {n} iterations AFTER the heavy suites, node on {sys.platform} ===")
-          for key in sorted(tally):
-              print(f"  {key:28} {tally[key]}")
-          if samples:
-              print("\n=== first sample of each failure mode ===")
-              print(json.dumps(samples, indent=2, default=str))
-          bad = sum(v for k, v in tally.items() if not k.endswith(":OK"))
-          if bad:
-              print(f"\n=== REPRODUCED UNDER LOAD: {bad} non-OK in {n} ===")
-              print("The isolated job did not reproduce this. The difference "
-                    "between the two jobs is the finding.")
-              sys.exit(1)
-          print(f"\n=== no reproduction in {n} iterations, even after the heavy suites ===")
-          print("Bounds the rate under this load too. It does not close #42.")
+          def alive(procs):
+              return sum(1 for p in procs if p.poll() is None)
+
+          parked, suite_proc = [], None
+          try:
+              # Sustained process-table pressure. Spawned rather than forked:
+              # os.fork does not exist on Windows, which is the platform in
+              # question.
+              for _ in range(parked_n):
+                  parked.append(subprocess.Popen(
+                      [sys.executable, "-c", f"import time; time.sleep({LOAD_SECONDS})"],
+                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+
+              # The heavy suites, on repeat, so they are still running when the
+              # last node iteration goes out. Output discarded: their verdicts
+              # are not what this job asks, they are here to churn processes,
+              # handles and job objects the way the original failing run did.
+              runner = (
+                  "import subprocess, sys, time\n"
+                  f"end = time.time() + {LOAD_SECONDS}\n"
+                  "while time.time() < end:\n"
+                  f"    for t in {SUITES!r}:\n"
+                  "        subprocess.run([sys.executable, t],\n"
+                  "                       stdout=subprocess.DEVNULL,\n"
+                  "                       stderr=subprocess.DEVNULL)\n"
+              )
+              suite_proc = subprocess.Popen([sys.executable, "-c", runner],
+                                            stdout=subprocess.DEVNULL,
+                                            stderr=subprocess.DEVNULL)
+              time.sleep(15)  # let the suites actually get going
+
+              # ── FLOOR, before measuring anything ────────────────────────
+              before = alive(parked)
+              print(f"load: {before}/{parked_n} parked processes alive, "
+                    f"suites running={suite_proc.poll() is None}")
+              if before < parked_n:
+                  print(f"::error::only {before}/{parked_n} parked processes survived "
+                        "startup — the load is not what this job claims to measure")
+                  sys.exit(2)
+              if suite_proc.poll() is not None:
+                  print("::error::the background suite runner exited before the loop "
+                        "started — there is no concurrent load")
+                  sys.exit(2)
+
+              tally, samples, ran = collections.Counter(), {}, 0
+              for i in range(n):
+                  r = executor.execute("node", SNIPPETS["node"], timeout=15)
+                  k = classify(r); tally[f"direct:{k}"] += 1; ran += 1
+                  if k != "OK" and f"direct:{k}" not in samples:
+                      samples[f"direct:{k}"] = {
+                          "iteration": i, "exit_code": r.get("exit_code"),
+                          "verdict": r.get("verdict"), "timed_out": r.get("timed_out"),
+                          "duration_ms": r.get("duration_ms"),
+                          "stderr": str(r.get("stderr", ""))[:400],
+                          "load_alive": alive(parked)}
+                  c = tools.compare_execution(SNIPPETS, timeout=15)
+                  for row in c.get("results", []):
+                      if row.get("language") != "node":
+                          continue
+                      k = classify(row); tally[f"compare:{k}"] += 1
+                      if k != "OK" and f"compare:{k}" not in samples:
+                          samples[f"compare:{k}"] = {
+                              "iteration": i,
+                              "siblings": {x.get("language"): x.get("stdout", "").strip()
+                                           for x in c.get("results", [])},
+                              "load_alive": alive(parked)}
+
+              # ── FLOOR, after ───────────────────────────────────────────
+              after = alive(parked)
+              suites_still = suite_proc.poll() is None
+              print(f"\nload at end: {after}/{parked_n} parked alive, "
+                    f"suites running={suites_still}")
+              if ran != n:
+                  print(f"::error::loop ran {ran} times, expected {n}")
+                  sys.exit(2)
+              if after < parked_n or not suites_still:
+                  print("::error::the load did not survive the measurement, so a clean "
+                        "result here would mean nothing. Re-run with a smaller "
+                        "`parked` or a longer LOAD_SECONDS.")
+                  sys.exit(2)
+
+              print(f"\n=== {n} iterations UNDER LIVE LOAD, node on {sys.platform} ===")
+              print(f"    ({parked_n} parked processes + the heavy suites on repeat, "
+                    "both confirmed running throughout)")
+              for key in sorted(tally):
+                  print(f"  {key:28} {tally[key]}")
+              if samples:
+                  print("\n=== first sample of each failure mode ===")
+                  print(json.dumps(samples, indent=2, default=str))
+
+              bad = sum(v for k, v in tally.items() if not k.endswith(":OK"))
+              if bad:
+                  print(f"\n=== REPRODUCED UNDER LIVE LOAD: {bad} non-OK in {n} ===")
+                  print("The isolated job does not reproduce this. The difference "
+                        "between the two jobs is the finding.")
+                  sys.exit(1)
+              print(f"\n=== no reproduction in {n} iterations under live load ===")
+              print("Bounds the rate under concurrent pressure too. #42 stays open.")
+          finally:
+              for p in parked:
+                  try:
+                      p.kill()
+                  except OSError:
+                      pass
+              if suite_proc is not None:
+                  try:
+                      suite_proc.kill()
+                  except OSError:
+                      pass
           PY
