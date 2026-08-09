@@ -96,6 +96,12 @@ for k in ("exit_code", "duration_ms", "cpu_ms", "peak_memory_kb", "timed_out",
           "unenforced", "platform"):
     check(f"success: field {k!r} present", k in d)
 
+#: The full key set of a successful run, captured before `d` is reused below.
+#: Every other return path is compared against THIS rather than against its own
+#: list of expected fields — see the compile-failure check at the end of the
+#: file for why that distinction is the whole point.
+SUCCESS_KEYS = set(d)
+
 # peak_memory_kb is normalised to KiB on every platform. getrusage reports it in
 # BYTES on macOS and KiB on Linux, so an unconverted macOS value shows up here as
 # an absurd figure — a hello-world in any of these runtimes is nowhere near 1 GiB.
@@ -140,6 +146,39 @@ d = run(["--lang", lang, "--timeout", "60"], ENVSRC)
 got = d.get("stdout", "").strip()
 check("env allowlist: canary did not reach the child",
       "codecalc-ci-canary" not in got, f"-> {got[:50]!r}")
+
+# ── every return path must have the SAME shape ──────────────────────────────
+# The compile-FAILURE return carried 13 keys where a successful run carried 16,
+# missing total_ms/platform/workdir. A caller reading result["workdir"] got a
+# KeyError whose only cause was that the submitted program did not compile,
+# which is an ordinary outcome and not an exceptional one.
+#
+# Asserted as SET EQUALITY against the successful run, deliberately, rather than
+# as another list of expected fields. A per-path field list is exactly what let
+# this diverge: both paths satisfied their own list, and nobody ever compared
+# the two lists to each other. Set equality cannot drift that way, and it also
+# catches a field added to one path and forgotten on the other.
+COMPILED_BROKEN = [
+    ("c", "this is not valid c"),
+    ("cpp", "this is not valid c++"),
+    ("rust", "this is not valid rust"),
+]
+broken = next(((lg, src) for lg, src in COMPILED_BROKEN if probe.get(lg)), None)
+if broken is None:
+    # Named, not silent: this runner cannot exercise the compile-failure path at
+    # all, which is different from exercising it and finding it correct.
+    print("SKIP compile-failure shape: no compiled language on this runner "
+          f"(probe reported: {', '.join(available[:10])})")
+else:
+    blang, bsrc = broken
+    fd = run(["--lang", blang, "--timeout", "60"], bsrc)
+    check(f"compile failure ({blang}): reported as a failure, not a crash",
+          fd.get("ok") is False and fd.get("phase") == "compile",
+          f"-> ok={fd.get('ok')} phase={fd.get('phase')}")
+    missing, extra = SUCCESS_KEYS - set(fd), set(fd) - SUCCESS_KEYS
+    check(f"compile failure ({blang}): identical key set to a successful run",
+          not missing and not extra,
+          f"-> missing={sorted(missing)} unexpected={sorted(extra)}")
 
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== EXECUTOR CONTRACT HOLDS ===")
