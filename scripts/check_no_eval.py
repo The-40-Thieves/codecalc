@@ -74,6 +74,52 @@ if scanned < MIN_FILES:
           "The gate is scanning nothing; an empty walk is not a clean tree.")
     sys.exit(1)
 
+# ── the OTHER evaluator: SymPy ─────────────────────────────────────────────
+# This gate scanned for literal eval/exec in codecalc's own source and found
+# none, correctly, while six @mcp.tool() functions handed caller strings to
+# sympify/parse_expr — which evaluate what they parse. `parse_expr` populates
+# its default global_dict from vars(builtins) deliberately, __import__ among
+# them, so `simplify_expression("__import__('os').system('id')")` ran id.
+#
+# A gate that only knows the names of the evaluators IT expects cannot see a
+# third-party parser that evaluates internally. So this asserts the screen
+# instead: any module reaching a SymPy parser must import reject_unsafe.
+#
+# File-scoped on purpose. Proving each individual call site sits behind a
+# guard needs flow analysis, and a check that claims more precision than it
+# has is the failure this file exists to prevent. The behavioural regression
+# in tests/test_bug_sweep.py probes all six tools with a live payload and
+# asserts nothing executes; this is the cheap structural half that runs on a
+# bare checkout.
+SYMPY_EVALUATORS = ("sympify(", "parse_expr(")
+sympy_sites: list[tuple[str, int]] = []
+for path in sorted((REPO / "codecalc").glob("*.py")):
+    for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        if any(k in stripped for k in SYMPY_EVALUATORS):
+            sympy_sites.append((path.name, lineno))
+
+# FLOOR. Ten call sites are known to exist. If this finds far fewer the
+# extractor has broken, and "no unguarded sites" would be true of nothing.
+if len(sympy_sites) < 8:
+    print(f"::error::found only {len(sympy_sites)} sympy parser call sites; the "
+          "extractor is broken and this check would pass vacuously")
+    sys.exit(1)
+else:
+    unguarded = sorted({
+        name for name, _ in sympy_sites
+        if "reject_unsafe" not in (REPO / "codecalc" / name).read_text(encoding="utf-8")
+    })
+    if unguarded:
+        print(f"::error::module(s) {unguarded} reach a SymPy parser with no "
+              "reject_unsafe screen; SymPy evaluates what it parses")
+        sys.exit(1)
+    else:
+        print(f"ok   sympy screen: {len(sympy_sites)} parser call sites, every "
+              "module importing reject_unsafe")
+
 for name in EXEC_ALLOWED:
     if not (PKG / name).is_file():
         print(f"::error::the documented exec() exception '{name}' no longer exists. "

@@ -10,6 +10,8 @@ from __future__ import annotations
 import itertools
 import re
 
+from .safe_expr import reject_unsafe, safe_global_dict
+
 _MATH_TRANSFORMS = None
 _BOOL_TRANSFORMS = None
 
@@ -39,11 +41,19 @@ def evaluate_expression(expression: str, **variables) -> dict:
     """Evaluate/simplify a math or boolean expression symbolically."""
     if len(expression) > _MAX_EXPR_LEN:
         return {"ok": False, "error": f"expression too long (max {_MAX_EXPR_LEN} chars)"}
+    # parse_expr EVALUATES what it parses, and its default global_dict is
+    # populated from vars(builtins) on purpose — 967 names on sympy 1.14.0,
+    # __import__ among them. The length cap above bounds work, not reach:
+    # `__import__('os').system('id')` is 31 characters. See safe_expr.
+    bad = reject_unsafe(expression)
+    if bad:
+        return {"ok": False, "error": bad}
     sp = _sympy()
     from sympy.parsing.sympy_parser import parse_expr
 
     try:
-        expr = parse_expr(expression, transformations=_math_transforms(), local_dict=variables)
+        expr = parse_expr(expression, transformations=_math_transforms(),
+                          local_dict=variables, global_dict=safe_global_dict())
     except Exception as exc:  # sympy raises many specific types
         return {"ok": False, "error": f"parse error: {exc}"}
 
@@ -337,10 +347,20 @@ def solve_linear(system: str, variables: str | list[str]) -> dict:
             raw = raw.strip()
             if not raw:
                 continue
+            # Screened per PIECE: this splits on ';' and '=' before sympify,
+            # and the screen refuses both, so the whole system string would
+            # never pass. What reaches the parser is what must be checked.
             if "=" in raw:
                 lhs, rhs = raw.split("=", 1)
+                for _part in (lhs, rhs):
+                    _bad = reject_unsafe(_part)
+                    if _bad:
+                        return {"ok": False, "error": _bad}
                 eqs.append(sp.Eq(sp.sympify(lhs), sp.sympify(rhs)))
             else:
+                _bad = reject_unsafe(raw)
+                if _bad:
+                    return {"ok": False, "error": _bad}
                 eqs.append(sp.sympify(raw, evaluate=False))
         sol = sp.solve(eqs, list(syms), dict=True)
         # A variable the caller ASKED for and the system does not constrain is

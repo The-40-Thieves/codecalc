@@ -17,6 +17,8 @@ from datetime import UTC, datetime
 from decimal import Decimal, getcontext
 from fractions import Fraction
 
+from .safe_expr import reject_unsafe
+
 getcontext().prec = 50
 
 # ─────────────────────────── exact AST evaluator ───────────────────────────
@@ -797,6 +799,12 @@ def algebraic_equiv(a: str, b: str) -> dict:
     Identity over symbolic reals says nothing about float rounding, integer
     truncation or modular overflow — usually where the real difference lives.
     """
+    # SymPy evaluates what it parses (see codecalc/safe_expr.py). Screen the
+    # caller's string BEFORE it reaches sympify, not after.
+    for _name, _val in (("a", a), ("b", b)):
+        _bad = reject_unsafe(_val)
+        if _bad:
+            return {"ok": False, "error": f"{_name}: {_bad}"}
     sp = _sympy()
     try:
         ea = sp.sympify(a)
@@ -813,6 +821,15 @@ def algebraic_equiv(a: str, b: str) -> dict:
 
 def solve_expression(expr: str, var: str = "x") -> dict:
     """Solve for a root or crossover: `x**2 - 4 = 0`, `2*x + 1 = 7`."""
+    # SymPy evaluates what it parses (see codecalc/safe_expr.py). Screen the
+    # caller's string BEFORE it reaches sympify, not after.
+    # Screened per SIDE, because this splits on '=' before sympify and the
+    # screen refuses '=' — the parts are what reach the parser, so the parts
+    # are what must be checked.
+    for _part in (expr.split("=", 1) if ("=" in expr and "==" not in expr) else [expr]):
+        _bad = reject_unsafe(_part)
+        if _bad:
+            return {"ok": False, "error": _bad}
     sp = _sympy()
     try:
         if "=" in expr and "==" not in expr:
@@ -830,6 +847,12 @@ def solve_expression(expr: str, var: str = "x") -> dict:
 
 def limit_expression(expr: str, var: str = "x", point: str = "oo") -> dict:
     """Asymptotic behaviour: limit of EXPR as var -> point (default oo)."""
+    # SymPy evaluates what it parses (see codecalc/safe_expr.py). Screen the
+    # caller's string BEFORE it reaches sympify, not after.
+    for _name, _val in (("expr", expr), ("point", point)):
+        _bad = reject_unsafe(_val)
+        if _bad:
+            return {"ok": False, "error": f"{_name}: {_bad}"}
     sp = _sympy()
     try:
         e = sp.sympify(expr)
@@ -844,6 +867,11 @@ def limit_expression(expr: str, var: str = "x", point: str = "oo") -> dict:
 
 def simplify_expression(expr: str) -> dict:
     """Simplified, factored and expanded forms of an expression."""
+    # SymPy evaluates what it parses (see codecalc/safe_expr.py). Screen the
+    # caller's string BEFORE it reaches sympify, not after.
+    _bad = reject_unsafe(expr)
+    if _bad:
+        return {"ok": False, "error": _bad}
     sp = _sympy()
     try:
         e = sp.sympify(expr)

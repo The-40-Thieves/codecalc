@@ -379,6 +379,68 @@ _executor_src = inspect.getsource(executor)
 check("_require_native_or_die() is called at module scope (import time)",
       re.search(r"^_require_native_or_die\(\)", _executor_src, re.M) is not None)
 
+# ═══ SymPy parsers must not execute what they are handed (GHSA advisory) ═══
+# Six @mcp.tool() functions passed caller strings to sympify/parse_expr, which
+# EVALUATE what they parse. parse_expr populates its default global_dict from
+# vars(builtins) deliberately — __import__ among them — so
+# simplify_expression("__import__('os').system('id')") ran id in the server
+# process, outside the Rust sandbox entirely. AUDIT.md CRITICAL-01 through a
+# different door.
+#
+# Probed BEHAVIOURALLY with a live payload rather than by asserting the guard
+# is present: a screen that exists and is bypassed looks identical to a screen
+# that works, from the source. Non-destructive — the payload writes one file
+# into a temp dir and the assertion is that the file never appears.
+import shutil as _shutil
+import tempfile as _tf
+
+from codecalc import logic as _logic
+
+_probe_dir = pathlib.Path(_tf.mkdtemp(prefix="cc-rce-probe-"))
+_marker = _probe_dir / "EXECUTED"
+_payload = f"__import__('pathlib').Path({str(_marker)!r}).write_text('x')"
+
+
+def _executed(fn) -> bool:
+    _marker.unlink(missing_ok=True)
+    try:
+        fn(_payload)
+    except Exception:  # a refusal or a parse error both count as not-executed
+        pass
+    hit = _marker.exists()
+    _marker.unlink(missing_ok=True)
+    return hit
+
+
+for _label, _call in (
+    ("evaluate_expression", lambda p: _logic.evaluate_expression(p)),
+    ("solve_linear (no =)", lambda p: _logic.solve_linear(p, "x")),
+    ("solve_linear (with =)", lambda p: _logic.solve_linear(p + " = 1", "x")),
+    ("algebraic_equiv", lambda p: exact.algebraic_equiv(p, "1")),
+    ("solve_expression", lambda p: exact.solve_expression(p)),
+    ("limit_expression", lambda p: exact.limit_expression(p, "x", "0")),
+    ("simplify_expression", lambda p: exact.simplify_expression(p)),
+):
+    check(f"{_label}: a payload string is NOT executed", not _executed(_call))
+
+_shutil.rmtree(_probe_dir, ignore_errors=True)
+
+# The refusal must be the documented structured shape, not an exception that
+# the MCP dispatcher flattens to "Internal server error" with no detail.
+_r = exact.simplify_expression("__import__('os').system('id')")
+check("a refused expression returns ok=False with a reason",
+      _r.get("ok") is False and "not permitted" in str(_r.get("error")),
+      f"-> {str(_r.get('error'))[:70]}")
+
+# ...and the screen must not have cost the tools their actual job, including
+# the sympy-only syntax implicit_multiplication_application enables.
+for _expr, _want in (("sin(x)**2 + cos(x)**2", "1"), ("2x + 1", "2*x + 1")):
+    _r = _logic.evaluate_expression(_expr)
+    check(f"legitimate expression still evaluates: {_expr}",
+          _r.get("ok") is True, f"-> {_r.get('error')}")
+check("decimals survive the refusal of the '.' OPERATOR",
+      _logic.evaluate_expression("1.5 + 2.25").get("ok") is True)
+
 # ═══ the streaming tool must apply the SAME ceilings (#61) ════════════════
 # execute_code took max_memory_mb/max_output_kb/max_cpu and forwarded all
 # three. execute_code_stream took only max_output_kb, and its argv omitted
