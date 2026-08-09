@@ -60,3 +60,4 @@ These invariants are enforced in CI on every pull request, so a regression fails
 - `check_claims.py` — the counts and licence declarations in README, AUDIT.md, and the repository description match the code
 - `check_portability.py` — no machine-specific paths or private addresses, including in tests
 - `tests/test_security.py`, `tests/test_session_jail.py` — the audit's findings as permanent regression tests
+- `tests/test_platform_contract.py` — every ceiling NOT named in `unenforced` is made to bite, on **both** backends. The Rust one runs in the sandbox job, which asserts `backend == "rust"`; the pure-Python fallback runs in the test matrix, which asserts `backend == "python"`. Neither can be tested by accident ([#66](https://github.com/The-40-Thieves/codecalc/issues/66))
