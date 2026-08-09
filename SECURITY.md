@@ -68,7 +68,11 @@ Three consequences worth stating plainly:
 - **Order is load-bearing.** The screen must run before *any* parse, including the `evaluate=False` shape inspection that bounds expression cost — `evaluate=False` suppresses arithmetic, not `eval`. `tests/test_security.py` asserts that a rejected string never reaches `parse_expr` at all, rather than leaving it to the order the lines happen to appear in.
 - **Cost is bounded separately from reach.** A screen that stops `__import__` does nothing about `9**9**9**9`, which is ten characters. Those bounds are in `safe_expr.py` too, with their measured thresholds, and are a distinct mechanism from the safety screen ([#67](https://github.com/The-40-Thieves/codecalc/issues/67)).
 
-If you are exposing these tools to input you do not control, the honest reading is the one upstream gives: treat an expression string as reaching an evaluator, and put a boundary around the process rather than trusting the screen.
+**The bound no longer depends on the screen being complete.** `evaluate_expression` runs its work in a forked child under `RLIMIT_CPU` and `RLIMIT_AS`, with a wall clock enforced by the parent and `SIGKILL` on expiry ([#78](https://github.com/The-40-Thieves/codecalc/issues/78)). A denylist has to anticipate; a bound does not. Demonstrated on expressions the screen has no opinion about — a 62-digit semiprime through `factorint`, and `nextprime(10**2000)` — both of which run past 25 seconds unguarded and are killed with a structured error naming the limit.
+
+This costs 10–50 ms per call, measured. It does not apply where there is no `fork`: on Windows the call runs in-process and the result says so in `unenforced`, in the executor's own vocabulary.
+
+If you are exposing these tools to input you do not control, the honest reading is still the one upstream gives: treat an expression string as reaching an evaluator. The difference is that the evaluator now runs somewhere it can be stopped.
 
 codecalc is built for a **single operator running it locally over stdio**. It has not been hardened for multi-user or hosted deployment, and the audit says so in its own verdict. If you intend to expose it to input you do not control, put it inside a container or microVM boundary of your own.
 

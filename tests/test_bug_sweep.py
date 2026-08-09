@@ -705,6 +705,66 @@ if _ex._rust and os.name != "nt":
 else:
     print("SKIP rust unreadable-output probe (no native executor, or Windows)")
 
+# ── #78: the bound must hold for things nobody put on a list ──────────────
+# safe_expr screens reach and bounds the shapes known to explode. Both are
+# denylists. This asserts the property a denylist cannot have: an expression
+# the screen has no opinion about is still stopped.
+from codecalc import guarded as _guarded
+
+if _guarded.CAN_FORK:
+    # Chosen by MEASUREMENT, not by intuition. A first attempt used a semiprime
+    # whose two factors were ~7919 apart, which Fermat's method factors
+    # instantly — it returned in 0.01s and proved nothing. These two run past
+    # 25s unguarded, with the screen raising no objection to either.
+    from sympy import nextprime as _nextprime
+
+    from codecalc.safe_expr import reject_unsafe as _screen
+
+    _p, _q = _nextprime(10**30), _nextprime(3 * 10**31)
+    _UNBOUNDED = [
+        (f"factorint({_p * _q})", "a 62-digit semiprime with far-apart factors"),
+        ("nextprime(10**2000)", "primality testing above a 2000-digit number"),
+    ]
+    for _expr, _why in _UNBOUNDED:
+        check(f"the screen has no opinion on this ({_why})",
+              _screen(_expr) is None, f"-> {_screen(_expr)!r}")
+        _t0 = time.time()
+        _r = _logic.evaluate_expression(_expr)
+        _elapsed = time.time() - _t0
+        check("  ...and it is KILLED anyway",
+              _r.get("ok") is False, f"-> ok={_r.get('ok')}")
+        check("  ...naming the limit that stopped it",
+              "limit" in (_r.get("error") or ""), f"-> {(_r.get('error') or '')[:70]!r}")
+        # The ceilings are CPU 10s and wall 15s. A bound that only holds after
+        # a minute is not the bound this claims to be.
+        check("  ...within its stated budget", _elapsed < 30,
+              f"-> {_elapsed:.1f}s")
+
+    # The guard must not change what a correct expression answers.
+    for _expr, _want in (("2+2", "4"), ("sin(x)**2 + cos(x)**2", "1")):
+        _r = _logic.evaluate_expression(_expr)
+        check(f"guarded evaluation still answers {_expr!r} correctly",
+              _r.get("ok") is True and _r.get("simplified") == _want,
+              f"-> {_r.get('simplified')!r}")
+else:
+    print("SKIP guarded-evaluation probes — this platform cannot fork")
+
+# Some SymPy functions return plain Python objects, not expressions. The result
+# builder assumed `.is_number` and `sp.simplify`, so ordinary number-theory
+# queries raised an uncaught AttributeError out of the tool.
+for _expr, _want in (("nextprime(100)", "101"),
+                     ("primefactors(60)", "[2, 3, 5]"),
+                     ("divisors(12)", "[1, 2, 3, 4, 6, 12]"),
+                     ("factorint(60)", "{2: 2, 3: 1, 5: 1}")):
+    try:
+        _r = _logic.evaluate_expression(_expr)
+        _crash = None
+    except Exception as _exc:
+        _r, _crash = {}, f"{type(_exc).__name__}: {_exc}"
+    check(f"{_expr}: a non-expression return is answered, not crashed",
+          _crash is None and _r.get("ok") is True and _r.get("simplified") == _want,
+          f"-> crash={_crash} simplified={_r.get('simplified')!r}")
+
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== ALL BUG-SWEEP REGRESSIONS FIXED ===")
 sys.exit(1 if FAILS else 0)

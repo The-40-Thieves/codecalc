@@ -327,6 +327,14 @@ Linux, macOS and Windows. The three do not offer the same primitives, and the
 executor reports which ones it could **not** apply in an `unenforced` array on
 every result rather than letting a caller assume they all held.
 
+Symbolic evaluation carries the same idea. `evaluate_expression` runs SymPy in
+a forked child under CPU and memory ceilings with a wall clock the parent
+enforces, so an expression nobody anticipated is still bounded — SymPy's own
+maintainers abandoned their attempt at a `safe=` flag as "security theater", so
+the screen in `safe_expr.py` buys time and the child buys the bound. Where
+there is no `fork`, the result reports `expression_bound_not_enforced_without_fork`
+rather than implying a guarantee.
+
 A second field, `output_error`, covers the other way a result can be wrong:
 absent means `stdout`/`stderr` are what the program produced, present means at
 least one of them is **not**, and names which stream and the OS error. That
