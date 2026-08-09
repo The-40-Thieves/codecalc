@@ -1,4 +1,5 @@
-"""codecalc makes no network calls. This asserts that, structurally.
+"""The codecalc PACKAGE opens no sockets of its own. This asserts that,
+structurally, and is careful about what it does not assert.
 
 The package used to contain two outbound paths: an LLM client that shipped user
 code to a configured gateway, and a context7 documentation fetch. Both are gone.
@@ -11,9 +12,25 @@ already has documentation access of its own, so the tool duplicated a capability
 its only user already had, in the one module that could still leak.
 
 What remains is a calculator that executes code, measures it, and does exact
-maths — with nothing to send anywhere. That is a stronger property than "one
-outbound request, and it's only documentation": it can be stated without
-qualification, and this file is what keeps it true.
+maths, with no outbound client of its own. That is a stronger property than "one
+outbound request, and it's only documentation", and this file is what keeps it
+true.
+
+WHAT THIS FILE DOES NOT PROVE, stated because the banner used to overreach.
+It reads the source of one Python package. It cannot say anything about what a
+CHILD PROCESS does, and three tool paths deliberately reach the network through
+one:
+
+  - install_package runs uv/npm/gem/cargo, which fetch from their registries
+  - runtimes_status / update_runtimes shell out to mise/rustup/swiftly/npm
+  - executed code reaches the network unless no_net is requested AND the native
+    executor is present to apply the shim
+
+So "codecalc makes no network calls", the claim this banner used to make, is
+false at the level a user cares about. "The package contains no outbound
+client" is true, is what is actually asserted below, and is what the banner now
+says. An operator who needs the stronger property has to enforce it at the
+process or container boundary, which is outside anything this file can check.
 
 These are STRUCTURAL assertions, deliberately. A test that watched for traffic
 would only prove nothing happened to fire during the test; reading the source
@@ -122,5 +139,5 @@ check("  ...and still blocks only the network families",
       "AF_INET" in shim.read_text(encoding="utf-8"))
 
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
-      "\n=== codecalc MAKES NO NETWORK CALLS ===")
+      "\n=== THE codecalc PACKAGE CONTAINS NO OUTBOUND CLIENT ===")
 sys.exit(1 if FAILS else 0)
