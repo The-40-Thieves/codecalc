@@ -379,6 +379,39 @@ _executor_src = inspect.getsource(executor)
 check("_require_native_or_die() is called at module scope (import time)",
       re.search(r"^_require_native_or_die\(\)", _executor_src, re.M) is not None)
 
+# ═══ the uid-0 process ceiling must be REPORTED, not silently absent (#62) ══
+# RLIMIT_NPROC does not bind a process whose effective uid is 0 — the kernel
+# exempts privileged processes. Both backends set that limit, so running as
+# root computes a ceiling that has no effect, and neither said so, which reads
+# as "the process ceiling was applied".
+#
+# Not a sandbox escape: running the server as root is a deployment error and
+# this is documented kernel behaviour. It is a reporting-fidelity defect, and
+# SECURITY.md puts "anything that makes the server report a guarantee it did
+# not apply" in scope.
+#
+# euid is simulated rather than requiring root, so this runs in CI as any
+# user. Verified separately against a real `sudo` run of both backends.
+_real_geteuid = getattr(os, "geteuid", None)
+if _real_geteuid is None:
+    print("SKIP uid-0 process ceiling (no os.geteuid on this platform)")
+else:
+    try:
+        os.geteuid = lambda: 0
+        _as_root = executor._unmeasured()
+        os.geteuid = lambda: 1000
+        _as_user = executor._unmeasured()
+    finally:
+        os.geteuid = _real_geteuid
+    check("as uid 0 the process ceiling is reported unenforced",
+          executor._UID0_PROCESS_CEILING in _as_root, f"-> {_as_root}")
+    check("as a normal uid it is NOT reported",
+          executor._UID0_PROCESS_CEILING not in _as_user, f"-> {_as_user}")
+    check("the caveat names RLIMIT_NPROC and uid 0",
+          "RLIMIT_NPROC" in executor._UID0_PROCESS_CEILING
+          and "uid 0" in executor._UID0_PROCESS_CEILING,
+          f"-> {executor._UID0_PROCESS_CEILING}")
+
 # ═══ SymPy parsers must not execute what they are handed (GHSA advisory) ═══
 # Six @mcp.tool() functions passed caller strings to sympify/parse_expr, which
 # EVALUATE what they parse. parse_expr populates its default global_dict from

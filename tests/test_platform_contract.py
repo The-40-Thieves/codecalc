@@ -63,6 +63,14 @@ KNOWN_UNENFORCED = {
     "memory_limit_clamped_to_hard_rlimit",
     "process_limit_is_a_fixed_ceiling_not_measured",
     "memory_limit_not_enforced_on_macos",
+    # RLIMIT_NPROC does not bind a process whose effective uid is 0: the
+    # kernel exempts privileged processes, so as root the ceiling is set and
+    # has no effect. Not an escape — running as root is a deployment error —
+    # but the result used to stay silent about it, which reads as "applied".
+    # Verified by running the executor under sudo, where it appears, and as an
+    # ordinary uid, where it does not. The Python fallback carries the prose
+    # equivalent and scripts/check_parity.py gates that both have one.
+    "process_limit_not_enforced_for_uid_0",
     # windows.rs
     "cpu_limit_counts_user_time_only_on_windows",
     "open_file_limit_unavailable_on_windows",
