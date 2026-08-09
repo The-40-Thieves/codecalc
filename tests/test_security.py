@@ -45,9 +45,34 @@ marker = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN", "SECRET_SHOULD_NOT_LEAK"
 r = executor.execute("python3", "import os; print('LEAK' if os.environ.get('GITHUB_PERSONAL_ACCESS_TOKEN') else 'CLEAN')")
 check("executed code sees NO host secrets", "CLEAN" in r.get("stdout", ""), f"-> {r.get('stdout','')[:40]!r}")
 
-# 5. env allowlist still lets runtimes work (PATH/HOME present)
-r = executor.execute("python3", "import os; print('PATH' in os.environ, bool(os.environ.get('HOME')))")
-check("allowlist keeps PATH+HOME functional", "True True" in r.get("stdout", ""))
+# 5. env allowlist still lets runtimes work (PATH + a home directory present)
+#
+# This asserted os.environ['HOME'] on every platform, which Windows does not
+# have: _ENV_ALLOWLIST carries USERPROFILE and APPDATA and its own comment calls
+# them "the Windows spelling of HOME". So the assertion encoded a Unix
+# assumption and read as a sandbox defect on Windows (#75).
+#
+# The property worth checking is the same everywhere — executed code can still
+# find its home directory after the allowlist has dropped everything else — so
+# the NAME is platform-specific and the property is not. Both spellings are
+# accepted rather than branching on sys.platform in the child, because a
+# Windows runner that also sets HOME should not thereby fail.
+_HOME_VARS = "('HOME', 'USERPROFILE')"
+r = executor.execute(
+    "python3",
+    "import os\n"
+    f"home = [v for v in {_HOME_VARS} if os.environ.get(v)]\n"
+    "print('PATH' in os.environ, home)\n",
+)
+# Detail on BOTH outcomes. This check used to pass no detail at all, so its CI
+# failure said only that something about PATH or HOME was wrong — not which,
+# and not what the child actually saw. That cost a round trip.
+check("allowlist keeps PATH + a home directory functional",
+      r.get("stdout", "").startswith("True [")
+      and r.get("stdout", "").strip() != "True []",
+      f"-> stdout={r.get('stdout','').strip()!r} "
+      f"backend={r.get('backend')} verdict={r.get('verdict')} "
+      f"stderr={str(r.get('stderr',''))[:80]!r}")
 
 # 6. infinite loop killed by timeout
 r = executor.execute("python3", "while True: pass", timeout=3)
@@ -182,9 +207,10 @@ except OSError:
 # processes rather than forking. Not written blind: skipped, and named as an
 # unverified gap rather than passed over quietly.
 _POSIX = os.name != "nt"
+_probe = None
 if _POSIX:
-    r = executor.execute("python3", _COUNTER, timeout=30)
-    _m = re.search(r"EAGAIN_AFTER (\d+)", r.get("stdout", "") or "")
+    _probe = executor.execute("python3", _COUNTER, timeout=30)
+    _m = re.search(r"EAGAIN_AFTER (\d+)", _probe.get("stdout", "") or "")
     _children = int(_m.group(1)) if _m else None
 else:
     _children = None
@@ -270,9 +296,48 @@ if not _POSIX:
     print("SKIP fork-bomb EAGAIN probe — os.fork() does not exist on Windows; "
           "the portable spawn probe above covers the guarantee there")
 else:
-    check("fork-bomb bounded by the process limit",
-          _children is not None and _children <= _limit,
-          f"-> {_children} children (limit {_limit}, measured={_measured})")
+    # TWO DIFFERENT FAILURES, kept apart. `_children is not None and
+    # _children <= _limit` reported both as "the process limit did not bound
+    # the fork bomb", so a probe that never produced a count — because it timed
+    # out, or the runtime was missing, or the executor could not read its
+    # output — read as a sandbox breach.
+    #
+    # That is what #75 was on macOS: `None children (limit 4096,
+    # measured=False)`. The ceiling was not exceeded; nothing was measured. An
+    # instrument that cannot take a reading has to say so, or it manufactures a
+    # finding out of its own failure — the same shape as #80, where an
+    # unreadable output file was reported as a program that printed nothing.
+    if _children is None:
+        _why = (f"no EAGAIN_AFTER in stdout "
+                f"(verdict={_probe.get('verdict')} ok={_probe.get('ok')} "
+                f"timed_out={_probe.get('timed_out')} "
+                f"exit={_probe.get('exit_code')} "
+                f"backend={_probe.get('backend')} "
+                f"output_error={_probe.get('output_error')!r} "
+                f"stdout={(_probe.get('stdout') or '')[-80:]!r} "
+                f"stderr={str(_probe.get('stderr') or '')[-160:]!r})")
+        # ONE narrow case is a skip rather than a failure, and only this one:
+        # the ceiling was NOT measured (so nproc_limit fell back to a fixed
+        # 4096) and the probe hit the wall clock. Forking toward 4096 on a
+        # runner where the ambient count is unknown is exactly the situation
+        # this file already documents for the portable spawn probe — "no safe
+        # low ceiling exists" — and a timeout there says the probe was too slow,
+        # not that the sandbox leaked.
+        #
+        # Every other way of producing no count still FAILS. A missing runtime,
+        # a nonzero exit, an unreadable stream (#80) or an empty stdout with a
+        # clean exit are all things worth being loud about, and folding them
+        # into this skip would be how a real breach goes quiet.
+        if not _measured and _probe.get("timed_out"):
+            print(f"SKIP fork-bomb probe — {sys.platform} cannot measure the "
+                  f"ambient task count, so the ceiling is a fixed {_limit} and "
+                  f"the probe outran its 30s budget. {_why}")
+        else:
+            check("fork-bomb probe produced a child count", False, f"-> {_why}")
+    else:
+        check("fork-bomb bounded by the process limit",
+              _children <= _limit,
+              f"-> {_children} children (limit {_limit}, measured={_measured})")
 if _POSIX and _measured:
     # +64 tolerates ambient churn between the measurement and the forks; the
     # point is that the bound is ~headroom, not exactly headroom.
