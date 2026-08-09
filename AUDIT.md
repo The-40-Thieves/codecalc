@@ -359,7 +359,6 @@ Residual-risk items 1-4 from the original audit remain; add:
    fetches public documentation; no user code is transmitted anywhere. Anything
    below that assumed a configured gateway no longer applies.
 
-
 1. **No network isolation.** `--no-net` exists and blocks `AF_INET`/`AF_INET6`
    via an `LD_PRELOAD`/`DYLD_INSERT_LIBRARIES` shim, leaving `AF_UNIX` alone —
    but it is a speed bump, not isolation: it reaches dynamically-linked programs
