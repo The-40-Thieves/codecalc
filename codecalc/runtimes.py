@@ -17,6 +17,7 @@ defaults to dry-run for the same reason.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from dataclasses import dataclass
@@ -289,6 +290,40 @@ _CHECKERS = {
     "apt": _check_apt, "npm": _check_npm, "uv": _check_uv, "nix": _check_nix,
 }
 
+#: Binaries that raise privilege. Checked against every element of a command
+#: rather than just the first, so `env FOO=1 sudo ...` or any future entry that
+#: does not lead with the elevator is still recognised. A denylist is right here
+#: because the set of commands is OURS — it is the constant below, not caller
+#: input — so this only has to cover what we might write, not what an attacker
+#: might send.
+_ELEVATORS = frozenset({"sudo", "doas", "pkexec", "run0"})
+
+#: Host-side opt-in for the elevated branch of `update(apply=True)`. Set on the
+#: MACHINE, which is the whole point: `apply=True` is an argument a connected
+#: model can flip on its own, and an environment variable is not.
+ALLOW_ELEVATED_ENV = "CODECALC_ALLOW_RUNTIME_APPLY"
+
+#: An empty-but-defined variable is NOT consent. `CODECALC_ALLOW_RUNTIME_APPLY=`
+#: in a compose file or a systemd unit is the shape of a variable someone
+#: cleared, and `os.environ.get(...) is not None` would read it as enabled.
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+def _is_elevated(cmd: list[str]) -> bool:
+    """Whether running `cmd` would raise privilege."""
+    return any(part in _ELEVATORS for part in cmd)
+
+
+def elevated_apply_allowed() -> bool:
+    """Whether the host has opted in to running elevated update commands.
+
+    Read per call, not cached at import: a long-lived server should pick up an
+    operator's decision without a restart, and caching would make the answer
+    depend on when the module happened to be imported.
+    """
+    return os.environ.get(ALLOW_ELEVATED_ENV, "").strip().lower() in _TRUTHY
+
+
 #: per-manager update commands (apply=True); "<PKGS>" is substituted with the
 #: concrete apt package list at call time — never passed literally.
 UPDATE_COMMANDS: dict[str, list[str]] = {
@@ -346,6 +381,10 @@ def status(languages: str | list[str] | None = None) -> dict:
             cmd = [("<PKGS>" if part == "<PKGS>" else part) for part in cmd]
             cmd = [p for p in cmd if p != "<PKGS>"] + pkgs
         info["update_command"] = " ".join(cmd) if cmd else None
+        # The command string has always CONTAINED "sudo" for apt, so this is
+        # not new information — it is the same fact as a field instead of a
+        # substring, so a caller can act on it without parsing a shell line.
+        info["elevated"] = _is_elevated(cmd)
 
     # A requested name that never matched is either a typo (not a recognised
     # language at all) or a language whose MANAGER's check just failed — very
@@ -433,9 +472,38 @@ def update(languages: str | list[str] | None = None, apply: bool = False,
                 pkgs += st["languages"][l].get("packages", [])
             pkgs = list(dict.fromkeys(pkgs))
             cmd = [p for p in cmd if p != "<PKGS>"] + pkgs
+
+        # An elevated command is one tool call away from a connected model:
+        # `apply` is an argument it controls. The environment variable is not,
+        # so this is the line between "the model decided" and "the operator
+        # decided". `sudo -n` already fails closed where a password is needed;
+        # this covers the passwordless rule that is common on dev machines and
+        # in CI images, which is precisely where -n does NOT stop it.
+        #
+        # Only the elevated managers are gated. mise/rustup/npm/uv touch a
+        # user-owned toolchain and stay reachable, so this does not break the
+        # documented apply=True workflow on a host without apt-managed runtimes.
+        if _is_elevated(cmd) and not elevated_apply_allowed():
+            executed.append({
+                "manager": mgr, "languages": langs, "command": " ".join(cmd),
+                "exit_code": None, "elevated": True, "skipped": True,
+                "output_tail": (
+                    f"refused: this command raises privilege and {ALLOW_ELEVATED_ENV} "
+                    f"is not set on the host. Set {ALLOW_ELEVATED_ENV}=1 in the "
+                    "server's environment to allow it."
+                ),
+                # NOT ok. Reporting a refusal as success would be the same
+                # silently-did-nothing shape #28 was filed about — the caller
+                # asked for an update and did not get one, and has to be able
+                # to tell that from a genuine no-op.
+                "ok": False,
+            })
+            continue
+
         run = _run(cmd, timeout=timeout)
         executed.append({
             "manager": mgr, "languages": langs, "command": " ".join(cmd),
+            "elevated": _is_elevated(cmd),
             "exit_code": run.exit_code,
             "output_tail": run.output[-1500:] if run.spawned else (run.error or "command did not run"),
             # An updater that never even started (missing executable, timed
@@ -457,4 +525,18 @@ def update(languages: str | list[str] | None = None, apply: bool = False,
     result = {"ok": all_ok, "dry_run": False, "executed": executed}
     if executed and not all_ok and succeeded > 0:
         result["partial_failure"] = True
+    # Lifted to the top level so a caller sees WHY without walking `executed`.
+    # A refusal that reads as a generic failure invites a retry; one that names
+    # the variable tells the operator exactly what to do, on the host, on purpose.
+    skipped = [e for e in executed if e.get("skipped")]
+    if skipped:
+        result["blocked_by_policy"] = [e["manager"] for e in skipped]
+        # Phrasing note: "update ... set" reads as `UPDATE x SET y` to ruff's
+        # S608 SQL-injection heuristic, which fired here on plain English.
+        # Reworded rather than silenced with a noqa — the ambiguity was real,
+        # just not a security one.
+        result["message"] = (
+            f"{len(skipped)} elevated command(s) were refused: "
+            f"{ALLOW_ELEVATED_ENV} is not enabled on this host."
+        )
     return result

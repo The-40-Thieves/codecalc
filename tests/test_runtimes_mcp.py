@@ -17,6 +17,7 @@ be worse than no test.
 """
 
 import asyncio
+import os
 import re
 import sys
 from pathlib import Path
@@ -253,6 +254,105 @@ try:
           f"-> {st.get('manager_errors')}")
 finally:
     runtimes._run = orig_run
+
+# The elevated-apply gate (#63).
+#
+# `apply=True` is an argument a connected model controls; the environment
+# variable is not. These assertions run against a FAKE status so the elevated
+# branch is reachable on any host, and a `_run` that RAISES rather than
+# executing — a test of a sudo gate that could actually invoke sudo when the
+# gate failed open would be worse than no test.
+class _Executed(Exception):
+    """Raised instead of running, so 'the gate opened' is observable safely."""
+
+
+def _apt_status(languages=None):
+    return {"ok": True, "summary": {"updatable": 1, "total": 1},
+            "languages": {"c": {"manager": "apt", "updatable": True,
+                                "packages": ["gcc"], "current": "13", "latest": "14"}}}
+
+
+def _rustup_status(languages=None):
+    return {"ok": True, "summary": {"updatable": 1, "total": 1},
+            "languages": {"rust": {"manager": "rustup", "updatable": True,
+                                   "current": "1.0", "latest": "1.1"}}}
+
+
+def _refuse_run(cmd, timeout=60):
+    raise _Executed(" ".join(cmd))
+
+
+_saved = (runtimes.status, runtimes._run, os.environ.get(runtimes.ALLOW_ELEVATED_ENV))
+try:
+    runtimes._run = _refuse_run
+
+    runtimes.status = _apt_status
+    os.environ.pop(runtimes.ALLOW_ELEVATED_ENV, None)
+    r = runtimes.update("c", apply=True)
+    entry = (r.get("executed") or [{}])[0]
+    check("an elevated update is refused when the host has not opted in",
+          entry.get("skipped") is True, f"-> {entry}")
+    check("  ...and does NOT report ok=True for having done nothing",
+          r.get("ok") is False and entry.get("ok") is False,
+          f"-> ok={r.get('ok')} entry_ok={entry.get('ok')}")
+    check("  ...naming the variable, so the refusal is actionable",
+          runtimes.ALLOW_ELEVATED_ENV in entry.get("output_tail", "")
+          and runtimes.ALLOW_ELEVATED_ENV in r.get("message", ""),
+          f"-> {entry.get('output_tail')!r}")
+    check("  ...and says which manager was blocked at the top level",
+          r.get("blocked_by_policy") == ["apt"], f"-> {r.get('blocked_by_policy')}")
+
+    # An empty-but-DEFINED variable is the shape of one someone cleared. A
+    # presence check (`is not None`) would read it as consent.
+    for value in ("", "   ", "0", "no", "false"):
+        os.environ[runtimes.ALLOW_ELEVATED_ENV] = value
+        got = (runtimes.update("c", apply=True).get("executed") or [{}])[0]
+        check(f"  ...{value!r} is not consent", got.get("skipped") is True, f"-> {got}")
+
+    for value in ("1", "true", "YES", "On"):
+        os.environ[runtimes.ALLOW_ELEVATED_ENV] = value
+        try:
+            runtimes.update("c", apply=True)
+            check(f"opting in with {value!r} lets the elevated command run", False,
+                  "-> gate stayed shut")
+        except _Executed as ran:
+            check(f"opting in with {value!r} lets the elevated command run",
+                  str(ran).startswith("sudo "), f"-> {ran}")
+
+    # The gate must be scoped to PRIVILEGE, not to apply=True. Gating every
+    # manager would break the documented workflow on hosts with no apt runtimes.
+    runtimes.status = _rustup_status
+    os.environ.pop(runtimes.ALLOW_ELEVATED_ENV, None)
+    try:
+        out = runtimes.update("rust", apply=True)
+        check("an UNPRIVILEGED manager is never gated", False, f"-> skipped: {out}")
+    except _Executed as ran:
+        check("an UNPRIVILEGED manager is never gated", str(ran) == "rustup update", f"-> {ran}")
+finally:
+    runtimes.status, runtimes._run = _saved[0], _saved[1]
+    if _saved[2] is None:
+        os.environ.pop(runtimes.ALLOW_ELEVATED_ENV, None)
+    else:
+        os.environ[runtimes.ALLOW_ELEVATED_ENV] = _saved[2]
+
+# `elevated` must be present on the NON-mutating path too — that is where an
+# operator looks before deciding, and it is the field that makes the decision
+# possible without parsing a shell string.
+live = runtimes.status()
+langs = (live.get("languages") or {})
+check("status() reports `elevated` on every language it returns",
+      all("elevated" in v for v in langs.values()),
+      f"-> missing on {[k for k, v in langs.items() if 'elevated' not in v]}")
+apt_langs = {k: v for k, v in langs.items() if v.get("manager") == "apt"}
+if apt_langs:
+    check("  ...and marks the apt (sudo) manager elevated",
+          all(v["elevated"] for v in apt_langs.values()),
+          f"-> {[k for k, v in apt_langs.items() if not v['elevated']]}")
+    check("  ...while user-owned managers are not",
+          not any(v["elevated"] for v in langs.values() if v.get("manager") in {"mise", "rustup", "npm", "uv"}),
+          "-> a user-owned manager was marked elevated")
+else:
+    print("SKIP apt elevation check — no apt-managed language on this host")
 
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else "\n=== RUNTIME TOOLS OK (dry-run only) ===")
 sys.exit(1 if FAILS else 0)
