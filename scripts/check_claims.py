@@ -14,11 +14,19 @@ Checked here:
   3. the crate's declared license matches the project license
   4. the test-file and assertion counts the README quotes
   5. the size of the env allowlist AUDIT.md describes
+  6. the post-fix suite snapshot AUDIT.md quotes
+  7. the GitHub repo description, when CI supplies it with --description
 
 The last two were added after both drifted in a single day: the README's
 "18 test files … 689 assertions" survived three PRs that changed both numbers,
 and AUDIT.md described an 11-entry env allowlist for a day after it grew to 23 —
 a security document understating what executed code is permitted to see.
+
+Checks 6 and 7 were added after the count reached 47 and TWO surfaces stayed at
+48 for a day: AUDIT.md's own post-fix snapshot, and the GitHub repo description.
+Both were stale by exactly the `context7_docs` removal. The README was correct
+throughout — because it was the only thing gated. A gate that covers one surface
+does not make the claim true, it makes the OTHER surfaces the ones that rot.
 
 FLOOR: each check asserts it actually found the claim in the README. A heading
 reworded from "MCP tools (48)" to "Tools" would otherwise make this pass by
@@ -27,6 +35,7 @@ matching nothing.
 
 from __future__ import annotations
 
+import argparse
 import re
 import sys
 import tomllib
@@ -45,6 +54,16 @@ SERVER = (REPO / "codecalc" / "server.py").read_text(encoding="utf-8")
 #: single item ("cpp/c++"). Kept explicit so widening it is a reviewable diff
 #: rather than a silent adjustment to make the number come out right.
 ALIAS_ENTRIES = {"c++"}
+
+#: The repo description lives on GitHub, not in the tree, so it is passed IN
+#: rather than fetched. Every other check here is a static assertion over files
+#: and must keep running on a bare checkout with no network and no token, which
+#: is the property that lets ci-security gate on them without an external feed.
+_parser = argparse.ArgumentParser(description="Check that stated counts match the code.")
+_parser.add_argument("--description", metavar="TEXT",
+                     help="GitHub repo description to check "
+                          "(CI: gh repo view --json description -q .description)")
+args = _parser.parse_args()
 
 failures: list[str] = []
 
@@ -151,6 +170,50 @@ elif missing:
          f"a security document must not understate what executed code can see")
 else:
     print(f"ok   env allowlist: AUDIT.md names all {len(allow)} permitted variables")
+
+# ── 6. AUDIT.md's own suite snapshot ────────────────────────────────────────
+# The README is not the only document quoting a tool count. AUDIT.md carries a
+# post-fix snapshot of what the suite reported, and it read `48/48 tools` while
+# server.py defined 47 — stale by exactly the context7_docs removal, on the same
+# day and for the same reason as the repo description. A security document
+# overstating its own coverage is the mirror of the env-allowlist drift above:
+# there the document understated what executed code could see, here it
+# overstated what the suite checked.
+snapshot = re.findall(r"test_mcp_all\.py\s*→\s*(\d+)\s*/\s*(\d+)\s+tools", AUDIT)
+if not snapshot:
+    fail("no 'test_mcp_all.py → N/N tools' snapshot found in AUDIT.md — "
+         "the check matched nothing")
+else:
+    wrong = [(a, b) for a, b in snapshot if int(a) != actual_tools or int(b) != actual_tools]
+    if wrong:
+        fail(f"AUDIT.md snapshot says {wrong[0][0]}/{wrong[0][1]} tools; "
+             f"server.py defines {actual_tools}")
+    else:
+        print(f"ok   AUDIT.md snapshot: {actual_tools}/{actual_tools} tools matches server.py")
+
+# ── 7. the GitHub repo description ──────────────────────────────────────────
+# The single most-read text in the project, rendered on every search result, and
+# the one surface no file in this tree can see. It claimed 48 tools for a day
+# after the count became 47. Supplied rather than fetched (see `args` above), so
+# the COMPARISON lives here with the others while the network stays in CI.
+if args.description is not None:
+    _before = len(failures)
+    d_tools = [int(n) for n in re.findall(r"(\d+)\s+MCP tools", args.description)]
+    d_langs = [int(n) for n in re.findall(r"(\d+)\s+languages", args.description)]
+    if not d_tools and not d_langs:
+        fail("--description was supplied but names no tool or language count — "
+             "it was reworded, or the wrong text was passed; either way this "
+             "check is no longer reading what it claims to read")
+    else:
+        if any(c != actual_tools for c in d_tools):
+            fail(f"repo description claims {sorted(set(d_tools))} MCP tools; "
+                 f"server.py defines {actual_tools}")
+        if any(c != actual_langs for c in d_langs):
+            fail(f"repo description claims {sorted(set(d_langs))} languages; "
+                 f"registry defines {actual_langs}")
+    if len(failures) == _before:
+        print(f"ok   repo description: agrees on {actual_tools} tools "
+              f"and {actual_langs} languages")
 
 if failures:
     print(f"\n=== {len(failures)} claim(s) out of date ===")

@@ -149,6 +149,24 @@ server's own process.
 - All in-process tools now also carry fastmcp's native `@mcp.tool(timeout=…)`
   as a backstop (confirmed via context7 docs: `prefecthq/fastmcp` tool timeout)
 
+**CORRECTION 2026-08-08 — the backstop above names a decorator that does not
+exist, and a source that no longer ships.** `@mcp.tool(timeout=…)` is not a
+parameter on `MCPServer`; the move to the official SDK 2.0 established that, and
+porting without replacing it would have deleted a documented mitigation. It is
+now `codecalc/mcp_middleware.py`, a `ServerMiddleware` over `tools/call` holding
+the per-tool deadlines in one table rather than scattered across decorators.
+
+**It bounds the RESPONSE, not the CPU.** The guarded tools are synchronous and
+run on a worker thread; a deadline stops us *waiting* for that thread, it cannot
+interrupt it. The load-bearing bounds are the ones above it in this list: the
+input caps (16 variables, 2,000 chars) and `z3`'s own
+`solver.set("timeout", 5000)`. Of the three, z3 is the only one that actually
+stops computing.
+
+The verification source is also gone: context7 was removed entirely in PR #20,
+so "confirmed via context7 docs" is no longer a claim anyone can re-run from
+this repo. The MCP 2.0 section below carries the full account.
+
 ### MEDIUM-06 — Predictable tempdir + argv stdin (E2BIG/symlink)
 
 **Vulnerability:** Rust created `codecalc-<pid>-<counter>` with
@@ -200,7 +218,7 @@ tests/test_smoke.py       → 31 passed, 0 failed (all languages via Rust execut
 tests/test_features.py    → ALL NEW-FEATURE TESTS PASS (sessions/files/artifacts/packages/verdicts/streaming/compact)
 tests/test_gap4.py        → ITEMS 1-4 ALL PASS (resources, inline images, multi-file, units)
 tests/test_calc_port.py   → ALL 19 PORTED FEATURES PASS (calc skill parity: exact, bitop, float, radix, ...)
-tests/test_mcp_all.py     → 48/48 tools round-trip over stdio + session file resources
+tests/test_mcp_all.py     → 47/47 tools round-trip over stdio + session file resources
 tests/test_runtimes_mcp.py → runtimes_status: dry-run safe, summary agrees with
                              the per-language detail (the counts are whatever
                              that machine has installed)
