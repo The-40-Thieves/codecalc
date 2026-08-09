@@ -17,7 +17,6 @@ import contextlib
 import json
 import os
 import re
-import shutil
 import subprocess
 import tempfile
 import threading
@@ -35,6 +34,17 @@ _SAFE_NAME = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
 _lock = threading.Lock()
 _workers: dict[str, Worker] = {}
+#: Session workdir identity (device, inode), recorded the moment each session
+#: directory is created and consulted by `stop()` before deleting it — mirrors
+#: executor/src/main.rs's created_identity/remove_own_workdir. A session's
+#: directory is the cwd of every call executed against it (via the Rust
+#: executor's --workdir), so executed code can rename another directory into
+#: its place; checking identity right before removal, instead of trusting that
+#: the path still names what this process created, is what keeps `stop()` from
+#: deleting whatever a swap left there. Entries for orphaned session dirs that
+#: predate this process (found by `list_sessions()` but never `start()`-ed
+#: here) are simply absent, which `stop()` treats as "no identity to compare".
+_SESSION_DIR_IDENTITY: dict[str, tuple[int, int] | None] = {}
 
 
 def _session_dir(session_id: str) -> Path:
@@ -59,6 +69,10 @@ def start(language: str = "python3", name: str | None = None) -> dict:
         session_id = f"{name}-{uuid.uuid4().hex[:8]}"
         d = _session_dir(session_id)
         d.mkdir(parents=True, exist_ok=True)
+        # Recorded immediately after creation, before any code ever runs with
+        # this directory as its cwd — see _SESSION_DIR_IDENTITY.
+        with _lock:
+            _SESSION_DIR_IDENTITY[session_id] = executor._dir_identity(d)
         return {
             "ok": True, "session_id": session_id, "language": name,
             "stateful": False, "workdir": str(d), "files": _list(d),
@@ -66,6 +80,8 @@ def start(language: str = "python3", name: str | None = None) -> dict:
     session_id = f"{name}-{uuid.uuid4().hex[:8]}"
     d = _session_dir(session_id)
     d.mkdir(parents=True, exist_ok=True)
+    with _lock:
+        _SESSION_DIR_IDENTITY[session_id] = executor._dir_identity(d)
     w = _spawn_worker(name, d)
     if w is None:
         return {"ok": False, "error": f"failed to start {name} REPL worker"}
@@ -78,14 +94,22 @@ def start(language: str = "python3", name: str | None = None) -> dict:
 
 
 def stop(session_id: str) -> dict:
-    """Kill the worker (if any) and delete the workspace."""
+    """Kill the worker (if any) and delete the workspace.
+
+    Deletion is identity-checked (device, inode recorded at creation,
+    re-checked here) — session code runs with this directory as its cwd, so
+    it can rename another directory into this path before stop() is called.
+    `deleted` reports whether removal actually happened rather than assuming
+    it did.
+    """
     with _lock:
         w = _workers.pop(session_id, None)
+        created = _SESSION_DIR_IDENTITY.pop(session_id, None)
     if w is not None:
         w.close()
     d = _session_dir(session_id)
-    shutil.rmtree(d, ignore_errors=True)
-    return {"ok": True, "session_id": session_id, "deleted": True}
+    deleted = executor._rmtree_checked(d, created)
+    return {"ok": True, "session_id": session_id, "deleted": deleted}
 
 
 def list_sessions() -> dict:

@@ -122,5 +122,137 @@ async def main():
 
 
 asyncio.run(main())
+
+
+# ── #28: apply=True must not report success it did not earn ────────────────
+# Everything above goes over MCP/stdio, which cannot monkeypatch the SERVER
+# subprocess's copy of codecalc.runtimes. These go straight at the module
+# instead — unknown names, missing executables, nonzero exits, timeouts and
+# partial success, entirely via dry_run and monkeypatched UPDATE_COMMANDS /
+# _run, never a real update. Same rule test_python_sweep.py already follows
+# for executor._rust: save the attribute, monkeypatch, restore in `finally`.
+from codecalc import runtimes
+
+# An unknown language must not enter apply mode at all: status() already
+# reports ok=False for it, and update() used to ignore that and return
+# {"ok": True, "dry_run": False, "executed": []} regardless.
+r = runtimes.update("notalanguage", apply=True)
+check("apply=True on an unknown language reports ok=False",
+      r.get("ok") is False, f"-> {r}")
+check("  ...and still names it unknown", r.get("unknown") == ["notalanguage"],
+      f"-> {r.get('unknown')}")
+check("  ...and executed nothing", not r.get("executed"), f"-> {r.get('executed')}")
+
+# A language that IS recognised but whose updater binary is missing: the
+# executed entry must carry the failure, and TOP-LEVEL ok must reflect it —
+# it used to stay hardcoded True with exit_code=None sitting right there.
+saved_cmd = dict(runtimes.UPDATE_COMMANDS)
+runtimes.UPDATE_COMMANDS["mise"] = ["/nonexistent/bin/codecalc-no-mise", "up"]
+try:
+    st = runtimes.status("gradle")
+    if st.get("languages", {}).get("gradle", {}).get("updatable"):
+        r = runtimes.update("gradle", apply=True)
+        check("a missing updater executable is reflected in ok=False",
+              r.get("ok") is False, f"-> {r}")
+        entry = (r.get("executed") or [{}])[0]
+        check("  ...with exit_code None", entry.get("exit_code") is None,
+              f"-> {entry.get('exit_code')}")
+        check("  ...and ok=False on the entry itself", entry.get("ok") is False,
+              f"-> {entry.get('ok')}")
+    else:
+        print("SKIP missing-updater regression (gradle not updatable on this host)")
+finally:
+    runtimes.UPDATE_COMMANDS.clear()
+    runtimes.UPDATE_COMMANDS.update(saved_cmd)
+
+# A nonzero exit from the updater is a real failure, not a shrug.
+saved_cmd = dict(runtimes.UPDATE_COMMANDS)
+runtimes.UPDATE_COMMANDS["mise"] = ["python3", "-c", "import sys; sys.exit(7)"]
+try:
+    st = runtimes.status("gradle")
+    if st.get("languages", {}).get("gradle", {}).get("updatable"):
+        r = runtimes.update("gradle", apply=True)
+        check("a nonzero exit from the updater reports ok=False",
+              r.get("ok") is False, f"-> {r}")
+        check("  ...with the real exit code preserved",
+              (r.get("executed") or [{}])[0].get("exit_code") == 7,
+              f"-> {(r.get('executed') or [{}])[0].get('exit_code')}")
+    else:
+        print("SKIP nonzero-exit regression (gradle not updatable on this host)")
+finally:
+    runtimes.UPDATE_COMMANDS.clear()
+    runtimes.UPDATE_COMMANDS.update(saved_cmd)
+
+# A timeout from the updater is also a failure, not exit_code=None-and-ok=True.
+saved_cmd = dict(runtimes.UPDATE_COMMANDS)
+runtimes.UPDATE_COMMANDS["mise"] = ["python3", "-c", "import time; time.sleep(5)"]
+try:
+    st = runtimes.status("gradle")
+    if st.get("languages", {}).get("gradle", {}).get("updatable"):
+        r = runtimes.update("gradle", apply=True, timeout=1)
+        check("a timed-out updater reports ok=False", r.get("ok") is False, f"-> {r}")
+        check("  ...and says it timed out",
+              "timed out" in ((r.get("executed") or [{}])[0].get("output_tail") or ""),
+              f"-> {(r.get('executed') or [{}])[0].get('output_tail')!r}")
+    else:
+        print("SKIP timeout regression (gradle not updatable on this host)")
+finally:
+    runtimes.UPDATE_COMMANDS.clear()
+    runtimes.UPDATE_COMMANDS.update(saved_cmd)
+
+# Partial success — one manager's update succeeds, another's fails — must be
+# represented truthfully: ok=False overall (not every requested action
+# succeeded), with partial_failure set and each manager's own outcome intact,
+# rather than collapsing to a single boolean that hides which half worked.
+saved_cmd = dict(runtimes.UPDATE_COMMANDS)
+runtimes.UPDATE_COMMANDS["mise"] = ["python3", "-c", "print('ok')"]
+runtimes.UPDATE_COMMANDS["swiftly"] = ["/nonexistent/bin/codecalc-no-swiftly", "update"]
+try:
+    st = runtimes.status("gradle,swift")
+    updatable = {n for n, i in st.get("languages", {}).items() if i.get("updatable")}
+    if {"gradle", "swift"} <= updatable:
+        r = runtimes.update("gradle,swift", apply=True)
+        check("partial success reports ok=False overall", r.get("ok") is False, f"-> {r}")
+        check("  ...and flags partial_failure", r.get("partial_failure") is True,
+              f"-> {r.get('partial_failure')}")
+        by_mgr = {e["manager"]: e for e in r.get("executed", [])}
+        check("  ...with mise's own success preserved",
+              by_mgr.get("mise", {}).get("ok") is True, f"-> {by_mgr.get('mise')}")
+        check("  ...and swiftly's own failure preserved",
+              by_mgr.get("swiftly", {}).get("ok") is False, f"-> {by_mgr.get('swiftly')}")
+    else:
+        print(f"SKIP partial-success regression (need gradle+swift updatable, have {sorted(updatable)})")
+finally:
+    runtimes.UPDATE_COMMANDS.clear()
+    runtimes.UPDATE_COMMANDS.update(saved_cmd)
+
+# An absent package manager must not read as "up to date" — the status
+# checkers used to collapse every subprocess failure (including a missing
+# binary) to the same empty string a healthy tool returns when it genuinely
+# has nothing to report.
+orig_run = runtimes._run
+
+
+def _fake_run(cmd, timeout=60):
+    if cmd and cmd[0] == "mise":
+        return runtimes._RunResult(False, "", None, "mise: not found (simulated)")
+    return orig_run(cmd, timeout=timeout)
+
+
+runtimes._run = _fake_run
+try:
+    st = runtimes.status("gradle")
+    check("a language whose manager is entirely unavailable is not ok=True",
+          st.get("ok") is False, f"-> {st}")
+    check("  ...and is not fabricated into languages",
+          "gradle" not in (st.get("languages") or {}), f"-> {sorted(st.get('languages') or {})}")
+    check("  ...and is distinguished from a typo via check_failed, not unknown",
+          st.get("check_failed") == ["gradle"] and not st.get("unknown"),
+          f"-> check_failed={st.get('check_failed')} unknown={st.get('unknown')}")
+    check("  ...naming which manager and why", "manager_errors" in st and "mise" in st["manager_errors"],
+          f"-> {st.get('manager_errors')}")
+finally:
+    runtimes._run = orig_run
+
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else "\n=== RUNTIME TOOLS OK (dry-run only) ===")
 sys.exit(1 if FAILS else 0)

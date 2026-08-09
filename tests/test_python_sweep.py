@@ -24,6 +24,7 @@ have passed while half the feature stayed broken.
 from __future__ import annotations
 
 import asyncio
+import io
 import os
 import pathlib
 import shutil
@@ -33,7 +34,7 @@ import tempfile
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from codecalc import executor, sessions
+from codecalc import executor, registry, sessions
 
 FAILS: list[str] = []
 SKIPS: list[str] = []
@@ -407,12 +408,255 @@ try:
 finally:
     executor._rust = saved_rust
 
+# ═══ 12. workdir deletion is identity-checked, not ownership-only (#38) ═══
+# The Rust executor has always refused to delete a workdir whose (device,
+# inode) no longer match what it recorded at creation — the executed program
+# runs with that directory as its cwd, so it can rename another one into its
+# place. The Python fallback enforced only ownership ("did WE create this
+# path"), not identity, so the same rename-swap attack made it delete a
+# directory it never made. Same repro as test_executor_sweep.py's "cleanup
+# keys on WHAT the path is, not where it came from", against the fallback.
+saved_rust = executor._rust
+try:
+    executor._rust = None
+    victim = pathlib.Path(tempfile.mkdtemp(prefix="cc-py-victim-"))
+    (victim / "important.txt").write_text("caller data")
+    code = ("import os\n"
+            "work = os.getcwd()\n"
+            f"os.rename(work, work + '.held')\n"
+            f"os.rename({str(victim)!r}, work)\n"
+            "print('swapped')\n")
+    r = executor._execute_python("python3", code, timeout=20)
+    swapped_to = pathlib.Path(r.get("workdir", "/nonexistent"))
+    # Whether the attack was actually STAGED, detected by the victim no longer
+    # being at its original path. Not by stdout: the swap renames the directory
+    # the output capture lives in, so "swapped" does not reliably come back
+    # even when the rename succeeded. Not by `ok` either, which is True on a
+    # successful swap AND on a platform that refused it.
+    staged = not victim.exists()
+    if not staged:
+        # The PLATFORM refused to stage the attack: Windows will not rename a
+        # directory that is a running process's current directory. The workdir
+        # is therefore still the one this run created, and deleting it is
+        # correct behaviour, not a breach.
+        #
+        # Asserting "the victim survived" here failed on windows-latest for a
+        # reason that had nothing to do with the guard — the victim was never
+        # moved anywhere. A regression test that cannot tell "the attack was
+        # blocked" from "the attack never happened" is measuring something
+        # other than what it names, which is the defect this file exists to
+        # catch.
+        skip("python fallback rename-swap",
+             "the platform refused the rename, so the attack could not be "
+             f"staged: ok={r.get('ok')} stderr={str(r.get('stderr'))[:70]!r}")
+    else:
+        check("a directory swapped in by rename is NOT deleted (python fallback)",
+              (swapped_to / "important.txt").is_file(),
+              f"-> {swapped_to} {'holds the data' if swapped_to.exists() else 'DELETED'}")
+    for leftover in (swapped_to, pathlib.Path(str(swapped_to) + ".held"), victim):
+        shutil.rmtree(leftover, ignore_errors=True)
+finally:
+    executor._rust = saved_rust
+
+# The same attack against a SESSION workdir: sessions.stop() must refuse to
+# delete it once the rename swap has happened, and must say so honestly via
+# `deleted` rather than reporting deletion that did not occur.
+if "bash" in registry.LANGUAGES:
+    victim = pathlib.Path(tempfile.mkdtemp(prefix="cc-sess-victim-"))
+    (victim / "important.txt").write_text("caller data")
+    started = sessions.start("bash")
+    sid = started["session_id"]
+    script = ('work="$(pwd)"\n'
+              'mv "$work" "$work.held"\n'
+              f'mv {str(victim)!r} "$work"\n'
+              'echo swapped\n')
+    out = sessions.execute(sid, script, language="bash")
+    stopped = sessions.stop(sid)
+    d = pathlib.Path(started["workdir"])
+    # Same distinction as the fallback case above: if the shell could not
+    # perform the rename, the attack was never staged and stop() deleting its
+    # own workdir is correct. Only assert the refusal where the swap actually
+    # happened.
+    if victim.exists():
+        skip("session workdir rename-swap",
+             "the platform refused the rename, so the victim is still at its "
+             f"original path and the attack was never staged: ok={out.get('ok')}")
+    else:
+        check("session stop() does not delete a directory swapped in by rename",
+              (d / "important.txt").is_file(),
+              f"-> ran ok={out.get('ok')}, dir exists={d.exists()}")
+        check("  ...and stop() reports deleted=False rather than lying",
+              stopped.get("deleted") is False, f"-> {stopped}")
+    shutil.rmtree(d, ignore_errors=True)
+    shutil.rmtree(pathlib.Path(str(d) + ".held"), ignore_errors=True)
+    shutil.rmtree(victim, ignore_errors=True)
+else:
+    skip("session workdir rename-swap regression", "bash not registered")
+
+# ═══ 13. a missing runtime returns a result, not a raised exception (#26) ═══
+# The fallback validated the language NAME but never checked that its
+# interpreter/compiler executable actually existed before spawning it, and
+# spawn-time OSError (FileNotFoundError for a missing binary, PermissionError
+# for one that is not executable) was not caught — executor.execute("ruby",
+# code) on a machine without ruby raised instead of returning {"ok": false}.
+# Forced onto the fallback: the Rust binary reads its OWN compiled-in language
+# table and would ignore this mutation of registry.LANGUAGES entirely, running
+# the REAL ruby/gcc and masking the defect this test exists to catch.
+saved_rust = executor._rust
+saved_entry = dict(registry.LANGUAGES["ruby"])
+try:
+    executor._rust = None
+    registry.LANGUAGES["ruby"] = {**saved_entry, "run": ["/nonexistent/bin/codecalc-no-ruby", "{file}"]}
+    try:
+        r = executor.execute("ruby", "puts 1")
+        raised = None
+    except Exception as exc:  # the exact defect under test: this must NOT raise
+        r, raised = {}, exc
+    check("a missing run-phase runtime returns a result instead of raising",
+          raised is None, f"-> raised {raised!r}")
+    check("  ...with ok False", r.get("ok") is False, f"-> {r.get('ok')}")
+    check("  ...naming the phase", r.get("phase") == "run", f"-> {r.get('phase')}")
+    check("  ...and a verdict", r.get("verdict") == "RTE", f"-> {r.get('verdict')}")
+    check("  ...and the platform field other fallback results carry",
+          r.get("platform") == sys.platform, f"-> {r.get('platform')}")
+    check("  ...naming the missing executable",
+          "codecalc-no-ruby" in (r.get("error") or ""), f"-> {r.get('error')!r}")
+finally:
+    registry.LANGUAGES["ruby"] = saved_entry
+    executor._rust = saved_rust
+
+saved_rust = executor._rust
+saved_entry = dict(registry.LANGUAGES["c"])
+try:
+    executor._rust = None
+    registry.LANGUAGES["c"] = {**saved_entry,
+                              "compile": ["/nonexistent/bin/codecalc-no-gcc", "{file}", "-o", "{exe}"]}
+    r = executor.execute("c", "int main(){return 0;}")
+    check("a missing compile-phase runtime returns a result instead of raising",
+          r.get("ok") is False and r.get("phase") == "compile",
+          f"-> ok={r.get('ok')} phase={r.get('phase')}")
+    check("  ...with a verdict too", r.get("verdict") == "RTE", f"-> {r.get('verdict')}")
+finally:
+    registry.LANGUAGES["c"] = saved_entry
+    executor._rust = saved_rust
+
+# ═══ 14. the output cap is enforced WHILE reading, not after (#25) ═════════
+# communicate() read a child to completion before max_output_kb was applied,
+# so a child writing far more than the cap made the PARENT allocate
+# proportionally to total output before the result could be classified OLE.
+# Measured before the fix: an 8 KiB cap against a 200 MiB write grew this
+# process's RSS by ~400 MB. The fix drains both streams incrementally and
+# kills the process group the moment either crosses the cap.
+saved_rust = executor._rust
+try:
+    executor._rust = None
+    if os.name != "nt":
+        import resource as _resource
+        before_kb = _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss
+        r = executor._execute_python(
+            "python3", "import sys\nsys.stdout.write('x' * (200 * 1024 * 1024))\n",
+            max_output_kb=8, timeout=30)
+        after_kb = _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss
+        delta_kb = after_kb - before_kb
+        check("a child writing 200MiB against an 8KiB cap is reported OLE",
+              r.get("verdict") == "OLE", f"-> {r.get('verdict')}")
+        check("  ...with stdout actually bounded near the cap",
+              len(r.get("stdout") or "") < 20_000, f"-> {len(r.get('stdout') or '')} bytes")
+        # A generous ceiling, not a tight one: this asserts the ENFORCEMENT
+        # exists (bytes are not proportional to the 200MiB written), not a
+        # specific allocator number, which is not stable across platforms.
+        check("  ...and parent memory did not grow proportionally to total output",
+              delta_kb < 50_000, f"-> RSS delta {delta_kb} KiB (200MiB write would show ~200000)")
+    else:
+        skip("bounded-output-cap memory regression", "ru_maxrss needs POSIX")
+
+    # Both streams, independently — stderr must be bounded too, not just stdout.
+    r = executor._execute_python(
+        "python3",
+        "import sys\nsys.stderr.write('e' * (5 * 1024 * 1024))\nsys.stdout.write('ok')\n",
+        max_output_kb=4, timeout=30)
+    check("stderr overflow is independently capped and reported OLE",
+          r.get("verdict") == "OLE" and len(r.get("stderr") or "") < 10_000,
+          f"-> verdict={r.get('verdict')} stderr_len={len(r.get('stderr') or '')}")
+
+    # A child that stays under the cap must be completely unaffected.
+    r = executor._execute_python("python3", "print('hi')", max_output_kb=64, timeout=20)
+    check("output under the cap is unaffected", r.get("verdict") == "OK" and "hi" in r.get("stdout", ""),
+          f"-> verdict={r.get('verdict')} stdout={r.get('stdout')!r}")
+finally:
+    executor._rust = saved_rust
+
 # ═══ 9. a comment must not cite a gate that does not exist ═══════════════
 mw = (REPO_ROOT / "codecalc" / "mcp_middleware.py").read_text(encoding="utf-8")
 import re
 
 for cited in re.findall(r"(?:scripts|tests)/[a-z_0-9]+\.py", mw):
     check(f"middleware cites a file that exists: {cited}", (REPO_ROOT / cited).is_file())
+
+# ═══ 10. three defects found by cross-vendor review of the #25/#38 fixes ═══
+# All three were introduced BY the fixes for #25 and #38, which is why they are
+# grouped: a fix is not exempt from the defect class it was written to close.
+
+# (a) _rmtree_checked returned True after rmtree(ignore_errors=True), which
+#     swallows every removal failure. So sessions.stop() reported deleted:true
+#     for a deletion that did not happen — the same "success it had not
+#     earned" shape #38 existed to end.
+_IS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
+if os.name == "nt" or _IS_ROOT:
+    # 0o000 does not stop removal for root, and Windows ignores it entirely, so
+    # the undeletable directory cannot be staged. Named rather than silently
+    # passed: not exercising the case is a different result from exercising it.
+    skip("rmtree reports the real outcome",
+         "root or Windows: a 0o000 directory is still removable here")
+else:
+    _d = pathlib.Path(tempfile.mkdtemp(prefix="cc-undeletable-"))
+    _sub = _d / "sub"
+    _sub.mkdir()
+    (_sub / "f").write_text("x")
+    _ident = executor._dir_identity(_d)
+    _sub.chmod(0o000)
+    try:
+        _res = executor._rmtree_checked(_d, _ident)
+        check("_rmtree_checked returns False when the directory is still there",
+              _res is False and _d.exists(), f"-> returned {_res}, exists={_d.exists()}")
+    finally:
+        _sub.chmod(0o700)
+        shutil.rmtree(_d, ignore_errors=True)
+_d2 = pathlib.Path(tempfile.mkdtemp(prefix="cc-deletable-"))
+check("_rmtree_checked still returns True on a real deletion",
+      executor._rmtree_checked(_d2, executor._dir_identity(_d2)) is True and not _d2.exists())
+
+# (b) the overflow signal was `len(chunk) > room`, which is false at exactly
+#     cap+1 — the child was never killed at the boundary even though the
+#     output had crossed the cap. Decided on total bytes seen now.
+for _n, _cap, _want in ((5, 4, True), (4, 4, False), (6, 4, True), (1, 4, False)):
+    _fired = []
+    _dr = executor._BoundedDrain(io.BytesIO(b"z" * _n), _cap)
+    _dr.drain(lambda f=_fired: f.append(1))
+    check(f"drain: cap={_cap} bytes={_n} signals overflow={_want}",
+          bool(_fired) is _want, f"-> fired={bool(_fired)} retained={len(_dr.data())}")
+
+# (c) the COMPILE path called _trim() without the caller's cap, so it used the
+#     64 KiB default while the drain had already bounded at the caller's cap.
+#     Under-cap: truncated with NO marker (silent). Over-cap: falsely cut.
+if "c" in registry.LANGUAGES and shutil.which("gcc"):
+    _saved = executor._rust
+    try:
+        executor._rust = None
+        _bad = "this is not valid c " * 200
+        _small = executor._execute_python("c", _bad, timeout=60, max_output_kb=1)
+        check("compile stderr truncated to the caller's cap IS marked truncated",
+              "[truncated]" in _small.get("stderr", ""),
+              f"-> {len(_small.get('stderr', ''))} bytes, marker="
+              f"{'[truncated]' in _small.get('stderr', '')}")
+        _big = executor._execute_python("c", _bad, timeout=60, max_output_kb=128)
+        check("compile stderr under a LARGER cap is not falsely truncated",
+              "[truncated]" not in _big.get("stderr", ""),
+              f"-> {len(_big.get('stderr', ''))} bytes")
+    finally:
+        executor._rust = _saved
+else:
+    skip("compile-path output cap", "no c compiler on this machine")
 
 print(f"\n=== {len(FAILS)} FAILURE(S), {len(SKIPS)} skipped ===" if FAILS else
       f"\n=== PYTHON SWEEP REGRESSIONS FIXED ({len(SKIPS)} skipped) ===")

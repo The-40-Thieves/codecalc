@@ -15,6 +15,7 @@ import os
 import platform
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -300,8 +301,198 @@ def _kill_group(proc: subprocess.Popen) -> None:
             pass
 
 
+# ── identity-checked workdir deletion (mirrors executor/src/main.rs) ───────
+#
+# The Rust executor's cleanup guard used to key on how the pathname
+# ORIGINATED — "we created it, so we may delete it". That is a claim about
+# the past, and the executed program can invalidate it: it runs with the
+# workdir as its cwd, so
+#
+#     os.rename(work, work + ".held")                 # move ours aside
+#     os.rename("/tmp/something-i-want-gone", work)   # put a victim there
+#
+# leaves an unconditional rmtree(work) deleting a directory this process
+# never made. Recording the identity at creation and re-checking it
+# immediately before removal keys on what the path IS at the moment of the
+# delete instead of on where it came from. This pair ports that guard to the
+# three places the Python side deletes a workdir it created: the pure-Python
+# fallback executor, execute_code_stream's --workdir, and session teardown.
+def _dir_identity(path: str | Path) -> tuple[int, int] | None:
+    """Identity (device, inode) of a directory, on platforms that have one.
+
+    Attempted on EVERY platform, not just POSIX. The first version of this
+    returned None on Windows outright, on the reasoning that Windows has no
+    cheap stable (dev, ino) — and CI disproved it the only way that counts: the
+    rename-swap regression ran on windows-latest and reported
+
+        FAIL a directory swapped in by rename is NOT deleted (python fallback)
+             -> C:\\Users\\...\\codecalc-r7oiykyq DELETED
+
+    A guard that returns None on a platform, feeding a caller that treats None
+    as "delete unconditionally", is not a recorded gap. It is the guard being
+    inert exactly where nobody looks, while the README states the guarantee
+    flatly.
+
+    `os.stat` on Windows does populate st_ino (the NTFS file index) and st_dev
+    (the volume serial number); the docs call st_ino "inode number or file
+    index" for precisely this reason. Where a filesystem cannot supply an index
+    it comes back as 0, which is not an identity and must not be compared as
+    one — hence the explicit rejection below rather than trusting a zero.
+    """
+    try:
+        # lstat, not stat: a symlink swapped into the path must not be
+        # followed to the directory it points at.
+        st = os.lstat(path)
+    except OSError:
+        return None
+    if not stat.S_ISDIR(st.st_mode):
+        return None
+    if not st.st_ino:
+        # 0 means the filesystem did not supply an index. Two different
+        # directories would both compare equal on it, so returning it would
+        # produce a check that always passes: the shape of defect this repo
+        # keeps finding, in the one place where passing means deleting.
+        return None
+    return (st.st_dev, st.st_ino)
+
+
+def _rmtree_checked(path: str | Path, created: tuple[int, int] | None) -> bool:
+    """Delete a directory this process created, refusing if it is no longer
+    the same directory that was created.
+
+    Mirrors `remove_own_workdir` in executor/src/main.rs. `created` is the
+    identity recorded at creation time.
+
+    `created is None` means no identity could be obtained, and this REFUSES
+    rather than deleting. That is the opposite of the first version, which
+    deleted unconditionally in that case, and the reversal is deliberate: this
+    is a delete path reached with executed code's cwd as its target, so
+    "I could not verify" has to mean "I do not delete". Failing open here
+    turns an unmeasurable filesystem into a silent loss of the guarantee the
+    README states flatly.
+
+    The cost is real and is stated rather than hidden: on a filesystem that
+    supplies no file index, temp directories accumulate instead of being
+    cleaned up. A visible leak is recoverable; deleting a directory someone
+    renamed into place is not.
+
+    Returns whether the directory was actually removed, so callers report the
+    real outcome instead of an assumed one.
+    """
+    if created is None:
+        print(f"codecalc: refusing to delete {path} — no directory identity "
+              "was available on this filesystem, so ownership cannot be "
+              "verified", file=sys.stderr)
+        return False
+    if _dir_identity(path) != created:
+        print(f"codecalc: refusing to delete {path} — it is not the "
+              "directory this run created", file=sys.stderr)
+        return False
+    shutil.rmtree(path, ignore_errors=True)
+    # ignore_errors=True swallows EVERY removal failure, so `return True` after
+    # it was a claim about what was attempted, not about what happened: an
+    # unreadable descendant on POSIX, or an open handle on Windows, left the
+    # directory in place while sessions.stop() reported `deleted: true`. That
+    # is the same "reported success it had not earned" defect this function was
+    # written to end, one layer down. Measured: returned True with the
+    # directory still on disk. Ask the filesystem instead of assuming.
+    # lexists, not exists: exists() FOLLOWS symlinks, so a dangling symlink
+    # left at the path would report False — i.e. "successfully deleted" — for a
+    # path that still has something on it. The whole point of this function is
+    # that something else may have put a different object where our directory
+    # was, so the absence check must not be the one that resolves it.
+    removed = not os.path.lexists(path)
+    if not removed:
+        print(f"codecalc: could not fully delete {path}", file=sys.stderr)
+    return removed
+
+
+def _feed_stdin(proc: subprocess.Popen, data: bytes) -> None:
+    """Write stdin and close it, in its own thread.
+
+    So a large stdin payload can never block the caller: with the read side
+    drained by _BoundedDrain threads running concurrently, the child is free
+    to consume stdin while producing output, but nothing here assumes that —
+    a write that blocks on a full pipe just blocks THIS thread, same as an
+    unread stdout/stderr pipe blocking _BoundedDrain.drain would.
+    """
+    try:
+        if data:
+            proc.stdin.write(data)
+    except (BrokenPipeError, OSError, ValueError):
+        pass
+    finally:
+        try:
+            proc.stdin.close()
+        except (OSError, ValueError):
+            pass
+
+
+class _BoundedDrain:
+    """Reads one pipe, in a background thread, into a buffer capped at
+    cap+1 bytes — never more, regardless of how much the child writes.
+
+    This is the fix for #25: `communicate()` reads a pipe to EOF before
+    anything looks at how much came back, so max_output_kb was a truncation
+    applied after the fact, not a ceiling — a child writing far more than the
+    cap made THIS process allocate proportionally to total output before the
+    result could even be classified OLE. Reading incrementally and refusing
+    to retain past the cap bounds that allocation to the cap itself, and
+    `on_overflow()` (set once the cap is first crossed) is what lets the
+    caller kill the child's process group promptly instead of waiting for it
+    to finish writing on its own.
+
+    +1, not `cap`: `_trim()` downstream decides whether to append the
+    "[truncated]" marker by checking `len(bytes) > cap`; retaining one byte
+    past the cap keeps that check meaningful without keeping anywhere near
+    the full output in memory.
+
+    Keeps reading — and discarding anything past the cap — until EOF
+    regardless of overflow, so an unread pipe can never deadlock the child.
+    This is the same hazard sessions.py's _drain_stderr/_drain_stdout guard
+    against for the long-lived REPL workers; a bounded buffer that stopped
+    reading at the cap would reintroduce it here.
+    """
+
+    def __init__(self, stream, cap: int):
+        self._stream = stream
+        self._cap = cap
+        self._retain = cap + 1
+        self._buf = bytearray()
+        self._seen = 0
+        self._signalled = False
+
+    def drain(self, on_overflow) -> None:
+        try:
+            while True:
+                chunk = self._stream.read(65536)
+                if not chunk:
+                    return
+                self._seen += len(chunk)
+                room = self._retain - len(self._buf)
+                if room > 0:
+                    self._buf.extend(chunk[:room])
+                # Overflow is decided on TOTAL BYTES SEEN against the cap, not
+                # on whether one chunk outran the remaining room. The latter
+                # was off by one at exactly the boundary: with cap=4 the buffer
+                # retains cap+1=5, so a single 5-byte chunk found room==5 and
+                # `5 > 5` was false — measured, retained=5 with the overflow
+                # never signalled. The output HAD crossed the cap, so `_trim`
+                # marked it truncated downstream while the child was never
+                # killed and ran on to the wall-clock timeout.
+                if not self._signalled and self._seen > self._cap:
+                    self._signalled = True
+                    on_overflow()
+        except (OSError, ValueError):
+            pass
+
+    def data(self) -> bytes:
+        return bytes(self._buf)
+
+
 def _run_step(argv: list[str], cwd: str, timeout: int, stdin: str,
-              max_memory_mb: int = 0, max_cpu: int = 0) -> tuple[int, bytes, bytes, bool, int]:
+              max_memory_mb: int = 0, max_cpu: int = 0,
+              max_output_bytes: int = MAX_OUTPUT_BYTES) -> tuple[int, bytes, bytes, bool, int]:
     # NOTE: preexec_fn is unsafe under threads (PLW1509) — this is the PYTHON
     # FALLBACK path only, used when the Rust binary is absent. It serializes
     # spawns with a lock to avoid concurrent fork+preexec races; the production
@@ -325,15 +516,42 @@ def _run_step(argv: list[str], cwd: str, timeout: int, stdin: str,
             start_new_session=True,
             preexec_fn=_limits(timeout, max_memory_mb, max_cpu),
         )
-        try:
-            out, err = proc.communicate(input=stdin.encode(), timeout=timeout)
-            return (proc.returncode, out, err, False,
-                    _children_cpu_ms_since(cpu_before))
-        except subprocess.TimeoutExpired:
-            _kill_group(proc)
-            proc.wait()
-            return (-1, b"", b"<killed: exceeded wall-clock timeout>", True,
-                    _children_cpu_ms_since(cpu_before))
+        overflow = threading.Event()
+        out_reader = _BoundedDrain(proc.stdout, max_output_bytes)
+        err_reader = _BoundedDrain(proc.stderr, max_output_bytes)
+        threads = [
+            threading.Thread(target=_feed_stdin, args=(proc, stdin.encode()), daemon=True),
+            threading.Thread(target=out_reader.drain, args=(overflow.set,), daemon=True),
+            threading.Thread(target=err_reader.drain, args=(overflow.set,), daemon=True),
+        ]
+        for t in threads:
+            t.start()
+
+        # Polled rather than one blocking proc.wait(timeout=timeout): the kill
+        # on overflow has to happen from THIS thread. Popen.wait() is not
+        # something this codebase calls from two threads on the same process
+        # at once, and a reader thread calling _kill_group the instant it sees
+        # overflow would do exactly that against the wait() below.
+        deadline = time.monotonic() + timeout
+        timed_out = False
+        while proc.poll() is None:
+            if overflow.is_set():
+                _kill_group(proc)
+                proc.wait()
+                break
+            if time.monotonic() >= deadline:
+                timed_out = True
+                _kill_group(proc)
+                proc.wait()
+                break
+            time.sleep(0.02)
+
+        for t in threads:
+            t.join(timeout=5)
+        cpu_ms = _children_cpu_ms_since(cpu_before)
+        if timed_out:
+            return (-1, b"", b"<killed: exceeded wall-clock timeout>", True, cpu_ms)
+        return (proc.returncode, out_reader.data(), err_reader.data(), False, cpu_ms)
 
 
 def _trim(b: bytes, cap: int = MAX_OUTPUT_BYTES) -> str:
@@ -365,6 +583,43 @@ def _fallback_verdict(rc: int, timed_out: bool, truncated: bool) -> str:
 _FALLBACK_UNMEASURED: list[str] = [
     "peak_memory_kb: ru_maxrss is a high-water mark and cannot be attributed to one run",
 ]
+
+
+def _runtime_unavailable_result(name: str, phase: str, argv: list[str], exc: OSError,
+                                workdir: str, started: float, no_net: bool) -> dict:
+    """The documented result shape for a runtime/compiler that failed to spawn.
+
+    The Rust executor never needs this: `Command::spawn()` failing there flows
+    through the SAME StepResult -> JSON envelope as any other outcome, so a
+    missing binary still comes back with the full shape a caller can inspect.
+    This path did not have that for free — `subprocess.Popen` raising OSError
+    (FileNotFoundError for a missing executable, PermissionError for one that
+    is not executable) went uncaught and escaped `execute()` entirely, so
+    asking the fallback for an uninstalled runtime raised an exception instead
+    of returning a result. Same keys as the run-phase success path (see the
+    comment there): a caller switching on `verdict` or reading `platform`
+    should not need a different code path for this failure than for any other.
+    """
+    missing = argv[0] if argv else "?"
+    detail = f"runtime unavailable for the {phase} phase of {name!r}: {missing!r} ({exc})"
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    return {
+        "ok": False, "language": name, "phase": phase,
+        "stdout": "", "stderr": detail, "exit_code": None,
+        "duration_ms": elapsed_ms, "workdir": workdir,
+        "compile_ms": elapsed_ms if phase == "compile" else 0,
+        "total_ms": elapsed_ms,
+        "timed_out": False,
+        "output_truncated": False,
+        "verdict": "RTE",
+        "cpu_ms": 0,
+        "peak_memory_kb": None,
+        "platform": sys.platform,
+        "unenforced": (["no_net: needs the native executor's LD_PRELOAD shim"]
+                       if no_net else []) + _FALLBACK_UNMEASURED,
+        "backend": "python",
+        "error": detail,
+    }
 
 
 def _children_cpu_seconds() -> float:
@@ -410,6 +665,12 @@ def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10
     # that tempdir undeleted. The two tests must agree on what "supplied" means.
     caller_workdir = bool(workdir)
     workdir = workdir or tempfile.mkdtemp(prefix="codecalc-")
+    # Recorded BEFORE the source is written or anything runs in the directory,
+    # exactly like main.rs's created_identity: the code about to execute has
+    # this directory as its cwd and can rename another one into its place
+    # before the `finally` below gets to clean up. None for a caller-supplied
+    # workdir, which this function never deletes.
+    created_identity = None if caller_workdir else _dir_identity(workdir)
     cap = max_output_kb * 1024 if max_output_kb > 0 else MAX_OUTPUT_BYTES
     started = time.monotonic()
     try:
@@ -422,24 +683,50 @@ def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10
         compile_ms = 0
         if entry["compile"]:
             argv = [a.format(**fmt) for a in entry["compile"]]
-            rc, out, err, to, _ = _run_step(argv, workdir, timeout, "",
-                                            max_memory_mb, max_cpu)
+            try:
+                rc, out, err, to, _ = _run_step(argv, workdir, timeout, "",
+                                                max_memory_mb, max_cpu, cap)
+            except OSError as exc:
+                # The compiler binary itself is missing or not executable.
+                # Unhandled, this escaped as a raised exception instead of the
+                # documented result shape every other failure path returns.
+                return _runtime_unavailable_result(name, "compile", argv, exc,
+                                                   workdir, started, no_net)
             if to:
                 return {"ok": False, "language": name, "phase": "compile",
-                        "stdout": "", "stderr": _trim(err), "exit_code": None,
+                        # _trim MUST get the caller's cap here. Without it the
+                        # compile path fell back to the 64 KiB default while
+                        # the drain had already bounded the bytes at the
+                        # caller's cap, so the two disagreed in both
+                        # directions: max_output_kb=1 against a 2 KiB compiler
+                        # error retained 1025 bytes and added NO truncation
+                        # marker (1025 < 65536), i.e. silent truncation
+                        # presented as complete output; and max_output_kb=128
+                        # against 70 KiB was falsely cut at 64 KiB.
+                        "stdout": "", "stderr": _trim(err, cap), "exit_code": None,
                         "duration_ms": 0, "timed_out": True}
             compile_ms = int((time.monotonic() - started) * 1000)
             if rc != 0:
                 return {"ok": False, "language": name, "phase": "compile",
-                        "stdout": _trim(out), "stderr": _trim(err), "exit_code": rc,
+                        "stdout": _trim(out, cap), "stderr": _trim(err, cap), "exit_code": rc,
                         "duration_ms": int((time.monotonic() - started) * 1000),
                         "timed_out": False}
 
         argv = [a.format(**fmt) for a in entry["run"]]
         run_started = time.monotonic()
-        rc, out, err, to, cpu_ms = _run_step(argv, workdir, timeout, stdin,
-                                             max_memory_mb, max_cpu)
+        try:
+            rc, out, err, to, cpu_ms = _run_step(argv, workdir, timeout, stdin,
+                                                 max_memory_mb, max_cpu, cap)
+        except OSError as exc:
+            # The interpreter/runtime binary itself is missing or not
+            # executable — same shape gap as the compile phase above.
+            return _runtime_unavailable_result(name, "run", argv, exc,
+                                               workdir, started, no_net)
         duration_ms = int((time.monotonic() - run_started) * 1000)
+        # out/err are already capped at cap+1 bytes by _run_step's incremental
+        # drain (see _BoundedDrain) — this comparison is what decides whether
+        # _trim() below should append the truncation marker, not what enforces
+        # the cap. The cap itself is enforced DURING the read, not here.
         truncated = len(out) > cap or len(err) > cap
         # The documented return shape is the SAME on both backends. It was not:
         # this path omitted verdict, cpu_ms, peak_memory_kb, output_truncated,
@@ -466,10 +753,15 @@ def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10
                                if no_net else []) + _FALLBACK_UNMEASURED,
                 "backend": "python"}
     finally:
-        # Only a directory this function created. Same rule as the Rust
-        # executor: a caller-supplied workdir belongs to the caller.
+        # Only a directory this function created, and only if it is STILL
+        # that directory. "Caller-supplied workdir belongs to the caller" is
+        # the ownership rule and was the only one enforced here; the Rust
+        # executor enforces a second one — identity, re-checked right before
+        # removal — because the code that just ran had this directory as its
+        # cwd and could have renamed a victim into its place. See
+        # _rmtree_checked.
         if not caller_workdir:
-            shutil.rmtree(workdir, ignore_errors=True)
+            _rmtree_checked(workdir, created_identity)
 
 
 # ── public API ─────────────────────────────────────────────────────────────

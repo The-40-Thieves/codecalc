@@ -330,6 +330,12 @@ shell and so are unavailable on Windows unless one is installed.
   recorded at creation and re-checked before removal, because executed code runs
   with that directory as its cwd and can rename another one into its place. A
   caller-supplied `--workdir` is a session workspace and is never deleted.
+  If the filesystem supplies no file index to identify the directory by, the
+  deletion is **refused** rather than performed unverified, so temp directories
+  accumulate there instead of the wrong one being removed. That trade is stated
+  because it is the one this guarantee actually makes: it was previously
+  implemented in the Rust executor only, and the Python fallback deleted
+  unconditionally, which CI caught on Windows.
 - rlimits: CPU (timeout+8s), address space 2TiB (V8/JVM need huge VA),
   file size 256MiB, 256 FDs, core dumps off
 - The **timeout is a total budget**: compile and run share it, so `--timeout 10`
