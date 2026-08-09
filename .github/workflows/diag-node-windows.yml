@@ -174,3 +174,124 @@ jobs:
                 "in a single run, so a clean pass here bounds the frequency "
                 "rather than closing the issue.")
           PY
+
+  in-situ:
+    # The isolated loop above found nothing in 580 executions across two
+    # dispatches, which bounds the rate rather than closing #42. The original
+    # failure did NOT happen in isolation: it happened inside
+    # `sandbox + security (windows-latest)`, part-way through the full suite,
+    # after the fork-bomb and process-limit probes had run.
+    #
+    # 580 clean isolated runs against one failure under load points away from
+    # "node is flaky" and toward contention or leftover state — most plausibly
+    # job-object ActiveProcessLimit pressure after those probes, or a prior
+    # test leaving a handle behind. This job tests that reading directly: it
+    # reproduces the sandbox job's setup, runs the SAME heavy suites first,
+    # and only then loops node.
+    #
+    # If this reproduces where the clean job does not, the difference between
+    # them IS the finding.
+    name: node repro AFTER the heavy suites (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: executor
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: '0.12.1'
+          python-version: '3.12'
+      - name: install (locked)
+        run: uv sync --frozen
+      - name: build the executor into bin/
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release --manifest-path executor/Cargo.toml
+          mkdir -p bin
+          cp executor/target/release/codecalc-exec.exe bin/
+      - name: assert the RUST backend is what we are measuring
+        shell: bash
+        run: |
+          set -euo pipefail
+          backend=$(uv run --no-sync python -c 'from codecalc import executor; print(executor.backend())')
+          [ "$backend" = "rust" ] || { echo "::error::backend is '$backend'"; exit 1; }
+          echo "backend: $backend"
+
+      # The load. continue-on-error because their PASS/FAIL is not what this
+      # job is asking — they are here to leave the runner in the state the
+      # original failure was observed in. A red suite here must not mask the
+      # loop's own result below.
+      - name: run the heavy suites first (the load, not the assertion)
+        continue-on-error: true
+        shell: bash
+        run: |
+          set +e
+          uv run --no-sync python tests/test_security.py
+          uv run --no-sync python tests/test_executor_sweep.py
+          uv run --no-sync python tests/test_platform_contract.py
+          echo "heavy suites finished (exit codes deliberately ignored)"
+
+      - name: NOW loop the node case
+        shell: bash
+        env:
+          ITERATIONS: ${{ inputs.iterations }}
+        run: |
+          set -euo pipefail
+          case "$ITERATIONS" in
+            ''|*[!0-9]*) echo "::error::iterations must be a positive integer, got '$ITERATIONS'"; exit 1 ;;
+          esac
+          uv run --no-sync python - "$ITERATIONS" <<'PY'
+          import collections, json, sys
+
+          from codecalc import executor, tools
+
+          n = int(sys.argv[1])
+          SNIPPETS = {"python3": "print(6*7)", "node": "console.log(6*7)", "ruby": "puts 6*7"}
+
+          def classify(r):
+              if r.get("ok") and r.get("stdout", "").strip() == "42":
+                  return "OK"
+              if r.get("timed_out"):
+                  return "TIMED_OUT"
+              if not r.get("stdout", "").strip():
+                  return "EMPTY_EXIT_0" if r.get("exit_code") == 0 else "NONZERO_EXIT_EMPTY"
+              return "OTHER"
+
+          tally, samples, ran = collections.Counter(), {}, 0
+          for i in range(n):
+              r = executor.execute("node", SNIPPETS["node"], timeout=15)
+              k = classify(r); tally[f"direct:{k}"] += 1; ran += 1
+              if k != "OK" and f"direct:{k}" not in samples:
+                  samples[f"direct:{k}"] = {"iteration": i, "exit_code": r.get("exit_code"),
+                                            "verdict": r.get("verdict"), "timed_out": r.get("timed_out"),
+                                            "stderr": str(r.get("stderr", ""))[:400]}
+              c = tools.compare_execution(SNIPPETS, timeout=15)
+              for row in c.get("results", []):
+                  if row.get("language") != "node":
+                      continue
+                  k = classify(row); tally[f"compare:{k}"] += 1
+                  if k != "OK" and f"compare:{k}" not in samples:
+                      samples[f"compare:{k}"] = {"iteration": i,
+                                                 "siblings": {x.get("language"): x.get("stdout", "").strip()
+                                                              for x in c.get("results", [])}}
+          if ran != n:
+              print(f"::error::loop ran {ran} times, expected {n}")
+              sys.exit(2)
+          print(f"\n=== {n} iterations AFTER the heavy suites, node on {sys.platform} ===")
+          for key in sorted(tally):
+              print(f"  {key:28} {tally[key]}")
+          if samples:
+              print("\n=== first sample of each failure mode ===")
+              print(json.dumps(samples, indent=2, default=str))
+          bad = sum(v for k, v in tally.items() if not k.endswith(":OK"))
+          if bad:
+              print(f"\n=== REPRODUCED UNDER LOAD: {bad} non-OK in {n} ===")
+              print("The isolated job did not reproduce this. The difference "
+                    "between the two jobs is the finding.")
+              sys.exit(1)
+          print(f"\n=== no reproduction in {n} iterations, even after the heavy suites ===")
+          print("Bounds the rate under this load too. It does not close #42.")
+          PY
