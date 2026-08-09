@@ -46,6 +46,18 @@ Point an MCP client at the installed command:
 { "mcpServers": { "codecalc": { "command": "uvx", "args": ["codecalc"] } } }
 ```
 
+Not sure what your install actually resolved? Ask it, rather than finding out
+from a tool call later:
+
+```bash
+codecalc doctor          # or: python -m codecalc doctor
+```
+
+It prints the execution backend and the binary behind it, whether installs are
+confined, how many of the 31 runtimes are present, and a client config block
+with absolute paths filled in. All of that is otherwise discoverable only by
+making a tool call and reading `backend`, `unenforced`, or a failure.
+
 Building the Rust core yourself, or running from a checkout? See "Build the
 Rust core" and "Run the server" below.
 

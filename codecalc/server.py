@@ -783,7 +783,84 @@ def extract_function(code: str, language: str, function_name: str,
                                          call=call, test_inputs=test_inputs)
 
 
+#: Registry entries that are a second spelling of a language already counted,
+#: not a language of their own. Mirrors ALIAS_ENTRIES in scripts/check_claims.py
+#: — the count this command prints has to agree with the one the README states
+#: and the gate enforces, or it is just a fourth opinion.
+_ALIAS_ENTRIES = {"c++"}
+
+
+def _doctor() -> int:
+    """Report what this install actually resolved, before a tool call has to.
+
+    The gap this fills: everything below is discoverable ONLY by making a tool
+    call and reading the result — the backend from `execute_code`'s `backend`
+    field, the missing runtimes from `list_languages`, the sandbox gaps from
+    `unenforced`. An operator wiring up an MCP client has no way to see any of
+    it until something has already gone quietly weaker than they expected.
+
+    Writes to STDOUT, which is safe here and nowhere else in this file: stdout
+    is the MCP transport, so anything printed during a normal run corrupts the
+    protocol stream. This path never starts the server.
+    """
+    import json
+    import shutil
+    import sys
+
+    print(f"codecalc {__version__}")
+    print(f"  python           {sys.version.split()[0]} on {sys.platform}")
+
+    backend = executor.backend()
+    print(f"  execution backend {backend}")
+    if backend == "rust":
+        print(f"    binary         {executor._rust}")
+    else:
+        print("    binary         NOT FOUND — running the pure-Python fallback.")
+        print("                   Set CODECALC_REQUIRE_NATIVE=1 to make this a")
+        print("                   startup failure instead of a weaker sandbox.")
+
+    from . import landlock
+    abi = landlock.abi_version()
+    print(f"  install sandbox   {'Landlock ABI ' + str(abi) if abi else 'unavailable (installs are not confined)'}")
+
+    # Counted the way the README counts, which is the way check_claims.py
+    # verifies: `c++` and `cpp` are one language written twice, so a raw
+    # len(LANGUAGES) says 32 where every other number in this project says 31.
+    # A doctor command that reported 32 would have introduced a THIRD figure
+    # into a repo that has a gate specifically because these drift.
+    langs = [l for l in registry.all_languages() if l["name"] not in _ALIAS_ENTRIES]
+    avail = executor.probe()
+    have = [l["name"] for l in langs if avail.get(l["name"], True)]
+    missing = [l["name"] for l in langs if not avail.get(l["name"], True)]
+    print(f"  runtimes          {len(have)}/{len(langs)} available")
+    if missing:
+        print(f"    missing        {', '.join(sorted(missing))}")
+
+    # Absolute paths, because the whole point is that it can be pasted. A
+    # relative one resolves against the CLIENT's working directory, which is
+    # not something the person pasting it controls or can easily predict.
+    exe = shutil.which("codecalc") or sys.executable
+    args = [] if shutil.which("codecalc") else ["-m", "codecalc"]
+    print("\n  MCP client config (copy into your client's JSON):")
+    print(json.dumps({"mcpServers": {"codecalc": {"command": exe, "args": args}}},
+                     indent=2))
+    return 0
+
+
 def main() -> None:
+    """stdio MCP server, or `doctor` when asked.
+
+    argv is inspected rather than parsed. A client spawns this with NO
+    arguments and speaks MCP on stdin/stdout; anything clever here — a parser
+    that prints usage to stdout, or exits on an unrecognised flag — would
+    break that in a way that looks like a protocol error. Unrecognised
+    arguments are therefore IGNORED and the server starts, which is the
+    behaviour that was always there.
+    """
+    import sys
+
+    if len(sys.argv) > 1 and sys.argv[1] in ("doctor", "--check", "--check-install"):
+        raise SystemExit(_doctor())
     mcp.run(transport="stdio")
 
 
