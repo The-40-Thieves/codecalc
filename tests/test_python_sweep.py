@@ -427,9 +427,31 @@ try:
             "print('swapped')\n")
     r = executor._execute_python("python3", code, timeout=20)
     swapped_to = pathlib.Path(r.get("workdir", "/nonexistent"))
-    check("a directory swapped in by rename is NOT deleted (python fallback)",
-          (swapped_to / "important.txt").is_file(),
-          f"-> {swapped_to} {'holds the data' if swapped_to.exists() else 'DELETED'}")
+    # Whether the attack was actually STAGED, detected by the victim no longer
+    # being at its original path. Not by stdout: the swap renames the directory
+    # the output capture lives in, so "swapped" does not reliably come back
+    # even when the rename succeeded. Not by `ok` either, which is True on a
+    # successful swap AND on a platform that refused it.
+    staged = not victim.exists()
+    if not staged:
+        # The PLATFORM refused to stage the attack: Windows will not rename a
+        # directory that is a running process's current directory. The workdir
+        # is therefore still the one this run created, and deleting it is
+        # correct behaviour, not a breach.
+        #
+        # Asserting "the victim survived" here failed on windows-latest for a
+        # reason that had nothing to do with the guard — the victim was never
+        # moved anywhere. A regression test that cannot tell "the attack was
+        # blocked" from "the attack never happened" is measuring something
+        # other than what it names, which is the defect this file exists to
+        # catch.
+        skip("python fallback rename-swap",
+             "the platform refused the rename, so the attack could not be "
+             f"staged: ok={r.get('ok')} stderr={str(r.get('stderr'))[:70]!r}")
+    else:
+        check("a directory swapped in by rename is NOT deleted (python fallback)",
+              (swapped_to / "important.txt").is_file(),
+              f"-> {swapped_to} {'holds the data' if swapped_to.exists() else 'DELETED'}")
     for leftover in (swapped_to, pathlib.Path(str(swapped_to) + ".held"), victim):
         shutil.rmtree(leftover, ignore_errors=True)
 finally:
@@ -450,10 +472,20 @@ if "bash" in registry.LANGUAGES:
     out = sessions.execute(sid, script, language="bash")
     stopped = sessions.stop(sid)
     d = pathlib.Path(started["workdir"])
-    check("session stop() does not delete a directory swapped in by rename",
-          (d / "important.txt").is_file(), f"-> ran ok={out.get('ok')}, dir exists={d.exists()}")
-    check("  ...and stop() reports deleted=False rather than lying",
-          stopped.get("deleted") is False, f"-> {stopped}")
+    # Same distinction as the fallback case above: if the shell could not
+    # perform the rename, the attack was never staged and stop() deleting its
+    # own workdir is correct. Only assert the refusal where the swap actually
+    # happened.
+    if victim.exists():
+        skip("session workdir rename-swap",
+             "the platform refused the rename, so the victim is still at its "
+             f"original path and the attack was never staged: ok={out.get('ok')}")
+    else:
+        check("session stop() does not delete a directory swapped in by rename",
+              (d / "important.txt").is_file(),
+              f"-> ran ok={out.get('ok')}, dir exists={d.exists()}")
+        check("  ...and stop() reports deleted=False rather than lying",
+              stopped.get("deleted") is False, f"-> {stopped}")
     shutil.rmtree(d, ignore_errors=True)
     shutil.rmtree(pathlib.Path(str(d) + ".held"), ignore_errors=True)
     shutil.rmtree(victim, ignore_errors=True)
