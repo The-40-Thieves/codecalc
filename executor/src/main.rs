@@ -737,6 +737,14 @@ fn execute(lang_name: &str, code: &str, stdin_data: &str, limits: &Limits, workd
                     "cpu_ms": 0, "peak_memory_kb": 0,
                     "timed_out": true, "verdict": "TLE",
                     "unenforced": Vec::<&str>::new(),
+                    // platform and workdir are on the normal return too. A new
+                    // return that omits fields the success path carries is how
+                    // this executor's shape drifted before: AUDIT.md records
+                    // "The documented return shape is the SAME on both
+                    // backends. It was not". A caller reading result["workdir"]
+                    // should not have to know which of three ways it got here.
+                    "platform": std::env::consts::OS,
+                    "workdir": work_s,
                 });
                 if workdir.is_none() {
                     remove_own_workdir(&work, created_identity);
