@@ -389,10 +389,44 @@ jobs:
           whl=$(ls dl/*.whl)
           echo "installing: $whl"
           uv pip install --python "$py" "$whl"
+      # EVERY assertion below runs from $RUNNER_TEMP, never the checkout.
+      #
+      # `python -c` prepends the current directory to sys.path, and this job
+      # checks the repo out — so running the assertions from the workspace
+      # imported the SOURCE TREE, not the wheel just installed. The source
+      # tree's sibling bin/ is gitignored and never built in this job, so
+      # every run reported `backend: python` and the job failed while the
+      # wheel it was supposed to be testing was perfectly good. Verified by
+      # hand: the same wheel installed into a clean venv and imported from
+      # OUTSIDE the repo reports `backend: rust`, with the executable at
+      # site-packages/bin/codecalc-exec and its mode bits intact.
+      #
+      # This job's stated purpose is "install the artifact exactly as a user
+      # would". It installed like a user and then imported like a developer,
+      # which is the difference between testing the artifact and testing the
+      # working copy.
+      #
+      # `-P` (3.11+) would also stop cwd being prepended, but leaving the
+      # workspace entirely is the stronger form: it cannot be defeated by a
+      # later step that forgets the flag.
+      - name: assert the INSTALLED package is the one under test
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          where=$("$py" -c "import codecalc, pathlib; print(pathlib.Path(codecalc.__file__).resolve())")
+          echo "codecalc imported from: $where"
+          case "$where" in
+            "$GITHUB_WORKSPACE"/*)
+              echo "::error::imported the checked-out SOURCE at $where, not the installed wheel. Every assertion after this would describe the working copy."
+              exit 1 ;;
+          esac
+          echo "ok: outside the workspace, so this is the installed distribution"
       - name: assert the RUST backend is what got installed
         shell: bash
         run: |
           set -euo pipefail
+          cd "$RUNNER_TEMP"
           backend=$("$py" -c "from codecalc import executor; print(executor.backend())")
           echo "backend: $backend"
           if [ "$backend" != "rust" ]; then
@@ -403,9 +437,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          cd "$RUNNER_TEMP"
           binpath=$("$py" -c "from codecalc import executor; print(executor._rust_binary())")
           echo "binary: $binpath"
-          "$py" scripts/contract_check.py "$binpath"
+          "$py" "$GITHUB_WORKSPACE/scripts/contract_check.py" "$binpath"
 
       # Issue #50's acceptance criterion, and the whole point of this job:
       # `backend() == "rust"` above passes even when the --no-net shim is
@@ -435,6 +470,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Same reason as the steps above: python - prepends cwd to sys.path,
+          # so this must not run from the checkout or it probes the source tree.
+          cd "$RUNNER_TEMP"
           "$py" - <<'PYEOF'
           import json
           from codecalc import executor
