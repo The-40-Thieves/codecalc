@@ -62,22 +62,6 @@ def evaluate_expression(expression: str, **variables) -> dict:
     return result
 
 
-def _to_bool_syntax(expression: str) -> str:
-    """Translate English boolean words into pure-Python boolean operators.
-
-    Python's `and`/`or`/`not`/`^` (xor on bools)/`<=` (implies)/`==` (iff)
-    are exactly boolean algebra when operands are bools, so a restricted
-    per-row eval gives the truth table without sympy's parser quirks.
-    """
-    s = expression
-    s = s.replace(" iff ", " == ").replace(" implies ", " <= ")
-    s = re.sub(r"\bxor\b", "^", s)
-    s = re.sub(r"\bnot\s+", "not ", s)
-    s = re.sub(r"\band\b", "and", s)
-    s = re.sub(r"\bor\b", "or", s)
-    return s
-
-
 _MAX_VARS = 16          # 2^16 = 65536 rows ceiling for truth tables
 _MAX_EXPR_LEN = 2000    # cap on expression size (sympy/parser DoS guard)
 

@@ -18,34 +18,11 @@ without two runtimes and a built binary.
 
 from __future__ import annotations
 
-import json
-import re
-
 from . import executor
 
 #: default edge-case inputs (each is stdin for the program)
 DEFAULT_EDGE_INPUTS = ["", "0", "1", "-1", "10", "100", "0.1\n0.2"]
 
-
-
-def _extract_code(text: str) -> str | None:
-    """Pull code from LLM output: fenced block, JSON code field, or raw."""
-    m = re.search(r"```(?:[a-zA-Z0-9_+-]*)\n(.*?)```", text, re.DOTALL)
-    if m:
-        return m.group(1).rstrip()
-    try:
-        obj = json.loads(text)
-        if isinstance(obj, dict) and "code" in obj:
-            return obj["code"]
-    except Exception:
-        pass
-    m = re.search(r'"code"\s*:\s*"((?:[^"\\]|\\.)*)"', text)
-    if m:
-        try:
-            return json.loads('"' + m.group(1) + '"')
-        except Exception:
-            pass
-    return None
 
 
 def _run(language: str, code: str, stdin: str, timeout: int = 15) -> dict:
@@ -137,13 +114,6 @@ def aggregate(outcomes: list[tuple[str, str]]) -> dict:
     return {"passed": passed, "reason": reason, "matched": matched,
             "mismatched": mismatched, "inconclusive": inconclusive,
             "total": len(outcomes)}
-
-
-def _worst_case(cases: list[dict]) -> dict | None:
-    """The most informative failing case: a real mismatch if there is one, else
-    an inconclusive one. Used to build retry feedback for the model."""
-    return (next((c for c in cases if c["outcome"] == "mismatch"), None)
-            or next((c for c in cases if c["outcome"] == "inconclusive"), None))
 
 
 def verify_translation(source: str, source_code: str, target: str,
