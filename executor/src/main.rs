@@ -389,6 +389,12 @@ struct StepResult {
     cpu_ms: u64,
     peak_memory_kb: u64,
     output_truncated: bool,
+    /// Why an output stream could not be read, if one could not. `None` is the
+    /// normal case and means the streams below are what the program actually
+    /// produced. `Some` means at least one of them is NOT, which a caller has
+    /// no other way to learn — an unreadable file and a silent program look
+    /// identical in `stdout`.
+    output_error: Option<String>,
     /// Guarantees this platform could not apply. Carried into the JSON so a
     /// caller can distinguish "the limit held" from "there was no limit".
     unenforced: Vec<&'static str>,
@@ -419,7 +425,10 @@ fn run_step(argv: &[String], work: &Path, tag: &str, stdin_data: &[u8], limits: 
                 exit_code: -2, signal: None, stdout: String::new(),
                 stderr: format!("cannot create I/O files in {}", work.display()),
                 timed_out: false, cpu_ms: 0, peak_memory_kb: 0,
-                output_truncated: false, unenforced: Vec::new(),
+                // None, not an error: nothing was ever written, so there is no
+                // output we failed to READ. The cause is already in stderr and
+                // exit_code -2 makes this ok=false regardless.
+                output_truncated: false, output_error: None, unenforced: Vec::new(),
             };
         }
     };
@@ -458,7 +467,8 @@ fn run_step(argv: &[String], work: &Path, tag: &str, stdin_data: &[u8], limits: 
                 exit_code: -2, signal: None, stdout: String::new(),
                 stderr: format!("spawn failed: {e}"), timed_out: false,
                 cpu_ms: 0, peak_memory_kb: 0, output_truncated: false,
-                unenforced: Vec::new(),
+                // As above: the spawn failure is the story, not a read failure.
+                output_error: None, unenforced: Vec::new(),
             };
         }
     };
@@ -470,8 +480,16 @@ fn run_step(argv: &[String], work: &Path, tag: &str, stdin_data: &[u8], limits: 
         unenforced.push("no_net_requested_but_no_shim_available");
     }
 
-    let (stdout, out_trunc) = read_capped(&out_path, limits.max_output_kb);
-    let (stderr, err_trunc) = read_capped(&err_path, limits.max_output_kb);
+    let (stdout, out_trunc, out_err) = read_capped(&out_path, limits.max_output_kb);
+    let (stderr, err_trunc, err_err) = read_capped(&err_path, limits.max_output_kb);
+    // Both are reported, and stdout's is named separately from stderr's: a
+    // caller acting on the answer needs to know which stream it cannot trust.
+    let output_error = match (out_err, err_err) {
+        (Some(a), Some(b)) => Some(format!("stdout: {a}; stderr: {b}")),
+        (Some(a), None) => Some(format!("stdout: {a}")),
+        (None, Some(b)) => Some(format!("stderr: {b}")),
+        (None, None) => None,
+    };
     let stderr = if waited.timed_out && stderr.is_empty() {
         "<killed: exceeded wall-clock timeout>".to_string()
     } else {
@@ -487,6 +505,7 @@ fn run_step(argv: &[String], work: &Path, tag: &str, stdin_data: &[u8], limits: 
         cpu_ms: waited.cpu_ms,
         peak_memory_kb: waited.peak_memory_kb,
         output_truncated: out_trunc || err_trunc,
+        output_error,
         unenforced,
     }
 }
@@ -523,18 +542,56 @@ fn resolve_limits(limits: &Limits) -> ResolvedLimits {
     }
 }
 
-fn read_capped(path: &Path, max_output_kb: u64) -> (String, bool) {
+/// Read one output file, capped, and SAY SO if it could not be read.
+///
+/// The third return value is the whole point. This used to be
+///
+///     if let Ok(mut f) = fs::File::open(path) { let _ = f.read_to_end(&mut buf); }
+///
+/// which discarded both failures, so "we could not read the output" and "the
+/// program printed nothing" produced byte-identical results — an unreadable
+/// file was reported as a successful run with an empty answer. Measured on the
+/// old code, four cases, three indistinguishable:
+///
+///     printed 42        -> stdout="42\n"  truncated=false
+///     printed nothing   -> stdout=""      truncated=false
+///     file MISSING      -> stdout=""      truncated=false
+///     file UNREADABLE   -> stdout=""      truncated=false
+///
+/// Both failures are kept, not just the open: a read that fails part-way
+/// returns whatever arrived first, which is WORSE than empty because it looks
+/// like complete output. `raw_os_error` is carried because the OS code is the
+/// thing that would identify the cause — on Windows, error 5 (access denied)
+/// and 32 (sharing violation) are documented, intermittent CI failures
+/// (rust-lang/rust#127883 measured ~15% of MSVC builds), and no one can tell
+/// which is happening here without the number.
+fn read_capped(path: &Path, max_output_kb: u64) -> (String, bool, Option<String>) {
     let cap = if max_output_kb > 0 { max_output_kb * 1024 } else { MAX_OUTPUT_BYTES };
     let mut buf = Vec::new();
-    if let Ok(mut f) = fs::File::open(path) {
-        let _ = f.read_to_end(&mut buf);
+    let mut error = None;
+    match fs::File::open(path) {
+        Ok(mut f) => {
+            if let Err(e) = f.read_to_end(&mut buf) {
+                // `{e}` already renders as "<message> (os error N)", so the
+                // code is carried without appending it again — the first draft
+                // printed "Permission denied (os error 13) (os error Some(13))".
+                error = Some(format!(
+                    "read {} failed after {} bytes: {e}",
+                    path.display(),
+                    buf.len()
+                ));
+            }
+        }
+        Err(e) => {
+            error = Some(format!("open {} failed: {e}", path.display()));
+        }
     }
     let truncated = buf.len() as u64 > cap;
     if truncated {
         buf.truncate(cap as usize);
         buf.extend_from_slice(b"\n...[truncated]");
     }
-    (String::from_utf8_lossy(&buf).into_owned(), truncated)
+    (String::from_utf8_lossy(&buf).into_owned(), truncated, error)
 }
 
 /// Classify a run into a verdict. Heuristics:
@@ -698,6 +755,10 @@ fn execute(lang_name: &str, code: &str, stdin_data: &str, limits: &Limits, workd
                 "cpu_ms": sr.cpu_ms, "peak_memory_kb": sr.peak_memory_kb,
                 "timed_out": sr.timed_out, "verdict": verdict(&sr, limits),
                 "unenforced": sr.unenforced,
+                // Same key set as the success return — contract_check.py gates
+                // that the two agree, so a field added to one must be added to
+                // the other or a compile failure loses a key its caller has.
+                "output_error": sr.output_error,
                 // total_ms/platform/workdir are on the success return and were
                 // missing here, so result["workdir"] was a KeyError for callers
                 // whose only mistake was writing code that did not compile.
@@ -773,7 +834,12 @@ fn execute(lang_name: &str, code: &str, stdin_data: &str, limits: &Limits, workd
     let total_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
     let result = json!({
-        "ok": sr.exit_code == 0 && !sr.timed_out && sr.signal.is_none(),
+        // An output we could not read is not a successful run. This used to
+        // be exit-status-only, so a failed read returned ok=true with an empty
+        // stdout — a wrong answer wearing a success. `output_error` below says
+        // which stream and why.
+        "ok": sr.exit_code == 0 && !sr.timed_out && sr.signal.is_none()
+            && sr.output_error.is_none(),
         "language": lang.name,
         "phase": "run",
         "stdout": sr.stdout,
@@ -790,6 +856,11 @@ fn execute(lang_name: &str, code: &str, stdin_data: &str, limits: &Limits, workd
         // Linux run; non-empty is not an error, it is the sandbox declining to
         // claim something it did not do.
         "unenforced": sr.unenforced,
+        // Present ONLY when a stream could not be read. Absent is the normal
+        // case and means stdout/stderr above are what the program produced;
+        // present means at least one of them is not, and names which and why
+        // including the OS error number.
+        "output_error": sr.output_error,
         "platform": std::env::consts::OS,
         "workdir": work_s,
     });

@@ -611,6 +611,100 @@ check("  ...and refuses one past it",
       _logic.evaluate_expression(f"factorial({_CAP + 1})").get("ok") is False,
       f"-> factorial({_CAP + 1})")
 
+# ── #80: an unreadable output stream must not read as an empty one ────────
+# read_capped() discarded both its open failure and its read failure, and the
+# Python fallback's _BoundedDrain swallowed OSError with a bare `pass`.
+# Different mechanisms, identical result: output that could not be read came
+# back as output that was simply empty, on a run reported as successful.
+#
+# Measured on the old code, four cases, three indistinguishable:
+#     printed 42 -> "42\n" | printed nothing -> "" | MISSING -> "" | UNREADABLE -> ""
+from codecalc import executor as _ex
+
+_saved_rust = _ex._rust
+_ex._rust = None
+try:
+    _r = _ex.execute("python3", "print(6*7)", timeout=10)
+    check("fallback: a normal run reports no output_error",
+          _r.get("ok") is True and _r.get("output_error") is None,
+          f"-> ok={_r.get('ok')} output_error={_r.get('output_error')!r}")
+
+    # Force the drain to fail part-way, the way a broken pipe would. A PARTIAL
+    # read is the case worth testing: it is worse than an empty one, because
+    # what comes back looks like the program's real output.
+    _real_drain = _ex._BoundedDrain.drain
+
+    def _failing_drain(self, on_overflow):
+        chunk = self._stream.read(4)
+        if chunk:
+            self._buf.extend(chunk)
+            self._seen += len(chunk)
+        self.error = f"OSError: [Errno 5] Input/output error (after {self._seen} bytes)"
+
+    _ex._BoundedDrain.drain = _failing_drain
+    try:
+        _r = _ex.execute("python3", "print('4' * 40)", timeout=10)
+        check("fallback: a failed drain is REPORTED, not swallowed",
+              _r.get("output_error") is not None,
+              f"-> output_error={_r.get('output_error')!r}")
+        check("  ...and makes the run not-ok, despite a clean exit",
+              _r.get("ok") is False and _r.get("exit_code") == 0,
+              f"-> ok={_r.get('ok')} exit_code={_r.get('exit_code')}")
+        check("  ...naming the stream and how far it got",
+              "stdout" in (_r.get("output_error") or "")
+              and "bytes" in (_r.get("output_error") or ""),
+              f"-> {_r.get('output_error')!r}")
+    finally:
+        _ex._BoundedDrain.drain = _real_drain
+finally:
+    _ex._rust = _saved_rust
+
+# The native backend, against the real binary when one is built. Its failure is
+# provoked for real — the output file is made unreadable while the child is
+# still running — rather than by patching, because the defect was in what the
+# binary does with a failed open.
+if _ex._rust and os.name != "nt":
+    import subprocess as _sp
+    import tempfile as _tf
+    import threading as _th
+
+    _w = _tf.mkdtemp()
+    try:
+        def _lock_output():
+            time.sleep(1.0)
+            for _f in pathlib.Path(_w).glob("*.out"):
+                try:
+                    _f.chmod(0o000)
+                except OSError:
+                    pass
+
+        _t = _th.Thread(target=_lock_output, daemon=True)
+        _t.start()
+        _proc = _sp.run([_ex._rust, "--lang", "python3", "--timeout", "20",
+                         "--workdir", _w],
+                        input=b"import time; time.sleep(2); print(6*7)",
+                        capture_output=True, timeout=60)
+        _t.join(timeout=5)
+        _out = json.loads(_proc.stdout.decode())
+        check("rust: an unreadable output file is REPORTED, not read as empty",
+              _out.get("output_error") is not None,
+              f"-> output_error={_out.get('output_error')!r}")
+        check("  ...and makes the run not-ok",
+              _out.get("ok") is False, f"-> ok={_out.get('ok')}")
+        check("  ...naming the stream and the OS error",
+              "stdout" in (_out.get("output_error") or "")
+              and "os error" in (_out.get("output_error") or ""),
+              f"-> {_out.get('output_error')!r}")
+    finally:
+        for _f in pathlib.Path(_w).glob("*"):
+            try:
+                _f.chmod(0o644)
+            except OSError:
+                pass
+        _shutil.rmtree(_w, ignore_errors=True)
+else:
+    print("SKIP rust unreadable-output probe (no native executor, or Windows)")
+
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== ALL BUG-SWEEP REGRESSIONS FIXED ===")
 sys.exit(1 if FAILS else 0)

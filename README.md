@@ -327,6 +327,14 @@ Linux, macOS and Windows. The three do not offer the same primitives, and the
 executor reports which ones it could **not** apply in an `unenforced` array on
 every result rather than letting a caller assume they all held.
 
+A second field, `output_error`, covers the other way a result can be wrong:
+absent means `stdout`/`stderr` are what the program produced, present means at
+least one of them is **not**, and names which stream and the OS error. That
+distinction did not exist until [#80](https://github.com/The-40-Thieves/codecalc/issues/80)
+— an output file that could not be read came back as a program that printed
+nothing, on a run reported as successful. `ok` now accounts for it on both
+backends.
+
 | Guarantee | Linux | macOS | Windows |
 |---|---|---|---|
 | Wall-clock timeout | yes | yes | yes |
