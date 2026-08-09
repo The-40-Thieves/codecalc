@@ -270,9 +270,21 @@ PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py         # every tool over MC
 PYTHONPATH=. .venv/bin/python tests/test_executor_sweep.py  # sandbox regressions
 ```
 
-20 test files and 5 gate scripts, **748 assertions**, and **zero skips** —
-nothing in the suite needs the internet, so none of it can be skipped for
-lack of it. These two numbers are gated by
+20 test files and 5 gate scripts, **748 assertions**. Nothing in the suite
+needs the internet, so none of it is ever skipped for lack of a network.
+
+It **can** skip for lack of a *capability*, and that is correct rather than a
+regression: a machine without a symlink privilege, without a given language
+runtime, or without a built native executor cannot exercise the cases that
+need them. The suite reports three distinct outcomes — the property holds, the
+property is broken, and this machine cannot exercise it — and every skip names
+its real cause. A nonzero skip count on Windows or in fallback mode is the
+healthy result; what would be wrong is a skip reading as a pass.
+
+This paragraph previously claimed **zero skips** unconditionally. That became
+false the moment the suite learned to distinguish the third outcome, and
+nothing gated it: `check_claims.py` gates the counts below, not the prose
+around them. The counts are gated by
 `scripts/check_claims.py`: they were written by hand once and were stale within
 three pull requests, which is exactly the failure the rest of that script
 exists to prevent. Four of the files are regression suites named after the
