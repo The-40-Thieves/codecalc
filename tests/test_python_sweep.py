@@ -24,6 +24,7 @@ have passed while half the feature stayed broken.
 from __future__ import annotations
 
 import asyncio
+import io
 import os
 import pathlib
 import shutil
@@ -591,6 +592,71 @@ import re
 
 for cited in re.findall(r"(?:scripts|tests)/[a-z_0-9]+\.py", mw):
     check(f"middleware cites a file that exists: {cited}", (REPO_ROOT / cited).is_file())
+
+# ═══ 10. three defects found by cross-vendor review of the #25/#38 fixes ═══
+# All three were introduced BY the fixes for #25 and #38, which is why they are
+# grouped: a fix is not exempt from the defect class it was written to close.
+
+# (a) _rmtree_checked returned True after rmtree(ignore_errors=True), which
+#     swallows every removal failure. So sessions.stop() reported deleted:true
+#     for a deletion that did not happen — the same "success it had not
+#     earned" shape #38 existed to end.
+_IS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
+if os.name == "nt" or _IS_ROOT:
+    # 0o000 does not stop removal for root, and Windows ignores it entirely, so
+    # the undeletable directory cannot be staged. Named rather than silently
+    # passed: not exercising the case is a different result from exercising it.
+    skip("rmtree reports the real outcome",
+         "root or Windows: a 0o000 directory is still removable here")
+else:
+    _d = pathlib.Path(tempfile.mkdtemp(prefix="cc-undeletable-"))
+    _sub = _d / "sub"
+    _sub.mkdir()
+    (_sub / "f").write_text("x")
+    _ident = executor._dir_identity(_d)
+    _sub.chmod(0o000)
+    try:
+        _res = executor._rmtree_checked(_d, _ident)
+        check("_rmtree_checked returns False when the directory is still there",
+              _res is False and _d.exists(), f"-> returned {_res}, exists={_d.exists()}")
+    finally:
+        _sub.chmod(0o700)
+        shutil.rmtree(_d, ignore_errors=True)
+_d2 = pathlib.Path(tempfile.mkdtemp(prefix="cc-deletable-"))
+check("_rmtree_checked still returns True on a real deletion",
+      executor._rmtree_checked(_d2, executor._dir_identity(_d2)) is True and not _d2.exists())
+
+# (b) the overflow signal was `len(chunk) > room`, which is false at exactly
+#     cap+1 — the child was never killed at the boundary even though the
+#     output had crossed the cap. Decided on total bytes seen now.
+for _n, _cap, _want in ((5, 4, True), (4, 4, False), (6, 4, True), (1, 4, False)):
+    _fired = []
+    _dr = executor._BoundedDrain(io.BytesIO(b"z" * _n), _cap)
+    _dr.drain(lambda f=_fired: f.append(1))
+    check(f"drain: cap={_cap} bytes={_n} signals overflow={_want}",
+          bool(_fired) is _want, f"-> fired={bool(_fired)} retained={len(_dr.data())}")
+
+# (c) the COMPILE path called _trim() without the caller's cap, so it used the
+#     64 KiB default while the drain had already bounded at the caller's cap.
+#     Under-cap: truncated with NO marker (silent). Over-cap: falsely cut.
+if "c" in registry.LANGUAGES and shutil.which("gcc"):
+    _saved = executor._rust
+    try:
+        executor._rust = None
+        _bad = "this is not valid c " * 200
+        _small = executor._execute_python("c", _bad, timeout=60, max_output_kb=1)
+        check("compile stderr truncated to the caller's cap IS marked truncated",
+              "[truncated]" in _small.get("stderr", ""),
+              f"-> {len(_small.get('stderr', ''))} bytes, marker="
+              f"{'[truncated]' in _small.get('stderr', '')}")
+        _big = executor._execute_python("c", _bad, timeout=60, max_output_kb=128)
+        check("compile stderr under a LARGER cap is not falsely truncated",
+              "[truncated]" not in _big.get("stderr", ""),
+              f"-> {len(_big.get('stderr', ''))} bytes")
+    finally:
+        executor._rust = _saved
+else:
+    skip("compile-path output cap", "no c compiler on this machine")
 
 print(f"\n=== {len(FAILS)} FAILURE(S), {len(SKIPS)} skipped ===" if FAILS else
       f"\n=== PYTHON SWEEP REGRESSIONS FIXED ({len(SKIPS)} skipped) ===")

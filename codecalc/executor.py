@@ -389,7 +389,17 @@ def _rmtree_checked(path: str | Path, created: tuple[int, int] | None) -> bool:
               "directory this run created", file=sys.stderr)
         return False
     shutil.rmtree(path, ignore_errors=True)
-    return True
+    # ignore_errors=True swallows EVERY removal failure, so `return True` after
+    # it was a claim about what was attempted, not about what happened: an
+    # unreadable descendant on POSIX, or an open handle on Windows, left the
+    # directory in place while sessions.stop() reported `deleted: true`. That
+    # is the same "reported success it had not earned" defect this function was
+    # written to end, one layer down. Measured: returned True with the
+    # directory still on disk. Ask the filesystem instead of assuming.
+    removed = not Path(path).exists()
+    if not removed:
+        print(f"codecalc: could not fully delete {path}", file=sys.stderr)
+    return removed
 
 
 def _feed_stdin(proc: subprocess.Popen, data: bytes) -> None:
@@ -441,8 +451,11 @@ class _BoundedDrain:
 
     def __init__(self, stream, cap: int):
         self._stream = stream
+        self._cap = cap
         self._retain = cap + 1
         self._buf = bytearray()
+        self._seen = 0
+        self._signalled = False
 
     def drain(self, on_overflow) -> None:
         try:
@@ -450,10 +463,20 @@ class _BoundedDrain:
                 chunk = self._stream.read(65536)
                 if not chunk:
                     return
+                self._seen += len(chunk)
                 room = self._retain - len(self._buf)
                 if room > 0:
                     self._buf.extend(chunk[:room])
-                if len(chunk) > room:
+                # Overflow is decided on TOTAL BYTES SEEN against the cap, not
+                # on whether one chunk outran the remaining room. The latter
+                # was off by one at exactly the boundary: with cap=4 the buffer
+                # retains cap+1=5, so a single 5-byte chunk found room==5 and
+                # `5 > 5` was false — measured, retained=5 with the overflow
+                # never signalled. The output HAD crossed the cap, so `_trim`
+                # marked it truncated downstream while the child was never
+                # killed and ran on to the wall-clock timeout.
+                if not self._signalled and self._seen > self._cap:
+                    self._signalled = True
                     on_overflow()
         except (OSError, ValueError):
             pass
@@ -666,12 +689,21 @@ def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10
                                                    workdir, started, no_net)
             if to:
                 return {"ok": False, "language": name, "phase": "compile",
-                        "stdout": "", "stderr": _trim(err), "exit_code": None,
+                        # _trim MUST get the caller's cap here. Without it the
+                        # compile path fell back to the 64 KiB default while
+                        # the drain had already bounded the bytes at the
+                        # caller's cap, so the two disagreed in both
+                        # directions: max_output_kb=1 against a 2 KiB compiler
+                        # error retained 1025 bytes and added NO truncation
+                        # marker (1025 < 65536), i.e. silent truncation
+                        # presented as complete output; and max_output_kb=128
+                        # against 70 KiB was falsely cut at 64 KiB.
+                        "stdout": "", "stderr": _trim(err, cap), "exit_code": None,
                         "duration_ms": 0, "timed_out": True}
             compile_ms = int((time.monotonic() - started) * 1000)
             if rc != 0:
                 return {"ok": False, "language": name, "phase": "compile",
-                        "stdout": _trim(out), "stderr": _trim(err), "exit_code": rc,
+                        "stdout": _trim(out, cap), "stderr": _trim(err, cap), "exit_code": rc,
                         "duration_ms": int((time.monotonic() - started) * 1000),
                         "timed_out": False}
 
