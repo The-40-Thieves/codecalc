@@ -80,8 +80,94 @@ KNOWN_UNENFORCED = {
     "no_net_requested_but_no_shim_available",
 }
 
+#: The fallback's vocabulary. Prose rather than the Rust backend's snake_case
+#: tokens, and deliberately not unified with it: the two are read by different
+#: audiences (a token is matched by code, a sentence is read by an operator)
+#: and forcing one spelling on both would be a cosmetic parity that hides the
+#: real question, which is whether each backend discloses what IT cannot do.
+KNOWN_FALLBACK_UNENFORCED = {
+    "no_net: needs the native executor's LD_PRELOAD shim",
+    "peak_memory_kb: ru_maxrss is a high-water mark and cannot be attributed to one run",
+    "max_processes: RLIMIT_NPROC does not bind a process running as uid 0",
+}
+
 if not executor._rust:
-    skip("platform contract", "no native executor built")
+    # NOT a skip. This whole file used to be `if _rust: <everything>`, so on a
+    # machine without a built binary it printed one SKIP line and exited 0 —
+    # a green check that covered nothing, on the backend with the FEWEST
+    # guarantees. That is the gap #66 named, and a vacuous pass is worse than
+    # no test because it reads as coverage.
+    #
+    # The contract is the same one stated at the top of this file, applied to
+    # the other backend: what it cannot enforce must be NAMED, and what it does
+    # not name must actually bite.
+    print("=== pure-Python fallback contract (no native executor) ===")
+
+    check("the fallback identifies itself as the backend in use",
+          executor.backend() == "python", f"-> {executor.backend()}")
+
+    clean = executor.execute("python3", "print(1)", timeout=15)
+    check("every result carries the backend that produced it",
+          clean.get("backend") == "python", f"-> {clean.get('backend')}")
+    check("a fallback run returns an unenforced array",
+          isinstance(clean.get("unenforced"), list), f"-> {clean.get('unenforced')!r}")
+    check("everything it reports is from the documented vocabulary",
+          set(clean.get("unenforced") or []) <= KNOWN_FALLBACK_UNENFORCED,
+          f"-> {sorted(set(clean.get('unenforced') or []) - KNOWN_FALLBACK_UNENFORCED)}")
+
+    # The core of #66: asking for network isolation the fallback cannot apply
+    # must SAY so. codecalc's documented answer is to report rather than refuse
+    # (SECURITY.md scopes the weaker fallback as documented behaviour, and
+    # CODECALC_REQUIRE_NATIVE=1 is the fail-closed lever) — which only holds up
+    # if the report is actually there.
+    netted = executor.execute("python3", "print(1)", timeout=15, no_net=True)
+    check("no_net=True on the fallback is reported as unenforced",
+          any(u.startswith("no_net:") for u in netted.get("unenforced") or []),
+          f"-> {netted.get('unenforced')}")
+    # A caveat that appears whether or not it was asked for is noise, and noise
+    # is how a caller learns to stop reading the field.
+    check("  ...and is absent when no_net was not requested",
+          not any(u.startswith("no_net:") for u in clean.get("unenforced") or []),
+          f"-> {clean.get('unenforced')}")
+
+    # Reporting a caveat about a number while also reporting the number would
+    # be two contradictory claims in one result.
+    check("peak_memory_kb is disclaimed and left unset, not both",
+          any(u.startswith("peak_memory_kb:") for u in clean.get("unenforced") or [])
+          and clean.get("peak_memory_kb") is None,
+          f"-> unenforced={clean.get('unenforced')} value={clean.get('peak_memory_kb')}")
+
+    # ── the other half: what it does NOT disclaim had better bite ──────────
+    # The fallback does not name the memory, output or wall-clock ceilings in
+    # `unenforced`, so each one is a live claim. Verdicts are asserted only
+    # where both backends agree on them: a violated memory ceiling surfaces as
+    # RTE here (the child dies of MemoryError under RLIMIT_AS) where the Rust
+    # path reports MLE, so the assertion is that the ceiling STOPPED it, not
+    # that the two spell the outcome identically.
+    mem = executor.execute("python3", "x = bytearray(400*1024*1024); print('ALLOCATED')",
+                           timeout=20, max_memory_mb=64)
+    check("an undisclaimed memory ceiling actually stops the program",
+          mem.get("ok") is False and "ALLOCATED" not in (mem.get("stdout") or ""),
+          f"-> verdict={mem.get('verdict')} stdout={(mem.get('stdout') or '')[:40]!r}")
+
+    out = executor.execute("python3", "print('x'*200000)", timeout=20, max_output_kb=8)
+    check("an undisclaimed output ceiling actually truncates",
+          out.get("verdict") == "OLE" and len(out.get("stdout") or "") < 200000,
+          f"-> verdict={out.get('verdict')} bytes={len(out.get('stdout') or '')}")
+
+    tle = executor.execute("python3", "while True: pass", timeout=3)
+    check("an undisclaimed wall-clock ceiling actually kills",
+          tle.get("verdict") == "TLE" and tle.get("timed_out") is True,
+          f"-> verdict={tle.get('verdict')} timed_out={tle.get('timed_out')}")
+
+    # The source's own list must not drift past what is documented above — the
+    # same gate the Rust vocabulary gets, so a new caveat cannot be added
+    # without being written down.
+    undocumented = set(executor._FALLBACK_UNMEASURED) - KNOWN_FALLBACK_UNENFORCED
+    check("every string in _FALLBACK_UNMEASURED is documented here",
+          not undocumented, f"-> {sorted(undocumented)}")
+
+    skip("native-executor contract", "no native executor built")
 else:
     # ── the vocabulary in the source matches the vocabulary here ───────────
     rust_sources = [
