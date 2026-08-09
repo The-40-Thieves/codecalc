@@ -571,11 +571,29 @@ try:
     executor._rust = None
     if os.name != "nt":
         import resource as _resource
-        before_kb = _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss
+
+        def _maxrss_kib() -> int:
+            """ru_maxrss in KiB on every platform.
+
+            getrusage reports it in KiB on Linux and in BYTES on macOS. This
+            test read the raw number into a variable called `delta_kb` and
+            compared it against a KiB threshold, so on macOS an 80 KiB growth
+            (81920 bytes) was measured as "81920 KiB" and failed a check meant
+            to catch 50 MiB. It passed or failed with allocator noise rather
+            than with the behaviour under test.
+
+            The same trap is already documented one layer down:
+            scripts/contract_check.py asserts "peak_memory_kb is KiB, not raw
+            bytes" because the executor had to normalise the identical value.
+            """
+            raw = _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss
+            return raw // 1024 if sys.platform == "darwin" else raw
+
+        before_kb = _maxrss_kib()
         r = executor._execute_python(
             "python3", "import sys\nsys.stdout.write('x' * (200 * 1024 * 1024))\n",
             max_output_kb=8, timeout=30)
-        after_kb = _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss
+        after_kb = _maxrss_kib()
         delta_kb = after_kb - before_kb
         check("a child writing 200MiB against an 8KiB cap is reported OLE",
               r.get("verdict") == "OLE", f"-> {r.get('verdict')}")
