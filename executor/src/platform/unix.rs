@@ -148,6 +148,20 @@ pub fn resolve(limits: &ResolvedLimits) -> (Rlimits, Vec<&'static str>) {
     if current_uid_tasks().is_none() {
         unenforced.push("process_limit_is_a_fixed_ceiling_not_measured");
     }
+    // RLIMIT_NPROC does not bind a process whose EFFECTIVE uid is 0: the kernel
+    // exempts privileged processes. So as root the ceiling is computed, set,
+    // and has no effect, while the result said nothing about it — which reads
+    // as "the process ceiling was applied".
+    //
+    // Running as root is a deployment error and this behaviour is documented
+    // kernel semantics, so it is not an escape. It is a reporting-fidelity
+    // defect, and the Python fallback carries the same entry so the two
+    // backends agree about what they could not apply. scripts/check_parity.py
+    // gates that they both have one.
+    // SAFETY: geteuid() cannot fail and touches no memory.
+    if unsafe { libc::geteuid() } == 0 {
+        unenforced.push("process_limit_not_enforced_for_uid_0");
+    }
 
     // RLIMIT_AS on macOS: Darwin accepts the call but does not enforce address
     // space the way Linux does, and a large soft value can be rejected outright.

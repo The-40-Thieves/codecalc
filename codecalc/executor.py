@@ -617,6 +617,33 @@ _FALLBACK_UNMEASURED: list[str] = [
     "peak_memory_kb: ru_maxrss is a high-water mark and cannot be attributed to one run",
 ]
 
+#: RLIMIT_NPROC does not bind a process whose EFFECTIVE uid is 0. The kernel
+#: exempts privileged processes, so as root the ceiling is computed, set, and
+#: has no effect — while the result said nothing about it, which reads as "the
+#: process ceiling was applied".
+#:
+#: Running the server as root is a deployment error and the kernel behaviour is
+#: documented, so this is not a sandbox escape. It is a reporting-fidelity
+#: defect, and SECURITY.md puts "anything that makes the server report a
+#: guarantee it did not apply" in scope. Reported rather than fixed, because
+#: the fix for running as root is to not run as root.
+_UID0_PROCESS_CEILING = (
+    "max_processes: RLIMIT_NPROC does not bind a process running as uid 0"
+)
+
+
+def _unmeasured() -> list[str]:
+    """`unenforced` entries for the pure-Python fallback, for THIS process.
+
+    Computed per call rather than at import: the euid check is one syscall and
+    a module-level constant would be wrong for anything that drops privileges
+    after import.
+    """
+    out = list(_FALLBACK_UNMEASURED)
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        out.append(_UID0_PROCESS_CEILING)
+    return out
+
 
 def _runtime_unavailable_result(name: str, phase: str, argv: list[str], exc: OSError,
                                 workdir: str, started: float, no_net: bool) -> dict:
@@ -649,7 +676,7 @@ def _runtime_unavailable_result(name: str, phase: str, argv: list[str], exc: OSE
         "peak_memory_kb": None,
         "platform": sys.platform,
         "unenforced": (["no_net: needs the native executor's LD_PRELOAD shim"]
-                       if no_net else []) + _FALLBACK_UNMEASURED,
+                       if no_net else []) + _unmeasured(),
         "backend": "python",
         "error": detail,
     }
@@ -783,7 +810,7 @@ def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10
                 "peak_memory_kb": None,
                 "platform": sys.platform,
                 "unenforced": (["no_net: needs the native executor's LD_PRELOAD shim"]
-                               if no_net else []) + _FALLBACK_UNMEASURED,
+                               if no_net else []) + _unmeasured(),
                 "backend": "python"}
     finally:
         # Only a directory this function created, and only if it is STILL

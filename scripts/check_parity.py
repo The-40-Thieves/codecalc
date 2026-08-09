@@ -40,6 +40,10 @@ sys.path.insert(0, str(REPO))
 from codecalc import executor, registry  # noqa: E402 — needs the path above
 
 RUST = (REPO / "executor" / "src" / "main.rs").read_text(encoding="utf-8")
+#: platform/unix.rs was never read by this script, which is why a behavioural
+#: difference living there could not be gated. The uid-0 check below is the
+#: first thing to need it.
+RUST_UNIX = (REPO / "executor" / "src" / "platform" / "unix.rs").read_text(encoding="utf-8")
 PY_EXECUTOR_SRC = (REPO / "codecalc" / "executor.py").read_text(encoding="utf-8")
 PY_SERVER_SRC = (REPO / "codecalc" / "server.py").read_text(encoding="utf-8")
 PY_SESSIONS_SRC = (REPO / "codecalc" / "sessions.py").read_text(encoding="utf-8")
@@ -206,6 +210,30 @@ for label, src in (("codecalc/executor.py", PY_EXECUTOR_SRC),
     if bare:
         fail(f"{label}: found {len(bare)} bare shutil.rmtree() call(s) on a workdir — "
              "identity-checked deletion (_rmtree_checked) must be used instead")
+
+# ── the uid-0 process-ceiling caveat, in BOTH backends ─────────────────────
+# RLIMIT_NPROC does not bind a process whose effective uid is 0: the kernel
+# exempts privileged processes. Both backends set that limit, so as root both
+# compute a ceiling that has no effect — and neither said so, which reads as
+# "the process ceiling was applied". Verified by running each backend as root:
+# the Rust executor now reports process_limit_not_enforced_for_uid_0 and the
+# Python fallback reports the max_processes caveat.
+#
+# Gated here because the two are easy to fix on one side only. The two
+# vocabularies differ by long-standing convention — Rust emits snake_case
+# tokens, Python emits prose — so this asserts each backend HAS a uid-0 entry
+# rather than that the strings match, which would be a false parity.
+_UID0_MARKERS = (
+    ("executor/src/platform/unix.rs", RUST_UNIX, "process_limit_not_enforced_for_uid_0"),
+    ("codecalc/executor.py", PY_EXECUTOR_SRC, "_UID0_PROCESS_CEILING"),
+)
+_missing_uid0 = [label for label, src, marker in _UID0_MARKERS if marker not in src]
+if _missing_uid0:
+    fail(f"{_missing_uid0} does not report the uid-0 process-ceiling caveat; "
+         "RLIMIT_NPROC is not enforced for uid 0 and a backend that stays silent "
+         "reports a guarantee it did not apply")
+else:
+    print("ok   uid-0 process ceiling: both backends report the caveat")
 
 if failures:
     print(f"\n=== {len(failures)} parity failure(s) ===")
