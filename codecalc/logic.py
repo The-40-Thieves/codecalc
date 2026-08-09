@@ -96,10 +96,19 @@ class _BoolParser:
     escapable via `().__class__.__base__.__subclasses__()` (host RCE)."""
 
     _OPS: frozenset = frozenset({"and", "or", "not", "xor", "implies", "iff"})
+    #: Parenthesis-nesting cap. Each "(" recurses through six mutually
+    #: recursive _parse_* methods before reaching _parse_primary again, so
+    #: `"(" * 999 + "a" + ")" * 999` (1999 chars — under _MAX_EXPR_LEN, so
+    #: the length guard never fires) drove ~6000 stack frames and raised a
+    #: bare RecursionError out of truth_table. This is comfortably below
+    #: CPython's default recursion limit even with the six-frame multiplier,
+    #: so the tool's own bound is what fires, not the interpreter's.
+    _MAX_NESTING = 100
 
     def __init__(self, text: str):
         self.tokens = _tokenize(text)
         self.pos = 0
+        self._depth = 0
 
     def parse(self) -> tuple:
         if not self.tokens:
@@ -120,10 +129,16 @@ class _BoolParser:
         return node
 
     def _parse_implies(self):
+        # Right-associative: `a implies b implies a` means `a -> (b -> a)`,
+        # the conventional reading. A `while` loop here (as `_parse_iff`
+        # above genuinely wants, since `iff` IS associative) folds LEFT
+        # instead: `(a -> b) -> a`, which is Peirce's formula — a different,
+        # non-tautologous statement for the example above. Recursing on the
+        # right operand instead of looping builds the tree right-associated.
         node = self._parse_xor()
-        while self._peek() == "implies":
+        if self._peek() == "implies":
             self.pos += 1
-            node = ("implies", node, self._parse_xor())
+            node = ("implies", node, self._parse_implies())
         return node
 
     def _parse_xor(self):
@@ -157,7 +172,11 @@ class _BoolParser:
         tok = self._peek()
         if tok == "(":
             self.pos += 1
+            self._depth += 1
+            if self._depth > self._MAX_NESTING:
+                raise ValueError(f"expression nesting too deep (max {self._MAX_NESTING})")
             node = self._parse_iff()
+            self._depth -= 1
             if self._peek() != ")":
                 raise ValueError("missing closing parenthesis")
             self.pos += 1
@@ -220,6 +239,12 @@ def truth_table(expression: str) -> dict:
         tree = _BoolParser(expression).parse()
     except ValueError as exc:
         return {"ok": False, "error": f"parse error: {exc}"}
+    except RecursionError as exc:
+        # The nesting cap on `(` above should catch this first, but it is a
+        # cap on ONE recursive path (parenthesis depth); this is the
+        # backstop for any other input shape that recurses too deep, same
+        # spirit as the length cap two lines up.
+        return {"ok": False, "error": f"expression too deeply nested to parse: {exc}"}
 
     vars_ = sorted(_collect_vars(tree))
     if len(vars_) > _MAX_VARS:

@@ -59,6 +59,15 @@ TOOL_TIMEOUTS: dict[str, float] = {
     "z3_check": 30,
     "solve_linear": 20,
     "analyze_complexity": 20,
+    # calc_exact and its sympy-backed siblings in exact.py were absent here,
+    # so they inherited DEFAULT_TIMEOUT_SECONDS (900s) instead of the 20s
+    # deadline their logic.py counterparts (evaluate_expression, solve_linear,
+    # analyze_complexity) get for the same class of in-process CPU work.
+    "calc_exact": 20,
+    "algebraic_equiv": 20,
+    "solve_expression": 20,
+    "limit_expression": 20,
+    "simplify_expression": 20,
     # Verification gates: they run BOTH programs, and verify_optimization
     # additionally times each at four sizes. No network, but real execution.
     "verify_translation": 120,

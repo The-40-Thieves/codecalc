@@ -52,7 +52,7 @@ _BIN = {
     ast.Div: lambda a, b: a / b,
     ast.FloorDiv: lambda a, b: a // b,
     ast.Mod: lambda a, b: a % b,
-    ast.Pow: lambda a, b: a ** b,
+    ast.Pow: lambda a, b: _pow_exact(a, b),
     ast.BitAnd: lambda a, b: _int_op(a, b, "&"),
     ast.BitOr: lambda a, b: _int_op(a, b, "|"),
     ast.BitXor: lambda a, b: _int_op(a, b, "^"),
@@ -79,6 +79,41 @@ def _int_op(a: Fraction, b: Fraction, op: str) -> Fraction:
         raise ValueError(f"negative shift count {bi}")
     return Fraction({"<<": ai << bi, ">>": ai >> bi,
                      "&": ai & bi, "|": ai | bi, "^": ai ^ bi}[op])
+
+
+#: Exponent magnitude and predicted-result-size guards for `**`. Both are
+#: checked BEFORE the exponentiation runs, not after: `a ** b` on Fraction has
+#: no magnitude guard of its own, so `2**10**6` (the inner `10**6` evaluates
+#: first, then `2**1000000`) takes seconds and `2**10**7` does not return in
+#: any reasonable time, both reachable from ordinary expression syntax with no
+#: big-integer literals involved.
+_MAX_POW_EXPONENT = 10_000
+_MAX_POW_RESULT_BITS = 50_000
+
+
+def _pow_exact(a: Fraction, b: Fraction) -> Fraction:
+    """a ** b, bounded before the computation runs rather than after.
+
+    The exponent's own magnitude is checked first (catches `2**10**7` for
+    free, since the huge exponent itself is rejected before any power is
+    taken). For an integer exponent, the result's bit length is then
+    predicted from the base's bit length — O(1) work — and rejected if it
+    would blow the budget, which catches a huge BASE with a modest exponent
+    too.
+    """
+    if abs(b) > _MAX_POW_EXPONENT:
+        raise ValueError(
+            f"exponent {b} exceeds the limit ({_MAX_POW_EXPONENT}) for exact exponentiation"
+        )
+    if b.denominator == 1 and a != 0:
+        base_bits = max(abs(a.numerator).bit_length(), abs(a.denominator).bit_length())
+        predicted_bits = base_bits * abs(int(b))
+        if predicted_bits > _MAX_POW_RESULT_BITS:
+            raise ValueError(
+                f"{a}**{b} would need ~{predicted_bits} bits to represent, "
+                f"exceeding the limit ({_MAX_POW_RESULT_BITS}) for exact exponentiation"
+            )
+    return a ** b
 
 
 #: Names consulted during the current eval_exact() call, reset per call.
@@ -153,6 +188,10 @@ def _ev(node):
     raise ValueError(f"unsupported syntax: {type(node).__name__}")
 
 
+#: DoS guard on input size, consistent with logic.py's _MAX_EXPR_LEN.
+_MAX_EXPR_LEN = 2000
+
+
 def eval_exact(expr: str) -> dict:
     """Evaluate an expression with EXACT rational arithmetic.
 
@@ -160,6 +199,8 @@ def eval_exact(expr: str) -> dict:
     arithmetic, comparisons, bitwise ops on integers, math.* functions,
     pi/e/tau. Returns the exact value plus decimal approximation.
     """
+    if len(expr) > _MAX_EXPR_LEN:
+        return {"ok": False, "error": f"expression too long (max {_MAX_EXPR_LEN} chars)"}
     try:
         tree = ast.parse(expr, mode="eval")
     except SyntaxError as exc:
@@ -176,9 +217,17 @@ def eval_exact(expr: str) -> dict:
     if isinstance(result, bool):
         return {"ok": True, "value": result, "type": "bool"}
     if isinstance(result, Fraction):
-        d = Decimal(result.numerator) / Decimal(result.denominator)
-        approx = f"{d:.12f}".rstrip("0").rstrip(".")
-        exact = str(result) if result.denominator != 1 else str(result.numerator)
+        # The pow guard above bounds the CPU cost of exponentiation, but its
+        # budget is looser than Python's own int->str conversion ceiling
+        # (4300 digits by default), so a result can still be too big to
+        # FORMAT even though it was cheap to compute. Catch that here rather
+        # than let it escape as a bare ValueError with no tool-level context.
+        try:
+            d = Decimal(result.numerator) / Decimal(result.denominator)
+            approx = f"{d:.12f}".rstrip("0").rstrip(".")
+            exact = str(result) if result.denominator != 1 else str(result.numerator)
+        except ValueError as exc:
+            return {"ok": False, "error": f"result too large to format: {exc}"}
         out = {"ok": True, "value": exact, "approx": approx,
                # `exact` previously meant "the exact form differs from the
                # 12-dp decimal", which is a different claim from the one the
@@ -256,10 +305,30 @@ def percentage(part: str, total: str) -> dict:
 
 # ─────────────────────────────── stats / pctl ──────────────────────────────
 
+def _first_non_finite(nums: list[float]) -> int | None:
+    """Index of the first nan/inf in NUMS, or None if every value is finite.
+
+    nan/inf reach these tools as ordinary floats and used to raise out of
+    them uncaught — Fraction()/int() conversions elsewhere in this module
+    assume a finite value and blow up on the ones that are not
+    (AttributeError from statistics.stdev on a NaN-poisoned sum, ValueError
+    converting NaN to int, ...). Naming the offending index turns that into
+    an answerable question about the caller's input.
+    """
+    for i, n in enumerate(nums):
+        if not math.isfinite(float(n)):
+            return i
+    return None
+
+
 def stats(nums: list[float]) -> dict:
     """mean, median, stdev (sample), and coefficient of variation (CV)."""
     if len(nums) < 2:
         return {"ok": False, "error": "need at least 2 numbers"}
+    idx = _first_non_finite(nums)
+    if idx is not None:
+        return {"ok": False,
+                "error": f"nums[{idx}] = {nums[idx]!r} is not finite; stats needs finite numbers"}
     vals = [float(n) for n in nums]
     mean = statistics.fmean(vals)
     stdev = statistics.stdev(vals) if len(vals) > 1 else 0.0
@@ -284,6 +353,10 @@ def percentiles(nums: list[float]) -> dict:
     """p50/p90/p95/p99 by nearest-rank AND linear interpolation."""
     if not nums:
         return {"ok": False, "error": "need at least 1 number"}
+    idx = _first_non_finite(nums)
+    if idx is not None:
+        return {"ok": False,
+                "error": f"nums[{idx}] = {nums[idx]!r} is not finite; percentiles needs finite numbers"}
     vals = sorted(float(n) for n in nums)
     n = len(vals)
     out = {}
@@ -327,6 +400,8 @@ def data_sizes(n: int) -> dict:
 def human_duration(seconds: float) -> dict:
     """Humanised duration plus per-day and per-30d rates."""
     s = float(seconds)
+    if not math.isfinite(s):
+        return {"ok": False, "error": f"seconds = {s!r} is not finite"}
     if s < 0:
         return {"ok": False, "error": "negative duration"}
     units = [("d", 86400), ("h", 3600), ("m", 60), ("s", 1)]
@@ -464,14 +539,21 @@ def radix_convert(value: str, from_base: int = 10, to_base: int = 10) -> dict:
     from math import gcd
     g = gcd(rem, den)
     rn, rd = rem // g, den // g
-    # reduce rd's prime factors to those in tb
+    # Reduce a SEPARATE copy of rd's prime factors to those in tb to decide
+    # `terminates`. This must not mutate rd itself: rd (paired with rn) is the
+    # denominator digits get generated from below, and rn/rd == rem/den (the
+    # true value) only while rd stays the reduced denominator. Stripping rd
+    # down to 1 in-place — the previous bug — left digit generation dividing
+    # the reduced numerator rn by the UNREDUCED den, i.e. computing rn/den,
+    # which is rem/den divided by g an extra time and is not the input at all.
+    check = rd
     t = tb
-    while rd > 1:
-        d = math.gcd(rd, t)
+    while check > 1:
+        d = math.gcd(check, t)
         if d == 1:
             break
-        rd //= d
-    terminates = rd == 1
+        check //= d
+    terminates = check == 1
 
     frac_digits = []
     r = rn
@@ -481,14 +563,14 @@ def radix_convert(value: str, from_base: int = 10, to_base: int = 10) -> dict:
             break
         seen[r] = len(frac_digits)
         r *= tb
-        frac_digits.append(_RADIX_DIGITS[r // den])
-        r %= den
+        frac_digits.append(_RADIX_DIGITS[r // rd])
+        r %= rd
     if terminates:
         guard = 0
         while r and guard < 100:
             r *= tb
-            frac_digits.append(_RADIX_DIGITS[r // den])
-            r %= den
+            frac_digits.append(_RADIX_DIGITS[r // rd])
+            r %= rd
             guard += 1
         frac_str = "".join(frac_digits) if frac_digits else "0"
     else:
@@ -523,22 +605,26 @@ def float_repr(x: float) -> dict:
         value = mant * (Fraction(2) ** e if e >= 0 else Fraction(1, 2 ** (-e)))
     if sign:
         value = -value
-    # ULP: distance to next representable
-    next_bits = bits + 1 if not (sign and bits) else bits - 1
-    next_val = struct.unpack(">d", struct.pack(">Q", next_bits & 0xFFFFFFFFFFFFFFFF))[0]
+    # Neighbours and ULP: math.nextafter, not the raw bit pattern. The bit
+    # pattern for -0.0 is 0x8000000000000000; decrementing that (the old
+    # "move away from zero" step for a negative sign) underflows to
+    # 0x7fffffffffffffff, which is a NaN encoding, not a neighbour. -0.0 is
+    # also the likeliest negative-zero input to a float-inspection tool.
+    # math.nextafter has no such special case: it is defined in terms of the
+    # real number line, so ±0.0 (which compare equal) both correctly step to
+    # ±5e-324. The bit-level path stays for bits_hex/exact/stored, which are
+    # legitimately about the stored encoding rather than the value's
+    # neighbours.
+    #
+    # This deliberately CHANGES +0.0 too, whose `prev` was -0.0 and is now
+    # -5e-324. The old special case reasoned that the adjacent bit pattern
+    # below +0.0 is -0.0, which is true of the ENCODING and false of the
+    # VALUE: -0.0 == 0.0, so it is not a neighbour on the number line. Mixing
+    # those two questions in one field is what produced the -0.0 bug. The
+    # encoding question is still answered, by bits_hex/sign/stored.
+    next_val = math.nextafter(x, math.inf)
+    prev_val = math.nextafter(x, -math.inf)
     ulp = abs(next_val - x)
-    # neighbours. Clamped: for +0.0 the bit pattern is 0 and `bits - 1` is -1,
-    # which struct.pack(">Q") rejects — float_repr(0.0) raised struct.error, and
-    # zero is the likeliest input to a float-inspection tool. The neighbour below
-    # +0.0 is -0.0 (bit pattern 1 << 63), and above the largest finite value
-    # there is only an infinity, so both ends are named rather than computed.
-    if not sign and bits == 0:            # +0.0
-        prev_val = -0.0
-    elif sign and bits == (1 << 63):      # -0.0
-        prev_val = struct.unpack(">d", struct.pack(">Q", 1))[0]
-    else:
-        prev_bits = bits - 1 if not sign else bits + 1
-        prev_val = struct.unpack(">d", struct.pack(">Q", prev_bits & 0xFFFFFFFFFFFFFFFF))[0]
     # is the literal representable? (compare exact rational of literal vs stored)
     exact = (Decimal(str(x)) == Decimal(value.numerator) / Decimal(value.denominator))
     d = Decimal(value.numerator) / Decimal(value.denominator)
@@ -644,7 +730,19 @@ def bitop(a: int, op: str, b: int | None = None, width: int = 64) -> dict:
         return {"ok": True, "op": op, "width": w, **show(r)}
     if b is None:
         return {"ok": False, "error": f"{op} needs two operands"}
-    b = int(b) & mask
+    # For shl/shr/sar/rol/ror, `b` is a SHIFT COUNT, not a value at this
+    # width — masking it with the width mask truncated the count itself:
+    # bitop(1, "shl", 256, 8) masked 256 to 0 and shifted by 0, silently
+    # turning "shift far past the width" into "don't shift at all". Keep the
+    # count as a real (unmasked) integer and reject a negative one outright;
+    # only and/or/xor/nand/nor/xnor treat `b` as a VALUE, which does get
+    # masked to the declared width like `a` above.
+    if op in ("shl", "shr", "sar", "rol", "ror"):
+        b = int(b)
+        if b < 0:
+            return {"ok": False, "error": f"negative shift/rotate count {b}"}
+    else:
+        b = int(b) & mask
     if op == "and":
         return {"ok": True, "op": op, "width": w, **show(a & b)}
     if op == "or":
