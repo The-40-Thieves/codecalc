@@ -422,14 +422,39 @@ jobs:
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP"
-          where=$("$py" -c "import codecalc, pathlib; print(pathlib.Path(codecalc.__file__).resolve())")
-          echo "codecalc imported from: $where"
-          case "$where" in
-            "$GITHUB_WORKSPACE"/*)
-              echo "::error::imported the checked-out SOURCE at $where, not the installed wheel. Every assertion after this would describe the working copy."
-              exit 1 ;;
-          esac
-          echo "ok: outside the workspace, so this is the installed distribution"
+          # Assert the POSITIVE property: codecalc resolves inside this
+          # interpreter's own purelib. The first version of this check asked
+          # the negative proxy "is the path outside $GITHUB_WORKSPACE", and it
+          # was wrong twice over:
+          #
+          #   * false POSITIVE on Linux and macOS — `uv venv verify-venv` puts
+          #     the venv INSIDE the workspace, so the correctly-installed
+          #     package lives under $GITHUB_WORKSPACE too and got rejected.
+          #   * false NEGATIVE on Windows — the path is D:\a\... and the shell
+          #     glob never matched, so the step passed without checking
+          #     anything. It would not have caught the source-tree import it
+          #     was written for.
+          #
+          # sysconfig.get_paths()["purelib"] is the interpreter's own answer to
+          # "where do installed packages go", so this compares against the
+          # venv rather than against a path guess, and needs no separator
+          # handling.
+          "$py" - <<'PYEOF'
+          import pathlib, sys, sysconfig
+
+          import codecalc
+
+          where = pathlib.Path(codecalc.__file__).resolve()
+          purelib = pathlib.Path(sysconfig.get_paths()["purelib"]).resolve()
+          print(f"codecalc:  {where}")
+          print(f"purelib:   {purelib}")
+          if purelib not in where.parents:
+              print("::error::codecalc did not resolve inside this interpreter's "
+                    "purelib, so it is not the installed distribution. Every "
+                    "assertion after this would describe some other copy.")
+              sys.exit(1)
+          print("ok: this is the installed distribution")
+          PYEOF
       - name: assert the RUST backend is what got installed
         shell: bash
         run: |
