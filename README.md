@@ -3,6 +3,11 @@
 Run code in **31 languages**, evaluate symbolic math, solve logic problems, and
 measure complexity — all exposed as MCP tools any AI model or agent can call.
 
+**It makes no network calls.** No model, no API key, no gateway, no telemetry:
+the caller is already a language model, so codecalc is the part that runs things
+and measures them. `tests/test_offline.py` asserts this structurally — the
+package imports nothing that can open a socket.
+
 ## Architecture (language-per-strength)
 
 | Layer | Language | Why |
@@ -68,7 +73,7 @@ carries on without one; `--no-net` then reports itself in `unenforced` rather
 than pretending), and [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild)
 for the static cross-builds (zig is used as the linker; no x86_64 GCC needed).
 
-## MCP tools (48) + MCP resources
+## MCP tools (47) + MCP resources
 
 Every session file is also exposed as an MCP resource:
 `codecalc://session/<session_id>/files/<path>` — images render inline for the
@@ -116,7 +121,6 @@ analysis, binary64 introspection.
 | `verify_optimization` | **Prove an optimisation**: you write the candidate, the executor confirms it still agrees with the original AND times both — accepted only if equivalent and measurably faster |
 | `extract_function` | Pull a named function + its dependency closure (imports, referenced helpers) into a standalone program and run it (ast-exact for python3, best-effort elsewhere) |
 | `compare_edge_cases` | Run the same logic in N languages on edge-case inputs (empty, zero, negative, float precision) and flag behavioral divergence |
-| `context7_docs` | Fetch up-to-date library docs from context7 (`/numpy/numpy`, `/golang/go`, `/Z3Prover/z3`...) — current API knowledge for any language |
 | `convert_units` | Dimensional unit conversion via sympy: length, mass, time, speed, energy, power, force, pressure, temperature (°C/°F/K), volume, area, data, frequency |
 | `physical_constants` | 22 physical constants with values (c, h, N_A, k_B, G, g, m_e, R, ...) |
 | `list_units` | All 140+ unit aliases for convert_units |
@@ -225,7 +229,7 @@ PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py         # every tool over MC
 PYTHONPATH=. .venv/bin/python tests/test_executor_sweep.py  # sandbox regressions
 ```
 
-20 test files and 5 gate scripts, **741 assertions**, none skipped on a machine
+20 test files and 5 gate scripts, **744 assertions**, none skipped on a machine
 with the full toolchain. These two numbers are gated by
 `scripts/check_claims.py`: they were written by hand once and were stale within
 three pull requests, which is exactly the failure the rest of that script

@@ -29,7 +29,6 @@ from mcp.types import ImageContent
 from . import (
     __version__,
     complexity,
-    context7,
     exact,
     executor,
     logic,
@@ -675,17 +674,6 @@ def compare_edge_cases(snippets: dict[str, str],
     where languages disagree on identical input.
     """
     return translation.compare_edge_cases(snippets, inputs=inputs)
-
-
-@mcp.tool()
-def context7_docs(library_id: str, query: str, fast: bool = True) -> dict:
-    """Fetch up-to-date library documentation from context7 for any language.
-
-    `library_id` is '/owner/repo' (e.g. '/numpy/numpy', '/golang/go',
-    '/Z3Prover/z3'). Returns current, LLM-reranked doc snippets for `query`.
-    Use before writing code that depends on library APIs you are unsure about.
-    """
-    return context7.docs(library_id, query, fast=fast)
 
 
 @mcp.tool()

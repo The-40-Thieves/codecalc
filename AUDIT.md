@@ -268,53 +268,14 @@ network-blocking shim. Each has a security-relevant design decision:
    `translate_code` was shipping it to whatever gateway the operator had set.
 
 
-9. **context7_docs**: third-party documentation content returned as data to
-   the caller; the server never executes or follows instructions found in it.
-   Only the requesting model decides how to use the snippets.
-10. **compare_edge_cases**: offline-capable; snippets are provided per language
-    and run through the standard sandbox. No LLM in the loop.
-11. **verify_optimization**: the speedup gate is MEASURED (same sizes, min-of-repeats,
-    baseline-subtracted), never the LLM's claim. Already-optimal code is
-    honestly rejected ("no accepted optimization after retry" with the
-    measured ratio) rather than fabricating a pass. Sub-noise-floor baselines
-    are accepted on correctness with an explicit warning — which is why the
-    correctness half has to be sound, and why the `verify_translation` defect
-    corrected under item 8 applied here too: a sub-noise-floor optimization
-    whose only gate was correctness could be accepted on the strength of both
-    versions crashing. Same fix, same tests.
-12. **extract_function**: python3 extraction is ast-exact (no regex on code);
-    the generated runner only reads stdin and prints the function result —
-    no eval of user strings beyond the already-sandboxed execution path. The
-    `call` override is inserted into the generated program, which runs only
-    inside the sandbox.
-13. **MCP resources + image delivery**: session files are served via a
-    `codecalc://session/...` resource template with a jail check on every
-    read (resolve-prefix), so the resource surface can't escape the session
-    root. Images are served inline (mime-detected) but capped at 4 MiB.
-    `session_read_file` returns ImageContent for images — the model sees
-    what the code produced, never unvalidated bytes executed.
-14. **session_run (multi-file)**: runs the entry file as a fresh process in
-    the session workdir via the standard executor — relative imports resolve
-    against jailed session files only. Language is inferred from extension;
-    no new execution surface beyond the existing sandbox.
-15. **convert_units / physical_constants**: unit expressions are parsed with
-    a restricted recursive-descent parser (numbers, names, `* / **` only) —
-    NO eval, keeping the zero-eval invariant. Names resolve against sympy's
-    units module or an internal composites table, never user code. Constants
-    use sympy values where resolvable, with explicit hardcoded fallbacks
-    (CODATA) where sympy lacks conversion factors.
-16. **exact arithmetic cluster** (`exact.py`, ported from the Claude calc
-    skill): `calc_exact` reuses the original's AST-walker design — a closed
-    set of node types, no attribute access, no imports, whitelisted math
-    functions only. Deliberately NOT `eval()` with a restricted namespace
-    (escapable via `().__class__.__bases__[0].__subclasses__()`). All other
-    tools in the cluster are pure functions over ints/Fractions/strings
-    (bitop, radix, float_repr, base_repr, ...) — no code evaluation at all.
-    `solve_expression`/`limit_expression`/`algebraic_equiv`/`simplify_expression`
-    use sympy `solve`/`limit`/`simplify` on parsed expressions (parse-only,
-    no execution), same surface as the pre-existing `evaluate_expression`.
+9. **Removed 2026-08-08: context7_docs.** It fetched public documentation and
+   executed nothing, so it was never a code-execution risk — but it was the
+   last outbound request in the package, and the caller of this server is a
+   language model that already has documentation access of its own. Removing a
+   duplicated capability to gain an unqualified property was the better trade:
+   codecalc now makes NO network calls, asserted structurally by
+   tests/test_offline.py rather than promised in prose.
 
-Residual-risk items 1-4 from the original audit remain; add:
 
 5. **Sessions accumulate disk**: workspaces persist until `session_stop` or
    manual cleanup. A runaway agent could fill disk. Consider a max-sessions
@@ -354,10 +315,16 @@ Residual-risk items 1-4 from the original audit remain; add:
 
 ## Residual risks (accepted, documented)
 
-0. **Removed 2026-08-08: outbound model calls.** The package no longer contains
-   an LLM client. `context7_docs` is the only remaining outbound request and it
-   fetches public documentation; no user code is transmitted anywhere. Anything
-   below that assumed a configured gateway no longer applies.
+0. **Removed 2026-08-08: ALL outbound requests.** The package contains no LLM
+   client and no documentation fetch. Nothing in `codecalc/` imports anything
+   that can open a socket, which `tests/test_offline.py` asserts per module.
+   No user code, and no telemetry, leaves the machine. Anything below that
+   assumed a configured gateway no longer applies.
+
+   Note the boundary this does NOT move: code the sandbox runs on a caller's
+   behalf still reaches the network unless `--no-net` is passed. The package
+   being offline and the executed program being offline are separate
+   guarantees, and only the second needs the shim.
 
 
 1. **No network isolation.** `--no-net` exists and blocks `AF_INET`/`AF_INET6`
