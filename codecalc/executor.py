@@ -396,7 +396,12 @@ def _rmtree_checked(path: str | Path, created: tuple[int, int] | None) -> bool:
     # is the same "reported success it had not earned" defect this function was
     # written to end, one layer down. Measured: returned True with the
     # directory still on disk. Ask the filesystem instead of assuming.
-    removed = not Path(path).exists()
+    # lexists, not exists: exists() FOLLOWS symlinks, so a dangling symlink
+    # left at the path would report False — i.e. "successfully deleted" — for a
+    # path that still has something on it. The whole point of this function is
+    # that something else may have put a different object where our directory
+    # was, so the absence check must not be the one that resolves it.
+    removed = not os.path.lexists(path)
     if not removed:
         print(f"codecalc: could not fully delete {path}", file=sys.stderr)
     return removed
