@@ -161,20 +161,6 @@ def write_file(session_id: str, path: str, content: str) -> dict:
     return {"ok": True, "path": str(target.relative_to(d))}
 
 
-def read_file(session_id: str, path: str, max_bytes: int = 64 * 1024) -> dict:
-    d = _session_dir(session_id)
-    if not d.is_dir():
-        return {"ok": False, "error": f"unknown session '{session_id}'"}
-    target = _jail(d, path)
-    if not target.is_file():
-        return {"ok": False, "error": f"no such file: {path}"}
-    data = target.read_bytes()
-    truncated = len(data) > max_bytes
-    return {"ok": True, "path": path, "size": len(data),
-            "content": data[:max_bytes].decode(errors="replace"),
-            "truncated": truncated}
-
-
 def list_files(session_id: str, path: str = "") -> dict:
     d = _session_dir(session_id)
     if not d.is_dir():

@@ -91,6 +91,51 @@ if EXE.exists():
 else:
     skip("workdir-deletion regressions", "bin/codecalc-exec not built")
 
+# ═══ 1b. the /proc walk must not truncate a status file ════════════════════
+# Sizing RLIMIT_NPROC means reading /proc/<pid>/status for every process. An
+# optimisation that read a single fixed 4096-byte buffer was wrong twice over,
+# and cross-vendor review caught both: `read` may legally return fewer bytes
+# than are available, and status can genuinely EXCEED 4 KiB, because the kernel
+# emits the whole `Groups:` list before `Threads:` and Linux allows up to 65536
+# supplementary groups.
+#
+# The consequence is silent and one-directional: a process whose `Threads:` fell
+# outside the window counted as ONE task instead of its real thread count,
+# under-sizing the fork-bomb ceiling. A truncated `Threads:\t12345` could even
+# parse as 123, which is worse than missing.
+unix_src = (REPO_ROOT / "executor" / "src" / "platform" / "unix.rs")
+if unix_src.exists():
+    u_src = unix_src.read_text(encoding="utf-8")
+    check("the /proc walk reads to EOF, not into a fixed window",
+          "read_to_end" in u_src and "vec![0u8; 4096]" not in u_src,
+          "-> a fixed buffer silently under-counts a process with many groups")
+    check("  ...and reuses one buffer rather than allocating per process",
+          "Vec::with_capacity" in u_src and "buf.clear()" in u_src)
+
+# The Python fallback walks /proc too, and read_text() is STRICT: a task Name:
+# holding non-UTF-8 bytes raises UnicodeDecodeError, which is not an OSError, so
+# one such process aborted the entire measurement and silently dropped the limit
+# to the fixed fallback. The two backends had diverged on the same file.
+exec_src = (REPO_ROOT / "codecalc" / "executor.py").read_text(encoding="utf-8")
+check("the python /proc walk decodes leniently",
+      'read_text(errors="replace")' in exec_src,
+      "-> strict decoding lets one process abort the whole count")
+
+# The two walks must agree. Comparing current_uid_tasks() to ITSELF would pass
+# unconditionally — the first version of this check did exactly that. The Rust
+# side's count is recoverable from the ceiling it applies: the child's
+# RLIMIT_NPROC is ambient + headroom, so subtracting the headroom recovers what
+# it measured, and that is what can be compared against the Python walk.
+if EXE.exists() and pathlib.Path("/proc/self/status").is_file():
+    r = run_exec("import resource; print(resource.getrlimit(resource.RLIMIT_NPROC)[0])")
+    applied = int((r.get("stdout") or "0").strip() or 0)
+    rust_ambient = applied - executor.DEFAULT_PROCESS_HEADROOM
+    py_ambient = executor.current_uid_tasks() or 0
+    check("both /proc walks measure the same machine",
+          py_ambient > 0 and abs(rust_ambient - py_ambient) < 100,
+          f"-> rust {rust_ambient}, python {py_ambient} "
+          f"(a large gap means one backend skips processes the other counts)")
+
 # ═══ 2. the tempdir retry loop must terminate ═══════════════════════════════
 # It retried on ANY error, so a permanent one (an unwritable TMPDIR) spun
 # forever: the process hung until the outer timeout killed it at exit 124.

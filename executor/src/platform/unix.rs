@@ -335,18 +335,51 @@ fn measure_uid_tasks() -> Option<u64> {
     if !cfg!(target_os = "linux") {
         return None;
     }
+    use std::io::Read;
+
     let uid = unsafe { libc::getuid() };
     let mut total: u64 = 0;
     let mut seen_any = false;
+    // Reused across every process, so the walk allocates once rather than
+    // ~600 times. Capacity, not a ceiling — see the read below.
+    let mut buf: Vec<u8> = Vec::with_capacity(4096);
+
     for entry in std::fs::read_dir("/proc").ok()?.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if name.is_empty() || !name.bytes().all(|b| b.is_ascii_digit()) {
             continue;
         }
-        let Ok(status) = std::fs::read_to_string(format!("/proc/{name}/status")) else {
-            continue; // exited between readdir and read
+        // read_to_end into a REUSED buffer, rather than read_to_string.
+        //
+        // /proc files report st_size == 0, so read_to_string cannot preallocate
+        // and grows from scratch every time: measured at 7.65 reads per file,
+        // 4631 reads for 597 processes. Reusing a Vec that already has capacity
+        // keeps the syscall count down without allocating per process.
+        //
+        // NOT a single fixed-size read. A first version used one 4096-byte read
+        // and was wrong twice over: `read` may legally return fewer bytes than
+        // are available, and status can genuinely exceed 4 KiB — the kernel
+        // emits the whole `Groups:` list before `Threads:`, and Linux allows up
+        // to 65536 supplementary groups. On this machine `Threads:` sits at
+        // byte 640 with 3456 bytes of headroom, so roughly 493 more groups
+        // (routine on an LDAP/AD-joined host) would push it out of a 4 KiB
+        // window. The process would then be counted as ONE task instead of its
+        // real thread count, under-sizing RLIMIT_NPROC — and a truncated
+        // `Threads:\t12345` can even parse as 123, which is worse than missing.
+        let Ok(mut f) = std::fs::File::open(format!("/proc/{name}/status")) else {
+            continue; // exited between readdir and open
         };
+        buf.clear();
+        if f.read_to_end(&mut buf).is_err() {
+            continue; // exited mid-read
+        }
+        // Lossy, where read_to_string was strict: a task Name: may contain
+        // bytes that are not valid UTF-8, and the old code skipped such a
+        // process entirely rather than counting it. The replacement character
+        // stays inside Name: and cannot disturb the ASCII fields parsed below.
+        let status = String::from_utf8_lossy(&buf);
+
         let mut this_uid: Option<u32> = None;
         let mut threads: Option<u64> = None;
         for line in status.lines() {

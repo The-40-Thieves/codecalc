@@ -401,15 +401,6 @@ def constants(name: str | None = None) -> dict:
     return out
 
 
-def _si_of(expr):
-    """Best-effort SI decomposition for a constant's numeric value."""
-    try:
-        from sympy.physics.units.systems.si import SI
-        return SI._get_dimensional_expr(expr)
-    except Exception:
-        return expr
-
-
 def list_units() -> dict:
     """List every supported unit alias grouped by dimension."""
     return {"ok": True,

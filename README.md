@@ -229,7 +229,7 @@ PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py         # every tool over MC
 PYTHONPATH=. .venv/bin/python tests/test_executor_sweep.py  # sandbox regressions
 ```
 
-20 test files and 5 gate scripts, **744 assertions**, and **zero skips** —
+20 test files and 5 gate scripts, **748 assertions**, and **zero skips** —
 nothing in the suite needs the internet, so none of it can be skipped for
 lack of it. These two numbers are gated by
 `scripts/check_claims.py`: they were written by hand once and were stale within

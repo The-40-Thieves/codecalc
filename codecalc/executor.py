@@ -133,7 +133,14 @@ def current_uid_tasks() -> int | None:
         if not entry.name.isdigit():
             continue
         try:
-            status = (entry / "status").read_text()
+            # errors="replace", not strict. A task Name: may hold bytes that
+            # are not valid UTF-8, and read_text() raises UnicodeDecodeError —
+            # which is NOT an OSError, so a single such process aborted the
+            # whole measurement and dropped the count to the fixed fallback.
+            # Found by cross-vendor review while checking why the Rust and
+            # Python walks had diverged; the Rust side reads bytes and decodes
+            # lossily, so it counted the process the Python side choked on.
+            status = (entry / "status").read_text(errors="replace")
         except OSError:
             continue  # exited between listing and reading
         this_uid = threads = None
