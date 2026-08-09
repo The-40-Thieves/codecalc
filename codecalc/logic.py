@@ -10,7 +10,7 @@ from __future__ import annotations
 import itertools
 import re
 
-from .guarded import run_guarded
+from .guarded import guarded_call
 from .safe_expr import reject_explosive, reject_unsafe, safe_global_dict
 
 _MATH_TRANSFORMS = None
@@ -49,16 +49,7 @@ def evaluate_expression(expression: str, **variables) -> dict:
     complete.
     """
     _warm_sympy()
-    outcome = run_guarded(_evaluate_expression, expression, **variables)
-    if outcome.get("ok"):
-        result = outcome["value"]
-    else:
-        result = {"ok": False, "error": outcome.get("error", "evaluation failed")}
-    # Carried through in the executor's own vocabulary: on a platform without
-    # fork the bound was not applied, and a caller has to be able to know that.
-    if outcome.get("unenforced"):
-        result = {**result, "unenforced": outcome["unenforced"]}
-    return result
+    return guarded_call(_evaluate_expression, expression, **variables)
 
 
 _WARMED = False
@@ -453,7 +444,7 @@ def z3_check(smt2: str, timeout_ms: int = 5000) -> dict:
         return {"ok": False, "error": f"z3 error: {exc}"}
 
 
-def solve_linear(system: str, variables: str | list[str]) -> dict:
+def _solve_linear(system: str, variables: str | list[str]) -> dict:
     """Solve a ';'-separated system of equations ('x + y = 10; x - y = 2')."""
     try:
         sp = _sympy()
@@ -496,3 +487,14 @@ def solve_linear(system: str, variables: str | list[str]) -> dict:
         return out
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
+
+
+def solve_linear(system: str, variables: str | list[str]) -> dict:
+    """Solve a system of linear equations for the named variables.
+
+    Guarded (#84): the body is unchanged, it just runs somewhere the parent can
+    kill it. Warmed through the same set evaluate_expression uses, because both
+    reach SymPy's core solving and simplification paths.
+    """
+    _warm_sympy()
+    return guarded_call(_solve_linear, system, variables)

@@ -221,3 +221,25 @@ def _reap(pid: int) -> None:
         os.waitpid(pid, os.WNOHANG)
     except OSError:
         pass
+
+
+def guarded_call(fn, *args, **kwargs) -> dict:
+    """Run a tool function under the bound and hand back its own result dict.
+
+    Every symbolic tool in this project returns `{"ok": ..., ...}`, so the
+    unwrapping is identical for all of them and lives here rather than being
+    written out at each call site — six copies of this would be six chances to
+    drop the `unenforced` passthrough, which is the part a caller cannot
+    reconstruct.
+    """
+    outcome = run_guarded(fn, *args, **kwargs)
+    if outcome.get("ok"):
+        result = outcome["value"]
+    else:
+        result = {"ok": False, "error": outcome.get("error", "evaluation failed")}
+    if outcome.get("unenforced"):
+        # The platform could not apply the bound. Merged rather than replacing
+        # any `unenforced` the tool itself reported.
+        existing = list(result.get("unenforced") or [])
+        result = {**result, "unenforced": existing + list(outcome["unenforced"])}
+    return result
