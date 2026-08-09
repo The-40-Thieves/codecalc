@@ -14,7 +14,8 @@ This hook does three things for a wheel build:
      shim on the platforms that have one. The shim and the binary must travel
      together — `executor/build.rs` documents why a binary without its
      version-matched shim silently enforces a stale (or no) `--no-net` policy.
-  3. set `pure_python = False` and `infer_tag = True` so the wheel gets a real
+  3. set `pure_python = False` and take the tag from CODECALC_WHEEL_TAG (never
+     `infer_tag`, which ABI-pins to the build interpreter) so the wheel gets a real
      platform tag instead of `py3-none-any` — a platform-tagged wheel with no
      binary inside would be worse than an honest pure-Python one.
 
@@ -29,6 +30,7 @@ from __future__ import annotations
 
 import os
 import platform
+import sysconfig
 from pathlib import Path
 from typing import Any
 
@@ -83,8 +85,32 @@ class ExecutorBuildHook(BuildHookInterface):
                     "README.md 'Build the Rust core')."
                 )
 
-        # A real platform tag (e.g. cp312-cp312-manylinux_..., ...-macosx_...,
-        # ...-win_amd64) instead of py3-none-any — this wheel now carries a
+        # A real platform tag instead of py3-none-any: this wheel carries a
         # platform-specific binary, so it must be installable-filtered as one.
         build_data["pure_python"] = False
-        build_data["infer_tag"] = True
+
+        # But NOT infer_tag. That reads the tag off the interpreter running the
+        # build and produced `cp311-cp311-linux_aarch64` — ABI-pinned to one
+        # CPython version for a payload that contains no CPython extension at
+        # all. `requires-python = ">=3.11"` would then be contradicted by the
+        # artifact: a 3.12 user gets no wheel and silently falls back to source,
+        # i.e. to the Python sandbox that cannot enforce no_net. The binary is a
+        # standalone executable; nothing about it is ABI-specific.
+        #
+        # CODECALC_WHEEL_TAG lets the release matrix state the target tag
+        # explicitly, which is also the only way to say `musllinux` — a static
+        # musl build produced on a glibc runner is otherwise tagged manylinux
+        # and refused on Alpine.
+        tag = os.environ.get("CODECALC_WHEEL_TAG")
+        if tag:
+            build_data["tag"] = tag
+            return
+        plat = sysconfig.get_platform().replace("-", "_").replace(".", "_")
+        build_data["tag"] = f"py3-none-{plat}"
+        self.app.display_warning(
+            f"CODECALC_WHEEL_TAG not set — tagging this wheel py3-none-{plat} "
+            "from the build host. Correct for a local build; the release "
+            "workflow sets the tag per target because the host cannot know "
+            "whether a static binary should be published as manylinux, "
+            "musllinux, or both."
+        )

@@ -8,22 +8,21 @@ name: release
 # which cannot enforce `no_net` (it says so in its own `unenforced` field).
 #
 # This workflow builds a PLATFORM-TAGGED wheel per target (hatch_build.py at
-# the repo root force_includes the binary and flips pure_python/infer_tag —
-# see that file), a standalone archive (binary + shim + LICENSE) per target
+# the repo root force_includes the binary, sets pure_python=False and takes
+# the tag from CODECALC_WHEEL_TAG — see that file), a standalone archive (binary + shim + LICENSE) per target
 # for anyone not using pip, a SHA256SUMS file, and attaches all of it to the
 # GitHub release. A `verify` job then installs each wheel into a clean venv —
 # the way a user actually gets it — and asserts `executor.backend() == "rust"`
 # and the full executor JSON contract, which is issue #24's acceptance
 # criterion "CI installs the artifact exactly as a user would".
 #
-# Why five runners rather than five cross-compiles from one: hatch_build.py
-# sets `infer_tag = True`, which tags the wheel from the INTERPRETER running
-# the build, not from the Rust target it cross-compiled. Building linux/musl
-# aarch64 on an x86_64 runner would therefore produce a binary that actually
-# runs on arm64 packaged inside a wheel TAGGED for x86_64 — installable on the
-# wrong machines and refused on the right one. Running the whole build,
-# `uv build --wheel` included, on a runner whose own architecture matches the
-# target sidesteps that mismatch instead of overriding the tag by hand.
+# Why five runners rather than five cross-compiles from one: the wheel tag is
+# now stated per target (matrix.wheel_tags), so the tag no longer depends on
+# the build host — but the verify job installs each wheel and RUNS the
+# executor inside it, which needs a machine of that architecture. Cross-
+# compiling all five from one runner would build the binaries fine and leave
+# four of the five wheels unverified, which is the half of the acceptance
+# criterion that actually catches a bad artifact.
 # ubuntu-24.04-arm and macos-15-intel are both free, GA hosted runners for
 # public repos (Linux arm64: GA Jan 2025; the Intel macOS image: available
 # through Fall 2027 as GitHub sunsets x86_64 macOS).
@@ -85,6 +84,8 @@ jobs:
             zig_target: x86_64-linux-musl
             shim: so
             exe_ext: ''
+            # Static musl: runs on glibc AND musl, so publish under both tags.
+            wheel_tags: 'py3-none-manylinux_2_17_x86_64 py3-none-musllinux_1_2_x86_64'
           - id: linux-aarch64-musl
             os: ubuntu-24.04-arm
             rust_target: aarch64-unknown-linux-musl
@@ -92,6 +93,7 @@ jobs:
             zig_target: aarch64-linux-musl
             shim: so
             exe_ext: ''
+            wheel_tags: 'py3-none-manylinux_2_17_aarch64 py3-none-musllinux_1_2_aarch64'
           - id: macos-aarch64
             os: macos-latest
             rust_target: aarch64-apple-darwin
@@ -99,6 +101,7 @@ jobs:
             zig_target: ''
             shim: dylib
             exe_ext: ''
+            wheel_tags: 'py3-none-macosx_11_0_arm64'
           - id: macos-x86_64
             os: macos-15-intel
             rust_target: x86_64-apple-darwin
@@ -106,6 +109,7 @@ jobs:
             zig_target: ''
             shim: dylib
             exe_ext: ''
+            wheel_tags: 'py3-none-macosx_10_12_x86_64'
           - id: windows-x86_64
             os: windows-latest
             rust_target: x86_64-pc-windows-msvc
@@ -113,6 +117,7 @@ jobs:
             zig_target: ''
             shim: none
             exe_ext: '.exe'
+            wheel_tags: 'py3-none-win_amd64'
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: ./.github/actions/setup-rust
@@ -213,11 +218,33 @@ jobs:
       # working tree and never goes near that path.
       - name: build the platform wheel
         shell: bash
+        env:
+          WHEEL_TAGS: ${{ matrix.wheel_tags }}
         run: |
           set -euo pipefail
           rm -rf dist
-          uv build --wheel --out-dir dist
+          # One wheel per tag. The payload is a standalone executable with no
+          # CPython ABI, so the tag is stated per target rather than inferred
+          # from the build interpreter — inferring gave `cp311-cp311-...`,
+          # pinning a 3.11-only wheel for a project declaring >=3.11 and
+          # leaving 3.12/3.13 users to fall back to source, i.e. to the Python
+          # sandbox that cannot enforce no_net.
+          #
+          # Linux emits TWO wheels from one build. The binary is static musl,
+          # so it runs on glibc and musl alike; a single manylinux tag hides it
+          # from Alpine and a single musllinux tag hides it from everyone else.
+          for tag in $WHEEL_TAGS; do
+            echo "::group::wheel $tag"
+            CODECALC_WHEEL_TAG="$tag" uv build --wheel --out-dir dist
+            echo "::endgroup::"
+          done
           ls -la dist/
+          # Every requested tag must have produced a file. A loop that built
+          # nothing would otherwise leave this step green with an empty dist/.
+          for tag in $WHEEL_TAGS; do
+            plat="${tag#py3-none-}"
+            ls dist/*"$plat".whl >/dev/null
+          done
 
       # The floor on this whole workflow: prove the wheel that just built
       # actually carries the binary and actually got a platform tag, rather
