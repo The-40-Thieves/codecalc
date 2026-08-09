@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import pathlib
 
 #: Syscall numbers. Identical on x86_64 and aarch64 — Landlock arrived after
 #: both moved to the generic table — and verified on aarch64 before use.
@@ -72,6 +73,13 @@ _READ_RIGHTS = ("execute", "read_file", "read_dir")
 _WRITE_RIGHTS = ("write_file", "remove_dir", "remove_file", "make_char",
                  "make_dir", "make_reg", "make_sock", "make_fifo",
                  "make_block", "make_sym", "refer", "truncate", "ioctl_dev")
+
+#: Rights that mean anything for a NON-directory. The kernel rejects a rule
+#: carrying directory-only rights on a file with EINVAL, so a mask has to be
+#: narrowed by what the path actually is. Found by adding /dev/null to a
+#: ruleset and watching the whole confinement fail to apply — which is the
+#: right direction to fail, but only if the caller notices.
+_FILE_RIGHTS = ("execute", "read_file", "write_file", "truncate", "ioctl_dev")
 
 
 class _RulesetAttr(ctypes.Structure):
@@ -175,10 +183,18 @@ def restrict_self(read_write: list[str], read_only: list[str]) -> None:
         raise OSError(ctypes.get_errno(), "landlock_create_ruleset failed")
 
     try:
-        rw_mask = _mask_for(abi, _READ_RIGHTS + _WRITE_RIGHTS)
-        ro_mask = _mask_for(abi, _READ_RIGHTS)
-        for paths, mask in ((read_write, rw_mask), (read_only, ro_mask)):
+        rw_names = _READ_RIGHTS + _WRITE_RIGHTS
+        ro_names = _READ_RIGHTS
+        for paths, names in ((read_write, rw_names), (read_only, ro_names)):
             for path in paths:
+                # A file gets the file-applicable subset; a directory gets the
+                # lot. Passing the lot for a file makes landlock_add_rule
+                # return EINVAL and takes the ENTIRE ruleset down with it.
+                is_dir = pathlib.Path(path).is_dir()
+                mask = _mask_for(abi, tuple(n for n in names
+                                            if is_dir or n in _FILE_RIGHTS))
+                if not mask:
+                    continue
                 try:
                     path_fd = os.open(path, os.O_PATH | os.O_CLOEXEC)
                 except OSError:
