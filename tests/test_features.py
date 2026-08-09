@@ -2,6 +2,7 @@
 verdicts, limits, streaming, compact mode."""
 import asyncio
 import json
+import pathlib
 import sys
 from pathlib import Path
 
@@ -111,8 +112,50 @@ async def main():
         # 8. cleanup
         await client.call_tool("session_stop", {"session_id": sid})
 
-    print(f"\n=== {len(FAILS)} failures ===" if FAILS else "\n=== ALL NEW-FEATURE TESTS PASS ===")
-    sys.exit(1 if FAILS else 0)
+    # ── #88: the two entry points and `doctor` ────────────────────────────────
+# `uvx codecalc` and `pipx run codecalc` always worked — they use the console
+# script in [project.scripts]. `python -m codecalc` did not, because there was
+# no __main__.py, and that is the form people reach for inside a venv they have
+# not activated.
+import subprocess as _sp2
+import sys as _sys2
+
+_r = _sp2.run([_sys2.executable, "-m", "codecalc", "doctor"],
+              capture_output=True, text=True, timeout=180)
+check("`python -m codecalc doctor` runs", _r.returncode == 0,
+      f"-> rc={_r.returncode} {(_r.stderr or '')[-90:]!r}")
+for _needle in ("execution backend", "runtimes", "mcpServers"):
+    check(f"  ...and reports {_needle!r}", _needle in _r.stdout,
+          f"-> {_r.stdout[:70]!r}")
+
+# The count it prints must be the one the README states and check_claims
+# enforces. A raw len(LANGUAGES) is 32 because `c++` and `cpp` are one language
+# written twice; printing that would put a third number into circulation.
+import re as _re2
+
+from codecalc import registry as _reg2
+
+_readme_n = int(_re2.search(r"\*\*(\d+) languages\*\*",
+                            pathlib.Path("README.md").read_text()).group(1))
+_m = _re2.search(r"runtimes\s+(\d+)/(\d+)", _r.stdout)
+check("doctor's language count matches the README's",
+      _m is not None and int(_m.group(2)) == _readme_n,
+      f"-> doctor={_m.group(2) if _m else '?'} README={_readme_n} "
+      f"raw_registry={len(_reg2.LANGUAGES)}")
+
+# The no-argument path is what an MCP client spawns. Anything that made it
+# print to stdout or exit would look like a protocol error to the client.
+_probe_src = (
+    "import sys; sys.argv=['codecalc']; "
+    "from codecalc import server; print('MAIN_RESOLVES', callable(server.main))"
+)
+_r2 = _sp2.run([_sys2.executable, "-c", _probe_src],
+               capture_output=True, text=True, timeout=120)
+check("the no-argument entry point is still the MCP server",
+      "MAIN_RESOLVES True" in _r2.stdout, f"-> {_r2.stdout[:60]!r}")
+
+print(f"\n=== {len(FAILS)} failures ===" if FAILS else "\n=== ALL NEW-FEATURE TESTS PASS ===")
+sys.exit(1 if FAILS else 0)
 
 
 asyncio.run(main())
