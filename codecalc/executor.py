@@ -494,6 +494,13 @@ class _BoundedDrain:
         self._buf = bytearray()
         self._seen = 0
         self._signalled = False
+        #: Why the drain stopped early, if it did. The except clause below used
+        #: to be a bare `pass`, so a pipe that failed mid-read returned whatever
+        #: had arrived so far and nobody was told — output that looks complete
+        #: and is not. Same defect the Rust backend had in read_capped (#80),
+        #: which is why both were fixed together: check_parity.py gates that the
+        #: two backends do not diverge on behaviour like this.
+        self.error: str | None = None
 
     def drain(self, on_overflow) -> None:
         try:
@@ -516,8 +523,11 @@ class _BoundedDrain:
                 if not self._signalled and self._seen > self._cap:
                     self._signalled = True
                     on_overflow()
-        except (OSError, ValueError):
-            pass
+        except (OSError, ValueError) as exc:
+            # Recorded, not swallowed. A partial read is worse than an empty
+            # one: it is indistinguishable from the program's real output.
+            self.error = (f"{type(exc).__name__}: {exc} "
+                          f"(after {self._seen} bytes)")
 
     def data(self) -> bytes:
         return bytes(self._buf)
@@ -583,8 +593,19 @@ def _run_step(argv: list[str], cwd: str, timeout: int, stdin: str,
             t.join(timeout=5)
         cpu_ms = _children_cpu_ms_since(cpu_before)
         if timed_out:
-            return (-1, b"", b"<killed: exceeded wall-clock timeout>", True, cpu_ms)
-        return (proc.returncode, out_reader.data(), err_reader.data(), False, cpu_ms)
+            return (-1, b"", b"<killed: exceeded wall-clock timeout>", True, cpu_ms, None)
+        # The drains' failures ride out with their data. Same reasoning as the
+        # Rust backend's read_capped (#80): output that could not be fully read
+        # is indistinguishable from output that was simply short, so the caller
+        # has to be told which stream and why.
+        drain_error = None
+        parts = [f"{stream}: {r.error}"
+                 for stream, r in (("stdout", out_reader), ("stderr", err_reader))
+                 if r.error]
+        if parts:
+            drain_error = "; ".join(parts)
+        return (proc.returncode, out_reader.data(), err_reader.data(), False, cpu_ms,
+                drain_error)
 
 
 def _trim(b: bytes, cap: int = MAX_OUTPUT_BYTES) -> str:
@@ -782,8 +803,8 @@ def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10
         if entry["compile"]:
             argv = [a.format(**fmt) for a in entry["compile"]]
             try:
-                rc, out, err, to, _ = _run_step(argv, workdir, timeout, "",
-                                                max_memory_mb, max_cpu, cap)
+                rc, out, err, to, _, compile_drain_error = _run_step(
+                    argv, workdir, timeout, "", max_memory_mb, max_cpu, cap)
             except OSError as exc:
                 # The compiler binary itself is missing or not executable.
                 # Unhandled, this escaped as a raised exception instead of the
@@ -802,18 +823,23 @@ def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10
                         # presented as complete output; and max_output_kb=128
                         # against 70 KiB was falsely cut at 64 KiB.
                         "stdout": "", "stderr": _trim(err, cap), "exit_code": None,
-                        "duration_ms": 0, "timed_out": True}
+                        "duration_ms": 0, "timed_out": True,
+                        "output_error": compile_drain_error}
             compile_ms = int((time.monotonic() - started) * 1000)
             if rc != 0:
                 return {"ok": False, "language": name, "phase": "compile",
                         "stdout": _trim(out, cap), "stderr": _trim(err, cap), "exit_code": rc,
                         "duration_ms": int((time.monotonic() - started) * 1000),
-                        "timed_out": False}
+                        "timed_out": False,
+                        # A compile that failed AND whose output we could not
+                        # fully read is two problems; reporting only the first
+                        # would leave the caller reading a truncated reason.
+                        "output_error": compile_drain_error}
 
         argv = [a.format(**fmt) for a in entry["run"]]
         run_started = time.monotonic()
         try:
-            rc, out, err, to, cpu_ms = _run_step(argv, workdir, timeout, stdin,
+            rc, out, err, to, cpu_ms, drain_error = _run_step(argv, workdir, timeout, stdin,
                                                  max_memory_mb, max_cpu, cap)
         except OSError as exc:
             # The interpreter/runtime binary itself is missing or not
@@ -832,7 +858,11 @@ def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10
         # them (`verdict`) named in execute_code's own docstring. A caller
         # switching on verdict could not tell a timeout from a crash here, and
         # CI never noticed because contract_check only exercises the binary.
-        return {"ok": rc == 0, "language": name, "phase": "run",
+        # `ok` accounts for the read, not just the exit status — the same rule
+        # the Rust backend now applies. Output we could not fully read is not a
+        # successful result, however cleanly the process exited.
+        return {"ok": rc == 0 and drain_error is None,
+                "language": name, "phase": "run",
                 "stdout": _trim(out, cap), "stderr": _trim(err, cap), "exit_code": rc,
                 "duration_ms": duration_ms, "workdir": workdir,
                 "compile_ms": compile_ms,
@@ -849,6 +879,7 @@ def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10
                 "platform": sys.platform,
                 "unenforced": (["no_net: needs the native executor's LD_PRELOAD shim"]
                                if no_net else []) + _unmeasured(max_memory_mb, max_cpu),
+                "output_error": drain_error,
                 "backend": "python"}
     finally:
         # Only a directory this function created, and only if it is STILL

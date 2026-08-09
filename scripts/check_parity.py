@@ -235,6 +235,42 @@ if _missing_uid0:
 else:
     print("ok   uid-0 process ceiling: both backends report the caveat")
 
+# ── an unreadable output stream must be REPORTED, on both backends (#80) ────
+# The Rust path read its output files with `if let Ok(f) = File::open(..) { let _
+# = f.read_to_end(..) }` and the Python fallback drained its pipes under a bare
+# `except (OSError, ValueError): pass`. Different mechanisms, identical defect:
+# output that could not be read came back as output that was simply empty, and
+# `ok` was computed from exit status alone, so it read as a successful run.
+#
+# Gated together because the two backends reached the same wrong answer
+# independently — which is the case for a parity check rather than two local
+# tests.
+# COUNTED, not merely present. The first draft of this gate looked for the
+# string "output_error" anywhere in each file and PASSED after the JSON
+# emission was deleted, because the struct field and its doc comment still
+# matched. Watched failing, which is how that was found. Every result shape a
+# caller can receive has to carry the field, so the floor is the number of
+# emission sites, not one.
+if floor("rust output_error emissions",
+         re.findall(r'"output_error": sr\.output_error', RUST), 2) and \
+   floor("python output_error emissions",
+         re.findall(r'"output_error": \w*drain_error', PY_EXECUTOR_SRC), 3):
+    print("ok   unreadable output: both backends report `output_error` "
+          "on every result shape")
+
+# The field is only worth having if it also reaches `ok`. A backend that reports
+# the error while still saying ok=true has told the caller twice — once wrongly.
+_OK_GUARDS = [
+    ("executor/src/main.rs", RUST, "sr.output_error.is_none()"),
+    ("codecalc/executor.py", PY_EXECUTOR_SRC, "drain_error is None"),
+]
+_missing_guard = [label for label, src, marker in _OK_GUARDS if marker not in src]
+if _missing_guard:
+    fail(f"{_missing_guard} computes `ok` without consulting the output-read "
+         "error, so an unreadable stream still reports a successful run")
+else:
+    print("ok   unreadable output: both backends fold it into `ok`")
+
 if failures:
     print(f"\n=== {len(failures)} parity failure(s) ===")
     sys.exit(1)
