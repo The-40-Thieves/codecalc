@@ -98,30 +98,18 @@ for lang in WORKER_LANGS:
         # Writing to fd 1 used to inject raw bytes into the response stream:
         # `sys.stdout = StringIO()` is a Python-level rebind and a child process
         # inherits the DESCRIPTOR. The output is now captured instead.
-        # POSIX gets an out-of-band pipe, so fd 1 cannot reach the protocol at
-        # all. Windows has neither preexec_fn nor pass_fds, so the node worker's
-        # protocol shares fd 1 there and a child CAN corrupt it — which is why
-        # the echoed request id exists. The guarantee differs by platform and so
-        # does the assertion: prevented where possible, DETECTED everywhere.
-        out_of_band = os.name != "nt" or lang == "python3"
-        if out_of_band:
-            check(f"{lang}: a subprocess writing to fd 1 does not break the protocol",
-                  r2.get("ok") is True, f"-> {str(r2.get('error'))[:70]}")
-        else:
-            check(f"{lang}: fd-1 corruption is DETECTED, never answered with a stale result",
-                  r2.get("ok") is False and "protocol error" in str(r2.get("error", "")),
-                  f"-> {str(r2.get('error'))[:80]}")
+        # PREVENTED on every platform now, not merely detected. POSIX hands the
+        # node worker an out-of-band pipe; Windows has neither pass_fds nor
+        # preexec_fn, so it gets a file the worker appends to instead — either
+        # way fd 1 cannot reach the protocol. The echoed request id remains as
+        # the backstop, but it is no longer what Windows depends on.
+        check(f"{lang}: a subprocess writing to fd 1 does not break the protocol",
+              r2.get("ok") is True, f"-> {str(r2.get('error'))[:70]}")
         if lang == "python3":
             check("python3: that subprocess output is CAPTURED, not lost",
                   "FROM_FD1" in (r2.get("stdout") or ""), f"-> {r2.get('stdout')!r}")
 
         # The off-by-one: these two calls used to return each other's answers.
-        # Where corruption killed the session (Windows node), a fresh one is
-        # needed — the point being that it DIED rather than silently desynced.
-        if not out_of_band:
-            sessions.stop(s)
-            s = sessions.start(lang)["session_id"]
-            sessions.execute(s, SET_STATE[lang])
         r3 = sessions.execute(s, USE_STATE[lang])
         r4 = sessions.execute(s, MARKER[lang])
         check(f"{lang}: a call returns ITS OWN result (state)",
@@ -151,6 +139,30 @@ check("a mismatched reply id terminates the session",
       'out.get("id") != req_id' in wsrc and "self.close()" in wsrc)
 check("a protocol error terminates the session instead of desyncing",
       wsrc.count("self.close()") >= 3, f"-> {wsrc.count('self.close()')} close() calls")
+
+# The file-backed channel is what Windows uses, and CI cannot reach it from
+# Linux or macOS. Forcing it here exercises the same code on every runner — an
+# unexercised fallback is one that works until it is needed, which is precisely
+# how the node worker came to be broken on Windows in the first place.
+if "node" in WORKER_LANGS:
+    sessions._FORCE_FILE_PROTOCOL = True
+    try:
+        s = sessions.start("node")["session_id"]
+        try:
+            sessions.execute(s, SET_STATE["node"])
+            r = sessions.execute(s, FD1_ESCAPE["node"])
+            check("file-backed protocol: fd-1 writes cannot reach it",
+                  r.get("ok") is True, f"-> {str(r.get('error'))[:70]}")
+            r = sessions.execute(s, USE_STATE["node"])
+            check("file-backed protocol: state survives and answers match",
+                  "state 42" in (r.get("stdout") or ""), f"-> {r.get('stdout')!r}")
+        finally:
+            sessions.stop(s)
+        leaked = list(pathlib.Path(tempfile.gettempdir()).glob("codecalc-proto-*"))
+        check("file-backed protocol: the channel file is cleaned up",
+              not leaked, f"-> {[p.name for p in leaked][:3]}")
+    finally:
+        sessions._FORCE_FILE_PROTOCOL = False
 
 # ═══ 3. a stateful session is not exempt from the output cap ═══════════════
 # It returned a 20 MB string whole, built three times over in memory on the way

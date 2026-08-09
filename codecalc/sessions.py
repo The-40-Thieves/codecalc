@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
 import uuid
 from pathlib import Path
@@ -465,6 +466,53 @@ for line in sys.stdin:
 '''
 
 
+#: Test seam: force the file-backed protocol channel on a platform that would
+#: otherwise use a pipe. The Windows path is otherwise unreachable from CI on
+#: Linux or macOS, and an unexercised fallback is one that works until it is
+#: needed.
+_FORCE_FILE_PROTOCOL = False
+
+
+class _TailReader:
+    """`readline()` over a file another process appends to.
+
+    A plain file object returns b"" at EOF rather than waiting, so it cannot
+    stand in for a pipe — `_readline_timeout` expects a blocking readline. This
+    polls, and gives up when the worker is gone so a dead worker leaves a
+    thread that exits rather than one that spins.
+    """
+
+    def __init__(self, path: Path, proc: subprocess.Popen):
+        self._path = path
+        self._proc = proc
+        self._offset = 0
+        self._buf = b""
+
+    def readline(self) -> bytes:
+        import time as _time
+
+        while True:
+            try:
+                with self._path.open("rb") as fh:
+                    fh.seek(self._offset)
+                    chunk = fh.read()
+            except OSError:
+                chunk = b""
+            if chunk:
+                self._offset += len(chunk)
+                self._buf += chunk
+            if b"\n" in self._buf:
+                line, self._buf = self._buf.split(b"\n", 1)
+                return line + b"\n"
+            if self._proc.poll() is not None and not chunk:
+                return b""          # worker exited and wrote nothing more
+            _time.sleep(0.005)
+
+    def close(self) -> None:
+        with contextlib.suppress(OSError):
+            self._path.unlink()
+
+
 def _proto_pipe() -> tuple[int, int] | None:
     """A pipe the child inherits for protocol responses, or None if impossible.
 
@@ -477,7 +525,7 @@ def _proto_pipe() -> tuple[int, int] | None:
     Windows has neither preexec_fn nor pass_fds, so there the protocol stays on
     stdout and the echoed request id is the only guard.
     """
-    if os.name == "nt":
+    if os.name == "nt" or _FORCE_FILE_PROTOCOL:
         return None
     return os.pipe()
 
@@ -503,6 +551,7 @@ def _spawn_worker(language: str, workdir: Path) -> Worker | None:
         else:  # node
             env = executor._env()
             limits = executor.session_worker_limits()
+            proto_file: Path | None = None
             if pipe is not None:
                 read_fd, write_fd = pipe
                 env["CODECALC_PROTO_FD"] = str(write_fd)
@@ -510,6 +559,16 @@ def _spawn_worker(language: str, workdir: Path) -> Worker | None:
                 if limits:
                     extra["preexec_fn"] = limits
             else:
+                # No pass_fds and no preexec_fn here (Windows), so the protocol
+                # cannot be handed over as a descriptor. A file the worker
+                # appends to is the portable equivalent: executed code writing
+                # to fd 1 cannot reach it, which is the property that matters —
+                # previously the protocol shared fd 1 and any child spawned with
+                # inherited stdio corrupted it.
+                fd, name = tempfile.mkstemp(prefix="codecalc-proto-", suffix=".jsonl")
+                os.close(fd)
+                proto_file = Path(name)
+                env["CODECALC_PROTO_PATH"] = str(proto_file)
                 extra = {"preexec_fn": limits} if limits else {}
             proc = subprocess.Popen(
                 ["node", "-e", _WORKER_BOOTSTRAP_NODE],
@@ -524,6 +583,8 @@ def _spawn_worker(language: str, workdir: Path) -> Worker | None:
                 os.close(write_fd)
                 proto = os.fdopen(read_fd, "rb")
                 pipe = None          # ownership transferred to `proto`
+            elif proto_file is not None:
+                proto = _TailReader(proto_file, proc)
         w = Worker(language, proc, proto=proto)
         # warm up: verify the worker answers before returning. Both failure
         # paths go through w.close(), which reaps the process group and closes
@@ -562,12 +623,17 @@ const fs = require('fs');
 // cannot pass one at all (Windows), PROTO_FD is 1 and the echoed request id is
 // what keeps a corrupted stream from being answered with a stale result.
 const PROTO_FD = Number(process.env.CODECALC_PROTO_FD || 1);
+// A path wins over a descriptor: it is used where the parent could not hand
+// over an fd at all (Windows has neither pass_fds nor preexec_fn), and it is
+// the only arrangement executed code cannot reach by writing to fd 1.
+const PROTO_PATH = process.env.CODECALC_PROTO_PATH || '';
 // The Buffer form with an EXPLICIT null position. `fs.writeSync(fd, string)`
 // throws EINVAL on a pipe, because the string overload supplies a file position
 // and a pipe is not seekable — verified, it killed the worker on the first
 // response. The loop is because a pipe write can be partial.
 function respond(obj) {
   const buf = Buffer.from(JSON.stringify(obj) + '\n', 'utf8');
+  if (PROTO_PATH) { fs.appendFileSync(PROTO_PATH, buf); return; }
   let off = 0;
   while (off < buf.length) {
     off += fs.writeSync(PROTO_FD, buf, off, buf.length - off, null);
