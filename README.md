@@ -24,6 +24,31 @@ the structural test cannot support and three of the tools above contradict. A
 guarantee stated more broadly than it is enforced is the failure this repo keeps
 correcting, so it is corrected here too.
 
+## Install
+
+```bash
+uvx codecalc          # run it directly, no environment to manage
+# or
+pip install codecalc  # into your own virtualenv
+```
+
+`.github/workflows/release.yml` publishes a platform-tagged wheel per target
+(Linux x86_64/aarch64 musl, macOS x86_64/aarch64, Windows x86_64), each
+carrying the matching `codecalc-exec` binary and — where the platform has
+one — its `--no-net` shim, so `executor.backend() == "rust"` on install
+without a manual build step. No wheel for your platform, or installed from
+source instead? Everything still runs; see the network table above for what
+falls back and to `unenforced` in that case.
+
+Point an MCP client at the installed command:
+
+```json
+{ "mcpServers": { "codecalc": { "command": "uvx", "args": ["codecalc"] } } }
+```
+
+Building the Rust core yourself, or running from a checkout? See "Build the
+Rust core" and "Run the server" below.
+
 ## Architecture (language-per-strength)
 
 | Layer | Language | Why |

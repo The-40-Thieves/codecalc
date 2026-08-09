@@ -14,6 +14,7 @@ executor/target/
 # Binaries (built artifacts — build from source via cargo-zigbuild)
 bin/codecalc-exec*
 bin/blocknet.so
+bin/blocknet.dylib
 
 # Sessions & data
 .codecalc/

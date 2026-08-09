@@ -1,0 +1,422 @@
+name: release
+
+# Issue #24, packaging half: the Rust executor is the production path, but a
+# plain `pip install codecalc` shipped only `codecalc/` — the wheel had never
+# packaged bin/codecalc-exec at all, no release had ever been tagged, and the
+# repository's own `.gitignore` excludes the binary and its --no-net shim as
+# build artifacts. A fresh install silently ran the pure-Python fallback,
+# which cannot enforce `no_net` (it says so in its own `unenforced` field).
+#
+# This workflow builds a PLATFORM-TAGGED wheel per target (hatch_build.py at
+# the repo root force_includes the binary and flips pure_python/infer_tag —
+# see that file), a standalone archive (binary + shim + LICENSE) per target
+# for anyone not using pip, a SHA256SUMS file, and attaches all of it to the
+# GitHub release. A `verify` job then installs each wheel into a clean venv —
+# the way a user actually gets it — and asserts `executor.backend() == "rust"`
+# and the full executor JSON contract, which is issue #24's acceptance
+# criterion "CI installs the artifact exactly as a user would".
+#
+# Why five runners rather than five cross-compiles from one: hatch_build.py
+# sets `infer_tag = True`, which tags the wheel from the INTERPRETER running
+# the build, not from the Rust target it cross-compiled. Building linux/musl
+# aarch64 on an x86_64 runner would therefore produce a binary that actually
+# runs on arm64 packaged inside a wheel TAGGED for x86_64 — installable on the
+# wrong machines and refused on the right one. Running the whole build,
+# `uv build --wheel` included, on a runner whose own architecture matches the
+# target sidesteps that mismatch instead of overriding the tag by hand.
+# ubuntu-24.04-arm and macos-15-intel are both free, GA hosted runners for
+# public repos (Linux arm64: GA Jan 2025; the Intel macOS image: available
+# through Fall 2027 as GitHub sunsets x86_64 macOS).
+#
+# Linux musl cross-compilation reuses exactly what ci-rust.yml's
+# `musl-cross-build` job already validates: cargo-zigbuild + zig as the
+# linker. The --no-net shim (blocknet.c) is compiled separately with
+# `zig cc -target <zig-triple>` for the same reason build.rs's own convenience
+# copy is NOT relied on here: build.rs shells out to plain `cc`, which is the
+# HOST compiler and would silently produce a wrong-architecture .so when
+# cross-compiling — so this workflow builds the shim itself, once per target,
+# with a compiler that actually targets that architecture.
+#
+# What this workflow deliberately does NOT do: push a tag or create a
+# release. It is validated via `workflow_dispatch` and local builds; the
+# `push: tags` trigger and the release-attach step only run for real on an
+# actual tag push, which this change does not make.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      publish_to_pypi:
+        description: >-
+          Also publish the built wheels to PyPI via trusted publishing (OIDC).
+          Requires the GitHub -> PyPI trusted publisher to already be
+          registered on the project's PyPI page (see
+          https://docs.pypi.org/trusted-publishers/using-a-publisher/) — this
+          repo has not registered one yet. Leave false to validate the
+          build/verify/checksum pipeline without touching PyPI at all.
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  # NOT cancel-in-progress: true like the CI workflows. Those cancel a
+  # superseded run of the same PR/branch, which is safe because nothing about
+  # an in-flight CI run is externally visible. A release build produces the
+  # artifacts a tag's GitHub release will carry — killing it mid-upload on a
+  # re-dispatch is how a release ends up with half its platforms attached.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build (${{ matrix.id }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: linux-x86_64-musl
+            os: ubuntu-latest
+            rust_target: x86_64-unknown-linux-musl
+            kind: musl
+            zig_target: x86_64-linux-musl
+            shim: so
+            exe_ext: ''
+          - id: linux-aarch64-musl
+            os: ubuntu-24.04-arm
+            rust_target: aarch64-unknown-linux-musl
+            kind: musl
+            zig_target: aarch64-linux-musl
+            shim: so
+            exe_ext: ''
+          - id: macos-aarch64
+            os: macos-latest
+            rust_target: aarch64-apple-darwin
+            kind: native
+            zig_target: ''
+            shim: dylib
+            exe_ext: ''
+          - id: macos-x86_64
+            os: macos-15-intel
+            rust_target: x86_64-apple-darwin
+            kind: native
+            zig_target: ''
+            shim: dylib
+            exe_ext: ''
+          - id: windows-x86_64
+            os: windows-latest
+            rust_target: x86_64-pc-windows-msvc
+            kind: native
+            zig_target: ''
+            shim: none
+            exe_ext: '.exe'
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: ./.github/actions/setup-rust
+        with:
+          targets: ${{ matrix.rust_target }}
+      - if: matrix.kind == 'musl'
+        uses: goto-bus-stop/setup-zig@abea47f85e598557f500fa1fd2ab7464fcb39406 # v2
+        with:
+          version: 0.13.0
+      - if: matrix.kind == 'musl'
+        uses: taiki-e/install-action@ed67fa35ac944f3a9b33f12c4dd43b6f31a47e20 # v2
+        with:
+          tool: cargo-zigbuild
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: executor
+          key: ${{ matrix.id }}
+
+      - name: cargo build codecalc-exec
+        working-directory: executor
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.kind }}" = "musl" ]; then
+            cargo zigbuild --release --target ${{ matrix.rust_target }}
+          else
+            cargo build --release --target ${{ matrix.rust_target }}
+          fi
+
+      # Same assertion as ci-rust.yml's musl-cross-build job: "it compiled" is
+      # not the claim, "it is a STATIC binary" is — a dynamically linked one
+      # would still build here and then fail on the old-glibc machines this
+      # artifact exists for.
+      - name: assert static linkage (musl targets)
+        if: matrix.kind == 'musl'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin=executor/target/${{ matrix.rust_target }}/release/codecalc-exec
+          [ -f "$bin" ] || { echo "::error::$bin was not produced"; exit 1; }
+          file "$bin"
+          if file "$bin" | grep -q "dynamically linked"; then
+            echo "::error::$bin is dynamically linked — the musl release artifact must be static."
+            exit 1
+          fi
+          echo "ok: statically linked, $(stat -c%s "$bin") bytes"
+
+      # Built separately from build.rs's own copy — see the workflow header
+      # for why plain `cc` cannot be trusted to target the right architecture
+      # here. Skipped on Windows: no LD_PRELOAD equivalent to hang a shim on,
+      # same as ci-rust.yml's `blocknet` job and codecalc/executor.py's
+      # `unenforced` reporting.
+      - name: build the --no-net shim
+        working-directory: executor
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ matrix.shim }}" in
+            so)
+              zig cc -target ${{ matrix.zig_target }} -shared -fPIC -O2 -Wall -Wextra -Werror -o blocknet.so blocknet.c
+              ;;
+            dylib)
+              cc -shared -fPIC -O2 -Wall -Wextra -Werror -o blocknet.dylib blocknet.c
+              ;;
+            none)
+              echo "windows: no shim to build (--no-net is reported unenforced)"
+              ;;
+          esac
+
+      # The binary and its shim must travel together — a binary installed
+      # without its version-matched shim silently reports --no-net as
+      # unenforced instead of failing loudly. hatch_build.py force_includes
+      # whatever it finds in bin/, so both land here before the wheel builds.
+      - name: assemble bin/
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p bin
+          cp "executor/target/${{ matrix.rust_target }}/release/codecalc-exec${{ matrix.exe_ext }}" bin/
+          if [ "${{ matrix.shim }}" = "so" ]; then
+            cp executor/blocknet.so bin/
+          elif [ "${{ matrix.shim }}" = "dylib" ]; then
+            cp executor/blocknet.dylib bin/
+          fi
+          ls -la bin/
+
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: '0.12.1'
+          python-version: '3.12'
+
+      # --wheel, deliberately not plain `uv build`: a plain build round-trips
+      # the wheel through an sdist first, and hatchling's VCS-ignore file
+      # location (locate_file(root, ".gitignore", boundary=".git")) does not
+      # walk into executor/.gitignore or otherwise stop `executor/target/`
+      # from being swept into the sdist — 14MB of build cache that has
+      # nothing to do with a release. --wheel builds directly from the
+      # working tree and never goes near that path.
+      - name: build the platform wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          uv build --wheel --out-dir dist
+          ls -la dist/
+
+      # The floor on this whole workflow: prove the wheel that just built
+      # actually carries the binary and actually got a platform tag, rather
+      # than trusting hatch_build.py's own intent. A wheel that builds is not
+      # a wheel that contains what it should.
+      - name: inspect the wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          whl=$(ls dist/*.whl)
+          echo "wheel: $whl"
+          case "$whl" in
+            *-none-any.whl)
+              echo "::error::$whl is an untagged (py3-none-any) wheel — the native executor was not bundled into it."
+              exit 1
+              ;;
+          esac
+          python3 -m zipfile -l "$whl" | tee /tmp/wheel-listing.txt
+          if ! grep -q "bin/codecalc-exec${{ matrix.exe_ext }}" /tmp/wheel-listing.txt; then
+            echo "::error::bin/codecalc-exec${{ matrix.exe_ext }} is not inside $whl"
+            exit 1
+          fi
+
+      - name: build the standalone archive (binary + shim + LICENSE)
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="codecalc-exec-${{ matrix.id }}"
+          mkdir -p "$stage"
+          cp "bin/codecalc-exec${{ matrix.exe_ext }}" "$stage"/
+          if [ -f bin/blocknet.so ]; then cp bin/blocknet.so "$stage"/; fi
+          if [ -f bin/blocknet.dylib ]; then cp bin/blocknet.dylib "$stage"/; fi
+          cp LICENSE "$stage"/
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a -tzip "dist/${stage}.zip" "$stage" >/dev/null
+          else
+            tar -czf "dist/${stage}.tar.gz" "$stage"
+          fi
+          ls -la dist/
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-${{ matrix.id }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  verify:
+    # Issue #24's acceptance criterion: "CI installs the artifact exactly as
+    # a user would and runs the contract suite against it." Not a rebuild —
+    # this downloads the wheel `build` just produced and does nothing a real
+    # `pip install codecalc` wouldn't also do.
+    name: verify install (${{ matrix.id }})
+    needs: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: linux-x86_64-musl
+            os: ubuntu-latest
+          - id: linux-aarch64-musl
+            os: ubuntu-24.04-arm
+          - id: macos-aarch64
+            os: macos-latest
+          - id: macos-x86_64
+            os: macos-15-intel
+          - id: windows-x86_64
+            os: windows-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-${{ matrix.id }}
+          path: dl
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: '0.12.1'
+          python-version: '3.12'
+      - name: uv venv + uv pip install, exactly as a user would
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv venv verify-venv
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            py="verify-venv/Scripts/python.exe"
+          else
+            py="verify-venv/bin/python"
+          fi
+          echo "py=$py" >> "$GITHUB_ENV"
+          whl=$(ls dl/*.whl)
+          echo "installing: $whl"
+          uv pip install --python "$py" "$whl"
+      - name: assert the RUST backend is what got installed
+        shell: bash
+        run: |
+          set -euo pipefail
+          backend=$("$py" -c "from codecalc import executor; print(executor.backend())")
+          echo "backend: $backend"
+          if [ "$backend" != "rust" ]; then
+            echo "::error::backend is '$backend', expected 'rust' — this wheel installed without its native executor."
+            exit 1
+          fi
+      - name: executor JSON contract, against the INSTALLED binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          binpath=$("$py" -c "from codecalc import executor; print(executor._rust_binary())")
+          echo "binary: $binpath"
+          "$py" scripts/contract_check.py "$binpath"
+
+  release-assets:
+    name: checksums + attach to GitHub release
+    needs: [build, verify]
+    runs-on: ubuntu-latest
+    # write, unlike every job above — this is the only one that touches the
+    # release itself, and only reaches the upload step on a real tag push.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-*
+          path: dl
+          merge-multiple: true
+
+      - name: SHA256SUMS, verified in this job
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp dl/* dist/
+          # BASENAMES, not full paths. A checksums file recording full paths
+          # instead of basenames has broken verification in this project
+          # before: `sha256sum -c` resolves each recorded name against a file
+          # by that literal name, so a path baked in at record time stops
+          # validating the moment the file is placed anywhere else — which is
+          # exactly what happens between this job and wherever a user
+          # downloads the release asset to.
+          ( cd dist && sha256sum -- * > SHA256SUMS )
+          echo "--- SHA256SUMS ---"
+          cat dist/SHA256SUMS
+          # Prove it actually validates, in THIS job, rather than trusting the
+          # format — the same principle as every other gate in this repo:
+          # "it wrote a file that looks like checksums" is not the claim.
+          ( cd dist && sha256sum -c SHA256SUMS )
+
+      - name: attach to the GitHub release
+        # Only on an actual tag push. workflow_dispatch is how this workflow
+        # is validated end-to-end WITHOUT a tag or a release existing — see
+        # the workflow header. Gating on the event, not on inputs, means a
+        # dispatch run can never reach `gh release create`/`upload` no matter
+        # what inputs it's given.
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF#refs/tags/}"
+          # DRAFT, deliberately. Pushing a throwaway tag to validate this
+          # pipeline has cost this project a public, non-undoable release
+          # before (see the workflow header and CLAUDE.md). A draft is the
+          # opposite of that: visible only to maintainers, and one `gh
+          # release delete` away from never having happened, until a human
+          # explicitly publishes it.
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --draft --title "$tag" --generate-notes
+          fi
+          gh release upload "$tag" dist/* --clobber
+
+  publish-pypi:
+    name: publish to PyPI (trusted publishing)
+    needs: [build, verify]
+    # Explicit opt-in input, checked against the dispatch event specifically
+    # — `inputs.publish_to_pypi` does not exist on a `push` trigger at all, so
+    # this must not be reachable from a tag push until someone deliberately
+    # dispatches it. The PyPI name `codecalc` is confirmed available
+    # (HTTP 404 as of writing) but no trusted publisher is registered yet, so
+    # this job is wired and left off rather than attempted-and-failing.
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_to_pypi
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-*
+          path: dl
+          merge-multiple: true
+      - name: stage wheels only (PyPI does not accept the standalone archives)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp dl/*.whl dist/
+          ls -la dist/
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        with:
+          packages-dir: dist
