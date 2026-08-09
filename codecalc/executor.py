@@ -632,16 +632,51 @@ _UID0_PROCESS_CEILING = (
 )
 
 
-def _unmeasured() -> list[str]:
+#: Ceilings the fallback CANNOT apply on a given platform. `_limits()` has
+#: always said so in its own docstring — "the fallback executor there gets a
+#: wall-clock timeout and a process-tree kill and nothing else" — but the
+#: RESULT never did, so a Windows caller asking for a 64MB ceiling got a
+#: successful run that allocated 400MB and an empty `unenforced`. The code knew
+#: and the output did not, which is the exact class SECURITY.md puts in scope.
+#:
+#: macOS is the subtler one: setrlimit(RLIMIT_AS) SUCCEEDS there and is then
+#: ignored, so nothing raises and the ceiling looks applied. The Rust backend
+#: has carried `memory_limit_not_enforced_on_macos` for this reason; the
+#: fallback never did.
+_NO_RLIMITS_AT_ALL = "the Python fallback applies no {} ceiling on Windows"
+_MACOS_AS_IGNORED = (
+    "max_memory_mb: setrlimit(RLIMIT_AS) is accepted and then ignored on macOS")
+
+
+def _unmeasured(max_memory_mb: int = 0, max_cpu: int = 0) -> list[str]:
     """`unenforced` entries for the pure-Python fallback, for THIS process.
 
-    Computed per call rather than at import: the euid check is one syscall and
-    a module-level constant would be wrong for anything that drops privileges
-    after import.
+    Computed per call rather than at import: the euid check is one syscall, a
+    module-level constant would be wrong for anything that drops privileges
+    after import, and the ceilings depend on what this particular call asked
+    for.
+
+    A ceiling is only disclaimed when it was REQUESTED, in the same way `no_net`
+    is. Naming a limit the caller never asked for would put permanent noise in
+    every result, and a field that always says something is a field callers
+    stop reading.
     """
     out = list(_FALLBACK_UNMEASURED)
     if hasattr(os, "geteuid") and os.geteuid() == 0:
         out.append(_UID0_PROCESS_CEILING)
+
+    if IS_WINDOWS:
+        # No setrlimit and no fork, so there is no hook to apply anything
+        # through. The process ceiling is unconditional because the fork-bomb
+        # guard is always meant to be on — the caller never asks for it, which
+        # is precisely why its absence has to be stated.
+        out.append("max_processes: " + _NO_RLIMITS_AT_ALL.format("process"))
+        if max_memory_mb > 0:
+            out.append("max_memory_mb: " + _NO_RLIMITS_AT_ALL.format("memory"))
+        if max_cpu > 0:
+            out.append("max_cpu: " + _NO_RLIMITS_AT_ALL.format("CPU"))
+    elif sys.platform == "darwin" and max_memory_mb > 0:
+        out.append(_MACOS_AS_IGNORED)
     return out
 
 
@@ -675,6 +710,9 @@ def _runtime_unavailable_result(name: str, phase: str, argv: list[str], exc: OSE
         "cpu_ms": 0,
         "peak_memory_kb": None,
         "platform": sys.platform,
+        # No ceilings are named here: nothing spawned, so there is nothing
+        # that could have been enforced or not. Disclaiming a limit for a run
+        # that never happened is noise, not honesty.
         "unenforced": (["no_net: needs the native executor's LD_PRELOAD shim"]
                        if no_net else []) + _unmeasured(),
         "backend": "python",
@@ -810,7 +848,7 @@ def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10
                 "peak_memory_kb": None,
                 "platform": sys.platform,
                 "unenforced": (["no_net: needs the native executor's LD_PRELOAD shim"]
-                               if no_net else []) + _unmeasured(),
+                               if no_net else []) + _unmeasured(max_memory_mb, max_cpu),
                 "backend": "python"}
     finally:
         # Only a directory this function created, and only if it is STILL

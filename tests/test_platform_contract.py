@@ -89,6 +89,16 @@ KNOWN_FALLBACK_UNENFORCED = {
     "no_net: needs the native executor's LD_PRELOAD shim",
     "peak_memory_kb: ru_maxrss is a high-water mark and cannot be attributed to one run",
     "max_processes: RLIMIT_NPROC does not bind a process running as uid 0",
+    # Windows: no setrlimit and no fork, so there is no hook to apply anything
+    # through. The process entry is unconditional there — the fork-bomb guard
+    # is always meant to be on, which is why its absence has to be stated.
+    "max_processes: the Python fallback applies no process ceiling on Windows",
+    "max_memory_mb: the Python fallback applies no memory ceiling on Windows",
+    "max_cpu: the Python fallback applies no CPU ceiling on Windows",
+    # macOS: setrlimit(RLIMIT_AS) SUCCEEDS and is then ignored, so nothing
+    # raises and the ceiling looks applied. The Rust backend has carried
+    # `memory_limit_not_enforced_on_macos` for this; the fallback did not.
+    "max_memory_mb: setrlimit(RLIMIT_AS) is accepted and then ignored on macOS",
 }
 
 if not executor._rust:
@@ -144,11 +154,21 @@ if not executor._rust:
     # RTE here (the child dies of MemoryError under RLIMIT_AS) where the Rust
     # path reports MLE, so the assertion is that the ceiling STOPPED it, not
     # that the two spell the outcome identically.
+    # Guarded the same way the Rust branch below guards its own: assert the
+    # bite only where THIS platform claims the ceiling. Written unguarded
+    # first, and CI was right to fail it — Windows applies no rlimits at all
+    # and macOS accepts setrlimit(RLIMIT_AS) and ignores it, so on both the
+    # 400MB allocation succeeded with verdict=OK. The fix was in the executor
+    # (it now says so) and the guard here is what makes the assertion mean
+    # "enforced where claimed" rather than "enforced everywhere".
     mem = executor.execute("python3", "x = bytearray(400*1024*1024); print('ALLOCATED')",
                            timeout=20, max_memory_mb=64)
-    check("an undisclaimed memory ceiling actually stops the program",
-          mem.get("ok") is False and "ALLOCATED" not in (mem.get("stdout") or ""),
-          f"-> verdict={mem.get('verdict')} stdout={(mem.get('stdout') or '')[:40]!r}")
+    if any("max_memory_mb" in u for u in mem.get("unenforced") or []):
+        skip("fallback memory ceiling", f"reported unenforced: {mem.get('unenforced')}")
+    else:
+        check("an undisclaimed memory ceiling actually stops the program",
+              mem.get("ok") is False and "ALLOCATED" not in (mem.get("stdout") or ""),
+              f"-> verdict={mem.get('verdict')} stdout={(mem.get('stdout') or '')[:40]!r}")
 
     out = executor.execute("python3", "print('x'*200000)", timeout=20, max_output_kb=8)
     check("an undisclaimed output ceiling actually truncates",
@@ -163,8 +183,14 @@ if not executor._rust:
     # The source's own list must not drift past what is documented above — the
     # same gate the Rust vocabulary gets, so a new caveat cannot be added
     # without being written down.
-    undocumented = set(executor._FALLBACK_UNMEASURED) - KNOWN_FALLBACK_UNENFORCED
-    check("every string in _FALLBACK_UNMEASURED is documented here",
+    # Exercise the ceiling-dependent branches too, not just the static list —
+    # the entries that only appear when a limit was REQUESTED are exactly the
+    # ones a static read would miss.
+    produced = (set(executor._FALLBACK_UNMEASURED)
+                | set(executor._unmeasured())
+                | set(executor._unmeasured(max_memory_mb=64, max_cpu=5)))
+    undocumented = produced - KNOWN_FALLBACK_UNENFORCED
+    check("every string the fallback can emit is documented here",
           not undocumented, f"-> {sorted(undocumented)}")
 
     skip("native-executor contract", "no native executor built")
