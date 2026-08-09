@@ -84,8 +84,7 @@ jobs:
             zig_target: x86_64-linux-musl
             shim: so
             exe_ext: ''
-            # Static musl: runs on glibc AND musl, so publish under both tags.
-            wheel_tags: 'py3-none-manylinux_2_17_x86_64 py3-none-musllinux_1_2_x86_64'
+            wheel_tags: 'py3-none-manylinux_2_17_x86_64'
           - id: linux-aarch64-musl
             os: ubuntu-24.04-arm
             rust_target: aarch64-unknown-linux-musl
@@ -93,7 +92,7 @@ jobs:
             zig_target: aarch64-linux-musl
             shim: so
             exe_ext: ''
-            wheel_tags: 'py3-none-manylinux_2_17_aarch64 py3-none-musllinux_1_2_aarch64'
+            wheel_tags: 'py3-none-manylinux_2_17_aarch64'
           - id: macos-aarch64
             os: macos-latest
             rust_target: aarch64-apple-darwin
@@ -230,9 +229,12 @@ jobs:
           # leaving 3.12/3.13 users to fall back to source, i.e. to the Python
           # sandbox that cannot enforce no_net.
           #
-          # Linux emits TWO wheels from one build. The binary is static musl,
-          # so it runs on glibc and musl alike; a single manylinux tag hides it
-          # from Alpine and a single musllinux tag hides it from everyone else.
+          # ONE tag per target. Publishing the Linux payload under manylinux
+          # AND musllinux was tried and reverted: the executor is static, but
+          # blocknet.so is built `zig cc -target ...-musl -shared` and comes out
+          # DYNAMICALLY linked against musl libc, so on glibc it fails to load
+          # and no_net silently stops being enforced. Same payload, two tags,
+          # one of them a lie. Tracked separately; see the musllinux issue.
           for tag in $WHEEL_TAGS; do
             echo "::group::wheel $tag"
             CODECALC_WHEEL_TAG="$tag" uv build --wheel --out-dir dist
