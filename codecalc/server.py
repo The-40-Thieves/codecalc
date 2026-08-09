@@ -63,6 +63,16 @@ mcp = MCPServer(
         "server/discover": CacheHint(ttl_ms=60_000, scope="public"),
     },
     middleware=[timeout_middleware],
+    # `instructions` is metadata every MCP client receives on connect, before
+    # it has called a single tool — the least invasive surface to put backend
+    # visibility on. list_languages() was the other candidate and was
+    # rejected: it returns a `list[dict]`, one entry per language, with no
+    # natural top-level slot for a server-wide field, and a caller only sees
+    # it if they think to call that specific tool. This f-string is evaluated
+    # once, at import time, after `executor` above has already resolved
+    # `_rust` (and, with CODECALC_REQUIRE_NATIVE=1, already refused to import
+    # at all if it came up empty) — so what it reports is what this process
+    # actually has, not a static claim that can drift from it.
     instructions=(
         "Universal coding & logic calculator. Tools: list_languages (available "
         "runtimes), execute_code (run code in 30+ languages, returns stdout/"
@@ -70,7 +80,10 @@ mcp = MCPServer(
         "truth_table (boolean logic), z3_check (SMT-LIB2 satisfiability), "
         "solve_linear (systems of equations), analyze_complexity (static Big-O), "
         "benchmark (empirical Big-O by running at increasing sizes), "
-        "compare_execution (same code across many languages)."
+        "compare_execution (same code across many languages). "
+        f"Execution backend: {executor.backend()} (rust = full sandbox "
+        "including no_net; python = fallback, no_net and peak_memory_kb "
+        "unenforced — see CODECALC_REQUIRE_NATIVE)."
     ),
 )
 

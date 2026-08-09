@@ -6,6 +6,17 @@ pure-Python implementation when the binary isn't built yet.
 
 Binary selection is architecture-aware so the right artifact is picked on both
 arm64 and x86_64 hosts (including the static musl builds for older machines).
+
+Set `CODECALC_REQUIRE_NATIVE=1` to turn that fallback into a startup failure
+instead of a silent downgrade. The check runs once, at IMPORT time: this
+module resolves the binary at module scope (`_rust = _rust_binary()` below),
+so the earliest point a missing/unusable binary can be known is also the
+earliest point to refuse — which, since `codecalc/server.py` imports this
+module before calling `mcp.run()`, makes "at import" and "at server start"
+the same moment for the MCP server, without a second check living in
+server.py. A raised `RuntimeError` names the variable and what was missing
+rather than leaving an operator to notice later that `no_net` was never
+enforced.
 """
 
 from __future__ import annotations
@@ -51,6 +62,10 @@ FALLBACK_NPROC_LIMIT = 4096
 MAX_PROCESSES_ENV = "CODECALC_MAX_PROCESSES"
 PROCESS_HEADROOM_ENV = "CODECALC_PROCESS_HEADROOM"
 CPU_GRACE_SECONDS = 8
+
+#: Fail-closed switch: refuse to start on the weaker Python fallback rather
+#: than silently downgrade. See _require_native_or_die() below.
+REQUIRE_NATIVE_ENV = "CODECALC_REQUIRE_NATIVE"
 
 
 def _binary_candidates() -> list[str]:
@@ -769,6 +784,40 @@ def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10
 _rust = _rust_binary()
 
 
+def _require_native_or_die() -> None:
+    """Fail loudly, at import time, if CODECALC_REQUIRE_NATIVE=1 and no usable
+    Rust binary was found.
+
+    Without this, an operator who sets the variable gets nothing: `_rust` is
+    simply None and every call quietly runs `_execute_python` instead — the
+    same fallback whose own `unenforced` field admits it cannot apply `no_net`.
+    "Require native" has to mean the process never answers a single call on
+    the weaker backend, and the only way to guarantee that is to refuse to
+    come up at all rather than gate it per-call: a per-call check would still
+    let `list_languages` or `probe()` succeed and look like a healthy server.
+
+    Any value other than unset/"0" counts as enabled, matching the informal
+    truthy convention this repo's own env vars already use elsewhere
+    (CODECALC_MAX_PROCESSES, CODECALC_PROCESS_HEADROOM are "set means use it").
+    """
+    if os.environ.get(REQUIRE_NATIVE_ENV, "0") == "0":
+        return
+    if _rust is not None:
+        return
+    raise RuntimeError(
+        f"{REQUIRE_NATIVE_ENV} is set, but no usable codecalc-exec binary was "
+        f"found (checked $CODECALC_EXEC_BIN and {_binary_candidates()}). "
+        "The Python fallback cannot enforce no_net and is not the sandbox this "
+        "variable asks for, so codecalc refuses to start rather than downgrade "
+        "silently. Build the Rust executor (README: 'Build the Rust core'), "
+        "point CODECALC_EXEC_BIN at a working binary, or unset "
+        f"{REQUIRE_NATIVE_ENV} to accept the weaker fallback."
+    )
+
+
+_require_native_or_die()
+
+
 def backend() -> str:
     """'rust' when the native binary is in use, else 'python'."""
     return "rust" if _rust else "python"
@@ -822,6 +871,17 @@ def execute(language: str, code: str, stdin: str = "", timeout: int = 10,
                         "stderr": (err or b"").decode(errors="replace")[:400]}
             result = json.loads(out.decode(errors="replace"))
             if isinstance(result, dict) and "ok" in result:
+                # The binary's own JSON carries no "backend" key — it has no
+                # concept of the Python fallback to distinguish itself from,
+                # and scripts/contract_check.py asserts its shape directly
+                # against the binary, so that shape must not change. Added
+                # HERE instead: this is the one place both backends' results
+                # pass through before a caller sees them, so it is the one
+                # place that can make them agree. Without it, an absent
+                # "backend" key on this path was indistinguishable from an
+                # older build that never reported the field at all — a caller
+                # could not tell "rust, unreported" from "rust, not present".
+                result["backend"] = "rust"
                 return result
             return {"ok": False, "error": f"executor produced invalid output: {err[:200]!r}"}
         except Exception as exc:

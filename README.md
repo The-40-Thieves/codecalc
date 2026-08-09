@@ -17,7 +17,7 @@ difference is worth stating rather than leaving a reader to discover:
 | the codecalc package itself | **Never.** No HTTP client, no gateway, no telemetry |
 | `install_package` | **Yes, by design.** It runs uv / npm / gem / cargo, which fetch from their registries. Installer hooks also run *outside* the sandbox — see [SECURITY.md](SECURITY.md) |
 | `runtimes_status`, `update_runtimes` | **Yes.** They shell out to mise / rustup / swiftly / npm, which check remote versions |
-| code you execute | **Yes, unless `no_net=True`** — and that shim needs the native executor, so the pure-Python fallback reports it in `unenforced` instead of applying it |
+| code you execute | **Yes, unless `no_net=True`** — and that shim needs the native executor, so the pure-Python fallback reports it in `unenforced` instead of applying it. Set `CODECALC_REQUIRE_NATIVE=1` to turn "fallback in use" into a startup failure instead of a result you have to notice by reading `unenforced` |
 
 The earlier wording here was an unqualified "it makes no network calls", which
 the structural test cannot support and three of the tools above contradict. A
@@ -243,6 +243,7 @@ All optional. codecalc runs with none of these set.
 |---|---|---|
 | `CODECALC_RUNTIME_PATH` | the server's own `PATH`, else `/usr/local/bin:/usr/bin:/bin` | The `PATH` executed code resolves runtimes on. **Set this when an MCP client spawns the server**: clients often launch with a stripped environment, so an inherited `PATH` can miss a toolchain manager's shims entirely and most languages silently become unavailable. `list_languages` reports what actually resolved. |
 | `CODECALC_EXEC_BIN` | `bin/codecalc-exec` (arch-matched) | Override the sandbox binary. Without one, codecalc falls back to a pure-Python executor — `list_languages` and `execute_code` still work, but the Rust path is the production one. |
+| `CODECALC_REQUIRE_NATIVE` | *(unset)* | Fail-closed: refuse to start if no usable `codecalc-exec` binary was found (checked at import, so this is also a server-start check), instead of silently answering every call on the weaker Python fallback. Raises naming `CODECALC_REQUIRE_NATIVE` and the paths that were checked. |
 | `CODECALC_SESSION_ROOT` | `~/.codecalc/sessions` | Where session workspaces live. |
 | `CODECALC_PROCESS_HEADROOM` | `512` | Fork-bomb guard. `RLIMIT_NPROC` is a **uid-wide task budget**, not a per-sandbox one — the kernel compares it against every thread your user owns, machine-wide. So codecalc measures the ambient count per execution and sets the limit to *ambient + headroom*: a bomb can add at most this many tasks, while a runtime wanting a few threads always has room however busy the box is. |
 | `CODECALC_MAX_PROCESSES` | *(unset)* | Escape hatch: pin `RLIMIT_NPROC` to an absolute value and skip the measurement. |
@@ -383,6 +384,16 @@ shell and so are unavailable on Windows unless one is installed.
 - `no_net` blocks the **network**, not every socket: it refuses `AF_INET` and
   `AF_INET6` and forwards everything else, so `AF_UNIX` local IPC keeps working.
 - No network namespace isolation (single-host tool; containerize for untrusted code)
+- Every result carries a `backend` field (`"rust"` or `"python"`) so a caller
+  never has to infer which sandbox actually ran from an absent key — that was
+  possible to confuse with an older build that never reported it at all. The
+  pure-Python fallback cannot provide everything above: it has no `no_net`
+  shim (reported in `unenforced`, not silently dropped), and `peak_memory_kb`
+  comes back `None` rather than a number, because `ru_maxrss` is a
+  process-lifetime high-water mark this path has no way to attribute to one
+  run. `CODECALC_REQUIRE_NATIVE=1` turns "running on the fallback" into a
+  startup failure instead of a guarantee you have to notice was quietly
+  weaker.
 
 ### Sessions
 
