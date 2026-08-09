@@ -38,8 +38,10 @@ could not install, which was never checked anywhere.
 
 from __future__ import annotations
 
+import pathlib
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from . import executor, registry
@@ -47,14 +49,56 @@ from . import executor, registry
 #: language -> (manager binary, argv template with {pkg} placeholder, env hint)
 #: {target} is substituted with the workspace directory. Every entry must be
 #: workspace-scoped: an installer that writes outside it does not belong here.
+#: LAYER 1 of the #23 mitigation: do not run the hostile code at all.
+#:
+#: Installing a package normally EXECUTES third-party code before anything is
+#: imported — npm lifecycle scripts, Python build backends, Composer plugins,
+#: Cargo build scripts. Confining that code is layer 2 below; not running it is
+#: cheaper, works on every platform, and needs no kernel feature.
+#:
+#: npm shipped exactly this as its own default in v12 (July 2026), after a year
+#: of supply-chain attacks that "shared the same core mechanism: a postinstall
+#: hook that fired the moment a developer ran npm install". codecalc cannot
+#: assume v12 — the npm on this host is 11.17.0 — so the flag is passed
+#: explicitly rather than relied upon.
+#:
+#: THE COST IS REAL AND IS NOT HIDDEN. `--ignore-scripts` breaks packages that
+#: genuinely need a build step (native addons), and `--only-binary=:all:` fails
+#: for a package with no wheel for this platform. Both failures are reported to
+#: the caller with the flag named, so "it did not install" is never mistaken
+#: for "the package does not exist".
 _INSTALLERS: dict[str, tuple[str, list[str], dict[str, str]]] = {
-    "python3": ("uv", ["uv", "pip", "install", "--target", "{target}", "{pkg}"], {"UV_CACHE_DIR": "~/.cache/uv"}),
-    "node": ("npm", ["npm", "install", "{pkg}", "--no-save", "--no-audit", "--no-fund"], {}),
-    "bun": ("bun", ["bun", "add", "{pkg}"], {}),
+    # --only-binary=:all: — wheels only. A source distribution runs its build
+    # backend, which is arbitrary code execution at install time.
+    "python3": ("uv", ["uv", "pip", "install", "--only-binary=:all:", "--target", "{target}", "{pkg}"], {"UV_CACHE_DIR": "{target}/.cache/uv"}),
+    # --prefix is a CONTAINMENT fix, not a convenience. Without it npm walks UP
+    # from cwd looking for a package root, finds none in the workspace, and
+    # settles on the first ancestor it likes — observed asking to
+    # `mkdir $HOME/node_modules/<pkg>` while cwd was the workspace. The workspace scoping this table's own comment
+    # promises was not happening for node, and the Landlock ruleset below is
+    # what surfaced it: the install failed with EACCES on a path outside the
+    # workspace rather than quietly succeeding somewhere else.
+    "node": ("npm", ["npm", "install", "{pkg}", "--prefix", "{target}", "--ignore-scripts", "--no-save", "--no-audit", "--no-fund"], {"npm_config_cache": "{target}/.cache/npm"}),
+    "bun": ("bun", ["bun", "add", "--ignore-scripts", "{pkg}"], {"BUN_INSTALL_CACHE_DIR": "{target}/.cache/bun"}),
     "deno": ("deno", ["deno", "install", "{pkg}"], {}),
-    "php": ("composer", ["composer", "require", "{pkg}"], {}),
-    "go": ("go", ["go", "get", "{pkg}"], {}),
-    "rust": ("cargo", ["cargo", "add", "{pkg}"], {}),
+    # Composer plugins are code; --no-scripts also declines the package's own.
+    "php": ("composer", ["composer", "require", "--no-scripts", "{pkg}"], {"COMPOSER_HOME": "{target}/.cache/composer", "COMPOSER_CACHE_DIR": "{target}/.cache/composer"}),
+    # `go get` does not execute package code; the build does, later, under the
+    # executor's own sandbox rather than here.
+    "go": ("go", ["go", "get", "{pkg}"], {"GOMODCACHE": "{target}/.cache/go/mod", "GOPATH": "{target}/.cache/go"}),
+    # `cargo add` only edits Cargo.toml — build.rs runs at BUILD time, which is
+    # the executor's sandbox, not this path.
+    "rust": ("cargo", ["cargo", "add", "{pkg}"], {"CARGO_HOME": "{target}/.cache/cargo"}),
+}
+
+#: The flag each installer relies on to keep third-party code from running, so
+#: a failure can name it. Absent means the manager does not execute package
+#: code at install time (see the per-entry comments above).
+_NO_EXEC_FLAG = {
+    "python3": "--only-binary=:all:",
+    "node": "--ignore-scripts",
+    "bun": "--ignore-scripts",
+    "php": "--no-scripts",
 }
 
 #: languages whose installer is not yet supported (declared so we can tell the
@@ -76,6 +120,93 @@ _DECLINED_REASON = {
 
 #: shared cache dir for ad-hoc (non-session) installs; sessions get their own
 CACHE_ROOT = Path("~/.codecalc/pkgs").expanduser()
+
+
+#: Managers VERIFIED to work under the Landlock ruleset below. Absence is not
+#: an oversight, it is a measured result: `uv` fails with "Failed to discover
+#: managed Python installations / Could not detect either glibc version nor
+#: musl libc version" under the ruleset, and the denials strace reports (/sys
+#: hugepage and cgroup cpu.max) are not the cause — allowing /sys changes
+#: nothing. Rather than ship a confinement that breaks the most-used installer,
+#: or silently retry unconfined and report a boundary that was not applied,
+#: python3 runs unconfined and SAYS SO. Tracked as its own issue.
+_CONFINABLE = {"node", "bun", "php", "go", "rust", "deno"}
+
+
+def _confinement(bin_: str, workspace: str, env: dict, language: str) -> tuple:
+    """(preexec_fn, unenforced) confining the installer to its workspace.
+
+    LAYER 2 of the #23 mitigation. Layer 1 stops the managers running
+    third-party code; this bounds what the manager itself — and anything a
+    future entry cannot disable — is able to reach.
+
+    Applied in preexec_fn, which is the only correct place for it: after fork
+    and before exec, in a child with one thread (so the ABI 8 TSYNC gap does
+    not apply) and no inherited descriptors (subprocess closes them), which is
+    what the kernel's "an fd opened before the ruleset stays usable" caveat
+    would otherwise leave open.
+
+    The read-only list is DERIVED, never hardcoded. An installer needs its own
+    runtime — node for npm, the toolchain prefix for uv — and those live
+    wherever the host put them. Resolving the binary and allowing its prefix
+    keeps this working on a mise host, a system-package host and a CI runner
+    alike, and keeps check_portability.py from finding a machine-specific path
+    baked into the source.
+    """
+    from . import landlock
+
+    if language not in _CONFINABLE:
+        return None, [f"install_not_confined_{language}"] + landlock.unenforced_reasons()
+    if not landlock.available():
+        return None, landlock.unenforced_reasons()
+
+    # NOTHING under $HOME. An earlier version allowed ~/.npm, ~/.cargo and
+    # friends, because an installer denied its own cache fails outright rather
+    # than degrading — npm dies with EACCES on ~/.npm/_logs. That made
+    # "confined to its workspace" untrue in the one place a reader would care.
+    #
+    # Every manager's cache is redirected into the workspace by env instead
+    # (see _INSTALLERS), so the allowance is unnecessary and the claim is
+    # honest. The cost is real: caches are no longer shared between installs,
+    # so a repeat install re-downloads and the workspace holds more.
+    writable = [workspace]
+    for key in ("UV_CACHE_DIR", "npm_config_cache", "BUN_INSTALL_CACHE_DIR",
+                "COMPOSER_HOME", "COMPOSER_CACHE_DIR", "CARGO_HOME",
+                "GOMODCACHE", "GOPATH"):
+        value = env.get(key)
+        if value:
+            writable.append(str(pathlib.Path(value).expanduser()))
+    # A private temp dir, not the shared one: managers unpack there, and
+    # /tmp is where a confined process would otherwise drop things for
+    # something outside the sandbox to pick up.
+    private_tmp = pathlib.Path(workspace) / ".tmp"
+    private_tmp.mkdir(parents=True, exist_ok=True)
+    writable.append(str(private_tmp))
+    env.setdefault("TMPDIR", str(private_tmp))
+
+    # /run is not decoration: /etc/resolv.conf is a symlink to
+    # ../run/systemd/resolve/stub-resolv.conf on systemd hosts, so without it
+    # every install dies with EAI_AGAIN and looks like a network outage rather
+    # than a policy decision. Measured the same way.
+    readable = ["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc", "/proc",
+                "/opt", "/run", "/var/lib"]
+    resolved = shutil.which(bin_, path=executor.registry.runtime_path()) or shutil.which(bin_)
+    if resolved:
+        # Two levels up from <prefix>/bin/<tool> is the toolchain root, which is
+        # what a runtime actually needs — node reaches its own lib/, uv reaches
+        # the interpreter it targets.
+        real = pathlib.Path(resolved).resolve()
+        readable.extend([str(real.parent), str(real.parent.parent)])
+    readable.append(sys.prefix)
+    readable.append(sys.base_prefix)
+
+    def _apply() -> None:
+        # Raises on failure, which subprocess turns into a failed spawn. That
+        # is deliberate: an installer that could not be confined must not run
+        # unconfined while the result claims otherwise.
+        landlock.restrict_self(read_write=writable, read_only=readable)
+
+    return _apply, landlock.unenforced_reasons()
 
 
 def install(language: str, package: str, session_id: str | None = None,
@@ -113,28 +244,59 @@ def install(language: str, package: str, session_id: str | None = None,
     cmd = [p.replace("{target}", str(cwd)).replace("{pkg}", spec) for p in tmpl]
 
     env = dict(executor._env())
-    env.update(env_hint)
+    # {target} in an env hint, not just in argv. Every manager cache is
+    # redirected INTO the workspace so nothing under $HOME needs to be
+    # writable — see _confinement below for why that matters.
+    env.update({k: v.replace("{target}", str(cwd)) for k, v in env_hint.items()})
+    confine, unenforced = _confinement(bin_, str(cwd), env, name)
+
+    def _out(result: dict) -> dict:
+        """Attach what the confinement could NOT enforce, to every outcome.
+
+        A helper rather than five literals: the field matters most on the
+        paths people read least — a timeout or a non-zero exit is exactly when
+        someone asks "was this thing contained?" — and a return added later
+        that forgot it would answer by omission.
+        """
+        return {**result, "unenforced": unenforced} if unenforced else result
+
     try:
         p = subprocess.run(cmd, cwd=str(cwd), env=env, capture_output=True,
-                           text=True, timeout=600)
+                           text=True, timeout=600, preexec_fn=confine)
     except subprocess.TimeoutExpired:
-        return {"ok": False, "error": "package install timed out (600s)"}
+        return _out({"ok": False, "error": "package install timed out (600s)"})
     except Exception as exc:
-        return {"ok": False, "error": f"install failed: {exc}"}
+        return _out({"ok": False, "error": f"install failed: {exc}"})
 
     tail = (p.stdout + p.stderr)[-1200:]
     if p.returncode != 0:
-        return {"ok": False, "error": f"install failed (rc={p.returncode})",
-                "output_tail": tail}
+        # A failure caused by layer 1 is named, so "it did not install" is
+        # never mistaken for "the package does not exist". The flag is the
+        # actionable part: a native addon needs a build step this deliberately
+        # refuses to run.
+        # Gated on EVIDENCE, not on the flag being present. The first version
+        # fired whenever the flag was in argv, so it explained a sandbox failure
+        # ("Failed to discover managed Python installations") as a missing
+        # build step — a confident, wrong diagnosis attached to an unrelated
+        # error, which is worse than no hint at all.
+        hint = _NO_EXEC_FLAG.get(name)
+        err = f"install failed (rc={p.returncode})"
+        _looks_like_build = any(m in tail.lower() for m in
+                                ("no matching distribution", "sdist", "source distribution",
+                                 "build", "wheel", "prepare_metadata", "gyp"))
+        if hint and _looks_like_build:
+            err += (f"; note {hint} is passed, so a package needing a build "
+                    "step at install time will fail here by design")
+        return _out({"ok": False, "error": err, "output_tail": tail})
     # Executed code finds a package only when it lands in the directory the
     # program runs from — sys.path[0] for python, node_modules lookup for node.
     # An ad-hoc install goes to the shared cache, which is NOT that directory, so
     # say so instead of reporting a success the caller cannot use.
     importable = session_id is not None
-    return {"ok": True, "language": name, "package": spec,
+    return _out({"ok": True, "language": name, "package": spec,
             "target": str(cwd), "importable": importable,
             "note": None if importable else
                     "installed into the shared cache, which executed code does NOT "
                     "have on its import path — pass session_id to install somewhere "
                     "your code can import from",
-            "output_tail": tail[-600:]}
+            "output_tail": tail[-600:]})
