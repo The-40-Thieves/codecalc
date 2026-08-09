@@ -42,3 +42,7 @@ sessions/
 # rebuild — the gate catching it is the gate working, not an obstacle.
 graphify-out/*
 !graphify-out/GRAPH_REPORT.md
+
+# Claude Code agent worktrees live here; they are checkouts of this repo and
+# must never be committed into it.
+.claude/
