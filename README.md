@@ -3,10 +3,26 @@
 Run code in **31 languages**, evaluate symbolic math, solve logic problems, and
 measure complexity — all exposed as MCP tools any AI model or agent can call.
 
-**It makes no network calls.** No model, no API key, no gateway, no telemetry:
-the caller is already a language model, so codecalc is the part that runs things
-and measures them. `tests/test_offline.py` asserts this structurally — the
-package imports nothing that can open a socket.
+**codecalc itself opens no sockets.** No model, no API key, no gateway, no
+telemetry: the caller is already a language model, so codecalc is the part that
+runs things and measures them. `tests/test_offline.py` asserts this
+structurally — nothing under `codecalc/` imports anything that can open a
+socket, asserted per module.
+
+That is a claim about the **package**, not about every tool call, and the
+difference is worth stating rather than leaving a reader to discover:
+
+| layer | reaches the network? |
+|---|---|
+| the codecalc package itself | **Never.** No HTTP client, no gateway, no telemetry |
+| `install_package` | **Yes, by design.** It runs uv / npm / gem / cargo, which fetch from their registries. Installer hooks also run *outside* the sandbox — see [SECURITY.md](SECURITY.md) |
+| `runtimes_status`, `update_runtimes` | **Yes.** They shell out to mise / rustup / swiftly / npm, which check remote versions |
+| code you execute | **Yes, unless `no_net=True`** — and that shim needs the native executor, so the pure-Python fallback reports it in `unenforced` instead of applying it |
+
+The earlier wording here was an unqualified "it makes no network calls", which
+the structural test cannot support and three of the tools above contradict. A
+guarantee stated more broadly than it is enforced is the failure this repo keeps
+correcting, so it is corrected here too.
 
 ## Architecture (language-per-strength)
 

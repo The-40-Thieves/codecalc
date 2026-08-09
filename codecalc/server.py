@@ -180,7 +180,18 @@ def install_package(language: str, package: str, session_id: str | None = None,
     """Install a package for a language (uv pip / npm / gem / go get / cargo add...).
 
     With session_id, installs into that session's workspace so executed code
-    can import it. Without, installs into a shared cache. Requires network.
+    can import it. Without, installs into a shared cache.
+
+    NETWORK: yes, always. The package manager fetches from its registry (PyPI,
+    npm, rubygems, crates.io). codecalc opens no socket itself; the child
+    process does.
+
+    NOT SANDBOXED: the installer runs as a direct subprocess of the server, so
+    install-time hooks (npm postinstall, Python build backends, Cargo build
+    scripts) execute with the server user's filesystem access. The environment
+    is still restricted to the allowlist, so secrets do not leak, but the
+    filesystem is not confined. Do not point this at untrusted input. See
+    SECURITY.md and issue #23.
     """
     return packages.install(language, package, session_id=session_id, version=version)
 
@@ -350,6 +361,10 @@ def runtimes_status(languages: str = "") -> dict:
     Reports current vs latest version per language, which package manager owns
     it (mise/rustup/swiftly/apt/npm/uv), and the exact command that would run.
     Optional `languages` = comma-separated subset, e.g. "python3,node,rust".
+
+    NETWORK: yes. Non-mutating refers to this machine's runtimes, not to
+    traffic — each package manager is asked what the latest version is, and
+    they answer by contacting their own remote index.
     """
     return runtimes.status(languages or None)
 
@@ -361,6 +376,11 @@ def update_runtimes(languages: str = "", apply: bool = False, timeout: int = 600
     anything. Pass apply=True to actually execute them (mise up, rustup update,
     swiftly update, apt-get upgrade of language packages, npm -g update, uv tool
     upgrade). `languages` = comma-separated subset; empty = all.
+
+    NETWORK: yes, on both paths. apply=False still asks each manager what the
+    latest version is, which is a remote lookup; apply=True additionally
+    downloads and installs. "Dry run" bounds what changes on disk, not what is
+    sent.
     """
     return runtimes.update(languages or None, apply=apply, timeout=timeout)
 
