@@ -615,6 +615,13 @@ def float_repr(x: float) -> dict:
     # ±5e-324. The bit-level path stays for bits_hex/exact/stored, which are
     # legitimately about the stored encoding rather than the value's
     # neighbours.
+    #
+    # This deliberately CHANGES +0.0 too, whose `prev` was -0.0 and is now
+    # -5e-324. The old special case reasoned that the adjacent bit pattern
+    # below +0.0 is -0.0, which is true of the ENCODING and false of the
+    # VALUE: -0.0 == 0.0, so it is not a neighbour on the number line. Mixing
+    # those two questions in one field is what produced the -0.0 bug. The
+    # encoding question is still answered, by bits_hex/sign/stored.
     next_val = math.nextafter(x, math.inf)
     prev_val = math.nextafter(x, -math.inf)
     ulp = abs(next_val - x)

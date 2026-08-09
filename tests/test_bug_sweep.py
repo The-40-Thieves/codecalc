@@ -210,7 +210,15 @@ check("float_repr(-0.0): prev is negative, not NaN and not GREATER than the inpu
 check("float_repr(-0.0): next is not NaN", r.get("next") == 5e-324, f"-> next={r.get('next')}")
 check("float_repr(-0.0): ulp is not NaN", r.get("ulp") == 5e-324, f"-> ulp={r.get('ulp')}")
 r = exact.float_repr(0.0)
-check("float_repr(0.0) neighbours unaffected by the -0.0 fix",
+# +0.0's `prev` DID change with this fix, from -0.0 to -5e-324, and the
+# assertion below is the new value. Recorded rather than glossed: the old code
+# special-cased it deliberately, on the reasoning that the adjacent bit PATTERN
+# below +0.0 is -0.0. That is true of the encoding and false of the value, and
+# mixing the two is what produced the -0.0 bug in the first place. `prev`/`next`/
+# `ulp` are value fields; `bits_hex`/`stored` are the encoding fields and still
+# report the pattern. math.nextafter answers the value question for every input
+# including both zeros, so it is now the only source for the three value fields.
+check("float_repr(0.0): prev is now -5e-324, NOT -0.0 (deliberate, see above)",
       r.get("prev") == -5e-324 and r.get("next") == 5e-324, f"-> {r}")
 # non-finite input to percentiles must not escape as a bare NaN (not valid
 # JSON) or be silently classified as a real percentile.
