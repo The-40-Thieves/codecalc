@@ -284,12 +284,20 @@ class Worker:
     def __init__(self, language: str, proc: subprocess.Popen, proto=None):
         self.language = language
         self.proc = proc
-        #: Where RESPONSES arrive. A dedicated pipe where the platform allows
-        #: one, so that output written to fd 1 by a child process cannot land in
-        #: the protocol stream. Falls back to the child's stdout on Windows,
-        #: where there is no preexec_fn to place the descriptor — there the
-        #: echoed request id still makes corruption detectable, just not
-        #: impossible.
+        #: Where RESPONSES arrive. Three routes, and on none of them can output
+        #: written to fd 1 by a child process land in the protocol stream:
+        #:
+        #:   node, POSIX     an out-of-band pipe handed over with `pass_fds`
+        #:   node, Windows   a `_TailReader` over a file the worker appends to,
+        #:                   because there is no `pass_fds` or `preexec_fn`
+        #:                   there to place a descriptor
+        #:   python3         the child's stdout, safe because the worker dups
+        #:                   the ORIGINAL fd 1 at startup and points fd 1 at a
+        #:                   capture file while executing (`_worker_bootstrap`)
+        #:
+        #: The echoed request id is a backstop on all three, not the guarantee
+        #: on any of them. It was the only guard on Windows before the
+        #: file-backed route existed; it is not any more.
         self._proto = proto if proto is not None else proc.stdout
         self._wlock = threading.Lock()
         self._close_lock = threading.Lock()
@@ -508,8 +516,12 @@ def _proto_pipe() -> tuple[int, int] | None:
     verified: fd 3 came back EBADF in the child. `pass_fds` keeps the original
     number open and inheritable, which is the supported way to do this.
 
-    Windows has neither preexec_fn nor pass_fds, so there the protocol stays on
-    stdout and the echoed request id is the only guard.
+    Windows has neither preexec_fn nor pass_fds, so no descriptor can be handed
+    over and this returns None. That is NOT a fallback to stdout: the caller
+    gives the worker a file to append to instead (`CODECALC_PROTO_PATH`, read
+    back through `_TailReader`), which keeps fd 1 out of the protocol by a
+    different route. `_FORCE_FILE_PROTOCOL` takes that same path on POSIX so the
+    suite exercises it where Windows is not available to.
     """
     if os.name == "nt" or _FORCE_FILE_PROTOCOL:
         return None
