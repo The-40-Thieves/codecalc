@@ -72,9 +72,25 @@ def classify_case(a: dict, b: dict) -> tuple[str, str]:
         return "mismatch", "the translation failed to compile"
 
     if a_ok and b_ok:
-        if _normalize(a.get("stdout", "")) == _normalize(b.get("stdout", "")):
-            return "match", ""
-        return "mismatch", "both ran; stdout differs"
+        a_out, b_out = _normalize(a.get("stdout", "")), _normalize(b.get("stdout", ""))
+        if a_out != b_out:
+            return "mismatch", "both ran; stdout differs"
+        if a_out == "":
+            # Both succeeded and both produced NOTHING. Agreeing on an
+            # absence of output is not evidence of a match: an exit-0 result
+            # with empty stdout is indistinguishable here from one whose
+            # output was silently lost (issue #42 — compare_execution saw
+            # `node` return ok=True/False with empty stdout on windows-latest
+            # while sibling languages produced real output from the same
+            # snippet). Scoring two such results as a "match" would let that
+            # race certify a translation, or a "winner", on exactly the case
+            # where nothing was actually compared — the same blind spot as
+            # "both failed" above, one level up: a program that never
+            # produced output gives no more evidence than one that crashed.
+            return "inconclusive", ("both programs succeeded but produced no "
+                                    "output; an absence of output is not "
+                                    "evidence of a match")
+        return "match", ""
 
     if a_ok != b_ok:
         which = "the translation" if a_ok else "the source program"

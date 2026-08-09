@@ -13,6 +13,28 @@ from codecalc import executor, logic, tools
 print("backend:", executor.backend())
 print("startup_without_sympy:", round(time.monotonic() - t0, 3), "s")
 
+
+def _missing_runtime(r: dict) -> bool:
+    """True when this result means the interpreter/compiler for this language
+    could not be spawned on this machine at all — not that the sandboxed
+    program ran and misbehaved. That is a fact about the machine, and must
+    read as SKIP, never as a false FAIL. Same detection as test_smoke.py:
+    the pure-Python fallback's `_runtime_unavailable_result` (exit_code
+    None, stderr says "runtime unavailable") and the Rust executor's spawn
+    failure (exit_code -2, stderr says "spawn failed"); a genuine
+    wrong-output failure always carries a real exit_code instead.
+    """
+    if r.get("ok") or r.get("timed_out"):
+        return False
+    stderr = r.get("stderr") or ""
+    return r.get("exit_code") in (None, -2) and (
+        "runtime unavailable" in stderr or "spawn failed" in stderr)
+
+
+def skip(name: str, why: str) -> None:
+    print(f"SKIP {name} ({why})")
+
+
 # Rust-executor language smoke (subset — full 31 already validated)
 for lang, code in {
     "python3": "print('rust-exec', 6*7)",
@@ -28,7 +50,11 @@ for lang, code in {
 }.items():
     r = executor.execute(lang, code, timeout=30)
     combined = r.get("stdout", "") + r.get("stderr", "")
-    print(f"{'PASS' if r.get('ok') and 'rust-exec' in combined else 'FAIL':4} {lang:10} {r.get('duration_ms',0):>7}ms")
+    ok = r.get("ok") and "rust-exec" in combined
+    if not ok and _missing_runtime(r):
+        skip(f"{lang} rust-exec smoke", (r.get("stderr") or "")[:160].replace("\n", " "))
+        continue
+    print(f"{'PASS' if ok else 'FAIL':4} {lang:10} {r.get('duration_ms',0):>7}ms")
 
 # logic layer
 print("eval:", json.dumps(logic.evaluate_expression("sqrt(144)+2**10"))[:80])
