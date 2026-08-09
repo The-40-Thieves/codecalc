@@ -379,6 +379,28 @@ _executor_src = inspect.getsource(executor)
 check("_require_native_or_die() is called at module scope (import time)",
       re.search(r"^_require_native_or_die\(\)", _executor_src, re.M) is not None)
 
+# ═══ the bundled binary lives INSIDE the package (#59) ═════════════════════
+# The wheel used to force_include to `bin/`, which installs to a TOP-LEVEL
+# site-packages/bin/ — a directory shared with every other distribution in the
+# environment. It now installs to codecalc/bin/, inside the namespace this
+# distribution owns, matching what Playwright and Zig do with their bundled
+# binaries. A source checkout still keeps built binaries at <repo>/bin, so both
+# roots are searched; package-local must come FIRST so an installed artifact
+# wins over anything lying in a working copy.
+import codecalc as _cc
+
+_pkg = pathlib.Path(_cc.__file__).resolve().parent
+_cands = [pathlib.Path(c) for c in executor._binary_candidates()]
+check("binary lookup searches the package's own bin/ first",
+      _cands and _cands[0].parent == _pkg / "bin", f"-> {_cands[0] if _cands else None}")
+check("binary lookup still searches the checkout's bin/ too",
+      any(c.parent == _pkg.parent / "bin" for c in _cands),
+      f"-> roots {sorted({str(c.parent) for c in _cands})}")
+check("package-local candidates all precede checkout candidates",
+      [c.parent == _pkg / "bin" for c in _cands] == sorted(
+          [c.parent == _pkg / "bin" for c in _cands], reverse=True),
+      f"-> {[c.parent.name + '/' + c.name for c in _cands]}")
+
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== ALL BUG-SWEEP REGRESSIONS FIXED ===")
 sys.exit(1 if FAILS else 0)

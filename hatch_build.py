@@ -8,9 +8,10 @@ backend — which cannot enforce `no_net` (it says so in its own `unenforced`
 field). See GitHub issue #24.
 
 This hook does three things for a wheel build:
-  1. force_include the platform's `bin/codecalc-exec[.exe]`, if it was built
+  1. force_include the platform's `bin/codecalc-exec[.exe]` to `codecalc/bin/`
+     inside the installed package, if it was built
      before `hatch build`/`uv build` ran (see README.md "Build the Rust core").
-  2. force_include the matching `bin/blocknet.so` / `bin/blocknet.dylib`
+  2. force_include the matching `bin/blocknet.so` / `bin/blocknet.dylib` beside it
      shim on the platforms that have one. The shim and the binary must travel
      together — `executor/build.rs` documents why a binary without its
      version-matched shim silently enforces a stale (or no) `--no-net` policy.
@@ -67,13 +68,13 @@ class ExecutorBuildHook(BuildHookInterface):
             )
             return
 
-        build_data["force_include"][str(exe)] = f"bin/{_EXE_NAME}"
+        build_data["force_include"][str(exe)] = f"codecalc/bin/{_EXE_NAME}"
 
         shim_name = _SHIM_NAME_BY_SYSTEM.get(platform.system().lower())
         if shim_name is not None:
             shim = bin_dir / shim_name
             if shim.is_file():
-                build_data["force_include"][str(shim)] = f"bin/{shim_name}"
+                build_data["force_include"][str(shim)] = f"codecalc/bin/{shim_name}"
             else:
                 self.app.display_warning(
                     f"{shim} not found — packaging codecalc-exec WITHOUT its "
