@@ -29,12 +29,30 @@ name: release
 #
 # Linux musl cross-compilation reuses exactly what ci-rust.yml's
 # `musl-cross-build` job already validates: cargo-zigbuild + zig as the
-# linker. The --no-net shim (blocknet.c) is compiled separately with
-# `zig cc -target <zig-triple>` for the same reason build.rs's own convenience
-# copy is NOT relied on here: build.rs shells out to plain `cc`, which is the
-# HOST compiler and would silently produce a wrong-architecture .so when
-# cross-compiling — so this workflow builds the shim itself, once per target,
-# with a compiler that actually targets that architecture.
+# linker. That gives the EXECUTOR a static binary that runs on glibc and
+# musl alike.
+#
+# The --no-net shim (blocknet.c) is a SEPARATE artifact loaded by a
+# DIFFERENT mechanism — dlopen/LD_PRELOAD by the target system's OWN
+# dynamic loader at runtime, not linked into codecalc-exec — so its
+# linkage does not need to match the executor's, and matching it was
+# exactly the bug (issue #50): building the shim with
+# `zig cc -target <arch>-linux-musl` produced a dynamically-linked object
+# (NEEDED libc.so, unversioned) that a glibc system's loader cannot
+# resolve. On some systems that aborts the child process with
+# "invalid ELF header"; on most it just drops the LD_PRELOAD entry and
+# silently runs the code with no network block at all — while the wheel
+# is tagged manylinux (glibc) and every field in the JSON result still
+# looks fine. The shim must match the libc the WHEEL is tagged for, not
+# the libc the executor happens to be linked against.
+#
+# Fixed by building the shim with the RUNNER's OWN `cc`. Every `build` job
+# here runs on a runner whose native architecture already matches its
+# target (ubuntu-latest = x86_64, ubuntu-24.04-arm = aarch64,
+# macos-latest = arm64, macos-15-intel = x86_64), so a native `cc` build
+# needs no cross-compilation flag to land on the right architecture — it
+# does so automatically, and it is glibc-linked on both Linux runners for
+# free.
 #
 # What this workflow deliberately does NOT do: push a tag or create a
 # release. It is validated via `workflow_dispatch` and local builds; the
@@ -81,7 +99,6 @@ jobs:
             os: ubuntu-latest
             rust_target: x86_64-unknown-linux-musl
             kind: musl
-            zig_target: x86_64-linux-musl
             shim: so
             exe_ext: ''
             wheel_tags: 'py3-none-manylinux_2_17_x86_64'
@@ -89,7 +106,6 @@ jobs:
             os: ubuntu-24.04-arm
             rust_target: aarch64-unknown-linux-musl
             kind: musl
-            zig_target: aarch64-linux-musl
             shim: so
             exe_ext: ''
             wheel_tags: 'py3-none-manylinux_2_17_aarch64'
@@ -97,7 +113,6 @@ jobs:
             os: macos-latest
             rust_target: aarch64-apple-darwin
             kind: native
-            zig_target: ''
             shim: dylib
             exe_ext: ''
             wheel_tags: 'py3-none-macosx_11_0_arm64'
@@ -105,7 +120,6 @@ jobs:
             os: macos-15-intel
             rust_target: x86_64-apple-darwin
             kind: native
-            zig_target: ''
             shim: dylib
             exe_ext: ''
             wheel_tags: 'py3-none-macosx_10_12_x86_64'
@@ -113,7 +127,6 @@ jobs:
             os: windows-latest
             rust_target: x86_64-pc-windows-msvc
             kind: native
-            zig_target: ''
             shim: none
             exe_ext: '.exe'
             wheel_tags: 'py3-none-win_amd64'
@@ -164,27 +177,59 @@ jobs:
           fi
           echo "ok: statically linked, $(stat -c%s "$bin") bytes"
 
-      # Built separately from build.rs's own copy — see the workflow header
-      # for why plain `cc` cannot be trusted to target the right architecture
-      # here. Skipped on Windows: no LD_PRELOAD equivalent to hang a shim on,
-      # same as ci-rust.yml's `blocknet` job and codecalc/executor.py's
-      # `unenforced` reporting.
+      # Built separately from build.rs's own copy — that one shells out to
+      # plain `cc` too, for local dev builds, but this workflow needs the
+      # artifact reproduced and asserted deliberately rather than inherited
+      # implicitly from `cargo build`.
+      #
+      # ALWAYS the runner's own native `cc` — see the workflow header for why
+      # that is correct here (and was NOT, for Linux, when this used to be
+      # `zig cc -target <arch>-linux-musl`). Skipped on Windows: no
+      # LD_PRELOAD equivalent to hang a shim on, same as ci-rust.yml's
+      # `blocknet` job and codecalc/executor.py's `unenforced` reporting.
       - name: build the --no-net shim
         working-directory: executor
         shell: bash
         run: |
           set -euo pipefail
           case "${{ matrix.shim }}" in
-            so)
-              zig cc -target ${{ matrix.zig_target }} -shared -fPIC -O2 -Wall -Wextra -Werror -o blocknet.so blocknet.c
-              ;;
-            dylib)
-              cc -shared -fPIC -O2 -Wall -Wextra -Werror -o blocknet.dylib blocknet.c
+            so|dylib)
+              cc -shared -fPIC -O2 -Wall -Wextra -Werror -o "blocknet.${{ matrix.shim }}" blocknet.c
               ;;
             none)
               echo "windows: no shim to build (--no-net is reported unenforced)"
               ;;
           esac
+
+      # BUILD-TIME floor: a shim that builds is not a shim that loads. Prove
+      # it is linked against the libc the WHEEL is tagged for (manylinux =
+      # glibc), not merely that compilation succeeded — compilation
+      # succeeded for the musl-linked shim too, and that one failed to load.
+      # A musl build of this exact source produces `NEEDED [libc.so]` (no
+      # version — musl has no soname versioning); a glibc build produces
+      # `NEEDED [libc.so.6]`. `ldd` is the strongest check available on this
+      # runner: this runner's libc IS the libc the manylinux wheel is tagged
+      # for (see the workflow header), so if `ldd` cannot resolve the shim
+      # here, dlopen cannot resolve it on an end user's machine either.
+      - name: assert the shim is linked against glibc, matching the wheel tag
+        if: matrix.shim == 'so'
+        working-directory: executor
+        shell: bash
+        run: |
+          set -euo pipefail
+          so=blocknet.so
+          file "$so"
+          needed=$(readelf -d "$so" | grep NEEDED)
+          echo "$needed"
+          if ! echo "$needed" | grep -q 'libc\.so\.6'; then
+            echo "::error::$so is not linked against a versioned glibc libc.so.6 ($needed) — the manylinux wheel needs a glibc-linked shim, not a musl one."
+            exit 1
+          fi
+          if ! ldd "$so"; then
+            echo "::error::$so built but this runner's own dynamic loader cannot resolve it — it would fail to load for a user on the same libc the wheel is tagged for."
+            exit 1
+          fi
+          echo "ok: $so is glibc-linked and loads on this runner"
 
       # The binary and its shim must travel together — a binary installed
       # without its version-matched shim silently reports --no-net as
@@ -230,11 +275,15 @@ jobs:
           # sandbox that cannot enforce no_net.
           #
           # ONE tag per target. Publishing the Linux payload under manylinux
-          # AND musllinux was tried and reverted: the executor is static, but
-          # blocknet.so is built `zig cc -target ...-musl -shared` and comes out
-          # DYNAMICALLY linked against musl libc, so on glibc it fails to load
-          # and no_net silently stops being enforced. Same payload, two tags,
-          # one of them a lie. Tracked separately; see the musllinux issue.
+          # AND musllinux was tried and reverted: same payload, two tags, and
+          # only one libc could be true of a single blocknet.so at a time.
+          # blocknet.so is now built with the runner's own (glibc) `cc` — see
+          # the workflow header — so it matches the manylinux tag this job
+          # actually publishes. It does NOT make the payload musl-correct:
+          # Alpine/musl users still get no Linux wheel at all here (an
+          # absence, not a wrong artifact) and would need a real musl build
+          # AND a musl verify environment, which is out of scope for this fix
+          # (issue #50) — see the musllinux issue.
           for tag in $WHEEL_TAGS; do
             echo "::group::wheel $tag"
             CODECALC_WHEEL_TAG="$tag" uv build --wheel --out-dir dist
@@ -357,6 +406,79 @@ jobs:
           binpath=$("$py" -c "from codecalc import executor; print(executor._rust_binary())")
           echo "binary: $binpath"
           "$py" scripts/contract_check.py "$binpath"
+
+      # Issue #50's acceptance criterion, and the whole point of this job:
+      # `backend() == "rust"` above passes even when the --no-net shim is
+      # unloadable, because it says nothing about the shim at all. This
+      # asserts the actual guarantee two ways, on the INSTALLED wheel:
+      #
+      #   1. `unenforced` must be empty — the executor's own accounting of
+      #      what it could not apply.
+      #   2. a real socket connect() attempt, made BY sandboxed code running
+      #      with no_net=True, must actually be refused. This is the part
+      #      `unenforced` alone cannot prove: the executor only checks that
+      #      a shim FILE exists next to the binary, not that the target
+      #      system's dynamic loader can actually resolve and load it — a
+      #      musl-linked blocknet.so on a glibc host passes that file-exists
+      #      check and still reports unenforced: [] while ld.so silently
+      #      drops the LD_PRELOAD entry and the connection goes through.
+      #      UDP connect() is used deliberately: it never sends a packet
+      #      (the kernel just records the peer address), so this needs no
+      #      real network reachability and cannot hang.
+      #
+      # Linux only: no_net is best-effort on macOS (SIP/hardened-runtime can
+      # strip DYLD_INSERT_LIBRARIES outright — see blocknet.c) and entirely
+      # unimplemented on Windows, both already reported via `unenforced`
+      # rather than asserted here as a hard pass/fail.
+      - name: no_net=True actually blocks a connection (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$py" - <<'PYEOF'
+          import json
+          from codecalc import executor
+
+          probe_code = (
+              "import socket, sys\n"
+              "try:\n"
+              "    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n"
+              "    s.connect(('192.0.2.1', 65535))\n"
+              "    print('NETWORK_NOT_BLOCKED')\n"
+              "except PermissionError:\n"
+              "    print('NETWORK_BLOCKED')\n"
+              "except OSError as e:\n"
+              "    print('NETWORK_BLOCKED_OTHER:' + str(e))\n"
+          )
+
+          result = executor.execute("python3", probe_code, no_net=True, timeout=10)
+          print(json.dumps(result, indent=2))
+
+          unenforced = result.get("unenforced", [])
+          assert unenforced == [], (
+              f"no_net=True left {unenforced!r} unenforced — the executor "
+              "itself says the shim did not apply. See issue #50."
+          )
+
+          stdout = result.get("stdout", "")
+          assert result.get("ok") and result.get("exit_code") == 0, (
+              f"sandboxed code did not run cleanly under no_net=True "
+              f"(ok={result.get('ok')!r}, exit_code={result.get('exit_code')!r}, "
+              f"stderr={result.get('stderr')!r}) — a shim that fails to load "
+              "can crash the child instead of silently letting it through; "
+              "either way the guarantee did not hold. See issue #50."
+          )
+          assert "NETWORK_BLOCKED" in stdout, (
+              f"a real connect() attempt was NOT refused under no_net=True "
+              f"(stdout={stdout!r}) — unenforced reported empty but the "
+              "network was actually reachable. This is exactly the failure "
+              "mode of a shim that builds and 'is present' but cannot "
+              "load: e.g. a musl-linked blocknet.so on a glibc host, where "
+              "ld.so silently drops a bad LD_PRELOAD entry and keeps going. "
+              "See issue #50."
+          )
+          print("ok: no_net=True is enforced — unenforced == [] and the connect() was refused")
+          PYEOF
 
   release-assets:
     name: checksums + attach to GitHub release

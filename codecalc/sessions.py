@@ -308,18 +308,22 @@ class Worker:
     def __init__(self, language: str, proc: subprocess.Popen, proto=None):
         self.language = language
         self.proc = proc
-        #: Where RESPONSES arrive. Three routes, and on none of them can output
+        #: Where RESPONSES arrive. Four routes, and on none of them can output
         #: written to fd 1 by a child process land in the protocol stream:
         #:
-        #:   node, POSIX     an out-of-band pipe handed over with `pass_fds`
-        #:   node, Windows   a `_TailReader` over a file the worker appends to,
-        #:                   because there is no `pass_fds` or `preexec_fn`
-        #:                   there to place a descriptor
-        #:   python3         the child's stdout, safe because the worker dups
-        #:                   the ORIGINAL fd 1 at startup and points fd 1 at a
-        #:                   capture file while executing (`_worker_bootstrap`)
+        #:   node, POSIX      an out-of-band pipe handed over with `pass_fds`
+        #:   node, Windows    a `_TailReader` over a file the worker appends to,
+        #:                    because there is no `pass_fds` or `preexec_fn`
+        #:                    there to place a descriptor
+        #:   python3, POSIX   the child's stdout, safe because the worker dups
+        #:                    the ORIGINAL fd 1 at startup and points fd 1 at a
+        #:                    capture file while executing (`_worker_bootstrap`)
+        #:   python3, Windows a `_TailReader` over a file, same as node — the
+        #:                    fd-1 dup above is not trusted there: a child can
+        #:                    still be handed the OS-level standard HANDLE
+        #:                    instead of the redirected CRT descriptor
         #:
-        #: The echoed request id is a backstop on all three, not the guarantee
+        #: The echoed request id is a backstop on all four, not the guarantee
         #: on any of them. It was the only guard on Windows before the
         #: file-backed route existed; it is not any more.
         self._proto = proto if proto is not None else proc.stdout
@@ -485,9 +489,10 @@ for line in sys.stdin:
 
 
 #: Test seam: force the file-backed protocol channel on a platform that would
-#: otherwise use a pipe. The Windows path is otherwise unreachable from CI on
-#: Linux or macOS, and an unexercised fallback is one that works until it is
-#: needed.
+#: otherwise use a pipe (node) or a dup'd fd 1 (python3). The Windows path is
+#: otherwise unreachable from CI on Linux or macOS, and an unexercised
+#: fallback is one that works until it is needed. Read by `_spawn_worker` for
+#: BOTH worker languages.
 _FORCE_FILE_PROTOCOL = False
 
 
@@ -556,20 +561,37 @@ def _spawn_worker(language: str, workdir: Path) -> Worker | None:
     bootstrap = Path(__file__).resolve().with_name("_worker_bootstrap.py")
     # Only node needs an out-of-band pipe. The python worker keeps a private dup
     # of the original fd 1 taken before anything is redirected, which gives it
-    # the same guarantee without an extra descriptor.
+    # the same guarantee without an extra descriptor — except on Windows (or
+    # forced), where the file-backed route below stands in for it, for the same
+    # reason node needs one there: a subprocess can still write through the
+    # process's inherited OS stdout HANDLE rather than the redirected CRT
+    # descriptor the dup trick relies on.
     pipe = _proto_pipe() if language != "python3" else None
     proto = None
     try:
         if language == "python3":
+            env = executor._env()
+            proto_file: Path | None = None
+            if os.name == "nt" or _FORCE_FILE_PROTOCOL:
+                # Same file-backed arrangement node uses on Windows (see the
+                # `else` branch below): a path executed code cannot reach by
+                # writing to fd 1, because on Windows the dup'd-fd-1 protocol
+                # _worker_bootstrap.py otherwise relies on is not trustworthy.
+                fd, name = tempfile.mkstemp(prefix="codecalc-proto-", suffix=".jsonl")
+                os.close(fd)
+                proto_file = Path(name)
+                env["CODECALC_PROTO_PATH"] = str(proto_file)
             proc = subprocess.Popen(
                 ["python3", "-u", str(bootstrap)],
                 cwd=str(workdir),
-                env=executor._env(),
+                env=env,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 start_new_session=True,
                 preexec_fn=executor.session_worker_limits(),
             )
+            if proto_file is not None:
+                proto = _TailReader(proto_file, proc)
         else:  # node
             env = executor._env()
             limits = executor.session_worker_limits()
