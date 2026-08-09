@@ -43,6 +43,29 @@ rather than an allowlist of names, because the names SymPy accepts are open
 (every symbol a caller invents) while the syntax an attacker needs is small
 and closed. If a bypass is found the answer is to stop passing caller strings
 to an evaluator, not to widen this list.
+
+UPSTREAM AGREES, AND HAS TRIED THIS:
+That last sentence was written from first principles here. SymPy's own
+maintainers reached it about their own attempt at the same thing. PR #12524
+added a `safe=` flag to sympify() built on an AST whitelist plus a name
+blacklist — structurally this module — and it was NEVER MERGED, abandoned
+since 2020:
+
+    "I am sure that someone malicious would be able to circumvent what we
+     have here so I would still describe this as unsafe rather than
+     'mostly safe'."                                     -- oscarbenjamin
+
+    "security theater that leads users into a false sense of security,
+     because it can still be bypassed"     -- asmeurer, the PR's own author
+
+sympy/sympy#10805 ("sympify shouldn't use eval") is still open, and the fix
+advocated there is a complete direct evaluator rather than any screening. So
+this file should be read as buying time against the obvious attacks, not as a
+boundary. Do not let its passing be mistaken for the input being safe.
+
+Also verified against the pinned version rather than assumed: sympy 1.14.0's
+sympify takes (a, locals, convert_xor, strict, rational, evaluate). There is
+no `safe=` to pass — code written against that PR raises TypeError.
 """
 
 from __future__ import annotations
