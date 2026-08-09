@@ -9,14 +9,16 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import pathlib
+import re
 import sys
 import time
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from codecalc import exact, logic, mcp_middleware, optimization, tools, units
+from codecalc import exact, executor, logic, mcp_middleware, optimization, tools, units
 
 FAILS: list[str] = []
 
@@ -288,6 +290,94 @@ for name in ("calc_exact", "algebraic_equiv", "solve_expression",
     check(f"{name} has a bounded TOOL_TIMEOUTS entry",
           mcp_middleware.TOOL_TIMEOUTS.get(name) == 20,
           f"-> {mcp_middleware.TOOL_TIMEOUTS.get(name)}")
+
+# ═══ issue #24: execute()'s rust path never reported which backend answered ═
+# Measured before this fix: `sorted(executor.execute("python3", "print(1)"))`
+# on the rust path carried no "backend" key at all, while the python fallback
+# already had `"backend": "python"` — so an absent key was indistinguishable
+# from an older build that never added the field. Fixed at the one place both
+# backends' results pass through a caller: where execute()'s rust branch
+# parses the binary's own JSON (codecalc/executor.py). The binary's own
+# contract (scripts/contract_check.py) is untouched — it still emits no
+# "backend" key, by design.
+#
+# Compared against executor.backend() rather than hardcoded, because CI runs
+# this file both with the rust binary built (backend()=="rust") and without
+# it (backend()=="python", e.g. the plain OS/version matrix job that never
+# builds bin/codecalc-exec) — a literal "rust" here would fail every run of
+# the second kind for a reason that has nothing to do with this fix.
+_live_backend = executor.backend()
+_r = executor.execute("python3", "print(1)")
+check(f"execute() backend field is present ({_live_backend!r} on this machine)",
+      "backend" in _r, f"-> keys={sorted(_r)}")
+if _live_backend == "rust":
+    check("rust path: backend is the literal string 'rust', not merely present",
+          _r.get("backend") == "rust", f"-> {_r.get('backend')!r}")
+else:
+    check("python fallback: backend is the literal string 'python'",
+          _r.get("backend") == "python", f"-> {_r.get('backend')!r}")
+
+# ═══ issue #24: CODECALC_REQUIRE_NATIVE must fail closed, not downgrade silently ═
+# Measured before this fix: setting CODECALC_REQUIRE_NATIVE=1 with no working
+# rust binary changed nothing observable — import succeeded, executor.backend()
+# still said "python", and execute() still ran normally on the fallback whose
+# own `unenforced` field admits it cannot apply no_net. codecalc/executor.py
+# now runs _require_native_or_die() once, at import time (right after `_rust`
+# is resolved), which raises RuntimeError naming the variable instead.
+#
+# Exercised by calling _require_native_or_die() directly against controlled
+# `executor._rust` values rather than by re-importing the module (a second
+# `import codecalc.executor` would hit sys.modules and never re-run the
+# module-level check) or by spawning a subprocess (whose result would depend
+# on whether THIS machine happens to already have bin/codecalc-exec built,
+# which is exactly the kind of environment-dependent flake this suite avoids
+# elsewhere). The manual, real-import demonstration of both branches — a
+# fresh interpreter, CODECALC_REQUIRE_NATIVE=1, with and without bin/codecalc-exec
+# present — is in this change's commit message.
+_orig_rust = executor._rust
+_orig_env = os.environ.get("CODECALC_REQUIRE_NATIVE")
+try:
+    os.environ.pop("CODECALC_REQUIRE_NATIVE", None)
+    executor._rust = None
+    try:
+        executor._require_native_or_die()
+        check("CODECALC_REQUIRE_NATIVE unset + no binary: does not raise", True)
+    except RuntimeError as exc:
+        check("CODECALC_REQUIRE_NATIVE unset + no binary: does not raise", False,
+              f"-> raised {exc}")
+
+    os.environ["CODECALC_REQUIRE_NATIVE"] = "1"
+    executor._rust = "/fake/codecalc-exec"  # any truthy value stands in for "found"
+    try:
+        executor._require_native_or_die()
+        check("CODECALC_REQUIRE_NATIVE=1 + binary present: does not raise", True)
+    except RuntimeError as exc:
+        check("CODECALC_REQUIRE_NATIVE=1 + binary present: does not raise", False,
+              f"-> raised {exc}")
+
+    executor._rust = None
+    try:
+        executor._require_native_or_die()
+        check("CODECALC_REQUIRE_NATIVE=1 + no binary: raises RuntimeError", False,
+              "-> did not raise")
+    except RuntimeError as exc:
+        check("CODECALC_REQUIRE_NATIVE=1 + no binary: raises RuntimeError", True)
+        check("  ...and the message names CODECALC_REQUIRE_NATIVE",
+              "CODECALC_REQUIRE_NATIVE" in str(exc), f"-> {exc}")
+finally:
+    executor._rust = _orig_rust
+    if _orig_env is None:
+        os.environ.pop("CODECALC_REQUIRE_NATIVE", None)
+    else:
+        os.environ["CODECALC_REQUIRE_NATIVE"] = _orig_env
+
+# ...and the check is actually WIRED at import time, not just defined and
+# never called — the same "defined but dead" gap scripts/check_parity.py
+# already guards against for the Rust/Python identity-checked deletion pair.
+# (`inspect` was already imported above, for tools._measure's source check.)
+_executor_src = inspect.getsource(executor)
+check("_require_native_or_die() is called at module scope (import time)",
+      re.search(r"^_require_native_or_die\(\)", _executor_src, re.M) is not None)
 
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== ALL BUG-SWEEP REGRESSIONS FIXED ===")
