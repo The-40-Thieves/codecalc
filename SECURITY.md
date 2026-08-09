@@ -30,7 +30,8 @@ codecalc **runs untrusted code in 31 languages**. That is its function, not a si
 
 - Executed code consuming CPU, memory, or disk up to the declared ceilings
 - Executed code reaching the network when `no_net` was not requested
-- `install_package` running installer hooks (`postinstall`, build backends, Cargo build scripts) **outside the sandbox**. This is a known limitation, tracked in [#23](https://github.com/The-40-Thieves/codecalc/issues/23), not a private vulnerability. Do not expose that tool to untrusted input.
+- `install_package` reaching the network to fetch a package, and the metadata syscalls Landlock cannot restrict (`chmod`, `chown`, `stat`, `utime`, `fcntl`, `access`). Both are reported in `unenforced` rather than implied.
+- UDP egress from a confined installer on kernels below Landlock ABI 10, DNS included. TCP is restrictable from ABI 4; UDP is not, and the result says so.
 - The pure-Python fallback executor providing fewer guarantees than the Rust one. It reports what it could not enforce in the `unenforced` array of every result.
 
 ## Known limitations
@@ -39,7 +40,7 @@ Stated here rather than discovered later:
 
 | Limitation | Effect |
 |---|---|
-| `install_package` is not sandboxed | Install-time hooks run with the server user's filesystem access ([#23](https://github.com/The-40-Thieves/codecalc/issues/23)) |
+| `install_package` runs a package manager | Install-time code is **not run** (`--ignore-scripts`, `--only-binary=:all:`, `--no-scripts`), and on Linux the manager is confined to its workspace with Landlock. What that does not cover is reported in `unenforced` ([#23](https://github.com/The-40-Thieves/codecalc/issues/23)) |
 | `update_runtimes` can update system packages | `apply=True` runs each manager's update command; the apt one is elevated. Gated on the host setting `CODECALC_ALLOW_RUNTIME_APPLY=1`, because `apply` is an argument a connected model controls ([#63](https://github.com/The-40-Thieves/codecalc/issues/63)) |
 | Python fallback lacks the `no_net` shim | `no_net` is reported in `unenforced` rather than applied |
 | Same-UID execution by default | Isolation is rlimits and process groups, not a container or VM |

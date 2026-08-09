@@ -354,6 +354,19 @@ network-blocking shim. Each has a security-relevant design decision:
    session, permanently, surviving `session_stop`. Both this document and the
    module docstring claimed workspace scoping throughout.
 
+   **CORRECTION 2026-08-09 — and node did not stay in the workspace either.**
+   `npm install` with cwd set to the workspace walks UP looking for a package
+   root, finds none, and settles on an ancestor: observed asking to
+   `mkdir /home/ubuntu/node_modules/<pkg>`. It is now pinned with `--prefix`.
+   This was found by the Landlock ruleset refusing the write, not by reading
+   the code — the unconfined install had been succeeding somewhere else and
+   reporting the workspace.
+
+   Install-time execution is now declined outright (`--ignore-scripts`,
+   `--only-binary=:all:`, `--no-scripts`) and the manager itself is confined to
+   its workspace on Linux. The gaps that remain — metadata syscalls, and UDP
+   below ABI 10 — are named in `unenforced` on every result.
+
    Fixed with `--target <workspace>`, which needs no environment plumbing:
    CPython puts the script's directory on `sys.path[0]` and executed code runs
    from the session workdir. Verified both halves — a package installed with
