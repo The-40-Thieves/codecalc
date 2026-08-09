@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from decimal import Decimal, getcontext
 from fractions import Fraction
 
+from .guarded import guarded_call
 from .safe_expr import reject_unsafe
 
 getcontext().prec = 50
@@ -793,7 +794,7 @@ def _sympy():
     return sp
 
 
-def algebraic_equiv(a: str, b: str) -> dict:
+def _algebraic_equiv(a: str, b: str) -> dict:
     """Are two expressions algebraically identical? (refactor verification)
 
     Identity over symbolic reals says nothing about float rounding, integer
@@ -819,7 +820,7 @@ def algebraic_equiv(a: str, b: str) -> dict:
                        "rounding, integer truncation or modular overflow") if not identical else None}
 
 
-def solve_expression(expr: str, var: str = "x") -> dict:
+def _solve_expression(expr: str, var: str = "x") -> dict:
     """Solve for a root or crossover: `x**2 - 4 = 0`, `2*x + 1 = 7`."""
     # SymPy evaluates what it parses (see codecalc/safe_expr.py). Screen the
     # caller's string BEFORE it reaches sympify, not after.
@@ -845,7 +846,7 @@ def solve_expression(expr: str, var: str = "x") -> dict:
             "solutions": [str(s) for s in solutions]}
 
 
-def limit_expression(expr: str, var: str = "x", point: str = "oo") -> dict:
+def _limit_expression(expr: str, var: str = "x", point: str = "oo") -> dict:
     """Asymptotic behaviour: limit of EXPR as var -> point (default oo)."""
     # SymPy evaluates what it parses (see codecalc/safe_expr.py). Screen the
     # caller's string BEFORE it reaches sympify, not after.
@@ -865,7 +866,7 @@ def limit_expression(expr: str, var: str = "x", point: str = "oo") -> dict:
             "point": str(pt), "limit": str(result)}
 
 
-def simplify_expression(expr: str) -> dict:
+def _simplify_expression(expr: str) -> dict:
     """Simplified, factored and expanded forms of an expression."""
     # SymPy evaluates what it parses (see codecalc/safe_expr.py). Screen the
     # caller's string BEFORE it reaches sympify, not after.
@@ -881,3 +882,64 @@ def simplify_expression(expr: str) -> dict:
                 "expanded": str(sp.expand(e))}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
+
+
+# ── the bound (#84) ────────────────────────────────────────────────────────
+# Each tool above reaches SymPy's parser, which evaluates what it parses. The
+# screen in safe_expr runs first and still does the work it always did; these
+# wrappers add the part a denylist cannot provide, which is a ceiling that did
+# not have to anticipate the expression.
+#
+# The bodies are untouched — renamed to _name and called through guarded_call,
+# so the result shapes a caller already depends on are unchanged except for an
+# `unenforced` entry where the platform has no fork.
+
+_EXACT_WARMED = False
+
+
+def _warm_exact() -> None:
+    """Warm the parent for the paths THESE tools take, once.
+
+    Not shared with logic.py's warm set, and not merged into it: measured,
+    solve/limit/simplify reach different SymPy submodules than
+    evaluate_expression does, and warming the wrong ones costs the same startup
+    while leaving the fork to re-import the right ones on every call. #78
+    measured that mistake at +196ms on a single expression.
+    """
+    global _EXACT_WARMED
+    if _EXACT_WARMED:
+        return
+    _EXACT_WARMED = True
+    try:
+        _simplify_expression("x**2 + 2*x + 1")
+        _solve_expression("x**2 - 4 = 0", "x")
+        _limit_expression("1/x", "x", "oo")
+        _algebraic_equiv("(x+1)**2", "x**2 + 2*x + 1")
+    except Exception:
+        # Warming is an optimisation; a failure here must not take down the
+        # call the caller actually made.
+        pass
+
+
+def algebraic_equiv(a: str, b: str) -> dict:
+    """Are two expressions algebraically identical? (refactor verification)"""
+    _warm_exact()
+    return guarded_call(_algebraic_equiv, a, b)
+
+
+def solve_expression(expr: str, var: str = "x") -> dict:
+    """Solve for a root or crossover: `x**2 - 4 = 0`, `2*x + 1 = 7`."""
+    _warm_exact()
+    return guarded_call(_solve_expression, expr, var)
+
+
+def limit_expression(expr: str, var: str = "x", point: str = "oo") -> dict:
+    """Asymptotic behaviour: limit of EXPR as var -> point (default oo)."""
+    _warm_exact()
+    return guarded_call(_limit_expression, expr, var, point)
+
+
+def simplify_expression(expr: str) -> dict:
+    """Simplified, factored and expanded forms of an expression."""
+    _warm_exact()
+    return guarded_call(_simplify_expression, expr)

@@ -327,7 +327,7 @@ Linux, macOS and Windows. The three do not offer the same primitives, and the
 executor reports which ones it could **not** apply in an `unenforced` array on
 every result rather than letting a caller assume they all held.
 
-Symbolic evaluation carries the same idea. `evaluate_expression` runs SymPy in
+Symbolic evaluation carries the same idea. Every symbolic tool runs SymPy in
 a forked child under CPU and memory ceilings with a wall clock the parent
 enforces, so an expression nobody anticipated is still bounded — SymPy's own
 maintainers abandoned their attempt at a `safe=` flag as "security theater", so
