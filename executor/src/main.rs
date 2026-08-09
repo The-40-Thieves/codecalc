@@ -698,6 +698,17 @@ fn execute(lang_name: &str, code: &str, stdin_data: &str, limits: &Limits, workd
                 "cpu_ms": sr.cpu_ms, "peak_memory_kb": sr.peak_memory_kb,
                 "timed_out": sr.timed_out, "verdict": verdict(&sr, limits),
                 "unenforced": sr.unenforced,
+                // total_ms/platform/workdir are on the success return and were
+                // missing here, so result["workdir"] was a KeyError for callers
+                // whose only mistake was writing code that did not compile.
+                // A compile failure is an ordinary outcome, not an exceptional
+                // one, and nothing in the contract says these fields are
+                // conditional. contract_check.py now asserts the two key sets
+                // are EQUAL rather than listing fields per path, because
+                // listing them per path is what let this diverge unnoticed.
+                "total_ms": u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                "platform": std::env::consts::OS,
+                "workdir": work_s,
             });
             if workdir.is_none() {
                 remove_own_workdir(&work, created_identity);
