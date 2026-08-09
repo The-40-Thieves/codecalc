@@ -1,6 +1,7 @@
-"""Stateful python3 REPL worker: JSON-lines request/response over a PRIVATE fd.
+"""Stateful python3 REPL worker: JSON-lines request/response over a channel
+executed code cannot reach.
 
-Two things here are deliberate and were both bugs before.
+Three things here are deliberate and were all bugs before.
 
 **The protocol does not share a file descriptor with the executed code.** The
 first version swapped `sys.stdout` for a StringIO and wrote responses with
@@ -13,6 +14,19 @@ writes straight past it. So an entirely ordinary session line —
 private descriptor that only this module writes to, and fd 1/2 are then pointed
 at capture files. Nothing the executed code can do reaches the protocol channel,
 and as a bonus subprocess output is now CAPTURED rather than lost.
+
+**On Windows, the fd-1 dup above is not trusted, and a file stands in for it.**
+`os.dup2` remaps this process's CRT file-descriptor table, but a subprocess
+started by executed code without an explicit stdout override can still be
+handed the OS-level standard HANDLE instead — a separate piece of state the
+CRT does not reliably keep in sync with the fd table on Windows. When
+`CODECALC_PROTO_PATH` is set (Windows, or `_FORCE_FILE_PROTOCOL` in
+sessions.py forcing the same route on POSIX for test coverage), responses are
+appended to that file instead of written to the fd-1 dup, exactly mirroring
+the node worker's Windows route (`sessions.py`'s `_TailReader`). The per-call
+fds are additionally mirrored onto the OS-level standard handles there (see
+`_set_std_handle` below), so a child that queries the raw handle rather than
+the CRT fd still lands in the capture file, not wherever fd 1 used to point.
 
 **Every response carries the id of the request it answers.** Corruption used to
 be unrecoverable *and silent*: the reader consumed the junk, left the real reply
@@ -33,16 +47,74 @@ import os
 import sys
 import tempfile
 import traceback
+from pathlib import Path
 
 #: Matches MAX_OUTPUT_BYTES in the Rust executor. A session is not exempt from
 #: the output cap just because it is stateful.
 MAX_OUTPUT_BYTES = 64 * 1024
 
-# The protocol channel: a dup of the ORIGINAL stdout, before anything is
-# redirected. Executed code cannot name this descriptor, and closing fd 1 (which
-# code is free to do) does not touch it.
-_proto_fd = os.dup(1)
-_proto = os.fdopen(_proto_fd, "w", encoding="utf-8", newline="\n")
+# The protocol channel. Two routes:
+#
+#   CODECALC_PROTO_PATH set    responses are appended to that file. Set on
+#                               Windows (and by sessions.py's
+#                               _FORCE_FILE_PROTOCOL, on POSIX, for test
+#                               coverage) because the fd-1 dup below is not
+#                               trustworthy there.
+#   unset (default, POSIX)     a dup of the ORIGINAL stdout, taken before
+#                               anything is redirected. Executed code cannot
+#                               name this descriptor, and closing fd 1 (which
+#                               code is free to do) does not touch it.
+_proto_path = os.environ.get("CODECALC_PROTO_PATH", "")
+_proto_path_obj = Path(_proto_path) if _proto_path else None
+if _proto_path:
+    _proto = None
+else:
+    _proto_fd = os.dup(1)
+    _proto = os.fdopen(_proto_fd, "w", encoding="utf-8", newline="\n")
+
+
+def _write_proto(line: str) -> None:
+    if _proto_path_obj is not None:
+        # Append, not write: a fresh open() per response so the file descriptor
+        # itself is never held across the exec() below, where executed code
+        # could otherwise inherit or close it.
+        with _proto_path_obj.open("a", encoding="utf-8", newline="\n") as fh:
+            fh.write(line)
+    else:
+        _proto.write(line)
+        _proto.flush()
+
+
+# On Windows, mirror the per-call fd 1/2 redirection onto the OS-level
+# standard handles too. `os.dup2` only remaps this process's CRT
+# file-descriptor table; a child spawned by executed code without an explicit
+# stdout override can still be handed GetStdHandle()'s value instead, which
+# the CRT does not reliably keep pointed at the same place. Elsewhere this is
+# a no-op: the fd-1 dup2 is already sufficient on POSIX.
+_STD_OUTPUT_HANDLE = -11
+_STD_ERROR_HANDLE = -12
+
+if os.name == "nt":
+    import ctypes
+    import msvcrt
+
+    _kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+
+    def _set_std_handle(std_id: int, fd: int) -> int:
+        """Point the OS-level standard handle at fd's handle; return the old one."""
+        prev = _kernel32.GetStdHandle(std_id)
+        _kernel32.SetStdHandle(std_id, msvcrt.get_osfhandle(fd))
+        return prev
+
+    def _restore_std_handle(std_id: int, handle: int) -> None:
+        _kernel32.SetStdHandle(std_id, handle)
+else:
+    def _set_std_handle(std_id: int, fd: int) -> int:
+        return -1
+
+    def _restore_std_handle(std_id: int, handle: int) -> None:
+        pass
+
 
 # Requests still arrive on stdin. The iterator below binds to this object once,
 # so rebinding sys.stdin per call cannot disturb it.
@@ -62,8 +134,7 @@ def _read_capped(fh) -> tuple[str, bool]:
 
 
 def _respond(payload: dict) -> None:
-    _proto.write(json.dumps(payload) + "\n")
-    _proto.flush()
+    _write_proto(json.dumps(payload) + "\n")
 
 
 for _line in _requests:
@@ -86,9 +157,16 @@ for _line in _requests:
     # Save fds 1/2 so they can be restored even if the executed code closes them.
     saved_out, saved_err = os.dup(1), os.dup(2)
     prev_stdin, prev_stdout, prev_stderr = sys.stdin, sys.stdout, sys.stderr
+    saved_std_out_handle = saved_std_err_handle = None
     try:
         os.dup2(out_f.fileno(), 1)
         os.dup2(err_f.fileno(), 2)
+        # See the module docstring: on Windows the CRT fd redirection above
+        # does not, by itself, reach a child spawned without an explicit
+        # stdout/stderr override. Mirroring it onto the OS-level standard
+        # handles is what makes THAT child land in the capture files too.
+        saved_std_out_handle = _set_std_handle(_STD_OUTPUT_HANDLE, 1)
+        saved_std_err_handle = _set_std_handle(_STD_ERROR_HANDLE, 2)
         # Python-level streams over the SAME descriptors, so interpreter output
         # and subprocess output interleave in the order they were written.
         sys.stdout = io.TextIOWrapper(os.fdopen(os.dup(1), "wb"), encoding="utf-8",
@@ -107,6 +185,10 @@ for _line in _requests:
         for stream in (sys.stdout, sys.stderr):
             with contextlib.suppress(Exception):
                 stream.flush()
+        if saved_std_out_handle is not None:
+            _restore_std_handle(_STD_OUTPUT_HANDLE, saved_std_out_handle)
+        if saved_std_err_handle is not None:
+            _restore_std_handle(_STD_ERROR_HANDLE, saved_std_err_handle)
         os.dup2(saved_out, 1)
         os.dup2(saved_err, 2)
         os.close(saved_out)
