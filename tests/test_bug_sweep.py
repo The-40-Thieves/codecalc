@@ -16,7 +16,7 @@ import time
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from codecalc import exact, optimization, tools, units
+from codecalc import exact, logic, mcp_middleware, optimization, tools, units
 
 FAILS: list[str] = []
 
@@ -163,6 +163,123 @@ for nm in ("convert_to", "Quantity"):
     check(f"unit parser rejects non-unit attribute {nm!r}", rejected)
 check("unit conversion still correct (1 km -> 1000 m)",
       units.convert(1, "km", "m")["value"] == 1000.0)
+
+# ═══ #40: radix_convert generated digits from the wrong denominator ═════════
+# rem/den was reduced to rn/rd to decide whether the expansion TERMINATES, but
+# digits were then generated from rn divided by the UNREDUCED den — the
+# expansion of rn/den, not of the input. Silent whenever rem/den was already
+# in lowest terms (e.g. 0.1 -> base 2), which is why it went unnoticed.
+for value, from_b, to_b, want in [
+    ("0.5", 10, 2, "0.1"), ("0.25", 10, 2, "0.01"), ("0.75", 10, 2, "0.11"),
+    ("0.125", 10, 2, "0.001"), ("0.2", 10, 5, "0.1"),
+]:
+    r = exact.radix_convert(value, from_b, to_b)
+    check(f"radix_convert({value!r}, {from_b}, {to_b}) == {want!r}",
+          r.get("value") == want, f"-> {r.get('value')}")
+    check("  ...and terminates", r.get("non_terminating") is False)
+# the one case that was already correct (rem/den already in lowest terms)
+# must stay correct.
+r = exact.radix_convert("0.1", 10, 2)
+check("radix_convert('0.1', 10, 2) is still non-terminating",
+      r.get("non_terminating") is True and r.get("value") == "0.00011…",
+      f"-> {r.get('value')}")
+
+# ═══ #33: bitop masked the shift COUNT by width instead of the value ════════
+# bitop(a, "shl", b, width) masked b with the width mask before dispatch, so a
+# shift count of 256 at width 8 became 256 & 0xff == 0 — "shift far past the
+# width" silently became "don't shift at all".
+r = exact.bitop(1, "shl", 256, 8)
+check("bitop shl: an unmasked-huge count still overflows to 0",
+      r.get("unsigned") == 0 and "overflow" in r, f"-> {r}")
+r = exact.bitop(128, "shr", 256, 8)
+check("bitop shr: an unmasked-huge count still zeroes out", r.get("unsigned") == 0, f"-> {r}")
+r = exact.bitop(1, "shl", -1, 32)
+check("bitop shl: a negative count is rejected, not reported as a huge shift",
+      r.get("ok") is False and "negative" in (r.get("error") or ""), f"-> {r}")
+# value operands (not shift counts) must still be masked to width.
+r = exact.bitop(0xFF, "and", 0x1FF, 8)
+check("bitop and: the VALUE operand is still masked to width", r.get("unsigned") == 0xFF, f"-> {r}")
+
+# ═══ #35: float_repr(-0.0) reported NaN neighbours and a NaN ulp ════════════
+# Neighbours were derived by incrementing/decrementing the raw bit pattern
+# with no special case for the two zero encodings; decrementing -0.0's
+# pattern (0x8000000000000000) underflowed into a NaN encoding.
+r = exact.float_repr(-0.0)
+check("float_repr(-0.0): prev is negative, not NaN and not GREATER than the input",
+      r.get("prev") == -5e-324, f"-> prev={r.get('prev')}")
+check("float_repr(-0.0): next is not NaN", r.get("next") == 5e-324, f"-> next={r.get('next')}")
+check("float_repr(-0.0): ulp is not NaN", r.get("ulp") == 5e-324, f"-> ulp={r.get('ulp')}")
+r = exact.float_repr(0.0)
+check("float_repr(0.0) neighbours unaffected by the -0.0 fix",
+      r.get("prev") == -5e-324 and r.get("next") == 5e-324, f"-> {r}")
+# non-finite input to percentiles must not escape as a bare NaN (not valid
+# JSON) or be silently classified as a real percentile.
+r = exact.percentiles([float("nan"), 1])
+check("percentiles rejects a non-finite input with a structured error",
+      r.get("ok") is False and "nums[0]" in (r.get("error") or ""), f"-> {r}")
+
+# ═══ #36: non-finite input raised uncaught out of stats/human_duration ══════
+r = exact.stats([1, float("nan")])
+check("stats rejects a NaN element, naming its index",
+      r.get("ok") is False and "nums[1]" in (r.get("error") or ""), f"-> {r}")
+r = exact.stats([1, float("inf")])
+check("stats rejects an inf element, naming its index",
+      r.get("ok") is False and "nums[1]" in (r.get("error") or ""), f"-> {r}")
+r = exact.human_duration(float("nan"))
+check("human_duration rejects a NaN duration instead of raising",
+      r.get("ok") is False, f"-> {r}")
+# ...and ordinary finite input is unaffected by the new screening.
+check("stats still computes on finite input", exact.stats([1, 2, 3]).get("ok") is True)
+check("human_duration still computes on finite input",
+      exact.human_duration(90061).get("ok") is True)
+
+# truth_table: a RecursionError from pathologically nested parens must come
+# back as a structured error, not crash the tool. 1999 chars is under
+# _MAX_EXPR_LEN (2000), so the length guard never fires on this input.
+r = logic.truth_table("(" * 999 + "a" + ")" * 999)
+check("truth_table survives 999 levels of nesting without raising",
+      r.get("ok") is False and "nest" in (r.get("error") or ""), f"-> {r}")
+check("truth_table still parses ordinary nesting", logic.truth_table("((a))").get("ok") is True)
+
+# ═══ #34: implies must be RIGHT-associative ══════════════════════════════════
+# `a implies b implies a` under the conventional right-associative reading is
+# `a -> (b -> a)`, a tautology. The left-associative parse taken before this
+# fix built `(a -> b) -> a` (Peirce's formula), which is NOT a tautology.
+r = logic.truth_table("a implies b implies a")
+check("a implies b implies a is a tautology (right-associative)",
+      r.get("tautology") is True, f"-> {r}")
+# _parse_iff is genuinely associative (a iff b iff c has one true reading
+# either way) and must be untouched.
+r = logic.truth_table("a iff b iff c")
+check("iff is still associative (unchanged)", r.get("ok") is True)
+
+# ═══ #32: exponentiation has no bound, and a huge result leaks ValueError ═══
+t0 = time.monotonic()
+r = exact.eval_exact("2**10**6")
+check("2**10**6 is rejected instead of taking seconds to compute",
+      r.get("ok") is False, f"-> {r}")
+check("  ...and rejected fast", time.monotonic() - t0 < 1.0)
+t0 = time.monotonic()
+r = exact.eval_exact("2**10**7")
+check("2**10**7 is rejected instead of hanging",
+      r.get("ok") is False, f"-> {r}")
+check("  ...and rejected fast", time.monotonic() - t0 < 1.0)
+r = exact.eval_exact("2**100000")
+check("2**100000 returns a structured error instead of raising ValueError",
+      r.get("ok") is False, f"-> {r}")
+check("  ...still an ordinary power computes", exact.eval_exact("2**64")["value"] == str(2 ** 64))
+# an expression over the DoS length cap is rejected before parsing.
+r = exact.eval_exact("1+" * 1001 + "1")
+check("eval_exact rejects an over-length expression",
+      r.get("ok") is False and "too long" in (r.get("error") or ""), f"-> {r.get('error')}")
+# calc_exact and its sympy-backed siblings must carry the same 20s deadline
+# as their logic.py counterparts (evaluate_expression, solve_linear,
+# analyze_complexity) instead of silently inheriting the 900s default.
+for name in ("calc_exact", "algebraic_equiv", "solve_expression",
+             "limit_expression", "simplify_expression"):
+    check(f"{name} has a bounded TOOL_TIMEOUTS entry",
+          mcp_middleware.TOOL_TIMEOUTS.get(name) == 20,
+          f"-> {mcp_middleware.TOOL_TIMEOUTS.get(name)}")
 
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== ALL BUG-SWEEP REGRESSIONS FIXED ===")
