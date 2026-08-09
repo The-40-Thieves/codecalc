@@ -559,6 +559,29 @@ fn verdict(sr: &StepResult, limits: &Limits) -> &'static str {
     "OK"
 }
 
+/// How many whole seconds remain in the wall-clock budget for the run step,
+/// given how long compiling already took. `elapsed_ms` is `started.elapsed()`
+/// captured right after the compile step returns, at millisecond precision —
+/// not a floored `compile_ms / 1000`, which is what let a 9,900ms compile get
+/// charged as spending only 9 whole seconds. Returns None when nothing is
+/// left — compiling alone met or exceeded the budget — meaning the run must
+/// not be attempted at all: the old code's unconditional `.max(1)` handed the
+/// run step a guaranteed extra second regardless of the deficit, so
+/// `--timeout 10` could take up to ~11.5s end to end.
+fn remaining_run_timeout_secs(budget_secs: u64, elapsed_ms: u64) -> Option<u64> {
+    let budget_ms = budget_secs.saturating_mul(1000);
+    if elapsed_ms >= budget_ms {
+        return None;
+    }
+    // spawn_and_wait's kill timer only understands whole seconds
+    // (Duration::from_secs in platform::spawn_and_wait), so any genuinely
+    // positive remainder is rounded UP to the smallest unit it supports
+    // rather than floored to zero — a compile that "just barely" fits inside
+    // the budget still gets to attempt the run. The guard above is what
+    // confines that rounding-up to cases where time truly remains.
+    Some((budget_ms - elapsed_ms).div_ceil(1000))
+}
+
 fn execute(lang_name: &str, code: &str, stdin_data: &str, limits: &Limits, workdir: Option<&str>) -> serde_json::Value {
     let lang = match canonical(lang_name) {
         Some(l) => l,
@@ -692,8 +715,43 @@ fn execute(lang_name: &str, code: &str, stdin_data: &str, limits: &Limits, workd
     // caller's timeout between them.
     let mut run_limits = *limits;
     if compile_ms > 0 {
-        let spent_secs = compile_ms / 1000;
-        run_limits.timeout = limits.timeout.saturating_sub(spent_secs).max(1);
+        let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        match remaining_run_timeout_secs(limits.timeout, elapsed_ms) {
+            Some(secs) => run_limits.timeout = secs,
+            None => {
+                // Compiling alone met or exceeded the whole wall-clock budget
+                // (compile's own kill enforcement is itself only
+                // second-granular, so it can overrun its nominal share
+                // slightly before the kill lands). Report TLE without
+                // starting the run — handing it a `.max(1)` floor regardless
+                // of the deficit was exactly the bug this replaces: with a
+                // --timeout 10 request, a 10.5s compile used to still get a
+                // guaranteed extra second for the run, pushing the total to
+                // ~11.5s.
+                let result = json!({
+                    "ok": false, "language": lang.name, "phase": "run",
+                    "stdout": "", "stderr": "<killed: exceeded wall-clock timeout>",
+                    "exit_code": serde_json::Value::Null,
+                    "duration_ms": 0, "compile_ms": compile_ms,
+                    "total_ms": elapsed_ms,
+                    "cpu_ms": 0, "peak_memory_kb": 0,
+                    "timed_out": true, "verdict": "TLE",
+                    "unenforced": Vec::<&str>::new(),
+                    // platform and workdir are on the normal return too. A new
+                    // return that omits fields the success path carries is how
+                    // this executor's shape drifted before: AUDIT.md records
+                    // "The documented return shape is the SAME on both
+                    // backends. It was not". A caller reading result["workdir"]
+                    // should not have to know which of three ways it got here.
+                    "platform": std::env::consts::OS,
+                    "workdir": work_s,
+                });
+                if workdir.is_none() {
+                    remove_own_workdir(&work, created_identity);
+                }
+                return result;
+            }
+        }
     }
     let run_started = Instant::now();
     let sr = run_step(&argv, &work, "run", stdin_data.as_bytes(), &run_limits);
@@ -795,4 +853,47 @@ fn main() {
 
     let result = execute(&lang, &code, &stdin_data, &limits, workdir.as_deref());
     println!("{result}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Bug #39: compile and run share `--timeout`'s wall-clock budget, but the
+    // remaining-budget arithmetic floored `compile_ms / 1000` and then
+    // unconditionally applied `.max(1)`, so the run step was ALWAYS handed at
+    // least one more second — even when compiling alone had already met or
+    // exceeded the entire budget. --timeout 10 could then take up to ~11.5s.
+
+    #[test]
+    fn compile_that_exactly_exhausts_the_budget_gets_no_run() {
+        assert_eq!(remaining_run_timeout_secs(10, 10_000), None);
+    }
+
+    #[test]
+    fn compile_that_overruns_the_budget_gets_no_run() {
+        // The reported case: a 10.5s compile against a 10s budget. The old
+        // formula floored 10_500ms to spent_secs=10, then
+        // 10.saturating_sub(10).max(1) handed the run a guaranteed extra
+        // second anyway, pushing the total to ~11.5s.
+        assert_eq!(remaining_run_timeout_secs(10, 10_500), None);
+    }
+
+    #[test]
+    fn compile_that_leaves_a_sub_second_remainder_still_gets_one_second() {
+        // The other reported case: a 9.9s compile against a 10s budget truly
+        // leaves 100ms. The platform's kill timer only understands whole
+        // seconds (Duration::from_secs in platform::spawn_and_wait), so that
+        // remainder rounds UP to the smallest unit it supports rather than
+        // being refused outright — a compile that "just barely" fits still
+        // gets to attempt the run. This is unchanged from the old formula in
+        // THIS case; what changes is that it no longer ALSO applies when
+        // nothing (or less than nothing) is left, per the two tests above.
+        assert_eq!(remaining_run_timeout_secs(10, 9_900), Some(1));
+    }
+
+    #[test]
+    fn compile_using_half_the_budget_leaves_the_other_half() {
+        assert_eq!(remaining_run_timeout_secs(10, 5_000), Some(5));
+    }
 }

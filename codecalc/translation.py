@@ -150,9 +150,21 @@ def verify_translation(source: str, source_code: str, target: str,
 
 def compare_edge_cases(snippets: dict[str, str],
                        inputs: list[str] | None = None,
-                       timeout: int = 15) -> dict:
+                       timeout: int = 15,
+                       order_sensitive: bool = True) -> dict:
     """Run the same logic in N languages (snippets: {language: code}) on
     edge-case inputs; report where behavior diverges.
+
+    order_sensitive (default True) matches _normalize/verify_translation's own
+    comparison: stdout is compared line-for-line, in order. Output ordering
+    (map/dict iteration, sort stability, concurrency) is one of the most
+    common genuine divergences between ports, so it is reported by default
+    rather than masked. Each divergence carries a "kind" of "content" (the
+    line sets themselves differ, or ok-status differs) or "order" (same
+    lines, same ok-status, different order) so an order-only difference is
+    never silently folded into agreement. Pass order_sensitive=False to
+    restore the old order-insensitive comparison (only "content" divergences
+    are then reported).
 
     Offline-capable: no LLM needed, snippets must be provided per language.
     """
@@ -169,14 +181,24 @@ def compare_edge_cases(snippets: dict[str, str],
                 "ok": r.get("ok"), "stdout": _normalize(r.get("stdout", ""))[:300],
                 "verdict": r.get("verdict"), "stderr": (r.get("stderr") or "")[:150],
             }
-        # divergence = outputs differ, or error-status differs
+        # divergence = outputs differ, or error-status differs. Two keys are
+        # built per run: the exact (order-sensitive) one and the sorted
+        # (order-insensitive) one, so an order-only difference can be told
+        # apart from a real content difference rather than collapsed into it.
         if len(row["runs"]) > 1:
-            behaviors = set()
+            exact_behaviors = set()
+            sorted_behaviors = set()
             for r in row["runs"].values():
-                behaviors.add((r["ok"], tuple(sorted(r["stdout"].splitlines()))))
-            if len(behaviors) > 1:
+                lines = tuple(r["stdout"].splitlines())
+                exact_behaviors.add((r["ok"], lines))
+                sorted_behaviors.add((r["ok"], tuple(sorted(lines))))
+            content_diverges = len(sorted_behaviors) > 1
+            order_diverges = not content_diverges and len(exact_behaviors) > 1
+            if content_diverges or (order_sensitive and order_diverges):
+                kind = "content" if content_diverges else "order"
                 divergences.append({"input": stdin[:60],
                                     "languages": list(row["runs"].keys()),
+                                    "kind": kind,
                                     "runs": row["runs"]})
         results.append(row)
 

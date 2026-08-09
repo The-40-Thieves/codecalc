@@ -27,7 +27,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from codecalc import executor, optimization, translation
-from codecalc.translation import aggregate, classify_case
+from codecalc.translation import aggregate, classify_case, compare_edge_cases
 
 FAILS = []
 
@@ -111,6 +111,42 @@ check("no cases at all -> NOT passed", r["passed"] is False,
 r = aggregate([("match", ""), ("inconclusive", "x"), ("mismatch", "d")])
 check("counts are broken out", (r["matched"], r["inconclusive"], r["mismatched"]) == (1, 1, 1),
       f"-> {r['matched']}/{r['inconclusive']}/{r['mismatched']}")
+
+
+# ── compare_edge_cases must not hide output-ORDER divergence ────────────────
+# The regression: a divergence key built from sorted(stdout.splitlines())
+# makes two languages that emit the same lines in a different order compare
+# equal, so no divergence is ever reported for exactly the class of bug this
+# tool exists to catch (map/dict iteration order, sort stability,
+# concurrency). classify_case/_normalize in this same module compare stdout
+# order-sensitively; compare_edge_cases must agree by default.
+_orig_run = translation._run
+try:
+    translation._run = lambda lang, code, stdin, timeout=15: {
+        "ok": True, "stdout": code, "verdict": "OK", "stderr": ""}
+
+    r = compare_edge_cases({"a": "x\ny\n", "b": "y\nx\n"}, inputs=["i"])
+    check("same lines, different order -> IS a divergence by default",
+          r["divergence_count"] == 1, f"-> {r['divergence_count']}")
+    check("  ...classified as an 'order' divergence, not folded into agreement",
+          r["divergences"] and r["divergences"][0]["kind"] == "order",
+          f"-> {r.get('divergences')}")
+
+    r = compare_edge_cases({"a": "x\ny\n", "b": "y\nx\n"}, inputs=["i"],
+                           order_sensitive=False)
+    check("order_sensitive=False restores the old order-insensitive comparison",
+          r["divergence_count"] == 0, f"-> {r['divergence_count']}")
+
+    r = compare_edge_cases({"a": "x\ny\n", "b": "x\nz\n"}, inputs=["i"])
+    check("a real content difference is still a divergence",
+          r["divergence_count"] == 1 and r["divergences"][0]["kind"] == "content",
+          f"-> {r.get('divergences')}")
+
+    r = compare_edge_cases({"a": "x\ny\n", "b": "x\ny\n"}, inputs=["i"])
+    check("identical output in identical order -> no divergence",
+          r["divergence_count"] == 0, f"-> {r['divergence_count']}")
+finally:
+    translation._run = _orig_run
 
 
 # ═══ the gates are callable on their own, with no model anywhere ═══════════
