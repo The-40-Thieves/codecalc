@@ -60,6 +60,18 @@ _DENIED_KEYWORDS = frozenset({
     "finally", "pass", "break", "continue", "is", "in",
 })
 
+#: STRING covers every string literal on every supported Python. FSTRING_START
+#: is a 3.12 addition (PEP 701 split f-strings into their own token types), and
+#: naming it unconditionally made this module fail to IMPORT on 3.11 with
+#: AttributeError — which took codecalc down entirely there, since exact.py
+#: imports this. The project declares requires-python >=3.11 and CI runs a
+#: py3.11 matrix leg; both said so immediately. Resolved once, at import, so
+#: the hot path stays a set lookup.
+_STRING_TOKENS = frozenset(
+    t for t in (getattr(tokenize, name, None) for name in ("STRING", "FSTRING_START"))
+    if t is not None
+)
+
 #: Operators with no place in a mathematical expression. `.` is the important
 #: one; the rest close off subscripting and statement syntax.
 _DENIED_OPS = frozenset({
@@ -91,8 +103,8 @@ def reject_unsafe(expression: str) -> str | None:
                         "underscores reach Python internals")
             if tok.string in _DENIED_KEYWORDS:
                 return f"keyword {tok.string!r} is not permitted in an expression"
-        elif tok.type in (tokenize.STRING, tokenize.FSTRING_START):
-            return ("string literals are not permitted in an expression")
+        elif tok.type in _STRING_TOKENS:
+            return "string literals are not permitted in an expression"
         elif tok.type == tokenize.OP and tok.string in _DENIED_OPS:
             if tok.string == ".":
                 return "attribute access is not permitted in an expression"
