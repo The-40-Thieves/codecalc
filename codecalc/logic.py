@@ -10,6 +10,7 @@ from __future__ import annotations
 import itertools
 import re
 
+from .guarded import run_guarded
 from .safe_expr import reject_explosive, reject_unsafe, safe_global_dict
 
 _MATH_TRANSFORMS = None
@@ -38,7 +39,68 @@ def _math_transforms():
 
 
 def evaluate_expression(expression: str, **variables) -> dict:
-    """Evaluate/simplify a math or boolean expression symbolically."""
+    """Evaluate/simplify a math or boolean expression symbolically.
+
+    The work runs in a process that can be KILLED (see `guarded`), because the
+    screens below are denylists and a denylist cannot bound what it did not
+    anticipate. Everything the screens do still happens — they are cheap, they
+    give better error messages, and they stop hostile input before it reaches
+    an evaluator at all — but the bound no longer depends on them being
+    complete.
+    """
+    _warm_sympy()
+    outcome = run_guarded(_evaluate_expression, expression, **variables)
+    if outcome.get("ok"):
+        result = outcome["value"]
+    else:
+        result = {"ok": False, "error": outcome.get("error", "evaluation failed")}
+    # Carried through in the executor's own vocabulary: on a platform without
+    # fork the bound was not applied, and a caller has to be able to know that.
+    if outcome.get("unenforced"):
+        result = {**result, "unenforced": outcome["unenforced"]}
+    return result
+
+
+_WARMED = False
+
+
+def _warm_sympy() -> None:
+    """Touch the lazy paths ONCE, in the parent, before anything is forked.
+
+    Measured, and the reason this exists: guarding made `2+2` take 291ms
+    against 0.68ms unguarded, while a HARDER expression cost only 19ms more.
+    Backwards, and the explanation is that SymPy imports submodules lazily and
+    caches them. In a forked child that warming happens, is used once, and dies
+    with the child — so every call re-imported, and the first call paid the
+    most because it warmed the most.
+
+    Doing it here means children inherit a warm parent through copy-on-write
+    and pay for none of it. It runs the same path a real call takes rather than
+    importing a list of module names, because what needs warming is whatever
+    simplify/expand actually reach, which is not something to guess at.
+    """
+    global _WARMED
+    if _WARMED:
+        return
+    _WARMED = True
+    try:
+        # A REPRESENTATIVE SET, not one expression. Warming with "1+1" alone
+        # left `sin(x)**2 + cos(x)**2` at 196ms of overhead, because trig
+        # simplification pulls in modules arithmetic never touches and each
+        # child was importing them again. These cover the paths the tool is
+        # actually asked for: integer arithmetic, polynomial expansion, trig
+        # identities and radicals.
+        for _seed in ("1+1", "x**2 + 2*x + 1", "sin(x)**2 + cos(x)**2", "sqrt(8)"):
+            _evaluate_expression(_seed)
+    except Exception:
+        # Warming is an optimisation. A failure here must not take out the call
+        # the user actually made — that one runs guarded a moment later and
+        # will report its own error properly.
+        pass
+
+
+def _evaluate_expression(expression: str, **variables) -> dict:
+    """The actual evaluation. Runs inside the guard, never called directly."""
     if len(expression) > _MAX_EXPR_LEN:
         return {"ok": False, "error": f"expression too long (max {_MAX_EXPR_LEN} chars)"}
     # parse_expr EVALUATES what it parses, and its default global_dict is
@@ -70,6 +132,26 @@ def evaluate_expression(expression: str, **variables) -> dict:
                           local_dict=variables, global_dict=safe_global_dict())
     except Exception as exc:  # sympy raises many specific types
         return {"ok": False, "error": f"parse error: {exc}"}
+
+    # NOT EVERY SymPy CALL RETURNS A SymPy OBJECT. `nextprime(100)` returns a
+    # plain int, `primefactors(60)` and `divisors(12)` return lists, and
+    # `factorint(60)` returns a dict. The code below assumed `.is_number` and
+    # `sp.simplify`, so every one of those ordinary, entirely legitimate
+    # queries crashed the tool with an uncaught AttributeError:
+    #
+    #     nextprime(100)   -> 'int' object has no attribute 'is_number'
+    #     primefactors(60) -> 'list' object has no attribute 'replace'
+    #
+    # They are answered here rather than merely not-crashing: the value IS the
+    # result, there is just nothing to simplify.
+    if not isinstance(expr, sp.Basic):
+        return {
+            "ok": True,
+            "expression": str(expr),
+            "simplified": str(expr),
+            "type": type(expr).__name__,
+            "value": str(expr),
+        }
 
     # Building the result is itself unbounded work, and it used to sit outside
     # any try: `factorial(99999)` parsed fine and then raised
