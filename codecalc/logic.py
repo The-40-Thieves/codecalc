@@ -10,7 +10,7 @@ from __future__ import annotations
 import itertools
 import re
 
-from .safe_expr import reject_unsafe, safe_global_dict
+from .safe_expr import reject_explosive, reject_unsafe, safe_global_dict
 
 _MATH_TRANSFORMS = None
 _BOOL_TRANSFORMS = None
@@ -51,25 +51,61 @@ def evaluate_expression(expression: str, **variables) -> dict:
     sp = _sympy()
     from sympy.parsing.sympy_parser import parse_expr
 
+    # Look at the shape BEFORE doing the arithmetic. `evaluate=False` builds
+    # the tree without evaluating operators, so a power tower costs 1ms to
+    # inspect and nothing to reject. It does not stop FUNCTION evaluation —
+    # that hazard is handled at the token level in reject_unsafe, above.
+    try:
+        shape = parse_expr(expression, transformations=_math_transforms(),
+                           local_dict=variables, global_dict=safe_global_dict(),
+                           evaluate=False)
+    except Exception as exc:
+        return {"ok": False, "error": f"parse error: {exc}"}
+    explosive = reject_explosive(shape)
+    if explosive:
+        return {"ok": False, "error": explosive}
+
     try:
         expr = parse_expr(expression, transformations=_math_transforms(),
                           local_dict=variables, global_dict=safe_global_dict())
     except Exception as exc:  # sympy raises many specific types
         return {"ok": False, "error": f"parse error: {exc}"}
 
-    result = {
-        "ok": True,
-        "expression": str(expr),
-        "simplified": str(sp.simplify(expr)),
-        "type": str(type(expr).__name__),
-    }
-    if expr.is_number:
-        result["value"] = str(expr.evalf(12))
+    # Building the result is itself unbounded work, and it used to sit outside
+    # any try: `factorial(99999)` parsed fine and then raised
+    # `ValueError: Exceeds the limit (4300 digits) for integer string
+    # conversion` out of str(expr), from inside SymPy's printer. The tool
+    # CRASHED rather than returning the {"ok": False, "error": ...} shape every
+    # other path uses, so a caller saw a transport-level failure instead of a
+    # result. The bounds above make that far less reachable; this makes it
+    # survivable when it is reached anyway.
+    try:
+        result = {
+            "ok": True,
+            "expression": str(expr),
+            "simplified": str(sp.simplify(expr)),
+            "type": str(type(expr).__name__),
+        }
+        if expr.is_number:
+            result["value"] = str(expr.evalf(12))
+    except _RESOURCE_ERRORS as exc:
+        return {"ok": False,
+                "error": f"expression exceeded a resource limit while evaluating: {exc}"}
     try:
         result["expanded"] = str(sp.expand(expr))
     except Exception:
         pass
     return result
+
+
+#: Raised when an expression is well-formed and simply too big. Distinguished
+#: from a parse error because the caller's fix is different: this one means
+#: "ask for less", not "fix your syntax".
+#:
+#: RecursionError is in here because a deeply nested expression exhausts the
+#: interpreter stack inside SymPy's own recursion, and OverflowError because
+#: float conversion of a large exact value raises rather than returning inf.
+_RESOURCE_ERRORS = (ValueError, RecursionError, OverflowError, MemoryError)
 
 
 _MAX_VARS = 16          # 2^16 = 65536 rows ceiling for truth tables
