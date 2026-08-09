@@ -44,6 +44,31 @@ Stated here rather than discovered later:
 | Python fallback lacks the `no_net` shim | `no_net` is reported in `unenforced` rather than applied |
 | Same-UID execution by default | Isolation is rlimits and process groups, not a container or VM |
 | No signed release artifacts yet | Verify what you build; there is nothing to verify against yet ([#24](https://github.com/The-40-Thieves/codecalc/issues/24)) |
+| The expression tools sit on an `eval`-based parser | SymPy evaluates what it parses. `codecalc/safe_expr.py` screens every caller string before SymPy sees it, and that screen is a denylist — SymPy's own maintainers describe the same approach as insufficient on its own. See below |
+
+### The expression tools and SymPy's `eval`
+
+`evaluate_expression`, `simplify_expression`, `solve_linear` and the other symbolic tools reach SymPy's `parse_expr`/`sympify`. Those **evaluate what they parse**, and SymPy says so in its own docstring:
+
+> .. warning:: Note that this function uses ``eval``, and thus shouldn't be used on unsanitized input.
+
+That is the whole reason `codecalc/safe_expr.py` exists: every caller string is screened at the token level, before SymPy is handed it. What that screen refuses, and why each rule is there, is documented in the module itself.
+
+**The screen is a denylist, and a denylist is not a sandbox.** This is not a hedge — it is upstream's own assessment of the same design. SymPy [PR #12524](https://github.com/sympy/sympy/pull/12524) added a `safe=` flag to `sympify()` built on an AST whitelist plus a name blacklist. It was **never merged** and has been abandoned since 2020. On it:
+
+> "I am sure that someone malicious would be able to circumvent what we have here so I would still describe this as unsafe rather than 'mostly safe'." — *oscarbenjamin*
+
+> "security theater that leads users into a false sense of security, because it can still be bypassed" — *asmeurer*, the PR's own author
+
+[Issue #10805](https://github.com/sympy/sympy/issues/10805) (*"sympify shouldn't use eval"*) is still open, and the fix upstream advocates is a complete direct evaluator rather than any form of screening.
+
+Three consequences worth stating plainly:
+
+- **There is no `safe=` flag to reach for.** Verified against the pinned version: sympy 1.14.0's `sympify` takes `a, locals, convert_xor, strict, rational, evaluate` and nothing else. Code written against that PR gets a `TypeError`.
+- **Order is load-bearing.** The screen must run before *any* parse, including the `evaluate=False` shape inspection that bounds expression cost — `evaluate=False` suppresses arithmetic, not `eval`. `tests/test_security.py` asserts that a rejected string never reaches `parse_expr` at all, rather than leaving it to the order the lines happen to appear in.
+- **Cost is bounded separately from reach.** A screen that stops `__import__` does nothing about `9**9**9**9`, which is ten characters. Those bounds are in `safe_expr.py` too, with their measured thresholds, and are a distinct mechanism from the safety screen ([#67](https://github.com/The-40-Thieves/codecalc/issues/67)).
+
+If you are exposing these tools to input you do not control, the honest reading is the one upstream gives: treat an expression string as reaching an evaluator, and put a boundary around the process rather than trusting the screen.
 
 codecalc is built for a **single operator running it locally over stdio**. It has not been hardened for multi-user or hosted deployment, and the audit says so in its own verdict. If you intend to expose it to input you do not control, put it inside a container or microVM boundary of your own.
 

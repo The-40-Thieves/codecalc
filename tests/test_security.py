@@ -84,6 +84,57 @@ check("benchmark detects polynomial growth (no eval regression)",
       "O(n" in est and est not in ("O(1)", "O(log n)"),
       f"-> {est}")
 
+# ── the safety screen must run BEFORE any parse ───────────────────────────
+# SymPy's parse_expr/sympify EVALUATE what they parse — its own docstring says
+# "this function uses ``eval``, and thus shouldn't be used on unsanitized
+# input" — so safe_expr.reject_unsafe is the only thing between a caller
+# string and an evaluator.
+#
+# That makes ORDER a security property, and order was previously guaranteed
+# only by which line came first in evaluate_expression. #67 added a SECOND
+# parse (`evaluate=False`, to bound cost before doing the arithmetic), which
+# is exactly the kind of edit that quietly reorders things: `evaluate=False`
+# suppresses ARITHMETIC, not `eval`. So it is asserted rather than read.
+#
+# Upstream's own view of screens like ours, from the abandoned attempt to add
+# `safe=` to sympify() (sympy/sympy#12524, never merged): "security theater
+# that leads users into a false sense of security, because it can still be
+# bypassed". Which is the argument for checking that ours at least runs.
+import sympy.parsing.sympy_parser as _spp
+
+_real_parse_expr = _spp.parse_expr
+_reached_parser = []
+
+
+def _spy_parse_expr(s, *args, **kwargs):
+    _reached_parser.append(s)
+    return _real_parse_expr(s, *args, **kwargs)
+
+
+_spp.parse_expr = _spy_parse_expr
+try:
+    # POSITIVE CONTROL FIRST. A spy that records nothing would make every
+    # assertion below vacuously true — "the hostile string never reached the
+    # parser" is worthless if NOTHING reaches the parser. Prove the instrument
+    # works before trusting what it does not see.
+    _reached_parser.clear()
+    _ok = logic.evaluate_expression("2+2")
+    check("control: a SAFE expression does reach parse_expr",
+          _ok.get("ok") is True and len(_reached_parser) > 0,
+          f"-> ok={_ok.get('ok')} parse calls={len(_reached_parser)}")
+
+    for _hostile in ("__import__('os').system('id')",
+                     "().__class__.__base__.__subclasses__()",
+                     "x.__class__",
+                     "lambda: 1"):
+        _reached_parser.clear()
+        _r = logic.evaluate_expression(_hostile)
+        check(f"screened before the parser: {_hostile[:34]!r}",
+              _r.get("ok") is False and not _reached_parser,
+              f"-> ok={_r.get('ok')} reached_parser={_reached_parser}")
+finally:
+    _spp.parse_expr = _real_parse_expr
+
 # 10. fork-bomb guard. LAST IN THE FILE, and that placement is load-bearing.
 #
 # These two tests are DESTRUCTIVE: between them they spawn up to the process
