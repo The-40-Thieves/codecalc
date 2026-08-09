@@ -541,6 +541,76 @@ check("package-local candidates all precede checkout candidates",
           [c.parent == _pkg / "bin" for c in _cands], reverse=True),
       f"-> {[c.parent.name + '/' + c.name for c in _cands]}")
 
+# ── #67: bounding the WORK, not just the input length ─────────────────────
+# The 2000-character cap bounds how much a caller can TYPE, which is a
+# different quantity from how much SymPy will DO. Every expression below is
+# under 30 characters. Measured before the fix:
+#
+#     9**9**9**9         SIGKILL at 2GB / 10s CPU
+#     (x+1)**100000      SIGKILL at 2GB / 10s CPU
+#     factorial(99999)   uncaught ValueError out of SymPy's printer
+#
+# The last one is the worst shape: not slow, but a CRASH where every other
+# path in this module returns {"ok": False, "error": ...}. A caller saw a
+# transport failure instead of a result.
+import time as _t
+
+from codecalc import logic as _logic
+
+_HOSTILE = [
+    ("9**9**9**9", "power tower"),
+    ("2**(10**9)", "power tower"),
+    ("(x+1)**100000", "symbolic power"),
+    ("factorial(99999)", "heavy function literal"),
+    ("factorial(60000)", "heavy function literal"),
+    ("binomial(200000,100000)", "heavy function, second arg"),
+]
+for _expr, _why in _HOSTILE:
+    _start = _t.time()
+    try:
+        _r = _logic.evaluate_expression(_expr)
+        _crashed = None
+    except Exception as _exc:
+        _r, _crashed = {}, f"{type(_exc).__name__}: {_exc}"
+    _elapsed = _t.time() - _start
+    check(f"{_expr}: refused rather than evaluated ({_why})",
+          _crashed is None and _r.get("ok") is False,
+          f"-> crash={_crashed} ok={_r.get('ok')}")
+    # A guard that returns the right answer after two minutes has not bounded
+    # anything. 5s is generous next to the ~0.3s these actually take, and well
+    # under the SIGKILL the unbounded versions earned.
+    check("  ...in bounded time", _elapsed < 5.0, f"-> {_elapsed:.2f}s")
+    check("  ...with a reason naming the limit",
+          any(w in (_r.get("error") or "") for w in ("limit", "tower", "digits")),
+          f"-> {(_r.get('error') or '')[:70]!r}")
+
+# The bound must not eat ordinary mathematics. Each of these is the kind of
+# thing the tool exists to answer, and each sits near a limit rather than far
+# from it — a cap that only passes trivial input is a cap set wrong.
+_LEGIT = {
+    "2+2": "4",
+    "2**64": "18446744073709551616",
+    "factorial(20)": "2432902008176640000",
+    "binomial(10,5)": "252",
+    "sin(x)**2 + cos(x)**2": "1",
+}
+for _expr, _want in _LEGIT.items():
+    _r = _logic.evaluate_expression(_expr)
+    check(f"{_expr}: still evaluates to {_want}",
+          _r.get("ok") is True and _r.get("simplified") == _want,
+          f"-> ok={_r.get('ok')} simplified={_r.get('simplified')!r}")
+
+# The boundary itself, asserted from both sides so the cap is a real edge
+# rather than a number in a comment.
+from codecalc.safe_expr import MAX_HEAVY_ARG as _CAP
+
+check("the heavy-argument cap admits its own limit",
+      _logic.evaluate_expression(f"factorial({_CAP})").get("ok") is True,
+      f"-> factorial({_CAP})")
+check("  ...and refuses one past it",
+      _logic.evaluate_expression(f"factorial({_CAP + 1})").get("ok") is False,
+      f"-> factorial({_CAP + 1})")
+
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== ALL BUG-SWEEP REGRESSIONS FIXED ===")
 sys.exit(1 if FAILS else 0)
