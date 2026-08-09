@@ -809,10 +809,34 @@ _PAIRS = [
     ("algebraic_equiv", _exact.algebraic_equiv, _exact._algebraic_equiv,
      ("(x+1)**2", "x**2+2*x+1")),
 ]
+# Compared MODULO the guard's own reporting. On a platform without fork the
+# guarded result legitimately carries one extra key — `unenforced`, saying the
+# bound was not applied — so a bare equality check failed on windows-latest for
+# the one reason that is not a defect. Caught by CI; the first version of this
+# assertion was wrong, not the code.
+#
+# So the two are compared with that key removed, and its presence is then
+# asserted in its own right: it must appear exactly when the platform cannot
+# fork, and never when it can. That turns the Windows path from something this
+# test tripped over into something it checks.
+def _without_guard_marker(result: dict) -> dict:
+    rest = [u for u in (result.get("unenforced") or [])
+            if u != _guarded.UNENFORCED_NO_FORK]
+    out = {k: v for k, v in result.items() if k != "unenforced"}
+    if rest:
+        out["unenforced"] = rest
+    return out
+
+
 for _label, _pub, _priv, _args in _PAIRS:
+    _g, _u = _pub(*_args), _priv(*_args)
     check(f"{_label}: the guard does not change a correct answer",
-          _pub(*_args) == _priv(*_args),
-          f"-> guarded={str(_pub(*_args))[:60]}")
+          _without_guard_marker(_g) == _without_guard_marker(_u),
+          f"-> guarded={str(_g)[:60]}")
+    _marked = _guarded.UNENFORCED_NO_FORK in (_g.get("unenforced") or [])
+    check("  ...and reports the bound as unenforced iff it could not apply it",
+          _marked == (not _guarded.CAN_FORK),
+          f"-> can_fork={_guarded.CAN_FORK} marked={_marked}")
 
 if _guarded.CAN_FORK:
     _p2, _q2 = _nextprime(10**30), _nextprime(3 * 10**31)
