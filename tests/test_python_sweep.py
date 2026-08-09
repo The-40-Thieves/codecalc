@@ -145,22 +145,41 @@ check("a protocol error terminates the session instead of desyncing",
 # Linux or macOS. Forcing it here exercises the same code on every runner — an
 # unexercised fallback is one that works until it is needed, which is precisely
 # how the node worker came to be broken on Windows in the first place.
-if "node" in WORKER_LANGS:
+#
+# python3 gets the identical exercise (issue #27): on Windows its usual
+# dup'd-fd-1 protocol is not trustworthy either — a subprocess started by
+# executed code can be handed the OS-level standard HANDLE instead of the
+# redirected CRT descriptor the dup relies on — so it falls back to the same
+# file-backed route as node. Before _worker_bootstrap.py understood
+# CODECALC_PROTO_PATH, forcing this for python3 did not reproduce that fd-1
+# escape (POSIX's fd dup is not the thing that is broken); it instead showed
+# the worker had NO file-backed route at all: the warm-up call in
+# `_spawn_worker` timed out waiting on a file nothing wrote to, closed the
+# worker, and every later call failed with "python3 worker died". That is the
+# gap this block now proves closed on Linux — what remains unverified here is
+# the Windows-specific handle-vs-fd divergence itself, which cannot be staged
+# on POSIX at all; only a Windows runner settles that part.
+for _forced_lang in ("python3", "node"):
+    if _forced_lang not in WORKER_LANGS:
+        continue
     sessions._FORCE_FILE_PROTOCOL = True
     try:
-        s = sessions.start("node")["session_id"]
+        s = sessions.start(_forced_lang)["session_id"]
         try:
-            sessions.execute(s, SET_STATE["node"])
-            r = sessions.execute(s, FD1_ESCAPE["node"])
-            check("file-backed protocol: fd-1 writes cannot reach it",
+            sessions.execute(s, SET_STATE[_forced_lang])
+            r = sessions.execute(s, FD1_ESCAPE[_forced_lang])
+            check(f"file-backed protocol ({_forced_lang}): fd-1 writes cannot reach it",
                   r.get("ok") is True, f"-> {str(r.get('error'))[:70]}")
-            r = sessions.execute(s, USE_STATE["node"])
-            check("file-backed protocol: state survives and answers match",
+            if _forced_lang == "python3":
+                check("file-backed protocol (python3): subprocess output is still CAPTURED",
+                      "FROM_FD1" in (r.get("stdout") or ""), f"-> {r.get('stdout')!r}")
+            r = sessions.execute(s, USE_STATE[_forced_lang])
+            check(f"file-backed protocol ({_forced_lang}): state survives and answers match",
                   "state 42" in (r.get("stdout") or ""), f"-> {r.get('stdout')!r}")
         finally:
             sessions.stop(s)
         leaked = list(pathlib.Path(tempfile.gettempdir()).glob("codecalc-proto-*"))
-        check("file-backed protocol: the channel file is cleaned up",
+        check(f"file-backed protocol ({_forced_lang}): the channel file is cleaned up",
               not leaked, f"-> {[p.name for p in leaked][:3]}")
     finally:
         sessions._FORCE_FILE_PROTOCOL = False
