@@ -215,6 +215,51 @@ if args.description is not None:
         print(f"ok   repo description: agrees on {actual_tools} tools "
               f"and {actual_langs} languages")
 
+# ── the shipped skill may only name things that exist ─────────────────────
+# codecalc/SKILL.md tells a model which tools to call and which result fields
+# to relay. It is prose about code, which is the same drift risk as the
+# README's counts — and it was the one surface here nothing checked.
+#
+# This gate was written once before, watched failing in both directions, and
+# then destroyed by `git checkout scripts/check_claims.py` at the end of a
+# mutation test — which reverts to HEAD, not to the previous edit. The skill
+# shipped claiming to be gated by a gate that no longer existed. That is the
+# defect this file exists to prevent, committed by this file's own author, so
+# it is worth naming here rather than in a changelog.
+#
+# Two directions, because they fail differently. A tool name that does not
+# exist sends a model looking for something it cannot call. A field that does
+# not exist tells it to relay something no tool returns, which reads as a
+# promise the output silently breaks.
+SKILL = (REPO / "codecalc" / "SKILL.md").read_text(encoding="utf-8")
+SERVER_SRC = (REPO / "codecalc" / "server.py").read_text(encoding="utf-8")
+
+_skill_tools = set(re.findall(r"`([a-z][a-z0-9_]+)`", SKILL))
+_declared_tools = set(re.findall(r"^def ([a-z][a-z0-9_]+)\(", SERVER_SRC, re.M))
+#: Backticked words that are fields, values or prose rather than tool names.
+#: Explicit so widening it is a reviewable diff.
+_NOT_TOOLS = {
+    "passed", "total", "inconclusive", "unenforced", "backend", "analysis",
+    "method", "output_error", "ok", "error", "stdout", "stderr", "no_net",
+    "peak_memory_kb", "stored", "mismatched", "identical", "divergences",
+    "static-estimate", "empirical", "regex-fallback", "python", "true", "false",
+    "int_widths", "DEFAULT_EDGE_INPUTS", "algebraic_equiv",
+}
+_named_but_absent = sorted(_skill_tools - _declared_tools - _NOT_TOOLS)
+if _named_but_absent:
+    fail(f"SKILL.md names tools that server.py does not define: {_named_but_absent}")
+else:
+    print(f"ok   SKILL.md: every tool it names is served ({len(_skill_tools & _declared_tools)} checked)")
+
+_RELAY_FIELDS = ["passed", "total", "inconclusive", "unenforced", "backend",
+                 "analysis", "method", "output_error"]
+_pkg = "\n".join(f.read_text(encoding="utf-8") for f in (REPO / "codecalc").glob("*.py"))
+_unproduced = [f for f in _RELAY_FIELDS if f'"{f}"' not in _pkg]
+if _unproduced:
+    fail(f"SKILL.md tells a model to relay fields no tool returns: {_unproduced}")
+else:
+    print(f"ok   SKILL.md: all {len(_RELAY_FIELDS)} relay fields are produced by the code")
+
 if failures:
     print(f"\n=== {len(failures)} claim(s) out of date ===")
     sys.exit(1)
