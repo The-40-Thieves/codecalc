@@ -154,6 +154,45 @@ _r2 = _sp2.run([_sys2.executable, "-c", _probe_src],
 check("the no-argument entry point is still the MCP server",
       "MAIN_RESOLVES True" in _r2.stdout, f"-> {_r2.stdout[:60]!r}")
 
+# ── #88 item 5: the extras degrade, they do not crash ─────────────────────
+# The imports were ALWAYS lazy; what was missing is what happens when one
+# fails. An ImportError escaping a tool says "this server is broken" when the
+# truth is "you installed the small variant and asked for a tool outside it".
+from codecalc import optional as _opt
+
+check("optional.have() answers without importing",
+      _opt.have("sympy") is True and _opt.have("definitely_not_a_module") is False,
+      f"-> sympy={_opt.have('sympy')}")
+
+# Simulated absence, because the test venv HAS sympy. Asserting the message
+# rather than the type: the message is what a caller reads out of the error
+# field, and it is the only part that tells them what to do.
+try:
+    raise _opt.MissingExtra("sympy", "symbolic")
+except ImportError as _exc:          # MissingExtra subclasses ImportError
+    _msg = str(_exc)
+for _needle in ("sympy is not installed", "symbolic", "pip install", "codecalc[full]"):
+    check(f"MissingExtra names {_needle!r}", _needle in _msg, f"-> {_msg[:80]!r}")
+check("  ...and lists the tools it affects",
+      "evaluate_expression" in _msg, f"-> {_msg[-90:]!r}")
+
+# Every module that reaches a heavy dependency must go through require(), or a
+# raw ImportError gets back out. Checked against the source, since the test
+# environment has the extras installed and cannot prove it by running.
+import pathlib as _pl2
+
+for _mod in ("logic.py", "exact.py", "units.py", "parsing.py"):
+    _src = _pl2.Path("codecalc") / _mod
+    _text = _src.read_text()
+    _raw = [l.strip() for l in _text.splitlines()
+            if l.strip().startswith(("import sympy", "import z3", "import tree_sitter"))]
+    check(f"{_mod}: no raw import of a heavy dependency", not _raw, f"-> {_raw}")
+
+check("pyproject declares the extras",
+      all(x in _pl2.Path("pyproject.toml").read_text()
+          for x in ("[project.optional-dependencies]", "symbolic", "parsing", "full")),
+      "-> optional-dependencies missing")
+
 print(f"\n=== {len(FAILS)} failures ===" if FAILS else "\n=== ALL NEW-FEATURE TESTS PASS ===")
 sys.exit(1 if FAILS else 0)
 

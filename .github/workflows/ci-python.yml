@@ -135,6 +135,45 @@ jobs:
       - name: absent-input regressions
         run: uv run --no-sync python tests/test_absent_input_sweep.py
 
+      # ── the BASE install, without the extras (#88) ───────────────────────
+      #
+      # sympy, z3 and tree-sitter are optional now. That is only true if
+      # something checks it: every other step here runs against `uv sync
+      # --frozen`, which installs everything, so a module-scope import of sympy
+      # added later would pass all of them and break the base install for
+      # everyone who did not ask for the symbolic extra.
+      #
+      # A separate venv rather than a separate job: the point is one install
+      # without the extras, and a job would repeat the whole matrix to get it.
+      - name: base install (no extras) still starts and degrades honestly
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv venv /tmp/base-venv
+          # Windows venvs put the interpreter in Scripts/python.exe, not
+          # bin/python. Hardcoding the POSIX layout failed both Windows legs
+          # with "No virtual environment ... found for path .../bin/python" —
+          # the venv was fine, the path was not.
+          BASE_PY=/tmp/base-venv/bin/python
+          [ -x "$BASE_PY" ] || BASE_PY=/tmp/base-venv/Scripts/python.exe
+          echo "base interpreter: $BASE_PY"
+          uv pip install --python "$BASE_PY" .
+          # The server must IMPORT. This is the regression that would hurt
+          # most: an import error here is a server that will not start at all.
+          "$BASE_PY" -c "import codecalc.server; print('import ok')"
+          "$BASE_PY" -m codecalc doctor
+          # And the symbolic tools must return the documented shape rather than
+          # raising — an ImportError escaping a tool tells a caller the server
+          # is broken when they simply installed the small variant.
+          "$BASE_PY" - <<'PY'
+          from codecalc import logic
+          r = logic.evaluate_expression("2+2")
+          assert r.get("ok") is False, r
+          assert "symbolic" in (r.get("error") or ""), r
+          assert "pip install" in (r.get("error") or ""), r
+          print("degrades honestly:", r["error"][:80])
+          PY
+
       # ── the FALLBACK backend, on purpose (#66) ───────────────────────────
       #
       # This job never builds the executor and `bin/` is gitignored, so every

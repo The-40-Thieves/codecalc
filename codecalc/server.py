@@ -828,6 +828,20 @@ def _doctor() -> int:
     # len(LANGUAGES) says 32 where every other number in this project says 31.
     # A doctor command that reported 32 would have introduced a THIRD figure
     # into a repo that has a gate specifically because these drift.
+    # Extras BEFORE runtimes: a caller whose symbolic tools are erroring needs
+    # this line, and it is the one thing `doctor` can tell them that no tool
+    # result will (a tool result names its own extra; only this names them all).
+    from . import optional
+    for extra, modules in (("symbolic", ("sympy", "z3")),
+                           ("parsing", ("tree_sitter_language_pack",))):
+        present = [m for m in modules if optional.have(m)]
+        if len(present) == len(modules):
+            print(f"  extra: {extra:9} installed")
+        else:
+            missing = [m for m in modules if m not in present]
+            print(f"  extra: {extra:9} MISSING ({', '.join(missing)}) — "
+                  f"pip install 'codecalc[{extra}]'")
+
     langs = [l for l in registry.all_languages() if l["name"] not in _ALIAS_ENTRIES]
     avail = executor.probe()
     have = [l["name"] for l in langs if avail.get(l["name"], True)]

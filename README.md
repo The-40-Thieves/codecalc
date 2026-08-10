@@ -27,10 +27,27 @@ correcting, so it is corrected here too.
 ## Install
 
 ```bash
-uvx codecalc          # run it directly, no environment to manage
+uvx 'codecalc[full]'          # run it directly, no environment to manage
 # or
-pip install codecalc  # into your own virtualenv
+pip install 'codecalc[full]'  # into your own virtualenv
 ```
+
+**Why `[full]`.** The base install is the MCP surface and the sandbox executor:
+31 language runtimes, sessions, packages, ~32 MB. The symbolic half — sympy and
+z3 — is 88.6 MB measured, and a caller who only runs code should not download an
+SMT solver to do it. So it is an extra:
+
+| install | size | what you get |
+|---|---|---|
+| `codecalc` | ~32 MB | execute_code, sessions, packages, complexity-free tools |
+| `codecalc[symbolic]` | +83 MB | evaluate_expression, solve, limits, truth tables, z3, units |
+| `codecalc[parsing]` | +5 MB | analyze_complexity via tree-sitter |
+| `codecalc[full]` | ~120 MB | everything |
+
+Nothing fails silently: a tool whose extra is missing returns
+`{"ok": false, "error": "sympy is not installed. It ships in the 'symbolic'
+extra: pip install 'codecalc[symbolic]' ..."}`, and `codecalc doctor` lists
+which extras are present before you make a call.
 
 `.github/workflows/release.yml` publishes a platform-tagged wheel per target
 (Linux x86_64/aarch64 musl, macOS x86_64/aarch64, Windows x86_64), each
@@ -40,11 +57,42 @@ without a manual build step. No wheel for your platform, or installed from
 source instead? Everything still runs; see the network table above for what
 falls back and to `unenforced` in that case.
 
-Point an MCP client at the installed command:
+Point an MCP client at the installed command. **The key differs by client** —
+`mcpServers` for most, `servers` for VS Code, `context_servers` for Zed — so
+these are given separately rather than as one snippet to adapt:
+
+**Claude Desktop** — `~/Library/Application Support/Claude/claude_desktop_config.json`
+(macOS), `%APPDATA%\Claude\claude_desktop_config.json` (Windows) · **Cursor**
+(`.cursor/mcp.json`) and **Claude Code** (`.mcp.json`) use the same shape:
 
 ```json
-{ "mcpServers": { "codecalc": { "command": "uvx", "args": ["codecalc"] } } }
+{ "mcpServers": { "codecalc": { "command": "uvx", "args": ["codecalc[full]"] } } }
 ```
+
+**VS Code** — `.vscode/mcp.json`, top-level key is `servers`:
+
+```json
+{ "servers": { "codecalc": { "command": "uvx", "args": ["codecalc[full]"] } } }
+```
+
+**Zed** — `~/.config/zed/settings.json`, key is `context_servers` and `command`
+is an object rather than a string:
+
+```json
+{ "context_servers": { "codecalc": { "command": { "path": "uvx", "args": ["codecalc[full]"] } } } }
+```
+
+**Windows paths need doubled backslashes** in JSON. If you installed into a venv
+rather than using `uvx`, point at the interpreter directly:
+
+```json
+{ "mcpServers": { "codecalc": {
+    "command": "C:\\path\\to\\venv\\Scripts\\python.exe",
+    "args": ["-m", "codecalc"] } } }
+```
+
+Run `codecalc doctor` to print a config block with the absolute paths of *your*
+install already filled in.
 
 Not sure what your install actually resolved? Ask it, rather than finding out
 from a tool call later:
