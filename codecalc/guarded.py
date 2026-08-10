@@ -47,6 +47,8 @@ import threading
 from time import monotonic as _monotonic
 from time import sleep as _sleep
 
+from . import errors
+
 #: Serialises forks from this module. See the threading note above.
 _FORK_LOCK = threading.Lock()
 
@@ -103,10 +105,8 @@ def _child(write_fd: int, fn, args: tuple, kwargs: dict,
         payload = '{"ok": false, "error": "expression exhausted the memory ceiling"}'
     except BaseException as exc:  # containment is the job — every failure, known or not
         try:
-            payload = json.dumps({
-                "ok": False,
-                "error": f"{type(exc).__name__}: {exc}"[:2000],
-            })
+            payload = json.dumps(errors.error_result(
+                errors.classify(exc), f"{type(exc).__name__}: {exc}"[:2000]))
         except Exception:
             payload = '{"ok": false, "error": "evaluation failed"}'
 
@@ -137,8 +137,9 @@ def run_guarded(fn, *args, cpu_seconds: int = DEFAULT_CPU_SECONDS,
             return {"ok": True, "value": fn(*args, **kwargs),
                     "unenforced": [UNENFORCED_NO_FORK]}
         except BaseException as exc:  # containment is the job
-            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"[:2000],
-                    "unenforced": [UNENFORCED_NO_FORK]}
+            return errors.error_result(
+                errors.classify(exc), f"{type(exc).__name__}: {exc}"[:2000],
+                unenforced=[UNENFORCED_NO_FORK])
 
     read_fd, write_fd = os.pipe()
     with _FORK_LOCK:
