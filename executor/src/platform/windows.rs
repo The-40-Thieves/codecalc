@@ -20,16 +20,15 @@ use std::process::{Child, Command};
 
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
 use windows_sys::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicAccountingInformation,
-    JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
-    JOB_OBJECT_LIMIT_PROCESS_TIME,
-    TerminateJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
+    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
     JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    JOB_OBJECT_LIMIT_PROCESS_MEMORY,
+    JOB_OBJECT_LIMIT_PROCESS_MEMORY, JOB_OBJECT_LIMIT_PROCESS_TIME,
+    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
+    QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
 };
 use windows_sys::Win32::System::Threading::{
-    GetExitCodeProcess, WaitForSingleObject, CREATE_NO_WINDOW,
+    CREATE_NO_WINDOW, GetExitCodeProcess, WaitForSingleObject,
 };
 
 use super::{ResolvedLimits, Wait};
@@ -75,8 +74,10 @@ fn create_job(limits: &ResolvedLimits) -> io::Result<Job> {
     //
     // The field is a LARGE_INTEGER in 100-nanosecond ticks.
     const TICKS_PER_SECOND: i64 = 10_000_000;
-    info.BasicLimitInformation.PerProcessUserTimeLimit =
-        limits.cpu_secs.saturating_mul(TICKS_PER_SECOND as u64).min(i64::MAX as u64) as i64;
+    info.BasicLimitInformation.PerProcessUserTimeLimit = limits
+        .cpu_secs
+        .saturating_mul(TICKS_PER_SECOND as u64)
+        .min(i64::MAX as u64) as i64;
     // Job-scoped, unlike RLIMIT_NPROC. Clamped to u32 because that is the field.
     info.BasicLimitInformation.ActiveProcessLimit =
         limits.max_processes.min(u32::MAX as u64) as u32;

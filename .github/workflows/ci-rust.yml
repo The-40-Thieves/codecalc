@@ -40,7 +40,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-rust
         with:
-          components: clippy
+          # rustfmt as well as clippy: the fmt step below needs it, and this
+          # input is what the composite hands to dtolnay/rust-toolchain, so the
+          # `components` list in rust-toolchain.toml does not cover it here.
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: executor
@@ -52,6 +55,23 @@ jobs:
         working-directory: executor
         shell: bash
         run: cargo clippy --all-targets --all-features -- -D warnings
+      # ONE runner, not the matrix: rustfmt's output depends on the source and the
+      # toolchain, both identical across the three, so the other two would only
+      # re-confirm the same answer more slowly. The toolchain is pinned in
+      # rust-toolchain.toml, which is what makes that safe to assume — an
+      # unpinned rustfmt could legitimately differ between runners.
+      #
+      # This gate went in AFTER the tree was already non-compliant: `cargo fmt`
+      # rewrote 401 lines across four files in the same commit. That reformat is
+      # provably cosmetic rather than merely believed to be — `.text`, `.rodata`,
+      # `.data` and `.eh_frame` are byte-identical before and after, and the only
+      # section that moved is `.data.rel.ro`, which holds the core::panic::Location
+      # line/column constants that shift when lines do.
+      - name: cargo fmt --check
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: executor
+        shell: bash
+        run: cargo fmt --check
 
   contract:
     # The claim is that codecalc works on Linux, macOS and Windows. That claim is
