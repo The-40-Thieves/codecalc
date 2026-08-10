@@ -368,6 +368,47 @@ if floor("session unenforced emissions",
          re.findall(r"_session_unenforced\(w\)", PY_SESSIONS_SRC), 2):
     print("ok   session disclosure: emitted on both stateful result shapes")
 
+# ── the two backends must return the SAME KEYS, measured not listed ────────
+# The gates above compare SOURCE constructs — allowlists, path strings, marker
+# presence. None of them compares the thing a caller actually receives, and a
+# field can therefore exist in one backend's output and not the other's while
+# every check here passes.
+#
+# It did. `output_truncated` was a field on the Rust StepResult, computed from
+# `out_trunc || err_trunc`, and used to raise the OLE verdict — and emitted by
+# neither Rust return. The Python fallback emitted it. So the Rust backend
+# answered "OLE" while omitting the field that says why, the fallback did not,
+# and `contract_check.py`'s "every return path must have the SAME shape" held
+# only within one backend. Nothing compared them to each other.
+#
+# This runs both and diffs the key sets. It is the only check in this file that
+# executes the product rather than reading it, which is exactly why it catches
+# what the others cannot.
+_probe = 'print("x" * 100000)'
+_rust_result = executor.execute("python3", _probe, max_output_kb=1)
+_saved_rust = executor._rust
+executor._rust = None          # force the pure-Python fallback
+try:
+    _py_result = executor.execute("python3", _probe, max_output_kb=1)
+finally:
+    executor._rust = _saved_rust
+
+if _rust_result.get("backend") != "rust":
+    # Not a pass. Without the native binary there is no second backend to
+    # compare against, and saying so beats a green check that compared one
+    # thing with itself.
+    print("SKIP backend key parity: no native executor built, nothing to compare")
+else:
+    _only_rust = sorted(set(_rust_result) - set(_py_result))
+    _only_py = sorted(set(_py_result) - set(_rust_result))
+    if _only_rust or _only_py:
+        fail("the two backends return DIFFERENT keys — "
+             f"rust-only={_only_rust} python-only={_only_py}. A caller cannot "
+             "switch backends without its field reads changing, which is the "
+             "one thing the shared result contract promises")
+    else:
+        print(f"ok   backend key parity: both return the same {len(_rust_result)} keys")
+
 if failures:
     print(f"\n=== {len(failures)} parity failure(s) ===")
     sys.exit(1)

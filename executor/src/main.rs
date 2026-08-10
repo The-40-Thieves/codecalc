@@ -1010,6 +1010,13 @@ fn execute(
                 // that the two agree, so a field added to one must be added to
                 // the other or a compile failure loses a key its caller has.
                 "output_error": sr.output_error,
+                // Whether either stream hit the cap. Computed since the cap
+                // landed, used to raise the OLE verdict, and emitted by NEITHER
+                // return until now — so the Rust backend told a caller "OLE"
+                // and left the field that says why out of the payload, while
+                // the Python fallback sent it. Two backends, two key sets,
+                // under a contract whose whole claim is that they agree.
+                "output_truncated": sr.output_truncated,
                 // total_ms/platform/workdir are on the success return and were
                 // missing here, so result["workdir"] was a KeyError for callers
                 // whose only mistake was writing code that did not compile.
@@ -1112,6 +1119,8 @@ fn execute(
         // present means at least one of them is not, and names which and why
         // including the OS error number.
         "output_error": sr.output_error,
+        // See the compile return for why this was missing.
+        "output_truncated": sr.output_truncated,
         "platform": std::env::consts::OS,
         "workdir": work_s,
     });
