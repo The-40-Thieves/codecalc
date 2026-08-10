@@ -381,10 +381,27 @@ def _read_nofollow(target: Path, max_bytes: int) -> bytes | None:
         # serve", and none of them worth distinguishing to the caller, which
         # already treats None as "no such resource".
         return None
-    with os.fdopen(fd, "rb") as fh:
-        st = os.fstat(fh.fileno())
+    # fstat the RAW descriptor, before fdopen. Ordering is load-bearing, not
+    # style: `os.open` SUCCEEDS on a directory, and `os.fdopen` on that
+    # descriptor then raises IsADirectoryError. With the fstat inside the
+    # `with`, that exception escaped `_read_nofollow` entirely — the old
+    # `is_file()` check had returned None for a directory — AND leaked the
+    # descriptor, because os.open had already succeeded and nothing closed it.
+    # Measured: `session_read_file` on a directory raised instead of reporting,
+    # and every attempt burned an fd toward RLIMIT_NOFILE.
+    #
+    # Screening on S_ISREG here rejects directories, device nodes, sockets and
+    # FIFOs before fdopen is ever reached, and the try/finally guarantees the
+    # descriptor is closed on every path that does not hand it to fdopen.
+    try:
+        st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode) or st.st_size > max_bytes:
+            os.close(fd)
             return None
+    except OSError:
+        os.close(fd)
+        return None
+    with os.fdopen(fd, "rb") as fh:
         # max_bytes + 1, and reject on the extra byte. The fstat above rejects a
         # file that is ALREADY too big without reading it, but a session can
         # append to its own artifact between that fstat and this read — the

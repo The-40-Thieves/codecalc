@@ -102,6 +102,9 @@ packages = ["codecalc"]
 # on disk. force_include itself bypasses file-selection, but `artifacts` is
 # what stops a *different* code path (packages/only-include walking bin/ some
 # other way) from silently excluding the same gitignored files.
+# codecalc/py.typed is tracked, not a build artifact, so it needs no entry
+# here — `packages = ["codecalc"]` above already carries it into the wheel.
+# Verified by inspecting the built wheel rather than assumed.
 artifacts = [
     "bin/codecalc-exec",
     "bin/codecalc-exec.exe",
