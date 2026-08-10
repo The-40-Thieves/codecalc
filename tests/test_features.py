@@ -155,6 +155,64 @@ _r2 = _sp2.run([_sys2.executable, "-c", _probe_src],
 check("the no-argument entry point is still the MCP server",
       "MAIN_RESOLVES True" in _r2.stdout, f"-> {_r2.stdout[:60]!r}")
 
+# ── #117: compact mode must not hide an unapplied guarantee ───────────────
+# The old compact result was exactly {ok, verdict, stdout, exit_code}, so
+# `execute_code(no_net=True, compact=True)` on a platform without the shim came
+# back looking like a clean sandboxed run with no `unenforced` at all. Token
+# efficiency that drops the disclosure is the defect SECURITY.md names by name:
+# "anything that makes the server report a guarantee it did not apply".
+#
+# Driven through a stateful session, because that is the shape where
+# `unenforced` is reliably NON-empty on every platform (#104 made the structural
+# gaps unconditional). Asserting on a one-shot run would pass on Linux with the
+# Rust backend, where `unenforced` is legitimately [] and the whole risk is
+# invisible.
+from codecalc import server as _srv117
+from codecalc import sessions as _sess117
+
+_s117 = _srv117.session_start("python3")
+if not _s117.get("ok"):
+    print(f"SKIP #117 compact disclosure (no python3 worker: {_s117.get('error')})")
+else:
+    _sid117 = _s117["session_id"]
+    try:
+        _full117 = _srv117.execute_code("python3", "print(1)", session_id=_sid117, no_net=True)
+        _comp117 = _srv117.execute_code("python3", "print(1)", session_id=_sid117,
+                                        no_net=True, compact=True)
+        _fu = _full117.get("unenforced") or []
+        _cu = _comp117.get("unenforced") or []
+        check("a non-empty `unenforced` survives compact mode",
+              bool(_cu), f"-> full={len(_fu)} compact={len(_cu)}")
+        check("  ...naming every guarantee the full result named",
+              len(_cu) == len(_fu) and
+              all(e.split(":", 1)[0].strip() in _cu for e in _fu),
+              f"-> full={[e.split(':',1)[0] for e in _fu]} compact={_cu}")
+        check("  ...and points at where the explanations are",
+              "unenforced_detail" in _comp117,
+              f"-> {_comp117.get('unenforced_detail')!r}")
+        check("compact is still smaller than full",
+              len(json.dumps(_comp117)) < len(json.dumps(_full117)),
+              f"-> {len(json.dumps(_comp117))} vs {len(json.dumps(_full117))} chars")
+    finally:
+        _sess117.stop(_sid117)
+
+# An EMPTY disclosure is omitted — saying nothing costs tokens for nothing.
+_clean117 = _srv117.execute_code("python3", "print(6*7)", compact=True)
+check("an empty `unenforced` is omitted from a compact result",
+      "unenforced" not in _clean117 and _clean117.get("stdout", "").strip() == "42",
+      f"-> keys={sorted(_clean117)}")
+
+# output_error is the other disclosure field and takes the same path.
+check("compact_result keeps a non-empty output_error",
+      _srv117.compact_result({"ok": False, "verdict": "RTE", "stdout": "",
+                              "exit_code": 1, "output_error": "could not read stdout"}
+                             ).get("output_error") == "could not read stdout")
+check("  ...and omits a null one",
+      "output_error" not in _srv117.compact_result(
+          {"ok": True, "verdict": "OK", "stdout": "x", "exit_code": 0,
+           "output_error": None}))
+
+
 # ── #88 item 5: the extras degrade, they do not crash ─────────────────────
 # The imports were ALWAYS lazy; what was missing is what happens when one
 # fails. An ImportError escaping a tool says "this server is broken" when the

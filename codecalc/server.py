@@ -98,6 +98,62 @@ def list_languages() -> list[dict]:
     return langs
 
 
+#: What a compact result ALWAYS carries.
+_COMPACT_ALWAYS = ("ok", "verdict", "stdout", "exit_code")
+
+#: Disclosure fields, carried at EVERY verbosity whenever they say something.
+#:
+#: These are the reason compact mode was a defect rather than a trade-off (#117).
+#: The old implementation returned exactly _COMPACT_ALWAYS, so
+#: `execute_code(no_net=True, compact=True)` came back as
+#: `{"ok": true, "verdict": "OK", ...}` on a platform where the LD_PRELOAD shim
+#: cannot be applied — a successful-looking result for a guarantee that was
+#: never applied, which is the one thing SECURITY.md puts in scope by name.
+#:
+#: Splitting by KIND rather than by size is the whole fix: `workdir` and
+#: `total_ms` are diagnostics a caller can live without, and `unenforced` is
+#: not. An empty `unenforced` is omitted because it costs tokens to say
+#: nothing; a non-empty one is the entire point of the field.
+_COMPACT_DISCLOSURE = ("unenforced", "output_error")
+
+
+def compact_result(result: dict) -> dict:
+    """A small result that cannot hide an unapplied guarantee.
+
+    Public because anything that re-envelopes a result — a facade over the tool
+    surface (#118), a future response_format — has to reuse this rather than
+    re-derive which fields are droppable. Re-deriving it is how the first
+    version lost `unenforced`.
+    """
+    out = {k: result.get(k) for k in _COMPACT_ALWAYS}
+    out["stdout"] = result.get("stdout", "")
+    for key in _COMPACT_DISCLOSURE:
+        value = result.get(key)
+        # Truthiness, not `is not None`: `unenforced` is [] when everything was
+        # applied and `output_error` is None when the streams read cleanly.
+        # Both mean "nothing to disclose" and neither is worth the tokens.
+        if value:
+            out[key] = value
+
+    # Keep WHAT was not applied; drop WHY. Each `unenforced` entry is
+    # "<guarantee>: <prose explaining the remedy>", and on a stateful session
+    # there are six of them — measured at 171 of a 199-token result, so the
+    # disclosure became the whole cost of a "compact" reply.
+    #
+    # The name is the part a caller must act on: it says which guarantee it did
+    # not get. The prose is a remedy, and it is available in full from the same
+    # call without `compact`, and from `session_start`. Naming survives; the
+    # explanation is the diagnostic half, which is what compact mode is for.
+    #
+    # `_full` is carried so nothing is silently truncated: the caller is told
+    # the explanations exist and where to get them.
+    terse = out.get("unenforced")
+    if terse:
+        out["unenforced"] = [e.split(":", 1)[0].strip() for e in terse]
+        out["unenforced_detail"] = "call without compact=True for the reason and remedy of each"
+    return out
+
+
 @mcp.tool()
 def execute_code(
     language: str,
@@ -121,7 +177,9 @@ def execute_code(
     - `max_memory_mb` / `max_cpu`: per-call resource ceilings.
     - `max_output_kb`: raise/lower the stdout cap (default 64 KiB).
     - `no_net`: block network egress (LD_PRELOAD shim; dynamic binaries only).
-    - `compact`: return only verdict + stdout, drop the heavy fields.
+    - `compact`: drop the diagnostic fields (timings, workdir, platform). Never
+      drops `unenforced` or `output_error` — if a guarantee you asked for was
+      not applied, a compact result still says so.
     """
     timeout = min(timeout, 120)
     if session_id:
@@ -140,9 +198,7 @@ def execute_code(
                                   max_output_kb=max_output_kb,
                                   max_cpu=max_cpu, no_net=no_net)
     if compact:
-        return {"ok": result.get("ok"), "verdict": result.get("verdict"),
-                "stdout": result.get("stdout", ""),
-                "exit_code": result.get("exit_code")}
+        return compact_result(result)
     return result
 
 
