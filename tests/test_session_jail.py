@@ -22,6 +22,7 @@ import os
 import pathlib
 import sys
 import tempfile
+import time
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
@@ -262,6 +263,135 @@ else:
                       f"-> refused={_nofollow_refused} escaped={_outside.exists()}")
     finally:
         sessions.stop(_sid)
+
+# ── the READ path must be as strict as the write path ──────────────────────
+# #107 gave `write_file` O_NOFOLLOW and left `resource_read` doing
+# `target.read_bytes()` straight after `_jail`. Same TOCTOU, one direction
+# over, and the read side is the one that hands bytes back to the MCP client.
+# The Landlock confinement does not cover it: that confines the WORKER, and
+# this read happens in the server process.
+_rd = pathlib.Path(tempfile.mkdtemp(prefix="codecalc-read-"))
+_outside_secret = _rd / "outside.txt"
+_outside_secret.write_text("OUTSIDE-CANARY", encoding="utf-8")
+_ws = _rd / "ws"
+_ws.mkdir()
+
+if not hasattr(os, "O_NOFOLLOW"):
+    # Windows has no O_NOFOLLOW, so `_O_NOFOLLOW` is 0, the flag is a no-op and
+    # the open follows the link. That is a documented platform gap — stated in
+    # `_write_nofollow`'s docstring — and it is why the write case above is
+    # skipped here too rather than asserted. Enshrining "it follows the symlink"
+    # as expected behaviour would turn a known weakness into a guarantee.
+    #
+    # Mirroring the write guard is the fix for a red Windows run this file
+    # caused on its first push: the write half had the check and the read half,
+    # written minutes later, did not.
+    skip("_read_nofollow refuses a symlinked final component",
+         "O_NOFOLLOW does not exist on this platform")
+elif _can_symlink(_ws):
+    (_ws / "link.bin").symlink_to(_outside_secret)
+    # Hand _read_nofollow the exact state the race leaves behind: a symlink
+    # sitting at the already-resolved path.
+    check("_read_nofollow refuses a symlinked final component",
+          sessions._read_nofollow(_ws / "link.bin", 1 << 20) is None)
+else:
+    skip("_read_nofollow refuses a symlinked final component",
+         "this account lacks symlink privilege")
+
+# A regular file still reads, or the guard above would be indistinguishable
+# from a function that always returns None.
+(_ws / "real.bin").write_bytes(b"hello")
+check("_read_nofollow still reads a regular file",
+      sessions._read_nofollow(_ws / "real.bin", 1 << 20) == b"hello")
+
+(_ws / "big.bin").write_bytes(b"x" * 4096)
+check("_read_nofollow refuses a file over the cap",
+      sessions._read_nofollow(_ws / "big.bin", 1024) is None)
+
+# The cap has to be applied BEFORE the content is read, not after. The old
+# implementation called `read_bytes()` and then compared `len(data)` to the
+# cap, so an oversized artifact was fully resident in memory before being
+# rejected — the same defect `read_capped` had on the Rust side (#103), and a
+# session can create the file that triggers it.
+#
+# Asserting `is None` does NOT distinguish the two: both return None. Timing a
+# SPARSE file does. 1 GiB costs no disk and no page cache, but reading it costs
+# a second or more and a gigabyte of RSS, while rejecting it from `fstat` is
+# effectively instant. Measured at 0.001s here against a 2s ceiling, so the
+# margin does not depend on this machine being fast.
+# POSIX only. `truncate()` gives a sparse file on ext4/APFS at no disk cost,
+# but NTFS does not guarantee sparseness, so on Windows this would write a real
+# 1 GiB of zeros to a CI runner's disk to test platform-independent logic.
+if os.name == "posix":
+    _sparse = _ws / "sparse.bin"
+    with _sparse.open("wb") as _fh:
+        _fh.truncate(1 << 30)
+    _t0 = time.monotonic()
+    _sparse_result = sessions._read_nofollow(_sparse, 1024)
+    _elapsed = time.monotonic() - _t0
+    # 0.5s: measured 0.000s for the fstat path and 1.07s for the read-then-check
+    # path on this machine. The threshold sits an order of magnitude above the
+    # former and below the latter, so it FAILS the old implementation rather
+    # than merely reporting a nicer number next to it — which the first draft,
+    # at 2.0s, did not.
+    check("_read_nofollow rejects an oversized file without reading it",
+          _sparse_result is None and _elapsed < 0.5,
+          f"-> {_elapsed:.3f}s for a 1 GiB sparse file")
+    _sparse.unlink()
+else:
+    skip("_read_nofollow rejects an oversized file without reading it",
+         "needs sparse-file support; NTFS would write a real 1 GiB")
+
+# A file that grows AFTER the fstat and before the read must be refused, not
+# served truncated. The descriptor being open does not freeze the size, and a
+# session can append to its own artifact in that window. `read(max_bytes)` would
+# hand back the cap-sized prefix of a now-oversized file and report success —
+# a silent truncation, against a contract that says over-cap returns None.
+#
+# Made deterministic by patching os.fstat to append during the call rather than
+# by racing a real writer. Found by a review bot on the PR, which also built
+# this reproduction; the version before it read exactly max_bytes and passed.
+_grow = _ws / "grow.bin"
+_grow.write_bytes(b"A" * 8)
+_real_fstat = sessions.os.fstat
+
+
+def _fstat_then_grow(fd):
+    _st = _real_fstat(fd)
+    with _grow.open("ab") as _gh:
+        _gh.write(b"BBBBB")
+    sessions.os.fstat = _real_fstat          # once, so the read itself is normal
+    return _st
+
+
+sessions.os.fstat = _fstat_then_grow
+try:
+    _grown = sessions._read_nofollow(_grow, 8)
+finally:
+    sessions.os.fstat = _real_fstat
+check("_read_nofollow refuses a file that grew past the cap after fstat",
+      _grown is None,
+      f"-> returned {None if _grown is None else f'{len(_grown)} bytes'}, file is now {_grow.stat().st_size}")
+
+# ...while a file exactly AT the cap still reads, so the +1 probe above cannot
+# be satisfied by rejecting everything.
+_exact = _ws / "exact.bin"
+_exact.write_bytes(b"C" * 8)
+check("_read_nofollow still reads a file exactly at the cap",
+      sessions._read_nofollow(_exact, 8) == b"C" * 8)
+
+# A FIFO must not park the server waiting for a writer.
+#
+# Stated honestly: the OLD code also declined this, because `is_file()` is
+# False for a FIFO. This is a floor on the NEW implementation rather than proof
+# of a fix — `fstat`+S_ISREG replaced `is_file()`, and O_NONBLOCK is what stops
+# the open() itself from blocking before either check can run.
+if hasattr(os, "mkfifo"):
+    os.mkfifo(_ws / "pipe")
+    check("_read_nofollow refuses a FIFO instead of blocking on it",
+          sessions._read_nofollow(_ws / "pipe", 1 << 20) is None)
+else:
+    skip("_read_nofollow refuses a FIFO", "os.mkfifo unavailable on this platform")
 
 # A workspace-only session runs a fresh sandboxed process per call, so it
 # carries all of it. The empty list is a real answer, not a missing one, and

@@ -18,6 +18,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import threading
@@ -278,10 +279,8 @@ def resource_read(session_id: str, path: str, max_bytes: int = 4 * 1024 * 1024) 
     import mimetypes
     d = _session_dir(session_id)
     target = _jail(d, path)
-    if not target.is_file():
-        return None
-    data = target.read_bytes()
-    if len(data) > max_bytes:
+    data = _read_nofollow(target, max_bytes)
+    if data is None:
         return None
     mime, _ = mimetypes.guess_type(str(target))
     if mime and mime.startswith("image/"):
@@ -342,6 +341,64 @@ def _write_nofollow(target: Path, content: str) -> None:
     fd = os.open(target, flags, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         fh.write(content)
+
+
+def _read_nofollow(target: Path, max_bytes: int) -> bytes | None:
+    """Read `target`, or None if it is not a regular file or is over the cap.
+
+    The read counterpart of `_write_nofollow`, and it exists because #107 fixed
+    the write path and left this one open — the same TOCTOU, one direction over.
+    `_jail` resolves the path and this opens it, and code running in the session
+    shares the workspace as its cwd, so it can drop a symlink into the resolved
+    path in between. Here that would make the SERVER read a file outside the
+    workspace and hand the bytes to the MCP client. The Landlock confinement
+    added in #107 does not cover it: that confines the worker, and this read
+    happens in the server process.
+
+    Three things this closes, not one:
+
+    - O_NOFOLLOW refuses a symlink at the final component, as on the write side.
+    - `fstat` on the OPEN descriptor replaces `target.is_file()`. Checking the
+      path and then opening it is two syscalls with the same window between them
+      that the check is meant to remove; asking the descriptor is the only form
+      that cannot be swapped underneath.
+    - The size is read from that same `fstat` and refused BEFORE any content is
+      read. The previous code called `read_bytes()` and then compared `len(data)`
+      to the cap, so an oversized artifact was fully loaded into memory before
+      being rejected. That is the defect `read_capped` had on the Rust side
+      (#103) reproduced here in Python, and a session can create the file that
+      triggers it.
+
+    O_NONBLOCK so that a FIFO left in the workspace cannot park the server on
+    open() waiting for a writer. It has no effect on a regular file, which the
+    S_ISREG check has by then established this is.
+    """
+    flags = os.O_RDONLY | _O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0)
+    try:
+        fd = os.open(target, flags)
+    except OSError:
+        # ELOOP (symlink), ENOENT, EACCES, ENXIO — all "not a file this may
+        # serve", and none of them worth distinguishing to the caller, which
+        # already treats None as "no such resource".
+        return None
+    with os.fdopen(fd, "rb") as fh:
+        st = os.fstat(fh.fileno())
+        if not stat.S_ISREG(st.st_mode) or st.st_size > max_bytes:
+            return None
+        # max_bytes + 1, and reject on the extra byte. The fstat above rejects a
+        # file that is ALREADY too big without reading it, but a session can
+        # append to its own artifact between that fstat and this read — the
+        # descriptor is open, and nothing about holding it freezes the size.
+        # `fh.read(max_bytes)` would then return the first max_bytes of a file
+        # that is now over the cap and report success, so the caller gets a
+        # SILENTLY TRUNCATED resource while this function's contract says an
+        # over-cap file returns None.
+        #
+        # One byte past the cap distinguishes "exactly at the limit" from
+        # "longer than the limit" without reading the whole thing, which is the
+        # same shape as `read_capped`'s `take(cap + 1)` on the Rust side (#103).
+        data = fh.read(max_bytes + 1)
+        return None if len(data) > max_bytes else data
 
 
 def _jail(d: Path, path: str) -> Path:
