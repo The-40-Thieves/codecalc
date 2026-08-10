@@ -72,12 +72,17 @@ fn main() {
     // tests/test_executor_sweep.py asserts the installed shim is not older
     // than blocknet.c.
     let profile = env::var("PROFILE").unwrap_or_default();
+    // A let-chain, which edition 2024 stabilizes. Under 2021 this was a nested
+    // `if let`; clippy's `collapsible_if` fires on that shape once let-chains
+    // are available, and `-D warnings` in CI makes it an error. Same control
+    // flow either way — the copy is best-effort and a failure is a warning,
+    // because the shim missing beside the binary is a degraded --no-net rather
+    // than a broken build.
     if let Some(exe_dir) = out_dir
         .ancestors()
         .find(|a| a.file_name().map(|n| n == profile.as_str()).unwrap_or(false))
+        && let Err(e) = fs::copy(&built, exe_dir.join(lib))
     {
-        if let Err(e) = fs::copy(&built, exe_dir.join(lib)) {
-            println!("cargo:warning=built the blocknet shim but could not place it beside the executable ({e})");
-        }
+        println!("cargo:warning=built the blocknet shim but could not place it beside the executable ({e})");
     }
 }
