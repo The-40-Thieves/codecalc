@@ -342,6 +342,44 @@ else:
     skip("_read_nofollow rejects an oversized file without reading it",
          "needs sparse-file support; NTFS would write a real 1 GiB")
 
+# A file that grows AFTER the fstat and before the read must be refused, not
+# served truncated. The descriptor being open does not freeze the size, and a
+# session can append to its own artifact in that window. `read(max_bytes)` would
+# hand back the cap-sized prefix of a now-oversized file and report success —
+# a silent truncation, against a contract that says over-cap returns None.
+#
+# Made deterministic by patching os.fstat to append during the call rather than
+# by racing a real writer. Found by a review bot on the PR, which also built
+# this reproduction; the version before it read exactly max_bytes and passed.
+_grow = _ws / "grow.bin"
+_grow.write_bytes(b"A" * 8)
+_real_fstat = sessions.os.fstat
+
+
+def _fstat_then_grow(fd):
+    _st = _real_fstat(fd)
+    with _grow.open("ab") as _gh:
+        _gh.write(b"BBBBB")
+    sessions.os.fstat = _real_fstat          # once, so the read itself is normal
+    return _st
+
+
+sessions.os.fstat = _fstat_then_grow
+try:
+    _grown = sessions._read_nofollow(_grow, 8)
+finally:
+    sessions.os.fstat = _real_fstat
+check("_read_nofollow refuses a file that grew past the cap after fstat",
+      _grown is None,
+      f"-> returned {None if _grown is None else f'{len(_grown)} bytes'}, file is now {_grow.stat().st_size}")
+
+# ...while a file exactly AT the cap still reads, so the +1 probe above cannot
+# be satisfied by rejecting everything.
+_exact = _ws / "exact.bin"
+_exact.write_bytes(b"C" * 8)
+check("_read_nofollow still reads a file exactly at the cap",
+      sessions._read_nofollow(_exact, 8) == b"C" * 8)
+
 # A FIFO must not park the server waiting for a writer.
 #
 # Stated honestly: the OLD code also declined this, because `is_file()` is

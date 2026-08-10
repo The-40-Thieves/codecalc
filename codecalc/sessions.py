@@ -385,7 +385,20 @@ def _read_nofollow(target: Path, max_bytes: int) -> bytes | None:
         st = os.fstat(fh.fileno())
         if not stat.S_ISREG(st.st_mode) or st.st_size > max_bytes:
             return None
-        return fh.read(max_bytes)
+        # max_bytes + 1, and reject on the extra byte. The fstat above rejects a
+        # file that is ALREADY too big without reading it, but a session can
+        # append to its own artifact between that fstat and this read — the
+        # descriptor is open, and nothing about holding it freezes the size.
+        # `fh.read(max_bytes)` would then return the first max_bytes of a file
+        # that is now over the cap and report success, so the caller gets a
+        # SILENTLY TRUNCATED resource while this function's contract says an
+        # over-cap file returns None.
+        #
+        # One byte past the cap distinguishes "exactly at the limit" from
+        # "longer than the limit" without reading the whole thing, which is the
+        # same shape as `read_capped`'s `take(cap + 1)` on the Rust side (#103).
+        data = fh.read(max_bytes + 1)
+        return None if len(data) > max_bytes else data
 
 
 def _jail(d: Path, path: str) -> Path:
