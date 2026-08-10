@@ -202,9 +202,32 @@ def eval_exact(expr: str) -> dict:
     `0.1 + 0.2 == 0.3` is True here (False in plain Python). Supports
     arithmetic, comparisons, bitwise ops on integers, math.* functions,
     pi/e/tau. Returns the exact value plus decimal approximation.
+
+    GUARDED, and it was the last symbolic tool that was not. #78 put the six
+    SymPy tools in a killable child; this one has its own AST evaluator over
+    math.*, so it was not in that set and nobody noticed. It bounded `**`
+    through _MAX_POW_EXPONENT and bounded nothing about function arguments —
+    `factorial(10000000)` ran until the process was killed from outside.
+
+    Two layers, same as everywhere else here. reject_unsafe screens the string
+    (it carries the heavy-argument cap); the guard bounds whatever the screen
+    did not anticipate, which for this tool is every one of the ~50 callables
+    dir(math) exposes.
     """
+    _warm_exact()
+    return guarded_call(_eval_exact, expr)
+
+
+def _eval_exact(expr: str) -> dict:
+    """The evaluation itself. Runs inside the guard, never called directly."""
     if len(expr) > _MAX_EXPR_LEN:
         return {"ok": False, "error": f"expression too long (max {_MAX_EXPR_LEN} chars)"}
+    # The screen the other four functions in this file already call, and this
+    # one never did. It carries the heavy-argument cap, which is what stops
+    # factorial(<huge>) before the evaluator reaches math.factorial.
+    _bad = reject_unsafe(expr)
+    if _bad:
+        return {"ok": False, "error": _bad}
     try:
         tree = ast.parse(expr, mode="eval")
     except SyntaxError as exc:
