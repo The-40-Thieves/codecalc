@@ -17,13 +17,15 @@ import contextlib
 import json
 import os
 import re
+import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import uuid
 from pathlib import Path
 
-from . import executor, registry
+from . import executor, landlock, registry
 
 SESSION_ROOT = Path(os.environ.get("CODECALC_SESSION_ROOT", "~/.codecalc/sessions")).expanduser()
 
@@ -82,14 +84,20 @@ def start(language: str = "python3", name: str | None = None) -> dict:
     d.mkdir(parents=True, exist_ok=True)
     with _lock:
         _SESSION_DIR_IDENTITY[session_id] = executor._dir_identity(d)
-    w = _spawn_worker(name, d)
+    w, why = _spawn_worker(name, d)
     if w is None:
-        return {"ok": False, "error": f"failed to start {name} REPL worker"}
+        return {"ok": False,
+                "error": f"failed to start {name} REPL worker: {why or 'unknown cause'}"}
     with _lock:
         _workers[session_id] = w
     return {
         "ok": True, "session_id": session_id, "language": name,
         "stateful": True, "workdir": str(d), "files": _list(d),
+        # Stated at creation as well as on every result: a caller deciding
+        # whether to put untrusted code in a session needs this BEFORE it runs
+        # any, not only in the output afterwards.
+        "confined": w.confined,
+        "unenforced": _session_unenforced(w),
     }
 
 
@@ -141,6 +149,64 @@ _WORKER_CANNOT_ENFORCE = {
     "max_output_kb": "the worker caps at 64 KiB; a custom cap needs a fresh process",
 }
 
+#: Guarantees a ONE-SHOT execution carries that a stateful worker does not,
+#: keyed by the name `check_parity.py` matches against the executor.
+#:
+#: These are reported UNCONDITIONALLY, which is the opposite of the rule
+#: `executor._unmeasured` follows ("a ceiling is only disclaimed when it was
+#: REQUESTED... a field that always says something is a field callers stop
+#: reading"). The distinction is who could have known to ask.
+#:
+#: `max_memory_mb` is a ceiling the caller passes, so naming it unasked is
+#: noise. The Rust sandbox is not: it is what `execute_code()` gives you by
+#: default, and adding `session_id=` silently takes it away. A caller cannot
+#: ask for a guarantee it does not know it just lost, so the only place that
+#: fact can appear is in every result that lacks it. #104.
+_SESSION_STRUCTURAL_GAPS = {
+    "sandbox_backend": (
+        "the worker is a plain subprocess, not codecalc-exec: the Rust "
+        "executor's ceilings, argv/env handling and its own unenforced "
+        "reporting do not apply to this call"),
+    "no_net": (
+        "the LD_PRELOAD network shim is applied at exec and a worker is "
+        "long-lived, so this session reaches the network"),
+    "process_group_kill": (
+        "applied per call on the one-shot path; here the worker's group is "
+        "reaped at timeout or session_stop, so a background child outlives "
+        "the call that started it"),
+    "peak_memory_kb": (
+        "not measured for worker calls; the field is null rather than zero"),
+}
+
+#: The filesystem half, which is conditional because it is the one gap that
+#: CAN close. Landlock confines the worker to its workspace where the kernel
+#: supports it (#23 built the module; ABI is checked at spawn).
+_NO_FS_CONFINEMENT = (
+    "filesystem_confinement: the worker can read any path this user can; "
+    "Landlock is unavailable here ({})")
+
+
+def _session_unenforced(w: "Worker | None") -> list[str]:
+    """Everything a stateful session does not carry, whether or not asked.
+
+    `w is None` means a workspace-only session, which runs a fresh sandboxed
+    process per call and therefore carries all of it — the empty list is a
+    real answer, not a missing one.
+    """
+    if w is None:
+        return []
+    out = [f"{k}: {v}" for k, v in _SESSION_STRUCTURAL_GAPS.items()]
+    if not w.confined:
+        abi = landlock.abi_version()
+        why = "kernel reports Landlock ABI 0" if abi == 0 else f"ABI {abi}"
+        out.append(_NO_FS_CONFINEMENT.format(why))
+    else:
+        # Confined is not unconfined, but it is also not total. Landlock leaves
+        # metadata syscalls and (below ABI 10) UDP alone at every version, and
+        # saying "confined" without that reads as more than it is.
+        out.extend(landlock.unenforced_reasons(scope="session"))
+    return out
+
 
 def execute(session_id: str, code: str, language: str | None = None,
             stdin: str = "", timeout: int = 30, max_memory_mb: int = 0,
@@ -164,9 +230,18 @@ def execute(session_id: str, code: str, language: str | None = None,
         asked = {"max_memory_mb": max_memory_mb, "max_cpu": max_cpu,
                  "no_net": no_net, "max_output_kb": max_output_kb}
         out = w.run(code, stdin=stdin, timeout=timeout)
+        # Two lists, deliberately: what the caller asked for and did not get,
+        # and what the caller never asked for because it did not know it was
+        # being dropped. `no_net` appears in both vocabularies; dict ordering
+        # plus the dedup below keeps the per-call phrasing, which is the more
+        # actionable of the two because it names the fix.
         unenforced = [f"{k}: {_WORKER_CANNOT_ENFORCE[k]}" for k, v in asked.items() if v]
-        if unenforced:
-            out.setdefault("unenforced", []).extend(unenforced)
+        seen = {e.split(":", 1)[0] for e in unenforced}
+        unenforced += [e for e in _session_unenforced(w)
+                       if e.split(":", 1)[0] not in seen]
+        out.setdefault("unenforced", []).extend(unenforced)
+        out["backend"] = "session-worker"
+        out["confined"] = w.confined
         return out
     # workspace-only session: fresh process in the session dir, fully sandboxed
     lang = registry.canonical(language) if language else "python3"
@@ -181,7 +256,7 @@ def write_file(session_id: str, path: str, content: str) -> dict:
         return {"ok": False, "error": f"unknown session '{session_id}'"}
     target = _jail(d, path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(content)
+    _write_nofollow(target, content)
     return {"ok": True, "path": str(target.relative_to(d))}
 
 
@@ -239,6 +314,35 @@ def _list(d: Path) -> list[dict]:
         else:
             out.append({"path": p.name, "type": "file", "size": p.stat().st_size})
     return out
+
+
+#: O_NOFOLLOW does not exist on Windows, where the value 0 makes the flag a
+#: no-op. That is not silently equivalent: see `_write_nofollow`.
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+
+
+def _write_nofollow(target: Path, content: str) -> None:
+    """Write `target`, refusing to follow a symlink at the final component.
+
+    `_jail` resolves the path and the caller then opens it, and those are two
+    separate syscalls. Code running inside the session shares the workspace as
+    its cwd, so it can delete the resolved file and drop a symlink to, say,
+    /path/to/home/.ssh/authorized_keys in its place in between — the check
+    passes on the real path and the write lands on the attacker's target.
+    Reported alongside #104.
+
+    O_NOFOLLOW closes the final component, which is the component `_jail`'s
+    resolve() cannot re-verify. Parent components are still a window in
+    principle: fully closing it needs openat2(RESOLVE_BENEATH), which is Linux
+    5.6+ and has no portable equivalent, and the parents here are inside a
+    workspace that resolve() already walked. On Windows the flag is absent
+    entirely and this degrades to an ordinary open — which is why the Landlock
+    confinement above matters even for a path this function guards.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _O_NOFOLLOW
+    fd = os.open(target, flags, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(content)
 
 
 def _jail(d: Path, path: str) -> Path:
@@ -308,6 +412,11 @@ class Worker:
     def __init__(self, language: str, proc: subprocess.Popen, proto=None):
         self.language = language
         self.proc = proc
+        #: Whether Landlock confined this worker to its workspace. Set by
+        #: `_spawn_worker` after the process is up; read by `execute` so a
+        #: result can say which filesystem guarantee the caller actually got
+        #: rather than describing the one the code hoped to apply.
+        self.confined = False
         #: Where RESPONSES arrive. Four routes, and on none of them can output
         #: written to fd 1 by a child process land in the protocol stream:
         #:
@@ -557,7 +666,102 @@ def _proto_pipe() -> tuple[int, int] | None:
     return os.pipe()
 
 
-def _spawn_worker(language: str, workdir: Path) -> Worker | None:
+def _confinement_paths(workdir: Path, proto_file: Path | None) -> tuple[list[str], list[str]]:
+    """(read_only, read_write) for a worker confined to its session workspace.
+
+    Read-only covers what an interpreter needs in order to START: its own
+    prefix, the loader and shared libraries, and the character devices that
+    everything opens. It is deliberately a superset across layouts — a path
+    that does not exist is skipped by `landlock.restrict_self` rather than
+    being fatal, because refusing to confine at all because /opt is absent
+    would be the worst outcome.
+
+    The interpreter prefix is resolved from the RUNTIME path, not from
+    `sys.prefix`. The server's own interpreter and the `python3` a worker
+    execs are frequently not the same install (here: a mise-managed 3.14.6
+    under /data), and granting the server's prefix would confine the worker
+    out of its own stdlib.
+
+    Read-write is the workspace and nothing else. That is why TMPDIR is
+    repointed into the workspace instead of /tmp being granted: /tmp holds
+    every other session's scratch files, and a confinement that leaves them
+    readable has not confined the thing worth confining.
+    """
+    ro = [
+        str(Path(__file__).resolve().parent),   # the bootstrap the worker execs
+        "/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc", "/opt",
+        # platform.libc_ver() and os.cpu_count() read these; denying /proc
+        # makes an interpreter fail in ways that name libc rather than the
+        # sandbox, which is a diagnostic dead end.
+        "/proc",
+        "/dev/null", "/dev/zero", "/dev/urandom", "/dev/random",
+    ]
+    path = registry.runtime_path()
+    for exe in ("python3", "node"):
+        found = shutil.which(exe, path=path)
+        if not found:
+            continue
+        real = Path(found).resolve()
+        ro.append(str(real))
+        # <prefix>/bin/python3 -> <prefix>. The stdlib, shared objects and (for
+        # node) lib/node_modules all hang off it.
+        if real.parent.name in ("bin", "Scripts"):
+            ro.append(str(real.parent.parent))
+    rw = [str(workdir)]
+    if proto_file is not None:
+        # The protocol file lives in the system temp dir, so it is granted as a
+        # FILE. landlock.restrict_self narrows the mask for a non-directory;
+        # passing the directory mask for a file returns EINVAL and takes the
+        # whole ruleset down, leaving the worker unconfined.
+        rw.append(str(proto_file))
+    return ro, rw
+
+
+def _worker_preexec(workdir: Path, proto_file: Path | None):
+    """preexec_fn applying rlimits and then Landlock, or None where neither runs.
+
+    Order matters only in that both must happen before exec; Landlock is
+    applied last because it is irreversible and a failed setrlimit should not
+    leave a confined-but-unlimited child.
+
+    Failure to confine is FATAL here. `restrict_self` raising propagates out of
+    preexec_fn, `Popen` raises in the parent, and `_spawn_worker` reports it —
+    which is the whole point of the module: a worker that silently starts
+    unconfined is the outcome this exists to remove. The caller still learns
+    that confinement is unavailable rather than broken, because
+    `landlock.available()` is checked before the spawn, not inside the child.
+    """
+    base = executor.session_worker_limits()
+    if not landlock.available():
+        return base
+    ro, rw = _confinement_paths(workdir, proto_file)
+
+    def _apply() -> None:
+        if base is not None:
+            base()
+        landlock.restrict_self(read_write=rw, read_only=ro)
+
+    return _apply
+
+
+def _worker_env(workdir: Path) -> dict:
+    """Worker environment with TMPDIR inside the workspace.
+
+    `TMPDIR`/`TEMP`/`TMP` are already on the executor's env allowlist on both
+    the Rust and Python sides, so this needs no parity change; `packages.py`
+    already does the same thing for installs. Without it, confined session code
+    calling `tempfile.mkstemp()` gets EACCES, because /tmp is not granted.
+    """
+    env = executor._env()
+    tmp = workdir / ".tmp"
+    with contextlib.suppress(OSError):
+        tmp.mkdir(parents=True, exist_ok=True)
+    for key in ("TMPDIR", "TEMP", "TMP"):
+        env[key] = str(tmp)
+    return env
+
+
+def _spawn_worker(language: str, workdir: Path) -> tuple[Worker | None, str | None]:
     bootstrap = Path(__file__).resolve().with_name("_worker_bootstrap.py")
     # Only node needs an out-of-band pipe. The python worker keeps a private dup
     # of the original fd 1 taken before anything is redirected, which gives it
@@ -570,7 +774,7 @@ def _spawn_worker(language: str, workdir: Path) -> Worker | None:
     proto = None
     try:
         if language == "python3":
-            env = executor._env()
+            env = _worker_env(workdir)
             proto_file: Path | None = None
             if os.name == "nt" or _FORCE_FILE_PROTOCOL:
                 # Same file-backed arrangement node uses on Windows (see the
@@ -588,20 +792,17 @@ def _spawn_worker(language: str, workdir: Path) -> Worker | None:
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 start_new_session=True,
-                preexec_fn=executor.session_worker_limits(),
+                preexec_fn=_worker_preexec(workdir, proto_file),
             )
             if proto_file is not None:
                 proto = _TailReader(proto_file, proc)
         else:  # node
-            env = executor._env()
-            limits = executor.session_worker_limits()
+            env = _worker_env(workdir)
             proto_file: Path | None = None
             if pipe is not None:
                 read_fd, write_fd = pipe
                 env["CODECALC_PROTO_FD"] = str(write_fd)
                 extra = {"pass_fds": (write_fd,)}
-                if limits:
-                    extra["preexec_fn"] = limits
             else:
                 # No pass_fds and no preexec_fn here (Windows), so the protocol
                 # cannot be handed over as a descriptor. A file the worker
@@ -613,7 +814,13 @@ def _spawn_worker(language: str, workdir: Path) -> Worker | None:
                 os.close(fd)
                 proto_file = Path(name)
                 env["CODECALC_PROTO_PATH"] = str(proto_file)
-                extra = {"preexec_fn": limits} if limits else {}
+                extra = {}
+            # Computed after the branch, because the ruleset has to grant the
+            # protocol FILE when that is the channel — and which channel it is
+            # is only settled above.
+            pre = _worker_preexec(workdir, proto_file)
+            if pre is not None:
+                extra["preexec_fn"] = pre
             proc = subprocess.Popen(
                 ["node", "-e", _WORKER_BOOTSTRAP_NODE],
                 cwd=str(workdir),
@@ -630,21 +837,27 @@ def _spawn_worker(language: str, workdir: Path) -> Worker | None:
             elif proto_file is not None:
                 proto = _TailReader(proto_file, proc)
         w = Worker(language, proc, proto=proto)
+        w.confined = landlock.available()
         # warm up: verify the worker answers before returning. Both failure
         # paths go through w.close(), which reaps the process group and closes
         # the protocol pipe — `proc.kill()` alone left the read end open on
         # every failed start, and nothing else was going to close it.
         try:
             r = w.run("", timeout=10)
-        except Exception:
+        except Exception as exc:
             w.close()
-            return None
+            return None, f"worker did not answer the warm-up call: {exc}"
         if not r.get("ok") and r.get("stderr"):
             w.close()
-            return None
-        return w
-    except Exception:
-        return None
+            return None, f"worker failed on warm-up: {r['stderr'][:400]}"
+        return w, None
+    except Exception as exc:
+        # The reason is returned rather than swallowed. A confinement allow-list
+        # that is wrong makes `landlock_add_rule` fail inside preexec_fn, which
+        # surfaces here as a spawn failure — and "failed to start python3 REPL
+        # worker" with no cause is the diagnostic dead end this repo keeps
+        # closing elsewhere (#62, #66, #80). Name what actually went wrong.
+        return None, f"{type(exc).__name__}: {exc}"
     finally:
         # If the pipe was created but never handed to a Worker, neither end has
         # an owner: leaking a read end here would eventually exhaust NOFILE.
