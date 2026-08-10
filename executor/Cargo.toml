@@ -1,7 +1,15 @@
 [package]
 name = "codecalc-exec"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
+# Declared, not merely implied. rust-toolchain.toml pins 1.97.1 for anyone
+# building IN this repo, but it is not Cargo metadata and does not reach a
+# crate that depends on this one — that needs `rust-version`, which was absent.
+# A crates.io consumer on an older toolchain therefore got no MSRV signal at
+# all and would have hit a raw compile error instead of Cargo's named one.
+# 1.97 matches what README.md already tells people to install; edition 2024
+# itself only needs 1.85, so this floor is set by the repo, not by the edition.
+rust-version = "1.97"
 description = "Sandboxed multi-language executor core for codecalc (Rust)"
 # Must match pyproject.toml and LICENSE — scripts/check_claims.py gates this.
 # Was "MIT" while the repo LICENSE and pyproject disagreed: the crate
