@@ -39,6 +39,7 @@ could not install, which was never checked anywhere.
 from __future__ import annotations
 
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -67,6 +68,13 @@ from . import executor, registry
 #: for a package with no wheel for this platform. Both failures are reported to
 #: the caller with the flag named, so "it did not install" is never mistaken
 #: for "the package does not exist".
+#: Characters a package specifier may contain. Deliberately broad — it exists
+#: to keep argv from being reinterpreted, not to validate any one registry's
+#: naming rules. `;`, `&`, `|`, backticks and quotes are absent, but note that
+#: nothing here is passed through a shell: the argv array is exec'd directly,
+#: so those were never the risk. The leading-hyphen check above is.
+_PACKAGE_NAME_RE = re.compile(r"[A-Za-z0-9._@/\[\]+~=<>!,\- ]+")
+
 _INSTALLERS: dict[str, tuple[str, list[str], dict[str, str]]] = {
     # --only-binary=:all: — wheels only. A source distribution runs its build
     # backend, which is arbitrary code execution at install time.
@@ -255,6 +263,27 @@ def install(language: str, package: str, session_id: str | None = None,
             shutil.which(bin_) is None:
         return {"ok": False, "error": f"package manager '{bin_}' not found"}
 
+    # ARGUMENT INJECTION. `package` lands in an argv array next to the
+    # manager's own flags, so a name beginning with '-' is not a name — it is
+    # an option. `install_package("python3", "--target=/etc")` was a flag
+    # uv would honour, and every manager here has an equivalent.
+    #
+    # A permissive charset rather than a per-ecosystem grammar: npm scopes
+    # (@scope/name), PyPI extras (pkg[extra]) and version specifiers are all
+    # legitimate, and a regex tight enough to encode one manager's rules would
+    # reject another's valid input. What matters is that the string cannot be
+    # read as an option, which is decided by the first character.
+    if not package:
+        return {"ok": False, "error": "no package name given"}
+    if package[0] == "-":
+        return {"ok": False,
+                "error": f"invalid package name {package!r}: a name starting "
+                         "with '-' would be read as a command-line flag by the "
+                         "package manager"}
+    if not _PACKAGE_NAME_RE.fullmatch(package):
+        return {"ok": False,
+                "error": f"invalid package name {package!r}: expected letters, "
+                         "digits and . _ - @ / [ ] + ~ = < > ! , or spaces"}
     spec = f"{package}=={version}" if version else package
 
     # session installs go into the session workspace; ad-hoc into the cache

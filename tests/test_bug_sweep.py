@@ -853,6 +853,56 @@ if _guarded.CAN_FORK:
         check("  ...within its stated budget", time.time() - _t0 < 30,
               f"-> {time.time() - _t0:.1f}s")
 
+# ── three screen bypasses found by an external audit ──────────────────────
+# All three defeated guards added earlier the same day, which is the point:
+# the guards were written against the shapes their author imagined.
+from codecalc import exact as _ex2
+from codecalc.safe_expr import reject_unsafe as _scr
+
+# 1. NON-DECIMAL LITERALS. The heavy-argument cap parsed with int(s), base 10.
+# int("0xffffff") raises ValueError and the except skipped it — so the SAME
+# NUMBER written in hex sailed past a cap that stops it in decimal.
+for _lit, _dec in (("0xffffff", 16777215), ("0o777777", 262143),
+                   ("0b111111111111111111111111", 16777215)):
+    _msg = _scr(f"factorial({_lit})") or ""
+    check(f"factorial({_lit}) is capped like factorial({_dec})",
+          str(_dec) in _msg and "exceeds the limit" in _msg, f"-> {_msg[:60]!r}")
+check("  ...while a small literal in any base still passes",
+      _scr("factorial(0x14)") is None, f"-> {_scr('factorial(0x14)')!r}")
+
+# 2. NEGATIVE EXPONENTS. `exp_value <= 1: continue` waved every negative
+# exponent through on its way to skipping 0 and 1 — and the digit estimate was
+# sign-blind too, so fixing only the first check left it passing.
+from sympy.parsing.sympy_parser import convert_xor as _cx
+from sympy.parsing.sympy_parser import implicit_multiplication_application as _ima
+from sympy.parsing.sympy_parser import parse_expr as _pe
+from sympy.parsing.sympy_parser import standard_transformations as _st
+
+from codecalc.safe_expr import reject_explosive as _rx
+
+_T = _st + (_ima, _cx)
+_neg = _rx(_pe("2**(-1000000)", transformations=_T, evaluate=False))
+check("a huge NEGATIVE exponent is refused",
+      _neg is not None and "digits" in _neg, f"-> {_neg!r}")
+check("  ...and a small one is not",
+      _rx(_pe("2**(-2)", transformations=_T, evaluate=False)) is None,
+      f"-> {_rx(_pe('2**(-2)', transformations=_T, evaluate=False)) or 'correctly allowed'}")
+
+# 3. eval_exact WAS NEITHER SCREENED NOR GUARDED. It has its own AST evaluator
+# over math.*, so #78's work on the six SymPy tools did not cover it, and it
+# bounded ** while bounding nothing about function arguments. Measured before
+# the fix: factorial(10000000) never returned — killed from outside at 30s.
+_t0 = time.time()
+_r = _ex2.eval_exact("factorial(10000000)")
+_elapsed = time.time() - _t0
+check("eval_exact refuses an unbounded factorial",
+      _r.get("ok") is False, f"-> ok={_r.get('ok')}")
+check("  ...in bounded time rather than never returning",
+      _elapsed < 20, f"-> {_elapsed:.2f}s")
+check("  ...and still answers ordinary exact arithmetic",
+      _ex2.eval_exact("0.1+0.2").get("value") == "3/10",
+      f"-> {_ex2.eval_exact('0.1+0.2').get('value')!r}")
+
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== ALL BUG-SWEEP REGRESSIONS FIXED ===")
 sys.exit(1 if FAILS else 0)

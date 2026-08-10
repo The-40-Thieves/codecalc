@@ -175,7 +175,12 @@ def _heavy_call_violation(tokens: list) -> str | None:
                     break
             elif nxt.type == tokenize.NUMBER:
                 try:
-                    value = int(nxt.string)
+                    # base 0, not base 10. `int("0xffffff")` raises ValueError,
+                    # and the except below skipped it — so factorial(0xffffff)
+                    # sailed past a cap that stops factorial(16777215), the
+                    # same number written differently. Octal and binary
+                    # literals had the identical hole.
+                    value = int(nxt.string, 0)
                 except ValueError:
                     continue  # a float or complex literal — not this hazard
                 if value > MAX_HEAVY_ARG:
@@ -291,7 +296,10 @@ def reject_explosive(tree) -> str | None:
             exp_value = int(exponent)
         except (TypeError, ValueError, OverflowError):
             return "the exponent is not a value this can bound"
-        if exp_value <= 1:
+        # abs(), because the danger is the MAGNITUDE. `2**(-1000000)` is a
+        # rational with a million-bit denominator, and `exp_value <= 1` waved
+        # every negative exponent through on its way to catching 0 and 1.
+        if abs(exp_value) <= 1:
             continue
 
         if base.free_symbols:
@@ -309,7 +317,11 @@ def reject_explosive(tree) -> str | None:
                 continue
             if magnitude > 1:
                 import math
-                digits = exp_value * math.log10(magnitude)
+                # abs() here too. A negative exponent produces a rational
+                # whose DENOMINATOR has that many digits, which costs the same
+                # to build; without it `digits` came out negative and every
+                # negative exponent compared under the cap.
+                digits = abs(exp_value) * math.log10(magnitude)
                 if digits > MAX_NUMERIC_DIGITS:
                     return (f"the result would have about {int(digits)} digits, "
                             f"over the limit of {MAX_NUMERIC_DIGITS}: it cannot be "

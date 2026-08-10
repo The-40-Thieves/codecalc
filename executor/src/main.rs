@@ -571,7 +571,15 @@ fn read_capped(path: &Path, max_output_kb: u64) -> (String, bool, Option<String>
     let mut error = None;
     match fs::File::open(path) {
         Ok(mut f) => {
-            if let Err(e) = f.read_to_end(&mut buf) {
+            // `take(cap + 1)`, not a bare read_to_end. FSIZE_LIMIT_BYTES is
+            // 256 MiB, so a program that fills stdout AND stderr made this
+            // process allocate half a gigabyte before the truncate below threw
+            // most of it away — per execution, concurrently. The cap is now
+            // applied at the source.
+            //
+            // +1 so `buf.len() > cap` below still detects overflow: reading
+            // exactly `cap` cannot distinguish "filled it" from "exceeded it".
+            if let Err(e) = (&mut f).take(cap + 1).read_to_end(&mut buf) {
                 // `{e}` already renders as "<message> (os error N)", so the
                 // code is carried without appending it again — the first draft
                 // printed "Permission denied (os error 13) (os error Some(13))".

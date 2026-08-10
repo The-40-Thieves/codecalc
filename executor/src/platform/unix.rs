@@ -24,7 +24,12 @@ static CHILD_PGID: AtomicI32 = AtomicI32::new(0);
 /// here even though `killpg(pgid, ...)` reads better.
 extern "C" fn terminate_child_group(sig: libc::c_int) {
     let pgid = CHILD_PGID.load(Ordering::SeqCst);
-    if pgid > 0 {
+    // > 1, not > 0. kill(-1, SIGKILL) is not "kill process group 1" — POSIX
+    // defines it as every process the caller may signal, which in a container
+    // or a fresh PID namespace is the whole world including this executor.
+    // A pgid of 1 should never happen; the cost of being wrong about that is
+    // total, and the guard is one character.
+    if pgid > 1 {
         unsafe { libc::kill(-pgid, libc::SIGKILL) };
     }
     unsafe { libc::_exit(128 + sig) };
@@ -279,7 +284,11 @@ pub fn spawn_and_wait(mut cmd: Command, limits: &ResolvedLimits) -> io::Result<W
         } else if r == -1 {
             let e = io::Error::last_os_error();
             if e.raw_os_error() != Some(libc::EINTR) {
-                unsafe { libc::kill(-pid, libc::SIGKILL) };
+                // Same reasoning as terminate_child_group above: a pid of 1
+                // would make this kill(-1, ...) and take the host with it.
+                if pid > 1 {
+                    unsafe { libc::kill(-pid, libc::SIGKILL) };
+                }
                 let _ = child.wait();
                 // Clear before returning: a stale pgid here means a later
                 // SIGTERM kills whatever process group has since taken that id.
