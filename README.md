@@ -355,7 +355,7 @@ PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py         # every tool over MC
 PYTHONPATH=. .venv/bin/python tests/test_executor_sweep.py  # sandbox regressions
 ```
 
-20 test files and 5 gate scripts, **748 assertions**. Nothing in the suite
+21 test files and 5 gate scripts, **1059 assertions**. Nothing in the suite
 needs the internet, so none of it is ever skipped for lack of a network.
 
 It **can** skip for lack of a *capability*, and that is correct rather than a

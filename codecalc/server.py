@@ -18,6 +18,8 @@ connection for exactly that reason.
 from __future__ import annotations
 
 import base64
+import functools
+import inspect
 import json
 from pathlib import Path
 
@@ -28,6 +30,7 @@ from mcp.types import ImageContent
 from . import (
     __version__,
     complexity,
+    errors,
     exact,
     executor,
     logic,
@@ -86,6 +89,49 @@ mcp = MCPServer(
         "unenforced — see CODECALC_REQUIRE_NATIVE)."
     ),
 )
+
+
+
+def _coded(fn):
+    """Attach an error code to any failing dict a tool returns.
+
+    Wraps at REGISTRATION so all 47 tools are covered by one change instead of
+    121 edits at the return sites. The first attempt put this on
+    `guarded_call`, which measured 0 of 8 on the most reachable failures
+    because those paths return rather than raise — see errors.py.
+
+    Codes attached here are inferred from the message and marked
+    `code_inferred: true`. That is a weaker claim than one chosen at a raise
+    site, and the label is what keeps the two distinguishable.
+    """
+    if inspect.iscoroutinefunction(fn):
+        @functools.wraps(fn)
+        async def _async(*args, **kwargs):
+            return errors.ensure_code(await fn(*args, **kwargs))
+        return _async
+
+    @functools.wraps(fn)
+    def _sync(*args, **kwargs):
+        return errors.ensure_code(fn(*args, **kwargs))
+    return _sync
+
+
+# Rebind `mcp.tool` rather than renaming 47 decorator lines. The rename was the
+# first attempt and broke four suites plus the CI round-trip check, all of which
+# count declarations with `grep -c '^@mcp\.tool'` and read 0 against 47 served.
+# That identity is load-bearing here, so the change that preserves it is the
+# right one: every `@mcp.tool()` below is unchanged and every counter still
+# works, while the wrapper is applied underneath.
+_mcp_tool = mcp.tool
+
+
+def _tool(*d_args, **d_kwargs):
+    def deco(fn):
+        return _mcp_tool(*d_args, **d_kwargs)(_coded(fn))
+    return deco
+
+
+mcp.tool = _tool
 
 
 @mcp.tool()
