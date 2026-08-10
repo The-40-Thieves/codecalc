@@ -19,7 +19,6 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 import tempfile
 import threading
 import uuid
@@ -186,7 +185,7 @@ _NO_FS_CONFINEMENT = (
     "Landlock is unavailable here ({})")
 
 
-def _session_unenforced(w: "Worker | None") -> list[str]:
+def _session_unenforced(w: Worker | None) -> list[str]:
     """Everything a stateful session does not carry, whether or not asked.
 
     `w is None` means a workspace-only session, which runs a fresh sandboxed
