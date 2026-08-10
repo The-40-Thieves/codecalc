@@ -7,6 +7,15 @@ description = "Sandboxed multi-language executor core for codecalc (Rust)"
 # Was "MIT" while the repo LICENSE and pyproject disagreed: the crate
 # compiles into bin/codecalc-exec, which is distributed, so the two cannot differ.
 license = "Apache-2.0"
+# crates.io warns without these, and the warning is worth heeding for THIS
+# crate specifically: it compiles into the binary that runs untrusted code, so
+# the first thing anyone evaluating it should be able to do is find the source
+# and the audit. A crates.io page with no repository link makes that harder
+# than it needs to be.
+repository = "https://github.com/The-40-Thieves/codecalc"
+homepage = "https://github.com/The-40-Thieves/codecalc"
+keywords = ["sandbox", "executor", "mcp", "rlimit", "seccomp"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
