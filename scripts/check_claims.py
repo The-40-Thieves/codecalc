@@ -116,6 +116,28 @@ elif rs_license != py_license:
 else:
     print(f"ok   license: pyproject and Cargo.toml agree on {py_license}")
 
+# The DECLARATION agreeing is not the same as the TEXT shipping. `cargo package`
+# can only include files under the crate root, so the repo-root LICENSE — which
+# the wheel ships via `license-files` — is not in the .crate at all unless a
+# copy lives in executor/. Verified with `cargo package --list`: the crate had
+# 14 files and none of them was a licence, while its metadata said Apache-2.0.
+#
+# The copy is what cargo requires, so the drift it creates gets a gate rather
+# than a comment. Compared byte-for-byte: a licence that has been edited on one
+# side only is worse than one that is merely absent, because both look present.
+_root_license = (REPO / "LICENSE").read_bytes()
+_crate_license_path = REPO / "executor" / "LICENSE"
+if not _crate_license_path.is_file():
+    fail("executor/LICENSE does not exist, so `cargo package` ships a crate whose "
+         f"metadata declares {rs_license} with no licence text in it — cargo cannot "
+         "include a file from outside the crate root")
+elif _crate_license_path.read_bytes() != _root_license:
+    fail("executor/LICENSE and the repo-root LICENSE differ — the crate and the "
+         "wheel would ship different licence text under the same declared licence")
+else:
+    print(f"ok   license: the crate ships the licence text, byte-identical to the "
+          f"repo root ({len(_root_license)} bytes)")
+
 # ── 4. test-file and assertion counts ───────────────────────────────────────
 # The assertion total is what the suite PRINTS, so it is recounted here rather
 # than trusted: a `check()` that stops running still exists in the source.
