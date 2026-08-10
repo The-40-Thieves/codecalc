@@ -272,15 +272,26 @@ _headroom = executor.DEFAULT_PROCESS_HEADROOM
 # So macOS is skipped here and covered by the fork probe, which measures the
 # boundary precisely and needs no ceiling of its own.
 _SPAWN_HEADROOM = 24
+#: How many the probe TRIES. Spawning fewer than this is the evidence that the
+#: ceiling bound it; the exact number depends on how busy the uid is and is not
+#: something to assert against.
+_SPAWN_ATTEMPTS = 400
+#: Tasks the rest of the machine may start during the probe without making the
+#: consistency check below wrong. Generous on purpose: it is a sanity bound on
+#: the ceiling, not a measurement of the scheduler.
+_CHURN_TOLERANCE = 32
 _ambient = executor.current_uid_tasks()
 _JOB_SCOPED = os.name == "nt"
 _spawn_limit = _SPAWN_HEADROOM if _JOB_SCOPED else (
     (_ambient + _SPAWN_HEADROOM) if _ambient is not None else None)
 
-_SPAWNER = """import subprocess, sys
+# The attempt cap is interpolated, not written twice. The assertion below
+# compares against _SPAWN_ATTEMPTS, and a probe that tried a different number
+# than the test believes would make that comparison quietly meaningless.
+_SPAWNER = f"""import subprocess, sys
 kids = []
 try:
-    while len(kids) < 400:
+    while len(kids) < {_SPAWN_ATTEMPTS}:
         kids.append(subprocess.Popen([sys.executable, "-c", "import time; time.sleep(20)"]))
 except Exception:
     pass
@@ -303,12 +314,42 @@ elif _exe:
         _d = json.loads(_p.stdout)
     except json.JSONDecodeError:
         _d = {}
+    # Re-read ambient AFTER the run. The ceiling is absolute — it is pinned to
+    # `ambient + headroom` through CODECALC_MAX_PROCESSES — so the number of
+    # children that fit is `limit - (ambient AT THAT MOMENT)`, not `headroom`.
+    # Those differ whenever the box gets busier or quieter mid-test.
+    _ambient_after = executor.current_uid_tasks()
     _m2 = re.search(r"SPAWNED (\d+)", _d.get("stdout") or "")
     _spawned = int(_m2.group(1)) if _m2 else None
+
+    # THE PROPERTY, and it does not depend on ambient at all: the ceiling
+    # stopped the spawn. The probe tries 400; if RLIMIT_NPROC were not applied
+    # it would get all 400. Anything short of that is the limit biting.
+    #
+    # This replaces `spawned <= headroom`, which failed on #97 with "45 children
+    # against a headroom of 24 (limit 98, ambient 74)". Ambient had FALLEN about
+    # 21 tasks between the measurement and the probe, so 45 children fit under a
+    # ceiling of 98 — the sandbox held exactly as designed and the expectation
+    # had gone stale. It could only fail when the machine got QUIETER, which is
+    # the opposite of when you want to hear from a process-limit test.
     check("process limit bounds SPAWNED children too (portable probe)",
-          _spawned is not None and _spawned <= _SPAWN_HEADROOM,
-          f"-> {_spawned} children against a headroom of {_SPAWN_HEADROOM} "
-          f"(limit {_spawn_limit}, ambient {_ambient})")
+          _spawned is not None and _spawned < _SPAWN_ATTEMPTS,
+          f"-> {_spawned} of {_SPAWN_ATTEMPTS} attempted "
+          f"(limit {_spawn_limit}, ambient {_ambient} -> {_ambient_after})")
+
+    # And the count has to be EXPLICABLE by that ceiling rather than merely
+    # under the attempt cap: children plus the tasks already running cannot
+    # exceed the limit. Checked against the more generous of the two ambient
+    # readings, with headroom for churn during the run itself — the point is to
+    # catch a ceiling that is an order of magnitude off, not to re-derive the
+    # scheduler's exact state.
+    if _spawned is not None and _ambient is not None and _ambient_after is not None:
+        _floor = min(_ambient, _ambient_after)
+        check("  ...and the count is consistent with that ceiling",
+              _spawned + _floor <= _spawn_limit + _CHURN_TOLERANCE,
+              f"-> {_spawned} + {_floor} ambient vs limit {_spawn_limit} "
+              f"(+{_CHURN_TOLERANCE} churn allowance)")
+
     check("  ...and the probe actually ran rather than dying early",
           _spawned is not None and _spawned > 0,
           f"-> {_spawned!r}; verdict={_d.get('verdict')} stderr={(_d.get('stderr') or '')[:60]!r}")
