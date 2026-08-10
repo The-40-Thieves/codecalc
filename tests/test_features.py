@@ -278,6 +278,14 @@ check("  ...in both directions",
       "relay fields no tool returns" in _claims_src,
       f"-> relay-field half {'present' if 'relay fields no tool returns' in _claims_src else 'MISSING'}")
 
+# Same floor, same reason, for the SECURITY.md counts. Deleting that gate would
+# not turn anything red on its own — check_claims.py would simply stop reading
+# the file and keep exiting 0 — which is exactly how the skill gate above was
+# lost once already.
+check("check_claims.py actually gates SECURITY.md",
+      "SECURITY.md" in _claims_src and "-entry allowlist" in _claims_src,
+      f"-> SECURITY mentions: {_claims_src.count('SECURITY')}")
+
 # doctor has to name it, or nobody installs it.
 _doc = _sp2.run([_sys2.executable, "-m", "codecalc", "doctor"],
                 capture_output=True, text=True, timeout=180)

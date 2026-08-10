@@ -215,6 +215,46 @@ if args.description is not None:
         print(f"ok   repo description: agrees on {actual_tools} tools "
               f"and {actual_langs} languages")
 
+# ── SECURITY.md carries numbers too, and nothing read it ───────────────────
+# Gate 5 above requires AUDIT.md to NAME every allowed environment variable.
+# SECURITY.md states the same allowlist as a COUNT — "the 23-entry allowlist" —
+# in its threat model, and until this gate no script read the file at all.
+#
+# That is the wrong way round. SECURITY.md is the document a reader reaches
+# first, it is linked from the PyPI page (#111), and a threat model that
+# understates what executed code can see is worse than an audit appendix that
+# does. The comment at the top of this file already records AUDIT.md carrying
+# an 11-entry claim for a day after the allowlist grew to 23 — same class of
+# drift, one file over, and that file was the one being watched.
+#
+# Counts only. The prose is not gated and should not be: a check that tried to
+# validate the threat model's ARGUMENT would be a check nobody could keep
+# green. These are the two numbers in it that a code change can silently
+# falsify.
+SECURITY = (REPO / "SECURITY.md").read_text(encoding="utf-8")
+
+_sec_allow = [int(n) for n in re.findall(r"(\d+)-entry allowlist", SECURITY)]
+if not _sec_allow:
+    fail("SECURITY.md no longer states an 'N-entry allowlist' — the extractor "
+         "matched nothing, so this gate proves nothing rather than passing")
+elif any(n != len(allow) for n in _sec_allow):
+    fail(f"SECURITY.md claims {sorted(set(_sec_allow))} allowed env vars; the "
+         f"executor permits {len(allow)}. A threat model that understates what "
+         "executed code can see is a security defect in the document")
+else:
+    print(f"ok   SECURITY.md: allowlist count matches the code ({len(allow)})")
+
+_sec_langs = [int(n) for n in re.findall(r"(\d+) languages", SECURITY)]
+if not _sec_langs:
+    fail("SECURITY.md no longer states 'N languages' — the extractor matched "
+         "nothing, so this gate proves nothing rather than passing")
+elif any(n != actual_langs for n in _sec_langs):
+    fail(f"SECURITY.md claims {sorted(set(_sec_langs))} languages; the registry "
+         f"defines {actual_langs}")
+else:
+    print(f"ok   SECURITY.md: language count matches the registry ({actual_langs})")
+
+
 # ── the shipped skill may only name things that exist ─────────────────────
 # codecalc/SKILL.md tells a model which tools to call and which result fields
 # to relay. It is prose about code, which is the same drift risk as the
