@@ -868,6 +868,15 @@ def _doctor() -> int:
     # Absolute paths, because the whole point is that it can be pasted. A
     # relative one resolves against the CLIENT's working directory, which is
     # not something the person pasting it controls or can easily predict.
+    # Where the shipped skill is, because a skill nobody can find is a skill
+    # nobody installs. It travels inside the wheel, so this path is correct for
+    # a uvx run, a venv, or a checkout without any of them differing.
+    skill = Path(__file__).resolve().parent / "SKILL.md"
+    print(f"  skill file        {skill}"
+          f"{'' if skill.is_file() else '  (MISSING)'}")
+    print("                    copy to your client's skills directory to make "
+          "the calling rules apply")
+
     exe = shutil.which("codecalc") or sys.executable
     args = [] if shutil.which("codecalc") else ["-m", "codecalc"]
     print("\n  MCP client config (copy into your client's JSON):")
