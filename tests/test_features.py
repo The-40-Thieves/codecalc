@@ -228,45 +228,6 @@ check("a failed benchmark claims no method at all",
       _failed.get("ok") is False and "method" not in _failed,
       f"-> ok={_failed.get('ok')} method={_failed.get('method')!r}")
 
-# ── the shipped skill (#88) ───────────────────────────────────────────────
-# The tools exist to stop a model asserting numbers it did not compute. Nothing
-# made a model REACH for them: no skill, no prompting guide, nothing in the
-# tree. codecalc/SKILL.md is that, and it ships inside the package so it
-# travels with the tools rather than living in a README nobody pastes.
-_skill = pathlib.Path("codecalc/SKILL.md")
-check("the skill ships inside the package", _skill.is_file(), f"-> {_skill}")
-_txt = _skill.read_text(encoding="utf-8")
-
-check("  ...with skill frontmatter a client can load",
-      _txt.startswith("---") and "name: codecalc" in _txt and "description:" in _txt,
-      f"-> {_txt[:40]!r}")
-
-# The two halves have different costs and different strictness, and the file
-# has to say so or it is just advice.
-for _needle, _why in (
-    ("mandatory, no exceptions", "the call-triggers are hard rules"),
-    ("Do not call these", "the anti-triggers exist, so the skill is not noise"),
-    ("Never drop a field you do not understand", "the relay rule is stated"),
-):
-    # Detail on BOTH outcomes: a "-> missing X" printed next to PASS reads as
-    # a broken check, which is how the first version of this looked.
-    check(f"the skill states {_why}", _needle in _txt,
-          f"-> {'found' if _needle in _txt else 'MISSING'} {_needle!r}")
-
-# Operand count was the WRONG threshold and the file must not reintroduce it:
-# 0.1 + 0.2 is two operands and the canonical failure; 2 + 3 + 4 is three and
-# never wrong. Type predicts error, length does not.
-_typed = "Operand count is **not** the test" in _txt and "0.1 + 0.2" in _txt
-check("  ...and keys on type rather than operand count", _typed,
-      f"-> type-vs-length rule {'present' if _typed else 'MISSING'}")
-
-# doctor has to name it, or nobody installs it.
-_doc = _sp2.run([_sys2.executable, "-m", "codecalc", "doctor"],
-                capture_output=True, text=True, timeout=180)
-check("doctor points at the skill file",
-      "SKILL.md" in _doc.stdout and "(MISSING)" not in _doc.stdout,
-      f"-> {[l for l in _doc.stdout.splitlines() if 'skill' in l.lower()]}")
-
 print(f"\n=== {len(FAILS)} failures ===" if FAILS else "\n=== ALL NEW-FEATURE TESTS PASS ===")
 sys.exit(1 if FAILS else 0)
 

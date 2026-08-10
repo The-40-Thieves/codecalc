@@ -93,16 +93,6 @@ rather than using `uvx`, point at the interpreter directly:
 Run `codecalc doctor` to print a config block with the absolute paths of *your*
 install already filled in.
 
-**Install the skill too.** The tools cannot help a model that never reaches for
-them — a model confident about `0.1 + 0.2` does not feel uncertain, it feels
-finished. `codecalc/SKILL.md` ships inside the package and says when calling is
-mandatory (any non-integer, any comparison you will state, anything past 2^53,
-any number stated as a claim), when it is noise (`2 + 3 + 4` needs no tool), and
-how results must be reported — `passed: true` means "equivalent on N inputs",
-never "verified". `codecalc doctor` prints its path; copy it into your client's
-skills directory. `check_claims.py` gates it, so it cannot name a tool that does
-not exist or a field no tool returns.
-
 Not sure what your install actually resolved? Ask it, rather than finding out
 from a tool call later:
 
