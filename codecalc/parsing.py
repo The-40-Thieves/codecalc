@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from functools import cache
 
 from . import registry
+from .optional import require
 
 #: codecalc registry name -> tree-sitter grammar name, where they differ.
 #: Anything absent uses the registry name unchanged. Deliberately explicit: a
@@ -62,7 +63,7 @@ def grammar_name(language: str) -> str | None:
 @cache
 def _grammar_available(name: str) -> bool:
     try:
-        import tree_sitter_language_pack as pack
+        pack = require("tree_sitter_language_pack")
 
         pack.get_language(name)
     except Exception:
@@ -84,7 +85,7 @@ def parser_for(language: str):
     if cache is None:
         cache = _local.parsers = {}
     if name not in cache:
-        import tree_sitter_language_pack as pack
+        pack = require("tree_sitter_language_pack")
 
         cache[name] = pack.get_parser(name)
     return cache[name]

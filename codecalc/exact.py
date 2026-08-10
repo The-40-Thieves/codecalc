@@ -18,6 +18,7 @@ from decimal import Decimal, getcontext
 from fractions import Fraction
 
 from .guarded import guarded_call
+from .optional import require
 from .safe_expr import reject_unsafe
 
 getcontext().prec = 50
@@ -790,7 +791,7 @@ def bitop(a: int, op: str, b: int | None = None, width: int = 64) -> dict:
 # ────────────────────────────── symbolic (sympy) ───────────────────────────
 
 def _sympy():
-    import sympy as sp
+    sp = require("sympy")
     return sp
 
 

@@ -10,15 +10,29 @@ dependencies = [
     # Bounded on both ends: `fastmcp>=2.0` with no ceiling had already carried
     # this project from 2.x to 3.4.6, a major bump nobody chose.
     "mcp>=2.0,<3",
+]
+
+# The heavy half, measured: sympy 40.4 MB + z3-solver 43.1 MB +
+# tree-sitter-language-pack 5.0 MB = 88.6 MB, against a base install that is
+# the MCP surface and the executor. Split out because a caller who only runs
+# code should not download an SMT solver to do it (#88).
+#
+# THE TRADE IS REAL AND IS NOT HIDDEN. `pip install codecalc` no longer brings
+# the symbolic tools; it brings a server whose symbolic tools return an error
+# naming the extra that provides them. `codecalc[full]` is what the README
+# tells people to install, and `codecalc doctor` reports which extras are
+# present, so the state is visible before a tool call rather than after one.
+[project.optional-dependencies]
+symbolic = [
     "sympy>=1.13,<2",
     "z3-solver>=4.13,<6",
-    # Real parsers for the static-analysis tools. tree-sitter-language-pack
-    # ships PRE-COMPILED grammars with wheels for manylinux, macOS and
-    # win_amd64 — no compiler at install time, which is what keeps the
-    # cross-platform support from regressing.
-    "tree-sitter>=0.25,<0.27",
-    "tree-sitter-language-pack>=1.14,<2",   # <6 not <5: the tree already resolved 5.0.0.0, and a
-                            # ceiling that DOWNGRADES a working dep is a regression, not a guard.
+]
+parsing = [
+    "tree-sitter-language-pack>=1.14,<2",
+]
+full = [
+    "codecalc[symbolic]",
+    "codecalc[parsing]",
 ]
 
 [project.scripts]

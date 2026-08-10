@@ -11,6 +11,7 @@ import itertools
 import re
 
 from .guarded import guarded_call
+from .optional import require
 from .safe_expr import reject_explosive, reject_unsafe, safe_global_dict
 
 _MATH_TRANSFORMS = None
@@ -19,8 +20,7 @@ _BOOL_TRANSFORMS = None
 
 def _sympy():
     """Lazy sympy import; returns the module."""
-    import sympy as sp
-    return sp
+    return require("sympy")
 
 
 def _math_transforms():
@@ -418,7 +418,7 @@ def z3_check(smt2: str, timeout_ms: int = 5000) -> dict:
         return {"ok": False, "error": "script has no (check-sat); z3 would report "
                                       "the state of an unchecked solver, not a verdict"}
     try:
-        import z3
+        z3 = require("z3")
         solver = z3.Solver()
         solver.set("timeout", timeout_ms)  # in-process hang guard
         solver.from_string(smt2)

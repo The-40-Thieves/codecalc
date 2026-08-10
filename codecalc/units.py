@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import re
 
+from .optional import require
+
 #: sympy is imported ON FIRST USE, not at module load.
 #:
 #: The README credited "lazy sympy/z3 imports" for a fast server start while
@@ -27,7 +29,7 @@ def _sympy():
     """(sympy, sympy.physics.units), imported once and cached."""
     global _SYMPY, _U
     if _SYMPY is None:
-        import sympy as _s
+        _s = require("sympy")
         from sympy.physics import units as _u
 
         _SYMPY, _U = _s, _u
