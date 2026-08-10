@@ -75,11 +75,10 @@ these are given separately rather than as one snippet to adapt:
 { "servers": { "codecalc": { "command": "uvx", "args": ["codecalc[full]"] } } }
 ```
 
-**Zed** — `~/.config/zed/settings.json`, key is `context_servers` and `command`
-is an object rather than a string:
+**Zed** — `~/.config/zed/settings.json`, key is `context_servers`:
 
 ```json
-{ "context_servers": { "codecalc": { "command": { "path": "uvx", "args": ["codecalc[full]"] } } } }
+{ "context_servers": { "codecalc": { "command": "uvx", "args": ["codecalc[full]"], "env": {} } } }
 ```
 
 **Windows paths need doubled backslashes** in JSON. If you installed into a venv
