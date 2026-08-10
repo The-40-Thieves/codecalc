@@ -3,6 +3,7 @@ verdicts, limits, streaming, compact mode."""
 import asyncio
 import json
 import pathlib
+import re as _re_mod
 import sys
 from pathlib import Path
 
@@ -270,6 +271,11 @@ check("  ...and keys on type rather than operand count", _typed,
 # So the assertion lives HERE, in the suite, pointed at the script. It is the
 # "every scan counts its inputs first" rule from CONTRIBUTING applied to a scan
 # that had no inputs at all.
+#: Strip `#` comments so a floor cannot be satisfied by prose describing the
+#: gate it guards. Deliberately simple: check_claims.py has no `#` inside a
+#: string literal, and the assertion below is over identifiers, not sentences.
+_re_comments = _re_mod.compile(r"#[^\n]*")
+
 _claims_src = pathlib.Path("scripts/check_claims.py").read_text(encoding="utf-8")
 check("check_claims.py actually gates the skill",
       "SKILL" in _claims_src and "names tools that server.py does not define" in _claims_src,
@@ -277,6 +283,26 @@ check("check_claims.py actually gates the skill",
 check("  ...in both directions",
       "relay fields no tool returns" in _claims_src,
       f"-> relay-field half {'present' if 'relay fields no tool returns' in _claims_src else 'MISSING'}")
+
+# Same floor, same reason, for the SECURITY.md counts. Deleting that gate would
+# not turn anything red on its own — check_claims.py would simply stop reading
+# the file and keep exiting 0 — which is exactly how the skill gate above was
+# lost once already.
+#
+# Matched against the source with COMMENTS STRIPPED, which is load-bearing. The
+# first version of this floor tested `"SECURITY.md" in _claims_src`, and the
+# gate it guards is introduced by a long comment block that says "SECURITY.md"
+# three times. Deleting the executable checks and leaving that comment kept the
+# floor green — verified, it passed with the gate gone. That is the same defect
+# as the `killpg` marker in check_parity.py, which matched a comment explaining
+# why killpg is NOT used: a check satisfied by prose about the check.
+#
+# The tokens below are variable names, which cannot plausibly appear in prose,
+# and they are required in the stripped source rather than anywhere in the file.
+_claims_code = _re_comments.sub("", _claims_src)
+check("check_claims.py actually gates SECURITY.md",
+      "_sec_allow" in _claims_code and "_sec_langs" in _claims_code,
+      f"-> stripped source mentions SECURITY {_claims_code.count('SECURITY')}x")
 
 # doctor has to name it, or nobody installs it.
 _doc = _sp2.run([_sys2.executable, "-m", "codecalc", "doctor"],
