@@ -132,10 +132,6 @@ ignore = [
                 # inside the isolated REPL subprocess. Documented in AUDIT.md item 1.
                 # scripts/check_no_eval.py is the real gate on this — it allows exec
                 # ONLY in that file, where a blanket ruff ignore cannot express that.
-    "S310",     # urllib with a non-literal URL: verified — llm.py and context7.py
-                # build every URL from a module-level constant plus urlencode()d
-                # params, so the scheme is never caller-controlled and the file://
-                # read this rule guards against is unreachable.
 ]
 
 [tool.ruff.lint.per-file-ignores]
