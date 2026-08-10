@@ -150,15 +150,22 @@ jobs:
         run: |
           set -euo pipefail
           uv venv /tmp/base-venv
-          uv pip install --python /tmp/base-venv/bin/python .
+          # Windows venvs put the interpreter in Scripts/python.exe, not
+          # bin/python. Hardcoding the POSIX layout failed both Windows legs
+          # with "No virtual environment ... found for path .../bin/python" —
+          # the venv was fine, the path was not.
+          BASE_PY=/tmp/base-venv/bin/python
+          [ -x "$BASE_PY" ] || BASE_PY=/tmp/base-venv/Scripts/python.exe
+          echo "base interpreter: $BASE_PY"
+          uv pip install --python "$BASE_PY" .
           # The server must IMPORT. This is the regression that would hurt
           # most: an import error here is a server that will not start at all.
-          /tmp/base-venv/bin/python -c "import codecalc.server; print('import ok')"
-          /tmp/base-venv/bin/python -m codecalc doctor
+          "$BASE_PY" -c "import codecalc.server; print('import ok')"
+          "$BASE_PY" -m codecalc doctor
           # And the symbolic tools must return the documented shape rather than
           # raising — an ImportError escaping a tool tells a caller the server
           # is broken when they simply installed the small variant.
-          /tmp/base-venv/bin/python - <<'PY'
+          "$BASE_PY" - <<'PY'
           from codecalc import logic
           r = logic.evaluate_expression("2+2")
           assert r.get("ok") is False, r
