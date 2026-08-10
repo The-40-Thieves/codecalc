@@ -276,7 +276,19 @@ _outside_secret.write_text("OUTSIDE-CANARY", encoding="utf-8")
 _ws = _rd / "ws"
 _ws.mkdir()
 
-if _can_symlink(_ws):
+if not hasattr(os, "O_NOFOLLOW"):
+    # Windows has no O_NOFOLLOW, so `_O_NOFOLLOW` is 0, the flag is a no-op and
+    # the open follows the link. That is a documented platform gap — stated in
+    # `_write_nofollow`'s docstring — and it is why the write case above is
+    # skipped here too rather than asserted. Enshrining "it follows the symlink"
+    # as expected behaviour would turn a known weakness into a guarantee.
+    #
+    # Mirroring the write guard is the fix for a red Windows run this file
+    # caused on its first push: the write half had the check and the read half,
+    # written minutes later, did not.
+    skip("_read_nofollow refuses a symlinked final component",
+         "O_NOFOLLOW does not exist on this platform")
+elif _can_symlink(_ws):
     (_ws / "link.bin").symlink_to(_outside_secret)
     # Hand _read_nofollow the exact state the race leaves behind: a symlink
     # sitting at the already-resolved path.
