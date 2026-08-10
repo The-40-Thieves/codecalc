@@ -129,24 +129,31 @@ def available() -> bool:
     return abi_version() > 0
 
 
-def unenforced_reasons(abi: int | None = None) -> list[str]:
+def unenforced_reasons(abi: int | None = None, scope: str = "install") -> list[str]:
     """What this confinement does NOT cover, in the executor's own vocabulary.
 
     Returned whether or not Landlock applied, because "we could not confine
     the installer" and "we confined it but UDP is still open" are different
     facts and a caller acting on either needs to know which it has.
+
+    `scope` names what was being confined. It defaults to "install" so the
+    package-install strings (#23) are unchanged, and sessions pass "session"
+    (#104) — a session result reading `install_udp_egress_unrestricted` is
+    describing the wrong subject, and a caller who greps for the guarantee
+    they lost would not find it under a name about installing packages.
     """
     abi = abi_version() if abi is None else abi
     if abi == 0:
-        return ["package_install_not_confined_no_landlock"]
+        return [f"{scope}_not_confined_no_landlock"] if scope != "install" else [
+            "package_install_not_confined_no_landlock"]
     out = [
         # True at every ABI: these are documented gaps, not version gaps.
-        "install_metadata_syscalls_unrestricted",  # chmod/chown/stat/utime/...
+        f"{scope}_metadata_syscalls_unrestricted",  # chmod/chown/stat/utime/...
     ]
     if abi < 10:
-        out.append("install_udp_egress_unrestricted")
+        out.append(f"{scope}_udp_egress_unrestricted")
     if abi < 4:
-        out.append("install_tcp_egress_unrestricted")
+        out.append(f"{scope}_tcp_egress_unrestricted")
     return out
 
 

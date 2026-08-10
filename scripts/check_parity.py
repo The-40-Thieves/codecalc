@@ -37,7 +37,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from codecalc import executor, registry  # noqa: E402 — needs the path above
+from codecalc import executor, registry, sessions  # noqa: E402 — needs the path above
 
 RUST = (REPO / "executor" / "src" / "main.rs").read_text(encoding="utf-8")
 #: platform/unix.rs was never read by this script, which is why a behavioural
@@ -270,6 +270,103 @@ if _missing_guard:
          "error, so an unreadable stream still reports a successful run")
 else:
     print("ok   unreadable output: both backends fold it into `ok`")
+
+# ── a session must declare every guarantee a one-shot run carries (#104) ────
+# `execute_code()` runs through codecalc-exec. `execute_code(session_id=...)`
+# on a stateful language runs through `subprocess.Popen` in sessions.py, and
+# the two therefore offer materially different guarantees under one tool name.
+# That is allowed — the worker is long-lived on purpose — but it may not be
+# SILENT, which is the class this repo has now corrected four times (#62, #66,
+# #80, and the gate this file grew for its own skill).
+#
+# The gate is a correspondence, not a spell-check: each key names a guarantee
+# the Rust path demonstrably provides, proven by a marker in its source. If the
+# executor ever stops providing one, the marker goes and this fails — which is
+# the point, because the session disclosure would then be describing a
+# difference that no longer exists. If a NEW guarantee lands on the Rust side,
+# add it here and to `_SESSION_STRUCTURAL_GAPS` together.
+def _code_only(src: str) -> str:
+    """Rust source with comments removed.
+
+    Load-bearing, not hygiene. The first draft proved `process_group_kill` with
+    the marker "killpg" — which appears in unix.rs exactly once, inside a
+    comment explaining why `killpg` is NOT used (it is not async-signal-safe;
+    the code calls `kill(-pgid)` instead). The gate was matching prose that
+    said the opposite of what it claimed to prove, and would have passed with
+    the kill deleted. A marker has to hit code.
+    """
+    src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
+    return re.sub(r"//[^\n]*", "", src)
+
+
+RUST_CODE = _code_only(RUST)
+RUST_UNIX_CODE = _code_only(RUST_UNIX)
+
+_ONE_SHOT_GUARANTEES = {
+    # session key          # proof it is real on the one-shot path
+    "no_net": ("executor/src/main.rs", RUST_CODE, "platform::apply_no_net"),
+    "peak_memory_kb": ("executor/src/main.rs", RUST_CODE, "waited.peak_memory_kb"),
+    # The actual mechanism, not the name of the call it deliberately avoids.
+    "process_group_kill": ("executor/src/platform/unix.rs", RUST_UNIX_CODE,
+                           "libc::kill(-pgid, libc::SIGKILL)"),
+    # Not a single call site: the whole binary is the guarantee. Its argv/env
+    # handling is what ENV_ALLOWLIST above already gates.
+    "sandbox_backend": ("executor/src/main.rs", RUST_CODE, "ENV_ALLOWLIST"),
+}
+
+_declared = set(sessions._SESSION_STRUCTURAL_GAPS)
+_missing_decl = sorted(set(_ONE_SHOT_GUARANTEES) - _declared)
+_stale_decl = sorted(_declared - set(_ONE_SHOT_GUARANTEES))
+_WORD = re.compile(r"[0-9A-Za-z_]")
+
+
+def _bounded(marker: str) -> re.Pattern:
+    """`marker` as a regex that will not match a longer identifier.
+
+    A plain `in` test passes after the symbol is RENAMED, because
+    "apply_no_net" is a substring of "apply_no_net_RENAMED" — watched, and it
+    was the one direction of four that did not fail.
+
+    The bound is applied per EDGE rather than with a bare `\\b`, because a
+    marker may legitimately begin or end with punctuation:
+    `libc::kill(-pgid, libc::SIGKILL)` ends in `)`, and `\\b` there asserts a
+    word/non-word transition that a following `;` does not provide, so the
+    pattern matched nothing and the gate failed on a correct tree. Watched
+    again after fixing, which is the only reason that was not shipped as a
+    permanently-red check.
+    """
+    pre = r"(?<![0-9A-Za-z_])" if _WORD.match(marker[0]) else ""
+    post = r"(?![0-9A-Za-z_])" if _WORD.match(marker[-1]) else ""
+    return re.compile(pre + re.escape(marker) + post)
+
+
+_lost_proof = sorted(k for k, (_, src, marker) in _ONE_SHOT_GUARANTEES.items()
+                     if not _bounded(marker).search(src))
+
+if _lost_proof:
+    fail(f"the one-shot path no longer shows evidence of {_lost_proof} "
+         "(marker gone from the Rust source), so the session disclosure for it "
+         "describes a difference that may not exist any more")
+elif _missing_decl:
+    fail(f"a stateful session does not declare {_missing_decl} in "
+         "_SESSION_STRUCTURAL_GAPS, so execute_code(session_id=...) drops a "
+         "guarantee that execute_code() applies and says nothing")
+elif _stale_decl:
+    fail(f"_SESSION_STRUCTURAL_GAPS declares {_stale_decl}, which no longer "
+         "corresponds to anything the one-shot path provides — a result "
+         "disclaiming a guarantee nobody offers is noise that trains callers "
+         "to skip the field")
+else:
+    print(f"ok   session disclosure: all {len(_ONE_SHOT_GUARANTEES)} one-shot "
+          "guarantees are declared")
+
+# COUNTED, for the reason recorded at the output_error gate above: a helper
+# that exists but is called nowhere discloses nothing. Both stateful result
+# shapes — the one `session_start` returns and the one `execute` returns — have
+# to carry it, so the floor is the number of call sites.
+if floor("session unenforced emissions",
+         re.findall(r"_session_unenforced\(w\)", PY_SESSIONS_SRC), 2):
+    print("ok   session disclosure: emitted on both stateful result shapes")
 
 if failures:
     print(f"\n=== {len(failures)} parity failure(s) ===")

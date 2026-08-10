@@ -18,6 +18,7 @@ not under `python3-deadbeef` no matter how the strings line up.
 
 from __future__ import annotations
 
+import os
 import pathlib
 import sys
 import tempfile
@@ -146,6 +147,127 @@ for bad in ("../evil", "a/b", "", "x" * 65, "we!rd"):
     except ValueError:
         rejected = True
     check(f"session id {bad[:14]!r} rejected", rejected)
+
+# ── #104: a stateful session does not carry the one-shot guarantees ─────────
+# `execute_code()` runs through codecalc-exec. `execute_code(session_id=...)`
+# on python3/node runs a long-lived `subprocess.Popen`, which cannot have the
+# Rust executor's ceilings, its per-call process-group kill or its --no-net
+# shim. That difference is allowed. Being silent about it is not.
+#
+# The canary check is a DISJUNCTION on purpose, matching the issue's acceptance
+# wording: either the file outside the workspace is unreadable, or the result
+# says it is readable. Landlock is Linux-only, so a suite that demanded
+# confinement would fail on macOS and Windows for being honest there.
+
+_root = tempfile.mkdtemp(prefix="codecalc-104-")
+sessions.SESSION_ROOT = pathlib.Path(_root) / "sessions"
+_canary_dir = tempfile.mkdtemp(prefix="codecalc-canary-")
+_canary = pathlib.Path(_canary_dir) / "canary.txt"
+_canary.write_text("TOP-SECRET", encoding="utf-8")
+
+_started = sessions.start("python3")
+if not _started.get("ok"):
+    skip("stateful session confinement", f"python3 worker unavailable: {_started.get('error')}")
+else:
+    _sid = _started["session_id"]
+    try:
+        _res = sessions.execute(_sid, "\n".join([
+            "try:",
+            f"    print('READ:' + open({str(_canary)!r}).read())",
+            "except Exception as e:",
+            "    print('DENIED:' + type(e).__name__)",
+        ]))
+        _out = _res.get("stdout", "")
+        _unenf = _res.get("unenforced", [])
+        _readable = _out.startswith("READ:")
+        _says_readable = any(e.startswith("filesystem_confinement:") for e in _unenf)
+
+        check("canary outside the workspace is unreadable, or the result says it is readable",
+              (not _readable) or _says_readable,
+              f"-> readable={_readable} disclosed={_says_readable}")
+
+        # The disjunction must not be satisfied by BOTH halves being wrong in a
+        # way that cancels: if the session claims confinement, the read has to
+        # actually fail. This is the direction that catches a `confined: True`
+        # set by a spawn path that never applied the ruleset.
+        check("a session claiming confinement really is confined",
+              (not _res.get("confined")) or (not _readable),
+              f"-> confined={_res.get('confined')} readable={_readable}")
+
+        # Unconditional: nothing above asked for a single ceiling.
+        for _key in sessions._SESSION_STRUCTURAL_GAPS:
+            check(f"structural gap {_key!r} disclosed without being asked for",
+                  any(e.startswith(_key + ":") for e in _unenf),
+                  f"-> {len(_unenf)} entries")
+
+        check("a session-backed result names its backend",
+              _res.get("backend") == "session-worker", f"-> {_res.get('backend')!r}")
+
+        # Landlock is inherited across exec, so a child process is covered too.
+        # Without this a session could shell out to read what it cannot open.
+        if _started.get("confined"):
+            _child = sessions.execute(_sid, "\n".join([
+                "import subprocess",
+                f"p = subprocess.run(['cat', {str(_canary)!r}], capture_output=True)",
+                "print('RC:' + str(p.returncode))",
+            ]))
+            check("confinement is inherited by child processes",
+                  "RC:0" not in _child.get("stdout", ""),
+                  f"-> {_child.get('stdout', '').strip()!r}")
+        else:
+            skip("confinement is inherited by child processes", "worker not confined here")
+
+        # TOCTOU: _jail() resolves the path, and the caller then opens it —
+        # two syscalls with a window between them. Code inside the session
+        # shares the workspace as its cwd, so it can drop a symlink into the
+        # resolved path during that window.
+        #
+        # Two guards, and they cover different orderings. A symlink planted
+        # BEFORE the call is caught by _jail, because resolve() follows it and
+        # the target is then outside the workspace. A symlink planted AFTER
+        # resolve() returns is invisible to that check, and the only thing left
+        # is O_NOFOLLOW on the open. The race itself is not schedulable from a
+        # test, so the second guard is exercised against the STATE the race
+        # produces rather than by trying to win it.
+        _wdir = pathlib.Path(_started["workdir"])
+        _outside = pathlib.Path(_canary_dir) / "escaped.txt"
+        _planted = _wdir / "planted.txt"
+        try:
+            _planted.symlink_to(_outside)
+        except OSError as exc:
+            skip("write_file symlink swap", f"symlink unsupported: {exc}")
+        else:
+            try:
+                sessions.write_file(_sid, "planted.txt", "pwned")
+                _jail_caught = False
+            except ValueError:
+                _jail_caught = True
+            check("a symlink present before the call is refused by _jail",
+                  _jail_caught and not _outside.exists(),
+                  f"-> escaped={_outside.exists()}")
+
+            # The post-resolve case: hand _write_nofollow the exact path state
+            # the race leaves behind and require it to refuse.
+            try:
+                sessions._write_nofollow(_planted, "pwned")
+                _nofollow_refused = False
+            except OSError:
+                _nofollow_refused = True
+            if not hasattr(os, "O_NOFOLLOW"):
+                skip("_write_nofollow refuses a symlinked final component",
+                     "O_NOFOLLOW does not exist on this platform")
+            else:
+                check("_write_nofollow refuses a symlinked final component",
+                      _nofollow_refused and not _outside.exists(),
+                      f"-> refused={_nofollow_refused} escaped={_outside.exists()}")
+    finally:
+        sessions.stop(_sid)
+
+# A workspace-only session runs a fresh sandboxed process per call, so it
+# carries all of it. The empty list is a real answer, not a missing one, and
+# asserting it keeps the disclosure from being pasted onto every session shape.
+check("a workspace-only session declares no structural gaps",
+      sessions._session_unenforced(None) == [])
 
 print(f"\n=== {len(FAILS)} FAILURES, {len(SKIPS)} skipped ===" if FAILS else
       f"\n=== ALL SESSION-JAIL TESTS PASS ({len(SKIPS)} skipped) ===")
