@@ -64,6 +64,17 @@ on:
     tags: ['v*']
   workflow_dispatch:
     inputs:
+      publish_to_crates:
+        description: >-
+          Also publish executor/ to crates.io as `codecalc-exec`, via Trusted
+          Publishing (OIDC). REQUIRES ONE MANUAL PUBLISH FIRST: RFC 3691 is
+          explicit that "a Trusted Publisher Configuration can only be created
+          after an initial manual publishing of a crate", and pending configs
+          are listed only as a future possibility. So the first release needs
+          `cargo publish` with a scoped token; every one after it can come from
+          here with no secret at all.
+        type: boolean
+        default: false
       publish_to_pypi:
         description: >-
           Also publish the built wheels to PyPI via trusted publishing (OIDC).
@@ -642,3 +653,33 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
           packages-dir: dist
+
+  publish-crates:
+    name: publish to crates.io (trusted publishing)
+    needs: [build, verify]
+    # Same shape as publish-pypi deliberately: one dispatch releases both, off
+    # the same commit and the same verified build, so the two registries cannot
+    # end up carrying different code under the same version. That is the whole
+    # reason this lives here rather than being run from a laptop.
+    #
+    # `inputs.publish_to_crates` does not exist on a `push` trigger, so a tag
+    # push can never reach this — the same guard publish-pypi uses.
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_to_crates
+    runs-on: ubuntu-latest
+    environment: crates-io
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: ./.github/actions/setup-rust
+      # Short-lived token from crates.io in exchange for the workflow's OIDC
+      # identity. The action's own post step revokes it when the job ends, so
+      # nothing outlives the run and there is no secret in this repository to
+      # rotate, leak or forget.
+      - name: authenticate to crates.io (OIDC)
+        id: crates-auth
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+      - name: publish codecalc-exec
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
+        run: cargo publish --manifest-path executor/Cargo.toml
