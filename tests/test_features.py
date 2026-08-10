@@ -299,10 +299,25 @@ check("  ...in both directions",
 #
 # The tokens below are variable names, which cannot plausibly appear in prose,
 # and they are required in the stripped source rather than anywhere in the file.
+#
+# Identifier presence alone is NOT enough, which a second reviewer pointed out
+# after the comment fix above: `_sec_allow = []` with the comparison deleted
+# keeps both names and gates nothing. So the floor also requires fragments that
+# exist only inside the fail() calls — a message cannot survive the removal of
+# the branch that raises it, and comment-stripping does not touch string
+# literals, so these prove the comparisons are still there.
 _claims_code = _re_comments.sub("", _claims_src)
+_sec_names = "_sec_allow" in _claims_code and "_sec_langs" in _claims_code
+# Fragments chosen to sit INSIDE one string literal each. The first attempt
+# spanned an implicit f-string concatenation ("...env vars; the " + "executor
+# permits...") and so matched nothing, failing a correct tree — the same
+# "watched it fail for the wrong reason" trap as the \b marker in
+# check_parity.py earlier today.
+_sec_compares = ("allowed env vars; the" in _claims_code
+                 and "languages; the registry" in _claims_code)
 check("check_claims.py actually gates SECURITY.md",
-      "_sec_allow" in _claims_code and "_sec_langs" in _claims_code,
-      f"-> stripped source mentions SECURITY {_claims_code.count('SECURITY')}x")
+      _sec_names and _sec_compares,
+      f"-> names={_sec_names} comparisons={_sec_compares}")
 
 # doctor has to name it, or nobody installs it.
 _doc = _sp2.run([_sys2.executable, "-m", "codecalc", "doctor"],
