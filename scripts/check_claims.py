@@ -215,6 +215,32 @@ if args.description is not None:
         print(f"ok   repo description: agrees on {actual_tools} tools "
               f"and {actual_langs} languages")
 
+# ── "Typing :: Typed" is a PEP 561 promise, and needs the marker ───────────
+# #111 added the classifier and no py.typed file. The classifier IS the claim
+# "this package ships usable type information"; without the marker, mypy and
+# pyright ignore every annotation in it, so the package has 196 annotated defs
+# that no consumer's type checker will look at. Found by a cross-vendor review
+# of #111 — a false claim introduced by the PR whose subject was metadata
+# accuracy, which is worth recording rather than quietly fixing.
+#
+# Gated in BOTH directions: the classifier without the marker is a promise that
+# is not kept, and the marker without the classifier is type information nobody
+# is told about.
+_pyproject_txt = (REPO / "pyproject.toml").read_text(encoding="utf-8")
+_typed_classifier = "Typing :: Typed" in _pyproject_txt
+_typed_marker = (REPO / "codecalc" / "py.typed").is_file()
+if _typed_classifier and not _typed_marker:
+    fail("pyproject declares the 'Typing :: Typed' classifier but codecalc/py.typed "
+         "does not exist — PEP 561 requires the marker, and without it every type "
+         "checker ignores the package's annotations while the metadata advertises them")
+elif _typed_marker and not _typed_classifier:
+    fail("codecalc/py.typed exists but pyproject does not declare 'Typing :: Typed' — "
+         "the package ships type information and does not say so")
+else:
+    print(f"ok   PEP 561: classifier and py.typed marker agree "
+          f"({'both present' if _typed_marker else 'both absent'})")
+
+
 # ── SECURITY.md carries numbers too, and nothing read it ───────────────────
 # Gate 5 above requires AUDIT.md to NAME every allowed environment variable.
 # SECURITY.md states the same allowlist as a COUNT — "the 23-entry allowlist" —
