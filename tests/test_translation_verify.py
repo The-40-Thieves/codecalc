@@ -27,6 +27,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from codecalc import executor, optimization, translation
+from codecalc import server as _server
 from codecalc.translation import aggregate, classify_case, compare_edge_cases
 
 FAILS = []
@@ -222,6 +223,50 @@ if executor._rust:
 else:
     print("SKIP live verification gates (no native executor built)")
 
+
+# ── the default evidence must include the discriminating inputs ───────────
+# The MCP tools defaulted to DEFAULT_EDGE_INPUTS[:4] — '', '0', '1', '-1' —
+# discarding '10', '100' and '0.1\n0.2'. Float formatting is one of the most
+# common genuine divergences between ports, so the default excluded the input
+# most likely to find a real bug.
+#
+# This is the demonstration, not an argument: the port below agrees on every
+# integral sum and differs only in float rendering. Under the old default it
+# was CERTIFIED equivalent.
+_SRC_F = "import sys\nv=[float(x) for x in sys.stdin.read().split()]\nprint(float(sum(v)))"
+_TGT_F = ("const t=require('fs').readFileSync(0,'utf8').trim();\n"
+          "const v=t?t.split(/\\s+/).map(Number):[];\n"
+          "const s=v.reduce((a,b)=>a+b,0);\n"
+          "console.log(s.toFixed(1));")
+
+if executor.probe().get("node"):
+    _four = translation.verify_translation("python3", _SRC_F, "node", _TGT_F,
+                                           translation.DEFAULT_EDGE_INPUTS[:4])
+    _full = translation.verify_translation("python3", _SRC_F, "node", _TGT_F,
+                                           translation.DEFAULT_EDGE_INPUTS)
+    # The control: without it, "the full set catches it" proves nothing about
+    # the slice — the port might diverge on every input.
+    check("control: the truncated set CERTIFIES this divergent port",
+          _four.get("passed") is True,
+          f"-> passed={_four.get('passed')} mismatched={_four.get('mismatched')}")
+    check("the full set catches the float divergence the slice hid",
+          _full.get("passed") is False and _full.get("mismatched") == 1,
+          f"-> passed={_full.get('passed')} mismatched={_full.get('mismatched')}")
+    _bad = [c for c in _full.get("cases", []) if c.get("outcome") == "mismatch"]
+    check("  ...and names the input that did it",
+          bool(_bad) and "0.1" in _bad[0].get("input", ""),
+          f"-> {_bad[0].get('input')!r} {_bad[0].get('source',{}).get('stdout')!r} vs "
+          f"{_bad[0].get('target',{}).get('stdout')!r}" if _bad else "-> no mismatch recorded")
+else:
+    print("SKIP float-divergence probe — node runtime not available")
+
+# The tools must not re-introduce the slice. Checked through the SERVER layer,
+# because that is the one a model calls and the one that carried the slice —
+# the module function never did.
+_srv = _server.verify_translation("print(1)", "python3", "console.log(1)", "node")
+check("the MCP tool tests the full default set",
+      _srv.get("total") == len(translation.DEFAULT_EDGE_INPUTS),
+      f"-> total={_srv.get('total')} of {len(translation.DEFAULT_EDGE_INPUTS)}")
 
 print(f"\n=== {len(FAILS)} FAILURES ===" if FAILS else
       "\n=== ALL TRANSLATION-VERIFICATION TESTS PASS ===")
