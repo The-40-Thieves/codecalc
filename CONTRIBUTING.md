@@ -87,6 +87,71 @@ Match the file you are editing. The prevailing idiom is a comment that explains 
 
 Measured numbers belong in the document with the method next to them. "Faster" without a figure and a spread is not a result.
 
+## Releasing
+
+One dispatch, one commit, every registry — so two registries cannot end up
+carrying different code under the same version. `release.yml` builds and
+verifies on any `v*` tag; publishing is opt-in per registry:
+
+```
+gh workflow run release.yml -f publish_to_pypi=true -f publish_to_crates=true
+```
+
+Both publish jobs authenticate with **OIDC trusted publishing**. There is no
+API token in this repository's secrets for either one, and nothing to rotate:
+each job exchanges the workflow's identity for a token that lives minutes, and
+crates.io's action revokes its own on the way out.
+
+**crates.io needs one manual publish first, once.** RFC 3691 is explicit that
+"a Trusted Publisher Configuration can only be created after an initial manual
+publishing of a crate"; pending configurations are listed only as a future
+possibility. So the first `codecalc-exec` release is:
+
+```bash
+ CARGO_REGISTRY_TOKEN='cio_...' cargo publish --manifest-path executor/Cargo.toml
+```
+
+with a token scoped to `publish-new` on that crate alone and the shortest
+expiry offered, revoked immediately afterwards. Do that from a machine that is
+NOT running codecalc: execution is same-uid, `CARGO_HOME` is in the executor's
+env allowlist, and a token written to `~/.cargo/credentials.toml` is therefore
+readable by anything you execute. Measured, not assumed. The environment
+variable above is not allowlisted, so it does not reach executed code.
+
+After that publish, configure the trusted publisher on the crate's settings
+page (repository `The-40-Thieves/codecalc`, workflow `release.yml`, environment
+`crates-io`) and no token is ever needed again.
+
+PyPI has no such bootstrap: a pending publisher works before the project
+exists, and the first OIDC publish creates it. It does NOT reserve the name
+beforehand, so until that publish happens the name stays claimable.
+
+**npm has no job here, and that is a decision rather than an omission.** It was
+built and then dropped, so the reasoning is recorded to save anyone repeating
+the exercise.
+
+This repository publishes no JavaScript — there is no `package.json` — and the
+MCP server is Python, which npm cannot deliver. The only shippable artifact is
+the Rust executor, and a wrapper for it was prototyped end to end: it worked,
+installed from tarballs, and ran. The cost is what settled it.
+
+`postinstall`-downloads-a-binary is not available: npm v12 stopped running
+install scripts by default in July 2026. The working pattern is
+`optionalDependencies` with per-platform packages — six packages that must
+version-lock on every release, since those dependencies pin exact versions and
+one straggler breaks the wrapper. npm's trusted publishing is configured PER
+PACKAGE ("each package can only have one trusted publisher configured at a
+time"), so that is six configurations, not one. It also introduces JavaScript
+into a repository whose gates — ruff, check_no_eval, the lot — do not cover it.
+
+Against that, `release.yml` already attaches those exact binaries to GitHub
+Releases with checksums. npm would have been a second, more fragile path to an
+artifact that is already distributed.
+
+If Node-ecosystem reach becomes worth that, the shape is known: a wrapper
+package plus five platform packages under a scope, generated from the release
+artifacts.
+
 ## Reporting security issues
 
 Do not open a public issue. See [SECURITY.md](SECURITY.md).
