@@ -141,6 +141,16 @@ def analyze(code: str, language: str = "python3") -> dict:
         "loops": loops,
         "max_nesting": depth,
         "recursion": recursive,
+        # TWO ORTHOGONAL FACTS, and only one of them was reported before.
+        # `analysis` says how the source was READ — parsed by tree-sitter, or
+        # guessed by regex when no grammar was available. `method` says whether
+        # the answer was MEASURED at all, and it never was: this counts loops
+        # and detects recursion. A caller could previously see
+        # analysis="tree-sitter" and reasonably hear "we determined the
+        # complexity", when the truth is "we read the structure accurately and
+        # inferred from it". `benchmark` is the empirical counterpart and
+        # reports method="empirical".
+        "method": "static-estimate",
         "analysis": analysis,
         "grammar": facts.grammar,
         "functions": facts.functions if facts.parsed else [],

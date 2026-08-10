@@ -211,6 +211,7 @@ def benchmark(code: str, language: str = "python3", sizes: str = "100,1000,10000
         return {
             "ok": True,
             "language": language,
+            "method": "empirical",
             "estimate": "O(1) (work below noise floor at all sizes)",
             "auto_scaled": scale_steps > 0,
             "candidate_scores": [],
@@ -228,6 +229,13 @@ def benchmark(code: str, language: str = "python3", sizes: str = "100,1000,10000
     return {
         "ok": True,
         "language": language,
+        # MEASURED, not inferred. `analyze_complexity` returns
+        # method="static-estimate" for the same question read off the source;
+        # this one ran the program at increasing sizes and timed it. The two
+        # sit next to each other in the tool list and a caller relaying either
+        # as "the complexity" without saying which has lost the distinction
+        # that makes one of them evidence.
+        "method": "empirical",
         "estimate": estimate,
         "best_score": fit.get("best_score"),
         "candidate_scores": fit.get("scores", []),
