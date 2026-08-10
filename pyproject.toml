@@ -4,6 +4,42 @@ version = "0.1.0"
 description = "Universal code + logic calculator for AI models: execute 31 languages, evaluate logic, analyze complexity. Exposed via MCP."
 license = "Apache-2.0"
 requires-python = ">=3.11"
+
+# The wheel carried NONE of this and its METADATA came to 700 bytes: name,
+# version, summary, licence, dependencies, nothing else. The PyPI page for a
+# package whose function is running untrusted code would have rendered with no
+# description and no link to its own SECURITY.md or AUDIT.md. README.md was
+# already IN the sdist — it was simply never declared as the long description.
+#
+# The asymmetry is what makes this worth a change rather than a nit: the crate
+# got `repository`, `homepage`, `keywords` and `categories` in #96 specifically
+# because crates.io warns without them. PyPI does not warn, so the same gap on
+# the Python side was silent — and 0.1.0 cannot be re-uploaded once published.
+readme = "README.md"
+
+# Deliberately no `License ::` classifier: `license = "Apache-2.0"` above is a
+# PEP 639 SPDX expression, and pairing it with the legacy classifier is the
+# combination modern build backends reject as ambiguous.
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Rust",
+    "Topic :: Security",
+    "Topic :: Software Development :: Interpreters",
+    "Topic :: Software Development :: Quality Assurance",
+    "Typing :: Typed",
+]
+keywords = ["mcp", "sandbox", "executor", "code-execution", "llm", "agent", "symbolic-math"]
+
 dependencies = [
     # The official SDK, NOT fastmcp. fastmcp 3.x pins mcp>=1.24,<2.0 and so
     # cannot reach protocol 2026-07-28 — the resolver is explicit about it.
@@ -37,6 +73,22 @@ full = [
 
 [project.scripts]
 codecalc = "codecalc.server:main"
+
+# Placed AFTER every array in [project], not before them. A `[project.urls]`
+# header opens a new TOML table, so everything following it belongs to that
+# table until the next header — putting this above `dependencies` silently
+# reparented the dependency list into it and the build failed with
+# "URL `dependencies` of field `project.urls` must be a string". Caught by the
+# build rather than by review, which is the argument for building the wheel as
+# part of changing its metadata.
+[project.urls]
+# Source first: for a package whose function is executing code, the shortest
+# path from the index page to the audit and the threat model is the point.
+Source = "https://github.com/The-40-Thieves/codecalc"
+Issues = "https://github.com/The-40-Thieves/codecalc/issues"
+Security = "https://github.com/The-40-Thieves/codecalc/blob/main/SECURITY.md"
+Audit = "https://github.com/The-40-Thieves/codecalc/blob/main/AUDIT.md"
+Changelog = "https://github.com/The-40-Thieves/codecalc/releases"
 
 [build-system]
 requires = ["hatchling"]
