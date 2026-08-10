@@ -101,7 +101,22 @@ def verify_optimization(original: str, candidate: str, language: str,
     measurement half unreachable on its own.
     """
     language = executor.registry.canonical(language) or language
-    inputs = test_inputs if test_inputs else DEFAULT_EDGE_INPUTS[:4]
+# The FULL set, not DEFAULT_EDGE_INPUTS[:4]. The slice kept '', '0', '1', '-1'
+    # and discarded '10', '100' and '0.1\n0.2' — the multi-digit cases and the
+    # float one. Float formatting is among the most common genuine divergences
+    # between ports, so the default evidence excluded the input most likely to
+    # find a real bug.
+    #
+    # Demonstrated rather than argued: a python3 -> node port that agrees on
+    # every integral sum and differs only in float rendering was CERTIFIED by
+    # the old default and rejected by the full set.
+    #
+    #     D[:4]  passed=True   matched=4 mismatched=0
+    #     D      passed=False  mismatched on '0.1\n0.2':
+    #                          '0.30000000000000004' vs '0.3'
+    #
+    # Cost of the change, measured: 0.38s -> 0.67s per call.
+    inputs = test_inputs if test_inputs else DEFAULT_EDGE_INPUTS
     size_list = sizes or [2000, 5000, 10000, 20000]
 
     ver = verify_translation(language, original, language, candidate, inputs,
@@ -249,7 +264,22 @@ def extract_function(code: str, language: str, function_name: str,
                                "language) to execute; only extraction done",
                     "signature": ex.get("signature")}
 
-    inputs = test_inputs if test_inputs else DEFAULT_EDGE_INPUTS[:4]
+# The FULL set, not DEFAULT_EDGE_INPUTS[:4]. The slice kept '', '0', '1', '-1'
+    # and discarded '10', '100' and '0.1\n0.2' — the multi-digit cases and the
+    # float one. Float formatting is among the most common genuine divergences
+    # between ports, so the default evidence excluded the input most likely to
+    # find a real bug.
+    #
+    # Demonstrated rather than argued: a python3 -> node port that agrees on
+    # every integral sum and differs only in float rendering was CERTIFIED by
+    # the old default and rejected by the full set.
+    #
+    #     D[:4]  passed=True   matched=4 mismatched=0
+    #     D      passed=False  mismatched on '0.1\n0.2':
+    #                          '0.30000000000000004' vs '0.3'
+    #
+    # Cost of the change, measured: 0.38s -> 0.67s per call.
+    inputs = test_inputs if test_inputs else DEFAULT_EDGE_INPUTS
     runs = []
     for stdin in inputs:
         r = executor.execute(language, program, stdin=stdin, timeout=timeout)
