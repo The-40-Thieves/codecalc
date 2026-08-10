@@ -193,6 +193,41 @@ check("pyproject declares the extras",
           for x in ("[project.optional-dependencies]", "symbolic", "parsing", "full")),
       "-> optional-dependencies missing")
 
+# ── estimate vs measurement, stated in the result ─────────────────────────
+# analyze_complexity and benchmark answer the same question and sit next to
+# each other in the tool list. One counts loops; the other runs the program at
+# increasing sizes. `analysis: tree-sitter|regex-fallback` distinguished PARSED
+# from GUESSED, which is a different axis and was the only one reported — so a
+# caller could see analysis="tree-sitter" and reasonably hear "we determined
+# the complexity" about a number nobody measured.
+from codecalc import complexity as _cx
+from codecalc import tools as _tools
+
+_static = _cx.analyze("for i in range(n):\n    for j in range(n):\n        pass", "python3")
+check("analyze_complexity declares itself an estimate",
+      _static.get("method") == "static-estimate", f"-> {_static.get('method')!r}")
+check("  ...while still reporting HOW it read the source",
+      _static.get("analysis") in ("tree-sitter", "regex-fallback"),
+      f"-> {_static.get('analysis')!r}")
+# The two axes are orthogonal: parsed-vs-guessed does not imply measured.
+check("  ...and the two are separate fields, not one",
+      _static.get("method") != _static.get("analysis"),
+      f"-> method={_static.get('method')!r} analysis={_static.get('analysis')!r}")
+
+_bench = _tools.benchmark(
+    "import sys\nn=int(sys.stdin.readline())\nx=[i*i for i in range(n)]\nprint(len(x))",
+    "python3", sizes="2000,4000,8000")
+check("benchmark declares itself empirical",
+      _bench.get("ok") is True and _bench.get("method") == "empirical",
+      f"-> ok={_bench.get('ok')} method={_bench.get('method')!r}")
+
+# A failed run measured nothing, so it must not claim to have. This is the
+# case that would otherwise let a caller relay "empirical" about an error.
+_failed = _tools.benchmark("import sys\nraise SystemExit(1)", "python3", sizes="100,200")
+check("a failed benchmark claims no method at all",
+      _failed.get("ok") is False and "method" not in _failed,
+      f"-> ok={_failed.get('ok')} method={_failed.get('method')!r}")
+
 print(f"\n=== {len(FAILS)} failures ===" if FAILS else "\n=== ALL NEW-FEATURE TESTS PASS ===")
 sys.exit(1 if FAILS else 0)
 
