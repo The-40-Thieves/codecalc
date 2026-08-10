@@ -380,6 +380,40 @@ _exact.write_bytes(b"C" * 8)
 check("_read_nofollow still reads a file exactly at the cap",
       sessions._read_nofollow(_exact, 8) == b"C" * 8)
 
+# Everything that is NOT a regular file must come back as None, never as an
+# exception. `os.open` SUCCEEDS on a directory and `os.fdopen` then raises
+# IsADirectoryError, so the first version of this helper let that escape and
+# leaked the descriptor with it — a regression against the `is_file()` check it
+# replaced, found by running these shapes rather than by reading the code.
+_shapes = [("directory", _ws), ("missing", _ws / "nope.bin")]
+(_ws / "dangling").symlink_to(_ws / "no-such-target") if _can_symlink(_ws) else None
+if (_ws / "dangling").is_symlink():
+    _shapes.append(("dangling symlink", _ws / "dangling"))
+if pathlib.Path("/dev/null").exists():
+    _shapes.append(("character device", pathlib.Path("/dev/null")))
+for _label, _p in _shapes:
+    try:
+        _r = sessions._read_nofollow(_p, 1 << 20)
+        check(f"_read_nofollow returns None for a {_label}", _r is None, f"-> {_r!r}")
+    except Exception as _exc:
+        check(f"_read_nofollow returns None for a {_label}", False,
+              f"-> RAISED {type(_exc).__name__}")
+
+# And none of those paths may leak a descriptor. The leak was invisible per
+# call; it only shows as a count that climbs, which is why this asserts the
+# count rather than any single result.
+_fd_dir = pathlib.Path(f"/proc/{os.getpid()}/fd")
+if _fd_dir.is_dir():
+    _fd_before = len(list(_fd_dir.iterdir()))
+    for _ in range(200):
+        for _, _p in _shapes:
+            sessions._read_nofollow(_p, 8)
+    _fd_after = len(list(_fd_dir.iterdir()))
+    check("_read_nofollow leaks no descriptor on the reject paths",
+          _fd_after <= _fd_before + 2, f"-> {_fd_before} -> {_fd_after} over 200 rounds")
+else:
+    skip("_read_nofollow leaks no descriptor on the reject paths", "no /proc on this platform")
+
 # A FIFO must not park the server waiting for a writer.
 #
 # Stated honestly: the OLD code also declined this, because `is_file()` is
