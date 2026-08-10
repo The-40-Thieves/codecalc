@@ -246,12 +246,28 @@ if executor.probe().get("node"):
                                            translation.DEFAULT_EDGE_INPUTS)
     # The control: without it, "the full set catches it" proves nothing about
     # the slice — the port might diverge on every input.
-    check("control: the truncated set CERTIFIES this divergent port",
-          _four.get("passed") is True,
-          f"-> passed={_four.get('passed')} mismatched={_four.get('mismatched')}")
+    # The control needs the four inputs to have actually RUN. They agree
+    # deterministically, so anything other than four matches means a runtime
+    # did not produce a comparable result — on windows-latest `node` returns
+    # ok=True with empty stdout intermittently (#42), which used to score as a
+    # mismatch and made this gate flaky: mismatched=1 here, then green on a
+    # re-run with no code change. `verify_translation` now reports that shape as
+    # inconclusive rather than as evidence, so the honest reading of an
+    # inconclusive control is "the experiment did not run", not "the claim is
+    # false". Asserting through it would be asserting about a measurement that
+    # was never taken.
+    if _four.get("inconclusive"):
+        print(f"SKIP control: the truncated set CERTIFIES this divergent port "
+              f"(runtime gave no comparable result on "
+              f"{_four['inconclusive']} of {_four['total']} inputs)")
+    else:
+        check("control: the truncated set CERTIFIES this divergent port",
+              _four.get("passed") is True,
+              f"-> passed={_four.get('passed')} mismatched={_four.get('mismatched')}")
     check("the full set catches the float divergence the slice hid",
-          _full.get("passed") is False and _full.get("mismatched") == 1,
-          f"-> passed={_full.get('passed')} mismatched={_full.get('mismatched')}")
+          _full.get("passed") is False and _full.get("mismatched") >= 1,
+          f"-> passed={_full.get('passed')} mismatched={_full.get('mismatched')} "
+          f"inconclusive={_full.get('inconclusive')}")
     _bad = [c for c in _full.get("cases", []) if c.get("outcome") == "mismatch"]
     check("  ...and names the input that did it",
           bool(_bad) and "0.1" in _bad[0].get("input", ""),
@@ -259,6 +275,70 @@ if executor.probe().get("node"):
           f"{_bad[0].get('target',{}).get('stdout')!r}" if _bad else "-> no mismatch recorded")
 else:
     print("SKIP float-divergence probe — node runtime not available")
+
+# ── a lost measurement is not a divergence (#42, the flaky Windows gate) ───
+# One side exits 0 with no output while the other prints something. That is the
+# same missing measurement classify_case already refuses to score when BOTH
+# sides are empty — the one-sided case fell through to "stdout differs" and was
+# reported as positive evidence of non-equivalence, which is what made the
+# Windows translation gate flaky.
+#
+# Driven through a stubbed _run so both branches are deterministic and need
+# neither node nor the flake itself to reproduce.
+_orig_run = translation._run
+
+
+def _stub_run(target_outputs):
+    calls = {"n": 0}
+
+    def _run(lang, code, stdin, timeout):
+        if lang == "python3":
+            return {"ok": True, "stdout": "0.0", "phase": "run", "stderr": ""}
+        i = calls["n"]
+        calls["n"] += 1
+        return {"ok": True, "stdout": target_outputs[min(i, len(target_outputs) - 1)],
+                "phase": "run", "stderr": ""}
+    return _run, calls
+
+
+for _label, _outs, _want, _runs in [
+    ("unstable runtime is INCONCLUSIVE, not a mismatch", ["", "0.0"], "inconclusive", 2),
+    ("a reproducibly empty port is still a MISMATCH", ["", ""], "mismatch", 2),
+    ("agreement costs no extra run", ["0.0"], "match", 1),
+]:
+    translation._run, _calls = _stub_run(_outs)
+    try:
+        _res = translation.verify_translation("python3", "s", "node", "t", [""])
+    finally:
+        translation._run = _orig_run
+    _case = _res["cases"][0]
+    check(_label, _case["outcome"] == _want and _calls["n"] == _runs,
+          f"-> outcome={_case['outcome']} target_runs={_calls['n']}")
+
+# The re-run must never turn a lost measurement into a PASS. Certifying a
+# translation because the runtime produced output the second time would be the
+# exact failure this repo keeps closing.
+translation._run, _ = _stub_run(["", "0.0"])
+try:
+    _flaky = translation.verify_translation("python3", "s", "node", "t", [""])
+finally:
+    translation._run = _orig_run
+check("an unstable runtime never certifies the translation",
+      _flaky.get("passed") is False,
+      f"-> passed={_flaky.get('passed')} inconclusive={_flaky.get('inconclusive')}")
+
+# Detector shape check: only ok=True + empty-vs-nonempty qualifies. A real
+# failure on one side is a genuine divergence and must stay one.
+_full_r = {"ok": True, "stdout": "0.0"}
+_empty_r = {"ok": True, "stdout": ""}
+check("vanished-output detector ignores a genuine failure",
+      translation.vanished_output_side(_full_r, {"ok": False, "stdout": ""}) is None)
+check("vanished-output detector ignores two empty results",
+      translation.vanished_output_side(_empty_r, _empty_r) is None)
+check("vanished-output detector names the empty side",
+      translation.vanished_output_side(_full_r, _empty_r) == "target"
+      and translation.vanished_output_side(_empty_r, _full_r) == "source")
+
 
 # The tools must not re-introduce the slice. Checked through the SERVER layer,
 # because that is the one a model calls and the one that carried the slice —

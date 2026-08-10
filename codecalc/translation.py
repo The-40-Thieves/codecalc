@@ -132,6 +132,35 @@ def aggregate(outcomes: list[tuple[str, str]]) -> dict:
             "total": len(outcomes)}
 
 
+def vanished_output_side(a: dict, b: dict) -> str | None:
+    """Which side reported SUCCESS with no output while the other produced some.
+
+    `classify_case` already refuses to score two empty-but-ok results as a
+    match, because an exit-0 run with no stdout cannot be distinguished from one
+    whose output was lost (#42: `node` returns ok=True with empty stdout on
+    windows-latest while sibling languages print normally from the same
+    snippet). That reasoning was applied to BOTH sides being empty and not to
+    ONE, so the one-sided case fell through to "both ran; stdout differs" and
+    was reported as positive evidence of non-equivalence.
+
+    It is not positive evidence. It is the same missing measurement, one level
+    over — and it is what made the Windows translation gate flaky: a control
+    whose four inputs all agree deterministically reported mismatched=1, then
+    passed on re-run with no code change.
+
+    Returning the side rather than a bool because the caller has to re-run
+    exactly that one.
+    """
+    if not (bool(a.get("ok")) and bool(b.get("ok"))):
+        return None
+    a_out, b_out = _normalize(a.get("stdout", "")), _normalize(b.get("stdout", ""))
+    if a_out and not b_out:
+        return "target"
+    if b_out and not a_out:
+        return "source"
+    return None
+
+
 def verify_translation(source: str, source_code: str, target: str,
                        target_code: str, test_inputs: list[str],
                        timeout: int = 15) -> dict:
@@ -146,6 +175,35 @@ def verify_translation(source: str, source_code: str, target: str,
         a = _run(source, source_code, stdin, timeout)
         b = _run(target, target_code, stdin, timeout)
         outcome, reason = classify_case(a, b)
+
+        # One side succeeded and printed nothing while the other printed
+        # something. Re-run THAT side once and let the two runs decide, rather
+        # than reporting a missing measurement as a difference.
+        #
+        # The re-run is not a retry-until-green: a port that prints nothing is a
+        # real divergence and must keep being reported as one. So the second run
+        # is evidence about the FIRST, and only the two together produce a
+        # verdict —
+        #   still empty  -> reproducible, the mismatch stands (signal preserved)
+        #   now non-empty -> the runtime is unstable on this input, which is not
+        #                    evidence of equivalence either, so: inconclusive.
+        #
+        # Adopting the second result silently would be the wrong fix: a runtime
+        # that produces output only sometimes has not shown the ports agree.
+        side = vanished_output_side(a, b) if outcome == "mismatch" else None
+        if side is not None:
+            if side == "target":
+                retry = _run(target, target_code, stdin, timeout)
+            else:
+                retry = _run(source, source_code, stdin, timeout)
+            if _normalize(retry.get("stdout", "")):
+                outcome = "inconclusive"
+                reason = (f"the {side} produced no output on the first run and "
+                          "output on a second run of the same input; the runtime "
+                          "is not deterministic here, so neither result is "
+                          "evidence about the translation")
+            else:
+                reason = f"{reason} (the empty side was re-run and was empty again)"
         outcomes.append((outcome, reason))
         cases.append({
             "input": stdin[:60],
