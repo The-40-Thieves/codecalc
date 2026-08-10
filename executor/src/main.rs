@@ -86,12 +86,30 @@ const CPU_GRACE_SECONDS: u64 = 8;
 /// list has always allowed. A name absent from the environment is simply not
 /// copied, so these are inert on POSIX.
 const ENV_ALLOWLIST: &[&str] = &[
-    "PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "PYTHONUNBUFFERED",
-    "JAVA_HOME", "CARGO_HOME", "RUSTUP_HOME", "GOPATH", "GOMODCACHE",
+    "PATH",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "TMPDIR",
+    "PYTHONUNBUFFERED",
+    "JAVA_HOME",
+    "CARGO_HOME",
+    "RUSTUP_HOME",
+    "GOPATH",
+    "GOMODCACHE",
     // Windows
-    "SystemRoot", "SYSTEMROOT", "windir", "COMSPEC", "PATHEXT",
-    "TEMP", "TMP", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
-    "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE",
+    "SystemRoot",
+    "SYSTEMROOT",
+    "windir",
+    "COMSPEC",
+    "PATHEXT",
+    "TEMP",
+    "TMP",
+    "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
 ];
 
 /// Env var an operator sets to pin the PATH executed code resolves runtimes on.
@@ -126,7 +144,10 @@ fn runtime_path() -> String {
 /// RLIMIT_NPROC for this execution. See the constants above for why it is
 /// measured rather than fixed.
 fn nproc_limit() -> u64 {
-    if let Some(v) = env::var(MAX_PROCESSES_ENV).ok().and_then(|s| s.parse::<u64>().ok()) {
+    if let Some(v) = env::var(MAX_PROCESSES_ENV)
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+    {
         return v; // operator override: an absolute cap, measurement skipped
     }
     let headroom = env::var(PROCESS_HEADROOM_ENV)
@@ -139,7 +160,6 @@ fn nproc_limit() -> u64 {
     }
 }
 
-
 /// A language entry: optional compile step + run step. `{file}` `{exe}` `{work}` are placeholders.
 struct Lang {
     name: &'static str,
@@ -150,74 +170,252 @@ struct Lang {
 
 const LANGS: &[Lang] = &[
     // interpreters
-    Lang { name: "python3", ext: "py", compile: None, run: &["python3", "{file}"] },
-    Lang { name: "node", ext: "js", compile: None, run: &["node", "{file}"] },
-    Lang { name: "bun", ext: "ts", compile: None, run: &["bun", "run", "{file}"] },
-    Lang { name: "deno", ext: "ts", compile: None, run: &["deno", "run", "{file}"] },
-    Lang { name: "typescript", ext: "ts", compile: None, run: &["deno", "run", "{file}"] },
-    Lang { name: "ruby", ext: "rb", compile: None, run: &["ruby", "{file}"] },
-    Lang { name: "php", ext: "php", compile: None, run: &["php", "{file}"] },
-    Lang { name: "perl", ext: "pl", compile: None, run: &["perl", "{file}"] },
-    Lang { name: "lua", ext: "lua", compile: None, run: &["lua", "{file}"] },
-    Lang { name: "tcl", ext: "tcl", compile: None, run: &["tclsh", "{file}"] },
-    Lang { name: "r", ext: "R", compile: None, run: &["Rscript", "{file}"] },
-    Lang { name: "elixir", ext: "exs", compile: None, run: &["elixir", "{file}"] },
-    Lang { name: "erlang", ext: "erl", compile: None, run: &["escript", "{file}"] },
-    Lang { name: "bash", ext: "sh", compile: None, run: &["bash", "{file}"] },
-    Lang { name: "zsh", ext: "zsh", compile: None, run: &["zsh", "{file}"] },
-    Lang { name: "mojo", ext: "mojo", compile: None, run: &["mojo", "run", "{file}"] },
-    Lang { name: "swift", ext: "swift", compile: None, run: &["swift", "{file}"] },
+    Lang {
+        name: "python3",
+        ext: "py",
+        compile: None,
+        run: &["python3", "{file}"],
+    },
+    Lang {
+        name: "node",
+        ext: "js",
+        compile: None,
+        run: &["node", "{file}"],
+    },
+    Lang {
+        name: "bun",
+        ext: "ts",
+        compile: None,
+        run: &["bun", "run", "{file}"],
+    },
+    Lang {
+        name: "deno",
+        ext: "ts",
+        compile: None,
+        run: &["deno", "run", "{file}"],
+    },
+    Lang {
+        name: "typescript",
+        ext: "ts",
+        compile: None,
+        run: &["deno", "run", "{file}"],
+    },
+    Lang {
+        name: "ruby",
+        ext: "rb",
+        compile: None,
+        run: &["ruby", "{file}"],
+    },
+    Lang {
+        name: "php",
+        ext: "php",
+        compile: None,
+        run: &["php", "{file}"],
+    },
+    Lang {
+        name: "perl",
+        ext: "pl",
+        compile: None,
+        run: &["perl", "{file}"],
+    },
+    Lang {
+        name: "lua",
+        ext: "lua",
+        compile: None,
+        run: &["lua", "{file}"],
+    },
+    Lang {
+        name: "tcl",
+        ext: "tcl",
+        compile: None,
+        run: &["tclsh", "{file}"],
+    },
+    Lang {
+        name: "r",
+        ext: "R",
+        compile: None,
+        run: &["Rscript", "{file}"],
+    },
+    Lang {
+        name: "elixir",
+        ext: "exs",
+        compile: None,
+        run: &["elixir", "{file}"],
+    },
+    Lang {
+        name: "erlang",
+        ext: "erl",
+        compile: None,
+        run: &["escript", "{file}"],
+    },
+    Lang {
+        name: "bash",
+        ext: "sh",
+        compile: None,
+        run: &["bash", "{file}"],
+    },
+    Lang {
+        name: "zsh",
+        ext: "zsh",
+        compile: None,
+        run: &["zsh", "{file}"],
+    },
+    Lang {
+        name: "mojo",
+        ext: "mojo",
+        compile: None,
+        run: &["mojo", "run", "{file}"],
+    },
+    Lang {
+        name: "swift",
+        ext: "swift",
+        compile: None,
+        run: &["swift", "{file}"],
+    },
     // compilers
-    Lang { name: "c", ext: "c", compile: Some(&["gcc", "-O2", "-o", "{exe}", "{file}"]), run: &["{exe}"] },
-    Lang { name: "cpp", ext: "cpp", compile: Some(&["g++", "-O2", "-o", "{exe}", "{file}"]), run: &["{exe}"] },
-    Lang { name: "c++", ext: "cpp", compile: Some(&["g++", "-O2", "-o", "{exe}", "{file}"]), run: &["{exe}"] },
-    Lang { name: "rust", ext: "rs", compile: Some(&["rustc", "-O", "-o", "{exe}", "{file}"]), run: &["{exe}"] },
-    Lang { name: "go", ext: "go", compile: None, run: &["go", "run", "{file}"] },
-    Lang { name: "fortran", ext: "f90", compile: Some(&["gfortran", "-O2", "-o", "{exe}", "{file}"]), run: &["{exe}"] },
-    Lang { name: "zig", ext: "zig", compile: None, run: &["zig", "run", "{file}"] },
-    Lang { name: "java", ext: "java", compile: None, run: &["java", "{file}"] },
-    Lang { name: "kotlin", ext: "kt", compile: Some(&["kotlinc", "{file}", "-include-runtime", "-d", "{work}/out.jar"]), run: &["java", "-jar", "{work}/out.jar"] },
+    Lang {
+        name: "c",
+        ext: "c",
+        compile: Some(&["gcc", "-O2", "-o", "{exe}", "{file}"]),
+        run: &["{exe}"],
+    },
+    Lang {
+        name: "cpp",
+        ext: "cpp",
+        compile: Some(&["g++", "-O2", "-o", "{exe}", "{file}"]),
+        run: &["{exe}"],
+    },
+    Lang {
+        name: "c++",
+        ext: "cpp",
+        compile: Some(&["g++", "-O2", "-o", "{exe}", "{file}"]),
+        run: &["{exe}"],
+    },
+    Lang {
+        name: "rust",
+        ext: "rs",
+        compile: Some(&["rustc", "-O", "-o", "{exe}", "{file}"]),
+        run: &["{exe}"],
+    },
+    Lang {
+        name: "go",
+        ext: "go",
+        compile: None,
+        run: &["go", "run", "{file}"],
+    },
+    Lang {
+        name: "fortran",
+        ext: "f90",
+        compile: Some(&["gfortran", "-O2", "-o", "{exe}", "{file}"]),
+        run: &["{exe}"],
+    },
+    Lang {
+        name: "zig",
+        ext: "zig",
+        compile: None,
+        run: &["zig", "run", "{file}"],
+    },
+    Lang {
+        name: "java",
+        ext: "java",
+        compile: None,
+        run: &["java", "{file}"],
+    },
+    Lang {
+        name: "kotlin",
+        ext: "kt",
+        compile: Some(&[
+            "kotlinc",
+            "{file}",
+            "-include-runtime",
+            "-d",
+            "{work}/out.jar",
+        ]),
+        run: &["java", "-jar", "{work}/out.jar"],
+    },
     // project wrappers
     Lang {
         name: "csharp",
         ext: "cs",
         compile: None,
-        run: &["bash", "-c", "dotnet new console -o \"$2/proj\" -n prog --force && cp \"$1\" \"$2/proj/Program.cs\" && dotnet run --project \"$2/proj\" --no-launch-profile", "codecalc", "{file}", "{work}"],
+        run: &[
+            "bash",
+            "-c",
+            "dotnet new console -o \"$2/proj\" -n prog --force && cp \"$1\" \"$2/proj/Program.cs\" && dotnet run --project \"$2/proj\" --no-launch-profile",
+            "codecalc",
+            "{file}",
+            "{work}",
+        ],
     },
     Lang {
         name: "gleam",
         ext: "gleam",
         compile: None,
-        run: &["bash", "-c", "gleam new \"$2/proj\" --name prog --skip-git && cp \"$1\" \"$2/proj/src/prog.gleam\" && cd \"$2/proj\" && gleam run", "codecalc", "{file}", "{work}"],
+        run: &[
+            "bash",
+            "-c",
+            "gleam new \"$2/proj\" --name prog --skip-git && cp \"$1\" \"$2/proj/src/prog.gleam\" && cd \"$2/proj\" && gleam run",
+            "codecalc",
+            "{file}",
+            "{work}",
+        ],
     },
     Lang {
         name: "haskell",
         ext: "hs",
         compile: None,
-        run: &["bash", "-c", "f=$(printf %q \"$1\"); e=$(printf %q \"$3\"); nix-shell -p ghc --run \"ghc -O2 -o $e $f && $e\"", "codecalc", "{file}", "{work}", "{exe}"],
+        run: &[
+            "bash",
+            "-c",
+            "f=$(printf %q \"$1\"); e=$(printf %q \"$3\"); nix-shell -p ghc --run \"ghc -O2 -o $e $f && $e\"",
+            "codecalc",
+            "{file}",
+            "{work}",
+            "{exe}",
+        ],
     },
     // data / query DSLs
     // `.read` as a SQL argument rather than a shell redirect: this is the only
     // wrapper language that did not actually need a shell, and dropping bash
     // makes sqlite work on Windows too.
-    Lang { name: "sqlite", ext: "sql", compile: None, run: &["sqlite3", ":memory:", ".read {file}"] },
-    Lang { name: "jq", ext: "jq", compile: None, run: &["jq", "-n", "-f", "{file}"] },
-    Lang { name: "awk", ext: "awk", compile: None, run: &["awk", "-f", "{file}"] },
+    Lang {
+        name: "sqlite",
+        ext: "sql",
+        compile: None,
+        run: &["sqlite3", ":memory:", ".read {file}"],
+    },
+    Lang {
+        name: "jq",
+        ext: "jq",
+        compile: None,
+        run: &["jq", "-n", "-f", "{file}"],
+    },
+    Lang {
+        name: "awk",
+        ext: "awk",
+        compile: None,
+        run: &["awk", "-f", "{file}"],
+    },
 ];
 
 fn canonical(name: &str) -> Option<&'static Lang> {
     let n = name.trim().to_lowercase();
-    LANGS.iter().find(|l| l.name == n).or_else(|| match n.as_str() {
-        "python" | "py" | "python3.14" | "python3.12" => LANGS.iter().find(|l| l.name == "python3"),
-        "js" | "javascript" | "nodejs" => LANGS.iter().find(|l| l.name == "node"),
-        "ts" => LANGS.iter().find(|l| l.name == "typescript"),
-        "cxx" => LANGS.iter().find(|l| l.name == "c++"),
-        "rscript" => LANGS.iter().find(|l| l.name == "r"),
-        "sh" | "shell" => LANGS.iter().find(|l| l.name == "bash"),
-        "cs" | "c#" | "dotnet" => LANGS.iter().find(|l| l.name == "csharp"),
-        "ghc" | "hs" => LANGS.iter().find(|l| l.name == "haskell"),
-        _ => None,
-    })
+    LANGS
+        .iter()
+        .find(|l| l.name == n)
+        .or_else(|| match n.as_str() {
+            "python" | "py" | "python3.14" | "python3.12" => {
+                LANGS.iter().find(|l| l.name == "python3")
+            }
+            "js" | "javascript" | "nodejs" => LANGS.iter().find(|l| l.name == "node"),
+            "ts" => LANGS.iter().find(|l| l.name == "typescript"),
+            "cxx" => LANGS.iter().find(|l| l.name == "c++"),
+            "rscript" => LANGS.iter().find(|l| l.name == "r"),
+            "sh" | "shell" => LANGS.iter().find(|l| l.name == "bash"),
+            "cs" | "c#" | "dotnet" => LANGS.iter().find(|l| l.name == "csharp"),
+            "ghc" | "hs" => LANGS.iter().find(|l| l.name == "haskell"),
+            _ => None,
+        })
 }
 
 /// Does `cmd` resolve on PATH? Used by --probe to report which runtimes an
@@ -278,7 +476,11 @@ fn is_executable(p: &Path) -> bool {
 
 /// First non-placeholder command in a run/compile template (the runtime binary).
 fn first_cmd(template: &[&'static str]) -> &'static str {
-    template.iter().find(|a| !a.starts_with('{')).copied().unwrap_or("")
+    template
+        .iter()
+        .find(|a| !a.starts_with('{'))
+        .copied()
+        .unwrap_or("")
 }
 
 /// Probe every language's runtime against PATH; JSON: {"language": bool, ...}
@@ -358,13 +560,13 @@ fn substitute(template: &str, file: &str, exe: &str, work: &str) -> String {
 /// Per-call resource limits (defaults applied by the caller).
 #[derive(Clone, Copy)]
 struct Limits {
-    timeout: u64,      // wall-clock seconds
-    max_cpu: u64,      // RLIMIT_CPU seconds (0 = timeout + grace)
-    max_memory_mb: u64,// RLIMIT_AS, 0 = 2 TiB default
-    max_output_kb: u64,// stdout/stderr cap + FSIZE, 0 = 64 KiB
-    no_net: bool,      // LD_PRELOAD a socket-blocking shim
-    // Precomputed in main() BEFORE any fork. apply_limits runs inside pre_exec,
-    // which must be async-signal-safe — it cannot walk /proc or allocate there.
+    timeout: u64,       // wall-clock seconds
+    max_cpu: u64,       // RLIMIT_CPU seconds (0 = timeout + grace)
+    max_memory_mb: u64, // RLIMIT_AS, 0 = 2 TiB default
+    max_output_kb: u64, // stdout/stderr cap + FSIZE, 0 = 64 KiB
+    no_net: bool,       // LD_PRELOAD a socket-blocking shim
+                        // Precomputed in main() BEFORE any fork. apply_limits runs inside pre_exec,
+                        // which must be async-signal-safe — it cannot walk /proc or allocate there.
 }
 
 impl Default for Limits {
@@ -405,7 +607,13 @@ struct StepResult {
 /// before we read. Limits, the timeout kill and resource accounting are all
 /// delegated to platform::spawn_and_wait; see platform/mod.rs for what each OS
 /// can actually enforce.
-fn run_step(argv: &[String], work: &Path, tag: &str, stdin_data: &[u8], limits: &Limits) -> StepResult {
+fn run_step(
+    argv: &[String],
+    work: &Path,
+    tag: &str,
+    stdin_data: &[u8],
+    limits: &Limits,
+) -> StepResult {
     let out_path = work.join(format!("{tag}.out"));
     let err_path = work.join(format!("{tag}.err"));
     let in_path = work.join(format!("{tag}.in"));
@@ -422,13 +630,19 @@ fn run_step(argv: &[String], work: &Path, tag: &str, stdin_data: &[u8], limits: 
         (Ok(o), Ok(e), Ok(i)) => (o, e, i),
         _ => {
             return StepResult {
-                exit_code: -2, signal: None, stdout: String::new(),
+                exit_code: -2,
+                signal: None,
+                stdout: String::new(),
                 stderr: format!("cannot create I/O files in {}", work.display()),
-                timed_out: false, cpu_ms: 0, peak_memory_kb: 0,
+                timed_out: false,
+                cpu_ms: 0,
+                peak_memory_kb: 0,
                 // None, not an error: nothing was ever written, so there is no
                 // output we failed to READ. The cause is already in stderr and
                 // exit_code -2 makes this ok=false regardless.
-                output_truncated: false, output_error: None, unenforced: Vec::new(),
+                output_truncated: false,
+                output_error: None,
+                unenforced: Vec::new(),
             };
         }
     };
@@ -464,11 +678,17 @@ fn run_step(argv: &[String], work: &Path, tag: &str, stdin_data: &[u8], limits: 
         Ok(w) => w,
         Err(e) => {
             return StepResult {
-                exit_code: -2, signal: None, stdout: String::new(),
-                stderr: format!("spawn failed: {e}"), timed_out: false,
-                cpu_ms: 0, peak_memory_kb: 0, output_truncated: false,
+                exit_code: -2,
+                signal: None,
+                stdout: String::new(),
+                stderr: format!("spawn failed: {e}"),
+                timed_out: false,
+                cpu_ms: 0,
+                peak_memory_kb: 0,
+                output_truncated: false,
                 // As above: the spawn failure is the story, not a read failure.
-                output_error: None, unenforced: Vec::new(),
+                output_error: None,
+                unenforced: Vec::new(),
             };
         }
     };
@@ -514,8 +734,16 @@ fn run_step(argv: &[String], work: &Path, tag: &str, stdin_data: &[u8], limits: 
 fn resolve_limits(limits: &Limits) -> ResolvedLimits {
     ResolvedLimits {
         timeout_secs: limits.timeout,
-        cpu_secs: if limits.max_cpu > 0 { limits.max_cpu } else { limits.timeout + CPU_GRACE_SECONDS },
-        memory_bytes: if limits.max_memory_mb > 0 { limits.max_memory_mb * 1024 * 1024 } else { AS_LIMIT_BYTES },
+        cpu_secs: if limits.max_cpu > 0 {
+            limits.max_cpu
+        } else {
+            limits.timeout + CPU_GRACE_SECONDS
+        },
+        memory_bytes: if limits.max_memory_mb > 0 {
+            limits.max_memory_mb * 1024 * 1024
+        } else {
+            AS_LIMIT_BYTES
+        },
         // FSIZE must stay STRICTLY ABOVE the output cap. Setting it equal to
         // the cap made overflow undetectable: the child hit EFBIG/SIGXFSZ at
         // exactly the cap, so `read_capped` never saw a file larger than the
@@ -566,7 +794,11 @@ fn resolve_limits(limits: &Limits) -> ResolvedLimits {
 /// (rust-lang/rust#127883 measured ~15% of MSVC builds), and no one can tell
 /// which is happening here without the number.
 fn read_capped(path: &Path, max_output_kb: u64) -> (String, bool, Option<String>) {
-    let cap = if max_output_kb > 0 { max_output_kb * 1024 } else { MAX_OUTPUT_BYTES };
+    let cap = if max_output_kb > 0 {
+        max_output_kb * 1024
+    } else {
+        MAX_OUTPUT_BYTES
+    };
     let mut buf = Vec::new();
     let mut error = None;
     match fs::File::open(path) {
@@ -647,7 +879,13 @@ fn remaining_run_timeout_secs(budget_secs: u64, elapsed_ms: u64) -> Option<u64> 
     Some((budget_ms - elapsed_ms).div_ceil(1000))
 }
 
-fn execute(lang_name: &str, code: &str, stdin_data: &str, limits: &Limits, workdir: Option<&str>) -> serde_json::Value {
+fn execute(
+    lang_name: &str,
+    code: &str,
+    stdin_data: &str,
+    limits: &Limits,
+    workdir: Option<&str>,
+) -> serde_json::Value {
     let lang = match canonical(lang_name) {
         Some(l) => l,
         None => {
@@ -683,7 +921,8 @@ fn execute(lang_name: &str, code: &str, stdin_data: &str, limits: &Limits, workd
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| u64::from(d.subsec_nanos()))
                         .unwrap_or(0);
-                let candidate = env::temp_dir().join(format!("codecalc-{}-{nonce:x}", std::process::id()));
+                let candidate =
+                    env::temp_dir().join(format!("codecalc-{}-{nonce:x}", std::process::id()));
                 match fs::create_dir(&candidate) {
                     Ok(()) => {
                         chosen = Some(candidate);
@@ -716,7 +955,11 @@ fn execute(lang_name: &str, code: &str, stdin_data: &str, limits: &Limits, workd
     // Recorded BEFORE anything runs in the directory, so cleanup compares
     // against the directory as CREATED rather than as the program left it.
     // None for a caller-supplied --workdir, which is never deleted anyway.
-    let created_identity = if workdir.is_none() { dir_identity(&work) } else { None };
+    let created_identity = if workdir.is_none() {
+        dir_identity(&work)
+    } else {
+        None
+    };
 
     let file = work.join(format!("main.{ext}", ext = lang.ext));
     // Windows needs the .exe extension for the compiled artifact; CreateProcess
@@ -909,12 +1152,42 @@ fn main() {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--lang" => { i += 1; if i < args.len() { lang = args[i].clone(); } }
-            "--timeout" => { i += 1; if i < args.len() { limits.timeout = args[i].parse().unwrap_or(10); } }
-            "--max-cpu" => { i += 1; if i < args.len() { limits.max_cpu = args[i].parse().unwrap_or(0); } }
-            "--max-memory-mb" => { i += 1; if i < args.len() { limits.max_memory_mb = args[i].parse().unwrap_or(0); } }
-            "--max-output-kb" => { i += 1; if i < args.len() { limits.max_output_kb = args[i].parse().unwrap_or(0); } }
-            "--stdin" => { i += 1; if i < args.len() { stdin_data = args[i].clone(); } }
+            "--lang" => {
+                i += 1;
+                if i < args.len() {
+                    lang = args[i].clone();
+                }
+            }
+            "--timeout" => {
+                i += 1;
+                if i < args.len() {
+                    limits.timeout = args[i].parse().unwrap_or(10);
+                }
+            }
+            "--max-cpu" => {
+                i += 1;
+                if i < args.len() {
+                    limits.max_cpu = args[i].parse().unwrap_or(0);
+                }
+            }
+            "--max-memory-mb" => {
+                i += 1;
+                if i < args.len() {
+                    limits.max_memory_mb = args[i].parse().unwrap_or(0);
+                }
+            }
+            "--max-output-kb" => {
+                i += 1;
+                if i < args.len() {
+                    limits.max_output_kb = args[i].parse().unwrap_or(0);
+                }
+            }
+            "--stdin" => {
+                i += 1;
+                if i < args.len() {
+                    stdin_data = args[i].clone();
+                }
+            }
             "--stdin-file" => {
                 // stdin too large for argv (E2BIG) — read from a file instead
                 i += 1;
@@ -928,7 +1201,9 @@ fn main() {
                     workdir = Some(args[i].clone());
                 }
             }
-            "--no-net" => { limits.no_net = true; }
+            "--no-net" => {
+                limits.no_net = true;
+            }
             _ => {}
         }
         i += 1;

@@ -25,7 +25,11 @@ fn main() {
     if target_os == "windows" {
         return;
     }
-    let lib = if target_os == "macos" { "blocknet.dylib" } else { "blocknet.so" };
+    let lib = if target_os == "macos" {
+        "blocknet.dylib"
+    } else {
+        "blocknet.so"
+    };
 
     // OUT_DIR is the only location cargo actually promises a build script may
     // write to, so the shim is BUILT there.
@@ -36,7 +40,9 @@ fn main() {
     // with warnings is a shim nobody has looked at.
     let cc = env::var("CC").unwrap_or_else(|_| "cc".to_string());
     let status = Command::new(&cc)
-        .args(["-shared", "-fPIC", "-O2", "-Wall", "-Wextra", "-Werror", "-o"])
+        .args([
+            "-shared", "-fPIC", "-O2", "-Wall", "-Wextra", "-Werror", "-o",
+        ])
         .arg(&built)
         .arg("blocknet.c")
         .status();
@@ -48,11 +54,15 @@ fn main() {
         // whereas a hard failure would make a missing C compiler block every
         // other language. Warn loudly instead.
         Ok(s) => {
-            println!("cargo:warning=blocknet shim failed to build ({s}); --no-net will report itself unenforced");
+            println!(
+                "cargo:warning=blocknet shim failed to build ({s}); --no-net will report itself unenforced"
+            );
             return;
         }
         Err(e) => {
-            println!("cargo:warning=could not run {cc} to build the blocknet shim ({e}); --no-net will report itself unenforced");
+            println!(
+                "cargo:warning=could not run {cc} to build the blocknet shim ({e}); --no-net will report itself unenforced"
+            );
             return;
         }
     }
@@ -78,11 +88,14 @@ fn main() {
     // flow either way — the copy is best-effort and a failure is a warning,
     // because the shim missing beside the binary is a degraded --no-net rather
     // than a broken build.
-    if let Some(exe_dir) = out_dir
-        .ancestors()
-        .find(|a| a.file_name().map(|n| n == profile.as_str()).unwrap_or(false))
-        && let Err(e) = fs::copy(&built, exe_dir.join(lib))
+    if let Some(exe_dir) = out_dir.ancestors().find(|a| {
+        a.file_name()
+            .map(|n| n == profile.as_str())
+            .unwrap_or(false)
+    }) && let Err(e) = fs::copy(&built, exe_dir.join(lib))
     {
-        println!("cargo:warning=built the blocknet shim but could not place it beside the executable ({e})");
+        println!(
+            "cargo:warning=built the blocknet shim but could not place it beside the executable ({e})"
+        );
     }
 }

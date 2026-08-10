@@ -5,8 +5,8 @@ use std::os::unix::process::CommandExt;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
-use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicI32, Ordering};
 
 use super::{ResolvedLimits, Wait};
 
@@ -183,7 +183,16 @@ pub fn resolve(limits: &ResolvedLimits) -> (Rlimits, Vec<&'static str>) {
         Some(v)
     };
 
-    (Rlimits { cpu, address_space, fsize, nofile, nproc }, unenforced)
+    (
+        Rlimits {
+            cpu,
+            address_space,
+            fsize,
+            nofile,
+            nproc,
+        },
+        unenforced,
+    )
 }
 
 /// Runs in the child between fork and exec. Must be async-signal-safe: no
@@ -191,7 +200,10 @@ pub fn resolve(limits: &ResolvedLimits) -> (Rlimits, Vec<&'static str>) {
 fn apply(r: &Rlimits) {
     unsafe {
         let set = |res: RlimitResource, v: u64| {
-            let rl = libc::rlimit { rlim_cur: v, rlim_max: v };
+            let rl = libc::rlimit {
+                rlim_cur: v,
+                rlim_max: v,
+            };
             libc::setrlimit(res, &rl);
         };
         set(libc::RLIMIT_CPU, r.cpu);
