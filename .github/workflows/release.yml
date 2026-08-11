@@ -83,6 +83,20 @@ on:
           https://docs.pypi.org/trusted-publishers/using-a-publisher/) — this
           repo has not registered one yet. Leave false to validate the
           build/verify/checksum pipeline without touching PyPI at all.
+          IRREVERSIBLE: a version uploaded to PyPI is burned even if the file
+          is later deleted. Rehearse with publish_to_testpypi first.
+        type: boolean
+        default: false
+      publish_to_testpypi:
+        description: >-
+          Upload the same built-and-verified wheels to TestPyPI instead, as a
+          REHEARSAL. This is the only switch here that can be run twice.
+          Without it, the first upload ever attempted against a real index is
+          the one that claims the name — every step before the upload has been
+          exercised many times and the one step that cannot be undone has been
+          exercised zero times. Needs a trusted publisher registered on
+          TestPyPI, so that the rehearsal exercises OIDC rather than a token
+          path the real release will not use.
         type: boolean
         default: false
 
@@ -578,6 +592,70 @@ jobs:
           path: dl
           merge-multiple: true
 
+      # ── SBOM, before the checksums so it is covered BY them ──────────────
+      #
+      # Scoped to the SOURCE TREE, not to the wheel, and that is a measured
+      # decision rather than a convenience. Scanning the built wheel with syft
+      # returns ZERO components: the wheel carries codecalc's own code and the
+      # executor binary and vendors none of its dependencies, so a wheel-scoped
+      # SBOM is an empty document with a bill-of-materials filename. That is the
+      # exact failure this repo keeps naming — an artifact that measures
+      # something other than what it claims.
+      #
+      # What an integrator actually wants to know is the dependency closure they
+      # get on install, and that lives in the lockfiles. Measured locally at the
+      # time of writing: 36 PyPI packages (the same 36 osv-scanner reports), 14
+      # cargo crates, and 26 GitHub Actions pinned by SHA.
+      # Pinned binary + checksum, matching how this repo installs actionlint and
+      # opengrep. NOT `curl https://.../install.sh | sh`, which is what syft's
+      # own README suggests: that fetches an unpinned script from a branch and
+      # pipes it to a shell, inside the job that produces the release artifacts.
+      # A supply-chain document is not worth much if the tool that generates it
+      # arrives that way.
+      - name: install syft v1.50.0 (pinned binary + checksum)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/syft-bin"
+          curl -sSL --fail -o "$RUNNER_TEMP/syft.tar.gz" \
+            https://github.com/anchore/syft/releases/download/v1.50.0/syft_1.50.0_linux_amd64.tar.gz
+          echo "bf7b29ff57f06da30918266a0e1c2885a8f99784798d1bdb1628886aa015d788  $RUNNER_TEMP/syft.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/syft.tar.gz" -C "$RUNNER_TEMP/syft-bin" syft
+          "$RUNNER_TEMP/syft-bin/syft" --version
+
+      - name: CycloneDX SBOM, and proof it is not empty
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          "$RUNNER_TEMP/syft-bin/syft" scan dir:. \
+            --exclude './.venv' --exclude './executor/target' --exclude './dl' \
+            -o cyclonedx-json=dist/codecalc-sbom.cyclonedx.json -q
+
+          # A FLOOR, for the same reason every scan in this repo has one: syft
+          # pointed at a tree it cannot parse exits 0 and writes a valid,
+          # empty CycloneDX document. "It produced an SBOM" is not the claim;
+          # "the SBOM lists the dependencies this thing actually has" is.
+          python3 - <<'PY'
+          import json, sys
+          sbom = json.load(open("dist/codecalc-sbom.cyclonedx.json"))
+          names = {c.get("name") for c in sbom.get("components", [])}
+          print(f"SBOM format: {sbom.get('bomFormat')} {sbom.get('specVersion')}")
+          print(f"components: {len(names)}")
+          # One from each ecosystem the lockfiles cover. If the Python side
+          # parses and the Rust side does not, a count-only floor would pass.
+          required = {"mcp", "sympy", "serde", "libc"}
+          missing = sorted(required - names)
+          if missing:
+              sys.exit(f"SBOM is missing {missing} — it did not read every "
+                       f"ecosystem, and an SBOM that silently covers one of two "
+                       f"is worse than none")
+          if len(names) < 40:
+              sys.exit(f"only {len(names)} components — the scan did not reach "
+                       f"the lockfiles")
+          print("ok   SBOM covers Python and Rust dependencies")
+          PY
+
       - name: SHA256SUMS, verified in this job
         shell: bash
         run: |
@@ -653,6 +731,48 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
           packages-dir: dist
+
+  publish-testpypi:
+    name: rehearse the upload on TestPyPI
+    needs: [build, verify]
+    # The one publish switch that can be run twice. Same artifacts, same action,
+    # same OIDC mechanism, different index — a rehearsal of a DIFFERENT
+    # mechanism would not be a rehearsal, which is why this uses trusted
+    # publishing rather than the token path TestPyPI also accepts.
+    #
+    # Deliberately NOT reachable from a tag push, exactly like the two real
+    # publish jobs: `inputs.*` does not exist on a `push` trigger, and gating on
+    # the event as well means a tag can never silently upload anywhere.
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_to_testpypi
+    runs-on: ubuntu-latest
+    environment: testpypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-*
+          path: dl
+          merge-multiple: true
+      - name: stage wheels only (an index does not accept the standalone archives)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp dl/*.whl dist/
+          ls -la dist/
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        with:
+          packages-dir: dist
+          repository-url: https://test.pypi.org/legacy/
+      - name: what to look at now
+        shell: bash
+        run: |
+          echo "Rehearsal uploaded. Check https://test.pypi.org/project/codecalc/ for:"
+          echo "  - the long description RENDERS (METADATA was 700 bytes once — see #111)"
+          echo "  - project URLs and classifiers are present"
+          echo "  - the licence shows as Apache-2.0"
+          echo "  - every platform wheel is listed, not just the first"
 
   publish-crates:
     name: publish to crates.io (trusted publishing)

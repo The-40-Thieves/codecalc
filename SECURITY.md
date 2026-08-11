@@ -81,6 +81,37 @@ codecalc is built for a **single operator running it locally over stdio**. It ha
 
 No release has been tagged. The supported version is `main`. Fixes land there and nowhere else.
 
+## Verifying a release artifact
+
+Every release carries three things beyond the wheels and archives themselves.
+
+**`SHA256SUMS`** — basenames, not paths, so `sha256sum -c` works wherever you put
+the files. The release job generates it and then verifies it in the same job,
+because "it wrote a file that looks like checksums" is not the claim.
+
+```bash
+sha256sum -c SHA256SUMS
+```
+
+**`codecalc-sbom.cyclonedx.json`** — a CycloneDX SBOM of the **dependency
+closure**, covering PyPI packages, Cargo crates and the GitHub Actions pinned in
+the workflows. It is scoped to the source tree rather than to the wheel on
+purpose: the wheel vendors no dependencies, so a wheel-scoped scan returns an
+empty document, and an empty file with a bill-of-materials name is worse than no
+file. The generating step asserts a component from each ecosystem is present and
+fails if the scan reached only one of them. It is listed in `SHA256SUMS` like
+everything else.
+
+**PEP 740 attestations** on the PyPI wheels — generated automatically by
+`pypa/gh-action-pypi-publish` (pinned at v1.14.2, above the 1.11.0 floor) as part
+of Trusted Publishing. These are Sigstore-backed build provenance tied to the
+workflow identity, with no long-lived key that could be lost or stolen. `pip`
+verifies them where supported; PyPI shows them on the file listing.
+
+There is no PGP key, and that is deliberate rather than an omission: a signing
+key held by one maintainer is a worse story than provenance bound to the
+workflow that actually built the artifact.
+
 ## What is gated
 
 These invariants are enforced in CI on every pull request, so a regression fails rather than ships:
@@ -89,5 +120,7 @@ These invariants are enforced in CI on every pull request, so a regression fails
 - `check_parity.py` — the env allowlist, runtime path, and language registry cannot drift between the Rust and Python backends
 - `check_claims.py` — the counts and licence declarations in README, AUDIT.md, and the repository description match the code
 - `check_portability.py` — no machine-specific paths or private addresses, including in tests
+- `check_contract.py` — the published result schema matches the code that produces it, both backends' verdict vocabularies agree with it, and every Rust envelope return carries every envelope field
+- `check_version.py` — one version across `pyproject.toml`, `executor/Cargo.toml`, `CHANGELOG.md`, and the git tag when running on one
 - `tests/test_security.py`, `tests/test_session_jail.py` — the audit's findings as permanent regression tests
 - `tests/test_platform_contract.py` — every ceiling NOT named in `unenforced` is made to bite, on **both** backends. The Rust one runs in the sandbox job, which asserts `backend == "rust"`; the pure-Python fallback runs in the test matrix, which asserts `backend == "python"`. Neither can be tested by accident ([#66](https://github.com/The-40-Thieves/codecalc/issues/66))

@@ -97,6 +97,28 @@ verifies on any `v*` tag; publishing is opt-in per registry:
 gh workflow run release.yml -f publish_to_pypi=true -f publish_to_crates=true
 ```
 
+**Rehearse the upload first.** Every step before the upload has been exercised
+many times; the upload itself has been exercised zero times, and it is the only
+step that cannot be undone — a version number uploaded to PyPI is burned even if
+the file is deleted afterwards.
+
+```
+gh workflow run release.yml -f publish_to_testpypi=true
+```
+
+Same artifacts, same action, same OIDC mechanism, different index. Register the
+trusted publisher on TestPyPI too, so the rehearsal exercises the mechanism the
+real release uses rather than the token path TestPyPI also accepts — a rehearsal
+of a different mechanism is not a rehearsal. Then read
+<https://test.pypi.org/project/codecalc/> and check the long description renders,
+the URLs and classifiers are there, and every platform wheel is listed. The wheel
+once shipped 700 bytes of METADATA with no description, no links and no
+classifiers (#111); a project page is where that is visible before it matters.
+
+crates.io has no equivalent rehearsal. RFC 3691 requires one manual publish
+before trusted publishing can be configured at all, so that path is manual by
+construction — see below.
+
 Both publish jobs authenticate with **OIDC trusted publishing**. There is no
 API token in this repository's secrets for either one, and nothing to rotate:
 each job exchanges the workflow's identity for a token that lives minutes, and
