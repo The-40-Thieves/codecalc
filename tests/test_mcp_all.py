@@ -187,11 +187,37 @@ async def main():
         check("compare_execution's winner is one of the languages run",
               r.get("fastest") in snippets, f"-> {r.get('fastest')!r}")
         results = r.get("results") or []
-        check("every language produced 42",
-              all((res.get("stdout") or "").strip() == "42" for res in results),
-              f"-> {[(res.get('language'), (res.get('stdout') or '').strip()) for res in results]}")
-        check("every run succeeded", all(res.get("ok") for res in results),
-              f"-> {[(res.get('language'), res.get('ok')) for res in results]}")
+        # THE-802: `node` intermittently comes back with empty stdout and
+        # ok=false on windows-latest. Three occurrences went by reporting only
+        # (language, stdout) and (language, ok), which cannot separate "node
+        # never started" from "node started and printed nothing" from "node was
+        # killed by the deadline". Those are different bugs with different
+        # fixes, and the executor ALREADY distinguishes them — `spawn failed:
+        # {e}`, `cannot create I/O files in {dir}`, and a synthesised message
+        # when a timeout leaves stderr empty, plus exit_code and timed_out on
+        # every row. compare_execution returns all of it. The detail string
+        # threw it away, so each occurrence cost a rerun and told us nothing.
+        #
+        # The PASS detail is deliberately left exactly as it was: this file's
+        # stdout is parsed by ci-python.yml's round-trip step, and a green run
+        # should not change shape. Only a FAILING run pays for the detail.
+        def _diag(rows: list) -> list:
+            return [{"language": x.get("language"),
+                     "ok": x.get("ok"),
+                     "stdout": (x.get("stdout") or "").strip()[:80],
+                     "stderr": (x.get("stderr") or "").strip()[:300],
+                     "exit_code": x.get("exit_code"),
+                     "timed_out": x.get("timed_out"),
+                     "duration_ms": x.get("duration_ms")} for x in rows]
+
+        produced_42 = all((res.get("stdout") or "").strip() == "42" for res in results)
+        check("every language produced 42", produced_42,
+              f"-> {[(res.get('language'), (res.get('stdout') or '').strip()) for res in results]}"
+              if produced_42 else f"-> {_diag(results)}")
+        all_ok = all(res.get("ok") for res in results)
+        check("every run succeeded", all_ok,
+              f"-> {[(res.get('language'), res.get('ok')) for res in results]}"
+              if all_ok else f"-> {_diag(results)}")
 
 
 asyncio.run(main())
