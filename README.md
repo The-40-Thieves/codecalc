@@ -313,6 +313,41 @@ protocol-level sessions, and directs servers needing cross-call state to use
 "explicit, server-minted handles passed as ordinary tool arguments". That is
 exactly what codecalc's `session_id` already is.
 
+## The result contract
+
+Every result carries `contract_version`, currently **1.0.0**. The published
+schema is [`docs/contract/result-v1.schema.json`](docs/contract/result-v1.schema.json)
+and the policy behind it — what MAJOR/MINOR/PATCH may change, the twelve-month
+deprecation window, worked success/failure/timeout examples, and the migration
+path from unversioned servers — is in
+[`docs/contract/README.md`](docs/contract/README.md).
+
+Two things a caller should know before reading anything else:
+
+- **`ok` means "ran and exited 0".** A program that behaves exactly as intended
+  and exits 3 comes back `ok: false`, `exit_code: 3`, `verdict: "RTE"`. To tell
+  a failed *program* from a failed *request*, read `verdict` — a request that
+  never reached a runtime has no `verdict` at all, and has a `code` instead.
+- **`code` is the branch target, not `error`.** Eight stable values; the prose
+  in `error` is free to improve and is not a contract. An unrecognised `code`
+  must be treated as `internal` — that is what lets a `1.x` client survive a
+  `2.0.0` server, though adding a code is still a MAJOR change, because the
+  published enum is closed and a strict validator rejects the result first.
+- **Truncation reports a size, not just a flag.** `output_truncated` says output
+  was cut; `stdout_bytes` / `stderr_bytes` say by how much — the bytes the
+  program actually produced, before the cap. A 200 000-character `print` under
+  `max_output_kb=1` returns 1 039 bytes of `stdout` and `stdout_bytes: 200001`,
+  so a caller can size a retry instead of guessing. `null` there means not
+  measured (nothing ran); a program that printed nothing reports `0`.
+
+The schema is JSON Schema 2020-12 — the dialect MCP 2026-07-28 defaults tool
+`outputSchema` to — so a client can validate our results with it directly.
+`scripts/check_contract.py` regenerates it from `codecalc/contract.py` and fails
+on a diff, and separately re-derives both backends' verdict vocabularies from
+`main.rs` and `executor.py`: `check_parity.py` compares the two backends' *key
+sets* and is structurally blind to a new verdict *value*, which would leave the
+published enum short and make a strictly validating client reject a good result.
+
 ## Configuration
 
 All optional. codecalc runs with none of these set.
@@ -384,7 +419,7 @@ PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py         # every tool over MC
 PYTHONPATH=. .venv/bin/python tests/test_executor_sweep.py  # sandbox regressions
 ```
 
-21 test files and 8 gate scripts, **1063 assertions**. Nothing in the suite
+22 test files and 9 gate scripts, **1181 assertions**. Nothing in the suite
 needs the internet, so none of it is ever skipped for lack of a network.
 
 It **can** skip for lack of a *capability*, and that is correct rather than a

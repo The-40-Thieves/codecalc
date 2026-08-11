@@ -254,7 +254,17 @@ else:
 if floor("rust output_error emissions",
          re.findall(r'"output_error": sr\.output_error', RUST), 2) and \
    floor("python output_error emissions",
-         re.findall(r'"output_error": \w*drain_error', PY_EXECUTOR_SRC), 3):
+         # Two syntactic forms, one meaning. The compile-failure shapes moved
+         # from inline dict literals into `_fallback_compile_failure(...)` when
+         # that path was fixed to return the full envelope, so the drain error
+         # now arrives as a KEYWORD ARGUMENT at two of the three sites. This
+         # gate's own comment says the floor is "the number of emission sites,
+         # not one" — that count is unchanged at three; only the spelling moved.
+         # Matching just the dict form would have made a refactor look like a
+         # deleted disclosure, which is the opposite of what this exists to
+         # catch.
+         re.findall(r'"output_error": \w*drain_error|output_error=\w*drain_error',
+                    PY_EXECUTOR_SRC), 3):
     print("ok   unreadable output: both backends report `output_error` "
           "on every result shape")
 

@@ -103,6 +103,16 @@ jobs:
       - name: MCP protocol conformance (2026-07-28)
         shell: bash
         run: uv run --no-sync python tests/test_mcp_protocol.py
+      # The result contract, validated rather than described. scripts/check_contract.py (in
+      # ci-security) proves the published schema matches the module that generates it; this proves
+      # the schema is a loadable JSON Schema 2020-12 document and that real results — every verdict,
+      # every error code, both backends, and the serialised responses over stdio — satisfy it.
+      # Needs jsonschema, which arrives transitively with mcp, so it belongs here and not in a gate
+      # that has to run on a bare checkout. Runs on the full OS matrix because the contract's central
+      # claim is that the two backends agree, and the fallback is what Windows and unbuilt hosts get.
+      - name: result contract (schema validity + product conformance)
+        shell: bash
+        run: uv run --no-sync python tests/test_contract.py
       # tree-sitter vs the regex heuristic it replaced. Pure: parsing only, no
       # sandbox, so it runs on all three OSes — which also proves the
       # pre-compiled grammar wheels resolve on each of them.

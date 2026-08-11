@@ -600,6 +600,25 @@ struct StepResult {
     /// Guarantees this platform could not apply. Carried into the JSON so a
     /// caller can distinguish "the limit held" from "there was no limit".
     unenforced: Vec<&'static str>,
+    /// How many bytes each stream actually produced, BEFORE the response cap.
+    ///
+    /// `output_truncated` says that output was cut; these say by how much, which
+    /// is the difference between "your program printed more than 8 KiB" and
+    /// "your program printed 4 MB". A caller deciding whether to re-run with a
+    /// higher `max_output_kb` cannot make that decision from a boolean.
+    ///
+    /// Read from the file's metadata rather than from the buffer: `read_capped`
+    /// deliberately stops at `cap + 1` bytes so a program that fills stdout
+    /// cannot make this process allocate proportionally to its output. The
+    /// buffer length is therefore the CAPPED size and can never answer this
+    /// question; one `stat` can, at no allocation cost.
+    ///
+    /// `None`, not 0, when the file could not be stat'd. Zero is a real and
+    /// common measurement here — a program that printed nothing — so using it
+    /// for "unknown" would be the same defect this struct's `output_error`
+    /// field exists to prevent.
+    stdout_bytes: Option<u64>,
+    stderr_bytes: Option<u64>,
 }
 
 /// Run one argv step, redirecting stdout/stderr to FILES in `work` rather than
@@ -643,6 +662,12 @@ fn run_step(
                 output_truncated: false,
                 output_error: None,
                 unenforced: Vec::new(),
+                // None, not Some(0). No program ran, so there is no program
+                // output to have counted — and the stderr above is OUR
+                // sentence, not the child's. Reporting 0 would be a
+                // measurement of something that never happened.
+                stdout_bytes: None,
+                stderr_bytes: None,
             };
         }
     };
@@ -689,6 +714,9 @@ fn run_step(
                 // As above: the spawn failure is the story, not a read failure.
                 output_error: None,
                 unenforced: Vec::new(),
+                // As above: nothing ran, so nothing produced output.
+                stdout_bytes: None,
+                stderr_bytes: None,
             };
         }
     };
@@ -700,8 +728,8 @@ fn run_step(
         unenforced.push("no_net_requested_but_no_shim_available");
     }
 
-    let (stdout, out_trunc, out_err) = read_capped(&out_path, limits.max_output_kb);
-    let (stderr, err_trunc, err_err) = read_capped(&err_path, limits.max_output_kb);
+    let (stdout, out_trunc, out_err, out_bytes) = read_capped(&out_path, limits.max_output_kb);
+    let (stderr, err_trunc, err_err, err_bytes) = read_capped(&err_path, limits.max_output_kb);
     // Both are reported, and stdout's is named separately from stderr's: a
     // caller acting on the answer needs to know which stream it cannot trust.
     let output_error = match (out_err, err_err) {
@@ -727,6 +755,8 @@ fn run_step(
         output_truncated: out_trunc || err_trunc,
         output_error,
         unenforced,
+        stdout_bytes: out_bytes,
+        stderr_bytes: err_bytes,
     }
 }
 
@@ -793,12 +823,21 @@ fn resolve_limits(limits: &Limits) -> ResolvedLimits {
 /// and 32 (sharing violation) are documented, intermittent CI failures
 /// (rust-lang/rust#127883 measured ~15% of MSVC builds), and no one can tell
 /// which is happening here without the number.
-fn read_capped(path: &Path, max_output_kb: u64) -> (String, bool, Option<String>) {
+fn read_capped(path: &Path, max_output_kb: u64) -> (String, bool, Option<String>, Option<u64>) {
     let cap = if max_output_kb > 0 {
         max_output_kb * 1024
     } else {
         MAX_OUTPUT_BYTES
     };
+    // The true size, taken BEFORE the capped read and independently of it. This
+    // is the only place the original length is still knowable: the read below
+    // stops at cap+1 on purpose, so `buf.len()` answers a different question.
+    //
+    // What this counts is bytes the child managed to WRITE. A program stopped by
+    // the FSIZE ceiling (SIGXFSZ) wrote less than it intended, and no number
+    // available here could say how much more it wanted — that limit is enforced
+    // by the kernel against the file, not by us against the program.
+    let original = fs::metadata(path).ok().map(|m| m.len());
     let mut buf = Vec::new();
     let mut error = None;
     match fs::File::open(path) {
@@ -831,7 +870,12 @@ fn read_capped(path: &Path, max_output_kb: u64) -> (String, bool, Option<String>
         buf.truncate(cap as usize);
         buf.extend_from_slice(b"\n...[truncated]");
     }
-    (String::from_utf8_lossy(&buf).into_owned(), truncated, error)
+    (
+        String::from_utf8_lossy(&buf).into_owned(),
+        truncated,
+        error,
+        original,
+    )
 }
 
 /// Classify a run into a verdict. Heuristics:
@@ -1017,6 +1061,11 @@ fn execute(
                 // the Python fallback sent it. Two backends, two key sets,
                 // under a contract whose whole claim is that they agree.
                 "output_truncated": sr.output_truncated,
+                // The sizes behind that boolean. A compiler that emits megabytes
+                // of template errors is the case this exists for: the caller
+                // needs to know whether raising max_output_kb would help.
+                "stdout_bytes": sr.stdout_bytes,
+                "stderr_bytes": sr.stderr_bytes,
                 // total_ms/platform/workdir are on the success return and were
                 // missing here, so result["workdir"] was a KeyError for callers
                 // whose only mistake was writing code that did not compile.
@@ -1067,6 +1116,21 @@ fn execute(
                     "cpu_ms": 0, "peak_memory_kb": 0,
                     "timed_out": true, "verdict": "TLE",
                     "unenforced": Vec::<&str>::new(),
+                    // This return carries a `verdict`, so it IS a full envelope
+                    // by the contract's own discrimination rule, and it was
+                    // missing four of the envelope's fields — two of them
+                    // (output_truncated, output_error) since before the byte
+                    // counts existed. Nobody noticed because no schema had ever
+                    // been written down to check it against.
+                    //
+                    // null for both counts, not 0: the run phase never started,
+                    // so there is no run output to have measured. The compile
+                    // step's own output was already reported and discarded with
+                    // its StepResult when the budget check failed.
+                    "output_truncated": false,
+                    "output_error": serde_json::Value::Null,
+                    "stdout_bytes": serde_json::Value::Null,
+                    "stderr_bytes": serde_json::Value::Null,
                     // platform and workdir are on the normal return too. A new
                     // return that omits fields the success path carries is how
                     // this executor's shape drifted before: AUDIT.md records
@@ -1121,6 +1185,12 @@ fn execute(
         "output_error": sr.output_error,
         // See the compile return for why this was missing.
         "output_truncated": sr.output_truncated,
+        // How much each stream ACTUALLY produced, before the response cap.
+        // `output_truncated` alone told a caller that output was cut and not by
+        // how much, so "printed 9 KiB" and "printed 4 MB" were the same answer
+        // and there was no way to size a retry.
+        "stdout_bytes": sr.stdout_bytes,
+        "stderr_bytes": sr.stderr_bytes,
         "platform": std::env::consts::OS,
         "workdir": work_s,
     });
