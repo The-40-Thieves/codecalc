@@ -46,6 +46,22 @@ jobs:
           python-version: '3.12'
       - run: python scripts/check_no_eval.py
 
+  tool-dispatch:
+    # TOOL_TIMEOUTS is keyed on the INBOUND tools/call name, so the per-tool deadlines are only
+    # correct while the tool a client asks for is the tool that runs. A dispatcher would make the
+    # middleware see the outer name and drop all twelve deadlines to the 900s default, silently.
+    # Kept as its own job rather than another step in zero-eval so a red square names the invariant
+    # that actually broke: a tool dispatch is not a dynamic-execution construct, and a gate that
+    # reports the wrong cause is one the next reader reasons about wrongly.
+    name: tool dispatch (the TOOL_TIMEOUTS precondition)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - run: python scripts/check_tool_dispatch.py
+
   parity:
     # codecalc keeps the SAME three security-critical constants in two languages: the env allowlist
     # (the CRITICAL-02 fix), RUNTIME_PATH, and the language registry. Nothing links the Rust copy to
