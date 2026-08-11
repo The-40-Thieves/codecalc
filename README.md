@@ -332,6 +332,35 @@ Both backends resolve `CODECALC_RUNTIME_PATH` identically, and
 contract ever drift — including if a machine-specific home directory finds its
 way back into the default.
 
+## Tool-definition token cost
+
+codecalc's `tools/list` returns 47 definitions. Measured with `o200k_base` as a
+proxy, that is roughly 7,600 tokens of descriptions and input schemas, and every
+client pays it before the first user message.
+
+codecalc does not hide its tools behind a discovery facade, and that is
+deliberate: the tool surface is where per-operation approval prompts, audit
+names and typed schemas live, and collapsing 47 tools into one dispatcher makes
+`install_package` and `percentage` look like the same permission to a client
+that approves by tool name. The cost is real, but the client is the better place
+to solve it, because the client can defer definitions **without** giving up the
+schemas or the per-tool boundary.
+
+If you are paying too much for codecalc's definitions:
+
+- **Claude Code** enables MCP tool search automatically once a server's tool
+  descriptions exceed roughly 10k tokens. codecalc sits under that threshold, so
+  it is not deferred by default. Set `ENABLE_TOOL_SEARCH=true` to force it on.
+- **Claude API, via the MCP connector**, takes `defer_loading` once on the
+  toolset's `default_config`, or per tool in `configs`. Deferred definitions stay
+  out of the system-prompt prefix, prompt caching is preserved, and a matching
+  tool is expanded into its full definition when the model searches for it.
+- **Any client** can filter which of the 47 tools it exposes to the model.
+  Nothing here requires codecalc to change.
+
+A server-side facade remains under consideration for clients with no such
+mechanism (`docs/design/2026-08-10-tool-facade.md`), and is not implemented.
+
 ## Test
 
 Each file is a standalone script that prints one `PASS`/`FAIL` line per

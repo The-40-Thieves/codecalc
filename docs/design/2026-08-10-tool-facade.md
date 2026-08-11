@@ -1,210 +1,203 @@
 # Design: put the 47 tools behind a discovery facade
 
 Tracks GitHub [#118](https://github.com/The-40-Thieves/codecalc/issues/118) and THE-784.
-Status: designed, not implemented. Written 2026-08-10 against `main` at `fcd236f`.
+Written 2026-08-10 against `main` at `fcd236f`.
 
-## Why now
+> [!important] Status: designed, reviewed, and deliberately NOT built yet
+> The first draft of this document was approved and then failed review on three independent
+> grounds. It has been rewritten. The facade is not the next piece of work; the prerequisites in
+> [Before this is built](#before-this-is-built) come first. What follows is the corrected design,
+> kept so the work does not have to be re-derived.
 
-The facade was deliberately held behind the versioned result contract (THE-781). The recorded
-reason was specific: a facade must wrap every result in an envelope, and choosing that envelope's
-shape before THE-781 decided it would mean migrating 47 tools onto a shape THE-781 would then
-revise.
+## Why the first draft was wrong
 
-THE-781 is only partly landed. Two slices merged (`output_truncated` backend divergence, and an
-eight-code error taxonomy in `fcd236f`); `contract_version`, the published schema and the migration
-path are still open. So the hold's rationale would still bite a facade that introduced an envelope.
+Two reviews ran against the approved draft: an external-evidence pass (Anthropic platform
+documentation, MCP specification, SDK sources) and an adversarial cross-vendor design review. They
+never saw each other's findings and reached the same verdict on the central decision.
 
-This design discharges the hold a different way: **`call_capability` relays the underlying tool's
-result verbatim.** The facade owns discovery and dispatch, never result shape. No envelope is
-chosen, so there is nothing for THE-781 to revise, and the rest of THE-781 lands on the tools
-themselves and reaches facade callers unchanged.
+### 1. A facade competes with the client's own tool search, and loses
 
-## A premise correction
+Anthropic's tool search tool is generally available. A client sends every tool definition and marks
+them `defer_loading: true`; the API keeps them out of the system-prompt prefix and, on search,
+returns `tool_reference` blocks that it **expands into full tool definitions**. For MCP servers
+reached through the MCP connector, the client sets this once on the toolset's `default_config` —
+the whole of codecalc defers with one line of client configuration and no server change.
 
-Both #118 and the decision note state that "the SDK has no `tools/list` filter, so the facade needs
-conditional registration across 47 decorator sites". That is not true of MCP SDK 2.0.
-`MCPServer.list_tools()` and `MCPServer.call_tool()` are public and documented as overridable.
+That mechanism searches tool names, descriptions, argument names and argument descriptions, and the
+definitions it expands are real, schema-enforced, strict-mode-compatible. A facade replaces all of
+that with `call_capability(name, args)`, whose `args` is an untyped object at the model boundary,
+and whose catalogue the client's search cannot see into.
 
-**Zero decorator sites change.** Every `@mcp.tool()` stays exactly as it is, which matters for more
-than diff size: the SDK keeps generating each tool's schema from its type hints. That generation is
-what `ci-python.yml`'s `declared == served` gate exists to protect, because a tool whose type hints
-the SDK cannot schematise is dropped from `list_tools` at registration with no error anywhere. An
-approach that stopped registering the 47 would delete the schema generation and the gate's subject
-matter together, and would force hand-rolled schemas for `describe_capability` whose drift from the
-real signatures nothing would catch.
+The two do not compose. Whichever layer hides the catalogue first wins, and the server winning is
+the worse outcome.
 
-The facade therefore filters the **view**, not the **registration**.
+### 2. A facade erases per-operation policy metadata
 
-## Decisions
+Forty-seven tools carry forty-seven sets of annotations, approval prompts and audit names. One
+`call_capability` makes package installation, runtime mutation, session file writes and ordinary
+arithmetic indistinguishable to any client that approves or denies by tool name.
 
-| Decision | Choice | Why |
-|---|---|---|
-| Result shape | Verbatim relay | Discharges the THE-781 hold; `unenforced` / `output_error` survive by construction |
-| Default surface | Facade default, `flat` opt-in | Nothing is published yet, so the flip is free now and a breaking change after the first release |
-| Seam | Subclass `MCPServer`, override `list_tools` | Public API; middleware is marked provisional in the SDK docs |
-| CI gate | Round-trip both modes, floor the catalogue | Keeps today's invariant intact and gates the surface users actually get |
+Relatedly: hiding a tool from `list_tools` does not hide it from `call_tool`. A client that guesses
+`install_package` can still invoke it in facade mode. The facade filters discovery, never
+invocation, and must not be described as a boundary.
 
-Rejected: intercepting `tools/list` via `ServerMiddleware` (works, and `mcp_middleware.py` already
-uses that hook, but the SDK marks middleware provisional and it buys nothing over the subclass); and
-porting obsidian-tc's registry shape literally (the large refactor this design avoids, and it drops
-SDK schema generation).
+### 3. The accuracy argument #118 rejected is real
 
-## Architecture
+#118 says the case is token cost "and nothing else", and that any argument from tool-selection
+accuracy at 47 tools "should be rejected". Anthropic's documentation states that selection accuracy
+"degrades once you exceed 30–50 available tools" and recommends tool search from 10 tools upward.
+47 is inside that band, not safely below it. The accuracy argument is sound; it simply argues for
+the client-side mechanism rather than for this facade.
 
-One new module, `codecalc/facade.py`, plus an `MCPServer` subclass in `codecalc/server.py`.
+## What is still true
+
+The measured prize is real: 47 definitions cost 7,625 tokens, a triad costs 257. codecalc also sits
+in a gap — Claude Code enables tool search automatically only above ~10K tokens of MCP tool
+descriptions, so at 7,625 codecalc is under the trigger and clients do pay the full cost today.
+
+**The cheapest fix is documentation, not code.** A client can set `ENABLE_TOOL_SEARCH=true`, or
+`defer_loading` on the toolset, and collect most of the prize immediately. That belongs in the
+README regardless of whether a facade is ever built.
+
+And for non-Claude clients there is no standard mechanism at all: the proposal to add
+`defer_loading` to the MCP Go SDK was closed as **not planned**, and what the 2026-07-28
+specification added instead — `ttlMs`, `cacheScope`, cursor pagination — saves round-trips, not
+context-window tokens. A server-side facade remains the only portable answer, which is why this
+design is kept rather than discarded.
+
+## Corrected design
+
+### Default
+
+**Flat by default. Facade behind `CODECALC_TOOL_MODE=facade`, documented as experimental.** The
+first draft had this inverted, on the argument that a pre-release project can flip a default for
+free. Free to change is not the same as right to change: facade-by-default degrades the
+best-supported client class, and the release default should be decided by measuring total task
+tokens, success rate, round-trips and approval behaviour, not `tools/list` size.
+
+Any unrecognised value of `CODECALC_TOOL_MODE` raises at startup rather than falling back.
+
+### The triad is registered like any other tool
+
+The first draft synthesised the three facade tools outside the registry, specifically so
+`grep -c '^@mcp\.tool'` would keep returning 47. That is designing production structure around a
+grep, and it was justified by a premise that is false for MCP SDK 2.0.0.
+
+The CI gate's comment claims a tool whose type hints cannot be schematised is "dropped from
+list_tools at registration, with no error anywhere". `Tool.from_function` raises — `ValueError`,
+`InvalidSignature` — it does not drop. The real silent-shrink path is a **duplicate name**:
+`ToolManager.add_tool` logs a warning, returns the existing tool, and the count quietly falls by
+one. The gate is worth keeping; its stated cause is wrong and should be corrected.
+
+So: register the triad normally, tag it `meta={"surface": "facade"}`, and derive every assertion
+from the registry or an explicit manifest rather than from a decorator count.
+
+### Dispatch
+
+`call_capability` must:
+
+- **Pass the original request context** through to the underlying call. `call_tool(name, args)` with
+  no context makes the SDK build a reduced `Context` that has lost `request_context`, breaking
+  progress reporting, logging and elicitation.
+- **Resolve the timeout by the underlying capability name, not the outer one.** This is the defect
+  that makes the first draft unshippable: `timeout_middleware` reads the tool name from
+  `ctx.params["name"]`, which under a facade is always `call_capability`. Not being in
+  `TOOL_TIMEOUTS`, it inherits `DEFAULT_TIMEOUT_SECONDS = 900.0`, and all twelve per-tool deadlines
+  stop firing — the AUDIT.md HIGH-05 mitigation, silently disabled by a change that never touches a
+  decorator, which is precisely what that table's comment says it exists to prevent.
+- **Refuse all three facade names** before dispatch, so the dispatcher cannot re-enter itself.
+- Reimplement, or explicitly delegate, the argument validation, result conversion, context injection
+  and output validation that the tool manager performs for registered tools.
+
+### Result shape
+
+Content is still relayed verbatim: the facade owns discovery and dispatch, never result keys, and
+`server.compact_result()` is not called on this path.
+
+Correlation data — which capability ran, the facade version — goes in MCP's `CallToolResult._meta`,
+which carries metadata without touching content. This replaces the first draft's "not even an echo"
+position: `_meta` gives correlation without inventing a competing envelope.
+
+What `_meta` does **not** give is insulation. Verbatim relay does not remove the eventual breaking
+change, it relocates it from 47 tools to `call_capability`, whose result is a polymorphic
+capability-dependent object. If a uniform envelope is wanted, it is THE-781's to define and the
+facade adopts it; the facade must not grow a competing one.
+
+Error paths are not verbatim either, and the first draft claimed otherwise: `MCPError` propagates as
+a protocol error while other exceptions become `CallToolResult(is_error=True)` with text content.
+
+### Discovery
+
+`find_capability` scores a query against names and descriptions from the live tool list. It needs an
+escape hatch, because pure positive lexical matching can make a capability permanently
+undiscoverable to a caller whose vocabulary differs — synonyms, morphology, acronyms, misspellings:
+
+- An empty query returns a **paginated catalogue**.
+- An exact capability name always matches.
+- A zero-match query returns deterministic nearest suggestions.
+- Query length and `limit` are bounded.
+
+Paginating a catalogue in response to an explicit discovery call does not relocate the 7,625 tokens
+into `tools/list`; it charges only the callers who ask. The first draft's blanket "never enumerate"
+rule confused the description with the response, and would have made facade mode strictly less
+capable than the flat surface.
+
+### Gates
+
+The stdio round-trip runs in both modes: flat asserts today's invariant unchanged, facade asserts
+the triad is what is served.
+
+The catalogue assertion must be **set equality, not cardinality**. `catalogue == declared` compares
+counts, so it passes if one tool disappears while another appears, or if the catalogue holds the
+wrong 47 names, and the flat leg already counts the same thing. Assert instead that
 
 ```
-tools/list  ->  CodecalcServer.list_tools()
-                  mode == facade  ->  the three facade tools
-                  mode == flat    ->  super().list_tools(), all 47
-
-tools/call  ->  find_capability      search over super().list_tools()
-                describe_capability  the SDK's generated input_schema
-                call_capability      self.call_tool(name, args), result relayed unchanged
+registered-name set == expected manifest == describable-name set == exact-name-searchable set
 ```
 
-### Mode selection
+plus name uniqueness, schema equality between `describe_capability` and the registered tool, and
+that every capability is invocable through the dispatcher with validation running before execution.
 
-`CODECALC_TOOL_MODE`: unset or `facade` selects the triad; `flat` selects the 47. **Any other value
-raises at startup.** It does not fall back to a default. A typo'd mode that silently serves the
-wrong surface is the exact defect shape this repo keeps finding, and a fallback would encode it.
+Because `mcp>=2.0,<3` admits any 2.x, contract tests pinning the `list_tools` / `call_tool` seam are
+required even though both are public today.
 
-In flat mode the three facade tools are **not** listed. Flat is the 47 and only the 47, so
-`served == declared` stays exact arithmetic rather than 47 plus an adjustment.
+## Before this is built
 
-This forces one structural constraint: **the triad is not declared with `@mcp.tool()`.** If it were,
-`grep -c '^@mcp\.tool'` would return 50, `super().list_tools()` would return 50, and the flat-mode
-identity this design relies on would be broken by the facade's own tools. Instead the triad is
-defined in `codecalc/facade.py` and injected by the subclass:
+1. THE-781 freezes the v1 result contract, so the facade adopts an envelope rather than inventing or
+   competing with one.
+2. An MCP-independent `CapabilityRegistry` with `list` / `describe` / `invoke`. It serves the facade
+   and the larger endpoint below equally, so it is not throwaway work under either outcome.
+3. A benchmarked vertical slice of the endpoint design — one `execute_code` plus a `codecalc` API
+   available inside the execution environment — measured on realistic tasks for total tokens,
+   latency, correctness and failure attribution.
 
-- `list_tools()` returns the injected triad in facade mode, or `super().list_tools()` in flat mode.
-- `call_tool()` routes the three facade names to their handlers and delegates everything else to
-  `super().call_tool()`.
+Only then is the surface decision made on evidence. The facade cuts startup tokens but can replace
+one operation with three round-trips; for a six-operation task that can cost more in total than it
+saves, which is the measurement none of the 7,625-versus-257 arithmetic captures.
 
-So `declared` keeps counting exactly the 47 real tools, and the facade surface is synthesised rather
-than registered.
+If the endpoint wins, the likely surface is `execute_code` plus `find_capability` /
+`describe_capability`, with no generic `call_capability`, and with privileged operations — package
+installation, runtime mutation, persistent session and file operations — kept as separately visible
+tools carrying their own approval metadata. An in-environment library must not become an unguarded
+bridge from executed code into privileged server operations: it needs the same validation, timeouts,
+quotas and policy checks as an MCP call.
 
-### The three capabilities
+## Independently real defects, extracted
 
-**`find_capability(query: str, limit: int = 10)`** scores `query` against each tool's name and
-description from `super().list_tools()` and returns only matches, as `{name, summary, score}`.
+These were surfaced by the review and are worth fixing whether or not a facade is ever built:
 
-The catalogue is searched, never enumerated into a tool description. This is structural, not a
-matter of discipline: a facade whose description lists all 47 operations has relocated the 7,625
-tokens rather than removed them, and would be worse than no facade because it adds a dispatch hop
-for nothing.
-
-Scoring is deterministic token overlap with a name-prefix boost. No new dependency, no index to
-build, nothing that can go stale relative to the registered tools, because the corpus is generated
-per call from the live tool list.
-
-**`describe_capability(name: str)`** returns the SDK's generated `input_schema`, the `output_schema`
-where one exists, and the description.
-
-This is the mitigation for the argument-correctness cost the facade otherwise imposes. #118 records
-hitting it concretely while measuring: calling `execute_code(code, language)` when the signature is
-`(language, code)`. The schema cannot drift from the real signature because the SDK derives both
-from the same type hints.
-
-**`call_capability(name: str, args: dict)`** delegates to `super().call_tool(name, args)` and
-returns the result unchanged.
-
-It delegates to `super()`, not `self`, and refuses any of the three facade names outright. Routing
-through `self` would let `call_capability("call_capability", ...)` re-enter the override and
-recurse; the refusal is asserted in the tests rather than left to the delegation detail.
-
-No envelope. No added keys. Not even a `capability` echo: a header is an envelope with fewer keys
-and tends to grow into one, and the caller already knows which capability it named.
-
-`server.compact_result()` is deliberately **not** called on this path. Its docstring says anything
-that re-envelopes a result must reuse it rather than re-derive which fields are droppable, because
-re-deriving that is how `unenforced` was lost the first time. Verbatim relay does not re-envelope,
-so there is no droppable-field decision to get wrong.
-
-## Error handling
-
-| Case | Response |
-|---|---|
-| `name` not a registered capability | Error naming the closest `find_capability` matches, so a wrong guess self-corrects |
-| `args` fails schema validation | The capability's schema, not a generic validation error, so a bad call costs one hop instead of a dead end |
-| Underlying tool raises | Relayed unchanged, including its THE-781 error code |
-| `name` is one of the three facade names | Refused, so the dispatcher cannot re-enter itself |
-| `CODECALC_TOOL_MODE` unrecognised | Raise at startup, naming the value and the two valid modes |
-
-## Gates and tests
-
-The `ci-python.yml` stdio round-trip runs **twice**:
-
-| Mode | Assertions |
-|---|---|
-| `flat` | `served == declared` (47 == 47), unchanged from today |
-| `facade` | `served == 3`, and `catalogue == declared` (47 == 47) |
-
-The catalogue assertion is the floor. Without it, a tool dropped at registration is invisible on a
-surface that only ever shows three names, and the facade leg would stay green while the product
-silently lost a tool. With it, the drop reddens both legs.
-
-`declared` keeps being derived from `grep -c '^@mcp\.tool' codecalc/server.py` rather than
-hardcoded, so it continues to track `scripts/check_claims.py` instead of becoming a second number to
-keep in sync.
-
-New `tests/test_facade.py` covers: mode selection including the raise on an unrecognised value; that
-facade mode lists exactly three tools and flat lists exactly 47 with no facade tools among them;
-that `find_capability` returns matches rather than the whole catalogue, and that no tool description
-enumerates the catalogue; that `describe_capability` returns a schema whose required argument names
-match the real function signature; that `call_capability` returns a result **byte-identical** to
-calling the tool directly, asserted on a tool that emits `unenforced`; that `call_capability`
-refuses its own three names; and every error path in the table above.
-
-One assertion earns its place specifically against this design's structural constraint: that
-`grep -c '^@mcp\.tool' codecalc/server.py` still returns 47 after the facade lands. If a later
-change declares a facade tool with the decorator, the flat-mode identity breaks silently, and this
-is the cheapest place to catch it.
-
-Per this repo's standing practice, every new assertion is watched failing against a seeded defect
-before it is trusted, and a floor asserts the round-trip gate itself exists so its breadth cannot
-silently shrink.
-
-The token figures are **re-measured** after the change. #118's 7,625 and 257 are the pre-change
-baseline and are not to be restated as results.
-
-## Out of scope
-
-- The middle "domain" mode (obsidian-tc ships ~13 in that mode). Two surfaces to gate, not three.
-- The larger endpoint #118 records but does not propose: a single `execute_code` plus a `codecalc`
-  API available inside the sandbox, so a caller expresses six operations as one script. Different
-  and much larger change, with its own discoverability and error-reporting trade-offs.
-- The remaining THE-781 items. Under verbatim relay they land independently and reach facade
-  callers for free.
-
-## THE-784's "report the selected underlying operation"
-
-THE-784's acceptance says high-level tools must report the selected underlying operation, which is a
-response-shape requirement. Verbatim relay adds no such key.
-
-Read as targeting **routing** tools that pick among several implementations, this does not apply to
-a dispatcher that runs exactly the capability the caller named. Confirmed with the owner 2026-08-10.
-Recorded here because it is an acceptance criterion this design knowingly does not satisfy under a
-different reading.
+- `TOOL_TIMEOUTS` is keyed on the inbound tool name, so any future indirection silently drops twelve
+  deadlines to 900s.
+- The `declared == served` gate's comment names a failure mechanism that does not exist in SDK 2.0.0
+  and misses the one that does (duplicate names).
+- `catalogue == declared`-style assertions compare counts where they should compare identity.
 
 ## Acceptance, mapped to #118
 
-- [ ] `tools/list` in the default mode returns the triad; the flat surface stays reachable behind an explicit mode
-- [ ] The catalogue is searched, never enumerated into a description
+- [ ] The flat surface stays the default; the triad is reachable behind an explicit experimental mode
+- [ ] The catalogue is searched rather than enumerated into a description, with a paginated browse escape hatch
 - [ ] A malformed `call_capability` returns the schema for the named capability
 - [ ] `unenforced` / `output_error` survive the facade path, gated
-- [ ] The token figures are re-measured after the change rather than assumed
-
-## Risks
-
-**The default flip is a breaking change after release.** It is free today only because nothing is
-published: no tags, no releases, PyPI `codecalc` unclaimed. If a release is cut before this lands,
-this decision has to be re-taken as a compatibility question.
-
-**Verbatim relay ties facade callers to per-tool result shapes.** That is the point, and it is what
-discharges the hold, but it does mean the facade offers no insulation if THE-781 later changes a
-tool's keys. The insulation would be an envelope, and an envelope is what was rejected.
-
-**A provisional-API dependency is avoided but not eliminated.** `list_tools` and `call_tool` are
-public, though `MCPServer` internals such as `_tool_manager` are not, and this design touches none
-of them.
+- [ ] Per-tool timeouts resolve by the underlying capability name, gated
+- [ ] Catalogue assertions compare name sets, not counts
+- [ ] The token figures are re-measured after any change rather than assumed
