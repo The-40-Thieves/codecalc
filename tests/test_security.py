@@ -207,40 +207,63 @@ check("benchmark detects polynomial growth (no eval regression)",
 # `safe=` to sympify() (sympy/sympy#12524, never merged): "security theater
 # that leads users into a false sense of security, because it can still be
 # bypassed". Which is the argument for checking that ours at least runs.
-import sympy.parsing.sympy_parser as _spp
+# GUARDED, because sympy is an extra and this is a module-scope import.
+#
+# Unguarded, a base install (`pip install codecalc`, or `uv sync` without
+# --all-extras) made this suite TRACEBACK after 14 passing assertions and exit
+# 1. In a `for f in tests/test_*.py` loop that reads as a FAILURE — the suite
+# claiming a security regression — when the truth is that the host does not
+# have the optional dependency the check needs.
+#
+# Every other suite here already guards its capability gaps: test_bug_sweep.py
+# carries five SKIP branches, test_executor_sweep.py maintains a SKIPS list and
+# reports the count. The package even ships codecalc/optional.py with a
+# MissingExtra class for exactly this. This one import was the exception, and it
+# was found by running the suite on a base install on a real machine — CI never
+# saw it, because CI's lockfile was installing sympy as a core dependency.
+try:
+    import sympy.parsing.sympy_parser as _spp
+    _HAVE_SYMPY = True
+except ImportError as _exc:
+    _spp = None
+    _HAVE_SYMPY = False
+    print(f"SKIP the safe_expr screen-order checks — sympy is not installed "
+          f"({_exc}); it ships in the 'symbolic' extra. The screen itself is "
+          f"gated by scripts/check_no_eval.py, which needs no dependencies.")
 
-_real_parse_expr = _spp.parse_expr
+_real_parse_expr = _spp.parse_expr if _HAVE_SYMPY else None
 _reached_parser = []
 
 
-def _spy_parse_expr(s, *args, **kwargs):
-    _reached_parser.append(s)
-    return _real_parse_expr(s, *args, **kwargs)
+if _HAVE_SYMPY:
+    def _spy_parse_expr(s, *args, **kwargs):
+        _reached_parser.append(s)
+        return _real_parse_expr(s, *args, **kwargs)
 
 
-_spp.parse_expr = _spy_parse_expr
-try:
-    # POSITIVE CONTROL FIRST. A spy that records nothing would make every
-    # assertion below vacuously true — "the hostile string never reached the
-    # parser" is worthless if NOTHING reaches the parser. Prove the instrument
-    # works before trusting what it does not see.
-    _reached_parser.clear()
-    _ok = logic.evaluate_expression("2+2")
-    check("control: a SAFE expression does reach parse_expr",
-          _ok.get("ok") is True and len(_reached_parser) > 0,
-          f"-> ok={_ok.get('ok')} parse calls={len(_reached_parser)}")
-
-    for _hostile in ("__import__('os').system('id')",
-                     "().__class__.__base__.__subclasses__()",
-                     "x.__class__",
-                     "lambda: 1"):
+    _spp.parse_expr = _spy_parse_expr
+    try:
+        # POSITIVE CONTROL FIRST. A spy that records nothing would make every
+        # assertion below vacuously true — "the hostile string never reached the
+        # parser" is worthless if NOTHING reaches the parser. Prove the instrument
+        # works before trusting what it does not see.
         _reached_parser.clear()
-        _r = logic.evaluate_expression(_hostile)
-        check(f"screened before the parser: {_hostile[:34]!r}",
-              _r.get("ok") is False and not _reached_parser,
-              f"-> ok={_r.get('ok')} reached_parser={_reached_parser}")
-finally:
-    _spp.parse_expr = _real_parse_expr
+        _ok = logic.evaluate_expression("2+2")
+        check("control: a SAFE expression does reach parse_expr",
+              _ok.get("ok") is True and len(_reached_parser) > 0,
+              f"-> ok={_ok.get('ok')} parse calls={len(_reached_parser)}")
+
+        for _hostile in ("__import__('os').system('id')",
+                         "().__class__.__base__.__subclasses__()",
+                         "x.__class__",
+                         "lambda: 1"):
+            _reached_parser.clear()
+            _r = logic.evaluate_expression(_hostile)
+            check(f"screened before the parser: {_hostile[:34]!r}",
+                  _r.get("ok") is False and not _reached_parser,
+                  f"-> ok={_r.get('ok')} reached_parser={_reached_parser}")
+    finally:
+        _spp.parse_expr = _real_parse_expr
 
 # 10. fork-bomb guard. LAST IN THE FILE, and that placement is load-bearing.
 #
