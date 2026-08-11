@@ -102,12 +102,30 @@ check("zero eval/exec/shell=True in codebase", not bad, f"-> {bad}")
 # 9. benchmark fit still works (no eval regression). Empirical timing is
 # noisy at small sizes — the security-relevant property is that it detects
 # polynomial growth (not O(1)/O(log n)); exact degree may wobble.
+#
+# THE-808: the largest size was n=8000, which is 64 million iterations of a
+# pure-Python double loop. Measured at 8.6s against this call's own 15s
+# timeout on an unloaded 4-core ARM box: a margin of 1.7x. The one observed
+# failure was macos-latest on 3.11, the slowest leg in the matrix, while 3.14
+# passed in the same run.
+#
+# A timeout here is not a slow measurement that widens an error bar. `_measure`
+# ABORTS the whole benchmark at the first one, deliberately, because a
+# timeout's wall clock was once appended as data and reported as a complexity
+# class. The result then carries `error` and NO `estimate` key, so
+# `.get("estimate", "")` returned "" and this check failed printing nothing at
+# all — three lines of CI output that could not distinguish "classified wrong"
+# from "never produced a classification".
+#
+# n=4000 measures 2.1s, a 7.2x margin, classifies identically as O(n^2), and
+# takes 9s instead of 35s per matrix leg.
 r = tools.benchmark("import sys\nn=int(sys.stdin.readline())\ns=0\nfor i in range(n):\n    for j in range(n): s+=i*j\nprint(s)",
-                    sizes="500,1000,2000,4000,8000", timeout=15)
+                    sizes="500,1000,2000,4000", timeout=15)
 est = r.get("estimate", "")
 check("benchmark detects polynomial growth (no eval regression)",
       "O(n" in est and est not in ("O(1)", "O(log n)"),
-      f"-> {est}")
+      f"-> {est}" if est
+      else f"-> NO ESTIMATE (ok={r.get('ok')}): {r.get('error')!r}")
 
 # ── the safety screen must run BEFORE any parse ───────────────────────────
 # SymPy's parse_expr/sympify EVALUATE what they parse — its own docstring says
