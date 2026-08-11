@@ -30,9 +30,10 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from mcp import Client
+from mcp.server.context import ServerRequestContext
 
-from codecalc import server
-from codecalc.mcp_middleware import TOOL_TIMEOUTS
+from codecalc import mcp_middleware, server
+from codecalc.mcp_middleware import DEFAULT_TIMEOUT_SECONDS, TOOL_TIMEOUTS, timeout_middleware
 
 EXPECTED_PROTOCOL = "2026-07-28"
 
@@ -43,6 +44,49 @@ def check(name: str, cond: bool, detail: str = "") -> None:
     print(f"{'PASS' if cond else 'FAIL':4} {name} {detail}")
     if not cond:
         FAILS.append(name)
+
+
+class _FakeAsyncio:
+    """Stand-in for the `asyncio` name inside mcp_middleware's module globals.
+
+    Swapped in for the duration of one call, so the `timeout=` argument
+    `asyncio.wait_for` was actually called with can be captured directly —
+    without waiting out a real 20s or 900s deadline, and without touching the
+    real `asyncio` module that the rest of this suite's event loop still needs
+    (this only rebinds the NAME `asyncio` resolves to inside
+    codecalc.mcp_middleware's namespace, not the shared module object).
+    """
+
+    def __init__(self) -> None:
+        self.captured: list[float] = []
+
+    async def wait_for(self, coro, timeout):
+        self.captured.append(timeout)
+        return await coro
+
+
+async def _drive_timeout_middleware(tool_name: str) -> float:
+    """Run a real `tools/call` for `tool_name` through timeout_middleware and
+    return the `timeout=` it actually handed to `asyncio.wait_for`."""
+    fake = _FakeAsyncio()
+    real_asyncio = mcp_middleware.asyncio
+    mcp_middleware.asyncio = fake
+    try:
+        ctx = ServerRequestContext(
+            session=None,
+            lifespan_context=None,
+            protocol_version=EXPECTED_PROTOCOL,
+            method="tools/call",
+            params={"name": tool_name, "arguments": {}},
+        )
+
+        async def call_next(_ctx):
+            return {"ok": True}
+
+        await timeout_middleware(ctx, call_next)
+    finally:
+        mcp_middleware.asyncio = real_asyncio
+    return fake.captured[0]
 
 
 async def main() -> None:
@@ -97,6 +141,24 @@ async def main() -> None:
         # deadline nobody is getting.
         missing = sorted(set(TOOL_TIMEOUTS) - set(names))
         check("every tool with a deadline still exists", not missing, f"-> {missing}")
+
+    # ── the deadline that applied, not just the table that lists it ─────────
+    # "every tool with a deadline still exists" (above) catches a renamed or
+    # deleted tool. It cannot catch the deadline failing to APPLY — e.g. if
+    # some future tool dispatched another tool through the MCP layer, the
+    # middleware would see the OUTER name and every deadline in TOOL_TIMEOUTS
+    # would silently fall back to DEFAULT_TIMEOUT_SECONDS (mcp_middleware.py's
+    # own comment on TOOL_TIMEOUTS explains why; scripts/check_tool_dispatch.py
+    # is the structural gate on the precondition).
+    # This drives a real tools/call through timeout_middleware and asserts the
+    # limit that was ACTUALLY handed to asyncio.wait_for.
+    applied = await _drive_timeout_middleware("calc_exact")
+    check("calc_exact's applied deadline is its 20s entry, not the 900s default",
+          applied == TOOL_TIMEOUTS["calc_exact"] == 20, f"-> {applied}")
+
+    applied = await _drive_timeout_middleware("not_a_registered_tool")
+    check("a tool with no TOOL_TIMEOUTS entry gets the 900s default",
+          applied == DEFAULT_TIMEOUT_SECONDS, f"-> {applied}")
 
     # ── and the trap this file exists for ───────────────────────────────────
     # The legacy path must still WORK (backward compatibility is a feature), it

@@ -52,6 +52,18 @@ TOOL_TIMEOUT_ERROR = -32010
 #: deadline that never fires. (This comment used to cite a check_tool_timeouts
 #: gate under scripts/ that has never existed. The assertion was real; the
 #: filename was not.)
+#:
+#: The lookup below keys on `_tool_name(ctx)` — the INBOUND `tools/call` name —
+#: not on whatever ends up executing. That is only correct because there is no
+#: dispatcher anywhere in this package: the tool a client asked for is always
+#: the tool that runs. If any tool implementation ever called another tool
+#: through the MCP layer (a facade, a router, a batching tool), the middleware
+#: would keep seeing the OUTER name, and every one of the deadlines above would
+#: silently fall back to DEFAULT_TIMEOUT_SECONDS (900s) for the dispatched call.
+#: scripts/check_tool_dispatch.py is what keeps that assumption enforced rather
+#: than merely assumed — it fails the build the moment a `.call_tool(...)`
+#: re-entry appears anywhere under codecalc/. That is also the gate this very
+#: comment block used to cite and that did not exist; it does now.
 TOOL_TIMEOUTS: dict[str, float] = {
     # in-process sympy / z3 work — AUDIT.md HIGH-05
     "evaluate_expression": 20,
