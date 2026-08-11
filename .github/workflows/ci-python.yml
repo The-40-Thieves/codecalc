@@ -8,6 +8,13 @@ name: ci-python
 # nothing to do with the PR. The `sandbox` job below covers the python3 path — which is the one every
 # security assertion in AUDIT.md is written against — and ci-rust.yml covers the executor binary's
 # contract directly.
+#
+# tests/test_hybrid.py is excluded for the same reason: it smoke-tests ten compiled and interpreted
+# runtimes (go, rust, java, swift, zig, elixir among them) that a hosted runner does not carry. This
+# line exists because its absence was NOT written down anywhere, while test_smoke.py's was — and an
+# undocumented exclusion is indistinguishable from an oversight. It also could not have failed a
+# build until THE-776: it printed `FAIL <lang>` and exited 0 regardless, with no accumulation
+# anywhere in the file. scripts/check_claims.py now asserts every suite can fail.
 
 on:
   pull_request:

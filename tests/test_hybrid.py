@@ -31,6 +31,18 @@ def _missing_runtime(r: dict) -> bool:
         "runtime unavailable" in stderr or "spawn failed" in stderr)
 
 
+#: Languages that ran and produced the wrong thing. A missing runtime is a fact
+#: about the machine and lands in SKIP instead, via `_missing_runtime` above.
+#:
+#: This file used to print `FAIL <lang>` and carry on, with no accumulation and
+#: no nonzero exit anywhere in it, so every language could fail and the suite
+#: still exited 0. That is the pattern PR #13 removed from three other suites,
+#: surviving here because nothing looked for it: scripts/check_claims.py counted
+#: `check(` sites and this file has none, and no workflow runs it, so CI never
+#: had an exit code to ignore. Found by the per-suite floor added for THE-776.
+FAILED: list[str] = []
+
+
 def skip(name: str, why: str) -> None:
     print(f"SKIP {name} ({why})")
 
@@ -55,6 +67,8 @@ for lang, code in {
         skip(f"{lang} rust-exec smoke", (r.get("stderr") or "")[:160].replace("\n", " "))
         continue
     print(f"{'PASS' if ok else 'FAIL':4} {lang:10} {r.get('duration_ms',0):>7}ms")
+    if not ok:
+        FAILED.append(f"{lang}: {(r.get('stderr') or r.get('stdout') or '')[:120]!r}")
 
 # logic layer
 print("eval:", json.dumps(logic.evaluate_expression("sqrt(144)+2**10"))[:80])
@@ -75,3 +89,10 @@ print("benchmark estimate:", bench.get("estimate"), "| ratios:", bench.get("doub
 # probe
 p = executor.probe()
 print("probe: python3 =", p.get("python3"), "| c =", p.get("c"), "| all langs:", len(p))
+
+if FAILED:
+    print(f"\n=== {len(FAILED)} language(s) ran and produced the wrong output ===")
+    for line in FAILED:
+        print(f"  {line}")
+    sys.exit(1)
+print(f"\n=== hybrid checks OK ({len(FAILED)} failures) ===")
