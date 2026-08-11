@@ -61,9 +61,19 @@ the thing is.
   the program produced before the response cap, so a caller can size a retry
   instead of guessing. Exact when `output_truncated` is false; a lower bound
   when it is true, because the two backends enforce the cap differently.
-- **`codecalc doctor`** (also `python -m codecalc doctor`) — reports the
-  resolved backend, the binary path, the install sandbox, installed extras,
-  runtime availability and the contract version, before a tool call has to.
+- **`codecalc doctor`** (also `python -m codecalc doctor`) — the install
+  verification step. Reports the resolved backend and its binary, the install
+  sandbox, extras, the status of every runtime, whether the workspace is
+  writable, and the contract version, before a tool call has to. **Exits `0`
+  when the install can execute and `1` when it cannot**, so it drops into a
+  Dockerfile or a CI job unchanged. A missing extra or an uninstalled runtime
+  does not fail it — those are facts about the host, not a broken install.
+- **`codecalc doctor --json`** — the same report as machine-readable data,
+  against a published schema (`docs/contract/doctor-v1.schema.json`) carrying
+  the same `contract_version` and policy as a tool result. Each runtime reports
+  `supported`, `installed`, `unhealthy` or `available`, and `status_basis` says
+  whether those came from resolving the command or from running it. `--deep`
+  executes them; without it nothing is ever reported `available`.
 - **Verification gates instead of generation.** `verify_translation` and
   `verify_optimization` take a candidate *the caller wrote* and prove or
   disprove it by execution. codecalc runs and measures; it does not generate.
@@ -78,6 +88,12 @@ the thing is.
   `[parsing]`. `codecalc doctor` names the exact command for anything missing.
 - **A skill file** (`codecalc/SKILL.md`) shipped inside the wheel, describing
   when to call these tools and how to report their results.
+- **`compare_execution` reports `discrepancies`.** Always present, empty when
+  there is nothing to disclose. A language that produces no stdout while a
+  sibling produces some is flagged rather than left as a blank row in a table —
+  an exit-0 run with no output cannot be distinguished from one whose output was
+  lost, and reading it as "the answer is empty" is how a lost result becomes a
+  wrong one.
 
 ### Security
 

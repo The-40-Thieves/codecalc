@@ -38,6 +38,47 @@ def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 
     # slowest. Compare against None explicitly.
     ok_runs = [r for r in results if r["ok"] and r["duration_ms"] is not None]
     fastest = min(ok_runs, key=lambda x: x["duration_ms"])["language"] if ok_runs else None
+
+    # VANISHED OUTPUT (THE-802 / #42).
+    #
+    # translation.py already refuses to score an empty-but-ok result as
+    # evidence, and `vanished_output_side` there names the reason: an exit-0 run
+    # with no stdout cannot be distinguished from one whose output was LOST.
+    # `node` does exactly this on windows-latest — ok with empty stdout while
+    # sibling languages print normally from the same snippet.
+    #
+    # That reasoning was applied to the translation gate and never to this tool,
+    # which is the more dangerous of the two. Here the caller has asked to run
+    # ONE computation several ways, so the siblings are a control the tool
+    # already has and was throwing away: if three languages printed and one
+    # printed nothing, the odd one out is a discrepancy, not a result.
+    #
+    # This does not guess a cause and does not fail the call. It surfaces the
+    # disagreement, because the failure mode being guarded is a caller reading
+    # `fastest` and a table of outputs and not noticing that one row is empty —
+    # and a node-only snippet, with no sibling to disagree with it, is a
+    # silently wrong answer rather than a red check.
+    produced = [r for r in results if (r["stdout"] or "").strip()]
+    silent = [r for r in results if not (r["stdout"] or "").strip()]
+    discrepancies = []
+    if produced and silent:
+        for r in silent:
+            discrepancies.append({
+                "language": r["language"],
+                "issue": "no stdout while another language produced some",
+                # `ok` is carried because the two cases need different
+                # responses: ok=False is a run that failed and said so, ok=True
+                # with no output is the one that can be mistaken for an answer.
+                "ok": r["ok"],
+                "exit_code": r["exit_code"],
+                "timed_out": r["timed_out"],
+                "detail": ("this run reported success and produced nothing, "
+                           "which is indistinguishable from output that was "
+                           "lost — do not read it as an empty result"
+                           if r["ok"] else
+                           "this run failed; its stderr says why"),
+            })
+
     return {
         "ok": True,
         "count": len(results),
@@ -45,6 +86,10 @@ def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 
         "results": results,
         "fastest": fastest,
         "fastest_note": None if ok_runs else "no language ran successfully",
+        # Always present, empty when there is nothing to disclose — the same
+        # rule `unenforced` follows. A field that appears only on trouble is a
+        # field a caller forgets to read.
+        "discrepancies": discrepancies,
     }
 
 
