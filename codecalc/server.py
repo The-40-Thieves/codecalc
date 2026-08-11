@@ -30,6 +30,7 @@ from mcp.types import ImageContent
 from . import (
     __version__,
     complexity,
+    contract,
     errors,
     exact,
     executor,
@@ -104,15 +105,29 @@ def _coded(fn):
     `code_inferred: true`. That is a weaker claim than one chosen at a raise
     site, and the label is what keeps the two distinguishable.
     """
+    # THE contract stamp goes here too, and this — not executor.execute — is the
+    # only place that reaches every result.
+    #
+    # The first version stamped `contract_version` inside executor.execute,
+    # reasoning that both backends pass through it. Both EXECUTOR backends do.
+    # Three tool surfaces do not: compact_result rebuilds the dict afterwards,
+    # the native streaming path returns the executor's JSON directly, and
+    # `execute_code(session_id=...)` routes to a warm worker that never calls
+    # executor.execute at all. All three returned unversioned results while the
+    # documentation said every result carries a version.
+    #
+    # This wrapper is applied to all 47 tools, so stamping here makes that claim
+    # true by construction. `stamp` uses setdefault, so the executor's own stamp
+    # is not overwritten and the two cannot disagree.
     if inspect.iscoroutinefunction(fn):
         @functools.wraps(fn)
         async def _async(*args, **kwargs):
-            return errors.ensure_code(await fn(*args, **kwargs))
+            return contract.stamp(errors.ensure_code(await fn(*args, **kwargs)))
         return _async
 
     @functools.wraps(fn)
     def _sync(*args, **kwargs):
-        return errors.ensure_code(fn(*args, **kwargs))
+        return contract.stamp(errors.ensure_code(fn(*args, **kwargs)))
     return _sync
 
 
@@ -436,6 +451,13 @@ async def execute_code_stream(
                 # all, so `if not result["streamed"]` was true on the path that
                 # DID stream. Both branches now answer the same question.
                 result["streamed"] = True
+                # The binary's JSON carries no `backend` key — executor.execute
+                # adds it, and this path builds its own subprocess call instead
+                # of going through that function, so it was the one execution
+                # surface returning a result a caller could not attribute to a
+                # backend. Same reasoning as executor.execute's own comment:
+                # absent is indistinguishable from "an older build".
+                result["backend"] = "rust"
                 return result
             return {"ok": False,
                     "error": f"executor invalid output: {stderr_b[:200]!r}"}
@@ -926,6 +948,13 @@ def _doctor() -> int:
 
     print(f"codecalc {__version__}")
     print(f"  python           {sys.version.split()[0]} on {sys.platform}")
+    # The result contract is versioned separately from the package on purpose:
+    # a package release that changes no field a caller reads should not look
+    # like a contract change, and a contract break has to be visible even in a
+    # patch release. Printed here so an operator can check which contract a
+    # deployment serves without making a tool call and reading the field back.
+    print(f"  result contract  {contract.CONTRACT_VERSION} "
+          f"(schema: docs/contract/result-v1.schema.json)")
 
     backend = executor.backend()
     print(f"  execution backend {backend}")

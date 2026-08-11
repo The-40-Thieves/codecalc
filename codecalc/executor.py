@@ -34,7 +34,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import registry
+from . import contract, registry
 
 #: POSIX-only stdlib. `resource` does not exist on Windows at all, so importing
 #: it unconditionally made `import codecalc` fail there before any code ran.
@@ -532,6 +532,25 @@ class _BoundedDrain:
     def data(self) -> bytes:
         return bytes(self._buf)
 
+    @property
+    def seen(self) -> int | None:
+        """Bytes read from the pipe, INCLUDING those discarded past the cap.
+
+        Already tracked — the overflow decision is made on it — and now
+        exposed, because it is the only number in this process that answers
+        "how much did the program print". `len(data())` cannot: the buffer stops
+        at cap+1 by design, which is the whole point of this class.
+
+        `None` when the drain failed part-way. `self._seen` is still an integer
+        in that case and returning it would present a PREFIX as an exact total —
+        and a failure before the first byte would report 0, which reads as
+        "measured: the program printed nothing". That is the same
+        could-not-measure/measured-zero conflation `output_error` and
+        `peak_memory_kb` already exist to avoid in this file, so this one
+        answers it the same way.
+        """
+        return None if self.error else self._seen
+
 
 def _run_step(argv: list[str], cwd: str, timeout: int, stdin: str,
               max_memory_mb: int = 0, max_cpu: int = 0,
@@ -562,6 +581,12 @@ def _run_step(argv: list[str], cwd: str, timeout: int, stdin: str,
         overflow = threading.Event()
         out_reader = _BoundedDrain(proc.stdout, max_output_bytes)
         err_reader = _BoundedDrain(proc.stderr, max_output_bytes)
+        # The two drain threads are held separately as well as in `threads`.
+        # Whether a stream's byte count is trustworthy depends on THAT stream's
+        # reader having finished, and nothing else: the first version of this
+        # check tested every thread in the list, so a stdin feeder still blocked
+        # on a child that had stopped reading would have nulled both counts
+        # while both drains had run cleanly to EOF.
         threads = [
             threading.Thread(target=_feed_stdin, args=(proc, stdin.encode()), daemon=True),
             threading.Thread(target=out_reader.drain, args=(overflow.set,), daemon=True),
@@ -591,9 +616,26 @@ def _run_step(argv: list[str], cwd: str, timeout: int, stdin: str,
 
         for t in threads:
             t.join(timeout=5)
+        # A drain thread that did not finish is still reading, so its running
+        # total is a sample of a moving number rather than a measurement. The
+        # join has always had this five-second bound; what is new is checking
+        # it, because the byte counts are the first thing to be REPORTED from
+        # these threads rather than merely collected. `_seen` would look like an
+        # exact figure and be a snapshot of an unfinished read.
+        _out_thread, _err_thread = threads[1], threads[2]
         cpu_ms = _children_cpu_ms_since(cpu_before)
+
+        def _seen_of(reader, thread) -> int | None:
+            return None if thread.is_alive() else reader.seen
         if timed_out:
-            return (-1, b"", b"<killed: exceeded wall-clock timeout>", True, cpu_ms, None)
+            # The byte counts are still REAL here, and are the drains' own
+            # totals rather than zero: a program killed at the wall clock had
+            # usually printed something first, and discarding that count would
+            # make a timeout look like a silent program. `data()` is dropped on
+            # this path — the stderr below is ours — but what the child produced
+            # was still measured.
+            return (-1, b"", b"<killed: exceeded wall-clock timeout>", True, cpu_ms, None,
+                    (_seen_of(out_reader, _out_thread), _seen_of(err_reader, _err_thread)))
         # The drains' failures ride out with their data. Same reasoning as the
         # Rust backend's read_capped (#80): output that could not be fully read
         # is indistinguishable from output that was simply short, so the caller
@@ -605,7 +647,7 @@ def _run_step(argv: list[str], cwd: str, timeout: int, stdin: str,
         if parts:
             drain_error = "; ".join(parts)
         return (proc.returncode, out_reader.data(), err_reader.data(), False, cpu_ms,
-                drain_error)
+                drain_error, (_seen_of(out_reader, _out_thread), _seen_of(err_reader, _err_thread)))
 
 
 def _trim(b: bytes, cap: int = MAX_OUTPUT_BYTES) -> str:
@@ -701,6 +743,55 @@ def _unmeasured(max_memory_mb: int = 0, max_cpu: int = 0) -> list[str]:
     return out
 
 
+def _fallback_compile_failure(name: str, *, stdout: str, stderr: str,
+                              exit_code: int | None, timed_out: bool,
+                              truncated: bool, elapsed_ms: int, workdir: str,
+                              output_error: str | None, no_net: bool,
+                              max_memory_mb: int, max_cpu: int,
+                              seen: tuple[int, int]) -> dict:
+    """A failed compile, in the SAME shape as every other result.
+
+    The run path already carries the note explaining why this matters — it once
+    omitted verdict, cpu_ms, peak_memory_kb, output_truncated, unenforced,
+    total_ms, compile_ms and platform, and "CI never noticed because
+    contract_check only exercises the binary". The COMPILE path was left with
+    exactly that defect, and survived for the same reason plus one more:
+    `scripts/check_parity.py` diffs the two backends' key sets using
+    `python3` — an INTERPRETED language — so no comparison this repo makes ever
+    compiles anything, and the compile branch of the fallback was never held
+    against the Rust one at all.
+
+    Measured before this: an invalid C program on the fallback returned 9 keys
+    where the native executor returns 19. A caller switching on `verdict` got
+    KeyError on one backend and "RTE" on the other, for the same source.
+
+    The Rust compile-failure return carries its own comment saying its key set
+    must match its success return; this is that rule applied on the side that
+    had no gate to enforce it.
+    """
+    return {"ok": False, "language": name, "phase": "compile",
+            "stdout": stdout, "stderr": stderr, "exit_code": exit_code,
+            "duration_ms": elapsed_ms, "workdir": workdir,
+            "compile_ms": elapsed_ms,
+            "total_ms": elapsed_ms,
+            "timed_out": timed_out,
+            "output_truncated": truncated,
+            "verdict": _fallback_verdict(exit_code if exit_code is not None else -1,
+                                         timed_out, truncated),
+            # Not measured on this path rather than measured as zero. _run_step
+            # returns cpu_ms for the RUN step; the compile step's is not
+            # attributed, and 0 would read as "the compiler used no CPU".
+            "cpu_ms": 0,
+            "peak_memory_kb": None,
+            "platform": sys.platform,
+            "unenforced": (["no_net: needs the native executor's LD_PRELOAD shim"]
+                           if no_net else []) + _unmeasured(max_memory_mb, max_cpu),
+            "output_error": output_error,
+            "stdout_bytes": seen[0],
+            "stderr_bytes": seen[1],
+            "backend": "python"}
+
+
 def _runtime_unavailable_result(name: str, phase: str, argv: list[str], exc: OSError,
                                 workdir: str, started: float, no_net: bool) -> dict:
     """The documented result shape for a runtime/compiler that failed to spawn.
@@ -736,6 +827,13 @@ def _runtime_unavailable_result(name: str, phase: str, argv: list[str], exc: OSE
         # that never happened is noise, not honesty.
         "unenforced": (["no_net: needs the native executor's LD_PRELOAD shim"]
                        if no_net else []) + _unmeasured(),
+        # None, not 0, for the same reason as `peak_memory_kb` above and the
+        # Rust backend's spawn-failure return: nothing ran, so there is no
+        # program output to have counted, and the `stderr` here is OUR sentence
+        # rather than the child's. Zero would be a measurement of something that
+        # never happened.
+        "stdout_bytes": None,
+        "stderr_bytes": None,
         "backend": "python",
         "error": detail,
     }
@@ -803,7 +901,7 @@ def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10
         if entry["compile"]:
             argv = [a.format(**fmt) for a in entry["compile"]]
             try:
-                rc, out, err, to, _, compile_drain_error = _run_step(
+                rc, out, err, to, _, compile_drain_error, compile_seen = _run_step(
                     argv, workdir, timeout, "", max_memory_mb, max_cpu, cap)
             except OSError as exc:
                 # The compiler binary itself is missing or not executable.
@@ -812,35 +910,31 @@ def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10
                 return _runtime_unavailable_result(name, "compile", argv, exc,
                                                    workdir, started, no_net)
             if to:
-                return {"ok": False, "language": name, "phase": "compile",
-                        # _trim MUST get the caller's cap here. Without it the
-                        # compile path fell back to the 64 KiB default while
-                        # the drain had already bounded the bytes at the
-                        # caller's cap, so the two disagreed in both
-                        # directions: max_output_kb=1 against a 2 KiB compiler
-                        # error retained 1025 bytes and added NO truncation
-                        # marker (1025 < 65536), i.e. silent truncation
-                        # presented as complete output; and max_output_kb=128
-                        # against 70 KiB was falsely cut at 64 KiB.
-                        "stdout": "", "stderr": _trim(err, cap), "exit_code": None,
-                        "duration_ms": 0, "timed_out": True,
-                        "output_error": compile_drain_error}
+                return _fallback_compile_failure(
+                    name, stdout="", stderr=_trim(err, cap), exit_code=None,
+                    timed_out=True, truncated=len(err) > cap,
+                    elapsed_ms=int((time.monotonic() - started) * 1000),
+                    workdir=workdir, output_error=compile_drain_error,
+                    no_net=no_net, max_memory_mb=max_memory_mb, max_cpu=max_cpu,
+                    seen=compile_seen)
             compile_ms = int((time.monotonic() - started) * 1000)
             if rc != 0:
-                return {"ok": False, "language": name, "phase": "compile",
-                        "stdout": _trim(out, cap), "stderr": _trim(err, cap), "exit_code": rc,
-                        "duration_ms": int((time.monotonic() - started) * 1000),
-                        "timed_out": False,
-                        # A compile that failed AND whose output we could not
-                        # fully read is two problems; reporting only the first
-                        # would leave the caller reading a truncated reason.
-                        "output_error": compile_drain_error}
+                return _fallback_compile_failure(
+                    name, stdout=_trim(out, cap), stderr=_trim(err, cap), exit_code=rc,
+                    timed_out=False, truncated=len(out) > cap or len(err) > cap,
+                    elapsed_ms=compile_ms, workdir=workdir,
+                    # A compile that failed AND whose output we could not fully
+                    # read is two problems; reporting only the first would leave
+                    # the caller reading a truncated reason.
+                    output_error=compile_drain_error,
+                    no_net=no_net, max_memory_mb=max_memory_mb, max_cpu=max_cpu,
+                    seen=compile_seen)
 
         argv = [a.format(**fmt) for a in entry["run"]]
         run_started = time.monotonic()
         try:
-            rc, out, err, to, cpu_ms, drain_error = _run_step(argv, workdir, timeout, stdin,
-                                                 max_memory_mb, max_cpu, cap)
+            rc, out, err, to, cpu_ms, drain_error, run_seen = _run_step(
+                argv, workdir, timeout, stdin, max_memory_mb, max_cpu, cap)
         except OSError as exc:
             # The interpreter/runtime binary itself is missing or not
             # executable — same shape gap as the compile phase above.
@@ -880,6 +974,12 @@ def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10
                 "unenforced": (["no_net: needs the native executor's LD_PRELOAD shim"]
                                if no_net else []) + _unmeasured(max_memory_mb, max_cpu),
                 "output_error": drain_error,
+                # What each stream actually produced, before the response cap.
+                # Taken from the drain's own running total, which it already
+                # kept to decide overflow — `len(out)` cannot answer this,
+                # because the buffer stops at cap+1 by design.
+                "stdout_bytes": run_seen[0],
+                "stderr_bytes": run_seen[1],
                 "backend": "python"}
     finally:
         # Only a directory this function created, and only if it is STILL
@@ -937,9 +1037,18 @@ def backend() -> str:
     return "rust" if _rust else "python"
 
 
-def execute(language: str, code: str, stdin: str = "", timeout: int = 10,
-            workdir: str | None = None, max_memory_mb: int = 0,
-            max_output_kb: int = 0, max_cpu: int = 0, no_net: bool = False) -> dict:
+def _execute_uncontracted(language: str, code: str, stdin: str = "", timeout: int = 10,
+                          workdir: str | None = None, max_memory_mb: int = 0,
+                          max_output_kb: int = 0, max_cpu: int = 0,
+                          no_net: bool = False) -> dict:
+    """The real work. Wrapped by `execute` below, which stamps the contract.
+
+    Split out rather than stamping at each `return`: this function has six exit
+    points across two backends and an exception path, and a version attached at
+    five of six is worse than none — a caller would read its absence as "an
+    older server" on exactly the failure paths where knowing the contract
+    matters most.
+    """
     if _rust:
         stdin_path = None
         try:
@@ -1007,6 +1116,23 @@ def execute(language: str, code: str, stdin: str = "", timeout: int = 10,
                            workdir=workdir, max_memory_mb=max_memory_mb,
                            max_output_kb=max_output_kb, max_cpu=max_cpu,
                            no_net=no_net)
+
+
+def execute(language: str, code: str, stdin: str = "", timeout: int = 10,
+            workdir: str | None = None, max_memory_mb: int = 0,
+            max_output_kb: int = 0, max_cpu: int = 0, no_net: bool = False) -> dict:
+    """Run `code` and return a result carrying the contract version (THE-781).
+
+    The stamp goes here for the same reason `backend` does: this is the one
+    place both backends' results pass through before a caller sees them, so it
+    is the one place that can make them agree. Doing it inside either backend
+    would put the version on one of them and leave `check_parity`'s key-set
+    diff to discover the asymmetry later.
+    """
+    return contract.stamp(_execute_uncontracted(
+        language, code, stdin=stdin, timeout=timeout, workdir=workdir,
+        max_memory_mb=max_memory_mb, max_output_kb=max_output_kb,
+        max_cpu=max_cpu, no_net=no_net))
 
 
 def probe() -> dict:

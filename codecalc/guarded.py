@@ -72,6 +72,25 @@ UNENFORCED_NO_FORK = "expression_bound_not_enforced_without_fork"
 
 CAN_FORK = hasattr(os, "fork") and hasattr(os, "waitpid")
 
+#: The only fields a failed guarded call passes on. Everything else the child
+#: or the parent put in the outcome — `value` above all — stops here.
+_CARRIED_ON_FAILURE = ("ok", "code", "error", "remedy", "code_inferred")
+
+#: The out-of-memory answer, serialised AT IMPORT TIME.
+#:
+#: The OOM branch in `_child` cannot afford to build anything: under MemoryError
+#: even formatting a message can raise again, which is why that branch answered
+#: with a bare literal. The literal carried no `code`, so the one failure in the
+#: taxonomy that is unambiguously `resource_exhausted` arrived at the server
+#: boundary codeless and had its code guessed back out of the words "memory
+#: ceiling" — the weak claim, for the case we are most certain about.
+#:
+#: Building the same JSON here costs nothing at failure time and keeps the
+#: property that made the literal correct: by the time a child hits MemoryError,
+#: this string has existed since import.
+_OOM_PAYLOAD = json.dumps(errors.error_result(
+    errors.RESOURCE_EXHAUSTED, "expression exhausted the memory ceiling"))
+
 
 def _child(write_fd: int, fn, args: tuple, kwargs: dict,
            cpu_seconds: int, memory_mb: int) -> None:
@@ -101,8 +120,9 @@ def _child(write_fd: int, fn, args: tuple, kwargs: dict,
         payload = json.dumps({"ok": True, "value": fn(*args, **kwargs)})
     except MemoryError:
         # Formatting the error can itself allocate, so this one is answered
-        # with a constant.
-        payload = '{"ok": false, "error": "expression exhausted the memory ceiling"}'
+        # with a constant — see _OOM_PAYLOAD, which is built at import time
+        # precisely so that nothing is constructed here.
+        payload = _OOM_PAYLOAD
     except BaseException as exc:  # containment is the job — every failure, known or not
         try:
             payload = json.dumps(errors.error_result(
@@ -184,24 +204,31 @@ def run_guarded(fn, *args, cpu_seconds: int = DEFAULT_CPU_SECONDS,
                 pass
         _reap(pid)
 
+    # The three failures below are the PARENT's own diagnosis, not the child's.
+    # Each one knows exactly what happened, so each names its code here rather
+    # than leaving `ensure_code` to guess it back out of the sentence. A code
+    # chosen where the failure is detected is the strong claim; one recovered
+    # from prose is the weak one, and these are not cases where we have to
+    # settle for the weak one.
     if timed_out:
-        return {"ok": False,
-                "error": f"expression exceeded the {wall_seconds}s evaluation "
-                         "limit and was killed"}
+        return errors.error_result(
+            errors.TIMEOUT,
+            f"expression exceeded the {wall_seconds}s evaluation limit and was killed")
     raw = b"".join(chunks)
     if not raw:
         # The child died without answering: RLIMIT_CPU (SIGXCPU) and the kernel
         # OOM killer both land here. Distinguishable from a timeout, which is
         # the parent's doing, and worth saying so rather than reporting a
         # generic failure.
-        return {"ok": False,
-                "error": "expression was terminated by a resource limit "
-                         f"(CPU {cpu_seconds}s / memory {memory_mb}MB) before "
-                         "producing a result"}
+        return errors.error_result(
+            errors.RESOURCE_EXHAUSTED,
+            "expression was terminated by a resource limit "
+            f"(CPU {cpu_seconds}s / memory {memory_mb}MB) before producing a result")
     try:
         return json.loads(raw.decode("utf-8", "replace"))
     except ValueError:
-        return {"ok": False, "error": "the guarded evaluation returned no usable result"}
+        return errors.error_result(
+            errors.INTERNAL, "the guarded evaluation returned no usable result")
 
 
 def _reap(pid: int) -> None:
@@ -237,7 +264,34 @@ def guarded_call(fn, *args, **kwargs) -> dict:
     if outcome.get("ok"):
         result = outcome["value"]
     else:
-        result = {"ok": False, "error": outcome.get("error", "evaluation failed")}
+        # Carry the failure through whole. This used to rebuild a bare
+        # `{"ok": False, "error": ...}`, which DISCARDED the `code` the child's
+        # `errors.classify()` had chosen at the raise site — and `ensure_code`
+        # at the server boundary then re-derived one from the message text and
+        # stamped it `code_inferred: True`. Two things were wrong with that.
+        #
+        # It downgraded every guarded failure's provenance from "chosen where it
+        # was raised" to "guessed from prose", which is the exact distinction
+        # errors.py exists to preserve and which check_claims counts.
+        #
+        # And for one code in six it did not round-trip at all. Measured across
+        # the taxonomy: FileNotFoundError classifies as `runtime_unavailable`
+        # (the language is not installed — remedy: install it), while its
+        # message "ghc" matches no hint and falls through to `internal` (remedy:
+        # report a bug). A caller was told to file an issue about a missing
+        # compiler. Wrong in the actionable direction, which is the failure mode
+        # errors.py's own comments call out.
+        # An explicit allowlist, not "everything except unenforced". The
+        # blocklist form was the first fix and a cross-vendor review flagged it:
+        # no current producer in run_guarded returns a `value` on the failure
+        # path, so nothing leaks today, but the shape of the code invited one.
+        # A future `{"ok": False, "value": ...}` — or a child payload shaped by
+        # something other than error_result — would have been forwarded whole
+        # into a tool result. Naming the four fields that belong to the error
+        # contract costs nothing and cannot acquire a fifth by accident.
+        result = {k: outcome[k] for k in _CARRIED_ON_FAILURE if k in outcome}
+        result["ok"] = False
+        result.setdefault("error", "evaluation failed")
     if outcome.get("unenforced"):
         # The platform could not apply the bound. Merged rather than replacing
         # any `unenforced` the tool itself reported.

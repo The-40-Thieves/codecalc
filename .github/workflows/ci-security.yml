@@ -62,6 +62,25 @@ jobs:
           python-version: '3.12'
       - run: python scripts/check_tool_dispatch.py
 
+  contract:
+    # docs/contract/result-v1.schema.json is generated from codecalc/contract.py and is what a
+    # client programs against. A generated document nobody regenerates drifts, and this one drifts
+    # worse than prose: a stale schema makes a strictly-validating client REJECT results that are
+    # correct. This job also re-derives both backends' verdict vocabularies from main.rs and
+    # executor.py, which is the check parity cannot make — check_parity.py diffs the two backends'
+    # KEY sets and is blind to a new verdict value that would be missing from the published enum.
+    # Its own job for the same reason as the one above: a red square should name the invariant.
+    name: published contract matches the code
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      # No `pip install`: this gate is stdlib-only on purpose, so a bare checkout proves the
+      # invariant. If it ever needs a dependency, that is the signal it belongs in the test suite.
+      - run: python scripts/check_contract.py
+
   parity:
     # codecalc keeps the SAME three security-critical constants in two languages: the env allowlist
     # (the CRITICAL-02 fix), RUNTIME_PATH, and the language registry. Nothing links the Rust copy to
