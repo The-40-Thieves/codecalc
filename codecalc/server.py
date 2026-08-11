@@ -31,6 +31,7 @@ from . import (
     __version__,
     complexity,
     contract,
+    doctor,
     errors,
     exact,
     executor,
@@ -929,7 +930,7 @@ def extract_function(code: str, language: str, function_name: str,
 _ALIAS_ENTRIES = {"c++"}
 
 
-def _doctor() -> int:
+def _doctor(as_json: bool = False, deep: bool = False) -> int:
     """Report what this install actually resolved, before a tool call has to.
 
     The gap this fills: everything below is discoverable ONLY by making a tool
@@ -937,6 +938,13 @@ def _doctor() -> int:
     field, the missing runtimes from `list_languages`, the sandbox gaps from
     `unenforced`. An operator wiring up an MCP client has no way to see any of
     it until something has already gone quietly weaker than they expected.
+
+    The report is BUILT in codecalc/doctor.py and only rendered here, so the
+    text a human reads and the JSON a script parses cannot drift apart. The
+    exit code is the report's own `healthy`, which is deliberately narrow: a
+    missing extra or an uninstalled Haskell is a fact about a host, not a
+    fault, and exiting non-zero for either would make this useless as the
+    install check THE-780 wants it to be.
 
     Writes to STDOUT, which is safe here and nowhere else in this file: stdout
     is the MCP transport, so anything printed during a normal run corrupts the
@@ -946,74 +954,84 @@ def _doctor() -> int:
     import shutil
     import sys
 
-    print(f"codecalc {__version__}")
-    print(f"  python           {sys.version.split()[0]} on {sys.platform}")
+    rep = doctor.report(deep=deep)
+
+    if as_json:
+        print(json.dumps(rep, indent=2, sort_keys=True))
+        return 0 if rep["healthy"] else 1
+
+    print(f"codecalc {rep['codecalc_version']}")
+    print(f"  python           {rep['python']['version']} on {rep['python']['platform']}")
     # The result contract is versioned separately from the package on purpose:
     # a package release that changes no field a caller reads should not look
     # like a contract change, and a contract break has to be visible even in a
-    # patch release. Printed here so an operator can check which contract a
-    # deployment serves without making a tool call and reading the field back.
-    print(f"  result contract  {contract.CONTRACT_VERSION} "
+    # patch release. The doctor JSON is covered by that same version and policy
+    # rather than a third number of its own.
+    print(f"  result contract  {rep['contract_version']} "
           f"(schema: docs/contract/result-v1.schema.json)")
 
-    backend = executor.backend()
-    print(f"  execution backend {backend}")
-    if backend == "rust":
-        print(f"    binary         {executor._rust}")
+    print(f"  execution backend {rep['backend']['kind']}")
+    if rep["backend"]["kind"] == "rust":
+        print(f"    binary         {rep['backend']['binary']}")
     else:
         print("    binary         NOT FOUND — running the pure-Python fallback.")
         print("                   Set CODECALC_REQUIRE_NATIVE=1 to make this a")
         print("                   startup failure instead of a weaker sandbox.")
 
-    from . import landlock
-    abi = landlock.abi_version()
-    print(f"  install sandbox   {'Landlock ABI ' + str(abi) if abi else 'unavailable (installs are not confined)'}")
+    sandbox = rep["install_sandbox"]
+    print("  install sandbox   " + (f"Landlock ABI {sandbox['landlock_abi']}"
+                                    if sandbox["confined"] else
+                                    "unavailable (installs are not confined)"))
+
+    # Extras BEFORE runtimes: a caller whose symbolic tools are erroring needs
+    # this line, and it is the one thing `doctor` can tell them that no tool
+    # result will (a tool result names its own extra; only this names them all).
+    for extra in rep["extras"]:
+        if extra["installed"]:
+            print(f"  extra: {extra['name']:9} installed")
+        else:
+            print(f"  extra: {extra['name']:9} MISSING "
+                  f"({', '.join(extra['missing'])}) — {extra['remedy']}")
 
     # Counted the way the README counts, which is the way check_claims.py
     # verifies: `c++` and `cpp` are one language written twice, so a raw
     # len(LANGUAGES) says 32 where every other number in this project says 31.
-    # A doctor command that reported 32 would have introduced a THIRD figure
-    # into a repo that has a gate specifically because these drift.
-    # Extras BEFORE runtimes: a caller whose symbolic tools are erroring needs
-    # this line, and it is the one thing `doctor` can tell them that no tool
-    # result will (a tool result names its own extra; only this names them all).
-    from . import optional
-    for extra, modules in (("symbolic", ("sympy", "z3")),
-                           ("parsing", ("tree_sitter_language_pack",))):
-        present = [m for m in modules if optional.have(m)]
-        if len(present) == len(modules):
-            print(f"  extra: {extra:9} installed")
-        else:
-            missing = [m for m in modules if m not in present]
-            print(f"  extra: {extra:9} MISSING ({', '.join(missing)}) — "
-                  f"pip install 'codecalc[{extra}]'")
+    summary, total = rep["runtime_summary"], len(rep["runtimes"])
+    resolved = total - summary["supported"]
+    print(f"  runtimes          {resolved}/{total} resolved "
+          f"({rep['status_basis']})")
+    for state in ("available", "unhealthy", "supported"):
+        names = sorted(r["name"] for r in rep["runtimes"] if r["status"] == state)
+        if names:
+            label = {"available": "verified", "unhealthy": "BROKEN",
+                     "supported": "missing"}[state]
+            print(f"    {label:14} {', '.join(names)}")
 
-    langs = [l for l in registry.all_languages() if l["name"] not in _ALIAS_ENTRIES]
-    avail = executor.probe()
-    have = [l["name"] for l in langs if avail.get(l["name"], True)]
-    missing = [l["name"] for l in langs if not avail.get(l["name"], True)]
-    print(f"  runtimes          {len(have)}/{len(langs)} available")
-    if missing:
-        print(f"    missing        {', '.join(sorted(missing))}")
+    ws = rep["workspace"]
+    print(f"  workspace         {ws['path']}"
+          f"{'' if ws['writable'] else '  NOT WRITABLE — ' + str(ws['error'])}")
+
+    # Where the shipped skill is, because a skill nobody can find is a skill
+    # nobody installs. It travels inside the wheel, so this path is correct for
+    # a uvx run, a venv, or a checkout without any of them differing.
+    print(f"  skill file        {rep['skill_file'] or '(MISSING)'}")
+    print("                    copy to your client's skills directory to make "
+          "the calling rules apply")
+
+    if rep["remedies"]:
+        print("\n  what to do:")
+        for r in rep["remedies"]:
+            print(f"    - {r}")
 
     # Absolute paths, because the whole point is that it can be pasted. A
     # relative one resolves against the CLIENT's working directory, which is
     # not something the person pasting it controls or can easily predict.
-    # Where the shipped skill is, because a skill nobody can find is a skill
-    # nobody installs. It travels inside the wheel, so this path is correct for
-    # a uvx run, a venv, or a checkout without any of them differing.
-    skill = Path(__file__).resolve().parent / "SKILL.md"
-    print(f"  skill file        {skill}"
-          f"{'' if skill.is_file() else '  (MISSING)'}")
-    print("                    copy to your client's skills directory to make "
-          "the calling rules apply")
-
     exe = shutil.which("codecalc") or sys.executable
     args = [] if shutil.which("codecalc") else ["-m", "codecalc"]
     print("\n  MCP client config (copy into your client's JSON):")
     print(json.dumps({"mcpServers": {"codecalc": {"command": exe, "args": args}}},
                      indent=2))
-    return 0
+    return 0 if rep["healthy"] else 1
 
 
 def main() -> None:
@@ -1029,7 +1047,12 @@ def main() -> None:
     import sys
 
     if len(sys.argv) > 1 and sys.argv[1] in ("doctor", "--check", "--check-install"):
-        raise SystemExit(_doctor())
+        # Flags read from the REST of argv, still without a parser. `--json`
+        # previously did nothing at all: it was accepted, ignored, and the human
+        # text printed anyway — a flag that no-ops is worse than one that does
+        # not exist, because a script wraps it and parses prose forever.
+        rest = sys.argv[2:]
+        raise SystemExit(_doctor(as_json="--json" in rest, deep="--deep" in rest))
     mcp.run(transport="stdio")
 
 

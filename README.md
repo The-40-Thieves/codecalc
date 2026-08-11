@@ -110,10 +110,42 @@ from a tool call later:
 codecalc doctor          # or: python -m codecalc doctor
 ```
 
+**This is the install verification step.** It exits `0` when the install can
+execute — a writable workspace and a resolved backend — and `1` when it cannot,
+so it works unchanged in a Dockerfile, a provisioning script or a CI job. A
+missing optional extra or an uninstalled Haskell does **not** fail it: those are
+facts about the host, not a broken install, and a check that goes red for them
+is one people learn to ignore.
+
 It prints the execution backend and the binary behind it, whether installs are
-confined, how many of the 31 runtimes are present, and a client config block
-with absolute paths filled in. All of that is otherwise discoverable only by
-making a tool call and reading `backend`, `unenforced`, or a failure.
+confined, the status of every one of the 31 runtimes, whether the workspace is
+writable, and a client config block with absolute paths filled in. All of that
+is otherwise discoverable only by making a tool call and reading `backend`,
+`unenforced`, or a failure.
+
+```bash
+codecalc doctor --json   # the same report, for scripts
+codecalc doctor --deep   # actually RUN each runtime, not just resolve it
+```
+
+`--json` emits the report and nothing else, against a published schema
+([`docs/contract/doctor-v1.schema.json`](docs/contract/doctor-v1.schema.json))
+carrying the same `contract_version` and the same policy as a tool result.
+
+Each runtime reports one of four states, and the difference between two of them
+is which measurement was actually taken:
+
+| state | means |
+|---|---|
+| `supported` | codecalc knows the language; nothing for it resolves here |
+| `installed` | its command resolves and is executable — **not run** |
+| `unhealthy` | resolves but cannot run, or was run and failed |
+| `available` | actually executed here and answered — `--deep` only |
+
+`status_basis` says which pass produced them. Without `--deep` nothing is ever
+reported `available`, because nothing was executed, and claiming otherwise for a
+binary that was merely found on `PATH` would be a stronger measurement than was
+taken.
 
 Building the Rust core yourself, or running from a checkout? See "Build the
 Rust core" and "Run the server" below.
@@ -419,7 +451,7 @@ PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py         # every tool over MC
 PYTHONPATH=. .venv/bin/python tests/test_executor_sweep.py  # sandbox regressions
 ```
 
-22 test files and 10 gate scripts, **1181 assertions**. Nothing in the suite
+23 test files and 10 gate scripts, **1181 assertions**. Nothing in the suite
 needs the internet, so none of it is ever skipped for lack of a network.
 
 It **can** skip for lack of a *capability*, and that is correct rather than a

@@ -421,6 +421,134 @@ def build_schema(dialect: str | None = None, schema_id: str | None = None) -> di
 RESULT_SCHEMA = build_schema()
 
 
+def build_doctor_schema(dialect: str | None = None, schema_id: str | None = None) -> dict:
+    """The schema for `codecalc doctor --json` (THE-780).
+
+    Under THIS contract's version and policy rather than a third number of its
+    own. The doctor payload is machine-readable output a client programs
+    against, which is exactly what the policy in docs/contract/README.md is
+    for; a separate `doctor_schema_version` would mean two documents to keep in
+    step, two deprecation windows, and two chances to forget one.
+
+    `runtimes[].status` is a CLOSED enum, so by that policy adding a fifth state
+    is a MAJOR change — the same rule `code` and `verdict` follow, for the same
+    reason: a strictly validating client rejects an unknown member before any
+    application logic can degrade it.
+    """
+    from .doctor import RUNTIME_STATES
+
+    identifiers = {}
+    if dialect:
+        identifiers["$schema"] = dialect
+    if schema_id:
+        identifiers["$id"] = schema_id
+    return {
+        **identifiers,
+        "title": "codecalc doctor report",
+        "description": (
+            f"`codecalc doctor --json`, version {CONTRACT_VERSION} — the same "
+            "contract version and policy as the execution result. Generated "
+            "from codecalc/contract.py by scripts/check_contract.py."
+        ),
+        "type": "object",
+        "required": ["contract_version", "codecalc_version", "healthy", "python",
+                     "backend", "install_sandbox", "extras", "status_basis",
+                     "runtimes", "runtime_summary", "workspace", "remedies"],
+        "properties": {
+            "contract_version": {"type": "string", "pattern": r"^\d+\.\d+\.\d+$"},
+            "codecalc_version": {"type": "string"},
+            "healthy": {
+                "type": "boolean",
+                "description": (
+                    "Deliberately NARROW, and the process exit code follows it: "
+                    "true when a workspace is writable and a backend resolved. A "
+                    "missing optional extra or an uninstalled runtime is a fact "
+                    "about the host, not a fault, and must not fail an install "
+                    "check."
+                ),
+            },
+            "python": {
+                "type": "object", "required": ["version", "platform"],
+                "properties": {"version": {"type": "string"},
+                               "platform": {"type": "string"}},
+            },
+            "backend": {
+                "type": "object", "required": ["kind", "binary", "detail"],
+                "properties": {
+                    "kind": {"type": "string", "enum": list(BACKENDS)},
+                    "binary": {"type": ["string", "null"]},
+                    "detail": {"type": ["string", "null"]},
+                },
+            },
+            "install_sandbox": {
+                "type": "object", "required": ["landlock_abi", "confined", "detail"],
+                "properties": {"landlock_abi": {"type": ["integer", "null"]},
+                               "confined": {"type": "boolean"},
+                               "detail": {"type": ["string", "null"]}},
+            },
+            "extras": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["name", "installed", "missing", "remedy"],
+                    "properties": {"name": {"type": "string"},
+                                   "installed": {"type": "boolean"},
+                                   "missing": {"type": "array",
+                                               "items": {"type": "string"}},
+                                   "remedy": {"type": ["string", "null"]}},
+                },
+            },
+            "status_basis": {
+                "type": "string", "enum": ["resolved", "executed"],
+                "description": (
+                    "Which measurement produced the runtime statuses. "
+                    "'resolved' means the command was found on PATH and NOT "
+                    "run, so no runtime can be 'available'. 'executed' means "
+                    "--deep ran them. Without this a reader cannot tell a host "
+                    "with nothing installed from a report that never looked."
+                ),
+            },
+            "runtimes": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["name", "command", "status", "path"],
+                    "properties": {
+                        "name": {"type": "string"},
+                        "command": {"type": "string"},
+                        "status": {
+                            "type": "string", "enum": list(RUNTIME_STATES),
+                            "description": (
+                                "supported = codecalc knows it, nothing resolves "
+                                "here · installed = resolves and is executable, "
+                                "NOT run · unhealthy = resolves but cannot run, "
+                                "or was run and failed · available = actually "
+                                "executed here and answered (--deep only)"
+                            ),
+                        },
+                        "path": {"type": ["string", "null"]},
+                        "detail": {"type": "string"},
+                    },
+                },
+            },
+            "runtime_summary": {
+                "type": "object",
+                "required": list(RUNTIME_STATES),
+                "properties": {s: {"type": "integer", "minimum": 0}
+                               for s in RUNTIME_STATES},
+            },
+            "workspace": {
+                "type": "object", "required": ["path", "writable", "error"],
+                "properties": {"path": {"type": "string"},
+                               "writable": {"type": "boolean"},
+                               "error": {"type": ["string", "null"]}},
+            },
+            "skill_file": {"type": ["string", "null"]},
+            "remedies": {"type": "array", "items": {"type": "string"}},
+        },
+    }
+
+
 def stamp(result: dict) -> dict:
     """Attach `contract_version` to a result. Mutates and returns it.
 

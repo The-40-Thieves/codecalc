@@ -61,6 +61,7 @@ sys.path.insert(0, str(REPO))
 from codecalc import contract, errors  # noqa: E402  (after sys.path)
 
 SCHEMA_PATH = REPO / "docs" / "contract" / "result-v1.schema.json"
+DOCTOR_SCHEMA_PATH = REPO / "docs" / "contract" / "doctor-v1.schema.json"
 DOCS_PATH = REPO / "docs" / "contract" / "README.md"
 RUST_SRC = REPO / "executor" / "src" / "main.rs"
 PY_SRC = REPO / "codecalc" / "executor.py"
@@ -82,6 +83,10 @@ SCHEMA_ID = (
     "https://raw.githubusercontent.com/The-40-Thieves/codecalc/main/"
     "docs/contract/result-v1.schema.json"
 )
+DOCTOR_SCHEMA_ID = (
+    "https://raw.githubusercontent.com/The-40-Thieves/codecalc/main/"
+    "docs/contract/doctor-v1.schema.json"
+)
 
 failures: list[str] = []
 
@@ -100,11 +105,30 @@ generated = json.dumps(
     contract.build_schema(dialect=JSON_SCHEMA_DIALECT, schema_id=SCHEMA_ID),
     indent=2, sort_keys=False) + "\n"
 
+doctor_generated = json.dumps(
+    contract.build_doctor_schema(dialect=JSON_SCHEMA_DIALECT,
+                                 schema_id=DOCTOR_SCHEMA_ID),
+    indent=2, sort_keys=False) + "\n"
+
 if "--write" in sys.argv:
     SCHEMA_PATH.parent.mkdir(parents=True, exist_ok=True)
     SCHEMA_PATH.write_text(generated, encoding="utf-8")
+    DOCTOR_SCHEMA_PATH.write_text(doctor_generated, encoding="utf-8")
     print(f"wrote {SCHEMA_PATH.relative_to(REPO)}")
+    print(f"wrote {DOCTOR_SCHEMA_PATH.relative_to(REPO)}")
     sys.exit(0)
+
+# The doctor schema drifts the same way and for the same reason: generated, and
+# published for a client to program against. THE-780 asked for "a documented,
+# versioned schema"; it is versioned by THIS contract rather than a third number.
+if not DOCTOR_SCHEMA_PATH.exists():
+    fail(f"{DOCTOR_SCHEMA_PATH.relative_to(REPO)} does not exist — run "
+         "`python scripts/check_contract.py --write` and commit it")
+elif DOCTOR_SCHEMA_PATH.read_text(encoding="utf-8") != doctor_generated:
+    fail(f"{DOCTOR_SCHEMA_PATH.relative_to(REPO)} is stale — regenerate with "
+         "`python scripts/check_contract.py --write`")
+else:
+    ok("published doctor schema matches contract.py")
 
 published: dict | None = None
 

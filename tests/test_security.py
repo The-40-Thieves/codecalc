@@ -317,6 +317,28 @@ print("SPAWNED", len(kids), flush=True)
 for k in kids:
     k.kill()
 """
+# THE-775: this probe is the ONLY thing covering the process limit on Windows.
+#
+# The fork probe below is guarded by `_POSIX` and skips there, correctly. So if
+# THIS one is ever skipped on Windows too, the platform has no process-limit
+# coverage at all and the suite still exits 0 — a skip is not a failure, and
+# "unverified" and "verified" print differently but exit the same.
+#
+# Measured on windows-latest at the time of writing, from that job's own log:
+#
+#   PASS process limit bounds SPAWNED children too (portable probe)
+#        -> 23 of 400 attempted (limit 24, ambient None -> None)
+#
+# which is the job-scoped flat ceiling the branching above says Windows takes.
+# That was the answer to "does it run"; this assertion is what keeps the answer
+# true. macOS is the one platform where skipping is correct — uid-wide
+# RLIMIT_NPROC with no measurable ambient count, covered by the fork probe.
+_MUST_NOT_SKIP = os.name == "nt" or sys.platform.startswith("linux")
+check("the portable probe is not skipped where it is the only coverage",
+      not (_MUST_NOT_SKIP and _spawn_limit is None),
+      f"-> platform={sys.platform} job_scoped={_JOB_SCOPED} "
+      f"ambient={_ambient} limit={_spawn_limit}")
+
 _exe = executor._rust
 if _exe and _spawn_limit is None:
     print(f"SKIP portable process-limit probe — {sys.platform} has a uid-wide "

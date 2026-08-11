@@ -1,0 +1,243 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/The-40-Thieves/codecalc/main/docs/contract/doctor-v1.schema.json",
+  "title": "codecalc doctor report",
+  "description": "`codecalc doctor --json`, version 1.0.0 \u2014 the same contract version and policy as the execution result. Generated from codecalc/contract.py by scripts/check_contract.py.",
+  "type": "object",
+  "required": [
+    "contract_version",
+    "codecalc_version",
+    "healthy",
+    "python",
+    "backend",
+    "install_sandbox",
+    "extras",
+    "status_basis",
+    "runtimes",
+    "runtime_summary",
+    "workspace",
+    "remedies"
+  ],
+  "properties": {
+    "contract_version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "codecalc_version": {
+      "type": "string"
+    },
+    "healthy": {
+      "type": "boolean",
+      "description": "Deliberately NARROW, and the process exit code follows it: true when a workspace is writable and a backend resolved. A missing optional extra or an uninstalled runtime is a fact about the host, not a fault, and must not fail an install check."
+    },
+    "python": {
+      "type": "object",
+      "required": [
+        "version",
+        "platform"
+      ],
+      "properties": {
+        "version": {
+          "type": "string"
+        },
+        "platform": {
+          "type": "string"
+        }
+      }
+    },
+    "backend": {
+      "type": "object",
+      "required": [
+        "kind",
+        "binary",
+        "detail"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "rust",
+            "python"
+          ]
+        },
+        "binary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "install_sandbox": {
+      "type": "object",
+      "required": [
+        "landlock_abi",
+        "confined",
+        "detail"
+      ],
+      "properties": {
+        "landlock_abi": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "confined": {
+          "type": "boolean"
+        },
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "extras": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "installed",
+          "missing",
+          "remedy"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "installed": {
+            "type": "boolean"
+          },
+          "missing": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "remedy": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      }
+    },
+    "status_basis": {
+      "type": "string",
+      "enum": [
+        "resolved",
+        "executed"
+      ],
+      "description": "Which measurement produced the runtime statuses. 'resolved' means the command was found on PATH and NOT run, so no runtime can be 'available'. 'executed' means --deep ran them. Without this a reader cannot tell a host with nothing installed from a report that never looked."
+    },
+    "runtimes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "command",
+          "status",
+          "path"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "command": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "supported",
+              "installed",
+              "unhealthy",
+              "available"
+            ],
+            "description": "supported = codecalc knows it, nothing resolves here \u00b7 installed = resolves and is executable, NOT run \u00b7 unhealthy = resolves but cannot run, or was run and failed \u00b7 available = actually executed here and answered (--deep only)"
+          },
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "detail": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "runtime_summary": {
+      "type": "object",
+      "required": [
+        "supported",
+        "installed",
+        "unhealthy",
+        "available"
+      ],
+      "properties": {
+        "supported": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "installed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unhealthy": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "available": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "workspace": {
+      "type": "object",
+      "required": [
+        "path",
+        "writable",
+        "error"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "writable": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "skill_file": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "remedies": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

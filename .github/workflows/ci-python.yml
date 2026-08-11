@@ -84,6 +84,31 @@ jobs:
         # The cheapest possible Windows regression test. Before the platform
         # split this raised ModuleNotFoundError: no module named 'resource'.
         run: uv run --no-sync python -c "import codecalc, codecalc.executor, codecalc.sessions, codecalc.server; print('import ok on', __import__('sys').platform)"
+      # THE-780: doctor is the documented install-verification step, so it has to
+      # work on every OS a user installs on — and its exit code is load-bearing
+      # (0 = can execute, 1 = cannot), which means a Dockerfile or provisioning
+      # script depends on it being right here. This job has no built binary and
+      # a partial set of runtimes, which is precisely the degraded shape doctor
+      # exists to describe: it must still exit 0, because a fallback backend and
+      # missing runtimes are facts about a host, not a broken install.
+      - name: doctor runs, and its exit code means what it says
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --no-sync python -m codecalc doctor
+          # --json must emit JSON and nothing else; a diagnostic whose
+          # machine-readable mode also prints a banner cannot be piped.
+          uv run --no-sync python -m codecalc doctor --json > doctor.json
+          uv run --no-sync python -c "
+          import json, sys
+          d = json.load(open('doctor.json'))
+          print('backend:', d['backend']['kind'], '| basis:', d['status_basis'],
+                '| runtimes:', d['runtime_summary'])
+          assert d['healthy'] is True, d
+          assert d['status_basis'] == 'resolved', d['status_basis']
+          assert not any(r['status'] == 'available' for r in d['runtimes']), \
+              'nothing was executed, so nothing may claim to be available'
+          "
       - name: calc parity
         shell: bash
         run: uv run --no-sync python tests/test_calc_port.py
@@ -113,6 +138,13 @@ jobs:
       - name: result contract (schema validity + product conformance)
         shell: bash
         run: uv run --no-sync python tests/test_contract.py
+      # doctor in the environments it exists to diagnose: no native executor, no
+      # runtimes, a resolved-but-unrunnable command, an unwritable workspace. A
+      # diagnostic is only worth having if it is right about a BROKEN host, and a
+      # green runner exercises none of those.
+      - name: doctor diagnostics (degraded environments)
+        shell: bash
+        run: uv run --no-sync python tests/test_doctor.py
       # tree-sitter vs the regex heuristic it replaced. Pure: parsing only, no
       # sandbox, so it runs on all three OSes — which also proves the
       # pre-compiled grammar wheels resolve on each of them.

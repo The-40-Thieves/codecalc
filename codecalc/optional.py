@@ -22,6 +22,19 @@ there rather than in a traceback nobody sees.
 from __future__ import annotations
 
 import importlib
+
+# `import importlib` does NOT bind `importlib.util` — submodules are only
+# attributes once something imports them. `have()` below calls
+# `importlib.util.find_spec`, so without this line it raises AttributeError in
+# any process where nothing else happened to import that submodule first.
+#
+# It never surfaced because the paths that call `have()` all ran after
+# `codecalc.server` had imported the MCP SDK, which loads importlib.util on the
+# way past. Found by calling `have()` from a new module whose import graph did
+# not: `python -c "from codecalc import optional; optional.have('sympy')"`
+# raised, while the identical call one line after `import importlib.util`
+# returned True. A latent defect one import away from being reachable.
+import importlib.util
 from types import ModuleType
 
 #: extra -> (pip target, what it unlocks). The second half is in the error

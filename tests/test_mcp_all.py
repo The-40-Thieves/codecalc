@@ -256,6 +256,48 @@ async def main():
               f"-> {[(res.get('language'), res.get('ok')) for res in results]}"
               if all_ok else f"-> {_diag(results)}")
 
+        # THE-802, the guard half. The diagnostic above makes an occurrence
+        # readable; this makes it VISIBLE TO A CALLER, which is the part that
+        # matters outside CI. A caller reads `fastest` and a table of outputs;
+        # nothing pointed at the row that printed nothing while its siblings
+        # printed fine, and a node-only snippet has no sibling to disagree with
+        # it at all.
+        check("compare_execution always reports a discrepancies list",
+              isinstance(r.get("discrepancies"), list),
+              f"-> {type(r.get('discrepancies')).__name__}")
+        # On a healthy runner every language prints, so the list is empty. If
+        # THE-802 fires here, this is the assertion that names it rather than
+        # leaving it to "every language produced 42".
+        check("...and it is empty when every language printed",
+              not r.get("discrepancies") if produced_42 else True,
+              f"-> {r.get('discrepancies')}")
+
+        # The guard itself, driven rather than waited for: one language that
+        # exits 0 and prints nothing beside one that prints. This is the shape
+        # #42 produces, and it must be flagged on every platform, not only the
+        # one where the flake happens to occur.
+        silent = dict(snippets)
+        silent["python3"] = "pass"          # exits 0, prints nothing
+        r2 = data(await client.call_tool("compare_execution", {"snippets": silent}))
+        flagged = {d.get("language") for d in (r2.get("discrepancies") or [])}
+        check("a silent run beside a printing one IS flagged",
+              "python3" in flagged, f"-> flagged={sorted(flagged)}")
+        py_row = next((d for d in (r2.get("discrepancies") or [])
+                       if d.get("language") == "python3"), {})
+        check("...and the flag says it reported SUCCESS with no output",
+              py_row.get("ok") is True and "lost" in (py_row.get("detail") or ""),
+              f"-> ok={py_row.get('ok')} detail={(py_row.get('detail') or '')[:60]!r}")
+
+        # NEGATIVE CONTROL. Every language silent means there is no sibling to
+        # disagree with, so there is no discrepancy to claim — only a caller who
+        # asked for nothing to be printed. A guard that fired here would cry
+        # wolf on every legitimate side-effect-only comparison.
+        r3 = data(await client.call_tool(
+            "compare_execution", {"snippets": {k: "pass" if k == "python3" else v
+                                               for k, v in {"python3": "pass"}.items()}}))
+        check("CONTROL: a single silent language is not a discrepancy",
+              not r3.get("discrepancies"), f"-> {r3.get('discrepancies')}")
+
 
 asyncio.run(main())
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else "\n=== EVERY TOOL RETURNED THE RIGHT ANSWER ===")
