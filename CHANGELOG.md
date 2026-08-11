@@ -1,0 +1,114 @@
+# Changelog
+
+All notable changes to this project are documented here, in
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
+
+## Two version numbers, on purpose
+
+This project versions **two** things, and they are not the same number.
+
+| What | Where | Current |
+|---|---|---|
+| The **package** — the tool surface, the CLI, the Python API | `pyproject.toml`, `executor/Cargo.toml`, this file | `0.1.0` |
+| The **result contract** — the shape every tool result comes back in | `docs/contract/README.md`, `contract_version` on every result | `1.0.0` |
+
+The contract is at `1.0.0` and the package is at `0.1.0` because those claims are
+genuinely different. The result contract has a published JSON Schema, a
+documented MAJOR/MINOR/PATCH policy, a twelve-month deprecation window, and a
+gate that fails if the schema drifts from the code — it is stable and says so.
+The package's tool surface is not: the roadmap restructures how requests are
+described and how execution backends plug in, and calling it `1.0.0` today would
+promise a stability nobody should rely on.
+
+[Semver's own guidance](https://packaging.python.org/en/latest/discussions/versioning/)
+is that reaching `1.0.0` means accepting MAJOR/MINOR/PATCH semantics, not
+"enough features have landed". `0.x` here is a statement about the tool surface
+only. Treat `0.y.z` as if it were `1.y.z` anyway: `y` bumps for breaking changes,
+`z` for compatible ones.
+
+If you pin one thing, pin `contract_version` — it is the number with a policy
+behind it.
+
+---
+
+## [0.1.0] — unreleased
+
+First public release. The tag will be `v0.1.0`; nothing has been published to
+PyPI or crates.io before it, so there is no upgrade path to describe — only what
+the thing is.
+
+### Added
+
+- **47 MCP tools across 31 languages.** Code execution, symbolic mathematics
+  (SymPy), logic and SMT solving (Z3), exact decimal arithmetic, unit
+  conversion, complexity analysis and benchmarking.
+- **A Rust sandbox executor** (`codecalc-exec`) with rlimits, wall-clock and CPU
+  ceilings, process-group kill, an output cap applied at the source, and an
+  `LD_PRELOAD` shim that blocks network syscalls when `no_net` is requested.
+- **A pure-Python fallback** for hosts without the built binary. It enforces
+  strictly less and reports exactly what it could not apply in `unenforced`,
+  rather than presenting a weaker sandbox as the same one.
+- **A published result contract**, version `1.0.0`. Every result carries
+  `contract_version`; the JSON Schema is at `docs/contract/result-v1.schema.json`
+  (JSON Schema 2020-12, the dialect MCP `2026-07-28` defaults `outputSchema` to)
+  and the policy is in `docs/contract/README.md`.
+- **Eight stable error codes** with an actionable `remedy` on every failure —
+  `validation`, `runtime_unavailable`, `timeout`, `resource_exhausted`,
+  `permission_denied`, `dependency_missing`, `worker_failure`, `internal`.
+  Branch on `code`; the prose in `error` is free to improve and is not a
+  contract.
+- **Byte counts behind truncation.** `stdout_bytes` / `stderr_bytes` report what
+  the program produced before the response cap, so a caller can size a retry
+  instead of guessing. Exact when `output_truncated` is false; a lower bound
+  when it is true, because the two backends enforce the cap differently.
+- **`codecalc doctor`** (also `python -m codecalc doctor`) — reports the
+  resolved backend, the binary path, the install sandbox, installed extras,
+  runtime availability and the contract version, before a tool call has to.
+- **Verification gates instead of generation.** `verify_translation` and
+  `verify_optimization` take a candidate *the caller wrote* and prove or
+  disprove it by execution. codecalc runs and measures; it does not generate.
+- **Warm sessions** with a persistent worker, workspace files and artifacts.
+  Session results declare what a long-lived worker cannot enforce that a
+  one-shot sandbox can.
+- **Platform wheels carrying the executor**, plus standalone archives and a
+  `SHA256SUMS` file for anyone not using pip.
+- **`CODECALC_REQUIRE_NATIVE=1`** — refuse to start on the weaker fallback
+  rather than silently downgrading.
+- **Optional extras** so a minimal install stays small: `[symbolic]`,
+  `[parsing]`. `codecalc doctor` names the exact command for anything missing.
+- **A skill file** (`codecalc/SKILL.md`) shipped inside the wheel, describing
+  when to call these tools and how to report their results.
+
+### Security
+
+- Apache-2.0 licensed. A pre-publication security audit ships in the repository
+  as `AUDIT.md` — 2 critical, 3 high, 3 medium, every one confirmed with a real
+  exploit attempt and fixed before the first release.
+- **No `eval`, and `exec` in exactly one file**, gated by
+  `scripts/check_no_eval.py` on every push.
+- **Executed code sees an allowlisted environment only.** API keys and tokens in
+  the host environment are never inherited.
+- **Package installation is confined with Landlock** where the kernel provides
+  it, and installer hooks are disabled by default.
+- **Offline by construction.** The package contains no LLM client, no
+  documentation fetch and no socket-capable import; `tests/test_offline.py`
+  asserts this per module and cannot skip. Executed code still reaches the
+  network unless `no_net` is both requested and enforceable — which the result
+  says, per call.
+
+### Known limitations
+
+- `no_net` needs the native executor's shim. The pure-Python fallback cannot
+  apply it and says so in `unenforced`.
+- `peak_memory_kb` is `null` on the fallback: `ru_maxrss` is a process-wide high
+  water mark and cannot be attributed to one run. `null` means not measured,
+  never zero.
+- The `MLE` verdict is native-only. The fallback reports `RTE` for an
+  out-of-memory kill rather than guessing at a ceiling it did not measure.
+- Stateful sessions run in a plain subprocess, not under the Rust executor.
+  Every session result lists the guarantees that therefore do not apply.
+- A known intermittent fault on Windows: `node` can return empty stdout with
+  `ok: false` through the sandbox. Tracked, with a dated reproduction, at
+  [#42](https://github.com/The-40-Thieves/codecalc/issues/42).
+
+[0.1.0]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.1.0

@@ -75,6 +75,27 @@ cargo build --release
 
 `check_claims.py` compares the tool count, language count, test-file count, assertion count, licence declarations, the env allowlist described in `AUDIT.md`, its suite snapshot, and the GitHub repository description against the code. Adding a tool or a test file therefore means updating README.md in the same commit. This is not busywork: the repository once shipped README, AUDIT.md, and the registry claiming 31, 33, and 32 languages simultaneously, all in one reviewed commit.
 
+## Changelog entries
+
+A change a **caller can observe** needs a line in `CHANGELOG.md` in the same PR: a
+new or removed tool, a changed result shape, a new error code, a changed default,
+a new environment variable. Internal refactors, test-only work and comment fixes
+do not.
+
+Semver says *that* something changed. It never says *what*, and a version number
+with no entry beside it leaves an integrator diffing tags to find out.
+
+Two version numbers exist here and they are not interchangeable — the package
+version in `pyproject.toml` / `executor/Cargo.toml`, and the **result contract**
+version in `codecalc/contract.py`. Changing a result shape means the contract's
+policy applies (`docs/contract/README.md`), which is stricter than the package's:
+adding a member to the `code` or `verdict` enum is a MAJOR contract change,
+because a strictly validating client rejects an unknown member before any
+application logic runs.
+
+`check_version.py` gates that the two manifests and the newest changelog heading
+all agree, and compares the git tag as well when running on one.
+
 ## Adding a language or a tool
 
 - Languages live in `codecalc/registry.py` and must exist in **both** backends. `check_parity.py` will tell you if you missed one.
