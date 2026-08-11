@@ -157,8 +157,9 @@ else:
     # Count `check(` call sites as the floor. An exact runtime count would mean
     # running the whole suite from a lint gate, which is the wrong place for it;
     # this catches the case that actually happened — the number left far behind.
-    sites = sum(len(re.findall(r"^\s*check\(", f.read_text(encoding="utf-8"), re.M))
-                for f in test_files)
+    per_file = {f.name: len(re.findall(r"^\s*check\(", f.read_text(encoding="utf-8"), re.M))
+                for f in test_files}
+    sites = sum(per_file.values())
     claimed = claimed_asserts[0]
     if sites == 0:
         fail("found no check() call sites — the extractor is broken")
@@ -166,7 +167,55 @@ else:
         fail(f"README claims {claimed} assertions but tests/ has {sites} check() sites; "
              f"the number has drifted far enough to be wrong")
     else:
-        print(f"ok   assertions: README claims {claimed}, {sites} check() sites back it")
+        print(f"ok   assertions: README claims {claimed}, {sites} check() sites make that "
+              f"plausible (a band, not a measurement — scripts/count_assertions.py measures)")
+
+    # PER-SUITE FLOOR. The band above is a statement about the TOTAL, so a suite
+    # whose assertions are all deleted disappears into it: 623 sites and 624 both
+    # sit comfortably inside it. That is not hypothetical here — three suites once
+    # shipped printing output and exiting 0 while asserting nothing at all (PR
+    # #13), and a total-shaped check could not have caught them, because a suite
+    # that asserts nothing subtracts from a number that was never measured.
+    #
+    # This is the part of THE-776 that can run on a bare checkout. The measured
+    # total cannot: no CI job runs all 21 suites (ci-python splits them across
+    # `tests` and `sandbox + security`), and manufacturing one by teeing each step
+    # would silently disable them, since GitHub's default shell is `bash -e` and
+    # not `bash -o pipefail`. scripts/count_assertions.py does the measuring, and
+    # says so.
+    # Two suites legitimately assert without the check() helper: they print a
+    # PASS/FAIL line per language and exit nonzero themselves. Named explicitly
+    # rather than detected, so widening this is a reviewable diff — the same
+    # shape as check_no_eval.py's EXEC_ALLOWED.
+    #
+    # "check() sites OR a nonzero exit" was tried first and is WRONG, because
+    # nearly every suite ends `if FAILS: sys.exit(1)` and FAILS is only appended
+    # by check(). Strip a suite's assertions and that exit survives, unable to
+    # fire — a file that looks like it can fail and cannot. Verified by deleting
+    # every check() from test_error_codes.py: the OR form passed it.
+    HANDROLLED = {"test_smoke.py", "test_hybrid.py"}
+    CAN_FAIL = re.compile(r"sys\.exit\(\s*[1-9]|raise\s+SystemExit\(\s*[1-9]")
+
+    missing_allowed = sorted(HANDROLLED - {f.name for f in test_files})
+    if missing_allowed:
+        fail(f"the hand-rolled allowlist names {', '.join(missing_allowed)}, which no longer "
+             f"exist(s) under tests/. An allowlist entry for a missing file silently widens "
+             f"the policy.")
+
+    silent = []
+    for f in test_files:
+        if f.name in HANDROLLED:
+            if not CAN_FAIL.search(f.read_text(encoding="utf-8")):
+                silent.append(f"{f.name} (hand-rolled, but has no nonzero exit)")
+        elif per_file[f.name] == 0:
+            silent.append(f"{f.name} (no check() sites)")
+    if silent:
+        fail(f"{len(silent)} test file(s) can never fail the build: {', '.join(sorted(silent))}. "
+             f"Every assertion in them could go red and the suite would still report success — "
+             f"the shape PR #13 removed from three other suites.")
+    else:
+        print(f"ok   all {len(per_file)} test files can fail the build "
+              f"({len(HANDROLLED)} hand-rolled, checked for a nonzero exit instead)")
 
 # ── 5. env allowlist size ───────────────────────────────────────────────────
 AUDIT = (REPO / "AUDIT.md").read_text(encoding="utf-8")
