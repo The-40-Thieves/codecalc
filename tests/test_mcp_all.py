@@ -19,6 +19,7 @@ that pins a duration is a test that fails on a busy machine for a reason that
 is not a defect — and one that pins nothing is what this file used to be.
 """
 
+import ast
 import asyncio
 import sys
 from pathlib import Path
@@ -42,14 +43,35 @@ def check(name: str, cond: bool, detail: str = "") -> None:
         FAILS.append(name)
 
 
-def declared_tool_count() -> int:
-    """Tools declared in server.py, counted the same way ci-python.yml does.
+def declared_tool_names() -> list[str]:
+    """Tool NAMES declared in server.py, the same way scripts/check_tool_names.py reads them.
 
-    Derived rather than hardcoded so this tracks scripts/check_claims.py instead
-    of becoming a third number to keep in sync.
+    Derived rather than hardcoded so this tracks the gate instead of becoming a
+    third number to keep in sync.
+
+    Names, not a count. This used to return `sum(1 for line in src ... )` and the
+    assertion below compared it to `len(names)`, which proves the same NUMBER of
+    tools arrived and never that they are the same tools — it passes when one is
+    lost and another gained. THE-811.
+
+    A list rather than a set, because two decorators declaring the same name is
+    the one silent registration path and a set would hide it.
     """
     src = (REPO_ROOT / "codecalc" / "server.py").read_text(encoding="utf-8")
-    return sum(1 for line in src.splitlines() if line.startswith("@mcp.tool"))
+    tree = ast.parse(src)
+    found = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for dec in node.decorator_list:
+            if isinstance(dec, ast.Call) and isinstance(dec.func, ast.Attribute) \
+                    and dec.func.attr == "tool":
+                name = node.name
+                for kw in dec.keywords:
+                    if kw.arg == "name" and isinstance(kw.value, ast.Constant):
+                        name = str(kw.value.value)
+                found.append(name)
+    return found
 
 
 async def main():
@@ -60,11 +82,26 @@ async def main():
         # to assert on and failed the build, which is the behaviour it was
         # written for. Kept, and the assertion it protects is now made here too.
         print(f"tools ({len(names)}): {names}")
-        declared = declared_tool_count()
+        # Sets, not counts, and the reason named correctly. The old detail said a
+        # tool the SDK cannot schematise "is dropped at registration, silently".
+        # It is not: Tool.from_function RAISES, so such a tool fails loudly at
+        # import. The silent path is a DUPLICATE NAME, which add_tool discards
+        # after logging a warning nothing reads. THE-810.
+        declared = declared_tool_names()
+        dupes = sorted({n for n in declared if declared.count(n) > 1})
+        check("no tool name is declared twice in server.py", not dupes,
+              f"-> {dupes}; add_tool keeps the first registration and discards the rest, "
+              f"so the served surface loses a tool while the decorator count does not")
+        # Unique declared names, deliberately: a duplicate collapses in a set, so
+        # this comparison cannot see one and must not appear to. Printing the raw
+        # 48-vs-47 here made a PASSING line read as a contradiction. Duplicates
+        # are the assertion above; this one owns identity.
+        missing, extra = sorted(set(declared) - set(names)), sorted(set(names) - set(declared))
         check("every tool declared in server.py reaches the client",
-              len(names) == declared,
-              f"-> {declared} declared, {len(names)} served; a tool whose type hints "
-              f"the SDK cannot turn into a schema is dropped at registration, silently")
+              not missing and not extra,
+              f"-> {len(set(declared))} unique declared, {len(names)} served; "
+              f"declared but never served: {missing or 'none'}; "
+              f"served but not declared: {extra or 'none'}")
 
         # ── list_languages ────────────────────────────────────────────────
         langs = data(await client.call_tool("list_languages", {}))
