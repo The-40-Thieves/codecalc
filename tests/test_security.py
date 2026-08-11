@@ -45,6 +45,70 @@ marker = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN", "SECRET_SHOULD_NOT_LEAK"
 r = executor.execute("python3", "import os; print('LEAK' if os.environ.get('GITHUB_PERSONAL_ACCESS_TOKEN') else 'CLEAN')")
 check("executed code sees NO host secrets", "CLEAN" in r.get("stdout", ""), f"-> {r.get('stdout','')[:40]!r}")
 
+# 4b. the allowlist has to survive the FILTER, not merely be declared (THE-802)
+#
+# `os.environ` UPPER-CASES every key on Windows — CPython's os.py does
+# `data[encodekey(key)] = value` with `encodekey = key.upper()` — so a
+# membership test against a mixed-case entry never matches there and the
+# variable is silently dropped from the child's environment.
+#
+# Measured against the real list, exactly ONE name was affected: `windir`. It is
+# one of the two the allowlist's own comment says were added because "node
+# returned empty output with ok=false through the sandbox on Windows while
+# probing as available". `SystemRoot` survived only because `SYSTEMROOT` happens
+# to be listed too. So the fix that made node work on Windows was half-applied
+# on this backend, while the Rust one always passed both — `std::env::var` is
+# case-insensitive there because the OS is.
+#
+# scripts/check_parity.py compares the two DECLARED lists and they are
+# identical, which is why it could not see this: a declaration is not a
+# behaviour. Asserted here against the real filter instead, with the Windows
+# casing simulated so the property holds on every runner rather than only the
+# one where it bites.
+_win_cased = {
+    "SystemRoot": r"C:\Windows", "windir": r"C:\Windows",
+    "ComSpec": r"C:\Windows\system32\cmd.exe", "PATHEXT": ".COM;.EXE",
+    "TEMP": r"C:\Temp", "USERPROFILE": r"C:\Users\x", "PATH": r"C:\Windows",
+}
+_as_python_sees = {k.upper(): v for k, v in _win_cased.items()}   # os.environ on nt
+_kept = {k for k in _as_python_sees if k.upper() in {n.upper() for n in executor._ENV_ALLOWLIST}}
+_dropped = sorted(set(_as_python_sees) - _kept)
+check("every allowlist name survives Windows key normalisation",
+      not _dropped,
+      f"-> dropped {_dropped}; os.environ upper-cases keys on nt, so a "
+      f"mixed-case entry is unreachable there")
+
+# And the filter itself must do it, not just the list. Run the REAL `_env()`
+# against a Windows-cased environment rather than re-deriving the rule here —
+# re-deriving it is how the first version of this check compared the list to
+# itself and passed whatever the code did.
+class _FakeOS:
+    """`os` with a substituted `environ`; everything else falls through.
+
+    Swapping the module reference rather than assigning to `os.environ`, which
+    does not clear the real environment and which ruff flags (B003) for exactly
+    that reason.
+    """
+
+    def __init__(self, environ):
+        self.environ = environ
+
+    def __getattr__(self, name):
+        return getattr(os, name)
+
+
+_saved_os = executor.os
+_saved_is_windows = executor.IS_WINDOWS
+try:
+    executor.os = _FakeOS(_as_python_sees)   # what Python would hand us on nt
+    executor.IS_WINDOWS = True
+    _passed = executor._env()
+finally:
+    executor.os = _saved_os
+    executor.IS_WINDOWS = _saved_is_windows
+check("_env() passes windir through on Windows",
+      "WINDIR" in _passed, f"-> kept {sorted(_passed)}")
+
 # 5. env allowlist still lets runtimes work (PATH + a home directory present)
 #
 # This asserted os.environ['HOME'] on every platform, which Windows does not

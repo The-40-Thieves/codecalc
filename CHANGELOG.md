@@ -97,6 +97,16 @@ the thing is.
 
 ### Security
 
+- **The Python fallback dropped `windir` on Windows.** `os.environ` upper-cases
+  every key there, so the mixed-case allowlist entry never matched and the
+  variable was filtered out of the child's environment — while the native
+  executor passed it, because `std::env::var` is case-insensitive on Windows.
+  `windir` is one of the two variables added because "node returned empty output
+  with ok=false through the sandbox on Windows", so the fix that made node work
+  there was only half-applied. Matching is now case-insensitive on Windows only;
+  POSIX environment variables are genuinely case-sensitive and widening the
+  allowlist there would weaken the boundary it exists to be.
+
 - Apache-2.0 licensed. A pre-publication security audit ships in the repository
   as `AUDIT.md` — 2 critical, 3 high, 3 medium, every one confirmed with a real
   exploit attempt and fixed before the first release.
