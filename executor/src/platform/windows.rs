@@ -20,15 +20,16 @@ use std::process::{Child, Command};
 
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
 use windows_sys::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
-    JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    JOB_OBJECT_LIMIT_PROCESS_MEMORY, JOB_OBJECT_LIMIT_PROCESS_TIME,
+    AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob,
+    JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_JOB_MEMORY,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_PROCESS_MEMORY,
+    JOB_OBJECT_LIMIT_PROCESS_TIME, JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK,
     JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
     JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
     QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
 };
 use windows_sys::Win32::System::Threading::{
-    CREATE_NO_WINDOW, GetExitCodeProcess, WaitForSingleObject,
+    CREATE_NO_WINDOW, GetCurrentProcess, GetExitCodeProcess, WaitForSingleObject,
 };
 
 use super::{ResolvedLimits, Wait};
@@ -98,6 +99,61 @@ fn create_job(limits: &ResolvedLimits) -> io::Result<Job> {
     Ok(job)
 }
 
+/// Does the job THIS process already belongs to allow children to break away?
+///
+/// Measured on Windows 11 Pro, from two unrelated launchers — an agent harness
+/// and Task Scheduler, the second started by the Schedule service with no agent
+/// anywhere in the parent chain — the sandboxed process reported:
+///
+///     IN_JOB True
+///     LIMIT_FLAGS 0x00003000   = KILL_ON_JOB_CLOSE | SILENT_BREAKAWAY_OK
+///     ACTIVE_PROCESS_LIMIT 0
+///     SPAWNED 60               (unbounded; the ceiling was 24)
+///
+/// while `SetInformationJobObject` and `AssignProcessToJobObject` had BOTH
+/// returned success. So the ceiling was set, the calls worked, and 400 of 400
+/// spawns went through — with the process limit absent from `unenforced`. A
+/// guarantee that is not there and does not say so is the one failure mode this
+/// array exists to prevent.
+///
+/// `SILENT_BREAKAWAY_OK` on an ancestor job is the mechanism: it lets processes
+/// in that job create children that are not associated with it. This asks the
+/// question directly rather than inferring it from a failed spawn count, which
+/// would cost a probe on every run.
+///
+/// Returns `None` when the question cannot be answered — not in a job, or the
+/// query failed. `None` is not "enforced": it means unknown, and the caller
+/// treats it as such.
+fn ambient_job_allows_breakaway() -> Option<bool> {
+    let mut in_job: i32 = 0;
+    // NULL job handle = "the job this process is in", per the API contract.
+    if unsafe { IsProcessInJob(GetCurrentProcess(), std::ptr::null_mut(), &mut in_job) } == 0 {
+        return None;
+    }
+    if in_job == 0 {
+        // Not in a job at all: nothing above us can grant breakaway. This is the
+        // shape the GitHub Server-SKU runner appears to have, and it is why CI
+        // measured the ceiling binding at 23 of 400 while two real desktops did
+        // not bind at all.
+        return Some(false);
+    }
+    let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+    let mut ret: u32 = 0;
+    let ok = unsafe {
+        QueryInformationJobObject(
+            std::ptr::null_mut(),
+            JobObjectExtendedLimitInformation,
+            &mut info as *mut _ as *mut core::ffi::c_void,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            &mut ret,
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    Some(info.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK != 0)
+}
+
 pub fn spawn_and_wait(mut cmd: Command, limits: &ResolvedLimits) -> io::Result<Wait> {
     // The CPU ceiling IS applied here (JOB_OBJECT_LIMIT_PROCESS_TIME, see
     // create_job) but it counts user-mode time only, so a caller comparing it
@@ -131,6 +187,60 @@ pub fn spawn_and_wait(mut cmd: Command, limits: &ResolvedLimits) -> io::Result<W
         let _ = child.kill();
         let _ = child.wait();
         return Err(err);
+    }
+
+    // ── THE-775: the ceiling is set; is it BINDING? ──────────────────────────
+    //
+    // Everything above can succeed and the process limit still not apply. Both
+    // API calls return success, `nproc_limit()` puts the right number in the
+    // job, and 400 of 400 children still spawn — measured on Windows 11 Pro
+    // from two unrelated launchers, one of them Task Scheduler with no agent in
+    // the parent chain.
+    //
+    // Neither check below explains WHY. They are not meant to: the root cause
+    // has three candidate fixes with three different blast radii, and choosing
+    // between them needs someone who can observe the result. What is correct
+    // under every one of those hypotheses is that codecalc must not report a
+    // ceiling it did not apply. So this DISCLOSES rather than repairs.
+    //
+    // The distinction matters to a caller more than the fix does. `400/400
+    // spawned` with `ok=true` and nothing in `unenforced` is a security
+    // guarantee silently absent. The same run with the ceiling declared
+    // unapplied is a documented platform limitation — a completely different
+    // thing to build on.
+    let mut limit_unverified: Option<&'static str> = None;
+
+    // (1) Post-assignment membership. Cheap, direct, and the one thing that can
+    // be asked about THIS child rather than about the environment.
+    let mut in_our_job: i32 = 0;
+    let queried = unsafe { IsProcessInJob(process, job.0, &mut in_our_job) };
+    if queried == 0 {
+        limit_unverified = Some("process_limit_membership_unverifiable_on_windows");
+    } else if in_our_job == 0 {
+        limit_unverified = Some("process_limit_not_enforced_child_escaped_the_job");
+    }
+
+    // (2) The precondition that was actually measured. An ancestor job carrying
+    // SILENT_BREAKAWAY_OK lets processes create children outside it, which is
+    // the observed shape on both desktops that failed. Checked even when (1)
+    // says the child is in our job, because membership and enforcement turned
+    // out not to be the same question — the child reported job flags 0x3000
+    // while codecalc sets 0x230A.
+    if limit_unverified.is_none() {
+        match ambient_job_allows_breakaway() {
+            Some(true) => {
+                limit_unverified =
+                    Some("process_limit_not_enforced_ambient_job_allows_breakaway")
+            }
+            None => {
+                limit_unverified = Some("process_limit_enforcement_unknown_on_windows")
+            }
+            Some(false) => {}
+        }
+    }
+
+    if let Some(reason) = limit_unverified {
+        unenforced.push(reason);
     }
 
     let timeout_ms = limits

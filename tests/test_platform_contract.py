@@ -76,6 +76,27 @@ KNOWN_UNENFORCED = {
     "open_file_limit_unavailable_on_windows",
     "file_size_limit_unavailable_on_windows",
     "no_net_unavailable_on_windows",
+    # windows.rs — THE-775. The process ceiling is SET, both job-object calls
+    # return success, and it still does not bind: measured on Windows 11 Pro
+    # from two unrelated launchers (an agent harness, and Task Scheduler with no
+    # agent in the parent chain), 400 of 400 spawns went through against a
+    # ceiling of 24. The runs came back ok=true with the process limit absent
+    # from this array, which is the one failure this file exists to catch.
+    #
+    # Four strings rather than one, because they are four different claims and a
+    # caller can act differently on each. "The child escaped the job" is a fact
+    # about this run; "an ancestor job allows breakaway" is a fact about the
+    # deployment; and the two `unknown`/`unverifiable` values say the question
+    # could not be answered at all — which is NOT the same as answering "no",
+    # and collapsing them into one token would lose exactly that distinction.
+    #
+    # None of these repairs the ceiling. They disclose it, which is correct
+    # under every candidate root cause and does not require choosing between
+    # them. The fix itself needs someone who can observe Windows.
+    "process_limit_not_enforced_child_escaped_the_job",
+    "process_limit_not_enforced_ambient_job_allows_breakaway",
+    "process_limit_membership_unverifiable_on_windows",
+    "process_limit_enforcement_unknown_on_windows",
     # main.rs — the shim is missing, so --no-net would do nothing
     "no_net_requested_but_no_shim_available",
 }
