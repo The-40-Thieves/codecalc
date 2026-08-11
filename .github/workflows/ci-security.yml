@@ -81,6 +81,21 @@ jobs:
       # invariant. If it ever needs a dependency, that is the signal it belongs in the test suite.
       - run: python scripts/check_contract.py
 
+  version:
+    # pyproject.toml, executor/Cargo.toml and CHANGELOG.md each declare a version, edited by hand.
+    # release.yml publishes the wheel and the crate from ONE dispatch precisely so the two
+    # registries cannot carry different code under the same version — two numbers defeat that at the
+    # one point it cannot be undone, since a version uploaded to PyPI is burned even if deleted.
+    # On a tag push this also compares GITHUB_REF, which is the moment the number becomes permanent.
+    name: one version, everywhere it is declared
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - run: python scripts/check_version.py
+
   parity:
     # codecalc keeps the SAME three security-critical constants in two languages: the env allowlist
     # (the CRITICAL-02 fix), RUNTIME_PATH, and the language registry. Nothing links the Rust copy to
