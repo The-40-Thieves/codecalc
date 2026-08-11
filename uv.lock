@@ -155,20 +155,32 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "mcp" },
+]
+
+[package.optional-dependencies]
+full = [
     { name = "sympy" },
-    { name = "tree-sitter" },
     { name = "tree-sitter-language-pack" },
+    { name = "z3-solver" },
+]
+parsing = [
+    { name = "tree-sitter-language-pack" },
+]
+symbolic = [
+    { name = "sympy" },
     { name = "z3-solver" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "codecalc", extras = ["parsing"], marker = "extra == 'full'" },
+    { name = "codecalc", extras = ["symbolic"], marker = "extra == 'full'" },
     { name = "mcp", specifier = ">=2.0,<3" },
-    { name = "sympy", specifier = ">=1.13,<2" },
-    { name = "tree-sitter", specifier = ">=0.25,<0.27" },
-    { name = "tree-sitter-language-pack", specifier = ">=1.14,<2" },
-    { name = "z3-solver", specifier = ">=4.13,<6" },
+    { name = "sympy", marker = "extra == 'symbolic'", specifier = ">=1.13,<2" },
+    { name = "tree-sitter-language-pack", marker = "extra == 'parsing'", specifier = ">=1.14,<2" },
+    { name = "z3-solver", marker = "extra == 'symbolic'", specifier = ">=4.13,<6" },
 ]
+provides-extras = ["symbolic", "parsing", "full"]
 
 [[package]]
 name = "colorama"

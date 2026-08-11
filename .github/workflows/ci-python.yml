@@ -72,10 +72,25 @@ jobs:
         with:
           version: '0.12.1'
           python-version: ${{ matrix.python }}
-      # --frozen: install exactly what uv.lock pins. Without it uv would re-resolve, and a CI run
-      # that silently upgrades the MCP SDK is not testing what a user gets.
-      - name: install (locked)
-        run: uv sync --frozen
+      # --locked, NOT --frozen. Both install exactly what uv.lock pins — which is the point, so a
+      # CI run cannot silently upgrade the MCP SDK — but `--frozen` never checks that the lock still
+      # DESCRIBES pyproject.toml, so a stale lock is used in silence.
+      #
+      # That is not hypothetical. The lock kept sympy, z3 and tree-sitter as CORE dependencies for
+      # the entire life of the #94 extras split: every job here installed a dependency set
+      # pyproject.toml does not describe, and `uv lock --check` had been failing the whole time with
+      # nothing asking it. `--locked` asserts the lock is current and fails if it is not.
+      #
+      # Found on a contributor's machine rather than here, and the asymmetry is the reason: plain
+      # `uv sync` re-resolves and produces the CORRECT base install, so a contributor and CI were
+      # running different environments. The suite then crashed there on an unguarded sympy import
+      # that CI's accidentally-fatter environment always satisfied.
+      #
+      # --all-extras because these suites genuinely need sympy and tree-sitter. The BASE install is
+      # tested separately below with `uv pip install .`, which resolves from pyproject rather than
+      # the lock — that step is what proves the extras are actually optional.
+      - name: install (locked, with extras)
+        run: uv sync --locked --all-extras
       # Pure-python parity suite: 19 ported calc features against known-good values. No sandbox, no
       # runtimes, no network — it should pass identically everywhere, which is exactly why it is the
       # cheapest signal that the arithmetic core did not regress.
@@ -305,7 +320,7 @@ jobs:
           version: '0.12.1'
           python-version: '3.12'
       - name: install (locked)
-        run: uv sync --frozen
+        run: uv sync --locked --all-extras
       # codecalc/executor.py picks the binary out of bin/ by architecture. Build it into place so
       # the suite exercises the RUST path — the production one. Without this step every executor
       # assertion below would silently run against the pure-Python fallback instead, testing the
