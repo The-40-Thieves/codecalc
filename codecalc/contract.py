@@ -345,10 +345,19 @@ def build_schema(dialect: str | None = None, schema_id: str | None = None) -> di
                     "the field that matters most here: a worker cannot apply "
                     "several ceilings a fresh sandbox can, and it says so."
                 ),
+                # `stdout`/`stderr`/`exit_code`/`output_truncated`/`session` are
+                # NOT required, because a session call whose worker DIED never
+                # ran the code and has none of them: it returns verdict RTE,
+                # backend session-worker, `error`, a worker_failure code and the
+                # disclosure list, and nothing else.
+                #
+                # Found by CI, on a runner where the worker could not start,
+                # after both a local suite and a cross-vendor review had passed.
+                # Neither reached it because both ran where sessions work. What
+                # `unenforced` and `verdict` being required buys is that a
+                # session result still cannot omit its disclosures.
                 "type": "object",
-                "required": ["ok", "verdict", "backend", "stdout", "stderr",
-                             "exit_code", "output_truncated", "unenforced",
-                             "session"],
+                "required": ["ok", "verdict", "backend", "unenforced"],
                 "properties": {
                     "ok": {"type": "boolean"},
                     "backend": {"const": SESSION_BACKEND},

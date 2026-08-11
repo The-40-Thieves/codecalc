@@ -210,12 +210,7 @@
         "ok",
         "verdict",
         "backend",
-        "stdout",
-        "stderr",
-        "exit_code",
-        "output_truncated",
-        "unenforced",
-        "session"
+        "unenforced"
       ],
       "properties": {
         "ok": {

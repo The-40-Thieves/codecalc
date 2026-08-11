@@ -870,7 +870,12 @@ fn read_capped(path: &Path, max_output_kb: u64) -> (String, bool, Option<String>
         buf.truncate(cap as usize);
         buf.extend_from_slice(b"\n...[truncated]");
     }
-    (String::from_utf8_lossy(&buf).into_owned(), truncated, error, original)
+    (
+        String::from_utf8_lossy(&buf).into_owned(),
+        truncated,
+        error,
+        original,
+    )
 }
 
 /// Classify a run into a verdict. Heuristics:
