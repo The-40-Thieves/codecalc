@@ -142,8 +142,32 @@ _ENV_ALLOWLIST = {
 }
 
 
+#: The allowlist as Windows spells it. `os.environ` UPPERCASES every key on nt —
+#: CPython's os.py does `data[encodekey(key)] = value` with `encodekey = upper`
+#: — so a membership test against the list above compares an upper-cased key to
+#: a mixed-case entry and silently drops it.
+#:
+#: Measured against the real list: exactly one name was affected, `windir`, and
+#: it is one of the two the comment above says were added because "node returned
+#: empty output with ok=false through the sandbox on Windows". `SystemRoot`
+#: survived only because `SYSTEMROOT` happens to be listed as well. So the fix
+#: that made node work on Windows was half-applied on this backend, and the
+#: Rust one has always passed both — `std::env::var` is case-insensitive on
+#: Windows, because the OS itself is.
+#:
+#: Upper-cased ONLY on nt. On POSIX environment variables are genuinely
+#: case-sensitive, and matching case-insensitively there would let a variable
+#: named `path` through alongside `PATH` — a widening of a list that exists as
+#: the CRITICAL-02 secret-leak boundary. The platform that is case-insensitive
+#: gets case-insensitive matching; the platform that is not, does not.
+_ENV_ALLOWLIST_NT = {k.upper() for k in _ENV_ALLOWLIST}
+
+
 def _env() -> dict:
-    env = {k: v for k, v in os.environ.items() if k in _ENV_ALLOWLIST}
+    if IS_WINDOWS:
+        env = {k: v for k, v in os.environ.items() if k.upper() in _ENV_ALLOWLIST_NT}
+    else:
+        env = {k: v for k, v in os.environ.items() if k in _ENV_ALLOWLIST}
     env["PATH"] = registry.runtime_path()
     env["PYTHONUNBUFFERED"] = "1"
     return env
