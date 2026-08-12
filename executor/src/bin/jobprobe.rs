@@ -27,18 +27,49 @@
 //!                     Also closes the assignment race platform/windows.rs
 //!                     documents. Does NOT by itself escape an ancestor job.
 //!
-//! Reading Microsoft's docs narrows it: "if the job has the extended limit
-//! JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK, then child processes of any parent
-//! process associated with the job are not associated with the job." That
-//! predicts `create_breakaway` is the one that matters and that
-//! `suspended_assign` alone is not sufficient — but a prediction is not a
-//! measurement, which is the whole point of this file. `all` runs every
-//! mechanism plus a combined one in a single pass so one Windows run answers it.
+//! Reading Microsoft's docs narrowed it to a prediction: "if the job has the
+//! extended limit JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK, then child processes of
+//! any parent process associated with the job are not associated with the job",
+//! which suggested `create_breakaway` was the one that mattered and that
+//! `suspended_assign` alone would not be sufficient.
+//!
+//! THAT PREDICTION WAS WRONG, AND MEASURING IT IS WHY THIS FILE EXISTS.
+//!
+//! Measured on Windows 11 Pro build 26200 across two launchers, `create_breakaway`
+//! is the only candidate that HARD-FAILS under a real ancestor job:
+//! `CREATE_BREAKAWAY_FROM_JOB` returns ERROR_ACCESS_DENIED unless the ancestor
+//! carries `JOB_OBJECT_LIMIT_BREAKAWAY_OK` (0x800) — which is a DIFFERENT flag
+//! from the `SILENT_BREAKAWAY_OK` (0x1000) the docs sentence is about. It takes
+//! the combined `breakaway+suspended` row down with it. `suspended_assign` binds
+//! under both launchers and errors under neither.
+//!
+//! So candidate 2 is unusable as a SOLE mechanism. That is a genuine result and
+//! it is not the same as "candidate 3 fixes the bug" — see the launcher table
+//! below for why nothing here has yet been measured against the actual failure.
 //!
 //! USAGE, on the Windows 11 Pro box:
 //!
 //!     cargo build --release --bin jobprobe
 //!     .\target\release\jobprobe.exe --spawns 400 --limit 24
+//!
+//! FROM TASK SCHEDULER, USE A .bat WRAPPER. Do not inline the command.
+//!
+//! A scheduled task has no console, so the output must be redirected to a file,
+//! and the obvious `schtasks /TR "cmd /c \"...\" > \"...\""` does not survive:
+//! four quote characters means cmd strips the outer pair and runs a mangled
+//! line. It REGISTERS fine and fails at runtime with `Last Result: 1` and no
+//! output file — which used to be indistinguishable from a clean run finding
+//! nothing bound. (That is why exit 1 is now reserved; see the exit codes at
+//! the bottom of `run`.) A wrapper puts the quoting inside a file where cmd
+//! cannot re-parse it:
+//!
+//!     # probe.bat
+//!     "E:\Projects\codecalc\executor\target\release\jobprobe.exe" ^
+//!         --spawns 400 --limit 24 > "E:\...\jobprobe-sched.txt" 2>&1
+//!
+//!     schtasks /Create /TN jobprobe /SC ONCE /ST 00:00 /F /TR "E:\...\probe.bat"
+//!     schtasks /Run /TN jobprobe
+//!     schtasks /Delete /TN jobprobe /F
 //!
 //! A mechanism BINDS if it spawned fewer than the limit. The control at the
 //! bottom re-runs the nested-job case that already worked (`ActiveProcessLimit=5`
@@ -56,16 +87,36 @@
 //! This bug is about the AMBIENT job a process is born into, so the thing that
 //! started `jobprobe.exe` is a variable, not context. Measured so far:
 //!
-//!   Task Scheduler / the original agent harness  ->  LIMIT_FLAGS 0x3000,
-//!       APL 0, 400/400 spawned. REPRODUCES.
-//!   A Claude Code agent shell (Win11 Pro 26200)  ->  LIMIT_FLAGS 0x2008
-//!       (`KILL_ON_JOB_CLOSE | ACTIVE_PROCESS`, i.e. exactly what codecalc
-//!       sets), APL 24, 23/400 spawned. DOES NOT REPRODUCE — the box behaves
-//!       like the GitHub runner, and `SILENT_BREAKAWAY_OK` is absent entirely.
+//!   ORIGINAL REPORT (agent harness, and Task Scheduler) — REPRODUCES
+//!       LIMIT_FLAGS 0x3000, APL 0, 400/400 spawned.
+//!   Claude Code agent shell, build 26200 — does NOT reproduce
+//!       LIMIT_FLAGS 0x2008, APL 24, 23/400. create_breakaway SUCCEEDS,
+//!       so there is no restrictive ancestor job.
+//!   TASK SCHEDULER, build 26200 — does NOT reproduce
+//!       LIMIT_FLAGS 0x2008, APL 24, 23/400. create_breakaway and
+//!       breakaway+suspended both fail ERROR_ACCESS_DENIED, which only
+//!       happens when an ancestor job REFUSES breakaway.
 //!
-//! So "an agent harness" is not one environment. A non-reproduction says the
-//! ambient job of THAT launcher is benign; it says nothing about the one that
-//! reproduces. Quote the launcher next to every table.
+//! THE THIRD ROW IS THE IMPORTANT ONE, and it is not a repeat negative. Task
+//! Scheduler is the launcher the ticket calls decisive — the one with no agent
+//! anywhere in the parent chain — and it now returns the OPPOSITE result on the
+//! same box. So the trigger is not "Task Scheduler", and it is not "an agent
+//! harness" either.
+//!
+//! It also separates two things the ticket's hypothesis binds together. Under
+//! Task Scheduler there IS a real, restrictive ancestor job (proven by the
+//! ACCESS_DENIED, not inferred), it carries no SILENT_BREAKAWAY_OK, and the
+//! ceiling BINDS anyway. "An ambient job is present" and "the ceiling is
+//! unenforced" are therefore independent — being in a job is not sufficient.
+//!
+//! The open question has moved. It is no longer "which mechanism binds" but
+//! "what did the original reproduction have that this box no longer does":
+//! a since-changed Windows build, a different task configuration, or something
+//! about that specific harness. Until a reproducing ambient job is available
+//! again, no mechanism can be confirmed against the ACTUAL failure — only
+//! against ordinary ones, which is what the rows above are.
+//!
+//! Quote the launcher next to every table.
 //!
 //! On non-Windows this exits 2 without pretending to have measured something.
 
@@ -581,13 +632,26 @@ mod imp {
         println!("=== END jobprobe (if this line is missing, the run was truncated) ===");
         let _ = std::io::stdout().flush();
 
-        // Exit code is the finding: 0 means at least one mechanism binds and
-        // there is something to implement; 1 means none did and the ticket needs
-        // a fourth candidate rather than a patch.
+        // Exit code is the finding, and it deliberately SKIPS 1.
+        //
+        //   0  at least one mechanism bound — there is something to implement
+        //   3  ran cleanly, nothing bound — the ticket needs a fourth candidate
+        //   2  not Windows; nothing was measured
+        //   1  NEVER RETURNED BY THIS PROGRAM. A 1 means whatever tried to start
+        //      it failed instead — a mangled `cmd /c` line, a missing binary, a
+        //      task that could not launch.
+        //
+        // 1 used to mean "nothing bound", which cost a real run: a Task
+        // Scheduler recipe with a `cmd /c` quoting bug reported `Last Result: 1`
+        // and produced no output file, which is INDISTINGUISHABLE from this
+        // program running correctly and finding that no mechanism binds — the
+        // exact result THE-818 is hunting. A harness failure that mimics the
+        // sought-after finding is the worst shape a diagnostic can have, so the
+        // two no longer share a code.
         if any_bound {
             ExitCode::SUCCESS
         } else {
-            ExitCode::from(1)
+            ExitCode::from(3)
         }
     }
 }
