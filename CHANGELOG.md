@@ -148,7 +148,7 @@ the thing is.
   each runtime re-splits it; the MSYS2 runtime `bash` is built on treats `\` as
   an escape, so a workdir path arrived with every separator eaten. codecalc now
   hands those runtimes the bare file name, which resolves against the workdir
-  that is already the child's cwd. The end-to-end case is **not gatable in CI** —
+  that is already the child's cwd. The end-to-end case is **not gateable in CI** —
   the `windows-latest` image resolves `bash` through a Git-for-Windows install
   whose paths do not expose the stripping — so what CI gates is the argv
   rendering itself, on all three platforms.
