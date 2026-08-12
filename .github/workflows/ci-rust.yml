@@ -93,7 +93,13 @@ jobs:
         run: |
           set -o pipefail
           cargo test 2>&1 | tee test.log
-          n=$(sed -n 's/^test result: ok\. \([0-9]*\) passed.*/\1/p' test.log | head -1)
+          # SUM every suite, do not take the first. The crate has more than one
+          # test binary (src/main.rs and src/bin/jobprobe.rs), cargo does not
+          # guarantee which runs first, and jobprobe has no #[test] of its own —
+          # so `head -1` read 9 or 0 depending on an ordering nothing pins. It
+          # happened to read 9; that is luck, not a gate.
+          n=$(sed -n 's/^test result: ok\. \([0-9]*\) passed.*/\1/p' test.log \
+              | awk '{s += $1} END {print s + 0}')
           echo "rust unit tests passed: ${n:-0}"
           [ "${n:-0}" -ge 9 ] || {
             echo "::error::expected at least 9 rust unit tests, ran ${n:-0} — the suite did not run"
