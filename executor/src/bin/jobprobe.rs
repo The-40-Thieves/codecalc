@@ -13,7 +13,7 @@
 //! WHY A PROBE INSTEAD OF A PATCH. THE-818's first acceptance criterion is that
 //! the mechanism be *confirmed on Windows* rather than argued from documentation,
 //! because picking wrong from a machine that cannot observe the failure is
-//! exactly how THE-775 got mis-triaged the first time. There are three candidate
+//! exactly how THE-775 got mistriaged the first time. There are three candidate
 //! fixes with different blast radii, and the documentation does not settle which
 //! one binds:
 //!
@@ -482,10 +482,11 @@ mod imp {
 
         println!("jobprobe — THE-818: which mechanism binds ActiveProcessLimit?");
         println!("limit={} spawns={}\n", args.limit, args.spawns);
-        println!(
-            "{:<21} {:>9}  {:<8} {:<11} {:<5} {}",
-            "MECHANISM", "SPAWNED", "VERDICT", "LIMIT_FLAGS", "APL", "NOTE"
-        );
+        // Inlined rather than passed as args: clippy::print_literal is denied,
+        // and it only fires on the Windows leg because this module is cfg'd to
+        // it — the same "the interesting branch is dead code everywhere else"
+        // asymmetry the fix in THE-817 was about, this time in the linter.
+        println!("MECHANISM               SPAWNED  VERDICT  LIMIT_FLAGS APL   NOTE");
 
         let mechanisms: Vec<Mechanism> = match args.mechanism {
             Some(m) => vec![m],
