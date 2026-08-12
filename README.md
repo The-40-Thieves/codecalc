@@ -26,6 +26,36 @@ correcting, so it is corrected here too.
 
 ## Install
 
+> [!IMPORTANT]
+> **Nothing has been published yet, so the two commands below do not work today.**
+> `codecalc` is **not registered on PyPI** — `pip install codecalc` gets a 404,
+> not this project. Until the first release, install from source (below).
+>
+> This warning is here rather than the commands being quietly left in place
+> because the name is free for anyone to claim. A public README advertising an
+> exact install command for an unregistered name is the setup for a
+> supply-chain attack: someone registers `codecalc`, publishes anything, and
+> every reader who followed these instructions installs it having done
+> everything right. Tracked as
+> [#91](https://github.com/The-40-Thieves/codecalc/issues/91), which is what
+> claims the name and deletes this box.
+
+**From source**, which is the supported path today:
+
+```bash
+git clone https://github.com/The-40-Thieves/codecalc
+cd codecalc
+uv sync --all-extras                 # or: pip install -e '.[full]'
+cargo build --release --manifest-path executor/Cargo.toml
+cp executor/target/release/codecalc-exec bin/
+uv run codecalc doctor               # verify: backend should read `rust`
+```
+
+Without the `cargo build`, everything still runs on the pure-Python fallback —
+`doctor` will say so, and the network table below says what that costs.
+
+**After the first release**, this becomes the install:
+
 ```bash
 uvx 'codecalc[full]'          # run it directly, no environment to manage
 # or

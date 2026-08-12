@@ -145,6 +145,20 @@ the thing is.
   guarantee from an absent one, which is the difference that matters. GitHub's
   Server-SKU runner does bind it, which is why CI never showed this.
 
+- **The distribution names are not claimed yet, and the README says so.**
+  Measured live: `pypi.org/pypi/codecalc` returns 404 and
+  `crates.io/api/v1/crates/codecalc-exec` returns 404. Both are free for anyone
+  to register, which is why the README's install box leads with that rather
+  than printing a `pip install` line that fetches whatever a stranger uploaded.
+  Claiming them is a browser action on the maintainer's accounts and cannot be
+  done from CI — [#91](https://github.com/The-40-Thieves/codecalc/issues/91).
+
+  **npm `codecalc` is already taken** by an unrelated package ("a calculator
+  created during NODE demo practicals", v1.0.0). This costs nothing: there is
+  no `package.json` here and no JS client is planned. Recorded so the collision
+  is not rediscovered as a surprise. If a JS client is ever published, the
+  scoped `@the-40-thieves/codecalc` is available and is the name to use.
+
 - **`bash` on Windows needs a Git-for-Windows-style build, and the path it is
   given is now separator-free.** Windows passes one command-line *string* and
   each runtime re-splits it; the MSYS2 runtime `bash` is built on treats `\` as
