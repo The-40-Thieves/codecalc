@@ -269,7 +269,7 @@ def _runtime_version(command: str, path: str | None) -> str | None:
 
     NONE MEANS NOT MEASURED, NEVER "no version". THE-780 asks doctor to report
     versions; it does not ask it to invent them. A runtime that has no version
-    flag, times out, crashes, or answers with something unparseable all produce
+    flag, times out, crashes, or answers with something unparsable all produce
     `None` here and leave `status` untouched — a version that could not be read
     says nothing about whether the runtime works, and demoting it would report a
     failure this function manufactured.
