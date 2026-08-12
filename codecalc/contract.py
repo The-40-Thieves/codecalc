@@ -512,7 +512,7 @@ def build_doctor_schema(dialect: str | None = None, schema_id: str | None = None
                 "type": "array",
                 "items": {
                     "type": "object",
-                    "required": ["name", "command", "status", "path"],
+                    "required": ["name", "command", "status", "path", "version"],
                     "properties": {
                         "name": {"type": "string"},
                         "command": {"type": "string"},
@@ -527,6 +527,15 @@ def build_doctor_schema(dialect: str | None = None, schema_id: str | None = None
                             ),
                         },
                         "path": {"type": ["string", "null"]},
+                        "version": {
+                            "type": ["string", "null"],
+                            "description": (
+                                "the runtime's own version string, read by "
+                                "running it with --version. null means NOT "
+                                "MEASURED — no --deep, no version flag, or an "
+                                "unreadable answer — never 'no version'."
+                            ),
+                        },
                         "detail": {"type": "string"},
                     },
                 },

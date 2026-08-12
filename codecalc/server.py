@@ -1003,6 +1003,14 @@ def _doctor(as_json: bool = False, deep: bool = False) -> int:
                      "supported": "missing"}[state]
             print(f"    {label:14} {', '.join(names)}")
 
+    # Versions are only read under --deep, so this block is silent without it
+    # rather than printing a column of blanks that reads as "no version".
+    versioned = [r for r in rep["runtimes"] if r.get("version")]
+    if versioned:
+        print(f"    versions       {len(versioned)}/{total} read")
+        for r in versioned:
+            print(f"      {r['name']:14} {r['version']}")
+
     ws = rep["workspace"]
     print(f"  workspace         {ws['path']}"
           f"{'' if ws['writable'] else '  NOT WRITABLE — ' + str(ws['error'])}")
