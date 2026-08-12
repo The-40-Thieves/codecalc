@@ -30,7 +30,17 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 
 SCAN_SUFFIXES = {".py", ".rs", ".toml", ".md", ".yml", ".yaml", ".c", ".sh", ".json"}
-SKIP_DIRS = {".git", ".venv", "target", "__pycache__", ".ruff_cache", "node_modules", "bin"}
+#: Skipped wherever they appear — build output and vendored trees, none of which
+#: this repo authors.
+SKIP_DIRS = {".git", ".venv", "target", "__pycache__", ".ruff_cache", "node_modules"}
+
+#: Skipped only at the REPO ROOT. `bin/` holds the compiled executor and is not
+#: source, but it was in SKIP_DIRS above, which is matched against every
+#: component of the path — so `executor/src/bin/`, the Cargo convention for a
+#: crate's extra binaries, was silently excluded too. A .rs file added there
+#: scanned as 201 files before and 201 files after, and the count is the only
+#: thing that would ever have shown it.
+SKIP_ROOT_DIRS = {"bin"}
 
 #: AUDIT.md is the project's security record. Its corrections quote the offending
 #: values verbatim — that is the point of a correction — so it is exempt.
@@ -52,7 +62,10 @@ scanned = 0
 for path in sorted(REPO.rglob("*")):
     if not path.is_file() or path.suffix not in SCAN_SUFFIXES:
         continue
-    if set(path.relative_to(REPO).parts) & SKIP_DIRS or path.name in SKIP_FILES:
+    rel = path.relative_to(REPO)
+    if set(rel.parts) & SKIP_DIRS or path.name in SKIP_FILES:
+        continue
+    if rel.parts[0] in SKIP_ROOT_DIRS:
         continue
     scanned += 1
     for lineno, line in enumerate(path.read_text(errors="replace").splitlines(), 1):
