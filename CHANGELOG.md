@@ -124,6 +124,18 @@ the thing is.
 
 ### Known limitations
 
+- **On Windows the process ceiling may not bind, and now says so.** Measured on
+  Windows 11 Pro from two unrelated launchers: the job-object `ActiveProcessLimit`
+  is set, both API calls succeed, and 400 of 400 child spawns still go through.
+  The run used to come back `ok: true` with nothing in `unenforced`. It now
+  discloses one of `process_limit_not_enforced_child_escaped_the_job`,
+  `process_limit_not_enforced_ambient_job_allows_breakaway`,
+  `process_limit_membership_unverifiable_on_windows` or
+  `process_limit_enforcement_unknown_on_windows`. The ceiling is **not** repaired
+  — the root cause is open (THE-775) — but a caller can now tell an applied
+  guarantee from an absent one, which is the difference that matters. GitHub's
+  Server-SKU runner does bind it, which is why CI never showed this.
+
 - `no_net` needs the native executor's shim. The pure-Python fallback cannot
   apply it and says so in `unenforced`.
 - `peak_memory_kb` is `null` on the fallback: `ru_maxrss` is a process-wide high
