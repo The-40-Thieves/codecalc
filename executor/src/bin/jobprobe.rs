@@ -45,6 +45,28 @@
 //! bound at 4/20 with WinError 1816) — if the control stops binding, the box
 //! changed and no row above it means anything.
 //!
+//! READ THE LAST TWO LINES FIRST. A run is only a measurement if it ends with
+//! `=== END jobprobe ===`, preceded by a `control:` line that has a result after
+//! it. A table with no control line is UNVALIDATED and must not be reported —
+//! that is not hypothetical, it is what the first version of this file did on
+//! real hardware, twice, silently.
+//!
+//! THE LAUNCHER IS PART OF THE MEASUREMENT — RECORD IT.
+//!
+//! This bug is about the AMBIENT job a process is born into, so the thing that
+//! started `jobprobe.exe` is a variable, not context. Measured so far:
+//!
+//!   Task Scheduler / the original agent harness  ->  LIMIT_FLAGS 0x3000,
+//!       APL 0, 400/400 spawned. REPRODUCES.
+//!   A Claude Code agent shell (Win11 Pro 26200)  ->  LIMIT_FLAGS 0x2008
+//!       (`KILL_ON_JOB_CLOSE | ACTIVE_PROCESS`, i.e. exactly what codecalc
+//!       sets), APL 24, 23/400 spawned. DOES NOT REPRODUCE — the box behaves
+//!       like the GitHub runner, and `SILENT_BREAKAWAY_OK` is absent entirely.
+//!
+//! So "an agent harness" is not one environment. A non-reproduction says the
+//! ambient job of THAT launcher is benign; it says nothing about the one that
+//! reproduces. Quote the launcher next to every table.
+//!
 //! On non-Windows this exits 2 without pretending to have measured something.
 
 use std::process::ExitCode;
@@ -210,7 +232,18 @@ mod imp {
             .collect()
     }
 
-    fn create_job(limit: u32, breakaway_ok_own: bool) -> Result<Job, String> {
+    /// `kill_on_close` MUST be false for a job this process assigns ITSELF to.
+    ///
+    /// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` terminates every process in the job
+    /// when the last handle closes. For the mechanism jobs that is exactly what
+    /// is wanted — it reaps leftover sleepers. For the control it was suicide:
+    /// `run_control` assigns the CURRENT process, and `Job`'s `Drop` closes the
+    /// handle at end of scope, so the job killed this process while unwinding.
+    /// The `format!` result was already built and never reached `println!`.
+    ///
+    /// Measured on Windows 11 Pro build 26200: nine stdout lines, empty stderr,
+    /// exit 0, twice. Deterministic, not flaky — and completely silent.
+    fn create_job(limit: u32, breakaway_ok_own: bool, kill_on_close: bool) -> Result<Job, String> {
         let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
         if handle.is_null() {
             return Err(format!(
@@ -220,8 +253,10 @@ mod imp {
         }
         let job = Job(handle);
         let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
-        info.BasicLimitInformation.LimitFlags =
-            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+        if kill_on_close {
+            info.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        }
         if breakaway_ok_own {
             info.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_BREAKAWAY_OK;
         }
@@ -306,7 +341,7 @@ mod imp {
         let out_s = out.to_string_lossy().into_owned();
         let _ = std::fs::remove_file(&out);
 
-        let job = create_job(limit, m == Mechanism::BreakawayOkOwn)?;
+        let job = create_job(limit, m == Mechanism::BreakawayOkOwn, true)?;
 
         let breakaway = matches!(
             m,
@@ -433,7 +468,7 @@ mod imp {
     /// can still do this and the failure above is codecalc's path rather than an
     /// OS capability gap. If this stops binding, no row above it means anything.
     fn run_control() -> String {
-        let job = match create_job(5, false) {
+        let job = match create_job(5, false, false) {
             Ok(j) => j,
             Err(e) => return format!("control job failed: {e}"),
         };
@@ -521,12 +556,30 @@ mod imp {
             }
         }
 
-        println!("\ncontrol: {}", run_control());
+        // ANNOUNCED BEFORE IT RUNS, and flushed, so its absence is loud.
+        //
+        // The first version printed only the RESULT, and the control killed this
+        // process before that line was reached (see create_job). What a reader
+        // got was a clean five-row table and no indication that the check which
+        // validates those rows never happened — the worst possible shape for a
+        // diagnostic, and it survived two runs on real hardware before someone
+        // went looking for the missing line.
+        //
+        // Now: if you see "control: running" with nothing after it, the control
+        // died. If you see neither, the run was cut short before it. Either way
+        // the table above is UNVALIDATED and must not be reported as a result.
+        print!("\ncontrol: running (nested ActiveProcessLimit=5)... ");
+        let _ = std::io::stdout().flush();
+        println!("{}", run_control());
         println!(
             "\nA mechanism BINDS if SPAWNED < {}. `baseline` is expected to be UNBOUND —\n\
              it is what codecalc does today. Report the whole table on THE-818.",
             args.limit
         );
+        // The last line, always. Its absence means the process died mid-run and
+        // whatever you scrolled past is a fragment, not a measurement.
+        println!("=== END jobprobe (if this line is missing, the run was truncated) ===");
+        let _ = std::io::stdout().flush();
 
         // Exit code is the finding: 0 means at least one mechanism binds and
         // there is something to implement; 1 means none did and the ticket needs
