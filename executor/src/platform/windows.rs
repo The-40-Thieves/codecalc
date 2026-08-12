@@ -20,13 +20,13 @@ use std::process::{Child, Command};
 
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
 use windows_sys::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob,
-    JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_JOB_MEMORY,
-    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_PROCESS_MEMORY,
-    JOB_OBJECT_LIMIT_PROCESS_TIME, JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK,
-    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-    JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
-    QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
+    AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
+    JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOB_OBJECT_LIMIT_PROCESS_MEMORY, JOB_OBJECT_LIMIT_PROCESS_TIME,
+    JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicAccountingInformation,
+    JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
+    TerminateJobObject,
 };
 use windows_sys::Win32::System::Threading::{
     CREATE_NO_WINDOW, GetCurrentProcess, GetExitCodeProcess, WaitForSingleObject,
@@ -229,12 +229,9 @@ pub fn spawn_and_wait(mut cmd: Command, limits: &ResolvedLimits) -> io::Result<W
     if limit_unverified.is_none() {
         match ambient_job_allows_breakaway() {
             Some(true) => {
-                limit_unverified =
-                    Some("process_limit_not_enforced_ambient_job_allows_breakaway")
+                limit_unverified = Some("process_limit_not_enforced_ambient_job_allows_breakaway")
             }
-            None => {
-                limit_unverified = Some("process_limit_enforcement_unknown_on_windows")
-            }
+            None => limit_unverified = Some("process_limit_enforcement_unknown_on_windows"),
             Some(false) => {}
         }
     }
