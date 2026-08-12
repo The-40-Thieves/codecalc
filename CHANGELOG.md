@@ -73,7 +73,9 @@ the thing is.
   the same `contract_version` and policy as a tool result. Each runtime reports
   `supported`, `installed`, `unhealthy` or `available`, and `status_basis` says
   whether those came from resolving the command or from running it. `--deep`
-  executes them; without it nothing is ever reported `available`.
+  executes them; without it nothing is ever reported `available`. `--deep` also
+  reads each runtime's own `version`; `null` means **not measured** — no
+  `--deep`, no version flag, or an unreadable answer — and never "no version".
 - **`list_languages` reports what it measured.** Each entry carries `status`
   (`supported` or `installed`) and `status_basis` (`resolved`), the same
   vocabulary `doctor` uses. `available` is still there and unchanged, but it was

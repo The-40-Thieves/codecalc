@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -160,7 +161,12 @@ def report(deep: bool = False) -> dict:
     for name in langs:
         cmd = primary_command(registry.LANGUAGES[name])
         status, path = _runtime_status(cmd)
-        row = {"name": name, "command": cmd, "status": status, "path": path}
+        # `version` is present on every row so a caller never has to branch on
+        # the key's existence, and is None unless it was actually read. Under
+        # --deep only, for the same reason `available` is: asking 31 runtimes
+        # their version is a build, not a diagnostic.
+        row = {"name": name, "command": cmd, "status": status, "path": path,
+               "version": _runtime_version(cmd, path) if deep else None}
         # Only languages with a hello program are promoted. Running the others
         # with an EMPTY source would execute a no-op, find no "codecalc" in its
         # stdout, and demote a perfectly good runtime to `unhealthy` — a --deep
@@ -236,6 +242,65 @@ _HELLO = {
     "lua": 'print("codecalc")',
     "bash": 'echo codecalc',
 }
+
+
+#: How to ask a runtime its version. Keyed by COMMAND rather than by language,
+#: because `primary_command` collapses several languages onto one binary and
+#: asking `bash` its version four times would be three wasted spawns.
+#:
+#: `--version` is the default and the map holds only the exceptions, so a
+#: runtime added later works without an entry. An exception is not a special
+#: case for its own sake: `java -version` predates the GNU convention and
+#: prints to STDERR, which is why both streams are read below.
+_VERSION_FLAG: dict[str, str] = {
+    "java": "-version",
+    "kotlinc": "-version",
+}
+
+#: Commands with no version flag worth calling. `escript` and `tclsh` have no
+#: non-interactive `--version`, and invoking them without one starts a REPL that
+#: would hang until the timeout. Listed rather than discovered, because "it hung
+#: for 10 seconds" is a bad way to learn this.
+_NO_VERSION = frozenset({"escript", "tclsh"})
+
+
+def _runtime_version(command: str, path: str | None) -> str | None:
+    """The runtime's own version string, or None when it could not be read.
+
+    NONE MEANS NOT MEASURED, NEVER "no version". THE-780 asks doctor to report
+    versions; it does not ask it to invent them. A runtime that has no version
+    flag, times out, crashes, or answers with something unparseable all produce
+    `None` here and leave `status` untouched — a version that could not be read
+    says nothing about whether the runtime works, and demoting it would report a
+    failure this function manufactured.
+
+    Runs under the executor's 23-entry env allowlist rather than the doctor
+    process's own environment. This is a diagnostic, but it is still spawning
+    host binaries, and there is no reason for `gcc --version` to see an API key.
+    """
+    if not path or command in _NO_VERSION:
+        return None
+    flag = _VERSION_FLAG.get(command, "--version")
+    try:
+        proc = subprocess.run(
+            [path, flag],
+            capture_output=True, timeout=10, env=executor._env(), check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    # stdout OR stderr: `java -version` uses stderr, and a runtime that answers
+    # on the stream we did not read is indistinguishable from one that did not
+    # answer at all.
+    for stream in (proc.stdout, proc.stderr):
+        text = (stream or b"").decode("utf-8", "replace").strip()
+        for line in text.splitlines():
+            line = line.strip()
+            if line:
+                # First non-empty line, capped. Some runtimes print a paragraph
+                # (gcc prints its licence), and the report is a diagnostic, not
+                # a transcript.
+                return line[:120]
+    return None
 
 
 def _skill_path() -> str | None:

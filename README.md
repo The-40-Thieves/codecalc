@@ -125,7 +125,7 @@ is otherwise discoverable only by making a tool call and reading `backend`,
 
 ```bash
 codecalc doctor --json   # the same report, for scripts
-codecalc doctor --deep   # actually RUN each runtime, not just resolve it
+codecalc doctor --deep   # actually RUN each runtime, and read its version
 ```
 
 `--json` emits the report and nothing else, against a published schema

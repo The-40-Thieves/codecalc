@@ -147,7 +147,8 @@
           "name",
           "command",
           "status",
-          "path"
+          "path",
+          "version"
         ],
         "properties": {
           "name": {
@@ -171,6 +172,13 @@
               "string",
               "null"
             ]
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "the runtime's own version string, read by running it with --version. null means NOT MEASURED \u2014 no --deep, no version flag, or an unreadable answer \u2014 never 'no version'."
           },
           "detail": {
             "type": "string"

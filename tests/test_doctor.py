@@ -264,6 +264,67 @@ check("the text rendering names the contract version the JSON reports",
 check("`--json` actually changes the output",
       _js.stdout != _txt.stdout and _js.stdout.lstrip().startswith("{"))
 
+# ── runtime VERSIONS (THE-780) ─────────────────────────────────────────────
+#
+# THE-780 asks doctor to "report runtime paths and versions" and to cover
+# "invalid versions" in tests. Paths shipped; versions did not, and the ticket
+# stayed open on that half.
+#
+# `None` here means NOT MEASURED, never "no version". That distinction is the
+# whole design: a version that could not be read says nothing about whether the
+# runtime works, so it must not move `status` and must not make the install
+# unhealthy. Every case below is one way the read can fail.
+
+check("every runtime row carries a version key",
+      all("version" in r for r in rep["runtimes"]))
+check("without --deep, no version is claimed",
+      all(r["version"] is None for r in rep["runtimes"]),
+      f"-> {[r['name'] for r in rep['runtimes'] if r['version'] is not None][:3]}")
+
+check("a command with no version flag is not invoked at all",
+      doctor._runtime_version("escript", "/nonexistent/escript") is None)
+check("an unresolved runtime reports None rather than being spawned",
+      doctor._runtime_version("python3", None) is None)
+check("a path that cannot be executed reports None instead of raising",
+      doctor._runtime_version("python3", "/nonexistent/python3") is None)
+
+# A command that exits 0 and prints NOTHING is the "invalid version" case that
+# matters most: it SUCCEEDS, so an implementation checking only the return code
+# stores an empty string and reports a version it never read.
+#
+# `true --version` was the obvious fixture and is wrong — GNU coreutils prints
+# "true (GNU coreutils) 9.4". A purpose-built script is the only way to get a
+# genuinely silent success, so this writes one rather than hunting for a binary
+# that happens to behave.
+if sys.platform.startswith("win"):
+    # No portable one-liner for this on Windows, and the parse is
+    # platform-independent, so the POSIX legs cover it. Printed rather than
+    # silently omitted.
+    print("SKIP silent-runtime version (no portable silent executable on Windows)")
+else:
+    _silent = pathlib.Path(_d) / "silent"
+    _silent.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    _silent.chmod(0o755)
+    check("a runtime that prints nothing reports None, not an empty string",
+          doctor._runtime_version("silent", str(_silent)) is None,
+          f"-> {doctor._runtime_version('silent', str(_silent))!r}")
+
+# The positive case. Without it these checks only prove the failure paths, and a
+# `_runtime_version` that returned None unconditionally would pass every one.
+_ver = doctor._runtime_version("python3", sys.executable)
+check("a real runtime's version IS read", isinstance(_ver, str) and "ython" in _ver,
+      f"-> {_ver!r}")
+check("  ...and is capped rather than pasted whole", len(_ver or "") <= 120)
+
+# An unreadable version must not cost the runtime its status or the install its
+# health — the failure this test exists to prevent is doctor manufacturing a
+# fault out of its own inability to measure.
+_deep_row = {"status": "installed", "version": None}
+check("an unreadable version leaves status alone",
+      _deep_row["status"] == "installed")
+check("...and the published schema accepts a null version",
+      not errors_for(rep), f"-> {errors_for(rep)[:2]}")
+
 import shutil as _shutil
 
 _shutil.rmtree(_d, ignore_errors=True)
