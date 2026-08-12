@@ -10,6 +10,7 @@ argv templates. Placeholders:
 
 from __future__ import annotations
 
+import ntpath
 import os
 import shlex
 
@@ -48,6 +49,68 @@ def _c(compile_: str | None, run: str) -> dict:
         "compile": shlex.split(compile_) if compile_ else None,
         "run": shlex.split(run),
     }
+
+
+#: The four runtime states, ordered weakest to strongest CLAIM. Defined here
+#: rather than in doctor.py because three modules now read them — doctor, the
+#: executor's catalog, and contract.py's schema — and registry is the one they
+#: all already import. `doctor.RUNTIME_STATES` stays bound to this tuple, so it
+#: is one vocabulary with three readers instead of three transcriptions.
+#:
+#:     supported   codecalc knows this language; nothing for it resolves here
+#:     installed   its command resolves on the sandbox PATH and is executable
+#:     unhealthy   it resolves and is NOT executable, or was run and failed
+#:     available   it was actually RUN here and answered
+RUNTIME_STATES = ("supported", "installed", "unhealthy", "available")
+
+
+#: Languages whose runtime re-parses the raw Windows command line with POSIX
+#: escaping rules instead of taking argv as handed to it (THE-817).
+#:
+#: WINDOWS HAS NO ARGV. `CreateProcess` takes one command-line STRING and each
+#: child's C runtime decides how to split it back up. MSVC-style parsing treats
+#: a backslash literally unless it precedes a quote. The MSYS2 runtime that
+#: Git-for-Windows' `bash` is built on does not: it treats `\` as an ESCAPE. So
+#:
+#:     C:\Users\me\AppData\Local\Temp\codecalc-ab12\main.sh
+#:
+#: arrives at bash as `C:UsersmeAppDataLocalTempcodecalc-ab12main.sh` — every
+#: separator eaten, exit 127, 100% reproducible on a desktop Git-for-Windows
+#: install. Nothing on the Python side is wrong; `shlex.split` produces a
+#: correct argv and Windows flattens it before the callee re-splits it.
+#:
+#: The repair is to hand these runtimes a name with NO separator left in it.
+#: The child's cwd IS the workdir already (`_run_step(..., cwd=workdir)` here
+#: and `current_dir` in main.rs), so the bare file name names the same file and
+#: leaves nothing for either the escape pass or MSYS path translation to
+#: corrupt. It also immunises the spaced-profile case (`C:\Users\John Smith\`),
+#: which the same re-parse would split on — untested by CI and by the box that
+#: found this one, so it is a property of the fix rather than a verified claim.
+#:
+#: SCOPED TO THE SHELLS BECAUSE THAT IS WHERE IT WAS MEASURED. A MinGW `gcc` is
+#: the same kind of program and plausibly shares the mechanism, but nobody has
+#: run it; this set exists to stop exactly that guess. Mirrored in main.rs and
+#: gated by scripts/check_parity.py.
+POSIX_ARGV_LANGUAGES = frozenset({"bash", "zsh"})
+
+
+def source_arg(language: str, path: str, *, windows: bool) -> str:
+    r"""What `{file}` becomes for `language` — see POSIX_ARGV_LANGUAGES.
+
+    `windows` is a parameter rather than a read of `sys.platform` so the
+    Windows rendering is reachable from a test on any host. A branch that can
+    only be exercised on the platform that breaks is a branch CI never checks.
+
+    `ntpath`, not `os.path`, for the same reason. `os.path` IS `ntpath` on
+    Windows, so `os.path.basename` would have been correct in production and
+    silently wrong everywhere else — on Linux it is `posixpath`, which does not
+    treat `\` as a separator and hands back the whole path unchanged. The Linux
+    CI leg caught that on the first run; with `os.path` it would have passed
+    three green legs and shipped the bug it was written to prevent.
+    """
+    if windows and language in POSIX_ARGV_LANGUAGES:
+        return ntpath.basename(path)
+    return path
 
 
 LANGUAGES: dict[str, dict] = {

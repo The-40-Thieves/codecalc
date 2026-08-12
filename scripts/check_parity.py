@@ -77,6 +77,32 @@ if floor("rust LANGS", rust_langs, 10) and floor("python LANGUAGES", py_langs, 1
     else:
         print(f"ok   language registry: {len(py_langs)} entries, identical in both backends")
 
+# ── 1b. POSIX-argv languages (THE-817) ──────────────────────────────────────
+#
+# Drift here is a SILENT correctness bug on exactly one platform. If a language
+# is listed in Rust only, the pure-Python fallback hands bash a Windows path
+# whose backslashes MSYS eats and the snippet fails with exit 127; if it is
+# listed in Python only, the native executor — the backend the bug was actually
+# reported on — keeps doing that. Either way both backends still return the
+# documented result shape, so nothing else in this file would notice.
+m = re.search(r"POSIX_ARGV_LANGUAGES:\s*&\[&str\]\s*=\s*&\[(.*?)\];", RUST, re.S)
+rust_posix_argv = set(re.findall(r'"([a-z0-9+#_-]+)"', m.group(1))) if m else set()
+py_posix_argv = set(registry.POSIX_ARGV_LANGUAGES)
+
+if floor("rust POSIX_ARGV_LANGUAGES", rust_posix_argv, 1) and \
+   floor("python POSIX_ARGV_LANGUAGES", py_posix_argv, 1):
+    if rust_posix_argv != py_posix_argv:
+        fail(f"POSIX-argv language drift — python-only: "
+             f"{sorted(py_posix_argv - rust_posix_argv)}, "
+             f"rust-only: {sorted(rust_posix_argv - py_posix_argv)}")
+    elif not (py_posix_argv <= py_langs):
+        # A name that is not a language is a typo that both copies share, which
+        # set equality alone would happily call agreement.
+        fail(f"POSIX-argv names that are not languages: "
+             f"{sorted(py_posix_argv - py_langs)}")
+    else:
+        print(f"ok   POSIX-argv languages: {sorted(py_posix_argv)}, identical in both backends")
+
 # ── 2. env allowlist ────────────────────────────────────────────────────────
 m = re.search(r"ENV_ALLOWLIST:\s*&\[&str\]\s*=\s*&\[(.*?)\];", RUST, re.S)
 rust_env = set(re.findall(r'"([A-Za-z_][A-Za-z0-9_]*)"', m.group(1))) if m else set()

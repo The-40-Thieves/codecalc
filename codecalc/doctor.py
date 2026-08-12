@@ -44,9 +44,11 @@ from pathlib import Path
 
 from . import __version__, contract, executor, landlock, optional, registry
 
-#: The four states, ordered weakest to strongest claim. Exported so the schema
-#: and the tests use the same list rather than three transcriptions of it.
-RUNTIME_STATES = ("supported", "installed", "unhealthy", "available")
+#: The four states, ordered weakest to strongest claim. Defined in registry.py
+#: and re-exported here: `list_languages` reports the same vocabulary now
+#: (THE-817), and registry is the module all three readers already import.
+#: contract.py's schema still imports it from this name.
+RUNTIME_STATES = registry.RUNTIME_STATES
 
 #: Extras, and the modules whose presence defines them. Mirrors what the text
 #: renderer used to hardcode.

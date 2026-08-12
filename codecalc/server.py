@@ -152,12 +152,8 @@ mcp.tool = _tool
 
 @mcp.tool()
 def list_languages() -> list[dict]:
-    """List every language codecalc can execute, with extension, compile flag, and runtime availability on this machine."""
-    langs = registry.all_languages()
-    avail = executor.probe()
-    for l in langs:
-        l["available"] = avail.get(l["name"], True)
-    return langs
+    """List every language codecalc can execute, with extension, compile flag, and what this machine resolved. `status` is `installed` (its command was found on the sandbox PATH) or `supported` (nothing for it here); `status_basis` is `resolved`, meaning nothing was executed to check. Run `codecalc doctor --deep` to promote a runtime to `available` by actually running it."""
+    return executor.catalog()
 
 
 #: What a compact result ALWAYS carries.

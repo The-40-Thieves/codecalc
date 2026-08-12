@@ -74,6 +74,13 @@ the thing is.
   `supported`, `installed`, `unhealthy` or `available`, and `status_basis` says
   whether those came from resolving the command or from running it. `--deep`
   executes them; without it nothing is ever reported `available`.
+- **`list_languages` reports what it measured.** Each entry carries `status`
+  (`supported` or `installed`) and `status_basis` (`resolved`), the same
+  vocabulary `doctor` uses. `available` is still there and unchanged, but it was
+  computed from finding the command on `PATH` while being named for something
+  stronger — on one host `bash` resolved, was reported available, and failed
+  every time. Nothing is reported `available` without being run, which is what
+  `doctor --deep` is for.
 - **Verification gates instead of generation.** `verify_translation` and
   `verify_optimization` take a candidate *the caller wrote* and prove or
   disprove it by execution. codecalc runs and measures; it does not generate.
@@ -132,9 +139,19 @@ the thing is.
   `process_limit_not_enforced_ambient_job_allows_breakaway`,
   `process_limit_membership_unverifiable_on_windows` or
   `process_limit_enforcement_unknown_on_windows`. The ceiling is **not** repaired
-  — the root cause is open (THE-775) — but a caller can now tell an applied
+  — the root cause is open (THE-818) — but a caller can now tell an applied
   guarantee from an absent one, which is the difference that matters. GitHub's
   Server-SKU runner does bind it, which is why CI never showed this.
+
+- **`bash` on Windows needs a Git-for-Windows-style build, and the path it is
+  given is now separator-free.** Windows passes one command-line *string* and
+  each runtime re-splits it; the MSYS2 runtime `bash` is built on treats `\` as
+  an escape, so a workdir path arrived with every separator eaten. codecalc now
+  hands those runtimes the bare file name, which resolves against the workdir
+  that is already the child's cwd. The end-to-end case is **not gateable in CI** —
+  the `windows-latest` image resolves `bash` through a Git-for-Windows install
+  whose paths do not expose the stripping — so what CI gates is the argv
+  rendering itself, on all three platforms.
 
 - `no_net` needs the native executor's shim. The pure-Python fallback cannot
   apply it and says so in `unenforced`.

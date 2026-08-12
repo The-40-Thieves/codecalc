@@ -3,12 +3,16 @@ name: ci-rust
 # The Rust executor is the security boundary: it is the only thing standing between a model-supplied
 # program and this host. It had no CI at all.
 #
-# Note what is deliberately NOT here: a bare `cargo test` job. executor/src/main.rs contains zero
-# `#[test]` functions, so `cargo test` exits 0 having run nothing — a green check that proves the
-# crate compiles and nothing else. Rather than ship that, the `contract` job below RUNS the built
-# binary and asserts its JSON output, which is the interface Python actually depends on. If unit
-# tests are added later, add a floor on the test count alongside them (an `ok. 0 passed` line reads
-# identically to a passing suite).
+# There IS a `cargo test` job now, and it carries the floor this note used to ask for. The note
+# previously read "executor/src/main.rs contains zero `#[test]` functions", which stopped being true
+# without anyone noticing: the crate had four, and no workflow ran them, so they sat in the tree
+# looking like coverage for however long it took to add the first one and not come back here. The
+# floor is what makes the job worth having — `ok. 0 passed` and `ok. 9 passed` are both green, and
+# only the count tells a suite that ran from a filter that matched nothing.
+#
+# The `contract` job below is still the load-bearing one: it RUNS the built binary and asserts its
+# JSON output, which is the interface Python actually depends on. Unit tests cover the pure helpers
+# that have no other way to be reached — argv rendering, timeout arithmetic.
 
 on:
   pull_request:
@@ -72,6 +76,29 @@ jobs:
         working-directory: executor
         shell: bash
         run: cargo fmt --check
+      # The header used to say this crate had zero `#[test]` functions, so a
+      # `cargo test` job would be a green check proving nothing. It had FOUR,
+      # and they had never run: the comment stayed accurate for exactly as long
+      # as it took someone to add the first test and not revisit it.
+      #
+      # So the floor the header asked for is here, and it is the point of the
+      # step rather than a decoration. `ok. 0 passed` and `ok. 9 passed` are
+      # both green; only the count distinguishes a suite that ran from a filter
+      # expression that matched nothing. Runs on the full matrix because
+      # source_arg's Windows branch takes `windows` as a parameter specifically
+      # so all three legs exercise it.
+      - name: cargo test (with a floor on the count)
+        working-directory: executor
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test 2>&1 | tee test.log
+          n=$(sed -n 's/^test result: ok\. \([0-9]*\) passed.*/\1/p' test.log | head -1)
+          echo "rust unit tests passed: ${n:-0}"
+          [ "${n:-0}" -ge 9 ] || {
+            echo "::error::expected at least 9 rust unit tests, ran ${n:-0} — the suite did not run"
+            exit 1
+          }
 
   contract:
     # The claim is that codecalc works on Linux, macOS and Windows. That claim is

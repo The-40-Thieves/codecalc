@@ -336,6 +336,84 @@ else:
     check("  ...and the README no longer calls it unavailable",
           "| CPU-time ceiling | `RLIMIT_CPU` | `RLIMIT_CPU` | reported unenforced |" not in readme)
 
+# ── THE-817: a runtime advertised on a host where it cannot run ──────────────
+#
+# Two independent defects stacked, and only fixing both closes the ticket.
+#
+#   1. bash FAILED on Windows. MSYS2 — which Git-for-Windows' bash is built on —
+#      re-parses the raw command line treating `\` as an ESCAPE, so every
+#      separator in the workdir path was eaten and bash got a garbage path
+#      (exit 127, 100% reproducible on a desktop install).
+#
+#   2. bash was ADVERTISED anyway, because `probe()` decides availability from
+#      resolution alone. `shutil.which` returning a path says the file is
+#      there; it says nothing about whether running it works.
+#
+# The second is the one that matters. A missing runtime that says so is a fact
+# about the host; a runtime advertised as present that fails every time is a
+# model being told it can use a tool that never works — and `list_languages` is
+# exactly the surface a model consults before choosing.
+#
+# These run on EVERY platform, not just Windows. `source_arg` takes `windows`
+# as a parameter precisely so the Windows rendering is reachable from a Linux
+# CI leg — the alternative is a check that silently no-ops on the three legs
+# most likely to run it.
+from codecalc import doctor, registry
+
+check("a POSIX-argv language set is declared",
+      len(registry.POSIX_ARGV_LANGUAGES) > 0,
+      f"-> {sorted(registry.POSIX_ARGV_LANGUAGES)}")
+check("  ...and bash is in it (the language the failure was measured on)",
+      "bash" in registry.POSIX_ARGV_LANGUAGES)
+
+# The actual repair: what these runtimes receive must have NO separator left in
+# it for MSYS to eat. Asserting "no separator" rather than "equals main.sh"
+# keeps the check about the PROPERTY that makes it safe.
+_WIN_SRC = r"C:\Users\John Smith\AppData\Local\Temp\codecalc-ab12\main.sh"
+for _lang in sorted(registry.POSIX_ARGV_LANGUAGES):
+    rendered = registry.source_arg(_lang, _WIN_SRC, windows=True)
+    check(f"{_lang}: the Windows source arg carries no path separator",
+          "\\" not in rendered and "/" not in rendered, f"-> {rendered!r}")
+    check("  ...and no space for the re-parse to split on",
+          " " not in rendered, f"-> {rendered!r}")
+
+# Unix argv is a real array, so nothing re-parses it and the absolute path is
+# unambiguous. Changing it there would be churn with a blast radius and no bug.
+_NIX_SRC = "/run/user/1000/codecalc-ab12/main.sh"   # not /tmp: ruff S108
+check("on Unix the absolute path is left alone",
+      registry.source_arg("bash", _NIX_SRC, windows=False) == _NIX_SRC)
+# A language whose runtime takes argv as given is untouched on Windows too.
+check("a non-POSIX-argv language is untouched on Windows",
+      registry.source_arg("python3", _WIN_SRC, windows=True) == _WIN_SRC)
+
+# ── and the advertising half ─────────────────────────────────────────────────
+#
+# `available` used to be computed from resolution and NAMED for execution. The
+# field stays (clients read it) but it no longer carries the whole claim on its
+# own: `status` says which of doctor's four states was reached and
+# `status_basis` says which measurement produced it.
+_langs = {l["name"]: l for l in executor.catalog()}
+_sample = next(iter(_langs))
+check("list_languages entries carry a status", "status" in _langs[_sample],
+      f"-> {_langs[_sample].get('status')!r}")
+check("  ...and say which measurement produced it",
+      "status_basis" in _langs[_sample],
+      f"-> {_langs[_sample].get('status_basis')!r}")
+check("  ...drawn from doctor's vocabulary, not a fifth one",
+      all(l["status"] in doctor.RUNTIME_STATES for l in _langs.values()),
+      f"-> {sorted({l['status'] for l in _langs.values()})}")
+# The whole point of the field: resolution must not be reported as execution.
+check("a resolution-based report never claims `available`",
+      all(l["status"] != "available" for l in _langs.values()
+          if l["status_basis"] == "resolved"))
+# doctor and list_languages are two views of one measurement. They disagreed
+# before only because they used different words for it.
+_doc = {r["name"]: r for r in doctor.report()["runtimes"]}
+_mismatch = [n for n, r in _doc.items()
+             if n in _langs and _langs[n]["status"] != r["status"]]
+check("doctor and list_languages agree on every runtime's status",
+      not _mismatch, f"-> {_mismatch[:5]}")
+
 print(f"\n=== {len(FAILS)} FAILURE(S), {len(SKIPS)} skipped ===" if FAILS else
       f"\n=== PLATFORM CONTRACT HOLDS ({len(SKIPS)} skipped) ===")
 sys.exit(1 if FAILS else 0)
