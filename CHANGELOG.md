@@ -131,6 +131,22 @@ the thing is.
   network unless `no_net` is both requested and enforceable — which the result
   says, per call.
 
+### Fixed
+
+- **Windows: the sandboxed child is now created suspended and assigned to the
+  job before its first instruction.** It used to be spawned normally and
+  assigned immediately after, leaving a window of microseconds in which it ran
+  outside the job — anything it spawned there escaped every limit. AUDIT.md
+  recorded this as a caveat that could only be closed by dropping
+  `std::process::Command` for a raw `CreateProcessW`; that was wrong, and is why
+  it stood. `CREATE_SUSPENDED` plus a PID-scoped thread resume closes the window
+  to zero and keeps Command's pipes, environment, cwd and argument quoting. A
+  child that cannot be placed in the job is killed rather than resumed.
+
+  This does **not** fix the separate Windows failure where the process ceiling
+  does not bind at all under an ambient job carrying `SILENT_BREAKAWAY_OK` —
+  see the known limitation below, which is unchanged and still disclosed.
+
 ### Known limitations
 
 - **On Windows the process ceiling may not bind, and now says so.** Measured on

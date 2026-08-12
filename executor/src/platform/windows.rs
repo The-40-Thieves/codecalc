@@ -18,7 +18,10 @@ use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::process::{Child, Command};
 
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0};
+use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+};
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
     JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
@@ -29,7 +32,8 @@ use windows_sys::Win32::System::JobObjects::{
     TerminateJobObject,
 };
 use windows_sys::Win32::System::Threading::{
-    CREATE_NO_WINDOW, GetCurrentProcess, GetExitCodeProcess, WaitForSingleObject,
+    CREATE_NO_WINDOW, CREATE_SUSPENDED, GetCurrentProcess, GetExitCodeProcess, OpenThread,
+    ResumeThread, THREAD_SUSPEND_RESUME, WaitForSingleObject,
 };
 
 use super::{ResolvedLimits, Wait};
@@ -154,6 +158,57 @@ fn ambient_job_allows_breakaway() -> Option<bool> {
     Some(info.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK != 0)
 }
 
+/// Resume a process created with `CREATE_SUSPENDED`, given only its PID.
+///
+/// `std::process::Command` owns the child's pipes, environment, cwd and
+/// argument quoting, and none of that is worth reimplementing — but it does not
+/// expose the initial thread handle, which is what `ResumeThread` normally
+/// wants. So the thread is found by snapshotting and filtering on the owning
+/// PID. A process created suspended has exactly one thread, and it has not run,
+/// so it cannot have made more.
+///
+/// Failing here is FATAL to the call rather than ignorable: a child left
+/// suspended never exits, and `WaitForSingleObject` would sit on it until the
+/// wall-clock timeout and report a TLE for a program that never ran a single
+/// instruction. The caller kills it instead.
+fn resume_process(pid: u32) -> io::Result<()> {
+    let snap = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+    if snap == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    let mut entry: THREADENTRY32 = unsafe { std::mem::zeroed() };
+    entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+
+    let mut resumed = 0usize;
+    if unsafe { Thread32First(snap, &mut entry) } != 0 {
+        loop {
+            if entry.th32OwnerProcessID == pid {
+                let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
+                if !thread.is_null() {
+                    // (u32::MAX) is the documented failure value; anything else
+                    // is the previous suspend count, which for a freshly
+                    // CREATE_SUSPENDED thread is 1.
+                    if unsafe { ResumeThread(thread) } != u32::MAX {
+                        resumed += 1;
+                    }
+                    unsafe { CloseHandle(thread) };
+                }
+            }
+            if unsafe { Thread32Next(snap, &mut entry) } == 0 {
+                break;
+            }
+        }
+    }
+    unsafe { CloseHandle(snap) };
+
+    if resumed == 0 {
+        return Err(io::Error::other(format!(
+            "created process {pid} suspended and could not resume it: no resumable thread found"
+        )));
+    }
+    Ok(())
+}
+
 pub fn spawn_and_wait(mut cmd: Command, limits: &ResolvedLimits) -> io::Result<Wait> {
     // The CPU ceiling IS applied here (JOB_OBJECT_LIMIT_PROCESS_TIME, see
     // create_job) but it counts user-mode time only, so a caller comparing it
@@ -169,21 +224,45 @@ pub fn spawn_and_wait(mut cmd: Command, limits: &ResolvedLimits) -> io::Result<W
 
     let job = create_job(limits)?;
 
+    // THE CHILD IS CREATED SUSPENDED AND ASSIGNED BEFORE ITS FIRST INSTRUCTION.
+    //
+    // This used to spawn normally and assign immediately after, which left a
+    // documented race: for the microseconds between `spawn()` returning and
+    // `AssignProcessToJobObject`, the child was running outside the job, and
+    // anything it spawned in that window escaped every limit. The comment here
+    // said closing it meant dropping `std::process::Command` for a raw
+    // `CreateProcessW`. It does not — `CREATE_SUSPENDED` plus a PID-scoped
+    // thread resume keeps Command's pipes, env, cwd and argument quoting while
+    // closing the window to zero.
+    //
+    // WHAT THIS DOES NOT DO: it does not fix THE-818. That failure is the
+    // ceiling not binding at all under an ambient job carrying
+    // SILENT_BREAKAWAY_OK, which is a different question from when the child
+    // joins the job, and it has not been reproducible on any measured launcher
+    // since. `suspended_assign` was the one candidate in jobprobe that bound
+    // under every launcher measured and errored under none — that is why it is
+    // safe to ship, not evidence that it repairs anything. The THE-775
+    // disclosure below is untouched and still fires exactly when it did.
+    //
     // CREATE_NO_WINDOW keeps console runtimes from flashing a window per run.
-    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
     let mut child: Child = cmd.spawn()?;
     let process: HANDLE = child.as_raw_handle() as HANDLE;
 
-    // HONEST CAVEAT: the child is assigned to the job immediately after spawn
-    // rather than being created suspended and assigned before its first
-    // instruction. std::process::Command does not expose the initial thread
-    // handle, so there is no supported way to ResumeThread it. The window is
-    // microseconds and any process the child creates AFTER assignment inherits
-    // the job, but a process spawned inside that window would escape the limits.
-    // Closing it properly means dropping std::process::Command for a raw
-    // CreateProcessW.
     if unsafe { AssignProcessToJobObject(job.0, process) } == 0 {
         let err = io::Error::last_os_error();
+        // Kill rather than resume: a child that could not be placed in the job
+        // must not be allowed to run at all, which is the whole point of having
+        // created it suspended.
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(err);
+    }
+
+    // Only now does the program get to execute. A failure here is fatal for the
+    // reason resume_process documents — a suspended child would otherwise be
+    // reported as a timeout having never run.
+    if let Err(err) = resume_process(child.id()) {
         let _ = child.kill();
         let _ = child.wait();
         return Err(err);

@@ -473,13 +473,23 @@ only appear when you compile for the target.
    give is a CPU-time limit, an open-file limit or a `no_net` shim; all three are
    reported through `unenforced` rather than assumed.
 
-   **Honest caveat, recorded rather than buried:** the child is assigned to the
-   job immediately after spawn rather than being created suspended and assigned
-   before its first instruction, because `std::process::Command` does not expose
-   the initial thread handle. The window is microseconds and any process the
-   child creates after assignment inherits the job, but a process spawned inside
-   that window would escape the limits. Closing it means dropping
-   `std::process::Command` for a raw `CreateProcessW`.
+   **The assignment race recorded here is CLOSED as of 2026-08-12.** It read:
+   the child is assigned to the job immediately after spawn rather than being
+   created suspended, so for the microseconds between `spawn()` returning and
+   `AssignProcessToJobObject` it ran outside the job, and anything it spawned in
+   that window escaped every limit.
+
+   It also said closing it meant dropping `std::process::Command` for a raw
+   `CreateProcessW`. That turned out to be wrong, and is why the caveat stood as
+   long as it did: `CREATE_SUSPENDED` plus a PID-scoped thread resume closes the
+   window to zero while keeping Command's pipes, environment, cwd and argument
+   quoting. The child is now assigned before its first instruction, and a child
+   that cannot be placed in the job is killed rather than resumed.
+
+   **This is not a fix for the ceiling not binding at all** under an ambient job
+   carrying `SILENT_BREAKAWAY_OK` — a different failure, tracked separately, and
+   still disclosed through `unenforced` rather than repaired. When the child
+   joins the job and whether the job's limits bind are independent questions.
 
 8. **`{exe}` needed a `.exe` extension on Windows**, and `sqlite` was invoked
    through `bash -c ... < file`. The redirect was the only shell dependency that
