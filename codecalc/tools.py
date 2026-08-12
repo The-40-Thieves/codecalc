@@ -137,8 +137,27 @@ def _fit_class(sizes: list[int], times_ms: list[float]) -> dict:
     }
 
 
+#: Below this many ratios, `statistics.median` cannot reject an outlier — with
+#: two values it IS the mean. Callers are told rather than silently given a
+#: number the docstring implies is robust. See `ratio_confidence` in the result.
+MIN_ROBUST_RATIOS = 3
+
+
 def _classify_by_ratio(ratios: list[float]) -> str:
-    """Classify by doubling ratio: 1≈O(1), 2≈O(n), 2-3≈O(n log n), 4≈O(n²), 8≈O(n³)."""
+    """Classify by doubling ratio: 1≈O(1), 2≈O(n), 2-3≈O(n log n), 4≈O(n²), 8≈O(n³).
+
+    The median is what makes this robust to a single slow run — but only once
+    there are at least three ratios to take a median OF. Note that baseline
+    subtraction in `benchmark()` forces `corrected[0]` to 0, so the first gap is
+    always discarded: N doubling sizes yield N-2 usable ratios, not N-1. Four
+    sizes therefore give two, and a median of two is a mean.
+
+    That is not hypothetical. On a shared macOS runner under sustained load, one
+    4x-slow largest measurement moved this from O(n^2) to O(c^n) — two classes —
+    three separate times (THE-808), because dividing by a small denominator can
+    only ever inflate. `ratio_confidence` in the result now says when the median
+    is carrying less weight than it appears to.
+    """
     if not ratios:
         return "unknown"
     r = statistics.median(ratios)
@@ -285,6 +304,22 @@ def benchmark(code: str, language: str = "python3", sizes: str = "100,1000,10000
         "best_score": fit.get("best_score"),
         "candidate_scores": fit.get("scores", []),
         "doubling_ratios": ratios,
+        # How much the median is actually doing. Two ratios make it a mean, so
+        # a single slow run moves the answer with nothing to reject it against —
+        # measured at two whole classes (O(n^2) -> O(c^n)) on a loaded runner.
+        # Always present, like `unenforced`: a field that appears only on
+        # trouble is a field a caller forgets to read.
+        #
+        # Note the arithmetic that surprises people: baseline subtraction forces
+        # corrected[0] to 0, so the first gap is always discarded and N doubling
+        # sizes give N-2 usable ratios. Five sizes is the floor for a real
+        # median, not four.
+        "ratio_confidence": (
+            "robust" if len(ratios) >= MIN_ROBUST_RATIOS else
+            f"low ({len(ratios)} ratio(s); a median needs >= {MIN_ROBUST_RATIOS} "
+            f"to reject an outlier, which needs >= {MIN_ROBUST_RATIOS + 2} "
+            f"doubling sizes because the first gap is always discarded)"
+        ),
         "baseline_ms": round(baseline, 2),
         "auto_scaled": scale_steps > 0,
         "runs": runs,
