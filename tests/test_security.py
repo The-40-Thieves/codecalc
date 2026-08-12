@@ -183,13 +183,63 @@ check("zero eval/exec/shell=True in codebase", not bad, f"-> {bad}")
 #
 # n=4000 measures 2.1s, a 7.2x margin, classifies identically as O(n^2), and
 # takes 9s instead of 35s per matrix leg.
+# FIVE sizes, not four, and the reason is structural rather than a tolerance
+# nudge (THE-808).
+#
+# `benchmark` subtracts a baseline before computing doubling ratios:
+#
+#     baseline  = min(times)
+#     corrected = [max(t - baseline, 0.0) for t in times]
+#
+# so `corrected[0]` is ALWAYS 0, and the first gap is always discarded by the
+# `ta > 3.0` guard. Four sizes give three gaps, minus that one, leaves exactly
+# TWO ratios — and `statistics.median` of two values is their MEAN. The design
+# says the median damps scheduler noise; with four sizes it damps nothing,
+# because there is no third value for an outlier to be rejected against.
+#
+# Modelled on the physical shape of this program (t = startup + k*n^2, a nested
+# n*n loop), one slow largest measurement is then enough to move the answer two
+# whole classes:
+#
+#     4 sizes, clean            ratios=[5.0, 4.2]     median 4.6   -> O(n^2)
+#     4 sizes, largest 2x slow  ratios=[5.0, 8.63]    median 6.8   -> O(n^3)
+#     4 sizes, largest 4x slow  ratios=[5.0, 17.48]   median 11.2  -> O(c^n)
+#
+#     5 sizes, largest 4x slow  ratios=[4.99,4.2,16.69] median 4.99 -> O(n^2)
+#
+# A 4x-slow largest run is ordinary on a shared macOS runner under sustained
+# load, which is where all three observed failures happened. n=250 is 62,500
+# iterations — about 6ms — so the third ratio costs nothing and buys the outlier
+# rejection the classifier was always documented to have.
+#
+# Deliberately NOT done: widening the tolerance. Every observed failure landed
+# on `O(c^n)`, two classes away, because dividing by a small denominator can
+# only ever inflate — a wider band would have hidden that rather than fixed it.
+_BENCH_SIZES = "250,500,1000,2000,4000"
 r = tools.benchmark("import sys\nn=int(sys.stdin.readline())\ns=0\nfor i in range(n):\n    for j in range(n): s+=i*j\nprint(s)",
-                    sizes="500,1000,2000,4000", timeout=15)
+                    sizes=_BENCH_SIZES, timeout=15)
 est = r.get("estimate", "")
+
+
+def _bench_detail() -> str:
+    """Everything needed to tell noise from a wrong curve, on failure only.
+
+    THE-808's first occurrence printed an EMPTY detail, so it could not say
+    whether the classifier saw noise or the wrong shape. #125 added the class
+    name; that was enough to show the answer was `O(c^n)` three times running
+    and not enough to say WHY. The measurements are what say why: a ratio is a
+    quotient, and a quotient needs its denominator on the record.
+    """
+    runs = [(x.get("n"), x.get("duration_ms")) for x in (r.get("runs") or [])]
+    return (f"-> {est or 'NO ESTIMATE'} | ok={r.get('ok')} err={r.get('error')!r} "
+            f"| sizes/durations_ms={runs} | ratios={r.get('doubling_ratios')} "
+            f"| auto_scaled={r.get('auto_scaled')} "
+            f"| top_fits={[s.get('class') for s in (r.get('candidate_scores') or [])[:3]]}")
+
+
 check("benchmark detects polynomial growth (no eval regression)",
       "O(n" in est and est not in ("O(1)", "O(log n)"),
-      f"-> {est}" if est
-      else f"-> NO ESTIMATE (ok={r.get('ok')}): {r.get('error')!r}")
+      _bench_detail())
 
 # ── the safety screen must run BEFORE any parse ───────────────────────────
 # SymPy's parse_expr/sympify EVALUATE what they parse — its own docstring says
