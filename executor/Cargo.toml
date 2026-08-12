@@ -43,6 +43,11 @@ windows-sys = { version = "0.61", features = [
     "Win32_Security",
     "Win32_System_JobObjects",
     "Win32_System_Threading",
+    # Thread32First/Next. The child is created suspended and assigned to the job
+    # before its first instruction, but `std::process::Command` does not expose
+    # the initial thread handle, so the thread to resume is found by snapshotting
+    # and filtering on the owning PID. See platform/windows.rs::resume_process.
+    "Win32_System_Diagnostics_ToolHelp",
 ] }
 
 # ── Older-computer optimizations ──────────────────────────────────────────
