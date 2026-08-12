@@ -557,6 +557,46 @@ fn substitute(template: &str, file: &str, exe: &str, work: &str) -> String {
         .replace("{work}", work)
 }
 
+/// Languages whose runtime re-parses the raw Windows command line with POSIX
+/// escaping rules instead of taking argv as handed to it (THE-817).
+///
+/// WINDOWS HAS NO ARGV. `CreateProcess` takes one command-line STRING and the
+/// child's C runtime splits it back up. MSVC-style parsing keeps a backslash
+/// literal unless it precedes a quote; the MSYS2 runtime that
+/// Git-for-Windows' `bash` is built on treats `\` as an ESCAPE, so
+/// `C:\Users\me\...\main.sh` reaches bash as `C:Usersmemain.sh` — every
+/// separator eaten, exit 127, reproducible on a desktop install. This is the
+/// path that box was running, so this copy is the one that closes the bug.
+///
+/// Mirrored in codecalc/registry.py; scripts/check_parity.py gates that the
+/// two lists stay identical.
+const POSIX_ARGV_LANGUAGES: &[&str] = &["bash", "zsh"];
+
+/// What `{file}` becomes for `language`.
+///
+/// The child's cwd is already the workdir (`run_step` sets `current_dir`), so
+/// the bare file name resolves to the same file and leaves nothing for the
+/// escape pass or MSYS path translation to corrupt. `{exe}` is deliberately
+/// NOT given this treatment: it is spawned rather than read, and a bare name
+/// would be resolved against PATH instead of the workdir.
+///
+/// `windows` is a PARAMETER rather than a `cfg!(windows)` read inside the body
+/// for the same reason the Python twin takes one: `cfg!` is a compile-time
+/// constant, so on a Linux build the interesting branch is dead code that no
+/// Linux CI leg can reach. Passing it in makes the Windows rendering testable
+/// on every host, which is where the tests below run.
+fn source_arg<'a>(language: &str, file: &'a str, windows: bool) -> &'a str {
+    if !windows || !POSIX_ARGV_LANGUAGES.contains(&language) {
+        return file;
+    }
+    // Split on BOTH separators: Windows accepts either, and a path that mixed
+    // them would keep whichever half this missed.
+    match file.rsplit(['\\', '/']).next() {
+        Some(base) if !base.is_empty() => base,
+        _ => file,
+    }
+}
+
 /// Per-call resource limits (defaults applied by the caller).
 #[derive(Clone, Copy)]
 struct Limits {
@@ -1037,7 +1077,14 @@ fn execute(
     if let Some(compile) = lang.compile {
         let argv: Vec<String> = compile
             .iter()
-            .map(|t| substitute(t, &file.to_string_lossy(), &exe.to_string_lossy(), &work_s))
+            .map(|t| {
+                substitute(
+                    t,
+                    source_arg(lang.name, &file.to_string_lossy(), cfg!(windows)),
+                    &exe.to_string_lossy(),
+                    &work_s,
+                )
+            })
             .collect();
         let sr = run_step(&argv, &work, "compile", b"", limits);
         compile_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -1088,7 +1135,14 @@ fn execute(
     let argv: Vec<String> = lang
         .run
         .iter()
-        .map(|t| substitute(t, &file.to_string_lossy(), &exe.to_string_lossy(), &work_s))
+        .map(|t| {
+            substitute(
+                t,
+                source_arg(lang.name, &file.to_string_lossy(), cfg!(windows)),
+                &exe.to_string_lossy(),
+                &work_s,
+            )
+        })
         .collect();
     // Budget what is LEFT after compiling, so compile+run cannot exceed the
     // caller's timeout between them.
@@ -1339,5 +1393,64 @@ mod tests {
     #[test]
     fn compile_using_half_the_budget_leaves_the_other_half() {
         assert_eq!(remaining_run_timeout_secs(10, 5_000), Some(5));
+    }
+
+    // ── THE-817 ─────────────────────────────────────────────────────────────
+    //
+    // These pass `windows` explicitly rather than relying on the build target,
+    // so the Windows rendering is checked on the Linux and macOS legs too. The
+    // bug being prevented is only reachable on Windows; a test that could only
+    // run there would have caught it after shipping, not before.
+
+    /// The repair, stated as the property that makes it safe: nothing left for
+    /// the MSYS escape pass to eat. A spaced profile is in the fixture because
+    /// the same re-parse splits on spaces, and `C:\Users\John Smith\` is the
+    /// untested case THE-817 flags as still open for every other runtime.
+    #[test]
+    fn posix_argv_languages_get_a_name_with_no_separator_on_windows() {
+        let win = r"C:\Users\John Smith\AppData\Local\Temp\codecalc-ab12\main.sh";
+        for lang in POSIX_ARGV_LANGUAGES {
+            let got = source_arg(lang, win, true);
+            assert_eq!(got, "main.sh", "{lang} kept a path");
+            assert!(!got.contains('\\'), "{lang} kept a backslash");
+            assert!(!got.contains(' '), "{lang} kept a space");
+        }
+    }
+
+    /// Forward slashes are legal separators on Windows, so a mixed path must
+    /// not keep whichever half a single-separator split missed.
+    #[test]
+    fn a_mixed_separator_path_is_still_reduced_to_the_name() {
+        assert_eq!(
+            source_arg("bash", r"C:/Users/me\tmp/main.sh", true),
+            "main.sh"
+        );
+    }
+
+    /// Unix argv is a real array — nothing re-parses it, so there is no bug to
+    /// fix and no reason to change what works.
+    #[test]
+    fn unix_keeps_the_absolute_path() {
+        assert_eq!(
+            source_arg("bash", "/tmp/codecalc-ab12/main.sh", false),
+            "/tmp/codecalc-ab12/main.sh"
+        );
+    }
+
+    /// A runtime that takes argv as given is untouched even on Windows: this
+    /// list is scoped to where the failure was measured, not applied broadly.
+    #[test]
+    fn a_normal_language_is_untouched_on_windows() {
+        let win = r"C:\Temp\codecalc-ab12\main.py";
+        assert_eq!(source_arg("python3", win, true), win);
+    }
+
+    /// `{exe}` must NOT get this treatment — it is spawned, and a bare name
+    /// would be resolved against PATH instead of the workdir. Asserting it
+    /// through `substitute` covers the wiring, not just the helper.
+    #[test]
+    fn the_compiled_artifact_keeps_its_absolute_path() {
+        let out = substitute("{exe}", "main.sh", r"C:\Temp\w\a.exe", r"C:\Temp\w");
+        assert_eq!(out, r"C:\Temp\w\a.exe");
     }
 }

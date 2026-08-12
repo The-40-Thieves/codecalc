@@ -919,7 +919,12 @@ def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10
         src.write_text(code)
         # Windows needs the .exe extension on the compiled artifact.
         exe_name = "a.exe" if IS_WINDOWS else "a.out"
-        fmt = {"file": str(src), "exe": str(Path(workdir) / exe_name), "work": workdir}
+        # `{file}` is rendered per-language: a runtime that re-parses the raw
+        # Windows command line gets a name with no separator in it (THE-817).
+        # `{exe}` stays absolute — it is spawned, not read, and a bare name
+        # would be looked up on PATH rather than in the workdir.
+        fmt = {"file": registry.source_arg(name, str(src), windows=IS_WINDOWS),
+               "exe": str(Path(workdir) / exe_name), "work": workdir}
 
         compile_ms = 0
         if entry["compile"]:
@@ -1157,6 +1162,36 @@ def execute(language: str, code: str, stdin: str = "", timeout: int = 10,
         language, code, stdin=stdin, timeout=timeout, workdir=workdir,
         max_memory_mb=max_memory_mb, max_output_kb=max_output_kb,
         max_cpu=max_cpu, no_net=no_net))
+
+
+def catalog() -> list[dict]:
+    """The `list_languages` payload: the registry plus what was measured here.
+
+    THE-817. `available` used to be the whole answer, and it was computed from
+    RESOLUTION — `shutil.which` (or the Rust `--probe`) finding the command on
+    PATH. That is a weaker fact than the name promises: on a desktop
+    Git-for-Windows install `bash` resolved, was reported available, and failed
+    100% of the time. A model consults this tool before choosing a language, so
+    a runtime advertised as usable that never works is worse than one reported
+    missing.
+
+    So the claim now carries its own basis. `status` says which of the four
+    states was reached and `status_basis` says which measurement decided it —
+    `resolved` here, which is why `status` never reaches `available`. Promoting
+    a runtime to `available` means RUNNING it, which is what `doctor --deep`
+    is for; doing it on a tool call would turn a listing into 31 spawns.
+
+    `available` is kept, unchanged, because clients read it. It is now the
+    boolean shadow of `status` rather than the only thing on offer.
+    """
+    langs = registry.all_languages()
+    resolved = probe()
+    for entry in langs:
+        found = resolved.get(entry["name"], True)
+        entry["available"] = found
+        entry["status"] = "installed" if found else "supported"
+        entry["status_basis"] = "resolved"
+    return langs
 
 
 def probe() -> dict:
