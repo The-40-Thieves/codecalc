@@ -452,7 +452,8 @@ def build_doctor_schema(dialect: str | None = None, schema_id: str | None = None
         ),
         "type": "object",
         "required": ["contract_version", "codecalc_version", "healthy", "python",
-                     "backend", "install_sandbox", "extras", "status_basis",
+                     "backend", "install_sandbox", "extras", "grammar_cache",
+                     "status_basis",
                      "runtimes", "runtime_summary", "workspace", "remedies"],
         "properties": {
             "contract_version": {"type": "string", "pattern": r"^\d+\.\d+\.\d+$"},
@@ -485,6 +486,33 @@ def build_doctor_schema(dialect: str | None = None, schema_id: str | None = None
                 "properties": {"landlock_abi": {"type": ["integer", "null"]},
                                "confined": {"type": "boolean"},
                                "detail": {"type": ["string", "null"]}},
+            },
+            "grammar_cache": {
+                "type": "object",
+                "required": ["extra_installed", "cached", "path", "grammars",
+                             "detail"],
+                "description": (
+                    "tree-sitter grammars are NOT in the wheel: the pack fetches "
+                    "each one on first use, in-process, into a local cache "
+                    "(THE-821). Reported so an offline or egress-restricted "
+                    "install can see it BEFORE analyze_complexity degrades to "
+                    "regex-fallback. `cached: false` is not a fault."
+                ),
+                "properties": {
+                    "extra_installed": {"type": "boolean"},
+                    "cached": {
+                        "type": "boolean",
+                        "description": (
+                            "At least one grammar is on disk. Derived from a "
+                            "COUNT, not from the directory existing — the pack "
+                            "creates the directory before downloading anything, "
+                            "so existence alone reports a warm cache that is not."
+                        ),
+                    },
+                    "path": {"type": ["string", "null"]},
+                    "grammars": {"type": "integer", "minimum": 0},
+                    "detail": {"type": ["string", "null"]},
+                },
             },
             "extras": {
                 "type": "array",

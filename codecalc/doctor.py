@@ -114,6 +114,57 @@ def _runtime_status(cmd: str) -> tuple[str, str | None]:
     return "supported", None
 
 
+def _grammar_cache() -> dict:
+    """Is the tree-sitter grammar cache warm? (THE-821)
+
+    `analyze_complexity` parses with tree-sitter, and the grammars are NOT in
+    the wheel — `tree-sitter-language-pack` ships a ~5 MB extension and fetches
+    each grammar on first use, in-process, into a local cache (28 grammars,
+    89 MB, ~15s cold).
+
+    That is a socket opened from inside the server, which is a surprise on a
+    host chosen for being offline. Reported here so it is discoverable BEFORE a
+    tool call degrades to `regex-fallback`, rather than after — an operator
+    planning an air-gapped install otherwise has no way to find out.
+
+    `cached: false` is not an error. It means the first analysis of each
+    language will reach the network; `scripts/prefetch_grammars.py` warms it.
+    """
+    if not optional.have("tree_sitter_language_pack"):
+        return {"extra_installed": False, "cached": False, "path": None,
+                "grammars": 0,
+                "detail": "the 'parsing' extra is not installed; "
+                          "analyze_complexity uses the regex fallback"}
+    try:
+        from tree_sitter_language_pack import cache_dir as _cache_dir
+
+        path = str(_cache_dir())
+    except Exception as exc:
+        return {"extra_installed": True, "cached": False, "path": None,
+                "grammars": 0,
+                "detail": f"cannot resolve the grammar cache: "
+                          f"{type(exc).__name__}: {exc}"}
+
+    # COUNTED, not just existence-checked: an empty cache directory is created
+    # by the pack before anything is downloaded, so `path.is_dir()` is true on a
+    # completely cold host and would report a warm cache that is not there.
+    count = 0
+    p = Path(path)
+    if p.is_dir():
+        count = sum(1 for f in p.iterdir()
+                    if f.is_file() and f.suffix in (".so", ".dylib", ".dll", ".pyd"))
+    return {
+        "extra_installed": True,
+        "cached": count > 0,
+        "path": path,
+        "grammars": count,
+        "detail": None if count else (
+            "no grammars cached — the first analyze_complexity call per "
+            "language will DOWNLOAD one. Run scripts/prefetch_grammars.py to "
+            "warm it, which is what an offline install needs"),
+    }
+
+
 def _workspace_check() -> dict:
     """Can we actually create a workdir? Written, not assumed.
 
@@ -218,6 +269,10 @@ def report(deep: bool = False) -> dict:
             "detail": None if abi else "installs are not confined on this host",
         },
         "extras": extras,
+        # Where analyze_complexity's grammars come from, and whether they are
+        # here yet. Not an extra and not a runtime: it is a network dependency
+        # of a tool, which neither of those blocks describes.
+        "grammar_cache": _grammar_cache(),
         # Which measurement produced the statuses above. Without this a reader
         # cannot tell `installed` ("found on PATH") from a --deep run that
         # simply found nothing runnable.
