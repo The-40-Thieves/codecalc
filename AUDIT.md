@@ -467,11 +467,21 @@ only appear when you compile for the target.
    cheapest possible regression test.
 
 7. **Windows sandboxing is a Job Object**, not rlimits: `KILL_ON_JOB_CLOSE` for
-   the tree kill, `ActiveProcessLimit` for the fork-bomb guard (job-scoped, so
-   strictly better than `RLIMIT_NPROC`'s uid-wide budget), `ProcessMemoryLimit`
+   the tree kill, `ActiveProcessLimit` for the fork-bomb guard, `ProcessMemoryLimit`
    for memory, and job accounting for CPU and peak memory. What Windows does NOT
    give is a CPU-time limit, an open-file limit or a `no_net` shim; all three are
    reported through `unenforced` rather than assumed.
+
+   **CORRECTION 2026-08-13.** This paragraph read "(job-scoped, so strictly
+   better than `RLIMIT_NPROC`'s uid-wide budget)". That was measured false:
+   400 of 400 spawns succeeded against a ceiling of 24 on Windows 11 Pro,
+   because `ActiveProcessLimit` comes from a process's IMMEDIATE job and
+   post-creation assignment does not guarantee ours is it. The claim was
+   comparative and load-bearing — it told a reader Windows was the STRONGEST of
+   the three platforms on exactly the axis where it is the only one that cannot
+   be shown to bind. Every post-creation assignment now reports
+   `process_limit_enforcement_unverified_on_windows`; see the README's platform
+   table for the full account and the opt-in repair.
 
    **The assignment race recorded here is CLOSED as of 2026-08-12.** It read:
    the child is assigned to the job immediately after spawn rather than being

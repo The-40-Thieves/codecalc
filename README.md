@@ -565,7 +565,7 @@ backends.
 |---|---|---|---|
 | Wall-clock timeout | yes | yes | yes |
 | Kill the whole process tree | `killpg` + `PDEATHSIG` | `killpg` | `TerminateJobObject` |
-| Fork-bomb guard | `RLIMIT_NPROC` (uid-wide) | `RLIMIT_NPROC` (uid-wide) | Job `ActiveProcessLimit` (**job-scoped**) |
+| Fork-bomb guard | `RLIMIT_NPROC` (uid-wide) | `RLIMIT_NPROC` (uid-wide) | Job `ActiveProcessLimit`, **reported unverified**⁵ |
 | Memory ceiling | `RLIMIT_AS` | reported unenforced¹ | Job `ProcessMemoryLimit` |
 | CPU-time ceiling | `RLIMIT_CPU` | `RLIMIT_CPU` | Job `PerProcessUserTimeLimit`⁴ |
 | Open-file ceiling | `RLIMIT_NOFILE` | `RLIMIT_NOFILE` | reported unenforced |
@@ -601,9 +601,36 @@ processes rather than walking up to the fallback. Verified to track the limit
 rather than something incidental: a headroom of 24 bounds it at 22 children and
 a headroom of 300 bounds it at 298.
 
-Windows' `ActiveProcessLimit` is scoped to the **job**, which makes it a
-genuinely better fork-bomb guard than `RLIMIT_NPROC`'s uid-wide budget — the
-failure mode that broke 14 of 31 runtimes on Linux cannot occur there.
+⁵ Windows' `ActiveProcessLimit` is scoped to the **job** rather than to the uid,
+so in principle it avoids the failure mode that broke 14 of 31 runtimes on
+Linux. In practice codecalc **cannot verify that it binds**, and says so on
+every run rather than claiming a ceiling it may not have applied.
+
+Measured on Windows 11 Pro: **400 of 400 spawns succeeded against a ceiling of
+24**, reproduced from two unrelated launchers including Task Scheduler. This is
+not a failed API call — `SetInformationJobObject` and `AssignProcessToJobObject`
+both return success and the correct limit reaches the job. It is topology.
+`ActiveProcessLimit` is **not** one of the limits combined across a nested job
+chain; those take the most restrictive value, while this one comes from the
+process's **immediate** job. A post-creation `AssignProcessToJobObject` places
+the child somewhere in that chain rather than at its end: measured, the child's
+immediate job reported `0x3000 / APL 0` while codecalc's reported
+`0x230A / APL 24`, so codecalc's ceiling was never consulted.
+
+No parent-side Win32 call returns another process's immediate job or its
+effective `ActiveProcessLimit`, so this cannot be closed by inspection. Every
+Windows run that assigns the child after creation therefore carries
+`process_limit_enforcement_unverified_on_windows` in `unenforced`. Four further
+strings can each positively *prove* a failure; none can prove success, so their
+silence does not imply enforcement.
+
+**Treat the Windows fork-bomb guard as unverified unless a run declares
+`process_limit_job_assigned_at_creation_on_windows`.** That string records the
+opt-in path, selected with `CODECALC_WIN_JOB_AT_CREATION=1`, which supplies the
+job at creation through `PROC_THREAD_ATTRIBUTE_JOB_LIST` so that codecalc's job
+is the child's immediate one and its `ActiveProcessLimit` is the one consulted.
+It is **off by default** pending verification on Windows hardware; the default
+path remains post-creation assignment, disclosed as above.
 
 Two things degrade rather than fail on a given platform: languages whose runtime
 is absent (`list_languages` reports `available: false`), and the shell-wrapper
