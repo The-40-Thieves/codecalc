@@ -79,6 +79,23 @@ import ctypes, ctypes.wintypes as w, subprocess, sys
 k32 = ctypes.WinDLL("kernel32", use_last_error=True)
 ULONG_PTR = ctypes.c_size_t
 
+# DECLARE THE ABI. ctypes defaults restype to c_int (32-bit signed), so a
+# HANDLE returned by OpenProcess is TRUNCATED on 64-bit Windows and every later
+# use of it fails. That silently turns "is this process in a job" into "the call
+# failed", which is exactly the measurement under suspicion here.
+k32.GetCurrentProcess.restype = w.HANDLE
+k32.GetCurrentProcess.argtypes = []
+k32.OpenProcess.restype = w.HANDLE
+k32.OpenProcess.argtypes = [w.DWORD, w.BOOL, w.DWORD]
+k32.CloseHandle.restype = w.BOOL
+k32.CloseHandle.argtypes = [w.HANDLE]
+k32.IsProcessInJob.restype = w.BOOL
+k32.IsProcessInJob.argtypes = [w.HANDLE, w.HANDLE, ctypes.POINTER(w.BOOL)]
+k32.QueryInformationJobObject.restype = w.BOOL
+k32.QueryInformationJobObject.argtypes = [w.HANDLE, ctypes.c_int,
+                                          ctypes.c_void_p, w.DWORD,
+                                          ctypes.POINTER(w.DWORD)]
+
 class BASIC(ctypes.Structure):
     _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64),
                 ("PerJobUserTimeLimit", ctypes.c_int64),
@@ -115,19 +132,26 @@ class ACCT(ctypes.Structure):
 EXTENDED_INFO, ACCT_INFO = 9, 1
 
 def in_job(handle=None):
-    b = ctypes.c_int(0)
+    """True / False / "ERROR n". A failed call is NOT an out-of-job result."""
+    b = w.BOOL(0)
     h = handle if handle is not None else k32.GetCurrentProcess()
     ok = k32.IsProcessInJob(h, None, ctypes.byref(b))
-    return bool(b.value) if ok else None
+    if not ok:
+        return "ERROR %d" % ctypes.get_last_error()
+    return bool(b.value)
 
 def query(cls, cls_id):
     """NULL job handle = 'the job this process is in', per the API contract."""
     buf, ret = cls(), w.DWORD(0)
     ok = k32.QueryInformationJobObject(None, cls_id, ctypes.byref(buf),
                                        ctypes.sizeof(buf), ctypes.byref(ret))
-    return buf if ok else None
+    if not ok:
+        out.setdefault("QUERY_ERRORS", []).append(
+            "%s: ERROR %d" % (cls.__name__, ctypes.get_last_error()))
+        return None
+    return buf
 
-out = {}
+out = {"QUERY_ERRORS": []}
 out["IN_JOB"] = in_job()
 ext = query(EXTENDED, EXTENDED_INFO)
 out["LIMIT_FLAGS"] = ext.BasicLimitInformation.LimitFlags if ext else None
@@ -151,8 +175,12 @@ out["FIRST_ERROR"] = err
 try:
     PROCESS_QUERY_LIMITED = 0x1000
     h = k32.OpenProcess(PROCESS_QUERY_LIMITED, False, kids[0].pid) if kids else None
-    out["CHILD0_IN_JOB"] = in_job(h) if h else None
-    if h:
+    if not kids:
+        out["CHILD0_IN_JOB"] = "no children spawned"
+    elif not h:
+        out["CHILD0_IN_JOB"] = "OpenProcess ERROR %d" % ctypes.get_last_error()
+    else:
+        out["CHILD0_IN_JOB"] = in_job(h)
         k32.CloseHandle(h)
 except Exception as exc:
     out["CHILD0_IN_JOB"] = "error: %s" % exc
@@ -294,6 +322,15 @@ def _parent_job_facts() -> dict:
     import ctypes.wintypes as w
 
     k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    # Same reason as the payload: an undeclared restype truncates HANDLEs.
+    k32.GetCurrentProcess.restype = w.HANDLE
+    k32.GetCurrentProcess.argtypes = []
+    k32.IsProcessInJob.restype = w.BOOL
+    k32.IsProcessInJob.argtypes = [w.HANDLE, w.HANDLE, ctypes.POINTER(w.BOOL)]
+    k32.QueryInformationJobObject.restype = w.BOOL
+    k32.QueryInformationJobObject.argtypes = [w.HANDLE, ctypes.c_int,
+                                              ctypes.c_void_p, w.DWORD,
+                                              ctypes.POINTER(w.DWORD)]
 
     class BASIC(ctypes.Structure):
         _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64),
@@ -319,9 +356,10 @@ def _parent_job_facts() -> dict:
                     ("PeakProcessMemoryUsed", ctypes.c_size_t),
                     ("PeakJobMemoryUsed", ctypes.c_size_t)]
 
-    b = ctypes.c_int(0)
+    b = w.BOOL(0)
     ok = k32.IsProcessInJob(k32.GetCurrentProcess(), None, ctypes.byref(b))
-    facts: dict = {"IN_JOB": bool(b.value) if ok else None}
+    facts: dict = {"IN_JOB": bool(b.value) if ok
+                   else f"ERROR {ctypes.get_last_error()}"}
 
     buf, ret = EXTENDED(), w.DWORD(0)
     if k32.QueryInformationJobObject(None, 9, ctypes.byref(buf),
