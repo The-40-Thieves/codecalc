@@ -124,7 +124,41 @@ from codecalc import registry
 
 supported = parsing.supported_languages()
 missing = sorted(set(registry.LANGUAGES) - set(supported))
-check("every registry language has a grammar", not missing, f"-> missing {missing}")
+# Report WHY, not just which. `missing ['python3']` was the entire diagnosis
+# available when grammars stopped loading on py3.14 in CI (THE-820), and it is
+# indistinguishable from a language this pack genuinely does not ship.
+#
+# Distinct REASONS rather than one per language: a pack-wide failure produces
+# the same error 32 times, and printing it 32 times buries the line that matters.
+_reasons = sorted({
+    (parsing.grammar_error(parsing.grammar_name(m)) or "no grammar in this pack")[:160]
+    for m in missing
+})
+check("every registry language has a grammar", not missing,
+      f"-> missing {len(missing)}: {missing[:6]}"
+      + (f" — {len(_reasons)} distinct reason(s): {_reasons[:2]}" if _reasons else ""))
+
+# ── 10b. FLOOR: is the parser alive at all? ─────────────────────────────────
+#
+# Half this file passes VACUOUSLY when tree-sitter is absent. Every case of the
+# form "the regex over-counts here and the parser correctly says 0" is also
+# satisfied by a parser that says 0 about everything, so a total outage presents
+# as a partial pass — five scattered failures among a dozen PASSes, with nothing
+# saying "the analyser is not running at all".
+#
+# That is exactly what THE-820 looked like in CI. This is the existence floor
+# the gate scripts already carry, applied to the differential: if the parser
+# cannot count the loops in a nested loop, nothing above measured a parser, and
+# the file should SAY so rather than leave a reader to infer it from which
+# assertions happened to fail.
+_alive = parsing.analyse("for i in range(3):\n    for j in range(3):\n        pass\n", "python3")
+check("FLOOR: the parser is actually running — everything above is vacuous if not",
+      _alive.parsed and _alive.loops > 0,
+      f"-> parsed={_alive.parsed} loops={_alive.loops} "
+      f"reason={_alive.reason or '(none)'} "
+      # The underlying exception, which `reason` summarises away. This is the
+      # line THE-820 needed and did not have.
+      f"| grammar_error={parsing.grammar_error('python') or '(none)'}")
 
 # ── 11. an unknown language degrades honestly ───────────────────────────────
 f = parsing.analyse("x", "notalanguage")
