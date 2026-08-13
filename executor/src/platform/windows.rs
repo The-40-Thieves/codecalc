@@ -16,6 +16,7 @@
 use std::io;
 use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
+use std::path::PathBuf;
 use std::process::{Child, Command};
 
 use windows_sys::Win32::Foundation::{
@@ -315,6 +316,62 @@ fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// Resolve the program using the environment attached to `cmd`.
+///
+/// `CreateProcessW` performs executable lookup before applying the child's
+/// environment block, so a null `lpApplicationName` searches the executor's
+/// PATH rather than the deliberately configured sandbox PATH. Rust's normal
+/// `Command` path resolves this for us; the raw creation-time path must do it.
+fn resolve_command_program(cmd: &Command) -> io::Result<PathBuf> {
+    let requested = PathBuf::from(cmd.get_program());
+    if requested.is_absolute() || requested.components().count() > 1 {
+        return requested.is_file().then_some(requested).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "configured executable does not exist",
+            )
+        });
+    }
+
+    let command_env = |name: &str| {
+        cmd.get_envs().find_map(|(key, value)| {
+            key.to_string_lossy()
+                .eq_ignore_ascii_case(name)
+                .then(|| value.map(|v| v.to_os_string()))
+                .flatten()
+        })
+    };
+    let path = command_env("PATH").unwrap_or_default();
+    let pathext = command_env("PATHEXT")
+        .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into())
+        .to_string_lossy()
+        .into_owned();
+    let mut names = vec![requested.clone()];
+    if requested.extension().is_none() {
+        for extension in pathext.split(';').filter(|extension| !extension.is_empty()) {
+            let mut name = requested.clone().into_os_string();
+            name.push(extension);
+            names.push(PathBuf::from(name));
+        }
+    }
+
+    for directory in std::env::split_paths(&path) {
+        for name in &names {
+            let candidate = directory.join(name);
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!(
+            "{} was not found on the configured runtime PATH",
+            requested.display()
+        ),
+    ))
+}
+
 /// Create the child with `J` supplied at CREATION, so it is the IMMEDIATE job.
 ///
 /// THE-818. Post-creation `AssignProcessToJobObject` puts us SOMEWHERE in the
@@ -342,9 +399,11 @@ fn spawn_with_job_at_creation(
     breakaway: bool,
 ) -> io::Result<(HANDLE, HANDLE)> {
     let inheritable_stdio = InheritableStdio::duplicate(stdio)?;
+    let program = resolve_command_program(cmd)?;
+    let program_w = to_wide(&program.to_string_lossy());
 
     // Command line: program then args, each quoted for the MSVC parser.
-    let mut line = super::quote_arg(cmd.get_program());
+    let mut line = super::quote_arg(program.as_os_str());
     for a in cmd.get_args() {
         line.push(' ');
         line.push_str(&super::quote_arg(a));
@@ -416,7 +475,7 @@ fn spawn_with_job_at_creation(
     let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
     let created = unsafe {
         CreateProcessW(
-            std::ptr::null(),
+            program_w.as_ptr(),
             line_w.as_mut_ptr(),
             std::ptr::null(),
             std::ptr::null(),

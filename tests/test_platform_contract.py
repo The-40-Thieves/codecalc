@@ -79,6 +79,12 @@ check(
     and "pi.dwProcessId" in creation_time_job_path,
     "-> compare this PID with the payload PID to detect a launcher boundary",
 )
+check(
+    "the raw Windows spawn resolves the executable from the command PATH",
+    "resolve_command_program(cmd)" in creation_time_job_path
+    and "CreateProcessW(\n            program_w.as_ptr()" in creation_time_job_path,
+    "-> a child environment block cannot control CreateProcessW executable lookup",
+)
 
 #: Every string the executor is allowed to put in `unenforced`, and where it
 #: comes from. A value outside this set is either a typo or a new limitation
