@@ -315,17 +315,53 @@ pub fn spawn_and_wait(mut cmd: Command, limits: &ResolvedLimits) -> io::Result<W
     // from two unrelated launchers, one of them Task Scheduler with no agent in
     // the parent chain.
     //
-    // Neither check below explains WHY. They are not meant to: the root cause
-    // has three candidate fixes with three different blast radii, and choosing
-    // between them needs someone who can observe the result. What is correct
-    // under every one of those hypotheses is that codecalc must not report a
-    // ceiling it did not apply. So this DISCLOSES rather than repairs.
+    // Neither check below explains WHY. They are not meant to: what is correct
+    // under every hypothesis is that codecalc must not report a ceiling it did
+    // not apply. So this DISCLOSES rather than repairs.
     //
     // The distinction matters to a caller more than the fix does. `400/400
     // spawned` with `ok=true` and nothing in `unenforced` is a security
     // guarantee silently absent. The same run with the ceiling declared
     // unapplied is a documented platform limitation — a completely different
     // thing to build on.
+    //
+    // ── AND NONE OF THE CHECKS BELOW CAN SEE THE FAILURE (THE-818) ───────────
+    //
+    // Measured on Windows 11 Pro with the executor instrumented via
+    // CODECALC_DIAG_JOB, three processes in one spawn chain reported three
+    // different job contexts:
+    //
+    //     the launcher (python)   LimitFlags 0x3000
+    //     THIS PROCESS            LimitFlags 0x0     <- an EMPTY job
+    //     the sandboxed child     LimitFlags 0x3000
+    //     its grandchildren       no job at all
+    //
+    // So `ambient_job_allows_breakaway()` returns Some(false) CORRECTLY: this
+    // process really is in a job that really does not permit breakaway. The
+    // function is not wrong. It is standing in the wrong place — its ambient
+    // job is unrelated to the job that governs the child, and there is no
+    // parent-side Win32 call that returns another process's immediate job, its
+    // chain, or its effective ActiveProcessLimit. Confirmed against the docs
+    // and by cross-vendor review.
+    //
+    // ActiveProcessLimit is also NOT one of the limits combined across a nested
+    // chain — those take the most restrictive value; the rest come from the
+    // IMMEDIATE job. So the child's 0x3000/APL 0 governs and our 24 is never
+    // consulted.
+    //
+    // Therefore INSPECT-THEN-DISCLOSE CANNOT BE MADE CORRECT HERE at any level
+    // of effort, and the honest default is to say the ceiling is unverified
+    // whenever it was applied by post-creation assignment. The checks below
+    // still run: each can positively prove a failure, and a proof is worth more
+    // than an admission. What none of them can do is prove SUCCESS, so their
+    // silence no longer implies enforcement.
+    //
+    // Repairing this needs the topology built at creation time
+    // (PROC_THREAD_ATTRIBUTE_JOB_LIST), not inspected afterwards. Until then
+    // this line is the difference between a caller who knows and one who does
+    // not.
+    unenforced.push("process_limit_enforcement_unverified_on_windows");
+
     let mut limit_unverified: Option<&'static str> = None;
 
     // (1) Post-assignment membership. Cheap, direct, and the one thing that can

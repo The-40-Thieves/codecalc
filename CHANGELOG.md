@@ -158,6 +158,21 @@ the thing is.
 
 ### Known limitations
 
+- **On Windows the process ceiling is now reported UNVERIFIED on every run.**
+  `process_limit_enforcement_unverified_on_windows` is emitted whenever the
+  child is assigned to the job after creation — which is every Windows run
+  today. It is not a detected failure; it is an admission. Measured with the
+  executor instrumented: three processes in one spawn chain reported three job
+  contexts — the launcher `0x3000`, **the executor itself an EMPTY job `0x0`**,
+  the sandboxed child `0x3000`, its grandchildren no job at all. The ambient
+  check answers truthfully about a topology the child is not in, and no
+  parent-side Win32 call returns another process's immediate job or effective
+  `ActiveProcessLimit`. `ActiveProcessLimit` is also not combined across a
+  nested chain — it comes from the *immediate* job — so the child's `APL 0`
+  governs and codecalc's 24 is never consulted. The four detection strings below
+  still fire: each can prove a failure, none can prove success, so their silence
+  no longer implies enforcement.
+
 - **On Windows the process ceiling may not bind, and now says so.** Measured on
   Windows 11 Pro from two unrelated launchers: the job-object `ActiveProcessLimit`
   is set, both API calls succeed, and 400 of 400 child spawns still go through.

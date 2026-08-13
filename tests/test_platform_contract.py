@@ -97,6 +97,14 @@ KNOWN_UNENFORCED = {
     "process_limit_not_enforced_ambient_job_allows_breakaway",
     "process_limit_membership_unverifiable_on_windows",
     "process_limit_enforcement_unknown_on_windows",
+    # THE-818: emitted on EVERY Windows run that assigns the child to the job
+    # after creation. Not a detected failure — an admission that no parent-side
+    # call can verify the ceiling applied. The four strings above can each prove
+    # a failure; none of them can prove success, so silence stopped meaning
+    # enforcement. Measured: this process sits in an EMPTY job (0x0) while its
+    # own child reports 0x3000, so the ambient check is answering truthfully
+    # about a topology the child is not in.
+    "process_limit_enforcement_unverified_on_windows",
     # main.rs — the shim is missing, so --no-net would do nothing
     "no_net_requested_but_no_shim_available",
 }
