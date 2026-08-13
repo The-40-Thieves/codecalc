@@ -32,8 +32,8 @@ use windows_sys::Win32::System::JobObjects::{
     TerminateJobObject,
 };
 use windows_sys::Win32::System::Threading::{
-    CREATE_BREAKAWAY_FROM_JOB, CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
-    CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
+    CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
+    DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
     GetExitCodeProcess, InitializeProcThreadAttributeList, OpenThread,
     PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES,
     STARTUPINFOEXW, STARTUPINFOW, THREAD_SUSPEND_RESUME, UpdateProcThreadAttribute,
@@ -280,7 +280,6 @@ fn spawn_with_job_at_creation(
     cmd: &Command,
     stdio: super::RawStdio,
     job: HANDLE,
-    breakaway: bool,
 ) -> io::Result<(HANDLE, HANDLE)> {
     // Command line: program then args, each quoted for the MSVC parser.
     let mut line = super::quote_arg(cmd.get_program());
@@ -344,13 +343,13 @@ fn spawn_with_job_at_creation(
     si.StartupInfo.hStdError = stdio.stderr as HANDLE;
     si.lpAttributeList = attr_list;
 
-    let mut flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT;
-    if breakaway {
-        // Needed when this process is itself in a job that would otherwise
-        // capture the child. FAILS with ERROR_ACCESS_DENIED if the ancestor
-        // does not permit it — which is reported, not swallowed.
-        flags |= CREATE_BREAKAWAY_FROM_JOB;
-    }
+    // Do not add CREATE_BREAKAWAY_FROM_JOB here. An ancestor carrying
+    // SILENT_BREAKAWAY_OK already excludes the child automatically, while an
+    // ordinary ancestor forms a supported nested chain with the supplied job
+    // as the immediate one. Combining explicit breakaway with JOB_LIST caused
+    // Windows 11 Pro to terminate the new process with ERROR_NOT_SUPPORTED
+    // (0x80070032) before its program executed (THE-818).
+    let flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT;
 
     let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
     let created = unsafe {
@@ -431,16 +430,14 @@ pub fn spawn_and_wait(
     let process: HANDLE;
 
     if at_creation {
-        let breakaway = ambient_job_allows_breakaway().unwrap_or(false);
         // Reported, never silently downgraded to the weaker path: a fallback
         // would put us back in the topology this exists to escape, while the
         // caller believed otherwise.
-        let (p, thread) =
-            spawn_with_job_at_creation(&cmd, stdio, job.0, breakaway).map_err(|e| {
-                io::Error::other(format!(
-                    "CODECALC_WIN_JOB_AT_CREATION=1 but creation-time job assignment failed: {e}"
-                ))
-            })?;
+        let (p, thread) = spawn_with_job_at_creation(&cmd, stdio, job.0).map_err(|e| {
+            io::Error::other(format!(
+                "CODECALC_WIN_JOB_AT_CREATION=1 but creation-time job assignment failed: {e}"
+            ))
+        })?;
         unsafe { ResumeThread(thread) };
         unsafe { CloseHandle(thread) };
         unenforced.push("process_limit_job_assigned_at_creation_on_windows");
