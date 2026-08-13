@@ -158,6 +158,19 @@ the thing is.
 
 ### Known limitations
 
+- **Windows: an opt-in path that supplies the job at process CREATION.**
+  `CODECALC_WIN_JOB_AT_CREATION=1` builds the child with
+  `PROC_THREAD_ATTRIBUTE_JOB_LIST` via `STARTUPINFOEX`, so codecalc's job is the
+  child's **immediate** job rather than merely somewhere in its chain — which is
+  the only arrangement where its `ActiveProcessLimit` is the one consulted.
+  Off by default: it cannot be exercised on the machine it was written on, and
+  it required hand-written MSVC argv quoting, the same class of bug as the
+  `bash` failure above. The quoting function is compiled and unit-tested on
+  every platform rather than only where it runs. A run that takes this path
+  says so with `process_limit_job_assigned_at_creation_on_windows`, and a
+  failure to create is reported rather than silently downgraded to the weaker
+  path.
+
 - **On Windows the process ceiling is now reported UNVERIFIED on every run.**
   `process_limit_enforcement_unverified_on_windows` is emitted whenever the
   child is assigned to the job after creation — which is every Windows run

@@ -365,7 +365,8 @@ mod imp {
             let mut cmd = child_command(&exe, spawns, &out_s);
             cmd.stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null());
-            let wait = platform::spawn_and_wait(cmd, &limits).map_err(|e| e.to_string())?;
+            let wait = platform::spawn_and_wait(cmd, &limits, platform::RawStdio::default())
+                .map_err(|e| e.to_string())?;
             let mut r = read_report(&out_s);
             r.unenforced = Some(if wait.unenforced.is_empty() {
                 "(none)".to_string()

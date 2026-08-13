@@ -723,6 +723,22 @@ fn run_step(
             cmd.env(key, val);
         }
     }
+    // Captured BEFORE `Stdio::from` consumes the Files. The Windows
+    // creation-time job path (THE-818) needs a raw CreateProcessW, which needs
+    // these; `Stdio` does not give them back. The handles stay valid for the
+    // lifetime of the Stdio values, which outlive the spawn.
+    #[cfg(windows)]
+    let raw_stdio = {
+        use std::os::windows::io::AsRawHandle;
+        platform::RawStdio {
+            stdin: in_f.as_raw_handle() as isize,
+            stdout: out_f.as_raw_handle() as isize,
+            stderr: err_f.as_raw_handle() as isize,
+        }
+    };
+    #[cfg(not(windows))]
+    let raw_stdio = platform::RawStdio::default();
+
     cmd.env("PATH", runtime_path()) // always the sandbox PATH, not the host's
         .env("PYTHONUNBUFFERED", "1")
         .stdin(Stdio::from(in_f))
@@ -739,7 +755,7 @@ fn run_step(
     }
 
     let resolved = resolve_limits(limits);
-    let waited = match platform::spawn_and_wait(cmd, &resolved) {
+    let waited = match platform::spawn_and_wait(cmd, &resolved, raw_stdio) {
         Ok(w) => w,
         Err(e) => {
             return StepResult {

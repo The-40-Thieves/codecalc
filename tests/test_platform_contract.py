@@ -105,6 +105,14 @@ KNOWN_UNENFORCED = {
     # own child reports 0x3000, so the ambient check is answering truthfully
     # about a topology the child is not in.
     "process_limit_enforcement_unverified_on_windows",
+    # THE-818, opt-in via CODECALC_WIN_JOB_AT_CREATION=1. NOT a limitation —
+    # the opposite. It records that the job was supplied at CREATION
+    # (PROC_THREAD_ATTRIBUTE_JOB_LIST) rather than assigned afterwards, so our
+    # job is the child's IMMEDIATE one and its ActiveProcessLimit is the one
+    # consulted. It sits in this array because a caller reading `unenforced`
+    # needs to know WHICH topology produced the run; without it, a measurement
+    # cannot be attributed to the path that produced it.
+    "process_limit_job_assigned_at_creation_on_windows",
     # main.rs — the shim is missing, so --no-net would do nothing
     "no_net_requested_but_no_shim_available",
 }
