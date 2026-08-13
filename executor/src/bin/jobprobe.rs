@@ -1,162 +1,139 @@
-//! jobprobe — which job-object mechanism actually binds `ActiveProcessLimit`?
+//! jobprobe — why does the process ceiling bind here and not there?
 //!
-//! THE-818. On Windows 11 Pro the ceiling is set, `SetInformationJobObject` and
-//! `AssignProcessToJobObject` both return success, and 400 of 400 child spawns
-//! go through against a limit of 24 — reproducible 3/3, from two unrelated
-//! launchers including Task Scheduler with no agent in the parent chain. The
-//! sandboxed process observes `LIMIT_FLAGS 0x3000`
-//! (`KILL_ON_JOB_CLOSE | SILENT_BREAKAWAY_OK`), a flag codecalc never sets.
+//! THE-818. **This file was rewritten on 2026-08-12 because its first version
+//! was measuring the wrong thing, and said so confidently.**
 //!
-//! PR #134 made that honest — the run now discloses `process_limit_not_enforced_*`
-//! instead of claiming a ceiling it did not apply. This binary is for the repair.
+//! WHAT WENT WRONG, because it is the reason this file now works the way it
+//! does. The original jobprobe built its OWN job object, spawned its OWN child
+//! and counted. It reported the ceiling binding at 23/400 on a Windows 11 Pro
+//! box — twice, from two launchers — and that was read as "the bug does not
+//! reproduce here". It does. On the same box, in the same shell, the shipped
+//! `codecalc-exec.exe` spawned 400 of 400 against the same ceiling of 24.
 //!
-//! WHY A PROBE INSTEAD OF A PATCH. THE-818's first acceptance criterion is that
-//! the mechanism be *confirmed on Windows* rather than argued from documentation,
-//! because picking wrong from a machine that cannot observe the failure is
-//! exactly how THE-775 got mistriaged the first time. There are three candidate
-//! fixes with different blast radii, and the documentation does not settle which
-//! one binds:
+//! Identical ambient job, opposite outcome, and the only variable was the code
+//! being run. A diagnostic that REIMPLEMENTS the code under test measures the
+//! reimplementation; its agreement with production is a hypothesis, not a
+//! result. Two "does not reproduce" reports and a launcher hunt followed from
+//! treating it as one.
 //!
-//!   baseline          what codecalc does today — the control that must FAIL
-//!   breakaway_ok_own  JOB_OBJECT_LIMIT_BREAKAWAY_OK on OUR job. Smallest change.
-//!                     Suspect: breakaway is granted by the ANCESTOR job, not ours.
-//!   create_breakaway  CREATE_BREAKAWAY_FROM_JOB at spawn — detach from the
-//!                     ambient job first, then assign to ours. Needs the ancestor
-//!                     to permit it, and ERROR_ACCESS_DENIED if it does not.
-//!   suspended_assign  raw CreateProcessW + CREATE_SUSPENDED, assign, ResumeThread.
-//!                     Also closes the assignment race platform/windows.rs
-//!                     documents. Does NOT by itself escape an ancestor job.
+//! SO THE PRODUCTION ARM IS NOT A MODEL. It calls `platform::spawn_and_wait` —
+//! the same function `main.rs` calls, through the same module, with the same
+//! job creation, the same suspended spawn and the same disclosure logic. If it
+//! ever stops matching production, it is because production changed underneath
+//! a shared function, not because this file drifted.
 //!
-//! Reading Microsoft's docs narrowed it to a prediction: "if the job has the
-//! extended limit JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK, then child processes of
-//! any parent process associated with the job are not associated with the job",
-//! which suggested `create_breakaway` was the one that mattered and that
-//! `suspended_assign` alone would not be sufficient.
+//! WHAT IT NOW MEASURES. Every arm runs the SAME child doing the SAME thing, so
+//! the job configuration is the only variable. The arms bisect the one
+//! difference left between the harness that bound and the binary that did not:
 //!
-//! THAT PREDICTION WAS WRONG, AND MEASURING IT IS WHY THIS FILE EXISTS.
+//!     production      platform::spawn_and_wait — the shipped path, 0x230A
+//!     flags_0x230A    production's FLAGS, jobprobe's spawn. Splits
+//!                     "the flags matter" from "the spawn path matters".
+//!     kill+active     0x2008 — what the old jobprobe used, and what bound
+//!     active_only     ACTIVE_PROCESS alone, the floor
+//!     +process_memory 0x2008 plus JOB_OBJECT_LIMIT_PROCESS_MEMORY
+//!     +job_memory     0x2008 plus JOB_OBJECT_LIMIT_JOB_MEMORY
+//!     +process_time   0x2008 plus JOB_OBJECT_LIMIT_PROCESS_TIME
 //!
-//! Measured on Windows 11 Pro build 26200 across two launchers, `create_breakaway`
-//! is the only candidate that HARD-FAILS under a real ancestor job:
-//! `CREATE_BREAKAWAY_FROM_JOB` returns ERROR_ACCESS_DENIED unless the ancestor
-//! carries `JOB_OBJECT_LIMIT_BREAKAWAY_OK` (0x800) — which is a DIFFERENT flag
-//! from the `SILENT_BREAKAWAY_OK` (0x1000) the docs sentence is about. It takes
-//! the combined `breakaway+suspended` row down with it. `suspended_assign` binds
-//! under both launchers and errors under neither.
-//!
-//! So candidate 2 is unusable as a SOLE mechanism. That is a genuine result and
-//! it is not the same as "candidate 3 fixes the bug" — see the launcher table
-//! below for why nothing here has yet been measured against the actual failure.
+//! Read it as a bisection. If `kill+active` binds and `flags_0x230A` does not,
+//! one of the three `+` arms names the flag responsible. If `flags_0x230A`
+//! binds and `production` does not, the flags are innocent and the spawn path
+//! is the difference. If everything binds except `production`, the difference
+//! is neither and the remaining variable is what production does that this file
+//! still does not — say so rather than concluding.
 //!
 //! USAGE, on the Windows 11 Pro box:
 //!
 //!     cargo build --release --bin jobprobe
 //!     .\target\release\jobprobe.exe --spawns 400 --limit 24
 //!
-//! FROM TASK SCHEDULER, USE A .bat WRAPPER. Do not inline the command.
+//! READ THE LAST TWO LINES FIRST. A run is a measurement only if it ends with
+//! `=== END jobprobe ===` preceded by a `control:` line with a result after it.
+//! A table with no control line is UNVALIDATED. That is not hypothetical — the
+//! first version of this file killed itself before printing the control, twice,
+//! silently, and the table looked complete.
 //!
-//! A scheduled task has no console, so the output must be redirected to a file,
-//! and the obvious `schtasks /TR "cmd /c \"...\" > \"...\""` does not survive:
-//! four quote characters means cmd strips the outer pair and runs a mangled
-//! line. It REGISTERS fine and fails at runtime with `Last Result: 1` and no
-//! output file — which used to be indistinguishable from a clean run finding
-//! nothing bound. (That is why exit 1 is now reserved; see the exit codes at
-//! the bottom of `run`.) A wrapper puts the quoting inside a file where cmd
-//! cannot re-parse it:
+//! EXIT CODES deliberately skip 1:
+//!
+//!     0  the arms disagree — there is a difference to name
+//!     3  every arm agreed; nothing was isolated
+//!     2  not Windows; nothing was measured
+//!     1  NEVER returned by this program. A 1 means whatever tried to start it
+//!        failed instead — a mangled `cmd /c` line, a missing binary.
+//!
+//! That separation exists because a Task Scheduler recipe with a quoting bug
+//! reported `Last Result: 1` and no output file, which was indistinguishable
+//! from a clean run finding nothing.
+//!
+//! FROM TASK SCHEDULER, USE A .bat WRAPPER. A scheduled task has no console, so
+//! output must be redirected, and `schtasks /TR "cmd /c \"...\" > \"...\""` does
+//! not survive: four quote characters, so cmd strips the outer pair. Put the
+//! quoting in a file where cmd cannot re-parse it:
 //!
 //!     # probe.bat
-//!     "E:\Projects\codecalc\executor\target\release\jobprobe.exe" ^
-//!         --spawns 400 --limit 24 > "E:\...\jobprobe-sched.txt" 2>&1
+//!     "E:\...\jobprobe.exe" --spawns 400 --limit 24 > "E:\...\out.txt" 2>&1
 //!
 //!     schtasks /Create /TN jobprobe /SC ONCE /ST 00:00 /F /TR "E:\...\probe.bat"
 //!     schtasks /Run /TN jobprobe
 //!     schtasks /Delete /TN jobprobe /F
 //!
-//! A mechanism BINDS if it spawned fewer than the limit. The control at the
-//! bottom re-runs the nested-job case that already worked (`ActiveProcessLimit=5`
-//! bound at 4/20 with WinError 1816) — if the control stops binding, the box
-//! changed and no row above it means anything.
-//!
-//! READ THE LAST TWO LINES FIRST. A run is only a measurement if it ends with
-//! `=== END jobprobe ===`, preceded by a `control:` line that has a result after
-//! it. A table with no control line is UNVALIDATED and must not be reported —
-//! that is not hypothetical, it is what the first version of this file did on
-//! real hardware, twice, silently.
-//!
-//! THE LAUNCHER IS PART OF THE MEASUREMENT — RECORD IT.
-//!
-//! This bug is about the AMBIENT job a process is born into, so the thing that
-//! started `jobprobe.exe` is a variable, not context. Measured so far:
-//!
-//!   ORIGINAL REPORT (agent harness, and Task Scheduler) — REPRODUCES
-//!       LIMIT_FLAGS 0x3000, APL 0, 400/400 spawned.
-//!   Claude Code agent shell, build 26200 — does NOT reproduce
-//!       LIMIT_FLAGS 0x2008, APL 24, 23/400. create_breakaway SUCCEEDS,
-//!       so there is no restrictive ancestor job.
-//!   TASK SCHEDULER, build 26200 — does NOT reproduce
-//!       LIMIT_FLAGS 0x2008, APL 24, 23/400. create_breakaway and
-//!       breakaway+suspended both fail ERROR_ACCESS_DENIED, which only
-//!       happens when an ancestor job REFUSES breakaway.
-//!
-//! THE THIRD ROW IS THE IMPORTANT ONE, and it is not a repeat negative. Task
-//! Scheduler is the launcher the ticket calls decisive — the one with no agent
-//! anywhere in the parent chain — and it now returns the OPPOSITE result on the
-//! same box. So the trigger is not "Task Scheduler", and it is not "an agent
-//! harness" either.
-//!
-//! It also separates two things the ticket's hypothesis binds together. Under
-//! Task Scheduler there IS a real, restrictive ancestor job (proven by the
-//! ACCESS_DENIED, not inferred), it carries no SILENT_BREAKAWAY_OK, and the
-//! ceiling BINDS anyway. "An ambient job is present" and "the ceiling is
-//! unenforced" are therefore independent — being in a job is not sufficient.
-//!
-//! The open question has moved. It is no longer "which mechanism binds" but
-//! "what did the original reproduction have that this box no longer does":
-//! a since-changed Windows build, a different task configuration, or something
-//! about that specific harness. Until a reproducing ambient job is available
-//! again, no mechanism can be confirmed against the ACTUAL failure — only
-//! against ordinary ones, which is what the rows above are.
-//!
-//! Quote the launcher next to every table.
+//! THE LAUNCHER IS PART OF THE MEASUREMENT — quote it next to every table. The
+//! ambient job differs per launcher, and that was a live hypothesis for a while.
+//! It is no longer the leading one: the shipped binary and this harness
+//! disagreed under an IDENTICAL ambient job, so the code path is the variable
+//! that matters. Record the launcher anyway; it costs a line.
 //!
 //! On non-Windows this exits 2 without pretending to have measured something.
 
 use std::process::ExitCode;
 
+/// Shared with `main.rs` rather than reimplemented — see the header. On
+/// non-Windows it is unused, which is why the allow is here.
+#[allow(dead_code, unused_imports)]
+#[path = "../platform/mod.rs"]
+mod platform;
+
 #[derive(Clone, Copy, PartialEq)]
-enum Mechanism {
-    Baseline,
-    BreakawayOkOwn,
-    CreateBreakaway,
-    SuspendedAssign,
-    /// `create_breakaway` + `suspended_assign` together: escape the ambient job
-    /// AND close the assignment race. If the two are independently necessary
-    /// this is the only row that both binds and has no gap.
-    BreakawayAndSuspended,
+enum Arm {
+    /// `platform::spawn_and_wait`: the shipped code, not a model of it.
+    Production,
+    /// Production's LimitFlags, this file's spawn. Splits flags from spawn path.
+    Flags230A,
+    /// What the old jobprobe used, and what bound on the box that failed.
+    KillActive,
+    ActiveOnly,
+    PlusProcessMemory,
+    PlusJobMemory,
+    PlusProcessTime,
 }
 
-impl Mechanism {
+impl Arm {
     fn name(self) -> &'static str {
         match self {
-            Mechanism::Baseline => "baseline",
-            Mechanism::BreakawayOkOwn => "breakaway_ok_own",
-            Mechanism::CreateBreakaway => "create_breakaway",
-            Mechanism::SuspendedAssign => "suspended_assign",
-            Mechanism::BreakawayAndSuspended => "breakaway+suspended",
+            Arm::Production => "production",
+            Arm::Flags230A => "flags_0x230A",
+            Arm::KillActive => "kill+active",
+            Arm::ActiveOnly => "active_only",
+            Arm::PlusProcessMemory => "+process_memory",
+            Arm::PlusJobMemory => "+job_memory",
+            Arm::PlusProcessTime => "+process_time",
         }
     }
 
-    fn all() -> [Mechanism; 5] {
+    fn all() -> [Arm; 7] {
         [
-            Mechanism::Baseline,
-            Mechanism::BreakawayOkOwn,
-            Mechanism::CreateBreakaway,
-            Mechanism::SuspendedAssign,
-            Mechanism::BreakawayAndSuspended,
+            Arm::Production,
+            Arm::Flags230A,
+            Arm::KillActive,
+            Arm::ActiveOnly,
+            Arm::PlusProcessMemory,
+            Arm::PlusJobMemory,
+            Arm::PlusProcessTime,
         ]
     }
 
-    fn parse(s: &str) -> Option<Mechanism> {
-        Mechanism::all().into_iter().find(|m| m.name() == s)
+    fn parse(s: &str) -> Option<Arm> {
+        Arm::all().into_iter().find(|a| a.name() == s)
     }
 }
 
@@ -166,7 +143,7 @@ struct Args {
     spawns: u32,
     limit: u32,
     out: Option<String>,
-    mechanism: Option<Mechanism>,
+    arm: Option<Arm>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -176,7 +153,7 @@ fn parse_args() -> Result<Args, String> {
         spawns: 400,
         limit: 24,
         out: None,
-        mechanism: None,
+        arm: None,
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -201,11 +178,10 @@ fn parse_args() -> Result<Args, String> {
                 a.out = Some(need(i)?);
                 i += 1;
             }
-            "--mechanism" => {
+            "--arm" => {
                 let v = need(i)?;
                 if v != "all" {
-                    a.mechanism =
-                        Some(Mechanism::parse(&v).ok_or(format!("unknown mechanism '{v}'"))?);
+                    a.arm = Some(Arm::parse(&v).ok_or(format!("unknown arm '{v}'"))?);
                 }
                 i += 1;
             }
@@ -223,8 +199,8 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("jobprobe: {e}");
             eprintln!(
-                "usage: jobprobe [--mechanism all|baseline|breakaway_ok_own|\
-                 create_breakaway|suspended_assign|breakaway+suspended] \
+                "usage: jobprobe [--arm all|production|flags_0x230A|kill+active|\
+                 active_only|+process_memory|+job_memory|+process_time] \
                  [--spawns N] [--limit L]"
             );
             return ExitCode::from(2);
@@ -236,9 +212,8 @@ fn main() -> ExitCode {
 // ── Windows ─────────────────────────────────────────────────────────────────
 #[cfg(windows)]
 mod imp {
-    use super::{Args, Mechanism};
+    use super::{Args, Arm, platform};
     use std::io::Write;
-    use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::AsRawHandle;
     use std::os::windows::process::CommandExt;
     use std::process::{Child, Command, ExitCode};
@@ -246,16 +221,16 @@ mod imp {
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob,
-        JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_BREAKAWAY_OK,
-        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_JOB_MEMORY,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_PROCESS_MEMORY,
+        JOB_OBJECT_LIMIT_PROCESS_TIME, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
         JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
     };
-    use windows_sys::Win32::System::Threading::{
-        CREATE_BREAKAWAY_FROM_JOB, CREATE_NO_WINDOW, CREATE_SUSPENDED, CreateProcessW,
-        GetCurrentProcess, PROCESS_INFORMATION, ResumeThread, STARTUPINFOW, WaitForSingleObject,
-    };
+    use windows_sys::Win32::System::Threading::{CREATE_NO_WINDOW, GetCurrentProcess};
 
-    const INFINITE: u32 = 0xFFFF_FFFF;
+    /// Mirrors `AS_LIMIT_BYTES` in main.rs — the default when no memory ceiling
+    /// is requested, which is the shape production runs in.
+    const AS_LIMIT_BYTES: u64 = 2048 * 1024 * 1024 * 1024;
 
     struct Job(HANDLE);
     impl Drop for Job {
@@ -264,37 +239,22 @@ mod imp {
         }
     }
 
-    /// What the CHILD reports back about the job it actually landed in. The
-    /// spawn count alone cannot distinguish "the ceiling does not bind" from
-    /// "the child is in a different job than the one we set the ceiling on",
-    /// and those need different fixes — so it reports both.
-    struct ChildReport {
+    struct Report {
         spawned: u32,
         in_job: bool,
         limit_flags: u32,
         active_process_limit: u32,
         first_error: String,
+        /// Only the production arm can report this: whether the shipped
+        /// disclosure fired. A run that spawns past the ceiling AND says
+        /// nothing is the defect this ticket is about.
+        unenforced: Option<String>,
     }
 
-    fn wide(s: &str) -> Vec<u16> {
-        std::ffi::OsStr::new(s)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect()
-    }
-
-    /// `kill_on_close` MUST be false for a job this process assigns ITSELF to.
-    ///
-    /// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` terminates every process in the job
-    /// when the last handle closes. For the mechanism jobs that is exactly what
-    /// is wanted — it reaps leftover sleepers. For the control it was suicide:
-    /// `run_control` assigns the CURRENT process, and `Job`'s `Drop` closes the
-    /// handle at end of scope, so the job killed this process while unwinding.
-    /// The `format!` result was already built and never reached `println!`.
-    ///
-    /// Measured on Windows 11 Pro build 26200: nine stdout lines, empty stderr,
-    /// exit 0, twice. Deterministic, not flaky — and completely silent.
-    fn create_job(limit: u32, breakaway_ok_own: bool, kill_on_close: bool) -> Result<Job, String> {
+    /// `kill_on_close` MUST be false for a job this process assigns ITSELF to —
+    /// closing the last handle kills every member, which for the control means
+    /// killing us mid-`format!`. That is not hypothetical; see #140.
+    fn create_job(limit: u32, flags: u32, kill_on_close: bool) -> Result<Job, String> {
         let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
         if handle.is_null() {
             return Err(format!(
@@ -304,14 +264,18 @@ mod imp {
         }
         let job = Job(handle);
         let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
-        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+        info.BasicLimitInformation.LimitFlags = flags;
         if kill_on_close {
             info.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
         }
-        if breakaway_ok_own {
-            info.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_BREAKAWAY_OK;
-        }
         info.BasicLimitInformation.ActiveProcessLimit = limit;
+        // Set unconditionally so the ONLY difference between arms is the flag
+        // bits. A limit whose flag is clear is ignored by Windows, so carrying
+        // the value everywhere keeps the comparison honest.
+        info.BasicLimitInformation.PerProcessUserTimeLimit = 30 * 10_000_000;
+        info.ProcessMemoryLimit = AS_LIMIT_BYTES.min(usize::MAX as u64) as usize;
+        info.JobMemoryLimit = AS_LIMIT_BYTES.min(usize::MAX as u64) as usize;
+
         let ok = unsafe {
             SetInformationJobObject(
                 job.0,
@@ -329,50 +293,31 @@ mod imp {
         Ok(job)
     }
 
-    /// Spawn the child with `CREATE_SUSPENDED` through a raw `CreateProcessW`,
-    /// so its initial thread handle is available to `ResumeThread` after the
-    /// job assignment. `std::process::Command` does not expose that handle,
-    /// which is precisely why platform/windows.rs documents the assignment race
-    /// it cannot close.
-    ///
-    /// Returns (process handle, thread handle). Both are owned by the caller.
-    fn spawn_suspended(cmdline: &str, extra_flags: u32) -> Result<(HANDLE, HANDLE), String> {
-        let mut si: STARTUPINFOW = unsafe { std::mem::zeroed() };
-        si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
-        let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
-        // CreateProcessW MUTATES lpCommandLine, so it must be a writable buffer.
-        let mut cl = wide(cmdline);
-        let ok = unsafe {
-            CreateProcessW(
-                std::ptr::null(),
-                cl.as_mut_ptr(),
-                std::ptr::null(),
-                std::ptr::null(),
-                0,
-                CREATE_SUSPENDED | CREATE_NO_WINDOW | extra_flags,
-                std::ptr::null(),
-                std::ptr::null(),
-                &si,
-                &mut pi,
-            )
-        };
-        if ok == 0 {
-            return Err(format!(
-                "CreateProcessW: {}",
-                std::io::Error::last_os_error()
-            ));
+    fn arm_flags(arm: Arm) -> u32 {
+        let base = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+        match arm {
+            Arm::ActiveOnly => JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
+            Arm::KillActive => base,
+            Arm::PlusProcessMemory => base | JOB_OBJECT_LIMIT_PROCESS_MEMORY,
+            Arm::PlusJobMemory => base | JOB_OBJECT_LIMIT_JOB_MEMORY,
+            Arm::PlusProcessTime => base | JOB_OBJECT_LIMIT_PROCESS_TIME,
+            // Exactly what platform/windows.rs sets.
+            Arm::Flags230A | Arm::Production => {
+                base | JOB_OBJECT_LIMIT_PROCESS_MEMORY
+                    | JOB_OBJECT_LIMIT_JOB_MEMORY
+                    | JOB_OBJECT_LIMIT_PROCESS_TIME
+            }
         }
-        Ok((pi.hProcess, pi.hThread))
     }
 
-    fn read_report(path: &str) -> ChildReport {
+    fn read_report(path: &str) -> Report {
         let text = std::fs::read_to_string(path).unwrap_or_default();
         let field = |k: &str| -> u32 {
             text.lines()
                 .find_map(|l| l.strip_prefix(k)?.trim().parse().ok())
                 .unwrap_or(0)
         };
-        ChildReport {
+        Report {
             spawned: field("spawned="),
             in_job: field("in_job=") != 0,
             limit_flags: field("limit_flags="),
@@ -382,76 +327,75 @@ mod imp {
                 .find_map(|l| l.strip_prefix("first_error="))
                 .unwrap_or("")
                 .to_string(),
+            unenforced: None,
         }
     }
 
-    fn run_mechanism(m: Mechanism, spawns: u32, limit: u32) -> Result<ChildReport, String> {
+    fn child_command(exe: &std::path::Path, spawns: u32, out: &str) -> Command {
+        let mut cmd = Command::new(exe);
+        cmd.args(["--child", "--spawns"])
+            .arg(spawns.to_string())
+            .args(["--out", out]);
+        cmd
+    }
+
+    fn run_arm(arm: Arm, spawns: u32, limit: u32) -> Result<Report, String> {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        let out =
-            std::env::temp_dir().join(format!("jobprobe-{}-{}.txt", m.name(), std::process::id()));
+        let out = std::env::temp_dir().join(format!(
+            "jobprobe-{}-{}.txt",
+            arm.name().replace(['+', '&'], "_"),
+            std::process::id()
+        ));
         let out_s = out.to_string_lossy().into_owned();
         let _ = std::fs::remove_file(&out);
 
-        let job = create_job(limit, m == Mechanism::BreakawayOkOwn, true)?;
-
-        let breakaway = matches!(
-            m,
-            Mechanism::CreateBreakaway | Mechanism::BreakawayAndSuspended
-        );
-        let suspended = matches!(
-            m,
-            Mechanism::SuspendedAssign | Mechanism::BreakawayAndSuspended
-        );
-        let extra = if breakaway {
-            CREATE_BREAKAWAY_FROM_JOB
+        let mut report = if arm == Arm::Production {
+            // THE POINT OF THIS FILE. Not a reimplementation of the shipped
+            // path — the shipped path. Same job creation, same suspended
+            // spawn, same disclosure.
+            let limits = platform::ResolvedLimits {
+                timeout_secs: 120,
+                cpu_secs: 30,
+                memory_bytes: AS_LIMIT_BYTES,
+                fsize_bytes: 256 * 1024 * 1024,
+                nofile: 256,
+                max_processes: u64::from(limit),
+                no_net: false,
+            };
+            let mut cmd = child_command(&exe, spawns, &out_s);
+            cmd.stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            let wait = platform::spawn_and_wait(cmd, &limits).map_err(|e| e.to_string())?;
+            let mut r = read_report(&out_s);
+            r.unenforced = Some(if wait.unenforced.is_empty() {
+                "(none)".to_string()
+            } else {
+                wait.unenforced.join(",")
+            });
+            r
         } else {
-            0
-        };
-
-        if suspended {
-            let cmdline = format!(
-                "\"{}\" --child --spawns {spawns} --out \"{out_s}\"",
-                exe.display()
-            );
-            let (proc, thread) = spawn_suspended(&cmdline, extra)?;
-            let assigned = unsafe { AssignProcessToJobObject(job.0, proc) };
-            let assign_err = std::io::Error::last_os_error();
-            // Resume REGARDLESS: a child left suspended never exits and the
-            // wait below would hang forever, turning a failed assignment into
-            // a hung probe rather than a reported one.
-            unsafe { ResumeThread(thread) };
-            unsafe { WaitForSingleObject(proc, INFINITE) };
-            unsafe { CloseHandle(thread) };
-            unsafe { CloseHandle(proc) };
-            if assigned == 0 {
-                return Err(format!("AssignProcessToJobObject: {assign_err}"));
-            }
-        } else {
-            let mut cmd = Command::new(&exe);
-            cmd.args(["--child", "--spawns"])
-                .arg(spawns.to_string())
-                .args(["--out", &out_s]);
-            cmd.creation_flags(CREATE_NO_WINDOW | extra);
-            let mut child: Child = cmd
-                .spawn()
-                .map_err(|e| format!("spawn: {e} (CREATE_BREAKAWAY_FROM_JOB is refused with ERROR_ACCESS_DENIED when the ancestor job does not permit it)"))?;
-            let proc: HANDLE = child.as_raw_handle() as HANDLE;
-            if unsafe { AssignProcessToJobObject(job.0, proc) } == 0 {
+            let job = create_job(limit, arm_flags(arm), true)?;
+            let mut cmd = child_command(&exe, spawns, &out_s);
+            cmd.creation_flags(CREATE_NO_WINDOW);
+            let mut child: Child = cmd.spawn().map_err(|e| format!("spawn: {e}"))?;
+            let process: HANDLE = child.as_raw_handle() as HANDLE;
+            if unsafe { AssignProcessToJobObject(job.0, process) } == 0 {
                 let e = std::io::Error::last_os_error();
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(format!("AssignProcessToJobObject: {e}"));
             }
             let _ = child.wait();
+            read_report(&out_s)
+        };
+        if report.active_process_limit == 0 && report.limit_flags == 0 {
+            report.first_error = format!("no report written to {out_s}");
         }
-
-        let report = read_report(&out_s);
         let _ = std::fs::remove_file(&out);
         Ok(report)
     }
 
-    /// The child: report the job it actually landed in, then try to exceed the
-    /// ceiling.
+    /// The child: report the job it landed in, then try to exceed the ceiling.
     fn run_child(spawns: u32, out: &str) -> ExitCode {
         let mut in_job: i32 = 0;
         unsafe { IsProcessInJob(GetCurrentProcess(), std::ptr::null_mut(), &mut in_job) };
@@ -483,15 +427,13 @@ mod imp {
             c.arg("--sleeper");
             c.creation_flags(CREATE_NO_WINDOW);
             match c.spawn() {
-                // HELD OPEN. A sleeper that exited would free its slot and the
-                // ceiling would never be reached no matter how many were
-                // started — the count would measure spawn throughput instead
-                // of the limit.
+                // HELD OPEN. A sleeper that exited would free its slot, and the
+                // count would measure spawn throughput instead of the ceiling.
                 Ok(ch) => kids.push(ch),
                 Err(e) => {
                     if first_error.is_empty() {
-                        // WinError 1816 = ERROR_TOO_MANY_ACTIVE_PROCESSES, which
-                        // is the ceiling biting rather than an ordinary failure.
+                        // WinError 1816 = ERROR_TOO_MANY_ACTIVE_PROCESSES, the
+                        // ceiling biting rather than an ordinary failure.
                         first_error = e.to_string().replace('\n', " ");
                     }
                     break;
@@ -514,19 +456,17 @@ mod imp {
         ExitCode::SUCCESS
     }
 
-    /// The control. A self-assigned nested job with `ActiveProcessLimit=5` bound
-    /// at 4/20 with WinError 1816 on the same box, which is what proves Windows
-    /// can still do this and the failure above is codecalc's path rather than an
-    /// OS capability gap. If this stops binding, no row above it means anything.
+    /// Proves Windows can still enforce this at all. If the control stops
+    /// binding, the box changed and no row above it means anything.
     fn run_control() -> String {
-        let job = match create_job(5, false, false) {
+        let job = match create_job(5, JOB_OBJECT_LIMIT_ACTIVE_PROCESS, false) {
             Ok(j) => j,
             Err(e) => return format!("control job failed: {e}"),
         };
         if unsafe { AssignProcessToJobObject(job.0, GetCurrentProcess()) } == 0 {
             return format!(
-                "control assign failed: {} (expected when this process is already \
-                 in a job that forbids nesting)",
+                "control assign failed: {} (expected when already in a job that \
+                 forbids nesting)",
                 std::io::Error::last_os_error()
             );
         }
@@ -556,99 +496,96 @@ mod imp {
 
     pub fn run(args: Args) -> ExitCode {
         if args.sleeper {
-            // Long enough to still be alive while the loop above it runs, short
-            // enough that a crashed parent does not leave the box littered.
             std::thread::sleep(std::time::Duration::from_secs(30));
             return ExitCode::SUCCESS;
         }
         if args.child {
-            let out = args.out.unwrap_or_default();
-            return run_child(args.spawns, &out);
+            return run_child(args.spawns, &args.out.unwrap_or_default());
         }
 
-        println!("jobprobe — THE-818: which mechanism binds ActiveProcessLimit?");
-        println!("limit={} spawns={}\n", args.limit, args.spawns);
-        // Inlined rather than passed as args: clippy::print_literal is denied,
-        // and it only fires on the Windows leg because this module is cfg'd to
-        // it — the same "the interesting branch is dead code everywhere else"
-        // asymmetry the fix in THE-817 was about, this time in the linter.
-        println!("MECHANISM               SPAWNED  VERDICT  LIMIT_FLAGS APL   NOTE");
+        println!("jobprobe — THE-818: what makes the ceiling bind here and not there?");
+        println!("limit={} spawns={}", args.limit, args.spawns);
+        println!("`production` calls platform::spawn_and_wait — the shipped path, not a model.\n");
+        println!("ARM              SPAWNED    VERDICT  LIMIT_FLAGS APL   NOTE");
 
-        let mechanisms: Vec<Mechanism> = match args.mechanism {
-            Some(m) => vec![m],
-            None => Mechanism::all().to_vec(),
+        let arms: Vec<Arm> = match args.arm {
+            Some(a) => vec![a],
+            None => Arm::all().to_vec(),
         };
-        let mut any_bound = false;
-        for m in mechanisms {
-            match run_mechanism(m, args.spawns, args.limit) {
+        let mut bound = 0usize;
+        let mut unbound = 0usize;
+        let mut production_lied = false;
+
+        for arm in arms {
+            match run_arm(arm, args.spawns, args.limit) {
                 Ok(r) => {
-                    // Fewer than the ceiling means the ceiling stopped it. The
-                    // comparison is against the LIMIT, not against `spawns`:
-                    // a run that stopped early for an unrelated reason would
+                    // Compared against the LIMIT, not against `spawns`: a run
+                    // that stopped early for an unrelated reason would
                     // otherwise read as a bind.
-                    let bound = r.spawned < args.limit;
-                    any_bound |= bound;
+                    let is_bound = r.spawned < args.limit;
+                    if is_bound {
+                        bound += 1;
+                    } else {
+                        unbound += 1;
+                    }
                     println!(
-                        "{:<21} {:>4}/{:<4} {:<8} 0x{:08X}  {:<5} {}",
-                        m.name(),
+                        "{:<16} {:>4}/{:<4} {:<8} 0x{:08X}  {:<5} {}",
+                        arm.name(),
                         r.spawned,
                         args.spawns,
-                        if bound { "BOUND" } else { "UNBOUND" },
+                        if is_bound { "BOUND" } else { "UNBOUND" },
                         r.limit_flags,
                         r.active_process_limit,
                         if r.in_job {
-                            &r.first_error
+                            r.first_error.clone()
                         } else {
-                            "child is in NO job"
+                            "child is in NO job".to_string()
                         }
                     );
+                    if let Some(u) = &r.unenforced {
+                        // The whole ticket in one line: did the shipped path
+                        // spawn past its ceiling AND stay silent about it?
+                        let silent = !is_bound && !u.contains("process_limit");
+                        println!(
+                            "                 unenforced: {u}{}",
+                            if silent {
+                                "   <-- SPAWNED PAST THE CEILING AND DISCLOSED NOTHING"
+                            } else {
+                                ""
+                            }
+                        );
+                        production_lied |= silent;
+                    }
                 }
-                Err(e) => println!("{:<21} {:>9}  {:<8} {e}", m.name(), "-", "ERROR"),
+                Err(e) => println!("{:<16} {:>9}  {:<8} {e}", arm.name(), "-", "ERROR"),
             }
         }
 
-        // ANNOUNCED BEFORE IT RUNS, and flushed, so its absence is loud.
-        //
-        // The first version printed only the RESULT, and the control killed this
-        // process before that line was reached (see create_job). What a reader
-        // got was a clean five-row table and no indication that the check which
-        // validates those rows never happened — the worst possible shape for a
-        // diagnostic, and it survived two runs on real hardware before someone
-        // went looking for the missing line.
-        //
-        // Now: if you see "control: running" with nothing after it, the control
-        // died. If you see neither, the run was cut short before it. Either way
-        // the table above is UNVALIDATED and must not be reported as a result.
         print!("\ncontrol: running (nested ActiveProcessLimit=5)... ");
         let _ = std::io::stdout().flush();
         println!("{}", run_control());
+
         println!(
-            "\nA mechanism BINDS if SPAWNED < {}. `baseline` is expected to be UNBOUND —\n\
-             it is what codecalc does today. Report the whole table on THE-818.",
+            "\nAn arm BINDS if SPAWNED < {}. Read the table as a bisection:\n  \
+             kill+active binds, flags_0x230A does not  -> one `+` arm names the flag\n  \
+             flags_0x230A binds, production does not   -> the flags are innocent; \
+             it is the spawn path\n  \
+             everything binds except production        -> neither; production does \
+             something this file still does not",
             args.limit
         );
-        // The last line, always. Its absence means the process died mid-run and
-        // whatever you scrolled past is a fragment, not a measurement.
+        if production_lied {
+            println!(
+                "\nPRODUCTION SPAWNED PAST ITS CEILING AND REPORTED NOTHING. That is \
+                 THE-818's\nacceptance criterion 4 failing on this host — a false claim, \
+                 not a missing one."
+            );
+        }
         println!("=== END jobprobe (if this line is missing, the run was truncated) ===");
         let _ = std::io::stdout().flush();
 
-        // Exit code is the finding, and it deliberately SKIPS 1.
-        //
-        //   0  at least one mechanism bound — there is something to implement
-        //   3  ran cleanly, nothing bound — the ticket needs a fourth candidate
-        //   2  not Windows; nothing was measured
-        //   1  NEVER RETURNED BY THIS PROGRAM. A 1 means whatever tried to start
-        //      it failed instead — a mangled `cmd /c` line, a missing binary, a
-        //      task that could not launch.
-        //
-        // 1 used to mean "nothing bound", which cost a real run: a Task
-        // Scheduler recipe with a `cmd /c` quoting bug reported `Last Result: 1`
-        // and produced no output file, which is INDISTINGUISHABLE from this
-        // program running correctly and finding that no mechanism binds — the
-        // exact result THE-818 is hunting. A harness failure that mimics the
-        // sought-after finding is the worst shape a diagnostic can have, so the
-        // two no longer share a code.
-        if any_bound {
+        // 0 = the arms disagree, so something was isolated. 3 = they all agreed.
+        if bound > 0 && unbound > 0 {
             ExitCode::SUCCESS
         } else {
             ExitCode::from(3)
@@ -666,10 +603,9 @@ mod imp {
         eprintln!(
             "jobprobe measures Windows Job Object behaviour and there is nothing \
              here to measure.\n\
-             It exits 2 rather than printing an empty table, because a probe that \
-             reports 'no mechanism bound' on a platform without job objects is \
-             worse than one that refuses: THE-818 is exactly a case where a \
-             confident wrong answer already cost a triage cycle."
+             It exits 2 rather than printing an empty table: a probe that reports \
+             'no difference found' on a platform without job objects is worse than \
+             one that declines."
         );
         ExitCode::from(2)
     }
