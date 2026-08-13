@@ -436,6 +436,10 @@ fn spawn_with_job_at_creation(
     if created == 0 {
         return Err(err);
     }
+    diag(&format!(
+        "spawn_with_job_at_creation: created PID={} breakaway={breakaway}",
+        pi.dwProcessId
+    ));
     Ok((pi.hProcess, pi.hThread))
 }
 
