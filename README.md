@@ -14,7 +14,7 @@ difference is worth stating rather than leaving a reader to discover:
 
 | layer | reaches the network? |
 |---|---|
-| the codecalc package itself | **Never.** No HTTP client, no gateway, no telemetry |
+| the codecalc package itself | **No client of its own** — no HTTP client, no gateway, no telemetry. One exception, in a dependency: `analyze_complexity` triggers a **grammar download** the first time a language is analysed (see below) |
 | `install_package` | **Yes, by design.** It runs uv / npm / gem / cargo, which fetch from their registries. Installer hooks also run *outside* the sandbox — see [SECURITY.md](SECURITY.md) |
 | `runtimes_status`, `update_runtimes` | **Yes.** They shell out to mise / rustup / swiftly / npm, which check remote versions |
 | code you execute | **Yes, unless `no_net=True`** — and that shim needs the native executor, so the pure-Python fallback reports it in `unenforced` instead of applying it. Set `CODECALC_REQUIRE_NATIVE=1` to turn "fallback in use" into a startup failure instead of a result you have to notice by reading `unenforced` |
@@ -23,6 +23,29 @@ The earlier wording here was an unqualified "it makes no network calls", which
 the structural test cannot support and three of the tools above contradict. A
 guarantee stated more broadly than it is enforced is the failure this repo keeps
 correcting, so it is corrected here too.
+
+**The grammar download, stated plainly, because it is the one that is easy to
+miss.** The other three paths above go through a CHILD PROCESS, which is what
+`tests/test_offline.py` says it cannot see. This one does not:
+`tree-sitter-language-pack` ships a ~5 MB extension and fetches each grammar on
+first use, **in-process**, into a local cache — 28 grammars, 89 MB, about 15
+seconds on a cold cache. So the first `analyze_complexity` call for a given
+language opens a socket from inside the server.
+
+It is verified (the pack checks a signature and raises on a checksum mismatch),
+it is cached, and it never happens again for that language. But "the package
+itself never reaches the network" was not true, and this row used to say it was.
+
+**For an offline or egress-restricted install**, warm the cache first — it is one
+command, and afterwards nothing here reaches the network:
+
+```bash
+python scripts/prefetch_grammars.py                    # fetch all 28 grammars
+python scripts/prefetch_grammars.py --print-cache-dir  # the directory to copy
+```
+
+`codecalc doctor` reports whether that cache is populated, so this is
+discoverable before it matters rather than after a tool call degrades.
 
 ## Install
 
@@ -71,7 +94,7 @@ SMT solver to do it. So it is an extra:
 |---|---|---|
 | `codecalc` | ~32 MB | execute_code, sessions, packages, complexity-free tools |
 | `codecalc[symbolic]` | +83 MB | evaluate_expression, solve, limits, truth tables, z3, units |
-| `codecalc[parsing]` | +5 MB | analyze_complexity via tree-sitter |
+| `codecalc[parsing]` | +5 MB installed, **+89 MB fetched on first use** | analyze_complexity via tree-sitter |
 | `codecalc[full]` | ~120 MB | everything |
 
 Nothing fails silently: a tool whose extra is missing returns

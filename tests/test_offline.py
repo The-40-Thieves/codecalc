@@ -26,6 +26,26 @@ one:
   - executed code reaches the network unless no_net is requested AND the native
     executor is present to apply the shim
 
+AND A FOURTH PATH THAT IS NOT A CHILD PROCESS, which is why it went unnoticed
+for so long (THE-821):
+
+  - analyze_complexity triggers a GRAMMAR DOWNLOAD, in-process, the first time a
+    language is analysed. `tree-sitter-language-pack` ships a ~5 MB extension
+    and fetches each grammar on demand into a local cache — 28 grammars, 89 MB,
+    ~15s cold. Measured: deleting one grammar and asking for it again brings the
+    file back byte-for-byte.
+
+The assertions below remain TRUE and unchanged: nothing under codecalc/ imports
+a socket-capable module. `parsing.py` imports tree_sitter_language_pack, which
+is not socket/urllib/http, so a structural read of THIS package cannot see it.
+That is the gap — the disclaimer above scoped itself to child processes, and an
+in-process fetch inside a DEPENDENCY falls between "our imports" and "what a
+subprocess does".
+
+The lesson generalises past this one package: "no outbound client in our source"
+is a claim about our source, not about our process. Any dependency may fetch at
+runtime, and no amount of reading codecalc/ will reveal it.
+
 So "codecalc makes no network calls", the claim this banner used to make, is
 false at the level a user cares about. "The package contains no outbound
 client" is true, is what is actually asserted below, and is what the banner now

@@ -325,6 +325,53 @@ check("an unreadable version leaves status alone",
 check("...and the published schema accepts a null version",
       not errors_for(rep), f"-> {errors_for(rep)[:2]}")
 
+# ── the grammar cache is a NETWORK dependency, and doctor says so (THE-821) ──
+#
+# tree-sitter grammars are not in the wheel. The pack fetches each one on first
+# use, in-process — 28 grammars, 89 MB, ~15s cold. That is a socket opened from
+# inside the server, on a tool (`analyze_complexity`) whose README row said the
+# package layer reaches the network `Never`.
+#
+# doctor reports it so an offline install can see it BEFORE a tool call
+# degrades to regex-fallback rather than after.
+
+_gc = rep["grammar_cache"]
+check("doctor reports the grammar cache", isinstance(_gc, dict),
+      f"-> {_gc!r}"[:80])
+for _k in ("extra_installed", "cached", "path", "grammars", "detail"):
+    check(f"  ...with {_k}", _k in _gc)
+check("  ...and it validates against the published schema",
+      not errors_for(rep), f"-> {errors_for(rep)[:2]}")
+
+# `cached` must come from a COUNT, not from the directory existing. The pack
+# creates the cache directory before downloading anything, so an existence
+# check reports a warm cache on a completely cold host — the exact "declared
+# != present" shape this repo keeps correcting.
+check("cached is derived from a grammar COUNT, not directory existence",
+      _gc["cached"] == (_gc["grammars"] > 0),
+      f"-> cached={_gc['cached']} grammars={_gc['grammars']}")
+
+# An empty-but-present cache directory must read as COLD.
+_empty = pathlib.Path(_d) / "empty-grammar-cache"
+_empty.mkdir(exist_ok=True)
+_saved_have = doctor.optional.have
+try:
+    import tree_sitter_language_pack as _tslp
+    _saved_cd = _tslp.cache_dir
+    _tslp.cache_dir = lambda: str(_empty)
+    try:
+        _cold = doctor._grammar_cache()
+    finally:
+        _tslp.cache_dir = _saved_cd
+    check("an EMPTY cache directory reports cold, not warm",
+          _cold["cached"] is False and _cold["grammars"] == 0,
+          f"-> {_cold['cached']} / {_cold['grammars']}")
+    check("  ...and names the remedy rather than only the state",
+          "prefetch_grammars" in (_cold["detail"] or ""),
+          f"-> {_cold['detail']}")
+except ImportError:
+    print("SKIP empty-grammar-cache (parsing extra not installed)")
+
 import shutil as _shutil
 
 _shutil.rmtree(_d, ignore_errors=True)

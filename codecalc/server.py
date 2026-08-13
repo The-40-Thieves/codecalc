@@ -1011,6 +1011,18 @@ def _doctor(as_json: bool = False, deep: bool = False) -> int:
         for r in versioned:
             print(f"      {r['name']:14} {r['version']}")
 
+    # Printed unconditionally, including when warm. An operator planning an
+    # offline install needs to see the state, and a line that only appears when
+    # something is wrong cannot be used to confirm something is right.
+    gc = rep["grammar_cache"]
+    if not gc["extra_installed"]:
+        print("  grammars          parsing extra not installed (regex fallback)")
+    elif gc["cached"]:
+        print(f"  grammars          {gc['grammars']} cached  {gc['path']}")
+    else:
+        print(f"  grammars          NONE CACHED — first use per language "
+              f"DOWNLOADS  {gc['path']}")
+
     ws = rep["workspace"]
     print(f"  workspace         {ws['path']}"
           f"{'' if ws['writable'] else '  NOT WRITABLE — ' + str(ws['error'])}")

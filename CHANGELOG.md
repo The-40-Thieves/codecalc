@@ -147,6 +147,15 @@ the thing is.
   does not bind at all under an ambient job carrying `SILENT_BREAKAWAY_OK` —
   see the known limitation below, which is unchanged and still disclosed.
 
+- **`analyze_complexity` downloads its grammars on first use, and the docs now
+  say so.** tree-sitter grammars are not in the wheel: the pack ships a ~5 MB
+  extension and fetches each grammar in-process into a local cache — 28
+  grammars, 89 MB, ~15s cold. The README's network table said the package layer
+  reaches the network `Never`, which was false, and the size table's `+5 MB` for
+  `[parsing]` described the wheel rather than the cost. `codecalc doctor` now
+  reports whether the cache is warm, and `scripts/prefetch_grammars.py` warms it
+  for an offline install.
+
 ### Known limitations
 
 - **On Windows the process ceiling may not bind, and now says so.** Measured on
