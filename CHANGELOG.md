@@ -37,6 +37,18 @@ First public release. The tag will be `v0.1.0`; nothing has been published to
 PyPI or crates.io before it, so there is no upgrade path to describe — only what
 the thing is.
 
+### Corrected before first publication
+
+- **The Windows fork-bomb claim.** The README's platform table and `AUDIT.md`
+  both described Windows' job-scoped `ActiveProcessLimit` as *better* than
+  `RLIMIT_NPROC`'s uid-wide budget. Measurement says otherwise: 400 of 400
+  spawns succeeded against a ceiling of 24 on Windows 11 Pro, because that limit
+  comes from a process's immediate job and post-creation assignment does not
+  guarantee ours is it. Both documents now state what is measured, and point at
+  `process_limit_enforcement_unverified_on_windows`, which every post-creation
+  Windows run declares. Corrected before `0.1.0` rather than after, because a
+  rendered release page cannot be edited without cutting a new version.
+
 ### Added
 
 - **47 MCP tools across 31 languages.** Code execution, symbolic mathematics
