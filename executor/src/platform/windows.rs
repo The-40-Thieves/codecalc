@@ -132,9 +132,11 @@ fn ambient_job_allows_breakaway() -> Option<bool> {
     let mut in_job: i32 = 0;
     // NULL job handle = "the job this process is in", per the API contract.
     if unsafe { IsProcessInJob(GetCurrentProcess(), std::ptr::null_mut(), &mut in_job) } == 0 {
+        diag("IsProcessInJob(self) FAILED -> returning None (unknown)");
         return None;
     }
     if in_job == 0 {
+        diag("self is in NO job -> returning Some(false), no disclosure");
         // Not in a job at all: nothing above us can grant breakaway. This is the
         // shape the GitHub Server-SKU runner appears to have, and it is why CI
         // measured the ceiling binding at 23 of 400 while two real desktops did
@@ -153,9 +155,46 @@ fn ambient_job_allows_breakaway() -> Option<bool> {
         )
     };
     if ok == 0 {
+        diag("QueryInformationJobObject(self) FAILED -> returning None (unknown)");
         return None;
     }
-    Some(info.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK != 0)
+    let flags = info.BasicLimitInformation.LimitFlags;
+    let silent = flags & JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK != 0;
+    diag(&format!(
+        "self IS in a job: LimitFlags=0x{:08X} APL={} SILENT_BREAKAWAY_OK={} -> Some({})",
+        flags, info.BasicLimitInformation.ActiveProcessLimit, silent, silent
+    ));
+    Some(silent)
+}
+
+/// Append a line to the path in `CODECALC_DIAG_JOB`, or do nothing (THE-818).
+///
+/// A FILE rather than stderr, deliberately: the executor's stderr IS the
+/// sandboxed program's stderr, and a diagnostic that contaminates the thing it
+/// is measuring is the failure this whole investigation keeps re-finding. Off
+/// unless the variable is set, so a normal run is byte-identical.
+///
+/// This exists because the question it answers is UNREACHABLE from outside the
+/// process. `scripts/diag_windows_job.py` mirrors this function in ctypes, but
+/// it runs in the DIAGNOSTIC, not in codecalc-exec — and if the diagnostic's
+/// own job carries SILENT_BREAKAWAY_OK then the executor it spawns silently
+/// breaks away and is in no job at all. Those two processes can therefore give
+/// opposite answers, and only this one is the answer that matters.
+fn diag(msg: &str) {
+    let Ok(path) = std::env::var("CODECALC_DIAG_JOB") else {
+        return;
+    };
+    if path.is_empty() {
+        return;
+    }
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = writeln!(f, "ambient_job_allows_breakaway: {msg}");
+    }
 }
 
 /// Resume a process created with `CREATE_SUSPENDED`, given only its PID.

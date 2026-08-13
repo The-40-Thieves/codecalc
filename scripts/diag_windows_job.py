@@ -214,16 +214,23 @@ def main() -> int:
 
     exe = executor._rust
     if not exe:
-        print("::error::no native executor (codecalc-exec). Build it first: "
-              "cargo build --release --manifest-path executor/Cargo.toml",
-              file=sys.stderr)
+        print("::error::no native executor (codecalc-exec).\n"
+              "  cargo build --release --manifest-path executor/Cargo.toml\n"
+              "  copy executor\\target\\release\\codecalc-exec.exe bin\\\n"
+              "THE COPY IS NOT OPTIONAL. `executor/target/release/` is NOT in\n"
+              "executor._binary_candidates(); only <repo>/bin/ and the packaged\n"
+              "codecalc/bin/ are. Building without copying leaves a STALE binary in\n"
+              "bin/ and this script measures that one, silently. Or set\n"
+              "CODECALC_EXEC_BIN to an explicit path.", file=sys.stderr)
         return 2
 
     # ── PARENT: what ambient_job_allows_breakaway() actually sees ───────────
     #
     # This is the block that decides whether the shipped disclosure is asking
     # about the right process. It mirrors platform/windows.rs:134 exactly.
-    print("=== PARENT (what the executor's own check sees) ===")
+    # NOT the executor. This process. The distinction is the whole finding
+    # below, and labelling it "the executor's own check" was wrong.
+    print("=== THIS DIAGNOSTIC's own job (NOT the executor's) ===")
     parent = _parent_job_facts()
     for k, v in parent.items():
         print(f"  {k:24} {_fmt(k, v)}")
@@ -277,17 +284,29 @@ def main() -> int:
         print(f"  disclosed: {disclosed}  (honest: the gap is reported)")
 
     pf, cf = parent.get("LIMIT_FLAGS"), child.get("LIMIT_FLAGS")
-    print("\n  parent vs child job:")
-    if pf is None or cf is None:
+    print("\n  this diagnostic's job vs the sandboxed child's:")
+    if not isinstance(pf, int) or not isinstance(cf, int):
         print("    one side could not be read — inconclusive")
     elif pf == cf:
-        print(f"    SAME job flags (0x{pf:08X}). If SILENT_BREAKAWAY_OK is set "
-              "here,\n    the shipped check should have fired: debug "
-              "ambient_job_allows_breakaway.")
+        print(f"    SAME flags (0x{pf:08X}).")
     else:
-        print(f"    DIFFERENT jobs — parent 0x{pf:08X}, child 0x{cf:08X}.")
-        print("    The shipped check asks GetCurrentProcess() and reports about")
-        print("    the child. It must interrogate the CHILD instead.")
+        print(f"    DIFFERENT — diagnostic 0x{pf:08X}, child 0x{cf:08X}.")
+
+    # THE TRAP THIS BLOCK USED TO SET. It compared this script's job to the
+    # child's and invited a conclusion about `ambient_job_allows_breakaway()`.
+    # That function does not run here — it runs inside codecalc-exec.exe, a
+    # THIRD process. And if this diagnostic's job carries SILENT_BREAKAWAY_OK,
+    # the executor it spawns breaks away silently and is in NO job, so it
+    # returns Some(false) and discloses nothing — while this script and the
+    # child both plainly show 0x3000. Every number above is consistent with
+    # that, and none of them measures it.
+    print("\n  NOTE: neither row above is the executor's job. "
+          "ambient_job_allows_breakaway()\n  runs inside codecalc-exec.exe, "
+          "which is a third process and may have broken\n  away from this "
+          "one. To see what IT reads, re-run with:\n"
+          "    set CODECALC_DIAG_JOB=%CD%\\jobdiag.txt\n"
+          "  and read that file. Do not infer the executor's view from these "
+          "rows.")
 
     return 0 if bound else 3
 
