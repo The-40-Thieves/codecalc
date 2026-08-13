@@ -60,15 +60,45 @@ def grammar_name(language: str) -> str | None:
     return GRAMMAR_ALIASES.get(canon, canon)
 
 
+#: Why a grammar could not be loaded, keyed by grammar name (THE-820).
+#:
+#: The `except` below used to discard the exception, which made every possible
+#: failure — the extra not installed, an ABI mismatch, a missing shared object,
+#: a grammar this pack genuinely does not ship — arrive at the caller as the
+#: same silent `False`. When tree-sitter stopped loading on py3.14 in CI, the
+#: entire diagnosis available was `missing ['python3']`: true, useless, and
+#: identical to what a language with no grammar looks like.
+#:
+#: The reason is KEPT rather than raised, because `parser_for` returning None is
+#: the designed behaviour — callers fall back to the regex heuristic and say so.
+#: What was wrong was throwing away why.
+_GRAMMAR_ERRORS: dict[str, str] = {}
+
+
 @cache
 def _grammar_available(name: str) -> bool:
     try:
         pack = require("tree_sitter_language_pack")
 
         pack.get_language(name)
-    except Exception:
+    except Exception as exc:
+        # Type AND message: "ImportError" alone does not distinguish a missing
+        # extra from a wheel that will not load on this interpreter, and those
+        # need different fixes.
+        _GRAMMAR_ERRORS[name] = f"{type(exc).__name__}: {exc}"
         return False
+    _GRAMMAR_ERRORS.pop(name, None)
     return True
+
+
+def grammar_error(name: str) -> str | None:
+    """Why `name` has no parser, or None if it has one or was never asked.
+
+    `_grammar_available` is cached, so ask it first: reading this without having
+    asked reports None for a grammar that was never attempted, which is not the
+    same as one that loaded.
+    """
+    return _GRAMMAR_ERRORS.get(name)
 
 
 def parser_for(language: str):
