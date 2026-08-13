@@ -32,8 +32,12 @@ use windows_sys::Win32::System::JobObjects::{
     TerminateJobObject,
 };
 use windows_sys::Win32::System::Threading::{
-    CREATE_NO_WINDOW, CREATE_SUSPENDED, GetCurrentProcess, GetExitCodeProcess, OpenThread,
-    ResumeThread, THREAD_SUSPEND_RESUME, WaitForSingleObject,
+    CREATE_BREAKAWAY_FROM_JOB, CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
+    CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
+    GetExitCodeProcess, InitializeProcThreadAttributeList, OpenThread,
+    PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES,
+    STARTUPINFOEXW, STARTUPINFOW, THREAD_SUSPEND_RESUME, UpdateProcThreadAttribute,
+    WaitForSingleObject,
 };
 
 use super::{ResolvedLimits, Wait};
@@ -248,7 +252,137 @@ fn resume_process(pid: u32) -> io::Result<()> {
     Ok(())
 }
 
-pub fn spawn_and_wait(mut cmd: Command, limits: &ResolvedLimits) -> io::Result<Wait> {
+fn to_wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// Create the child with `J` supplied at CREATION, so it is the IMMEDIATE job.
+///
+/// THE-818. Post-creation `AssignProcessToJobObject` puts us SOMEWHERE in the
+/// child's job chain but not necessarily at its end, and `ActiveProcessLimit`
+/// is not one of the limits combined across a chain — it comes from the
+/// immediate job. Measured on Windows 11 Pro: the child's immediate job
+/// reported `0x3000 / APL 0` while ours was `0x230A / APL 24`, and 400 of 400
+/// spawns went through.
+///
+/// `PROC_THREAD_ATTRIBUTE_JOB_LIST` assigns before the initial thread runs and
+/// puts `J` at the end of the chain, which is the only arrangement in which our
+/// ceiling is the one consulted. Jobs are applied in the order supplied; we
+/// supply exactly one.
+///
+/// OPT-IN, and deliberately so: this cannot be tested from the machine it was
+/// written on, and the argv quoting above is the same class of bug that made
+/// bash unusable on Windows for the project's whole life. Set
+/// `CODECALC_WIN_JOB_AT_CREATION=1` to measure it; the default path is
+/// unchanged until a Windows run says this one works.
+#[allow(clippy::too_many_arguments)]
+fn spawn_with_job_at_creation(
+    cmd: &Command,
+    stdio: super::RawStdio,
+    job: HANDLE,
+    breakaway: bool,
+) -> io::Result<(HANDLE, HANDLE)> {
+    // Command line: program then args, each quoted for the MSVC parser.
+    let mut line = super::quote_arg(cmd.get_program());
+    for a in cmd.get_args() {
+        line.push(' ');
+        line.push_str(&super::quote_arg(a));
+    }
+    let mut line_w = to_wide(&line);
+
+    // Environment block: KEY=VALUE\0 ... \0. `Command` already holds exactly
+    // the allowlist, so this inherits the CRITICAL-02 filtering rather than
+    // rebuilding it.
+    let mut env_w: Vec<u16> = Vec::new();
+    for (k, v) in cmd.get_envs() {
+        let Some(v) = v else { continue };
+        env_w.extend(k.to_string_lossy().encode_utf16());
+        env_w.push(u16::from(b'='));
+        env_w.extend(v.to_string_lossy().encode_utf16());
+        env_w.push(0);
+    }
+    env_w.push(0);
+
+    let cwd_w = cmd.get_current_dir().map(|d| to_wide(&d.to_string_lossy()));
+
+    // Two-call pattern: ask the size, allocate, initialise.
+    let mut size: usize = 0;
+    unsafe { InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &mut size) };
+    if size == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut attr_buf = vec![0u8; size];
+    let attr_list = attr_buf.as_mut_ptr() as *mut core::ffi::c_void;
+    if unsafe { InitializeProcThreadAttributeList(attr_list, 1, 0, &mut size) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    // `job` must outlive the call; it is owned by the caller's Job guard.
+    let job_handle = job;
+    let ok = unsafe {
+        UpdateProcThreadAttribute(
+            attr_list,
+            0,
+            PROC_THREAD_ATTRIBUTE_JOB_LIST as usize,
+            &job_handle as *const HANDLE as *const core::ffi::c_void,
+            std::mem::size_of::<HANDLE>(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+        )
+    };
+    if ok == 0 {
+        let e = io::Error::last_os_error();
+        unsafe { DeleteProcThreadAttributeList(attr_list) };
+        return Err(e);
+    }
+
+    let mut si: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
+    si.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+    si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    si.StartupInfo.hStdInput = stdio.stdin as HANDLE;
+    si.StartupInfo.hStdOutput = stdio.stdout as HANDLE;
+    si.StartupInfo.hStdError = stdio.stderr as HANDLE;
+    si.lpAttributeList = attr_list;
+
+    let mut flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT;
+    if breakaway {
+        // Needed when this process is itself in a job that would otherwise
+        // capture the child. FAILS with ERROR_ACCESS_DENIED if the ancestor
+        // does not permit it — which is reported, not swallowed.
+        flags |= CREATE_BREAKAWAY_FROM_JOB;
+    }
+
+    let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+    let created = unsafe {
+        CreateProcessW(
+            std::ptr::null(),
+            line_w.as_mut_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1, // bInheritHandles: required for STARTF_USESTDHANDLES
+            flags,
+            env_w.as_ptr() as *const core::ffi::c_void,
+            cwd_w
+                .as_ref()
+                .map(|w| w.as_ptr())
+                .unwrap_or(std::ptr::null()),
+            &si as *const STARTUPINFOEXW as *const STARTUPINFOW,
+            &mut pi,
+        )
+    };
+    let err = io::Error::last_os_error();
+    unsafe { DeleteProcThreadAttributeList(attr_list) };
+    if created == 0 {
+        return Err(err);
+    }
+    Ok((pi.hProcess, pi.hThread))
+}
+
+pub fn spawn_and_wait(
+    mut cmd: Command,
+    limits: &ResolvedLimits,
+    stdio: super::RawStdio,
+) -> io::Result<Wait> {
     // The CPU ceiling IS applied here (JOB_OBJECT_LIMIT_PROCESS_TIME, see
     // create_job) but it counts user-mode time only, so a caller comparing it
     // to RLIMIT_CPU is told what it does not cover rather than left to assume.
@@ -284,27 +418,58 @@ pub fn spawn_and_wait(mut cmd: Command, limits: &ResolvedLimits) -> io::Result<W
     // disclosure below is untouched and still fires exactly when it did.
     //
     // CREATE_NO_WINDOW keeps console runtimes from flashing a window per run.
-    cmd.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
-    let mut child: Child = cmd.spawn()?;
-    let process: HANDLE = child.as_raw_handle() as HANDLE;
+    // THE-818 opt-in: build the topology at creation instead of assigning
+    // afterwards, so OUR job is the child's IMMEDIATE job and its
+    // ActiveProcessLimit is the one consulted. Off by default until a Windows
+    // run confirms it; see spawn_with_job_at_creation.
+    let at_creation = std::env::var("CODECALC_WIN_JOB_AT_CREATION")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    // `Some` on the ordinary path (std owns the child), `None` on the
+    // creation-time path (we own a raw handle). Both converge on `process`.
+    let mut child: Option<Child> = None;
+    let process: HANDLE;
 
-    if unsafe { AssignProcessToJobObject(job.0, process) } == 0 {
-        let err = io::Error::last_os_error();
-        // Kill rather than resume: a child that could not be placed in the job
-        // must not be allowed to run at all, which is the whole point of having
-        // created it suspended.
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(err);
+    if at_creation {
+        let breakaway = ambient_job_allows_breakaway().unwrap_or(false);
+        // Reported, never silently downgraded to the weaker path: a fallback
+        // would put us back in the topology this exists to escape, while the
+        // caller believed otherwise.
+        let (p, thread) =
+            spawn_with_job_at_creation(&cmd, stdio, job.0, breakaway).map_err(|e| {
+                io::Error::other(format!(
+                    "CODECALC_WIN_JOB_AT_CREATION=1 but creation-time job assignment failed: {e}"
+                ))
+            })?;
+        unsafe { ResumeThread(thread) };
+        unsafe { CloseHandle(thread) };
+        unenforced.push("process_limit_job_assigned_at_creation_on_windows");
+        process = p;
+    } else {
+        cmd.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
+        let spawned: Child = cmd.spawn()?;
+        process = spawned.as_raw_handle() as HANDLE;
+        child = Some(spawned);
     }
 
-    // Only now does the program get to execute. A failure here is fatal for the
-    // reason resume_process documents — a suspended child would otherwise be
-    // reported as a timeout having never run.
-    if let Err(err) = resume_process(child.id()) {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(err);
+    if let Some(c) = child.as_mut() {
+        if unsafe { AssignProcessToJobObject(job.0, process) } == 0 {
+            let err = io::Error::last_os_error();
+            // Kill rather than resume: a child that could not be placed in the
+            // job must not be allowed to run at all, which is the whole point
+            // of having created it suspended.
+            let _ = c.kill();
+            let _ = c.wait();
+            return Err(err);
+        }
+        // Only now does the program get to execute. A failure here is fatal for
+        // the reason resume_process documents — a suspended child would
+        // otherwise be reported as a timeout having never run.
+        if let Err(err) = resume_process(c.id()) {
+            let _ = c.kill();
+            let _ = c.wait();
+            return Err(err);
+        }
     }
 
     // ── THE-775: the ceiling is set; is it BINDING? ──────────────────────────
@@ -404,7 +569,9 @@ pub fn spawn_and_wait(mut cmd: Command, limits: &ResolvedLimits) -> io::Result<W
     if timed_out {
         // Kills every process in the job, not just the one we spawned.
         unsafe { TerminateJobObject(job.0, 1) };
-        let _ = child.wait();
+        if let Some(c) = child.as_mut() {
+            let _ = c.wait();
+        }
     }
 
     let mut code: u32 = 0;

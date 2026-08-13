@@ -35,6 +35,22 @@ mod windows;
 #[cfg(windows)]
 pub use windows::{current_uid_tasks, spawn_and_wait};
 
+/// Raw std handles, for the Windows creation-time job path (THE-818).
+///
+/// `std::process::Command` cannot pass `PROC_THREAD_ATTRIBUTE_JOB_LIST`, so
+/// that path needs a raw `CreateProcessW` — which needs the three handles
+/// `Stdio::from(File)` would otherwise consume. Captured before the conversion
+/// and carried here. Zeroed and ignored on Unix.
+#[derive(Clone, Copy, Default)]
+// Read only by the Windows creation-time path; on Unix the struct is carried
+// and ignored, which is the point of it being cross-platform.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub struct RawStdio {
+    pub stdin: isize,
+    pub stdout: isize,
+    pub stderr: isize,
+}
+
 /// Resolved, per-execution resource ceilings handed to the platform layer.
 #[derive(Clone, Copy)]
 pub struct ResolvedLimits {
@@ -112,5 +128,108 @@ pub fn apply_no_net(cmd: &mut Command, exe_dir: &Path) -> bool {
             true
         }
         _ => false,
+    }
+}
+
+/// Quote one argument the way the MSVC C runtime parses it back.
+///
+/// `CreateProcessW` takes one STRING; the callee re-splits it. Getting this
+/// wrong corrupts every execution silently, which is exactly how THE-817
+/// happened one layer up. Rule, from Microsoft's own parser description:
+/// backslashes are literal EXCEPT immediately before a quote, where they are
+/// escapes and must be doubled — including the run before the closing quote.
+// Used by the Windows creation-time path; unused on Unix, where it is kept
+// compiled and TESTED anyway. A rule only one platform can check is a rule
+// nothing checks — the lesson from THE-817's `os.path` vs `ntpath` branch.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn quote_arg(arg: &std::ffi::OsStr) -> String {
+    let s = arg.to_string_lossy();
+    if !s.is_empty() && !s.contains([' ', '\t', '"']) {
+        return s.into_owned();
+    }
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    let mut backslashes = 0usize;
+    for c in s.chars() {
+        match c {
+            '\\' => {
+                backslashes += 1;
+                out.push('\\');
+            }
+            '"' => {
+                // Double the run, then escape the quote itself.
+                for _ in 0..backslashes {
+                    out.push('\\');
+                }
+                backslashes = 0;
+                out.push('\\');
+                out.push('"');
+            }
+            _ => {
+                backslashes = 0;
+                out.push(c);
+            }
+        }
+    }
+    // The run before the CLOSING quote is escaping it, so double it too.
+    for _ in 0..backslashes {
+        out.push('\\');
+    }
+    out.push('"');
+    out
+}
+
+#[cfg(test)]
+mod quoting_tests {
+    use super::quote_arg;
+    use std::ffi::OsStr;
+
+    // These test the REAL function, not a restatement of it. An earlier draft
+    // asserted against a reference reimplementation written in the same sitting
+    // — which agrees by construction and proves nothing. quote_arg lives here
+    // rather than in the cfg(windows) module for exactly that reason: a rule
+    // only Windows can check is a rule nothing checks.
+
+    fn q(s: &str) -> String {
+        quote_arg(OsStr::new(s))
+    }
+
+    #[test]
+    fn a_plain_argument_is_not_quoted() {
+        assert_eq!(q("main.py"), "main.py");
+    }
+
+    #[test]
+    fn backslashes_not_before_a_quote_are_literal() {
+        // A Windows path must survive untouched. THE-817 inverted.
+        assert_eq!(q(r"C:\Temp\main.py"), r"C:\Temp\main.py");
+    }
+
+    #[test]
+    fn a_space_forces_quoting() {
+        assert_eq!(q("John Smith"), "\"John Smith\"");
+    }
+
+    #[test]
+    fn the_backslash_run_before_the_closing_quote_is_doubled() {
+        // Without doubling, the trailing backslash escapes OUR closing quote
+        // and the argument swallows the rest of the command line.
+        assert_eq!(q(r"C:\a b\"), "\"C:\\a b\\\\\"");
+    }
+
+    #[test]
+    fn an_embedded_quote_is_escaped() {
+        assert_eq!(q(r#"say "hi""#), r#""say \"hi\"""#);
+    }
+
+    #[test]
+    fn a_backslash_run_before_an_embedded_quote_is_doubled() {
+        assert_eq!(q(r#"a\"b"#), r#""a\\\"b""#);
+    }
+
+    #[test]
+    fn the_empty_argument_survives_as_an_empty_quoted_string() {
+        // Dropping it would silently shift every later argument left.
+        assert_eq!(q(""), "\"\"");
     }
 }

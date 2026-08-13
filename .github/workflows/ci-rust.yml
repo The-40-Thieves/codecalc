@@ -101,8 +101,8 @@ jobs:
           n=$(sed -n 's/^test result: ok\. \([0-9]*\) passed.*/\1/p' test.log \
               | awk '{s += $1} END {print s + 0}')
           echo "rust unit tests passed: ${n:-0}"
-          [ "${n:-0}" -ge 9 ] || {
-            echo "::error::expected at least 9 rust unit tests, ran ${n:-0} — the suite did not run"
+          [ "${n:-0}" -ge 23 ] || {
+            echo "::error::expected at least 23 rust unit tests, ran ${n:-0} — the suite did not run"
             exit 1
           }
 

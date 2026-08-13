@@ -230,7 +230,13 @@ fn maxrss_to_kb(ru_maxrss: i64) -> u64 {
     }
 }
 
-pub fn spawn_and_wait(mut cmd: Command, limits: &ResolvedLimits) -> io::Result<Wait> {
+pub fn spawn_and_wait(
+    mut cmd: Command,
+    limits: &ResolvedLimits,
+    // Windows-only (THE-818): the creation-time job path needs the raw
+    // handles. Unix has no equivalent problem and ignores this.
+    _stdio: super::RawStdio,
+) -> io::Result<Wait> {
     let (rlimits, unenforced) = resolve(limits);
     // Own process group, so a timeout can killpg the child's whole tree.
     cmd.process_group(0);
