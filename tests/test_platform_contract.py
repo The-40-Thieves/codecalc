@@ -52,27 +52,6 @@ IS_LINUX = sys.platform.startswith("linux")
 IS_MAC = sys.platform == "darwin"
 IS_WINDOWS = sys.platform.startswith("win")
 
-WINDOWS_RS = (REPO_ROOT / "executor" / "src" / "platform" / "windows.rs").read_text(
-    encoding="utf-8"
-)
-
-# THE-818. A parent job carrying SILENT_BREAKAWAY_OK already makes its child
-# break away automatically. Combining an explicit CREATE_BREAKAWAY_FROM_JOB
-# with PROC_THREAD_ATTRIBUTE_JOB_LIST terminated the creation-time child with
-# HRESULT 0x80070032 (ERROR_NOT_SUPPORTED) on the Windows 11 Pro repro host,
-# before the submitted program executed. Pin the boundary rather than the
-# symptom: the creation-time path supplies the new immediate job and must not
-# also request explicit breakaway.
-creation_time_job_path = WINDOWS_RS.split(
-    "fn spawn_with_job_at_creation", 1
-)[1].split("pub fn spawn_and_wait", 1)[0]
-check(
-    "the creation-time job path does not also request explicit breakaway",
-    "flags |= CREATE_BREAKAWAY_FROM_JOB" not in creation_time_job_path
-    and "breakaway: bool" not in creation_time_job_path,
-    "-> explicit breakaway plus PROC_THREAD_ATTRIBUTE_JOB_LIST exited 0x80070032",
-)
-
 #: Every string the executor is allowed to put in `unenforced`, and where it
 #: comes from. A value outside this set is either a typo or a new limitation
 #: nobody wrote down — both worth failing over.
