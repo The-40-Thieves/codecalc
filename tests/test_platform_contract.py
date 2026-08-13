@@ -52,6 +52,28 @@ IS_LINUX = sys.platform.startswith("linux")
 IS_MAC = sys.platform == "darwin"
 IS_WINDOWS = sys.platform.startswith("win")
 
+WINDOWS_RS = (REPO_ROOT / "executor" / "src" / "platform" / "windows.rs").read_text(
+    encoding="utf-8"
+)
+
+# THE-818. The raw CreateProcessW path bypasses std::process::Command's Windows
+# handle preparation. bInheritHandles=TRUE only copies handles that already
+# carry HANDLE_FLAG_INHERIT; files opened by Rust do not. The raw path must
+# therefore duplicate its three standard handles as inheritable and pass those
+# duplicates in STARTUPINFOEXW.
+creation_time_job_path = WINDOWS_RS.split(
+    "fn spawn_with_job_at_creation", 1
+)[1].split("pub fn spawn_and_wait", 1)[0]
+check(
+    "the creation-time job path supplies inheritable standard handles",
+    "DuplicateHandle" in WINDOWS_RS
+    and "InheritableStdio::duplicate(stdio)" in creation_time_job_path
+    and "si.StartupInfo.hStdInput = inheritable_stdio[0]" in creation_time_job_path
+    and "si.StartupInfo.hStdOutput = inheritable_stdio[1]" in creation_time_job_path
+    and "si.StartupInfo.hStdError = inheritable_stdio[2]" in creation_time_job_path,
+    "-> STARTF_USESTDHANDLES requires inheritable handles in the child",
+)
+
 #: Every string the executor is allowed to put in `unenforced`, and where it
 #: comes from. A value outside this set is either a typo or a new limitation
 #: nobody wrote down — both worth failing over.

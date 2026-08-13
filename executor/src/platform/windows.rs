@@ -18,7 +18,10 @@ use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::process::{Child, Command};
 
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE, INVALID_HANDLE_VALUE,
+    WAIT_OBJECT_0,
+};
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
 };
@@ -49,6 +52,62 @@ struct Job(HANDLE);
 impl Drop for Job {
     fn drop(&mut self) {
         unsafe { CloseHandle(self.0) };
+    }
+}
+
+/// Child-side copies of stdin/stdout/stderr for raw `CreateProcessW`.
+///
+/// Rust opens `File` handles as non-inheritable. `bInheritHandles=TRUE` only
+/// copies handles that already carry the inherit bit, so passing the originals
+/// in `STARTF_USESTDHANDLES` leaves the child with invalid standard handles.
+struct InheritableStdio([HANDLE; 3]);
+
+impl InheritableStdio {
+    fn duplicate(stdio: super::RawStdio) -> io::Result<Self> {
+        let process = unsafe { GetCurrentProcess() };
+        let sources = [
+            stdio.stdin as HANDLE,
+            stdio.stdout as HANDLE,
+            stdio.stderr as HANDLE,
+        ];
+        let mut handles = [std::ptr::null_mut(); 3];
+        for (index, source) in sources.into_iter().enumerate() {
+            if unsafe {
+                DuplicateHandle(
+                    process,
+                    source,
+                    process,
+                    &mut handles[index],
+                    0,
+                    1,
+                    DUPLICATE_SAME_ACCESS,
+                )
+            } == 0
+            {
+                let error = io::Error::last_os_error();
+                for handle in handles.into_iter().take(index) {
+                    unsafe { CloseHandle(handle) };
+                }
+                return Err(error);
+            }
+        }
+        Ok(Self(handles))
+    }
+}
+
+impl std::ops::Index<usize> for InheritableStdio {
+    type Output = HANDLE;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.0[index]
+    }
+}
+
+impl Drop for InheritableStdio {
+    fn drop(&mut self) {
+        for handle in self.0 {
+            unsafe { CloseHandle(handle) };
+        }
     }
 }
 
@@ -282,6 +341,8 @@ fn spawn_with_job_at_creation(
     job: HANDLE,
     breakaway: bool,
 ) -> io::Result<(HANDLE, HANDLE)> {
+    let inheritable_stdio = InheritableStdio::duplicate(stdio)?;
+
     // Command line: program then args, each quoted for the MSVC parser.
     let mut line = super::quote_arg(cmd.get_program());
     for a in cmd.get_args() {
@@ -339,9 +400,9 @@ fn spawn_with_job_at_creation(
     let mut si: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
     si.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
     si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-    si.StartupInfo.hStdInput = stdio.stdin as HANDLE;
-    si.StartupInfo.hStdOutput = stdio.stdout as HANDLE;
-    si.StartupInfo.hStdError = stdio.stderr as HANDLE;
+    si.StartupInfo.hStdInput = inheritable_stdio[0];
+    si.StartupInfo.hStdOutput = inheritable_stdio[1];
+    si.StartupInfo.hStdError = inheritable_stdio[2];
     si.lpAttributeList = attr_list;
 
     let mut flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT;
