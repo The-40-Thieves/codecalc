@@ -15,6 +15,18 @@ def run_execution_conformance(provider: providers.ExecutionProvider,
     check("conformance: descriptor is JSON serializable",
           isinstance(json.loads(json.dumps(descriptor)), dict))
 
+    health = provider.health()
+    check("conformance: health is JSON serializable",
+          isinstance(json.loads(json.dumps(health)), dict))
+    check("conformance: health identifies the provider",
+          health.get("provider_id") == descriptor["provider_id"])
+    check("conformance: readiness is explicit",
+          isinstance(health.get("ready"), bool))
+
+    runtimes = provider.list_runtimes()
+    check("conformance: runtime discovery is JSON serializable",
+          isinstance(json.loads(json.dumps(runtimes)), list))
+
     success = provider.execute(providers.ComputationSpec(
         language="python3", code='print("conformance")'
     ))

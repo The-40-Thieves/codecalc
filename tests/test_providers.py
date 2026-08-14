@@ -163,6 +163,25 @@ def test_local_provider_passes_the_shared_execution_conformance_suite() -> None:
     run_execution_conformance(providers.LocalExecutionProvider(), check)
 
 
+def test_local_provider_reports_health_and_runtime_discovery() -> None:
+    provider = providers.LocalExecutionProvider()
+
+    health = provider.health()
+    runtimes = provider.list_runtimes()
+
+    check("health identifies the provider",
+          health["provider_id"] == provider.provider_id)
+    check("health reports the active local backend",
+          health["backend"] in {"rust", "python"})
+    check("healthy local provider is ready", health["ready"] is True)
+    check("runtime discovery returns the canonical catalog",
+          runtimes == providers.executor.catalog())
+    check("health capability is advertised",
+          provider.describe()["capabilities"]["health"] is True)
+    check("runtime discovery capability is advertised",
+          provider.describe()["capabilities"]["runtime_discovery"] is True)
+
+
 if __name__ == "__main__":
     test_descriptor_is_versioned_and_machine_readable()
     test_local_provider_preserves_the_execution_result_contract()
@@ -173,4 +192,5 @@ if __name__ == "__main__":
     test_registry_rejects_an_incompatible_provider_interface()
     test_policy_routing_receives_the_spec_and_explicit_selection_wins()
     test_local_provider_passes_the_shared_execution_conformance_suite()
+    test_local_provider_reports_health_and_runtime_discovery()
     sys.exit(1 if FAILS else 0)

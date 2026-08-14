@@ -81,6 +81,10 @@ class ExecutionProvider(Protocol):
 
     def describe(self) -> dict: ...
 
+    def health(self) -> dict: ...
+
+    def list_runtimes(self) -> list[dict]: ...
+
     def execute(self, spec: ComputationSpec) -> dict: ...
 
     def cancel(self, run_id: str) -> None: ...
@@ -170,9 +174,22 @@ class LocalExecutionProvider:
                 "files": False,
                 "artifacts": False,
                 "sessions": False,
+                "health": True,
+                "runtime_discovery": True,
                 "network_control": executor.backend() == "rust",
             },
         ).to_dict()
+
+    def health(self) -> dict:
+        return {
+            "provider_id": self.provider_id,
+            "provider_version": __version__,
+            "ready": True,
+            "backend": executor.backend(),
+        }
+
+    def list_runtimes(self) -> list[dict]:
+        return executor.catalog()
 
     def execute(self, spec: ComputationSpec) -> dict:
         return executor.execute(
