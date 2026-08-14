@@ -3,18 +3,19 @@
 Run code in **31 languages**, evaluate symbolic math, solve logic problems, and
 measure complexity — all exposed as MCP tools any AI model or agent can call.
 
-**codecalc itself opens no sockets.** No model, no API key, no gateway, no
-telemetry: the caller is already a language model, so codecalc is the part that
-runs things and measures them. `tests/test_offline.py` asserts this
-structurally — nothing under `codecalc/` imports anything that can open a
-socket, asserted per module.
+**CodeCalc's core opens no sockets.** No model gateway or telemetry is built
+in. `tests/test_offline.py` asserts this for the top-level core modules. The
+opt-in Piston provider is the deliberate exception: its wire client lives under
+`codecalc/provider_adapters/` and is registered only when
+`CODECALC_PISTON_URL` is configured.
 
 That is a claim about the **package**, not about every tool call, and the
 difference is worth stating rather than leaving a reader to discover:
 
 | layer | reaches the network? |
 |---|---|
-| the codecalc package itself | **No client of its own** — no HTTP client, no gateway, no telemetry. One exception, in a dependency: `analyze_complexity` triggers a **grammar download** the first time a language is analysed (see below) |
+| CodeCalc core | **No HTTP client, model gateway, or telemetry.** One dependency exception: `analyze_complexity` may download a grammar on first use (see below) |
+| configured Piston provider | **Yes, explicitly.** Calls only the operator-supplied `CODECALC_PISTON_URL`; credentials stay in its authorization header and are redacted from results |
 | `install_package` | **Yes, by design.** It runs uv / npm / gem / cargo, which fetch from their registries. Installer hooks also run *outside* the sandbox — see [SECURITY.md](SECURITY.md) |
 | `runtimes_status`, `update_runtimes` | **Yes.** They shell out to mise / rustup / swiftly / npm, which check remote versions |
 | code you execute | **Yes, unless `no_net=True`** — and that shim needs the native executor, so the pure-Python fallback reports it in `unenforced` instead of applying it. Set `CODECALC_REQUIRE_NATIVE=1` to turn "fallback in use" into a startup failure instead of a result you have to notice by reading `unenforced` |
@@ -268,7 +269,7 @@ carries on without one; `--no-net` then reports itself in `unenforced` rather
 than pretending), and [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild)
 for the static cross-builds (zig is used as the linker; no x86_64 GCC needed).
 
-## MCP tools (47) + MCP resources
+## MCP tools (48) + MCP resources
 
 Every session file is also exposed as an MCP resource:
 `codecalc://session/<session_id>/files/<path>` — images render inline for the
@@ -304,11 +305,12 @@ analysis, binary64 introspection.
 | Tool | Description |
 |---|---|
 | `list_languages` | 31 languages with extension, compile flag, runtime availability |
+| `list_execution_providers` | Execution-provider identity, interface version, host class, and machine-readable capabilities |
 | `execute_code` | Run code in any language → stdout/stderr/exit_code/**verdict** (OK/TLE/MLE/OLE/RTE)/cpu_ms/peak_memory_kb; per-call limits (`max_memory_mb`, `max_output_kb`, `max_cpu`), `no_net`, `compact` |
-| `execute_code_stream` | Like execute_code but reports progress + partial output while running |
+| `execute_code_stream` | Provider-selected execution using the same canonical limits as `execute_code`, with progress + partial output when the provider supports streaming |
 | `session_start` | Persistent session; python3/node get a stateful REPL worker (variables/imports persist across calls), other languages a workspace dir |
 | `session_stop` / `session_list` | Session lifecycle |
-| `session_files` / `session_read_file` / `session_write_file` | Workspace file tools, jailed to the session dir; `session_read_file` returns images inline (as_image) |
+| `session_files` / `session_read_file` / `session_write_file` | Workspace file tools, jailed to the session dir; listings support `page_size`/`cursor`, and reads return images inline (`as_image`) |
 | `session_run` | **Multi-file programs**: execute an entry file that imports other session files (helper.py, data/...) in the workspace |
 | `session_artifacts` | List files created by executed code (results, images, CSVs) |
 | `install_package` | Install packages (uv pip/npm/gem/go/cargo...) into a session or shared cache |
@@ -362,7 +364,14 @@ which is exactly where `-n` does not stop it.
 ```bash
 cd /path/to/codecalc && .venv/bin/python -m codecalc.server
 # stdio transport — register with any MCP client
+
+# The identical tool/resource registry over stateless Streamable HTTP:
+.venv/bin/python -m codecalc.server serve-http --host 127.0.0.1 --port 8000
 ```
+
+Streamable HTTP binds to loopback by default and has no CodeCalc authentication
+layer. Do not bind it to an untrusted network without an authenticating reverse
+proxy and the stronger process/container isolation described in `SECURITY.md`.
 
 Point an MCP client at it:
 
@@ -407,6 +416,10 @@ deprecation window, worked success/failure/timeout examples, and the migration
 path from unversioned servers — is in
 [`docs/contract/README.md`](docs/contract/README.md).
 
+For in-process Python use, the supported protocol-neutral service boundary—and
+the session/storage internals that are deliberately not public—is documented in
+[`docs/embedding.md`](docs/embedding.md).
+
 Two things a caller should know before reading anything else:
 
 - **`ok` means "ran and exited 0".** A program that behaves exactly as intended
@@ -442,6 +455,9 @@ All optional. codecalc runs with none of these set.
 | `CODECALC_RUNTIME_PATH` | the server's own `PATH`, else `/usr/local/bin:/usr/bin:/bin` | The `PATH` executed code resolves runtimes on. **Set this when an MCP client spawns the server**: clients often launch with a stripped environment, so an inherited `PATH` can miss a toolchain manager's shims entirely and most languages silently become unavailable. `list_languages` reports what actually resolved. |
 | `CODECALC_EXEC_BIN` | `bin/codecalc-exec` (arch-matched) | Override the sandbox binary. Without one, codecalc falls back to a pure-Python executor — `list_languages` and `execute_code` still work, but the Rust path is the production one. |
 | `CODECALC_REQUIRE_NATIVE` | *(unset)* | Fail-closed: refuse to start if no usable `codecalc-exec` binary was found (checked at import, so this is also a server-start check), instead of silently answering every call on the weaker Python fallback. Raises naming `CODECALC_REQUIRE_NATIVE` and the paths that were checked. |
+| `CODECALC_EXECUTION_PROVIDER` | `local` | Default execution-provider ID. Explicit `execute_code(provider=...)` selection still wins. Setting this to an unregistered provider fails explicitly; it never falls back. |
+| `CODECALC_PISTON_URL` | *(unset)* | Register the non-local open-source Piston v2 provider at this absolute HTTP(S) base URL. No public service is contacted by default. |
+| `CODECALC_PISTON_AUTHORIZATION` | *(unset)* | Exact value for Piston's `Authorization` header. It is scoped to the Piston transport and redacted from normalized results, descriptors, health, and receipts. |
 | `CODECALC_ALLOW_RUNTIME_APPLY` | *(unset)* | Permit `update_runtimes(apply=True)` to run the **elevated** update commands (apt, via `sudo`). Unset, they are skipped with `ok: false` naming this variable, and the unprivileged managers still run. Deliberately an environment variable rather than a tool argument: `apply` is something a connected model can flip, and this is not. Accepts `1`/`true`/`yes`/`on`; an empty value is not consent. |
 | `CODECALC_SESSION_ROOT` | `~/.codecalc/sessions` | Where session workspaces live. |
 | `CODECALC_PROCESS_HEADROOM` | `512` | Fork-bomb guard. `RLIMIT_NPROC` is a **uid-wide task budget**, not a per-sandbox one — the kernel compares it against every thread your user owns, machine-wide. So codecalc measures the ambient count per execution and sets the limit to *ambient + headroom*: a bomb can add at most this many tasks, while a runtime wanting a few threads always has room however busy the box is. |
@@ -454,13 +470,13 @@ way back into the default.
 
 ## Tool-definition token cost
 
-codecalc's `tools/list` returns 47 definitions. Measured with `o200k_base` as a
+codecalc's `tools/list` returns 48 definitions. Measured with `o200k_base` as a
 proxy, that is roughly 7,600 tokens of descriptions and input schemas, and every
 client pays it before the first user message.
 
 codecalc does not hide its tools behind a discovery facade, and that is
 deliberate: the tool surface is where per-operation approval prompts, audit
-names and typed schemas live, and collapsing 47 tools into one dispatcher makes
+names and typed schemas live, and collapsing 48 tools into one dispatcher makes
 `install_package` and `percentage` look like the same permission to a client
 that approves by tool name. The cost is real, but the client is the better place
 to solve it, because the client can defer definitions **without** giving up the
@@ -475,7 +491,7 @@ If you are paying too much for codecalc's definitions:
   toolset's `default_config`, or per tool in `configs`. Deferred definitions stay
   out of the system-prompt prefix, prompt caching is preserved, and a matching
   tool is expanded into its full definition when the model searches for it.
-- **Any client** can filter which of the 47 tools it exposes to the model.
+- **Any client** can filter which of the 48 tools it exposes to the model.
   Nothing here requires codecalc to change.
 
 A server-side facade remains under consideration for clients with no such
@@ -504,7 +520,7 @@ PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py         # every tool over MC
 PYTHONPATH=. .venv/bin/python tests/test_executor_sweep.py  # sandbox regressions
 ```
 
-23 test files and 10 gate scripts, **1222 assertions**. Nothing in the suite
+25 test files and 10 gate scripts, **1222 assertions**. Nothing in the suite
 needs the internet, so none of it is ever skipped for lack of a network.
 
 It **can** skip for lack of a *capability*, and that is correct rather than a

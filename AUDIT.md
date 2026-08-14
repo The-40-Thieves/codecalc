@@ -218,7 +218,7 @@ tests/test_smoke.py       → 31 passed, 0 failed (all languages via Rust execut
 tests/test_features.py    → ALL NEW-FEATURE TESTS PASS (sessions/files/artifacts/packages/verdicts/streaming/compact)
 tests/test_gap4.py        → ITEMS 1-4 ALL PASS (resources, inline images, multi-file, units)
 tests/test_calc_port.py   → ALL 19 PORTED FEATURES PASS (calc skill parity: exact, bitop, float, radix, ...)
-tests/test_mcp_all.py     → 47/47 tools round-trip over stdio + session file resources
+tests/test_mcp_all.py     → 48/48 tools round-trip over stdio + session file resources
 tests/test_runtimes_mcp.py → runtimes_status: dry-run safe, summary agrees with
                              the per-language detail (the counts are whatever
                              that machine has installed)
@@ -389,11 +389,11 @@ network-blocking shim. Each has a security-relevant design decision:
 
 ## Residual risks (accepted, documented)
 
-0. **Removed 2026-08-08: ALL outbound requests.** The package contains no LLM
-   client and no documentation fetch. Nothing in `codecalc/` imports anything
-   that can open a socket, which `tests/test_offline.py` asserts per module.
-   No user code, and no telemetry, leaves the machine. Anything below that
-   assumed a configured gateway no longer applies.
+0. **Core outbound boundary.** The package contains no LLM client,
+   documentation fetch, or telemetry. Top-level core modules import no HTTP or
+   socket client, which `tests/test_offline.py` asserts per module. The opt-in
+   Piston execution provider is isolated under `codecalc/provider_adapters/`
+   and reaches only the operator-configured endpoint.
 
    Note the boundary this does NOT move: code the sandbox runs on a caller's
    behalf still reaches the network unless `--no-net` is passed. The package

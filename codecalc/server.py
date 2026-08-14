@@ -20,8 +20,6 @@ from __future__ import annotations
 import base64
 import functools
 import inspect
-import json
-from pathlib import Path
 
 from mcp.server import CacheHint, MCPServer
 from mcp.server.mcpserver import Context
@@ -34,18 +32,22 @@ from . import (
     doctor,
     errors,
     exact,
+    execution_service,
     executor,
     logic,
     optimization,
     packages,
-    registry,
+    providers,
     runtimes,
-    sessions,
     tools,
     translation,
     units,
 )
 from .mcp_middleware import timeout_middleware
+
+_provider_registry = providers.configured_registry()
+_execution_service = execution_service.ExecutionService(_provider_registry)
+_session_service = execution_service.SessionService()
 
 mcp = MCPServer(
     name="codecalc",
@@ -97,7 +99,7 @@ mcp = MCPServer(
 def _coded(fn):
     """Attach an error code to any failing dict a tool returns.
 
-    Wraps at REGISTRATION so all 47 tools are covered by one change instead of
+    Wraps at REGISTRATION so all 48 tools are covered by one change instead of
     121 edits at the return sites. The first attempt put this on
     `guarded_call`, which measured 0 of 8 on the most reachable failures
     because those paths return rather than raise — see errors.py.
@@ -117,7 +119,7 @@ def _coded(fn):
     # executor.execute at all. All three returned unversioned results while the
     # documentation said every result carries a version.
     #
-    # This wrapper is applied to all 47 tools, so stamping here makes that claim
+    # This wrapper is applied to all 48 tools, so stamping here makes that claim
     # true by construction. `stamp` uses setdefault, so the executor's own stamp
     # is not overwritten and the two cannot disagree.
     if inspect.iscoroutinefunction(fn):
@@ -132,9 +134,9 @@ def _coded(fn):
     return _sync
 
 
-# Rebind `mcp.tool` rather than renaming 47 decorator lines. The rename was the
+# Rebind `mcp.tool` rather than renaming 48 decorator lines. The rename was the
 # first attempt and broke four suites plus the CI round-trip check, all of which
-# count declarations with `grep -c '^@mcp\.tool'` and read 0 against 47 served.
+# count declarations with `grep -c '^@mcp\.tool'` and read 0 against 48 served.
 # That identity is load-bearing here, so the change that preserves it is the
 # right one: every `@mcp.tool()` below is unchanged and every counter still
 # works, while the wrapper is applied underneath.
@@ -156,10 +158,18 @@ def list_languages() -> list[dict]:
     return executor.catalog()
 
 
+@mcp.tool()
+def list_execution_providers() -> list[dict]:
+    """List execution providers and their machine-readable capabilities."""
+    return _provider_registry.descriptors()
+
+
 #: What a compact result ALWAYS carries.
 _COMPACT_ALWAYS = ("ok", "verdict", "stdout", "exit_code")
 
-#: Disclosure fields, carried at EVERY verbosity whenever they say something.
+#: Disclosure and provenance fields, carried at EVERY verbosity whenever they
+#: say something. Provider identity is part of the execution receipt, not a
+#: diagnostic detail, so compact mode must retain it too.
 #:
 #: These are the reason compact mode was a defect rather than a trade-off (#117).
 #: The old implementation returned exactly _COMPACT_ALWAYS, so
@@ -172,7 +182,7 @@ _COMPACT_ALWAYS = ("ok", "verdict", "stdout", "exit_code")
 #: `total_ms` are diagnostics a caller can live without, and `unenforced` is
 #: not. An empty `unenforced` is omitted because it costs tokens to say
 #: nothing; a non-empty one is the entire point of the field.
-_COMPACT_DISCLOSURE = ("unenforced", "output_error")
+_COMPACT_DISCLOSURE = ("unenforced", "output_error", "provider")
 
 
 def compact_result(result: dict) -> dict:
@@ -224,6 +234,7 @@ def execute_code(
     max_cpu: int = 0,
     no_net: bool = False,
     compact: bool = False,
+    provider: str | None = None,
 ) -> dict:
     """Execute `code` in `language` in a sandbox.
 
@@ -240,21 +251,26 @@ def execute_code(
       not applied, a compact result still says so.
     """
     timeout = min(timeout, 120)
+    spec = providers.ComputationSpec(
+        language=language,
+        code=code,
+        stdin=stdin,
+        timeout=timeout,
+        max_memory_mb=max_memory_mb,
+        max_output_kb=max_output_kb,
+        max_cpu=max_cpu,
+        no_net=no_net,
+    )
     if session_id:
         # Every ceiling documented above is forwarded. They used to stop here:
         # the session branch passed only stdin and timeout, so `no_net=True`
         # silently reached the network and `max_memory_mb` was ignored. What a
         # stateful worker genuinely cannot apply now comes back in `unenforced`.
-        result = sessions.execute(session_id, code, language=language,
-                                  stdin=stdin, timeout=timeout,
-                                  max_memory_mb=max_memory_mb,
-                                  max_output_kb=max_output_kb,
-                                  max_cpu=max_cpu, no_net=no_net)
+        result = _execution_service.execute_session(
+            _session_service, session_id, spec, provider_id=provider
+        )
     else:
-        result = executor.execute(language, code, stdin=stdin, timeout=timeout,
-                                  max_memory_mb=max_memory_mb,
-                                  max_output_kb=max_output_kb,
-                                  max_cpu=max_cpu, no_net=no_net)
+        result = _execution_service.execute(spec, provider_id=provider)
     if compact:
         return compact_result(result)
     return result
@@ -265,39 +281,42 @@ def session_start(language: str = "python3") -> dict:
     """Start a persistent session. python3/node get a stateful REPL worker
     (variables/imports persist across execute_code calls); other languages get
     a persistent workspace directory. Returns session_id."""
-    return sessions.start(language)
+    return _session_service.start(language)
 
 
 @mcp.tool()
 def session_stop(session_id: str) -> dict:
     """Stop a session: kill its REPL worker (if any) and delete its workspace."""
-    return sessions.stop(session_id)
+    return _session_service.stop(session_id)
 
 
 @mcp.tool()
 def session_list() -> dict:
     """List active sessions and their languages/state."""
-    return sessions.list_sessions()
+    return _session_service.list_sessions()
 
 
 @mcp.tool()
-def session_files(session_id: str, path: str = "") -> dict:
-    """List files in a session workspace (path is relative, '' = root)."""
-    return sessions.list_files(session_id, path)
+def session_files(session_id: str, path: str = "", page_size: int | None = None,
+                  cursor: str | None = None) -> dict:
+    """List workspace files, optionally using a bounded cursor page."""
+    return _session_service.list_files(
+        session_id, path, page_size=page_size, cursor=cursor
+    )
 
 
 @mcp.tool()
 def session_write_file(session_id: str, path: str, content: str) -> dict:
     """Write a file into a session workspace (relative path, no escapes).
     Use this to seed input data for executed code."""
-    return sessions.write_file(session_id, path, content)
+    return _session_service.write_file(session_id, path, content)
 
 
 @mcp.tool()
 def session_artifacts(session_id: str) -> dict:
     """List files created by executed code in a session (excluding runner
     internals like main.py/run.out)."""
-    return sessions.artifacts(session_id)
+    return _session_service.artifacts(session_id)
 
 
 @mcp.tool()
@@ -332,6 +351,7 @@ async def execute_code_stream(
     max_output_kb: int = 0,
     max_cpu: int = 0,
     no_net: bool = False,
+    provider: str | None = None,
     ctx: Context = None,
 ) -> dict:
     """Execute code and STREAM progress + partial output as it runs.
@@ -352,116 +372,26 @@ async def execute_code_stream(
     enough to want progress. That divergence is stated rather than left for a
     reader to discover by comparing two min() calls.
     """
-    import asyncio
-    import tempfile
-
     timeout = min(timeout, 300)
+    spec = providers.ComputationSpec(
+        language=language, code=code, stdin=stdin, timeout=timeout,
+        max_memory_mb=max_memory_mb, max_output_kb=max_output_kb,
+        max_cpu=max_cpu, no_net=no_net,
+    )
 
-    # Every other tool falls back to the pure-Python executor when the Rust
-    # binary is absent — a configuration the README explicitly supports. This
-    # one used executor._rust directly, so argv[0] was None and it raised
-    # TypeError. Streaming needs the binary (it tails run.out in a --workdir),
-    # so fall back to a single non-streaming run rather than failing.
-    if executor._rust is None:
-        result = executor.execute(language, code, stdin=stdin, timeout=timeout,
-                                  max_memory_mb=max_memory_mb,
-                                  max_output_kb=max_output_kb,
-                                  max_cpu=max_cpu, no_net=no_net)
-        result["streamed"] = False
-        result["note"] = ("no native executor binary; ran without streaming. "
-                          "Build it (cargo build --release) for progress updates.")
-        return result
-
-    workdir = Path(tempfile.mkdtemp(prefix="codecalc-stream-"))
-    # Recorded BEFORE the executed code gets this directory as its cwd (via
-    # --workdir below), exactly like executor/src/main.rs's created_identity.
-    # This dir is passed to the Rust executor as a caller-supplied --workdir,
-    # so the Rust side never deletes it — that duty is entirely ours here, and
-    # the unconditional shutil.rmtree() this used to be is exactly the gap
-    # #38 reported: identity recorded at creation, re-checked immediately
-    # before removal, so a rename-swap by the executed program is refused
-    # rather than deleting whatever now sits at this path.
-    created_identity = executor._dir_identity(workdir)
-    try:
-        # run the Rust executor directly with --workdir so run.out grows live
-        args = [executor._rust, "--lang", language, "--timeout", str(timeout),
-                "--workdir", str(workdir)]
-        # Same flags, same conditions, as codecalc/executor.py builds for the
-        # non-streaming path. The executor has always accepted --max-memory-mb
-        # and --max-cpu (main.rs); this tool simply never passed them.
-        if max_memory_mb > 0:
-            args += ["--max-memory-mb", str(max_memory_mb)]
-        if max_output_kb > 0:
-            args += ["--max-output-kb", str(max_output_kb)]
-        if max_cpu > 0:
-            args += ["--max-cpu", str(max_cpu)]
-        if no_net:
-            args += ["--no-net"]
-        sf = None
-        if stdin:
-            with tempfile.NamedTemporaryFile(mode="w", prefix="cc-stdin-",
-                                             suffix=".txt", delete=False) as _sf:
-                _sf.write(stdin)
-                sf = _sf.name
-            args += ["--stdin-file", sf]
-
-        proc = await asyncio.create_subprocess_exec(
-            *args, stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-        proc.stdin.write(code.encode())
-        await proc.stdin.drain()
-        proc.stdin.close()
-
-        # tail run.out while the child runs; report progress + partial output
-        out_path = workdir / "run.out"
-        last_len = 0
-        partial = ""
-        while proc.returncode is None:
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=0.25)
-            except TimeoutError:
-                pass
-            if out_path.exists():
-                data = out_path.read_bytes()
-                if len(data) > last_len:
-                    chunk = data[last_len:].decode(errors="replace")
-                    partial += chunk
-                    last_len = len(data)
-                    if ctx is not None:
-                        try:
-                            await ctx.report_progress(
-                                progress=float(last_len), total=None,
-                                message=f"stdout so far: {last_len} bytes",
-                            )
-                        except Exception:
-                            pass
-
-        stdout_b, stderr_b = await proc.communicate()
-        if sf:
-            Path(sf).unlink(missing_ok=True)
+    async def report_progress(value: int, message: str) -> None:
+        if ctx is None:
+            return
         try:
-            result = json.loads(stdout_b.decode(errors="replace"))
-            if isinstance(result, dict) and "ok" in result:
-                result["streamed_partial"] = partial
-                # The fallback path sets streamed=False; this one set nothing at
-                # all, so `if not result["streamed"]` was true on the path that
-                # DID stream. Both branches now answer the same question.
-                result["streamed"] = True
-                # The binary's JSON carries no `backend` key — executor.execute
-                # adds it, and this path builds its own subprocess call instead
-                # of going through that function, so it was the one execution
-                # surface returning a result a caller could not attribute to a
-                # backend. Same reasoning as executor.execute's own comment:
-                # absent is indistinguishable from "an older build".
-                result["backend"] = "rust"
-                return result
-            return {"ok": False,
-                    "error": f"executor invalid output: {stderr_b[:200]!r}"}
-        except Exception as exc:
-            return {"ok": False, "error": f"stream failed: {exc}"}
-    finally:
-        executor._rmtree_checked(workdir, created_identity)
+            await ctx.report_progress(
+                progress=float(value), total=None, message=message
+            )
+        except Exception:
+            pass
+
+    return await _execution_service.execute_stream(
+        spec, provider_id=provider, on_progress=report_progress
+    )
 
 
 @mcp.tool()
@@ -563,10 +493,13 @@ def update_runtimes(languages: str = "", apply: bool = False, timeout: int = 600
               mime_type="application/octet-stream")
 def session_file_resource(session_id: str, path: str):
     """MCP resource: session workspace file. str for text, bytes for binary."""
-    result = sessions.resource_read(session_id, path)
-    if result is None:
+    result = _session_service.read_file(
+        session_id, path, max_bytes=4 * 1024 * 1024
+    )
+    if not result.get("ok"):
         raise ValueError(f"no such file: {path}")
-    data, mime = result
+    data = result["content_bytes"]
+    mime = result["mime_type"]
     if mime.startswith("image/"):
         return data  # bytes -> BlobResourceContents, rendered inline by clients
     try:
@@ -584,20 +517,13 @@ def session_read_file(session_id: str, path: str, max_bytes: int = 65536,
     file is returned as an inline image the model can see. Use session_files
     to discover paths; session_artifacts lists what executed code produced.
     """
-    d = sessions._session_dir(session_id)
-    if not d.is_dir():
-        return {"ok": False, "error": f"unknown session '{session_id}'"}
-    target = sessions._jail(d, path)
-    if not target.is_file():
-        return {"ok": False, "error": f"no such file: {path}"}
-
-    import mimetypes
-    mime, _ = mimetypes.guess_type(str(target))
-    is_image = bool(mime and mime.startswith("image/"))
-
-    if is_image or as_image:
-        if target.stat().st_size > 4 * 1024 * 1024:
-            return {"ok": False, "error": "image too large (>4MiB)"}
+    result = _session_service.read_file(
+        session_id, path, max_bytes=max_bytes, as_image=as_image
+    )
+    if not result.get("ok"):
+        return result
+    data = result.pop("content_bytes")
+    if result.pop("is_image"):
         # fastmcp's Image(path=...) helper has no counterpart in the official
         # SDK; ImageContent is the protocol type and wants base64 itself.
         # as_image=True on a non-image file is honoured deliberately: the caller
@@ -605,16 +531,12 @@ def session_read_file(session_id: str, path: str, max_bytes: int = 65536,
         # rather than refusing.
         return ImageContent(
             type="image",
-            data=base64.b64encode(target.read_bytes()).decode("ascii"),
-            mimeType=mime if is_image else "image/png",
+            data=base64.b64encode(data).decode("ascii"),
+            mimeType=(result.pop("mime_type")
+                      if result["mime_type"].startswith("image/") else "image/png"),
         )
-
-    data = target.read_bytes()
-    truncated = len(data) > max_bytes
-    return {"ok": True, "path": path, "size": len(data),
-            "content": data[:max_bytes].decode(errors="replace"),
-            "truncated": truncated,
-            "resource": f"codecalc://session/{session_id}/files/{path}"}
+    result.pop("mime_type")
+    return result
 
 
 @mcp.tool()
@@ -627,25 +549,9 @@ def session_run(session_id: str, entry_file: str, language: str | None = None,
     relative imports and data files resolve. Returns stdout/stderr/verdict
     plus the entry file's path.
     """
-    d = sessions._session_dir(session_id)
-    if not d.is_dir():
-        return {"ok": False, "error": f"unknown session '{session_id}'"}
-    target = sessions._jail(d, entry_file)
-    if not target.is_file():
-        return {"ok": False, "error": f"no such file: {entry_file}"}
-
-    # infer language from extension if not given
-    if language is None:
-        ext = target.suffix.lstrip(".")
-        by_ext = {v: k for k, v in registry.EXTENSIONS.items()}
-        language = by_ext.get(ext, "python3")
-
-    code = target.read_text(errors="replace")
-    result = executor.execute(language, code, stdin=stdin, timeout=timeout,
-                              workdir=str(d))
-    result["entry_file"] = entry_file
-    result["language"] = language
-    return result
+    return _session_service.run_file(
+        session_id, entry_file, language=language, stdin=stdin, timeout=timeout
+    )
 
 
 @mcp.tool()
@@ -1069,6 +975,22 @@ def main() -> None:
         # not exist, because a script wraps it and parses prose forever.
         rest = sys.argv[2:]
         raise SystemExit(_doctor(as_json="--json" in rest, deep="--deep" in rest))
+    if len(sys.argv) > 1 and sys.argv[1] == "serve-http":
+        rest = sys.argv[2:]
+        host = (rest[rest.index("--host") + 1]
+                if "--host" in rest and rest.index("--host") + 1 < len(rest)
+                else "127.0.0.1")
+        port_text = (rest[rest.index("--port") + 1]
+                     if "--port" in rest and rest.index("--port") + 1 < len(rest)
+                     else "8000")
+        mcp.run(
+            transport="streamable-http",
+            host=host,
+            port=int(port_text),
+            json_response=True,
+            stateless_http=True,
+        )
+        return
     mcp.run(transport="stdio")
 
 

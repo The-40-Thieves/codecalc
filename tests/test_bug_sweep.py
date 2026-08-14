@@ -499,9 +499,9 @@ check("the two tools agree on the ceiling parameters",
       f"-> sync={sorted(_CEILINGS & _sync)} stream={sorted(_CEILINGS & _strm)}")
 
 # Declared is not forwarded: the argv builder must actually pass them.
-_src = _inspect.getsource(_server.execute_code_stream)
+_src = _inspect.getsource(executor.execute_stream)
 for _flag in ("--max-memory-mb", "--max-cpu", "--max-output-kb"):
-    check(f"streaming argv passes {_flag}", _flag in _src)
+    check(f"provider-backed streaming argv passes {_flag}", _flag in _src)
 
 # ...and forwarded is not enforced. One real bounded run, kept small so it
 # trips in about a second.

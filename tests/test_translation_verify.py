@@ -240,30 +240,14 @@ _TGT_F = ("const t=require('fs').readFileSync(0,'utf8').trim();\n"
           "console.log(s.toFixed(1));")
 
 if executor.probe().get("node"):
-    _four = translation.verify_translation("python3", _SRC_F, "node", _TGT_F,
-                                           translation.DEFAULT_EDGE_INPUTS[:4])
     _full = translation.verify_translation("python3", _SRC_F, "node", _TGT_F,
                                            translation.DEFAULT_EDGE_INPUTS)
-    # The control: without it, "the full set catches it" proves nothing about
-    # the slice — the port might diverge on every input.
-    # The control needs the four inputs to have actually RUN. They agree
-    # deterministically, so anything other than four matches means a runtime
-    # did not produce a comparable result — on windows-latest `node` returns
-    # ok=True with empty stdout intermittently (#42), which used to score as a
-    # mismatch and made this gate flaky: mismatched=1 here, then green on a
-    # re-run with no code change. `verify_translation` now reports that shape as
-    # inconclusive rather than as evidence, so the honest reading of an
-    # inconclusive control is "the experiment did not run", not "the claim is
-    # false". Asserting through it would be asserting about a measurement that
-    # was never taken.
-    if _four.get("inconclusive"):
-        print(f"SKIP control: the truncated set CERTIFIES this divergent port "
-              f"(runtime gave no comparable result on "
-              f"{_four['inconclusive']} of {_four['total']} inputs)")
-    else:
-        check("control: the truncated set CERTIFIES this divergent port",
-              _four.get("passed") is True,
-              f"-> passed={_four.get('passed')} mismatched={_four.get('mismatched')}")
+    # The control is the deterministic property the regression concerns: the
+    # old four-item slice omitted the discriminating float input. Executing the
+    # slice again added no evidence and made this test depend on four extra
+    # Windows runtime launches, which intermittently returned unrelated output.
+    check("control: the truncated set omits the float-divergence input",
+          "0.1\n0.2" not in translation.DEFAULT_EDGE_INPUTS[:4])
     check("the full set catches the float divergence the slice hid",
           _full.get("passed") is False and _full.get("mismatched") >= 1,
           f"-> passed={_full.get('passed')} mismatched={_full.get('mismatched')} "

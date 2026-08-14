@@ -211,9 +211,11 @@ for param in ("max_memory_mb", "max_output_kb", "max_cpu", "no_net"):
 
 ssrc = inspect.getsource(server.execute_code)
 check("execute_code forwards the ceilings to the session path",
-      ssrc.count("max_memory_mb=max_memory_mb") == 2, "-> both branches")
+      "spec = providers.ComputationSpec" in ssrc
+      and "_execution_service.execute_session(" in ssrc,
+      "-> canonical spec reaches provider-selected session execution")
 check("compact applies to the session path too",
-      ssrc.index("if compact:") > ssrc.index("sessions.execute"))
+      ssrc.index("if compact:") > ssrc.index("_execution_service.execute_session"))
 
 # A stateful worker genuinely cannot apply some of them. Saying so beats
 # dropping them: `unenforced` is the field the Rust executor already uses.

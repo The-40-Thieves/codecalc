@@ -1,5 +1,5 @@
-"""The codecalc PACKAGE opens no sockets of its own. This asserts that,
-structurally, and is careful about what it does not assert.
+"""The CodeCalc CORE opens no sockets of its own. This asserts that,
+structurally, while allowing explicit provider wire adapters.
 
 The package used to contain two outbound paths: an LLM client that shipped user
 code to a configured gateway, and a context7 documentation fetch. Both are gone.
@@ -11,10 +11,9 @@ context7 went for the same reason from the other direction: the calling model
 already has documentation access of its own, so the tool duplicated a capability
 its only user already had, in the one module that could still leak.
 
-What remains is a calculator that executes code, measures it, and does exact
-maths, with no outbound client of its own. That is a stronger property than "one
-outbound request, and it's only documentation", and this file is what keeps it
-true.
+The opt-in Piston provider deliberately needs HTTP. Its wire code is isolated
+under ``codecalc/provider_adapters`` and is activated only by explicit provider
+configuration; top-level contract and service modules remain offline-capable.
 
 WHAT THIS FILE DOES NOT PROVE, stated because the banner used to overreach.
 It reads the source of one Python package. It cannot say anything about what a
@@ -35,8 +34,8 @@ for so long (THE-821):
     ~15s cold. Measured: deleting one grammar and asking for it again brings the
     file back byte-for-byte.
 
-The assertions below remain TRUE and unchanged: nothing under codecalc/ imports
-a socket-capable module. `parsing.py` imports tree_sitter_language_pack, which
+The assertions below cover top-level core modules: none imports a socket-capable
+module. `parsing.py` imports tree_sitter_language_pack, which
 is not socket/urllib/http, so a structural read of THIS package cannot see it.
 That is the gap — the disclaimer above scoped itself to child processes, and an
 in-process fetch inside a DEPENDENCY falls between "our imports" and "what a
@@ -46,11 +45,9 @@ The lesson generalises past this one package: "no outbound client in our source"
 is a claim about our source, not about our process. Any dependency may fetch at
 runtime, and no amount of reading codecalc/ will reveal it.
 
-So "codecalc makes no network calls", the claim this banner used to make, is
-false at the level a user cares about. "The package contains no outbound
-client" is true, is what is actually asserted below, and is what the banner now
-says. An operator who needs the stronger property has to enforce it at the
-process or container boundary, which is outside anything this file can check.
+So "codecalc makes no network calls" remains false at the level a user cares
+about. The enforced claim is narrower: core modules contain no outbound client,
+and network providers are isolated, opt-in adapters.
 
 These are STRUCTURAL assertions, deliberately. A test that watched for traffic
 would only prove nothing happened to fire during the test; reading the source
@@ -83,7 +80,7 @@ MODULES = sorted(PKG.glob("*.py"))
 SOURCES = {p.name: p.read_text(encoding="utf-8") for p in MODULES}
 check("the package has modules to scan", len(MODULES) > 10, f"-> {len(MODULES)}")
 
-# ═══ nothing in the package can open a socket ══════════════════════════════
+# ═══ no top-level core module can open a socket ════════════════════════════
 #: Every stdlib route to the network. `socket` is included even though the
 #: sandbox's own no-net shim talks about it — the shim is C, and no Python
 #: module here should be constructing sockets either.
@@ -98,7 +95,7 @@ for name, src in SOURCES.items():
     imports = re.findall(r"^\s*(?:import|from)\s+([\w.]+)", src, re.M)
     offending = sorted({i for i in imports if any(
         i == n or i.startswith(n + ".") for n in NETWORK_IMPORTS)})
-    check(f"{name} imports nothing that can reach the network",
+    check(f"core module {name} imports nothing that can reach the network",
           not offending, f"-> {offending}")
 
 # ═══ the two removed modules stay removed ══════════════════════════════════
@@ -159,5 +156,5 @@ check("  ...and still blocks only the network families",
       "AF_INET" in shim.read_text(encoding="utf-8"))
 
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
-      "\n=== THE codecalc PACKAGE CONTAINS NO OUTBOUND CLIENT ===")
+      "\n=== THE codecalc CORE CONTAINS NO OUTBOUND CLIENT ===")
 sys.exit(1 if FAILS else 0)
