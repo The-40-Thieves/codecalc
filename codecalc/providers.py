@@ -343,9 +343,11 @@ class PistonExecutionProvider:
             "run_timeout": timeout_ms,
             "compile_cpu_time": spec.max_cpu * 1000,
             "run_cpu_time": spec.max_cpu * 1000,
-            "compile_memory_limit": spec.max_memory_mb * 1024 * 1024,
-            "run_memory_limit": spec.max_memory_mb * 1024 * 1024,
         }
+        if spec.max_memory_mb > 0:
+            memory_limit = spec.max_memory_mb * 1024 * 1024
+            payload["compile_memory_limit"] = memory_limit
+            payload["run_memory_limit"] = memory_limit
         try:
             response = self._transport(
                 "POST", "/api/v2/execute", dict(self._headers), payload,
@@ -359,9 +361,13 @@ class PistonExecutionProvider:
             )
             return contract.stamp(_redact_secrets(failure, self._secrets))
         data = response if isinstance(response, dict) else {}
-        run = data.get("run") if isinstance(data.get("run"), dict) else {}
-        stdout = str(run.get("stdout") or "")
-        stderr = str(run.get("stderr") or "")
+        compile_stage = (data.get("compile")
+                         if isinstance(data.get("compile"), dict) else {})
+        run_stage = data.get("run") if isinstance(data.get("run"), dict) else {}
+        phase = "run" if run_stage else "compile"
+        stage = run_stage or compile_stage
+        stdout = str(stage.get("stdout") or "")
+        stderr = str(stage.get("stderr") or "")
         stdout_bytes = len(stdout.encode())
         stderr_bytes = len(stderr.encode())
         client_output_overflow = False
@@ -373,13 +379,15 @@ class PistonExecutionProvider:
             remaining = max(0, output_cap - len(stdout.encode()))
             stderr = _truncate_utf8(stderr, remaining)
             unenforced.append("max_output_kb_enforced_after_provider_response")
-        exit_code = run.get("code")
-        duration_ms = int(run.get("wall_time") or 0)
-        cpu_ms = int(run.get("cpu_time") or 0)
-        memory_bytes = run.get("memory")
+        exit_code = stage.get("code")
+        compile_ms = int(compile_stage.get("wall_time") or 0)
+        run_ms = int(run_stage.get("wall_time") or 0)
+        duration_ms = run_ms if run_stage else compile_ms
+        cpu_ms = int(stage.get("cpu_time") or 0)
+        memory_bytes = stage.get("memory")
         peak_memory_kb = (int(memory_bytes) // 1024
                           if isinstance(memory_bytes, int) else None)
-        status = run.get("status")
+        status = stage.get("status")
         timed_out = status == "TO"
         output_truncated = status in {"OL", "EL"} or client_output_overflow
         if timed_out:
@@ -392,7 +400,7 @@ class PistonExecutionProvider:
         result = {
             "ok": ok,
             "language": spec.language,
-            "phase": "run",
+            "phase": phase,
             "backend": "python",
             "platform": "remote",
             "stdout": stdout,
@@ -403,8 +411,8 @@ class PistonExecutionProvider:
             "output_truncated": output_truncated,
             "output_error": None,
             "duration_ms": duration_ms,
-            "compile_ms": 0,
-            "total_ms": duration_ms,
+            "compile_ms": compile_ms,
+            "total_ms": compile_ms + run_ms,
             "cpu_ms": cpu_ms,
             "peak_memory_kb": peak_memory_kb,
             "unenforced": unenforced,

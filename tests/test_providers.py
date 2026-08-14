@@ -393,6 +393,52 @@ def test_piston_execution_maps_remote_statuses_to_common_verdicts() -> None:
               result["output_truncated"] is truncated)
 
 
+def test_piston_omits_unrequested_memory_limits() -> None:
+    payloads: list[dict] = []
+
+    def transport(method: str, path: str, headers: dict[str, str],
+                  payload: dict | None, timeout: int) -> object:
+        del method, path, headers, timeout
+        payloads.append(dict(payload or {}))
+        return {"run": {"stdout": "", "stderr": "", "code": 0}}
+
+    providers.PistonExecutionProvider(
+        base_url="http://piston.test", transport=transport
+    ).execute(providers.ComputationSpec(language="python3", code="pass"))
+
+    check("Piston omits an unset compile memory limit",
+          "compile_memory_limit" not in payloads[0])
+    check("Piston omits an unset run memory limit",
+          "run_memory_limit" not in payloads[0])
+
+
+def test_piston_preserves_compile_stage_failures() -> None:
+    def transport(method: str, path: str, headers: dict[str, str],
+                  payload: dict | None, timeout: int) -> object:
+        del method, path, headers, payload, timeout
+        return {
+            "compile": {
+                "stdout": "",
+                "stderr": "syntax error\n",
+                "code": 1,
+                "cpu_time": 4,
+                "wall_time": 9,
+                "memory": 4096,
+            }
+        }
+
+    result = providers.PistonExecutionProvider(
+        base_url="http://piston.test", transport=transport
+    ).execute(providers.ComputationSpec(language="c", code="bad source"))
+
+    check("Piston compile failures retain the compile phase",
+          result["phase"] == "compile")
+    check("Piston compile failures retain diagnostics and exit code",
+          result["stderr"] == "syntax error\n" and result["exit_code"] == 1)
+    check("Piston compile failures retain compile timing",
+          result["compile_ms"] == 9 and result["duration_ms"] == 9)
+
+
 def test_piston_provider_rejects_unavailable_capabilities_before_transport() -> None:
     calls = 0
 
@@ -690,6 +736,8 @@ if __name__ == "__main__":
     test_piston_credentials_are_scoped_to_transport_headers()
     test_piston_execution_normalizes_the_v2_result_contract()
     test_piston_execution_maps_remote_statuses_to_common_verdicts()
+    test_piston_omits_unrequested_memory_limits()
+    test_piston_preserves_compile_stage_failures()
     test_piston_provider_rejects_unavailable_capabilities_before_transport()
     test_piston_http_transport_serializes_json_without_exposing_credentials()
     test_piston_http_transport_rejects_non_http_base_urls()

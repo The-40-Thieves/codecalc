@@ -59,7 +59,50 @@ class ExecutionService:
                 available_providers=list(exc.available),
             ))
 
-        result = dict(provider.execute(spec))
+        try:
+            result = dict(provider.execute(spec))
+        except UnsupportedCapability as exc:
+            return contract.stamp(errors.error_result(
+                errors.VALIDATION,
+                str(exc),
+                provider_error=exc.code,
+                requested_provider=exc.provider_id,
+                capability=exc.capability,
+            ))
+        descriptor = provider.describe()
+        result["provider"] = {
+            "interface_version": descriptor["interface_version"],
+            "provider_id": descriptor["provider_id"],
+            "provider_version": descriptor["provider_version"],
+            "host_class": descriptor["host_class"],
+            "limits": _limit_receipt(spec, result),
+        }
+        return contract.stamp(result)
+
+    def execute_session(self, session_service: SessionService, session_id: str,
+                        spec: ComputationSpec, *,
+                        provider_id: str | None = None) -> dict:
+        """Execute a CodeCalc workspace session without changing providers."""
+        try:
+            provider = self.registry.select(provider_id, spec=spec)
+        except UnknownProvider as exc:
+            return contract.stamp(errors.error_result(
+                errors.VALIDATION,
+                str(exc),
+                provider_error=exc.code,
+                requested_provider=exc.provider_id,
+                available_providers=list(exc.available),
+            ))
+        if provider.provider_id != "local":
+            exc = UnsupportedCapability(provider.provider_id, "sessions")
+            return contract.stamp(errors.error_result(
+                errors.VALIDATION,
+                str(exc),
+                provider_error=exc.code,
+                requested_provider=exc.provider_id,
+                capability=exc.capability,
+            ))
+        result = dict(session_service.execute(session_id, spec))
         descriptor = provider.describe()
         result["provider"] = {
             "interface_version": descriptor["interface_version"],

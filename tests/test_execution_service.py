@@ -216,6 +216,25 @@ def test_service_rejects_unsupported_streaming_without_fallback() -> None:
           and result["capability"] == "stream")
 
 
+def test_service_normalizes_unsupported_synchronous_capabilities() -> None:
+    registry = providers.ProviderRegistry(default_provider_id="piston")
+    registry.register(providers.PistonExecutionProvider(
+        base_url="http://piston.test", transport=lambda *_args: {}
+    ))
+    service = execution_service.ExecutionService(registry)
+
+    result = service.execute(providers.ComputationSpec(
+        language="python3", code="pass", no_net=True
+    ))
+
+    check("unsupported synchronous capability is a normalized rejection",
+          result["ok"] is False and result["code"] == "validation")
+    check("synchronous rejection identifies provider and capability",
+          result["provider_error"] == "unsupported_capability"
+          and result["requested_provider"] == "piston"
+          and result["capability"] == "network_control")
+
+
 def test_service_receipt_reports_requested_and_provider_enforced_limits() -> None:
     class LimitProvider(providers.LocalExecutionProvider):
         provider_id = "limits"
@@ -525,6 +544,8 @@ def test_mcp_execute_adapter_routes_session_execution_through_the_service() -> N
 
     check("session execution adapter returns the shared service result",
           result.get("stdout") == "session service\n")
+    check("session execution receipt identifies the selected provider",
+          result.get("provider", {}).get("provider_id") == "local")
     check("session execution adapter delegates to the shared service", bool(calls))
     if not calls:
         return
@@ -542,6 +563,38 @@ def test_mcp_execute_adapter_routes_session_execution_through_the_service() -> N
               max_cpu=2,
               no_net=True,
           ))
+
+
+def test_mcp_session_execution_rejects_a_nonlocal_provider() -> None:
+    calls: list[tuple] = []
+
+    class RecordingSessionService:
+        def execute(self, session_id: str, spec: providers.ComputationSpec) -> dict:
+            calls.append((session_id, spec))
+            return {"ok": True}
+
+    registry = providers.ProviderRegistry(default_provider_id="local")
+    registry.register(providers.LocalExecutionProvider())
+    registry.register(providers.PistonExecutionProvider(
+        base_url="http://piston.test", transport=lambda *_args: {}
+    ))
+    old_execution = server._execution_service
+    old_session = server._session_service
+    server._execution_service = execution_service.ExecutionService(registry)
+    server._session_service = RecordingSessionService()
+    try:
+        result = server.execute_code(
+            "python3", "pass", session_id="sid", provider="piston"
+        )
+    finally:
+        server._execution_service = old_execution
+        server._session_service = old_session
+
+    check("nonlocal session selection is rejected explicitly",
+          result["ok"] is False
+          and result["provider_error"] == "unsupported_capability"
+          and result["capability"] == "sessions")
+    check("nonlocal session selection never executes locally", calls == [])
 
 
 def test_mcp_stream_adapter_compiles_spec_and_delegates_progress() -> None:
@@ -619,6 +672,7 @@ if __name__ == "__main__":
     test_service_verifies_one_workload_independently_across_two_providers()
     test_service_routes_streaming_through_the_selected_provider()
     test_service_rejects_unsupported_streaming_without_fallback()
+    test_service_normalizes_unsupported_synchronous_capabilities()
     test_service_receipt_reports_requested_and_provider_enforced_limits()
     test_session_service_owns_protocol_neutral_lifecycle_and_artifacts()
     test_session_service_reads_bounded_files_and_runs_workspace_entries()
@@ -626,6 +680,7 @@ if __name__ == "__main__":
     test_mcp_session_adapters_delegate_to_the_shared_service()
     test_mcp_read_adapter_alone_converts_neutral_bytes_to_image_content()
     test_mcp_execute_adapter_routes_session_execution_through_the_service()
+    test_mcp_session_execution_rejects_a_nonlocal_provider()
     test_mcp_stream_adapter_compiles_spec_and_delegates_progress()
     test_main_runs_the_same_server_over_explicit_streamable_http()
     sys.exit(1 if FAILS else 0)

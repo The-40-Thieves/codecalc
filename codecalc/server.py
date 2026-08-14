@@ -266,7 +266,9 @@ def execute_code(
         # the session branch passed only stdin and timeout, so `no_net=True`
         # silently reached the network and `max_memory_mb` was ignored. What a
         # stateful worker genuinely cannot apply now comes back in `unenforced`.
-        result = _session_service.execute(session_id, spec)
+        result = _execution_service.execute_session(
+            _session_service, session_id, spec, provider_id=provider
+        )
     else:
         result = _execution_service.execute(spec, provider_id=provider)
     if compact:
