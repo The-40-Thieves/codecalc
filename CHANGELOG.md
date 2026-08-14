@@ -168,25 +168,25 @@ the thing is.
   reports whether the cache is warm, and `scripts/prefetch_grammars.py` warms it
   for an offline install.
 
+### Fixed
+
+- **Windows process containment is creation-time and terminal by default.**
+  `PROC_THREAD_ATTRIBUTE_JOB_LIST` makes CodeCalc's job the initial runtime's
+  immediate job; `JOB_OBJECT_UILIMIT_EXITWINDOWS` prevents a launcher from
+  hiding the payload behind a weaker nested job; and
+  `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` restricts inherited handles to the three
+  standard streams. Verified with a direct Python runtime on Windows 11 Pro:
+  23 children against a total process limit of 24, then WinError 1816.
+  `CODECALC_WIN_JOB_AT_CREATION=0` keeps the old post-creation route as an
+  explicitly unverified compatibility escape hatch.
+
 ### Known limitations
 
-- **Windows: an opt-in path that supplies the job at process CREATION.**
-  `CODECALC_WIN_JOB_AT_CREATION=1` builds the child with
-  `PROC_THREAD_ATTRIBUTE_JOB_LIST` via `STARTUPINFOEX`, so codecalc's job is the
-  child's **immediate** job rather than merely somewhere in its chain — which is
-  the only arrangement where its `ActiveProcessLimit` is the one consulted.
-  Off by default: it cannot be exercised on the machine it was written on, and
-  it required hand-written MSVC argv quoting, the same class of bug as the
-  `bash` failure above. The quoting function is compiled and unit-tested on
-  every platform rather than only where it runs. A run that takes this path
-  says so with `process_limit_job_assigned_at_creation_on_windows`, and a
-  failure to create is reported rather than silently downgraded to the weaker
-  path.
-
-- **On Windows the process ceiling is now reported UNVERIFIED on every run.**
+- **On Windows the legacy process path is reported UNVERIFIED.**
   `process_limit_enforcement_unverified_on_windows` is emitted whenever the
-  child is assigned to the job after creation — which is every Windows run
-  today. It is not a detected failure; it is an admission. Measured with the
+  child is assigned to the job after creation. This route is now selected only
+  with `CODECALC_WIN_JOB_AT_CREATION=0`. It is not a detected failure; it is an
+  admission. Measured with the
   executor instrumented: three processes in one spawn chain reported three job
   contexts — the launcher `0x3000`, **the executor itself an EMPTY job `0x0`**,
   the sandboxed child `0x3000`, its grandchildren no job at all. The ambient

@@ -16,9 +16,13 @@
 use std::io;
 use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
+use std::path::PathBuf;
 use std::process::{Child, Command};
 
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE, INVALID_HANDLE_VALUE,
+    WAIT_OBJECT_0,
+};
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
 };
@@ -26,18 +30,19 @@ use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
     JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     JOB_OBJECT_LIMIT_PROCESS_MEMORY, JOB_OBJECT_LIMIT_PROCESS_TIME,
-    JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+    JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK, JOB_OBJECT_UILIMIT_EXITWINDOWS,
+    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_BASIC_UI_RESTRICTIONS,
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicAccountingInformation,
-    JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
-    TerminateJobObject,
+    JobObjectBasicUIRestrictions, JobObjectExtendedLimitInformation, QueryInformationJobObject,
+    SetInformationJobObject, TerminateJobObject,
 };
 use windows_sys::Win32::System::Threading::{
     CREATE_BREAKAWAY_FROM_JOB, CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
     CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
     GetExitCodeProcess, InitializeProcThreadAttributeList, OpenThread,
-    PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES,
-    STARTUPINFOEXW, STARTUPINFOW, THREAD_SUSPEND_RESUME, UpdateProcThreadAttribute,
-    WaitForSingleObject,
+    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_INFORMATION,
+    ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW, THREAD_SUSPEND_RESUME,
+    UpdateProcThreadAttribute, WaitForSingleObject,
 };
 
 use super::{ResolvedLimits, Wait};
@@ -49,6 +54,62 @@ struct Job(HANDLE);
 impl Drop for Job {
     fn drop(&mut self) {
         unsafe { CloseHandle(self.0) };
+    }
+}
+
+/// Child-side copies of stdin/stdout/stderr for raw `CreateProcessW`.
+///
+/// Rust opens `File` handles as non-inheritable. `bInheritHandles=TRUE` only
+/// copies handles that already carry the inherit bit, so passing the originals
+/// in `STARTF_USESTDHANDLES` leaves the child with invalid standard handles.
+struct InheritableStdio([HANDLE; 3]);
+
+impl InheritableStdio {
+    fn duplicate(stdio: super::RawStdio) -> io::Result<Self> {
+        let process = unsafe { GetCurrentProcess() };
+        let sources = [
+            stdio.stdin as HANDLE,
+            stdio.stdout as HANDLE,
+            stdio.stderr as HANDLE,
+        ];
+        let mut handles = [std::ptr::null_mut(); 3];
+        for (index, source) in sources.into_iter().enumerate() {
+            if unsafe {
+                DuplicateHandle(
+                    process,
+                    source,
+                    process,
+                    &mut handles[index],
+                    0,
+                    1,
+                    DUPLICATE_SAME_ACCESS,
+                )
+            } == 0
+            {
+                let error = io::Error::last_os_error();
+                for handle in handles.into_iter().take(index) {
+                    unsafe { CloseHandle(handle) };
+                }
+                return Err(error);
+            }
+        }
+        Ok(Self(handles))
+    }
+}
+
+impl std::ops::Index<usize> for InheritableStdio {
+    type Output = HANDLE;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.0[index]
+    }
+}
+
+impl Drop for InheritableStdio {
+    fn drop(&mut self) {
+        for handle in self.0 {
+            unsafe { CloseHandle(handle) };
+        }
     }
 }
 
@@ -99,6 +160,25 @@ fn create_job(limits: &ResolvedLimits) -> io::Result<Job> {
             JobObjectExtendedLimitInformation,
             &info as *const _ as *const core::ffi::c_void,
             std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    // Windows only forms nested job hierarchies when neither job has UI
+    // restrictions. EXITWINDOWS is harmless for this non-interactive executor
+    // and makes our resource job terminal, so a launcher cannot hide the real
+    // runtime behind a weaker immediate job with no ActiveProcessLimit.
+    let ui = JOBOBJECT_BASIC_UI_RESTRICTIONS {
+        UIRestrictionsClass: JOB_OBJECT_UILIMIT_EXITWINDOWS,
+    };
+    let ok = unsafe {
+        SetInformationJobObject(
+            job.0,
+            JobObjectBasicUIRestrictions,
+            &ui as *const _ as *const core::ffi::c_void,
+            std::mem::size_of::<JOBOBJECT_BASIC_UI_RESTRICTIONS>() as u32,
         )
     };
     if ok == 0 {
@@ -256,6 +336,62 @@ fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// Resolve the program using the environment attached to `cmd`.
+///
+/// `CreateProcessW` performs executable lookup before applying the child's
+/// environment block, so a null `lpApplicationName` searches the executor's
+/// PATH rather than the deliberately configured sandbox PATH. Rust's normal
+/// `Command` path resolves this for us; the raw creation-time path must do it.
+fn resolve_command_program(cmd: &Command) -> io::Result<PathBuf> {
+    let requested = PathBuf::from(cmd.get_program());
+    if requested.is_absolute() || requested.components().count() > 1 {
+        return requested.is_file().then_some(requested).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "configured executable does not exist",
+            )
+        });
+    }
+
+    let command_env = |name: &str| {
+        cmd.get_envs().find_map(|(key, value)| {
+            key.to_string_lossy()
+                .eq_ignore_ascii_case(name)
+                .then(|| value.map(|v| v.to_os_string()))
+                .flatten()
+        })
+    };
+    let path = command_env("PATH").unwrap_or_default();
+    let pathext = command_env("PATHEXT")
+        .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into())
+        .to_string_lossy()
+        .into_owned();
+    let mut names = vec![requested.clone()];
+    if requested.extension().is_none() {
+        for extension in pathext.split(';').filter(|extension| !extension.is_empty()) {
+            let mut name = requested.clone().into_os_string();
+            name.push(extension);
+            names.push(PathBuf::from(name));
+        }
+    }
+
+    for directory in std::env::split_paths(&path) {
+        for name in &names {
+            let candidate = directory.join(name);
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!(
+            "{} was not found on the configured runtime PATH",
+            requested.display()
+        ),
+    ))
+}
+
 /// Create the child with `J` supplied at CREATION, so it is the IMMEDIATE job.
 ///
 /// THE-818. Post-creation `AssignProcessToJobObject` puts us SOMEWHERE in the
@@ -270,11 +406,10 @@ fn to_wide(s: &str) -> Vec<u16> {
 /// ceiling is the one consulted. Jobs are applied in the order supplied; we
 /// supply exactly one.
 ///
-/// OPT-IN, and deliberately so: this cannot be tested from the machine it was
-/// written on, and the argv quoting above is the same class of bug that made
-/// bash unusable on Windows for the project's whole life. Set
-/// `CODECALC_WIN_JOB_AT_CREATION=1` to measure it; the default path is
-/// unchanged until a Windows run says this one works.
+/// Enabled by default after a direct Python runtime bound at 23/400 against a
+/// limit of 24 on Windows 11 Pro. Set CODECALC_WIN_JOB_AT_CREATION=0 only as a
+/// compatibility escape hatch; that old topology remains explicitly
+/// unverified.
 #[allow(clippy::too_many_arguments)]
 fn spawn_with_job_at_creation(
     cmd: &Command,
@@ -282,8 +417,12 @@ fn spawn_with_job_at_creation(
     job: HANDLE,
     breakaway: bool,
 ) -> io::Result<(HANDLE, HANDLE)> {
+    let inheritable_stdio = InheritableStdio::duplicate(stdio)?;
+    let program = resolve_command_program(cmd)?;
+    let program_w = to_wide(&program.to_string_lossy());
+
     // Command line: program then args, each quoted for the MSVC parser.
-    let mut line = super::quote_arg(cmd.get_program());
+    let mut line = super::quote_arg(program.as_os_str());
     for a in cmd.get_args() {
         line.push(' ');
         line.push_str(&super::quote_arg(a));
@@ -307,13 +446,13 @@ fn spawn_with_job_at_creation(
 
     // Two-call pattern: ask the size, allocate, initialise.
     let mut size: usize = 0;
-    unsafe { InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &mut size) };
+    unsafe { InitializeProcThreadAttributeList(std::ptr::null_mut(), 2, 0, &mut size) };
     if size == 0 {
         return Err(io::Error::last_os_error());
     }
     let mut attr_buf = vec![0u8; size];
     let attr_list = attr_buf.as_mut_ptr() as *mut core::ffi::c_void;
-    if unsafe { InitializeProcThreadAttributeList(attr_list, 1, 0, &mut size) } == 0 {
+    if unsafe { InitializeProcThreadAttributeList(attr_list, 2, 0, &mut size) } == 0 {
         return Err(io::Error::last_os_error());
     }
 
@@ -336,12 +475,37 @@ fn spawn_with_job_at_creation(
         return Err(e);
     }
 
+    // bInheritHandles must be TRUE for STARTF_USESTDHANDLES. Restrict that
+    // inheritance to these child-side duplicates so files, sockets, tokens and
+    // the job handle itself cannot leak from the executor into submitted code.
+    let inherited_handles = [
+        inheritable_stdio[0],
+        inheritable_stdio[1],
+        inheritable_stdio[2],
+    ];
+    let ok = unsafe {
+        UpdateProcThreadAttribute(
+            attr_list,
+            0,
+            PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+            inherited_handles.as_ptr() as *const core::ffi::c_void,
+            std::mem::size_of_val(&inherited_handles),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+        )
+    };
+    if ok == 0 {
+        let e = io::Error::last_os_error();
+        unsafe { DeleteProcThreadAttributeList(attr_list) };
+        return Err(e);
+    }
+
     let mut si: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
     si.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
     si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-    si.StartupInfo.hStdInput = stdio.stdin as HANDLE;
-    si.StartupInfo.hStdOutput = stdio.stdout as HANDLE;
-    si.StartupInfo.hStdError = stdio.stderr as HANDLE;
+    si.StartupInfo.hStdInput = inheritable_stdio[0];
+    si.StartupInfo.hStdOutput = inheritable_stdio[1];
+    si.StartupInfo.hStdError = inheritable_stdio[2];
     si.lpAttributeList = attr_list;
 
     let mut flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT;
@@ -355,7 +519,7 @@ fn spawn_with_job_at_creation(
     let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
     let created = unsafe {
         CreateProcessW(
-            std::ptr::null(),
+            program_w.as_ptr(),
             line_w.as_mut_ptr(),
             std::ptr::null(),
             std::ptr::null(),
@@ -375,6 +539,10 @@ fn spawn_with_job_at_creation(
     if created == 0 {
         return Err(err);
     }
+    diag(&format!(
+        "spawn_with_job_at_creation: created PID={} breakaway={breakaway}",
+        pi.dwProcessId
+    ));
     Ok((pi.hProcess, pi.hThread))
 }
 
@@ -418,13 +586,12 @@ pub fn spawn_and_wait(
     // disclosure below is untouched and still fires exactly when it did.
     //
     // CREATE_NO_WINDOW keeps console runtimes from flashing a window per run.
-    // THE-818 opt-in: build the topology at creation instead of assigning
-    // afterwards, so OUR job is the child's IMMEDIATE job and its
-    // ActiveProcessLimit is the one consulted. Off by default until a Windows
-    // run confirms it; see spawn_with_job_at_creation.
+    // THE-818: build the topology at creation so OUR job is the child's
+    // IMMEDIATE job and its ActiveProcessLimit is the one consulted. The old
+    // post-creation route remains only as an explicit compatibility escape.
     let at_creation = std::env::var("CODECALC_WIN_JOB_AT_CREATION")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+        .unwrap_or(true);
     // `Some` on the ordinary path (std owns the child), `None` on the
     // creation-time path (we own a raw handle). Both converge on `process`.
     let mut child: Option<Child> = None;
@@ -443,13 +610,13 @@ pub fn spawn_and_wait(
             })?;
         unsafe { ResumeThread(thread) };
         unsafe { CloseHandle(thread) };
-        unenforced.push("process_limit_job_assigned_at_creation_on_windows");
         process = p;
     } else {
         cmd.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
         let spawned: Child = cmd.spawn()?;
         process = spawned.as_raw_handle() as HANDLE;
         child = Some(spawned);
+        unenforced.push("process_limit_enforcement_unverified_on_windows");
     }
 
     if let Some(c) = child.as_mut() {
@@ -525,8 +692,6 @@ pub fn spawn_and_wait(
     // (PROC_THREAD_ATTRIBUTE_JOB_LIST), not inspected afterwards. Until then
     // this line is the difference between a caller who knows and one who does
     // not.
-    unenforced.push("process_limit_enforcement_unverified_on_windows");
-
     let mut limit_unverified: Option<&'static str> = None;
 
     // (1) Post-assignment membership. Cheap, direct, and the one thing that can

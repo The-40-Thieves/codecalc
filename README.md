@@ -602,9 +602,10 @@ rather than something incidental: a headroom of 24 bounds it at 22 children and
 a headroom of 300 bounds it at 298.
 
 ⁵ Windows' `ActiveProcessLimit` is scoped to the **job** rather than to the uid,
-so in principle it avoids the failure mode that broke 14 of 31 runtimes on
-Linux. In practice codecalc **cannot verify that it binds**, and says so on
-every run rather than claiming a ceiling it may not have applied.
+so it avoids the failure mode that broke 14 of 31 runtimes on Linux. CodeCalc
+now supplies that job at process creation, makes it non-nestable with the
+minimal `JOB_OBJECT_UILIMIT_EXITWINDOWS` restriction, and allowlists only the
+three standard I/O handles inherited by the child.
 
 Measured on Windows 11 Pro: **400 of 400 spawns succeeded against a ceiling of
 24**, reproduced from two unrelated launchers including Task Scheduler. This is
@@ -619,18 +620,17 @@ immediate job reported `0x3000 / APL 0` while codecalc's reported
 
 No parent-side Win32 call returns another process's immediate job or its
 effective `ActiveProcessLimit`, so this cannot be closed by inspection. Every
-Windows run that assigns the child after creation therefore carries
+compatibility run that assigns the child after creation therefore carries
 `process_limit_enforcement_unverified_on_windows` in `unenforced`. Four further
 strings can each positively *prove* a failure; none can prove success, so their
 silence does not imply enforcement.
 
-**Treat the Windows fork-bomb guard as unverified unless a run declares
-`process_limit_job_assigned_at_creation_on_windows`.** That string records the
-opt-in path, selected with `CODECALC_WIN_JOB_AT_CREATION=1`, which supplies the
-job at creation through `PROC_THREAD_ATTRIBUTE_JOB_LIST` so that codecalc's job
-is the child's immediate one and its `ActiveProcessLimit` is the one consulted.
-It is **off by default** pending verification on Windows hardware; the default
-path remains post-creation assignment, disclosed as above.
+Creation-time assignment is the default. It was verified on Windows 11 Pro with
+a direct Python runtime: 23 children succeeded against a total limit of 24 and
+the next spawn failed with WinError 1816. Runtime launchers that require an
+inner job now fail rather than silently escaping the limit; configure a direct
+runtime executable. `CODECALC_WIN_JOB_AT_CREATION=0` retains the old path only
+as an explicitly unverified compatibility escape hatch.
 
 Two things degrade rather than fail on a given platform: languages whose runtime
 is absent (`list_languages` reports `available: false`), and the shell-wrapper
