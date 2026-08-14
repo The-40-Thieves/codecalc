@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from . import contract, errors
+from . import contract, errors, sessions
 from .providers import ComputationSpec, ProviderRegistry, UnknownProvider
 
 
@@ -84,3 +84,38 @@ class ExecutionService:
             "comparison": comparison,
             "results": results,
         })
+
+
+class SessionService:
+    """Protocol-neutral session lifecycle, workspace, and artifact service."""
+
+    def start(self, language: str = "python3") -> dict:
+        return sessions.start(language)
+
+    def execute(self, session_id: str, spec: ComputationSpec) -> dict:
+        return sessions.execute(
+            session_id,
+            spec.code,
+            language=spec.language,
+            stdin=spec.stdin,
+            timeout=spec.timeout,
+            max_memory_mb=spec.max_memory_mb,
+            max_output_kb=spec.max_output_kb,
+            max_cpu=spec.max_cpu,
+            no_net=spec.no_net,
+        )
+
+    def stop(self, session_id: str) -> dict:
+        return sessions.stop(session_id)
+
+    def list_sessions(self) -> dict:
+        return sessions.list_sessions()
+
+    def list_files(self, session_id: str, path: str = "") -> dict:
+        return sessions.list_files(session_id, path)
+
+    def write_file(self, session_id: str, path: str, content: str) -> dict:
+        return sessions.write_file(session_id, path, content)
+
+    def artifacts(self, session_id: str) -> dict:
+        return sessions.artifacts(session_id)

@@ -51,6 +51,7 @@ from .mcp_middleware import timeout_middleware
 
 _provider_registry = providers.configured_registry()
 _execution_service = execution_service.ExecutionService(_provider_registry)
+_session_service = execution_service.SessionService()
 
 mcp = MCPServer(
     name="codecalc",
@@ -254,27 +255,23 @@ def execute_code(
       not applied, a compact result still says so.
     """
     timeout = min(timeout, 120)
+    spec = providers.ComputationSpec(
+        language=language,
+        code=code,
+        stdin=stdin,
+        timeout=timeout,
+        max_memory_mb=max_memory_mb,
+        max_output_kb=max_output_kb,
+        max_cpu=max_cpu,
+        no_net=no_net,
+    )
     if session_id:
         # Every ceiling documented above is forwarded. They used to stop here:
         # the session branch passed only stdin and timeout, so `no_net=True`
         # silently reached the network and `max_memory_mb` was ignored. What a
         # stateful worker genuinely cannot apply now comes back in `unenforced`.
-        result = sessions.execute(session_id, code, language=language,
-                                  stdin=stdin, timeout=timeout,
-                                  max_memory_mb=max_memory_mb,
-                                  max_output_kb=max_output_kb,
-                                  max_cpu=max_cpu, no_net=no_net)
+        result = _session_service.execute(session_id, spec)
     else:
-        spec = providers.ComputationSpec(
-            language=language,
-            code=code,
-            stdin=stdin,
-            timeout=timeout,
-            max_memory_mb=max_memory_mb,
-            max_output_kb=max_output_kb,
-            max_cpu=max_cpu,
-            no_net=no_net,
-        )
         result = _execution_service.execute(spec, provider_id=provider)
     if compact:
         return compact_result(result)
@@ -286,39 +283,39 @@ def session_start(language: str = "python3") -> dict:
     """Start a persistent session. python3/node get a stateful REPL worker
     (variables/imports persist across execute_code calls); other languages get
     a persistent workspace directory. Returns session_id."""
-    return sessions.start(language)
+    return _session_service.start(language)
 
 
 @mcp.tool()
 def session_stop(session_id: str) -> dict:
     """Stop a session: kill its REPL worker (if any) and delete its workspace."""
-    return sessions.stop(session_id)
+    return _session_service.stop(session_id)
 
 
 @mcp.tool()
 def session_list() -> dict:
     """List active sessions and their languages/state."""
-    return sessions.list_sessions()
+    return _session_service.list_sessions()
 
 
 @mcp.tool()
 def session_files(session_id: str, path: str = "") -> dict:
     """List files in a session workspace (path is relative, '' = root)."""
-    return sessions.list_files(session_id, path)
+    return _session_service.list_files(session_id, path)
 
 
 @mcp.tool()
 def session_write_file(session_id: str, path: str, content: str) -> dict:
     """Write a file into a session workspace (relative path, no escapes).
     Use this to seed input data for executed code."""
-    return sessions.write_file(session_id, path, content)
+    return _session_service.write_file(session_id, path, content)
 
 
 @mcp.tool()
 def session_artifacts(session_id: str) -> dict:
     """List files created by executed code in a session (excluding runner
     internals like main.py/run.out)."""
-    return sessions.artifacts(session_id)
+    return _session_service.artifacts(session_id)
 
 
 @mcp.tool()

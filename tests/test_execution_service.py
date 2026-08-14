@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import sys
+import tempfile
+from pathlib import Path
 
-from codecalc import contract, execution_service, providers, server
+from codecalc import contract, execution_service, providers, server, sessions
 
 FAILS: list[str] = []
 
@@ -208,6 +210,150 @@ def test_service_receipt_reports_requested_and_provider_enforced_limits() -> Non
           ])
 
 
+def test_session_service_owns_protocol_neutral_lifecycle_and_artifacts() -> None:
+    service_type = getattr(execution_service, "SessionService", None)
+    check("protocol-neutral session service is available", service_type is not None)
+    if service_type is None:
+        return
+
+    old_root = sessions.SESSION_ROOT
+    with tempfile.TemporaryDirectory(prefix="codecalc-session-service-") as root:
+        sessions.SESSION_ROOT = Path(root)
+        try:
+            service = service_type()
+            started = service.start("bash")
+            session_id = started["session_id"]
+            written = service.write_file(session_id, "data/value.txt", "42")
+            files = service.list_files(session_id, "data")
+            artifacts = service.artifacts(session_id)
+            active = service.list_sessions()
+            stopped = service.stop(session_id)
+        finally:
+            sessions.SESSION_ROOT = old_root
+
+    check("session service starts a real workspace session",
+          started["ok"] is True and started["stateful"] is False)
+    check("session service writes within the workspace", written["ok"] is True)
+    check("session service lists workspace files",
+          files["ok"] is True and files["files"][0]["path"] == "value.txt")
+    check("session service exposes generated artifacts",
+          artifacts["artifacts"] == [{"path": "data/value.txt", "size": 2}])
+    check("session service lists active sessions",
+          active["sessions"][0]["session_id"] == session_id)
+    check("session service cleans up its workspace",
+          stopped["ok"] is True and stopped["deleted"] is True)
+
+
+def test_mcp_session_adapters_delegate_to_the_shared_service() -> None:
+    calls: list[tuple] = []
+
+    class RecordingSessionService:
+        def start(self, language: str = "python3") -> dict:
+            calls.append(("start", language))
+            return {"operation": "start"}
+
+        def stop(self, session_id: str) -> dict:
+            calls.append(("stop", session_id))
+            return {"operation": "stop"}
+
+        def list_sessions(self) -> dict:
+            calls.append(("list",))
+            return {"operation": "list"}
+
+        def list_files(self, session_id: str, path: str = "") -> dict:
+            calls.append(("files", session_id, path))
+            return {"operation": "files"}
+
+        def write_file(self, session_id: str, path: str, content: str) -> dict:
+            calls.append(("write", session_id, path, content))
+            return {"operation": "write"}
+
+        def artifacts(self, session_id: str) -> dict:
+            calls.append(("artifacts", session_id))
+            return {"operation": "artifacts"}
+
+    old_service = getattr(server, "_session_service", None)
+    check("MCP server owns a shared session service", old_service is not None)
+    if old_service is None:
+        return
+    server._session_service = RecordingSessionService()
+    try:
+        results = [
+            server.session_start("bash"),
+            server.session_stop("sid"),
+            server.session_list(),
+            server.session_files("sid", "data"),
+            server.session_write_file("sid", "data/x", "value"),
+            server.session_artifacts("sid"),
+        ]
+    finally:
+        server._session_service = old_service
+
+    check("MCP session adapters preserve service results",
+          [result["operation"] for result in results]
+          == ["start", "stop", "list", "files", "write", "artifacts"])
+    check("MCP session adapters preserve canonical arguments", calls == [
+        ("start", "bash"),
+        ("stop", "sid"),
+        ("list",),
+        ("files", "sid", "data"),
+        ("write", "sid", "data/x", "value"),
+        ("artifacts", "sid"),
+    ])
+
+
+def test_mcp_execute_adapter_routes_session_execution_through_the_service() -> None:
+    calls: list[tuple] = []
+
+    class RecordingSessionService:
+        def execute(self, session_id: str, spec: providers.ComputationSpec) -> dict:
+            calls.append((session_id, spec))
+            return contract.stamp({
+                "ok": True,
+                "verdict": "OK",
+                "stdout": "session service\n",
+                "stderr": "",
+                "exit_code": 0,
+            })
+
+    old_service = server._session_service
+    server._session_service = RecordingSessionService()
+    try:
+        result = server.execute_code(
+            "python3",
+            'print("session service")',
+            stdin="input",
+            timeout=200,
+            session_id="sid",
+            max_memory_mb=32,
+            max_output_kb=4,
+            max_cpu=2,
+            no_net=True,
+        )
+    finally:
+        server._session_service = old_service
+
+    check("session execution adapter returns the shared service result",
+          result.get("stdout") == "session service\n")
+    check("session execution adapter delegates to the shared service", bool(calls))
+    if not calls:
+        return
+    session_id, spec = calls[0]
+    check("session execution adapter preserves the session handle",
+          session_id == "sid")
+    check("session execution adapter compiles a canonical bounded spec",
+          spec == providers.ComputationSpec(
+              language="python3",
+              code='print("session service")',
+              stdin="input",
+              timeout=120,
+              max_memory_mb=32,
+              max_output_kb=4,
+              max_cpu=2,
+              no_net=True,
+          ))
+
+
 if __name__ == "__main__":
     test_service_routes_a_canonical_spec_and_records_provider_identity()
     test_service_rejects_an_unknown_provider_without_falling_back()
@@ -217,4 +363,7 @@ if __name__ == "__main__":
     test_service_applies_policy_routing_when_selection_is_not_explicit()
     test_service_verifies_one_workload_independently_across_two_providers()
     test_service_receipt_reports_requested_and_provider_enforced_limits()
+    test_session_service_owns_protocol_neutral_lifecycle_and_artifacts()
+    test_mcp_session_adapters_delegate_to_the_shared_service()
+    test_mcp_execute_adapter_routes_session_execution_through_the_service()
     sys.exit(1 if FAILS else 0)
