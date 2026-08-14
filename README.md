@@ -408,6 +408,10 @@ deprecation window, worked success/failure/timeout examples, and the migration
 path from unversioned servers — is in
 [`docs/contract/README.md`](docs/contract/README.md).
 
+For in-process Python use, the supported protocol-neutral service boundary—and
+the session/storage internals that are deliberately not public—is documented in
+[`docs/embedding.md`](docs/embedding.md).
+
 Two things a caller should know before reading anything else:
 
 - **`ok` means "ran and exited 0".** A program that behaves exactly as intended
