@@ -34,10 +34,11 @@ identity.
 All providers implement `describe()`, `health()`, `list_runtimes()`, and
 `execute(spec)`. Health reports an explicit readiness boolean and runtime
 discovery returns JSON-serializable entries. Optional operations remain present
-on the interface so their failure is uniform. Calling one that the descriptor
-marks false raises `UnsupportedCapability` with the stable provider error code
-`unsupported_capability`; CodeCalc must never silently route that operation to
-a weaker provider.
+on the interface so their failure is uniform: `inspect`, `stream`, `cancel`,
+`cleanup`, `collect_artifacts`, `list_files`, and `create_session`. Calling one
+that the descriptor marks false raises `UnsupportedCapability` with the stable
+provider error code `unsupported_capability`; CodeCalc must never silently
+route that operation to a weaker provider.
 
 Provider selection is explicit or uses the configured default. An unknown
 explicit ID returns a validation result carrying `provider_error` set to

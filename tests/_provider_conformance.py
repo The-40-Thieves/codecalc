@@ -50,10 +50,13 @@ def run_execution_conformance(provider: providers.ExecutionProvider,
     check("conformance: invalid runtime is an error", rejected.get("ok") is False)
 
     optional_operations = (
+        ("inspect", "inspect"),
+        ("stream", "stream"),
         ("cancel", "cancel"),
         ("cleanup", "cleanup"),
         ("artifacts", "collect_artifacts"),
         ("files", "list_files"),
+        ("sessions", "create_session"),
     )
     for capability, method in optional_operations:
         try:

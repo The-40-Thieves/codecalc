@@ -138,6 +138,10 @@ class ExecutionProvider(Protocol):
 
     def execute(self, spec: ComputationSpec) -> dict: ...
 
+    def inspect(self, run_id: str) -> dict: ...
+
+    def stream(self, run_id: str) -> object: ...
+
     def cancel(self, run_id: str) -> None: ...
 
     def cleanup(self, run_id: str) -> None: ...
@@ -145,6 +149,8 @@ class ExecutionProvider(Protocol):
     def collect_artifacts(self, run_id: str) -> list[dict]: ...
 
     def list_files(self, run_id: str) -> list[dict]: ...
+
+    def create_session(self, language: str) -> dict: ...
 
 
 @runtime_checkable
@@ -260,6 +266,14 @@ class LocalExecutionProvider:
         del run_id
         raise UnsupportedCapability(self.provider_id, "cancel")
 
+    def inspect(self, run_id: str) -> dict:
+        del run_id
+        raise UnsupportedCapability(self.provider_id, "inspect")
+
+    def stream(self, run_id: str) -> object:
+        del run_id
+        raise UnsupportedCapability(self.provider_id, "stream")
+
     def cleanup(self, run_id: str) -> None:
         del run_id
         raise UnsupportedCapability(self.provider_id, "cleanup")
@@ -271,6 +285,10 @@ class LocalExecutionProvider:
     def list_files(self, run_id: str) -> list[dict]:
         del run_id
         raise UnsupportedCapability(self.provider_id, "files")
+
+    def create_session(self, language: str) -> dict:
+        del language
+        raise UnsupportedCapability(self.provider_id, "sessions")
 
 
 class PistonExecutionProvider:
@@ -421,6 +439,14 @@ class PistonExecutionProvider:
         del run_id
         raise UnsupportedCapability(self.provider_id, "cancel")
 
+    def inspect(self, run_id: str) -> dict:
+        del run_id
+        raise UnsupportedCapability(self.provider_id, "inspect")
+
+    def stream(self, run_id: str) -> object:
+        del run_id
+        raise UnsupportedCapability(self.provider_id, "stream")
+
     def cleanup(self, run_id: str) -> None:
         del run_id
         raise UnsupportedCapability(self.provider_id, "cleanup")
@@ -432,6 +458,10 @@ class PistonExecutionProvider:
     def list_files(self, run_id: str) -> list[dict]:
         del run_id
         raise UnsupportedCapability(self.provider_id, "files")
+
+    def create_session(self, language: str) -> dict:
+        del language
+        raise UnsupportedCapability(self.provider_id, "sessions")
 
 
 def configured_registry(
