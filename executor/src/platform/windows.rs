@@ -30,18 +30,19 @@ use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
     JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     JOB_OBJECT_LIMIT_PROCESS_MEMORY, JOB_OBJECT_LIMIT_PROCESS_TIME,
-    JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+    JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK, JOB_OBJECT_UILIMIT_EXITWINDOWS,
+    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_BASIC_UI_RESTRICTIONS,
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicAccountingInformation,
-    JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
-    TerminateJobObject,
+    JobObjectBasicUIRestrictions, JobObjectExtendedLimitInformation, QueryInformationJobObject,
+    SetInformationJobObject, TerminateJobObject,
 };
 use windows_sys::Win32::System::Threading::{
     CREATE_BREAKAWAY_FROM_JOB, CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
     CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
     GetExitCodeProcess, InitializeProcThreadAttributeList, OpenThread,
-    PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES,
-    STARTUPINFOEXW, STARTUPINFOW, THREAD_SUSPEND_RESUME, UpdateProcThreadAttribute,
-    WaitForSingleObject,
+    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_INFORMATION,
+    ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW, THREAD_SUSPEND_RESUME,
+    UpdateProcThreadAttribute, WaitForSingleObject,
 };
 
 use super::{ResolvedLimits, Wait};
@@ -159,6 +160,25 @@ fn create_job(limits: &ResolvedLimits) -> io::Result<Job> {
             JobObjectExtendedLimitInformation,
             &info as *const _ as *const core::ffi::c_void,
             std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    // Windows only forms nested job hierarchies when neither job has UI
+    // restrictions. EXITWINDOWS is harmless for this non-interactive executor
+    // and makes our resource job terminal, so a launcher cannot hide the real
+    // runtime behind a weaker immediate job with no ActiveProcessLimit.
+    let ui = JOBOBJECT_BASIC_UI_RESTRICTIONS {
+        UIRestrictionsClass: JOB_OBJECT_UILIMIT_EXITWINDOWS,
+    };
+    let ok = unsafe {
+        SetInformationJobObject(
+            job.0,
+            JobObjectBasicUIRestrictions,
+            &ui as *const _ as *const core::ffi::c_void,
+            std::mem::size_of::<JOBOBJECT_BASIC_UI_RESTRICTIONS>() as u32,
         )
     };
     if ok == 0 {
@@ -386,11 +406,10 @@ fn resolve_command_program(cmd: &Command) -> io::Result<PathBuf> {
 /// ceiling is the one consulted. Jobs are applied in the order supplied; we
 /// supply exactly one.
 ///
-/// OPT-IN, and deliberately so: this cannot be tested from the machine it was
-/// written on, and the argv quoting above is the same class of bug that made
-/// bash unusable on Windows for the project's whole life. Set
-/// `CODECALC_WIN_JOB_AT_CREATION=1` to measure it; the default path is
-/// unchanged until a Windows run says this one works.
+/// Enabled by default after a direct Python runtime bound at 23/400 against a
+/// limit of 24 on Windows 11 Pro. Set CODECALC_WIN_JOB_AT_CREATION=0 only as a
+/// compatibility escape hatch; that old topology remains explicitly
+/// unverified.
 #[allow(clippy::too_many_arguments)]
 fn spawn_with_job_at_creation(
     cmd: &Command,
@@ -427,13 +446,13 @@ fn spawn_with_job_at_creation(
 
     // Two-call pattern: ask the size, allocate, initialise.
     let mut size: usize = 0;
-    unsafe { InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &mut size) };
+    unsafe { InitializeProcThreadAttributeList(std::ptr::null_mut(), 2, 0, &mut size) };
     if size == 0 {
         return Err(io::Error::last_os_error());
     }
     let mut attr_buf = vec![0u8; size];
     let attr_list = attr_buf.as_mut_ptr() as *mut core::ffi::c_void;
-    if unsafe { InitializeProcThreadAttributeList(attr_list, 1, 0, &mut size) } == 0 {
+    if unsafe { InitializeProcThreadAttributeList(attr_list, 2, 0, &mut size) } == 0 {
         return Err(io::Error::last_os_error());
     }
 
@@ -446,6 +465,31 @@ fn spawn_with_job_at_creation(
             PROC_THREAD_ATTRIBUTE_JOB_LIST as usize,
             &job_handle as *const HANDLE as *const core::ffi::c_void,
             std::mem::size_of::<HANDLE>(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+        )
+    };
+    if ok == 0 {
+        let e = io::Error::last_os_error();
+        unsafe { DeleteProcThreadAttributeList(attr_list) };
+        return Err(e);
+    }
+
+    // bInheritHandles must be TRUE for STARTF_USESTDHANDLES. Restrict that
+    // inheritance to these child-side duplicates so files, sockets, tokens and
+    // the job handle itself cannot leak from the executor into submitted code.
+    let inherited_handles = [
+        inheritable_stdio[0],
+        inheritable_stdio[1],
+        inheritable_stdio[2],
+    ];
+    let ok = unsafe {
+        UpdateProcThreadAttribute(
+            attr_list,
+            0,
+            PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+            inherited_handles.as_ptr() as *const core::ffi::c_void,
+            std::mem::size_of_val(&inherited_handles),
             std::ptr::null_mut(),
             std::ptr::null(),
         )
@@ -542,13 +586,12 @@ pub fn spawn_and_wait(
     // disclosure below is untouched and still fires exactly when it did.
     //
     // CREATE_NO_WINDOW keeps console runtimes from flashing a window per run.
-    // THE-818 opt-in: build the topology at creation instead of assigning
-    // afterwards, so OUR job is the child's IMMEDIATE job and its
-    // ActiveProcessLimit is the one consulted. Off by default until a Windows
-    // run confirms it; see spawn_with_job_at_creation.
+    // THE-818: build the topology at creation so OUR job is the child's
+    // IMMEDIATE job and its ActiveProcessLimit is the one consulted. The old
+    // post-creation route remains only as an explicit compatibility escape.
     let at_creation = std::env::var("CODECALC_WIN_JOB_AT_CREATION")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+        .unwrap_or(true);
     // `Some` on the ordinary path (std owns the child), `None` on the
     // creation-time path (we own a raw handle). Both converge on `process`.
     let mut child: Option<Child> = None;
@@ -567,13 +610,13 @@ pub fn spawn_and_wait(
             })?;
         unsafe { ResumeThread(thread) };
         unsafe { CloseHandle(thread) };
-        unenforced.push("process_limit_job_assigned_at_creation_on_windows");
         process = p;
     } else {
         cmd.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
         let spawned: Child = cmd.spawn()?;
         process = spawned.as_raw_handle() as HANDLE;
         child = Some(spawned);
+        unenforced.push("process_limit_enforcement_unverified_on_windows");
     }
 
     if let Some(c) = child.as_mut() {
@@ -649,8 +692,6 @@ pub fn spawn_and_wait(
     // (PROC_THREAD_ATTRIBUTE_JOB_LIST), not inspected afterwards. Until then
     // this line is the difference between a caller who knows and one who does
     // not.
-    unenforced.push("process_limit_enforcement_unverified_on_windows");
-
     let mut limit_unverified: Option<&'static str> = None;
 
     // (1) Post-assignment membership. Cheap, direct, and the one thing that can

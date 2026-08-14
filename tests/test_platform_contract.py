@@ -64,6 +64,10 @@ WINDOWS_RS = (REPO_ROOT / "executor" / "src" / "platform" / "windows.rs").read_t
 creation_time_job_path = WINDOWS_RS.split(
     "fn spawn_with_job_at_creation", 1
 )[1].split("pub fn spawn_and_wait", 1)[0]
+spawn_and_wait_path = WINDOWS_RS.split("pub fn spawn_and_wait", 1)[1]
+creation_branch, legacy_branch = spawn_and_wait_path.split(
+    "if at_creation {", 1
+)[1].split("} else {", 1)
 check(
     "the creation-time job path supplies inheritable standard handles",
     "DuplicateHandle" in WINDOWS_RS
@@ -84,6 +88,36 @@ check(
     "resolve_command_program(cmd)" in creation_time_job_path
     and "CreateProcessW(\n            program_w.as_ptr()" in creation_time_job_path,
     "-> a child environment block cannot control CreateProcessW executable lookup",
+)
+check(
+    "the Windows limit job cannot be hidden behind a weaker nested job",
+    "JobObjectBasicUIRestrictions" in WINDOWS_RS
+    and "JOB_OBJECT_UILIMIT_EXITWINDOWS" in WINDOWS_RS
+    and "SetInformationJobObject(" in WINDOWS_RS,
+    "-> any UI restriction makes the CodeCalc job non-nestable",
+)
+check(
+    "the raw Windows spawn inherits only its three standard handles",
+    "PROC_THREAD_ATTRIBUTE_HANDLE_LIST" in creation_time_job_path
+    and "let inherited_handles = [" in creation_time_job_path
+    and "InitializeProcThreadAttributeList(std::ptr::null_mut(), 2" in creation_time_job_path,
+    "-> bInheritHandles=TRUE must not leak unrelated inheritable handles",
+)
+check(
+    "creation-time job assignment is the Windows default",
+    ".unwrap_or(true)" in WINDOWS_RS
+    and ".unwrap_or(false)" not in WINDOWS_RS.split(
+        "let at_creation =", 1
+    )[1].split(";", 1)[0],
+    "-> the post-creation topology was measured not to enforce the ceiling",
+)
+check(
+    "a successful creation-time assignment is not reported as unenforced",
+    'unenforced.push("process_limit_job_assigned_at_creation_on_windows")'
+    not in creation_branch
+    and 'unenforced.push("process_limit_enforcement_unverified_on_windows")'
+    in legacy_branch,
+    "-> topology diagnostics and missing enforcement are different claims",
 )
 
 #: Every string the executor is allowed to put in `unenforced`, and where it
