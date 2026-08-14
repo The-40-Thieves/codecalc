@@ -350,15 +350,17 @@ def test_mcp_session_adapters_delegate_to_the_shared_service() -> None:
             server.session_write_file("sid", "data/x", "value"),
             server.session_artifacts("sid"),
             server.session_read_file("sid", "data/x", 7),
+            server.session_file_resource("sid", "data/x"),
             server.session_run("sid", "main.py", "python3", "input", 9),
         ]
     finally:
         server._session_service = old_service
 
     check("MCP session adapters preserve service results",
-          [result["operation"] for result in results]
+          [result if isinstance(result, str) else result["operation"]
+           for result in results]
           == ["start", "stop", "list", "files", "write", "artifacts",
-              "read", "run"])
+              "read", "abc", "run"])
     check("MCP session adapters preserve canonical arguments", calls == [
         ("start", "bash"),
         ("stop", "sid"),
@@ -367,6 +369,7 @@ def test_mcp_session_adapters_delegate_to_the_shared_service() -> None:
         ("write", "sid", "data/x", "value"),
         ("artifacts", "sid"),
         ("read", "sid", "data/x", 7, False),
+        ("read", "sid", "data/x", 4 * 1024 * 1024, False),
         ("run", "sid", "main.py", "python3", "input", 9),
     ])
 

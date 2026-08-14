@@ -41,7 +41,6 @@ from . import (
     packages,
     providers,
     runtimes,
-    sessions,
     tools,
     translation,
     units,
@@ -580,10 +579,13 @@ def update_runtimes(languages: str = "", apply: bool = False, timeout: int = 600
               mime_type="application/octet-stream")
 def session_file_resource(session_id: str, path: str):
     """MCP resource: session workspace file. str for text, bytes for binary."""
-    result = sessions.resource_read(session_id, path)
-    if result is None:
+    result = _session_service.read_file(
+        session_id, path, max_bytes=4 * 1024 * 1024
+    )
+    if not result.get("ok"):
         raise ValueError(f"no such file: {path}")
-    data, mime = result
+    data = result["content_bytes"]
+    mime = result["mime_type"]
     if mime.startswith("image/"):
         return data  # bytes -> BlobResourceContents, rendered inline by clients
     try:
