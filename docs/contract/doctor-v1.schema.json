@@ -10,6 +10,7 @@
     "healthy",
     "python",
     "backend",
+    "execution_providers",
     "install_sandbox",
     "extras",
     "grammar_cache",
@@ -73,6 +74,62 @@
             "null"
           ]
         }
+      }
+    },
+    "execution_providers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "interface_version",
+          "provider_id",
+          "provider_version",
+          "host_class",
+          "strict",
+          "capabilities",
+          "ready",
+          "technology",
+          "detail"
+        ],
+        "properties": {
+          "interface_version": {
+            "type": "string"
+          },
+          "provider_id": {
+            "type": "string"
+          },
+          "provider_version": {
+            "type": "string"
+          },
+          "host_class": {
+            "type": "string"
+          },
+          "strict": {
+            "type": "boolean"
+          },
+          "capabilities": {
+            "type": "object"
+          },
+          "ready": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "technology": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
       }
     },
     "install_sandbox": {

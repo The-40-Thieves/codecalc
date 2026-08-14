@@ -452,7 +452,7 @@ def build_doctor_schema(dialect: str | None = None, schema_id: str | None = None
         ),
         "type": "object",
         "required": ["contract_version", "codecalc_version", "healthy", "python",
-                     "backend", "install_sandbox", "extras", "grammar_cache",
+                     "backend", "execution_providers", "install_sandbox", "extras", "grammar_cache",
                      "status_basis",
                      "runtimes", "runtime_summary", "workspace", "remedies"],
         "properties": {
@@ -479,6 +479,27 @@ def build_doctor_schema(dialect: str | None = None, schema_id: str | None = None
                     "kind": {"type": "string", "enum": list(BACKENDS)},
                     "binary": {"type": ["string", "null"]},
                     "detail": {"type": ["string", "null"]},
+                },
+            },
+            "execution_providers": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["interface_version", "provider_id",
+                                 "provider_version", "host_class", "strict",
+                                 "capabilities", "ready", "technology", "detail"],
+                    "properties": {
+                        "interface_version": {"type": "string"},
+                        "provider_id": {"type": "string"},
+                        "provider_version": {"type": "string"},
+                        "host_class": {"type": "string"},
+                        "strict": {"type": "boolean"},
+                        "capabilities": {"type": "object"},
+                        "ready": {"type": ["boolean", "null"]},
+                        "technology": {"type": ["string", "null"]},
+                        "detail": {"type": ["string", "null"]},
+                    },
+                    "additionalProperties": False,
                 },
             },
             "install_sandbox": {

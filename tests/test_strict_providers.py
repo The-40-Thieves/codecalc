@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 
-from codecalc import providers
+from codecalc import doctor, providers
 
 FAILS: list[str] = []
 
@@ -41,7 +41,18 @@ def test_local_provider_is_explicitly_non_strict() -> None:
     check("local provider labels its trust boundary", descriptor["strict"] is False)
 
 
+def test_doctor_reports_strict_provider_readiness() -> None:
+    report = doctor.report()
+    provider_id = f"{providers.strict_host_platform()}-strict"
+    rows = {row["provider_id"]: row for row in report["execution_providers"]}
+    check("doctor publishes strict provider readiness", provider_id in rows)
+    check("doctor does not confuse local health with strict readiness",
+          rows[provider_id]["strict"] is True
+          and rows[provider_id]["ready"] is False)
+
+
 if __name__ == "__main__":
     test_host_strict_provider_is_discoverable_and_fails_closed()
     test_local_provider_is_explicitly_non_strict()
+    test_doctor_reports_strict_provider_readiness()
     sys.exit(1 if FAILS else 0)

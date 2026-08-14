@@ -880,6 +880,15 @@ def _doctor(as_json: bool = False, deep: bool = False) -> int:
         print("                   Set CODECALC_REQUIRE_NATIVE=1 to make this a")
         print("                   startup failure instead of a weaker sandbox.")
 
+    print("  execution providers")
+    for provider in rep["execution_providers"]:
+        readiness = ("ready" if provider["ready"] is True else
+                     "UNAVAILABLE" if provider["ready"] is False else "not probed")
+        boundary = "strict" if provider["strict"] else "non-strict"
+        print(f"    {provider['provider_id']:18} {readiness}, {boundary}")
+        if provider["detail"]:
+            print(f"      {provider['detail']}")
+
     sandbox = rep["install_sandbox"]
     print("  install sandbox   " + (f"Landlock ABI {sandbox['landlock_abi']}"
                                     if sandbox["confined"] else
