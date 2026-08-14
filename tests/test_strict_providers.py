@@ -261,7 +261,7 @@ def test_remote_strict_rejects_client_workdir_before_network() -> None:
     )
     try:
         provider.execute(providers.ComputationSpec(
-            "python3", "pass", workdir="/Users/example/project"
+            "python3", "pass", workdir="/client/workspace"
         ))
     except providers.UnsupportedCapability as exc:
         check("remote strict rejects client-local workdir", exc.capability == "workdir")
