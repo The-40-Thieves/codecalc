@@ -181,7 +181,7 @@ if isinstance(getattr(executor, "NPROC_LIMIT", None), int):
 # and can rename another one into its place. Rust has always enforced this
 # (dir_identity/remove_own_workdir in main.rs). Python did not, at three call
 # sites that each delete a directory they created: the pure-Python fallback
-# executor, execute_code_stream's --workdir, and session teardown. Comparing
+# executor, provider-backed streaming's --workdir, and session teardown. Comparing
 # env-var names and numeric constants (sections 1-4 above) could not have
 # caught this — the constants matched fine; the BEHAVIOUR of an entire
 # function was missing. This section asserts the property directly: both
@@ -212,8 +212,8 @@ if floor("python _dir_identity fn", re.findall(r"def _dir_identity", PY_EXECUTOR
 PY_SITES = [
     ("codecalc/executor.py: _execute_python's cleanup", PY_EXECUTOR_SRC,
      r"if not caller_workdir:\s*\n\s*_rmtree_checked\(workdir"),
-    ("codecalc/server.py: execute_code_stream's cleanup", PY_SERVER_SRC,
-     r"executor\._rmtree_checked\(workdir"),
+    ("codecalc/executor.py: execute_stream's cleanup", PY_EXECUTOR_SRC,
+     r"def execute_stream[\s\S]*?_rmtree_checked\(workdir, created_identity\)"),
     ("codecalc/sessions.py: stop()'s cleanup", PY_SESSIONS_SRC,
      r"executor\._rmtree_checked\(d"),
 ]

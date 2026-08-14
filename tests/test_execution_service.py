@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import sys
 import tempfile
@@ -156,6 +157,65 @@ def test_service_verifies_one_workload_independently_across_two_providers() -> N
           result["contract_version"] == contract.CONTRACT_VERSION)
 
 
+def test_service_routes_streaming_through_the_selected_provider() -> None:
+    progress: list[tuple[int, str]] = []
+
+    class StreamingProvider(providers.LocalExecutionProvider):
+        provider_id = "streaming"
+
+        def describe(self) -> dict:
+            descriptor = super().describe()
+            descriptor["provider_id"] = self.provider_id
+            descriptor["capabilities"]["stream"] = True
+            return descriptor
+
+        async def execute_stream(self, spec: providers.ComputationSpec,
+                                 on_progress=None) -> dict:
+            if on_progress is not None:
+                await on_progress(4, "stdout so far: 4 bytes")
+            return contract.stamp({
+                "ok": True, "verdict": "OK", "stdout": spec.code,
+                "stderr": "", "exit_code": 0, "unenforced": [],
+            })
+
+    async def record_progress(value: int, message: str) -> None:
+        progress.append((value, message))
+
+    registry = providers.ProviderRegistry(default_provider_id="streaming")
+    registry.register(StreamingProvider())
+    service = execution_service.ExecutionService(registry)
+    spec = providers.ComputationSpec(language="python3", code="data")
+
+    result = asyncio.run(service.execute_stream(spec, on_progress=record_progress))
+
+    check("streaming routes through provider capability",
+          result["provider"]["provider_id"] == "streaming")
+    check("streaming preserves provider result contract",
+          result["contract_version"] == contract.CONTRACT_VERSION)
+    check("streaming forwards protocol-neutral progress",
+          progress == [(4, "stdout so far: 4 bytes")])
+
+
+def test_service_rejects_unsupported_streaming_without_fallback() -> None:
+    registry = providers.ProviderRegistry(default_provider_id="local")
+    registry.register(providers.LocalExecutionProvider())
+    registry.register(providers.PistonExecutionProvider(
+        base_url="http://piston.test", transport=lambda *_args: {}
+    ))
+    service = execution_service.ExecutionService(registry)
+
+    result = asyncio.run(service.execute_stream(
+        providers.ComputationSpec(language="python3", code="pass"),
+        provider_id="piston",
+    ))
+
+    check("unsupported streaming is a normalized rejection", result["ok"] is False)
+    check("unsupported streaming identifies provider and capability",
+          result["provider_error"] == "unsupported_capability"
+          and result["requested_provider"] == "piston"
+          and result["capability"] == "stream")
+
+
 def test_service_receipt_reports_requested_and_provider_enforced_limits() -> None:
     class LimitProvider(providers.LocalExecutionProvider):
         provider_id = "limits"
@@ -286,6 +346,31 @@ def test_session_service_reads_bounded_files_and_runs_workspace_entries() -> Non
     check("read/run test cleans up its workspace", stopped["deleted"] is True)
 
 
+def test_session_file_pagination_is_shared_and_cursor_based() -> None:
+    old_root = sessions.SESSION_ROOT
+    with tempfile.TemporaryDirectory(prefix="codecalc-session-pages-") as root:
+        sessions.SESSION_ROOT = Path(root)
+        try:
+            service = execution_service.SessionService()
+            session_id = service.start("bash")["session_id"]
+            for name in ("a.txt", "b.txt", "c.txt"):
+                service.write_file(session_id, name, name)
+            first = service.list_files(session_id, page_size=2)
+            second = service.list_files(
+                session_id, page_size=2, cursor=first["next_cursor"]
+            )
+            service.stop(session_id)
+        finally:
+            sessions.SESSION_ROOT = old_root
+
+    check("first file page is bounded and publishes a cursor",
+          [item["path"] for item in first["files"]] == ["a.txt", "b.txt"]
+          and first["next_cursor"] == "2")
+    check("next file page resumes without overlap",
+          [item["path"] for item in second["files"]] == ["c.txt"]
+          and second["next_cursor"] is None)
+
+
 def test_mcp_session_adapters_delegate_to_the_shared_service() -> None:
     calls: list[tuple] = []
 
@@ -302,8 +387,10 @@ def test_mcp_session_adapters_delegate_to_the_shared_service() -> None:
             calls.append(("list",))
             return {"operation": "list"}
 
-        def list_files(self, session_id: str, path: str = "") -> dict:
-            calls.append(("files", session_id, path))
+        def list_files(self, session_id: str, path: str = "", *,
+                       page_size: int | None = None,
+                       cursor: str | None = None) -> dict:
+            calls.append(("files", session_id, path, page_size, cursor))
             return {"operation": "files"}
 
         def write_file(self, session_id: str, path: str, content: str) -> dict:
@@ -346,7 +433,7 @@ def test_mcp_session_adapters_delegate_to_the_shared_service() -> None:
             server.session_start("bash"),
             server.session_stop("sid"),
             server.session_list(),
-            server.session_files("sid", "data"),
+            server.session_files("sid", "data", 10, "20"),
             server.session_write_file("sid", "data/x", "value"),
             server.session_artifacts("sid"),
             server.session_read_file("sid", "data/x", 7),
@@ -365,7 +452,7 @@ def test_mcp_session_adapters_delegate_to_the_shared_service() -> None:
         ("start", "bash"),
         ("stop", "sid"),
         ("list",),
-        ("files", "sid", "data"),
+        ("files", "sid", "data", 10, "20"),
         ("write", "sid", "data/x", "value"),
         ("artifacts", "sid"),
         ("read", "sid", "data/x", 7, False),
@@ -457,6 +544,71 @@ def test_mcp_execute_adapter_routes_session_execution_through_the_service() -> N
           ))
 
 
+def test_mcp_stream_adapter_compiles_spec_and_delegates_progress() -> None:
+    calls: list[tuple] = []
+
+    class RecordingExecutionService:
+        async def execute_stream(self, spec: providers.ComputationSpec, *,
+                                 provider_id=None, on_progress=None) -> dict:
+            calls.append((spec, provider_id))
+            if on_progress is not None:
+                await on_progress(3, "three")
+            return {"ok": True, "streamed": True}
+
+    class RecordingContext:
+        async def report_progress(self, *, progress: float, total, message: str) -> None:
+            calls.append((progress, total, message))
+
+    old_service = server._execution_service
+    server._execution_service = RecordingExecutionService()
+    try:
+        result = asyncio.run(server.execute_code_stream(
+            "python3", "print(1)", stdin="in", timeout=999,
+            max_memory_mb=32, max_output_kb=4, max_cpu=2, no_net=True,
+            provider="local", ctx=RecordingContext(),
+        ))
+    finally:
+        server._execution_service = old_service
+
+    check("stream adapter returns service result", result["streamed"] is True)
+    check("stream adapter compiles a bounded canonical spec", calls[0] == (
+        providers.ComputationSpec(
+            language="python3", code="print(1)", stdin="in", timeout=300,
+            max_memory_mb=32, max_output_kb=4, max_cpu=2, no_net=True,
+        ),
+        "local",
+    ))
+    check("stream adapter translates progress only at MCP boundary",
+          calls[1] == (3.0, None, "three"))
+
+
+def test_main_runs_the_same_server_over_explicit_streamable_http() -> None:
+    calls: list[dict] = []
+
+    class RecordingMCPServer:
+        def run(self, **kwargs) -> None:
+            calls.append(kwargs)
+
+    old_mcp = server.mcp
+    old_argv = sys.argv
+    server.mcp = RecordingMCPServer()
+    sys.argv = ["codecalc", "serve-http", "--host", "127.0.0.2", "--port", "8123"]
+    try:
+        server.main()
+    finally:
+        sys.argv = old_argv
+        server.mcp = old_mcp
+
+    check("HTTP uses the same registered MCP server object",
+          calls == [{
+              "transport": "streamable-http",
+              "host": "127.0.0.2",
+              "port": 8123,
+              "json_response": True,
+              "stateless_http": True,
+          }])
+
+
 if __name__ == "__main__":
     test_service_routes_a_canonical_spec_and_records_provider_identity()
     test_service_rejects_an_unknown_provider_without_falling_back()
@@ -465,10 +617,15 @@ if __name__ == "__main__":
     test_mcp_adapter_publishes_provider_descriptors()
     test_service_applies_policy_routing_when_selection_is_not_explicit()
     test_service_verifies_one_workload_independently_across_two_providers()
+    test_service_routes_streaming_through_the_selected_provider()
+    test_service_rejects_unsupported_streaming_without_fallback()
     test_service_receipt_reports_requested_and_provider_enforced_limits()
     test_session_service_owns_protocol_neutral_lifecycle_and_artifacts()
     test_session_service_reads_bounded_files_and_runs_workspace_entries()
+    test_session_file_pagination_is_shared_and_cursor_based()
     test_mcp_session_adapters_delegate_to_the_shared_service()
     test_mcp_read_adapter_alone_converts_neutral_bytes_to_image_content()
     test_mcp_execute_adapter_routes_session_execution_through_the_service()
+    test_mcp_stream_adapter_compiles_spec_and_delegates_progress()
+    test_main_runs_the_same_server_over_explicit_streamable_http()
     sys.exit(1 if FAILS else 0)

@@ -306,10 +306,10 @@ analysis, binary64 introspection.
 | `list_languages` | 31 languages with extension, compile flag, runtime availability |
 | `list_execution_providers` | Execution-provider identity, interface version, host class, and machine-readable capabilities |
 | `execute_code` | Run code in any language → stdout/stderr/exit_code/**verdict** (OK/TLE/MLE/OLE/RTE)/cpu_ms/peak_memory_kb; per-call limits (`max_memory_mb`, `max_output_kb`, `max_cpu`), `no_net`, `compact` |
-| `execute_code_stream` | Like execute_code but reports progress + partial output while running |
+| `execute_code_stream` | Provider-selected execution using the same canonical limits as `execute_code`, with progress + partial output when the provider supports streaming |
 | `session_start` | Persistent session; python3/node get a stateful REPL worker (variables/imports persist across calls), other languages a workspace dir |
 | `session_stop` / `session_list` | Session lifecycle |
-| `session_files` / `session_read_file` / `session_write_file` | Workspace file tools, jailed to the session dir; `session_read_file` returns images inline (as_image) |
+| `session_files` / `session_read_file` / `session_write_file` | Workspace file tools, jailed to the session dir; listings support `page_size`/`cursor`, and reads return images inline (`as_image`) |
 | `session_run` | **Multi-file programs**: execute an entry file that imports other session files (helper.py, data/...) in the workspace |
 | `session_artifacts` | List files created by executed code (results, images, CSVs) |
 | `install_package` | Install packages (uv pip/npm/gem/go/cargo...) into a session or shared cache |
@@ -363,7 +363,14 @@ which is exactly where `-n` does not stop it.
 ```bash
 cd /path/to/codecalc && .venv/bin/python -m codecalc.server
 # stdio transport — register with any MCP client
+
+# The identical tool/resource registry over stateless Streamable HTTP:
+.venv/bin/python -m codecalc.server serve-http --host 127.0.0.1 --port 8000
 ```
+
+Streamable HTTP binds to loopback by default and has no CodeCalc authentication
+layer. Do not bind it to an untrusted network without an authenticating reverse
+proxy and the stronger process/container isolation described in `SECURITY.md`.
 
 Point an MCP client at it:
 

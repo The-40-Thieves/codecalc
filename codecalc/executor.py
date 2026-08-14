@@ -1164,6 +1164,88 @@ def execute(language: str, code: str, stdin: str = "", timeout: int = 10,
         max_cpu=max_cpu, no_net=no_net))
 
 
+async def execute_stream(spec, on_progress=None) -> dict:
+    """Execute a canonical request and report protocol-neutral progress."""
+    import asyncio
+
+    if _rust is None:
+        result = execute(
+            spec.language, spec.code, stdin=spec.stdin, timeout=spec.timeout,
+            workdir=spec.workdir, max_memory_mb=spec.max_memory_mb,
+            max_output_kb=spec.max_output_kb, max_cpu=spec.max_cpu,
+            no_net=spec.no_net,
+        )
+        result["streamed"] = False
+        result["note"] = ("no native executor binary; ran without streaming. "
+                          "Build it for progress updates.")
+        return result
+
+    workdir = Path(tempfile.mkdtemp(prefix="codecalc-stream-"))
+    created_identity = _dir_identity(workdir)
+    stdin_path = None
+    try:
+        args = [_rust, "--lang", spec.language, "--timeout", str(spec.timeout),
+                "--workdir", str(workdir)]
+        if spec.max_memory_mb > 0:
+            args += ["--max-memory-mb", str(spec.max_memory_mb)]
+        if spec.max_output_kb > 0:
+            args += ["--max-output-kb", str(spec.max_output_kb)]
+        if spec.max_cpu > 0:
+            args += ["--max-cpu", str(spec.max_cpu)]
+        if spec.no_net:
+            args += ["--no-net"]
+        if spec.stdin:
+            with tempfile.NamedTemporaryFile(
+                mode="w", prefix="cc-stdin-", suffix=".txt", delete=False
+            ) as stdin_file:
+                stdin_file.write(spec.stdin)
+                stdin_path = stdin_file.name
+            args += ["--stdin-file", stdin_path]
+
+        proc = await asyncio.create_subprocess_exec(
+            *args, stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        if proc.stdin is None:
+            raise RuntimeError("streaming executor stdin pipe was not created")
+        proc.stdin.write(spec.code.encode())
+        await proc.stdin.drain()
+        proc.stdin.close()
+
+        out_path = workdir / "run.out"
+        last_len = 0
+        partial = ""
+        while proc.returncode is None:
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=0.25)
+            except TimeoutError:
+                pass
+            if out_path.exists():
+                data = out_path.read_bytes()
+                if len(data) > last_len:
+                    chunk = data[last_len:].decode(errors="replace")
+                    partial += chunk
+                    last_len = len(data)
+                    if on_progress is not None:
+                        await on_progress(last_len, f"stdout so far: {last_len} bytes")
+
+        stdout_bytes, stderr_bytes = await proc.communicate()
+        result = json.loads(stdout_bytes.decode(errors="replace"))
+        if not isinstance(result, dict) or "ok" not in result:
+            return {"ok": False,
+                    "error": f"executor invalid output: {stderr_bytes[:200]!r}"}
+        result["streamed_partial"] = partial
+        result["streamed"] = True
+        result["backend"] = "rust"
+        return contract.stamp(result)
+    except Exception as exc:
+        return contract.stamp({"ok": False, "error": f"stream failed: {exc}"})
+    finally:
+        if stdin_path:
+            Path(stdin_path).unlink(missing_ok=True)
+        _rmtree_checked(workdir, created_identity)
+
+
 def catalog() -> list[dict]:
     """The `list_languages` payload: the registry plus what was measured here.
 

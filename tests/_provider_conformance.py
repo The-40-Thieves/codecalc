@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Callable
 
@@ -49,9 +50,27 @@ def run_execution_conformance(provider: providers.ExecutionProvider,
     ))
     check("conformance: invalid runtime is an error", rejected.get("ok") is False)
 
+    if descriptor["capabilities"]["stream"]:
+        streamed = asyncio.run(provider.execute_stream(
+            providers.ComputationSpec(language="python3", code='print("stream")')
+        ))
+        check("conformance: supported stream executes",
+              streamed.get("ok") is True)
+        check("conformance: supported stream is truthful",
+              isinstance(streamed.get("streamed"), bool))
+    else:
+        try:
+            asyncio.run(provider.execute_stream(
+                providers.ComputationSpec(language="python3", code="pass")
+            ))
+        except providers.UnsupportedCapability as exc:
+            check("conformance: unsupported stream is explicit",
+                  exc.capability == "stream")
+        else:
+            check("conformance: unsupported stream cannot silently succeed", False)
+
     optional_operations = (
         ("inspect", "inspect"),
-        ("stream", "stream"),
         ("cancel", "cancel"),
         ("cleanup", "cleanup"),
         ("artifacts", "collect_artifacts"),

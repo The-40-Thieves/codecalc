@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 from . import contract, errors, executor, registry, sessions
-from .providers import ComputationSpec, ProviderRegistry, UnknownProvider
+from .providers import (
+    ComputationSpec,
+    ProviderRegistry,
+    UnknownProvider,
+    UnsupportedCapability,
+)
 
 
 def _limit_receipt(spec: ComputationSpec, result: dict) -> dict:
@@ -65,6 +70,39 @@ class ExecutionService:
         }
         return contract.stamp(result)
 
+    async def execute_stream(self, spec: ComputationSpec, *, provider_id: str | None = None,
+                             on_progress=None) -> dict:
+        """Stream through the selected provider using protocol-neutral progress."""
+        try:
+            provider = self.registry.select(provider_id, spec=spec)
+        except UnknownProvider as exc:
+            return contract.stamp(errors.error_result(
+                errors.VALIDATION,
+                str(exc),
+                provider_error=exc.code,
+                requested_provider=exc.provider_id,
+                available_providers=list(exc.available),
+            ))
+        try:
+            result = dict(await provider.execute_stream(spec, on_progress=on_progress))
+        except UnsupportedCapability as exc:
+            return contract.stamp(errors.error_result(
+                errors.VALIDATION,
+                str(exc),
+                provider_error=exc.code,
+                requested_provider=exc.provider_id,
+                capability=exc.capability,
+            ))
+        descriptor = provider.describe()
+        result["provider"] = {
+            "interface_version": descriptor["interface_version"],
+            "provider_id": descriptor["provider_id"],
+            "provider_version": descriptor["provider_version"],
+            "host_class": descriptor["host_class"],
+            "limits": _limit_receipt(spec, result),
+        }
+        return contract.stamp(result)
+
     def verify_across_providers(self, spec: ComputationSpec,
                                 first_provider_id: str,
                                 second_provider_id: str) -> dict:
@@ -111,8 +149,26 @@ class SessionService:
     def list_sessions(self) -> dict:
         return sessions.list_sessions()
 
-    def list_files(self, session_id: str, path: str = "") -> dict:
-        return sessions.list_files(session_id, path)
+    def list_files(self, session_id: str, path: str = "", *,
+                   page_size: int | None = None,
+                   cursor: str | None = None) -> dict:
+        result = sessions.list_files(session_id, path)
+        if not result.get("ok") or page_size is None:
+            return result
+        if page_size < 1:
+            return {"ok": False, "error": "page_size must be positive"}
+        try:
+            offset = int(cursor or "0")
+        except ValueError:
+            return {"ok": False, "error": "invalid cursor"}
+        if offset < 0:
+            return {"ok": False, "error": "invalid cursor"}
+        page_size = min(page_size, 1000)
+        files = result["files"]
+        end = min(len(files), offset + page_size)
+        result["files"] = files[offset:end]
+        result["next_cursor"] = str(end) if end < len(files) else None
+        return result
 
     def write_file(self, session_id: str, path: str, content: str) -> dict:
         return sessions.write_file(session_id, path, content)

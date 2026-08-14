@@ -138,6 +138,9 @@ class ExecutionProvider(Protocol):
 
     def execute(self, spec: ComputationSpec) -> dict: ...
 
+    async def execute_stream(self, spec: ComputationSpec,
+                             on_progress=None) -> dict: ...
+
     def inspect(self, run_id: str) -> dict: ...
 
     def stream(self, run_id: str) -> object: ...
@@ -225,7 +228,7 @@ class LocalExecutionProvider:
             capabilities={
                 "execute": True,
                 "inspect": False,
-                "stream": False,
+                "stream": True,
                 "cancel": False,
                 "cleanup": False,
                 "files": False,
@@ -261,6 +264,10 @@ class LocalExecutionProvider:
             max_cpu=spec.max_cpu,
             no_net=spec.no_net,
         )
+
+    async def execute_stream(self, spec: ComputationSpec,
+                             on_progress=None) -> dict:
+        return await executor.execute_stream(spec, on_progress=on_progress)
 
     def cancel(self, run_id: str) -> None:
         del run_id
@@ -434,6 +441,11 @@ class PistonExecutionProvider:
             "stderr_bytes": stderr_bytes,
         }
         return contract.stamp(_redact_secrets(result, self._secrets))
+
+    async def execute_stream(self, spec: ComputationSpec,
+                             on_progress=None) -> dict:
+        del spec, on_progress
+        raise UnsupportedCapability(self.provider_id, "stream")
 
     def cancel(self, run_id: str) -> None:
         del run_id

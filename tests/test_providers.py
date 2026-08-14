@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from collections.abc import Mapping
@@ -51,6 +52,25 @@ def test_local_provider_preserves_the_execution_result_contract() -> None:
           result["contract_version"] == contract.CONTRACT_VERSION)
     check("local provider preserves backend identity",
           result["backend"] in {"rust", "python"})
+
+
+def test_local_provider_owns_streaming_and_truthfully_falls_back() -> None:
+    provider = providers.LocalExecutionProvider()
+    old_rust = providers.executor._rust
+    providers.executor._rust = None
+    try:
+        result = asyncio.run(provider.execute_stream(
+            providers.ComputationSpec(language="python3", code='print("stream")')
+        ))
+    finally:
+        providers.executor._rust = old_rust
+
+    check("local provider advertises streaming",
+          provider.describe()["capabilities"]["stream"] is True)
+    check("streaming fallback preserves execution output",
+          result["ok"] is True and result["stdout"].strip() == "stream")
+    check("streaming fallback discloses that progress was unavailable",
+          result["streamed"] is False and "note" in result)
 
 
 def test_unsupported_provider_capability_fails_explicitly() -> None:
@@ -657,6 +677,7 @@ def test_piston_execution_returns_a_redacted_transport_error_contract() -> None:
 if __name__ == "__main__":
     test_descriptor_is_versioned_and_machine_readable()
     test_local_provider_preserves_the_execution_result_contract()
+    test_local_provider_owns_streaming_and_truthfully_falls_back()
     test_unsupported_provider_capability_fails_explicitly()
     test_registry_supports_default_and_explicit_provider_selection()
     test_unknown_provider_fails_with_a_stable_machine_code()

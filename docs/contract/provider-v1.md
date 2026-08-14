@@ -31,14 +31,16 @@ identity.
 
 ## Required operations
 
-All providers implement `describe()`, `health()`, `list_runtimes()`, and
-`execute(spec)`. Health reports an explicit readiness boolean and runtime
+All providers implement `describe()`, `health()`, `list_runtimes()`,
+`execute(spec)`, and async `execute_stream(spec, on_progress=...)`. Health reports an explicit readiness boolean and runtime
 discovery returns JSON-serializable entries. Optional operations remain present
 on the interface so their failure is uniform: `inspect`, `stream`, `cancel`,
 `cleanup`, `collect_artifacts`, `list_files`, and `create_session`. Calling one
 that the descriptor marks false raises `UnsupportedCapability` with the stable
 provider error code `unsupported_capability`; CodeCalc must never silently
-route that operation to a weaker provider.
+route that operation to a weaker provider. A provider advertising `stream=true`
+executes the canonical spec and may invoke the protocol-neutral progress
+callback; transport objects such as MCP contexts never cross this boundary.
 
 Provider selection is explicit or uses the configured default. An unknown
 explicit ID returns a validation result carrying `provider_error` set to
@@ -60,7 +62,10 @@ resource telemetry from agreement, and retains both provider receipts.
 ## Included providers
 
 `local` wraps the existing Rust executor or Python fallback. It remains the
-default and requires no configuration.
+default and requires no configuration. It advertises streaming: the native
+executor reports partial stdout through the progress callback, while the
+Python fallback completes synchronously and returns `streamed=false` with an
+explicit note rather than pretending it emitted progress.
 
 `piston` targets the open-source Piston v2 HTTP API. It is registered only when
 `CODECALC_PISTON_URL` contains an absolute HTTP(S) base URL; CodeCalc has no

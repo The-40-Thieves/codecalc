@@ -28,6 +28,14 @@ individual adapters.
 MCP types; adapters decide how to render those bytes. `SessionService.run_file()`
 executes an entry file in the session workspace so relative imports and data
 paths retain the same behavior across MCP and embedded callers.
+`SessionService.list_files()` accepts optional `page_size` and opaque `cursor`
+arguments; omitting them preserves the original unpaginated response.
+
+`ExecutionService.execute_stream()` selects providers with the same explicit
+or policy routing as `execute()`. Its progress callback uses only byte counts
+and messages. MCP adapters translate those values into protocol progress
+notifications; provider and computation identity remain free of transport
+metadata.
 
 ## Not an embedding API
 

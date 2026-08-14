@@ -20,8 +20,6 @@ from __future__ import annotations
 import base64
 import functools
 import inspect
-import json
-from pathlib import Path
 
 from mcp.server import CacheHint, MCPServer
 from mcp.server.mcpserver import Context
@@ -297,9 +295,12 @@ def session_list() -> dict:
 
 
 @mcp.tool()
-def session_files(session_id: str, path: str = "") -> dict:
-    """List files in a session workspace (path is relative, '' = root)."""
-    return _session_service.list_files(session_id, path)
+def session_files(session_id: str, path: str = "", page_size: int | None = None,
+                  cursor: str | None = None) -> dict:
+    """List workspace files, optionally using a bounded cursor page."""
+    return _session_service.list_files(
+        session_id, path, page_size=page_size, cursor=cursor
+    )
 
 
 @mcp.tool()
@@ -348,6 +349,7 @@ async def execute_code_stream(
     max_output_kb: int = 0,
     max_cpu: int = 0,
     no_net: bool = False,
+    provider: str | None = None,
     ctx: Context = None,
 ) -> dict:
     """Execute code and STREAM progress + partial output as it runs.
@@ -368,116 +370,26 @@ async def execute_code_stream(
     enough to want progress. That divergence is stated rather than left for a
     reader to discover by comparing two min() calls.
     """
-    import asyncio
-    import tempfile
-
     timeout = min(timeout, 300)
+    spec = providers.ComputationSpec(
+        language=language, code=code, stdin=stdin, timeout=timeout,
+        max_memory_mb=max_memory_mb, max_output_kb=max_output_kb,
+        max_cpu=max_cpu, no_net=no_net,
+    )
 
-    # Every other tool falls back to the pure-Python executor when the Rust
-    # binary is absent — a configuration the README explicitly supports. This
-    # one used executor._rust directly, so argv[0] was None and it raised
-    # TypeError. Streaming needs the binary (it tails run.out in a --workdir),
-    # so fall back to a single non-streaming run rather than failing.
-    if executor._rust is None:
-        result = executor.execute(language, code, stdin=stdin, timeout=timeout,
-                                  max_memory_mb=max_memory_mb,
-                                  max_output_kb=max_output_kb,
-                                  max_cpu=max_cpu, no_net=no_net)
-        result["streamed"] = False
-        result["note"] = ("no native executor binary; ran without streaming. "
-                          "Build it (cargo build --release) for progress updates.")
-        return result
-
-    workdir = Path(tempfile.mkdtemp(prefix="codecalc-stream-"))
-    # Recorded BEFORE the executed code gets this directory as its cwd (via
-    # --workdir below), exactly like executor/src/main.rs's created_identity.
-    # This dir is passed to the Rust executor as a caller-supplied --workdir,
-    # so the Rust side never deletes it — that duty is entirely ours here, and
-    # the unconditional shutil.rmtree() this used to be is exactly the gap
-    # #38 reported: identity recorded at creation, re-checked immediately
-    # before removal, so a rename-swap by the executed program is refused
-    # rather than deleting whatever now sits at this path.
-    created_identity = executor._dir_identity(workdir)
-    try:
-        # run the Rust executor directly with --workdir so run.out grows live
-        args = [executor._rust, "--lang", language, "--timeout", str(timeout),
-                "--workdir", str(workdir)]
-        # Same flags, same conditions, as codecalc/executor.py builds for the
-        # non-streaming path. The executor has always accepted --max-memory-mb
-        # and --max-cpu (main.rs); this tool simply never passed them.
-        if max_memory_mb > 0:
-            args += ["--max-memory-mb", str(max_memory_mb)]
-        if max_output_kb > 0:
-            args += ["--max-output-kb", str(max_output_kb)]
-        if max_cpu > 0:
-            args += ["--max-cpu", str(max_cpu)]
-        if no_net:
-            args += ["--no-net"]
-        sf = None
-        if stdin:
-            with tempfile.NamedTemporaryFile(mode="w", prefix="cc-stdin-",
-                                             suffix=".txt", delete=False) as _sf:
-                _sf.write(stdin)
-                sf = _sf.name
-            args += ["--stdin-file", sf]
-
-        proc = await asyncio.create_subprocess_exec(
-            *args, stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-        proc.stdin.write(code.encode())
-        await proc.stdin.drain()
-        proc.stdin.close()
-
-        # tail run.out while the child runs; report progress + partial output
-        out_path = workdir / "run.out"
-        last_len = 0
-        partial = ""
-        while proc.returncode is None:
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=0.25)
-            except TimeoutError:
-                pass
-            if out_path.exists():
-                data = out_path.read_bytes()
-                if len(data) > last_len:
-                    chunk = data[last_len:].decode(errors="replace")
-                    partial += chunk
-                    last_len = len(data)
-                    if ctx is not None:
-                        try:
-                            await ctx.report_progress(
-                                progress=float(last_len), total=None,
-                                message=f"stdout so far: {last_len} bytes",
-                            )
-                        except Exception:
-                            pass
-
-        stdout_b, stderr_b = await proc.communicate()
-        if sf:
-            Path(sf).unlink(missing_ok=True)
+    async def report_progress(value: int, message: str) -> None:
+        if ctx is None:
+            return
         try:
-            result = json.loads(stdout_b.decode(errors="replace"))
-            if isinstance(result, dict) and "ok" in result:
-                result["streamed_partial"] = partial
-                # The fallback path sets streamed=False; this one set nothing at
-                # all, so `if not result["streamed"]` was true on the path that
-                # DID stream. Both branches now answer the same question.
-                result["streamed"] = True
-                # The binary's JSON carries no `backend` key — executor.execute
-                # adds it, and this path builds its own subprocess call instead
-                # of going through that function, so it was the one execution
-                # surface returning a result a caller could not attribute to a
-                # backend. Same reasoning as executor.execute's own comment:
-                # absent is indistinguishable from "an older build".
-                result["backend"] = "rust"
-                return result
-            return {"ok": False,
-                    "error": f"executor invalid output: {stderr_b[:200]!r}"}
-        except Exception as exc:
-            return {"ok": False, "error": f"stream failed: {exc}"}
-    finally:
-        executor._rmtree_checked(workdir, created_identity)
+            await ctx.report_progress(
+                progress=float(value), total=None, message=message
+            )
+        except Exception:
+            pass
+
+    return await _execution_service.execute_stream(
+        spec, provider_id=provider, on_progress=report_progress
+    )
 
 
 @mcp.tool()
@@ -1061,6 +973,22 @@ def main() -> None:
         # not exist, because a script wraps it and parses prose forever.
         rest = sys.argv[2:]
         raise SystemExit(_doctor(as_json="--json" in rest, deep="--deep" in rest))
+    if len(sys.argv) > 1 and sys.argv[1] == "serve-http":
+        rest = sys.argv[2:]
+        host = (rest[rest.index("--host") + 1]
+                if "--host" in rest and rest.index("--host") + 1 < len(rest)
+                else "127.0.0.1")
+        port_text = (rest[rest.index("--port") + 1]
+                     if "--port" in rest and rest.index("--port") + 1 < len(rest)
+                     else "8000")
+        mcp.run(
+            transport="streamable-http",
+            host=host,
+            port=int(port_text),
+            json_response=True,
+            stateless_http=True,
+        )
+        return
     mcp.run(transport="stdio")
 
 
