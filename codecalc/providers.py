@@ -9,6 +9,7 @@ one it does not implement fails explicitly.
 from __future__ import annotations
 
 import os
+import sys
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from typing import Protocol, runtime_checkable
@@ -110,6 +111,8 @@ class ExecutionProvider(Protocol):
 
     def execute(self, spec: ComputationSpec) -> dict: ...
 
+    def execute_managed(self, run_id: str, spec: ComputationSpec) -> dict: ...
+
     async def execute_stream(self, spec: ComputationSpec,
                              on_progress=None) -> dict: ...
 
@@ -180,6 +183,7 @@ class ProviderDescriptor:
     provider_id: str
     provider_version: str
     host_class: str
+    strict: bool
     capabilities: dict[str, bool]
 
     def to_dict(self) -> dict:
@@ -197,8 +201,10 @@ class LocalExecutionProvider:
             provider_id=self.provider_id,
             provider_version=__version__,
             host_class="local",
+            strict=False,
             capabilities={
                 "execute": True,
+                "managed_runs": False,
                 "inspect": False,
                 "stream": True,
                 "cancel": False,
@@ -236,6 +242,10 @@ class LocalExecutionProvider:
             max_cpu=spec.max_cpu,
             no_net=spec.no_net,
         )
+
+    def execute_managed(self, run_id: str, spec: ComputationSpec) -> dict:
+        del run_id, spec
+        raise UnsupportedCapability(self.provider_id, "managed_runs")
 
     async def execute_stream(self, spec: ComputationSpec,
                              on_progress=None) -> dict:
@@ -293,6 +303,7 @@ class PistonExecutionProvider:
             provider_id=self.provider_id,
             provider_version="api-v2",
             host_class="remote",
+            strict=False,
             capabilities={
                 "execute": True,
                 "inspect": False,
@@ -422,6 +433,10 @@ class PistonExecutionProvider:
         }
         return contract.stamp(_redact_secrets(result, self._secrets))
 
+    def execute_managed(self, run_id: str, spec: ComputationSpec) -> dict:
+        del run_id, spec
+        raise UnsupportedCapability(self.provider_id, "managed_runs")
+
     async def execute_stream(self, spec: ComputationSpec,
                              on_progress=None) -> dict:
         del spec, on_progress
@@ -456,6 +471,77 @@ class PistonExecutionProvider:
         raise UnsupportedCapability(self.provider_id, "sessions")
 
 
+def strict_host_platform() -> str:
+    if sys.platform.startswith("linux"):
+        return "linux"
+    if sys.platform == "darwin":
+        return "macos"
+    if os.name == "nt":
+        return "windows"
+    return "unsupported"
+
+
+class NativeStrictExecutionProvider(LocalExecutionProvider):
+    """Host strict provider that refuses work until its backend is verified."""
+
+    def __init__(self, platform_name: str) -> None:
+        self.platform_name = platform_name
+        self.provider_id = f"{platform_name}-strict"
+
+    def describe(self) -> dict:
+        return ProviderDescriptor(
+            interface_version=PROVIDER_INTERFACE_VERSION,
+            provider_id=self.provider_id,
+            provider_version=__version__,
+            host_class=self.platform_name,
+            strict=True,
+            capabilities={
+                "execute": True,
+                "managed_runs": True,
+                "inspect": True,
+                "stream": True,
+                "cancel": True,
+                "cleanup": True,
+                "files": False,
+                "artifacts": False,
+                "sessions": True,
+                "health": True,
+                "runtime_discovery": True,
+                "workdir": True,
+                "network_control": True,
+            },
+        ).to_dict()
+
+    def health(self) -> dict:
+        technology = {
+            "linux": "cgroup-v2+namespaces+seccomp+landlock",
+            "windows": "appcontainer+job-object",
+            "macos": "virtualization-framework",
+        }.get(self.platform_name, "unsupported")
+        return {
+            "provider_id": self.provider_id,
+            "provider_version": __version__,
+            "ready": False,
+            "strict": True,
+            "technology": technology,
+            "error": "strict backend prerequisites have not been verified",
+        }
+
+    def execute(self, spec: ComputationSpec) -> dict:
+        del spec
+        return contract.stamp(errors.error_result(
+            errors.INTERNAL,
+            f"{self.provider_id} is unavailable: strict backend prerequisites "
+            "have not been verified; refusing to run the payload",
+            provider_error="strict_provider_unavailable",
+            requested_provider=self.provider_id,
+        ))
+
+    def execute_managed(self, run_id: str, spec: ComputationSpec) -> dict:
+        del run_id
+        return self.execute(spec)
+
+
 def configured_registry(
     environment: Mapping[str, str] | None = None,
 ) -> ProviderRegistry:
@@ -465,6 +551,9 @@ def configured_registry(
         default_provider_id=env.get(DEFAULT_PROVIDER_ENV, "local")
     )
     registry.register(LocalExecutionProvider())
+    platform_name = strict_host_platform()
+    if platform_name != "unsupported":
+        registry.register(NativeStrictExecutionProvider(platform_name))
     piston_url = env.get(PISTON_URL_ENV, "").strip()
     if piston_url:
         registry.register(PistonExecutionProvider(

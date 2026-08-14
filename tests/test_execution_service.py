@@ -79,8 +79,10 @@ def test_mcp_adapter_publishes_provider_descriptors() -> None:
     descriptors = server.list_execution_providers()
 
     check("provider discovery returns a list", isinstance(descriptors, list))
-    check("provider discovery exposes the local provider",
-          [item["provider_id"] for item in descriptors] == ["local"])
+    provider_ids = [item["provider_id"] for item in descriptors]
+    check("provider discovery exposes local and host-strict providers",
+          "local" in provider_ids
+          and f"{providers.strict_host_platform()}-strict" in provider_ids)
     check("provider discovery exposes machine-readable capabilities",
           descriptors[0]["capabilities"]["execute"] is True)
 
