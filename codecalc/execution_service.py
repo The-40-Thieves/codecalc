@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from . import contract, errors, sessions
+from . import contract, errors, executor, registry, sessions
 from .providers import ComputationSpec, ProviderRegistry, UnknownProvider
 
 
@@ -119,3 +119,53 @@ class SessionService:
 
     def artifacts(self, session_id: str) -> dict:
         return sessions.artifacts(session_id)
+
+    def read_file(self, session_id: str, path: str, max_bytes: int = 65536,
+                  *, as_image: bool = False) -> dict:
+        """Read a workspace file without exposing MCP content types."""
+        if max_bytes < 0:
+            return {"ok": False, "error": "max_bytes must be non-negative"}
+        if not sessions._session_dir(session_id).is_dir():
+            return {"ok": False, "error": f"unknown session '{session_id}'"}
+        resource = sessions.resource_read(session_id, path)
+        if resource is None:
+            return {"ok": False, "error": f"no such file or file too large: {path}"}
+        data, mime_type = resource
+        is_image = mime_type.startswith("image/")
+        return {
+            "ok": True,
+            "path": path,
+            "size": len(data),
+            "content": data[:max_bytes].decode(errors="replace"),
+            "content_bytes": data,
+            "mime_type": mime_type if is_image else "application/octet-stream",
+            "is_image": is_image or as_image,
+            "truncated": len(data) > max_bytes,
+            "resource": f"codecalc://session/{session_id}/files/{path}",
+        }
+
+    def run_file(self, session_id: str, entry_file: str,
+                 language: str | None = None, stdin: str = "",
+                 timeout: int = 30) -> dict:
+        """Run a workspace entry file as a fresh process in its session."""
+        workdir = sessions._session_dir(session_id)
+        if not workdir.is_dir():
+            return {"ok": False, "error": f"unknown session '{session_id}'"}
+        resource = sessions.resource_read(session_id, entry_file)
+        if resource is None:
+            return {"ok": False, "error": f"no such file or file too large: {entry_file}"}
+        data, _mime_type = resource
+        if language is None:
+            extension = entry_file.rsplit(".", 1)[-1] if "." in entry_file else ""
+            by_extension = {value: key for key, value in registry.EXTENSIONS.items()}
+            language = by_extension.get(extension, "python3")
+        result = executor.execute(
+            language,
+            data.decode(errors="replace"),
+            stdin=stdin,
+            timeout=timeout,
+            workdir=str(workdir),
+        )
+        result["entry_file"] = entry_file
+        result["language"] = language
+        return result

@@ -14,7 +14,8 @@ Embedded Python callers may construct and use:
 - `execution_service.ExecutionService` for fresh execution, provider receipts,
   policy routing, and cross-provider verification;
 - `execution_service.SessionService` for session execution, lifecycle,
-  workspace files, and artifacts; and
+  bounded workspace reads, multi-file entry execution, workspace writes and
+  listings, and artifacts; and
 - the versioned result and provider contracts under `docs/contract/`.
 
 Adapters compile transport inputs into these request objects and return the
@@ -22,6 +23,11 @@ service result unchanged except for transport-only representation concerns,
 such as converting image bytes into an MCP `ImageContent`. Authorization and
 provider-routing policy belong at or below the shared service boundary, not in
 individual adapters.
+
+`SessionService.read_file()` returns bytes and MIME metadata without importing
+MCP types; adapters decide how to render those bytes. `SessionService.run_file()`
+executes an entry file in the session workspace so relative imports and data
+paths retain the same behavior across MCP and embedded callers.
 
 ## Not an embedding API
 

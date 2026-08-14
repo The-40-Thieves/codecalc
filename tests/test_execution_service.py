@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import base64
 import sys
 import tempfile
 from pathlib import Path
+
+from mcp.types import ImageContent
 
 from codecalc import contract, execution_service, providers, server, sessions
 
@@ -244,6 +247,45 @@ def test_session_service_owns_protocol_neutral_lifecycle_and_artifacts() -> None
           stopped["ok"] is True and stopped["deleted"] is True)
 
 
+def test_session_service_reads_bounded_files_and_runs_workspace_entries() -> None:
+    service_type = getattr(execution_service, "SessionService", None)
+    check("session service supports workspace reads and runs", service_type is not None)
+    if service_type is None:
+        return
+
+    old_root = sessions.SESSION_ROOT
+    with tempfile.TemporaryDirectory(prefix="codecalc-session-read-run-") as root:
+        sessions.SESSION_ROOT = Path(root)
+        try:
+            service = service_type()
+            started = service.start("bash")
+            session_id = started["session_id"]
+            service.write_file(session_id, "message.txt", "abcdef")
+            service.write_file(session_id, "main.sh", 'printf "workspace-run\\n"')
+            read = service.read_file(session_id, "message.txt", max_bytes=3)
+            run = service.run_file(session_id, "main.sh", timeout=10)
+            stopped = service.stop(session_id)
+        finally:
+            sessions.SESSION_ROOT = old_root
+
+    check("session service returns a protocol-neutral bounded read", read == {
+        "ok": True,
+        "path": "message.txt",
+        "size": 6,
+        "content": "abc",
+        "content_bytes": b"abcdef",
+        "mime_type": "application/octet-stream",
+        "is_image": False,
+        "truncated": True,
+        "resource": f"codecalc://session/{session_id}/files/message.txt",
+    })
+    check("session service infers and runs a workspace entry",
+          run["ok"] is True and run["stdout"] == "workspace-run\n")
+    check("workspace run reports its canonical entry and language",
+          run["entry_file"] == "main.sh" and run["language"] == "bash")
+    check("read/run test cleans up its workspace", stopped["deleted"] is True)
+
+
 def test_mcp_session_adapters_delegate_to_the_shared_service() -> None:
     calls: list[tuple] = []
 
@@ -272,6 +314,28 @@ def test_mcp_session_adapters_delegate_to_the_shared_service() -> None:
             calls.append(("artifacts", session_id))
             return {"operation": "artifacts"}
 
+        def read_file(self, session_id: str, path: str,
+                      max_bytes: int = 65536, *, as_image: bool = False) -> dict:
+            calls.append(("read", session_id, path, max_bytes, as_image))
+            return {
+                "operation": "read",
+                "ok": True,
+                "path": path,
+                "size": 3,
+                "content": "abc",
+                "content_bytes": b"abc",
+                "mime_type": "application/octet-stream",
+                "is_image": False,
+                "truncated": False,
+                "resource": f"codecalc://session/{session_id}/files/{path}",
+            }
+
+        def run_file(self, session_id: str, entry_file: str,
+                     language: str | None = None, stdin: str = "",
+                     timeout: int = 30) -> dict:
+            calls.append(("run", session_id, entry_file, language, stdin, timeout))
+            return {"operation": "run"}
+
     old_service = getattr(server, "_session_service", None)
     check("MCP server owns a shared session service", old_service is not None)
     if old_service is None:
@@ -285,13 +349,16 @@ def test_mcp_session_adapters_delegate_to_the_shared_service() -> None:
             server.session_files("sid", "data"),
             server.session_write_file("sid", "data/x", "value"),
             server.session_artifacts("sid"),
+            server.session_read_file("sid", "data/x", 7),
+            server.session_run("sid", "main.py", "python3", "input", 9),
         ]
     finally:
         server._session_service = old_service
 
     check("MCP session adapters preserve service results",
           [result["operation"] for result in results]
-          == ["start", "stop", "list", "files", "write", "artifacts"])
+          == ["start", "stop", "list", "files", "write", "artifacts",
+              "read", "run"])
     check("MCP session adapters preserve canonical arguments", calls == [
         ("start", "bash"),
         ("stop", "sid"),
@@ -299,7 +366,40 @@ def test_mcp_session_adapters_delegate_to_the_shared_service() -> None:
         ("files", "sid", "data"),
         ("write", "sid", "data/x", "value"),
         ("artifacts", "sid"),
+        ("read", "sid", "data/x", 7, False),
+        ("run", "sid", "main.py", "python3", "input", 9),
     ])
+
+
+def test_mcp_read_adapter_alone_converts_neutral_bytes_to_image_content() -> None:
+    class ImageSessionService:
+        def read_file(self, session_id: str, path: str,
+                      max_bytes: int = 65536, *, as_image: bool = False) -> dict:
+            del session_id, max_bytes, as_image
+            return {
+                "ok": True,
+                "path": path,
+                "size": 4,
+                "content": "",
+                "content_bytes": b"\x89PNG",
+                "mime_type": "image/png",
+                "is_image": True,
+                "truncated": False,
+                "resource": f"codecalc://session/sid/files/{path}",
+            }
+
+    old_service = server._session_service
+    server._session_service = ImageSessionService()
+    try:
+        result = server.session_read_file("sid", "plot.png")
+    finally:
+        server._session_service = old_service
+
+    check("image conversion remains an MCP adapter concern",
+          isinstance(result, ImageContent))
+    check("image adapter preserves bytes and MIME type",
+          result.data == base64.b64encode(b"\x89PNG").decode("ascii")
+          and result.mime_type == "image/png")
 
 
 def test_mcp_execute_adapter_routes_session_execution_through_the_service() -> None:
@@ -364,6 +464,8 @@ if __name__ == "__main__":
     test_service_verifies_one_workload_independently_across_two_providers()
     test_service_receipt_reports_requested_and_provider_enforced_limits()
     test_session_service_owns_protocol_neutral_lifecycle_and_artifacts()
+    test_session_service_reads_bounded_files_and_runs_workspace_entries()
     test_mcp_session_adapters_delegate_to_the_shared_service()
+    test_mcp_read_adapter_alone_converts_neutral_bytes_to_image_content()
     test_mcp_execute_adapter_routes_session_execution_through_the_service()
     sys.exit(1 if FAILS else 0)

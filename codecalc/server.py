@@ -40,7 +40,6 @@ from . import (
     optimization,
     packages,
     providers,
-    registry,
     runtimes,
     sessions,
     tools,
@@ -602,20 +601,13 @@ def session_read_file(session_id: str, path: str, max_bytes: int = 65536,
     file is returned as an inline image the model can see. Use session_files
     to discover paths; session_artifacts lists what executed code produced.
     """
-    d = sessions._session_dir(session_id)
-    if not d.is_dir():
-        return {"ok": False, "error": f"unknown session '{session_id}'"}
-    target = sessions._jail(d, path)
-    if not target.is_file():
-        return {"ok": False, "error": f"no such file: {path}"}
-
-    import mimetypes
-    mime, _ = mimetypes.guess_type(str(target))
-    is_image = bool(mime and mime.startswith("image/"))
-
-    if is_image or as_image:
-        if target.stat().st_size > 4 * 1024 * 1024:
-            return {"ok": False, "error": "image too large (>4MiB)"}
+    result = _session_service.read_file(
+        session_id, path, max_bytes=max_bytes, as_image=as_image
+    )
+    if not result.get("ok"):
+        return result
+    data = result.pop("content_bytes")
+    if result.pop("is_image"):
         # fastmcp's Image(path=...) helper has no counterpart in the official
         # SDK; ImageContent is the protocol type and wants base64 itself.
         # as_image=True on a non-image file is honoured deliberately: the caller
@@ -623,16 +615,12 @@ def session_read_file(session_id: str, path: str, max_bytes: int = 65536,
         # rather than refusing.
         return ImageContent(
             type="image",
-            data=base64.b64encode(target.read_bytes()).decode("ascii"),
-            mimeType=mime if is_image else "image/png",
+            data=base64.b64encode(data).decode("ascii"),
+            mimeType=(result.pop("mime_type")
+                      if result["mime_type"].startswith("image/") else "image/png"),
         )
-
-    data = target.read_bytes()
-    truncated = len(data) > max_bytes
-    return {"ok": True, "path": path, "size": len(data),
-            "content": data[:max_bytes].decode(errors="replace"),
-            "truncated": truncated,
-            "resource": f"codecalc://session/{session_id}/files/{path}"}
+    result.pop("mime_type")
+    return result
 
 
 @mcp.tool()
@@ -645,25 +633,9 @@ def session_run(session_id: str, entry_file: str, language: str | None = None,
     relative imports and data files resolve. Returns stdout/stderr/verdict
     plus the entry file's path.
     """
-    d = sessions._session_dir(session_id)
-    if not d.is_dir():
-        return {"ok": False, "error": f"unknown session '{session_id}'"}
-    target = sessions._jail(d, entry_file)
-    if not target.is_file():
-        return {"ok": False, "error": f"no such file: {entry_file}"}
-
-    # infer language from extension if not given
-    if language is None:
-        ext = target.suffix.lstrip(".")
-        by_ext = {v: k for k, v in registry.EXTENSIONS.items()}
-        language = by_ext.get(ext, "python3")
-
-    code = target.read_text(errors="replace")
-    result = executor.execute(language, code, stdin=stdin, timeout=timeout,
-                              workdir=str(d))
-    result["entry_file"] = entry_file
-    result["language"] = language
-    return result
+    return _session_service.run_file(
+        session_id, entry_file, language=language, stdin=stdin, timeout=timeout
+    )
 
 
 @mcp.tool()
