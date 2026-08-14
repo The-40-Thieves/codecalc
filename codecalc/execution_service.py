@@ -6,6 +6,34 @@ from . import contract, errors
 from .providers import ComputationSpec, ProviderRegistry, UnknownProvider
 
 
+def _limit_receipt(spec: ComputationSpec, result: dict) -> dict:
+    disclosures = [str(item) for item in result.get("unenforced") or []]
+    disclosure_text = "\n".join(disclosures).lower()
+    requested_controls = (
+        ("timeout", spec.timeout > 0, ("timeout",)),
+        ("max_memory_mb", spec.max_memory_mb > 0, ("memory",)),
+        ("max_output_kb", spec.max_output_kb > 0, ("output",)),
+        ("max_cpu", spec.max_cpu > 0, ("cpu",)),
+        ("no_net", spec.no_net, ("no_net", "network")),
+    )
+    reported_enforced = [
+        name
+        for name, requested, markers in requested_controls
+        if requested and not any(marker in disclosure_text for marker in markers)
+    ]
+    return {
+        "requested": {
+            "timeout_seconds": spec.timeout,
+            "max_memory_mb": spec.max_memory_mb,
+            "max_output_kb": spec.max_output_kb,
+            "max_cpu_seconds": spec.max_cpu,
+            "no_net": spec.no_net,
+        },
+        "provider_reported_enforced": reported_enforced,
+        "unenforced": disclosures,
+    }
+
+
 class ExecutionService:
     """Select an execution provider and preserve CodeCalc's result contract."""
 
@@ -33,6 +61,7 @@ class ExecutionService:
             "provider_id": descriptor["provider_id"],
             "provider_version": descriptor["provider_version"],
             "host_class": descriptor["host_class"],
+            "limits": _limit_receipt(spec, result),
         }
         return contract.stamp(result)
 

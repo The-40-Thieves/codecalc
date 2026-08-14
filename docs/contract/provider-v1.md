@@ -44,7 +44,12 @@ explicit ID returns a validation result carrying `provider_error` set to
 `unknown_provider`; it never falls back.
 
 Every successful execution receipt carries provider ID, provider version,
-interface version, and host class. Compact results retain this provenance.
+interface version, host class, and a `limits` object. The limits receipt records
+the canonical requested values, the controls the provider reports as enforced,
+and the exact `unenforced` disclosures returned with the result. “Provider
+reported” is deliberate: CodeCalc preserves the backend's enforcement claim; it
+does not independently attest to a remote host's configuration. Compact results
+retain this provenance.
 
 Cross-provider verification executes the same immutable `ComputationSpec`
 independently through two explicitly selected providers. It compares semantic

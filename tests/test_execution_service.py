@@ -151,6 +151,63 @@ def test_service_verifies_one_workload_independently_across_two_providers() -> N
           result["contract_version"] == contract.CONTRACT_VERSION)
 
 
+def test_service_receipt_reports_requested_and_provider_enforced_limits() -> None:
+    class LimitProvider(providers.LocalExecutionProvider):
+        provider_id = "limits"
+
+        def describe(self) -> dict:
+            descriptor = super().describe()
+            descriptor["provider_id"] = self.provider_id
+            return descriptor
+
+        def execute(self, spec: providers.ComputationSpec) -> dict:
+            del spec
+            return contract.stamp({
+                "ok": True,
+                "verdict": "OK",
+                "stdout": "",
+                "stderr": "",
+                "exit_code": 0,
+                "unenforced": [
+                    "max_output_kb_enforced_after_provider_response",
+                    "no_net_unavailable_on_test_provider",
+                ],
+            })
+
+    registry = providers.ProviderRegistry(default_provider_id="limits")
+    registry.register(LimitProvider())
+    service = execution_service.ExecutionService(registry)
+
+    result = service.execute(providers.ComputationSpec(
+        language="python3",
+        code="pass",
+        timeout=7,
+        max_memory_mb=32,
+        max_output_kb=4,
+        max_cpu=2,
+        no_net=True,
+    ))
+    limits = result["provider"]["limits"]
+
+    check("receipt records every requested resource control",
+          limits["requested"] == {
+              "timeout_seconds": 7,
+              "max_memory_mb": 32,
+              "max_output_kb": 4,
+              "max_cpu_seconds": 2,
+              "no_net": True,
+          })
+    check("receipt names controls the provider reports as enforced",
+          limits["provider_reported_enforced"] == [
+              "timeout", "max_memory_mb", "max_cpu"
+          ])
+    check("receipt retains exact unenforced disclosures",
+          limits["unenforced"] == [
+              "max_output_kb_enforced_after_provider_response",
+              "no_net_unavailable_on_test_provider",
+          ])
+
+
 if __name__ == "__main__":
     test_service_routes_a_canonical_spec_and_records_provider_identity()
     test_service_rejects_an_unknown_provider_without_falling_back()
@@ -159,4 +216,5 @@ if __name__ == "__main__":
     test_mcp_adapter_publishes_provider_descriptors()
     test_service_applies_policy_routing_when_selection_is_not_explicit()
     test_service_verifies_one_workload_independently_across_two_providers()
+    test_service_receipt_reports_requested_and_provider_enforced_limits()
     sys.exit(1 if FAILS else 0)
