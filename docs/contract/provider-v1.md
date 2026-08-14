@@ -45,6 +45,11 @@ explicit ID returns a validation result carrying `provider_error` set to
 Every successful execution receipt carries provider ID, provider version,
 interface version, and host class. Compact results retain this provenance.
 
+Cross-provider verification executes the same immutable `ComputationSpec`
+independently through two explicitly selected providers. It compares semantic
+result fields (`ok`, verdict, stdout, stderr, and exit code), excludes timing and
+resource telemetry from agreement, and retains both provider receipts.
+
 ## Versioning policy
 
 The interface uses semantic versioning independently of the execution-result

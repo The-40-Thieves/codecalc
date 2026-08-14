@@ -108,6 +108,49 @@ def test_service_applies_policy_routing_when_selection_is_not_explicit() -> None
           result["provider"]["provider_id"] == "remote")
 
 
+def test_service_verifies_one_workload_independently_across_two_providers() -> None:
+    class RecordingProvider(providers.LocalExecutionProvider):
+        def __init__(self, provider_id: str, stdout: str) -> None:
+            self.provider_id = provider_id
+            self.stdout = stdout
+            self.calls: list[providers.ComputationSpec] = []
+
+        def describe(self) -> dict:
+            descriptor = super().describe()
+            descriptor["provider_id"] = self.provider_id
+            return descriptor
+
+        def execute(self, spec: providers.ComputationSpec) -> dict:
+            self.calls.append(spec)
+            return contract.stamp({
+                "ok": True,
+                "verdict": "OK",
+                "stdout": self.stdout,
+                "stderr": "",
+                "exit_code": 0,
+            })
+
+    left = RecordingProvider("left", "same\n")
+    right = RecordingProvider("right", "same\n")
+    registry = providers.ProviderRegistry(default_provider_id="left")
+    registry.register(left)
+    registry.register(right)
+    service = execution_service.ExecutionService(registry)
+    spec = providers.ComputationSpec(language="python3", code='print("same")')
+
+    result = service.verify_across_providers(spec, "left", "right")
+
+    check("cross-provider verification reports agreement",
+          result["agreement"] is True)
+    check("cross-provider verification runs each provider once",
+          left.calls == [spec] and right.calls == [spec])
+    check("cross-provider verification keeps both receipts",
+          [item["provider"]["provider_id"] for item in result["results"]]
+          == ["left", "right"])
+    check("cross-provider verification carries the result contract",
+          result["contract_version"] == contract.CONTRACT_VERSION)
+
+
 if __name__ == "__main__":
     test_service_routes_a_canonical_spec_and_records_provider_identity()
     test_service_rejects_an_unknown_provider_without_falling_back()
@@ -115,4 +158,5 @@ if __name__ == "__main__":
     test_compact_results_keep_provider_identity()
     test_mcp_adapter_publishes_provider_descriptors()
     test_service_applies_policy_routing_when_selection_is_not_explicit()
+    test_service_verifies_one_workload_independently_across_two_providers()
     sys.exit(1 if FAILS else 0)

@@ -9,6 +9,8 @@ from .providers import ComputationSpec, ProviderRegistry, UnknownProvider
 class ExecutionService:
     """Select an execution provider and preserve CodeCalc's result contract."""
 
+    _VERIFICATION_FIELDS = ("ok", "verdict", "stdout", "stderr", "exit_code")
+
     def __init__(self, registry: ProviderRegistry) -> None:
         self.registry = registry
 
@@ -33,3 +35,23 @@ class ExecutionService:
             "host_class": descriptor["host_class"],
         }
         return contract.stamp(result)
+
+    def verify_across_providers(self, spec: ComputationSpec,
+                                first_provider_id: str,
+                                second_provider_id: str) -> dict:
+        """Execute one canonical request twice and compare semantic outputs."""
+        results = [
+            self.execute(spec, provider_id=first_provider_id),
+            self.execute(spec, provider_id=second_provider_id),
+        ]
+        comparison = {
+            field: results[0].get(field) == results[1].get(field)
+            for field in self._VERIFICATION_FIELDS
+        }
+        agreement = all(comparison.values())
+        return contract.stamp({
+            "ok": agreement and all(result.get("ok") is True for result in results),
+            "agreement": agreement,
+            "comparison": comparison,
+            "results": results,
+        })
