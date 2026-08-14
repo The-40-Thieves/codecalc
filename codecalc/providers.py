@@ -8,12 +8,63 @@ one it does not implement fails explicitly.
 
 from __future__ import annotations
 
+import json
+import os
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from typing import Protocol, runtime_checkable
+from urllib.parse import urlsplit
+from urllib.request import Request, urlopen
 
-from . import __version__, executor
+from . import __version__, contract, executor
 
 PROVIDER_INTERFACE_VERSION = "1.0.0"
+DEFAULT_PROVIDER_ENV = "CODECALC_EXECUTION_PROVIDER"
+PISTON_URL_ENV = "CODECALC_PISTON_URL"
+PISTON_AUTHORIZATION_ENV = "CODECALC_PISTON_AUTHORIZATION"
+ProviderTransport = Callable[[str, str, dict[str, str], dict | None, int], object]
+
+
+def _redact_secrets(value: object, secrets: tuple[str, ...]) -> object:
+    if isinstance(value, str):
+        for secret in secrets:
+            value = value.replace(secret, "[REDACTED]")
+        return value
+    if isinstance(value, list):
+        return [_redact_secrets(item, secrets) for item in value]
+    if isinstance(value, dict):
+        return {key: _redact_secrets(item, secrets) for key, item in value.items()}
+    return value
+
+
+def _truncate_utf8(value: str, max_bytes: int) -> str:
+    return value.encode()[:max_bytes].decode(errors="ignore")
+
+
+class PistonHTTPTransport:
+    """Small JSON transport for Piston, injectable at the network boundary."""
+
+    def __init__(self, base_url: str, *, opener: Callable = urlopen) -> None:
+        parsed = urlsplit(base_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("Piston base_url must be an absolute HTTP(S) URL")
+        self.base_url = base_url.rstrip("/")
+        self._opener = opener
+
+    def __call__(self, method: str, path: str, headers: dict[str, str],
+                 payload: dict | None, timeout: int) -> object:
+        body = json.dumps(payload).encode() if payload is not None else None
+        request_headers = dict(headers)
+        if body is not None:
+            request_headers["Content-Type"] = "application/json"
+        request = Request(  # noqa: S310 -- constructor rejects non-HTTP(S) URLs
+            f"{self.base_url}/{path.lstrip('/')}",
+            data=body,
+            headers=request_headers,
+            method=method,
+        )
+        with self._opener(request, timeout=timeout) as response:
+            return json.loads(response.read().decode())
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,6 +227,7 @@ class LocalExecutionProvider:
                 "sessions": False,
                 "health": True,
                 "runtime_discovery": True,
+                "workdir": True,
                 "network_control": executor.backend() == "rust",
             },
         ).to_dict()
@@ -219,3 +271,169 @@ class LocalExecutionProvider:
     def list_files(self, run_id: str) -> list[dict]:
         del run_id
         raise UnsupportedCapability(self.provider_id, "files")
+
+
+class PistonExecutionProvider:
+    """Adapter for a self-hosted Piston v2 HTTP API."""
+
+    provider_id = "piston"
+
+    def __init__(self, *, base_url: str, transport: ProviderTransport | None = None,
+                 authorization: str | None = None) -> None:
+        self.base_url = base_url.rstrip("/")
+        self._transport = transport or PistonHTTPTransport(self.base_url)
+        self._headers = ({"Authorization": authorization} if authorization else {})
+        raw_credential = authorization.split(maxsplit=1)[-1] if authorization else ""
+        self._secrets = tuple(sorted(
+            {item for item in (authorization, raw_credential) if item},
+            key=len,
+            reverse=True,
+        ))
+
+    def describe(self) -> dict:
+        return ProviderDescriptor(
+            interface_version=PROVIDER_INTERFACE_VERSION,
+            provider_id=self.provider_id,
+            provider_version="api-v2",
+            host_class="remote",
+            capabilities={
+                "execute": True,
+                "inspect": False,
+                "stream": False,
+                "cancel": False,
+                "cleanup": False,
+                "files": False,
+                "artifacts": False,
+                "sessions": False,
+                "health": True,
+                "runtime_discovery": True,
+                "workdir": False,
+                "network_control": False,
+            },
+        ).to_dict()
+
+    def health(self) -> dict:
+        self.list_runtimes()
+        return {
+            "provider_id": self.provider_id,
+            "provider_version": "api-v2",
+            "ready": True,
+        }
+
+    def list_runtimes(self) -> list[dict]:
+        result = self._transport(
+            "GET", "/api/v2/runtimes", dict(self._headers), None, 10
+        )
+        return list(result) if isinstance(result, list) else []
+
+    def execute(self, spec: ComputationSpec) -> dict:
+        if spec.no_net:
+            raise UnsupportedCapability(self.provider_id, "network_control")
+        if spec.workdir is not None:
+            raise UnsupportedCapability(self.provider_id, "workdir")
+        timeout_ms = spec.timeout * 1000
+        payload = {
+            "language": spec.language,
+            "version": "*",
+            "files": [{"content": spec.code}],
+            "stdin": spec.stdin,
+            "compile_timeout": timeout_ms,
+            "run_timeout": timeout_ms,
+            "compile_cpu_time": spec.max_cpu * 1000,
+            "run_cpu_time": spec.max_cpu * 1000,
+            "compile_memory_limit": spec.max_memory_mb * 1024 * 1024,
+            "run_memory_limit": spec.max_memory_mb * 1024 * 1024,
+        }
+        response = self._transport(
+            "POST", "/api/v2/execute", dict(self._headers), payload,
+            spec.timeout + 5,
+        )
+        data = response if isinstance(response, dict) else {}
+        run = data.get("run") if isinstance(data.get("run"), dict) else {}
+        stdout = str(run.get("stdout") or "")
+        stderr = str(run.get("stderr") or "")
+        stdout_bytes = len(stdout.encode())
+        stderr_bytes = len(stderr.encode())
+        client_output_overflow = False
+        unenforced: list[str] = []
+        if spec.max_output_kb > 0:
+            output_cap = spec.max_output_kb * 1024
+            client_output_overflow = stdout_bytes + stderr_bytes > output_cap
+            stdout = _truncate_utf8(stdout, output_cap)
+            remaining = max(0, output_cap - len(stdout.encode()))
+            stderr = _truncate_utf8(stderr, remaining)
+            unenforced.append("max_output_kb_enforced_after_provider_response")
+        exit_code = run.get("code")
+        duration_ms = int(run.get("wall_time") or 0)
+        cpu_ms = int(run.get("cpu_time") or 0)
+        memory_bytes = run.get("memory")
+        peak_memory_kb = (int(memory_bytes) // 1024
+                          if isinstance(memory_bytes, int) else None)
+        status = run.get("status")
+        timed_out = status == "TO"
+        output_truncated = status in {"OL", "EL"} or client_output_overflow
+        if timed_out:
+            verdict = "TLE"
+        elif output_truncated:
+            verdict = "OLE"
+        else:
+            verdict = "OK" if exit_code == 0 else "RTE"
+        ok = verdict == "OK"
+        result = {
+            "ok": ok,
+            "language": spec.language,
+            "phase": "run",
+            "backend": "python",
+            "platform": "remote",
+            "stdout": stdout,
+            "stderr": stderr,
+            "exit_code": exit_code,
+            "timed_out": timed_out,
+            "verdict": verdict,
+            "output_truncated": output_truncated,
+            "output_error": None,
+            "duration_ms": duration_ms,
+            "compile_ms": 0,
+            "total_ms": duration_ms,
+            "cpu_ms": cpu_ms,
+            "peak_memory_kb": peak_memory_kb,
+            "unenforced": unenforced,
+            "workdir": "piston:ephemeral",
+            "stdout_bytes": stdout_bytes,
+            "stderr_bytes": stderr_bytes,
+        }
+        return contract.stamp(_redact_secrets(result, self._secrets))
+
+    def cancel(self, run_id: str) -> None:
+        del run_id
+        raise UnsupportedCapability(self.provider_id, "cancel")
+
+    def cleanup(self, run_id: str) -> None:
+        del run_id
+        raise UnsupportedCapability(self.provider_id, "cleanup")
+
+    def collect_artifacts(self, run_id: str) -> list[dict]:
+        del run_id
+        raise UnsupportedCapability(self.provider_id, "artifacts")
+
+    def list_files(self, run_id: str) -> list[dict]:
+        del run_id
+        raise UnsupportedCapability(self.provider_id, "files")
+
+
+def configured_registry(
+    environment: Mapping[str, str] | None = None,
+) -> ProviderRegistry:
+    """Build the provider registry from process configuration."""
+    env = os.environ if environment is None else environment
+    registry = ProviderRegistry(
+        default_provider_id=env.get(DEFAULT_PROVIDER_ENV, "local")
+    )
+    registry.register(LocalExecutionProvider())
+    piston_url = env.get(PISTON_URL_ENV, "").strip()
+    if piston_url:
+        registry.register(PistonExecutionProvider(
+            base_url=piston_url,
+            authorization=env.get(PISTON_AUTHORIZATION_ENV) or None,
+        ))
+    return registry

@@ -49,8 +49,7 @@ from . import (
 )
 from .mcp_middleware import timeout_middleware
 
-_provider_registry = providers.ProviderRegistry(default_provider_id="local")
-_provider_registry.register(providers.LocalExecutionProvider())
+_provider_registry = providers.configured_registry()
 _execution_service = execution_service.ExecutionService(_provider_registry)
 
 mcp = MCPServer(
