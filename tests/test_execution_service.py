@@ -79,10 +79,40 @@ def test_mcp_adapter_publishes_provider_descriptors() -> None:
           descriptors[0]["capabilities"]["execute"] is True)
 
 
+def test_service_applies_policy_routing_when_selection_is_not_explicit() -> None:
+    class RemoteProvider(providers.LocalExecutionProvider):
+        provider_id = "remote"
+
+        def describe(self) -> dict:
+            descriptor = super().describe()
+            descriptor["provider_id"] = self.provider_id
+            return descriptor
+
+    class RemotePolicy:
+        def select_provider(self, spec: providers.ComputationSpec,
+                            descriptors: list[dict]) -> str | None:
+            return "remote"
+
+    registry = providers.ProviderRegistry(
+        default_provider_id="local", policy=RemotePolicy()
+    )
+    registry.register(providers.LocalExecutionProvider())
+    registry.register(RemoteProvider())
+    service = execution_service.ExecutionService(registry)
+
+    result = service.execute(
+        providers.ComputationSpec(language="python3", code='print("policy")')
+    )
+
+    check("service uses the provider selected by policy",
+          result["provider"]["provider_id"] == "remote")
+
+
 if __name__ == "__main__":
     test_service_routes_a_canonical_spec_and_records_provider_identity()
     test_service_rejects_an_unknown_provider_without_falling_back()
     test_mcp_adapter_accepts_explicit_local_provider_selection()
     test_compact_results_keep_provider_identity()
     test_mcp_adapter_publishes_provider_descriptors()
+    test_service_applies_policy_routing_when_selection_is_not_explicit()
     sys.exit(1 if FAILS else 0)

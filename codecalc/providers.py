@@ -85,12 +85,28 @@ class ExecutionProvider(Protocol):
 
     def cancel(self, run_id: str) -> None: ...
 
+    def cleanup(self, run_id: str) -> None: ...
+
+    def collect_artifacts(self, run_id: str) -> list[dict]: ...
+
+    def list_files(self, run_id: str) -> list[dict]: ...
+
+
+@runtime_checkable
+class ProviderSelectionPolicy(Protocol):
+    """Choose a provider from a canonical request and current descriptors."""
+
+    def select_provider(self, spec: ComputationSpec,
+                        descriptors: list[dict]) -> str | None: ...
+
 
 class ProviderRegistry:
     """Provider discovery and deterministic explicit/default selection."""
 
-    def __init__(self, *, default_provider_id: str) -> None:
+    def __init__(self, *, default_provider_id: str,
+                 policy: ProviderSelectionPolicy | None = None) -> None:
         self.default_provider_id = default_provider_id
+        self.policy = policy
         self._providers: dict[str, ExecutionProvider] = {}
 
     def register(self, provider: ExecutionProvider) -> None:
@@ -105,8 +121,12 @@ class ProviderRegistry:
             )
         self._providers[provider.provider_id] = provider
 
-    def select(self, provider_id: str | None = None) -> ExecutionProvider:
-        selected = provider_id or self.default_provider_id
+    def select(self, provider_id: str | None = None, *,
+               spec: ComputationSpec | None = None) -> ExecutionProvider:
+        selected = provider_id
+        if selected is None and self.policy is not None and spec is not None:
+            selected = self.policy.select_provider(spec, self.descriptors())
+        selected = selected or self.default_provider_id
         try:
             return self._providers[selected]
         except KeyError:
@@ -170,3 +190,15 @@ class LocalExecutionProvider:
     def cancel(self, run_id: str) -> None:
         del run_id
         raise UnsupportedCapability(self.provider_id, "cancel")
+
+    def cleanup(self, run_id: str) -> None:
+        del run_id
+        raise UnsupportedCapability(self.provider_id, "cleanup")
+
+    def collect_artifacts(self, run_id: str) -> list[dict]:
+        del run_id
+        raise UnsupportedCapability(self.provider_id, "artifacts")
+
+    def list_files(self, run_id: str) -> list[dict]:
+        del run_id
+        raise UnsupportedCapability(self.provider_id, "files")

@@ -6,6 +6,8 @@ import json
 import sys
 from pathlib import Path
 
+from _provider_conformance import run_execution_conformance
+
 from codecalc import contract, providers
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -123,6 +125,44 @@ def test_registry_rejects_an_incompatible_provider_interface() -> None:
         check("incompatible provider cannot be registered", False)
 
 
+def test_policy_routing_receives_the_spec_and_explicit_selection_wins() -> None:
+    class RemoteProvider(providers.LocalExecutionProvider):
+        provider_id = "remote"
+
+        def describe(self) -> dict:
+            descriptor = super().describe()
+            descriptor["provider_id"] = self.provider_id
+            descriptor["host_class"] = "test-region"
+            return descriptor
+
+    class NoNetworkPolicy:
+        def __init__(self) -> None:
+            self.seen: providers.ComputationSpec | None = None
+
+        def select_provider(self, spec: providers.ComputationSpec,
+                            descriptors: list[dict]) -> str | None:
+            self.seen = spec
+            return "remote" if spec.no_net else None
+
+    policy = NoNetworkPolicy()
+    local = providers.LocalExecutionProvider()
+    remote = RemoteProvider()
+    registry = providers.ProviderRegistry(default_provider_id="local", policy=policy)
+    registry.register(local)
+    registry.register(remote)
+    spec = providers.ComputationSpec(language="python3", code="pass", no_net=True)
+
+    check("policy can route from the canonical request",
+          registry.select(spec=spec) is remote)
+    check("policy receives the canonical request", policy.seen is spec)
+    check("explicit selection overrides routing policy",
+          registry.select("local", spec=spec) is local)
+
+
+def test_local_provider_passes_the_shared_execution_conformance_suite() -> None:
+    run_execution_conformance(providers.LocalExecutionProvider(), check)
+
+
 if __name__ == "__main__":
     test_descriptor_is_versioned_and_machine_readable()
     test_local_provider_preserves_the_execution_result_contract()
@@ -131,4 +171,6 @@ if __name__ == "__main__":
     test_unknown_provider_fails_with_a_stable_machine_code()
     test_provider_interface_is_published_with_its_versioning_policy()
     test_registry_rejects_an_incompatible_provider_interface()
+    test_policy_routing_receives_the_spec_and_explicit_selection_wins()
+    test_local_provider_passes_the_shared_execution_conformance_suite()
     sys.exit(1 if FAILS else 0)

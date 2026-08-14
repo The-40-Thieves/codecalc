@@ -14,7 +14,7 @@ class ExecutionService:
 
     def execute(self, spec: ComputationSpec, *, provider_id: str | None = None) -> dict:
         try:
-            provider = self.registry.select(provider_id)
+            provider = self.registry.select(provider_id, spec=spec)
         except UnknownProvider as exc:
             return contract.stamp(errors.error_result(
                 errors.VALIDATION,
