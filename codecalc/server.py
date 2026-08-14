@@ -165,7 +165,9 @@ def list_languages() -> list[dict]:
 #: What a compact result ALWAYS carries.
 _COMPACT_ALWAYS = ("ok", "verdict", "stdout", "exit_code")
 
-#: Disclosure fields, carried at EVERY verbosity whenever they say something.
+#: Disclosure and provenance fields, carried at EVERY verbosity whenever they
+#: say something. Provider identity is part of the execution receipt, not a
+#: diagnostic detail, so compact mode must retain it too.
 #:
 #: These are the reason compact mode was a defect rather than a trade-off (#117).
 #: The old implementation returned exactly _COMPACT_ALWAYS, so
@@ -178,7 +180,7 @@ _COMPACT_ALWAYS = ("ok", "verdict", "stdout", "exit_code")
 #: `total_ms` are diagnostics a caller can live without, and `unenforced` is
 #: not. An empty `unenforced` is omitted because it costs tokens to say
 #: nothing; a non-empty one is the entire point of the field.
-_COMPACT_DISCLOSURE = ("unenforced", "output_error")
+_COMPACT_DISCLOSURE = ("unenforced", "output_error", "provider")
 
 
 def compact_result(result: dict) -> dict:

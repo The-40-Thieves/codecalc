@@ -59,8 +59,19 @@ def test_mcp_adapter_accepts_explicit_local_provider_selection() -> None:
           result["provider"]["provider_id"] == "local")
 
 
+def test_compact_results_keep_provider_identity() -> None:
+    result = server.execute_code(
+        "python3", 'print("compact")', provider="local", compact=True
+    )
+
+    check("compact execution succeeds", result["ok"] is True)
+    check("compact result keeps provider identity",
+          result.get("provider", {}).get("provider_id") == "local")
+
+
 if __name__ == "__main__":
     test_service_routes_a_canonical_spec_and_records_provider_identity()
     test_service_rejects_an_unknown_provider_without_falling_back()
     test_mcp_adapter_accepts_explicit_local_provider_selection()
+    test_compact_results_keep_provider_identity()
     sys.exit(1 if FAILS else 0)

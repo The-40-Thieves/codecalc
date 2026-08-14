@@ -58,6 +58,21 @@ class UnknownProvider(LookupError):
         )
 
 
+class ProviderInterfaceMismatch(ValueError):
+    """A provider implements an incompatible major interface version."""
+
+    code = "provider_interface_mismatch"
+
+    def __init__(self, provider_id: str, offered: str, required: str) -> None:
+        self.provider_id = provider_id
+        self.offered = offered
+        self.required = required
+        super().__init__(
+            f"provider {provider_id!r} implements interface {offered!r}; "
+            f"CodeCalc requires a compatible {required!r} interface"
+        )
+
+
 @runtime_checkable
 class ExecutionProvider(Protocol):
     """The provider surface implemented independently of MCP or HTTP."""
@@ -81,6 +96,13 @@ class ProviderRegistry:
     def register(self, provider: ExecutionProvider) -> None:
         if provider.provider_id in self._providers:
             raise ValueError(f"provider {provider.provider_id!r} is already registered")
+        offered = str(provider.describe().get("interface_version", ""))
+        offered_major = offered.split(".", 1)[0]
+        required_major = PROVIDER_INTERFACE_VERSION.split(".", 1)[0]
+        if not offered_major.isdigit() or offered_major != required_major:
+            raise ProviderInterfaceMismatch(
+                provider.provider_id, offered, PROVIDER_INTERFACE_VERSION
+            )
         self._providers[provider.provider_id] = provider
 
     def select(self, provider_id: str | None = None) -> ExecutionProvider:

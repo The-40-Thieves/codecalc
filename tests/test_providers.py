@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 
 from codecalc import contract, providers
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 FAILS: list[str] = []
 
@@ -85,10 +88,47 @@ def test_unknown_provider_fails_with_a_stable_machine_code() -> None:
         check("unknown provider cannot silently select a fallback", False)
 
 
+def test_provider_interface_is_published_with_its_versioning_policy() -> None:
+    path = REPO_ROOT / "docs" / "contract" / "provider-v1.md"
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+
+    check("provider interface documentation is published", bool(text))
+    check("provider documentation names the current interface version",
+          providers.PROVIDER_INTERFACE_VERSION in text)
+    check("provider documentation defines capability-driven degradation",
+          "unsupported_capability" in text)
+    check("provider documentation defines compatibility rules",
+          "Versioning policy" in text)
+
+
+def test_registry_rejects_an_incompatible_provider_interface() -> None:
+    class FutureProvider(providers.LocalExecutionProvider):
+        provider_id = "future"
+
+        def describe(self) -> dict:
+            descriptor = super().describe()
+            descriptor["provider_id"] = self.provider_id
+            descriptor["interface_version"] = "2.0.0"
+            return descriptor
+
+    registry = providers.ProviderRegistry(default_provider_id="local")
+    try:
+        registry.register(FutureProvider())
+    except providers.ProviderInterfaceMismatch as exc:
+        check("interface mismatch identifies its provider", exc.provider_id == "future")
+        check("interface mismatch identifies the offered version", exc.offered == "2.0.0")
+        check("interface mismatch carries a stable code",
+              exc.code == "provider_interface_mismatch")
+    else:
+        check("incompatible provider cannot be registered", False)
+
+
 if __name__ == "__main__":
     test_descriptor_is_versioned_and_machine_readable()
     test_local_provider_preserves_the_execution_result_contract()
     test_unsupported_provider_capability_fails_explicitly()
     test_registry_supports_default_and_explicit_provider_selection()
     test_unknown_provider_fails_with_a_stable_machine_code()
+    test_provider_interface_is_published_with_its_versioning_policy()
+    test_registry_rejects_an_incompatible_provider_interface()
     sys.exit(1 if FAILS else 0)
