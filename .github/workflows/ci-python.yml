@@ -161,6 +161,14 @@ jobs:
           assert not any(r['status'] == 'available' for r in d['runtimes']), \
               'nothing was executed, so nothing may claim to be available'
           "
+      # Pure launch-contract tests run on every client OS. They do not require
+      # Docker: an injected command runner proves the argv, fail-closed probe,
+      # ownership checks, and gvisor-v1 receipt are platform-neutral.
+      - name: strict provider and gVisor launch contract
+        shell: bash
+        run: |
+          uv run --no-sync python tests/test_strict_providers.py
+          uv run --no-sync python tests/test_gvisor_runtime.py
       - name: calc parity
         shell: bash
         run: uv run --no-sync python tests/test_calc_port.py

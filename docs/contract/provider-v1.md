@@ -107,12 +107,18 @@ service. `CODECALC_STRICT_AUTHORIZATION` is sent only in the Authorization
 header and is redacted from errors and metadata.
 
 Before sending source, the adapter requires `/v1/health` to report a compatible
-provider interface, `ready=true`, `strict=true`, and all of `cgroup_v2`,
-`namespaces`, `seccomp`, `landlock`, `filesystem`, `network`, `descendants`,
-and `resource_limits` as enforced. Missing controls produce
+provider interface, `ready=true`, `strict=true`, `isolation_profile=gvisor-v1`,
+and all of `application_kernel`, `cgroup_v2`, `namespaces`, `seccomp`,
+`read_only_rootfs`, `non_root`, `capabilities_dropped`, `filesystem`, `network`,
+`descendants`, and `resource_limits` as enforced. Missing controls produce
 `strict_attestation_failed`; the execution endpoint is never called. Each
 successful execution must repeat those controls in its receipt. Managed run
 IDs are used in execute, inspect, cancel, and cleanup paths.
+
+The Linux service profile uses a digest-pinned executor image under Docker's
+explicitly registered gVisor `runsc` runtime. It supports Linux x86_64 and
+ARM64; gVisor's default `systrap` platform avoids requiring KVM. Landlock may
+still harden local execution, but it is not evidence for the gVisor boundary.
 
 ## Versioning policy
 

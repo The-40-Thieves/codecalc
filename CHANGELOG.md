@@ -53,10 +53,18 @@ the thing is.
 
 - **Authenticated remote strict execution for macOS clients.** Setting
   `CODECALC_STRICT_URL` activates `<host>-strict`; the adapter verifies the
-  Linux service's cgroup, namespace, seccomp, Landlock, filesystem, network,
-  descendant, and resource-limit receipt before sending source. Missing or
+  Linux service's versioned `gvisor-v1` application-kernel, cgroup-v2,
+  namespace, seccomp, filesystem, network, descendant, and resource-limit
+  receipt before sending source. Missing or
   incomplete providers fail closed, managed run IDs are preserved through
   cancellation and cleanup, and authorization material is redacted.
+
+- **Portable Linux gVisor launcher contract.** The strict service now has a
+  shell-free Docker launcher for a digest-pinned executor image, explicit
+  `runsc`, cgroup-v2 CPU/memory/PID limits, no network, read-only rootfs,
+  bounded tmpfs, non-root UID, dropped capabilities, and
+  `no-new-privileges`. It supports the x86_64 and ARM64 architectures supported
+  by gVisor and fails closed when Docker, cgroup v2, or `runsc` is absent.
 
 - **47 MCP tools across 31 languages.** Code execution, symbolic mathematics
   (SymPy), logic and SMT solving (Z3), exact decimal arithmetic, unit

@@ -466,6 +466,12 @@ All optional. codecalc runs with none of these set.
 | `CODECALC_PROCESS_HEADROOM` | `512` | Fork-bomb guard. `RLIMIT_NPROC` is a **uid-wide task budget**, not a per-sandbox one — the kernel compares it against every thread your user owns, machine-wide. So codecalc measures the ambient count per execution and sets the limit to *ambient + headroom*: a bomb can add at most this many tasks, while a runtime wanting a few threads always has room however busy the box is. |
 | `CODECALC_MAX_PROCESSES` | *(unset)* | Escape hatch: pin `RLIMIT_NPROC` to an absolute value and skip the measurement. |
 
+The strict service runs on Linux x86_64 or ARM64 with Docker Engine, cgroup v2,
+and an explicitly registered gVisor `runsc` runtime. Its executor image must be
+pinned by `@sha256:` digest. The default `systrap` platform works without KVM,
+so the same authenticated service can be used from Linux, macOS, and Windows;
+strict clients never fall back to native local execution.
+
 Both backends resolve `CODECALC_RUNTIME_PATH` identically, and
 `scripts/check_parity.py` fails CI if the Rust and Python copies of that
 contract ever drift — including if a machine-specific home directory finds its
@@ -523,7 +529,7 @@ PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py         # every tool over MC
 PYTHONPATH=. .venv/bin/python tests/test_executor_sweep.py  # sandbox regressions
 ```
 
-27 test files and 10 gate scripts, **1222 assertions**. Nothing in the suite
+28 test files and 10 gate scripts, **1222 assertions**. Nothing in the suite
 needs the internet, so none of it is ever skipped for lack of a network.
 
 It **can** skip for lack of a *capability*, and that is correct rather than a

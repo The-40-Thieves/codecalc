@@ -22,17 +22,30 @@ truthfully non-strict; selecting a strict provider never falls back to it.
 
 ### Linux strict (THE-828)
 
-1. Add failing capability-probe and launch-receipt tests.
-2. Add a dedicated Linux launcher that creates a cgroup-v2 leaf, writes
-   `pids.max`, `memory.max`, and CPU controls before execution, enters isolated
-   namespaces, applies `no_new_privs`, seccomp, and Landlock, and reports every
-   verified primitive in its receipt.
-3. Require kernel/controller/delegation prerequisites in `doctor`; strict
-   selection fails before executing payload code if any required primitive is
-   absent.
-4. Kill via `cgroup.kill`, reap, and remove the cgroup deterministically.
-5. Add Linux CI probes for fork/memory bombs, descendants, egress, filesystem
-   escape, cancellation, and cleanup.
+1. Add failing capability-probe and launch-receipt tests for a versioned
+   `gvisor-v1` isolation profile.
+2. Use Docker Engine with an explicitly registered gVisor `runsc` OCI runtime.
+   Default to gVisor's `systrap` platform so Linux hosts and VMs need no KVM;
+   allow a separately registered KVM runtime as an operator-selected option.
+3. Support both upstream gVisor architectures (x86_64 and ARM64) with a
+   multi-architecture, digest-pinned executor image. Never pull mutable tags or
+   silently fall back to `runc`.
+4. Apply the outer cgroup-v2 CPU, memory, and PID limits before the workload;
+   disable networking; use a read-only root, bounded tmpfs, non-root UID,
+   dropped capabilities, and `no-new-privileges`. Do not bind arbitrary host
+   paths into the sandbox.
+5. Probe Docker, cgroup v2, and the named `runsc` registration in `doctor` and
+   at service startup. Run a real startup canary and fail closed before payload
+   submission when the boundary cannot be proved.
+6. Treat gVisor's application kernel as the strict syscall/filesystem boundary.
+   Landlock remains useful local defense-in-depth but is not a required guest
+   attestation for `gvisor-v1`.
+7. Label every container with its immutable run identity, verify ownership
+   before cancel/delete, recover owned orphans at startup, and clean up
+   deterministically.
+8. Add Linux CI probes for fork/memory bombs, descendants, egress, filesystem
+   escape, cancellation, cleanup, and an assertion that the workload really ran
+   under `runsc`.
 
 ### Windows strict (THE-829)
 
@@ -48,9 +61,11 @@ truthfully non-strict; selecting a strict provider never falls back to it.
 1. Implement `macos-strict` as an authenticated remote adapter to the Linux
    strict execution service; native macOS execution remains explicitly
    non-strict.
-2. Require a versioned readiness handshake that proves the remote provider is
-   strict and reports cgroup, namespace, seccomp, Landlock, filesystem, and
-   network controls. Reject incomplete or incompatible receipts.
+2. Require a versioned `gvisor-v1` readiness handshake that proves the remote
+   provider is strict and reports the application-kernel, cgroup-v2, namespace,
+   seccomp, read-only-root, non-root, capability, filesystem, network,
+   descendant, and resource controls. Reject incomplete, incompatible, or
+   differently profiled receipts.
 3. Bind managed run IDs, deadlines, cancellation, collection, and cleanup to
    the remote provider. Never route a failed remote request to the host-native
    executor.
@@ -67,3 +82,14 @@ truthfully non-strict; selecting a strict provider never falls back to it.
 3. Commit in reviewable slices (`THE-831`, `THE-828`, `THE-829`, `THE-830`,
    docs/CI), push this branch, open a PR, and attach verification evidence to
    all four Linear issues.
+
+## Portability boundary
+
+- Linux x86_64/ARM64 hosts run the strict service with Docker + `runsc`.
+- macOS, Windows, and Linux clients use the same authenticated HTTPS protocol;
+  none needs local virtualization or a platform-specific sandbox facility.
+- The portable client and protocol are provider-neutral. A future containerd
+  or Kubernetes adapter may emit the same `gvisor-v1` receipt, but only after
+  equivalent measured startup and per-run evidence exists.
+- Native local execution remains available on every supported OS and remains
+  explicitly non-strict. Strict selection never degrades to it.

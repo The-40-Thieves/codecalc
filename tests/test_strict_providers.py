@@ -59,6 +59,7 @@ def _strict_health(**overrides) -> dict:
         "interface_version": providers.PROVIDER_INTERFACE_VERSION,
         "provider_id": "linux-strict",
         "provider_version": "test",
+        "isolation_profile": providers.STRICT_ISOLATION_PROFILE,
         "ready": True,
         "strict": True,
         "enforcement": dict.fromkeys(providers.STRICT_CONTROLS, True),

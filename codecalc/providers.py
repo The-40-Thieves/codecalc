@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 
 from . import __version__, contract, errors, executor
 from .provider_adapters.piston import PistonHTTPTransport
+from .strict_runtime import ENFORCEMENT_CONTROLS, ISOLATION_PROFILE
 
 PROVIDER_INTERFACE_VERSION = "1.0.0"
 DEFAULT_PROVIDER_ENV = "CODECALC_EXECUTION_PROVIDER"
@@ -26,16 +27,8 @@ PISTON_AUTHORIZATION_ENV = "CODECALC_PISTON_AUTHORIZATION"
 STRICT_URL_ENV = "CODECALC_STRICT_URL"
 STRICT_AUTHORIZATION_ENV = "CODECALC_STRICT_AUTHORIZATION"
 ProviderTransport = Callable[[str, str, dict[str, str], dict | None, int], object]
-STRICT_CONTROLS = (
-    "cgroup_v2",
-    "namespaces",
-    "seccomp",
-    "landlock",
-    "filesystem",
-    "network",
-    "descendants",
-    "resource_limits",
-)
+STRICT_ISOLATION_PROFILE = ISOLATION_PROFILE
+STRICT_CONTROLS = ENFORCEMENT_CONTROLS
 
 
 def _redact_secrets(value: object, secrets: tuple[str, ...]) -> object:
@@ -647,6 +640,7 @@ class RemoteStrictExecutionProvider:
             if not isinstance(enforcement, dict) or enforcement.get(name) is not True
         ]
         if (health.get("provider_id") != "linux-strict"
+                or health.get("isolation_profile") != STRICT_ISOLATION_PROFILE
                 or health.get("ready") is not True or health.get("strict") is not True
                 or not compatible or missing):
             detail = ", ".join(missing) if missing else "readiness or interface"
@@ -674,6 +668,7 @@ class RemoteStrictExecutionProvider:
             "strict": True,
             "technology": "remote-linux-strict",
             "remote_provider_id": health["provider_id"],
+            "isolation_profile": STRICT_ISOLATION_PROFILE,
             "enforcement": dict(health["enforcement"]),
         }
 
@@ -721,6 +716,7 @@ class RemoteStrictExecutionProvider:
         result["strict_receipt"] = {
             "verified": True,
             "remote_provider_id": health["provider_id"],
+            "isolation_profile": STRICT_ISOLATION_PROFILE,
             "controls": list(STRICT_CONTROLS),
         }
         return contract.stamp(_redact_secrets(result, self._secrets))
