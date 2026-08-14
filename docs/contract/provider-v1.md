@@ -78,6 +78,10 @@ CodeCalc applies a requested `max_output_kb` to the returned buffers, classifies
 overflow as `OLE`, and records
 `max_output_kb_enforced_after_provider_response` in `unenforced` so this
 post-response protection is never presented as remote resource enforcement.
+Piston health converts connection/JSON failures into `ready: false`; execution
+converts them into a rejected result with
+`provider_error="provider_transport_failure"`. Both paths redact configured
+authorization material before returning data to an adapter.
 
 The Piston adapter reports `backend="python"` in the version-1 result envelope
 because that closed field identifies CodeCalc's adapter implementation. The

@@ -16,7 +16,7 @@ from typing import Protocol, runtime_checkable
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
-from . import __version__, contract, executor
+from . import __version__, contract, errors, executor
 
 PROVIDER_INTERFACE_VERSION = "1.0.0"
 DEFAULT_PROVIDER_ENV = "CODECALC_EXECUTION_PROVIDER"
@@ -313,12 +313,17 @@ class PistonExecutionProvider:
         ).to_dict()
 
     def health(self) -> dict:
-        self.list_runtimes()
-        return {
+        health = {
             "provider_id": self.provider_id,
             "provider_version": "api-v2",
             "ready": True,
         }
+        try:
+            self.list_runtimes()
+        except Exception as exc:
+            health["ready"] = False
+            health["error"] = str(exc)
+        return _redact_secrets(health, self._secrets)
 
     def list_runtimes(self) -> list[dict]:
         result = self._transport(
@@ -344,10 +349,18 @@ class PistonExecutionProvider:
             "compile_memory_limit": spec.max_memory_mb * 1024 * 1024,
             "run_memory_limit": spec.max_memory_mb * 1024 * 1024,
         }
-        response = self._transport(
-            "POST", "/api/v2/execute", dict(self._headers), payload,
-            spec.timeout + 5,
-        )
+        try:
+            response = self._transport(
+                "POST", "/api/v2/execute", dict(self._headers), payload,
+                spec.timeout + 5,
+            )
+        except Exception as exc:
+            failure = errors.error_result(
+                errors.INTERNAL,
+                f"Piston transport failed: {exc}",
+                provider_error="provider_transport_failure",
+            )
+            return contract.stamp(_redact_secrets(failure, self._secrets))
         data = response if isinstance(response, dict) else {}
         run = data.get("run") if isinstance(data.get("run"), dict) else {}
         stdout = str(run.get("stdout") or "")

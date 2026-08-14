@@ -601,6 +601,59 @@ def test_configured_registry_enables_piston_without_disclosing_credentials() -> 
           and "registry-provider-value" not in serialized_descriptors)
 
 
+def test_piston_health_reports_redacted_transport_failure() -> None:
+    authorization_value = "Bearer " + "health-provider-value"
+
+    def transport(method: str, path: str, headers: dict[str, str],
+                  payload: dict | None, timeout: int) -> object:
+        del method, path, headers, payload, timeout
+        raise OSError(f"connection failed for {authorization_value}")
+
+    provider = providers.PistonExecutionProvider(
+        base_url="https://piston.internal",
+        authorization=authorization_value,
+        transport=transport,
+    )
+
+    health = provider.health()
+    serialized = json.dumps(health)
+
+    check("Piston health reports transport failure as not ready",
+          health["ready"] is False)
+    check("Piston health identifies the failed provider",
+          health["provider_id"] == "piston")
+    check("Piston health redacts transport failure credentials",
+          "health-provider-value" not in serialized
+          and "[REDACTED]" in serialized)
+
+
+def test_piston_execution_returns_a_redacted_transport_error_contract() -> None:
+    authorization_value = "Bearer " + "execution-provider-value"
+
+    def transport(method: str, path: str, headers: dict[str, str],
+                  payload: dict | None, timeout: int) -> object:
+        del method, path, headers, payload, timeout
+        raise OSError(f"remote unavailable for {authorization_value}")
+
+    result = providers.PistonExecutionProvider(
+        base_url="https://piston.internal",
+        authorization=authorization_value,
+        transport=transport,
+    ).execute(providers.ComputationSpec(language="python3", code="pass"))
+    serialized = json.dumps(result)
+
+    check("Piston transport failure returns a rejected result",
+          result["ok"] is False and "verdict" not in result)
+    check("Piston transport failure carries a stable provider error",
+          result["code"] == "internal"
+          and result["provider_error"] == "provider_transport_failure")
+    check("Piston transport error carries the result contract",
+          result["contract_version"] == contract.CONTRACT_VERSION)
+    check("Piston transport error redacts provider credentials",
+          "execution-provider-value" not in serialized
+          and "[REDACTED]" in serialized)
+
+
 if __name__ == "__main__":
     test_descriptor_is_versioned_and_machine_readable()
     test_local_provider_preserves_the_execution_result_contract()
@@ -623,4 +676,6 @@ if __name__ == "__main__":
     test_piston_provider_passes_the_shared_execution_conformance_suite()
     test_piston_applies_the_requested_output_cap_to_remote_results()
     test_configured_registry_enables_piston_without_disclosing_credentials()
+    test_piston_health_reports_redacted_transport_failure()
+    test_piston_execution_returns_a_redacted_transport_error_contract()
     sys.exit(1 if FAILS else 0)
