@@ -44,15 +44,54 @@ class UnsupportedCapability(RuntimeError):
         )
 
 
+class UnknownProvider(LookupError):
+    """Selection named a provider that is not registered."""
+
+    code = "unknown_provider"
+
+    def __init__(self, provider_id: str, available: tuple[str, ...]) -> None:
+        self.provider_id = provider_id
+        self.available = available
+        choices = ", ".join(available) or "none"
+        super().__init__(
+            f"unknown execution provider {provider_id!r}; available: {choices}"
+        )
+
+
 @runtime_checkable
 class ExecutionProvider(Protocol):
     """The provider surface implemented independently of MCP or HTTP."""
+
+    provider_id: str
 
     def describe(self) -> dict: ...
 
     def execute(self, spec: ComputationSpec) -> dict: ...
 
     def cancel(self, run_id: str) -> None: ...
+
+
+class ProviderRegistry:
+    """Provider discovery and deterministic explicit/default selection."""
+
+    def __init__(self, *, default_provider_id: str) -> None:
+        self.default_provider_id = default_provider_id
+        self._providers: dict[str, ExecutionProvider] = {}
+
+    def register(self, provider: ExecutionProvider) -> None:
+        if provider.provider_id in self._providers:
+            raise ValueError(f"provider {provider.provider_id!r} is already registered")
+        self._providers[provider.provider_id] = provider
+
+    def select(self, provider_id: str | None = None) -> ExecutionProvider:
+        selected = provider_id or self.default_provider_id
+        try:
+            return self._providers[selected]
+        except KeyError:
+            raise UnknownProvider(selected, tuple(sorted(self._providers))) from None
+
+    def descriptors(self) -> list[dict]:
+        return [self._providers[key].describe() for key in sorted(self._providers)]
 
 
 @dataclass(frozen=True, slots=True)

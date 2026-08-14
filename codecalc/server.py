@@ -34,10 +34,12 @@ from . import (
     doctor,
     errors,
     exact,
+    execution_service,
     executor,
     logic,
     optimization,
     packages,
+    providers,
     registry,
     runtimes,
     sessions,
@@ -46,6 +48,10 @@ from . import (
     units,
 )
 from .mcp_middleware import timeout_middleware
+
+_provider_registry = providers.ProviderRegistry(default_provider_id="local")
+_provider_registry.register(providers.LocalExecutionProvider())
+_execution_service = execution_service.ExecutionService(_provider_registry)
 
 mcp = MCPServer(
     name="codecalc",
@@ -224,6 +230,7 @@ def execute_code(
     max_cpu: int = 0,
     no_net: bool = False,
     compact: bool = False,
+    provider: str | None = None,
 ) -> dict:
     """Execute `code` in `language` in a sandbox.
 
@@ -251,10 +258,17 @@ def execute_code(
                                   max_output_kb=max_output_kb,
                                   max_cpu=max_cpu, no_net=no_net)
     else:
-        result = executor.execute(language, code, stdin=stdin, timeout=timeout,
-                                  max_memory_mb=max_memory_mb,
-                                  max_output_kb=max_output_kb,
-                                  max_cpu=max_cpu, no_net=no_net)
+        spec = providers.ComputationSpec(
+            language=language,
+            code=code,
+            stdin=stdin,
+            timeout=timeout,
+            max_memory_mb=max_memory_mb,
+            max_output_kb=max_output_kb,
+            max_cpu=max_cpu,
+            no_net=no_net,
+        )
+        result = _execution_service.execute(spec, provider_id=provider)
     if compact:
         return compact_result(result)
     return result

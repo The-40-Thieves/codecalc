@@ -3,8 +3,17 @@
 from __future__ import annotations
 
 import json
+import sys
 
 from codecalc import contract, providers
+
+FAILS: list[str] = []
+
+
+def check(name: str, condition: bool) -> None:
+    print(f"{'PASS' if condition else 'FAIL':4} {name}")
+    if not condition:
+        FAILS.append(name)
 
 
 def test_descriptor_is_versioned_and_machine_readable() -> None:
@@ -13,11 +22,14 @@ def test_descriptor_is_versioned_and_machine_readable() -> None:
     descriptor = provider.describe()
     encoded = json.loads(json.dumps(descriptor))
 
-    assert encoded["interface_version"] == providers.PROVIDER_INTERFACE_VERSION
-    assert encoded["provider_id"] == "local"
-    assert encoded["provider_version"]
-    assert encoded["capabilities"]["execute"] is True
-    assert encoded["capabilities"]["cancel"] is False
+    check("descriptor identifies the provider interface version",
+          encoded["interface_version"] == providers.PROVIDER_INTERFACE_VERSION)
+    check("descriptor identifies the local provider", encoded["provider_id"] == "local")
+    check("descriptor identifies the provider implementation version",
+          bool(encoded["provider_version"]))
+    check("descriptor advertises execution", encoded["capabilities"]["execute"] is True)
+    check("descriptor does not advertise cancellation",
+          encoded["capabilities"]["cancel"] is False)
 
 
 def test_local_provider_preserves_the_execution_result_contract() -> None:
@@ -26,10 +38,12 @@ def test_local_provider_preserves_the_execution_result_contract() -> None:
 
     result = provider.execute(spec)
 
-    assert result["ok"] is True
-    assert result["stdout"].strip() == "provider"
-    assert result["contract_version"] == contract.CONTRACT_VERSION
-    assert result["backend"] in {"rust", "python"}
+    check("local provider executes successfully", result["ok"] is True)
+    check("local provider preserves stdout", result["stdout"].strip() == "provider")
+    check("local provider preserves the result contract version",
+          result["contract_version"] == contract.CONTRACT_VERSION)
+    check("local provider preserves backend identity",
+          result["backend"] in {"rust", "python"})
 
 
 def test_unsupported_provider_capability_fails_explicitly() -> None:
@@ -38,14 +52,43 @@ def test_unsupported_provider_capability_fails_explicitly() -> None:
     try:
         provider.cancel("run-id")
     except providers.UnsupportedCapability as exc:
-        assert exc.provider_id == "local"
-        assert exc.capability == "cancel"
-        assert exc.code == "unsupported_capability"
+        check("unsupported error identifies its provider", exc.provider_id == "local")
+        check("unsupported error identifies its capability", exc.capability == "cancel")
+        check("unsupported error carries a stable code",
+              exc.code == "unsupported_capability")
     else:
-        raise AssertionError("cancel silently succeeded despite being unsupported")
+        check("unsupported cancellation cannot silently succeed", False)
+
+
+def test_registry_supports_default_and_explicit_provider_selection() -> None:
+    local = providers.LocalExecutionProvider()
+    registry = providers.ProviderRegistry(default_provider_id="local")
+    registry.register(local)
+
+    check("registry selects its default provider", registry.select() is local)
+    check("registry supports explicit provider selection", registry.select("local") is local)
+    check("registry publishes every provider descriptor",
+          registry.descriptors() == [local.describe()])
+
+
+def test_unknown_provider_fails_with_a_stable_machine_code() -> None:
+    registry = providers.ProviderRegistry(default_provider_id="local")
+    registry.register(providers.LocalExecutionProvider())
+
+    try:
+        registry.select("missing")
+    except providers.UnknownProvider as exc:
+        check("unknown error identifies the request", exc.provider_id == "missing")
+        check("unknown error carries a stable code", exc.code == "unknown_provider")
+        check("unknown error lists available providers", exc.available == ("local",))
+    else:
+        check("unknown provider cannot silently select a fallback", False)
 
 
 if __name__ == "__main__":
     test_descriptor_is_versioned_and_machine_readable()
     test_local_provider_preserves_the_execution_result_contract()
     test_unsupported_provider_capability_fails_explicitly()
+    test_registry_supports_default_and_explicit_provider_selection()
+    test_unknown_provider_fails_with_a_stable_machine_code()
+    sys.exit(1 if FAILS else 0)
