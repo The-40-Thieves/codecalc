@@ -389,11 +389,11 @@ network-blocking shim. Each has a security-relevant design decision:
 
 ## Residual risks (accepted, documented)
 
-0. **Removed 2026-08-08: ALL outbound requests.** The package contains no LLM
-   client and no documentation fetch. Nothing in `codecalc/` imports anything
-   that can open a socket, which `tests/test_offline.py` asserts per module.
-   No user code, and no telemetry, leaves the machine. Anything below that
-   assumed a configured gateway no longer applies.
+0. **Core outbound boundary.** The package contains no LLM client,
+   documentation fetch, or telemetry. Top-level core modules import no HTTP or
+   socket client, which `tests/test_offline.py` asserts per module. The opt-in
+   Piston execution provider is isolated under `codecalc/provider_adapters/`
+   and reaches only the operator-configured endpoint.
 
    Note the boundary this does NOT move: code the sandbox runs on a caller's
    behalf still reaches the network unless `--no-net` is passed. The package

@@ -3,18 +3,19 @@
 Run code in **31 languages**, evaluate symbolic math, solve logic problems, and
 measure complexity — all exposed as MCP tools any AI model or agent can call.
 
-**codecalc itself opens no sockets.** No model, no API key, no gateway, no
-telemetry: the caller is already a language model, so codecalc is the part that
-runs things and measures them. `tests/test_offline.py` asserts this
-structurally — nothing under `codecalc/` imports anything that can open a
-socket, asserted per module.
+**CodeCalc's core opens no sockets.** No model gateway or telemetry is built
+in. `tests/test_offline.py` asserts this for the top-level core modules. The
+opt-in Piston provider is the deliberate exception: its wire client lives under
+`codecalc/provider_adapters/` and is registered only when
+`CODECALC_PISTON_URL` is configured.
 
 That is a claim about the **package**, not about every tool call, and the
 difference is worth stating rather than leaving a reader to discover:
 
 | layer | reaches the network? |
 |---|---|
-| the codecalc package itself | **No client of its own** — no HTTP client, no gateway, no telemetry. One exception, in a dependency: `analyze_complexity` triggers a **grammar download** the first time a language is analysed (see below) |
+| CodeCalc core | **No HTTP client, model gateway, or telemetry.** One dependency exception: `analyze_complexity` may download a grammar on first use (see below) |
+| configured Piston provider | **Yes, explicitly.** Calls only the operator-supplied `CODECALC_PISTON_URL`; credentials stay in its authorization header and are redacted from results |
 | `install_package` | **Yes, by design.** It runs uv / npm / gem / cargo, which fetch from their registries. Installer hooks also run *outside* the sandbox — see [SECURITY.md](SECURITY.md) |
 | `runtimes_status`, `update_runtimes` | **Yes.** They shell out to mise / rustup / swiftly / npm, which check remote versions |
 | code you execute | **Yes, unless `no_net=True`** — and that shim needs the native executor, so the pure-Python fallback reports it in `unenforced` instead of applying it. Set `CODECALC_REQUIRE_NATIVE=1` to turn "fallback in use" into a startup failure instead of a result you have to notice by reading `unenforced` |
