@@ -51,6 +51,13 @@ the thing is.
 
 ### Added
 
+- **Authenticated remote strict execution for macOS clients.** Setting
+  `CODECALC_STRICT_URL` activates `<host>-strict`; the adapter verifies the
+  Linux service's cgroup, namespace, seccomp, Landlock, filesystem, network,
+  descendant, and resource-limit receipt before sending source. Missing or
+  incomplete providers fail closed, managed run IDs are preserved through
+  cancellation and cleanup, and authorization material is redacted.
+
 - **47 MCP tools across 31 languages.** Code execution, symbolic mathematics
   (SymPy), logic and SMT solving (Z3), exact decimal arithmetic, unit
   conversion, complexity analysis and benchmarking.

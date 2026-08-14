@@ -45,16 +45,19 @@ truthfully non-strict; selecting a strict provider never falls back to it.
 
 ### macOS strict (THE-830)
 
-1. Add a maintained Virtualization.framework helper contract and a provider
-   adapter that talks to it; native macOS execution remains non-strict.
-2. Require an architecture-matched, immutable Linux guest image and signed
-   helper with the virtualization entitlement. Expose CPU/memory/no-network
-   configuration and disposable per-run storage in the receipt.
-3. Fail closed when virtualization, entitlement, helper, or image validation is
-   unavailable; never route the request to the host-native executor.
-4. Gate full VM conformance on a supported self-hosted macOS runner because
-   GitHub-hosted macOS runners do not support nested virtualization; keep
-   compile/unit/fail-closed checks on hosted CI.
+1. Implement `macos-strict` as an authenticated remote adapter to the Linux
+   strict execution service; native macOS execution remains explicitly
+   non-strict.
+2. Require a versioned readiness handshake that proves the remote provider is
+   strict and reports cgroup, namespace, seccomp, Landlock, filesystem, and
+   network controls. Reject incomplete or incompatible receipts.
+3. Bind managed run IDs, deadlines, cancellation, collection, and cleanup to
+   the remote provider. Never route a failed remote request to the host-native
+   executor.
+4. Run the macOS client/protocol/fail-closed suite on GitHub-hosted macOS and
+   run the hostile workload conformance suite on the Linux execution host.
+   This avoids unsupported nested virtualization while preserving a real VM or
+   OS boundary for every strict workload.
 
 ## Documentation and delivery
 

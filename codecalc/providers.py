@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import os
 import sys
+import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from typing import Protocol, runtime_checkable
+from urllib.parse import urlsplit
 
 from . import __version__, contract, errors, executor
 from .provider_adapters.piston import PistonHTTPTransport
@@ -21,7 +23,19 @@ PROVIDER_INTERFACE_VERSION = "1.0.0"
 DEFAULT_PROVIDER_ENV = "CODECALC_EXECUTION_PROVIDER"
 PISTON_URL_ENV = "CODECALC_PISTON_URL"
 PISTON_AUTHORIZATION_ENV = "CODECALC_PISTON_AUTHORIZATION"
+STRICT_URL_ENV = "CODECALC_STRICT_URL"
+STRICT_AUTHORIZATION_ENV = "CODECALC_STRICT_AUTHORIZATION"
 ProviderTransport = Callable[[str, str, dict[str, str], dict | None, int], object]
+STRICT_CONTROLS = (
+    "cgroup_v2",
+    "namespaces",
+    "seccomp",
+    "landlock",
+    "filesystem",
+    "network",
+    "descendants",
+    "resource_limits",
+)
 
 
 def _redact_secrets(value: object, secrets: tuple[str, ...]) -> object:
@@ -95,6 +109,16 @@ class ProviderInterfaceMismatch(ValueError):
             f"provider {provider_id!r} implements interface {offered!r}; "
             f"CodeCalc requires a compatible {required!r} interface"
         )
+
+
+class ProviderOperationFailure(RuntimeError):
+    """A provider lifecycle operation failed after secrets were removed."""
+
+    def __init__(self, provider_id: str, operation: str) -> None:
+        self.provider_id = provider_id
+        self.operation = operation
+        self.code = f"provider_{operation}_failed"
+        super().__init__(f"provider {provider_id!r} {operation} failed")
 
 
 @runtime_checkable
@@ -542,8 +566,219 @@ class NativeStrictExecutionProvider(LocalExecutionProvider):
         return self.execute(spec)
 
 
+class RemoteStrictExecutionProvider:
+    """Authenticated client for the Linux strict execution service."""
+
+    def __init__(self, *, client_platform: str, base_url: str,
+                 authorization: str | None = None,
+                 transport: ProviderTransport | None = None) -> None:
+        self.client_platform = client_platform
+        self.provider_id = f"{client_platform}-strict"
+        self.base_url = base_url.rstrip("/")
+        parsed = urlsplit(self.base_url)
+        loopback = parsed.hostname in {"127.0.0.1", "::1", "localhost"}
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError("remote strict provider credentials belong in Authorization")
+        if parsed.scheme != "https" and not (parsed.scheme == "http" and loopback):
+            raise ValueError("remote strict provider requires HTTPS (HTTP is loopback-only)")
+        self._transport = transport or PistonHTTPTransport(self.base_url)
+        self._headers = ({"Authorization": authorization} if authorization else {})
+        self._authenticated = bool(authorization)
+        raw_credential = authorization.split(maxsplit=1)[-1] if authorization else ""
+        self._secrets = tuple(sorted(
+            {item for item in (authorization, raw_credential) if item},
+            key=len, reverse=True,
+        ))
+
+    def describe(self) -> dict:
+        return ProviderDescriptor(
+            interface_version=PROVIDER_INTERFACE_VERSION,
+            provider_id=self.provider_id,
+            provider_version=__version__,
+            host_class=self.client_platform,
+            strict=True,
+            capabilities={
+                "execute": True,
+                "managed_runs": True,
+                "inspect": True,
+                "stream": False,
+                "cancel": True,
+                "cleanup": True,
+                "files": False,
+                "artifacts": False,
+                "sessions": False,
+                "health": True,
+                "runtime_discovery": True,
+                "workdir": False,
+                "network_control": True,
+            },
+        ).to_dict()
+
+    def _failure(self, message: str, provider_error: str) -> dict:
+        result = contract.stamp(errors.error_result(
+            errors.INTERNAL,
+            message,
+            provider_error=provider_error,
+            requested_provider=self.provider_id,
+        ))
+        return _redact_secrets(result, self._secrets)
+
+    def _verified_health(self) -> tuple[dict | None, dict | None]:
+        if not self._authenticated:
+            return None, self._failure(
+                "strict provider authentication is required",
+                "strict_authentication_required",
+            )
+        try:
+            response = self._transport(
+                "GET", "/v1/health", dict(self._headers), None, 10
+            )
+        except Exception as exc:
+            return None, self._failure(
+                f"strict provider health check failed: {exc}",
+                "strict_provider_unavailable",
+            )
+        health = response if isinstance(response, dict) else {}
+        offered = str(health.get("interface_version", ""))
+        compatible = offered.split(".", 1)[0] == PROVIDER_INTERFACE_VERSION.split(".", 1)[0]
+        enforcement = health.get("enforcement")
+        missing = [
+            name for name in STRICT_CONTROLS
+            if not isinstance(enforcement, dict) or enforcement.get(name) is not True
+        ]
+        if (health.get("provider_id") != "linux-strict"
+                or health.get("ready") is not True or health.get("strict") is not True
+                or not compatible or missing):
+            detail = ", ".join(missing) if missing else "readiness or interface"
+            return None, self._failure(
+                f"strict provider attestation failed: {detail}",
+                "strict_attestation_failed",
+            )
+        return health, None
+
+    def health(self) -> dict:
+        health, failure = self._verified_health()
+        if failure is not None:
+            return {
+                "provider_id": self.provider_id,
+                "provider_version": __version__,
+                "ready": False,
+                "strict": True,
+                "technology": "remote-linux-strict",
+                "error": failure["error"],
+            }
+        return {
+            "provider_id": self.provider_id,
+            "provider_version": __version__,
+            "ready": True,
+            "strict": True,
+            "technology": "remote-linux-strict",
+            "remote_provider_id": health["provider_id"],
+            "enforcement": dict(health["enforcement"]),
+        }
+
+    def list_runtimes(self) -> list[dict]:
+        _health, failure = self._verified_health()
+        if failure is not None:
+            return []
+        response = self._transport(
+            "GET", "/v1/runtimes", dict(self._headers), None, 10
+        )
+        return list(response) if isinstance(response, list) else []
+
+    def execute(self, spec: ComputationSpec) -> dict:
+        return self.execute_managed(uuid.uuid4().hex, spec)
+
+    def execute_managed(self, run_id: str, spec: ComputationSpec) -> dict:
+        if spec.workdir is not None:
+            raise UnsupportedCapability(self.provider_id, "workdir")
+        health, failure = self._verified_health()
+        if failure is not None:
+            return failure
+        payload = asdict(spec)
+        payload["run_id"] = run_id
+        try:
+            response = self._transport(
+                "POST", f"/v1/runs/{run_id}/execute", dict(self._headers),
+                payload, spec.timeout + 5,
+            )
+        except Exception as exc:
+            return self._failure(
+                f"strict provider execution failed: {exc}",
+                "provider_transport_failure",
+            )
+        result = dict(response) if isinstance(response, dict) else {}
+        enforcement = result.pop("enforcement", None)
+        missing = [
+            name for name in STRICT_CONTROLS
+            if not isinstance(enforcement, dict) or enforcement.get(name) is not True
+        ]
+        if missing:
+            return self._failure(
+                f"strict execution receipt omitted controls: {', '.join(missing)}",
+                "strict_attestation_failed",
+            )
+        result["strict_receipt"] = {
+            "verified": True,
+            "remote_provider_id": health["provider_id"],
+            "controls": list(STRICT_CONTROLS),
+        }
+        return contract.stamp(_redact_secrets(result, self._secrets))
+
+    async def execute_stream(self, spec: ComputationSpec, on_progress=None) -> dict:
+        del spec, on_progress
+        raise UnsupportedCapability(self.provider_id, "stream")
+
+    def inspect(self, run_id: str) -> dict:
+        if not self._authenticated:
+            raise ProviderOperationFailure(self.provider_id, "inspect")
+        response = self._transport(
+            "GET", f"/v1/runs/{run_id}", dict(self._headers), None, 10
+        )
+        result = dict(response) if isinstance(response, dict) else {}
+        return _redact_secrets(result, self._secrets)
+
+    def stream(self, run_id: str) -> object:
+        del run_id
+        raise UnsupportedCapability(self.provider_id, "stream")
+
+    def cancel(self, run_id: str) -> None:
+        if not self._authenticated:
+            raise ProviderOperationFailure(self.provider_id, "cancel")
+        try:
+            self._transport(
+                "POST", f"/v1/runs/{run_id}/cancel", dict(self._headers), {}, 10
+            )
+        except Exception:
+            raise ProviderOperationFailure(self.provider_id, "cancel") from None
+
+    def cleanup(self, run_id: str) -> None:
+        if not self._authenticated:
+            raise ProviderOperationFailure(self.provider_id, "cleanup")
+        try:
+            self._transport(
+                "DELETE", f"/v1/runs/{run_id}", dict(self._headers), None, 10
+            )
+        except Exception:
+            raise ProviderOperationFailure(self.provider_id, "cleanup") from None
+
+    def collect_artifacts(self, run_id: str) -> list[dict]:
+        del run_id
+        raise UnsupportedCapability(self.provider_id, "artifacts")
+
+    def list_files(self, run_id: str) -> list[dict]:
+        del run_id
+        raise UnsupportedCapability(self.provider_id, "files")
+
+    def create_session(self, language: str) -> dict:
+        del language
+        raise UnsupportedCapability(self.provider_id, "sessions")
+
+
 def configured_registry(
     environment: Mapping[str, str] | None = None,
+    *,
+    strict_transport: ProviderTransport | None = None,
 ) -> ProviderRegistry:
     """Build the provider registry from process configuration."""
     env = os.environ if environment is None else environment
@@ -552,7 +787,15 @@ def configured_registry(
     )
     registry.register(LocalExecutionProvider())
     platform_name = strict_host_platform()
-    if platform_name != "unsupported":
+    strict_url = env.get(STRICT_URL_ENV, "").strip()
+    if platform_name != "unsupported" and strict_url:
+        registry.register(RemoteStrictExecutionProvider(
+            client_platform=platform_name,
+            base_url=strict_url,
+            authorization=env.get(STRICT_AUTHORIZATION_ENV) or None,
+            transport=strict_transport,
+        ))
+    elif platform_name != "unsupported":
         registry.register(NativeStrictExecutionProvider(platform_name))
     piston_url = env.get(PISTON_URL_ENV, "").strip()
     if piston_url:

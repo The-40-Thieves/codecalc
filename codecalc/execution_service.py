@@ -5,10 +5,12 @@ from __future__ import annotations
 from . import contract, errors, executor, registry, sessions
 from .providers import (
     ComputationSpec,
+    ProviderOperationFailure,
     ProviderRegistry,
     UnknownProvider,
     UnsupportedCapability,
 )
+from .run_supervisor import RunSupervisor
 
 
 def _limit_receipt(spec: ComputationSpec, result: dict) -> dict:
@@ -44,8 +46,10 @@ class ExecutionService:
 
     _VERIFICATION_FIELDS = ("ok", "verdict", "stdout", "stderr", "exit_code")
 
-    def __init__(self, registry: ProviderRegistry) -> None:
+    def __init__(self, registry: ProviderRegistry,
+                 *, supervisor: RunSupervisor | None = None) -> None:
         self.registry = registry
+        self.supervisor = supervisor
 
     def execute(self, spec: ComputationSpec, *, provider_id: str | None = None) -> dict:
         try:
@@ -60,7 +64,35 @@ class ExecutionService:
             ))
 
         try:
-            result = dict(provider.execute(spec))
+            if provider.describe()["capabilities"].get("managed_runs"):
+                if self.supervisor is None:
+                    return contract.stamp(errors.error_result(
+                        errors.INTERNAL,
+                        "managed execution provider requires a run supervisor",
+                        provider_error="run_supervisor_unavailable",
+                        requested_provider=provider.provider_id,
+                    ))
+                handle = self.supervisor.start(spec, provider_id=provider.provider_id)
+                cleanup_failure = None
+                try:
+                    result = dict(self.supervisor.wait(
+                        handle.run_id, timeout=spec.timeout + 10
+                    ))
+                finally:
+                    try:
+                        self.supervisor.cleanup(handle.run_id)
+                    except ProviderOperationFailure as exc:
+                        cleanup_failure = exc
+                if cleanup_failure is not None:
+                    return contract.stamp(errors.error_result(
+                        errors.INTERNAL,
+                        str(cleanup_failure),
+                        provider_error=cleanup_failure.code,
+                        requested_provider=cleanup_failure.provider_id,
+                        run_id=handle.run_id,
+                    ))
+            else:
+                result = dict(provider.execute(spec))
         except UnsupportedCapability as exc:
             return contract.stamp(errors.error_result(
                 errors.VALIDATION,

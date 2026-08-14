@@ -392,8 +392,11 @@ network-blocking shim. Each has a security-relevant design decision:
 0. **Core outbound boundary.** The package contains no LLM client,
    documentation fetch, or telemetry. Top-level core modules import no HTTP or
    socket client, which `tests/test_offline.py` asserts per module. The opt-in
-   Piston execution provider is isolated under `codecalc/provider_adapters/`
-   and reaches only the operator-configured endpoint.
+   Piston and strict execution providers reach only their operator-configured
+   endpoints. Strict credentials remain transport headers, and the strict
+   adapter verifies a complete Linux enforcement handshake before submitting
+   source. Native macOS execution remains local single-operator containment;
+   hostile macOS-client workloads use the authenticated remote Linux boundary.
 
    Note the boundary this does NOT move: code the sandbox runs on a caller's
    behalf still reaches the network unless `--no-net` is passed. The package
