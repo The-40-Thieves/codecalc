@@ -69,9 +69,20 @@ def test_compact_results_keep_provider_identity() -> None:
           result.get("provider", {}).get("provider_id") == "local")
 
 
+def test_mcp_adapter_publishes_provider_descriptors() -> None:
+    descriptors = server.list_execution_providers()
+
+    check("provider discovery returns a list", isinstance(descriptors, list))
+    check("provider discovery exposes the local provider",
+          [item["provider_id"] for item in descriptors] == ["local"])
+    check("provider discovery exposes machine-readable capabilities",
+          descriptors[0]["capabilities"]["execute"] is True)
+
+
 if __name__ == "__main__":
     test_service_routes_a_canonical_spec_and_records_provider_identity()
     test_service_rejects_an_unknown_provider_without_falling_back()
     test_mcp_adapter_accepts_explicit_local_provider_selection()
     test_compact_results_keep_provider_identity()
+    test_mcp_adapter_publishes_provider_descriptors()
     sys.exit(1 if FAILS else 0)

@@ -103,7 +103,7 @@ mcp = MCPServer(
 def _coded(fn):
     """Attach an error code to any failing dict a tool returns.
 
-    Wraps at REGISTRATION so all 47 tools are covered by one change instead of
+    Wraps at REGISTRATION so all 48 tools are covered by one change instead of
     121 edits at the return sites. The first attempt put this on
     `guarded_call`, which measured 0 of 8 on the most reachable failures
     because those paths return rather than raise — see errors.py.
@@ -123,7 +123,7 @@ def _coded(fn):
     # executor.execute at all. All three returned unversioned results while the
     # documentation said every result carries a version.
     #
-    # This wrapper is applied to all 47 tools, so stamping here makes that claim
+    # This wrapper is applied to all 48 tools, so stamping here makes that claim
     # true by construction. `stamp` uses setdefault, so the executor's own stamp
     # is not overwritten and the two cannot disagree.
     if inspect.iscoroutinefunction(fn):
@@ -138,9 +138,9 @@ def _coded(fn):
     return _sync
 
 
-# Rebind `mcp.tool` rather than renaming 47 decorator lines. The rename was the
+# Rebind `mcp.tool` rather than renaming 48 decorator lines. The rename was the
 # first attempt and broke four suites plus the CI round-trip check, all of which
-# count declarations with `grep -c '^@mcp\.tool'` and read 0 against 47 served.
+# count declarations with `grep -c '^@mcp\.tool'` and read 0 against 48 served.
 # That identity is load-bearing here, so the change that preserves it is the
 # right one: every `@mcp.tool()` below is unchanged and every counter still
 # works, while the wrapper is applied underneath.
@@ -160,6 +160,12 @@ mcp.tool = _tool
 def list_languages() -> list[dict]:
     """List every language codecalc can execute, with extension, compile flag, and what this machine resolved. `status` is `installed` (its command was found on the sandbox PATH) or `supported` (nothing for it here); `status_basis` is `resolved`, meaning nothing was executed to check. Run `codecalc doctor --deep` to promote a runtime to `available` by actually running it."""
     return executor.catalog()
+
+
+@mcp.tool()
+def list_execution_providers() -> list[dict]:
+    """List execution providers and their machine-readable capabilities."""
+    return _provider_registry.descriptors()
 
 
 #: What a compact result ALWAYS carries.
