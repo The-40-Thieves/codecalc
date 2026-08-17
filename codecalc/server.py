@@ -48,6 +48,60 @@ from . import (
 )
 from .mcp_middleware import timeout_middleware
 
+#: Bearer token for the Streamable HTTP transport (THE-786). Unset means the
+#: transport is loopback-only: `serve-http` REFUSES a non-loopback bind
+#: without it, because a token-less bind on a routable interface exposes 48
+#: unauthenticated code-execution tools to whatever the interface reaches.
+#: stdio ignores this entirely — auth is HTTP middleware, and an MCP client
+#: spawning the server over stdio is already inside the trust boundary.
+HTTP_TOKEN_ENV = "CODECALC_HTTP_TOKEN"  # noqa: S105 -- the env var's NAME, not a credential
+
+#: What the auth metadata advertises as this server's own URL. Only consulted
+#: when a token is set. Loopback default rather than a public placeholder: the
+#: package bans public URL literals (tests/test_offline.py), and the operator
+#: binding a real interface knows the real URL.
+HTTP_URL_ENV = "CODECALC_HTTP_URL"
+
+
+def _http_auth() -> dict:
+    """Constructor kwargs wiring bearer auth into the server, or {}.
+
+    Computed at import because `token_verifier`/`auth` are constructor-only in
+    the SDK (both must be supplied together), and the module-level server below
+    is the one every transport serves. The token comparison is constant-time:
+    a timing oracle on an auth check is the classic way a static token leaks.
+
+    The SDK's `BearerAuthBackend` does the header parsing and 401s; this
+    verifier is the part that is OURS — it decides what counts as valid.
+    """
+    import hmac
+
+    token = os.environ.get(HTTP_TOKEN_ENV, "")
+    if not token:
+        return {}
+
+    from mcp.server.auth.provider import AccessToken, TokenVerifier
+    from mcp.server.auth.settings import AuthSettings
+    from pydantic import AnyHttpUrl
+
+    class _StaticTokenVerifier(TokenVerifier):
+        async def verify_token(self, presented: str) -> AccessToken | None:
+            if not hmac.compare_digest(presented.encode(), token.encode()):
+                return None
+            return AccessToken(token=presented, client_id="codecalc-operator",
+                               scopes=["codecalc"])
+
+    base = os.environ.get(HTTP_URL_ENV, "").strip() or "http://127.0.0.1:8000"
+    return {
+        "token_verifier": _StaticTokenVerifier(),
+        "auth": AuthSettings(
+            issuer_url=AnyHttpUrl(base),
+            resource_server_url=AnyHttpUrl(base.rstrip("/") + "/mcp"),
+            required_scopes=["codecalc"],
+        ),
+    }
+
+
 _provider_registry = providers.configured_registry()
 _managed_provider = any(
     row["capabilities"].get("managed_runs")
@@ -88,6 +142,9 @@ mcp = MCPServer(
         "server/discover": CacheHint(ttl_ms=60_000, scope="public"),
     },
     middleware=[timeout_middleware],
+    # Bearer auth for the HTTP transport, absent unless CODECALC_HTTP_TOKEN is
+    # set. Inert over stdio either way — see _http_auth.
+    **_http_auth(),
     # `instructions` is metadata every MCP client receives on connect, before
     # it has called a single tool — the least invasive surface to put backend
     # visibility on. list_languages() was the other candidate and was
@@ -1010,6 +1067,27 @@ def main() -> None:
         port_text = (rest[rest.index("--port") + 1]
                      if "--port" in rest and rest.index("--port") + 1 < len(rest)
                      else "8000")
+        # FAIL CLOSED on a routable bind with no auth (THE-786). The whole
+        # 127/8 block and ::1 are loopback — `ipaddress` decides, not a string
+        # compare, because 127.0.0.2 is exactly as loopback as 127.0.0.1 and a
+        # list of spellings would refuse it wrongly. An unparsable host
+        # ("localhost", a DNS name) is loopback only for the names that mean
+        # it; anything else is treated as routable, which errs closed.
+        import ipaddress
+        try:
+            loopback = ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            loopback = host in ("localhost", "ip6-localhost")
+        if not loopback and not os.environ.get(HTTP_TOKEN_ENV):
+            print(
+                f"codecalc serve-http: refusing to bind {host}: it is not a "
+                f"loopback address and {HTTP_TOKEN_ENV} is not set. An "
+                "unauthenticated bind on a routable interface would expose "
+                "every execution tool to that network. Set the variable to a "
+                "strong secret and restart, or bind 127.0.0.1.",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
         mcp.run(
             transport="streamable-http",
             host=host,

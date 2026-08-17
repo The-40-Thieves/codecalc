@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -664,6 +666,95 @@ def test_main_runs_the_same_server_over_explicit_streamable_http() -> None:
           }])
 
 
+def test_serve_http_refuses_a_non_loopback_bind_without_a_token() -> None:
+    """THE-786 residual: fail CLOSED. serve-http on a non-loopback host with no
+    CODECALC_HTTP_TOKEN would expose 48 unauthenticated code-execution tools to
+    whatever network the interface reaches. Refusing to start is the only
+    answer that cannot be misconfigured into an open server."""
+    calls: list[dict] = []
+
+    class RecordingMCPServer:
+        def run(self, **kwargs) -> None:
+            calls.append(kwargs)
+
+    old_mcp, old_argv = server.mcp, sys.argv
+    old_token = os.environ.pop(server.HTTP_TOKEN_ENV, None)
+    server.mcp = RecordingMCPServer()
+    sys.argv = ["codecalc", "serve-http", "--host", "0.0.0.0", "--port", "8123"]  # noqa: S104 -- the refused bind IS the subject
+    try:
+        raised = None
+        try:
+            server.main()
+        except SystemExit as exc:
+            raised = exc.code
+    finally:
+        sys.argv = old_argv
+        server.mcp = old_mcp
+        if old_token is not None:
+            os.environ[server.HTTP_TOKEN_ENV] = old_token
+    check("non-loopback bind without a token refuses to start",
+          raised not in (None, 0))
+    check("the refused server never ran", calls == [])
+
+
+def test_serve_http_allows_non_loopback_with_a_token_and_loopback_range_without() -> None:
+    calls: list[dict] = []
+
+    class RecordingMCPServer:
+        def run(self, **kwargs) -> None:
+            calls.append(kwargs)
+
+    old_mcp, old_argv = server.mcp, sys.argv
+    server.mcp = RecordingMCPServer()
+    try:
+        os.environ[server.HTTP_TOKEN_ENV] = "test-token-value"
+        sys.argv = ["codecalc", "serve-http", "--host", "0.0.0.0", "--port", "8123"]  # noqa: S104 -- the refused bind IS the subject
+        server.main()
+        check("non-loopback bind with a token starts", len(calls) == 1)
+    finally:
+        sys.argv = old_argv
+        server.mcp = old_mcp
+        os.environ.pop(server.HTTP_TOKEN_ENV, None)
+    # 127.0.0.2 is loopback (the whole 127/8 block is), so the earlier test in
+    # this file must keep passing without a token — a string comparison against
+    # "127.0.0.1" would have broken it. This is asserted there, not here.
+
+
+def test_http_auth_verifier_accepts_only_the_exact_token() -> None:
+    """The static verifier is OUR code (the SDK's bearer middleware is not):
+    wrong token -> None, right token -> an AccessToken carrying the scope."""
+    os.environ[server.HTTP_TOKEN_ENV] = "sekrit"
+    try:
+        wired = server._http_auth()
+        check("auth wiring present when the token is set",
+              set(wired) == {"token_verifier", "auth"})
+        verifier = wired["token_verifier"]
+        good = asyncio.run(verifier.verify_token("sekrit"))
+        bad = asyncio.run(verifier.verify_token("not-it"))
+        prefix = asyncio.run(verifier.verify_token("sekrit "))
+        check("the exact token verifies", good is not None and "codecalc" in good.scopes)
+        check("a wrong token is rejected", bad is None)
+        check("a near-miss token is rejected", prefix is None)
+    finally:
+        os.environ.pop(server.HTTP_TOKEN_ENV, None)
+    check("no token means no auth wiring", server._http_auth() == {})
+
+
+def test_http_auth_is_wired_into_the_server_at_import_when_the_token_is_set() -> None:
+    """The verifier only protects anything if the CONSTRUCTED server carries
+    it. A subprocess import with the env set is the only honest probe: this
+    process's `server.mcp` was already built without one."""
+    proc = subprocess.run(
+        [sys.executable, "-c",
+         ("import codecalc.server as s, sys; "
+          "sys.exit(0 if s.mcp._token_verifier is not None else 3)")],
+        env={**os.environ, server.HTTP_TOKEN_ENV: "probe-token"},
+        capture_output=True, timeout=120,
+    )
+    check("a token in the environment wires the verifier into the server",
+          proc.returncode == 0)
+
+
 if __name__ == "__main__":
     test_service_routes_a_canonical_spec_and_records_provider_identity()
     test_service_rejects_an_unknown_provider_without_falling_back()
@@ -685,4 +776,8 @@ if __name__ == "__main__":
     test_mcp_session_execution_rejects_a_nonlocal_provider()
     test_mcp_stream_adapter_compiles_spec_and_delegates_progress()
     test_main_runs_the_same_server_over_explicit_streamable_http()
+    test_serve_http_refuses_a_non_loopback_bind_without_a_token()
+    test_serve_http_allows_non_loopback_with_a_token_and_loopback_range_without()
+    test_http_auth_verifier_accepts_only_the_exact_token()
+    test_http_auth_is_wired_into_the_server_at_import_when_the_token_is_set()
     sys.exit(1 if FAILS else 0)
