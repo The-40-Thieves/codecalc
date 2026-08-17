@@ -774,12 +774,26 @@ def _confinement_paths(workdir: Path, proto_file: Path | None) -> tuple[list[str
         found = shutil.which(exe, path=path)
         if not found:
             continue
-        real = Path(found).resolve()
+        unresolved = Path(found)
+        real = unresolved.resolve()
         ro.append(str(real))
         # <prefix>/bin/python3 -> <prefix>. The stdlib, shared objects and (for
         # node) lib/node_modules all hang off it.
         if real.parent.name in ("bin", "Scripts"):
             ro.append(str(real.parent.parent))
+        # The UNRESOLVED prefix as well, when it differs. A venv's python3 is a
+        # symlink into a base interpreter, and resolving it grants only the
+        # base — but sys.executable stays the venv path, and CPython's
+        # site.venv() reads <venv>/pyvenv.cfg BESIDE it during interpreter
+        # startup (plus <venv>/lib for site-packages). With only the resolved
+        # prefix granted, Landlock denies that read and the worker dies before
+        # the bootstrap runs a single line. `uvx codecalc` and any MCP client
+        # spawning the console script from a venv resolve python3 exactly this
+        # way, so this is the COMMON deployment, not an edge case. Measured:
+        # the worker exited 1 with `PermissionError: ... .venv/pyvenv.cfg`
+        # while session_start reported ok=True (see _spawn_worker's warm-up).
+        if unresolved != real and unresolved.parent.name in ("bin", "Scripts"):
+            ro.append(str(unresolved.parent.parent))
     rw = [str(workdir)]
     if proto_file is not None:
         # The protocol file lives in the system temp dir, so it is granted as a
@@ -920,9 +934,25 @@ def _spawn_worker(language: str, workdir: Path) -> tuple[Worker | None, str | No
         except Exception as exc:
             w.close()
             return None, f"worker did not answer the warm-up call: {exc}"
-        if not r.get("ok") and r.get("stderr"):
+        if not r.get("ok"):
+            # ANY failed warm-up is fatal, not just one that carries `stderr`.
+            # The old condition was `not ok AND r.get("stderr")` — but a worker
+            # that dies BEFORE answering returns {"ok": False, "error":
+            # "worker closed"} with no stderr key at all, so the gate passed
+            # exactly the workers that were already dead, and session_start
+            # reported ok=True for a session whose every later call would fail
+            # with "worker died". A gate keyed on the wrong field is the shape
+            # this repo keeps finding; this one was in the function whose job
+            # is to be the gate. The worker's stderr tail is carried because it
+            # holds the actual traceback (the venv/Landlock case prints a
+            # PermissionError there that no other surface reports).
+            detail = (r.get("stderr") or r.get("error") or "no detail")[:200]
+            tail = w.stderr_tail(5)
             w.close()
-            return None, f"worker failed on warm-up: {r['stderr'][:400]}"
+            reason = f"worker failed on warm-up: {detail}"
+            if tail:
+                reason += f" | worker stderr: {tail[:400]}"
+            return None, reason
         return w, None
     except Exception as exc:
         # The reason is returned rather than swallowed. A confinement allow-list
