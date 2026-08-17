@@ -76,6 +76,11 @@ def test_launch_is_shell_free_and_applies_every_outer_limit() -> None:
                 "Runtimes": {"runsc": {}}, "CgroupVersion": "2",
                 "Architecture": "x86_64", "ServerVersion": "28.3.3",
             }))
+        if argv[1] == "inspect":
+            return completed(argv, json.dumps({
+                "io.codecalc.owner": "codecalc-strict",
+                "io.codecalc.run-id": "0123456789abcdef",
+            }))
         return completed(argv, '{"ok":true,"verdict":"OK"}')
 
     runtime = DockerGVisorRuntime(GVisorConfig(image=IMAGE), runner=runner)
@@ -123,6 +128,55 @@ def test_cancel_refuses_container_without_matching_ownership_labels() -> None:
     )
 
 
+def test_cleanup_never_removes_a_foreign_container_even_after_a_failed_run() -> None:
+    """THE-834. The name `codecalc-<run_id>` can be squatted BEFORE our run:
+    `docker run --name` then fails with a conflict, and the old cleanup path
+    (`verify_ownership=False` in execute's finally) force-removed whatever
+    held the name — a container codecalc never created. The refusal has to
+    hold on the failure path too, because the failure path is exactly the one
+    a squat produces."""
+    calls: list[list[str]] = []
+
+    def runner(argv, **_kwargs):
+        calls.append(argv)
+        if argv[1] == "info":
+            return completed(argv, json.dumps({
+                "Runtimes": {"runsc": {}}, "CgroupVersion": "2",
+            }))
+        if argv[1] == "run":
+            return completed(argv, "", returncode=125)  # name conflict
+        if argv[1] == "inspect":
+            return completed(argv, json.dumps({"io.codecalc.owner": "someone-else"}))
+        raise AssertionError(f"unexpected mutation: {argv}")
+
+    runtime = DockerGVisorRuntime(GVisorConfig(image=IMAGE), runner=runner)
+    expect_raises(
+        "squatted name still fails the run", StrictRuntimeUnavailable, "failed",
+        lambda: runtime.execute("squatted-run", language="python3",
+                                source="print(1)", timeout=1),
+    )
+    check("a foreign container is NEVER removed, even on the failure path",
+          not any(argv[1] == "rm" for argv in calls))
+
+
+def test_cleanup_is_idempotent_when_the_container_is_already_gone() -> None:
+    """An absent container is nothing to remove, not a refusal: inspect
+    failing must make cleanup a quiet no-op, or every failed probe would
+    raise a SECOND error out of the finally and mask the first."""
+    calls: list[list[str]] = []
+
+    def runner(argv, **_kwargs):
+        calls.append(argv)
+        if argv[1] == "inspect":
+            return completed(argv, "", returncode=1)  # no such container
+        raise AssertionError(f"unexpected mutation: {argv}")
+
+    runtime = DockerGVisorRuntime(GVisorConfig(image=IMAGE), runner=runner)
+    runtime.cleanup("long-gone")
+    check("cleanup of an absent container issues no rm and does not raise",
+          not any(argv[1] == "rm" for argv in calls))
+
+
 if __name__ == "__main__":
     test_config_requires_digest_pinned_image()
     test_probe_requires_registered_runsc_and_cgroup_v2()
@@ -130,6 +184,8 @@ if __name__ == "__main__":
     test_launch_is_shell_free_and_applies_every_outer_limit()
     test_run_id_cannot_become_a_docker_option_or_foreign_container_name()
     test_cancel_refuses_container_without_matching_ownership_labels()
+    test_cleanup_never_removes_a_foreign_container_even_after_a_failed_run()
+    test_cleanup_is_idempotent_when_the_container_is_already_gone()
     for failure in FAILS:
         print(f"FAIL {failure}")
     raise SystemExit(1 if FAILS else 0)
