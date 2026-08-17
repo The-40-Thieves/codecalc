@@ -433,6 +433,97 @@ else:
 check("a workspace-only session declares no structural gaps",
       sessions._session_unenforced(None) == [])
 
+# ── the warm-up gate must fail CLOSED, and a venv worker must survive ────────
+#
+# Two defects found together on a Landlock-capable host running codecalc from a
+# venv — which is what `uvx codecalc` and every MCP client spawning the console
+# script produce, i.e. the most common real deployment:
+#
+#   1. `_spawn_worker`'s warm-up rejected a worker only when the failing result
+#      carried a `stderr` key. A worker that died BEFORE answering returns
+#      {"ok": False, "error": "worker closed"} with no stderr at all, so the
+#      gate passed it and session_start reported ok=True for a session whose
+#      worker was already a corpse. Every later call then failed with
+#      "worker died" — and the #104 confinement check above passed VACUOUSLY on
+#      exactly that shape, because a dead worker reads nothing.
+#
+#   2. The reason the worker died: `_confinement_paths` grants the RESOLVED
+#      interpreter prefix, but a venv's python3 is a symlink, sys.executable
+#      stays the venv path, and CPython's site.venv() reads <venv>/pyvenv.cfg
+#      beside it during startup. With only the resolved prefix granted,
+#      Landlock denies that read and the interpreter dies before the bootstrap
+#      runs a single line.
+
+if os.name == "nt":
+    skip("warm-up gate fails closed on a worker that dies unanswered",
+         "the fake-interpreter fixture is a shell script")
+    skip("a venv-resolved python3 worker survives confinement",
+         "venv layout differs on Windows (Scripts/, no python3 name)")
+else:
+    import shutil as _shutil
+    import subprocess as _subprocess
+    import sys as _sys
+
+    # (1) A worker that exits before answering must fail session_start LOUDLY.
+    _fake_dir = pathlib.Path(tempfile.mkdtemp(prefix="codecalc-fakepy-"))
+    _fake = _fake_dir / "python3"
+    _fake.write_text("#!/bin/sh\nexit 7\n", encoding="utf-8")
+    _fake.chmod(0o755)
+    _saved_path = os.environ.get("PATH", "")
+    _saved_runtime = os.environ.get("CODECALC_RUNTIME_PATH")
+    try:
+        # Both PATHs, so resolution is deterministic regardless of which one
+        # subprocess consults on this platform.
+        os.environ["PATH"] = f"{_fake_dir}{os.pathsep}{_saved_path}"
+        os.environ["CODECALC_RUNTIME_PATH"] = os.environ["PATH"]
+        _dead = sessions.start("python3")
+        check("warm-up gate fails closed on a worker that dies unanswered",
+              _dead.get("ok") is False,
+              f"-> ok={_dead.get('ok')} error={str(_dead.get('error'))[:80]}")
+    finally:
+        os.environ["PATH"] = _saved_path
+        if _saved_runtime is None:
+            os.environ.pop("CODECALC_RUNTIME_PATH", None)
+        else:
+            os.environ["CODECALC_RUNTIME_PATH"] = _saved_runtime
+        _shutil.rmtree(_fake_dir, ignore_errors=True)
+
+    # (2) A worker resolved through a venv must start AND answer. Exercises the
+    # pyvenv.cfg read under Landlock where the kernel has it; on kernels
+    # without Landlock the worker is unconfined and this asserts the same
+    # behaviour, which is the contract either way.
+    _venv_dir = pathlib.Path(tempfile.mkdtemp(prefix="codecalc-venv-")) / "v"
+    _made = _subprocess.run(
+        [_sys.executable, "-m", "venv", "--without-pip", str(_venv_dir)],
+        capture_output=True, timeout=120,
+    )
+    if _made.returncode != 0 or not (_venv_dir / "bin" / "python3").exists():
+        skip("a venv-resolved python3 worker survives confinement",
+             f"could not build a venv here: rc={_made.returncode}")
+    else:
+        _saved_path = os.environ.get("PATH", "")
+        _saved_runtime = os.environ.get("CODECALC_RUNTIME_PATH")
+        try:
+            os.environ["PATH"] = f"{_venv_dir / 'bin'}{os.pathsep}{_saved_path}"
+            os.environ["CODECALC_RUNTIME_PATH"] = os.environ["PATH"]
+            _vs = sessions.start("python3")
+            if not _vs.get("ok"):
+                check("a venv-resolved python3 worker survives confinement",
+                      False, f"-> start failed: {str(_vs.get('error'))[:200]}")
+            else:
+                _vr = sessions.execute(_vs["session_id"], "print(6*7)")
+                check("a venv-resolved python3 worker survives confinement",
+                      _vr.get("ok") is True and "42" in (_vr.get("stdout") or ""),
+                      f"-> ok={_vr.get('ok')} stdout={(_vr.get('stdout') or '')!r:.40} "
+                      f"error={str(_vr.get('error'))[:80]}")
+                sessions.stop(_vs["session_id"])
+        finally:
+            os.environ["PATH"] = _saved_path
+            if _saved_runtime is None:
+                os.environ.pop("CODECALC_RUNTIME_PATH", None)
+            else:
+                os.environ["CODECALC_RUNTIME_PATH"] = _saved_runtime
+
 print(f"\n=== {len(FAILS)} FAILURES, {len(SKIPS)} skipped ===" if FAILS else
       f"\n=== ALL SESSION-JAIL TESTS PASS ({len(SKIPS)} skipped) ===")
 sys.exit(1 if FAILS else 0)
