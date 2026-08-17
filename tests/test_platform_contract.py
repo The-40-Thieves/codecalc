@@ -549,6 +549,28 @@ try:
 finally:
     executor.IS_WINDOWS = _saved_win
 
+# ── THE-836: release packaging fails closed, decided by a pure function ─────
+# The end-to-end (CODECALC_REQUIRE_BINARY=1 + `uv build` refusing on a hidden
+# binary/shim, degrading to a warned pure wheel without the switch) was proven
+# by hand and is exercised by every release build; this pins the DECISION so it
+# cannot regress without a red check.
+sys.path.insert(0, str(REPO_ROOT))
+from hatch_build import missing_release_artifacts
+
+check("release artifacts complete -> nothing missing",
+      missing_release_artifacts(True, "blocknet.so", True) == [])
+check("a missing executor is named",
+      missing_release_artifacts(False, "blocknet.so", True) == ["codecalc-exec"])
+check("a missing shim is named",
+      missing_release_artifacts(True, "blocknet.so", False) == ["blocknet.so"])
+check("both missing -> both named",
+      missing_release_artifacts(False, "blocknet.so", False)
+      == ["codecalc-exec", "blocknet.so"])
+check("no shim on Windows is the platform, not a gap",
+      missing_release_artifacts(True, None, False) == [])
+check("Windows still requires the executor",
+      missing_release_artifacts(False, None, False) == ["codecalc-exec"])
+
 print(f"\n=== {len(FAILS)} FAILURE(S), {len(SKIPS)} skipped ===" if FAILS else
       f"\n=== PLATFORM CONTRACT HOLDS ({len(SKIPS)} skipped) ===")
 sys.exit(1 if FAILS else 0)
