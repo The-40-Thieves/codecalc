@@ -458,10 +458,19 @@ All optional. codecalc runs with none of these set.
 | `CODECALC_EXECUTION_PROVIDER` | `local` | Default execution-provider ID. Explicit `execute_code(provider=...)` selection still wins. Setting this to an unregistered provider fails explicitly; it never falls back. |
 | `CODECALC_PISTON_URL` | *(unset)* | Register the non-local open-source Piston v2 provider at this absolute HTTP(S) base URL. No public service is contacted by default. |
 | `CODECALC_PISTON_AUTHORIZATION` | *(unset)* | Exact value for Piston's `Authorization` header. It is scoped to the Piston transport and redacted from normalized results, descriptors, health, and receipts. |
+| `CODECALC_STRICT_URL` | *(unset)* | Activate the current OS's `<host>-strict` provider as an authenticated client of the Linux strict execution service. Without it, strict selection fails closed. The adapter verifies the remote enforcement handshake before sending source. |
+| `CODECALC_STRICT_AUTHORIZATION` | *(unset)* | Exact value for the strict service's `Authorization` header. It is never published in descriptors, doctor output, errors, or receipts. |
+| `CODECALC_RUN_STATE_DIR` | `~/.codecalc/runs` | Durable metadata-only journal for managed strict runs. Source, stdin, output, and credentials are never written there. On restart, recorded orphan runs are cancelled and cleaned through their owning provider. |
 | `CODECALC_ALLOW_RUNTIME_APPLY` | *(unset)* | Permit `update_runtimes(apply=True)` to run the **elevated** update commands (apt, via `sudo`). Unset, they are skipped with `ok: false` naming this variable, and the unprivileged managers still run. Deliberately an environment variable rather than a tool argument: `apply` is something a connected model can flip, and this is not. Accepts `1`/`true`/`yes`/`on`; an empty value is not consent. |
 | `CODECALC_SESSION_ROOT` | `~/.codecalc/sessions` | Where session workspaces live. |
 | `CODECALC_PROCESS_HEADROOM` | `512` | Fork-bomb guard. `RLIMIT_NPROC` is a **uid-wide task budget**, not a per-sandbox one — the kernel compares it against every thread your user owns, machine-wide. So codecalc measures the ambient count per execution and sets the limit to *ambient + headroom*: a bomb can add at most this many tasks, while a runtime wanting a few threads always has room however busy the box is. |
 | `CODECALC_MAX_PROCESSES` | *(unset)* | Escape hatch: pin `RLIMIT_NPROC` to an absolute value and skip the measurement. |
+
+The strict service runs on Linux x86_64 or ARM64 with Docker Engine, cgroup v2,
+and an explicitly registered gVisor `runsc` runtime. Its executor image must be
+pinned by `@sha256:` digest. The default `systrap` platform works without KVM,
+so the same authenticated service can be used from Linux, macOS, and Windows;
+strict clients never fall back to native local execution.
 
 Both backends resolve `CODECALC_RUNTIME_PATH` identically, and
 `scripts/check_parity.py` fails CI if the Rust and Python copies of that
@@ -520,7 +529,7 @@ PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py         # every tool over MC
 PYTHONPATH=. .venv/bin/python tests/test_executor_sweep.py  # sandbox regressions
 ```
 
-25 test files and 10 gate scripts, **1222 assertions**. Nothing in the suite
+28 test files and 10 gate scripts, **1222 assertions**. Nothing in the suite
 needs the internet, so none of it is ever skipped for lack of a network.
 
 It **can** skip for lack of a *capability*, and that is correct rather than a
@@ -560,6 +569,14 @@ Two rules the suite holds itself to, learned from breaking both:
 Linux, macOS and Windows. The three do not offer the same primitives, and the
 executor reports which ones it could **not** apply in an `unenforced` array on
 every result rather than letting a caller assume they all held.
+
+The native table below describes the `local` provider and is **not a hostile-code
+security boundary**. On macOS, `<host>-strict` instead uses the explicitly
+configured Linux strict service: the macOS binary performs provider selection,
+attestation, supervision, and result validation, while untrusted code executes
+inside the remote cgroup/namespace/seccomp/Landlock boundary. A missing or
+incomplete service fails before source leaves the Mac and never falls back to
+native execution.
 
 Symbolic evaluation carries the same idea. Every symbolic tool runs SymPy in
 a forked child under CPU and memory ceilings with a wall clock the parent

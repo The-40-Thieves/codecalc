@@ -227,6 +227,17 @@ jobs:
     # --fail: trufflehog exits 0 WITH FINDINGS unless this is passed.
     # --fail-on-scan-errors: a scan that errors part-way otherwise prints "0 verified", which is
     #   byte-identical to a clean repo.
+    # --exclude-detectors=Lob: a false-positive CLASS, not a risk acceptance. A Lob key is `test_`
+    #   plus 35 characters with no required keyword nearby, which is byte-for-byte the shape of a
+    #   pytest function name exactly 40 characters long — `test_config_requires_digest_pinned_image`
+    #   is one. Worse, Lob answers 200 to any `test_`-prefixed value, so --only-verified, the flag
+    #   whose entire job is suppressing false positives, is what PROMOTES these to "verified live
+    #   secret". Measured on this tree with a .venv present: 85 findings, 100% Lob, 100% 40-character
+    #   test names out of sympy and jsonschema. codecalc has no Lob dependency and no reason to grow
+    #   one (`rg -i '\blob\b'` over the tree is empty). This cannot fail open the way a path or
+    #   keyword exclusion could: an unrecognised detector name ABORTS the scan with "unrecognized
+    #   detector type" and exit 1, so a typo here turns the job red rather than blind — checked
+    #   against v3.96.0, not assumed. gitleaks above is untouched and stays the fail-closed half.
     name: trufflehog (verified live secrets)
     runs-on: ubuntu-latest
     steps:
@@ -241,7 +252,7 @@ jobs:
           tar -xzf "$RUNNER_TEMP/th.tar.gz" -C "$RUNNER_TEMP/th-bin" trufflehog
           echo "$RUNNER_TEMP/th-bin" >> "$GITHUB_PATH"
       - name: trufflehog
-        run: trufflehog filesystem . --only-verified --no-update --fail --fail-on-scan-errors
+        run: trufflehog filesystem . --only-verified --no-update --fail --fail-on-scan-errors --exclude-detectors=Lob
 
   osv-scanner:
     # Cross-ecosystem dependency scan over EVERY lockfile in the tree.

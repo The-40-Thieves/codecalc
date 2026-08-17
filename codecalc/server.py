@@ -20,6 +20,8 @@ from __future__ import annotations
 import base64
 import functools
 import inspect
+import os
+from pathlib import Path
 
 from mcp.server import CacheHint, MCPServer
 from mcp.server.mcpserver import Context
@@ -38,6 +40,7 @@ from . import (
     optimization,
     packages,
     providers,
+    run_supervisor,
     runtimes,
     tools,
     translation,
@@ -46,7 +49,22 @@ from . import (
 from .mcp_middleware import timeout_middleware
 
 _provider_registry = providers.configured_registry()
-_execution_service = execution_service.ExecutionService(_provider_registry)
+_managed_provider = any(
+    row["capabilities"].get("managed_runs")
+    for row in _provider_registry.descriptors()
+)
+_run_supervisor = None
+if _managed_provider:
+    _run_state_dir = Path(os.environ.get(
+        "CODECALC_RUN_STATE_DIR", Path.home() / ".codecalc" / "runs"
+    ))
+    _run_supervisor = run_supervisor.RunSupervisor(
+        _provider_registry, state_dir=_run_state_dir
+    )
+    _run_supervisor.recover_orphans()
+_execution_service = execution_service.ExecutionService(
+    _provider_registry, supervisor=_run_supervisor
+)
 _session_service = execution_service.SessionService()
 
 mcp = MCPServer(
@@ -879,6 +897,15 @@ def _doctor(as_json: bool = False, deep: bool = False) -> int:
         print("    binary         NOT FOUND — running the pure-Python fallback.")
         print("                   Set CODECALC_REQUIRE_NATIVE=1 to make this a")
         print("                   startup failure instead of a weaker sandbox.")
+
+    print("  execution providers")
+    for provider in rep["execution_providers"]:
+        readiness = ("ready" if provider["ready"] is True else
+                     "UNAVAILABLE" if provider["ready"] is False else "not probed")
+        boundary = "strict" if provider["strict"] else "non-strict"
+        print(f"    {provider['provider_id']:18} {readiness}, {boundary}")
+        if provider["detail"]:
+            print(f"      {provider['detail']}")
 
     sandbox = rep["install_sandbox"]
     print("  install sandbox   " + (f"Landlock ABI {sandbox['landlock_abi']}"

@@ -22,12 +22,17 @@ Every provider publishes a JSON-serializable descriptor containing:
 - `provider_id`: stable selection key
 - `provider_version`: provider implementation version
 - `host_class`: local, region, or other placement class
+- `strict`: whether the provider claims a security boundary for hostile code
 - `capabilities`: boolean support declarations
 
-Version 1 defines capability keys for `execute`, `inspect`, `stream`, `cancel`,
+Version 1 defines capability keys for `execute`, `managed_runs`, `inspect`, `stream`, `cancel`,
 `cleanup`, `files`, `artifacts`, `sessions`, `health`, `runtime_discovery`, and
 `workdir`, and `network_control`. Callers must not infer support from provider
 identity.
+
+`managed_runs=true` means the provider receives CodeCalc's run ID before the
+payload starts, so later inspection, cancellation, and cleanup target the same
+owned workload rather than an unrelated provider-generated ID.
 
 ## Required operations
 
@@ -93,6 +98,27 @@ The Piston adapter reports `backend="python"` in the version-1 result envelope
 because that closed field identifies CodeCalc's adapter implementation. The
 independent provider receipt identifies `provider_id="piston"`; adding Piston
 to the closed backend enum would break strict version-1 schema validators.
+
+`<host>-strict` is always discoverable for the current client OS. Without
+`CODECALC_STRICT_URL` it is an unavailable, fail-closed descriptor: selecting
+it returns `strict_provider_unavailable` and executes nothing. With an explicit
+URL it becomes an authenticated adapter to CodeCalc's Linux strict execution
+service. `CODECALC_STRICT_AUTHORIZATION` is sent only in the Authorization
+header and is redacted from errors and metadata.
+
+Before sending source, the adapter requires `/v1/health` to report a compatible
+provider interface, `ready=true`, `strict=true`, `isolation_profile=gvisor-v1`,
+and all of `application_kernel`, `cgroup_v2`, `namespaces`, `seccomp`,
+`read_only_rootfs`, `non_root`, `capabilities_dropped`, `filesystem`, `network`,
+`descendants`, and `resource_limits` as enforced. Missing controls produce
+`strict_attestation_failed`; the execution endpoint is never called. Each
+successful execution must repeat those controls in its receipt. Managed run
+IDs are used in execute, inspect, cancel, and cleanup paths.
+
+The Linux service profile uses a digest-pinned executor image under Docker's
+explicitly registered gVisor `runsc` runtime. It supports Linux x86_64 and
+ARM64; gVisor's default `systrap` platform avoids requiring KVM. Landlock may
+still harden local execution, but it is not evidence for the gVisor boundary.
 
 ## Versioning policy
 

@@ -43,7 +43,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from . import __version__, contract, executor, landlock, optional, registry
+from . import __version__, contract, executor, landlock, optional, providers, registry
 
 #: The four states, ordered weakest to strongest claim. Defined in registry.py
 #: and re-exported here: `list_languages` reports the same vocabulary now
@@ -236,6 +236,21 @@ def report(deep: bool = False) -> dict:
     summary = {state: sum(1 for r in runtimes if r["status"] == state)
                for state in RUNTIME_STATES}
     workspace = _workspace_check()
+    provider_registry = providers.configured_registry()
+    execution_providers = []
+    for descriptor in provider_registry.descriptors():
+        row = dict(descriptor)
+        if descriptor["host_class"] in {"local", providers.strict_host_platform()}:
+            health = provider_registry.select(descriptor["provider_id"]).health()
+            row["ready"] = health["ready"]
+            row["technology"] = health.get("technology")
+            row["detail"] = health.get("error")
+        else:
+            # Doctor must not turn into an unsolicited remote network probe.
+            row["ready"] = None
+            row["technology"] = None
+            row["detail"] = "remote readiness not probed by doctor"
+        execution_providers.append(row)
 
     # `healthy` is deliberately NARROW. A missing optional extra and an
     # uninstalled Haskell are ordinary facts about a host, not faults, and
@@ -263,6 +278,7 @@ def report(deep: bool = False) -> dict:
                 "which cannot enforce no_net. Set CODECALC_REQUIRE_NATIVE=1 to "
                 "make this a startup failure instead of a weaker sandbox."),
         },
+        "execution_providers": execution_providers,
         "install_sandbox": {
             "landlock_abi": abi,
             "confined": bool(abi),

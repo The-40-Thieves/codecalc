@@ -659,9 +659,10 @@ def test_configured_registry_enables_piston_without_disclosing_credentials() -> 
 
     check("configured provider registry selects Piston by default",
           registry.select().provider_id == "piston")
-    check("configured provider registry retains the local provider",
-          [item["provider_id"] for item in registry.descriptors()]
-          == ["local", "piston"])
+    provider_ids = [item["provider_id"] for item in registry.descriptors()]
+    check("configured registry retains local and host-strict providers",
+          "local" in provider_ids and "piston" in provider_ids
+          and f"{providers.strict_host_platform()}-strict" in provider_ids)
     check("configured provider registry never publishes credentials",
           authorization_value not in serialized_descriptors
           and "registry-provider-value" not in serialized_descriptors)
