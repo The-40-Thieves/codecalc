@@ -894,6 +894,14 @@ def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10
     if name is None:
         known = ", ".join(sorted(registry.LANGUAGES))
         return {"ok": False, "error": f"unknown language '{language}'. Available: {known}"}
+    if not registry.plan_supported(name, windows=IS_WINDOWS):
+        # A structured refusal, not an exit-127 from a shell that is not
+        # there. Mirrors the Rust executor's own check; the fallback needs its
+        # own copy because it is the backend that runs where the binary was
+        # never built — which includes Windows dev boxes.
+        return {"ok": False,
+                "error": f"'{name}' is unsupported on this platform: its plan "
+                         "needs a POSIX shell to scaffold a project"}
 
     entry = registry.LANGUAGES[name]
     ext = registry.EXTENSIONS[name]
@@ -1289,6 +1297,24 @@ def probe() -> dict:
     # Python fallback: check the primary command of each language
     out = {}
     for name, entry in registry.LANGUAGES.items():
+        # A plan the platform cannot run is unavailable regardless of what is
+        # installed, and a shell-wrapped plan is available only when BOTH the
+        # real tool and the shell resolve — probing bash alone advertised
+        # gleam on machines that had never seen gleam (THE-835).
+        if not registry.plan_supported(name, windows=IS_WINDOWS):
+            out[name] = False
+            continue
+        if name in registry.SHELL_WRAPPED:
+            # Resolved against the SANDBOX PATH, same as doctor's
+            # _runtime_status — executed code runs on runtime_path(), so
+            # probing the server's ambient PATH would report tools the
+            # sandbox cannot actually reach (caught by a restricted-PATH
+            # simulation of a hosted runner).
+            sandbox_path = registry.runtime_path()
+            tool = registry.WRAPPED_TOOL[name]
+            out[name] = (shutil.which(tool, path=sandbox_path) is not None
+                         and shutil.which("bash", path=sandbox_path) is not None)
+            continue
         cmd = entry["run"][0] if entry["run"] else ""
         if cmd.startswith("{"):
             cmd = (entry["compile"] or ["bash"])[0] if entry["compile"] else "bash"

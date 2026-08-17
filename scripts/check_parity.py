@@ -103,6 +103,32 @@ if floor("rust POSIX_ARGV_LANGUAGES", rust_posix_argv, 1) and \
     else:
         print(f"ok   POSIX-argv languages: {sorted(py_posix_argv)}, identical in both backends")
 
+# ── 1b. shell-wrapped languages (THE-835) ───────────────────────────────────
+# Same three-way rule as the POSIX-argv set, for the same reason: the set
+# decides per-platform availability in BOTH backends, so a copy that drifts
+# makes probe() and --probe disagree about which languages exist on Windows.
+m = re.search(r"SHELL_WRAPPED:\s*&\[&str\]\s*=\s*&\[(.*?)\];", RUST, re.S)
+rust_wrapped = set(re.findall(r'"([a-z0-9+#_-]+)"', m.group(1))) if m else set()
+py_wrapped = set(registry.SHELL_WRAPPED)
+
+if floor("rust SHELL_WRAPPED", rust_wrapped, 1) and \
+   floor("python SHELL_WRAPPED", py_wrapped, 1):
+    if rust_wrapped != py_wrapped:
+        fail(f"shell-wrapped language drift — python-only: "
+             f"{sorted(py_wrapped - rust_wrapped)}, "
+             f"rust-only: {sorted(rust_wrapped - py_wrapped)}")
+    elif not (py_wrapped <= py_langs):
+        fail(f"shell-wrapped names that are not languages: "
+             f"{sorted(py_wrapped - py_langs)}")
+    elif set(registry.WRAPPED_TOOL) != py_wrapped:
+        # Every wrapped language must name the tool its probe checks, or the
+        # probe falls back to the bash lie this set exists to end.
+        fail(f"WRAPPED_TOOL keys {sorted(registry.WRAPPED_TOOL)} do not match "
+             f"SHELL_WRAPPED {sorted(py_wrapped)}")
+    else:
+        print(f"ok   shell-wrapped languages: {sorted(py_wrapped)}, identical "
+              f"in both backends, every one naming its tool")
+
 # ── 2. env allowlist ────────────────────────────────────────────────────────
 m = re.search(r"ENV_ALLOWLIST:\s*&\[&str\]\s*=\s*&\[(.*?)\];", RUST, re.S)
 rust_env = set(re.findall(r'"([A-Za-z_][A-Za-z0-9_]*)"', m.group(1))) if m else set()

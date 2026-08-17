@@ -666,9 +666,11 @@ runtime executable. `CODECALC_WIN_JOB_AT_CREATION=0` retains the old path only
 as an explicitly unverified compatibility escape hatch.
 
 Two things degrade rather than fail on a given platform: languages whose runtime
-is absent (`list_languages` reports `available: false`), and the shell-wrapper
-languages — `bash`, `zsh`, `csharp`, `gleam`, `haskell` — which need a POSIX
-shell and so are unavailable on Windows unless one is installed.
+is absent (`list_languages` reports `available: false`), and the shell-wrapped
+plans — `gleam` and `haskell` — which need a POSIX shell to scaffold a project
+and report `available: false` on Windows outright rather than resolving through
+a bash that cannot run them. `csharp` left that set: .NET 10 runs a single `.cs`
+file directly, so it is shell-free on every platform.
 
 ## Sandbox guarantees
 
@@ -763,7 +765,7 @@ than failing opaquely.
 ## Notes
 
 - Java uses single-file source launch (JEP 330). Kotlin compiles to a jar.
-- csharp/gleam/haskell scaffold a temp project (dotnet new / gleam new / nix-shell).
+- gleam/haskell scaffold a temp project (gleam new / nix-shell); csharp runs the file directly (.NET 10 file-based apps).
 - `benchmark` uses the stdin-N contract: code reads N from stdin, work sized by N.
 
 ## CI

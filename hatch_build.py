@@ -35,9 +35,37 @@ import sysconfig
 from pathlib import Path
 from typing import Any
 
-from hatchling.builders.hooks.plugin.interface import BuildHookInterface
+try:
+    from hatchling.builders.hooks.plugin.interface import BuildHookInterface
+except ImportError:  # pragma: no cover — test environments without hatchling
+    # Only hatchling itself ever instantiates the hook class. Guarding the
+    # import keeps `missing_release_artifacts` importable by the test suite,
+    # whose environment installs runtime dependencies, not build backends.
+    BuildHookInterface = object  # type: ignore[assignment,misc]
 
 _EXE_NAME = "codecalc-exec.exe" if os.name == "nt" else "codecalc-exec"
+
+#: Release-only fail-closed switch (THE-836). The warn-and-degrade behaviour
+#: below is right for a dev checkout — a missing compiler must not block
+#: `pip install` — and wrong for a release build, where the same degradation
+#: silently publishes a pure-Python artifact whose installs cannot enforce
+#: no_net. The release workflow sets this; a dev build never needs to.
+REQUIRE_BINARY_ENV = "CODECALC_REQUIRE_BINARY"
+
+
+def missing_release_artifacts(exe_exists: bool, shim_name: str | None,
+                              shim_exists: bool) -> list[str]:
+    """What a fail-closed release build is missing, by name. Pure, testable.
+
+    `shim_name` is None on platforms that have no shim (Windows) — an absent
+    shim there is not a missing artifact, it is the platform.
+    """
+    missing = []
+    if not exe_exists:
+        missing.append("codecalc-exec")
+    if shim_name is not None and not shim_exists:
+        missing.append(shim_name)
+    return missing
 
 #: Matches codecalc/executor.py's `os.name == "nt"` / POSIX split: Windows has
 #: no LD_PRELOAD equivalent, so there is no shim to bundle there at all — the
@@ -57,6 +85,19 @@ class ExecutorBuildHook(BuildHookInterface):
         root = Path(self.root)
         bin_dir = root / "bin"
         exe = bin_dir / _EXE_NAME
+
+        if os.environ.get(REQUIRE_BINARY_ENV):
+            shim_name = _SHIM_NAME_BY_SYSTEM.get(platform.system().lower())
+            shim_exists = shim_name is not None and (bin_dir / shim_name).is_file()
+            missing = missing_release_artifacts(exe.is_file(), shim_name, shim_exists)
+            if missing:
+                raise RuntimeError(
+                    f"{REQUIRE_BINARY_ENV} is set and bin/ is missing "
+                    f"{', '.join(missing)} — refusing to build a release wheel "
+                    "that would silently downgrade installs to the pure-Python "
+                    "sandbox (no no_net enforcement). Build the executor first, "
+                    "or unset the variable for a dev build."
+                )
 
         if not exe.is_file():
             self.app.display_warning(

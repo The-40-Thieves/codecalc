@@ -102,17 +102,26 @@ check("without --deep, NOTHING claims to have been executed",
 # Two copies of "which command decides whether this language resolves" that
 # drift would make doctor and the executor disagree about what exists, which is
 # worse than either being wrong alone.
+# Compared through doctor's SHIPPED rows rather than by re-deriving
+# primary_command here: THE-835 made the deciding rule richer than one command
+# (a wrapped plan needs its real tool AND a shell, and no Windows plan at all),
+# and a test that re-implements half of that rule passes wherever its half
+# happens to agree — which is exactly how the pre-fix version passed on a dev
+# box with gleam installed while every hosted runner failed it.
 _probe = executor.probe()
 _mismatch = []
-for name, entry in registry.LANGUAGES.items():
-    if name in doctor.ALIAS_ENTRIES:
-        continue
-    status, _ = doctor._runtime_status(doctor.primary_command(entry))
-    resolves = status != "supported"
+for row in doctor.report()["runtimes"]:
+    name = row["name"]
+    resolves = row["status"] != "supported"
     if resolves != bool(_probe.get(name, True)):
-        _mismatch.append((name, status, _probe.get(name)))
+        _mismatch.append((name, row["status"], _probe.get(name)))
 check("doctor and executor.probe agree on what resolves",
       not _mismatch, f"-> {_mismatch[:4]}")
+# And the deciding COMMAND is the real tool for wrapped plans, not bash —
+# the specific lie THE-835 removed.
+check("a wrapped plan's deciding command is its tool, not bash",
+      all(doctor.primary_command(registry.LANGUAGES[n], n) == registry.WRAPPED_TOOL[n]
+          for n in registry.SHELL_WRAPPED))
 
 
 # ── MISSING EXECUTOR ───────────────────────────────────────────────────────

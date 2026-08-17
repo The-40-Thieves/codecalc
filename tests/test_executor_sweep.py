@@ -373,7 +373,10 @@ def shell_invariant(table: dict, label: str) -> None:
 shell_invariant(registry.LANGUAGES, "python")
 
 # Where a script IS used, the paths have to arrive as positional parameters.
-for lang in ("csharp", "gleam", "haskell"):
+# Keyed on SHELL_WRAPPED rather than a hand-list: csharp left the wrapper set
+# when .NET 10 made a shell unnecessary (THE-835), and a hand-list here is how
+# a test keeps asserting yesterday's registry.
+for lang in sorted(registry.SHELL_WRAPPED):
     argv = registry.LANGUAGES[lang]["run"]
     check(f"{lang}: paths passed as positional parameters",
           any(PLACEHOLDER.fullmatch(a) for a in argv), f"-> {argv[-3:]}")

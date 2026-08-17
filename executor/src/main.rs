@@ -334,18 +334,15 @@ const LANGS: &[Lang] = &[
         run: &["java", "-jar", "{work}/out.jar"],
     },
     // project wrappers
+    // csharp is not one any more (THE-835): .NET 10 runs a single .cs file
+    // directly, implicit usings included, so the bash/cp scaffold — which made
+    // C# structurally unsupported on Windows — is gone. Mirrored in
+    // codecalc/registry.py; check_parity gates the registries.
     Lang {
         name: "csharp",
         ext: "cs",
         compile: None,
-        run: &[
-            "bash",
-            "-c",
-            "dotnet new console -o \"$2/proj\" -n prog --force && cp \"$1\" \"$2/proj/Program.cs\" && dotnet run --project \"$2/proj\" --no-launch-profile",
-            "codecalc",
-            "{file}",
-            "{work}",
-        ],
+        run: &["dotnet", "run", "{file}"],
     },
     Lang {
         name: "gleam",
@@ -487,17 +484,24 @@ fn first_cmd(template: &[&'static str]) -> &'static str {
 fn probe() -> serde_json::Value {
     let mut out = serde_json::Map::new();
     for lang in LANGS {
-        // Compiled languages have all-placeholder run templates ({exe});
-        // their real runtime is the compile command's first binary.
-        let cmd = match first_cmd(lang.run) {
-            "" => first_cmd(lang.compile.unwrap_or(&[])),
-            c => c,
-        };
-        let available = if cmd.is_empty() || cmd == "bash" || cmd == "sh" {
-            // bash -c wrappers need bash itself; empty = nothing to probe
-            on_path(if cmd.is_empty() { "bash" } else { cmd })
+        // A shell-wrapped plan is available only when the REAL tool and the
+        // shell both resolve, and never on a platform whose plan cannot run
+        // (THE-835). Probing bash alone claimed gleam was available on
+        // machines that had never seen gleam.
+        let available = if let Some(tool) = wrapped_tool(lang.name) {
+            plan_supported(lang.name, cfg!(windows)) && on_path(tool) && on_path("bash")
         } else {
-            on_path(cmd)
+            // Compiled languages have all-placeholder run templates ({exe});
+            // their real runtime is the compile command's first binary.
+            let cmd = match first_cmd(lang.run) {
+                "" => first_cmd(lang.compile.unwrap_or(&[])),
+                c => c,
+            };
+            if cmd.is_empty() || cmd == "bash" || cmd == "sh" {
+                on_path(if cmd.is_empty() { "bash" } else { cmd })
+            } else {
+                on_path(cmd)
+            }
         };
         out.insert(lang.name.to_string(), json!(available));
     }
@@ -571,6 +575,32 @@ fn substitute(template: &str, file: &str, exe: &str, work: &str) -> String {
 /// Mirrored in codecalc/registry.py; scripts/check_parity.py gates that the
 /// two lists stay identical.
 const POSIX_ARGV_LANGUAGES: &[&str] = &["bash", "zsh"];
+
+/// Languages whose canonical plan still needs a POSIX shell to scaffold a
+/// workspace (THE-835). Before this set existed all wrapper languages probed
+/// as `bash`, so a Windows box with Git-for-Windows advertised them as
+/// available for plans that were structurally unable to run — THE-817's lie,
+/// one level up. Mirrored in codecalc/registry.py; scripts/check_parity.py
+/// gates the two copies.
+const SHELL_WRAPPED: &[&str] = &["gleam", "haskell"];
+
+/// The tool that does the real work inside each wrapper. Probing THIS is what
+/// makes availability honest: bash being present says nothing about gleam.
+fn wrapped_tool(lang: &str) -> Option<&'static str> {
+    match lang {
+        "gleam" => Some("gleam"),
+        "haskell" => Some("nix-shell"),
+        _ => None,
+    }
+}
+
+/// Whether `lang`'s canonical plan can execute on this platform AT ALL —
+/// distinct from whether its runtime is installed. `windows` is a parameter
+/// rather than a `cfg!` read for the same reason `source_arg` takes one: a
+/// branch only the breaking platform can reach is a branch CI never checks.
+fn plan_supported(lang: &str, windows: bool) -> bool {
+    !(windows && SHELL_WRAPPED.contains(&lang))
+}
 
 /// What `{file}` becomes for `language`.
 ///
@@ -996,6 +1026,16 @@ fn execute(
             });
         }
     };
+    if !plan_supported(lang.name, cfg!(windows)) {
+        // A structured refusal, not an exit-127 from a shell that is not
+        // there. Mirrored in the Python fallback's _execute_python.
+        return json!({
+            "ok": false,
+            "error": format!(
+                "'{}' is unsupported on this platform: its plan needs a POSIX \
+                 shell to scaffold a project", lang.name),
+        });
+    }
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     // Secure tempdir: use fs::create_dir (O_EXCL semantics — fails on existing
@@ -1468,5 +1508,36 @@ mod tests {
     fn the_compiled_artifact_keeps_its_absolute_path() {
         let out = substitute("{exe}", "main.sh", r"C:\Temp\w\a.exe", r"C:\Temp\w");
         assert_eq!(out, r"C:\Temp\w\a.exe");
+    }
+
+    // ── THE-835 ─────────────────────────────────────────────────────────────
+    // `windows` is a parameter for the same reason source_arg's is: these run
+    // on every CI leg, so the Windows verdicts are checked where Windows is
+    // not available to check them.
+
+    #[test]
+    fn shell_wrapped_plans_are_unsupported_on_windows() {
+        for lang in SHELL_WRAPPED {
+            assert!(!plan_supported(lang, true), "{lang} claimed a Windows plan");
+            assert!(plan_supported(lang, false), "{lang} lost its POSIX plan");
+        }
+    }
+
+    #[test]
+    fn csharp_is_no_longer_shell_wrapped_and_runs_everywhere() {
+        let lang = canonical("csharp").expect("csharp is registered");
+        assert_eq!(lang.run[0], "dotnet", "csharp reacquired a wrapper");
+        assert!(plan_supported("csharp", true));
+        assert!(!SHELL_WRAPPED.contains(&"csharp"));
+    }
+
+    #[test]
+    fn every_wrapped_language_names_its_real_tool() {
+        // A wrapper with no tool mapping would fall through to the bash probe,
+        // which is the exact lie this set exists to end.
+        for lang in SHELL_WRAPPED {
+            assert!(wrapped_tool(lang).is_some(), "{lang} has no wrapped_tool");
+        }
+        assert!(wrapped_tool("python3").is_none());
     }
 }
