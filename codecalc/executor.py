@@ -1305,9 +1305,15 @@ def probe() -> dict:
             out[name] = False
             continue
         if name in registry.SHELL_WRAPPED:
+            # Resolved against the SANDBOX PATH, same as doctor's
+            # _runtime_status — executed code runs on runtime_path(), so
+            # probing the server's ambient PATH would report tools the
+            # sandbox cannot actually reach (caught by a restricted-PATH
+            # simulation of a hosted runner).
+            sandbox_path = registry.runtime_path()
             tool = registry.WRAPPED_TOOL[name]
-            out[name] = (shutil.which(tool) is not None
-                         and shutil.which("bash") is not None)
+            out[name] = (shutil.which(tool, path=sandbox_path) is not None
+                         and shutil.which("bash", path=sandbox_path) is not None)
             continue
         cmd = entry["run"][0] if entry["run"] else ""
         if cmd.startswith("{"):
