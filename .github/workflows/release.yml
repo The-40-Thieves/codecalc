@@ -155,17 +155,23 @@ jobs:
             shim: none
             exe_ext: '.exe'
             wheel_tags: 'py3-none-win_amd64'
-          # Windows ARM64 (THE-836). windows-11-arm is a GA hosted runner for
-          # public repos, so this follows the workflow's own rule — build AND
-          # verify on the target's native architecture — rather than
-          # cross-compiling an artifact the verify job could never run.
+          # Windows ARM64 (THE-836): STANDALONE ARCHIVE ONLY, no wheel. This
+          # is upstream, not policy: codecalc -> mcp 2.0 -> pyjwt[crypto] ->
+          # cryptography, and pyca/cryptography publishes no win_arm64 wheel
+          # (verified against PyPI, latest 50.0.0), so `pip install` of ANY
+          # mcp-2.0 package on this platform tries to build cryptography from
+          # sdist and dies in openssl-sys — measured on the first dispatch of
+          # this very matrix entry. Publishing our wheel would hand users an
+          # install that fails in its dependencies while looking like our
+          # fault. The executor binary has no Python dependency chain, so the
+          # archive ships; the wheel returns when cryptography does.
           - id: windows-aarch64
             os: windows-11-arm
             rust_target: aarch64-pc-windows-msvc
             kind: native
             shim: none
             exe_ext: '.exe'
-            wheel_tags: 'py3-none-win_arm64'
+            wheel_tags: ''
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-rust
@@ -297,6 +303,7 @@ jobs:
       # nothing to do with a release. --wheel builds directly from the
       # working tree and never goes near that path.
       - name: build the platform wheel
+        if: matrix.wheel_tags != ''
         shell: bash
         env:
           WHEEL_TAGS: ${{ matrix.wheel_tags }}
@@ -344,6 +351,7 @@ jobs:
       # than trusting hatch_build.py's own intent. A wheel that builds is not
       # a wheel that contains what it should.
       - name: inspect the wheel
+        if: matrix.wheel_tags != ''
         shell: bash
         run: |
           set -euo pipefail
@@ -365,6 +373,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p dist
           stage="codecalc-exec-${{ matrix.id }}"
           mkdir -p "$stage"
           cp "bin/codecalc-exec${{ matrix.exe_ext }}" "$stage"/
@@ -407,8 +416,12 @@ jobs:
             os: macos-15-intel
           - id: windows-x86_64
             os: windows-latest
+          # Archive-only (see the build matrix note): there is no wheel to
+          # install, so this leg verifies what actually ships — the executor
+          # binary's JSON contract, run on the target's native architecture.
           - id: windows-aarch64
             os: windows-11-arm
+            mode: archive
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -420,6 +433,7 @@ jobs:
           version: '0.12.1'
           python-version: '3.12'
       - name: uv venv + uv pip install, exactly as a user would
+        if: matrix.mode != 'archive'
         shell: bash
         run: |
           set -euo pipefail
@@ -462,6 +476,7 @@ jobs:
       # workspace entirely is the stronger form: it cannot be defeated by a
       # later step that forgets the flag.
       - name: assert the INSTALLED package is the one under test
+        if: matrix.mode != 'archive'
         shell: bash
         run: |
           set -euo pipefail
@@ -500,6 +515,7 @@ jobs:
           print("ok: this is the installed distribution")
           PYEOF
       - name: assert the RUST backend is what got installed
+        if: matrix.mode != 'archive'
         shell: bash
         run: |
           set -euo pipefail
@@ -511,6 +527,7 @@ jobs:
             exit 1
           fi
       - name: executor JSON contract, against the INSTALLED binary
+        if: matrix.mode != 'archive'
         shell: bash
         run: |
           set -euo pipefail
@@ -518,6 +535,19 @@ jobs:
           binpath=$("$py" -c "from codecalc import executor; print(executor._rust_binary())")
           echo "binary: $binpath"
           "$py" "$GITHUB_WORKSPACE/scripts/contract_check.py" "$binpath"
+
+      - name: executor JSON contract, against the STANDALONE archive
+        if: matrix.mode == 'archive'
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive=$(ls dl/codecalc-exec-${{ matrix.id }}.zip)
+          mkdir -p "$RUNNER_TEMP/standalone"
+          7z x "$archive" -o"$RUNNER_TEMP/standalone" >/dev/null
+          exe="$RUNNER_TEMP/standalone/codecalc-exec-${{ matrix.id }}/codecalc-exec.exe"
+          [ -f "$exe" ] || { echo "::error::$exe missing from the archive"; exit 1; }
+          cd "$RUNNER_TEMP"
+          python "$GITHUB_WORKSPACE/scripts/contract_check.py" "$exe"
 
       # Issue #50's acceptance criterion, and the whole point of this job:
       # `backend() == "rust"` above passes even when the --no-net shim is
