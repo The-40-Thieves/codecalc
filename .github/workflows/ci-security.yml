@@ -325,22 +325,49 @@ jobs:
         working-directory: executor
         run: cargo audit
 
+  opengrep-baseline:
+    # The SAST baseline used to live in a comment right here, listing 5 accepted findings in
+    # llm.py / context7.py / complexity.py / _worker_bootstrap.py. Two of those files were then
+    # DELETED with the LLM and context7 removal, so four of five entries named files that did not
+    # exist — while the real scan had dropped to 2 findings, one of them new and undocumented. Read
+    # against a baseline of 5, "2 findings" looks like improvement. It was not; it was four findings
+    # leaving with their files and a fresh one arriving unnoticed.
+    #
+    # A comment cannot be wrong out loud. scripts/check_opengrep_baseline.py now holds the baseline
+    # as data and asserts every entry names a file that exists and carries a reason. This is the
+    # second time a justification in this repo outlived its files (the first was the S310 ruff
+    # exemption, #100), and check_no_eval.py already floors on exactly this for its exec() exception.
+    #
+    # GATES, and runs on every PR, because it is a static assertion about files in this repo with no
+    # external feed — the same test the header applies to parity/no-eval/claims. It needs no opengrep
+    # and no network, so a file deletion is caught in the PR that deletes it, not a month later.
+    name: opengrep baseline names files that exist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - run: python scripts/check_opengrep_baseline.py
+
   opengrep:
     # Full-tree SAST on a schedule rather than per-PR: a `--config auto` pass takes minutes and this
     # repo is 7k lines, so per-PR it would mostly re-report the same known-and-reviewed findings.
+    # The reviewed baseline is scripts/check_opengrep_baseline.py, NOT a comment here: one list in
+    # two places is how the first copy rotted.
     #
-    # Baseline at wiring time: 5 findings, all `audit` severity, all reviewed —
-    #   1x exec-detected      _worker_bootstrap.py, the documented REPL-subprocess exec
-    #   4x dynamic-urllib-use llm.py / context7.py / complexity.py. Verified NOT exploitable: every
-    #                         URL is a module-level constant plus urlencode()d params, so the
-    #                         file:// scheme this rule guards against is unreachable.
-    # continue-on-error to match: a scheduled scan against a static tree has no PR to block.
+    # continue-on-error stays. `--config auto` pulls rules from a registry that changes with no PR,
+    # which is precisely the external feed the header commits to not gating on. The structural half
+    # above gates instead, and it has no feed.
     name: opengrep (scheduled full-tree SAST)
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
       - name: install opengrep v1.25.0 (pinned binary + checksum)
         run: |
           set -euo pipefail
@@ -351,4 +378,13 @@ jobs:
           chmod +x "$RUNNER_TEMP/opengrep-bin/opengrep"
           echo "$RUNNER_TEMP/opengrep-bin" >> "$GITHUB_PATH"
       - name: opengrep scan
-        run: opengrep scan --config auto --error .
+        # No `--error`: a raw finding count is not the verdict. Every finding here is either already
+        # reviewed or is news, and only the baseline knows which. `--json --output` exits 0 with
+        # findings present, so the next step is what decides.
+        run: opengrep scan --config auto --json --output opengrep.json .
+      - name: compare findings to the reviewed baseline
+        # Fails on a finding absent from the baseline, and warns on an accepted entry that no longer
+        # fires so the record gets trimmed instead of quietly becoming fiction. Also floors on
+        # paths.scanned: a scan that covered nothing emits `results: []`, byte-identical to a clean
+        # tree, which is the same trap --fail-on-scan-errors closes for trufflehog above.
+        run: python scripts/check_opengrep_baseline.py --findings opengrep.json

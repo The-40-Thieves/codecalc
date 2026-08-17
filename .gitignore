@@ -47,3 +47,7 @@ graphify-out/*
 # Claude Code agent worktrees live here; they are checkouts of this repo and
 # must never be committed into it.
 .claude/
+
+# scripts/check_opengrep_baseline.py --findings reads this; the opengrep job writes it
+# into the workspace root. It is a CI artifact, never a tracked file.
+opengrep.json
