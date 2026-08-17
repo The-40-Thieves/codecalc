@@ -66,14 +66,22 @@ EXTRAS: dict[str, tuple[str, ...]] = {
 ALIAS_ENTRIES = frozenset({"c++"})
 
 
-def primary_command(entry: dict) -> str:
+def primary_command(entry: dict, name: str | None = None) -> str:
     """The command whose presence decides whether a language resolves.
 
     Mirrors the fallback in `executor.probe()` deliberately, and
     `tests/test_doctor.py` asserts the two agree on every language. Two copies
     of this rule that drift would make `doctor` and the executor disagree about
     which runtimes exist, which is worse than either being wrong on its own.
+
+    For a shell-wrapped language the deciding command is the REAL tool, not
+    `bash` (THE-835): `bash` resolving says nothing about whether gleam is
+    installed, and probing it advertised wrapper languages on machines that
+    had never seen them. `name` is optional only for callers that predate the
+    wrapper distinction; passing it is what makes the answer honest.
     """
+    if name is not None and name in registry.SHELL_WRAPPED:
+        return registry.WRAPPED_TOOL[name]
     cmd = entry["run"][0] if entry["run"] else ""
     if cmd.startswith("{"):
         cmd = (entry["compile"] or ["bash"])[0] if entry["compile"] else "bash"
@@ -210,8 +218,28 @@ def report(deep: bool = False) -> dict:
     langs = [name for name in sorted(registry.LANGUAGES) if name not in ALIAS_ENTRIES]
     runtimes = []
     for name in langs:
-        cmd = primary_command(registry.LANGUAGES[name])
+        cmd = primary_command(registry.LANGUAGES[name], name)
+        # A plan the platform cannot run reports `supported` — "codecalc knows
+        # this language, nothing FOR IT here" — with the reason in `detail`,
+        # BEFORE any resolution happens. Resolving the tool first and then
+        # deciding would report gleam `installed` on a Windows box where the
+        # plan is structurally unable to run (THE-835): a stronger claim than
+        # was measured, which is the defect this file's docstring is about.
+        if not registry.plan_supported(name, windows=os.name == "nt"):
+            runtimes.append({
+                "name": name, "command": cmd, "status": "supported",
+                "path": None, "version": None,
+                "detail": "the canonical plan needs a POSIX shell to scaffold "
+                          "a project; unsupported on Windows",
+            })
+            continue
         status, path = _runtime_status(cmd)
+        # A wrapped plan needs its shell AS WELL as its tool. The tool
+        # resolving while bash is absent (minimal containers) is still a plan
+        # that cannot run, and `installed` would overstate it.
+        if (name in registry.SHELL_WRAPPED and status == "installed"
+                and shutil.which("bash", path=registry.runtime_path()) is None):
+            status, path = "supported", None
         # `version` is present on every row so a caller never has to branch on
         # the key's existence, and is None unless it was actually read. Under
         # --deep only, for the same reason `available` is: asking 31 runtimes

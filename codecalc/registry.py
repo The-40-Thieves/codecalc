@@ -93,6 +93,42 @@ RUNTIME_STATES = ("supported", "installed", "unhealthy", "available")
 #: gated by scripts/check_parity.py.
 POSIX_ARGV_LANGUAGES = frozenset({"bash", "zsh"})
 
+#: Languages whose CANONICAL PLAN still needs a POSIX shell to prepare its
+#: workspace — the `bash -c` wrappers (THE-835). csharp left this set when
+#: .NET 10's file-based execution made a shell unnecessary; these two remain:
+#: gleam has no single-file mode (a project must be scaffolded), and haskell's
+#: plan runs through `nix-shell`, which is a POSIX-only environment manager.
+#:
+#: The set exists so the WRAPPER requirement is a checkable fact instead of a
+#: string buried in an argv template. Before it, all three wrapper languages
+#: probed as `bash` — so on a Windows box with Git-for-Windows they advertised
+#: `available: true` for plans that were structurally unable to run (the same
+#: lie THE-817 fixed for bash itself, one level up). Mirrored in
+#: executor/src/main.rs; scripts/check_parity.py gates the two copies.
+SHELL_WRAPPED = frozenset({"gleam", "haskell"})
+
+#: The tool that does the real work inside each wrapper. Probing THIS is what
+#: makes availability honest: `bash` being present says nothing about whether
+#: gleam is, and it was the only thing being checked.
+WRAPPED_TOOL = {"gleam": "gleam", "haskell": "nix-shell"}
+
+
+def plan_supported(name: str, *, windows: bool) -> bool:
+    """Whether `name`'s canonical plan can execute on this platform AT ALL.
+
+    Distinct from "is the runtime installed": a shell-wrapped plan on Windows
+    is unsupported no matter what is installed, and reporting it as merely
+    missing invites installing things that will not help.
+
+    `windows` is a parameter rather than a platform read, for the same reason
+    `source_arg` takes one: a branch only the breaking platform can reach is a
+    branch CI never checks.
+    """
+    canon = canonical(name)
+    if canon is None:
+        return False
+    return not (windows and canon in SHELL_WRAPPED)
+
 
 def source_arg(language: str, path: str, *, windows: bool) -> str:
     r"""What `{file}` becomes for `language` — see POSIX_ARGV_LANGUAGES.
@@ -147,10 +183,13 @@ LANGUAGES: dict[str, dict] = {
         "java -jar {work}/out.jar",
     ),
     # ── project-wrapper runtimes ──────────────────────────────────────────
-    "csharp": _c(
-        None,
-        'bash -c \'dotnet new console -o "$2/proj" -n prog --force && cp "$1" "$2/proj/Program.cs" && dotnet run --project "$2/proj" --no-launch-profile\' codecalc {file} {work}',
-    ),
+    # csharp is NOT a wrapper any more (THE-835). .NET 10 runs a single .cs
+    # file directly ("file-based apps"), implicit usings included — verified
+    # with this registry's own smoke snippet under the executor's env
+    # allowlist. The old plan shelled out to `dotnet new console` + `cp`,
+    # which made C# structurally unsupported on Windows for want of bash while
+    # the runtime itself resolved fine.
+    "csharp": _c(None, "dotnet run {file}"),
     "gleam": _c(
         None,
         'bash -c \'gleam new "$2/proj" --name prog --skip-git && cp "$1" "$2/proj/src/prog.gleam" && cd "$2/proj" && gleam run\' codecalc {file} {work}',

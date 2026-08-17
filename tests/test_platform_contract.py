@@ -498,6 +498,57 @@ _mismatch = [n for n, r in _doc.items()
 check("doctor and list_languages agree on every runtime's status",
       not _mismatch, f"-> {_mismatch[:5]}")
 
+# ── THE-835: shell-wrapped plans are a checkable fact, not an argv string ───
+# `windows` is a parameter (the source_arg pattern), so every verdict below is
+# exercised on this leg regardless of what this leg runs on.
+
+check("csharp's plan is shell-free",
+      registry.LANGUAGES["csharp"]["run"][0] == "dotnet",
+      f"-> {registry.LANGUAGES['csharp']['run']}")
+check("csharp is not in SHELL_WRAPPED", "csharp" not in registry.SHELL_WRAPPED)
+check("wrapped plans are unsupported on Windows",
+      all(not registry.plan_supported(n, windows=True)
+          for n in registry.SHELL_WRAPPED))
+check("wrapped plans keep their POSIX support",
+      all(registry.plan_supported(n, windows=False)
+          for n in registry.SHELL_WRAPPED))
+check("an unknown language is unsupported everywhere",
+      not registry.plan_supported("nosuchlang", windows=False))
+check("every wrapped language names its real tool",
+      set(registry.WRAPPED_TOOL) == set(registry.SHELL_WRAPPED))
+
+# The probe must require the REAL tool, not just bash. Simulated by hiding the
+# tool from resolution while bash stays present — the pre-fix probe answered
+# True for gleam on exactly this machine shape.
+_real_which = executor.shutil.which
+try:
+    executor.shutil.which = lambda cmd, path=None: (
+        None if cmd in registry.WRAPPED_TOOL.values() else _real_which(cmd, path=path))
+    # probe() prefers the Rust --probe; hide the binary for the duration so
+    # the PYTHON fallback path is the one under test.
+    _saved_rust = executor._rust
+    executor._rust = None
+    _p = executor.probe()
+    executor._rust = _saved_rust
+    check("a wrapper language without its tool probes unavailable",
+          all(_p[n] is False for n in registry.SHELL_WRAPPED),
+          f"-> {[(n, _p[n]) for n in registry.SHELL_WRAPPED]}")
+finally:
+    executor.shutil.which = _real_which
+    executor._rust = _saved_rust
+
+# The fallback executor refuses an unsupported plan with a structured error,
+# not an exit-127 from a shell that is not there.
+_saved_win = executor.IS_WINDOWS
+try:
+    executor.IS_WINDOWS = True
+    _r = executor._execute_python("gleam", "io.println(42)")
+    check("the fallback refuses a wrapped plan on Windows, structurally",
+          _r.get("ok") is False and "unsupported on this platform" in _r.get("error", ""),
+          f"-> {_r.get('error', '')[:80]}")
+finally:
+    executor.IS_WINDOWS = _saved_win
+
 print(f"\n=== {len(FAILS)} FAILURE(S), {len(SKIPS)} skipped ===" if FAILS else
       f"\n=== PLATFORM CONTRACT HOLDS ({len(SKIPS)} skipped) ===")
 sys.exit(1 if FAILS else 0)
