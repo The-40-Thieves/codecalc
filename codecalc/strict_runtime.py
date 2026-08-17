@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import subprocess
@@ -127,6 +128,16 @@ class DockerGVisorRuntime:
             self.config.image,
             "codecalc-exec", "--lang", language, "--timeout", str(timeout),
         ]
+        # Cleanup is OWNERSHIP-VERIFIED on both exits (THE-834). It used to be
+        # `verify_ownership=False` in a finally, which force-removed whatever
+        # held the name — and the name `codecalc-<run_id>` can be squatted
+        # BEFORE this run, in which case `docker run --name` fails with a
+        # conflict and the failure path is exactly the one that reaches a
+        # container codecalc never created. On the failure path a cleanup
+        # refusal is suppressed, because the run's own error (the conflict)
+        # is the diagnosis and a second exception from the finally would mask
+        # it; on the success path a refusal propagates, because our own
+        # container having foreign labels is the story.
         try:
             proc = self._runner(
                 argv, input=source, capture_output=True, text=True,
@@ -149,23 +160,38 @@ class DockerGVisorRuntime:
                 "image": self.config.image,
                 "controls": list(ENFORCEMENT_CONTROLS),
             }
-            return result
-        finally:
-            self.cleanup(run_id, verify_ownership=False)
+        except BaseException:
+            with contextlib.suppress(StrictRuntimeUnavailable):
+                self.cleanup(run_id)
+            raise
+        self.cleanup(run_id)
+        return result
 
     def _name(self, run_id: str) -> str:
         if not _RUN_ID.fullmatch(run_id):
             raise ValueError("run_id is not a safe strict container identity")
         return f"codecalc-{run_id}"
 
-    def _owned(self, run_id: str) -> bool:
+    def _owned(self, run_id: str) -> bool | None:
+        """Tri-state, and the middle value is load-bearing (THE-834).
+
+        True   the container exists and carries codecalc's ownership labels
+        False  the container EXISTS and is someone else's — never touch it
+        None   inspect could not find it — nothing to remove, not a refusal
+
+        Collapsing None into False is what made verified cleanup unusable
+        from a finally: every failed probe (container never created) then
+        raised a refusal that masked the primary error, which is why the old
+        code opted out with verify_ownership=False — and force-removed
+        squatters instead.
+        """
         name = self._name(run_id)
         proc = self._runner(
             [self.config.docker, "inspect", "--format", "{{json .Config.Labels}}", name],
             capture_output=True, text=True, timeout=10, check=False, shell=False,
         )
         if proc.returncode != 0:
-            return False
+            return None
         try:
             labels = json.loads(proc.stdout)
         except json.JSONDecodeError as exc:
@@ -177,7 +203,7 @@ class DockerGVisorRuntime:
         )
 
     def cancel(self, run_id: str) -> None:
-        if not self._owned(run_id):
+        if self._owned(run_id) is not True:
             raise StrictRuntimeUnavailable("refusing to cancel container without matching ownership")
         proc = self._runner(
             [self.config.docker, "kill", self._name(run_id)],
@@ -186,8 +212,19 @@ class DockerGVisorRuntime:
         if proc.returncode != 0:
             raise StrictRuntimeUnavailable("failed to cancel owned strict container")
 
-    def cleanup(self, run_id: str, *, verify_ownership: bool = True) -> None:
-        if verify_ownership and not self._owned(run_id):
+    def cleanup(self, run_id: str) -> None:
+        """Remove the run's container — OURS, verified, every time (THE-834).
+
+        There is deliberately no opt-out parameter any more. The one caller
+        that used `verify_ownership=False` (execute's teardown) was the one
+        place the guard mattered most: a squatted `codecalc-<run_id>` makes
+        `docker run --name` fail, and the teardown then force-removed the
+        squatter. Absent is idempotent success; foreign is a refusal.
+        """
+        owned = self._owned(run_id)
+        if owned is None:
+            return  # nothing exists under this name; removing it is a no-op
+        if owned is False:
             raise StrictRuntimeUnavailable("refusing to remove container without matching ownership")
         self._runner(
             [self.config.docker, "rm", "--force", "--volumes", self._name(run_id)],
