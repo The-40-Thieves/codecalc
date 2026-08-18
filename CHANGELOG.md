@@ -74,7 +74,10 @@ keeps working against `1.1.0`.
 - **A deny-by-default operator allowlist for package installs** (THE-791).
 - **A capability broker, deny-by-default network, and an audit stream** (THE-787).
   A small policy layer whose one invariant is that the capabilities policy
-  APPROVES for a job never exceed the ones the requester REQUESTED. Off by
+  APPROVES for a job never exceed the ones the requester REQUESTED. Applied
+  identically on the synchronous (`execute_code`/stream/session) and background
+  (`run_submit`) paths — a policy the sync path enforces cannot be bypassed by
+  moving the job to the background. Off by
   default (`CODECALC_CAPABILITY_POLICY` unset = today's behaviour). Set it and
   `deny-network` flips the default to network-denied unless a job requests and is
   granted network; `strict` refuses a job whose denial the provider cannot

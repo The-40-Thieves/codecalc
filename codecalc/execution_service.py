@@ -32,6 +32,57 @@ from .run_supervisor import RunSupervisor
 RECEIPT_VERSION = providers.RECEIPT_VERSION
 
 
+def broker_run(spec: ComputationSpec, provider, *,
+               policy: capabilities.CapabilityPolicy | None,
+               audit: audit_module.AuditLog, session_id: str | None = None):
+    """Decide, audit, and enforce capabilities for ONE run.
+
+    Shared by `ExecutionService` (the sync execute/stream/session paths) and by
+    `server.run_submit` (the background path), so a policy the sync path enforces
+    cannot be bypassed by submitting the same job to the background — the CRITICAL
+    THE-787 fix-round bug. Returns `(run_spec, decision, rejection_or_None)`:
+
+    - `run_spec` is the possibly-narrowed spec to actually run (a denied network
+      forces `no_net`); `spec` (the request as written) still names the receipt.
+    - `decision` is threaded onto the receipt so every path surfaces the four
+      capability sets identically.
+    - `rejection` is a stamped `PERMISSION_DENIED` result when the broker refuses
+      (escalation, or strict + an unenforceable denial); the caller returns it
+      WITHOUT starting any work.
+
+    When no policy is active the decision is the passthrough disclosure
+    (approved == requested, `brokered: false`) and the spec is unchanged.
+    """
+    decision = capabilities.decide(spec, provider.describe(), policy)
+    if decision.rejected:
+        audit.emit(
+            audit_module.CAPABILITY_REJECTED,
+            session_id=session_id,
+            decision="rejected",
+            reason=decision.reason,
+            provider_id=provider.provider_id,
+            provider_error=decision.provider_error,
+            requested=sorted(decision.requested),
+            policy=decision.policy_source or None,
+        )
+        rejection = contract.stamp(capabilities.rejection_result(
+            decision, provider_id=provider.provider_id))
+        return spec, decision, rejection
+    if decision.brokered:
+        audit.emit(
+            audit_module.CAPABILITY_DENIED if decision.denied
+            else audit_module.CAPABILITY_APPROVED,
+            session_id=session_id,
+            decision="denied" if decision.denied else "approved",
+            provider_id=provider.provider_id,
+            requested=sorted(decision.requested),
+            approved=sorted(decision.approved),
+            denied=sorted(decision.denied),
+            policy=decision.policy_source or None,
+        )
+    return capabilities.enforced_spec(spec, decision), decision, None
+
+
 class ExecutionService:
     """Select an execution provider and preserve CodeCalc's result contract."""
 
@@ -64,41 +115,11 @@ class ExecutionService:
 
     def _broker(self, spec: ComputationSpec, provider, *,
                 session_id: str | None = None):
-        """Broker `spec` against the active policy. Returns
-        `(effective_spec, decision, rejection_result_or_None)`.
-
-        Emits one audit event for the decision. When no policy is active the
-        decision is the passthrough disclosure (approved == requested,
-        `brokered: false`) and the spec is returned unchanged — today's behaviour.
-        """
-        decision = capabilities.decide(spec, provider.describe(), self._policy())
-        if decision.rejected:
-            self.audit.emit(
-                audit_module.CAPABILITY_REJECTED,
-                session_id=session_id,
-                decision="rejected",
-                reason=decision.reason,
-                provider_id=provider.provider_id,
-                provider_error=decision.provider_error,
-                requested=sorted(decision.requested),
-                policy=decision.policy_source or None,
-            )
-            rejection = contract.stamp(capabilities.rejection_result(
-                decision, provider_id=provider.provider_id))
-            return spec, decision, rejection
-        if decision.brokered:
-            self.audit.emit(
-                audit_module.CAPABILITY_DENIED if decision.denied
-                else audit_module.CAPABILITY_APPROVED,
-                session_id=session_id,
-                decision="denied" if decision.denied else "approved",
-                provider_id=provider.provider_id,
-                requested=sorted(decision.requested),
-                approved=sorted(decision.approved),
-                denied=sorted(decision.denied),
-                policy=decision.policy_source or None,
-            )
-        return capabilities.enforced_spec(spec, decision), decision, None
+        """Broker `spec` against the active policy. Thin wrapper over the shared
+        `broker_run` so the sync service and the background `run_submit` path
+        enforce identically (THE-787 fix round: run_submit used to bypass this)."""
+        return broker_run(spec, provider, policy=self._policy(),
+                          audit=self.audit, session_id=session_id)
 
     def execute(self, spec: ComputationSpec, *, provider_id: str | None = None) -> dict:
         try:
@@ -130,7 +151,8 @@ class ExecutionService:
                         provider_error="run_supervisor_unavailable",
                         requested_provider=provider.provider_id,
                     ))
-                handle = self.supervisor.start(run_spec, provider_id=provider.provider_id)
+                handle = self.supervisor.start(run_spec, provider_id=provider.provider_id,
+                                               capability_decision=decision)
                 cleanup_failure = None
                 try:
                     result = dict(self.supervisor.wait(

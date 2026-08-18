@@ -46,6 +46,11 @@ class _Run:
     state: str = "running"
     result: dict | None = None
     cleaned: bool = False
+    #: THE-787: the capability broker's decision for this run, threaded through
+    #: so `_collect`'s receipt carries the same `capabilities` block a sync
+    #: execute_code result does. In-memory only (not journalled): a recovered
+    #: orphan is cancelled/cleaned, never re-collected into a receipt.
+    capability_decision: object | None = None
 
 
 class TooManyActiveRuns(RuntimeError):
@@ -107,7 +112,8 @@ class RunSupervisor:
         temporary.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
         temporary.replace(destination)
 
-    def start(self, spec: ComputationSpec, *, provider_id: str | None = None) -> RunHandle:
+    def start(self, spec: ComputationSpec, *, provider_id: str | None = None,
+              capability_decision: object | None = None) -> RunHandle:
         provider = self.registry.select(provider_id, spec=spec)
         now = time.time()
         handle = RunHandle(
@@ -144,7 +150,8 @@ class RunSupervisor:
             if active >= self.max_active_runs:
                 raise TooManyActiveRuns(active, self.max_active_runs)
             future = self._pool.submit(operation, *arguments)
-            run = _Run(handle=handle, provider=provider, spec=spec, future=future)
+            run = _Run(handle=handle, provider=provider, spec=spec, future=future,
+                       capability_decision=capability_decision)
             self._runs[handle.run_id] = run
             self._write(run)
         return handle
@@ -190,7 +197,9 @@ class RunSupervisor:
                 # this a run_inspect terminal result was missing `provider`
                 # entirely — the one field a caller uses to see which limits the
                 # provider actually enforced.
-                run.result = attach_receipt(run.spec, run.provider, result)
+                run.result = attach_receipt(
+                    run.spec, run.provider, result,
+                    capability_decision=run.capability_decision)
             except Exception as exc:  # ANY failure must terminalize the run
                 # F1 (cross-vendor): a provider whose future RAISES —
                 # UnsupportedCapability, a transport error, or a failure while

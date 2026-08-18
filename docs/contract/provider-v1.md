@@ -68,7 +68,7 @@ one, PATCH changes descriptions only.
 | `source_sha256` | `sha256:<hex>` over the source that was executed, independent of the limits wrapped around it. |
 | `determinism` | `locale` (`LANG`/`LC_ALL`), `timezone`, `seed`, and an `unrecorded` list. |
 | `limits` | The requested-versus-enforced receipt, below. |
-| `capabilities` | The capability broker's decision (added in `receipt_version` **1.2.0**), below. Present on every result the execution service produces; absent for an un-brokered background run. |
+| `capabilities` | The capability broker's decision (added in `receipt_version` **1.2.0**), below. Present on every brokered result — the synchronous `execute_code`/stream/session paths AND background `run_submit` runs (their `run_inspect` terminal receipt carries the identical block). |
 
 ## The capability broker (`capabilities`)
 
@@ -85,6 +85,12 @@ policy may narrow the capabilities a job asked for, never add to them.
 | `denied` | `requested − approved`. |
 | `brokered` | `false` when no policy was active (pure disclosure, run unchanged); `true` when a policy decided. |
 | `policy` | The `CODECALC_CAPABILITY_POLICY` directive string that produced the decision, or null when brokering was off. |
+
+Brokering runs on the same footing for a synchronous `execute_code` and a
+background `run_submit`: `run_submit` decides and enforces before the run starts,
+so a policy cannot be bypassed by moving a job to the background — an escalation
+or strict-unenforceable job is rejected before any background work, and an
+enforced run's `run_inspect` receipt carries the same `capabilities` block.
 
 Brokering is **off by default**. `CODECALC_CAPABILITY_POLICY` unset (or empty)
 runs exactly as before — the block still reports the four sets with

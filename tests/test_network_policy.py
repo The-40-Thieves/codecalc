@@ -142,6 +142,95 @@ pol_allow = capabilities.policy_from_env(
 check("allow-network parses to an explicit grant",
       pol_allow is not None and NET in pol_allow.grant and NET in pol_allow.default_deny)
 
+
+# ── F. the BACKGROUND path (run_submit) is brokered identically ────────────
+# THE-787 fix round, CRITICAL: run_submit used to call RunSupervisor.start
+# directly, bypassing the broker entirely — a deny-network policy the sync
+# execute_code path enforced was silently void on the background path (network
+# reached), and a strict-unenforceable job ran to completion instead of being
+# rejected. These drive the real server.run_submit / run_inspect tools against
+# a recording provider registered into the server's own registry, so the fix is
+# exercised end to end, not just the helper.
+import os
+import tempfile
+import time
+
+# Isolate the server's run-state and audit paths into throwaway dirs BEFORE the
+# import that builds them, so this test's background-run journals and audit
+# lines never touch the shared ~/.codecalc — a synthetic-provider journal left
+# in the real state dir would make a later server import trip recover_orphans.
+_state = tempfile.mkdtemp(prefix="codecalc-netpolicy-runs-")
+os.environ["CODECALC_RUN_STATE_DIR"] = _state
+os.environ["CODECALC_AUDIT_LOG"] = str(pathlib.Path(_state) / "audit.log")
+
+from codecalc import server
+
+
+class _ServerRecordingProvider(providers.LocalExecutionProvider):
+    def __init__(self, provider_id: str, *, network_control: bool) -> None:
+        self.provider_id = provider_id
+        self._network_control = network_control
+        self.captured = None
+
+    def describe(self) -> dict:
+        d = super().describe()
+        d["provider_id"] = self.provider_id
+        d["capabilities"] = dict(d["capabilities"])
+        d["capabilities"]["network_control"] = self._network_control
+        return d
+
+    def execute(self, spec: providers.ComputationSpec) -> dict:
+        self.captured = spec
+        return contract.stamp({"ok": True, "verdict": "OK", "stdout": "",
+                               "stderr": "", "exit_code": 0, "unenforced": []})
+
+
+_bg = _ServerRecordingProvider("net-policy-bg", network_control=True)
+_bg_strict = _ServerRecordingProvider("net-policy-bg-strict", network_control=False)
+server._provider_registry.register(_bg)
+server._provider_registry.register(_bg_strict)
+
+# deny-network via the background path: no_net FORCED, receipt carries the block.
+os.environ[capabilities.POLICY_ENV] = "deny-network"
+try:
+    _sub = server.run_submit(language="python3", code="print(1)", provider="net-policy-bg")
+    check("run_submit under deny-network accepts and returns a run_id",
+          _sub.get("ok") is True and bool(_sub.get("run_id")))
+    _term = server.run_inspect(_sub["run_id"])
+    for _ in range(50):  # let the background future settle
+        if "provider" in _term:
+            break
+        time.sleep(0.02)
+        _term = server.run_inspect(_sub["run_id"])
+    check("run_submit FORCES no_net on the background provider (broker not bypassed)",
+          _bg.captured is not None and _bg.captured.no_net is True)
+    _bg_caps = _term.get("provider", {}).get("capabilities")
+    check("the run_inspect terminal receipt carries the capabilities block",
+          isinstance(_bg_caps, dict))
+    check("the background receipt shows network requested but denied",
+          _bg_caps and _bg_caps["denied"] == ["network"]
+          and _bg_caps["approved"] == [] and _bg_caps["brokered"] is True)
+finally:
+    os.environ.pop(capabilities.POLICY_ENV, None)
+
+# strict + unenforceable denial via the background path: REJECTED PRE-START.
+os.environ[capabilities.POLICY_ENV] = "deny-network,strict"
+try:
+    _runs_before = len(server._run_supervisor._runs)
+    _rej = server.run_submit(language="python3", code="print(1)",
+                             provider="net-policy-bg-strict")
+    _runs_after = len(server._run_supervisor._runs)
+    check("strict-unenforceable run_submit is REJECTED, not run",
+          _rej.get("ok") is False
+          and _rej.get("provider_error") == capabilities.CAPABILITY_UNENFORCEABLE)
+    check("the rejection is PRE-start: no run was created",
+          _runs_before == _runs_after)
+    check("the rejected strict run never reached the provider",
+          _bg_strict.captured is None)
+finally:
+    os.environ.pop(capabilities.POLICY_ENV, None)
+
+
 print(f"\n=== {len(FAILS)} FAILURES ===" if FAILS else
       "\n=== ALL NETWORK-POLICY TESTS PASS ===")
 sys.exit(1 if FAILS else 0)

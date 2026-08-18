@@ -135,6 +135,33 @@ check("CODECALC_AUDIT_LOG=<path> honours it",
           {"CODECALC_AUDIT_LOG": str(_tmp / "x.log")}).path) == str(_tmp / "x.log"))
 
 
+# ── the server ARMS redaction with the provider-auth secret values ─────────
+# THE-787 fix round, IMPORTANT: from_env() was called with no secrets=, so the
+# redaction pass existed but was never armed against the real credentials. The
+# server now feeds the CODECALC_*_AUTHORIZATION / _HTTP_TOKEN values in.
+# Isolate the server's run-state dir before importing it (keeps this test off the
+# shared ~/.codecalc/runs).
+os.environ["CODECALC_RUN_STATE_DIR"] = str(_tmp / "runs")
+from codecalc import providers, server
+
+_CRED = "sk-strict-XYZ789redactme"
+os.environ[providers.STRICT_AUTHORIZATION_ENV] = f"Bearer {_CRED}"
+try:
+    _secrets = server._audit_secrets()
+    check("the server registers the whole Authorization header for redaction",
+          f"Bearer {_CRED}" in _secrets)
+    check("the server also registers the bare credential portion",
+          _CRED in _secrets)
+    _armed = audit_module.AuditLog(_tmp / "armed.log", clock=lambda: 0.0, secrets=_secrets)
+    _armed.emit(audit_module.CAPABILITY_REJECTED, run_id="r4",
+                reason=f"provider said {_CRED}")
+    _raw_armed = (_tmp / "armed.log").read_text(encoding="utf-8")
+    check("a credential value reaching an audit field is redacted",
+          _CRED not in _raw_armed and "[REDACTED]" in _raw_armed)
+finally:
+    os.environ.pop(providers.STRICT_AUTHORIZATION_ENV, None)
+
+
 print(f"\n=== {len(FAILS)} FAILURES ===" if FAILS else
       "\n=== ALL AUDIT-LOG TESTS PASS ===")
 sys.exit(1 if FAILS else 0)
