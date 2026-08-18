@@ -15,6 +15,7 @@ from .providers import (
     ComputationSpec,
     ExecutionProvider,
     ProviderRegistry,
+    UnknownProvider,
     UnsupportedCapability,
     attach_receipt,
 )
@@ -388,7 +389,21 @@ class RunSupervisor:
                 record = json.loads(path.read_text(encoding="utf-8"))
                 if record.get("state") not in _ACTIVE_STATES:
                     continue
-                provider = self.registry.select(str(record["provider_id"]))
+                try:
+                    provider = self.registry.select(str(record["provider_id"]))
+                except UnknownProvider:
+                    # THE-846: the journal names a provider not registered THIS
+                    # boot (a config change, a plugin not loaded yet). select()
+                    # raises UnknownProvider — a LookupError NOT in the except
+                    # tuple below — and recover_orphans() runs at server IMPORT
+                    # time, so an uncaught raise here took the whole server down
+                    # on the very restart the journal exists to survive, until
+                    # the file was removed by hand. Treat it as unrecoverable-
+                    # for-now journal state: PRESERVE the entry (the provider may
+                    # register again next boot) and SKIP this run, continuing to
+                    # recover the rest. Scoped to the select() call so a
+                    # LookupError from anywhere else stays a real defect.
+                    continue
                 run_id = str(record["run_id"])
                 capabilities = provider.describe()["capabilities"]
                 # Capability-gated (THE-778), same reasoning as the `cleanup`
