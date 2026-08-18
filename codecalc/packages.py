@@ -258,18 +258,82 @@ CACHE_ROOT = Path("~/.codecalc/pkgs").expanduser()
 #: has to be measured under the ruleset before it is claimed to be confined.
 _CONFINABLE = {"python3", "node", "bun", "php", "go", "rust", "deno"}
 
+#: THE-819: the macOS counterpart to `_CONFINABLE`, for `sandbox-exec`
+#: (`sandbox_macos.py`) rather than Landlock. Populated the same way and for
+#: the same reason `_CONFINABLE` is "all of them": the mechanism being tested
+#: is generic — a subprocess either can or cannot write outside the paths a
+#: Seatbelt profile grants it, independent of which binary that subprocess
+#: is — so `tests/test_package_isolation.py` proving the ruleset against one
+#: probe process on macOS CI (`ci-python.yml`'s `tests` job runs
+#: `macos-latest`) is the same warrant `_CONFINABLE` already relies on for
+#: Landlock. It stays a separate set rather than being unioned with
+#: `_CONFINABLE`: Landlock passing says nothing about Seatbelt, and a manager
+#: added later has to be measured under BOTH before being claimed confined on
+#: BOTH.
+_CONFINABLE_DARWIN = {"python3", "node", "bun", "php", "go", "rust", "deno"}
+
 #: Device nodes an installer legitimately needs. Granted individually rather
 #: than by allowing /dev, which would hand over every device on the host.
 #: Read-WRITE because writing to /dev/null is what a redirect does.
 _DEVICE_NODES = ("/dev/null", "/dev/zero", "/dev/urandom", "/dev/random")
 
+#: THE-819 / THE-818: Windows has NO shipped install-time filesystem
+#: confinement. The job-object machinery THE-818 is building is unverified on
+#: real Windows 11 (that ticket was reopened) and a restricted-token/
+#: AppContainer approach cannot be built or proven from a Linux dev box, so
+#: none is claimed here — the honest disclosure
+#: (`package_install_not_confined_no_landlock`, landlock's own token, since
+#: `abi_version()` is 0 on every non-Linux kernel) keeps firing on Windows
+#: exactly as it does today.
+#:
+#: This is a documented NO-OP: setting it adds one extra disclosure string and
+#: changes no behaviour. It exists so an operator who has read THE-818/THE-819
+#: can say "I know this is unconfined on Windows" in a result rather than
+#: that fact being invisible until they read this source file. An
+#: empty-but-set value counts as set, same convention as every other
+#: `CODECALC_*` boolean here (`runtimes.ALLOW_ELEVATED_ENV`,
+#: `capabilities.POLICY_ENV`): the ambiguous input a real deployment sends is
+#: `VAR=""`, and treating that as "off" is the wrong default for a security
+#: knob.
+WIN_INSTALL_CONFINE_ENV = "CODECALC_WIN_INSTALL_CONFINE"
+
 
 def _confinement(bin_: str, workspace: str, env: dict, language: str) -> tuple:
-    """(preexec_fn, unenforced) confining the installer to its workspace.
+    """(cmd_prefix, preexec_fn, unenforced): confining the installer to its
+    workspace, however THIS platform can do it.
 
     LAYER 2 of the #23 mitigation. Layer 1 stops the managers running
     third-party code; this bounds what the manager itself — and anything a
     future entry cannot disable — is able to reach.
+
+    Two mechanisms, dispatched by platform, because they attach to the child
+    differently: Landlock (`_landlock_confinement`, Linux) applies in a
+    `preexec_fn` between fork and exec; `sandbox-exec` (`_macos_confinement`,
+    THE-819) is itself the process that execs the installer, so it has to be
+    PREPENDED to argv instead. `cmd_prefix` is `[]` and `preexec_fn` is `None`
+    on whichever half a given platform does not use, so `install()` can always
+    do `cmd = cmd_prefix + cmd` and pass `preexec_fn=confine` unconditionally.
+
+    Windows has neither: see `WIN_INSTALL_CONFINE_ENV`'s comment for why none
+    is claimed here, and THE-818 for the unrelated, unverified job-object work
+    that is not this.
+    """
+    if sys.platform == "darwin":
+        return _macos_confinement(bin_, workspace, env, language)
+    confine, unenforced = _landlock_confinement(bin_, workspace, env, language)
+    if executor.IS_WINDOWS and WIN_INSTALL_CONFINE_ENV in os.environ:
+        # A documented no-op: see WIN_INSTALL_CONFINE_ENV's comment above.
+        # Appended to whatever _landlock_confinement already reported (always
+        # `package_install_not_confined_no_landlock` on Windows, since
+        # landlock.abi_version() is 0 on every non-Linux kernel) rather than
+        # replacing it, so this can never make the disclosure list SHORTER.
+        unenforced = [*unenforced, "package_install_confinement_unverified_on_windows"]
+    return [], confine, unenforced
+
+
+def _landlock_confinement(bin_: str, workspace: str, env: dict, language: str) -> tuple:
+    """(preexec_fn, unenforced) confining the installer to its workspace, via
+    Landlock. Linux only — see `_confinement` for the platform dispatch.
 
     Applied in preexec_fn, which is the only correct place for it: after fork
     and before exec, in a child with one thread (so the ABI 8 TSYNC gap does
@@ -354,6 +418,79 @@ def _confinement(bin_: str, workspace: str, env: dict, language: str) -> tuple:
         landlock.restrict_self(read_write=writable, read_only=readable)
 
     return _apply, landlock.unenforced_reasons()
+
+
+def _macos_confinement(bin_: str, workspace: str, env: dict, language: str) -> tuple:
+    """(cmd_prefix, preexec_fn, unenforced): confining the installer to its
+    workspace via `sandbox-exec`. macOS only — see `_confinement` for the
+    platform dispatch and `sandbox_macos.py` for the mechanism and why its
+    profile is shaped the way it is.
+
+    `preexec_fn` is always `None` here: Seatbelt confinement is `sandbox-exec`
+    ITSELF running as the child, wrapping argv, not something applied after
+    fork the way Landlock's `preexec_fn` is.
+    """
+    from . import sandbox_macos
+
+    if language not in _CONFINABLE_DARWIN:
+        return [], None, [f"install_not_confined_{language}"] + \
+            sandbox_macos.unenforced_reasons(sandbox_macos.available())
+    if not sandbox_macos.available():
+        return [], None, sandbox_macos.unenforced_reasons(False)
+
+    # Same rule as _landlock_confinement: NOTHING under $HOME. Every manager's
+    # cache is already redirected into the workspace by env (see
+    # _INSTALLERS), so this list is only ever workspace-rooted paths.
+    writable = [workspace]
+    for key in ("UV_CACHE_DIR", "npm_config_cache", "BUN_INSTALL_CACHE_DIR",
+                "COMPOSER_HOME", "COMPOSER_CACHE_DIR", "CARGO_HOME",
+                "GOMODCACHE", "GOPATH"):
+        value = env.get(key)
+        if value:
+            writable.append(str(pathlib.Path(value).expanduser()))
+    # A private temp dir, not the shared one, and pointed at by TMPDIR — see
+    # sandbox_macos.build_profile's docstring for why this matters more here
+    # than on Linux: macOS's real per-user temp dir lives under
+    # /private/var/folders/<hash>/..., which this profile never allowlists,
+    # so an installer that ignored TMPDIR and used the system default would
+    # find it refused rather than silently falling outside the workspace.
+    private_tmp = pathlib.Path(workspace) / ".tmp"
+    private_tmp.mkdir(parents=True, exist_ok=True)
+    writable.append(str(private_tmp))
+    env.setdefault("TMPDIR", str(private_tmp))
+
+    # Read-only: the macOS system layout's counterpart to
+    # _landlock_confinement's /usr, /lib, /bin, /sbin, /etc, /proc, /opt,
+    # /run, /var/lib — broad top-level system directories, not "everything",
+    # DERIVED plus the resolved binary's own toolchain prefix, same reasoning
+    # as the Linux path: an installer needs its own runtime (node for npm,
+    # the toolchain prefix for uv) and those live wherever the host put them.
+    #
+    # fix-round-2: NOT blanket "/private/var". That tree is also where every
+    # workspace and canary in this file's own confinement test live (both
+    # come from tempfile.mkdtemp()), so granting it here would make the
+    # canary readable and turn "confined: a same-UID canary outside it is
+    # unreadable" into a false negative on the real security property the
+    # moment the interpreter could actually start. The one /private/var
+    # subpath startup genuinely needs (/private/var/db) is baked into
+    # sandbox_macos._STARTUP_BASELINE instead of listed here, precisely so
+    # it cannot be widened back to the whole tree by a future edit to this
+    # function.
+    readable = ["/usr", "/bin", "/sbin", "/System", "/Library",
+                "/private/etc", "/dev", "/opt"]
+    resolved = shutil.which(bin_, path=executor.registry.runtime_path()) or shutil.which(bin_)
+    if resolved:
+        real = pathlib.Path(resolved).resolve()
+        readable.extend([str(real.parent), str(real.parent.parent)])
+    readable.append(sys.prefix)
+    readable.append(sys.base_prefix)
+
+    profile = sandbox_macos.build_profile(read_write=writable, read_only=readable)
+    profile_path = private_tmp / "install.sb"
+    profile_path.write_text(profile, encoding="utf-8")
+
+    return (sandbox_macos.command_prefix(str(profile_path)), None,
+            sandbox_macos.unenforced_reasons(True))
 
 
 def install(language: str, package: str, session_id: str | None = None,
@@ -469,7 +606,11 @@ def install(language: str, package: str, session_id: str | None = None,
     # redirected INTO the workspace so nothing under $HOME needs to be
     # writable — see _confinement below for why that matters.
     env.update({k: v.replace("{target}", str(cwd)) for k, v in env_hint.items()})
-    confine, unenforced = _confinement(bin_, str(cwd), env, name)
+    cmd_prefix, confine, unenforced = _confinement(bin_, str(cwd), env, name)
+    # On macOS, confinement IS the command — `sandbox-exec -f <profile>` wraps
+    # argv rather than running in a preexec_fn (see _confinement's docstring).
+    # `cmd_prefix` is `[]` everywhere else, so this is a no-op on Linux/Windows.
+    cmd = cmd_prefix + cmd
 
     def _out(result: dict) -> dict:
         """Attach what the confinement could NOT enforce, to every outcome.

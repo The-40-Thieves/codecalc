@@ -97,6 +97,7 @@ for var in ("GEM_HOME", "GEM_PATH", "R_LIBS", "PYTHONPATH"):
 # npm shipped this as its own default in v12 after a year of supply-chain
 # attacks through postinstall hooks; the npm on a given host may be older, so
 # the flag is passed rather than assumed.
+import os as _os
 import subprocess as _sp
 import sys as _sys
 import sysconfig as _sysconfig
@@ -181,6 +182,127 @@ _outside = {_outside!r}\nprint(t(lambda: open({_ws!r}+"/in.txt","w").write("ok")
 else:
     print(f"SKIP Landlock confinement probes — unavailable on {_sys.platform}")
 
+# THE-819: the macOS counterpart, via sandbox-exec (Seatbelt) rather than
+# Landlock. Same shape as the Landlock probe above, on purpose — a write
+# outside the workspace refused, a same-UID canary outside it unreadable —
+# and gated to run its POSITIVE assertions only on darwin, where the real
+# kernel/Seatbelt interaction can happen. `ci-python.yml`'s `tests` job runs
+# on `macos-latest`, so this is where the mechanism actually gets measured;
+# everywhere else it SKIPS with a recorded reason rather than silently
+# passing, per THE-819's own instruction not to fake a pass on Linux.
+from codecalc import sandbox_macos as _sm
+
+if _sys.platform == "darwin" and _sm.available():
+    _ws_mac = _tf.mkdtemp()
+    # fix-round-2: under $HOME, NOT tempfile.mkdtemp()'s default location.
+    # The default (/var/folders/... -> /private/var/folders/... resolved) is
+    # the SAME tree _RO_mac must grant /private/var/db from for the
+    # interpreter to start at all — a canary living anywhere else in that
+    # tree would have been readable the moment startup worked, a false
+    # negative on the actual security property, not a real one. $HOME
+    # (/Users/<runner> on macOS CI) is same-UID and outside every _RO_mac
+    # entry below; verified by construction right after _RO_mac exists.
+    _canary_mac_dir = pathlib.Path(_tf.mkdtemp(dir=str(pathlib.Path("~").expanduser())))
+    _canary_mac = _canary_mac_dir / "secret.canary"
+    _canary_mac.write_text("SECRET-CANARY")
+    _outside_mac = str(pathlib.Path(_tf.gettempdir()) / "codecalc-escape-probe-macos")
+    _probe_mac = f'''
+import os
+def t(fn):
+    try:
+        fn(); return "ALLOWED"
+    except Exception as e:
+        return type(e).__name__
+_outside = {_outside_mac!r}
+print(t(lambda: open({_ws_mac!r}+"/in.txt","w").write("ok")),
+      t(lambda: open(_outside, "w").write("x")),
+      t(lambda: open({str(_canary_mac)!r}).read()))
+'''
+    # fix-round-2: NOT blanket "/private/var" — sandbox_macos.py's own
+    # _STARTUP_BASELINE now grants only the narrow /private/var/db subpath
+    # startup needs; see its docstring and packages._macos_confinement's
+    # matching comment for why re-adding the whole tree here would be the
+    # same false-negative bug this round fixed.
+    _RO_mac = ["/usr", "/bin", "/sbin", "/System", "/Library", "/private/etc",
+               "/dev", "/opt", _sys.prefix, _sys.base_prefix,
+               _sysconfig.get_paths()["purelib"]]
+    # Verify by construction, not just by inspection: the canary must not be
+    # a subpath of the workspace or of any _RO_mac entry, in RESOLVED form
+    # (the same form fix-round-1 established Seatbelt actually matches
+    # against) — otherwise "canary outside is unreadable" below would be
+    # asserting a property that was never actually being tested.
+    _canary_real_mac = str(pathlib.Path(_canary_mac).resolve())
+    _ws_real_mac = _os.path.realpath(_ws_mac)
+    _ro_real_mac = [_os.path.realpath(_p) for _p in _RO_mac]
+    _canary_covered_mac = (
+        _canary_real_mac == _ws_real_mac
+        or _canary_real_mac.startswith(_ws_real_mac.rstrip("/") + "/")
+        or any(_canary_real_mac == _r or _canary_real_mac.startswith(_r.rstrip("/") + "/")
+               for _r in _ro_real_mac))
+    check("fix-round-2: the canary is NOT under the workspace or any read-allowed path",
+          not _canary_covered_mac,
+          f"-> canary={_canary_real_mac} ws={_ws_real_mac} ro={_ro_real_mac}")
+    _profile_path_mac = pathlib.Path(_ws_mac) / "probe.sb"
+    _profile_path_mac.write_text(
+        _sm.build_profile(read_write=[_ws_mac], read_only=_RO_mac), encoding="utf-8")
+
+    try:
+        _cp_free_mac = _sp.run([_sys.executable, "-c", _probe_mac], capture_output=True,
+                                text=True, timeout=60)
+        _cp_held_mac = _sp.run(_sm.command_prefix(str(_profile_path_mac)) +
+                                [_sys.executable, "-c", _probe_mac],
+                                capture_output=True, text=True, timeout=60)
+        _free_mac = _cp_free_mac.stdout.split()
+        _held_mac = _cp_held_mac.stdout.split()
+        # fix-round-1: empty output (rc != 0, nothing on stdout) means the
+        # CHILD never ran or never got far enough to print — either the
+        # profile was rejected as malformed, or a rule that should have
+        # matched (e.g. the workspace) didn't. That is a DIFFERENT failure
+        # from "confinement is too strong in the intended way" (which prints
+        # PermissionError, not nothing), so the detail carries rc + stderr
+        # from BOTH runs — the exact signal fix-round-1 had to ask for by
+        # hand from a live CI run, now attached to the assertion itself.
+        _diag = (f"rc={_cp_held_mac.returncode} "
+                 f"stderr={_cp_held_mac.stderr.strip()!r} "
+                 f"free_rc={_cp_free_mac.returncode} "
+                 f"free_stderr={_cp_free_mac.stderr.strip()!r} "
+                 f"profile={_profile_path_mac}")
+        # The control matters: if the unconfined run cannot write either, the
+        # confined result proves nothing about sandbox-exec.
+        check("control: unconfined, all three succeed (macOS)",
+              _free_mac == ["ALLOWED", "ALLOWED", "ALLOWED"], f"-> {_free_mac} {_diag}")
+        check("confined (sandbox-exec): the workspace stays writable",
+              len(_held_mac) == 3 and _held_mac[0] == "ALLOWED", f"-> {_held_mac} {_diag}")
+        check("confined (sandbox-exec): a write OUTSIDE the workspace is refused",
+              len(_held_mac) == 3 and _held_mac[1] == "PermissionError", f"-> {_held_mac} {_diag}")
+        check("confined (sandbox-exec): a same-UID canary outside it is unreadable",
+              len(_held_mac) == 3 and _held_mac[2] == "PermissionError", f"-> {_held_mac} {_diag}")
+    finally:
+        _canary_mac.unlink(missing_ok=True)
+        _canary_mac_dir.rmdir()
+        for _f in pathlib.Path(_ws_mac).glob("*"):
+            _f.unlink()
+        pathlib.Path(_ws_mac).rmdir()
+        pathlib.Path(_outside_mac).unlink(missing_ok=True)
+elif _sys.platform == "darwin":
+    print("SKIP sandbox-exec confinement probes — sandbox-exec not found on this macOS host")
+else:
+    print(f"SKIP sandbox-exec confinement probes — not darwin ({_sys.platform})")
+
+# The disclosure vocabulary itself needs no macOS host to check — pure string
+# logic, same as the Landlock "truthful reporting" checks near the bottom of
+# this file.
+check("sandbox-exec unavailable is disclosed by its own token",
+      "package_install_not_confined_no_sandbox_exec" in _sm.unenforced_reasons(False),
+      f"-> {_sm.unenforced_reasons(False)}")
+_sm_applied = _sm.unenforced_reasons(True)
+check("sandbox-exec applied still discloses the network + metadata gaps",
+      {"install_metadata_syscalls_unrestricted", "install_tcp_egress_unrestricted",
+       "install_udp_egress_unrestricted"} <= set(_sm_applied), f"-> {_sm_applied}")
+check("  ...and does NOT repeat the 'not confined' token once applied",
+      "package_install_not_confined_no_sandbox_exec" not in _sm_applied,
+      f"-> {_sm_applied}")
+
 # NOTHING under $HOME may be writable by a confined installer. An earlier
 # version allowed ~/.npm, ~/.cargo and friends because managers fail without a
 # writable cache; the caches are now redirected into the workspace instead, so
@@ -190,7 +312,7 @@ if _ll.available():
     _probe_ws = _tf.mkdtemp()
     _env = {k: v.replace("{target}", _probe_ws)
             for k, v in _pkgs._INSTALLERS["node"][2].items()}
-    _fn, _reasons_probe = _pkgs._confinement("npm", _probe_ws, _env, "node")
+    _prefix, _fn, _reasons_probe = _pkgs._confinement("npm", _probe_ws, _env, "node")
     import inspect as _inspect
     _writable = _inspect.getclosurevars(_fn).nonlocals.get("writable", []) if _fn else []
     _home = str(pathlib.Path("~").expanduser())
@@ -218,16 +340,95 @@ _confinable = set(_pkgs._CONFINABLE)
 check("every declared installer is confined",
       _declared <= _confinable, f"-> unconfined: {sorted(_declared - _confinable)}")
 
+# THE-819: same claim, same warrant, for the macOS mechanism.
+_confinable_darwin = set(_pkgs._CONFINABLE_DARWIN)
+check("every declared installer is confined on macOS too",
+      _declared <= _confinable_darwin,
+      f"-> unconfined on macOS: {sorted(_declared - _confinable_darwin)}")
+
+if _sys.platform == "darwin" and _sm.available():
+    _ws3 = _tf.mkdtemp()
+    _env3 = {k: v.replace("{target}", _ws3)
+             for k, v in _pkgs._INSTALLERS["python3"][2].items()}
+    _prefix3, _fn3, _reasons3 = _pkgs._confinement("uv", _ws3, _env3, "python3")
+    check("  ...including python3, which gets a sandbox-exec profile",
+          bool(_prefix3) and _prefix3[0] == "sandbox-exec" and _fn3 is None,
+          f"-> {_prefix3}")
+    check("  ...and the applied result does NOT claim 'not confined'",
+          "package_install_not_confined_no_sandbox_exec" not in _reasons3,
+          f"-> {_reasons3}")
+    for _f in sorted(pathlib.Path(_ws3).rglob("*"), reverse=True):
+        _f.rmdir() if _f.is_dir() else _f.unlink()
+    pathlib.Path(_ws3).rmdir()
+
 if _ll.available():
     _ws2 = _tf.mkdtemp()
     _env2 = {k: v.replace("{target}", _ws2)
              for k, v in _pkgs._INSTALLERS["python3"][2].items()}
-    _fn2, _ = _pkgs._confinement("uv", _ws2, _env2, "python3")
+    _, _fn2, _ = _pkgs._confinement("uv", _ws2, _env2, "python3")
     check("  ...including python3, which now gets a ruleset",
           _fn2 is not None, f"-> {_fn2}")
     for _f in sorted(pathlib.Path(_ws2).rglob("*"), reverse=True):
         _f.rmdir() if _f.is_dir() else _f.unlink()
     pathlib.Path(_ws2).rmdir()
+
+# THE-819 Deliverable C: the Windows OFF-by-default flag is a documented
+# NO-OP. There is no real Windows box here, so this is tested the way
+# tests/test_platform_contract.py tests Windows-only Rust source from
+# Linux — by exercising the LOGIC directly rather than needing the platform.
+#
+# `sys.platform`, `executor.IS_WINDOWS` AND `landlock.abi_version` are all
+# monkeypatched, and through the real `_confinement()` dispatcher rather than
+# a piece of it in isolation:
+#   - `_confinement` checks `sys.platform == "darwin"` FIRST, so on an actual
+#     macOS runner calling it with only `IS_WINDOWS` patched would silently
+#     take the macOS branch instead and this block would assert nothing
+#     about Windows at all.
+#   - `landlock.abi_version()` decides Landlock availability from
+#     `os.uname().sysname`, NOT from `sys.platform` — so on a Linux box
+#     running this suite (true here), patching only `sys.platform` would
+#     leave Landlock genuinely available and this block would exercise a
+#     REAL Landlock ruleset instead of the "no Landlock on Windows" path it
+#     means to test.
+# Both are the same failure shape this suite's own docstring warns about: a
+# check() that never reaches the code it claims to test. All three are
+# restored in `finally`.
+_real_platform = _sys.platform
+_real_is_windows = _pkgs.executor.IS_WINDOWS
+_real_abi_version = _ll.abi_version
+try:
+    _sys.platform = "win32"
+    _pkgs.executor.IS_WINDOWS = True
+    _ll.abi_version = lambda *_a, **_k: 0
+    _ws4 = _tf.mkdtemp()
+    _, _, _reasons_win_off = _pkgs._confinement("npm", _ws4, {}, "node")
+    check("WIN_INSTALL_CONFINE_ENV unset: no extra disclosure token",
+          "package_install_confinement_unverified_on_windows" not in _reasons_win_off,
+          f"-> {_reasons_win_off}")
+    check("  ...and the base 'unconfined on Windows' disclosure still fires",
+          "package_install_not_confined_no_landlock" in _reasons_win_off,
+          f"-> {_reasons_win_off}")
+
+    # Empty-but-set counts as set — same convention as CODECALC_PACKAGE_ALLOWLIST
+    # (see _allowlist()'s comment) and CODECALC_ALLOW_RUNTIME_APPLY.
+    _os.environ[_pkgs.WIN_INSTALL_CONFINE_ENV] = ""
+    try:
+        _, _, _reasons_win_on = _pkgs._confinement("npm", _ws4, {}, "node")
+    finally:
+        del _os.environ[_pkgs.WIN_INSTALL_CONFINE_ENV]
+    check("WIN_INSTALL_CONFINE_ENV set (even empty): the unverified token fires",
+          "package_install_confinement_unverified_on_windows" in _reasons_win_on,
+          f"-> {_reasons_win_on}")
+    check("  ...WITHOUT claiming enforcement — the base disclosure fires too",
+          "package_install_not_confined_no_landlock" in _reasons_win_on,
+          f"-> {_reasons_win_on}")
+    check("  ...so the flag can only ADD a disclosure, never remove one",
+          len(_reasons_win_on) > len(_reasons_win_off), f"-> {_reasons_win_on}")
+finally:
+    _sys.platform = _real_platform
+    _pkgs.executor.IS_WINDOWS = _real_is_windows
+    _ll.abi_version = _real_abi_version
+    pathlib.Path(_ws4).rmdir()
 
 # Truthful reporting is its own requirement: the gaps are real and stated.
 _reasons = _ll.unenforced_reasons()

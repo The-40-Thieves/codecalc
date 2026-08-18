@@ -46,6 +46,29 @@ compatible addition bumps MINOR, it does not leave the version unchanged. A
 
 ### Added
 
+- **`install_package` confinement extended to macOS** (THE-819). Layer 2 of
+  the #23 mitigation — bounding what the installer *binary itself* can reach
+  on disk, on top of Layer 1's "do not run its install-time code at all" —
+  was Linux-only (`landlock.abi_version()` returns 0 off Linux), leaving
+  macOS and Windows installs running with the server user's full filesystem
+  access behind an honest but unenforced disclosure token. macOS now gets a
+  real boundary via `sandbox-exec` (`codecalc/sandbox_macos.py`): a generated
+  Seatbelt profile scopes both reads and writes to the workspace, its
+  redirected caches and a curated set of system paths, denying everything
+  else — network stays open (an install needs it) and is reported, not
+  enforced, via the same `install_tcp_egress_unrestricted` /
+  `install_udp_egress_unrestricted` / `install_metadata_syscalls_unrestricted`
+  tokens Linux already emits. `tests/test_package_isolation.py` runs the same
+  write-outside-refused / canary-outside-unreadable assertions the Linux
+  Landlock probe uses, gated to execute on `darwin` (CI's `macos-latest` leg)
+  and to SKIP with a recorded reason everywhere else — the mechanism is
+  proven by macOS CI, not argued from documentation. Windows gets no claimed
+  confinement (THE-818's job-object work is unverified on real Windows 11)
+  but a documented no-op opt-in, `CODECALC_WIN_INSTALL_CONFINE`, adds a
+  `package_install_confinement_unverified_on_windows` disclosure without
+  claiming enforcement; the base `package_install_not_confined_no_landlock`
+  disclosure keeps firing on Windows exactly as before.
+
 - **Linux strict gVisor boundary made real** (THE-828). A real executor
   container image (`docker/executor.Dockerfile`, multi-stage/minimal/non-root,
   carrying `codecalc-exec` + `blocknet.so` + python3);
