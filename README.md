@@ -445,7 +445,7 @@ exactly what codecalc's `session_id` already is.
 
 ## The result contract
 
-Every result carries `contract_version`, currently **1.0.0**. The published
+Every result carries `contract_version`, currently **1.2.0**. The published
 schema is [`docs/contract/result-v1.schema.json`](docs/contract/result-v1.schema.json)
 and the policy behind it — what MAJOR/MINOR/PATCH may change, the twelve-month
 deprecation window, worked success/failure/timeout examples, and the migration
@@ -570,7 +570,7 @@ PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py         # every tool over MC
 PYTHONPATH=. .venv/bin/python tests/test_executor_sweep.py  # sandbox regressions
 ```
 
-34 test files and 11 CI-invoked scripts, **1962 assertions**. "CI-invoked"
+37 test files and 11 CI-invoked scripts, **2045 assertions**. "CI-invoked"
 means referenced by path (`scripts/<name>.py`) from a job in
 `.github/workflows/*.yml` — `scripts/check_claims.py` derives the count that
 way and gates it, so a script wired into a workflow without this sentence

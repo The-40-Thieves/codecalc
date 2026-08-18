@@ -234,9 +234,10 @@ ARM64), by `tests/test_gvisor_conformance.py`:
 
 `codecalc doctor` (and the strict service at startup) call the runtime's host
 probe and surface these prerequisites; `doctor --deep` adds a real startup
-canary. Owned orphan containers are reconciled at service startup by
-`DockerGVisorRuntime.recover_orphans()`, keyed on the immutable run-identity
-label.
+canary. `DockerGVisorRuntime.recover_orphans()` reconciles owned orphan
+containers by their immutable run-identity label; it is invoked by the remote
+strict execution service (which lives out of this repo) at that service's
+startup, not by codecalc itself.
 
 RESIDUALS, stated plainly:
 

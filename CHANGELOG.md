@@ -49,8 +49,10 @@ compatible addition bumps MINOR, it does not leave the version unchanged. A
 - **Linux strict gVisor boundary made real** (THE-828). A real executor
   container image (`docker/executor.Dockerfile`, multi-stage/minimal/non-root,
   carrying `codecalc-exec` + `blocknet.so` + python3);
-  `DockerGVisorRuntime.recover_orphans()` reconciles owned strict containers at
-  startup by their immutable run-identity label; `doctor` now CALLS the
+  `DockerGVisorRuntime.recover_orphans()` reconciles owned strict containers by
+  their immutable run-identity label when the remote strict execution service
+  (which lives out of this repo) invokes it at that service's startup; `doctor`
+  now CALLS the
   runtime's host probe and surfaces measured prerequisites in a `strict_runtime`
   block (Docker present, cgroup v2, `runsc` registered, image present, and a
   real startup canary under `--deep`), failing closed with a structured reason
