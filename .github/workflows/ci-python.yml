@@ -228,6 +228,17 @@ jobs:
       - name: result contract (schema validity + product conformance)
         shell: bash
         run: uv run --no-sync python tests/test_contract.py
+      # THE-781/THE-844: the stable error-code taxonomy. Pure logic over
+      # classify()/ensure_code() plus a handful of symbolic calls (sympy, from
+      # --all-extras) — no sandbox, no runtimes — so it runs on the full matrix.
+      # The full matrix is the point for THE-844 specifically: RecursionError's
+      # message wording is interpreter-specific ("maximum recursion depth
+      # exceeded" on <3.14, "stack overflow" on >=3.14), so an oversized
+      # expression classified as `resource_exhausted` on 3.11 and `internal` on
+      # 3.14 — a version-dependent code that only the 3.14 leg here can catch.
+      - name: error-code taxonomy (result contract codes)
+        shell: bash
+        run: uv run --no-sync python tests/test_error_codes.py
       # The run-lifecycle state machine (THE-778/THE-831): identity, cancel,
       # cleanup and crash-recovery journalling, all against fake providers —
       # no sandbox, no native executor, so it belongs on the full matrix
@@ -472,6 +483,19 @@ jobs:
         run: uv run --no-sync python tests/test_platform_contract.py
       - name: runtime self-update tools
         run: uv run --no-sync python tests/test_runtimes_mcp.py
+      # MCP-stdio round-trips that EXECUTE code (python3) and drive sessions,
+      # files, artifacts, streaming, packages and units through the real server.
+      # They live here, not in the matrix job, for the same reason test_mcp_all
+      # below does: they need the built executor and a working python3 runtime,
+      # and the matrix's fallback-backend Windows/macOS legs are the wrong place
+      # for a suite that round-trips real code execution. Neither ran in CI
+      # before — they were gated on one developer's machine.
+      - name: MCP feature surface (sessions, files, artifacts, streaming)
+        run: uv run --no-sync python tests/test_features.py
+      - name: MCP resources + session_run + units (gap items 1-4)
+        run: uv run --no-sync python tests/test_gap4.py
+      - name: MCP stdio surface answers (values, not just non-empty)
+        run: uv run --no-sync python tests/test_mcp.py
       - name: MCP stdio round-trip
         shell: bash
         run: |
