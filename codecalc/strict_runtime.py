@@ -175,8 +175,13 @@ class GVisorConfig:
 #: workload. This overhead is sized above the reliable floor so that the guest
 #: keeps its full nominal budget AND `process_limit=1` still boots
 #: (1 + 48 = 49 > ~34). It is added on top of the caller's GUEST process budget
-#: rather than reinterpreting it, so the guest semantic stays honest: the guest
-#: still gets ~`process_limit` tasks of its own, the sandbox gets its overhead.
+#: rather than reinterpreting it, so the guest semantic stays honest and errs
+#: GENEROUS: the guest is guaranteed at least `process_limit` tasks of its own,
+#: and in practice a little more — `process_limit + (48 - actual_overhead)`,
+#: since the real sandbox overhead (~30-35 measured) is below the 48 we reserve.
+#: That slack is bounded (the host `--pids-limit` is a hard ceiling; the fork
+#: bomb stays contained at the effective limit) and never leaves the guest with
+#: FEWER processes than it asked for.
 _GVISOR_HOST_OVERHEAD = 48
 
 
