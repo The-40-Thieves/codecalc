@@ -41,7 +41,7 @@ def _service(policy=None):
         providers.configured_registry(), policy=policy)
 
 
-# ── the pure invariant: approved ⊆ requested, ALWAYS ───────────────────────
+# ── the pure invariant: approved subset-of-or-equal requested, ALWAYS ───────────────────────
 # Swept across every (requested, policy) pair the broker can see. A property,
 # not an example: whatever the policy grants or denies, the approved set is a
 # subset of what was asked for, or the decision is a rejection.
@@ -58,7 +58,7 @@ for _req in (frozenset(), frozenset({NET})):
     for _pol in _POLICIES:
         for _sup in (_NO_SUPPORT, _SUPPORTS_NET):
             _d = capabilities.broker(_req, policy=_pol, provider_supported=_sup)
-            check(f"approved ⊆ requested [req={sorted(_req)} pol={_pol.source} "
+            check(f"approved subset-of-or-equal requested [req={sorted(_req)} pol={_pol.source} "
                   f"sup={sorted(_sup)}]",
                   _d.rejected or _d.approved <= _req,
                   f"approved={sorted(_d.approved)} requested={sorted(_req)}")

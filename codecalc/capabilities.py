@@ -12,7 +12,7 @@ WHY THIS IS A PURE FUNCTION, AND WHY THAT MATTERS
 `BrokerDecision`. It reads no environment, opens no file, runs nothing. The
 environment is parsed once by `policy_from_env()` and the run wiring lives in
 `execution_service.py`; keeping the decision itself pure is what lets the
-invariant be tested directly (approved ⊆ requested) rather than inferred from a
+invariant be tested directly (approved subset-of-or-equal requested) rather than inferred from a
 side effect.
 
 THE CAPABILITY VOCABULARY IS REUSED, NOT INVENTED
@@ -88,7 +88,7 @@ class CapabilityPolicy:
 
 @dataclass(frozen=True, slots=True)
 class BrokerDecision:
-    """The outcome of one brokering. `approved ⊆ requested` always holds.
+    """The outcome of one brokering. `approved subset-of-or-equal requested` always holds.
 
     `effective` is the capability posture the run actually HAS: every approved
     capability, plus any DENIED capability whose denial the provider could not
@@ -154,7 +154,7 @@ def provider_supported_capabilities(descriptor: Mapping) -> frozenset[str]:
 
 def broker(requested: frozenset[str], *, policy: CapabilityPolicy,
            provider_supported: frozenset[str]) -> BrokerDecision:
-    """Pure policy decision. `approved ⊆ requested` is guaranteed by construction.
+    """Pure policy decision. `approved subset-of-or-equal requested` is guaranteed by construction.
 
     Two rejection conditions, both from THE-787:
 

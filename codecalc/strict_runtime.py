@@ -322,7 +322,7 @@ def host_prerequisites(
     surface without aborting. One function serves both so the refusal and the
     diagnostic can never describe different hosts.
 
-    A daemon that is down, missing, or answers with something unparseable all
+    A daemon that is down, missing, or answers with something unparsable all
     collapse to `docker_present: False` — from the boundary's point of view they
     are the same fact (nothing can be launched) and each leaves the remaining
     flags false, which is the fail-closed reading.

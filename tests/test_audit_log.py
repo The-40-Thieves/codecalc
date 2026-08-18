@@ -109,7 +109,7 @@ if _ins_events:
 
 
 # ── redaction: a configured secret never appears in the record ─────────────
-_SECRET = "tok_live_abc123DEF"  # noqa: S105 -- a FAKE secret, the fixture the redaction test redacts
+_SECRET = "tok_live_abc123DEF"  # noqa: S105 -- a FAKE secret, the fixture the redaction test redacts  # gitleaks:allow -- fake fixture for the redaction test
 _red_log = audit_module.AuditLog(_tmp / "red.log", clock=lambda: 0.0, secrets=(_SECRET,))
 _red_log.emit(audit_module.CLEANUP, run_id="r2", reason=f"leaked {_SECRET} oops")
 _raw_red = (_tmp / "red.log").read_text(encoding="utf-8")
@@ -144,7 +144,7 @@ check("CODECALC_AUDIT_LOG=<path> honours it",
 os.environ["CODECALC_RUN_STATE_DIR"] = str(_tmp / "runs")
 from codecalc import providers, server
 
-_CRED = "sk-strict-XYZ789redactme"
+_CRED = "sk-strict-XYZ789redactme"  # gitleaks:allow -- fake fixture for the redaction test
 os.environ[providers.STRICT_AUTHORIZATION_ENV] = f"Bearer {_CRED}"
 try:
     _secrets = server._audit_secrets()
