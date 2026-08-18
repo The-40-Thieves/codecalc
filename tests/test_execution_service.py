@@ -962,6 +962,140 @@ def test_run_tools_return_an_internal_error_when_no_supervisor_is_wired() -> Non
           cancelled.get("ok") is False and cancelled.get("code") == "internal")
 
 
+def _real_local_registry() -> providers.ProviderRegistry:
+    registry = providers.ProviderRegistry(default_provider_id="local")
+    registry.register(providers.LocalExecutionProvider())
+    return registry
+
+
+def test_run_cancel_on_the_real_local_provider_does_not_strand_the_result() -> None:
+    """THE-778 fix round, review Critical #1 — the reviewer's own repro,
+    against the ACTUAL LocalExecutionProvider (not a stand-in): submit ->
+    run_cancel (gets the honest unsupported error) -> the run completes on
+    its own -> run_inspect must reach a terminal state and return the FULL
+    result, not poll "cancelling" forever. Reviewer's own observation was
+    10 polls over 5s all reporting state=cancelling while
+    _run_supervisor.wait() returned the finished result immediately —
+    this exercises the same sequence end to end through the MCP tools."""
+    old = server._run_supervisor
+    with tempfile.TemporaryDirectory(prefix="codecalc-run-tools-real-local-") as root:
+        server._run_supervisor = run_supervisor.RunSupervisor(
+            _real_local_registry(), state_dir=Path(root)
+        )
+        try:
+            submitted = server.run_submit("python3", "print('still here')", timeout=10)
+            check("submission on the real local provider succeeds",
+                  submitted.get("ok") is True)
+            run_id = submitted.get("run_id", "")
+
+            cancelled = server.run_cancel(run_id)
+            check("run_cancel on the real local provider reports the honest "
+                  "unsupported error",
+                  cancelled.get("ok") is False
+                  and cancelled.get("code") == "validation"
+                  and cancelled.get("provider_error") == "unsupported_capability")
+
+            terminal = None
+            for _ in range(200):
+                inspected = server.run_inspect(run_id)
+                if inspected.get("state") in {"finished", "cleaned"}:
+                    terminal = inspected
+                    break
+                time.sleep(0.02)
+            check("run_inspect reaches a terminal state after a failed cancel "
+                  "(not stranded at 'cancelling' forever)", terminal is not None)
+            if terminal is not None:
+                check("the terminal result is the run's real output, not stranded",
+                      terminal.get("stdout", "").strip() == "still here"
+                      and terminal.get("ok") is True)
+        finally:
+            server._run_supervisor = old
+
+
+def test_run_inspect_terminal_result_has_the_same_keys_as_execute_code() -> None:
+    """THE-778 fix round, review Important #2: run_submit bypasses
+    ExecutionService.execute() — the only OTHER place the `provider`
+    receipt was attached — so a terminal run_inspect result was missing it
+    entirely. This is the gate that keeps the two surfaces from drifting
+    apart again: same provider (the real local one, so both sides go
+    through the identical executor.execute() call), same code, key sets
+    compared modulo the documented run_* allowlist."""
+    exec_result = server.execute_code("python3", "print('parity')")
+
+    old = server._run_supervisor
+    with tempfile.TemporaryDirectory(prefix="codecalc-run-tools-parity-") as root:
+        server._run_supervisor = run_supervisor.RunSupervisor(
+            _real_local_registry(), state_dir=Path(root)
+        )
+        try:
+            submitted = server.run_submit("python3", "print('parity')")
+            run_id = submitted.get("run_id", "")
+            terminal = None
+            for _ in range(200):
+                inspected = server.run_inspect(run_id)
+                if inspected.get("state") in {"finished", "cleaned"}:
+                    terminal = inspected
+                    break
+                time.sleep(0.02)
+            check("run_inspect reaches a terminal state for the parity check",
+                  terminal is not None)
+            if terminal is None:
+                return
+            missing = set(exec_result) - set(terminal)
+            extra = set(terminal) - set(exec_result) - server._RUN_EXTRA_KEYS
+            check("run_inspect terminal result carries every execute_code key",
+                  not missing)
+            check("run_inspect's only extra keys are the documented run_* allowlist",
+                  not extra)
+            check("run_inspect terminal result carries the provider receipt",
+                  isinstance(terminal.get("provider"), dict)
+                  and terminal["provider"].get("provider_id") == "local"
+                  and "limits" in terminal["provider"])
+        finally:
+            server._run_supervisor = old
+
+
+def test_run_submit_admission_cap_returns_resource_exhausted() -> None:
+    """THE-778 fix round, review Important #3a: run_submit must refuse past
+    CODECALC_MAX_ACTIVE_RUNS with a stable, tested error rather than
+    growing the run table without bound."""
+    provider = _FakeUncancellableRunningProvider()
+    registry = _run_registry(provider)
+    old = server._run_supervisor
+    with tempfile.TemporaryDirectory(prefix="codecalc-run-tools-cap-") as root:
+        server._run_supervisor = run_supervisor.RunSupervisor(
+            registry, state_dir=Path(root), max_active_runs=1,
+        )
+        try:
+            first = server.run_submit("python3", "x", timeout=5)
+            check("the first submission, under the cap, succeeds",
+                  first.get("ok") is True)
+            provider.entered.wait(2)
+
+            second = server.run_submit("python3", "y", timeout=5)
+            check("a submission past the cap is a resource_exhausted error",
+                  second.get("ok") is False
+                  and second.get("code") == "resource_exhausted")
+            check("the error reports the active count and the configured limit",
+                  second.get("active_runs") == 1 and second.get("limit") == 1)
+
+            provider.release.set()
+            freed = None
+            for _ in range(200):
+                if server.run_inspect(first["run_id"]).get("state") in {"finished", "cleaned"}:
+                    freed = True
+                    break
+                time.sleep(0.02)
+            check("the first run reaches terminal so capacity frees up",
+                  freed is True)
+
+            third = server.run_submit("python3", "z", timeout=5)
+            check("a submission after capacity frees up succeeds",
+                  third.get("ok") is True)
+        finally:
+            server._run_supervisor = old
+
+
 # ── THE-783: session output spills to a workspace artifact ─────────────────
 
 def _spill_read(session_id: str, spill_uri: str) -> bytes:
@@ -1012,30 +1146,70 @@ def test_session_output_spills_past_the_default_cap_instead_of_dropping_it() -> 
             sessions.SESSION_ROOT = old_root
 
 
-def test_session_output_spill_is_binary_safe() -> None:
+def test_session_output_spill_is_faithful_to_the_pipelines_str_representation() -> None:
+    """NOT "binary-safe" (THE-778/783 fix round, review Important #4):
+    codecalc's WHOLE pipeline already decodes stdout/stderr with
+    errors="replace" before spill_if_truncated's code ever sees a `str` —
+    both backends do this (executor.py's `_trim`, the Rust binary's own
+    JSON encoding), for every result, spill or not. So genuinely invalid
+    UTF-8 is already lossy SYSTEM-WIDE, upstream of this feature entirely,
+    and claiming the spill itself is "binary-safe" overstates what it can
+    promise. What IS true, and asserted here explicitly in both directions:
+
+      - a NUL byte (U+0000) IS valid UTF-8, so it round-trips byte-identical
+        (this was the ONLY case the old, misleadingly-named version of this
+        test checked — passing it proved NUL-safety, not binary safety);
+      - a genuinely invalid byte (a lone 0xFF, not valid UTF-8 on its own)
+        is NOT preserved — it comes back as U+FFFD, the same replacement
+        character every other codecalc result already shows for it, not
+        the original byte. Checked for loosely (replacement present,
+        original byte absent) rather than an exact byte-for-byte match,
+        because the exact BYTE COUNT `errors="replace"` produces for one
+        invalid input byte is a decoder implementation detail that has
+        already been seen to differ between the Rust and Python backends
+        for TRUNCATION MARKER text in this same file — asserting an exact
+        sequence here would pin that same kind of backend detail rather
+        than the actual claim under test.
+    """
     old_root = sessions.SESSION_ROOT
-    with tempfile.TemporaryDirectory(prefix="codecalc-spill-binary-") as root:
+    with tempfile.TemporaryDirectory(prefix="codecalc-spill-fidelity-") as root:
         sessions.SESSION_ROOT = Path(root)
         try:
             session_id = sessions.start("bash")["session_id"]
-            # A NUL byte embedded past the truncation point — valid UTF-8 (it
-            # is U+0000), so it survives codecalc's existing decode/encode
-            # boundary exactly, which is the fidelity spill_if_truncated
-            # documents it inherits rather than promising a stronger one.
-            code = (
+
+            nul_code = (
                 "head -c 70000 /dev/zero | tr '\\0' 'B'; "
                 "printf '\\0'; "
                 "head -c 10 /dev/zero | tr '\\0' 'C'"
             )
-            result = sessions.execute(session_id, code, language="bash")
-            spill_uri = result.get("stdout_spill")
-            check("a binary payload with an embedded NUL still triggers a spill",
-                  isinstance(spill_uri, str))
-            if spill_uri:
-                data = _spill_read(session_id, spill_uri)
+            nul_result = sessions.execute(session_id, nul_code, language="bash")
+            nul_spill = nul_result.get("stdout_spill")
+            check("a NUL byte still triggers a spill", isinstance(nul_spill, str))
+            if nul_spill:
+                data = _spill_read(session_id, nul_spill)
                 expected = b"B" * 70_000 + b"\x00" + b"C" * 10
-                check("the spilled NUL-containing content round-trips byte-identical",
+                check("a NUL byte (valid UTF-8) round-trips byte-identical",
                       data == expected)
+
+            invalid_code = (
+                "head -c 70000 /dev/zero | tr '\\0' 'B'; "
+                "printf '\\xff'; "
+                "head -c 10 /dev/zero | tr '\\0' 'C'"
+            )
+            invalid_result = sessions.execute(session_id, invalid_code, language="bash")
+            invalid_spill = invalid_result.get("stdout_spill")
+            check("invalid UTF-8 still triggers a spill (the stream is still oversized)",
+                  isinstance(invalid_spill, str))
+            if invalid_spill:
+                data = _spill_read(session_id, invalid_spill)
+                check("invalid UTF-8 is replaced with U+FFFD in the spill, matching "
+                      "the pipeline's own str representation",
+                      "�".encode() in data)
+                check("the original 0xFF byte is genuinely gone — lossy upstream "
+                      "of the spill, not something this feature can recover",
+                      b"\xff" not in data)
+                check("the surrounding bytes on both sides are otherwise intact",
+                      data.startswith(b"B" * 70_000) and data.endswith(b"C" * 10))
         finally:
             sessions.SESSION_ROOT = old_root
 
@@ -1116,8 +1290,11 @@ if __name__ == "__main__":
     test_run_cancel_honestly_reports_a_provider_that_cannot_cancel()
     test_run_cancel_reaches_a_provider_that_supports_it()
     test_run_tools_return_an_internal_error_when_no_supervisor_is_wired()
+    test_run_cancel_on_the_real_local_provider_does_not_strand_the_result()
+    test_run_inspect_terminal_result_has_the_same_keys_as_execute_code()
+    test_run_submit_admission_cap_returns_resource_exhausted()
     test_session_output_spills_past_the_default_cap_instead_of_dropping_it()
-    test_session_output_spill_is_binary_safe()
+    test_session_output_spill_is_faithful_to_the_pipelines_str_representation()
     test_session_run_also_spills_oversized_output()
     test_spill_files_are_retained_up_to_a_bounded_count()
     sys.exit(1 if FAILS else 0)

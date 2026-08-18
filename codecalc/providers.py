@@ -62,6 +62,59 @@ class ComputationSpec:
     no_net: bool = False
 
 
+def _limit_receipt(spec: ComputationSpec, result: dict) -> dict:
+    disclosures = [str(item) for item in result.get("unenforced") or []]
+    disclosure_text = "\n".join(disclosures).lower()
+    requested_controls = (
+        ("timeout", spec.timeout > 0, ("timeout",)),
+        ("max_memory_mb", spec.max_memory_mb > 0, ("memory",)),
+        ("max_output_kb", spec.max_output_kb > 0, ("output",)),
+        ("max_cpu", spec.max_cpu > 0, ("cpu",)),
+        ("no_net", spec.no_net, ("no_net", "network")),
+    )
+    reported_enforced = [
+        name
+        for name, requested, markers in requested_controls
+        if requested and not any(marker in disclosure_text for marker in markers)
+    ]
+    return {
+        "requested": {
+            "timeout_seconds": spec.timeout,
+            "max_memory_mb": spec.max_memory_mb,
+            "max_output_kb": spec.max_output_kb,
+            "max_cpu_seconds": spec.max_cpu,
+            "no_net": spec.no_net,
+        },
+        "provider_reported_enforced": reported_enforced,
+        "unenforced": disclosures,
+    }
+
+
+def attach_receipt(spec: ComputationSpec, provider: ExecutionProvider, result: dict) -> dict:
+    """Add the provider-identity + limits-enforcement receipt every FULL
+    execution result carries, mutating and returning `result`.
+
+    Moved here from execution_service.py (originally private to
+    `ExecutionService.execute()`/`execute_session()`/`execute_stream()`) so
+    RunSupervisor's own background-run collection (`_collect()`, THE-778
+    fix-round review) can produce the identical shape `execute_code` does
+    instead of a caller being able to tell "ran through ExecutionService"
+    from "ran through run_submit" by whether `provider` is present at all.
+    `providers.py` is the one module both `execution_service.py` and
+    `run_supervisor.py` already import, which is what makes this the shared
+    home without a circular import.
+    """
+    descriptor = provider.describe()
+    result["provider"] = {
+        "interface_version": descriptor["interface_version"],
+        "provider_id": descriptor["provider_id"],
+        "provider_version": descriptor["provider_version"],
+        "host_class": descriptor["host_class"],
+        "limits": _limit_receipt(spec, result),
+    }
+    return result
+
+
 class UnsupportedCapability(RuntimeError):
     """A provider was asked to perform an operation it did not advertise."""
 

@@ -9,36 +9,9 @@ from .providers import (
     ProviderRegistry,
     UnknownProvider,
     UnsupportedCapability,
+    attach_receipt,
 )
 from .run_supervisor import RunSupervisor
-
-
-def _limit_receipt(spec: ComputationSpec, result: dict) -> dict:
-    disclosures = [str(item) for item in result.get("unenforced") or []]
-    disclosure_text = "\n".join(disclosures).lower()
-    requested_controls = (
-        ("timeout", spec.timeout > 0, ("timeout",)),
-        ("max_memory_mb", spec.max_memory_mb > 0, ("memory",)),
-        ("max_output_kb", spec.max_output_kb > 0, ("output",)),
-        ("max_cpu", spec.max_cpu > 0, ("cpu",)),
-        ("no_net", spec.no_net, ("no_net", "network")),
-    )
-    reported_enforced = [
-        name
-        for name, requested, markers in requested_controls
-        if requested and not any(marker in disclosure_text for marker in markers)
-    ]
-    return {
-        "requested": {
-            "timeout_seconds": spec.timeout,
-            "max_memory_mb": spec.max_memory_mb,
-            "max_output_kb": spec.max_output_kb,
-            "max_cpu_seconds": spec.max_cpu,
-            "no_net": spec.no_net,
-        },
-        "provider_reported_enforced": reported_enforced,
-        "unenforced": disclosures,
-    }
 
 
 class ExecutionService:
@@ -101,15 +74,7 @@ class ExecutionService:
                 requested_provider=exc.provider_id,
                 capability=exc.capability,
             ))
-        descriptor = provider.describe()
-        result["provider"] = {
-            "interface_version": descriptor["interface_version"],
-            "provider_id": descriptor["provider_id"],
-            "provider_version": descriptor["provider_version"],
-            "host_class": descriptor["host_class"],
-            "limits": _limit_receipt(spec, result),
-        }
-        return contract.stamp(result)
+        return contract.stamp(attach_receipt(spec, provider, result))
 
     def execute_session(self, session_service: SessionService, session_id: str,
                         spec: ComputationSpec, *,
@@ -135,15 +100,7 @@ class ExecutionService:
                 capability=exc.capability,
             ))
         result = dict(session_service.execute(session_id, spec))
-        descriptor = provider.describe()
-        result["provider"] = {
-            "interface_version": descriptor["interface_version"],
-            "provider_id": descriptor["provider_id"],
-            "provider_version": descriptor["provider_version"],
-            "host_class": descriptor["host_class"],
-            "limits": _limit_receipt(spec, result),
-        }
-        return contract.stamp(result)
+        return contract.stamp(attach_receipt(spec, provider, result))
 
     async def execute_stream(self, spec: ComputationSpec, *, provider_id: str | None = None,
                              on_progress=None) -> dict:
@@ -168,15 +125,7 @@ class ExecutionService:
                 requested_provider=exc.provider_id,
                 capability=exc.capability,
             ))
-        descriptor = provider.describe()
-        result["provider"] = {
-            "interface_version": descriptor["interface_version"],
-            "provider_id": descriptor["provider_id"],
-            "provider_version": descriptor["provider_version"],
-            "host_class": descriptor["host_class"],
-            "limits": _limit_receipt(spec, result),
-        }
-        return contract.stamp(result)
+        return contract.stamp(attach_receipt(spec, provider, result))
 
     def verify_across_providers(self, spec: ComputationSpec,
                                 first_provider_id: str,

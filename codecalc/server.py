@@ -115,8 +115,16 @@ _provider_registry = providers.configured_registry()
 _run_state_dir = Path(os.environ.get(
     "CODECALC_RUN_STATE_DIR", Path.home() / ".codecalc" / "runs"
 ))
+#: Admission cap for run_submit (THE-778 fix round, review Important #3a).
+#: Bounds RunSupervisor's in-memory run table and thread pool against an
+#: unbounded burst of submissions, or a caller that never inspects/cancels
+#: what it starts — nothing else on this path rejects a submission. 64
+#: matches RunSupervisor's own constructor default; the env var lets an
+#: operator raise or lower it without a code change, same pattern as
+#: CODECALC_RUN_STATE_DIR above.
+_max_active_runs = int(os.environ.get("CODECALC_MAX_ACTIVE_RUNS", "64"))
 _run_supervisor = run_supervisor.RunSupervisor(
-    _provider_registry, state_dir=_run_state_dir
+    _provider_registry, state_dir=_run_state_dir, max_active_runs=_max_active_runs
 )
 _run_supervisor.recover_orphans()
 _execution_service = execution_service.ExecutionService(
@@ -494,6 +502,22 @@ async def execute_code_stream(
     )
 
 
+#: Keys a terminal run_inspect() result carries BEYOND execute_code's own
+#: result shape (THE-778 fix round, review Important #2): RunHandle's own
+#: fields, RunSupervisor's state bookkeeping, and the one best-effort
+#: disclosure (`cleanup_error`) that appears only if a provider's own
+#: cleanup() fails. Named explicitly, not left implicit, so the key-set
+#: parity test in tests/test_execution_service.py has one place to compare
+#: against instead of a second hardcoded copy of this list — the exact
+#: pattern that let `provider` silently go missing from run_inspect in the
+#: first place (execute_code and run_inspect drifted because nothing
+#: compared their shapes).
+_RUN_EXTRA_KEYS = frozenset({
+    "run_id", "provider_id", "started_at", "deadline", "state", "cleaned",
+    "cleanup_error",
+})
+
+
 @mcp.tool()
 def run_submit(
     language: str,
@@ -518,6 +542,11 @@ def run_submit(
     deadline (same 120s ceiling as execute_code) — it bounds the run, not how
     long you wait to collect it.
 
+    Admission is capped (CODECALC_MAX_ACTIVE_RUNS, default 64): past that
+    many runs still running/cancelling at once, this returns a
+    resource_exhausted error rather than growing without bound — call
+    run_inspect/run_cancel to make room, or wait for one to finish.
+
     Retention: see run_inspect.
     """
     if _run_supervisor is None:
@@ -538,6 +567,14 @@ def run_submit(
             errors.VALIDATION, str(exc), provider_error=exc.code,
             requested_provider=exc.provider_id, available_providers=list(exc.available),
         )
+    except run_supervisor.TooManyActiveRuns as exc:
+        return errors.error_result(
+            errors.RESOURCE_EXHAUSTED,
+            f"{exc.active} runs are already active against a limit of "
+            f"{exc.limit}; call run_inspect/run_cancel to free one up, or "
+            "wait for one to finish, then retry",
+            active_runs=exc.active, limit=exc.limit,
+        )
     return {
         "ok": True, "run_id": handle.run_id, "provider_id": handle.provider_id,
         "started_at": handle.started_at, "deadline": handle.deadline,
@@ -554,8 +591,11 @@ def run_inspect(run_id: str) -> dict:
 
     Once terminal (`state` "finished"/"cleaned"/"recovered"), this returns
     the SAME result shape execute_code returns — stdout/stderr/exit_code/
-    verdict/unenforced/... — merged with `run_id` and `state`. Read `ok` and
-    `verdict` on a terminal result to tell a clean finish from a failure; a
+    verdict/unenforced/provider (the interface_version/provider_id/limits
+    receipt)/... — merged with a small set of run_* extras (run_id,
+    provider_id, started_at, deadline, state, cleaned; see server.py's
+    _RUN_EXTRA_KEYS). Read `ok` and `verdict` on a terminal result to tell a
+    clean finish from a failure; a
     run stopped by run_cancel is only reflected there for a provider that
     actually supports cancellation (see run_cancel's own docstring) — check
     the result the same way you would any other run.
