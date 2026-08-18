@@ -538,6 +538,15 @@ jobs:
       # like one that is enforced until something exceeds it.
       - name: platform contract (unenforced tells the truth)
         run: uv run --no-sync python tests/test_platform_contract.py
+      # THE-829. The AppContainer strict backend, bounded to what CI can see:
+      # the source contract runs on every OS here; on windows-latest the runtime
+      # smoke sets CODECALC_WIN_APPCONTAINER=1 and confirms the executor still
+      # emits valid JSON and either discloses the unverified isolation or fails
+      # closed — NEVER that the isolation holds, which needs a real Windows 11
+      # box. The built executor from the step above is what makes the runtime
+      # leg meaningful rather than a source-scan alone.
+      - name: AppContainer strict backend (compiles, runs, discloses unverified)
+        run: uv run --no-sync python tests/test_appcontainer.py
       - name: runtime self-update tools
         run: uv run --no-sync python tests/test_runtimes_mcp.py
       # MCP-stdio round-trips that EXECUTE code (python3) and drive sessions,
