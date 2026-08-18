@@ -39,8 +39,15 @@ libc = "0.2"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     # CreateJobObjectW takes a SECURITY_ATTRIBUTES pointer, so it is gated behind
-    # this feature even though we pass null.
+    # this feature even though we pass null. Also carries SECURITY_CAPABILITIES,
+    # SID_AND_ATTRIBUTES, PSID/ACL and FreeSid for the THE-829 AppContainer path.
     "Win32_Security",
+    # THE-829 (OFF by default, UNVERIFIED on real Windows 11): least-privilege
+    # AppContainer profile create/derive/delete lives here...
+    "Win32_Security_Isolation",
+    # ...and the explicit-ACL grant (SetNamedSecurityInfoW / SetEntriesInAclW,
+    # EXPLICIT_ACCESS_W, TRUSTEE_W) that hands only the workdir to the AC SID.
+    "Win32_Security_Authorization",
     "Win32_System_JobObjects",
     "Win32_System_Threading",
     # Thread32First/Next. The child is created suspended and assigned to the job

@@ -475,6 +475,20 @@ only appear when you compile for the target.
    give is a CPU-time limit, an open-file limit or a `no_net` shim; all three are
    reported through `unenforced` rather than assumed.
 
+   **The Job Object is a RESOURCE boundary, not a SECURITY one — keep the two
+   apart.** An optional AppContainer backend (THE-829, opt-in via
+   `CODECALC_WIN_APPCONTAINER=1`, **OFF by default**) adds the security
+   isolation the Job Object never claimed: a least-privilege AppContainer profile
+   with no capability SIDs (no network), whose SID is granted by an explicit ACL
+   only the workdir plus read+execute on the runtime directory, launched with
+   `SECURITY_CAPABILITIES` composed into the THE-818 creation-time attribute
+   list. It **fails closed** (profile/SID/ACL failure refuses the launch, never
+   an unconfined fallthrough) and is **UNVERIFIED on real Windows 11**: the
+   isolation properties — payload cannot read the user profile or write outside
+   the workdir — are only observable on a Win11 desktop, so every run that takes
+   the path emits `appcontainer_isolation_unverified_on_windows`. Inherits the
+   unverified status of THE-818, on which it is layered.
+
    **CORRECTION 2026-08-13.** This paragraph read "(job-scoped, so strictly
    better than `RLIMIT_NPROC`'s uid-wide budget)". That was measured false:
    400 of 400 spawns succeeded against a ceiling of 24 on Windows 11 Pro,

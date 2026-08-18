@@ -20,8 +20,20 @@ use std::path::PathBuf;
 use std::process::{Child, Command};
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE, INVALID_HANDLE_VALUE,
+    CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
     WAIT_OBJECT_0,
+};
+use windows_sys::Win32::Security::Authorization::{
+    EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW, NO_MULTIPLE_TRUSTEE, SE_FILE_OBJECT,
+    SetEntriesInAclW, SetNamedSecurityInfoW, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN,
+};
+use windows_sys::Win32::Security::Isolation::{
+    CreateAppContainerProfile, DeleteAppContainerProfile,
+    DeriveAppContainerSidFromAppContainerName,
+};
+use windows_sys::Win32::Security::{
+    ACL, DACL_SECURITY_INFORMATION, FreeSid, PSECURITY_DESCRIPTOR, PSID, SECURITY_CAPABILITIES,
+    SUB_CONTAINERS_AND_OBJECTS_INHERIT,
 };
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
@@ -40,7 +52,8 @@ use windows_sys::Win32::System::Threading::{
     CREATE_BREAKAWAY_FROM_JOB, CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
     CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
     GetExitCodeProcess, InitializeProcThreadAttributeList, OpenThread,
-    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_INFORMATION,
+    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST,
+    PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION,
     ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW, THREAD_SUSPEND_RESUME,
     UpdateProcThreadAttribute, WaitForSingleObject,
 };
@@ -392,6 +405,241 @@ fn resolve_command_program(cmd: &Command) -> io::Result<PathBuf> {
     ))
 }
 
+// ── THE-829: least-privilege AppContainer strict backend ─────────────────────
+//
+// OFF by default (CODECALC_WIN_APPCONTAINER=1 opts in) and IMPLEMENTED-BUT-
+// UNVERIFIED on real Windows 11, exactly like THE-818's creation-time job
+// topology it layers on. The isolation properties this is meant to provide — a
+// payload that cannot read the user profile, cannot write outside the workdir,
+// and gets no network — are only observable on a real Win11 desktop, which the
+// author cannot run. So the code is written to be correct and to FAIL CLOSED,
+// it cross-compiles for `x86_64-pc-windows-msvc`, and every run that takes this
+// path emits `appcontainer_isolation_unverified_on_windows` in `unenforced`
+// rather than any claim that the isolation was confirmed. Do not read a green
+// CI run on the Server-SKU runner as verification of the Win11 behaviour: CI can
+// at most show this compiles, runs, and discloses — never that isolation holds.
+
+// GENERIC_* access masks. Kept as plain u32 literals (the field they feed,
+// EXPLICIT_ACCESS_W::grfAccessPermissions, is a u32) so we do not drag in the
+// GENERIC_ACCESS_RIGHTS newtype and its feature just to cast it straight back.
+const GENERIC_READ: u32 = 0x8000_0000;
+const GENERIC_EXECUTE: u32 = 0x2000_0000;
+const GENERIC_ALL: u32 = 0x1000_0000;
+
+/// HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS): the profile name is already
+/// registered, which is not an error — we derive its SID and reuse it.
+const HRESULT_ALREADY_EXISTS: i32 = 0x8007_00B7u32 as i32;
+
+/// One execution's AppContainer profile, with deterministic cleanup.
+///
+/// Drop deletes the profile and frees the SID EVEN ON THE ERROR PATH — an
+/// aborted launch must not leave a profile (or its ACL state) behind. The SID is
+/// the one handed back by `CreateAppContainerProfile` /
+/// `DeriveAppContainerSidFromAppContainerName`, both of which document `FreeSid`
+/// as the matching free.
+struct AppContainer {
+    name_w: Vec<u16>,
+    sid: PSID,
+}
+
+impl Drop for AppContainer {
+    fn drop(&mut self) {
+        // Delete first, then free: DeleteAppContainerProfile takes the NAME, not
+        // the SID, so ordering is independent, but freeing last keeps the SID
+        // valid for the whole teardown.
+        unsafe { DeleteAppContainerProfile(self.name_w.as_ptr()) };
+        if !self.sid.is_null() {
+            unsafe { FreeSid(self.sid) };
+        }
+    }
+}
+
+/// Create (or reuse) a least-privilege AppContainer profile with NO capability
+/// SIDs — no network, no user-profile access, nothing but what an explicit ACL
+/// later grants. Returns `Err` on any failure so the caller can FAIL CLOSED;
+/// there is deliberately no unconfined fallback.
+fn create_appcontainer() -> io::Result<AppContainer> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    // Unique per execution: pid + a process-local counter + wall-clock nanos.
+    // AppContainer names are capped at 64 UTF-16 units, so this stays short.
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let name: String = format!("codecalc.exec.{}.{n}.{nanos}", std::process::id())
+        .chars()
+        .take(64)
+        .collect();
+    let name_w = to_wide(&name);
+    let display_w = to_wide("codecalc executor sandbox");
+    let desc_w = to_wide("codecalc least-privilege execution AppContainer (THE-829, unverified)");
+
+    let mut sid: PSID = std::ptr::null_mut();
+    let hr = unsafe {
+        CreateAppContainerProfile(
+            name_w.as_ptr(),
+            display_w.as_ptr(),
+            desc_w.as_ptr(),
+            // No capabilities: the container gets no network capability SID (or
+            // any other), so network is denied by default — modelled as an
+            // explicit capability that is simply never granted here.
+            std::ptr::null(),
+            0,
+            &mut sid,
+        )
+    };
+    if hr != 0 {
+        if hr == HRESULT_ALREADY_EXISTS {
+            // Reuse: derive the SID for the profile that already exists.
+            let hr2 =
+                unsafe { DeriveAppContainerSidFromAppContainerName(name_w.as_ptr(), &mut sid) };
+            if hr2 != 0 {
+                return Err(io::Error::other(format!(
+                    "DeriveAppContainerSidFromAppContainerName failed: HRESULT 0x{:08X}",
+                    hr2 as u32
+                )));
+            }
+        } else {
+            return Err(io::Error::other(format!(
+                "CreateAppContainerProfile failed: HRESULT 0x{:08X}",
+                hr as u32
+            )));
+        }
+    }
+    if sid.is_null() {
+        // Profile call reported success but gave no SID: delete what we may have
+        // created and refuse rather than launch unconfined.
+        unsafe { DeleteAppContainerProfile(name_w.as_ptr()) };
+        return Err(io::Error::other(
+            "AppContainer profile returned a null SID",
+        ));
+    }
+    Ok(AppContainer { name_w, sid })
+}
+
+/// ADD an allow-ACE for `sid` on `path`, preserving the directory's existing
+/// ACL. Additive on purpose: the executor still has to write into and later
+/// delete a temp workdir, and inherited ACEs (the operator's own access) must
+/// survive — replacing the DACL wholesale would strip both. So the current DACL
+/// is read, the one entry merged in, and the result written back unprotected.
+fn grant_sid_path_access(sid: PSID, path: &std::path::Path, access: u32) -> io::Result<()> {
+    let path_w = to_wide(&path.to_string_lossy());
+
+    // 1. Read the existing DACL (and the security descriptor that backs it).
+    let mut old_dacl: *mut ACL = std::ptr::null_mut();
+    let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    let rc = unsafe {
+        GetNamedSecurityInfoW(
+            path_w.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut old_dacl,
+            std::ptr::null_mut(),
+            &mut sd,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::from_raw_os_error(rc as i32));
+    }
+    // The descriptor is LocalAlloc'd; free it however we leave this function.
+    struct LocalMem(*mut core::ffi::c_void);
+    impl Drop for LocalMem {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe { LocalFree(self.0) };
+            }
+        }
+    }
+    let _sd_guard = LocalMem(sd);
+
+    // 2. Describe the single ACE: this SID, this access, inherited by the files
+    // and subdirectories the payload creates underneath.
+    let mut ea: EXPLICIT_ACCESS_W = unsafe { std::mem::zeroed() };
+    ea.grfAccessPermissions = access;
+    ea.grfAccessMode = GRANT_ACCESS;
+    ea.grfInheritance = SUB_CONTAINERS_AND_OBJECTS_INHERIT;
+    ea.Trustee.MultipleTrusteeOperation = NO_MULTIPLE_TRUSTEE;
+    ea.Trustee.pMultipleTrustee = std::ptr::null_mut();
+    ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+    ea.Trustee.TrusteeType = TRUSTEE_IS_UNKNOWN;
+    // For TRUSTEE_IS_SID, ptstrName IS the PSID, reinterpreted as the API wants.
+    ea.Trustee.ptstrName = sid as *mut u16;
+
+    // 3. Merge the ACE into a NEW acl built on top of the existing one.
+    let mut new_dacl: *mut ACL = std::ptr::null_mut();
+    let rc = unsafe { SetEntriesInAclW(1, &ea, old_dacl, &mut new_dacl) };
+    if rc != 0 {
+        return Err(io::Error::from_raw_os_error(rc as i32));
+    }
+    let _new_dacl_guard = LocalMem(new_dacl as *mut core::ffi::c_void);
+
+    // 4. Write it back. DACL_SECURITY_INFORMATION without the PROTECTED flag
+    // means "merge with inheritance", so this ADDS the ACE rather than replacing
+    // the object's protection.
+    let rc = unsafe {
+        SetNamedSecurityInfoW(
+            path_w.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            new_dacl as *const ACL,
+            std::ptr::null(),
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::from_raw_os_error(rc as i32));
+    }
+    Ok(())
+}
+
+/// Build the least-privilege AppContainer, grant it ONLY the sandbox workdir
+/// (read/write) plus read+execute on the resolved runtime's own directory, and
+/// return the profile guard together with a boxed `SECURITY_CAPABILITIES` whose
+/// pointer is handed to `spawn_with_job_at_creation`.
+///
+/// The box's address is stable and both it and the profile are kept alive by the
+/// caller for the whole spawn+wait, because `CreateProcessW` reads the struct
+/// (and the SID it points at) during creation. FAILS CLOSED: any error here
+/// aborts the launch instead of dropping to an unconfined process.
+fn prepare_appcontainer(
+    cmd: &Command,
+) -> io::Result<(AppContainer, Box<SECURITY_CAPABILITIES>)> {
+    let ac = create_appcontainer()?;
+
+    // The one directory the payload may write: its sandbox workdir. Full access,
+    // inherited by anything it creates inside. Errors are labelled so a
+    // FAIL-CLOSED launch is attributable to the appcontainer ACL path.
+    if let Some(work) = cmd.get_current_dir() {
+        grant_sid_path_access(ac.sid, work, GENERIC_ALL).map_err(|e| {
+            io::Error::other(format!("appcontainer workdir ACL grant failed: {e}"))
+        })?;
+    }
+    // Read-only runtime assets: the interpreter/compiler must be able to load
+    // itself. Grant read+execute on its own directory and NOTHING else — not the
+    // user profile, not the rest of the disk. Comprehensive per-asset grants
+    // (e.g. a full interpreter install tree) are a Win11-box verification item.
+    if let Ok(program) = resolve_command_program(cmd)
+        && let Some(dir) = program.parent()
+    {
+        grant_sid_path_access(ac.sid, dir, GENERIC_READ | GENERIC_EXECUTE).map_err(|e| {
+            io::Error::other(format!("appcontainer runtime-dir ACL grant failed: {e}"))
+        })?;
+    }
+
+    let caps = Box::new(SECURITY_CAPABILITIES {
+        AppContainerSid: ac.sid,
+        Capabilities: std::ptr::null_mut(),
+        CapabilityCount: 0,
+        Reserved: 0,
+    });
+    Ok((ac, caps))
+}
+
 /// Create the child with `J` supplied at CREATION, so it is the IMMEDIATE job.
 ///
 /// THE-818. Post-creation `AssignProcessToJobObject` puts us SOMEWHERE in the
@@ -410,12 +658,19 @@ fn resolve_command_program(cmd: &Command) -> io::Result<PathBuf> {
 /// limit of 24 on Windows 11 Pro. Set CODECALC_WIN_JOB_AT_CREATION=0 only as a
 /// compatibility escape hatch; that old topology remains explicitly
 /// unverified.
+/// `sec_caps`, when `Some`, adds `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES`
+/// as a THIRD attribute in the SAME list, so the child is launched inside the
+/// AppContainer (THE-829) while still being assigned to `job` at creation
+/// (THE-818). The pointer and the struct it addresses must outlive this call —
+/// the caller owns both. `None` reproduces the two-attribute THE-818 topology
+/// exactly.
 #[allow(clippy::too_many_arguments)]
 fn spawn_with_job_at_creation(
     cmd: &Command,
     stdio: super::RawStdio,
     job: HANDLE,
     breakaway: bool,
+    sec_caps: Option<*const SECURITY_CAPABILITIES>,
 ) -> io::Result<(HANDLE, HANDLE)> {
     let inheritable_stdio = InheritableStdio::duplicate(stdio)?;
     let program = resolve_command_program(cmd)?;
@@ -444,15 +699,19 @@ fn spawn_with_job_at_creation(
 
     let cwd_w = cmd.get_current_dir().map(|d| to_wide(&d.to_string_lossy()));
 
+    // Attribute count: JOB_LIST + HANDLE_LIST always, plus SECURITY_CAPABILITIES
+    // when the AppContainer path (THE-829) supplied it. All live in ONE list.
+    let attr_count: u32 = if sec_caps.is_some() { 3 } else { 2 };
+
     // Two-call pattern: ask the size, allocate, initialise.
     let mut size: usize = 0;
-    unsafe { InitializeProcThreadAttributeList(std::ptr::null_mut(), 2, 0, &mut size) };
+    unsafe { InitializeProcThreadAttributeList(std::ptr::null_mut(), attr_count, 0, &mut size) };
     if size == 0 {
         return Err(io::Error::last_os_error());
     }
     let mut attr_buf = vec![0u8; size];
     let attr_list = attr_buf.as_mut_ptr() as *mut core::ffi::c_void;
-    if unsafe { InitializeProcThreadAttributeList(attr_list, 2, 0, &mut size) } == 0 {
+    if unsafe { InitializeProcThreadAttributeList(attr_list, attr_count, 0, &mut size) } == 0 {
         return Err(io::Error::last_os_error());
     }
 
@@ -498,6 +757,27 @@ fn spawn_with_job_at_creation(
         let e = io::Error::last_os_error();
         unsafe { DeleteProcThreadAttributeList(attr_list) };
         return Err(e);
+    }
+
+    // THE-829: the AppContainer's SECURITY_CAPABILITIES, in the same list. When
+    // absent this is skipped and the topology is byte-for-byte the THE-818 one.
+    if let Some(caps) = sec_caps {
+        let ok = unsafe {
+            UpdateProcThreadAttribute(
+                attr_list,
+                0,
+                PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES as usize,
+                caps as *const core::ffi::c_void,
+                std::mem::size_of::<SECURITY_CAPABILITIES>(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            )
+        };
+        if ok == 0 {
+            let e = io::Error::last_os_error();
+            unsafe { DeleteProcThreadAttributeList(attr_list) };
+            return Err(e);
+        }
     }
 
     let mut si: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
@@ -589,23 +869,49 @@ pub fn spawn_and_wait(
     // THE-818: build the topology at creation so OUR job is the child's
     // IMMEDIATE job and its ActiveProcessLimit is the one consulted. The old
     // post-creation route remains only as an explicit compatibility escape.
-    let at_creation = std::env::var("CODECALC_WIN_JOB_AT_CREATION")
+    // THE-829: the AppContainer strict backend, OFF by default and UNVERIFIED on
+    // real Windows 11. It REQUIRES the creation-time path (it rides the same
+    // STARTUPINFOEX attribute list), so requesting it forces `at_creation`.
+    let appcontainer = std::env::var("CODECALC_WIN_APPCONTAINER")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(true);
+        .unwrap_or(false);
+    let at_creation = appcontainer
+        || std::env::var("CODECALC_WIN_JOB_AT_CREATION")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(true);
     // `Some` on the ordinary path (std owns the child), `None` on the
     // creation-time path (we own a raw handle). Both converge on `process`.
     let mut child: Option<Child> = None;
     let process: HANDLE;
+    // AppContainer resources kept alive for the WHOLE call: CreateProcessW reads
+    // the SECURITY_CAPABILITIES (and the SID it points at) during creation, and
+    // the profile's Drop runs deterministic cleanup after the child has exited.
+    let mut appcontainer_guard: Option<AppContainer> = None;
+    let mut caps_box: Option<Box<SECURITY_CAPABILITIES>> = None;
 
     if at_creation {
         let breakaway = ambient_job_allows_breakaway().unwrap_or(false);
+        let mut sec_caps_ptr: Option<*const SECURITY_CAPABILITIES> = None;
+        if appcontainer {
+            // Implemented but UNVERIFIED on real Windows 11 — disclosed on every
+            // run that takes this path, never claimed as confirmed isolation.
+            unenforced.push("appcontainer_isolation_unverified_on_windows");
+            // FAIL CLOSED: profile/SID/ACL failure aborts the launch. There is
+            // no unconfined fallback while the strict flag is on (criterion 6).
+            let (ac, caps) = prepare_appcontainer(&cmd)?;
+            sec_caps_ptr = Some(caps.as_ref() as *const SECURITY_CAPABILITIES);
+            appcontainer_guard = Some(ac);
+            caps_box = Some(caps);
+        }
         // Reported, never silently downgraded to the weaker path: a fallback
         // would put us back in the topology this exists to escape, while the
         // caller believed otherwise.
         let (p, thread) =
-            spawn_with_job_at_creation(&cmd, stdio, job.0, breakaway).map_err(|e| {
+            spawn_with_job_at_creation(&cmd, stdio, job.0, breakaway, sec_caps_ptr).map_err(|e| {
+                // Names the appcontainer flag so a FAIL-CLOSED launch is
+                // attributable to the strict path rather than a bare OS error.
                 io::Error::other(format!(
-                    "CODECALC_WIN_JOB_AT_CREATION=1 but creation-time job assignment failed: {e}"
+                    "creation-time strict launch failed (appcontainer={appcontainer}): {e}"
                 ))
             })?;
         unsafe { ResumeThread(thread) };
@@ -778,6 +1084,14 @@ pub fn spawn_and_wait(
             0
         }
     };
+
+    // Deterministic AppContainer cleanup runs HERE, after the child has exited
+    // and its accounting has been read — the profile's Drop deletes the profile
+    // and frees the SID. Explicit so the ordering (and the fact these guards are
+    // kept alive across the whole spawn+wait, not just to their last mention) is
+    // visible rather than incidental. No-ops when the AppContainer path was off.
+    drop(caps_box);
+    drop(appcontainer_guard);
 
     Ok(Wait {
         // Windows has no signals; an abnormal termination is just an exit code.
