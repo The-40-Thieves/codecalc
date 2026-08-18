@@ -38,7 +38,7 @@
       "properties": {
         "language": {
           "type": "string",
-          "description": "Runtime key from codecalc's language registry, e.g. 'python3'."
+          "description": "Runtime key from codecalc's language registry, e.g. 'python3'. Identity is over the request AS SPELLED, not the normalized runtime: operationally-equivalent aliases ('python', 'py', 'python3' all run as python3) are DIFFERENT requests and get different spec_hashes. This names the request as given; it does not claim two spellings are the same computation."
         },
         "code": {
           "type": "string",
@@ -69,7 +69,7 @@
         },
         "max_output_kb": {
           "type": "integer",
-          "description": "Combined stdout+stderr ceiling in KiB; 0 means uncapped.",
+          "description": "Combined stdout+stderr ceiling in KiB. 0 is NOT uncapped: it selects the backend default of 64 KiB (both the native and fallback executors apply it), and output past that is truncated. Pass an explicit value to raise or lower the cap.",
           "default": 0
         },
         "max_cpu": {

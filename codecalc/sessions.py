@@ -201,6 +201,31 @@ def _note_activity(session_id: str) -> None:
             _touch(session_id)
 
 
+def _reap_then_note(session_id: str) -> None:
+    """Run the idle-expiry gate, THEN record activity (THE-779 fix wave, F4).
+
+    The non-execute entry points — write_file / list_files / resource_read /
+    artifacts — recorded activity by calling `_note_activity` directly, which
+    REFRESHES the idle clock. A worker already idle past the TTL was thereby
+    revived by a bare workspace touch instead of reaped, and the next execute()
+    then ran in the ORIGINAL worker rather than returning the documented expiry
+    error — contradicting the README's "reaped on next access to ANY session".
+
+    Reaping first (the same lazy check-on-access execute() runs) fixes it: an
+    expired worker is torn down here, and `_note_activity`'s own
+    `session_id in _workers` guard then declines to re-arm a clock for a worker
+    that no longer exists. A still-live worker is NOT reaped (`_reap_if_idle`
+    returns False) and its clock is refreshed exactly as before, so an in-use
+    session is unaffected (test 8). These file paths never spawn a worker, so
+    the two lock acquisitions here carry none of the silent-respawn risk that
+    made execute() route through the single-critical-section
+    `_get_worker_or_expired` instead: the worst a race can do is skip a clock
+    refresh, which is the safe direction.
+    """
+    _reap_if_idle(session_id)
+    _note_activity(session_id)
+
+
 def _mark_expired_locked(session_id: str) -> None:
     """Add `session_id` to the bounded in-memory expired cache.
 
@@ -751,7 +776,7 @@ def write_file(session_id: str, path: str, content: str) -> dict:
     d = _session_dir(session_id)
     if not d.is_dir():
         return {"ok": False, "error": f"unknown session '{session_id}'"}
-    _note_activity(session_id)
+    _reap_then_note(session_id)  # F4: reap an expired worker, never revive it
     target = _jail(d, path)
     target.parent.mkdir(parents=True, exist_ok=True)
     _write_nofollow(target, content)
@@ -762,7 +787,7 @@ def list_files(session_id: str, path: str = "") -> dict:
     d = _session_dir(session_id)
     if not d.is_dir():
         return {"ok": False, "error": f"unknown session '{session_id}'"}
-    _note_activity(session_id)
+    _reap_then_note(session_id)  # F4: reap an expired worker, never revive it
     base = _jail(d, path)
     if not base.is_dir():
         return {"ok": False, "error": f"no such directory: {path}"}
@@ -778,7 +803,7 @@ def resource_read(session_id: str, path: str,
     """
     import mimetypes
     d = _session_dir(session_id)
-    _note_activity(session_id)
+    _reap_then_note(session_id)  # F4: reap an expired worker, never revive it
     target = _jail(d, path)
     data = _read_nofollow(target, max_bytes)
     if data is None:
@@ -794,7 +819,7 @@ def artifacts(session_id: str) -> dict:
     d = _session_dir(session_id)
     if not d.is_dir():
         return {"ok": False, "error": f"unknown session '{session_id}'"}
-    _note_activity(session_id)
+    _reap_then_note(session_id)  # F4: reap an expired worker, never revive it
     files = []
     for p in sorted(d.rglob("*")):
         if "__pycache__" in p.parts or p.name.endswith(".pyc"):

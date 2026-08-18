@@ -409,6 +409,99 @@ def test_prune_runs_on_terminal_collection_not_only_cleanup() -> None:
           len(journals) <= 1)
 
 
+class _RaisingProvider(providers.LocalExecutionProvider):
+    """execute() RAISES — the background-run analogue of the cancel-stranding
+    bug. Pre-fix, _collect() called future.result() unchecked, so the raise
+    left the run stuck 'running' with its admission slot held and its result
+    unreachable via inspect()."""
+
+    provider_id = "raising"
+
+    def describe(self) -> dict:
+        result = super().describe()
+        result["provider_id"] = self.provider_id
+        return result
+
+    def execute(self, spec: providers.ComputationSpec) -> dict:
+        del spec
+        raise providers.UnsupportedCapability(self.provider_id, "execute")
+
+
+def test_a_provider_that_raises_becomes_a_terminal_failed_result_not_a_strand() -> None:
+    """F1 (cross-vendor): a provider whose execute() RAISES must not strand the
+    run in 'running' forever with its admission slot held and its result
+    unreachable via inspect(). ANY exception (provider error, receipt-
+    construction failure) becomes a TERMINAL failed result — inspectable once,
+    stable code — and the slot is freed. Same class as the cancel-stranding
+    fix, different trigger (the future's own body raised)."""
+    provider = _RaisingProvider()
+    registry = providers.ProviderRegistry(default_provider_id=provider.provider_id)
+    registry.register(provider)
+    with tempfile.TemporaryDirectory(prefix="codecalc-runs-raise-") as root:
+        supervisor = run_supervisor.RunSupervisor(
+            registry, state_dir=Path(root), max_active_runs=1)
+        handle = supervisor.start(providers.ComputationSpec("python3", "boom"))
+
+        terminal = None
+        raised = None
+        for _ in range(200):
+            try:
+                status = supervisor.inspect(handle.run_id)
+            except Exception as exc:  # pre-fix: the provider's raise escapes here
+                raised = exc
+                break
+            if status["state"] in run_supervisor._TERMINAL_STATES:
+                terminal = status
+                break
+            time.sleep(0.02)
+
+        result = supervisor.wait(handle.run_id, timeout=1) if terminal else None
+
+        # The failed run's slot must be freed for the next submission (cap=1).
+        second_raised = None
+        second = None
+        try:
+            second = supervisor.start(providers.ComputationSpec("python3", "next"))
+        except run_supervisor.TooManyActiveRuns as exc:
+            second_raised = exc
+
+    check("inspect() never lets the provider exception escape", raised is None)
+    check("a raising run reaches a TERMINAL state, not stranded at 'running'",
+          terminal is not None)
+    check("the terminal result is a coded failure, inspectable once",
+          result is not None and result.get("ok") is False and bool(result.get("code")))
+    check("the failed run's admission slot is freed for the next submit",
+          second_raised is None and second is not None)
+
+
+def test_a_completed_but_uninspected_run_frees_its_admission_slot() -> None:
+    """F5 (cross-vendor): admission counts stored 'running' state, and a done
+    future stays 'running' until inspected/waited. With max_active_runs=1 a fast
+    finished run still made the next submit RESOURCE_EXHAUSTED — contradicting
+    the error's own 'wait for one to finish, then retry'. start() now reaps done
+    futures before counting, so COMPLETION frees a slot, not just inspection."""
+    provider = _FastProvider()
+    registry = providers.ProviderRegistry(default_provider_id=provider.provider_id)
+    registry.register(provider)
+    with tempfile.TemporaryDirectory(prefix="codecalc-runs-slot-") as root:
+        supervisor = run_supervisor.RunSupervisor(
+            registry, state_dir=Path(root), max_active_runs=1)
+        first = supervisor.start(providers.ComputationSpec("python3", "one"))
+        # Let it finish WITHOUT inspect()/wait() — the future is done, but the
+        # run is still RECORDED 'running' because nothing collected it.
+        supervisor._runs[first.run_id].future.result(timeout=2)
+
+        raised = None
+        second = None
+        try:
+            second = supervisor.start(providers.ComputationSpec("python3", "two"))
+        except run_supervisor.TooManyActiveRuns as exc:
+            raised = exc
+
+    check("a completed-but-uninspected run does not hold its admission slot",
+          raised is None and second is not None)
+
+
 if __name__ == "__main__":
     test_lifecycle_is_provider_bound_and_cleanup_is_idempotent()
     test_journal_is_bounded_and_orphans_are_reconciled()
@@ -418,4 +511,6 @@ if __name__ == "__main__":
     test_a_set_but_empty_admission_cap_does_not_crash_the_server_at_import()
     test_prune_never_deletes_a_still_active_runs_journal()
     test_prune_runs_on_terminal_collection_not_only_cleanup()
+    test_a_provider_that_raises_becomes_a_terminal_failed_result_not_a_strand()
+    test_a_completed_but_uninspected_run_frees_its_admission_slot()
     sys.exit(1 if FAILS else 0)

@@ -64,13 +64,13 @@ class ExecutionService:
                     except ProviderOperationFailure as exc:
                         cleanup_failure = exc
                 if cleanup_failure is not None:
-                    return contract.stamp(errors.error_result(
-                        errors.INTERNAL,
-                        str(cleanup_failure),
-                        provider_error=cleanup_failure.code,
-                        requested_provider=cleanup_failure.provider_id,
-                        run_id=handle.run_id,
-                    ))
+                    # F3 (cross-vendor): cleanup is best-effort and must NOT
+                    # discard the collected result. Replacing a good result
+                    # (stdout/verdict/receipt) with an internal error over a
+                    # provider-side resource-release problem loses exactly what
+                    # the caller asked for. Mirror run_inspect (server.py): keep
+                    # the result and append `cleanup_error`.
+                    result["cleanup_error"] = str(cleanup_failure)
             else:
                 result = dict(provider.execute(spec))
         except UnsupportedCapability as exc:
@@ -107,7 +107,11 @@ class ExecutionService:
                 capability=exc.capability,
             ))
         result = dict(session_service.execute(session_id, spec))
-        return contract.stamp(attach_receipt(spec, provider, result))
+        # F6 (cross-vendor): name the session in the receipt. The spec is
+        # identical across sessions, so without this two sessions running the
+        # same code produced byte-identical receipts despite different state.
+        return contract.stamp(attach_receipt(spec, provider, result,
+                                             session_id=session_id))
 
     async def execute_stream(self, spec: ComputationSpec, *, provider_id: str | None = None,
                              on_progress=None) -> dict:

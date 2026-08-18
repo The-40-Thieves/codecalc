@@ -1,7 +1,13 @@
 # The codecalc result contract
 
-**Current version: `1.0.0`** · Schema: [`result-v1.schema.json`](result-v1.schema.json) ·
+**Current version: `1.1.0`** · Schema: [`result-v1.schema.json`](result-v1.schema.json) ·
 Source of truth: [`codecalc/contract.py`](../../codecalc/contract.py)
+
+`1.1.0` is a MINOR bump over `1.0.0`: it ADDS a fifth result shape
+(`run_lifecycle`, for the `run_submit`/`run_inspect`/`run_cancel` background-run
+tools) and adds fields to existing results (an execution receipt with
+`session_id`, and grade metadata). Additions only — a `1.0.0` client keeps
+working. See the versioning policy below for why an addition is MINOR.
 
 Every codecalc tool result carries `contract_version`. This document says what
 that number promises, what may change under each part of it, and how a client
@@ -14,17 +20,27 @@ handed to a client as an `outputSchema` and validated with no translation step.
 
 ---
 
-## The four shapes
+## The five shapes
 
-Every result carries `ok` and `contract_version`. Beyond that there are four
+Every result carries `ok` and `contract_version`. Beyond that there are five
 shapes, and a client discriminates them in this order:
 
 | Shape | Discriminator | What it is |
 |---|---|---|
-| **rejected** | no `verdict` | Nothing ran — unknown language, malformed request, an executor that would not start. Carries `error` and a `code`. |
+| **rejected** | no `verdict`, carries `error` | Nothing ran — unknown language, malformed request, an executor that would not start. Carries `error` and a `code`. |
+| **run_lifecycle** | a `run_id` and `state`, no `verdict`/`error`/`backend` | A background-run response from `run_submit`, `run_inspect` *while the run is still active*, or `run_cancel`. Names the run; nothing has run through it yet. |
 | **session** | `backend == "session-worker"` | Ran in a warm session worker. |
 | **compact** | `verdict` present, no `backend` | `execute_code(compact=True)`. |
 | **envelope** | `verdict` present, `backend` in `rust`/`python` | A fresh sandboxed run. All 21 fields. |
+
+**The run_lifecycle shape** (added in `1.1.0`) is the reply the background-run
+tools return before a run finishes — `run_submit`'s handle, a poll of a
+still-running `run_inspect`, or `run_cancel`'s acknowledgement. A *terminal*
+`run_inspect` does not use it: once the run settles, `run_inspect` returns the
+full **envelope** (or, on a failed run, the **rejected** error shape) merged with
+the run's own extras (`run_id`, `state`, `cleaned`, …). Forbidding
+`verdict`/`error`/`backend` on this shape is what keeps it from colliding with
+those, so exactly one branch matches any stamped run response.
 
 **The envelope** is the full shape: 21 fields including `contract_version`, identical
 across both backends because `scripts/check_parity.py` runs both and diffs their
@@ -441,6 +457,15 @@ every one of them is a place where two implementations could silently disagree.
    canonicalizers diverge between runtimes, and NaN/Infinity are not JSON.
 8. **Anything with no rule is refused** — sets above all, which have no stable
    iteration order.
+
+**Identity is over the request AS SPELLED, not the normalized runtime.**
+`language: "python"`, `"py"` and `"python3"` all execute on python3, but they are
+three different requests and get three different `spec_hash`es — the hash names
+the request as given, and does not claim two spellings are the same computation.
+Normalizing an alias before hashing would collapse distinct requests onto one
+identity; this contract keeps them distinct. (`max_output_kb: 0` is likewise
+literal-not-magic: it selects the backend's 64 KiB default, not an uncapped
+stream.)
 
 ### Secrets are never part of an identity
 

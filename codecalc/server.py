@@ -334,7 +334,11 @@ _COMPACT_DISCLOSURE = (
 #: `interface_version`, `host_class`, `source_sha256`, `spec_schema_version` and
 #: the determinism block are descriptive, unchanged between calls, and one
 #: non-compact call away — which the caller is told, rather than left to notice.
-_COMPACT_RECEIPT = ("receipt_version", "provider_id", "spec_hash", "limits")
+#: `session_id` (F6) is kept, not dropped: it is part of what makes a receipt
+#: distinguish two runs of the same spec in different sessions, so dropping it in
+#: compact mode would reopen F6 for compact session receipts. It is one short
+#: uuid or null.
+_COMPACT_RECEIPT = ("receipt_version", "provider_id", "session_id", "spec_hash", "limits")
 
 
 def compact_result(result: dict) -> dict:
@@ -713,6 +717,14 @@ def run_inspect(run_id: str) -> dict:
         # over a resource-release problem that has nothing to do with the
         # result being reported.
         result = {**result, "cleanup_error": str(exc)}
+    # F9 (cross-vendor): re-read the status AFTER cleanup(). `status` above was
+    # captured pre-cleanup, so returning it made the FIRST terminal read report
+    # cleaned=false (state "finished") and the NEXT read cleaned=true (state
+    # "cleaned") — a spurious change for a caller polling to completion. A
+    # successful cleanup advanced the run to "cleaned"; a failed one left it
+    # "finished" with cleanup_error already appended above. Either way the fresh
+    # status is the accurate one.
+    status = _run_supervisor.inspect(run_id)
     return {**result, **status}
 
 

@@ -51,7 +51,7 @@ from . import errors
 #: each component is allowed to change — the short form is that MAJOR is the
 #: only one that may break a reader, and it carries a twelve-month deprecation
 #: window before anything is removed.
-CONTRACT_VERSION = "1.0.0"
+CONTRACT_VERSION = "1.1.0"
 
 # THE `$schema` AND `$id` URIs ARE NOT HERE ON PURPOSE.
 #
@@ -201,12 +201,13 @@ def build_schema(dialect: str | None = None, schema_id: str | None = None) -> di
                 ),
             },
         },
-        # FOUR shapes, discriminated so that exactly one branch can match:
+        # FIVE shapes, discriminated so that exactly one branch can match:
         #
-        #   envelope  verdict present, backend in (rust, python)
-        #   session   backend == "session-worker"
-        #   compact   verdict present, NO backend key
-        #   rejected  no verdict at all
+        #   envelope       verdict present, backend in (rust, python)
+        #   session        backend == "session-worker"
+        #   compact        verdict present, NO backend key
+        #   rejected       no verdict at all, carries `error`
+        #   run_lifecycle  a run_id, a state, and NO verdict/error/backend
         #
         # The first version of this schema had two branches and asserted that
         # `executor.execute` was the single choke point for every execution
@@ -215,11 +216,23 @@ def build_schema(dialect: str | None = None, schema_id: str | None = None) -> di
         # returns raw executor JSON, and sessions bypass the function entirely.
         # All three produced results that NEITHER branch accepted — a published
         # document that the product fails, which is worse than no document.
+        #
+        # A second cross-vendor review (F2) found the same defect one surface
+        # over: run_submit / run_inspect-while-active / run_cancel return
+        # responses stamped `contract_version` that matched none of the four —
+        # ok=true with a run_id, no verdict, no backend, no error. `run_lifecycle`
+        # is that fifth shape. It is discriminated AWAY from a TERMINAL
+        # run_inspect (which returns a full envelope, or a rejected-shaped
+        # failure, plus run_* extras) by forbidding verdict/error/backend: a
+        # terminal success carries `verdict`, a terminal failure carries `error`,
+        # so neither collides with this branch and `oneOf`'s exactly-one rule
+        # holds.
         "oneOf": [
             {"$ref": "#/$defs/execution_envelope"},
             {"$ref": "#/$defs/session_result"},
             {"$ref": "#/$defs/compact_result"},
             {"$ref": "#/$defs/rejected"},
+            {"$ref": "#/$defs/run_lifecycle"},
         ],
         "$defs": {
             "execution_envelope": {
@@ -396,6 +409,48 @@ def build_schema(dialect: str | None = None, schema_id: str | None = None) -> di
                     "exit_code": {"type": ["integer", "null"]},
                     "unenforced": {"type": "array", "items": {"type": "string"}},
                     "output_error": {"type": ["string", "null"]},
+                },
+            },
+            "run_lifecycle": {
+                "title": "a background-run lifecycle response",
+                "description": (
+                    "Returned by run_submit, by run_inspect WHILE the run is "
+                    "still active (state running/cancelling), and by run_cancel. "
+                    "It names the run — `run_id` and `state` — but nothing ran "
+                    "yet through it, so there is no `verdict`, no `backend`, and "
+                    "no `error`. A TERMINAL run_inspect does not use this shape: "
+                    "it returns the full execution envelope (or, on a failed "
+                    "run, the rejected error shape) merged with the same run_* "
+                    "extras. Forbidding verdict/error/backend here is what keeps "
+                    "this branch from colliding with those, so exactly one "
+                    "oneOf branch matches any stamped run response."
+                ),
+                "type": "object",
+                "required": ["ok", "run_id", "state"],
+                "not": {"anyOf": [
+                    {"required": ["verdict"]},
+                    {"required": ["error"]},
+                    {"required": ["backend"]},
+                ]},
+                "properties": {
+                    "ok": {"type": "boolean"},
+                    "run_id": {"type": "string"},
+                    "provider_id": {"type": "string"},
+                    "started_at": {"type": "number"},
+                    "deadline": {"type": "number"},
+                    "state": {
+                        "type": "string",
+                        "description": (
+                            "The run's lifecycle state — running/cancelling "
+                            "before it settles, or a terminal state reported by "
+                            "run_cancel on an already-finished run. Left as a "
+                            "free string rather than a closed enum: the states "
+                            "are owned by run_supervisor, and pinning them here "
+                            "would be a second declaration that could drift."
+                        ),
+                    },
+                    "cleaned": {"type": "boolean"},
+                    "cancelled": {"type": "boolean"},
                 },
             },
             "rejected": {

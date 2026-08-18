@@ -10,6 +10,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from . import contract, errors
 from .providers import (
     ComputationSpec,
     ExecutionProvider,
@@ -129,6 +130,16 @@ class RunSupervisor:
         # `self._pool.submit()` only enqueues and returns immediately, so
         # doing it here does not hold the lock through any real work.
         with self._lock:
+            # F5 (cross-vendor): reap done futures BEFORE counting, so a run
+            # that finished with nobody polling it stops occupying a slot.
+            # Admission counts `_ACTIVE_STATES`, and a completed-but-uncollected
+            # future sits in "running" until inspect()/wait() transitions it —
+            # so a fast finished run made the next submit spuriously
+            # RESOURCE_EXHAUSTED, contradicting the error's own "wait for one to
+            # finish, then retry". Aligned with the state-aware prune: the state
+            # a run RECORDS decides whether it is active, not the label it was
+            # last left at.
+            self._reap_completed_locked()
             active = sum(1 for r in self._runs.values() if r.state in _ACTIVE_STATES)
             if active >= self.max_active_runs:
                 raise TooManyActiveRuns(active, self.max_active_runs)
@@ -171,14 +182,27 @@ class RunSupervisor:
 
     def _collect(self, run: _Run) -> dict:
         if run.result is None:
-            result = dict(run.future.result())
-            # Same receipt execute_code always carries (THE-778 fix round,
-            # review Important #2): start() bypasses ExecutionService.execute(),
-            # which is the only other place this gets attached, so without
-            # this a run_inspect terminal result was missing `provider`
-            # entirely — the one field a caller uses to see which limits the
-            # provider actually enforced.
-            run.result = attach_receipt(run.spec, run.provider, result)
+            try:
+                result = dict(run.future.result())
+                # Same receipt execute_code always carries (THE-778 fix round,
+                # review Important #2): start() bypasses ExecutionService.execute(),
+                # which is the only other place this gets attached, so without
+                # this a run_inspect terminal result was missing `provider`
+                # entirely — the one field a caller uses to see which limits the
+                # provider actually enforced.
+                run.result = attach_receipt(run.spec, run.provider, result)
+            except Exception as exc:  # ANY failure must terminalize the run
+                # F1 (cross-vendor): a provider whose future RAISES —
+                # UnsupportedCapability, a transport error, or a failure while
+                # attach_receipt() builds the provenance block — must not
+                # strand the run in "running" forever with its admission slot
+                # held and its result unreachable via inspect(). Turn ANY
+                # exception into a TERMINAL, coded failure: inspectable exactly
+                # once, freeing the slot, and returning the same error contract
+                # every other failure does rather than re-raising inside a poll.
+                # Same class as the cancel-stranding fix above, different
+                # trigger (the future's own body raised).
+                run.result = self._failed_result(run, exc)
             run.state = "finished"
             self._write(run)
             # THE-778 fix round, review Important #3b: pruning on every
@@ -190,6 +214,31 @@ class RunSupervisor:
             self._prune()
         return run.result
 
+    def _failed_result(self, run: _Run, exc: Exception) -> dict:
+        """A terminal, coded failure for a run whose future raised (F1).
+
+        Stamped and coded so run_inspect returns the same error contract every
+        other failure does. `provider_error` carries the exception's own stable
+        `code` where it has one (UnsupportedCapability, ProviderOperationFailure)
+        and its type name otherwise.
+        """
+        return contract.stamp(errors.error_result(
+            errors.INTERNAL,
+            f"background run failed: {exc}",
+            provider_error=getattr(exc, "code", None) or type(exc).__name__,
+            requested_provider=run.handle.provider_id,
+            run_id=run.handle.run_id,
+        ))
+
+    def _reap_completed_locked(self) -> None:
+        """Collect any run whose future is already done (F5). Caller holds
+        `_lock`. `_collect` is lock-safe — inspect() already calls it under the
+        same lock — and, post-F1, cannot raise even if the future's body did.
+        """
+        for run in list(self._runs.values()):
+            if run.state in _ACTIVE_STATES and run.future.done():
+                self._collect(run)
+
     def wait(self, run_id: str, *, timeout: float | None = None) -> dict:
         with self._lock:
             run = self._get(run_id)
@@ -197,6 +246,14 @@ class RunSupervisor:
             run.future.result(timeout=timeout)
         except TimeoutError:
             raise TimeoutError(f"run {run_id!r} did not finish before wait timeout") from None
+        except Exception:
+            # F1 (cross-vendor): block until the future settles, but do NOT
+            # re-raise its body's exception here — `_collect()` below (under the
+            # lock) is the single place that turns a raised future into a
+            # TERMINAL failed result. Letting `future.result()` re-raise would
+            # strand the caller with the provider's exception before that
+            # normalization ever runs.
+            pass
         with self._lock:
             return dict(self._collect(run))
 

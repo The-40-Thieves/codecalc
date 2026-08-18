@@ -173,6 +173,53 @@ def test_service_verifies_one_workload_independently_across_two_providers() -> N
           result["contract_version"] == contract.CONTRACT_VERSION)
 
 
+def test_managed_execution_preserves_a_good_result_when_cleanup_fails() -> None:
+    """F3 (cross-vendor): the synchronous managed path collected a good result,
+    then let a ProviderOperationFailure from cleanup() REPLACE it with an
+    internal error — stdout/verdict/receipt lost. run_inspect already treats
+    cleanup as best-effort (appends `cleanup_error`); the sync path must mirror
+    that: keep the collected result and disclose the cleanup failure."""
+    class _CleanupFailsProvider(providers.LocalExecutionProvider):
+        provider_id = "cleanup-fails"
+
+        def describe(self) -> dict:
+            descriptor = super().describe()
+            descriptor["provider_id"] = self.provider_id
+            descriptor["capabilities"]["managed_runs"] = True
+            descriptor["capabilities"]["cleanup"] = True
+            return descriptor
+
+        def execute_managed(self, run_id: str,
+                            spec: providers.ComputationSpec) -> dict:
+            del run_id
+            return contract.stamp({
+                "ok": True, "verdict": "OK", "stdout": spec.code,
+                "stderr": "", "exit_code": 0, "unenforced": [],
+            })
+
+        def cleanup(self, run_id: str) -> None:
+            del run_id
+            raise providers.ProviderOperationFailure(self.provider_id, "cleanup")
+
+    provider = _CleanupFailsProvider()
+    registry = providers.ProviderRegistry(default_provider_id=provider.provider_id)
+    registry.register(provider)
+    with tempfile.TemporaryDirectory(prefix="codecalc-cleanup-fail-") as root:
+        supervisor = run_supervisor.RunSupervisor(registry, state_dir=Path(root))
+        service = execution_service.ExecutionService(registry, supervisor=supervisor)
+        result = service.execute(providers.ComputationSpec("python3", "kept-output"))
+
+    check("a cleanup failure does NOT discard the collected result",
+          result.get("stdout") == "kept-output" and result.get("verdict") == "OK")
+    check("the result still carries the execution receipt",
+          isinstance(result.get("provider"), dict)
+          and result["provider"].get("provider_id") == "cleanup-fails")
+    check("the cleanup failure is disclosed rather than swallowed or fatal",
+          bool(result.get("cleanup_error")))
+    check("the preserved result still carries the contract version",
+          result.get("contract_version") == contract.CONTRACT_VERSION)
+
+
 def test_service_routes_streaming_through_the_selected_provider() -> None:
     progress: list[tuple[int, str]] = []
 
@@ -505,6 +552,41 @@ def test_every_receipt_bearing_path_carries_the_same_receipt() -> None:
     check("all three agree on the source identity",
           plain["source_sha256"] == streamed["source_sha256"]
           == in_session["source_sha256"])
+
+
+def test_receipt_distinguishes_two_sessions_running_the_same_spec() -> None:
+    """F6 (cross-vendor): execute_code builds the SAME ComputationSpec whatever
+    the session_id, and the receipt recorded neither the session nor any
+    workspace-state marker — so `print(x)` with x=1 in session A and x=2 in
+    session B produced different output yet byte-identical spec_hash/
+    source_sha256/receipt. The receipt now records session_id, so identical
+    receipts cannot mask runs in different sessions."""
+    spec = providers.ComputationSpec(language="python3", code='print("same source")')
+    service = _service()
+    a = server.session_start("python3")
+    b = server.session_start("python3")
+    try:
+        ra = execution_service.ExecutionService(service.registry).execute_session(
+            execution_service.SessionService(), a["session_id"], spec)["provider"]
+        rb = execution_service.ExecutionService(service.registry).execute_session(
+            execution_service.SessionService(), b["session_id"], spec)["provider"]
+    finally:
+        server.session_stop(a["session_id"])
+        server.session_stop(b["session_id"])
+
+    check("the receipt records the session a run happened in",
+          ra.get("session_id") == a["session_id"]
+          and rb.get("session_id") == b["session_id"])
+    check("two sessions running the identical spec get DISTINGUISHABLE receipts",
+          ra != rb and ra.get("session_id") != rb.get("session_id"))
+    check("a session receipt still names the request by content",
+          ra.get("spec_hash") == spec.spec_hash())
+    check("the receipt version reflects the added session_id field",
+          ra.get("receipt_version") == execution_service.RECEIPT_VERSION)
+
+    plain = service.execute(spec)["provider"]
+    check("a session-LESS run records session_id as null, not a fake one",
+          plain.get("session_id") is None)
 
 
 def test_compact_mode_keeps_the_actionable_half_of_the_receipt() -> None:
@@ -1290,6 +1372,41 @@ def test_run_inspect_terminal_result_has_the_same_keys_as_execute_code() -> None
             server._run_supervisor = old
 
 
+def test_first_terminal_run_inspect_reports_cleaned_state_accurately() -> None:
+    """F9 (cross-vendor): run_inspect captured `status` BEFORE calling cleanup()
+    and returned that, so the FIRST terminal read reported cleaned=false and the
+    NEXT reported cleaned=true — a spurious state change for a caller polling to
+    completion. Refreshing status AFTER cleanup makes the first read accurate."""
+    registry = _run_registry(_FakeRunProvider())
+    old = server._run_supervisor
+    with tempfile.TemporaryDirectory(prefix="codecalc-run-f9-") as root:
+        server._run_supervisor = run_supervisor.RunSupervisor(registry, state_dir=Path(root))
+        try:
+            submitted = server.run_submit("python3", "x")
+            run_id = submitted["run_id"]
+            first_terminal = None
+            for _ in range(200):
+                inspected = server.run_inspect(run_id)
+                if inspected.get("state") in {"finished", "cleaned", "recovered"}:
+                    first_terminal = inspected
+                    break
+                time.sleep(0.02)
+            check("run_inspect reaches a terminal state", first_terminal is not None)
+            if first_terminal is not None:
+                check("the FIRST terminal read already reports cleaned=True "
+                      "(no stale pre-cleanup state)",
+                      first_terminal.get("cleaned") is True,
+                      )
+                check("...and its state reflects the completed cleanup",
+                      first_terminal.get("state") == "cleaned")
+                nxt = server.run_inspect(run_id)
+                check("a second terminal read agrees with the first (no state flip)",
+                      nxt.get("cleaned") == first_terminal.get("cleaned")
+                      and nxt.get("state") == first_terminal.get("state"))
+        finally:
+            server._run_supervisor = old
+
+
 def test_run_submit_admission_cap_returns_resource_exhausted() -> None:
     """THE-778 fix round, review Important #3a: run_submit must refuse past
     CODECALC_MAX_ACTIVE_RUNS with a stable, tested error rather than
@@ -1556,12 +1673,14 @@ if __name__ == "__main__":
     test_service_rejects_unsupported_streaming_without_fallback()
     test_service_normalizes_unsupported_synchronous_capabilities()
     test_service_receipt_reports_requested_and_provider_enforced_limits()
+    test_managed_execution_preserves_a_good_result_when_cleanup_fails()
     test_receipt_names_the_request_and_the_source_by_content()
     test_receipt_is_stable_for_identical_inputs_and_moves_for_different_ones()
     test_receipt_records_the_determinism_inputs_it_can_observe()
     test_receipt_determinism_does_not_claim_a_remote_environment()
     test_receipt_carries_no_secret_and_no_machine_specific_path()
     test_every_receipt_bearing_path_carries_the_same_receipt()
+    test_receipt_distinguishes_two_sessions_running_the_same_spec()
     test_compact_mode_keeps_the_actionable_half_of_the_receipt()
     test_session_service_owns_protocol_neutral_lifecycle_and_artifacts()
     test_session_service_reads_bounded_files_and_runs_workspace_entries()
@@ -1584,6 +1703,7 @@ if __name__ == "__main__":
     test_run_tools_return_an_internal_error_when_no_supervisor_is_wired()
     test_run_cancel_on_the_real_local_provider_does_not_strand_the_result()
     test_run_inspect_terminal_result_has_the_same_keys_as_execute_code()
+    test_first_terminal_run_inspect_reports_cleaned_state_accurately()
     test_run_submit_admission_cap_returns_resource_exhausted()
     test_session_output_spills_past_the_default_cap_instead_of_dropping_it()
     test_session_output_spill_is_faithful_to_the_pipelines_str_representation()

@@ -513,6 +513,53 @@ async def main() -> None:
 asyncio.run(main())
 
 
+# ── background-run responses validate too (THE-778 shapes, F2) ─────────────
+# run_submit / run_inspect (while active) / run_cancel return responses that are
+# stamped `contract_version` but matched NONE of the four published shapes: a
+# run_submit reply is {ok, run_id, provider_id, started_at, deadline, state} —
+# no verdict, no backend, no error. A stamped response the schema rejects is a
+# document the product fails, which is the exact defect this suite exists to
+# catch. The run lifecycle shape closes it.
+import tempfile as _tempfile
+import time as _time
+
+from codecalc import providers as _providers
+from codecalc import run_supervisor as _run_supervisor_mod
+
+_run_reg = _providers.ProviderRegistry(default_provider_id="local")
+_run_reg.register(_providers.LocalExecutionProvider())
+_old_sup = server._run_supervisor
+with _tempfile.TemporaryDirectory(prefix="codecalc-contract-run-") as _run_root:
+    server._run_supervisor = _run_supervisor_mod.RunSupervisor(
+        _run_reg, state_dir=pathlib.Path(_run_root))
+    try:
+        _submitted = server.run_submit("python3", "print('bg')", timeout=10)
+        check("a run_submit response validates against the published schema",
+              not errors_for(_submitted), f"-> {errors_for(_submitted)[:2]}")
+        check("the run_submit response carries contract_version",
+              _submitted.get("contract_version") == contract.CONTRACT_VERSION,
+              f"-> {_submitted.get('contract_version')}")
+        _rid = _submitted.get("run_id", "")
+        _terminal = None
+        for _ in range(200):
+            _ins = server.run_inspect(_rid)
+            if _ins.get("state") in {"finished", "cleaned", "recovered"}:
+                _terminal = _ins
+                break
+            # a non-terminal run_inspect is ALSO a published shape
+            check("a non-terminal run_inspect validates", not errors_for(_ins),
+                  f"-> {errors_for(_ins)[:2]}")
+            _time.sleep(0.02)
+        check("a terminal run_inspect validates against the published schema",
+              _terminal is not None and not errors_for(_terminal),
+              f"-> {errors_for(_terminal)[:2] if _terminal else 'never terminal'}")
+        _cancelled = server.run_cancel(_rid)
+        check("a run_cancel response validates against the published schema",
+              not errors_for(_cancelled), f"-> {errors_for(_cancelled)[:2]}")
+    finally:
+        server._run_supervisor = _old_sup
+
+
 # ── the REQUEST contract, on every OS this runs on (THE-793) ──────────────
 # `scripts/check_contract.py` recomputes the golden vectors too, but only ever
 # on a Linux gate runner. The vectors' central claim is that the canonical bytes

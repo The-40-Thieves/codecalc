@@ -106,7 +106,13 @@ from __future__ import annotations
 
 #: Bump on any change to what evidence maps to what grade. See "Versioning"
 #: above — this is a RULES version, not the package version.
-GRADE_RULES_VERSION = "1"
+#:
+#: "2" (cross-vendor fix wave, F7): a `verify_optimization` result that is
+#: `accepted` but whose measured speed ratio is not > 1 is now `ungraded` rather
+#: than `cross_checked`. optimization.py can accept a slowdown (min_speedup is
+#: unvalidated); the grade no longer certifies one as a speed-cross-checked
+#: optimisation. This changes what evidence maps to what grade, hence the bump.
+GRADE_RULES_VERSION = "2"
 
 EXECUTED = "executed"
 CROSS_CHECKED = "cross_checked"
@@ -169,6 +175,20 @@ def grade_verify_optimization(result: dict, language: str) -> dict:
     matched, total = verification.get("matched"), verification.get("total")
     speedup = result.get("speedup") or {}
     ratio = speedup.get("ratio")
+    # F7 (cross-vendor): `cross_checked` folds a correctness check AND a real
+    # speedup into ONE grade, so it may not be issued unless the speedup is
+    # real. optimization.py accepts on `ratio >= min_speedup` with min_speedup
+    # unvalidated (it may be <= 1 — a pre-existing defect ticketed separately),
+    # so an `accepted=True` result can carry a measured SLOWDOWN. A ratio that
+    # is not > 1 is not a speedup, leaving the "genuine optimisation" claim
+    # unproven exactly like an equivalent-but-not-faster candidate — so it stays
+    # ungraded rather than certifying a slowdown as cross_checked on the speed
+    # dimension. (`bool` is an `int`, but a ratio is never a bool.)
+    if not isinstance(ratio, (int, float)) or ratio <= 1:
+        return _graded(result, UNGRADED,
+                       f"not graded: accepted, and the correctness check passed, "
+                       f"but the measured speed ratio {ratio}x is not a speedup "
+                       f"(> 1x) — 'genuine optimisation' is unproven")
     sizes_measured = len(speedup.get("per_size") or [])
     basis = (f"cross-checked: original and candidate independently agreed on "
              f"{matched}/{total} test input(s) under {language} execution; "

@@ -246,9 +246,14 @@ def test_execution_service_reports_cleanup_failure_without_secret() -> None:
         service = execution_service.ExecutionService(registry, supervisor=supervisor)
         result = service.execute(providers.ComputationSpec("python3", "pass"))
 
-    check("cleanup failure is a normalized provider error",
-          result["ok"] is False
-          and result["provider_error"] == "provider_cleanup_failed")
+    # F3 (cross-vendor): cleanup is best-effort and must NOT discard the good
+    # execution result. The run itself succeeded (ok=True); the cleanup failure
+    # is disclosed via `cleanup_error` rather than replacing stdout/verdict/
+    # receipt with an internal error.
+    check("a cleanup failure preserves the successful execution result",
+          result["ok"] is True and result.get("verdict") == "OK")
+    check("the cleanup failure is disclosed via cleanup_error, not swallowed",
+          bool(result.get("cleanup_error")))
     check("cleanup failure redacts strict credential",
           "cleanup-secret" not in json.dumps(result))
 

@@ -401,6 +401,43 @@ for lang in WORKER_LANGS[:1]:
                 sessions.stop(s)
         _with_ttl("0.2", _run)
 
+# ── 9. F4: a non-execute touch AFTER expiry must NOT revive the worker ─────
+# The mirror of test 8. There the touch lands BEFORE the TTL elapses and keeps
+# the session alive. Here the worker has ALREADY sat idle past the TTL when the
+# touch arrives: it must be REAPED (the documented "reaped on next access"),
+# not revived by a bare workspace touch that refreshes the idle clock. Pre-fix,
+# write_file / list_files / resource_read / artifacts called `_note_activity()`
+# directly, refreshing the clock — so the worker survived and the NEXT execute()
+# ran in the ORIGINAL worker instead of returning the expiry error. Only test 8
+# covered access-before-expiry; this covers access-after.
+_AFTER_EXPIRY_TOUCHES = [
+    ("write_file", lambda s: sessions.write_file(s, "staged2.txt", "y")),
+    ("list_files", lambda s: sessions.list_files(s)),
+    ("resource_read", lambda s: sessions.resource_read(s, "staged.txt")),
+    ("artifacts", lambda s: sessions.artifacts(s)),
+]
+for lang in WORKER_LANGS[:1]:
+    for _name, _touch_call in _AFTER_EXPIRY_TOUCHES:
+        def _run(lang=lang, _name=_name, _touch_call=_touch_call):
+            s = sessions.start(lang)["session_id"]
+            try:
+                sessions.write_file(s, "staged.txt", "x")
+                pid = sessions._workers[s].proc.pid
+                time.sleep(0.10)  # idle past the 0.05s TTL configured below
+                _touch_call(s)    # a touch AFTER expiry
+                gone = _pid_gone(pid)
+                check(f"{lang}: {_name}() after expiry REAPS the idle worker "
+                      f"instead of reviving it",
+                      gone, f"-> pid {pid} {'gone' if gone else 'still alive'}")
+                r = sessions.execute(s, MARKER[lang])
+                check(f"{lang}: after {_name}() the next execute() gets the expiry "
+                      f"error, not a run in the original worker",
+                      r.get("ok") is False and r.get("code") == errors.WORKER_FAILURE,
+                      f"-> {r}")
+            finally:
+                sessions.stop(s)
+        _with_ttl("0.05", _run)
+
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== SESSION IDLE-EXPIRY REAPS THE WORKER, NOT JUST THE BOOKKEEPING ===")
 sys.exit(1 if FAILS else 0)

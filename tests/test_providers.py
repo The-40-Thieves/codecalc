@@ -1108,7 +1108,40 @@ def test_spec_golden_vectors_pin_the_canonical_encoding() -> None:
           len(by_bytes) < len(vectors))
 
 
+def test_field_docs_are_honest_about_the_output_cap_default() -> None:
+    """F8 (cross-vendor): the receipt/spec doc for max_output_kb published '0
+    means uncapped', but both backends apply a 64 KiB default — a request >64
+    KiB is truncated while its receipt claims no cap. The published meaning must
+    not contradict the behaviour."""
+    doc = providers.COMPUTATION_SPEC_FIELD_DOCS["max_output_kb"]
+    check("F8: max_output_kb doc no longer makes the false '0 means uncapped' claim",
+          "means uncapped" not in doc.lower())
+    check("F8: ...it names the real effective default (64 KiB)", "64" in doc)
+    # The behaviour the doc now describes: 0 selects the executor default cap.
+    from codecalc import executor
+    check("F8: the executor default the doc points at really is 64 KiB",
+          executor.MAX_OUTPUT_BYTES == 64 * 1024)
+
+
+def test_field_docs_scope_identity_to_the_request_as_spelled() -> None:
+    """F10 (cross-vendor): operationally-equivalent language aliases (python /
+    py / python3 all run as python3) hash to DIFFERENT spec_hashes, because
+    identity is over the request as spelled, not the normalized runtime. The
+    documented claim must say so precisely rather than imply 'same computation'."""
+    h_py = providers.ComputationSpec("py", "print(1)").spec_hash()
+    h_py3 = providers.ComputationSpec("python3", "print(1)").spec_hash()
+    check("F10: aliases hash DISTINCTLY — identity is over the request as spelled",
+          h_py != h_py3)
+    ldoc = providers.COMPUTATION_SPEC_FIELD_DOCS["language"].lower()
+    check("F10: the language field doc states identity is over the request as spelled "
+          "(aliases are distinct requests)",
+          ("as spelled" in ldoc or "as written" in ldoc)
+          and ("alias" in ldoc or "python3" in ldoc))
+
+
 if __name__ == "__main__":
+    test_field_docs_are_honest_about_the_output_cap_default()
+    test_field_docs_scope_identity_to_the_request_as_spelled()
     test_descriptor_is_versioned_and_machine_readable()
     test_local_provider_preserves_the_execution_result_contract()
     test_local_provider_owns_streaming_and_truthfully_falls_back()

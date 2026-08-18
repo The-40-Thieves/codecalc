@@ -99,7 +99,14 @@ class ComputationSpec:
 #: undocumented field, so a field added without a description is a failing gate
 #: rather than a published schema with a blank in it.
 COMPUTATION_SPEC_FIELD_DOCS = {
-    "language": "Runtime key from codecalc's language registry, e.g. 'python3'.",
+    "language": (
+        "Runtime key from codecalc's language registry, e.g. 'python3'. "
+        "Identity is over the request AS SPELLED, not the normalized runtime: "
+        "operationally-equivalent aliases ('python', 'py', 'python3' all run as "
+        "python3) are DIFFERENT requests and get different spec_hashes. This "
+        "names the request as given; it does not claim two spellings are the "
+        "same computation."
+    ),
     "code": "The program source to execute, verbatim.",
     "stdin": "Text written to the process's standard input. '' means none.",
     "timeout": "Wall-clock ceiling in seconds for the whole request.",
@@ -108,7 +115,12 @@ COMPUTATION_SPEC_FIELD_DOCS = {
         "ephemeral one. null and '' are different requests."
     ),
     "max_memory_mb": "Address-space ceiling in MiB; 0 means the provider default.",
-    "max_output_kb": "Combined stdout+stderr ceiling in KiB; 0 means uncapped.",
+    "max_output_kb": (
+        "Combined stdout+stderr ceiling in KiB. 0 is NOT uncapped: it selects "
+        "the backend default of 64 KiB (both the native and fallback executors "
+        "apply it), and output past that is truncated. Pass an explicit value "
+        "to raise or lower the cap."
+    ),
     "max_cpu": "CPU-time ceiling in seconds; 0 means the provider default.",
     "no_net": (
         "Request network isolation. Providers that cannot enforce it disclose so "
@@ -135,7 +147,11 @@ def build_spec_schema(dialect: str | None = None,
 #: source", which are not the same fact.
 #:
 #: MAJOR removes or retypes a key · MINOR adds one · PATCH changes descriptions.
-RECEIPT_VERSION = "1.0.0"
+#:
+#: 1.1.0 (cross-vendor fix wave, F6): added `session_id`. It is the run's
+#: session (from `execute_session`) or null for a session-less run. Adding a key
+#: is MINOR.
+RECEIPT_VERSION = "1.1.0"
 
 #: The determinism inputs the receipt has a slot for. Every one of them appears
 #: EITHER with a value OR in `unrecorded` — never as a bare null, because a null
@@ -230,7 +246,7 @@ def _limit_receipt(spec: ComputationSpec, result: dict) -> dict:
 
 
 def _execution_receipt(spec: ComputationSpec, descriptor: dict,
-                       result: dict) -> dict:
+                       result: dict, session_id: str | None = None) -> dict:
     """Provider identity, content hashes, determinism inputs, limits (THE-782).
 
     THE-790 attached provider identity and the limits receipt. Those answer
@@ -242,10 +258,24 @@ def _execution_receipt(spec: ComputationSpec, descriptor: dict,
     without it a stored hash is a number whose meaning has an expiry date
     nobody wrote down.
 
+    `session_id` (F6, cross-vendor) closes a gap the content hashes alone left
+    open: `execute_code(session_id=...)` builds the SAME ComputationSpec
+    whatever the session, and interpreter STATE lives in the session, not the
+    spec — so `print(x)` with x=1 in one session and x=2 in another produced
+    different output under an identical spec_hash/source_sha256. Recording the
+    session id means two such runs no longer share a byte-identical receipt.
+    It is null for a session-less run (which ran in no session — an honest,
+    meaningful null, not a missing value). WORKSPACE STATE ITSELF IS NOT
+    HASHED: the receipt names WHICH session, not the exact bytes of its
+    workspace or interpreter heap, so two runs in the SAME session with
+    different in-memory state still share a receipt. Session-state hashing was
+    out of scope for this fix; the session id is the identity recorded.
+
     NOTHING MACHINE-SPECIFIC GOES IN. `workdir` may be an absolute path on the
     operator's disk; it reaches the receipt only through `spec_hash`, never as
     text. The determinism block reads exactly three names out of the forwarded
-    environment rather than copying it, so PATH and HOME cannot ride along.
+    environment rather than copying it, so PATH and HOME cannot ride along. A
+    session id is a codecalc-minted uuid, not a host path, so it is safe here.
     """
     return {
         "receipt_version": RECEIPT_VERSION,
@@ -253,6 +283,7 @@ def _execution_receipt(spec: ComputationSpec, descriptor: dict,
         "provider_id": descriptor["provider_id"],
         "provider_version": descriptor["provider_version"],
         "host_class": descriptor["host_class"],
+        "session_id": session_id,
         "spec_schema_version": spec_identity.COMPUTATION_SPEC_VERSION,
         "spec_hash": spec_identity.spec_hash(spec),
         "source_sha256": spec_identity.text_hash(spec.code),
@@ -261,7 +292,8 @@ def _execution_receipt(spec: ComputationSpec, descriptor: dict,
     }
 
 
-def attach_receipt(spec: ComputationSpec, provider: ExecutionProvider, result: dict) -> dict:
+def attach_receipt(spec: ComputationSpec, provider: ExecutionProvider,
+                   result: dict, *, session_id: str | None = None) -> dict:
     """Add the FULL execution receipt (identity, content hashes, determinism
     inputs, limits enforcement — THE-782) every full execution result
     carries, mutating and returning `result`.
@@ -277,8 +309,13 @@ def attach_receipt(spec: ComputationSpec, provider: ExecutionProvider, result: d
     what makes this the shared home without a circular import — and it
     already imports `spec_identity` for `ComputationSpec`'s own identity
     methods, so this needed no new dependency to relocate here.
+
+    `session_id` (F6) is forwarded to the receipt so a session run names the
+    session it happened in. Keyword-only and defaulting to None, so every
+    session-less caller (execute/execute_stream, run_supervisor) is unchanged.
     """
-    result["provider"] = _execution_receipt(spec, provider.describe(), result)
+    result["provider"] = _execution_receipt(spec, provider.describe(), result,
+                                             session_id=session_id)
     return result
 
 

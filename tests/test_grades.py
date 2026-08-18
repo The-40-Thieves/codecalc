@@ -159,6 +159,35 @@ g = grades.grade_verify_optimization(optimization_measurement_failed(), "python3
 check("optimization measurement failure -> ungraded", g["grade"] == grades.UNGRADED, f"-> {g['grade']}")
 
 
+# ── F7: an ACCEPTED result with a measured SLOWDOWN is never cross_checked ──
+# optimization.py accepts on ratio >= min_speedup with min_speedup unvalidated
+# (it may be <= 1 — a pre-existing defect, ticketed separately), so an
+# `accepted=True` result can carry a measured SLOWDOWN. The GRADE must not
+# certify that as cross_checked "on the speed dimension" — a ratio that is not a
+# real speedup (> 1) leaves the optimisation claim unproven and stays ungraded,
+# exactly like an equivalent-but-not-faster candidate.
+def optimization_accepted_but_slower(ratio=0.5):
+    return {"ok": True, "accepted": True, "reason": "accepted (min_speedup unvalidated)",
+            "speedup": {"ratio": ratio, "measurable": True,
+                        "per_size": [{"n": 1, "before_ms": 5, "after_ms": 10, "ratio": ratio}]},
+            "min_speedup": 0,
+            "verification": {"passed": True, "matched": 4, "total": 4},
+            "language": "python3"}
+
+
+g = grades.grade_verify_optimization(optimization_accepted_but_slower(0.5), "python3")
+check("F7: accepted-but-slower (ratio 0.5x) is NOT cross_checked",
+      g["grade"] != grades.CROSS_CHECKED, f"-> {g['grade']}")
+check("F7: ...it is ungraded — a slowdown never wears a speed grade",
+      g["grade"] == grades.UNGRADED, f"-> {g['grade']}")
+check("F7: the ungraded basis names the non-speedup ratio, not a fake speedup",
+      "0.5" in g["grade_basis"] and "cross-checked" not in g["grade_basis"],
+      f"-> {g['grade_basis']}")
+g_eq = grades.grade_verify_optimization(optimization_accepted_but_slower(1.0), "python3")
+check("F7: accepted at exactly 1.0x (no speedup) is also ungraded",
+      g_eq["grade"] == grades.UNGRADED, f"-> {g_eq['grade']}")
+
+
 # ═══ 3. derivation table: z3_check ═══════════════════════════════════════════
 
 g = grades.grade_z3_check(z3_unsat())
