@@ -14,6 +14,7 @@ no sandbox, no native executor, so it runs on the full OS matrix.
 
 from __future__ import annotations
 
+import re
 import tempfile
 from pathlib import Path
 
@@ -159,12 +160,18 @@ def test_diagnostic_tag_path_is_unchanged() -> None:
           strict_image({STRICT_IMAGE_ENV: MUTABLE}) == MUTABLE)
 
 
-def test_committed_lock_is_a_placeholder_so_the_repo_ships_fail_closed() -> None:
-    # The shipped state: no digest is pinned yet, so a caller reading the real
-    # committed lock (empty environment → default lock path) gets None and the
-    # execution path fails closed. The first `workflow_dispatch` replaces this.
-    check("the committed lock ships unpublished (execution path fails closed today)",
-          published_strict_image({}) is None)
+def test_committed_lock_resolves_to_none_or_a_wellformed_digest() -> None:
+    # The committed lock is either `unpublished` (fail-closed, before the first
+    # publish) OR a digest the publish-executor-image workflow pinned. Both are
+    # valid shipped states, so this asserts the ROBUST invariant that holds in
+    # either: reading the real committed lock (empty env → default path) yields
+    # None (unpublished) or a well-formed ghcr `@sha256:` digest — never a
+    # mutable tag or malformed value. (It ships published today: the image was
+    # dispatched to GHCR and the digest committed.)
+    resolved = published_strict_image({})
+    check("the committed lock resolves to None or a well-formed ghcr digest",
+          resolved is None
+          or bool(re.fullmatch(r"ghcr\.io/[^\s@]+@sha256:[0-9a-f]{64}", resolved)))
 
 
 if __name__ == "__main__":
@@ -179,7 +186,7 @@ if __name__ == "__main__":
     test_execution_config_never_falls_back_to_the_mutable_local_tag()
     test_gvisorconfig_accepts_a_ghcr_digest_and_rejects_a_ghcr_mutable_tag()
     test_diagnostic_tag_path_is_unchanged()
-    test_committed_lock_is_a_placeholder_so_the_repo_ships_fail_closed()
+    test_committed_lock_resolves_to_none_or_a_wellformed_digest()
     for failure in FAILS:
         print(f"FAIL {failure}")
     raise SystemExit(1 if FAILS else 0)
