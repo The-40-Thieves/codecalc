@@ -917,6 +917,31 @@ class _ByNameSpec:
     HASH_BY_NAME_FIELDS = ("env",)
 
 
+@dataclasses.dataclass(frozen=True)
+class _CompoundSecretSpec:
+    """The names a real codebase uses. None of them is the bare word."""
+
+    code: str
+    db_password: str
+    auth_token: str
+    client_secret: str
+    apiKey: str  # camelCase on purpose; the tokeniser must split it
+
+
+@dataclasses.dataclass(frozen=True)
+class _MappingSecretSpec:
+    code: str
+    metadata: dict
+
+
+@dataclasses.dataclass(frozen=True)
+class _DeclaredNotSecretSpec:
+    code: str
+    token_budget: int
+
+    NOT_SECRET_FIELDS = ("token_budget",)
+
+
 def test_spec_canonical_content_never_carries_secret_values() -> None:
     """The identity of a request must not become a place secrets are stored."""
     today = {f.name for f in dataclasses.fields(providers.ComputationSpec)}
@@ -942,6 +967,61 @@ def test_spec_canonical_content_never_carries_secret_values() -> None:
     check("changing a secret NAME does change the request identity",
           spec_identity.spec_hash(_ByNameSpec(code="x", env={"TOKEN": "a"}))
           != spec_identity.spec_hash(_ByNameSpec(code="x", env={"OTHER": "a"})))
+
+
+def test_secret_refusal_reads_compound_names_not_just_bare_words() -> None:
+    """`db_password` is not the word `password`, and a gate that only knows the
+    bare word protects nothing a real codebase would actually be named.
+
+    Found by cross-vendor review of the first version of this module, which
+    matched the field name EXACTLY against a twelve-word set: `db_password`,
+    `auth_token` and `client_secret` all hashed their values unrefused while the
+    docstring claimed the rule was "a gate rather than advice".
+    """
+    def refusal(instance: object) -> str:
+        try:
+            spec_identity.canonical_bytes(instance)
+        except spec_identity.UncanonicalizableValue as exc:
+            return str(exc)
+        return ""
+
+    # S106 noqa: these are fixture values for a test whose whole subject is
+    # credential-shaped field NAMES. Nothing here is a real credential.
+    compound = refusal(_CompoundSecretSpec(
+        code="x", db_password="hunter2", auth_token="abc123",  # noqa: S106
+        client_secret="shh", apiKey="k"))  # noqa: S106
+    check("a compound secret field name is refused", bool(compound))
+    check("the refusal names the field it stopped on", "db_password" in compound)
+
+    for field, value in (("db_password", "hunter2"), ("auth_token", "abc123"),
+                         ("client_secret", "shh"), ("apiKey", "k")):
+        one = dataclasses.make_dataclass(
+            "_One", [("code", str), (field, str)], frozen=True)
+        check(f"{field} alone is refused", bool(refusal(one("x", value))))
+
+    check("a mapping KEY that names a secret is refused too",
+          bool(refusal(_MappingSecretSpec(code="x",
+                                          metadata={"auth_token": "abc123"}))))
+    check("an innocent mapping key still hashes",
+          not refusal(_MappingSecretSpec(code="x", metadata={"run_label": "a"})))
+
+    # The cost of a token rule is false positives, so there is a reviewable way
+    # out that keeps the VALUE in the identity — distinct from HASH_BY_NAME_FIELDS,
+    # which silently drops it.
+    check("a field declared not-secret hashes its value normally",
+          json.loads(spec_identity.canonical_bytes(
+              _DeclaredNotSecretSpec(code="x", token_budget=7)))
+          ["spec"]["token_budget"] == 7)
+    undeclared = dataclasses.make_dataclass(
+        "_Undeclared", [("code", str), ("token_budget", int)], frozen=True)
+    check("...and without that declaration the same name is refused",
+          bool(refusal(undeclared("x", 7))))
+
+    check("an innocent field that merely CONTAINS a secret word is not refused",
+          not refusal(dataclasses.make_dataclass(
+              "_Author", [("code", str), ("author", str)], frozen=True)("x", "me")))
+    check("ComputationSpec's own field names still pass the tokeniser",
+          not refusal(providers.ComputationSpec(language="python3", code="x")))
 
 
 def test_published_spec_schema_cannot_drift_from_the_dataclass() -> None:
@@ -1060,6 +1140,7 @@ if __name__ == "__main__":
     test_spec_hash_is_stable_across_processes()
     test_spec_canonicalization_refuses_what_it_cannot_hash_stably()
     test_spec_canonical_content_never_carries_secret_values()
+    test_secret_refusal_reads_compound_names_not_just_bare_words()
     test_published_spec_schema_cannot_drift_from_the_dataclass()
     test_spec_golden_vectors_pin_the_canonical_encoding()
     sys.exit(1 if FAILS else 0)

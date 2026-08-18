@@ -448,11 +448,34 @@ Canonical bytes are hashed, logged beside receipts and compared across
 processes, so a secret in them is a secret in all three. `ComputationSpec`
 carries **no** credential-bearing field today — `language`, `code`, `stdin`,
 `timeout`, `workdir`, `max_memory_mb`, `max_output_kb`, `max_cpu`, `no_net` — and
-the encoder keeps it that way: a field whose name matches
-`spec_identity.SECRET_BEARING_FIELD_NAMES` is **refused**, unless the dataclass
-declares it in `HASH_BY_NAME_FIELDS`, in which case only its sorted **key names**
-enter the content and the values never do. Changing a credential's value then
-does not change the request's identity; adding or removing one does.
+the encoder keeps it that way.
+
+A field name is **tokenised** — split on separators and camelCase boundaries —
+and refused if any token is in `spec_identity.SECRET_BEARING_WORDS`. Tokenising
+rather than exact-matching is load-bearing: `db_password`, `auth_token` and
+`client_secret` are what a real codebase calls these things, and an exact-match
+rule that only knows `password` guards a name nobody uses. Substring matching was
+rejected for the opposite reason — it fires on `author`. The same words are
+applied to **mapping keys** one level deeper, since a field policy cannot see
+inside a `dict`.
+
+Two escape hatches, both declared on the dataclass:
+
+| Attribute | Effect | Use when |
+|---|---|---|
+| `HASH_BY_NAME_FIELDS` | Only the sorted **key names** enter the content | The field really does carry credentials |
+| `NOT_SECRET_FIELDS` | The value is hashed normally | The token rule caught an innocent name (`token_budget`, `cache_key`) |
+
+They are separate on purpose: reaching for the first to silence a false positive
+would silently drop a real value out of the request's identity.
+
+`key` is in the word set deliberately and is the aggressive entry — it catches
+`private_key` and `signing_key`, and also `sort_key`. A false positive costs one
+declared line; a false negative puts a private key inside a hash that gets
+logged.
+
+Changing a credential's value does not change the request's identity; adding or
+removing one does.
 
 ### Versioning policy for `COMPUTATION_SPEC_VERSION`
 

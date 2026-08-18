@@ -74,11 +74,33 @@ hashed, logged next to receipts, and compared across processes. Read at the time
 of writing, `ComputationSpec` carries NO credential-bearing field — its fields
 are `language`, `code`, `stdin`, `timeout`, `workdir`, `max_memory_mb`,
 `max_output_kb`, `max_cpu`, `no_net`. So there is nothing to strip today, and
-the job is to keep it that way: a field whose NAME is in
-`SECRET_BEARING_FIELD_NAMES` is refused outright, unless the dataclass
-explicitly declares it in `HASH_BY_NAME_FIELDS`, in which case only its sorted
-KEY NAMES enter the canonical content and the values never do. That is the
-ticket's "hash by reference/name", implemented as a gate rather than as advice.
+the job is to keep it that way.
+
+A field whose name TOKENISES to one of `SECRET_BEARING_WORDS` is refused
+outright — and tokenising is the whole point. The first version of this module
+compared the field name exactly against that set; cross-vendor review showed
+`db_password`, `auth_token` and `client_secret` all sailing through by value,
+because none of them is the bare word and all of them are what a real codebase
+calls the thing. Tokenising splits on separators and camelCase boundaries, so
+those three are caught while `author` is not.
+
+The same words are applied to MAPPING KEYS, one level deeper, because a field
+policy cannot see inside a `dict` and `{"auth_token": ...}` would otherwise hash
+by value with nothing to stop it.
+
+Two escape hatches, both class attributes, both a reviewable diff:
+
+  * `HASH_BY_NAME_FIELDS` — hash only the sorted KEY NAMES, never the values.
+    That is the ticket's "hash by reference/name".
+  * `NOT_SECRET_FIELDS` — the token rule caught an innocent name (`token_budget`,
+    `cache_key`); keep hashing the value. Separate from the first on purpose:
+    reaching for `HASH_BY_NAME_FIELDS` to silence a false positive would silently
+    drop a real value out of the identity.
+
+`key` is in the word set deliberately, and it is the aggressive entry: it catches
+`private_key` and `signing_key`, and it also catches `sort_key`. A false positive
+here is one declared line in `NOT_SECRET_FIELDS`; a false negative is a private
+key inside a hash that gets logged. The loud direction is the right one.
 
 STABLE ACROSS PROCESSES
 Nothing here reads `hash()` or iterates a `set`, so the encoding does not depend
@@ -93,6 +115,7 @@ import base64
 import enum
 import hashlib
 import json
+import re
 import types
 import typing
 from collections.abc import Mapping, Sequence
@@ -113,15 +136,42 @@ SPEC_HASH_ALGORITHM = "sha256"
 #: The reserved key that marks a base64 `bytes` value. See rule 6.
 BYTES_TAG = "__bytes_b64__"
 
-#: Field names that carry credentials in every codebase that has one. A spec
-#: field with one of these names is refused unless the dataclass opts it into
-#: name-only hashing. Matched case-insensitively on the exact field name, not as
-#: a substring: `code` must not be caught by `code`-adjacent heuristics, and a
-#: substring rule would fire on names like `token_budget` that hold no secret.
-SECRET_BEARING_FIELD_NAMES = frozenset({
+#: Words that carry credentials in every codebase that has one.
+#:
+#: Matched per NAME TOKEN, not against the whole name and not as a substring.
+#: The first version of this module compared the field name EXACTLY against this
+#: set, and cross-vendor review demonstrated in three lines what that protects:
+#:
+#:     db_password, auth_token, client_secret   ->  all hashed by VALUE, unrefused
+#:
+#: None of them is the bare word, and all of them are what a real codebase calls
+#: the thing. A gate that only knows `password` guards a name nobody uses.
+#:
+#: Substring matching was rejected for the opposite failure — it fires on
+#: `author` because `auth` is inside it. Tokenising splits on separators AND on
+#: camelCase boundaries, so `db_password`, `authToken` and `client_secret` are
+#: caught while `author` (one token, not in the set) is not.
+SECRET_BEARING_WORDS = frozenset({
     "api_key", "apikey", "auth", "authorization", "credential", "credentials",
-    "env", "environ", "environment", "password", "secret", "secrets", "token",
+    "env", "environ", "environment", "key", "password", "secret", "secrets",
+    "token",
 })
+
+#: Retained under its original name because the docs and tests refer to it, and
+#: because "the words that make a field name secret-bearing" is what it always
+#: meant. The rename to `SECRET_BEARING_WORDS` is the accurate one.
+SECRET_BEARING_FIELD_NAMES = SECRET_BEARING_WORDS
+
+#: Splits `db_password` and `authToken` alike: on any run of non-alphanumerics,
+#: and on a lower-to-upper case boundary.
+_NAME_TOKENS = re.compile(r"[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])")
+
+
+def secret_bearing(name: str) -> bool:
+    """True when `name` reads as credential-bearing under the token rule."""
+    tokens = {part.lower() for part in _NAME_TOKENS.split(name) if part}
+    tokens.add(name.lower())
+    return bool(tokens & SECRET_BEARING_WORDS)
 
 
 class UncanonicalizableValue(TypeError):
@@ -194,6 +244,17 @@ def _encode(value: object, path: str) -> object:
                 raise UncanonicalizableValue(
                     path, f"{BYTES_TAG!r} is reserved for the bytes encoding and "
                           "may not be used as a mapping key")
+            # A field-name policy cannot see inside an arbitrary mapping, so a
+            # `metadata: dict` holding {"auth_token": ...} would hash its value
+            # with nothing to stop it. Same rule, same words, one level deeper —
+            # which is what makes "secrets never enter an identity" true rather
+            # than true-of-fields.
+            if secret_bearing(key):
+                raise UncanonicalizableValue(
+                    f"{path}.{key}",
+                    "a mapping key that names a credential may not be hashed by "
+                    "value; carry the secret outside the spec, or reduce the "
+                    "mapping to its key names via HASH_BY_NAME_FIELDS")
             encoded[key] = _encode(item, f"{path}.{key}")
         return encoded
     if isinstance(value, Sequence):
@@ -203,7 +264,9 @@ def _encode(value: object, path: str) -> object:
 
 
 def _encode_dataclass(instance: object, path: str = "") -> dict[str, object]:
-    by_name = _hash_by_name_fields(type(instance))
+    spec_type = type(instance)
+    by_name = _hash_by_name_fields(spec_type)
+    not_secret = frozenset(getattr(spec_type, "NOT_SECRET_FIELDS", ()))
     encoded: dict[str, object] = {}
     for field in fields(instance):  # type: ignore[arg-type]
         value = getattr(instance, field.name)
@@ -211,11 +274,13 @@ def _encode_dataclass(instance: object, path: str = "") -> dict[str, object]:
         if field.name in by_name:
             encoded[field.name] = _encode_names_only(value, here)
             continue
-        if field.name.lower() in SECRET_BEARING_FIELD_NAMES:
+        if field.name not in not_secret and secret_bearing(field.name):
             raise UncanonicalizableValue(
-                here, "a secret-bearing field name may not be hashed by value; "
-                      "declare it in the dataclass's HASH_BY_NAME_FIELDS so only "
-                      "its key names enter the canonical content")
+                here, "a secret-bearing field name may not be hashed by value. "
+                      "Declare it in the dataclass's HASH_BY_NAME_FIELDS to hash "
+                      "only its key names, or — if the token rule caught an "
+                      "innocent name like `token_budget` — in NOT_SECRET_FIELDS "
+                      "to keep hashing the value")
         encoded[field.name] = _encode(value, here)
     return encoded
 
