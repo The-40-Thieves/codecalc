@@ -162,6 +162,41 @@ class GVisorConfig:
             raise ValueError("strict runtime name is invalid")
 
 
+#: Host-side task overhead of a gVisor sandbox (THE-849). Docker's
+#: `--pids-limit` bounds HOST-side tasks, and under runsc that cgroup also holds
+#: the sandbox process, the gofer, and the platform's own threads — none of
+#: which exist under runc. So a limit that is a fine GUEST budget under runc is
+#: below the floor the sandbox needs just to BOOT: a default-configured strict
+#: run (`process_limit=24`) could not even start, failing with
+#: "cannot create sandbox: cannot read client sync file … EOF". Measured on Cave
+#: under real runsc: the sandbox boot floor is ~30 host tasks and a trivial
+#: Python workload (a few interpreter threads) runs reliably from ~34; below
+#: that the guest is killed (exit_code -2) or `tini` cannot even exec the
+#: workload. This overhead is sized above the reliable floor so that the guest
+#: keeps its full nominal budget AND `process_limit=1` still boots
+#: (1 + 48 = 49 > ~34). It is added on top of the caller's GUEST process budget
+#: rather than reinterpreting it, so the guest semantic stays honest and errs
+#: GENEROUS: the guest is guaranteed at least `process_limit` tasks of its own,
+#: and in practice a little more — `process_limit + (48 - actual_overhead)`,
+#: since the real sandbox overhead (~30-35 measured) is below the 48 we reserve.
+#: That slack is bounded (the host `--pids-limit` is a hard ceiling; the fork
+#: bomb stays contained at the effective limit) and never leaves the guest with
+#: FEWER processes than it asked for.
+_GVISOR_HOST_OVERHEAD = 48
+
+
+def _effective_pids_limit(process_limit: int) -> int:
+    """Translate a GUEST process budget into Docker's HOST-side `--pids-limit`.
+
+    `process_limit` is the caller-facing budget for the workload's OWN processes.
+    Under gVisor the host cgroup must additionally hold the sandbox's own tasks
+    (`_GVISOR_HOST_OVERHEAD`), so the effective host limit is the sum. Because the
+    overhead alone already clears the measured boot floor, every `process_limit >=
+    1` produces a limit that boots — the overhead IS the floor.
+    """
+    return process_limit + _GVISOR_HOST_OVERHEAD
+
+
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 
 
@@ -230,7 +265,9 @@ class DockerGVisorRuntime:
             "--cap-drop=ALL",
             "--security-opt", "no-new-privileges:true",
             f"--user={self.config.user}",
-            f"--pids-limit={process_limit}",
+            # `process_limit` is the GUEST budget; the host `--pids-limit` must
+            # also cover the gVisor sandbox's own tasks or it cannot boot (THE-849).
+            f"--pids-limit={_effective_pids_limit(process_limit)}",
             f"--memory={memory_mb}m",
             f"--cpus={cpu_count:g}",
             "--tmpfs", f"{_TMP_DIRECTORY}:rw,noexec,nosuid,nodev,size={self.config.tmpfs_mb}m",

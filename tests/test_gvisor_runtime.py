@@ -6,9 +6,11 @@ import json
 import subprocess
 
 from codecalc.strict_runtime import (
+    _GVISOR_HOST_OVERHEAD,
     DockerGVisorRuntime,
     GVisorConfig,
     StrictRuntimeUnavailable,
+    _effective_pids_limit,
     check_prerequisites,
     host_prerequisites,
 )
@@ -102,7 +104,9 @@ def test_launch_is_shell_free_and_applies_every_outer_limit() -> None:
     check("launch uses a read-only root", "--read-only" in argv)
     check("launch drops every capability", "--cap-drop=ALL" in argv)
     check("launch forbids privilege gain", "no-new-privileges:true" in argv)
-    check("launch applies the PID limit", "--pids-limit=24" in argv)
+    # process_limit=24 is the GUEST budget; the host --pids-limit adds the gVisor
+    # sandbox overhead so the sandbox can boot at all (THE-849): 24 + 48 = 72.
+    check("launch applies the effective PID limit", "--pids-limit=72" in argv)
     check("launch applies the memory limit", "--memory=256m" in argv)
     check("launch applies the CPU limit", "--cpus=1.5" in argv)
     check("launch uses the pinned image", IMAGE in argv)
@@ -111,6 +115,41 @@ def test_launch_is_shell_free_and_applies_every_outer_limit() -> None:
     check("result carries gvisor-v1 receipt", result["strict_receipt"]["isolation_profile"] == "gvisor-v1")
     check("container is removed after collection",
           calls[-1][0][1:] == ["rm", "--force", "--volumes", "codecalc-0123456789abcdef"])
+
+
+def test_effective_pids_limit_adds_sandbox_overhead_and_floors_the_smallest_budget() -> None:
+    # The measured gVisor sandbox boot floor on Cave is ~30 host tasks and a
+    # trivial workload runs from ~34 (THE-849). The overhead must clear that even
+    # for the smallest possible guest budget, so process_limit=1 still boots.
+    check("overhead clears the measured boot floor", _GVISOR_HOST_OVERHEAD >= 34)
+    check("guest budget is preserved additively", _effective_pids_limit(24) == 24 + _GVISOR_HOST_OVERHEAD)
+    check("smallest budget still clears the boot floor",
+          _effective_pids_limit(1) >= _GVISOR_HOST_OVERHEAD and _effective_pids_limit(1) >= 34)
+
+    calls: list[list[str]] = []
+
+    def runner(argv, **_kwargs):
+        calls.append(argv)
+        if argv[1] == "info":
+            return completed(argv, json.dumps({
+                "Runtimes": {"runsc": {}}, "CgroupVersion": "2",
+                "Architecture": "x86_64", "ServerVersion": "28.3.3",
+            }))
+        if argv[1] == "inspect":
+            return completed(argv, json.dumps({
+                "io.codecalc.owner": "codecalc-strict",
+                "io.codecalc.run-id": "0123456789abcdef",
+            }))
+        return completed(argv, '{"ok":true,"verdict":"OK"}')
+
+    runtime = DockerGVisorRuntime(GVisorConfig(image=IMAGE), runner=runner)
+    runtime.execute(
+        "0123456789abcdef", language="python3", source="print(42)", timeout=7,
+        process_limit=1,
+    )
+    argv = next(call for call in calls if call[1] == "run")
+    check("floor applies the overhead for process_limit=1",
+          f"--pids-limit={1 + _GVISOR_HOST_OVERHEAD}" in argv)
 
 
 def test_run_id_cannot_become_a_docker_option_or_foreign_container_name() -> None:
@@ -350,6 +389,7 @@ if __name__ == "__main__":
     test_probe_requires_registered_runsc_and_cgroup_v2()
     test_probe_reports_versioned_gvisor_attestation()
     test_launch_is_shell_free_and_applies_every_outer_limit()
+    test_effective_pids_limit_adds_sandbox_overhead_and_floors_the_smallest_budget()
     test_run_id_cannot_become_a_docker_option_or_foreign_container_name()
     test_cancel_refuses_container_without_matching_ownership_labels()
     test_cleanup_never_removes_a_foreign_container_even_after_a_failed_run()
