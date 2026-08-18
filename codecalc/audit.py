@@ -24,6 +24,15 @@ An audit write must not be able to fail a run. Every append is wrapped: a full
 disk or an unwritable directory drops the event (and says so on stderr once) but
 the execution it describes still returns its result. The trail is provenance,
 not a transaction log the product depends on.
+
+CREATE-ON-WRITE, NOT ON CONSTRUCTION (THE-848)
+`AuditLog.__init__` does not touch the filesystem. The directory is created
+lazily, on the first `emit()` that actually has a line to write. Before this,
+`__init__` did the `mkdir`, which meant merely *constructing* an `AuditLog` —
+including the one `codecalc.server` builds at import time via `from_env()` —
+created `~/.codecalc/audit/` as a side effect of import. An import must be
+free of that: a CI runner or a test that only imports `codecalc.server`
+should not leave a directory behind in the real home.
 """
 
 from __future__ import annotations
@@ -66,11 +75,6 @@ class AuditLog:
         # substring is redacted whole rather than partially.
         self._secrets = tuple(sorted({s for s in secrets if s}, key=len, reverse=True))
         self._warned = False
-        if self.path is not None:
-            try:
-                self.path.parent.mkdir(parents=True, exist_ok=True)
-            except OSError:
-                self._warn()
 
     def _warn(self) -> None:
         if not self._warned:
@@ -105,6 +109,9 @@ class AuditLog:
         if self.path is not None:
             line = self._redact(json.dumps(event, sort_keys=True))
             try:
+                # Created here, on first use, not in __init__ — see the module
+                # docstring's CREATE-ON-WRITE note (THE-848).
+                self.path.parent.mkdir(parents=True, exist_ok=True)
                 with self.path.open("a", encoding="utf-8") as handle:
                     handle.write(line + "\n")
             except OSError:

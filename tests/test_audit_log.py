@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import subprocess
 import sys
 import tempfile
 
@@ -135,13 +136,55 @@ check("CODECALC_AUDIT_LOG=<path> honours it",
           {"CODECALC_AUDIT_LOG": str(_tmp / "x.log")}).path) == str(_tmp / "x.log"))
 
 
+# ── importing codecalc.server must be free of filesystem side effects ──────
+# THE-848: `AuditLog.__init__` used to `mkdir` the audit directory, so just
+# IMPORTING codecalc.server (which builds the process audit log at module
+# scope via `from_env()`) created `~/.codecalc/audit/` on every CI runner and
+# every test that imports it. Run the import in a subprocess with a fake HOME
+# and no CODECALC_AUDIT_LOG override, so it takes the real default path
+# resolution — and assert the directory stays absent until something emits.
+_fake_home = pathlib.Path(tempfile.mkdtemp(prefix="codecalc-audit-fakehome-"))
+_import_env = dict(os.environ)
+_import_env["HOME"] = str(_fake_home)
+_import_env["USERPROFILE"] = str(_fake_home)  # Windows: expanduser()/Path.home() read this
+_import_env.pop("CODECALC_AUDIT_LOG", None)  # exercise the real default, not this file's override
+_import_env.pop("CODECALC_RUN_STATE_DIR", None)
+_import_proc = subprocess.run(
+    [sys.executable, "-c",
+     "from codecalc import server; print('IMPORTED', server._audit_log.path)"],
+    cwd=REPO_ROOT, env=_import_env, capture_output=True, text=True, timeout=180)
+_fake_audit_dir = _fake_home / ".codecalc" / "audit"
+check("importing codecalc.server succeeds",
+      _import_proc.returncode == 0,
+      f"-> stdout={_import_proc.stdout!r} stderr={_import_proc.stderr!r}")
+check("importing codecalc.server does NOT create ~/.codecalc/audit/",
+      not _fake_audit_dir.exists(),
+      f"-> {_fake_audit_dir} exists={_fake_audit_dir.exists()}")
+
+# The directory IS created on the first actual emit (create-on-write), proven
+# in the SAME fake home so this is the positive half of the assertion above.
+_emit_proc = subprocess.run(
+    [sys.executable, "-c",
+     ("from codecalc import audit as audit_module\n"
+      "log = audit_module.from_env()\n"
+      "log.emit(audit_module.CLEANUP, reason='probe')\n")],
+    cwd=REPO_ROOT, env=_import_env, capture_output=True, text=True, timeout=180)
+check("a first emit() succeeds",
+      _emit_proc.returncode == 0,
+      f"-> stdout={_emit_proc.stdout!r} stderr={_emit_proc.stderr!r}")
+check("a first emit() creates the audit directory and writes the line",
+      (_fake_audit_dir / "audit.log").exists(),
+      f"-> {_fake_audit_dir / 'audit.log'}")
+
+
 # ── the server ARMS redaction with the provider-auth secret values ─────────
 # THE-787 fix round, IMPORTANT: from_env() was called with no secrets=, so the
 # redaction pass existed but was never armed against the real credentials. The
 # server now feeds the CODECALC_*_AUTHORIZATION / _HTTP_TOKEN values in.
-# Isolate the server's run-state dir before importing it (keeps this test off the
-# shared ~/.codecalc/runs).
+# Isolate the server's run-state dir AND audit log before importing it (keeps
+# this test off the shared ~/.codecalc/runs and ~/.codecalc/audit — THE-848).
 os.environ["CODECALC_RUN_STATE_DIR"] = str(_tmp / "runs")
+os.environ["CODECALC_AUDIT_LOG"] = str(_tmp / "server-import.log")
 from codecalc import providers, server
 
 _CRED = "sk-strict-XYZ789redactme"  # gitleaks:allow -- fake fixture for the redaction test
