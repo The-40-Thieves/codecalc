@@ -263,13 +263,26 @@ def decide(spec: object, descriptor: Mapping,
 
 
 def enforced_spec(spec, decision: BrokerDecision):
-    """Return the spec to actually RUN, with a denied network forced to no_net.
+    """Return the spec to actually RUN, forcing no_net ONLY where the provider can
+    enforce the network denial.
+
+    A denied `network` is forced to `no_net=True` only when the selected provider
+    declared `network_control` (it is in `decision.provider_supported`). Forcing
+    `no_net` onto a provider that CANNOT enforce it is dishonest — and against a
+    provider that RAISES on an unenforceable `no_net` (e.g. Piston) it converts a
+    disclosable leak into a hard `validation` error (THE-847). So under a
+    NON-strict policy an unenforceable denial leaves the request AS-ASKED and the
+    leak is disclosed through `decision.effective` (network stays effective, the
+    contract's "disclosed as still effective where it cannot"); under a STRICT
+    policy this branch is never reached — `broker()` has already rejected the job
+    before any side effect, so strict still fails closed.
 
     A rejected decision never reaches here (the caller returns the error first).
-    When nothing network-related is denied the spec is returned unchanged, so the
-    common case allocates no new object.
+    When no enforceable network denial applies the spec is returned unchanged, so
+    the common case allocates no new object.
     """
-    if NETWORK in decision.denied and not getattr(spec, "no_net", False):
+    if (NETWORK in decision.denied and NETWORK in decision.provider_supported
+            and not getattr(spec, "no_net", False)):
         return dataclasses.replace(spec, no_net=True)
     return spec
 

@@ -133,6 +133,21 @@ compatible addition bumps MINOR, it does not leave the version unchanged. A
 
 ### Fixed
 
+- **Non-strict `deny-network` hard-errored on a provider that cannot enforce it**
+  (THE-847). The broker forced `no_net` onto the run whenever `network` was
+  denied, regardless of whether the selected provider could enforce it. A
+  provider that RAISES on an unenforceable `no_net` — the Piston adapter, whose
+  network toggle is a server setting, not a per-request control — then returned a
+  `validation` error, so a network-requesting job routed to it hard-errored
+  instead of running-with-disclosure, contradicting the contract's "disclosed as
+  effective where it cannot enforce." `capabilities.enforced_spec` now forces
+  `no_net` only where the provider declared `network_control`; under a non-strict
+  policy an unenforceable denial leaves the request as-asked and discloses the
+  leak (`network` stays in the receipt's `effective` set). STRICT policy is
+  unchanged — an unenforceable denial is still rejected before any side effect —
+  and the native Linux shim path still enforces and blocks egress. No result
+  shape or `contract_version` change: the disclosure already lived in the
+  `effective` set.
 - **The spill path wrote and deleted outside the session workspace.** The three
   spill helpers resolved the `.codecalc-spill` directory without the `_jail`
   guard every other session path uses. `mkdir(exist_ok=True)` does not follow a
