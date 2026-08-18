@@ -167,6 +167,7 @@ check("the no-argument entry point is still the MCP server",
 # gaps unconditional). Asserting on a one-shot run would pass on Linux with the
 # Rust backend, where `unenforced` is legitimately [] and the whole risk is
 # invisible.
+from codecalc import executor as _exec117
 from codecalc import server as _srv117
 from codecalc import sessions as _sess117
 
@@ -197,10 +198,37 @@ else:
         _sess117.stop(_sid117)
 
 # An EMPTY disclosure is omitted — saying nothing costs tokens for nothing.
-_clean117 = _srv117.execute_code("python3", "print(6*7)", compact=True)
+#
+# Called through compact_result directly, the way the output_error pair below
+# already is. Driving it through execute_code made the assertion depend on which
+# BACKEND happened to be built: only the native executor enforces everything, so
+# only there is `unenforced` empty and only there was this branch reachable at
+# all. On a fallback host the Python backend truthfully discloses
+# `peak_memory_kb`, compaction correctly RETAINS that disclosure, and this check
+# failed — reporting a defect where the product was right, and reporting nothing
+# at all about the rule it was named after. The rule belongs to compact_result,
+# so compact_result is what gets called.
 check("an empty `unenforced` is omitted from a compact result",
-      "unenforced" not in _clean117 and _clean117.get("stdout", "").strip() == "42",
-      f"-> keys={sorted(_clean117)}")
+      "unenforced" not in _srv117.compact_result(
+          {"ok": True, "verdict": "OK", "stdout": "42", "exit_code": 0,
+           "unenforced": []}))
+check("  ...and an empty one takes no `unenforced_detail` with it",
+      "unenforced_detail" not in _srv117.compact_result(
+          {"ok": True, "verdict": "OK", "stdout": "42", "exit_code": 0,
+           "unenforced": []}))
+
+# End-to-end on WHICHEVER backend is present: the disclosure is there exactly
+# when there was something to disclose. That equivalence is true on both, so a
+# fallback host gets a real assertion here rather than a skip or a false red.
+_clean117 = _srv117.execute_code("python3", "print(6*7)", compact=True)
+_fullclean117 = _srv117.execute_code("python3", "print(6*7)")
+check("  ...and end-to-end, `unenforced` appears exactly when non-empty",
+      ("unenforced" in _clean117) == bool(_fullclean117.get("unenforced")),
+      f"-> backend={_exec117.backend()} compact_keys={sorted(_clean117)} "
+      f"full_unenforced={_fullclean117.get('unenforced')}")
+check("  ...with the program's own output intact",
+      _clean117.get("stdout", "").strip() == "42",
+      f"-> {_clean117.get('stdout', '')!r}")
 
 # output_error is the other disclosure field and takes the same path.
 check("compact_result keeps a non-empty output_error",
