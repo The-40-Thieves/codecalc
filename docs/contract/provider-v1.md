@@ -216,7 +216,9 @@ The executor image is built by `docker/executor.Dockerfile` (multi-stage,
 minimal, non-root, tini as an init so `codecalc-exec` is never PID 1) and
 carries `codecalc-exec` plus its `blocknet.so` shim and a python3 runtime.
 `scripts/build_executor_image.sh` builds it locally; `scripts/gvisor_conformance.sh`
-builds it and runs the hostile-workload conformance.
+builds it and runs the hostile-workload conformance. For the PRODUCTION execution
+path the image is published to GHCR and pinned by digest — see the image-residual
+note below.
 
 What is PROVEN, on a runsc-capable host (measured on Cave, Docker 29.7.2 + runsc,
 ARM64), by `tests/test_gvisor_conformance.py`:
@@ -239,12 +241,33 @@ containers by their immutable run-identity label; it is invoked by the remote
 strict execution service (which lives out of this repo) at that service's
 startup, not by codecalc itself.
 
+### Published, digest-pinned image (THE-828 image residual — CLOSED, operator-gated)
+
+A **registry-published, multi-architecture, DIGEST-PINNED image** is now produced
+by the `publish-executor-image` workflow. One operator `workflow_dispatch`:
+
+1. builds `docker/executor.Dockerfile` for `linux/amd64` AND `linux/arm64`
+   (buildx + QEMU) and pushes it to `ghcr.io/the-40-thieves/codecalc-exec`
+   (lowercase org, GHCR), authenticated with the built-in `GITHUB_TOKEN` and
+   `packages: write` — no external secret; and
+2. commits the immutable index digest into `docker/executor-image.lock` as
+   `ghcr.io/the-40-thieves/codecalc-exec@sha256:<digest>`, pushed back to the branch.
+
+`published_strict_image()` reads that lock as the production default;
+`strict_execution_config()` builds the `GVisorConfig` from it. When the lock holds
+no digest yet (placeholder/absent — the shipped state until the first dispatch),
+the execution path **fails closed** with `StrictImageUnavailable` ("no published
+strict image; run the publish-executor-image workflow"), never falling back to the
+mutable local tag. `GVisorConfig` still refuses a mutable reference outright.
+`strict_image()` keeps the local `codecalc-exec:strict` tag for DIAGNOSTICS
+(`doctor`, `check_prerequisites`, the startup canary), which do not require a digest.
+
+What still requires the operator: the **first `workflow_dispatch`** — the real
+multi-arch push and the first committed digest happen only then (there is no
+push/PR trigger), and until it runs the production execution path is fail-closed.
+
 RESIDUALS, stated plainly:
 
-- A **registry-published, multi-architecture, DIGEST-PINNED image** is a release
-  step needing registry credentials and is NOT produced here. `GVisorConfig`
-  still requires a digest-pinned reference for the production execution path; the
-  local build proves the boundary until that image exists.
 - **GitHub CI cannot exercise this**: hosted runners have no `runsc`, so the
   conformance suite SKIPS there (green, with a printed reason). It is proven on
   Cave / a runsc host, not on GitHub runners.

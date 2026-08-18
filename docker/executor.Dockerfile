@@ -16,11 +16,12 @@
 # BUILD (from the repo root, on a runsc-capable host — see scripts/build_executor_image.sh):
 #   docker build -f docker/executor.Dockerfile -t codecalc-exec:strict .
 #
-# RESIDUAL, stated plainly: a registry-published, multi-architecture,
-# DIGEST-PINNED image is a release step (it needs registry credentials) and is
-# NOT produced here. `GVisorConfig` still requires a digest-pinned reference for
-# the production execution path; this local build is what proves the boundary on
-# a runsc host until that release image exists.
+# This Dockerfile is ALSO what the `publish-executor-image` workflow builds — for
+# `linux/amd64` + `linux/arm64`, pushed to `ghcr.io/the-40-thieves/codecalc-exec`
+# and digest-pinned into `docker/executor-image.lock` — to produce the registry
+# image the PRODUCTION execution path requires (`GVisorConfig` refuses a mutable
+# tag). This local `codecalc-exec:strict` tag is the DIAGNOSTIC artifact (doctor,
+# the conformance suite); it is not the execution-path image.
 
 # ── builder: compile codecalc-exec + blocknet.so from source ────────────────
 FROM rust:1-slim-bookworm AS builder

@@ -10,6 +10,7 @@ import subprocess
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 ISOLATION_PROFILE = "gvisor-v1"
@@ -49,15 +50,101 @@ RUN_ID_LABEL = "io.codecalc.run-id"
 STRICT_IMAGE_ENV = "CODECALC_STRICT_IMAGE"
 DEFAULT_STRICT_IMAGE = "codecalc-exec:strict"
 
+#: The committed digest lock for the PUBLISHED strict executor image (THE-828).
+#: `.github/workflows/publish-executor-image.yml` builds the multi-arch image,
+#: pushes it to `ghcr.io/the-40-thieves/codecalc-exec`, and rewrites this file
+#: with the immutable `@sha256:` digest it got back. Until that first dispatch
+#: the file holds only a placeholder, and the production EXECUTION path fails
+#: closed (see `strict_execution_config`) rather than pinning the mutable local
+#: diagnostic tag. Resolved at the repo root so the strict service — which runs
+#: from a checkout on a runsc host, not from the installed wheel — finds it;
+#: `CODECALC_STRICT_IMAGE_LOCK` overrides the path (used by the tests).
+STRICT_IMAGE_LOCK_ENV = "CODECALC_STRICT_IMAGE_LOCK"
+DEFAULT_IMAGE_LOCK = Path(__file__).resolve().parent.parent / "docker" / "executor-image.lock"
+
 
 def strict_image(environment: Mapping[str, str] | None = None) -> str:
-    """The executor image reference for host diagnostics, from the environment."""
+    """The executor image reference for host DIAGNOSTICS, from the environment.
+
+    This is the mutable-tag path — `doctor`, `check_prerequisites`, the startup
+    canary — which names the artifact for a presence probe and does NOT require a
+    digest. The production execution path is `strict_execution_config`, which is
+    digest-required and fails closed; the two are deliberately separate.
+    """
     env = os.environ if environment is None else environment
     return (env.get(STRICT_IMAGE_ENV) or "").strip() or DEFAULT_STRICT_IMAGE
 
 
+def _image_lock_path(environment: Mapping[str, str] | None) -> Path:
+    env = os.environ if environment is None else environment
+    override = (env.get(STRICT_IMAGE_LOCK_ENV) or "").strip()
+    return Path(override) if override else DEFAULT_IMAGE_LOCK
+
+
+def published_strict_image(environment: Mapping[str, str] | None = None) -> str | None:
+    """The digest-pinned executor image for the PRODUCTION execution path, or None.
+
+    Resolution, in order:
+      1. the committed digest lock (`docker/executor-image.lock`) — the real,
+         immutable digest the publish-executor-image workflow wrote after pushing
+         the multi-arch image to GHCR; the first `@sha256:`-pinned line wins, so
+         the file's comments and placeholder are ignored;
+      2. `CODECALC_STRICT_IMAGE`, but ONLY when it is itself digest-pinned;
+      3. None — nothing is pinned yet.
+
+    None is the fail-closed signal: `strict_execution_config` turns it into a
+    refusal rather than a fall back to the mutable local diagnostic tag. A
+    mutable value in either source is NOT used here (it would fail `GVisorConfig`
+    anyway); `strict_image()` keeps the mutable tag for diagnostics, which never
+    require a digest.
+    """
+    try:
+        text = _image_lock_path(environment).read_text(encoding="utf-8")
+    except OSError:
+        text = ""
+    for line in text.splitlines():
+        candidate = line.strip()
+        if _DIGEST_IMAGE.fullmatch(candidate):
+            return candidate
+    env = os.environ if environment is None else environment
+    override = (env.get(STRICT_IMAGE_ENV) or "").strip()
+    return override if _DIGEST_IMAGE.fullmatch(override) else None
+
+
 class StrictRuntimeUnavailable(RuntimeError):
     """The host cannot prove the configured strict runtime boundary."""
+
+
+class StrictImageUnavailable(StrictRuntimeUnavailable):
+    """No published, digest-pinned strict image is available yet (THE-828).
+
+    Raised on the execution path when neither the committed digest lock nor a
+    digest-pinned `CODECALC_STRICT_IMAGE` names one — the fail-closed refusal
+    that keeps the mutable local diagnostic tag off the production path.
+    """
+
+
+def strict_execution_config(
+    environment: Mapping[str, str] | None = None, **overrides: Any
+) -> GVisorConfig:
+    """The `GVisorConfig` for the PRODUCTION execution path, or FAIL CLOSED.
+
+    The execution path is digest-required: it pins the published digest when the
+    lock file (or a digest-pinned `CODECALC_STRICT_IMAGE`) provides one, and
+    refuses — it NEVER falls back to the mutable local diagnostic tag — when none
+    is published yet. Diagnostics stay on `strict_image()` / `check_prerequisites`,
+    which do not require a digest, so `doctor` and the conformance suite keep
+    working against a locally built image exactly as before.
+    """
+    image = published_strict_image(environment)
+    if image is None:
+        raise StrictImageUnavailable(
+            "no published strict image; run the publish-executor-image workflow "
+            "to build, push, and digest-pin the multi-arch executor image to "
+            "ghcr.io/the-40-thieves/codecalc-exec (the local tag is a diagnostic "
+            "only, never the execution path)"
+        )
+    return GVisorConfig(image=image, **overrides)
 
 
 @dataclass(frozen=True)

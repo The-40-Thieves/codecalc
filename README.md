@@ -509,9 +509,17 @@ All optional. codecalc runs with none of these set.
 
 The strict service runs on Linux x86_64 or ARM64 with Docker Engine, cgroup v2,
 and an explicitly registered gVisor `runsc` runtime. Its executor image must be
-pinned by `@sha256:` digest. The default `systrap` platform works without KVM,
-so the same authenticated service can be used from Linux, macOS, and Windows;
-strict clients never fall back to native local execution.
+pinned by `@sha256:` digest on the execution path. That image is published to
+GHCR (`ghcr.io/the-40-thieves/codecalc-exec`, multi-arch amd64+arm64) by the
+`publish-executor-image` workflow, which an operator dispatches
+(`workflow_dispatch`); the workflow commits the immutable digest into
+`docker/executor-image.lock`, and `published_strict_image()` resolves it as the
+production default. Until that first dispatch no digest is pinned and the
+execution path **fails closed** — it never falls back to the mutable local
+diagnostic tag (`codecalc-exec:strict`), which `doctor` and the conformance
+suite keep using. The default `systrap` platform works without KVM, so the same
+authenticated service can be used from Linux, macOS, and Windows; strict clients
+never fall back to native local execution.
 
 Both backends resolve `CODECALC_RUNTIME_PATH` identically, and
 `scripts/check_parity.py` fails CI if the Rust and Python copies of that
@@ -570,7 +578,7 @@ PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py         # every tool over MC
 PYTHONPATH=. .venv/bin/python tests/test_executor_sweep.py  # sandbox regressions
 ```
 
-37 test files and 11 CI-invoked scripts, **2045 assertions**. "CI-invoked"
+38 test files and 11 CI-invoked scripts, **2045 assertions**. "CI-invoked"
 means referenced by path (`scripts/<name>.py`) from a job in
 `.github/workflows/*.yml` — `scripts/check_claims.py` derives the count that
 way and gates it, so a script wired into a workflow without this sentence
