@@ -218,21 +218,36 @@ print(t(lambda: open({_ws_mac!r}+"/in.txt","w").write("ok")),
         _sm.build_profile(read_write=[_ws_mac], read_only=_RO_mac), encoding="utf-8")
 
     try:
-        _free_mac = _sp.run([_sys.executable, "-c", _probe_mac], capture_output=True,
-                             text=True, timeout=60).stdout.split()
-        _held_mac = _sp.run(_sm.command_prefix(str(_profile_path_mac)) +
-                             [_sys.executable, "-c", _probe_mac],
-                             capture_output=True, text=True, timeout=60).stdout.split()
+        _cp_free_mac = _sp.run([_sys.executable, "-c", _probe_mac], capture_output=True,
+                                text=True, timeout=60)
+        _cp_held_mac = _sp.run(_sm.command_prefix(str(_profile_path_mac)) +
+                                [_sys.executable, "-c", _probe_mac],
+                                capture_output=True, text=True, timeout=60)
+        _free_mac = _cp_free_mac.stdout.split()
+        _held_mac = _cp_held_mac.stdout.split()
+        # fix-round-1: empty output (rc != 0, nothing on stdout) means the
+        # CHILD never ran or never got far enough to print — either the
+        # profile was rejected as malformed, or a rule that should have
+        # matched (e.g. the workspace) didn't. That is a DIFFERENT failure
+        # from "confinement is too strong in the intended way" (which prints
+        # PermissionError, not nothing), so the detail carries rc + stderr
+        # from BOTH runs — the exact signal fix-round-1 had to ask for by
+        # hand from a live CI run, now attached to the assertion itself.
+        _diag = (f"rc={_cp_held_mac.returncode} "
+                 f"stderr={_cp_held_mac.stderr.strip()!r} "
+                 f"free_rc={_cp_free_mac.returncode} "
+                 f"free_stderr={_cp_free_mac.stderr.strip()!r} "
+                 f"profile={_profile_path_mac}")
         # The control matters: if the unconfined run cannot write either, the
         # confined result proves nothing about sandbox-exec.
         check("control: unconfined, all three succeed (macOS)",
-              _free_mac == ["ALLOWED", "ALLOWED", "ALLOWED"], f"-> {_free_mac}")
+              _free_mac == ["ALLOWED", "ALLOWED", "ALLOWED"], f"-> {_free_mac} {_diag}")
         check("confined (sandbox-exec): the workspace stays writable",
-              len(_held_mac) == 3 and _held_mac[0] == "ALLOWED", f"-> {_held_mac}")
+              len(_held_mac) == 3 and _held_mac[0] == "ALLOWED", f"-> {_held_mac} {_diag}")
         check("confined (sandbox-exec): a write OUTSIDE the workspace is refused",
-              len(_held_mac) == 3 and _held_mac[1] == "PermissionError", f"-> {_held_mac}")
+              len(_held_mac) == 3 and _held_mac[1] == "PermissionError", f"-> {_held_mac} {_diag}")
         check("confined (sandbox-exec): a same-UID canary outside it is unreadable",
-              len(_held_mac) == 3 and _held_mac[2] == "PermissionError", f"-> {_held_mac}")
+              len(_held_mac) == 3 and _held_mac[2] == "PermissionError", f"-> {_held_mac} {_diag}")
     finally:
         _canary_mac.unlink(missing_ok=True)
         _canary_mac_dir.rmdir()

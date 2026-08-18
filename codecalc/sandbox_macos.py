@@ -33,9 +33,15 @@ process needs just to START, which breaks the child before it prints
 anything, in a way this repo cannot reproduce (development happens on Linux;
 this module's confinement is only PROVEN by macOS CI, per the module's own
 test) — is managed by leaving every non-filesystem operation class
-(process-fork, process-exec, signal, sysctl-read, mach-lookup, iokit-open,
-POSIX IPC) UNQUALIFIED rather than narrowed to specific service names this
-repo cannot verify from a Linux box. Filesystem is the one class actually
+(process-fork, process-exec*, signal, sysctl-read, mach-lookup, iokit-open)
+UNQUALIFIED rather than narrowed to specific service names this repo cannot
+verify from a Linux box. `build_profile()`'s own comment on that block
+explains fix-round-1's choice to trim this list to keywords with HIGH
+confidence of both validity and necessity — an invalid Seatbelt keyword fails
+the WHOLE profile closed, the identical symptom (silent, total, including on
+the positive control) that the path-canonicalization bug below produced, so
+an uncertain grant this repo cannot verify is worth less than the profile
+staying parseable. Filesystem is the one class actually
 scoped, because it is the one class the test can and does measure without
 macOS: reads via an allowlist, writes via `read_write` alone. This mirrors
 OpenAI Codex CLI's Seatbelt sandbox for the identical job (confining a
@@ -57,6 +63,7 @@ everything a reader might assume".
 
 from __future__ import annotations
 
+import os
 import shutil
 import sys
 
@@ -102,6 +109,31 @@ def _quote(path: str) -> str:
     return path.replace("\\", "\\\\").replace('"', '\\"')
 
 
+def _canon(path: str) -> str:
+    """Resolve symlinks BEFORE a path reaches a `(subpath ...)` rule.
+
+    THE-819 fix-round-1: Seatbelt matches a process's paths in their
+    kernel-RESOLVED (symlink-free) form, regardless of what string the
+    process itself used to open() them. macOS's own temp directory is the
+    textbook case that broke this: `tempfile.mkdtemp()` returns something
+    under `/var/folders/...`, but `/var` is itself a symlink to
+    `/private/var` — so a rule written as `(subpath "/var/folders/...")`
+    never matches the `/private/var/folders/...` form the kernel actually
+    presents to Seatbelt. Measured on macOS CI: every workspace rule silently
+    missed, the confined child couldn't even write its OWN workspace, and the
+    probe produced no output at all — not "confinement too strong", the
+    profile simply never matched anything real.
+
+    `/tmp` -> `/private/tmp` and `/etc` -> `/private/etc` are the same trap.
+    `os.path.realpath()` handles all three (and every path that is already
+    canonical is returned unchanged, so this is safe to apply universally
+    rather than special-casing which inputs need it). It resolves symlinks in
+    whatever PREFIX of the path currently exists and leaves the rest
+    literal — exactly what a not-yet-created cache subdirectory needs.
+    """
+    return os.path.realpath(path)
+
+
 def build_profile(read_write: list[str], read_only: list[str]) -> str:
     """A `(deny default)` Seatbelt profile: writes confined to `read_write`,
     reads confined to `read_write | read_only`, everything else on the
@@ -111,10 +143,12 @@ def build_profile(read_write: list[str], read_only: list[str]) -> str:
 
     Nonexistent paths are included anyway — `subpath` matching a path that is
     not there yet is inert, not an error, so a cache directory created lazily
-    by the installer is still covered.
+    by the installer is still covered. Every path is passed through
+    `_canon()` first — see its docstring for why an unresolved path silently
+    matches nothing.
     """
-    rw = " ".join(f'(subpath "{_quote(p)}")' for p in read_write)
-    ro = " ".join(f'(subpath "{_quote(p)}")' for p in read_only)
+    rw = " ".join(f'(subpath "{_quote(_canon(p))}")' for p in read_write)
+    ro = " ".join(f'(subpath "{_quote(_canon(p))}")' for p in read_only)
     lines = [
         "(version 1)",
         "(deny default)",
@@ -125,14 +159,26 @@ def build_profile(read_write: list[str], read_only: list[str]) -> str:
         "; what it may run, look up or introspect. See the module docstring for",
         "; why these stay unqualified rather than a service-name allowlist this",
         "; repo cannot verify without a macOS host.",
+        "; ",
+        "; fix-round-1: trimmed to the operations this repo has HIGH confidence",
+        "; are both valid Seatbelt keywords and load-bearing for a forked/exec'd",
+        "; interpreter to start at all (process creation, dyld/libSystem's mach",
+        "; lookups, sysctl-based runtime probing, IOKit hardware queries some",
+        "; frameworks make even headless). `process-exec*` (wildcard, not the",
+        "; bare `process-exec`) so the interpreter-arguments sub-operation a",
+        "; shebang re-exec triggers is covered too. Two narrower, lower-value",
+        "; grants (mach-priv-host-port, ipc-posix-shm) were dropped rather than",
+        "; kept on uncertain footing — an invalid keyword fails the WHOLE",
+        "; profile closed, same symptom (empty output, even on the positive",
+        "; control) as the path-canonicalization bug this round actually fixed,",
+        "; so unverifiable-from-here grants are cut unless something is known",
+        "; to need them.",
         "(allow process-fork)",
-        "(allow process-exec)",
+        "(allow process-exec*)",
         "(allow signal (target self))",
         "(allow sysctl-read)",
         "(allow mach-lookup)",
-        "(allow mach-priv-host-port)",
         "(allow iokit-open)",
-        "(allow ipc-posix-shm)",
         "",
         "; Metadata (stat/access/xattr-read) unrestricted everywhere — matching",
         "; landlock.py's identical, documented gap on Linux, not a wider hole:",
