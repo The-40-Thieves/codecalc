@@ -502,6 +502,52 @@ def test_a_completed_but_uninspected_run_frees_its_admission_slot() -> None:
           raised is None and second is not None)
 
 
+def test_recover_orphans_skips_an_unregistered_provider_without_crashing() -> None:
+    """THE-846: a journalled active run naming a provider NOT registered this
+    boot must not crash recover_orphans() — which runs at server IMPORT time.
+    registry.select() raises UnknownProvider (a LookupError) for such a run;
+    the pre-fix except (KeyError, OSError, ValueError, TypeError,
+    JSONDecodeError) did not catch it, so a single stale journal took the whole
+    server down at startup until the file was removed by hand. The unknown-
+    provider run is SKIPPED and its journal PRESERVED (the provider may register
+    again next boot), while every other orphan still recovers. The ghost sorts
+    FIRST, so a passing 'live' recovery also proves the loop continued past it."""
+    provider = BlockingProvider()
+    registry = providers.ProviderRegistry(default_provider_id=provider.provider_id)
+    registry.register(provider)
+    with tempfile.TemporaryDirectory(prefix="codecalc-runs-ghost-") as root:
+        state_dir = Path(root)
+        ghost = state_dir / "ghost.json"
+        ghost.write_text(json.dumps({
+            "run_id": "ghost", "provider_id": "not-registered-this-boot",
+            "state": "running",
+        }), encoding="utf-8")
+        live = state_dir / "live.json"
+        live.write_text(json.dumps({
+            "run_id": "live", "provider_id": provider.provider_id,
+            "state": "running",
+        }), encoding="utf-8")
+        supervisor = run_supervisor.RunSupervisor(registry, state_dir=state_dir)
+
+        raised = None
+        recovered = None
+        try:
+            recovered = supervisor.recover_orphans()
+        except Exception as exc:  # pre-fix: UnknownProvider escapes here
+            raised = exc
+
+        ghost_after = (
+            json.loads(ghost.read_text(encoding="utf-8")) if ghost.exists() else None
+        )
+
+    check("recover_orphans does not raise on an unregistered provider",
+          raised is None)
+    check("an orphan naming a registered provider still recovers past the skip",
+          recovered == ["live"] and provider.cancelled == ["live"])
+    check("the unregistered-provider journal is preserved, not deleted",
+          ghost_after is not None and ghost_after.get("state") == "running")
+
+
 if __name__ == "__main__":
     test_lifecycle_is_provider_bound_and_cleanup_is_idempotent()
     test_journal_is_bounded_and_orphans_are_reconciled()
@@ -513,4 +559,5 @@ if __name__ == "__main__":
     test_prune_runs_on_terminal_collection_not_only_cleanup()
     test_a_provider_that_raises_becomes_a_terminal_failed_result_not_a_strand()
     test_a_completed_but_uninspected_run_frees_its_admission_slot()
+    test_recover_orphans_skips_an_unregistered_provider_without_crashing()
     sys.exit(1 if FAILS else 0)
