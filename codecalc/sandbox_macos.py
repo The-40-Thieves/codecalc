@@ -45,11 +45,14 @@ instructive ways and the next reader should not repeat either mistake:
   from OpenAI Codex CLI's ACTUAL shipped Seatbelt profile — a program that
   runs the identical kind of job (a forked/exec'd interpreter under `(deny
   default)`) in production, right down to a comment explicitly calling out
-  Python multiprocessing. Pinned source, commit
-  e13c1d569d953ecac06a09cf5663fb3cd405636d:
-    https://github.com/openai/codex/blob/e13c1d569d953ecac06a09cf5663fb3cd405636d/codex-rs/sandboxing/src/seatbelt_base_policy.sbpl
-    https://github.com/openai/codex/blob/e13c1d569d953ecac06a09cf5663fb3cd405636d/codex-rs/sandboxing/src/restricted_read_only_platform_defaults.sbpl
-    https://github.com/openai/codex/blob/e13c1d569d953ecac06a09cf5663fb3cd405636d/codex-rs/sandboxing/src/seatbelt_network_policy.sbpl
+  Python multiprocessing. Pinned source: the openai/codex repository at
+  commit e13c1d569d953ecac06a09cf5663fb3cd405636d, files under
+  codex-rs/sandboxing/src/ —
+    seatbelt_base_policy.sbpl
+    restricted_read_only_platform_defaults.sbpl
+    seatbelt_network_policy.sbpl
+  (bare paths, not links: this package forbids an embedded outbound URL in
+  its source, so the reference is given as repo + commit + path instead.)
   (Codex's own base policy says it is in turn "inspired by Chrome's sandbox
   policy".) Every grant below traces to one of those three files or is
   marked as this module's own addition.
