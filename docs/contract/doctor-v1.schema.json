@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/The-40-Thieves/codecalc/main/docs/contract/doctor-v1.schema.json",
   "title": "codecalc doctor report",
-  "description": "`codecalc doctor --json`, version 1.1.0 \u2014 the same contract version and policy as the execution result. Generated from codecalc/contract.py by scripts/check_contract.py.",
+  "description": "`codecalc doctor --json`, version 1.2.0 \u2014 the same contract version and policy as the execution result. Generated from codecalc/contract.py by scripts/check_contract.py.",
   "type": "object",
   "required": [
     "contract_version",
@@ -11,6 +11,7 @@
     "python",
     "backend",
     "execution_providers",
+    "strict_runtime",
     "install_sandbox",
     "extras",
     "grammar_cache",
@@ -130,6 +131,106 @@
           }
         },
         "additionalProperties": false
+      }
+    },
+    "strict_runtime": {
+      "type": "object",
+      "required": [
+        "available",
+        "docker_present",
+        "cgroup_v2",
+        "runtime",
+        "runtime_registered",
+        "architecture",
+        "docker_version",
+        "image",
+        "image_present",
+        "canary",
+        "detail"
+      ],
+      "description": "The gVisor strict-execution boundary's MEASURED prerequisites (THE-828). Doctor calls the same host probe the runtime uses. `available` is fail-closed: false with a named `detail` on any host that cannot prove the boundary (no Docker, no cgroup v2, no runsc, or no executor image) \u2014 a fact about the host, never a broken install. `canary` is null unless --deep, when it launches the image under runsc and confirms the runtime OUT OF BAND (docker inspect), not from anything the workload printed.",
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "docker_present": {
+          "type": "boolean"
+        },
+        "cgroup_v2": {
+          "type": "boolean"
+        },
+        "runtime": {
+          "type": "string"
+        },
+        "runtime_registered": {
+          "type": "boolean"
+        },
+        "architecture": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "docker_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "image": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "image_present": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "canary": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "required": [
+            "attempted",
+            "ran",
+            "runtime_observed",
+            "verified_runsc",
+            "detail"
+          ],
+          "properties": {
+            "attempted": {
+              "type": "boolean"
+            },
+            "ran": {
+              "type": "boolean"
+            },
+            "runtime_observed": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "verified_runsc": {
+              "type": "boolean"
+            },
+            "detail": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
       }
     },
     "install_sandbox": {

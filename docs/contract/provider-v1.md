@@ -163,6 +163,48 @@ explicitly registered gVisor `runsc` runtime. It supports Linux x86_64 and
 ARM64; gVisor's default `systrap` platform avoids requiring KVM. Landlock may
 still harden local execution, but it is not evidence for the gVisor boundary.
 
+### Boundary evidence (THE-828), and what is measured where
+
+The executor image is built by `docker/executor.Dockerfile` (multi-stage,
+minimal, non-root, tini as an init so `codecalc-exec` is never PID 1) and
+carries `codecalc-exec` plus its `blocknet.so` shim and a python3 runtime.
+`scripts/build_executor_image.sh` builds it locally; `scripts/gvisor_conformance.sh`
+builds it and runs the hostile-workload conformance.
+
+What is PROVEN, on a runsc-capable host (measured on Cave, Docker 29.7.2 + runsc,
+ARM64), by `tests/test_gvisor_conformance.py`:
+
+- The workload genuinely runs under `runsc`, confirmed OUT OF BAND by
+  `docker inspect .HostConfig.Runtime` — never a string the payload printed.
+- A **fork bomb** is bounded by `--pids-limit`; the container terminates, is not
+  OOM-killed, and leaves no host processes.
+- A **memory bomb** is OOM-killed by the cgroup memory limit (exit 137), not the
+  host.
+- A **descendant tree** is entirely destroyed on cancellation — no leaked host
+  processes or containers.
+- **Egress** is blocked by `--network=none`; **filesystem** writes outside the
+  bounded tmpfs are blocked by the read-only root with no host bind.
+
+`codecalc doctor` (and the strict service at startup) call the runtime's host
+probe and surface these prerequisites; `doctor --deep` adds a real startup
+canary. Owned orphan containers are reconciled at service startup by
+`DockerGVisorRuntime.recover_orphans()`, keyed on the immutable run-identity
+label.
+
+RESIDUALS, stated plainly:
+
+- A **registry-published, multi-architecture, DIGEST-PINNED image** is a release
+  step needing registry credentials and is NOT produced here. `GVisorConfig`
+  still requires a digest-pinned reference for the production execution path; the
+  local build proves the boundary until that image exists.
+- **GitHub CI cannot exercise this**: hosted runners have no `runsc`, so the
+  conformance suite SKIPS there (green, with a printed reason). It is proven on
+  Cave / a runsc host, not on GitHub runners.
+- `--pids-limit` under gVisor bounds HOST-side tasks (the sandbox and gofer
+  count too), so the process limit must leave headroom for gVisor's baseline
+  (~48 is the floor on Cave); a runc-appropriate limit of 24 is too low for the
+  sandbox to start.
+
 ## Versioning policy
 
 The interface uses semantic versioning independently of the execution-result

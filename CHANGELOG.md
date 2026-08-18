@@ -10,9 +10,9 @@ This project versions **two** things, and they are not the same number.
 | What | Where | Current |
 |---|---|---|
 | The **package** — the tool surface, the CLI, the Python API | `pyproject.toml`, `executor/Cargo.toml`, this file | `0.1.0` |
-| The **result contract** — the shape every tool result comes back in | `docs/contract/README.md`, `contract_version` on every result | `1.1.0` |
+| The **result contract** — the shape every tool result comes back in | `docs/contract/README.md`, `contract_version` on every result | `1.2.0` |
 
-The contract is at `1.1.0` and the package is at `0.1.0` because those claims are
+The contract is at `1.2.0` and the package is at `0.1.0` because those claims are
 genuinely different. The result contract has a published JSON Schema, a
 documented MAJOR/MINOR/PATCH policy, a twelve-month deprecation window, and a
 gate that fails if the schema drifts from the code — it is stable and says so.
@@ -36,14 +36,32 @@ behind it.
 Everything below has landed on `main` since `0.1.0` and is not yet tagged. It
 changes the **tool surface** (48 tools → 51) and adds to the **result
 contract**, so it is a MINOR bump when it is cut, not a patch. The
-`contract_version` moves `1.0.0` → **`1.1.0`** for the same reason: it ADDS a
-fifth result shape (`run_lifecycle`, for the background-run tools) and adds
-fields (an execution receipt with `session_id`, grade metadata). Additions are
-exactly what the contract's own policy defines as a MINOR bump — a compatible
-addition bumps MINOR, it does not leave the version unchanged. A `1.0.0` client
-keeps working against `1.1.0`.
+`contract_version` moves `1.0.0` → **`1.2.0`** for the same reason: `1.1.0`
+ADDED a fifth result shape (`run_lifecycle`, for the background-run tools) and
+fields (an execution receipt with `session_id`, grade metadata), and `1.2.0`
+ADDS a `strict_runtime` prerequisites block to the `doctor` diagnostic document.
+Additions are exactly what the contract's own policy defines as a MINOR bump — a
+compatible addition bumps MINOR, it does not leave the version unchanged. A
+`1.0.0` client keeps working against `1.2.0`.
 
 ### Added
+
+- **Linux strict gVisor boundary made real** (THE-828). A real executor
+  container image (`docker/executor.Dockerfile`, multi-stage/minimal/non-root,
+  carrying `codecalc-exec` + `blocknet.so` + python3);
+  `DockerGVisorRuntime.recover_orphans()` reconciles owned strict containers at
+  startup by their immutable run-identity label; `doctor` now CALLS the
+  runtime's host probe and surfaces measured prerequisites in a `strict_runtime`
+  block (Docker present, cgroup v2, `runsc` registered, image present, and a
+  real startup canary under `--deep`), failing closed with a structured reason
+  on a host without `runsc`. A hostile-workload conformance suite
+  (`tests/test_gvisor_conformance.py`) launches the image under `--runtime=runsc`
+  and proves fork-bomb/memory-bomb/descendant-escape/egress/filesystem
+  containment on a runsc host, verifying the runtime OUT OF BAND. It skips
+  without `runsc` (GitHub CI), and runs via `scripts/gvisor_conformance.sh` on
+  Cave / a runsc host. Residual: the registry-published, multi-arch,
+  digest-pinned image (a release step) and GitHub-CI-under-runsc are not
+  delivered here — see `docs/contract/provider-v1.md`.
 
 - **Background runs: `run_submit`, `run_inspect`, `run_cancel`** (THE-778).
   Submit code and get a `run_id` back immediately instead of holding an MCP

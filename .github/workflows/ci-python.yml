@@ -169,6 +169,18 @@ jobs:
         run: |
           uv run --no-sync python tests/test_strict_providers.py
           uv run --no-sync python tests/test_gvisor_runtime.py
+      # The REAL hostile-workload conformance (THE-828). It launches the executor
+      # image under `--runtime=runsc` and drives fork/memory bombs, descendant
+      # escape, egress and filesystem escape through real containers. GitHub
+      # runners have NO runsc registered, so this SELF-SKIPS here (exit 0, with a
+      # printed reason) — it is NOT proven on GitHub CI and does not claim to be.
+      # It RUNS and PASSES on Cave / a runsc-capable host via
+      # scripts/gvisor_conformance.sh, which builds the image first. This step
+      # exists so a regression in the harness itself (an import error, a broken
+      # skip) fails the build even where the boundary cannot be exercised.
+      - name: gVisor hostile-workload conformance (skips without runsc)
+        shell: bash
+        run: uv run --no-sync python tests/test_gvisor_conformance.py
       # The provider boundary and the execution service. Neither ran in CI at
       # all before this — seven suites do not, and these two are where the
       # ComputationSpec identity (THE-793) and the execution receipt (THE-782)
