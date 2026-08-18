@@ -177,13 +177,15 @@ def grade_verify_optimization(result: dict, language: str) -> dict:
     ratio = speedup.get("ratio")
     # F7 (cross-vendor): `cross_checked` folds a correctness check AND a real
     # speedup into ONE grade, so it may not be issued unless the speedup is
-    # real. optimization.py accepts on `ratio >= min_speedup` with min_speedup
-    # unvalidated (it may be <= 1 — a pre-existing defect ticketed separately),
-    # so an `accepted=True` result can carry a measured SLOWDOWN. A ratio that
-    # is not > 1 is not a speedup, leaving the "genuine optimisation" claim
-    # unproven exactly like an equivalent-but-not-faster candidate — so it stays
-    # ungraded rather than certifying a slowdown as cross_checked on the speed
-    # dimension. (`bool` is an `int`, but a ratio is never a bool.)
+    # real. optimization.py now refuses accepted=True unless min_speedup > 1 AND
+    # the measured ratio > 1 (THE-843, fixed on this branch), so an accepted
+    # result can no longer carry a measured SLOWDOWN. This branch is kept as a
+    # defensive floor at the grade boundary: even if a future caller of
+    # grade_verify_optimization hands in an accepted result with ratio <= 1, a
+    # ratio that is not > 1 is not a speedup, leaving the "genuine optimisation"
+    # claim unproven exactly like an equivalent-but-not-faster candidate — so it
+    # stays ungraded rather than certifying a slowdown as cross_checked on the
+    # speed dimension. (`bool` is an `int`, but a ratio is never a bool.)
     if not isinstance(ratio, (int, float)) or ratio <= 1:
         return _graded(result, UNGRADED,
                        f"not graded: accepted, and the correctness check passed, "

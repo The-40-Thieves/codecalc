@@ -196,6 +196,25 @@ def _ev(node):
 _MAX_EXPR_LEN = 2000
 
 
+def _too_long(*parts: str) -> dict | None:
+    """Reject before sympify if any part exceeds the length cap (THE-844).
+
+    The cap used to be enforced in exactly one sympify entry point (_eval_exact).
+    The others — _algebraic_equiv, _solve_expression, _limit_expression,
+    _simplify_expression — reached sp.sympify with no cap, so a 120k-char
+    expression blew the parser's recursion limit. The resulting failure's
+    message wording is interpreter-specific ("maximum recursion depth exceeded"
+    on <3.14, "stack overflow" on >=3.14), so it classified as `resource_exhausted`
+    on older CPython and `internal` on 3.14 — the same input, two different codes.
+    A length gate ahead of every parser rejects oversized input as "expression
+    too long" on EVERY interpreter, before anything reaches sympify.
+    """
+    for p in parts:
+        if p is not None and len(p) > _MAX_EXPR_LEN:
+            return {"ok": False, "error": f"expression too long (max {_MAX_EXPR_LEN} chars)"}
+    return None
+
+
 def eval_exact(expr: str) -> dict:
     """Evaluate an expression with EXACT rational arithmetic.
 
@@ -826,6 +845,8 @@ def _algebraic_equiv(a: str, b: str) -> dict:
     """
     # SymPy evaluates what it parses (see codecalc/safe_expr.py). Screen the
     # caller's string BEFORE it reaches sympify, not after.
+    if (_long := _too_long(a, b)):
+        return _long
     for _name, _val in (("a", a), ("b", b)):
         _bad = reject_unsafe(_val)
         if _bad:
@@ -851,6 +872,8 @@ def _solve_expression(expr: str, var: str = "x") -> dict:
     # Screened per SIDE, because this splits on '=' before sympify and the
     # screen refuses '=' — the parts are what reach the parser, so the parts
     # are what must be checked.
+    if (_long := _too_long(expr)):
+        return _long
     for _part in (expr.split("=", 1) if ("=" in expr and "==" not in expr) else [expr]):
         _bad = reject_unsafe(_part)
         if _bad:
@@ -874,6 +897,8 @@ def _limit_expression(expr: str, var: str = "x", point: str = "oo") -> dict:
     """Asymptotic behaviour: limit of EXPR as var -> point (default oo)."""
     # SymPy evaluates what it parses (see codecalc/safe_expr.py). Screen the
     # caller's string BEFORE it reaches sympify, not after.
+    if (_long := _too_long(expr, point)):
+        return _long
     for _name, _val in (("expr", expr), ("point", point)):
         _bad = reject_unsafe(_val)
         if _bad:
@@ -894,6 +919,8 @@ def _simplify_expression(expr: str) -> dict:
     """Simplified, factored and expanded forms of an expression."""
     # SymPy evaluates what it parses (see codecalc/safe_expr.py). Screen the
     # caller's string BEFORE it reaches sympify, not after.
+    if (_long := _too_long(expr)):
+        return _long
     _bad = reject_unsafe(expr)
     if _bad:
         return {"ok": False, "error": _bad}

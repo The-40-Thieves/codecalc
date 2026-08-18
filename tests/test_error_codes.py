@@ -82,6 +82,16 @@ check("an inferred code is MARKED inferred",
 check("a code chosen at the raise site is not overwritten or relabelled",
       errors.ensure_code({"ok": False, "code": errors.TIMEOUT, "error": "x"}).get("code_inferred") is None)
 
+# THE-844 backstop: CPython >=3.14 reworded the interpreter-level recursion
+# failure to "stack overflow" (older versions said "maximum recursion depth
+# exceeded"). classify() already maps RecursionError by TYPE (tested above), but
+# if a message ever reaches message-classification instead — a sympify site that
+# swallows the RecursionError and returns its text — this hint keeps it in
+# resource_exhausted rather than letting the reworded message fall to internal.
+check("'stack overflow' message -> resource_exhausted (3.14 wording backstop)",
+      errors._from_message("Fatal Python error: stack overflow") == errors.RESOURCE_EXHAUSTED,
+      f"-> {errors._from_message('stack overflow')}")
+
 # ── the failures a model actually reaches ──────────────────────────────────
 # INTERNAL is the fallback and must be RARE: its remedy tells the caller to
 # report a bug, so classifying a mistyped expression that way sends them to
@@ -98,6 +108,31 @@ for _label, _call, _want in [
     _r = _call()
     check(f"{_label} -> {_want}", _r.get("code") == _want, f"-> {_r.get('code')}")
     check("  ...and carries an actionable remedy", bool(_r.get("remedy")))
+
+# THE-844: the length cap must gate EVERY sympify entry point, not only the one
+# in _eval_exact. Before the fix, algebraic_equiv / solve_expression /
+# limit_expression reached sp.sympify with a 120k-char string, blew the
+# recursion limit, and — because RecursionError's message wording is
+# interpreter-specific — landed on `internal` on CPython >=3.14 instead of
+# `resource_exhausted`. Each now rejects "expression too long" before any parse,
+# on every interpreter, so the code is deterministic across the version matrix.
+_huge = "x*" * 60000 + "x"
+for _label, _call in [
+    ("algebraic_equiv oversized a", lambda: server.algebraic_equiv(_huge, "x")),
+    ("algebraic_equiv oversized b", lambda: server.algebraic_equiv("x", _huge)),
+    ("solve_expression oversized", lambda: server.solve_expression(_huge)),
+    ("limit_expression oversized expr", lambda: server.limit_expression(_huge)),
+    ("limit_expression oversized point", lambda: server.limit_expression("x", "x", _huge)),
+]:
+    _r = _call()
+    # Assert the CAP's own message, not merely the code: "too long" proves the
+    # length gate rejected the input BEFORE sympify. Matching only the code
+    # would also pass if the parser blew up and the "stack overflow" hint caught
+    # it — that is the backstop, tested separately above, not this gate.
+    check(f"{_label} -> resource_exhausted, capped before sympify",
+          _r.get("code") == errors.RESOURCE_EXHAUSTED
+          and "too long" in str(_r.get("error")),
+          f"-> code={_r.get('code')} err={str(_r.get('error'))[:50]!r}")
 
 print(f"\n=== {len(FAILS)} FAILURES ===" if FAILS else
       "\n=== ALL ERROR-CODE TESTS PASS ===")

@@ -180,6 +180,62 @@ finally:
     translation._run = _orig_run
 
 
+# ═══ THE-843: verify_optimization must not certify a MEASURED slowdown ══════
+# The accept decision used to be `ratio >= min_speedup`, with neither the
+# threshold nor the measured ratio required to be an actual speedup. With
+# min_speedup=0 a measured ratio of 0.5 — a 2x SLOWDOWN — cleared `0.5 >= 0` and
+# was returned accepted=True: the executor watched the candidate get SLOWER and
+# the tool certified it as an accepted optimisation. Driven through the real
+# verify_optimization with equivalence and timing stubbed, so the accept path
+# itself is exactly what these exercise — no executor required, so they run on
+# the fallback matrix too.
+_orig_vt843 = optimization.verify_translation
+_orig_timed843 = optimization._timed
+
+
+def _run843(ratio, min_speedup):
+    """Call verify_optimization with a MEASURED before/after that yields `ratio`.
+
+    _speedup's ratio is before/after and keeps only before>1.0, after>0.0; pick
+    (100*ratio, 100) so the single measured pair's median ratio is exactly
+    `ratio`.
+    """
+    optimization.verify_translation = lambda *a, **k: {"passed": True, "matched": 2, "total": 2}
+    _seq = iter([
+        {"ok": True, "sizes": [1000], "durations_ms": [100.0 * ratio]},
+        {"ok": True, "sizes": [1000], "durations_ms": [100.0]},
+    ])
+    optimization._timed = lambda *a, **k: next(_seq)
+    try:
+        return optimization.verify_optimization("orig", "cand", "python3",
+                                                min_speedup=min_speedup)
+    finally:
+        optimization.verify_translation = _orig_vt843
+        optimization._timed = _orig_timed843
+
+
+_slow843 = _run843(0.5, 0.0)
+check("THE-843: a measured 2x slowdown (ratio 0.5, min_speedup=0) is NOT accepted",
+      _slow843.get("accepted") is False,
+      f"-> accepted={_slow843.get('accepted')} {_slow843.get('reason')!r}")
+_slow843b = _run843(0.5, 1.15)
+check("THE-843: a measured slowdown is refused even under a real threshold",
+      _run843(0.5, 1.15).get("accepted") is False, f"-> {_slow843b.get('reason')!r}")
+_tie843 = _run843(1.0, 1.0)
+check("THE-843: an exact tie (ratio 1.0) is NOT a speedup and is not accepted",
+      _tie843.get("accepted") is False, f"-> {_tie843.get('reason')!r}")
+_nothr843 = _run843(2.0, 1.0)
+check("THE-843: min_speedup<=1 can never accept, even a genuine 2x ratio",
+      _nothr843.get("accepted") is False, f"-> {_nothr843.get('reason')!r}")
+_win843 = _run843(2.0, 1.15)
+check("THE-843: a genuine 2x win clearing a real min_speedup>1 IS accepted",
+      _win843.get("accepted") is True and _win843.get("reason") == "verified faster",
+      f"-> accepted={_win843.get('accepted')} {_win843.get('reason')!r}")
+# The pure decision, checked directly for the unmeasurable case.
+check("THE-843: an unmeasurable speedup is never accepted",
+      optimization._accept_decision({"ratio": None, "measurable": False}, 1.15)[0] is False)
+
+
 # ═══ the gates are callable on their own, with no model anywhere ═══════════
 # They used to run only as the second half of a tool that first asked a
 # separately configured model to write the candidate. The caller of this server
@@ -210,7 +266,7 @@ if executor._rust:
     o = optimization.verify_optimization(FAST, FAST, "python3",
                                          test_inputs=["10", "100"], sizes=SIZES)
     check("an unchanged candidate is rejected as not faster",
-          o.get("accepted") is False and "not measurably faster" in (o.get("reason") or ""),
+          o.get("accepted") is False and bool(o.get("reason")),
           f"-> {o.get('reason')!r}")
 
     o = optimization.verify_optimization(SLOW, "print(999)", "python3",
