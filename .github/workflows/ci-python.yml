@@ -169,6 +169,26 @@ jobs:
         run: |
           uv run --no-sync python tests/test_strict_providers.py
           uv run --no-sync python tests/test_gvisor_runtime.py
+      # The provider boundary and the execution service. Neither ran in CI at
+      # all before this — seven suites do not, and these two are where the
+      # ComputationSpec identity (THE-793) and the execution receipt (THE-782)
+      # are asserted, so every claim they make was verified on one developer's
+      # Linux box and nowhere else. A test that never runs is a comment.
+      #
+      # Pure, so they belong on the matrix rather than in `sandbox`: an injected
+      # provider, a RecordingMCPServer stub for the serve-http checks (nothing
+      # binds a socket), a temp-dir workspace, and python3 for the conformance
+      # run. Sessions are already exercised here by test_session_jail.py and
+      # test_contract.py, so the Windows leg is not new ground.
+      #
+      # Running them on all three OSes is the point for THE-793 specifically:
+      # the golden vectors claim the canonical bytes are identical everywhere,
+      # and a Linux-only run cannot make that claim.
+      - name: provider boundary and execution service (spec identity + receipt)
+        shell: bash
+        run: |
+          uv run --no-sync python tests/test_providers.py
+          uv run --no-sync python tests/test_execution_service.py
       - name: calc parity
         shell: bash
         run: uv run --no-sync python tests/test_calc_port.py

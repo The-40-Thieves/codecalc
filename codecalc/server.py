@@ -259,6 +259,23 @@ _COMPACT_ALWAYS = ("ok", "verdict", "stdout", "exit_code")
 #: nothing; a non-empty one is the entire point of the field.
 _COMPACT_DISCLOSURE = ("unenforced", "output_error", "provider")
 
+#: The receipt keys compact mode keeps, in the order they are emitted.
+#:
+#: THE-782 grew the receipt from provider identity to provider identity PLUS
+#: content hashes and determinism inputs. Copied wholesale, that took a compact
+#: result from 603 to 1019 bytes — a 69% increase in the one mode whose entire
+#: purpose is not spending tokens, and past the bar this file already set when
+#: it measured a disclosure at 171 of a 199-token reply and called that a defect.
+#:
+#: So the same split applies here as to `unenforced`: keep what a caller must
+#: ACT on, drop what they can fetch. `limits` stays whole because it is the
+#: unapplied-guarantee half that #117 exists for, and `spec_hash` stays because
+#: naming which request this was is what THE-782 added. `provider_version`,
+#: `interface_version`, `host_class`, `source_sha256`, `spec_schema_version` and
+#: the determinism block are descriptive, unchanged between calls, and one
+#: non-compact call away — which the caller is told, rather than left to notice.
+_COMPACT_RECEIPT = ("receipt_version", "provider_id", "spec_hash", "limits")
+
 
 def compact_result(result: dict) -> dict:
     """A small result that cannot hide an unapplied guarantee.
@@ -294,6 +311,16 @@ def compact_result(result: dict) -> dict:
     if terse:
         out["unenforced"] = [e.split(":", 1)[0].strip() for e in terse]
         out["unenforced_detail"] = "call without compact=True for the reason and remedy of each"
+
+    # Same treatment for the execution receipt (THE-782). See _COMPACT_RECEIPT.
+    receipt = out.get("provider")
+    if isinstance(receipt, dict):
+        dropped = [key for key in receipt if key not in _COMPACT_RECEIPT]
+        out["provider"] = {key: receipt[key] for key in _COMPACT_RECEIPT
+                           if key in receipt}
+        if dropped:
+            out["provider"]["receipt_detail"] = (
+                "call without compact=True for " + ", ".join(sorted(dropped)))
     return out
 
 
