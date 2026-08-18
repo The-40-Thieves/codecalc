@@ -97,9 +97,13 @@ runs exactly as before — the block still reports the four sets with
 `approved == requested` and `brokered: false`, but nothing is denied and nothing
 is rejected. When the variable is set, comma-separated directives configure it:
 
-- `deny-network` — flip the default to network-denied. A job that did not
-  request network runs with `no_net` forced on (enforced where the provider can,
-  e.g. the native Linux shim; disclosed as still `effective` where it cannot).
+- `deny-network` — flip the default to network-denied. Where the provider can
+  enforce the denial (e.g. the native Linux shim), the job runs with `no_net`
+  forced on. Where it cannot, a non-strict policy leaves the request as-asked and
+  discloses the leak — `network` stays in `effective` — rather than forcing a
+  `no_net` the provider would silently ignore or, like Piston, reject outright.
+  Combine with `strict` to reject an unenforceable denial instead of disclosing
+  it.
 - `allow-network` — explicitly grant network. Honoured only for a job that
   requested network; granting network to a job that asked for none is an
   escalation the broker **rejects**.

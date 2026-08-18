@@ -43,7 +43,9 @@ def broker_run(spec: ComputationSpec, provider, *,
     THE-787 fix-round bug. Returns `(run_spec, decision, rejection_or_None)`:
 
     - `run_spec` is the possibly-narrowed spec to actually run (a denied network
-      forces `no_net`); `spec` (the request as written) still names the receipt.
+      forces `no_net` only where the provider can enforce it — see
+      `capabilities.enforced_spec`); `spec` (the request as written) still names
+      the receipt.
     - `decision` is threaded onto the receipt so every path surfaces the four
       capability sets identically.
     - `rejection` is a stamped `PERMISSION_DENIED` result when the broker refuses
@@ -134,8 +136,10 @@ class ExecutionService:
             ))
 
         # THE-787: broker capabilities BEFORE any side effect. `run_spec` is the
-        # possibly-narrowed spec that actually runs (network denied -> no_net);
-        # `spec` (the request as written) still names the receipt, so `spec_hash`
+        # possibly-narrowed spec that actually runs (network denied -> no_net
+        # where the provider can enforce it; THE-847: left as-asked and disclosed
+        # as effective where it cannot); `spec` (the request as written) still
+        # names the receipt, so `spec_hash`
         # and `limits.requested` describe what was asked, and the `capabilities`
         # block describes what was approved and enforced.
         run_spec, decision, rejection = self._broker(spec, provider)
@@ -216,7 +220,8 @@ class ExecutionService:
                 capability=exc.capability,
             ))
         # THE-787: broker before the worker runs; a denied network forces no_net
-        # on the spec the session worker receives.
+        # on the spec the session worker receives where the provider can enforce
+        # it (the local provider on the rust backend does; THE-847).
         run_spec, decision, rejection = self._broker(spec, provider,
                                                      session_id=session_id)
         if rejection is not None:

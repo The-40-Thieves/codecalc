@@ -23,7 +23,8 @@ import sys
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from codecalc import capabilities, contract, execution_service, providers
+from codecalc import capabilities, contract, execution_service, executor, providers
+from codecalc.providers import UnsupportedCapability
 
 FAILS = []
 
@@ -65,7 +66,7 @@ class RecordingProvider(providers.LocalExecutionProvider):
 
 
 def _service(provider, policy):
-    registry = providers.ProviderRegistry(default_provider_id="recording")
+    registry = providers.ProviderRegistry(default_provider_id=provider.provider_id)
     registry.register(provider)
     return execution_service.ExecutionService(registry, policy=policy)
 
@@ -85,19 +86,67 @@ check("the receipt shows network requested but denied",
 check("an ENFORCED denial leaves network out of the effective set",
       caps_a["effective"] == [])
 
-# ── B. policy ON + a provider that cannot control the network ──────────────
-# no_net is still forced onto the run, and the receipt HONESTLY discloses that
-# the denial could not be enforced (network stays effective) — the fallback's
-# fail-open reality, disclosed rather than hidden. This is the branch the CI
-# python-fallback matrix job exercises.
+# ── B. NON-strict policy ON + a provider that cannot control the network ───
+# THE-847: no_net is NOT forced onto a provider that cannot enforce it. Forcing a
+# `no_net` the provider will ignore is dishonest, and against a provider that
+# RAISES on `no_net` (section B2, the real Piston shape) it turns a disclosable
+# leak into a hard `validation` error. The non-strict contract is DISCLOSE: run
+# the request AS-ASKED and surface the leak in the capabilities block (network
+# stays `effective`). This is the branch the CI python-fallback matrix exercises.
 prov_b = RecordingProvider(network_control=False)
 res_b = _service(prov_b, _DENY).execute(
     providers.ComputationSpec(language="python3", code="print(1)", no_net=False))
-check("deny-network forces no_net even when the provider cannot enforce it",
-      prov_b.captured is not None and prov_b.captured.no_net is True)
+check("non-strict deny-network does NOT force no_net a provider cannot enforce",
+      prov_b.captured is not None and prov_b.captured.no_net is False)
+check("the unenforceable non-strict run completes (no hard-error)",
+      res_b["ok"] is True)
 caps_b = res_b["provider"]["capabilities"]
-check("an UNENFORCEABLE denial discloses network as still effective (leak, named)",
-      caps_b["denied"] == ["network"] and caps_b["effective"] == ["network"])
+check("the receipt shows network requested and denied-by-policy",
+      caps_b["requested"] == ["network"] and caps_b["denied"] == ["network"]
+      and caps_b["approved"] == [])
+check("an UNENFORCEABLE denial discloses network as still effective (leak, disclosed)",
+      caps_b["effective"] == ["network"] and caps_b["provider_supported"] == [])
+
+# ── B2. NON-strict policy ON + a provider that RAISES on no_net (Piston shape)
+# This is the exact bug THE-847 fixes: PistonExecutionProvider raises
+# UnsupportedCapability on no_net=True (network is a server-side setting, not a
+# per-request control). Before the fix the broker forced no_net onto it and
+# `execute` raised, so a network-requesting job hard-errored with a `validation`
+# result instead of running-with-disclosure. After the fix the request runs
+# as-asked and the leak is disclosed, identically to section B.
+class PistonShapedProvider(providers.LocalExecutionProvider):
+    """A provider that, like the real Piston adapter, cannot enforce no_net and
+    RAISES rather than silently ignoring it."""
+
+    def __init__(self) -> None:
+        self.provider_id = "piston-shaped"
+        self.reached = False
+
+    def describe(self) -> dict:
+        d = super().describe()
+        d["provider_id"] = self.provider_id
+        d["capabilities"] = dict(d["capabilities"])
+        d["capabilities"]["network_control"] = False
+        return d
+
+    def execute(self, spec: providers.ComputationSpec) -> dict:
+        if spec.no_net:  # mirrors providers.py PistonExecutionProvider.execute
+            raise UnsupportedCapability(self.provider_id, "network_control")
+        self.reached = True
+        return contract.stamp({"ok": True, "verdict": "OK", "stdout": "",
+                               "stderr": "", "exit_code": 0, "unenforced": []})
+
+prov_b2 = PistonShapedProvider()
+res_b2 = _service(prov_b2, _DENY).execute(
+    providers.ComputationSpec(language="python3", code="print(1)", no_net=False))
+check("non-strict deny-network on a RAISING provider RUNS (not a hard-error)",
+      res_b2["ok"] is True and prov_b2.reached is True)
+check("the raising provider was reached with network left as-asked (no forced no_net)",
+      res_b2.get("error") is None and res_b2.get("provider_error") is None)
+caps_b2 = res_b2["provider"]["capabilities"]
+check("the raising-provider receipt discloses the unenforced denial as effective",
+      caps_b2["requested"] == ["network"] and caps_b2["denied"] == ["network"]
+      and caps_b2["approved"] == [] and caps_b2["effective"] == ["network"])
 
 # ── C. strict + unenforceable denial: REJECTED, nothing runs ───────────────
 prov_c = RecordingProvider(network_control=False)
@@ -141,6 +190,42 @@ pol_allow = capabilities.policy_from_env(
     {capabilities.POLICY_ENV: "deny-network,allow-network"})
 check("allow-network parses to an explicit grant",
       pol_allow is not None and NET in pol_allow.grant and NET in pol_allow.default_deny)
+
+
+# ── G. the LOCAL rust provider CAN enforce: deny-network BLOCKS egress ──────
+# The counterpart to sections B/B2: where the provider genuinely controls the
+# network (the native Linux shim, backend == "rust"), deny-network is ENFORCED,
+# not merely disclosed. This drives the REAL LocalExecutionProvider end to end so
+# THE-847's "disclose where you can't" change did not weaken the "block where you
+# can" path. Skipped off the rust backend (the python fallback cannot enforce, so
+# it takes the section-B disclose path instead — its own suites cover that).
+if executor.backend() == "rust" and sys.platform.startswith("linux"):
+    _local = providers.LocalExecutionProvider()
+    _registry_g = providers.ProviderRegistry(default_provider_id="local")
+    _registry_g.register(_local)
+    _svc_g = execution_service.ExecutionService(_registry_g, policy=_DENY)
+    _egress_code = (
+        "import socket\n"
+        "try:\n"
+        "    t = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n"
+        "    t.settimeout(4); t.connect(('1.1.1.1', 80))\n"
+        "    print('EGRESS REACHED')\n"
+        "except OSError as e:\n"
+        "    print('EGRESS blocked', e.errno)\n"
+    )
+    res_g = _svc_g.execute(
+        providers.ComputationSpec(language="python3", code=_egress_code, no_net=False))
+    out_g = res_g.get("stdout", "")
+    check("deny-network on the rust local provider BLOCKS network egress",
+          "EGRESS blocked" in out_g and "EGRESS REACHED" not in out_g,
+          f"-> {out_g[:80]!r}")
+    caps_g = res_g["provider"]["capabilities"]
+    check("an ENFORCED denial keeps network OUT of the effective set (no leak)",
+          caps_g["denied"] == ["network"] and caps_g["effective"] == []
+          and caps_g["provider_supported"] == ["network"])
+else:
+    check("rust-egress enforcement check ran (skipped: not the rust/linux backend)",
+          True, f"-> backend={executor.backend()!r} platform={sys.platform!r}")
 
 
 # ── F. the BACKGROUND path (run_submit) is brokered identically ────────────
