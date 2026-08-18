@@ -152,6 +152,38 @@ def test_effective_pids_limit_adds_sandbox_overhead_and_floors_the_smallest_budg
           f"--pids-limit={1 + _GVISOR_HOST_OVERHEAD}" in argv)
 
 
+def test_strict_receipt_discloses_the_guest_to_host_pid_translation() -> None:
+    """THE-850. THE-849 makes the host --pids-limit = process_limit + overhead,
+    but the strict receipt recorded neither the requested guest budget nor the
+    effective host limit — so the translation was invisible to an auditor. The
+    receipt must disclose both, plus the overhead applied, additively."""
+    def runner(argv, **_kwargs):
+        if argv[1] == "info":
+            return completed(argv, json.dumps({
+                "Runtimes": {"runsc": {}}, "CgroupVersion": "2",
+                "Architecture": "x86_64", "ServerVersion": "28.3.3",
+            }))
+        if argv[1] == "inspect":
+            return completed(argv, json.dumps({
+                "io.codecalc.owner": "codecalc-strict",
+                "io.codecalc.run-id": "0123456789abcdef",
+            }))
+        return completed(argv, '{"ok":true,"verdict":"OK"}')
+
+    runtime = DockerGVisorRuntime(GVisorConfig(image=IMAGE), runner=runner)
+    result = runtime.execute(
+        "0123456789abcdef", language="python3", source="print(42)", timeout=7,
+        process_limit=24,
+    )
+    receipt = result["strict_receipt"]
+    check("receipt discloses the requested guest budget", receipt["process_limit"] == 24)
+    check("receipt discloses the effective host --pids-limit", receipt["pids_limit"] == 72)
+    check("receipt discloses the overhead applied",
+          receipt["gvisor_host_overhead"] == _GVISOR_HOST_OVERHEAD)
+    check("effective limit is requested plus overhead",
+          receipt["pids_limit"] == receipt["process_limit"] + receipt["gvisor_host_overhead"])
+
+
 def test_run_id_cannot_become_a_docker_option_or_foreign_container_name() -> None:
     runtime = DockerGVisorRuntime(GVisorConfig(image=IMAGE), runner=lambda *_a, **_k: completed([]))
     expect_raises(
@@ -390,6 +422,7 @@ if __name__ == "__main__":
     test_probe_reports_versioned_gvisor_attestation()
     test_launch_is_shell_free_and_applies_every_outer_limit()
     test_effective_pids_limit_adds_sandbox_overhead_and_floors_the_smallest_budget()
+    test_strict_receipt_discloses_the_guest_to_host_pid_translation()
     test_run_id_cannot_become_a_docker_option_or_foreign_container_name()
     test_cancel_refuses_container_without_matching_ownership_labels()
     test_cleanup_never_removes_a_foreign_container_even_after_a_failed_run()

@@ -306,6 +306,15 @@ class DockerGVisorRuntime:
                 "runtime": self.config.runtime,
                 "image": self.config.image,
                 "controls": list(ENFORCEMENT_CONTROLS),
+                # THE-850: disclose the guest->host PID translation THE-849
+                # applies. `process_limit` is the caller's GUEST budget as
+                # requested; `pids_limit` is the effective HOST
+                # `--pids-limit` actually passed to `docker run`; the
+                # difference is `gvisor_host_overhead`, so an auditor can see
+                # the translation instead of just its result.
+                "process_limit": process_limit,
+                "pids_limit": _effective_pids_limit(process_limit),
+                "gvisor_host_overhead": _GVISOR_HOST_OVERHEAD,
             }
         except BaseException:
             with contextlib.suppress(StrictRuntimeUnavailable):
