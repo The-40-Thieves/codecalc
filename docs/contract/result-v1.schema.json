@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/The-40-Thieves/codecalc/main/docs/contract/result-v1.schema.json",
   "title": "codecalc execution result",
-  "description": "The result contract for codecalc's execution tools, version 1.0.0. Generated from codecalc/contract.py by scripts/check_contract.py \u2014 edit the module, not this file.",
+  "description": "The result contract for codecalc's execution tools, version 1.1.0. Generated from codecalc/contract.py by scripts/check_contract.py \u2014 edit the module, not this file.",
   "type": "object",
   "required": [
     "ok",
@@ -31,6 +31,9 @@
     },
     {
       "$ref": "#/$defs/rejected"
+    },
+    {
+      "$ref": "#/$defs/run_lifecycle"
     }
   ],
   "$defs": {
@@ -333,6 +336,62 @@
             "string",
             "null"
           ]
+        }
+      }
+    },
+    "run_lifecycle": {
+      "title": "a background-run lifecycle response",
+      "description": "Returned by run_submit, by run_inspect WHILE the run is still active (state running/cancelling), and by run_cancel. It names the run \u2014 `run_id` and `state` \u2014 but nothing ran yet through it, so there is no `verdict`, no `backend`, and no `error`. A TERMINAL run_inspect does not use this shape: it returns the full execution envelope (or, on a failed run, the rejected error shape) merged with the same run_* extras. Forbidding verdict/error/backend here is what keeps this branch from colliding with those, so exactly one oneOf branch matches any stamped run response.",
+      "type": "object",
+      "required": [
+        "ok",
+        "run_id",
+        "state"
+      ],
+      "not": {
+        "anyOf": [
+          {
+            "required": [
+              "verdict"
+            ]
+          },
+          {
+            "required": [
+              "error"
+            ]
+          },
+          {
+            "required": [
+              "backend"
+            ]
+          }
+        ]
+      },
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "provider_id": {
+          "type": "string"
+        },
+        "started_at": {
+          "type": "number"
+        },
+        "deadline": {
+          "type": "number"
+        },
+        "state": {
+          "type": "string",
+          "description": "The run's lifecycle state \u2014 running/cancelling before it settles, or a terminal state reported by run_cancel on an already-finished run. Left as a free string rather than a closed enum: the states are owned by run_supervisor, and pinning them here would be a second declaration that could drift."
+        },
+        "cleaned": {
+          "type": "boolean"
+        },
+        "cancelled": {
+          "type": "boolean"
         }
       }
     },

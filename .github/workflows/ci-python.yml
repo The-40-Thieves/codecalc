@@ -169,6 +169,26 @@ jobs:
         run: |
           uv run --no-sync python tests/test_strict_providers.py
           uv run --no-sync python tests/test_gvisor_runtime.py
+      # The provider boundary and the execution service. Neither ran in CI at
+      # all before this — seven suites do not, and these two are where the
+      # ComputationSpec identity (THE-793) and the execution receipt (THE-782)
+      # are asserted, so every claim they make was verified on one developer's
+      # Linux box and nowhere else. A test that never runs is a comment.
+      #
+      # Pure, so they belong on the matrix rather than in `sandbox`: an injected
+      # provider, a RecordingMCPServer stub for the serve-http checks (nothing
+      # binds a socket), a temp-dir workspace, and python3 for the conformance
+      # run. Sessions are already exercised here by test_session_jail.py and
+      # test_contract.py, so the Windows leg is not new ground.
+      #
+      # Running them on all three OSes is the point for THE-793 specifically:
+      # the golden vectors claim the canonical bytes are identical everywhere,
+      # and a Linux-only run cannot make that claim.
+      - name: provider boundary and execution service (spec identity + receipt)
+        shell: bash
+        run: |
+          uv run --no-sync python tests/test_providers.py
+          uv run --no-sync python tests/test_execution_service.py
       - name: calc parity
         shell: bash
         run: uv run --no-sync python tests/test_calc_port.py
@@ -179,6 +199,16 @@ jobs:
       - name: translation verification gate
         shell: bash
         run: uv run --no-sync python tests/test_translation_verify.py
+      # THE-785: the grade vocabulary (cross_checked / solver_proven / ungraded,
+      # plus the reserved executed) derived from evidence verify_translation,
+      # verify_optimization and z3_check already emit. Mostly pure — fixtures are
+      # hand-built evidence dicts, same reasoning as the translation verification
+      # gate above — with a handful of real z3_check calls at the end to prove the
+      # engine/timeout_ms evidence actually flows through. Needs the sympy/z3
+      # extras this job's `--all-extras` install already provides.
+      - name: grade vocabulary derivation rules
+        shell: bash
+        run: uv run --no-sync python tests/test_grades.py
       # Session workspace confinement. Also sandbox-free: _jail() is path logic over a tempdir, so
       # the boundary can be checked on any runner rather than only where a session can be started.
       # The protocol gate. Asserts the NEGOTIATED version from a real connection,
@@ -198,6 +228,13 @@ jobs:
       - name: result contract (schema validity + product conformance)
         shell: bash
         run: uv run --no-sync python tests/test_contract.py
+      # The run-lifecycle state machine (THE-778/THE-831): identity, cancel,
+      # cleanup and crash-recovery journalling, all against fake providers —
+      # no sandbox, no native executor, so it belongs on the full matrix
+      # alongside the other protocol-neutral suites rather than in `sandbox`.
+      - name: run supervisor lifecycle
+        shell: bash
+        run: uv run --no-sync python tests/test_run_supervisor.py
       # doctor in the environments it exists to diagnose: no native executor, no
       # runtimes, a resolved-but-unrunnable command, an unwritable workspace. A
       # diagnostic is only worth having if it is right about a BROKEN host, and a
@@ -217,6 +254,13 @@ jobs:
       - name: package install isolation
         shell: bash
         run: uv run --no-sync python tests/test_package_isolation.py
+      # THE-791: CODECALC_PACKAGE_ALLOWLIST is unset by default (no behaviour
+      # change) but deny-by-default once configured, with subprocess.run
+      # stubbed so a denial is asserted PRE-side-effect rather than trusted
+      # from the return value alone.
+      - name: package install allowlist (deny-by-default)
+        shell: bash
+        run: uv run --no-sync python tests/test_package_allowlist.py
       # Regressions from the 2026-08-08 bug sweep: lost exactness, wrong widths,
       # crashes on ordinary inputs, a dead ns path, and documented constant
       # names that resolved to nothing.
@@ -229,12 +273,24 @@ jobs:
         # letters, case-insensitive paths and a different separator, and the
         # boundary check must hold under all of them.
         run: uv run --no-sync python tests/test_session_jail.py
+      # tests/test_execution_service.py already runs above ("provider boundary
+      # and execution service (spec identity + receipt)") — that step now also
+      # covers run_submit/run_inspect/run_cancel (THE-778, fake providers, no
+      # sandbox) and session output spill (THE-783, real bash sessions), added
+      # to the same file rather than wired a second time here.
       # The sweeps below were written on Linux and gated only there. Both carry
       # POSIX-only sections that skip themselves, and both are the kind of thing
       # a platform difference breaks quietly — session workers, file
       # descriptors, subprocess semantics — so they run on all three.
       - name: session + worker regressions
         run: uv run --no-sync python tests/test_python_sweep.py
+      # THE-779: CODECALC_SESSION_IDLE_TTL_SECONDS is unset by default (no
+      # expiry, ever) but reaps an idle worker on next access once
+      # configured. Covers both worker languages and asserts on the OS-level
+      # PID, not just the in-memory bookkeeping — same platform reasoning as
+      # the sweep above.
+      - name: session idle-expiry
+        run: uv run --no-sync python tests/test_session_idle_expiry.py
       # No network needed and none permitted: this asserts the package cannot
       # make an outbound request at all, so it cannot flake on connectivity.
       - name: offline guarantee (no network calls anywhere)

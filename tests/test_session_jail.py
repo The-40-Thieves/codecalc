@@ -524,6 +524,124 @@ else:
             else:
                 os.environ["CODECALC_RUNTIME_PATH"] = _saved_runtime
 
+# ── C1: THE-783's spill helpers are jailed like every other session path ────
+# Reproduced before the fix, both directions, in the UNSANDBOXED SERVER
+# process (the Rust sandbox has already returned by the time a spill is
+# written). `_spill_dir` resolved `.codecalc-spill` without `_jail`, and
+# `mkdir(exist_ok=True)` does NOT follow a symlink at the final component —
+# it swallows the EEXIST the link produces and hands back a path that now
+# names the link's target. `O_NOFOLLOW` on the spill FILE guards only the
+# final component, so it never saw the swapped DIRECTORY. Executed code owns
+# the workspace as its cwd, so planting that symlink is a thing a session can
+# actually do, and it bought two primitives:
+#
+#   WRITE  — `_write_spill` creates an attacker-sized, attacker-content
+#            `*.bin` in any directory the server user can reach.
+#   DELETE — `_prune_spill` globs `*.bin` through the same unresolved path
+#            and unlinks everything past `_SPILL_RETENTION`, including files
+#            it never created and did not write.
+#
+# The delete half matters on its own: this repo's convention is that a delete
+# path is held to the same strictness as the write path, and a guard that
+# only covered `_write_spill` would have left `_prune_spill` a standalone
+# arbitrary-unlink primitive.
+_spill_root = pathlib.Path(tempfile.mkdtemp(prefix="codecalc-spill-jail-")).resolve()
+sessions.SESSION_ROOT = _spill_root / "sessions"
+sessions.SESSION_ROOT.mkdir(parents=True, exist_ok=True)
+
+if not _can_symlink(_spill_root):
+    for _name in ("_write_spill refuses a symlinked spill directory",
+                  "no spill payload lands outside the session workspace",
+                  "a pre-existing file outside the workspace is NOT unlinked",
+                  "_prune_spill refuses a symlinked spill directory",
+                  "an oversized session run cannot write through a symlinked spill dir",
+                  "an ordinary spill still writes inside the workspace"):
+        skip(_name, "this account lacks symlink privilege, so the spill helpers "
+                    "cannot be attacked this way here")
+else:
+    _victim = _spill_root / "victim"
+    _victim.mkdir()
+    # A pre-existing file the prune path must never be able to reach. Named
+    # `*.bin` because that is exactly the glob `_prune_spill` unlinks through.
+    _bystander = _victim / "pre-existing.bin"
+    _bystander.write_bytes(b"NOT THE SERVER'S TO DELETE")
+
+    _spill_sid = sessions.start("bash")["session_id"]
+    _spill_d = sessions._session_dir(_spill_sid)
+    # What executed code does with its own cwd.
+    (_spill_d / sessions._SPILL_DIRNAME).symlink_to(_victim, target_is_directory=True)
+
+    def _escapes(fn) -> bool:
+        """True when the helper REFUSED with the jail's own error."""
+        try:
+            fn()
+        except ValueError:
+            return False
+        return True
+
+    # ONE call reproduces BOTH halves: `_write_spill` creates the payload and
+    # then prunes. Retention of 1 means the newly written file is the only one
+    # kept, so the pre-existing bystander — older, and reachable only through
+    # the symlink — is what the prune unlinks. Measured pre-fix: the payload
+    # appeared in `victim/` and `pre-existing.bin` was gone.
+    _old_retention = sessions._SPILL_RETENTION
+    sessions._SPILL_RETENTION = 1
+    try:
+        _escaped_write = _escapes(
+            lambda: sessions._write_spill(_spill_d, "stdout", b"P" * 4096))
+    finally:
+        sessions._SPILL_RETENTION = _old_retention
+    check("_write_spill refuses a symlinked spill directory",
+          not _escaped_write, f"-> escaped={_escaped_write}")
+    check("no spill payload lands outside the session workspace",
+          [p.name for p in sorted(_victim.glob("*.bin"))] == ["pre-existing.bin"],
+          f"-> {[p.name for p in sorted(_victim.glob('*.bin'))]}")
+    check("a pre-existing file outside the workspace is NOT unlinked",
+          _bystander.is_file() and _bystander.read_bytes() == b"NOT THE SERVER'S TO DELETE",
+          f"-> exists={_bystander.exists()}")
+
+    # And the DELETE path refuses on its own, not merely because the write
+    # ahead of it did. Same strictness as the write path is this repo's rule,
+    # and a guard that only sat in `_write_spill` would leave `_prune_spill`
+    # an arbitrary-unlink primitive for the next caller that reaches it.
+    check("_prune_spill refuses a symlinked spill directory",
+          not _escapes(lambda: sessions._prune_spill(_spill_d)))
+
+    # End-to-end through the real entry point: oversized output from executed
+    # code, spilled by `sessions.execute`, with the trap already in place.
+    #
+    # A REDUNDANT confirmation over the direct `_write_spill`/`_prune_spill`
+    # calls above (which already assert the security invariant unconditionally
+    # on synthetic bytes), but a valuable one because it exercises the whole
+    # execute -> spill_if_truncated -> _write_spill path against the live
+    # symlink trap. The producer is a portable `python3` program — no bash, no
+    # /dev/zero, no MSYS binary-pipe — so the fallback runs it natively and
+    # emits the same oversized stream on Linux, macOS AND Windows, keeping this
+    # security check live on the CI runners that have no native executor. (The
+    # earlier bash `head -c /dev/zero | tr` form measured stdout_bytes=0 under
+    # git-bash, which would have made "not escaped" pass vacuously there.)
+    _big = 'import sys; sys.stdout.write("A" * 100000)'
+    try:
+        _res = sessions.execute(_spill_sid, _big, language="python3")
+        _e2e_escaped = "stdout_spill" in _res
+    except ValueError:
+        _e2e_escaped = False
+    check("an oversized session run cannot write through a symlinked spill dir",
+          not _e2e_escaped
+          and [p.name for p in sorted(_victim.glob("*.bin"))] == ["pre-existing.bin"],
+          f"-> escaped={_e2e_escaped} "
+          f"victim={[p.name for p in sorted(_victim.glob('*.bin'))]}")
+
+    # The legitimate case still works: a real directory, no symlink.
+    _ok_sid = sessions.start("bash")["session_id"]
+    _ok_d = sessions._session_dir(_ok_sid)
+    try:
+        _rel = sessions._write_spill(_ok_d, "stdout", b"Q" * 1024)
+        _wrote_inside = (_ok_d / _rel).is_file()
+    except ValueError:
+        _wrote_inside = False
+    check("an ordinary spill still writes inside the workspace", _wrote_inside)
+
 print(f"\n=== {len(FAILS)} FAILURES, {len(SKIPS)} skipped ===" if FAILS else
       f"\n=== ALL SESSION-JAIL TESTS PASS ({len(SKIPS)} skipped) ===")
 sys.exit(1 if FAILS else 0)

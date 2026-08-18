@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/The-40-Thieves/codecalc/main/docs/contract/doctor-v1.schema.json",
   "title": "codecalc doctor report",
-  "description": "`codecalc doctor --json`, version 1.0.0 \u2014 the same contract version and policy as the execution result. Generated from codecalc/contract.py by scripts/check_contract.py.",
+  "description": "`codecalc doctor --json`, version 1.1.0 \u2014 the same contract version and policy as the execution result. Generated from codecalc/contract.py by scripts/check_contract.py.",
   "type": "object",
   "required": [
     "contract_version",

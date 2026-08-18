@@ -1,7 +1,13 @@
 # The codecalc result contract
 
-**Current version: `1.0.0`** · Schema: [`result-v1.schema.json`](result-v1.schema.json) ·
+**Current version: `1.1.0`** · Schema: [`result-v1.schema.json`](result-v1.schema.json) ·
 Source of truth: [`codecalc/contract.py`](../../codecalc/contract.py)
+
+`1.1.0` is a MINOR bump over `1.0.0`: it ADDS a fifth result shape
+(`run_lifecycle`, for the `run_submit`/`run_inspect`/`run_cancel` background-run
+tools) and adds fields to existing results (an execution receipt with
+`session_id`, and grade metadata). Additions only — a `1.0.0` client keeps
+working. See the versioning policy below for why an addition is MINOR.
 
 Every codecalc tool result carries `contract_version`. This document says what
 that number promises, what may change under each part of it, and how a client
@@ -14,17 +20,27 @@ handed to a client as an `outputSchema` and validated with no translation step.
 
 ---
 
-## The four shapes
+## The five shapes
 
-Every result carries `ok` and `contract_version`. Beyond that there are four
+Every result carries `ok` and `contract_version`. Beyond that there are five
 shapes, and a client discriminates them in this order:
 
 | Shape | Discriminator | What it is |
 |---|---|---|
-| **rejected** | no `verdict` | Nothing ran — unknown language, malformed request, an executor that would not start. Carries `error` and a `code`. |
+| **rejected** | no `verdict`, carries `error` | Nothing ran — unknown language, malformed request, an executor that would not start. Carries `error` and a `code`. |
+| **run_lifecycle** | a `run_id` and `state`, no `verdict`/`error`/`backend` | A background-run response from `run_submit`, `run_inspect` *while the run is still active*, or `run_cancel`. Names the run; nothing has run through it yet. |
 | **session** | `backend == "session-worker"` | Ran in a warm session worker. |
 | **compact** | `verdict` present, no `backend` | `execute_code(compact=True)`. |
 | **envelope** | `verdict` present, `backend` in `rust`/`python` | A fresh sandboxed run. All 21 fields. |
+
+**The run_lifecycle shape** (added in `1.1.0`) is the reply the background-run
+tools return before a run finishes — `run_submit`'s handle, a poll of a
+still-running `run_inspect`, or `run_cancel`'s acknowledgement. A *terminal*
+`run_inspect` does not use it: once the run settles, `run_inspect` returns the
+full **envelope** (or, on a failed run, the **rejected** error shape) merged with
+the run's own extras (`run_id`, `state`, `cleaned`, …). Forbidding
+`verdict`/`error`/`backend` on this shape is what keeps it from colliding with
+those, so exactly one branch matches any stamped run response.
 
 **The envelope** is the full shape: 21 fields including `contract_version`, identical
 across both backends because `scripts/check_parity.py` runs both and diffs their
@@ -48,7 +64,7 @@ implementation and the one that was a defect (#117).
 > Both were wrong, and a cross-vendor review found it: compact results, native
 > streaming and session workers all returned shapes the published schema
 > rejected. The version is now stamped at the MCP tool boundary, which is the
-> only place that actually reaches all 48 tools.
+> only place that actually reaches all 51 tools.
 
 Padding the short shapes with nulls so one schema fits everything was considered
 and rejected. It would have made "we could not tell you the exit code" and "the
@@ -116,7 +132,7 @@ practice, so matching it is the only number that means anything.
 ### How a client discovers the version
 
 Read `contract_version` off any result. It is stamped at the **MCP tool
-boundary**, which is the only place that reaches all 48 tools — so it is present
+boundary**, which is the only place that reaches all 51 tools — so it is present
 on success, on failure, on timeout, on a rejected request, on a compact result
 and on a session result alike. `executor.execute()` stamps it too, for callers
 using codecalc as a library rather than over MCP; the stamp uses `setdefault`,
@@ -244,7 +260,7 @@ Real transcripts, captured by running the product. `workdir`, timings and
 ```json
 {
   "ok": true,
-  "contract_version": "1.0.0",
+  "contract_version": "1.1.0",
   "language": "python3",
   "phase": "run",
   "backend": "rust",
@@ -278,7 +294,7 @@ request has a `code` and no `verdict`.
 ```json
 {
   "ok": false,
-  "contract_version": "1.0.0",
+  "contract_version": "1.1.0",
   "language": "python3",
   "phase": "run",
   "backend": "rust",
@@ -310,7 +326,7 @@ request has a `code` and no `verdict`.
 ```json
 {
   "ok": false,
-  "contract_version": "1.0.0",
+  "contract_version": "1.1.0",
   "language": "python3",
   "phase": "run",
   "backend": "rust",
@@ -341,7 +357,7 @@ No `verdict`, because nothing ran.
 ```json
 {
   "ok": false,
-  "contract_version": "1.0.0",
+  "contract_version": "1.1.0",
   "backend": "rust",
   "code": "validation",
   "error": "unknown language 'nosuchlang'. Available: python3, node, bun, deno, ...",
@@ -357,7 +373,7 @@ but they carry the same error half, so a caller branches on `code` identically.
 ```json
 {
   "ok": false,
-  "contract_version": "1.0.0",
+  "contract_version": "1.1.0",
   "code": "validation",
   "code_inferred": true,
   "error": "Sympify of expression 'could not parse 'x +++ ***'' failed ...",
@@ -383,6 +399,140 @@ working** on `1.0.0` — it simply cannot see the new information. The migration
 is opt-in, and the only thing that is genuinely retired is the practice of
 matching on error prose, which was never stable enough to be a contract in the
 first place.
+
+---
+
+## The request half: a canonical spec and its content hash
+
+Everything above describes what comes **back**. This section describes what a
+request **is**, so that two parties can agree on a name for one without shipping
+the whole object around. THE-793.
+
+`providers.ComputationSpec` is the canonical, transport-neutral request. Its
+identity is a byte encoding plus a digest over it:
+
+| Artifact | Where |
+|---|---|
+| Published schema | [`computation-spec-v1.schema.json`](computation-spec-v1.schema.json) |
+| Golden vectors | [`computation-spec-v1.vectors.json`](computation-spec-v1.vectors.json) |
+| Implementation | `codecalc/spec_identity.py` |
+| Version | `COMPUTATION_SPEC_VERSION` — **1.0.0** |
+
+The schema describes the **canonical document**, not the dataclass:
+
+```json
+{"schema_version":"1.0.0","spec":{"code":"print(1)","language":"python3","max_cpu":0,"max_memory_mb":0,"max_output_kb":0,"no_net":false,"stdin":"","timeout":10,"workdir":null}}
+```
+
+Serialize exactly that — UTF-8, object keys sorted, no insignificant whitespace —
+and `sha256` the bytes. The result is prefixed with its algorithm:
+
+```
+sha256:a5093b8724c9815a4d05452288027446d17416b4009dc1e1fde9e36aea163089
+```
+
+### The canonicalization rules
+
+They are stated here because a second implementation has to reproduce them, and
+every one of them is a place where two implementations could silently disagree.
+
+1. **JSON, UTF-8, sorted keys, `(",", ":")` separators.** This is RFC 8785 for
+   the value space a spec can hold. JCS orders keys by UTF-16 code unit and this
+   implementation by code point; the two can only differ above the BMP, and every
+   key is a dataclass field name.
+2. **Every field is emitted, defaults included.** There is no "absent". A spec
+   built with defaults and one with the same values passed explicitly produce
+   identical bytes, and the bytes reconstruct the request without consulting a
+   default table.
+3. **`null` is a value.** `workdir: null` (provider chooses) and `workdir: ""`
+   (an empty path) are different requests with different hashes.
+4. **Booleans are not integers.** `no_net: true` and `no_net: 1` do not collide.
+5. **Array order is kept; object key order is not.** A sequence's order was
+   asked for; a mapping's is an artifact of construction. Tuples and lists encode
+   identically — JSON has one array type.
+6. **`bytes` encode as `{"__bytes_b64__": "<base64>"}`.** A bare base64 string
+   would collide with a text field holding the same characters, so the tag is
+   reserved and a mapping may not use it as a key.
+7. **Floats are refused.** Shortest-round-trip IEEE-754 printing is where
+   canonicalizers diverge between runtimes, and NaN/Infinity are not JSON.
+8. **Anything with no rule is refused** — sets above all, which have no stable
+   iteration order.
+
+**Identity is over the request AS SPELLED, not the normalized runtime.**
+`language: "python"`, `"py"` and `"python3"` all execute on python3, but they are
+three different requests and get three different `spec_hash`es — the hash names
+the request as given, and does not claim two spellings are the same computation.
+Normalizing an alias before hashing would collapse distinct requests onto one
+identity; this contract keeps them distinct. (`max_output_kb: 0` is likewise
+literal-not-magic: it selects the backend's 64 KiB default, not an uncapped
+stream.)
+
+### Secrets are never part of an identity
+
+Canonical bytes are hashed, logged beside receipts and compared across
+processes, so a secret in them is a secret in all three. `ComputationSpec`
+carries **no** credential-bearing field today — `language`, `code`, `stdin`,
+`timeout`, `workdir`, `max_memory_mb`, `max_output_kb`, `max_cpu`, `no_net` — and
+the encoder keeps it that way.
+
+A field name is **tokenised** — split on separators and camelCase boundaries —
+and refused if any token is in `spec_identity.SECRET_BEARING_WORDS`. Tokenising
+rather than exact-matching is load-bearing: `db_password`, `auth_token` and
+`client_secret` are what a real codebase calls these things, and an exact-match
+rule that only knows `password` guards a name nobody uses. Substring matching was
+rejected for the opposite reason — it fires on `author`. The same words are
+applied to **mapping keys** one level deeper, since a field policy cannot see
+inside a `dict`.
+
+Two escape hatches, both declared on the dataclass:
+
+| Attribute | Effect | Use when |
+|---|---|---|
+| `HASH_BY_NAME_FIELDS` | Only the sorted **key names** enter the content | The field really does carry credentials |
+| `NOT_SECRET_FIELDS` | The value is hashed normally | The token rule caught an innocent name (`token_budget`, `cache_key`) |
+
+They are separate on purpose: reaching for the first to silence a false positive
+would silently drop a real value out of the request's identity.
+
+`key` is in the word set deliberately and is the aggressive entry — it catches
+`private_key` and `signing_key`, and also `sort_key`. A false positive costs one
+declared line; a false negative puts a private key inside a hash that gets
+logged.
+
+Changing a credential's value does not change the request's identity; adding or
+removing one does.
+
+### Versioning policy for `COMPUTATION_SPEC_VERSION`
+
+Independent of `CONTRACT_VERSION`: they version different documents and are free
+to move apart.
+
+| Component | Means | Examples |
+|---|---|---|
+| **MAJOR** | An old canonical document is no longer valid, or a rule changed | Removing or renaming a field · retyping one · changing a canonicalization rule · changing a default |
+| **MINOR** | Additive: new optional field, new documented rule for a value kind that was previously refused | Adding a field with a default |
+| **PATCH** | Documentation and descriptions only; the bytes are untouched | Rewording a field description |
+
+**Read this before you store a hash.** Rule 2 means MINOR is additive for the
+*schema* but **not** hash-preserving: adding a field changes every canonical
+document, and therefore every hash. That is the price of bytes that stand alone,
+and it is stated rather than papered over. A consumer that persists spec hashes
+**must** persist `schema_version` beside them and treat hashes from different
+versions as incomparable rather than unequal.
+
+### Changing the request contract
+
+1. Edit `providers.ComputationSpec` and its entry in
+   `COMPUTATION_SPEC_FIELD_DOCS` — the schema generator refuses to publish an
+   undocumented field.
+2. `python scripts/check_contract.py --write` regenerates
+   `computation-spec-v1.schema.json`.
+3. Bump `COMPUTATION_SPEC_VERSION` per the table above and say so here.
+4. **Hand-edit** `computation-spec-v1.vectors.json`. Nothing regenerates it, on
+   purpose: a vector its own generator rewrites cannot detect a change to the
+   encoding, which is the one failure a schema check cannot see — the field set
+   never moves, and every previously published hash silently means something
+   else.
 
 ---
 

@@ -36,12 +36,14 @@ from . import (
     exact,
     execution_service,
     executor,
+    grades,
     logic,
     optimization,
     packages,
     providers,
     run_supervisor,
     runtimes,
+    sessions,
     tools,
     translation,
     units,
@@ -50,7 +52,7 @@ from .mcp_middleware import timeout_middleware
 
 #: Bearer token for the Streamable HTTP transport (THE-786). Unset means the
 #: transport is loopback-only: `serve-http` REFUSES a non-loopback bind
-#: without it, because a token-less bind on a routable interface exposes 48
+#: without it, because a token-less bind on a routable interface exposes 51
 #: unauthenticated code-execution tools to whatever the interface reaches.
 #: stdio ignores this entirely — auth is HTTP middleware, and an MCP client
 #: spawning the server over stdio is already inside the trust boundary.
@@ -103,19 +105,66 @@ def _http_auth() -> dict:
 
 
 _provider_registry = providers.configured_registry()
-_managed_provider = any(
-    row["capabilities"].get("managed_runs")
-    for row in _provider_registry.descriptors()
+# Unconditional (THE-778). Previously built only when a "managed_runs"
+# provider (today: RemoteStrictExecutionProvider) was configured, because the
+# only consumer was ExecutionService.execute()'s managed-provider branch,
+# which itself checks `self.supervisor is None` before using it — so building
+# one for every OTHER provider selection was a genuine no-op. run_submit/
+# run_inspect/run_cancel below are the first consumer that needs a supervisor
+# for the DEFAULT `local` provider too (RunSupervisor.start() already runs a
+# non-managed provider's plain `execute()` on a thread-pool worker — see its
+# own docstring — so nothing about managed_runs is actually required here).
+_run_state_dir = Path(os.environ.get(
+    "CODECALC_RUN_STATE_DIR", Path.home() / ".codecalc" / "runs"
+))
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    """A positive integer from the environment, or `default` — never a raise.
+
+    `int(os.environ.get(NAME, "64"))` defaults only when the variable is
+    ABSENT. Set-but-EMPTY is a different thing and a common one: `export
+    CODECALC_MAX_ACTIVE_RUNS=` in a shell profile, a blank value in a compose
+    file or a systemd `Environment=` line all produce it, and it reached
+    `int("")` -> ValueError at MODULE IMPORT with nothing above it to catch —
+    the server did not start at all. Non-numeric and non-positive values did
+    the same thing one line later, since RunSupervisor rejects a
+    max_active_runs that is not positive.
+
+    Falls back rather than refusing to start, because the failure this
+    replaces was itself a refusal to start over a knob nobody has to set —
+    but LOUDLY on stderr, so an operator who meant to raise the cap is not
+    left believing a typo took effect. Same shape as the allowlist
+    empty-string handling in `packages`, which treats a blank entry as absent
+    instead of as a value.
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value <= 0:
+        import sys
+        print(f"codecalc: ignoring {name}={raw!r} — expected a positive "
+              f"integer; using the default of {default}", file=sys.stderr)
+        return default
+    return value
+
+
+#: Admission cap for run_submit (THE-778 fix round, review Important #3a).
+#: Bounds RunSupervisor's in-memory run table and thread pool against an
+#: unbounded burst of submissions, or a caller that never inspects/cancels
+#: what it starts — nothing else on this path rejects a submission. 64
+#: matches RunSupervisor's own constructor default; the env var lets an
+#: operator raise or lower it without a code change, same pattern as
+#: CODECALC_RUN_STATE_DIR above.
+_max_active_runs = _positive_int_env("CODECALC_MAX_ACTIVE_RUNS", 64)
+_run_supervisor = run_supervisor.RunSupervisor(
+    _provider_registry, state_dir=_run_state_dir, max_active_runs=_max_active_runs
 )
-_run_supervisor = None
-if _managed_provider:
-    _run_state_dir = Path(os.environ.get(
-        "CODECALC_RUN_STATE_DIR", Path.home() / ".codecalc" / "runs"
-    ))
-    _run_supervisor = run_supervisor.RunSupervisor(
-        _provider_registry, state_dir=_run_state_dir
-    )
-    _run_supervisor.recover_orphans()
+_run_supervisor.recover_orphans()
 _execution_service = execution_service.ExecutionService(
     _provider_registry, supervisor=_run_supervisor
 )
@@ -174,7 +223,7 @@ mcp = MCPServer(
 def _coded(fn):
     """Attach an error code to any failing dict a tool returns.
 
-    Wraps at REGISTRATION so all 48 tools are covered by one change instead of
+    Wraps at REGISTRATION so all 51 tools are covered by one change instead of
     121 edits at the return sites. The first attempt put this on
     `guarded_call`, which measured 0 of 8 on the most reachable failures
     because those paths return rather than raise — see errors.py.
@@ -194,7 +243,7 @@ def _coded(fn):
     # executor.execute at all. All three returned unversioned results while the
     # documentation said every result carries a version.
     #
-    # This wrapper is applied to all 48 tools, so stamping here makes that claim
+    # This wrapper is applied to all 51 tools, so stamping here makes that claim
     # true by construction. `stamp` uses setdefault, so the executor's own stamp
     # is not overwritten and the two cannot disagree.
     if inspect.iscoroutinefunction(fn):
@@ -209,9 +258,9 @@ def _coded(fn):
     return _sync
 
 
-# Rebind `mcp.tool` rather than renaming 48 decorator lines. The rename was the
+# Rebind `mcp.tool` rather than renaming 51 decorator lines. The rename was the
 # first attempt and broke four suites plus the CI round-trip check, all of which
-# count declarations with `grep -c '^@mcp\.tool'` and read 0 against 48 served.
+# count declarations with `grep -c '^@mcp\.tool'` and read 0 against 51 served.
 # That identity is load-bearing here, so the change that preserves it is the
 # right one: every `@mcp.tool()` below is unchanged and every counter still
 # works, while the wrapper is applied underneath.
@@ -257,7 +306,39 @@ _COMPACT_ALWAYS = ("ok", "verdict", "stdout", "exit_code")
 #: `total_ms` are diagnostics a caller can live without, and `unenforced` is
 #: not. An empty `unenforced` is omitted because it costs tokens to say
 #: nothing; a non-empty one is the entire point of the field.
-_COMPACT_DISCLOSURE = ("unenforced", "output_error", "provider")
+#:
+#: The `stdout_spill`/`stderr_spill` pair (THE-783) belongs here for the same
+#: reason: compact mode already keeps a truncated `stdout` prefix via
+#: _COMPACT_ALWAYS, and dropping the pointer to the FULL stream on top of
+#: that would make "spill instead of just truncating" true for every caller
+#: except the ones who asked for the small reply — exactly backwards, since a
+#: compact caller is the one least likely to have the full text any other
+#: way.
+_COMPACT_DISCLOSURE = (
+    "unenforced", "output_error", "provider",
+    "stdout_spill", "stderr_spill", "stdout_spill_capped", "stderr_spill_capped",
+)
+
+#: The receipt keys compact mode keeps, in the order they are emitted.
+#:
+#: THE-782 grew the receipt from provider identity to provider identity PLUS
+#: content hashes and determinism inputs. Copied wholesale, that took a compact
+#: result from 603 to 1019 bytes — a 69% increase in the one mode whose entire
+#: purpose is not spending tokens, and past the bar this file already set when
+#: it measured a disclosure at 171 of a 199-token reply and called that a defect.
+#:
+#: So the same split applies here as to `unenforced`: keep what a caller must
+#: ACT on, drop what they can fetch. `limits` stays whole because it is the
+#: unapplied-guarantee half that #117 exists for, and `spec_hash` stays because
+#: naming which request this was is what THE-782 added. `provider_version`,
+#: `interface_version`, `host_class`, `source_sha256`, `spec_schema_version` and
+#: the determinism block are descriptive, unchanged between calls, and one
+#: non-compact call away — which the caller is told, rather than left to notice.
+#: `session_id` (F6) is kept, not dropped: it is part of what makes a receipt
+#: distinguish two runs of the same spec in different sessions, so dropping it in
+#: compact mode would reopen F6 for compact session receipts. It is one short
+#: uuid or null.
+_COMPACT_RECEIPT = ("receipt_version", "provider_id", "session_id", "spec_hash", "limits")
 
 
 def compact_result(result: dict) -> dict:
@@ -294,6 +375,16 @@ def compact_result(result: dict) -> dict:
     if terse:
         out["unenforced"] = [e.split(":", 1)[0].strip() for e in terse]
         out["unenforced_detail"] = "call without compact=True for the reason and remedy of each"
+
+    # Same treatment for the execution receipt (THE-782). See _COMPACT_RECEIPT.
+    receipt = out.get("provider")
+    if isinstance(receipt, dict):
+        dropped = [key for key in receipt if key not in _COMPACT_RECEIPT]
+        out["provider"] = {key: receipt[key] for key in _COMPACT_RECEIPT
+                           if key in receipt}
+        if dropped:
+            out["provider"]["receipt_detail"] = (
+                "call without compact=True for " + ", ".join(sorted(dropped)))
     return out
 
 
@@ -324,6 +415,17 @@ def execute_code(
     - `compact`: drop the diagnostic fields (timings, workdir, platform). Never
       drops `unenforced` or `output_error` — if a guarantee you asked for was
       not applied, a compact result still says so.
+
+    With `session_id` set and `max_output_kb` left at its default, output that
+    would otherwise be truncated is instead SPILLED (THE-783): the inline
+    `stdout`/`stderr` still carry the same truncated prefix as before, and
+    `stdout_spill`/`stderr_spill` name a `codecalc://session/{sid}/files/...`
+    resource carrying the fuller stream (session_read_file or the resource
+    route reads it back) — capped at 4 MiB, `..._spill_capped: true` if even
+    that was not enough to hold everything. Passing an EXPLICIT
+    `max_output_kb` is honoured as a literal ceiling with no spill, same as
+    before. Session-LESS runs (no `session_id`) have no workspace to spill
+    into and keep the old truncate-and-drop behaviour.
     """
     timeout = min(timeout, 120)
     spec = providers.ComputationSpec(
@@ -469,6 +571,212 @@ async def execute_code_stream(
     )
 
 
+#: Keys a terminal run_inspect() result carries BEYOND execute_code's own
+#: result shape (THE-778 fix round, review Important #2): RunHandle's own
+#: fields, RunSupervisor's state bookkeeping, and the one best-effort
+#: disclosure (`cleanup_error`) that appears only if a provider's own
+#: cleanup() fails. Named explicitly, not left implicit, so the key-set
+#: parity test in tests/test_execution_service.py has one place to compare
+#: against instead of a second hardcoded copy of this list — the exact
+#: pattern that let `provider` silently go missing from run_inspect in the
+#: first place (execute_code and run_inspect drifted because nothing
+#: compared their shapes).
+_RUN_EXTRA_KEYS = frozenset({
+    "run_id", "provider_id", "started_at", "deadline", "state", "cleaned",
+    "cleanup_error",
+})
+
+
+@mcp.tool()
+def run_submit(
+    language: str,
+    code: str,
+    stdin: str = "",
+    timeout: int = 30,
+    max_memory_mb: int = 0,
+    max_output_kb: int = 0,
+    max_cpu: int = 0,
+    no_net: bool = False,
+    provider: str | None = None,
+) -> dict:
+    """Submit code for BACKGROUND execution; returns a run_id immediately.
+
+    Same request shape as execute_code (minus session_id: a run is a
+    standalone process, not a session workspace). The work proceeds on a
+    background worker; poll it with run_inspect(run_id) and, if needed, stop
+    it early with run_cancel(run_id).
+
+    Use this instead of execute_code when you would rather not hold an MCP
+    call open for the whole computation. `timeout` is still the WORK's own
+    deadline (same 120s ceiling as execute_code) — it bounds the run, not how
+    long you wait to collect it.
+
+    Admission is capped (CODECALC_MAX_ACTIVE_RUNS, default 64): past that
+    many runs still running/cancelling at once, this returns a
+    resource_exhausted error rather than growing without bound — call
+    run_inspect/run_cancel to make room, or wait for one to finish.
+
+    Retention: see run_inspect.
+    """
+    if _run_supervisor is None:
+        return errors.error_result(
+            errors.INTERNAL, "run supervisor unavailable",
+            provider_error="run_supervisor_unavailable",
+        )
+    timeout = min(timeout, 120)
+    spec = providers.ComputationSpec(
+        language=language, code=code, stdin=stdin, timeout=timeout,
+        max_memory_mb=max_memory_mb, max_output_kb=max_output_kb,
+        max_cpu=max_cpu, no_net=no_net,
+    )
+    try:
+        handle = _run_supervisor.start(spec, provider_id=provider)
+    except providers.UnknownProvider as exc:
+        return errors.error_result(
+            errors.VALIDATION, str(exc), provider_error=exc.code,
+            requested_provider=exc.provider_id, available_providers=list(exc.available),
+        )
+    except run_supervisor.TooManyActiveRuns as exc:
+        return errors.error_result(
+            errors.RESOURCE_EXHAUSTED,
+            f"{exc.active} runs are already active against a limit of "
+            f"{exc.limit}; call run_inspect/run_cancel to free one up, or "
+            "wait for one to finish, then retry",
+            active_runs=exc.active, limit=exc.limit,
+        )
+    return {
+        "ok": True, "run_id": handle.run_id, "provider_id": handle.provider_id,
+        "started_at": handle.started_at, "deadline": handle.deadline,
+        "state": "running",
+    }
+
+
+@mcp.tool()
+def run_inspect(run_id: str) -> dict:
+    """Poll a background run started with run_submit.
+
+    While running: {"ok": True, "state": "running"|"cancelling", "run_id",
+    "provider_id", "started_at", "deadline"}.
+
+    Once terminal (`state` "finished"/"cleaned"/"recovered"), this returns
+    the SAME result shape execute_code returns — stdout/stderr/exit_code/
+    verdict/unenforced/provider (the interface_version/provider_id/limits
+    receipt)/... — merged with a small set of run_* extras (run_id,
+    provider_id, started_at, deadline, state, cleaned; see server.py's
+    _RUN_EXTRA_KEYS). Read `ok` and `verdict` on a terminal result to tell a
+    clean finish from a failure; a
+    run stopped by run_cancel is only reflected there for a provider that
+    actually supports cancellation (see run_cancel's own docstring) — check
+    the result the same way you would any other run.
+
+    Retention: a finished run's result stays inspectable for the life of
+    this server process — call this as many times as you like; nothing is
+    consumed by reading it. What IS released on the first terminal read is
+    the PROVIDER's own resources for that run (RunSupervisor.cleanup(),
+    idempotent on repeat calls) — the in-memory record of the run itself is
+    not evicted; there is no cap or TTL on it here, deliberately: the durable
+    state machine, leases and TTL-based eviction are out of this residual's
+    scope (see run_supervisor.py's own docstring). A long-lived server that
+    calls run_submit very many times will grow this table; the on-disk
+    crash-recovery journal underneath it is already bounded
+    (RunSupervisor.max_completed), independent of this.
+    """
+    if _run_supervisor is None:
+        return errors.error_result(
+            errors.INTERNAL, "run supervisor unavailable",
+            provider_error="run_supervisor_unavailable",
+        )
+    try:
+        status = _run_supervisor.inspect(run_id)
+    except KeyError:
+        return errors.error_result(
+            errors.VALIDATION, f"unknown run {run_id!r}",
+            provider_error="unknown_run", run_id=run_id,
+        )
+    if status["state"] not in {"finished", "cleaned", "recovered"}:
+        return {"ok": True, **status}
+    try:
+        result = dict(_run_supervisor.wait(run_id, timeout=0))
+    except TimeoutError:
+        # Should be unreachable: `status` above already reported a terminal
+        # state, so the future backing it is done. Reported rather than
+        # assumed, in case RunSupervisor's state machine changes under this.
+        return errors.error_result(
+            errors.INTERNAL,
+            f"run {run_id!r} reported state {status['state']!r} but its "
+            "result was not yet collectible",
+            provider_error="run_result_not_collectible", run_id=run_id,
+        )
+    try:
+        _run_supervisor.cleanup(run_id)
+    except providers.ProviderOperationFailure as exc:
+        # Best-effort and disclosed, not fatal: the CALLER's result is
+        # already collected above and is correct regardless of whether the
+        # provider released its own side of the run. Failing the whole
+        # inspect call here would poison every future poll of this run_id
+        # over a resource-release problem that has nothing to do with the
+        # result being reported.
+        result = {**result, "cleanup_error": str(exc)}
+    # F9 (cross-vendor): re-read the status AFTER cleanup(). `status` above was
+    # captured pre-cleanup, so returning it made the FIRST terminal read report
+    # cleaned=false (state "finished") and the NEXT read cleaned=true (state
+    # "cleaned") — a spurious change for a caller polling to completion. A
+    # successful cleanup advanced the run to "cleaned"; a failed one left it
+    # "finished" with cleanup_error already appended above. Either way the fresh
+    # status is the accurate one.
+    status = _run_supervisor.inspect(run_id)
+    return {**result, **status}
+
+
+@mcp.tool()
+def run_cancel(run_id: str) -> dict:
+    """Cancel a background run started with run_submit.
+
+    Idempotent: calling this on a run that is already finished/cleaned
+    reports `cancelled: false, state: <its actual terminal state>` rather
+    than erroring — matching execute_code's own "no partial result" rule,
+    there is nothing partial to hand back either way.
+
+    Propagation depends on the SELECTED PROVIDER (see
+    list_execution_providers' `cancel` capability). The built-in `local`
+    provider does not support stopping a run once it has started; that is
+    reported honestly here rather than silently pretended to have worked —
+    the computation keeps running to completion and its result stays
+    available via run_inspect, so bound it in advance with run_submit's own
+    `timeout` instead. A provider that DOES advertise `cancel: true` reaches
+    the full spawned process tree the same way execute_code's own
+    cancellation does — RunSupervisor already owns that; this tool only
+    calls it.
+    """
+    if _run_supervisor is None:
+        return errors.error_result(
+            errors.INTERNAL, "run supervisor unavailable",
+            provider_error="run_supervisor_unavailable",
+        )
+    try:
+        result = _run_supervisor.cancel(run_id)
+    except KeyError:
+        return errors.error_result(
+            errors.VALIDATION, f"unknown run {run_id!r}",
+            provider_error="unknown_run", run_id=run_id,
+        )
+    except providers.UnsupportedCapability as exc:
+        return errors.error_result(
+            errors.VALIDATION,
+            f"provider {exc.provider_id!r} does not support cancelling a "
+            "run once it has started; the computation continues to "
+            "completion and its result stays available via run_inspect",
+            provider_error=exc.code, requested_provider=exc.provider_id,
+            run_id=run_id,
+        )
+    except providers.ProviderOperationFailure as exc:
+        return errors.error_result(
+            errors.INTERNAL, str(exc), provider_error=exc.code,
+            requested_provider=exc.provider_id, run_id=run_id,
+        )
+    return {"ok": True, **result}
+
+
 @mcp.tool()
 def evaluate_expression(expression: str) -> dict:
     """Symbolically evaluate or simplify a math expression, e.g. 'integrate(x**2, x)' or 'sqrt(144) + 2**10'."""
@@ -483,8 +791,17 @@ def truth_table(expression: str) -> dict:
 
 @mcp.tool()
 def z3_check(smt2: str) -> dict:
-    """Check an SMT-LIB2 formula with Z3: sat/unsat/unknown plus a model. Example: '(declare-const x Int)(assert (> x 5))(check-sat)'."""
-    return logic.z3_check(smt2)
+    """Check an SMT-LIB2 formula with Z3: sat/unsat/unknown plus a model. Example:
+    '(declare-const x Int)(assert (> x 5))(check-sat)'.
+
+    `unsat` is graded `solver_proven` — see `grade_basis` for the engine
+    version and timeout bound it was decided within. `sat` is graded
+    `ungraded`: it's a real decided answer, just not a proof — reserving
+    `solver_proven` for `unsat` means a counterexample can never wear a
+    proof grade. `unknown` carries no proof either way and is also graded
+    `ungraded`.
+    """
+    return grades.grade_z3_check(logic.z3_check(smt2))
 
 
 @mcp.tool()
@@ -569,7 +886,7 @@ def update_runtimes(languages: str = "", apply: bool = False, timeout: int = 600
 def session_file_resource(session_id: str, path: str):
     """MCP resource: session workspace file. str for text, bytes for binary."""
     result = _session_service.read_file(
-        session_id, path, max_bytes=4 * 1024 * 1024
+        session_id, path, max_bytes=sessions.RESOURCE_MAX_BYTES
     )
     if not result.get("ok"):
         raise ValueError(f"no such file: {path}")
@@ -622,7 +939,9 @@ def session_run(session_id: str, entry_file: str, language: str | None = None,
 
     Runs as a fresh process in the session workdir (not the REPL worker), so
     relative imports and data files resolve. Returns stdout/stderr/verdict
-    plus the entry file's path.
+    plus the entry file's path. Oversized output spills into the session
+    workspace the same way execute_code's does — see its docstring for
+    `stdout_spill`/`stderr_spill`.
     """
     return _session_service.run_file(
         session_id, entry_file, language=language, stdin=stdin, timeout=timeout
@@ -829,8 +1148,12 @@ def verify_translation(source_code: str, source_language: str,
     Use it after porting anything: python3 -> go, node -> rust, a rewritten
     function against the original. Pair with compare_edge_cases to find the
     inputs worth testing.
+
+    A pass is graded `cross_checked` (two independent implementations, run
+    and agreeing — see `grade_basis` for which runtimes). A non-pass is
+    graded `ungraded`: never a softer positive grade.
     """
-    return translation.verify_translation(
+    result = translation.verify_translation(
         source_language, source_code, target_language, target_code,
     # The FULL set, not DEFAULT_EDGE_INPUTS[:4]. The slice kept '', '0', '1', '-1'
         # and discarded '10', '100' and '0.1\n0.2' — the multi-digit cases and the
@@ -848,6 +1171,7 @@ def verify_translation(source_code: str, source_language: str,
         #
         # Cost of the change, measured: 0.38s -> 0.67s per call.
         test_inputs if test_inputs else translation.DEFAULT_EDGE_INPUTS)
+    return grades.grade_verify_translation(result, source_language, target_language)
 
 
 @mcp.tool()
@@ -879,10 +1203,16 @@ def verify_optimization(original: str, candidate: str, language: str,
     1.09x" is the answer an optimiser that fabricates wins cannot give. A
     candidate that is faster but wrong fails the first gate, and its speed is
     never measured, because a faster wrong answer is not an optimisation.
+
+    An accepted result is graded `cross_checked` (see `grade_basis` for the
+    runtime and the measured speedup). A rejection — wrong OR merely not
+    faster enough — is graded `ungraded`: correctness alone does not earn a
+    grade for the optimisation claim this tool exists to answer.
     """
-    return optimization.verify_optimization(
+    result = optimization.verify_optimization(
         original, candidate, language, test_inputs=test_inputs,
         sizes=sizes, min_speedup=min_speedup)
+    return grades.grade_verify_optimization(result, result.get("language", language))
 
 
 @mcp.tool()

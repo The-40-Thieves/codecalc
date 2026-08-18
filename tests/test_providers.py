@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+import enum
 import json
+import os
+import subprocess
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -11,9 +15,12 @@ from pathlib import Path
 from _provider_conformance import run_execution_conformance
 from jsonschema import Draft202012Validator
 
-from codecalc import contract, providers
+from codecalc import contract, providers, spec_identity
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+SPEC_SCHEMA_PATH = REPO_ROOT / "docs" / "contract" / "computation-spec-v1.schema.json"
+SPEC_VECTORS_PATH = REPO_ROOT / "docs" / "contract" / "computation-spec-v1.vectors.json"
 
 FAILS: list[str] = []
 
@@ -721,7 +728,420 @@ def test_piston_execution_returns_a_redacted_transport_error_contract() -> None:
           and "[REDACTED]" in serialized)
 
 
+# ═══ spec identity: canonical bytes, content hash, published schema (THE-793) ═══
+#
+# THE-790 built the canonical REQUEST. What was missing was its IDENTITY: two
+# callers building the same request could not agree on a name for it, so nothing
+# downstream — a cache, a receipt, a provenance record — could say "this is the
+# same computation" without comparing whole objects.
+
+
+def _spec(**overrides: object) -> providers.ComputationSpec:
+    base: dict = {"language": "python3", "code": 'print("x")'}
+    base.update(overrides)
+    return providers.ComputationSpec(**base)  # type: ignore[arg-type]
+
+
+def test_spec_canonical_bytes_ignore_construction_order() -> None:
+    """Equivalent requests hash the same however they were built."""
+    keyword_first = providers.ComputationSpec(
+        timeout=5, code="print(1)", language="python3", no_net=True,
+    )
+    keyword_last = providers.ComputationSpec(
+        language="python3", code="print(1)", no_net=True, timeout=5,
+    )
+    positional = providers.ComputationSpec("python3", "print(1)", "", 5,
+                                           None, 0, 0, 0, True)
+
+    check("keyword order does not change the canonical bytes",
+          spec_identity.canonical_bytes(keyword_first)
+          == spec_identity.canonical_bytes(keyword_last))
+    check("positional construction does not change the canonical bytes",
+          spec_identity.canonical_bytes(positional)
+          == spec_identity.canonical_bytes(keyword_first))
+    check("equivalent requests share one content hash",
+          spec_identity.spec_hash(positional) == spec_identity.spec_hash(keyword_last))
+
+    # A default left alone and the same value passed explicitly are the same
+    # request. Canonicalization emits every field, so neither can be "absent".
+    check("a defaulted field and the same value passed explicitly agree",
+          spec_identity.spec_hash(_spec())
+          == spec_identity.spec_hash(_spec(stdin="", timeout=10, workdir=None,
+                                           max_memory_mb=0, max_output_kb=0,
+                                           max_cpu=0, no_net=False)))
+    check("a different request gets a different hash",
+          spec_identity.spec_hash(_spec()) != spec_identity.spec_hash(_spec(timeout=11)))
+
+
+def test_spec_canonical_form_is_deterministic_json() -> None:
+    """The rules the hash rests on, asserted rather than described."""
+    spec = _spec(code='print("héllo")', workdir=None)
+    raw = spec_identity.canonical_bytes(spec)
+    document = json.loads(raw)
+
+    check("canonical bytes are UTF-8", raw.decode("utf-8") == raw.decode())
+    check("canonical bytes carry no insignificant whitespace",
+          b", " not in raw and b": " not in raw and b"\n" not in raw)
+    check("canonical object keys are sorted",
+          list(document["spec"]) == sorted(document["spec"]))
+    check("the canonical document names the schema version it was built under",
+          document["schema_version"] == providers.COMPUTATION_SPEC_VERSION)
+    check("every dataclass field reaches the canonical document",
+          set(document["spec"])
+          == {f.name for f in dataclasses.fields(providers.ComputationSpec)})
+    check("None is a value, not an absence", document["spec"]["workdir"] is None)
+    check("None and the empty string are different requests",
+          spec_identity.spec_hash(_spec(workdir=None))
+          != spec_identity.spec_hash(_spec(workdir="")))
+    check("booleans stay booleans and are not folded into 0/1",
+          spec_identity.canonical_bytes(_spec(no_net=True)).find(b'"no_net":true') > 0)
+    check("booleans and integers do not collide",
+          spec_identity.spec_hash(_spec(no_net=True))
+          != spec_identity.spec_hash(_spec(no_net=1)))
+    check("the content hash names its algorithm",
+          spec_identity.spec_hash(spec).startswith("sha256:")
+          and len(spec_identity.spec_hash(spec)) == len("sha256:") + 64)
+
+
+def test_spec_hash_is_stable_across_processes() -> None:
+    """A hash that depends on process state is not an identity.
+
+    Run in a FRESH interpreter with hash randomization on, because that is the
+    exact way a canonicalizer built on `set` iteration or `hash()` produces a
+    stable-looking value inside one process and a different one in the next.
+    """
+    spec = _spec(code="print(sum(range(3)))", stdin="4\n", max_cpu=2, no_net=True)
+    expected = spec_identity.spec_hash(spec)
+
+    probe = (
+        "from codecalc import providers, spec_identity;"
+        "print(spec_identity.spec_hash(providers.ComputationSpec("
+        "language='python3', code='print(sum(range(3)))', stdin='4\\n',"
+        " max_cpu=2, no_net=True)))"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=REPO_ROOT, capture_output=True, text=True, timeout=120,
+        env={**os.environ, "PYTHONHASHSEED": "random"},
+    )
+    check("a fresh interpreter computes the same content hash",
+          proc.returncode == 0 and proc.stdout.strip() == expected)
+
+
+class _Colour(enum.Enum):
+    RED = "red"
+
+
+@dataclasses.dataclass(frozen=True)
+class _Nested:
+    name: str
+    weight: int
+
+
+@dataclasses.dataclass(frozen=True)
+class _Wide:
+    """A spec-shaped dataclass covering every value kind the rules name."""
+
+    text: str
+    number: int
+    flag: bool
+    absent: str | None
+    blob: bytes
+    items: tuple[str, ...]
+    mapping: dict
+    nested: _Nested
+    colour: _Colour
+
+
+@dataclasses.dataclass(frozen=True)
+class _Floaty:
+    ratio: float
+
+
+@dataclasses.dataclass(frozen=True)
+class _Setty:
+    tags: set
+
+
+def test_spec_canonicalization_refuses_what_it_cannot_hash_stably() -> None:
+    """Every value kind has a rule, and the rule for "no rule" is to refuse."""
+    wide = _Wide(
+        text="t", number=7, flag=False, absent=None, blob=b"\x00\xff",
+        items=("b", "a"), mapping={"z": 1, "a": 2}, nested=_Nested("n", 3),
+        colour=_Colour.RED,
+    )
+    document = json.loads(spec_identity.canonical_bytes(wide))["spec"]
+
+    check("sequence order is preserved because it is semantic",
+          document["items"] == ["b", "a"])
+    check("a tuple and a list are the same JSON array",
+          spec_identity.canonical_bytes(wide)
+          == spec_identity.canonical_bytes(dataclasses.replace(wide, items=["b", "a"])))
+    check("mapping keys are sorted so insertion order cannot leak in",
+          list(document["mapping"]) == ["a", "z"]
+          and spec_identity.canonical_bytes(wide)
+          == spec_identity.canonical_bytes(
+              dataclasses.replace(wide, mapping={"a": 2, "z": 1})))
+    check("a nested dataclass canonicalizes as its own object",
+          document["nested"] == {"name": "n", "weight": 3})
+    check("an enum canonicalizes as its value", document["colour"] == "red")
+    check("bytes are tagged base64 rather than an ambiguous string",
+          document["blob"] == {spec_identity.BYTES_TAG: "AP8="})
+
+    def refused(instance: object) -> bool:
+        try:
+            spec_identity.canonical_bytes(instance)
+        except spec_identity.UncanonicalizableValue:
+            return True
+        return False
+
+    check("a float is refused rather than silently rounded", refused(_Floaty(0.1)))
+    check("a set is refused because it has no stable order", refused(_Setty({"a"})))
+    check("a non-string mapping key is refused",
+          refused(dataclasses.replace(wide, mapping={1: "a"})))
+    check("the bytes tag is reserved and cannot be forged by a mapping",
+          refused(dataclasses.replace(wide, mapping={spec_identity.BYTES_TAG: "AA=="})))
+
+
+@dataclasses.dataclass(frozen=True)
+class _SecretSpec:
+    code: str
+    env: dict
+
+
+@dataclasses.dataclass(frozen=True)
+class _ByNameSpec:
+    code: str
+    env: dict
+
+    HASH_BY_NAME_FIELDS = ("env",)
+
+
+@dataclasses.dataclass(frozen=True)
+class _CompoundSecretSpec:
+    """The names a real codebase uses. None of them is the bare word."""
+
+    code: str
+    db_password: str
+    auth_token: str
+    client_secret: str
+    apiKey: str  # camelCase on purpose; the tokeniser must split it
+
+
+@dataclasses.dataclass(frozen=True)
+class _MappingSecretSpec:
+    code: str
+    metadata: dict
+
+
+@dataclasses.dataclass(frozen=True)
+class _DeclaredNotSecretSpec:
+    code: str
+    token_budget: int
+
+    NOT_SECRET_FIELDS = ("token_budget",)
+
+
+def test_spec_canonical_content_never_carries_secret_values() -> None:
+    """The identity of a request must not become a place secrets are stored."""
+    today = {f.name for f in dataclasses.fields(providers.ComputationSpec)}
+    check("ComputationSpec declares no secret-bearing field today",
+          not (today & spec_identity.SECRET_BEARING_FIELD_NAMES))
+
+    try:
+        spec_identity.canonical_bytes(_SecretSpec(code="x", env={"TOKEN": "s3cret"}))
+        refused = False
+    except spec_identity.UncanonicalizableValue as exc:
+        refused = "env" in str(exc)
+    check("an undeclared secret-bearing field is refused, not hashed", refused)
+
+    by_name = spec_identity.canonical_bytes(
+        _ByNameSpec(code="x", env={"TOKEN": "s3cret", "API_KEY": "also-secret"}))
+    check("a declared secret-bearing field is hashed by NAME only",
+          json.loads(by_name)["spec"]["env"] == ["API_KEY", "TOKEN"])
+    check("no secret value reaches the canonical bytes",
+          b"s3cret" not in by_name and b"also-secret" not in by_name)
+    check("changing a secret VALUE does not change the request identity",
+          spec_identity.spec_hash(_ByNameSpec(code="x", env={"TOKEN": "a"}))
+          == spec_identity.spec_hash(_ByNameSpec(code="x", env={"TOKEN": "b"})))
+    check("changing a secret NAME does change the request identity",
+          spec_identity.spec_hash(_ByNameSpec(code="x", env={"TOKEN": "a"}))
+          != spec_identity.spec_hash(_ByNameSpec(code="x", env={"OTHER": "a"})))
+
+
+def test_secret_refusal_reads_compound_names_not_just_bare_words() -> None:
+    """`db_password` is not the word `password`, and a gate that only knows the
+    bare word protects nothing a real codebase would actually be named.
+
+    Found by cross-vendor review of the first version of this module, which
+    matched the field name EXACTLY against a twelve-word set: `db_password`,
+    `auth_token` and `client_secret` all hashed their values unrefused while the
+    docstring claimed the rule was "a gate rather than advice".
+    """
+    def refusal(instance: object) -> str:
+        try:
+            spec_identity.canonical_bytes(instance)
+        except spec_identity.UncanonicalizableValue as exc:
+            return str(exc)
+        return ""
+
+    # S106 noqa: these are fixture values for a test whose whole subject is
+    # credential-shaped field NAMES. Nothing here is a real credential.
+    compound = refusal(_CompoundSecretSpec(
+        code="x", db_password="hunter2", auth_token="abc123",  # noqa: S106
+        client_secret="shh", apiKey="k"))  # noqa: S106
+    check("a compound secret field name is refused", bool(compound))
+    check("the refusal names the field it stopped on", "db_password" in compound)
+
+    for field, value in (("db_password", "hunter2"), ("auth_token", "abc123"),
+                         ("client_secret", "shh"), ("apiKey", "k")):
+        one = dataclasses.make_dataclass(
+            "_One", [("code", str), (field, str)], frozen=True)
+        check(f"{field} alone is refused", bool(refusal(one("x", value))))
+
+    check("a mapping KEY that names a secret is refused too",
+          bool(refusal(_MappingSecretSpec(code="x",
+                                          metadata={"auth_token": "abc123"}))))
+    check("an innocent mapping key still hashes",
+          not refusal(_MappingSecretSpec(code="x", metadata={"run_label": "a"})))
+
+    # The cost of a token rule is false positives, so there is a reviewable way
+    # out that keeps the VALUE in the identity — distinct from HASH_BY_NAME_FIELDS,
+    # which silently drops it.
+    check("a field declared not-secret hashes its value normally",
+          json.loads(spec_identity.canonical_bytes(
+              _DeclaredNotSecretSpec(code="x", token_budget=7)))
+          ["spec"]["token_budget"] == 7)
+    undeclared = dataclasses.make_dataclass(
+        "_Undeclared", [("code", str), ("token_budget", int)], frozen=True)
+    check("...and without that declaration the same name is refused",
+          bool(refusal(undeclared("x", 7))))
+
+    check("an innocent field that merely CONTAINS a secret word is not refused",
+          not refusal(dataclasses.make_dataclass(
+              "_Author", [("code", str), ("author", str)], frozen=True)("x", "me")))
+    check("ComputationSpec's own field names still pass the tokeniser",
+          not refusal(providers.ComputationSpec(language="python3", code="x")))
+
+
+def test_published_spec_schema_cannot_drift_from_the_dataclass() -> None:
+    """The published document is derived from the dataclass, then diffed."""
+    check("the spec schema is published", SPEC_SCHEMA_PATH.exists())
+    published = json.loads(SPEC_SCHEMA_PATH.read_text(encoding="utf-8"))
+    generated = providers.build_spec_schema(
+        dialect=published.get("$schema"), schema_id=published.get("$id"))
+
+    check("the published spec schema matches the generator", published == generated)
+
+    Draft202012Validator.check_schema(published)
+    validator = Draft202012Validator(published)
+    properties = published["$defs"]["computation_spec"]["properties"]
+    declared = {f.name for f in dataclasses.fields(providers.ComputationSpec)}
+
+    check("the published property set is exactly the dataclass field set",
+          set(properties) == declared and len(declared) >= 5)
+    check("every canonical field is required, defaults included",
+          sorted(published["$defs"]["computation_spec"]["required"]) == sorted(declared))
+    check("the spec object is closed so an unknown field cannot pass unhashed",
+          published["$defs"]["computation_spec"]["additionalProperties"] is False)
+    check("every field carries a description",
+          all(properties[name].get("description") for name in properties))
+    check("the schema states the version the canonical document declares",
+          published["properties"]["schema_version"]["const"]
+          == providers.COMPUTATION_SPEC_VERSION)
+    check("a real canonical document satisfies the published schema",
+          validator.is_valid(json.loads(spec_identity.canonical_bytes(_spec()))))
+    check("a canonical document with an extra field is rejected",
+          not validator.is_valid({"schema_version": providers.COMPUTATION_SPEC_VERSION,
+                                  "spec": {**json.loads(
+                                      spec_identity.canonical_bytes(_spec()))["spec"],
+                                      "surprise": 1}}))
+
+    policy = (REPO_ROOT / "docs" / "contract" / "README.md").read_text(encoding="utf-8")
+    check("the spec schema version is documented",
+          providers.COMPUTATION_SPEC_VERSION in policy
+          and "computation-spec-v1.schema.json" in policy)
+
+
+def test_spec_golden_vectors_pin_the_canonical_encoding() -> None:
+    """Committed vectors, recomputed. Changing a rule turns these red.
+
+    Deliberately NOT regenerated by any --write flag: a vector the generator
+    rewrites is the generator reading its own output, which is a green check
+    for a comparison that never happened.
+    """
+    check("golden vectors are published", SPEC_VECTORS_PATH.exists())
+    document = json.loads(SPEC_VECTORS_PATH.read_text(encoding="utf-8"))
+    vectors = document["vectors"]
+
+    check("the vector file names the schema version it pins",
+          document["schema_version"] == providers.COMPUTATION_SPEC_VERSION)
+    check("there are enough vectors to be a corpus rather than an example",
+          len(vectors) >= 5)
+
+    wrong_bytes, wrong_hash = [], []
+    for vector in vectors:
+        spec = providers.ComputationSpec(**vector["kwargs"])
+        if spec_identity.canonical_bytes(spec).decode() != vector["canonical"]:
+            wrong_bytes.append(vector["name"])
+        if spec_identity.spec_hash(spec) != vector["spec_hash"]:
+            wrong_hash.append(vector["name"])
+
+    check(f"all {len(vectors)} vectors reproduce their canonical bytes", not wrong_bytes)
+    check(f"all {len(vectors)} vectors reproduce their content hash", not wrong_hash)
+    check("the vectors exercise defaulted and fully-explicit construction",
+          any(len(v["kwargs"]) == 2 for v in vectors)
+          and any(len(v["kwargs"])
+                  == len(dataclasses.fields(providers.ComputationSpec)) for v in vectors))
+
+    # Injective, not unique: the corpus deliberately holds two vectors that ARE
+    # the same request (defaults left alone vs passed explicitly), so equal bytes
+    # must share a hash. Different bytes sharing one is the failure.
+    by_bytes: dict[str, set[str]] = {}
+    for vector in vectors:
+        by_bytes.setdefault(vector["canonical"], set()).add(vector["spec_hash"])
+    check("each canonical byte string maps to exactly one hash",
+          all(len(hashes) == 1 for hashes in by_bytes.values()))
+    check("different canonical byte strings never share a hash",
+          len({h for hashes in by_bytes.values() for h in hashes}) == len(by_bytes))
+    check("the corpus pins that defaults and explicit values are one request",
+          len(by_bytes) < len(vectors))
+
+
+def test_field_docs_are_honest_about_the_output_cap_default() -> None:
+    """F8 (cross-vendor): the receipt/spec doc for max_output_kb published '0
+    means uncapped', but both backends apply a 64 KiB default — a request >64
+    KiB is truncated while its receipt claims no cap. The published meaning must
+    not contradict the behaviour."""
+    doc = providers.COMPUTATION_SPEC_FIELD_DOCS["max_output_kb"]
+    check("F8: max_output_kb doc no longer makes the false '0 means uncapped' claim",
+          "means uncapped" not in doc.lower())
+    check("F8: ...it names the real effective default (64 KiB)", "64" in doc)
+    # The behaviour the doc now describes: 0 selects the executor default cap.
+    from codecalc import executor
+    check("F8: the executor default the doc points at really is 64 KiB",
+          executor.MAX_OUTPUT_BYTES == 64 * 1024)
+
+
+def test_field_docs_scope_identity_to_the_request_as_spelled() -> None:
+    """F10 (cross-vendor): operationally-equivalent language aliases (python /
+    py / python3 all run as python3) hash to DIFFERENT spec_hashes, because
+    identity is over the request as spelled, not the normalized runtime. The
+    documented claim must say so precisely rather than imply 'same computation'."""
+    h_py = providers.ComputationSpec("py", "print(1)").spec_hash()
+    h_py3 = providers.ComputationSpec("python3", "print(1)").spec_hash()
+    check("F10: aliases hash DISTINCTLY — identity is over the request as spelled",
+          h_py != h_py3)
+    ldoc = providers.COMPUTATION_SPEC_FIELD_DOCS["language"].lower()
+    check("F10: the language field doc states identity is over the request as spelled "
+          "(aliases are distinct requests)",
+          ("as spelled" in ldoc or "as written" in ldoc)
+          and ("alias" in ldoc or "python3" in ldoc))
+
+
 if __name__ == "__main__":
+    test_field_docs_are_honest_about_the_output_cap_default()
+    test_field_docs_scope_identity_to_the_request_as_spelled()
     test_descriptor_is_versioned_and_machine_readable()
     test_local_provider_preserves_the_execution_result_contract()
     test_local_provider_owns_streaming_and_truthfully_falls_back()
@@ -748,4 +1168,12 @@ if __name__ == "__main__":
     test_configured_registry_enables_piston_without_disclosing_credentials()
     test_piston_health_reports_redacted_transport_failure()
     test_piston_execution_returns_a_redacted_transport_error_contract()
+    test_spec_canonical_bytes_ignore_construction_order()
+    test_spec_canonical_form_is_deterministic_json()
+    test_spec_hash_is_stable_across_processes()
+    test_spec_canonicalization_refuses_what_it_cannot_hash_stably()
+    test_spec_canonical_content_never_carries_secret_values()
+    test_secret_refusal_reads_compound_names_not_just_bare_words()
+    test_published_spec_schema_cannot_drift_from_the_dataclass()
+    test_spec_golden_vectors_pin_the_canonical_encoding()
     sys.exit(1 if FAILS else 0)

@@ -513,6 +513,111 @@ async def main() -> None:
 asyncio.run(main())
 
 
+# ── background-run responses validate too (THE-778 shapes, F2) ─────────────
+# run_submit / run_inspect (while active) / run_cancel return responses that are
+# stamped `contract_version` but matched NONE of the four published shapes: a
+# run_submit reply is {ok, run_id, provider_id, started_at, deadline, state} —
+# no verdict, no backend, no error. A stamped response the schema rejects is a
+# document the product fails, which is the exact defect this suite exists to
+# catch. The run lifecycle shape closes it.
+import tempfile as _tempfile
+import time as _time
+
+from codecalc import providers as _providers
+from codecalc import run_supervisor as _run_supervisor_mod
+
+_run_reg = _providers.ProviderRegistry(default_provider_id="local")
+_run_reg.register(_providers.LocalExecutionProvider())
+_old_sup = server._run_supervisor
+with _tempfile.TemporaryDirectory(prefix="codecalc-contract-run-") as _run_root:
+    server._run_supervisor = _run_supervisor_mod.RunSupervisor(
+        _run_reg, state_dir=pathlib.Path(_run_root))
+    try:
+        _submitted = server.run_submit("python3", "print('bg')", timeout=10)
+        check("a run_submit response validates against the published schema",
+              not errors_for(_submitted), f"-> {errors_for(_submitted)[:2]}")
+        check("the run_submit response carries contract_version",
+              _submitted.get("contract_version") == contract.CONTRACT_VERSION,
+              f"-> {_submitted.get('contract_version')}")
+        _rid = _submitted.get("run_id", "")
+        _terminal = None
+        for _ in range(200):
+            _ins = server.run_inspect(_rid)
+            if _ins.get("state") in {"finished", "cleaned", "recovered"}:
+                _terminal = _ins
+                break
+            # a non-terminal run_inspect is ALSO a published shape
+            check("a non-terminal run_inspect validates", not errors_for(_ins),
+                  f"-> {errors_for(_ins)[:2]}")
+            _time.sleep(0.02)
+        check("a terminal run_inspect validates against the published schema",
+              _terminal is not None and not errors_for(_terminal),
+              f"-> {errors_for(_terminal)[:2] if _terminal else 'never terminal'}")
+        _cancelled = server.run_cancel(_rid)
+        check("a run_cancel response validates against the published schema",
+              not errors_for(_cancelled), f"-> {errors_for(_cancelled)[:2]}")
+    finally:
+        server._run_supervisor = _old_sup
+
+
+# ── the REQUEST contract, on every OS this runs on (THE-793) ──────────────
+# `scripts/check_contract.py` recomputes the golden vectors too, but only ever
+# on a Linux gate runner. The vectors' central claim is that the canonical bytes
+# are the same EVERYWHERE — so recomputing them here, where the suite runs on
+# the full OS matrix, is the part of the claim the gate structurally cannot
+# make. It also answers the question the stdlib-only gate cannot: whether the
+# published request schema is a document a validator will actually load.
+SPEC_SCHEMA_PATH = REPO_ROOT / "docs" / "contract" / "computation-spec-v1.schema.json"
+SPEC_VECTORS_PATH = REPO_ROOT / "docs" / "contract" / "computation-spec-v1.vectors.json"
+
+check("the published request schema exists", SPEC_SCHEMA_PATH.exists(),
+      f"-> {SPEC_SCHEMA_PATH.relative_to(REPO_ROOT)}")
+check("the golden vectors exist", SPEC_VECTORS_PATH.exists(),
+      f"-> {SPEC_VECTORS_PATH.relative_to(REPO_ROOT)}")
+
+if SPEC_SCHEMA_PATH.exists() and SPEC_VECTORS_PATH.exists():
+    from codecalc import providers, spec_identity
+
+    _spec_schema = json.loads(SPEC_SCHEMA_PATH.read_text(encoding="utf-8"))
+    try:
+        Draft202012Validator.check_schema(_spec_schema)
+        _loads = True
+    except Exception as exc:  # ANY failure to load counts, so this is broad
+        _loads = False
+        print(f"     schema rejected by the validator: {exc}")
+    check("the published request schema is a loadable 2020-12 document", _loads)
+
+    _spec_validator = Draft202012Validator(_spec_schema)
+
+    # NEGATIVE CONTROL FIRST, for the same reason as above: a validator that
+    # accepts anything makes every acceptance below vacuous.
+    _sample = json.loads(spec_identity.canonical_bytes(
+        providers.ComputationSpec(language="python3", code="print(1)")))
+    check("the request validator REJECTS an unknown field",
+          not _spec_validator.is_valid(
+              {**_sample, "spec": {**_sample["spec"], "surprise": 1}}))
+    check("the request validator REJECTS a missing field",
+          not _spec_validator.is_valid(
+              {**_sample,
+               "spec": {k: v for k, v in _sample["spec"].items() if k != "no_net"}}))
+
+    _vectors = json.loads(SPEC_VECTORS_PATH.read_text(encoding="utf-8"))["vectors"]
+    _bad_bytes = [v["name"] for v in _vectors
+                  if spec_identity.canonical_bytes(
+                      providers.ComputationSpec(**v["kwargs"])).decode() != v["canonical"]]
+    _bad_hash = [v["name"] for v in _vectors
+                 if spec_identity.spec_hash(
+                     providers.ComputationSpec(**v["kwargs"])) != v["spec_hash"]]
+    _invalid = [v["name"] for v in _vectors
+                if not _spec_validator.is_valid(json.loads(v["canonical"]))]
+    check(f"all {len(_vectors)} golden vectors reproduce their bytes on this OS",
+          not _bad_bytes, f"-> {_bad_bytes}")
+    check(f"all {len(_vectors)} golden vectors reproduce their hash on this OS",
+          not _bad_hash, f"-> {_bad_hash}")
+    check("every golden canonical document validates against the schema",
+          not _invalid, f"-> {_invalid}")
+
+
 # ── the gate itself exists ────────────────────────────────────────────────
 # Same floor as tests/test_features.py:274. A gate destroyed by an editing
 # accident raises nothing and every check it performed silently stops
@@ -524,6 +629,8 @@ if _gate.exists():
     check("the gate still checks the schema is in sync", "--write" in _src)
     check("the gate still cross-checks both backends' verdicts",
           "rust_verdicts" in _src and "python_verdicts" in _src)
+    check("the gate still recomputes the golden vectors",
+          "SPEC_VECTORS_PATH" in _src and "canonical_bytes" in _src)
 
 
 print(f"\n=== {len(FAILS)} FAILURES ===" if FAILS else

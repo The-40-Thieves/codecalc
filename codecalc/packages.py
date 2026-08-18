@@ -38,6 +38,7 @@ could not install, which was never checked anywhere.
 
 from __future__ import annotations
 
+import os
 import pathlib
 import re
 import shutil
@@ -45,7 +46,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import executor, registry
+from . import errors, executor, registry
 
 #: language -> (manager binary, argv template with {pkg} placeholder, env hint)
 #: {target} is substituted with the workspace directory. Every entry must be
@@ -74,6 +75,115 @@ from . import executor, registry
 #: nothing here is passed through a shell: the argv array is exec'd directly,
 #: so those were never the risk. The leading-hyphen check above is.
 _PACKAGE_NAME_RE = re.compile(r"[A-Za-z0-9._@/\[\]+~=<>!,\- ]+")
+
+#: THE-791 residual: an operator opt-in, deny-by-default allowlist.
+#:
+#: UNSET (default) is today's behaviour — every syntactically valid name
+#: passes, same as before this existed. SET makes install() deny-by-default:
+#: a name not on the list is refused before any subprocess or network work,
+#: which is the property the ticket asks for ("a package allowlist that
+#: ignores --index-url is a fence with a gate" — so the gate has to be the
+#: FIRST thing standing between a request and a spawn, not a filter on the
+#: result).
+#:
+#: Comma-separated entries. Each is either `<language>:<name>` (scoped to one
+#: ecosystem — the "per ecosystem where distinguishable" the ticket asks for,
+#: `<language>` is whatever `registry.canonical()` returns, e.g. `python3`,
+#: `node`) or a bare `<name>` (allowed in every ecosystem this module
+#: installs for). Matching is case-insensitive and against the BARE name —
+#: `requests[security]==2.31.0` matches an entry of `requests`; see
+#: `_bare_name`.
+#:
+#: There is no separate "registries" knob. install_package accepts no
+#: index-url/registry-override parameter today — the ticket's own charset
+#: already refuses a colon, so a registry URL cannot reach argv at all — so
+#: there is nothing to allowlist there yet. What this module DOES bind is
+#: the other user-controlled field that lands in the same argv slot: see the
+#: embedded-flag-token check in `install()`, which refuses a package/version
+#: string shaped like a flag regardless of whether the allowlist is even
+#: configured.
+ALLOWLIST_ENV = "CODECALC_PACKAGE_ALLOWLIST"
+
+#: Characters that start a qualifier a package manager parses separately from
+#: the bare installable name: `[` (PyPI extras), version-specifier operators,
+#: `,` (specifier lists) and space. `@` and `/` are NOT stop characters —
+#: npm scopes (`@scope/name`) start with `@`, and stripping at the first `/`
+#: would break every scoped package's second half.
+_QUALIFIER_RE = re.compile(r"[\[=<>!~, ]")
+
+
+def _bare_name(package: str) -> str:
+    """The installable name, stripped of extras/version-pin syntax, lowered.
+
+    Used only for allowlist comparison — installers still receive the full
+    `package` string unmodified.
+    """
+    stop = _QUALIFIER_RE.search(package)
+    return (package[:stop.start()] if stop else package).strip().lower()
+
+
+def _allowlist() -> set[str] | None:
+    """Configured allowlist entries, lowercased. None means UNSET — the only
+    reading that means "no allowlist, install anything" (today's default).
+
+    fix-round-1 IMPORTANT: `os.environ.get(ALLOWLIST_ENV, "")` cannot tell
+    "the variable is not set" from "the variable is set to the empty
+    string" — both read back as `""`. Treating either one as "unset"
+    (the previous shape here) made `CODECALC_PACKAGE_ALLOWLIST=""` degrade
+    to allow-everything: the LEAST safe reading of an ambiguous operator
+    input on what is supposed to be a deny-by-default control, and a
+    realistic input to receive — an empty Kubernetes/Compose secret, or an
+    unresolved `${TEMPLATE_VAR}` in a manifest, both produce exactly `""`,
+    not an absent variable.
+
+    So membership in `os.environ` is checked FIRST, and is the ONLY thing
+    that means unset. Every other value — `""` included — reaches
+    `_allowlist_denial()` as a (possibly empty) SET, which denies every
+    package: fail closed, not fail open, for anything an operator actually
+    set the variable to.
+
+    Read per call rather than cached at import — an operator's decision
+    should take effect without a server restart, same reasoning as
+    runtimes.elevated_apply_allowed().
+    """
+    if ALLOWLIST_ENV not in os.environ:
+        return None
+    raw = os.environ[ALLOWLIST_ENV]
+    return {e.strip().lower() for e in raw.split(",") if e.strip()}
+
+
+def _allowlist_denial(language: str, package: str) -> str | None:
+    """None if `package` is allowed under `language`; else the denial reason.
+
+    Checked BEFORE the installer table lookup that follows it, so an unset
+    allowlist costs one dict-less function call and a configured one refuses
+    before `shutil.which` or `subprocess.run` ever run.
+    """
+    entries = _allowlist()
+    if entries is None:
+        return None
+    bare = _bare_name(package)
+    if bare in entries or f"{language}:{bare}" in entries:
+        return None
+    return (f"package {bare!r} is not on the {ALLOWLIST_ENV} allowlist for "
+            f"ecosystem '{language}'; deny-by-default is active because "
+            f"{ALLOWLIST_ENV} is set")
+
+
+#: A package/version string containing a SPACE followed by a token starting
+#: with `-` is refused outright, allowlist or not. subprocess's argv-list
+#: semantics already make this inert — `{pkg}` lands as ONE argv element, so
+#: no shell ever re-splits "pkg --index-url=..." into two flags — but the
+#: ticket calls out this exact shape ("a package allowlist that ignores
+#: --index-url is a fence with a gate"), and refusing the shape does not rely
+#: on that mechanics detail continuing to hold if this code is ever moved
+#: behind something that DOES reinterpret argv.
+_EMBEDDED_FLAG_RE = re.compile(r"\s-")
+
+
+def _has_embedded_flag(spec: str) -> bool:
+    return bool(_EMBEDDED_FLAG_RE.search(spec))
+
 
 _INSTALLERS: dict[str, tuple[str, list[str], dict[str, str]]] = {
     # --only-binary=:all: — wheels only. A source distribution runs its build
@@ -284,6 +394,44 @@ def install(language: str, package: str, session_id: str | None = None,
         return {"ok": False,
                 "error": f"invalid package name {package!r}: expected letters, "
                          "digits and . _ - @ / [ ] + ~ = < > ! , or spaces"}
+    # `version` lands in the SAME argv slot as `package` (see `spec` below), so
+    # it gets the same injection checks — a caller-controlled string that
+    # skipped them here was the other half of "install_package accepts", and
+    # a leading-hyphen/charset check on `package` alone left it unvalidated.
+    if version is not None:
+        if not version:
+            return {"ok": False, "error": "empty version given"}
+        if version[0] == "-":
+            return {"ok": False,
+                    "error": f"invalid version {version!r}: a version starting "
+                             "with '-' would be read as a command-line flag by "
+                             "the package manager"}
+        if not _PACKAGE_NAME_RE.fullmatch(version):
+            return {"ok": False,
+                    "error": f"invalid version {version!r}: expected letters, "
+                             "digits and . _ - @ / [ ] + ~ = < > ! , or spaces"}
+    # A space followed by a '-' is refused outright, allowlist configured or
+    # not — see `_has_embedded_flag`'s comment for why this is defensive
+    # rather than closing a currently-reachable hole.
+    if _has_embedded_flag(package):
+        return {"ok": False,
+                "error": f"invalid package name {package!r}: a space followed "
+                         "by '-' looks like an embedded command-line flag"}
+    if version is not None and _has_embedded_flag(version):
+        return {"ok": False,
+                "error": f"invalid version {version!r}: a space followed by "
+                         "'-' looks like an embedded command-line flag"}
+
+    # THE-791: deny-by-default operator allowlist. Checked after the format
+    # validation above (so a malformed name is reported as malformed, not as
+    # "not allowed") and before every remaining side-effecting step: no
+    # session-dir lookup, no cache-dir mkdir, no subprocess.run. (The
+    # installer/binary resolution above this point is PATH lookups only —
+    # shutil.which never spawns a process or touches the network.)
+    denial = _allowlist_denial(name, package)
+    if denial:
+        return errors.error_result(errors.PERMISSION_DENIED, denial)
+
     spec = f"{package}=={version}" if version else package
 
     # session installs go into the session workspace; ad-hoc into the cache

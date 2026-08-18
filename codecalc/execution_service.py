@@ -2,43 +2,23 @@
 
 from __future__ import annotations
 
-from . import contract, errors, executor, registry, sessions
+from . import contract, errors, executor, providers, registry, sessions
 from .providers import (
     ComputationSpec,
     ProviderOperationFailure,
     ProviderRegistry,
     UnknownProvider,
     UnsupportedCapability,
+    attach_receipt,
 )
 from .run_supervisor import RunSupervisor
 
-
-def _limit_receipt(spec: ComputationSpec, result: dict) -> dict:
-    disclosures = [str(item) for item in result.get("unenforced") or []]
-    disclosure_text = "\n".join(disclosures).lower()
-    requested_controls = (
-        ("timeout", spec.timeout > 0, ("timeout",)),
-        ("max_memory_mb", spec.max_memory_mb > 0, ("memory",)),
-        ("max_output_kb", spec.max_output_kb > 0, ("output",)),
-        ("max_cpu", spec.max_cpu > 0, ("cpu",)),
-        ("no_net", spec.no_net, ("no_net", "network")),
-    )
-    reported_enforced = [
-        name
-        for name, requested, markers in requested_controls
-        if requested and not any(marker in disclosure_text for marker in markers)
-    ]
-    return {
-        "requested": {
-            "timeout_seconds": spec.timeout,
-            "max_memory_mb": spec.max_memory_mb,
-            "max_output_kb": spec.max_output_kb,
-            "max_cpu_seconds": spec.max_cpu,
-            "no_net": spec.no_net,
-        },
-        "provider_reported_enforced": reported_enforced,
-        "unenforced": disclosures,
-    }
+#: Re-exported beside the module that now builds the receipt (moved to
+#: providers.py in the THE-778 fix-round merge — see attach_receipt), the
+#: same way providers.py itself re-exports COMPUTATION_SPEC_VERSION from
+#: spec_identity: callers already import `execution_service`, and this
+#: keeps `execution_service.RECEIPT_VERSION` a stable name across the move.
+RECEIPT_VERSION = providers.RECEIPT_VERSION
 
 
 class ExecutionService:
@@ -84,13 +64,13 @@ class ExecutionService:
                     except ProviderOperationFailure as exc:
                         cleanup_failure = exc
                 if cleanup_failure is not None:
-                    return contract.stamp(errors.error_result(
-                        errors.INTERNAL,
-                        str(cleanup_failure),
-                        provider_error=cleanup_failure.code,
-                        requested_provider=cleanup_failure.provider_id,
-                        run_id=handle.run_id,
-                    ))
+                    # F3 (cross-vendor): cleanup is best-effort and must NOT
+                    # discard the collected result. Replacing a good result
+                    # (stdout/verdict/receipt) with an internal error over a
+                    # provider-side resource-release problem loses exactly what
+                    # the caller asked for. Mirror run_inspect (server.py): keep
+                    # the result and append `cleanup_error`.
+                    result["cleanup_error"] = str(cleanup_failure)
             else:
                 result = dict(provider.execute(spec))
         except UnsupportedCapability as exc:
@@ -101,15 +81,7 @@ class ExecutionService:
                 requested_provider=exc.provider_id,
                 capability=exc.capability,
             ))
-        descriptor = provider.describe()
-        result["provider"] = {
-            "interface_version": descriptor["interface_version"],
-            "provider_id": descriptor["provider_id"],
-            "provider_version": descriptor["provider_version"],
-            "host_class": descriptor["host_class"],
-            "limits": _limit_receipt(spec, result),
-        }
-        return contract.stamp(result)
+        return contract.stamp(attach_receipt(spec, provider, result))
 
     def execute_session(self, session_service: SessionService, session_id: str,
                         spec: ComputationSpec, *,
@@ -135,15 +107,11 @@ class ExecutionService:
                 capability=exc.capability,
             ))
         result = dict(session_service.execute(session_id, spec))
-        descriptor = provider.describe()
-        result["provider"] = {
-            "interface_version": descriptor["interface_version"],
-            "provider_id": descriptor["provider_id"],
-            "provider_version": descriptor["provider_version"],
-            "host_class": descriptor["host_class"],
-            "limits": _limit_receipt(spec, result),
-        }
-        return contract.stamp(result)
+        # F6 (cross-vendor): name the session in the receipt. The spec is
+        # identical across sessions, so without this two sessions running the
+        # same code produced byte-identical receipts despite different state.
+        return contract.stamp(attach_receipt(spec, provider, result,
+                                             session_id=session_id))
 
     async def execute_stream(self, spec: ComputationSpec, *, provider_id: str | None = None,
                              on_progress=None) -> dict:
@@ -168,15 +136,7 @@ class ExecutionService:
                 requested_provider=exc.provider_id,
                 capability=exc.capability,
             ))
-        descriptor = provider.describe()
-        result["provider"] = {
-            "interface_version": descriptor["interface_version"],
-            "provider_id": descriptor["provider_id"],
-            "provider_version": descriptor["provider_version"],
-            "host_class": descriptor["host_class"],
-            "limits": _limit_receipt(spec, result),
-        }
-        return contract.stamp(result)
+        return contract.stamp(attach_receipt(spec, provider, result))
 
     def verify_across_providers(self, spec: ComputationSpec,
                                 first_provider_id: str,
@@ -290,13 +250,19 @@ class SessionService:
             extension = entry_file.rsplit(".", 1)[-1] if "." in entry_file else ""
             by_extension = {value: key for key, value in registry.EXTENSIONS.items()}
             language = by_extension.get(extension, "python3")
+        # THE-783: captured at the larger spill ceiling and re-truncated to
+        # the executor's own default cap, same as sessions.execute()'s
+        # workspace branch — session_run has no caller-facing max_output_kb
+        # of its own to honour instead (see sessions.SPILL_CAPTURE_KB).
         result = executor.execute(
             language,
             data.decode(errors="replace"),
             stdin=stdin,
             timeout=timeout,
             workdir=str(workdir),
+            max_output_kb=sessions.SPILL_CAPTURE_KB,
         )
+        result = sessions.spill_if_truncated(session_id, result, 0)
         result["entry_file"] = entry_file
         result["language"] = language
         return result

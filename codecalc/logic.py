@@ -439,6 +439,11 @@ def z3_check(smt2: str, timeout_ms: int = 5000) -> dict:
             "result": str(verdict),
             "model": model,
             "assertions": len(solver.assertions()),
+            # Evidence for codecalc/grades.py (THE-785): WHICH engine decided
+            # this and within WHAT bound. Recorded here because z3_check is
+            # the only place that knows either — grades.py only reads them.
+            "engine": f"z3 {z3.get_version_string()}",
+            "timeout_ms": timeout_ms,
         }
     except Exception as exc:
         return {"ok": False, "error": f"z3 error: {exc}"}

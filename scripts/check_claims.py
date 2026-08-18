@@ -16,6 +16,7 @@ Checked here:
   5. the size of the env allowlist AUDIT.md describes
   6. the post-fix suite snapshot AUDIT.md quotes
   7. the GitHub repo description, when CI supplies it with --description
+  8. the CI-invoked gate-script count the README quotes (THE-842)
 
 The last two were added after both drifted in a single day: the README's
 "18 test files … 689 assertions" survived three PRs that changed both numbers,
@@ -27,6 +28,11 @@ Checks 6 and 7 were added after the count reached 47 and TWO surfaces stayed at
 Both were stale by exactly the `context7_docs` removal. The README was correct
 throughout — because it was the only thing gated. A gate that covers one surface
 does not make the claim true, it makes the OTHER surfaces the ones that rot.
+
+Check 8 exists because "11 gate scripts" was UNPARSED PROSE — a number typed
+once, matching nothing else in the tree, no different from "18 test files"
+before check 4 existed. See that check's own comment for why the workflow-
+reference definition was chosen over the two others measured.
 
 FLOOR: each check asserts it actually found the claim in the README. A heading
 reworded from "MCP tools (48)" to "Tools" would otherwise make this pass by
@@ -216,6 +222,55 @@ else:
     else:
         print(f"ok   all {len(per_file)} test files can fail the build "
               f"({len(HANDROLLED)} hand-rolled, checked for a nonzero exit instead)")
+
+# ── 4b. CI-invoked script count (THE-842) ───────────────────────────────────
+# The README said "11 gate scripts", and nothing tied that number to any
+# property of the repo — the same shape as the test-file/assertion counts
+# above before check 4 existed. Three ways to derive "gate script" were
+# measured before picking one:
+#
+#   every *.py under scripts/                          -> 13
+#     Rejected: includes count_assertions.py (a MEASURING tool this file's
+#     own comment above distinguishes from a gate) and diag_windows_job.py
+#     (a CI job helper, not a check).
+#   files named check_*.py                              -> 9
+#     Rejected: excludes contract_check.py, which IS invoked as a gate in
+#     ci-rust.yml and release.yml — it is simply named check LAST — and would
+#     silently drop it (or any future gate) from the count for a naming
+#     accident rather than a behavioural one.
+#   referenced by `scripts/[a-z_]+\.py` in a workflow    -> 11  (chosen)
+#     A REPO PROPERTY rather than a naming convention: "does CI actually run
+#     this script." A script renamed out of the check_* pattern but still
+#     wired into a workflow keeps counting; one deleted from every workflow
+#     stops, in both cases without touching this file. It also happens to be
+#     the number the README already carried — which is exactly how "11" went
+#     unnoticed as prose for as long as it did: it was RIGHT, and nothing was
+#     gating it, so a future drift in either direction would have looked the
+#     same as this one did.
+#
+# FLOOR, both directions: zero references means the extractor broke (a
+# workflow rewrite that stopped naming scripts by path would otherwise pass
+# silently), and an absent README claim means this proves nothing rather
+# than passing by matching nothing — same shape as every other check here.
+WORKFLOWS_DIR = REPO / ".github" / "workflows"
+_workflow_text = "\n".join(
+    p.read_text(encoding="utf-8") for p in sorted(WORKFLOWS_DIR.glob("*.yml")))
+ci_scripts = set(re.findall(r"scripts/[a-z_]+\.py", _workflow_text))
+if not ci_scripts:
+    fail("found zero 'scripts/<name>.py' references across "
+         ".github/workflows/*.yml — the extractor is broken")
+else:
+    claimed_gates = [int(n) for n in re.findall(r"(\d+)\s+CI-invoked scripts", README)]
+    if not claimed_gates:
+        fail("no 'N CI-invoked scripts' claim found in README.md — the check "
+             "matched nothing")
+    elif any(c != len(ci_scripts) for c in claimed_gates):
+        fail(f"README claims {sorted(set(claimed_gates))} CI-invoked scripts; "
+             f"{len(ci_scripts)} distinct scripts/*.py paths are referenced by "
+             f".github/workflows/*.yml: {sorted(ci_scripts)}")
+    else:
+        print(f"ok   CI-invoked scripts: README and the workflows agree on "
+              f"{len(ci_scripts)} ({sorted(ci_scripts)})")
 
 # ── 5. env allowlist size ───────────────────────────────────────────────────
 AUDIT = (REPO / "AUDIT.md").read_text(encoding="utf-8")

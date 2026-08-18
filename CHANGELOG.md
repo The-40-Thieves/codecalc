@@ -10,9 +10,9 @@ This project versions **two** things, and they are not the same number.
 | What | Where | Current |
 |---|---|---|
 | The **package** — the tool surface, the CLI, the Python API | `pyproject.toml`, `executor/Cargo.toml`, this file | `0.1.0` |
-| The **result contract** — the shape every tool result comes back in | `docs/contract/README.md`, `contract_version` on every result | `1.0.0` |
+| The **result contract** — the shape every tool result comes back in | `docs/contract/README.md`, `contract_version` on every result | `1.1.0` |
 
-The contract is at `1.0.0` and the package is at `0.1.0` because those claims are
+The contract is at `1.1.0` and the package is at `0.1.0` because those claims are
 genuinely different. The result contract has a published JSON Schema, a
 documented MAJOR/MINOR/PATCH policy, a twelve-month deprecation window, and a
 gate that fails if the schema drifts from the code — it is stable and says so.
@@ -31,11 +31,125 @@ behind it.
 
 ---
 
-## [0.1.0] — unreleased
+## [Unreleased]
 
-First public release. The tag will be `v0.1.0`; nothing has been published to
-PyPI or crates.io before it, so there is no upgrade path to describe — only what
-the thing is.
+Everything below has landed on `main` since `0.1.0` and is not yet tagged. It
+changes the **tool surface** (48 tools → 51) and adds to the **result
+contract**, so it is a MINOR bump when it is cut, not a patch. The
+`contract_version` moves `1.0.0` → **`1.1.0`** for the same reason: it ADDS a
+fifth result shape (`run_lifecycle`, for the background-run tools) and adds
+fields (an execution receipt with `session_id`, grade metadata). Additions are
+exactly what the contract's own policy defines as a MINOR bump — a compatible
+addition bumps MINOR, it does not leave the version unchanged. A `1.0.0` client
+keeps working against `1.1.0`.
+
+### Added
+
+- **Background runs: `run_submit`, `run_inspect`, `run_cancel`** (THE-778).
+  Submit code and get a `run_id` back immediately instead of holding an MCP
+  call open for the whole computation; poll with `run_inspect`, stop early with
+  `run_cancel`. Cancellation is honest about a provider that cannot cancel, and
+  a cancelled run's result is still collectible rather than stranded. Admission
+  is capped (`CODECALC_MAX_ACTIVE_RUNS`, default 64) and past the cap a
+  submission is refused with `resource_exhausted` rather than growing the run
+  table without bound.
+- **Oversized session output spills to a workspace artifact** (THE-783).
+  Session output that the default 64 KiB cap would have truncated and DROPPED
+  is captured up to 4 MiB and written into the session workspace instead;
+  `stdout_spill` / `stderr_spill` carry a `codecalc://session/{id}/files/...`
+  URI, and `stdout_spill_capped` / `stderr_spill_capped` say outright when the
+  spill is fuller than the inline value but still not the whole stream. The
+  inline value is byte-for-byte what it always was.
+- **An execution receipt** naming WHAT ran and under WHICH conditions
+  (THE-782), alongside a published `ComputationSpec` schema with a content hash
+  (THE-793), so two runs of the same request are identifiable as such.
+- **A grade vocabulary for `verify_*` results** (THE-785). `z3_check`'s grading
+  is narrowed to unsat-only rather than reading a `sat` answer as a proof.
+- **Idle-expiry for abandoned stateful sessions** (THE-779).
+  `CODECALC_SESSION_IDLE_TTL_SECONDS`, unset by default: a session untouched
+  for longer than this has its worker reaped on the next access, and a
+  subsequent call gets `ok: false` with the stable `worker_failure` code —
+  never a silent respawn. Every session entry point counts as a touch, not only
+  `execute`.
+- **A deny-by-default operator allowlist for package installs** (THE-791).
+- **A gate on the README's own gate-script count** (THE-842), so the count of
+  CI-invoked scripts cannot drift from the workflows the way the tool count
+  once did.
+
+### Fixed
+
+- **The spill path wrote and deleted outside the session workspace.** The three
+  spill helpers resolved the `.codecalc-spill` directory without the `_jail`
+  guard every other session path uses. `mkdir(exist_ok=True)` does not follow a
+  symlink at the final component, so executed code — which owns the workspace
+  as its cwd — could replace that directory with a symlink and get both an
+  arbitrary-location file CREATE and, through the retention prune's `*.bin`
+  glob, an arbitrary `*.bin` UNLINK, in the unsandboxed server process.
+- **A spill the server wrote could be impossible to read back.** The capture
+  ceiling counts raw stream bytes; the file written is the `errors="replace"`
+  re-encoding, where one invalid byte becomes a 3-byte U+FFFD. The write is
+  now bounded by the same constant the resource read enforces, so any spill
+  that exists is fetchable in full.
+- **`CODECALC_MAX_ACTIVE_RUNS` set-but-empty crashed the server at import.**
+  Empty, non-numeric and non-positive values now fall back to the default with
+  a message on stderr, instead of `int("")` raising where nothing catches it.
+- **A set-but-empty package allowlist denied all rather than allowing all.**
+
+#### Cross-vendor review fix wave (correctness / API-design)
+
+A second cross-vendor (Codex) review of the integrated branch found ten issues;
+these nine were in this branch's diff and are fixed here (the tenth —
+`optimization.py` accepting a candidate against an unvalidated `min_speedup ≤ 1`
+— is pre-existing and out of this diff, ticketed separately; F7 below keeps the
+GRADE honest in the meantime).
+
+- **A background run whose provider RAISED was stranded forever** (F1). The run
+  supervisor collected `future.result()` unchecked, so a provider error left the
+  run stuck `running` with its admission slot held and its result unreachable
+  via `run_inspect`. Any exception now becomes a terminal, coded failure —
+  inspectable once, slot freed.
+- **The result contract gained a fifth shape, `run_lifecycle`, and
+  `contract_version` bumped `1.0.0` → `1.1.0`** (F2). `run_submit` /
+  `run_inspect`-while-active / `run_cancel` responses were stamped a contract
+  version but matched none of the four published shapes; they now validate, and
+  the additive change bumps MINOR (the changelog previously claimed an addition
+  left the version unchanged, which reversed semver).
+- **Synchronous managed execution no longer discards a good result when cleanup
+  fails** (F3). A `ProviderOperationFailure` from `cleanup()` replaced the
+  collected stdout/verdict/receipt with an internal error; the result is now
+  preserved and a `cleanup_error` field is appended, mirroring `run_inspect`.
+- **A non-execute session touch after idle-expiry no longer revives the worker**
+  (F4). `session_write_file` / `session_files` / `session_read_file` /
+  `session_artifacts` refreshed the idle clock without first running the expiry
+  gate, so a bare touch kept an expired worker alive; they now reap first, and
+  the next `execute` gets the documented expiry error.
+- **A completed-but-uninspected background run no longer holds admission
+  capacity** (F5). Done futures are reaped before the admission count, so
+  completion — not just inspection — frees a slot.
+- **The execution receipt now records `session_id`** (F6, receipt
+  `1.0.0` → `1.1.0`). The same spec runs in different sessions produced
+  byte-identical receipts; the session is now named (workspace-state hashing is
+  out of scope and stated as such).
+- **`verify_optimization` grading no longer certifies a SLOWDOWN as
+  `cross_checked`** (F7, `grade_rules_version` `1` → `2`). An accepted result
+  whose measured speed ratio is not `> 1` is `ungraded` rather than graded as a
+  speed-cross-checked optimisation.
+- **The `max_output_kb` documentation no longer claims `0` means "uncapped"**
+  (F8) — `0` selects the backends' 64 KiB default, and the doc now says so.
+- **The first terminal `run_inspect` reports accurate cleanup state** (F9). It
+  returned pre-cleanup status, so the first terminal read said `cleaned=false`
+  and the next said `cleaned=true`; the status is now refreshed after cleanup.
+- **The request-identity docs state identity is over the request AS SPELLED**
+  (F10). Operationally-equivalent language aliases (`python` / `py` / `python3`)
+  hash distinctly; the docs no longer imply two spellings are "the same
+  computation".
+
+---
+
+## [0.1.0] — 2026-08-17
+
+First public release. Nothing had been published to PyPI or crates.io before
+it, so there was no upgrade path to describe — only what the thing is.
 
 ### Corrected before first publication
 
@@ -66,7 +180,7 @@ the thing is.
   `no-new-privileges`. It supports the x86_64 and ARM64 architectures supported
   by gVisor and fails closed when Docker, cgroup v2, or `runsc` is absent.
 
-- **47 MCP tools across 31 languages.** Code execution, symbolic mathematics
+- **48 MCP tools across 31 languages.** Code execution, symbolic mathematics
   (SymPy), logic and SMT solving (Z3), exact decimal arithmetic, unit
   conversion, complexity analysis and benchmarking.
 - **A Rust sandbox executor** (`codecalc-exec`) with rlimits, wall-clock and CPU

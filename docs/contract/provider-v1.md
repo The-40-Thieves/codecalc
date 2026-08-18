@@ -51,13 +51,56 @@ Provider selection is explicit or uses the configured default. An unknown
 explicit ID returns a validation result carrying `provider_error` set to
 `unknown_provider`; it never falls back.
 
-Every successful execution receipt carries provider ID, provider version,
-interface version, host class, and a `limits` object. The limits receipt records
-the canonical requested values, the controls the provider reports as enforced,
-and the exact `unenforced` disclosures returned with the result. “Provider
-reported” is deliberate: CodeCalc preserves the backend's enforcement claim; it
-does not independently attest to a remote host's configuration. Compact results
-retain this provenance.
+## The execution receipt
+
+Every successful execution result carries a `provider` object — the execution
+receipt — versioned by its own `receipt_version` (currently **1.1.0**) so a
+reader can tell "this receipt predates source hashes" from "this run had no
+source", which are not the same fact. MAJOR removes or retypes a key, MINOR adds
+one, PATCH changes descriptions only.
+
+| Key | What it says |
+|---|---|
+| `receipt_version` | Semver of this block. |
+| `provider_id`, `provider_version`, `interface_version`, `host_class` | Who ran it. |
+| `spec_hash` | `sha256:<hex>` naming the request by content — see [the request contract](README.md#the-request-half-a-canonical-spec-and-its-content-hash). |
+| `spec_schema_version` | The canonical form `spec_hash` was taken under. Without it a stored hash is a number whose meaning has an undocumented expiry. |
+| `source_sha256` | `sha256:<hex>` over the source that was executed, independent of the limits wrapped around it. |
+| `determinism` | `locale` (`LANG`/`LC_ALL`), `timezone`, `seed`, and an `unrecorded` list. |
+| `limits` | The requested-versus-enforced receipt, below. |
+
+The limits receipt records the canonical requested values, the controls the
+provider reports as enforced, and the exact `unenforced` disclosures returned
+with the result. “Provider reported” is deliberate: CodeCalc preserves the
+backend's enforcement claim; it does not independently attest to a remote host's
+configuration.
+
+**`determinism` reports what it observed and names what it did not.** Every input
+appears either with a value or in `unrecorded` — never as a bare `null`, because
+an unexplained null reads identically to "the value was empty" and to "this key
+was never populated". Three facts are stated rather than smoothed over:
+
+* `TZ` is **not** in the executor's environment allowlist, so the child inherits
+  the host's system zone and CodeCalc cannot name it. `timezone` is unrecorded
+  rather than guessed from the server's own zone, which describes a different
+  process. Add `TZ` to the allowlist and this populates itself — the block is
+  read back out of `executor._env()`, not transcribed from it.
+* CodeCalc has **no seed concept**: no tool accepts one and no runtime is seeded.
+  `seed` is `null` on every run and says why.
+* Only the `local` provider runs through CodeCalc's own sandbox. For any other,
+  `source` is `provider_owned` and nothing is reported, because this server's
+  locale is not the locale of a run that happened on someone else's host.
+
+**The receipt is portable JSON.** No secret and no machine-specific absolute path
+reaches it: `workdir` enters only through `spec_hash`, never as text, and the
+determinism block reads exactly three names out of the forwarded environment
+rather than copying it, so `PATH` and `HOME` cannot ride along.
+
+Compact results retain the actionable half — `receipt_version`, `provider_id`,
+`spec_hash` and the whole `limits` object — and name the descriptive keys they
+dropped in `receipt_detail`. Copying the receipt wholesale grew a compact result
+by 69%, which defeats the mode it rides in; the split follows the same rule
+already applied to `unenforced`.
 
 Cross-provider verification executes the same immutable `ComputationSpec`
 independently through two explicitly selected providers. It compares semantic

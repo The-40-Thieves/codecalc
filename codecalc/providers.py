@@ -16,7 +16,7 @@ from dataclasses import asdict, dataclass
 from typing import Protocol, runtime_checkable
 from urllib.parse import urlsplit
 
-from . import __version__, contract, errors, executor
+from . import __version__, contract, errors, executor, spec_identity
 from .provider_adapters.piston import PistonHTTPTransport
 from .strict_runtime import ENFORCEMENT_CONTROLS, ISOLATION_PROFILE
 
@@ -27,6 +27,9 @@ PISTON_AUTHORIZATION_ENV = "CODECALC_PISTON_AUTHORIZATION"
 STRICT_URL_ENV = "CODECALC_STRICT_URL"
 STRICT_AUTHORIZATION_ENV = "CODECALC_STRICT_AUTHORIZATION"
 ProviderTransport = Callable[[str, str, dict[str, str], dict | None, int], object]
+#: Re-exported beside the dataclass it versions, the same way
+#: STRICT_ISOLATION_PROFILE is: callers already import `providers`.
+COMPUTATION_SPEC_VERSION = spec_identity.COMPUTATION_SPEC_VERSION
 STRICT_ISOLATION_PROFILE = ISOLATION_PROFILE
 STRICT_CONTROLS = ENFORCEMENT_CONTROLS
 
@@ -49,7 +52,19 @@ def _truncate_utf8(value: str, max_bytes: int) -> str:
 
 @dataclass(frozen=True, slots=True)
 class ComputationSpec:
-    """Canonical execution request shared by transports and providers."""
+    """Canonical execution request shared by transports and providers.
+
+    Its IDENTITY lives in `codecalc/spec_identity.py`: `canonical_bytes()` gives
+    a deterministic encoding and `spec_hash()` the sha256 over it, so a cache, a
+    receipt or a provenance record can name a request instead of carrying it.
+
+    NOTE FOR ANYONE ADDING A FIELD. Canonicalization emits every field, so a new
+    one changes every spec hash — that is a MINOR bump of
+    `COMPUTATION_SPEC_VERSION` and the golden vectors in
+    `docs/contract/computation-spec-v1.vectors.json` must be recomputed by hand.
+    Adding a credential-bearing field is refused outright unless it is declared
+    in `HASH_BY_NAME_FIELDS`; see spec_identity's SECRETS section.
+    """
 
     language: str
     code: str
@@ -60,6 +75,248 @@ class ComputationSpec:
     max_output_kb: int = 0
     max_cpu: int = 0
     no_net: bool = False
+
+    #: Fields whose VALUES must not enter the canonical bytes; only their key
+    #: names do. Empty because no field of this spec carries a credential —
+    #: `spec_identity.SECRET_BEARING_FIELD_NAMES` keeps it that way by refusing
+    #: to hash one that appears without being declared here.
+    #:
+    #: Deliberately UNANNOTATED: an annotation would make it a tenth dataclass
+    #: field, which would put the policy itself into the hashed content.
+    HASH_BY_NAME_FIELDS = ()
+
+    def canonical_bytes(self) -> bytes:
+        """The deterministic encoding this request hashes to."""
+        return spec_identity.canonical_bytes(self)
+
+    def spec_hash(self) -> str:
+        """`sha256:<hex>` over `canonical_bytes()`."""
+        return spec_identity.spec_hash(self)
+
+
+#: One line per published field. Kept next to the dataclass, and NOT optional:
+#: `spec_identity.build_spec_schema` refuses to generate a document with an
+#: undocumented field, so a field added without a description is a failing gate
+#: rather than a published schema with a blank in it.
+COMPUTATION_SPEC_FIELD_DOCS = {
+    "language": (
+        "Runtime key from codecalc's language registry, e.g. 'python3'. "
+        "Identity is over the request AS SPELLED, not the normalized runtime: "
+        "operationally-equivalent aliases ('python', 'py', 'python3' all run as "
+        "python3) are DIFFERENT requests and get different spec_hashes. This "
+        "names the request as given; it does not claim two spellings are the "
+        "same computation."
+    ),
+    "code": "The program source to execute, verbatim.",
+    "stdin": "Text written to the process's standard input. '' means none.",
+    "timeout": "Wall-clock ceiling in seconds for the whole request.",
+    "workdir": (
+        "Working directory for the run, or null to let the provider choose an "
+        "ephemeral one. null and '' are different requests."
+    ),
+    "max_memory_mb": "Address-space ceiling in MiB; 0 means the provider default.",
+    "max_output_kb": (
+        "Combined stdout+stderr ceiling in KiB. 0 is NOT uncapped: it selects "
+        "the backend default of 64 KiB (both the native and fallback executors "
+        "apply it), and output past that is truncated. Pass an explicit value "
+        "to raise or lower the cap."
+    ),
+    "max_cpu": "CPU-time ceiling in seconds; 0 means the provider default.",
+    "no_net": (
+        "Request network isolation. Providers that cannot enforce it disclose so "
+        "in the result's `unenforced` list rather than failing quietly."
+    ),
+}
+
+
+def build_spec_schema(dialect: str | None = None,
+                      schema_id: str | None = None) -> dict:
+    """The published JSON Schema for a canonical ComputationSpec document."""
+    return spec_identity.build_spec_schema(
+        ComputationSpec,
+        field_docs=COMPUTATION_SPEC_FIELD_DOCS,
+        dialect=dialect,
+        schema_id=schema_id,
+    )
+
+
+#: Semver of the execution receipt (THE-782). Separate from CONTRACT_VERSION
+#: and from COMPUTATION_SPEC_VERSION: those version what a result LOOKS like and
+#: what a request IS. This versions the provenance block attached to a result, so
+#: a reader can tell "this receipt predates source hashes" from "this run had no
+#: source", which are not the same fact.
+#:
+#: MAJOR removes or retypes a key · MINOR adds one · PATCH changes descriptions.
+#:
+#: 1.1.0 (cross-vendor fix wave, F6): added `session_id`. It is the run's
+#: session (from `execute_session`) or null for a session-less run. Adding a key
+#: is MINOR.
+RECEIPT_VERSION = "1.1.0"
+
+#: The determinism inputs the receipt has a slot for. Every one of them appears
+#: EITHER with a value OR in `unrecorded` — never as a bare null, because a null
+#: with no explanation reads identically to "the value was empty" and to "this
+#: key was never populated", and those are different facts about a run.
+DETERMINISM_INPUTS = ("locale.LANG", "locale.LC_ALL", "timezone", "seed")
+
+#: The provider whose executions run through codecalc's OWN sandbox, and are
+#: therefore the only ones whose environment codecalc can honestly describe.
+#: `execute_session` already keys on this same identifier.
+_SANDBOXED_PROVIDER_ID = "local"
+
+
+def _determinism_value(receipt: dict, dotted: str) -> object:
+    node: object = receipt
+    for part in dotted.split("."):
+        node = node[part]  # type: ignore[index]
+    return node
+
+
+def _determinism_receipt(provider_id: str) -> dict:
+    """Locale, timezone and seed — as the run will actually see them.
+
+    DERIVED, NOT TRANSCRIBED. `executor._env()` is the single function that
+    builds the child's environment from the allowlist, and both the sandbox and
+    the session worker call it. Reading the answer back out of it means this
+    block cannot drift from what is really forwarded: add TZ to the allowlist and
+    `timezone` starts being populated here with no edit, which is the whole
+    point of not copying the list.
+
+    THREE THINGS ARE HONEST HERE RATHER THAN CONVENIENT:
+
+      * `TZ` is NOT in the env allowlist today, so the child inherits the host's
+        system zone and codecalc cannot name it. Reported as unrecorded rather
+        than guessed from the server's own `time.tzname`, which would describe
+        the wrong process.
+      * codecalc has NO seed concept — no tool accepts one and no runtime is
+        seeded — so `seed` is null on every run, and says why.
+      * A provider other than `local` runs somewhere codecalc does not control.
+        Reporting this server's locale for a run that happened on someone else's
+        host would be a confident lie, so nothing is reported at all.
+    """
+    if provider_id == _SANDBOXED_PROVIDER_ID:
+        forwarded = executor._env()
+        receipt = {
+            "source": "env_allowlist",
+            "locale": {"LANG": forwarded.get("LANG"),
+                       "LC_ALL": forwarded.get("LC_ALL")},
+            "timezone": forwarded.get("TZ"),
+            "seed": None,
+        }
+    else:
+        receipt = {
+            "source": "provider_owned",
+            "locale": {"LANG": None, "LC_ALL": None},
+            "timezone": None,
+            "seed": None,
+        }
+    receipt["unrecorded"] = sorted(
+        name for name in DETERMINISM_INPUTS
+        if _determinism_value(receipt, name) is None
+    )
+    return receipt
+
+
+def _limit_receipt(spec: ComputationSpec, result: dict) -> dict:
+    disclosures = [str(item) for item in result.get("unenforced") or []]
+    disclosure_text = "\n".join(disclosures).lower()
+    requested_controls = (
+        ("timeout", spec.timeout > 0, ("timeout",)),
+        ("max_memory_mb", spec.max_memory_mb > 0, ("memory",)),
+        ("max_output_kb", spec.max_output_kb > 0, ("output",)),
+        ("max_cpu", spec.max_cpu > 0, ("cpu",)),
+        ("no_net", spec.no_net, ("no_net", "network")),
+    )
+    reported_enforced = [
+        name
+        for name, requested, markers in requested_controls
+        if requested and not any(marker in disclosure_text for marker in markers)
+    ]
+    return {
+        "requested": {
+            "timeout_seconds": spec.timeout,
+            "max_memory_mb": spec.max_memory_mb,
+            "max_output_kb": spec.max_output_kb,
+            "max_cpu_seconds": spec.max_cpu,
+            "no_net": spec.no_net,
+        },
+        "provider_reported_enforced": reported_enforced,
+        "unenforced": disclosures,
+    }
+
+
+def _execution_receipt(spec: ComputationSpec, descriptor: dict,
+                       result: dict, session_id: str | None = None) -> dict:
+    """Provider identity, content hashes, determinism inputs, limits (THE-782).
+
+    THE-790 attached provider identity and the limits receipt. Those answer
+    "who ran it" and "what did you ask for"; they do not answer the question
+    someone re-reading a result a week later actually has, which is WHICH
+    request this was. `spec_hash` answers it by content, `source_sha256` names
+    the program independently of the limits wrapped around it, and
+    `spec_schema_version` records the canonical form both were taken under —
+    without it a stored hash is a number whose meaning has an expiry date
+    nobody wrote down.
+
+    `session_id` (F6, cross-vendor) closes a gap the content hashes alone left
+    open: `execute_code(session_id=...)` builds the SAME ComputationSpec
+    whatever the session, and interpreter STATE lives in the session, not the
+    spec — so `print(x)` with x=1 in one session and x=2 in another produced
+    different output under an identical spec_hash/source_sha256. Recording the
+    session id means two such runs no longer share a byte-identical receipt.
+    It is null for a session-less run (which ran in no session — an honest,
+    meaningful null, not a missing value). WORKSPACE STATE ITSELF IS NOT
+    HASHED: the receipt names WHICH session, not the exact bytes of its
+    workspace or interpreter heap, so two runs in the SAME session with
+    different in-memory state still share a receipt. Session-state hashing was
+    out of scope for this fix; the session id is the identity recorded.
+
+    NOTHING MACHINE-SPECIFIC GOES IN. `workdir` may be an absolute path on the
+    operator's disk; it reaches the receipt only through `spec_hash`, never as
+    text. The determinism block reads exactly three names out of the forwarded
+    environment rather than copying it, so PATH and HOME cannot ride along. A
+    session id is a codecalc-minted uuid, not a host path, so it is safe here.
+    """
+    return {
+        "receipt_version": RECEIPT_VERSION,
+        "interface_version": descriptor["interface_version"],
+        "provider_id": descriptor["provider_id"],
+        "provider_version": descriptor["provider_version"],
+        "host_class": descriptor["host_class"],
+        "session_id": session_id,
+        "spec_schema_version": spec_identity.COMPUTATION_SPEC_VERSION,
+        "spec_hash": spec_identity.spec_hash(spec),
+        "source_sha256": spec_identity.text_hash(spec.code),
+        "determinism": _determinism_receipt(descriptor["provider_id"]),
+        "limits": _limit_receipt(spec, result),
+    }
+
+
+def attach_receipt(spec: ComputationSpec, provider: ExecutionProvider,
+                   result: dict, *, session_id: str | None = None) -> dict:
+    """Add the FULL execution receipt (identity, content hashes, determinism
+    inputs, limits enforcement — THE-782) every full execution result
+    carries, mutating and returning `result`.
+
+    Moved here from execution_service.py (originally private to
+    `ExecutionService.execute()`/`execute_session()`/`execute_stream()`) so
+    RunSupervisor's own background-run collection (`_collect()`, THE-778
+    fix-round review) can produce the identical shape `execute_code` does
+    instead of a caller being able to tell "ran through ExecutionService"
+    from "ran through run_submit" by whether `provider` is present, or by
+    which RECEIPT FIELDS it carries. `providers.py` is the one module both
+    `execution_service.py` and `run_supervisor.py` already import, which is
+    what makes this the shared home without a circular import — and it
+    already imports `spec_identity` for `ComputationSpec`'s own identity
+    methods, so this needed no new dependency to relocate here.
+
+    `session_id` (F6) is forwarded to the receipt so a session run names the
+    session it happened in. Keyword-only and defaulting to None, so every
+    session-less caller (execute/execute_stream, run_supervisor) is unchanged.
+    """
+    result["provider"] = _execution_receipt(spec, provider.describe(), result,
+                                             session_id=session_id)
+    return result
 
 
 class UnsupportedCapability(RuntimeError):

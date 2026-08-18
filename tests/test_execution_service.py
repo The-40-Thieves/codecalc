@@ -4,15 +4,28 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import os
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 from mcp.types import ImageContent
 
-from codecalc import contract, execution_service, providers, server, sessions
+from codecalc import (
+    contract,
+    execution_service,
+    executor,
+    providers,
+    registry,
+    run_supervisor,
+    server,
+    sessions,
+    spec_identity,
+)
 
 FAILS: list[str] = []
 
@@ -161,6 +174,53 @@ def test_service_verifies_one_workload_independently_across_two_providers() -> N
           result["contract_version"] == contract.CONTRACT_VERSION)
 
 
+def test_managed_execution_preserves_a_good_result_when_cleanup_fails() -> None:
+    """F3 (cross-vendor): the synchronous managed path collected a good result,
+    then let a ProviderOperationFailure from cleanup() REPLACE it with an
+    internal error — stdout/verdict/receipt lost. run_inspect already treats
+    cleanup as best-effort (appends `cleanup_error`); the sync path must mirror
+    that: keep the collected result and disclose the cleanup failure."""
+    class _CleanupFailsProvider(providers.LocalExecutionProvider):
+        provider_id = "cleanup-fails"
+
+        def describe(self) -> dict:
+            descriptor = super().describe()
+            descriptor["provider_id"] = self.provider_id
+            descriptor["capabilities"]["managed_runs"] = True
+            descriptor["capabilities"]["cleanup"] = True
+            return descriptor
+
+        def execute_managed(self, run_id: str,
+                            spec: providers.ComputationSpec) -> dict:
+            del run_id
+            return contract.stamp({
+                "ok": True, "verdict": "OK", "stdout": spec.code,
+                "stderr": "", "exit_code": 0, "unenforced": [],
+            })
+
+        def cleanup(self, run_id: str) -> None:
+            del run_id
+            raise providers.ProviderOperationFailure(self.provider_id, "cleanup")
+
+    provider = _CleanupFailsProvider()
+    registry = providers.ProviderRegistry(default_provider_id=provider.provider_id)
+    registry.register(provider)
+    with tempfile.TemporaryDirectory(prefix="codecalc-cleanup-fail-") as root:
+        supervisor = run_supervisor.RunSupervisor(registry, state_dir=Path(root))
+        service = execution_service.ExecutionService(registry, supervisor=supervisor)
+        result = service.execute(providers.ComputationSpec("python3", "kept-output"))
+
+    check("a cleanup failure does NOT discard the collected result",
+          result.get("stdout") == "kept-output" and result.get("verdict") == "OK")
+    check("the result still carries the execution receipt",
+          isinstance(result.get("provider"), dict)
+          and result["provider"].get("provider_id") == "cleanup-fails")
+    check("the cleanup failure is disclosed rather than swallowed or fatal",
+          bool(result.get("cleanup_error")))
+    check("the preserved result still carries the contract version",
+          result.get("contract_version") == contract.CONTRACT_VERSION)
+
+
 def test_service_routes_streaming_through_the_selected_provider() -> None:
     progress: list[tuple[int, str]] = []
 
@@ -296,6 +356,266 @@ def test_service_receipt_reports_requested_and_provider_enforced_limits() -> Non
           ])
 
 
+# ═══ the receipt names WHAT ran and under WHICH conditions (THE-782) ═══════
+#
+# The limits half above answers "what did you ask for and what did the provider
+# claim to enforce". It does not answer the two questions someone re-reading a
+# result a week later actually has: WHICH request was this, and what did the
+# environment look like. Content hashes answer the first; the determinism block
+# answers the second, including — loudly — the parts codecalc cannot observe.
+
+
+def _receipt_provider(**overrides: object):
+    class ReceiptProvider(providers.LocalExecutionProvider):
+        # Deliberately NOT "local": this provider stands in for anything that
+        # runs its workload somewhere codecalc does not control.
+        provider_id = "receipt"
+
+        def describe(self) -> dict:
+            descriptor = super().describe()
+            descriptor["provider_id"] = self.provider_id
+            descriptor.update(overrides)
+            return descriptor
+
+        def execute(self, spec: providers.ComputationSpec) -> dict:
+            del spec
+            return contract.stamp({"ok": True, "verdict": "OK", "stdout": "",
+                                   "stderr": "", "exit_code": 0, "unenforced": []})
+
+    return ReceiptProvider
+
+
+def _receipt_for(spec: providers.ComputationSpec, **overrides: object) -> dict:
+    registry = providers.ProviderRegistry(default_provider_id="receipt")
+    registry.register(_receipt_provider(**overrides)())
+    return execution_service.ExecutionService(registry).execute(spec)["provider"]
+
+
+def test_receipt_names_the_request_and_the_source_by_content() -> None:
+    spec = providers.ComputationSpec(language="python3", code='print("receipt")',
+                                     stdin="1\n", timeout=7, no_net=True)
+    receipt = _receipt_for(spec)
+
+    check("the receipt is versioned so a reader can evolve",
+          receipt["receipt_version"] == execution_service.RECEIPT_VERSION)
+    check("the receipt version is semver",
+          len(execution_service.RECEIPT_VERSION.split(".")) == 3)
+    check("the receipt names the request by content hash",
+          receipt["spec_hash"] == spec.spec_hash()
+          and receipt["spec_hash"].startswith("sha256:"))
+    check("the receipt names the canonical form the hash was taken under",
+          receipt["spec_schema_version"] == providers.COMPUTATION_SPEC_VERSION)
+    check("the receipt hashes the source that was actually executed",
+          receipt["source_sha256"]
+          == spec_identity.text_hash('print("receipt")'))
+    check("the source hash is not the spec hash",
+          receipt["source_sha256"] != receipt["spec_hash"])
+    check("the requested-vs-enforced distinction is untouched",
+          receipt["limits"]["requested"]["timeout_seconds"] == 7
+          and "provider_reported_enforced" in receipt["limits"]
+          and "unenforced" in receipt["limits"])
+
+
+def test_receipt_is_stable_for_identical_inputs_and_moves_for_different_ones() -> None:
+    spec = providers.ComputationSpec(language="python3", code="pass", timeout=3)
+    first = _receipt_for(spec)
+    second = _receipt_for(providers.ComputationSpec(
+        timeout=3, code="pass", language="python3"))
+    other = _receipt_for(providers.ComputationSpec(
+        language="python3", code="pass", timeout=4))
+
+    stable = ("receipt_version", "spec_hash", "spec_schema_version",
+              "source_sha256", "determinism")
+    check("two identical requests produce an identical receipt",
+          {k: first[k] for k in stable} == {k: second[k] for k in stable})
+    check("a different request produces a different spec hash",
+          other["spec_hash"] != first["spec_hash"])
+    check("the same source under a different request keeps one source hash",
+          other["source_sha256"] == first["source_sha256"])
+
+
+def test_receipt_records_the_determinism_inputs_it_can_observe() -> None:
+    # The real local provider, because the determinism block describes the
+    # environment codecalc's OWN sandbox forwards — which is a claim only the
+    # provider that actually runs through that sandbox is entitled to make.
+    determinism = _service().execute(providers.ComputationSpec(
+        language="python3", code="pass"))["provider"]["determinism"]
+    forwarded = executor._env()
+
+    check("determinism names where its values came from",
+          determinism["source"] == "env_allowlist")
+    check("locale is what the env allowlist actually forwards",
+          determinism["locale"] == {"LANG": forwarded.get("LANG"),
+                                    "LC_ALL": forwarded.get("LC_ALL")})
+    check("timezone is what the env allowlist actually forwards",
+          determinism["timezone"] == forwarded.get("TZ"))
+    check("TZ is not in the allowlist today, so timezone is unrecorded",
+          "TZ" not in executor._ENV_ALLOWLIST
+          and "timezone" in determinism["unrecorded"])
+    check("codecalc has no seed concept, and the receipt says so rather than "
+          "reporting a null nobody can interpret",
+          determinism["seed"] is None and "seed" in determinism["unrecorded"])
+    check("every unrecorded entry is genuinely null",
+          all(_determinism_value(determinism, name) is None
+              for name in determinism["unrecorded"]))
+    # Imported, not spelled out: a fifth determinism input added to
+    # providers.DETERMINISM_INPUTS would be silently exempt from this
+    # assertion if the tuple lived here too. Same single-source rule the
+    # `server._RUN_EXTRA_KEYS` check above follows.
+    check("nothing is both recorded and unrecorded",
+          all(_determinism_value(determinism, name) is not None
+              for name in providers.DETERMINISM_INPUTS
+              if name not in determinism["unrecorded"]))
+
+
+def _determinism_value(determinism: dict, dotted: str) -> object:
+    node: object = determinism
+    for part in dotted.split("."):
+        node = node[part]  # type: ignore[index]
+    return node
+
+
+def test_receipt_determinism_does_not_claim_a_remote_environment() -> None:
+    """CodeCalc controls the local sandbox's environment. It does not control a
+    remote provider's, and a receipt that reported the client's locale for a run
+    that happened on someone else's host would be a confident lie."""
+    remote = _receipt_for(
+        providers.ComputationSpec(language="python3", code="pass"))["determinism"]
+
+    check("a non-sandboxed provider does not borrow the client's environment",
+          remote["source"] == "provider_owned")
+    check("a remote run records nothing it did not observe",
+          remote["locale"] == {"LANG": None, "LC_ALL": None}
+          and remote["timezone"] is None and remote["seed"] is None)
+    check("and says so, rather than leaving four bare nulls",
+          sorted(remote["unrecorded"])
+          == ["locale.LANG", "locale.LC_ALL", "seed", "timezone"])
+
+
+def test_receipt_carries_no_secret_and_no_machine_specific_path() -> None:
+    """A receipt travels: it is logged, pasted into tickets, and returned to a
+    caller. It must be portable JSON with nothing in it that identifies a host."""
+    # THE REAL LOCAL PROVIDER, not the stand-in. An earlier version of this test
+    # used the stand-in and therefore exercised the `provider_owned` branch,
+    # which reads no environment at all — so it passed with the entire forwarded
+    # environment spliced into the determinism block. Found by seeding exactly
+    # that defect and watching nothing go red.
+    with tempfile.TemporaryDirectory() as workdir:
+        spec = providers.ComputationSpec(language="python3", code="pass",
+                                         workdir=workdir)
+        receipt = _service().execute(spec)["provider"]
+        serialized = json.dumps(receipt)
+        check("the workdir path never reaches the receipt, only its hash",
+              workdir not in serialized)
+
+    check("the receipt is JSON-serializable", isinstance(serialized, str))
+    check("the determinism block came from the sandbox, so this is the branch "
+          "that could leak",
+          receipt["determinism"]["source"] == "env_allowlist")
+    check("no absolute home-directory path appears anywhere in the receipt",
+          str(Path.home()) not in serialized)
+    forwarded = executor._env()
+    check("the forwarded PATH does not leak through the determinism block",
+          forwarded["PATH"] not in serialized)
+    check("HOME does not leak through the determinism block",
+          not forwarded.get("HOME") or forwarded["HOME"] not in serialized)
+    check("the determinism block carries only the three named inputs",
+          set(receipt["determinism"])
+          == {"source", "locale", "timezone", "seed", "unrecorded"})
+
+
+def test_every_receipt_bearing_path_carries_the_same_receipt() -> None:
+    """A receipt on one path and not another is worse than none: a reader cannot
+    tell "no hash" from "this path forgot". execute, execute_stream and session
+    execution all attach it."""
+    spec = providers.ComputationSpec(language="python3", code='print("paths")')
+    service = _service()
+
+    plain = service.execute(spec)["provider"]
+    streamed = asyncio.run(service.execute_stream(spec))["provider"]
+    session = server.session_start("python3")
+    try:
+        in_session = execution_service.ExecutionService(
+            service.registry).execute_session(
+                execution_service.SessionService(), session["session_id"], spec
+            )["provider"]
+    finally:
+        server.session_stop(session["session_id"])
+
+    required = {"receipt_version", "spec_hash", "spec_schema_version",
+                "source_sha256", "determinism", "limits"}
+    check("execute() attaches the full receipt", required <= set(plain))
+    check("execute_stream() attaches the full receipt", required <= set(streamed))
+    check("execute_session() attaches the full receipt", required <= set(in_session))
+    check("all three agree on the request identity",
+          plain["spec_hash"] == streamed["spec_hash"] == in_session["spec_hash"]
+          == spec.spec_hash())
+    check("all three agree on the source identity",
+          plain["source_sha256"] == streamed["source_sha256"]
+          == in_session["source_sha256"])
+
+
+def test_receipt_distinguishes_two_sessions_running_the_same_spec() -> None:
+    """F6 (cross-vendor): execute_code builds the SAME ComputationSpec whatever
+    the session_id, and the receipt recorded neither the session nor any
+    workspace-state marker — so `print(x)` with x=1 in session A and x=2 in
+    session B produced different output yet byte-identical spec_hash/
+    source_sha256/receipt. The receipt now records session_id, so identical
+    receipts cannot mask runs in different sessions."""
+    spec = providers.ComputationSpec(language="python3", code='print("same source")')
+    service = _service()
+    a = server.session_start("python3")
+    b = server.session_start("python3")
+    try:
+        ra = execution_service.ExecutionService(service.registry).execute_session(
+            execution_service.SessionService(), a["session_id"], spec)["provider"]
+        rb = execution_service.ExecutionService(service.registry).execute_session(
+            execution_service.SessionService(), b["session_id"], spec)["provider"]
+    finally:
+        server.session_stop(a["session_id"])
+        server.session_stop(b["session_id"])
+
+    check("the receipt records the session a run happened in",
+          ra.get("session_id") == a["session_id"]
+          and rb.get("session_id") == b["session_id"])
+    check("two sessions running the identical spec get DISTINGUISHABLE receipts",
+          ra != rb and ra.get("session_id") != rb.get("session_id"))
+    check("a session receipt still names the request by content",
+          ra.get("spec_hash") == spec.spec_hash())
+    check("the receipt version reflects the added session_id field",
+          ra.get("receipt_version") == execution_service.RECEIPT_VERSION)
+
+    plain = service.execute(spec)["provider"]
+    check("a session-LESS run records session_id as null, not a fake one",
+          plain.get("session_id") is None)
+
+
+def test_compact_mode_keeps_the_actionable_half_of_the_receipt() -> None:
+    """A receipt that doubles a compact reply defeats the mode it rides in.
+
+    Copied wholesale, THE-782's additions took a compact result from 603 to
+    1019 bytes — measured, and past the bar server.py already set when it called
+    a 171-of-199-token disclosure a defect. What a caller must ACT on stays;
+    what is descriptive and one call away is named and dropped.
+    """
+    full = server.execute_code("python3", 'print("c")', provider="local")["provider"]
+    terse = server.execute_code(
+        "python3", 'print("c")', provider="local", compact=True)["provider"]
+
+    check("compact keeps the request identity", terse["spec_hash"] == full["spec_hash"])
+    check("compact keeps the receipt version",
+          terse["receipt_version"] == execution_service.RECEIPT_VERSION)
+    check("compact keeps provider identity", terse["provider_id"] == "local")
+    check("compact keeps the whole limits receipt", terse["limits"] == full["limits"])
+    check("compact drops the descriptive half",
+          "determinism" not in terse and "source_sha256" not in terse)
+    check("compact names every key it dropped rather than truncating silently",
+          all(key in terse["receipt_detail"]
+              for key in set(full) - set(terse) - {"receipt_detail"}))
+    check("the compact receipt is smaller than the full one",
+          len(json.dumps(terse)) < len(json.dumps(full)))
+
+
 def test_session_service_owns_protocol_neutral_lifecycle_and_artifacts() -> None:
     service_type = getattr(execution_service, "SessionService", None)
     check("protocol-neutral session service is available", service_type is not None)
@@ -336,21 +656,36 @@ def test_session_service_reads_bounded_files_and_runs_workspace_entries() -> Non
     if service_type is None:
         return
 
+    # Extension->language inference is pure registry logic and needs no
+    # execution, so the `.sh`->bash coverage this test exists for is asserted
+    # directly against the same reversed-EXTENSIONS map run_file() uses. This
+    # keeps that coverage on EVERY matrix OS, where actually RUNNING a `.sh`
+    # entry would fail: on the Windows git-bash fallback a `bash <path>` run
+    # dies (MSYS eats the `\` separators, exit 127 — see registry.py's
+    # POSIX_ARGV_LANGUAGES note), so the RUN itself is exercised below with a
+    # portable python3 entry instead, which runs identically on ubuntu, macos
+    # and windows. The two together preserve the original substance —
+    # extension->language inference AND a workspace entry that actually runs.
+    by_extension = {value: key for key, value in registry.EXTENSIONS.items()}
+
     old_root = sessions.SESSION_ROOT
     with tempfile.TemporaryDirectory(prefix="codecalc-session-read-run-") as root:
         sessions.SESSION_ROOT = Path(root)
         try:
             service = service_type()
-            started = service.start("bash")
+            started = service.start("python3")
             session_id = started["session_id"]
             service.write_file(session_id, "message.txt", "abcdef")
-            service.write_file(session_id, "main.sh", 'printf "workspace-run\\n"')
+            service.write_file(session_id, "main.py", 'print("workspace-run")')
             read = service.read_file(session_id, "message.txt", max_bytes=3)
-            run = service.run_file(session_id, "main.sh", timeout=10)
+            run = service.run_file(session_id, "main.py", timeout=10)
             stopped = service.stop(session_id)
         finally:
             sessions.SESSION_ROOT = old_root
 
+    check("a `.sh` entry infers the bash language (pure registry inference, "
+          "no execution — the coverage a bash RUN cannot carry on Windows)",
+          by_extension.get("sh") == "bash")
     check("session service returns a protocol-neutral bounded read", read == {
         "ok": True,
         "path": "message.txt",
@@ -362,10 +697,15 @@ def test_session_service_reads_bounded_files_and_runs_workspace_entries() -> Non
         "truncated": True,
         "resource": f"codecalc://session/{session_id}/files/message.txt",
     })
+    # Newline-normalized: the executor returns the program's raw stdout
+    # unchanged (it decodes bytes, it does not translate line endings), so
+    # python3's print() lands "workspace-run\r\n" on Windows and
+    # "workspace-run\n" on POSIX. The invariant under test is "the entry ran
+    # and produced its line", not the platform's newline convention.
     check("session service infers and runs a workspace entry",
-          run["ok"] is True and run["stdout"] == "workspace-run\n")
-    check("workspace run reports its canonical entry and language",
-          run["entry_file"] == "main.sh" and run["language"] == "bash")
+          run["ok"] is True and run["stdout"].replace("\r\n", "\n") == "workspace-run\n")
+    check("workspace run reports its canonical entry and inferred language",
+          run["entry_file"] == "main.py" and run["language"] == "python3")
     check("read/run test cleans up its workspace", stopped["deleted"] is True)
 
 
@@ -668,7 +1008,7 @@ def test_main_runs_the_same_server_over_explicit_streamable_http() -> None:
 
 def test_serve_http_refuses_a_non_loopback_bind_without_a_token() -> None:
     """THE-786 residual: fail CLOSED. serve-http on a non-loopback host with no
-    CODECALC_HTTP_TOKEN would expose 48 unauthenticated code-execution tools to
+    CODECALC_HTTP_TOKEN would expose 51 unauthenticated code-execution tools to
     whatever network the interface reaches. Refusing to start is the only
     answer that cannot be misconfigured into an open server."""
     calls: list[dict] = []
@@ -755,6 +1095,611 @@ def test_http_auth_is_wired_into_the_server_at_import_when_the_token_is_set() ->
           proc.returncode == 0)
 
 
+# ── THE-778: run_submit / run_inspect / run_cancel ──────────────────────────
+
+class _FakeRunProvider(providers.LocalExecutionProvider):
+    """A provider that finishes fast and deterministically, so run_submit/
+    run_inspect tests do not depend on the real sandbox or on timing."""
+
+    provider_id = "fake-run"
+
+    def describe(self) -> dict:
+        result = super().describe()
+        result["provider_id"] = self.provider_id
+        return result
+
+    def execute(self, spec: providers.ComputationSpec) -> dict:
+        return contract.stamp({
+            "ok": True, "verdict": "OK", "stdout": spec.code,
+            "stderr": "", "exit_code": 0, "unenforced": [],
+        })
+
+
+class _FakeCancellableProvider(_FakeRunProvider):
+    """Like _FakeRunProvider, but blocks until cancelled and DOES advertise
+    `cancel`/`cleanup` — the branch a provider like RemoteStrictExecution-
+    Provider takes, as opposed to the built-in `local` provider."""
+
+    provider_id = "fake-cancellable"
+
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.cancelled: list[str] = []
+
+    def describe(self) -> dict:
+        result = super().describe()
+        result["capabilities"]["cancel"] = True
+        result["capabilities"]["cleanup"] = True
+        return result
+
+    def execute(self, spec: providers.ComputationSpec) -> dict:
+        self.entered.set()
+        self.release.wait(5)
+        return contract.stamp({
+            "ok": True, "verdict": "OK", "stdout": spec.code,
+            "stderr": "", "exit_code": 0, "unenforced": [],
+        })
+
+    def cancel(self, run_id: str) -> None:
+        self.cancelled.append(run_id)
+        self.release.set()
+
+    def cleanup(self, run_id: str) -> None:
+        pass
+
+
+def _run_registry(*provs) -> providers.ProviderRegistry:
+    registry = providers.ProviderRegistry(default_provider_id=provs[0].provider_id)
+    for p in provs:
+        registry.register(p)
+    return registry
+
+
+def test_run_submit_returns_a_run_id_immediately_and_run_inspect_polls_to_terminal() -> None:
+    registry = _run_registry(_FakeRunProvider())
+    old = server._run_supervisor
+    with tempfile.TemporaryDirectory(prefix="codecalc-run-tools-") as root:
+        server._run_supervisor = run_supervisor.RunSupervisor(registry, state_dir=Path(root))
+        try:
+            submitted = server.run_submit("python3", "collected-output")
+            check("run_submit succeeds and returns a run_id",
+                  submitted.get("ok") is True and bool(submitted.get("run_id")))
+            check("run_submit reports the selected provider and a running state",
+                  submitted.get("provider_id") == "fake-run" and submitted.get("state") == "running")
+            run_id = submitted.get("run_id", "")
+
+            terminal = None
+            for _ in range(100):
+                inspected = server.run_inspect(run_id)
+                if inspected.get("state") in {"finished", "cleaned"}:
+                    terminal = inspected
+                    break
+                time.sleep(0.02)
+            check("run_inspect eventually reaches a terminal state", terminal is not None)
+            if terminal is not None:
+                check("a terminal run_inspect carries the execute_code result shape",
+                      terminal.get("stdout") == "collected-output"
+                      and terminal.get("verdict") == "OK"
+                      and terminal.get("ok") is True)
+                check("a terminal run_inspect still carries its own run_id",
+                      terminal.get("run_id") == run_id)
+                again = server.run_inspect(run_id)
+                check("a finished run stays inspectable on a second read (retention)",
+                      again.get("stdout") == "collected-output")
+        finally:
+            server._run_supervisor = old
+
+
+def test_run_inspect_reports_a_validation_error_for_an_unknown_run_id() -> None:
+    registry = _run_registry(_FakeRunProvider())
+    old = server._run_supervisor
+    with tempfile.TemporaryDirectory(prefix="codecalc-run-tools-unknown-") as root:
+        server._run_supervisor = run_supervisor.RunSupervisor(registry, state_dir=Path(root))
+        try:
+            result = server.run_inspect("does-not-exist")
+            check("unknown run_id is a validation error, not a crash",
+                  result.get("ok") is False and result.get("code") == "validation")
+            check("unknown run_id names the provider_error",
+                  result.get("provider_error") == "unknown_run")
+        finally:
+            server._run_supervisor = old
+
+
+def test_run_cancel_is_idempotent_on_an_already_terminal_run() -> None:
+    registry = _run_registry(_FakeRunProvider())
+    old = server._run_supervisor
+    with tempfile.TemporaryDirectory(prefix="codecalc-run-tools-cancel-terminal-") as root:
+        server._run_supervisor = run_supervisor.RunSupervisor(registry, state_dir=Path(root))
+        try:
+            submitted = server.run_submit("python3", "x")
+            run_id = submitted["run_id"]
+            for _ in range(100):
+                if server.run_inspect(run_id).get("state") == "finished":
+                    break
+                time.sleep(0.02)
+            result = server.run_cancel(run_id)
+            check("cancelling an already-finished run is a no-op, not an error",
+                  result.get("ok") is True and result.get("cancelled") is False)
+        finally:
+            server._run_supervisor = old
+
+
+class _FakeUncancellableRunningProvider(_FakeRunProvider):
+    """Like _FakeRunProvider, but blocks until released — so a cancel races a
+    REAL running state, not a terminal one — while still not advertising
+    `cancel` (LocalExecutionProvider's own shape)."""
+
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def execute(self, spec: providers.ComputationSpec) -> dict:
+        self.entered.set()
+        self.release.wait(5)
+        return super().execute(spec)
+
+
+def test_run_cancel_honestly_reports_a_provider_that_cannot_cancel() -> None:
+    """The built-in `local` provider (LocalExecutionProvider) does not
+    advertise `cancel` and its cancel() raises UnsupportedCapability. This
+    must not escape run_cancel as an unhandled exception, and must not be
+    reported as a fake success either — see run_cancel's own docstring."""
+    provider = _FakeUncancellableRunningProvider()
+    registry = _run_registry(provider)
+    old = server._run_supervisor
+    with tempfile.TemporaryDirectory(prefix="codecalc-run-tools-uncancellable-") as root:
+        server._run_supervisor = run_supervisor.RunSupervisor(registry, state_dir=Path(root))
+        try:
+            submitted = server.run_submit("python3", "x", timeout=5)
+            run_id = submitted["run_id"]
+            provider.entered.wait(2)
+            result = server.run_cancel(run_id)
+            provider.release.set()
+            check("cancelling an uncancellable provider is a validation error, not a crash",
+                  result.get("ok") is False and result.get("code") == "validation")
+            check("the error names the provider that could not cancel",
+                  result.get("requested_provider") == provider.provider_id)
+        finally:
+            server._run_supervisor = old
+
+
+def test_run_cancel_reaches_a_provider_that_supports_it() -> None:
+    provider = _FakeCancellableProvider()
+    registry = _run_registry(provider)
+    old = server._run_supervisor
+    with tempfile.TemporaryDirectory(prefix="codecalc-run-tools-cancellable-") as root:
+        server._run_supervisor = run_supervisor.RunSupervisor(registry, state_dir=Path(root))
+        try:
+            submitted = server.run_submit("python3", "x", timeout=5)
+            run_id = submitted["run_id"]
+            provider.entered.wait(2)
+            result = server.run_cancel(run_id)
+            check("a provider that supports cancel reports cancelled=True",
+                  result.get("ok") is True and result.get("cancelled") is True)
+            check("the cancel reaches the owning provider",
+                  provider.cancelled == [run_id])
+        finally:
+            server._run_supervisor = old
+
+
+def test_run_tools_return_an_internal_error_when_no_supervisor_is_wired() -> None:
+    old = server._run_supervisor
+    server._run_supervisor = None
+    try:
+        submitted = server.run_submit("python3", "x")
+        inspected = server.run_inspect("whatever")
+        cancelled = server.run_cancel("whatever")
+    finally:
+        server._run_supervisor = old
+    check("run_submit fails cleanly with no supervisor wired",
+          submitted.get("ok") is False and submitted.get("code") == "internal")
+    check("run_inspect fails cleanly with no supervisor wired",
+          inspected.get("ok") is False and inspected.get("code") == "internal")
+    check("run_cancel fails cleanly with no supervisor wired",
+          cancelled.get("ok") is False and cancelled.get("code") == "internal")
+
+
+def _real_local_registry() -> providers.ProviderRegistry:
+    registry = providers.ProviderRegistry(default_provider_id="local")
+    registry.register(providers.LocalExecutionProvider())
+    return registry
+
+
+def test_run_cancel_on_the_real_local_provider_does_not_strand_the_result() -> None:
+    """THE-778 fix round, review Critical #1 — the reviewer's own repro,
+    against the ACTUAL LocalExecutionProvider (not a stand-in): submit ->
+    run_cancel (gets the honest unsupported error) -> the run completes on
+    its own -> run_inspect must reach a terminal state and return the FULL
+    result, not poll "cancelling" forever. Reviewer's own observation was
+    10 polls over 5s all reporting state=cancelling while
+    _run_supervisor.wait() returned the finished result immediately —
+    this exercises the same sequence end to end through the MCP tools."""
+    old = server._run_supervisor
+    with tempfile.TemporaryDirectory(prefix="codecalc-run-tools-real-local-") as root:
+        server._run_supervisor = run_supervisor.RunSupervisor(
+            _real_local_registry(), state_dir=Path(root)
+        )
+        try:
+            submitted = server.run_submit("python3", "print('still here')", timeout=10)
+            check("submission on the real local provider succeeds",
+                  submitted.get("ok") is True)
+            run_id = submitted.get("run_id", "")
+
+            cancelled = server.run_cancel(run_id)
+            check("run_cancel on the real local provider reports the honest "
+                  "unsupported error",
+                  cancelled.get("ok") is False
+                  and cancelled.get("code") == "validation"
+                  and cancelled.get("provider_error") == "unsupported_capability")
+
+            terminal = None
+            for _ in range(200):
+                inspected = server.run_inspect(run_id)
+                if inspected.get("state") in {"finished", "cleaned"}:
+                    terminal = inspected
+                    break
+                time.sleep(0.02)
+            check("run_inspect reaches a terminal state after a failed cancel "
+                  "(not stranded at 'cancelling' forever)", terminal is not None)
+            if terminal is not None:
+                check("the terminal result is the run's real output, not stranded",
+                      terminal.get("stdout", "").strip() == "still here"
+                      and terminal.get("ok") is True)
+        finally:
+            server._run_supervisor = old
+
+
+def test_run_inspect_terminal_result_has_the_same_keys_as_execute_code() -> None:
+    """THE-778 fix round, review Important #2: run_submit bypasses
+    ExecutionService.execute() — the only OTHER place the `provider`
+    receipt was attached — so a terminal run_inspect result was missing it
+    entirely. This is the gate that keeps the two surfaces from drifting
+    apart again: same provider (the real local one, so both sides go
+    through the identical executor.execute() call), same code, key sets
+    compared modulo the documented run_* allowlist."""
+    exec_result = server.execute_code("python3", "print('parity')")
+
+    old = server._run_supervisor
+    with tempfile.TemporaryDirectory(prefix="codecalc-run-tools-parity-") as root:
+        server._run_supervisor = run_supervisor.RunSupervisor(
+            _real_local_registry(), state_dir=Path(root)
+        )
+        try:
+            submitted = server.run_submit("python3", "print('parity')")
+            run_id = submitted.get("run_id", "")
+            terminal = None
+            for _ in range(200):
+                inspected = server.run_inspect(run_id)
+                if inspected.get("state") in {"finished", "cleaned"}:
+                    terminal = inspected
+                    break
+                time.sleep(0.02)
+            check("run_inspect reaches a terminal state for the parity check",
+                  terminal is not None)
+            if terminal is None:
+                return
+            missing = set(exec_result) - set(terminal)
+            extra = set(terminal) - set(exec_result) - server._RUN_EXTRA_KEYS
+            check("run_inspect terminal result carries every execute_code key",
+                  not missing)
+            check("run_inspect's only extra keys are the documented run_* allowlist",
+                  not extra)
+            check("run_inspect terminal result carries the provider receipt",
+                  isinstance(terminal.get("provider"), dict)
+                  and terminal["provider"].get("provider_id") == "local"
+                  and "limits" in terminal["provider"])
+        finally:
+            server._run_supervisor = old
+
+
+def test_first_terminal_run_inspect_reports_cleaned_state_accurately() -> None:
+    """F9 (cross-vendor): run_inspect captured `status` BEFORE calling cleanup()
+    and returned that, so the FIRST terminal read reported cleaned=false and the
+    NEXT reported cleaned=true — a spurious state change for a caller polling to
+    completion. Refreshing status AFTER cleanup makes the first read accurate."""
+    registry = _run_registry(_FakeRunProvider())
+    old = server._run_supervisor
+    with tempfile.TemporaryDirectory(prefix="codecalc-run-f9-") as root:
+        server._run_supervisor = run_supervisor.RunSupervisor(registry, state_dir=Path(root))
+        try:
+            submitted = server.run_submit("python3", "x")
+            run_id = submitted["run_id"]
+            first_terminal = None
+            for _ in range(200):
+                inspected = server.run_inspect(run_id)
+                if inspected.get("state") in {"finished", "cleaned", "recovered"}:
+                    first_terminal = inspected
+                    break
+                time.sleep(0.02)
+            check("run_inspect reaches a terminal state", first_terminal is not None)
+            if first_terminal is not None:
+                check("the FIRST terminal read already reports cleaned=True "
+                      "(no stale pre-cleanup state)",
+                      first_terminal.get("cleaned") is True,
+                      )
+                check("...and its state reflects the completed cleanup",
+                      first_terminal.get("state") == "cleaned")
+                nxt = server.run_inspect(run_id)
+                check("a second terminal read agrees with the first (no state flip)",
+                      nxt.get("cleaned") == first_terminal.get("cleaned")
+                      and nxt.get("state") == first_terminal.get("state"))
+        finally:
+            server._run_supervisor = old
+
+
+def test_run_submit_admission_cap_returns_resource_exhausted() -> None:
+    """THE-778 fix round, review Important #3a: run_submit must refuse past
+    CODECALC_MAX_ACTIVE_RUNS with a stable, tested error rather than
+    growing the run table without bound."""
+    provider = _FakeUncancellableRunningProvider()
+    registry = _run_registry(provider)
+    old = server._run_supervisor
+    with tempfile.TemporaryDirectory(prefix="codecalc-run-tools-cap-") as root:
+        server._run_supervisor = run_supervisor.RunSupervisor(
+            registry, state_dir=Path(root), max_active_runs=1,
+        )
+        try:
+            first = server.run_submit("python3", "x", timeout=5)
+            check("the first submission, under the cap, succeeds",
+                  first.get("ok") is True)
+            provider.entered.wait(2)
+
+            second = server.run_submit("python3", "y", timeout=5)
+            check("a submission past the cap is a resource_exhausted error",
+                  second.get("ok") is False
+                  and second.get("code") == "resource_exhausted")
+            check("the error reports the active count and the configured limit",
+                  second.get("active_runs") == 1 and second.get("limit") == 1)
+
+            provider.release.set()
+            freed = None
+            for _ in range(200):
+                if server.run_inspect(first["run_id"]).get("state") in {"finished", "cleaned"}:
+                    freed = True
+                    break
+                time.sleep(0.02)
+            check("the first run reaches terminal so capacity frees up",
+                  freed is True)
+
+            third = server.run_submit("python3", "z", timeout=5)
+            check("a submission after capacity frees up succeeds",
+                  third.get("ok") is True)
+        finally:
+            server._run_supervisor = old
+
+
+# ── THE-783: session output spills to a workspace artifact ─────────────────
+
+def _spill_read(session_id: str, spill_uri: str) -> bytes:
+    rel = spill_uri.split("/files/", 1)[1]
+    data, _mime = sessions.resource_read(session_id, rel)
+    return data
+
+
+def test_session_output_spills_past_the_default_cap_instead_of_dropping_it() -> None:
+    old_root = sessions.SESSION_ROOT
+    with tempfile.TemporaryDirectory(prefix="codecalc-spill-") as root:
+        sessions.SESSION_ROOT = Path(root)
+        try:
+            session_id = sessions.start("bash")["session_id"]
+            # 100000 bytes of 'A', produced by a portable `python3` program.
+            # This runs identically on every fallback OS: Windows git-bash
+            # cannot produce a binary stream through `head -c /dev/zero | tr`
+            # (it emits nothing), so the old bash producer spilled on
+            # Linux/macOS but not on the Windows CI runner.
+            code = 'import sys; sys.stdout.write("A" * 100000)'
+            result = sessions.execute(session_id, code, language="python3")
+            full = b"A" * 100_000
+
+            check("oversized session output is reported truncated",
+                  result.get("output_truncated") is True)
+            marker = "\n…[truncated]"
+            check("the inline stdout stays at the default cap plus the truncation marker",
+                  len(result["stdout"]) == executor.MAX_OUTPUT_BYTES + len(marker))
+            check("the inline stdout is a real PREFIX of the full output",
+                  full.decode().startswith(result["stdout"][:-len(marker)]))
+            spill_uri = result.get("stdout_spill")
+            check("a spill resource URI is returned",
+                  isinstance(spill_uri, str)
+                  and spill_uri.startswith(f"codecalc://session/{session_id}/files/"))
+            data = _spill_read(session_id, spill_uri) if spill_uri else None
+            check("the spill file is byte-identical to the FULL output", data == full)
+
+            below = sessions.execute(
+                session_id, 'print("below-threshold")', language="python3")
+            check("output at/under the cap is never spilled",
+                  below.get("output_truncated") is False and "stdout_spill" not in below)
+
+            explicit = sessions.execute(session_id, code, language="python3", max_output_kb=1)
+            # <= 1024 + a short truncation-marker allowance — the exact
+            # marker text is a per-backend detail (executor.py appends
+            # "…[truncated]"; the Rust binary appends "...[truncated]", two
+            # bytes longer) and is not what this assertion is about.
+            check("an EXPLICIT max_output_kb caps output literally, with no spill",
+                  "stdout_spill" not in explicit
+                  and len(explicit["stdout"]) <= 1024 + 20)
+        finally:
+            sessions.SESSION_ROOT = old_root
+
+
+def test_session_output_spill_is_faithful_to_the_pipelines_str_representation() -> None:
+    """NOT "binary-safe" (THE-778/783 fix round, review Important #4):
+    codecalc's WHOLE pipeline already decodes stdout/stderr with
+    errors="replace" before spill_if_truncated's code ever sees a `str` —
+    both backends do this (executor.py's `_trim`, the Rust binary's own
+    JSON encoding), for every result, spill or not. So genuinely invalid
+    UTF-8 is already lossy SYSTEM-WIDE, upstream of this feature entirely,
+    and claiming the spill itself is "binary-safe" overstates what it can
+    promise. What IS true, and asserted here explicitly in both directions:
+
+      - a NUL byte (U+0000) IS valid UTF-8, so it round-trips byte-identical
+        (this was the ONLY case the old, misleadingly-named version of this
+        test checked — passing it proved NUL-safety, not binary safety);
+      - a genuinely invalid byte (a lone 0xFF, not valid UTF-8 on its own)
+        is NOT preserved — it comes back as U+FFFD, the same replacement
+        character every other codecalc result already shows for it, not
+        the original byte. Checked for loosely (replacement present,
+        original byte absent) rather than an exact byte-for-byte match,
+        because the exact BYTE COUNT `errors="replace"` produces for one
+        invalid input byte is a decoder implementation detail that has
+        already been seen to differ between the Rust and Python backends
+        for TRUNCATION MARKER text in this same file — asserting an exact
+        sequence here would pin that same kind of backend detail rather
+        than the actual claim under test.
+    """
+    old_root = sessions.SESSION_ROOT
+    with tempfile.TemporaryDirectory(prefix="codecalc-spill-fidelity-") as root:
+        sessions.SESSION_ROOT = Path(root)
+        try:
+            session_id = sessions.start("bash")["session_id"]
+
+            nul_code = (
+                "import sys; "
+                'sys.stdout.buffer.write(b"B" * 70000 + b"\\x00" + b"C" * 10)'
+            )
+            nul_result = sessions.execute(session_id, nul_code, language="python3")
+            nul_spill = nul_result.get("stdout_spill")
+            check("a NUL byte still triggers a spill", isinstance(nul_spill, str))
+            if nul_spill:
+                data = _spill_read(session_id, nul_spill)
+                expected = b"B" * 70_000 + b"\x00" + b"C" * 10
+                check("a NUL byte (valid UTF-8) round-trips byte-identical",
+                      data == expected)
+
+            invalid_code = (
+                "import sys; "
+                'sys.stdout.buffer.write(b"B" * 70000 + b"\\xff" + b"C" * 10)'
+            )
+            invalid_result = sessions.execute(session_id, invalid_code, language="python3")
+            invalid_spill = invalid_result.get("stdout_spill")
+            check("invalid UTF-8 still triggers a spill (the stream is still oversized)",
+                  isinstance(invalid_spill, str))
+            if invalid_spill:
+                data = _spill_read(session_id, invalid_spill)
+                check("invalid UTF-8 is replaced with U+FFFD in the spill, matching "
+                      "the pipeline's own str representation",
+                      "�".encode() in data)
+                check("the original 0xFF byte is genuinely gone — lossy upstream "
+                      "of the spill, not something this feature can recover",
+                      b"\xff" not in data)
+                check("the surrounding bytes on both sides are otherwise intact",
+                      data.startswith(b"B" * 70_000) and data.endswith(b"C" * 10))
+        finally:
+            sessions.SESSION_ROOT = old_root
+
+
+def test_session_run_also_spills_oversized_output() -> None:
+    """execution_service.SessionService.run_file() (the session_run MCP tool)
+    calls executor.execute() directly rather than through sessions.execute(),
+    so it needs its own wiring — this is that wiring's test."""
+    old_root = sessions.SESSION_ROOT
+    with tempfile.TemporaryDirectory(prefix="codecalc-spill-run-") as root:
+        sessions.SESSION_ROOT = Path(root)
+        try:
+            service = execution_service.SessionService()
+            session_id = service.start("bash")["session_id"]
+            service.write_file(
+                session_id, "main.py",
+                'import sys; sys.stdout.write("A" * 100000)',
+            )
+            result = service.run_file(session_id, "main.py", timeout=10)
+            spill_uri = result.get("stdout_spill")
+            check("session_run spills oversized output the same way execute_code does",
+                  result.get("output_truncated") is True and isinstance(spill_uri, str))
+            # `.get()` above rather than a bare `result["stdout_spill"]`: a
+            # missing spill is a clean assertion FAIL, never a KeyError that
+            # crashes the rest of this script-style suite.
+            data = _spill_read(session_id, spill_uri) if isinstance(spill_uri, str) else None
+            check("session_run's spill is byte-identical to the full output",
+                  data == b"A" * 100_000)
+        finally:
+            sessions.SESSION_ROOT = old_root
+
+
+def test_a_spill_the_server_writes_is_always_readable_back() -> None:
+    """The capture cap and the resource READ cap have to agree, or the
+    feature writes files nobody can fetch.
+
+    Measured before the fix: the capture ceiling is SPILL_CAPTURE_KB (4 MiB)
+    of RAW stream bytes, but what gets WRITTEN is the errors="replace"
+    RE-ENCODING of an already-decoded str, where one invalid input byte
+    becomes a 3-byte U+FFFD. 1.5 MB of 0xFF therefore captured fine and
+    spilled 4.5 MB — past `resource_read`'s 4 MiB cap, which refuses
+    outright (returns None, not a short read). The spill existed, the
+    result advertised its URI, and every fetch of it failed. This asserts
+    the invariant directly rather than the arithmetic: whatever the server
+    writes, the resource route hands back in full.
+    """
+    old_root = sessions.SESSION_ROOT
+    with tempfile.TemporaryDirectory(prefix="codecalc-spill-readback-") as root:
+        sessions.SESSION_ROOT = Path(root)
+        try:
+            session_id = sessions.start("bash")["session_id"]
+            # Enough 0xFF (valid bytes, invalid UTF-8 everywhere) that the
+            # errors="replace" RE-ENCODING — 3 bytes per U+FFFD — overflows the
+            # resource read cap and forces the write-side trim this test is
+            # about. The count is COMPUTED from the constant, not hardcoded:
+            # half a cap of raw 0xFF re-encodes to 1.5x the cap, comfortably
+            # over. Produced by a portable `python3` program so the overflow
+            # is reproduced on every fallback OS including Windows (the bash
+            # `head -c /dev/zero | tr` form emits nothing under git-bash, which
+            # is why this probe used to be dead on the Windows CI runner).
+            n_bytes = sessions.RESOURCE_MAX_BYTES // 2
+            code = f'import sys; sys.stdout.buffer.write(b"\\xff" * {n_bytes})'
+            result = sessions.execute(session_id, code, language="python3")
+            spill_uri = result.get("stdout_spill")
+            check("U+FFFD-expanding output still spills", isinstance(spill_uri, str))
+            if not isinstance(spill_uri, str):
+                return
+            rel = spill_uri.split("/files/", 1)[1]
+            on_disk = (sessions._session_dir(session_id) / rel).stat().st_size
+            check(f"the spill written ({on_disk} B) is never larger than the "
+                  f"resource read cap ({sessions.RESOURCE_MAX_BYTES} B)",
+                  on_disk <= sessions.RESOURCE_MAX_BYTES)
+            fetched = sessions.resource_read(session_id, rel)
+            check("the spill resource can actually be read back", fetched is not None)
+            if fetched is not None:
+                check("and comes back whole, not silently short",
+                      len(fetched[0]) == on_disk)
+            check("a spill trimmed to the read cap says so rather than reading complete",
+                  result.get("stdout_spill_capped") is True)
+
+            # And the ordinary case is untouched: an under-cap spill is not
+            # marked capped, or the flag above would mean nothing.
+            small = sessions.execute(
+                session_id, 'import sys; sys.stdout.write("A" * 100000)',
+                language="python3")
+            check("a spill that fits is not flagged as capped",
+                  "stdout_spill_capped" not in small)
+        finally:
+            sessions.SESSION_ROOT = old_root
+
+
+def test_spill_files_are_retained_up_to_a_bounded_count() -> None:
+    old_root = sessions.SESSION_ROOT
+    old_retention = sessions._SPILL_RETENTION
+    sessions._SPILL_RETENTION = 3
+    with tempfile.TemporaryDirectory(prefix="codecalc-spill-retention-") as root:
+        sessions.SESSION_ROOT = Path(root)
+        try:
+            session_id = sessions.start("bash")["session_id"]
+            # Portable python3 producer (see the spill tests above): a bash
+            # `head -c /dev/zero | tr` pipeline produces no spill under Windows
+            # git-bash, which would leave `spill_dir` empty and satisfy
+            # "<= retention" vacuously without ever exercising the prune.
+            code = 'import sys; sys.stdout.write("A" * 100000)'
+            for _ in range(6):
+                sessions.execute(session_id, code, language="python3")
+            spill_dir = sessions._session_dir(session_id) / sessions._SPILL_DIRNAME
+            remaining = list(spill_dir.glob("*.bin"))
+            check("spill retention prunes to the bounded count",
+                  len(remaining) <= sessions._SPILL_RETENTION)
+        finally:
+            sessions.SESSION_ROOT = old_root
+            sessions._SPILL_RETENTION = old_retention
+
+
 if __name__ == "__main__":
     test_service_routes_a_canonical_spec_and_records_provider_identity()
     test_service_rejects_an_unknown_provider_without_falling_back()
@@ -767,6 +1712,15 @@ if __name__ == "__main__":
     test_service_rejects_unsupported_streaming_without_fallback()
     test_service_normalizes_unsupported_synchronous_capabilities()
     test_service_receipt_reports_requested_and_provider_enforced_limits()
+    test_managed_execution_preserves_a_good_result_when_cleanup_fails()
+    test_receipt_names_the_request_and_the_source_by_content()
+    test_receipt_is_stable_for_identical_inputs_and_moves_for_different_ones()
+    test_receipt_records_the_determinism_inputs_it_can_observe()
+    test_receipt_determinism_does_not_claim_a_remote_environment()
+    test_receipt_carries_no_secret_and_no_machine_specific_path()
+    test_every_receipt_bearing_path_carries_the_same_receipt()
+    test_receipt_distinguishes_two_sessions_running_the_same_spec()
+    test_compact_mode_keeps_the_actionable_half_of_the_receipt()
     test_session_service_owns_protocol_neutral_lifecycle_and_artifacts()
     test_session_service_reads_bounded_files_and_runs_workspace_entries()
     test_session_file_pagination_is_shared_and_cursor_based()
@@ -780,4 +1734,19 @@ if __name__ == "__main__":
     test_serve_http_allows_non_loopback_with_a_token_and_loopback_range_without()
     test_http_auth_verifier_accepts_only_the_exact_token()
     test_http_auth_is_wired_into_the_server_at_import_when_the_token_is_set()
+    test_run_submit_returns_a_run_id_immediately_and_run_inspect_polls_to_terminal()
+    test_run_inspect_reports_a_validation_error_for_an_unknown_run_id()
+    test_run_cancel_is_idempotent_on_an_already_terminal_run()
+    test_run_cancel_honestly_reports_a_provider_that_cannot_cancel()
+    test_run_cancel_reaches_a_provider_that_supports_it()
+    test_run_tools_return_an_internal_error_when_no_supervisor_is_wired()
+    test_run_cancel_on_the_real_local_provider_does_not_strand_the_result()
+    test_run_inspect_terminal_result_has_the_same_keys_as_execute_code()
+    test_first_terminal_run_inspect_reports_cleaned_state_accurately()
+    test_run_submit_admission_cap_returns_resource_exhausted()
+    test_session_output_spills_past_the_default_cap_instead_of_dropping_it()
+    test_session_output_spill_is_faithful_to_the_pipelines_str_representation()
+    test_session_run_also_spills_oversized_output()
+    test_a_spill_the_server_writes_is_always_readable_back()
+    test_spill_files_are_retained_up_to_a_bounded_count()
     sys.exit(1 if FAILS else 0)

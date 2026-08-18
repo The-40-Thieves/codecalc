@@ -269,7 +269,7 @@ carries on without one; `--no-net` then reports itself in `unenforced` rather
 than pretending), and [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild)
 for the static cross-builds (zig is used as the linker; no x86_64 GCC needed).
 
-## MCP tools (48) + MCP resources
+## MCP tools (51) + MCP resources
 
 Every session file is also exposed as an MCP resource:
 `codecalc://session/<session_id>/files/<path>` — images render inline for the
@@ -306,16 +306,19 @@ analysis, binary64 introspection.
 |---|---|
 | `list_languages` | 31 languages with extension, compile flag, runtime availability |
 | `list_execution_providers` | Execution-provider identity, interface version, host class, and machine-readable capabilities |
-| `execute_code` | Run code in any language → stdout/stderr/exit_code/**verdict** (OK/TLE/MLE/OLE/RTE)/cpu_ms/peak_memory_kb; per-call limits (`max_memory_mb`, `max_output_kb`, `max_cpu`), `no_net`, `compact` |
+| `execute_code` | Run code in any language → stdout/stderr/exit_code/**verdict** (OK/TLE/MLE/OLE/RTE)/cpu_ms/peak_memory_kb; per-call limits (`max_memory_mb`, `max_output_kb`, `max_cpu`), `no_net`, `compact`. With a session and no explicit `max_output_kb`, oversized output **spills** into the session workspace (`stdout_spill`/`stderr_spill`) instead of just truncating |
 | `execute_code_stream` | Provider-selected execution using the same canonical limits as `execute_code`, with progress + partial output when the provider supports streaming |
+| `run_submit` | Submit code for **background execution**; returns a `run_id` immediately instead of holding the call open |
+| `run_inspect` | Poll a background run: status while running, the full `execute_code` result shape once terminal |
+| `run_cancel` | Cancel a background run; idempotent on an already-terminal run, honest about providers that cannot cancel mid-flight |
 | `session_start` | Persistent session; python3/node get a stateful REPL worker (variables/imports persist across calls), other languages a workspace dir |
 | `session_stop` / `session_list` | Session lifecycle |
 | `session_files` / `session_read_file` / `session_write_file` | Workspace file tools, jailed to the session dir; listings support `page_size`/`cursor`, and reads return images inline (`as_image`) |
 | `session_run` | **Multi-file programs**: execute an entry file that imports other session files (helper.py, data/...) in the workspace |
 | `session_artifacts` | List files created by executed code (results, images, CSVs) |
 | `install_package` | Install packages (uv pip/npm/gem/go/cargo...) into a session or shared cache |
-| `verify_translation` | **Prove a port is equivalent**: you write the translation, the executor runs both versions on the same inputs and reports match / diverged / inconclusive per input |
-| `verify_optimization` | **Prove an optimisation**: you write the candidate, the executor confirms it still agrees with the original AND times both — accepted only if equivalent and measurably faster |
+| `verify_translation` | **Prove a port is equivalent**: you write the translation, the executor runs both versions on the same inputs and reports match / diverged / inconclusive per input. A pass is graded `cross_checked` (see [Grade vocabulary](#grade-vocabulary)) |
+| `verify_optimization` | **Prove an optimisation**: you write the candidate, the executor confirms it still agrees with the original AND times both — accepted only if equivalent and measurably faster. Accepted is graded `cross_checked` |
 | `extract_function` | Pull a named function + its dependency closure (imports, referenced helpers) into a standalone program and run it (ast-exact for python3, best-effort elsewhere) |
 | `compare_edge_cases` | Run the same logic in N languages on edge-case inputs (empty, zero, negative, float precision) and flag behavioral divergence |
 | `convert_units` | Dimensional unit conversion via sympy: length, mass, time, speed, energy, power, force, pressure, temperature (°C/°F/K), volume, area, data, frequency |
@@ -323,13 +326,46 @@ analysis, binary64 introspection.
 | `list_units` | All 140+ unit aliases for convert_units |
 | `evaluate_expression` | Symbolic math: `integrate(x**2, x)`, `sqrt(144) + 2**10` |
 | `truth_table` | Boolean algebra: `a and b or not c`, `p xor q`, `a implies b` |
-| `z3_check` | SMT-LIB2 satisfiability + model |
+| `z3_check` | SMT-LIB2 satisfiability + model. An `unsat` verdict is graded `solver_proven`; `sat` is graded `ungraded` (decided, but not proof-shaped — see [Grade vocabulary](#grade-vocabulary)) |
 | `solve_linear` | Systems of equations: `x + y = 10; x - y = 2` |
 | `analyze_complexity` | Static Big-O estimate from code structure, parsed with **tree-sitter** (every supported language). Reports `analysis: tree-sitter\|regex-fallback` so you can tell a parse from a guess |
 | `benchmark` | Empirical Big-O: runs code at increasing N, fits growth curve |
 | `compare_execution` | Same code across N languages side-by-side |
 | `runtimes_status` | **Non-mutating** update check: current vs latest for every language runtime, which package manager owns it, and the command that would run |
 | `update_runtimes` | Update runtimes. **Dry-run by default** (`apply=False` returns the commands); `apply=True` executes them |
+
+## Grade vocabulary
+
+`verify_translation`, `verify_optimization` and `z3_check` return `grade` +
+`grade_basis` (+ `grade_rules_version`) on top of their own result. The grade
+names how strong the evidence for a success actually is; it is derived from
+evidence those tools already emit, in `codecalc/grades.py` — the verifiers
+never assign their own grade.
+
+| Grade | Means | Emitted by |
+|---|---|---|
+| `cross_checked` | Two independently authored programs were both actually run and their outputs agreed. `grade_basis` names the runtime(s) that did the checking. | `verify_translation` (source vs. port), `verify_optimization` (original vs. candidate) |
+| `solver_proven` | Z3 returned `unsat` within its timeout — a machine-checked refutation, not a heuristic. `grade_basis` names the engine version and the timeout bound. **Not** `sat`: see below. | `z3_check` |
+| `executed` | Reserved: the claimed computation ran and produced the reported result, with no independent second opinion. Not currently emitted by any tool above — every one of them also clears the `cross_checked`/`solver_proven` bar. | — |
+| `ungraded` | Explicit non-grade for a mismatch, an inconclusive comparison, a rejected optimisation candidate, a measurement failure, a Z3 `unknown` verdict, and — deliberately — a Z3 `sat` verdict. A real value on `grade`, never an absent key. **Never** a softened stand-in for one of the three grades above. | any of the above, on a non-success |
+
+`z3_check`'s `sat` verdicts are graded `ungraded`, not `solver_proven`, even
+though `sat` is just as decisive a verdict as `unsat`. The ticket's motivating
+pattern is proving a property P by asserting not-P and checking `unsat`; a
+caller running that pattern who gets `sat` back has learned P is FALSE, and
+`solver_proven` on that result would let a reader who skims `grade` without
+`result` mistake a counterexample for a proof. `sat`'s `grade_basis` says so
+explicitly: satisfiability was decided, but `solver_proven` is reserved for
+`unsat` so a counterexample can never wear a proof grade. Widening `sat` back
+into `solver_proven` later is additive; narrowing it after callers depend on
+the wider behaviour would not be, so this ships narrow now. Full reasoning:
+`codecalc/grades.py`'s module docstring.
+
+`algebraic_equiv` is deliberately NOT graded: it compares two expressions via
+`sympy.simplify(a - b) == 0`, a CAS transformation rather than a decision
+procedure with a checkable certificate, and it is one simplifier's opinion
+rather than two independent implementations agreeing. None of the three
+grades describes that evidence honestly.
 
 ## Runtime self-update
 
@@ -460,9 +496,12 @@ All optional. codecalc runs with none of these set.
 | `CODECALC_PISTON_AUTHORIZATION` | *(unset)* | Exact value for Piston's `Authorization` header. It is scoped to the Piston transport and redacted from normalized results, descriptors, health, and receipts. |
 | `CODECALC_STRICT_URL` | *(unset)* | Activate the current OS's `<host>-strict` provider as an authenticated client of the Linux strict execution service. Without it, strict selection fails closed. The adapter verifies the remote enforcement handshake before sending source. |
 | `CODECALC_STRICT_AUTHORIZATION` | *(unset)* | Exact value for the strict service's `Authorization` header. It is never published in descriptors, doctor output, errors, or receipts. |
-| `CODECALC_RUN_STATE_DIR` | `~/.codecalc/runs` | Durable metadata-only journal for managed strict runs. Source, stdin, output, and credentials are never written there. On restart, recorded orphan runs are cancelled and cleaned through their owning provider. |
+| `CODECALC_RUN_STATE_DIR` | `~/.codecalc/runs` | Durable metadata-only journal backing `run_submit`/`run_inspect`/`run_cancel`, for every provider (not only managed strict runs). Source, stdin, output, and credentials are never written there. On restart, recorded orphan runs are cancelled and cleaned through their owning provider where it supports that; where it does not (the built-in `local` provider), there is nothing to signal and the record is simply marked recovered. |
+| `CODECALC_MAX_ACTIVE_RUNS` | `64` | Admission cap for `run_submit`: how many runs may be running/cancelling at once before further submissions are refused with a `resource_exhausted` error. Bounds the in-memory run table and its thread pool against an unbounded burst or a caller that never inspects/cancels what it starts. An empty, non-numeric or non-positive value falls back to `64` with a message on stderr — a set-but-empty variable is a shell and compose-file commonplace, and it used to abort the server's import. |
 | `CODECALC_ALLOW_RUNTIME_APPLY` | *(unset)* | Permit `update_runtimes(apply=True)` to run the **elevated** update commands (apt, via `sudo`). Unset, they are skipped with `ok: false` naming this variable, and the unprivileged managers still run. Deliberately an environment variable rather than a tool argument: `apply` is something a connected model can flip, and this is not. Accepts `1`/`true`/`yes`/`on`; an empty value is not consent. |
 | `CODECALC_SESSION_ROOT` | `~/.codecalc/sessions` | Where session workspaces live. |
+| `CODECALC_PACKAGE_ALLOWLIST` | *(unset)* | Deny-by-default allowlist for `install_package`. Unset, any syntactically valid package name may be installed (today's behaviour). Set, only listed packages install — anything else is refused before any subprocess or network work, with the stable `permission_denied` code. Comma-separated; each entry is `<language>:<name>` (scoped to one ecosystem) or a bare `<name>` (every ecosystem). Matches the bare name, ignoring `[extras]` and `==version` pins. |
+| `CODECALC_SESSION_IDLE_TTL_SECONDS` | *(unset)* | Idle-expiry for stateful (python3/node) session workers: a session untouched for longer than this is reaped — worker killed via the same teardown `session_stop` uses — on its next access. Unset, a session worker lives until `session_stop` or server exit, same as before this existed. A subsequent call on an expired session gets `ok: false` with the stable `worker_failure` code, never a silent respawn. |
 | `CODECALC_PROCESS_HEADROOM` | `512` | Fork-bomb guard. `RLIMIT_NPROC` is a **uid-wide task budget**, not a per-sandbox one — the kernel compares it against every thread your user owns, machine-wide. So codecalc measures the ambient count per execution and sets the limit to *ambient + headroom*: a bomb can add at most this many tasks, while a runtime wanting a few threads always has room however busy the box is. |
 | `CODECALC_MAX_PROCESSES` | *(unset)* | Escape hatch: pin `RLIMIT_NPROC` to an absolute value and skip the measurement. |
 
@@ -479,13 +518,13 @@ way back into the default.
 
 ## Tool-definition token cost
 
-codecalc's `tools/list` returns 48 definitions. Measured with `o200k_base` as a
-proxy, that is roughly 7,600 tokens of descriptions and input schemas, and every
+codecalc's `tools/list` returns 51 definitions. Measured with `o200k_base` as a
+proxy, that is roughly 9,200 tokens of descriptions and input schemas, and every
 client pays it before the first user message.
 
 codecalc does not hide its tools behind a discovery facade, and that is
 deliberate: the tool surface is where per-operation approval prompts, audit
-names and typed schemas live, and collapsing 48 tools into one dispatcher makes
+names and typed schemas live, and collapsing 51 tools into one dispatcher makes
 `install_package` and `percentage` look like the same permission to a client
 that approves by tool name. The cost is real, but the client is the better place
 to solve it, because the client can defer definitions **without** giving up the
@@ -500,7 +539,7 @@ If you are paying too much for codecalc's definitions:
   toolset's `default_config`, or per tool in `configs`. Deferred definitions stay
   out of the system-prompt prefix, prompt caching is preserved, and a matching
   tool is expanded into its full definition when the model searches for it.
-- **Any client** can filter which of the 48 tools it exposes to the model.
+- **Any client** can filter which of the 51 tools it exposes to the model.
   Nothing here requires codecalc to change.
 
 A server-side facade remains under consideration for clients with no such
@@ -529,7 +568,12 @@ PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py         # every tool over MC
 PYTHONPATH=. .venv/bin/python tests/test_executor_sweep.py  # sandbox regressions
 ```
 
-28 test files and 11 gate scripts, **1222 assertions**. Nothing in the suite
+31 test files and 11 CI-invoked scripts, **1830 assertions**. "CI-invoked"
+means referenced by path (`scripts/<name>.py`) from a job in
+`.github/workflows/*.yml` — `scripts/check_claims.py` derives the count that
+way and gates it, so a script wired into a workflow without this sentence
+changing, or this sentence bumped without a workflow change, fails the build.
+Nothing in the suite
 needs the internet, so none of it is ever skipped for lack of a network.
 
 It **can** skip for lack of a *capability*, and that is correct rather than a
