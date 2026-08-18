@@ -487,9 +487,12 @@ def z3_check(smt2: str) -> dict:
     """Check an SMT-LIB2 formula with Z3: sat/unsat/unknown plus a model. Example:
     '(declare-const x Int)(assert (> x 5))(check-sat)'.
 
-    A decisive verdict (sat or unsat) is graded `solver_proven` — see
-    `grade_basis` for the engine version and timeout bound it was decided
-    within. `unknown` carries no proof either way and is graded `ungraded`.
+    `unsat` is graded `solver_proven` — see `grade_basis` for the engine
+    version and timeout bound it was decided within. `sat` is graded
+    `ungraded`: it's a real decided answer, just not a proof — reserving
+    `solver_proven` for `unsat` means a counterexample can never wear a
+    proof grade. `unknown` carries no proof either way and is also graded
+    `ungraded`.
     """
     return grades.grade_z3_check(logic.z3_check(smt2))
 
