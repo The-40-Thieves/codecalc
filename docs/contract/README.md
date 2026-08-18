@@ -1,11 +1,19 @@
 # The codecalc result contract
 
-**Current version: `1.1.0`** · Schema: [`result-v1.schema.json`](result-v1.schema.json) ·
+**Current version: `1.2.0`** · Schema: [`result-v1.schema.json`](result-v1.schema.json) ·
 Source of truth: [`codecalc/contract.py`](../../codecalc/contract.py)
 
-`1.1.0` is a MINOR bump over `1.0.0`: it ADDS a fifth result shape
+`1.2.0` is a MINOR bump over `1.1.0`: it ADDS a `strict_runtime` block to the
+`doctor` diagnostic document — the gVisor strict-execution boundary's measured
+prerequisites (Docker present, cgroup v2, the `runsc` runtime registered, the
+executor image present, and under `--deep` a real startup canary verified out of
+band). The execution **result** shape is unchanged, so a `1.1.0` result client
+is unaffected; the doctor schema is versioned by this same contract number
+(see below), and gaining a field is an addition, hence MINOR.
+
+`1.1.0` was a MINOR bump over `1.0.0`: it ADDED a fifth result shape
 (`run_lifecycle`, for the `run_submit`/`run_inspect`/`run_cancel` background-run
-tools) and adds fields to existing results (an execution receipt with
+tools) and added fields to existing results (an execution receipt with
 `session_id`, and grade metadata). Additions only — a `1.0.0` client keeps
 working. See the versioning policy below for why an addition is MINOR.
 

@@ -5,7 +5,13 @@ from __future__ import annotations
 import json
 import subprocess
 
-from codecalc.strict_runtime import DockerGVisorRuntime, GVisorConfig, StrictRuntimeUnavailable
+from codecalc.strict_runtime import (
+    DockerGVisorRuntime,
+    GVisorConfig,
+    StrictRuntimeUnavailable,
+    check_prerequisites,
+    host_prerequisites,
+)
 
 IMAGE = "registry.example/codecalc-exec@sha256:" + "a" * 64
 FAILS: list[str] = []
@@ -177,6 +183,168 @@ def test_cleanup_is_idempotent_when_the_container_is_already_gone() -> None:
           not any(argv[1] == "rm" for argv in calls))
 
 
+def test_host_prerequisites_reports_measured_facts_without_raising() -> None:
+    def runner(argv, **_kwargs):
+        return completed(argv, json.dumps({
+            "Runtimes": {"runsc": {"path": "/usr/bin/runsc"}, "runc": {}},
+            "CgroupVersion": "2", "Architecture": "aarch64",
+            "ServerVersion": "29.7.2",
+        }))
+
+    facts = host_prerequisites(runner=runner)
+    check("host prereqs sees Docker", facts["docker_present"] is True)
+    check("host prereqs sees cgroup v2", facts["cgroup_v2"] is True)
+    check("host prereqs sees runsc registered", facts["runtime_registered"] is True)
+    check("host prereqs reports architecture", facts["architecture"] == "aarch64")
+
+
+def test_host_prerequisites_fails_closed_when_docker_is_absent() -> None:
+    def runner(argv, **_kwargs):
+        raise FileNotFoundError("docker")
+
+    facts = host_prerequisites(runner=runner)
+    check("absent Docker: not present", facts["docker_present"] is False)
+    check("absent Docker: runsc not registered", facts["runtime_registered"] is False)
+    check("absent Docker: cgroup unknown reported false", facts["cgroup_v2"] is False)
+
+
+def test_host_prerequisites_fails_closed_when_runsc_is_unregistered() -> None:
+    def runner(argv, **_kwargs):
+        return completed(argv, json.dumps({
+            "Runtimes": {"runc": {}}, "CgroupVersion": "2",
+        }))
+
+    facts = host_prerequisites(runner=runner)
+    check("Docker present but no runsc: present", facts["docker_present"] is True)
+    check("Docker present but no runsc: not registered",
+          facts["runtime_registered"] is False)
+
+
+def test_check_prerequisites_is_available_when_boundary_is_provable() -> None:
+    def runner(argv, **_kwargs):
+        if argv[1] == "info":
+            return completed(argv, json.dumps({
+                "Runtimes": {"runsc": {}}, "CgroupVersion": "2",
+                "Architecture": "aarch64", "ServerVersion": "29.7.2",
+            }))
+        if argv[1] == "image":  # docker image inspect
+            return completed(argv, json.dumps([{"Id": "sha256:" + "a" * 64}]))
+        raise AssertionError(f"unexpected call: {argv}")
+
+    report = check_prerequisites(image="codecalc-exec:strict", runner=runner)
+    check("cheap prereqs are available", report["available"] is True)
+    check("image presence measured", report["image_present"] is True)
+    check("runtime name surfaced", report["runtime"] == "runsc")
+    check("no canary without deep", report["canary"] is None)
+
+
+def test_check_prerequisites_fails_closed_without_runsc_with_a_clear_message() -> None:
+    def runner(argv, **_kwargs):
+        if argv[1] == "info":
+            return completed(argv, json.dumps({
+                "Runtimes": {"runc": {}}, "CgroupVersion": "2",
+            }))
+        if argv[1] == "image":
+            return completed(argv, json.dumps([{"Id": "sha256:" + "a" * 64}]))
+        raise AssertionError(f"unexpected call: {argv}")
+
+    report = check_prerequisites(image="codecalc-exec:strict", runner=runner)
+    check("no runsc: not available", report["available"] is False)
+    check("no runsc: structured reason names runsc",
+          report["detail"] is not None and "runsc" in report["detail"])
+    check("no runsc: registration flag is false",
+          report["runtime_registered"] is False)
+
+
+def test_check_prerequisites_deep_runs_a_canary_verified_out_of_band() -> None:
+    calls: list[list[str]] = []
+
+    def runner(argv, **_kwargs):
+        calls.append(argv)
+        if argv[1] == "info":
+            return completed(argv, json.dumps({
+                "Runtimes": {"runsc": {}}, "CgroupVersion": "2",
+                "Architecture": "aarch64", "ServerVersion": "29.7.2",
+            }))
+        if argv[1] == "image":
+            return completed(argv, json.dumps([{"Id": "sha256:" + "a" * 64}]))
+        if argv[1] == "run":
+            return completed(argv, "deadbeef\n")
+        if argv[1] == "inspect":
+            return completed(argv, "runsc\n")  # HostConfig.Runtime, harness-observed
+        if argv[1] == "rm":
+            return completed(argv, "")
+        raise AssertionError(f"unexpected call: {argv}")
+
+    report = check_prerequisites(image="codecalc-exec:strict", deep=True, runner=runner)
+    check("deep canary attempted", report["canary"]["attempted"] is True)
+    check("deep canary ran", report["canary"]["ran"] is True)
+    check("deep canary confirms runsc out of band",
+          report["canary"]["verified_runsc"] is True
+          and report["canary"]["runtime_observed"] == "runsc")
+    check("deep available requires the verified canary", report["available"] is True)
+    check("canary launches under runsc",
+          any(a[1] == "run" and "--runtime=runsc" in a for a in calls))
+
+
+def test_recover_orphans_removes_owned_containers_and_returns_run_ids() -> None:
+    removed: list[str] = []
+
+    def runner(argv, **_kwargs):
+        if argv[1] == "ps":
+            return completed(argv, "cid_one\ncid_two\n")
+        if argv[1] == "inspect":
+            target = argv[-1]
+            return completed(argv, json.dumps({
+                "io.codecalc.owner": "codecalc-strict",
+                "io.codecalc.run-id": f"run-of-{target}",
+            }))
+        if argv[1] == "rm":
+            removed.append(argv[-1])
+            return completed(argv, "")
+        raise AssertionError(f"unexpected call: {argv}")
+
+    runtime = DockerGVisorRuntime(GVisorConfig(image=IMAGE), runner=runner)
+    recovered = runtime.recover_orphans()
+    check("both owned orphans are removed", removed == ["cid_one", "cid_two"])
+    check("recovery returns each orphan's run identity",
+          recovered == ["run-of-cid_one", "run-of-cid_two"])
+
+
+def test_recover_orphans_never_removes_a_container_that_lost_our_label_in_a_race() -> None:
+    removed: list[str] = []
+
+    def runner(argv, **_kwargs):
+        if argv[1] == "ps":
+            return completed(argv, "cid_one\n")
+        if argv[1] == "inspect":
+            # Re-inspected out of band: the label filter matched, but by the
+            # time we look the container is someone else's — never touch it.
+            return completed(argv, json.dumps({"io.codecalc.owner": "someone-else"}))
+        if argv[1] == "rm":
+            removed.append(argv[-1])
+            return completed(argv, "")
+        raise AssertionError(f"unexpected mutation: {argv}")
+
+    runtime = DockerGVisorRuntime(GVisorConfig(image=IMAGE), runner=runner)
+    recovered = runtime.recover_orphans()
+    check("a container that lost our label is not removed", removed == [])
+    check("and it is not reported as recovered", recovered == [])
+
+
+def test_recover_orphans_fails_closed_when_it_cannot_enumerate() -> None:
+    def runner(argv, **_kwargs):
+        if argv[1] == "ps":
+            return completed(argv, "", returncode=1)
+        raise AssertionError(f"unexpected call: {argv}")
+
+    runtime = DockerGVisorRuntime(GVisorConfig(image=IMAGE), runner=runner)
+    expect_raises(
+        "enumeration failure", StrictRuntimeUnavailable, "enumerate",
+        runtime.recover_orphans,
+    )
+
+
 if __name__ == "__main__":
     test_config_requires_digest_pinned_image()
     test_probe_requires_registered_runsc_and_cgroup_v2()
@@ -186,6 +354,15 @@ if __name__ == "__main__":
     test_cancel_refuses_container_without_matching_ownership_labels()
     test_cleanup_never_removes_a_foreign_container_even_after_a_failed_run()
     test_cleanup_is_idempotent_when_the_container_is_already_gone()
+    test_host_prerequisites_reports_measured_facts_without_raising()
+    test_host_prerequisites_fails_closed_when_docker_is_absent()
+    test_host_prerequisites_fails_closed_when_runsc_is_unregistered()
+    test_check_prerequisites_is_available_when_boundary_is_provable()
+    test_check_prerequisites_fails_closed_without_runsc_with_a_clear_message()
+    test_check_prerequisites_deep_runs_a_canary_verified_out_of_band()
+    test_recover_orphans_removes_owned_containers_and_returns_run_ids()
+    test_recover_orphans_never_removes_a_container_that_lost_our_label_in_a_race()
+    test_recover_orphans_fails_closed_when_it_cannot_enumerate()
     for failure in FAILS:
         print(f"FAIL {failure}")
     raise SystemExit(1 if FAILS else 0)

@@ -1294,6 +1294,16 @@ def _doctor(as_json: bool = False, deep: bool = False) -> int:
         if provider["detail"]:
             print(f"      {provider['detail']}")
 
+    strict = rep["strict_runtime"]
+    strict_state = ("available" if strict["available"] else "UNAVAILABLE")
+    print(f"  strict runtime    {strict_state} "
+          f"({strict['runtime']} on Docker + gVisor)")
+    if strict["canary"] is not None and strict["canary"]["verified_runsc"]:
+        print(f"    canary         ran under {strict['canary']['runtime_observed']} "
+              "(verified out of band)")
+    if strict["detail"]:
+        print(f"    {strict['detail']}")
+
     sandbox = rep["install_sandbox"]
     print("  install sandbox   " + (f"Landlock ABI {sandbox['landlock_abi']}"
                                     if sandbox["confined"] else
