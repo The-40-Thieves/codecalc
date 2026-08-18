@@ -72,6 +72,23 @@ keeps working against `1.1.0`.
   never a silent respawn. Every session entry point counts as a touch, not only
   `execute`.
 - **A deny-by-default operator allowlist for package installs** (THE-791).
+- **A capability broker, deny-by-default network, and an audit stream** (THE-787).
+  A small policy layer whose one invariant is that the capabilities policy
+  APPROVES for a job never exceed the ones the requester REQUESTED. Off by
+  default (`CODECALC_CAPABILITY_POLICY` unset = today's behaviour). Set it and
+  `deny-network` flips the default to network-denied unless a job requests and is
+  granted network; `strict` refuses a job whose denial the provider cannot
+  enforce; an escalation (policy granting a capability the request did not ask
+  for) is refused with a stable `permission_denied` /
+  `capability_not_requested`. The four sets — requested / approved /
+  provider_supported / effective — are surfaced on a new `capabilities` block in
+  the execution receipt (`receipt_version` `1.1.0` → **`1.2.0`**, a MINOR add
+  inside the receipt; the result `contract_version` is unaffected because the
+  block lives under the un-schema'd `provider` receipt). Broker decisions and
+  security-relevant side effects (denied capability, refused install, cleanup)
+  are appended to an audit stream at `~/.codecalc/audit/audit.log`
+  (`CODECALC_AUDIT_LOG` relocates or disables it), each event source-safe
+  (injected clock) and redacted of secrets.
 - **A gate on the README's own gate-script count** (THE-842), so the count of
   CI-invoked scripts cannot drift from the workflows the way the tool count
   once did.

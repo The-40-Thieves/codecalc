@@ -2,7 +2,18 @@
 
 from __future__ import annotations
 
-from . import contract, errors, executor, providers, registry, sessions
+from . import (
+    audit as audit_module,
+)
+from . import (
+    capabilities,
+    contract,
+    errors,
+    executor,
+    providers,
+    registry,
+    sessions,
+)
 from .providers import (
     ComputationSpec,
     ProviderOperationFailure,
@@ -27,9 +38,67 @@ class ExecutionService:
     _VERIFICATION_FIELDS = ("ok", "verdict", "stdout", "stderr", "exit_code")
 
     def __init__(self, registry: ProviderRegistry,
-                 *, supervisor: RunSupervisor | None = None) -> None:
+                 *, supervisor: RunSupervisor | None = None,
+                 audit: audit_module.AuditLog | None = None,
+                 policy: capabilities.CapabilityPolicy | None = None,
+                 policy_from_env: bool = True) -> None:
         self.registry = registry
         self.supervisor = supervisor
+        # An explicit AuditLog wins; otherwise a no-op sink, so brokering never
+        # depends on a configured audit (server.py passes the real one).
+        self.audit = audit if audit is not None else audit_module.AuditLog(None)
+        # THE-787 capability policy. An explicit `policy` pins it (tests); else
+        # it is read from CODECALC_CAPABILITY_POLICY per call unless
+        # `policy_from_env=False` forces brokering fully off. Read per call, not
+        # cached, so an operator's change takes effect without a restart — same
+        # reasoning as packages._allowlist().
+        self._explicit_policy = policy
+        self._policy_from_env = policy_from_env
+
+    def _policy(self) -> capabilities.CapabilityPolicy | None:
+        if self._explicit_policy is not None:
+            return self._explicit_policy
+        if not self._policy_from_env:
+            return None
+        return capabilities.policy_from_env()
+
+    def _broker(self, spec: ComputationSpec, provider, *,
+                session_id: str | None = None):
+        """Broker `spec` against the active policy. Returns
+        `(effective_spec, decision, rejection_result_or_None)`.
+
+        Emits one audit event for the decision. When no policy is active the
+        decision is the passthrough disclosure (approved == requested,
+        `brokered: false`) and the spec is returned unchanged — today's behaviour.
+        """
+        decision = capabilities.decide(spec, provider.describe(), self._policy())
+        if decision.rejected:
+            self.audit.emit(
+                audit_module.CAPABILITY_REJECTED,
+                session_id=session_id,
+                decision="rejected",
+                reason=decision.reason,
+                provider_id=provider.provider_id,
+                provider_error=decision.provider_error,
+                requested=sorted(decision.requested),
+                policy=decision.policy_source or None,
+            )
+            rejection = contract.stamp(capabilities.rejection_result(
+                decision, provider_id=provider.provider_id))
+            return spec, decision, rejection
+        if decision.brokered:
+            self.audit.emit(
+                audit_module.CAPABILITY_DENIED if decision.denied
+                else audit_module.CAPABILITY_APPROVED,
+                session_id=session_id,
+                decision="denied" if decision.denied else "approved",
+                provider_id=provider.provider_id,
+                requested=sorted(decision.requested),
+                approved=sorted(decision.approved),
+                denied=sorted(decision.denied),
+                policy=decision.policy_source or None,
+            )
+        return capabilities.enforced_spec(spec, decision), decision, None
 
     def execute(self, spec: ComputationSpec, *, provider_id: str | None = None) -> dict:
         try:
@@ -43,6 +112,15 @@ class ExecutionService:
                 available_providers=list(exc.available),
             ))
 
+        # THE-787: broker capabilities BEFORE any side effect. `run_spec` is the
+        # possibly-narrowed spec that actually runs (network denied -> no_net);
+        # `spec` (the request as written) still names the receipt, so `spec_hash`
+        # and `limits.requested` describe what was asked, and the `capabilities`
+        # block describes what was approved and enforced.
+        run_spec, decision, rejection = self._broker(spec, provider)
+        if rejection is not None:
+            return rejection
+
         try:
             if provider.describe()["capabilities"].get("managed_runs"):
                 if self.supervisor is None:
@@ -52,17 +130,24 @@ class ExecutionService:
                         provider_error="run_supervisor_unavailable",
                         requested_provider=provider.provider_id,
                     ))
-                handle = self.supervisor.start(spec, provider_id=provider.provider_id)
+                handle = self.supervisor.start(run_spec, provider_id=provider.provider_id)
                 cleanup_failure = None
                 try:
                     result = dict(self.supervisor.wait(
-                        handle.run_id, timeout=spec.timeout + 10
+                        handle.run_id, timeout=run_spec.timeout + 10
                     ))
                 finally:
                     try:
                         self.supervisor.cleanup(handle.run_id)
+                        self.audit.emit(
+                            audit_module.CLEANUP, run_id=handle.run_id,
+                            decision="cleaned", provider_id=provider.provider_id)
                     except ProviderOperationFailure as exc:
                         cleanup_failure = exc
+                        self.audit.emit(
+                            audit_module.CLEANUP, run_id=handle.run_id,
+                            decision="cleanup_failed", reason=str(exc),
+                            provider_id=provider.provider_id)
                 if cleanup_failure is not None:
                     # F3 (cross-vendor): cleanup is best-effort and must NOT
                     # discard the collected result. Replacing a good result
@@ -72,7 +157,7 @@ class ExecutionService:
                     # the result and append `cleanup_error`.
                     result["cleanup_error"] = str(cleanup_failure)
             else:
-                result = dict(provider.execute(spec))
+                result = dict(provider.execute(run_spec))
         except UnsupportedCapability as exc:
             return contract.stamp(errors.error_result(
                 errors.VALIDATION,
@@ -81,7 +166,8 @@ class ExecutionService:
                 requested_provider=exc.provider_id,
                 capability=exc.capability,
             ))
-        return contract.stamp(attach_receipt(spec, provider, result))
+        return contract.stamp(attach_receipt(spec, provider, result,
+                                             capability_decision=decision))
 
     def execute_session(self, session_service: SessionService, session_id: str,
                         spec: ComputationSpec, *,
@@ -106,12 +192,19 @@ class ExecutionService:
                 requested_provider=exc.provider_id,
                 capability=exc.capability,
             ))
-        result = dict(session_service.execute(session_id, spec))
+        # THE-787: broker before the worker runs; a denied network forces no_net
+        # on the spec the session worker receives.
+        run_spec, decision, rejection = self._broker(spec, provider,
+                                                     session_id=session_id)
+        if rejection is not None:
+            return rejection
+        result = dict(session_service.execute(session_id, run_spec))
         # F6 (cross-vendor): name the session in the receipt. The spec is
         # identical across sessions, so without this two sessions running the
         # same code produced byte-identical receipts despite different state.
         return contract.stamp(attach_receipt(spec, provider, result,
-                                             session_id=session_id))
+                                             session_id=session_id,
+                                             capability_decision=decision))
 
     async def execute_stream(self, spec: ComputationSpec, *, provider_id: str | None = None,
                              on_progress=None) -> dict:
@@ -126,8 +219,11 @@ class ExecutionService:
                 requested_provider=exc.provider_id,
                 available_providers=list(exc.available),
             ))
+        run_spec, decision, rejection = self._broker(spec, provider)
+        if rejection is not None:
+            return rejection
         try:
-            result = dict(await provider.execute_stream(spec, on_progress=on_progress))
+            result = dict(await provider.execute_stream(run_spec, on_progress=on_progress))
         except UnsupportedCapability as exc:
             return contract.stamp(errors.error_result(
                 errors.VALIDATION,
@@ -136,7 +232,8 @@ class ExecutionService:
                 requested_provider=exc.provider_id,
                 capability=exc.capability,
             ))
-        return contract.stamp(attach_receipt(spec, provider, result))
+        return contract.stamp(attach_receipt(spec, provider, result,
+                                             capability_decision=decision))
 
     def verify_across_providers(self, spec: ComputationSpec,
                                 first_provider_id: str,

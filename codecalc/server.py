@@ -48,6 +48,9 @@ from . import (
     translation,
     units,
 )
+from . import (
+    audit as audit_module,
+)
 from .mcp_middleware import timeout_middleware
 
 #: Bearer token for the Streamable HTTP transport (THE-786). Unset means the
@@ -165,8 +168,13 @@ _run_supervisor = run_supervisor.RunSupervisor(
     _provider_registry, state_dir=_run_state_dir, max_active_runs=_max_active_runs
 )
 _run_supervisor.recover_orphans()
+# THE-787: one append-only audit sink for broker decisions and security-relevant
+# side effects (denied capability, refused install, cleanup). Defaults to
+# ~/.codecalc/audit/audit.log; CODECALC_AUDIT_LOG relocates it, or disables it
+# when set empty. Best effort — a write failure never fails a run.
+_audit_log = audit_module.from_env()
 _execution_service = execution_service.ExecutionService(
-    _provider_registry, supervisor=_run_supervisor
+    _provider_registry, supervisor=_run_supervisor, audit=_audit_log
 )
 _session_service = execution_service.SessionService()
 
@@ -515,7 +523,8 @@ def install_package(language: str, package: str, session_id: str | None = None,
     filesystem is not confined. Do not point this at untrusted input. See
     SECURITY.md and issue #23.
     """
-    return packages.install(language, package, session_id=session_id, version=version)
+    return packages.install(language, package, session_id=session_id,
+                            version=version, audit=_audit_log)
 
 
 @mcp.tool()

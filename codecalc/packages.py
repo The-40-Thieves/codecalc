@@ -357,8 +357,14 @@ def _confinement(bin_: str, workspace: str, env: dict, language: str) -> tuple:
 
 
 def install(language: str, package: str, session_id: str | None = None,
-            version: str | None = None) -> dict:
-    """Install a package for a language. Returns where it was installed."""
+            version: str | None = None, audit: object | None = None) -> dict:
+    """Install a package for a language. Returns where it was installed.
+
+    `audit` (THE-787), when given, is an `audit.AuditLog`: a deny-by-default
+    allowlist refusal emits an `install_denied` event carrying the ecosystem and
+    the bare package name — never a credential or the install output. Default
+    None keeps every existing caller unchanged.
+    """
     name = registry.canonical(language) or language
     if name in _UNSUPPORTED:
         reason = _DECLINED_REASON.get(name)
@@ -430,6 +436,15 @@ def install(language: str, package: str, session_id: str | None = None,
     # shutil.which never spawns a process or touches the network.)
     denial = _allowlist_denial(name, package)
     if denial:
+        if audit is not None:
+            audit.emit(
+                "install_denied",
+                session_id=session_id,
+                decision="denied",
+                reason=denial,
+                language=name,
+                package=_bare_name(package),
+            )
         return errors.error_result(errors.PERMISSION_DENIED, denial)
 
     spec = f"{package}=={version}" if version else package
