@@ -15,4 +15,5 @@
 # To publish and pin: run the publish-executor-image workflow (workflow_dispatch).
 # It rewrites the line below with the real digest and commits it back, e.g.
 #   ghcr.io/the-40-thieves/codecalc-exec@sha256:0123...cdef
-unpublished
+
+ghcr.io/the-40-thieves/codecalc-exec@sha256:c495a2dff63b6d7df37d7017f0cfc48321affc017b911d7c291e0ab2f9a93dc1
