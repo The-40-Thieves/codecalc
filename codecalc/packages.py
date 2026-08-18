@@ -123,15 +123,32 @@ def _bare_name(package: str) -> str:
 
 
 def _allowlist() -> set[str] | None:
-    """Configured allowlist entries, lowercased, or None when unset.
+    """Configured allowlist entries, lowercased. None means UNSET — the only
+    reading that means "no allowlist, install anything" (today's default).
+
+    fix-round-1 IMPORTANT: `os.environ.get(ALLOWLIST_ENV, "")` cannot tell
+    "the variable is not set" from "the variable is set to the empty
+    string" — both read back as `""`. Treating either one as "unset"
+    (the previous shape here) made `CODECALC_PACKAGE_ALLOWLIST=""` degrade
+    to allow-everything: the LEAST safe reading of an ambiguous operator
+    input on what is supposed to be a deny-by-default control, and a
+    realistic input to receive — an empty Kubernetes/Compose secret, or an
+    unresolved `${TEMPLATE_VAR}` in a manifest, both produce exactly `""`,
+    not an absent variable.
+
+    So membership in `os.environ` is checked FIRST, and is the ONLY thing
+    that means unset. Every other value — `""` included — reaches
+    `_allowlist_denial()` as a (possibly empty) SET, which denies every
+    package: fail closed, not fail open, for anything an operator actually
+    set the variable to.
 
     Read per call rather than cached at import — an operator's decision
     should take effect without a server restart, same reasoning as
     runtimes.elevated_apply_allowed().
     """
-    raw = os.environ.get(ALLOWLIST_ENV, "")
-    if not raw.strip():
+    if ALLOWLIST_ENV not in os.environ:
         return None
+    raw = os.environ[ALLOWLIST_ENV]
     return {e.strip().lower() for e in raw.split(",") if e.strip()}
 
 

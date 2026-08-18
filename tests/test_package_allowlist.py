@@ -205,6 +205,52 @@ with _env(None):
     check("  ...and no subprocess was spawned for it",
           len(calls) == 0, f"-> {calls}")
 
+# ── 8. fix-round-1 IMPORTANT: SET-BUT-EMPTY means DENY ALL, not allow-all ──
+# `os.environ.get(ALLOWLIST_ENV, "")` cannot tell "unset" from "set to the
+# empty string" — both read back as "". Reading either as "no allowlist"
+# made `CODECALC_PACKAGE_ALLOWLIST=""` degrade to allow-everything, the
+# least-safe reading of an ambiguous operator input on a deny-by-default
+# control — and a realistic one: an empty k8s/compose secret or an
+# unresolved `${TEMPLATE_VAR}` both produce exactly "", not an absent var.
+with _env(""):
+    calls = []
+    packages.subprocess.run = _stub_run(calls)
+    try:
+        r = packages.install("python3", "requests")  # would be fine if UNSET
+    finally:
+        packages.subprocess.run = _orig_run
+    check("set-but-empty allowlist DENIES a package that would pass if unset",
+          r.get("ok") is False, f"-> {r}")
+    check("  ...pre-side-effect: no subprocess spawned",
+          len(calls) == 0, f"-> {calls}")
+    check("  ...with the stable PERMISSION_DENIED code",
+          r.get("code") == errors.PERMISSION_DENIED, f"-> {r.get('code')}")
+
+# Whitespace-only is the same operator mistake wearing a different shape —
+# splits to zero usable entries, must deny for the same reason.
+with _env("   "):
+    calls = []
+    packages.subprocess.run = _stub_run(calls)
+    try:
+        r = packages.install("python3", "requests")
+    finally:
+        packages.subprocess.run = _orig_run
+    check("whitespace-only allowlist also denies (zero usable entries, not unset)",
+          r.get("ok") is False, f"-> {r}")
+
+# Genuinely UNSET (never touched os.environ at all) still means "today's
+# behaviour" — the control case proving the fix distinguishes the two
+# inputs rather than just denying everything unconditionally now.
+with _env(None):
+    calls = []
+    packages.subprocess.run = _stub_run(calls)
+    try:
+        r = packages.install("python3", "requests")
+    finally:
+        packages.subprocess.run = _orig_run
+    check("CONTROL: genuinely unset still installs (not conflated with set-but-empty)",
+          r.get("ok") is True, f"-> {r}")
+
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== PACKAGE ALLOWLIST IS DENY-BY-DEFAULT WHEN CONFIGURED ===")
 sys.exit(1 if FAILS else 0)
