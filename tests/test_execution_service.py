@@ -697,8 +697,13 @@ def test_session_service_reads_bounded_files_and_runs_workspace_entries() -> Non
         "truncated": True,
         "resource": f"codecalc://session/{session_id}/files/message.txt",
     })
+    # Newline-normalized: the executor returns the program's raw stdout
+    # unchanged (it decodes bytes, it does not translate line endings), so
+    # python3's print() lands "workspace-run\r\n" on Windows and
+    # "workspace-run\n" on POSIX. The invariant under test is "the entry ran
+    # and produced its line", not the platform's newline convention.
     check("session service infers and runs a workspace entry",
-          run["ok"] is True and run["stdout"] == "workspace-run\n")
+          run["ok"] is True and run["stdout"].replace("\r\n", "\n") == "workspace-run\n")
     check("workspace run reports its canonical entry and inferred language",
           run["entry_file"] == "main.py" and run["language"] == "python3")
     check("read/run test cleans up its workspace", stopped["deleted"] is True)
