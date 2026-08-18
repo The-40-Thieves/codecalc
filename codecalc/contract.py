@@ -51,7 +51,7 @@ from . import errors
 #: each component is allowed to change — the short form is that MAJOR is the
 #: only one that may break a reader, and it carries a twelve-month deprecation
 #: window before anything is removed.
-CONTRACT_VERSION = "1.1.0"
+CONTRACT_VERSION = "1.2.0"
 
 # THE `$schema` AND `$id` URIs ARE NOT HERE ON PURPOSE.
 #
@@ -507,7 +507,8 @@ def build_doctor_schema(dialect: str | None = None, schema_id: str | None = None
         ),
         "type": "object",
         "required": ["contract_version", "codecalc_version", "healthy", "python",
-                     "backend", "execution_providers", "install_sandbox", "extras", "grammar_cache",
+                     "backend", "execution_providers", "strict_runtime",
+                     "install_sandbox", "extras", "grammar_cache",
                      "status_basis",
                      "runtimes", "runtime_summary", "workspace", "remedies"],
         "properties": {
@@ -555,6 +556,48 @@ def build_doctor_schema(dialect: str | None = None, schema_id: str | None = None
                         "detail": {"type": ["string", "null"]},
                     },
                     "additionalProperties": False,
+                },
+            },
+            "strict_runtime": {
+                "type": "object",
+                "required": ["available", "docker_present", "cgroup_v2",
+                             "runtime", "runtime_registered", "architecture",
+                             "docker_version", "image", "image_present",
+                             "canary", "detail"],
+                "description": (
+                    "The gVisor strict-execution boundary's MEASURED "
+                    "prerequisites (THE-828). Doctor calls the same host probe "
+                    "the runtime uses. `available` is fail-closed: false with a "
+                    "named `detail` on any host that cannot prove the boundary "
+                    "(no Docker, no cgroup v2, no runsc, or no executor image) — "
+                    "a fact about the host, never a broken install. `canary` is "
+                    "null unless --deep, when it launches the image under runsc "
+                    "and confirms the runtime OUT OF BAND (docker inspect), not "
+                    "from anything the workload printed."
+                ),
+                "properties": {
+                    "available": {"type": "boolean"},
+                    "docker_present": {"type": "boolean"},
+                    "cgroup_v2": {"type": "boolean"},
+                    "runtime": {"type": "string"},
+                    "runtime_registered": {"type": "boolean"},
+                    "architecture": {"type": ["string", "null"]},
+                    "docker_version": {"type": ["string", "null"]},
+                    "image": {"type": ["string", "null"]},
+                    "image_present": {"type": ["boolean", "null"]},
+                    "canary": {
+                        "type": ["object", "null"],
+                        "required": ["attempted", "ran", "runtime_observed",
+                                     "verified_runsc", "detail"],
+                        "properties": {
+                            "attempted": {"type": "boolean"},
+                            "ran": {"type": "boolean"},
+                            "runtime_observed": {"type": ["string", "null"]},
+                            "verified_runsc": {"type": "boolean"},
+                            "detail": {"type": ["string", "null"]},
+                        },
+                    },
+                    "detail": {"type": ["string", "null"]},
                 },
             },
             "install_sandbox": {

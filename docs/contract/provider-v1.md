@@ -54,7 +54,7 @@ explicit ID returns a validation result carrying `provider_error` set to
 ## The execution receipt
 
 Every successful execution result carries a `provider` object — the execution
-receipt — versioned by its own `receipt_version` (currently **1.1.0**) so a
+receipt — versioned by its own `receipt_version` (currently **1.2.0**) so a
 reader can tell "this receipt predates source hashes" from "this run had no
 source", which are not the same fact. MAJOR removes or retypes a key, MINOR adds
 one, PATCH changes descriptions only.
@@ -68,6 +68,53 @@ one, PATCH changes descriptions only.
 | `source_sha256` | `sha256:<hex>` over the source that was executed, independent of the limits wrapped around it. |
 | `determinism` | `locale` (`LANG`/`LC_ALL`), `timezone`, `seed`, and an `unrecorded` list. |
 | `limits` | The requested-versus-enforced receipt, below. |
+| `capabilities` | The capability broker's decision (added in `receipt_version` **1.2.0**), below. Present on every brokered result — the synchronous `execute_code`/stream/session paths AND background `run_submit` runs (their `run_inspect` terminal receipt carries the identical block). |
+
+## The capability broker (`capabilities`)
+
+The `capabilities` block records what the capability broker decided for a run.
+Its one load-bearing invariant is that **approved never exceeds requested**:
+policy may narrow the capabilities a job asked for, never add to them.
+
+| Field | What it says |
+|---|---|
+| `requested` | Capabilities the job asked for, read from the request as written. `network` is requested when `no_net` is false (its default). |
+| `approved` | The policy-approved subset — always ⊆ `requested`. |
+| `provider_supported` | Capabilities the selected provider can enforce a decision about (`network` when the descriptor's `network_control` is true). |
+| `effective` | The capabilities actually in force: every approved one, plus any DENIED one whose denial the provider could not enforce (a leak, disclosed rather than hidden). |
+| `denied` | `requested − approved`. |
+| `brokered` | `false` when no policy was active (pure disclosure, run unchanged); `true` when a policy decided. |
+| `policy` | The `CODECALC_CAPABILITY_POLICY` directive string that produced the decision, or null when brokering was off. |
+
+Brokering runs on the same footing for a synchronous `execute_code` and a
+background `run_submit`: `run_submit` decides and enforces before the run starts,
+so a policy cannot be bypassed by moving a job to the background — an escalation
+or strict-unenforceable job is rejected before any background work, and an
+enforced run's `run_inspect` receipt carries the same `capabilities` block.
+
+Brokering is **off by default**. `CODECALC_CAPABILITY_POLICY` unset (or empty)
+runs exactly as before — the block still reports the four sets with
+`approved == requested` and `brokered: false`, but nothing is denied and nothing
+is rejected. When the variable is set, comma-separated directives configure it:
+
+- `deny-network` — flip the default to network-denied. A job that did not
+  request network runs with `no_net` forced on (enforced where the provider can,
+  e.g. the native Linux shim; disclosed as still `effective` where it cannot).
+- `allow-network` — explicitly grant network. Honoured only for a job that
+  requested network; granting network to a job that asked for none is an
+  escalation the broker **rejects**.
+- `strict` — reject a job outright when a capability's brokered DENIAL cannot be
+  enforced by the selected provider, rather than run with a denial the sandbox
+  would silently leak.
+
+A rejection is a stable coded failure: taxonomy code `permission_denied` with a
+`provider_error` of `capability_not_requested` (escalation) or
+`capability_unenforceable` (strict, no enforcement available), refused before any
+side effect. Broker decisions and other security-relevant side effects (a denied
+capability, a refused install, a cleanup) are appended to an audit stream at
+`~/.codecalc/audit/audit.log` (relocate with `CODECALC_AUDIT_LOG`, disable by
+setting it empty); each event carries a source-safe timestamp, the run/session
+id, the decision and its reason, and never the executed source or a credential.
 
 The limits receipt records the canonical requested values, the controls the
 provider reports as enforced, and the exact `unenforced` disclosures returned
@@ -162,6 +209,49 @@ The Linux service profile uses a digest-pinned executor image under Docker's
 explicitly registered gVisor `runsc` runtime. It supports Linux x86_64 and
 ARM64; gVisor's default `systrap` platform avoids requiring KVM. Landlock may
 still harden local execution, but it is not evidence for the gVisor boundary.
+
+### Boundary evidence (THE-828), and what is measured where
+
+The executor image is built by `docker/executor.Dockerfile` (multi-stage,
+minimal, non-root, tini as an init so `codecalc-exec` is never PID 1) and
+carries `codecalc-exec` plus its `blocknet.so` shim and a python3 runtime.
+`scripts/build_executor_image.sh` builds it locally; `scripts/gvisor_conformance.sh`
+builds it and runs the hostile-workload conformance.
+
+What is PROVEN, on a runsc-capable host (measured on Cave, Docker 29.7.2 + runsc,
+ARM64), by `tests/test_gvisor_conformance.py`:
+
+- The workload genuinely runs under `runsc`, confirmed OUT OF BAND by
+  `docker inspect .HostConfig.Runtime` — never a string the payload printed.
+- A **fork bomb** is bounded by `--pids-limit`; the container terminates, is not
+  OOM-killed, and leaves no host processes.
+- A **memory bomb** is OOM-killed by the cgroup memory limit (exit 137), not the
+  host.
+- A **descendant tree** is entirely destroyed on cancellation — no leaked host
+  processes or containers.
+- **Egress** is blocked by `--network=none`; **filesystem** writes outside the
+  bounded tmpfs are blocked by the read-only root with no host bind.
+
+`codecalc doctor` (and the strict service at startup) call the runtime's host
+probe and surface these prerequisites; `doctor --deep` adds a real startup
+canary. `DockerGVisorRuntime.recover_orphans()` reconciles owned orphan
+containers by their immutable run-identity label; it is invoked by the remote
+strict execution service (which lives out of this repo) at that service's
+startup, not by codecalc itself.
+
+RESIDUALS, stated plainly:
+
+- A **registry-published, multi-architecture, DIGEST-PINNED image** is a release
+  step needing registry credentials and is NOT produced here. `GVisorConfig`
+  still requires a digest-pinned reference for the production execution path; the
+  local build proves the boundary until that image exists.
+- **GitHub CI cannot exercise this**: hosted runners have no `runsc`, so the
+  conformance suite SKIPS there (green, with a printed reason). It is proven on
+  Cave / a runsc host, not on GitHub runners.
+- `--pids-limit` under gVisor bounds HOST-side tasks (the sandbox and gofer
+  count too), so the process limit must leave headroom for gVisor's baseline
+  (~48 is the floor on Cave); a runc-appropriate limit of 24 is too low for the
+  sandbox to start.
 
 ## Versioning policy
 

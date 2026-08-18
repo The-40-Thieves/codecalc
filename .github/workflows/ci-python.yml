@@ -169,6 +169,18 @@ jobs:
         run: |
           uv run --no-sync python tests/test_strict_providers.py
           uv run --no-sync python tests/test_gvisor_runtime.py
+      # The REAL hostile-workload conformance (THE-828). It launches the executor
+      # image under `--runtime=runsc` and drives fork/memory bombs, descendant
+      # escape, egress and filesystem escape through real containers. GitHub
+      # runners have NO runsc registered, so this SELF-SKIPS here (exit 0, with a
+      # printed reason) — it is NOT proven on GitHub CI and does not claim to be.
+      # It RUNS and PASSES on Cave / a runsc-capable host via
+      # scripts/gvisor_conformance.sh, which builds the image first. This step
+      # exists so a regression in the harness itself (an import error, a broken
+      # skip) fails the build even where the boundary cannot be exercised.
+      - name: gVisor hostile-workload conformance (skips without runsc)
+        shell: bash
+        run: uv run --no-sync python tests/test_gvisor_conformance.py
       # The provider boundary and the execution service. Neither ran in CI at
       # all before this — seven suites do not, and these two are where the
       # ComputationSpec identity (THE-793) and the execution receipt (THE-782)
@@ -228,6 +240,28 @@ jobs:
       - name: result contract (schema validity + product conformance)
         shell: bash
         run: uv run --no-sync python tests/test_contract.py
+      # THE-781/THE-844: the stable error-code taxonomy. Pure logic over
+      # classify()/ensure_code() plus a handful of symbolic calls (sympy, from
+      # --all-extras) — no sandbox, no runtimes — so it runs on the full matrix.
+      # The full matrix is the point for THE-844 specifically: RecursionError's
+      # message wording is interpreter-specific ("maximum recursion depth
+      # exceeded" on <3.14, "stack overflow" on >=3.14), so an oversized
+      # expression classified as `resource_exhausted` on 3.11 and `internal` on
+      # 3.14 — a version-dependent code that only the 3.14 leg here can catch.
+      - name: error-code taxonomy (result contract codes)
+        shell: bash
+        run: uv run --no-sync python tests/test_error_codes.py
+      # THE-844 behavioral floor: every public sympy-backed tool must reject an
+      # oversized expression VIA THE LENGTH CAP (before sp.sympify), not via the
+      # "stack overflow" message backstop. Pure logic over the tool surface (no
+      # sandbox, no runtimes), and it belongs on the full matrix for the same
+      # reason test_error_codes does — the cap is what keeps the code stable
+      # across the py3.11/py3.14 interpreter-wording split. It caught solve_linear
+      # riding the backstop uncapped, which the taxonomy suite's code-only check
+      # let through.
+      - name: expression length cap (every sympy entry point, before parse)
+        shell: bash
+        run: uv run --no-sync python tests/test_expr_length_cap.py
       # The run-lifecycle state machine (THE-778/THE-831): identity, cancel,
       # cleanup and crash-recovery journalling, all against fake providers —
       # no sandbox, no native executor, so it belongs on the full matrix
@@ -235,6 +269,17 @@ jobs:
       - name: run supervisor lifecycle
         shell: bash
         run: uv run --no-sync python tests/test_run_supervisor.py
+      # THE-831 sixth criterion: output backpressure cannot deadlock the payload
+      # or supervisor. Unlike the lifecycle suite above (fake providers, no real
+      # output), this drives the REAL path — RunSupervisor's thread pool ->
+      # executor.execute -> the bounded output capture — with a portable python3
+      # producer flooding several MiB past the pipe buffer and the cap, single
+      # and concurrent, under a wait() watchdog that turns a hang into a failed
+      # check rather than a hung job. Portable producer so it runs on the native
+      # backend here and the pure-Python fallback the matrix leg uses.
+      - name: run supervisor output backpressure (no deadlock)
+        shell: bash
+        run: uv run --no-sync python tests/test_run_supervisor_backpressure.py
       # doctor in the environments it exists to diagnose: no native executor, no
       # runtimes, a resolved-but-unrunnable command, an unwritable workspace. A
       # diagnostic is only worth having if it is right about a BROKEN host, and a
@@ -261,6 +306,20 @@ jobs:
       - name: package install allowlist (deny-by-default)
         shell: bash
         run: uv run --no-sync python tests/test_package_allowlist.py
+      # THE-787: the capability broker (approved never exceeds requested),
+      # deny-by-default network as a policy option, and the append-only audit
+      # stream. All three run against synthetic providers / injected clocks —
+      # no sandbox, no native executor — so they belong on the full OS matrix
+      # alongside the other protocol-neutral policy suites. The network-policy
+      # suite deliberately covers BOTH a network-controlling provider and one
+      # that cannot enforce no_net, so the python-fallback matrix job exercises
+      # the fail-open-but-disclosed branch the native backend never takes.
+      - name: capability broker, network policy, and audit stream (THE-787)
+        shell: bash
+        run: |
+          uv run --no-sync python tests/test_capability_broker.py
+          uv run --no-sync python tests/test_network_policy.py
+          uv run --no-sync python tests/test_audit_log.py
       # Regressions from the 2026-08-08 bug sweep: lost exactness, wrong widths,
       # crashes on ordinary inputs, a dead ns path, and documented constant
       # names that resolved to nothing.
@@ -472,6 +531,24 @@ jobs:
         run: uv run --no-sync python tests/test_platform_contract.py
       - name: runtime self-update tools
         run: uv run --no-sync python tests/test_runtimes_mcp.py
+      # MCP-stdio round-trips that EXECUTE code (python3) and drive sessions,
+      # files, artifacts, streaming, packages and units through the real server.
+      # They need the built executor and a working python3 runtime. This job is
+      # itself an OS matrix (ubuntu/macos/windows), and their python3-execution
+      # portability there is UNVERIFIED — test_features in particular reads
+      # execution stdout that CRLF-shifts on Windows — so they are pinned to
+      # Linux with `if: runner.os == 'Linux'` rather than risking the exact
+      # cross-platform whack-a-mole this repo keeps fighting. Neither ran in CI
+      # before; they were gated on one developer's machine.
+      - name: MCP feature surface (sessions, files, artifacts, streaming)
+        if: runner.os == 'Linux'
+        run: uv run --no-sync python tests/test_features.py
+      - name: MCP resources + session_run + units (gap items 1-4)
+        if: runner.os == 'Linux'
+        run: uv run --no-sync python tests/test_gap4.py
+      - name: MCP stdio surface answers (values, not just non-empty)
+        if: runner.os == 'Linux'
+        run: uv run --no-sync python tests/test_mcp.py
       - name: MCP stdio round-trip
         shell: bash
         run: |

@@ -151,7 +151,13 @@ def build_spec_schema(dialect: str | None = None,
 #: 1.1.0 (cross-vendor fix wave, F6): added `session_id`. It is the run's
 #: session (from `execute_session`) or null for a session-less run. Adding a key
 #: is MINOR.
-RECEIPT_VERSION = "1.1.0"
+#:
+#: 1.2.0 (THE-787): added `capabilities` — the capability broker's four sets
+#: (requested / approved / provider_supported / effective, plus denied and the
+#: policy that produced them). Present whenever a decision is threaded through
+#: `attach_receipt` (every ExecutionService path), absent for an un-brokered
+#: background run. Adding a key is MINOR.
+RECEIPT_VERSION = "1.2.0"
 
 #: The determinism inputs the receipt has a slot for. Every one of them appears
 #: EITHER with a value OR in `unrecorded` — never as a bare null, because a null
@@ -246,7 +252,8 @@ def _limit_receipt(spec: ComputationSpec, result: dict) -> dict:
 
 
 def _execution_receipt(spec: ComputationSpec, descriptor: dict,
-                       result: dict, session_id: str | None = None) -> dict:
+                       result: dict, session_id: str | None = None,
+                       capability_decision: object | None = None) -> dict:
     """Provider identity, content hashes, determinism inputs, limits (THE-782).
 
     THE-790 attached provider identity and the limits receipt. Those answer
@@ -277,7 +284,7 @@ def _execution_receipt(spec: ComputationSpec, descriptor: dict,
     environment rather than copying it, so PATH and HOME cannot ride along. A
     session id is a codecalc-minted uuid, not a host path, so it is safe here.
     """
-    return {
+    receipt = {
         "receipt_version": RECEIPT_VERSION,
         "interface_version": descriptor["interface_version"],
         "provider_id": descriptor["provider_id"],
@@ -290,10 +297,18 @@ def _execution_receipt(spec: ComputationSpec, descriptor: dict,
         "determinism": _determinism_receipt(descriptor["provider_id"]),
         "limits": _limit_receipt(spec, result),
     }
+    # THE-787: the capability broker's four sets. Attached only when a decision
+    # was threaded through (every ExecutionService path); an un-brokered
+    # background run omits it rather than claiming a brokering that did not
+    # happen. `to_receipt()` is duck-typed to avoid importing capabilities here.
+    if capability_decision is not None:
+        receipt["capabilities"] = capability_decision.to_receipt()
+    return receipt
 
 
 def attach_receipt(spec: ComputationSpec, provider: ExecutionProvider,
-                   result: dict, *, session_id: str | None = None) -> dict:
+                   result: dict, *, session_id: str | None = None,
+                   capability_decision: object | None = None) -> dict:
     """Add the FULL execution receipt (identity, content hashes, determinism
     inputs, limits enforcement — THE-782) every full execution result
     carries, mutating and returning `result`.
@@ -315,7 +330,8 @@ def attach_receipt(spec: ComputationSpec, provider: ExecutionProvider,
     session-less caller (execute/execute_stream, run_supervisor) is unchanged.
     """
     result["provider"] = _execution_receipt(spec, provider.describe(), result,
-                                             session_id=session_id)
+                                             session_id=session_id,
+                                             capability_decision=capability_decision)
     return result
 
 

@@ -43,7 +43,16 @@ import sys
 import tempfile
 from pathlib import Path
 
-from . import __version__, contract, executor, landlock, optional, providers, registry
+from . import (
+    __version__,
+    contract,
+    executor,
+    landlock,
+    optional,
+    providers,
+    registry,
+    strict_runtime,
+)
 
 #: The four states, ordered weakest to strongest claim. Defined in registry.py
 #: and re-exported here: `list_languages` reports the same vocabulary now
@@ -307,6 +316,16 @@ def report(deep: bool = False) -> dict:
                 "make this a startup failure instead of a weaker sandbox."),
         },
         "execution_providers": execution_providers,
+        # The gVisor strict boundary's MEASURED prerequisites (THE-828). Doctor
+        # calls the same host probe the runtime uses, so a `runsc` that doctor
+        # says is registered is the one the boundary attests. Cheap by default —
+        # `docker info` and an image lookup, resolution not execution, the same
+        # split `status_basis` names for runtimes; `--deep` promotes it to a real
+        # container startup canary that confirms, out of band, that the image
+        # genuinely ran under runsc. Fail-closed: an unmet prerequisite makes
+        # `available` false and names the reason, which is what a host WITHOUT
+        # runsc reports — a fact about the host, so it never fails the install.
+        "strict_runtime": strict_runtime.check_prerequisites(deep=deep),
         "install_sandbox": {
             "landlock_abi": abi,
             "confined": bool(abi),

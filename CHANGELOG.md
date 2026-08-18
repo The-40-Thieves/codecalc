@@ -10,9 +10,9 @@ This project versions **two** things, and they are not the same number.
 | What | Where | Current |
 |---|---|---|
 | The **package** — the tool surface, the CLI, the Python API | `pyproject.toml`, `executor/Cargo.toml`, this file | `0.1.0` |
-| The **result contract** — the shape every tool result comes back in | `docs/contract/README.md`, `contract_version` on every result | `1.1.0` |
+| The **result contract** — the shape every tool result comes back in | `docs/contract/README.md`, `contract_version` on every result | `1.2.0` |
 
-The contract is at `1.1.0` and the package is at `0.1.0` because those claims are
+The contract is at `1.2.0` and the package is at `0.1.0` because those claims are
 genuinely different. The result contract has a published JSON Schema, a
 documented MAJOR/MINOR/PATCH policy, a twelve-month deprecation window, and a
 gate that fails if the schema drifts from the code — it is stable and says so.
@@ -36,14 +36,34 @@ behind it.
 Everything below has landed on `main` since `0.1.0` and is not yet tagged. It
 changes the **tool surface** (48 tools → 51) and adds to the **result
 contract**, so it is a MINOR bump when it is cut, not a patch. The
-`contract_version` moves `1.0.0` → **`1.1.0`** for the same reason: it ADDS a
-fifth result shape (`run_lifecycle`, for the background-run tools) and adds
-fields (an execution receipt with `session_id`, grade metadata). Additions are
-exactly what the contract's own policy defines as a MINOR bump — a compatible
-addition bumps MINOR, it does not leave the version unchanged. A `1.0.0` client
-keeps working against `1.1.0`.
+`contract_version` moves `1.0.0` → **`1.2.0`** for the same reason: `1.1.0`
+ADDED a fifth result shape (`run_lifecycle`, for the background-run tools) and
+fields (an execution receipt with `session_id`, grade metadata), and `1.2.0`
+ADDS a `strict_runtime` prerequisites block to the `doctor` diagnostic document.
+Additions are exactly what the contract's own policy defines as a MINOR bump — a
+compatible addition bumps MINOR, it does not leave the version unchanged. A
+`1.0.0` client keeps working against `1.2.0`.
 
 ### Added
+
+- **Linux strict gVisor boundary made real** (THE-828). A real executor
+  container image (`docker/executor.Dockerfile`, multi-stage/minimal/non-root,
+  carrying `codecalc-exec` + `blocknet.so` + python3);
+  `DockerGVisorRuntime.recover_orphans()` reconciles owned strict containers by
+  their immutable run-identity label when the remote strict execution service
+  (which lives out of this repo) invokes it at that service's startup; `doctor`
+  now CALLS the
+  runtime's host probe and surfaces measured prerequisites in a `strict_runtime`
+  block (Docker present, cgroup v2, `runsc` registered, image present, and a
+  real startup canary under `--deep`), failing closed with a structured reason
+  on a host without `runsc`. A hostile-workload conformance suite
+  (`tests/test_gvisor_conformance.py`) launches the image under `--runtime=runsc`
+  and proves fork-bomb/memory-bomb/descendant-escape/egress/filesystem
+  containment on a runsc host, verifying the runtime OUT OF BAND. It skips
+  without `runsc` (GitHub CI), and runs via `scripts/gvisor_conformance.sh` on
+  Cave / a runsc host. Residual: the registry-published, multi-arch,
+  digest-pinned image (a release step) and GitHub-CI-under-runsc are not
+  delivered here — see `docs/contract/provider-v1.md`.
 
 - **Background runs: `run_submit`, `run_inspect`, `run_cancel`** (THE-778).
   Submit code and get a `run_id` back immediately instead of holding an MCP
@@ -72,6 +92,26 @@ keeps working against `1.1.0`.
   never a silent respawn. Every session entry point counts as a touch, not only
   `execute`.
 - **A deny-by-default operator allowlist for package installs** (THE-791).
+- **A capability broker, deny-by-default network, and an audit stream** (THE-787).
+  A small policy layer whose one invariant is that the capabilities policy
+  APPROVES for a job never exceed the ones the requester REQUESTED. Applied
+  identically on the synchronous (`execute_code`/stream/session) and background
+  (`run_submit`) paths — a policy the sync path enforces cannot be bypassed by
+  moving the job to the background. Off by
+  default (`CODECALC_CAPABILITY_POLICY` unset = today's behaviour). Set it and
+  `deny-network` flips the default to network-denied unless a job requests and is
+  granted network; `strict` refuses a job whose denial the provider cannot
+  enforce; an escalation (policy granting a capability the request did not ask
+  for) is refused with a stable `permission_denied` /
+  `capability_not_requested`. The four sets — requested / approved /
+  provider_supported / effective — are surfaced on a new `capabilities` block in
+  the execution receipt (`receipt_version` `1.1.0` → **`1.2.0`**, a MINOR add
+  inside the receipt; the result `contract_version` is unaffected because the
+  block lives under the un-schema'd `provider` receipt). Broker decisions and
+  security-relevant side effects (denied capability, refused install, cleanup)
+  are appended to an audit stream at `~/.codecalc/audit/audit.log`
+  (`CODECALC_AUDIT_LOG` relocates or disables it), each event source-safe
+  (injected clock) and redacted of secrets.
 - **A gate on the README's own gate-script count** (THE-842), so the count of
   CI-invoked scripts cannot drift from the workflows the way the tool count
   once did.

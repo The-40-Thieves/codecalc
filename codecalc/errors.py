@@ -134,6 +134,13 @@ _MESSAGE_HINTS = (
     ("too many", RESOURCE_EXHAUSTED),
     ("resource limit", RESOURCE_EXHAUSTED),
     ("exceeded", RESOURCE_EXHAUSTED),
+    # CPython >=3.14 reworded the recursion/stack failure from "maximum
+    # recursion depth exceeded" to "stack overflow" (and SymPy's own parser
+    # surfaces "Stack overflow ... during compilation"). classify() maps
+    # RecursionError by TYPE, but a site that swallows it and returns its text
+    # reaches here — without this hint the reworded message falls to INTERNAL
+    # on 3.14 while the identical failure was RESOURCE_EXHAUSTED on <3.14.
+    ("stack overflow", RESOURCE_EXHAUSTED),
     # dependency
     ("not installed", DEPENDENCY_MISSING),
     ("ships in the", DEPENDENCY_MISSING),

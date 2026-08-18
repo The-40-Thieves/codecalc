@@ -77,6 +77,38 @@ def _speedup(before: dict, after: dict) -> dict:
     }
 
 
+def _accept_decision(sp: dict, min_speedup: float) -> tuple[bool, str]:
+    """Decide accept/reject from a MEASURED speedup and the caller's threshold.
+
+    Accepted (THE-843) requires the speedup to be REAL, not merely to clear an
+    arithmetic comparison. `ratio >= min_speedup` alone certified a measured
+    SLOWDOWN: with min_speedup=0 a measured 0.5x — a 2x slowdown — cleared
+    `0.5 >= 0` and was returned accepted=True. So all three must hold:
+
+      - the ratio was actually measured (measurable, numeric)
+      - the threshold itself demands a speedup: min_speedup > 1
+      - the measured ratio is an actual speedup AND clears it: ratio > 1
+        and ratio >= min_speedup
+
+    A ratio <= 1, or a min_speedup <= 1, can NEVER yield accepted=True; the
+    grade side (grades.grade_verify_optimization) already refuses to certify a
+    ratio <= 1, and this makes the tool agree at the source. `bool` is an `int`,
+    but a measured ratio is never a bool.
+    """
+    ratio = sp.get("ratio")
+    if not sp.get("measurable") or not isinstance(ratio, (int, float)) or isinstance(ratio, bool):
+        return False, "equivalent but not measurably faster"
+    if min_speedup <= 1:
+        return False, (f"min_speedup={min_speedup} does not demand a speedup "
+                       f"(it must be > 1) — refusing to certify a non-improvement")
+    if ratio <= 1:
+        return False, (f"measured ratio {ratio}x is not a speedup (> 1x); "
+                       f"equivalent but not faster")
+    if ratio < min_speedup:
+        return False, f"measured {ratio}x is below the required {min_speedup}x"
+    return True, "verified faster"
+
+
 def verify_optimization(original: str, candidate: str, language: str,
                         test_inputs: list[str] | None = None,
                         sizes: list[int] | None = None,
@@ -136,13 +168,11 @@ def verify_optimization(original: str, candidate: str, language: str,
         return {"ok": False, "error": f"candidate measurement failed: {after.get('error')}"}
 
     sp = _speedup(before, after)
-    ratio = sp.get("ratio")
-    accepted = bool(sp.get("measurable")) and ratio is not None and ratio >= min_speedup
+    accepted, reason = _accept_decision(sp, min_speedup)
     return {
         "ok": True,
         "accepted": accepted,
-        "reason": ("verified faster" if accepted else
-                   "equivalent but not measurably faster"),
+        "reason": reason,
         "speedup": sp,
         "min_speedup": min_speedup,
         "verification": ver,
