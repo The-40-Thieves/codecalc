@@ -131,6 +131,46 @@ def _runtime_status(cmd: str) -> tuple[str, str | None]:
     return "supported", None
 
 
+def _windows_isolation() -> dict:
+    """Job Object RESOURCE limits vs AppContainer SECURITY isolation (THE-829).
+
+    An operator reading doctor on Windows must not conflate the two guarantees.
+    The Job Object caps memory, process count and user-mode CPU, and every run
+    already names in `unenforced` which of those did NOT bind. AppContainer is a
+    different guarantee entirely — a security boundary that denies the payload
+    the user profile, the disk outside its workdir, and the network. It is:
+
+      * OFF by default (opt-in via CODECALC_WIN_APPCONTAINER=1), and
+      * IMPLEMENTED-BUT-UNVERIFIED on real Windows 11 — the isolation properties
+        are only observable on a Win11 desktop, so codecalc discloses
+        `appcontainer_isolation_unverified_on_windows` on every run that takes
+        the path rather than claiming the boundary was confirmed.
+
+    Reported on every platform (inert off Windows) so the distinction is
+    discoverable from the machine-readable report, not just the prose docs.
+    """
+    on_windows = sys.platform.startswith("win")
+    requested = os.environ.get("CODECALC_WIN_APPCONTAINER", "") in {"1", "true", "True"}
+    return {
+        "applies": on_windows,
+        "job_object_resource_limits": (
+            "memory, process count and user-mode CPU; per-run honesty in `unenforced`"
+        ),
+        "appcontainer_security_isolation": {
+            "flag": "CODECALC_WIN_APPCONTAINER",
+            "default": "off",
+            "requested": requested,
+            "status": "implemented_unverified_on_windows_11",
+            "disclosure_token": "appcontainer_isolation_unverified_on_windows",
+            "detail": (
+                "AppContainer security isolation is IMPLEMENTED but UNVERIFIED on "
+                "real Windows 11; it is distinct from the Job Object's resource "
+                "limits and is OFF unless CODECALC_WIN_APPCONTAINER=1."
+            ),
+        },
+    }
+
+
 def _grammar_cache() -> dict:
     """Is the tree-sitter grammar cache warm? (THE-821)
 
@@ -331,6 +371,13 @@ def report(deep: bool = False) -> dict:
             "confined": bool(abi),
             "detail": None if abi else "installs are not confined on this host",
         },
+        # Two DIFFERENT Windows guarantees, kept apart on purpose. The Job Object
+        # gives RESOURCE limits (memory, process count, user-mode CPU) and its
+        # honesty lives in each run's `unenforced`. AppContainer gives SECURITY
+        # isolation (payload denied the user profile, the disk outside its
+        # workdir, and the network) — a separate thing, opt-in and OFF by
+        # default, and IMPLEMENTED-BUT-UNVERIFIED on real Windows 11.
+        "windows_isolation": _windows_isolation(),
         "extras": extras,
         # Where analyze_complexity's grammars come from, and whether they are
         # here yet. Not an extra and not a runtime: it is a network dependency

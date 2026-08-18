@@ -100,7 +100,11 @@ check(
     "the raw Windows spawn inherits only its three standard handles",
     "PROC_THREAD_ATTRIBUTE_HANDLE_LIST" in creation_time_job_path
     and "let inherited_handles = [" in creation_time_job_path
-    and "InitializeProcThreadAttributeList(std::ptr::null_mut(), 2" in creation_time_job_path,
+    # THE-829 made the attribute count a variable (2, or 3 with the AppContainer
+    # SECURITY_CAPABILITIES attribute in the same list), so the literal `2` is
+    # now `attr_count`. The property — the list is initialised before use — holds.
+    and "InitializeProcThreadAttributeList(std::ptr::null_mut(), attr_count"
+    in creation_time_job_path,
     "-> bInheritHandles=TRUE must not leak unrelated inheritable handles",
 )
 check(
@@ -181,6 +185,16 @@ KNOWN_UNENFORCED = {
     # needs to know WHICH topology produced the run; without it, a measurement
     # cannot be attributed to the path that produced it.
     "process_limit_job_assigned_at_creation_on_windows",
+    # windows.rs — THE-829, opt-in via CODECALC_WIN_APPCONTAINER=1 and OFF by
+    # default. Records that the run was launched inside a least-privilege
+    # AppContainer (a SECURITY isolation boundary — payload denied the user
+    # profile, the disk outside its workdir, and the network) layered on the
+    # THE-818 creation-time Job Object. It sits in `unenforced` because the
+    # boundary is IMPLEMENTED but UNVERIFIED on real Windows 11: the author
+    # cannot run Win11, and a Server-SKU CI runner can confirm the path compiles,
+    # runs and discloses but NOT that the isolation holds. Distinct from the
+    # Job Object's *resource* limits above, which are a different guarantee.
+    "appcontainer_isolation_unverified_on_windows",
     # main.rs — the shim is missing, so --no-net would do nothing
     "no_net_requested_but_no_shim_available",
 }

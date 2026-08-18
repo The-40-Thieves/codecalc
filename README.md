@@ -578,7 +578,7 @@ PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py         # every tool over MC
 PYTHONPATH=. .venv/bin/python tests/test_executor_sweep.py  # sandbox regressions
 ```
 
-39 test files and 11 CI-invoked scripts, **2139 assertions**. "CI-invoked"
+40 test files and 11 CI-invoked scripts, **2139 assertions**. "CI-invoked"
 means referenced by path (`scripts/<name>.py`) from a job in
 `.github/workflows/*.yml` — `scripts/check_claims.py` derives the count that
 way and gates it, so a script wired into a workflow without this sentence
@@ -718,6 +718,27 @@ the next spawn failed with WinError 1816. Runtime launchers that require an
 inner job now fail rather than silently escaping the limit; configure a direct
 runtime executable. `CODECALC_WIN_JOB_AT_CREATION=0` retains the old path only
 as an explicitly unverified compatibility escape hatch.
+
+**AppContainer security isolation is a DIFFERENT guarantee from the Job Object's
+resource limits, and is UNVERIFIED on real Windows 11.** The Job Object above
+caps *resources* — memory, process count, user-mode CPU — and each run names in
+`unenforced` which of those did not bind. The optional AppContainer backend adds
+a *security* boundary layered on the same creation-time topology: a
+least-privilege AppContainer profile (`CreateAppContainerProfile`, no capability
+SIDs, so no network) whose SID is granted — by an explicit ACL — only the
+sandbox workdir plus read+execute on the runtime's own directory, launched with
+`SECURITY_CAPABILITIES` in the same `STARTUPINFOEX` attribute list as the job
+assignment. The intended property is that a payload cannot read the user profile
+or write outside its workdir. It is **OFF by default** (opt in with
+`CODECALC_WIN_APPCONTAINER=1`) and **fails closed** — if profile creation, SID
+derivation or the ACL grant fails, the launch is refused rather than dropped to
+an unconfined process. Because those isolation properties are only observable on
+a real Windows 11 desktop, which codecalc's authors cannot run, every run that
+takes this path emits `appcontainer_isolation_unverified_on_windows` and the
+boundary is disclosed as implemented-but-unverified. A Server-SKU CI runner can
+confirm only that the path compiles, runs and discloses — not that the isolation
+holds; that remains a Windows-11-box acceptance item, exactly like
+`CODECALC_WIN_JOB_AT_CREATION`.
 
 Two things degrade rather than fail on a given platform: languages whose runtime
 is absent (`list_languages` reports `available: false`), and the shell-wrapped
