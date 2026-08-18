@@ -54,7 +54,7 @@ explicit ID returns a validation result carrying `provider_error` set to
 ## The execution receipt
 
 Every successful execution result carries a `provider` object — the execution
-receipt — versioned by its own `receipt_version` (currently **1.0.0**) so a
+receipt — versioned by its own `receipt_version` (currently **1.1.0**) so a
 reader can tell "this receipt predates source hashes" from "this run had no
 source", which are not the same fact. MAJOR removes or retypes a key, MINOR adds
 one, PATCH changes descriptions only.

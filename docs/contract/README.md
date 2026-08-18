@@ -260,7 +260,7 @@ Real transcripts, captured by running the product. `workdir`, timings and
 ```json
 {
   "ok": true,
-  "contract_version": "1.0.0",
+  "contract_version": "1.1.0",
   "language": "python3",
   "phase": "run",
   "backend": "rust",
@@ -294,7 +294,7 @@ request has a `code` and no `verdict`.
 ```json
 {
   "ok": false,
-  "contract_version": "1.0.0",
+  "contract_version": "1.1.0",
   "language": "python3",
   "phase": "run",
   "backend": "rust",
@@ -326,7 +326,7 @@ request has a `code` and no `verdict`.
 ```json
 {
   "ok": false,
-  "contract_version": "1.0.0",
+  "contract_version": "1.1.0",
   "language": "python3",
   "phase": "run",
   "backend": "rust",
@@ -357,7 +357,7 @@ No `verdict`, because nothing ran.
 ```json
 {
   "ok": false,
-  "contract_version": "1.0.0",
+  "contract_version": "1.1.0",
   "backend": "rust",
   "code": "validation",
   "error": "unknown language 'nosuchlang'. Available: python3, node, bun, deno, ...",
@@ -373,7 +373,7 @@ but they carry the same error half, so a caller branches on `code` identically.
 ```json
 {
   "ok": false,
-  "contract_version": "1.0.0",
+  "contract_version": "1.1.0",
   "code": "validation",
   "code_inferred": true,
   "error": "Sympify of expression 'could not parse 'x +++ ***'' failed ...",
