@@ -28,37 +28,63 @@ canary file OUTSIDE the workspace is unreadable, which only a scoped
 file-read allowlist can satisfy — a `(deny file-write*)`-only profile would
 pass every OTHER assertion and fail exactly that one.
 
-The risk `(deny default)` carries — forgetting a mach-lookup/sysctl-read a
-process needs just to START, which breaks the child before it prints
-anything, in a way this repo cannot reproduce (development happens on Linux;
-this module's confinement is only PROVEN by macOS CI, per the module's own
-test) — is managed by leaving every non-filesystem operation class
-(process-fork, process-exec*, signal, sysctl-read, mach-lookup, iokit-open)
-UNQUALIFIED rather than narrowed to specific service names this repo cannot
-verify from a Linux box. `build_profile()`'s own comment on that block
-explains fix-round-1's choice to trim this list to keywords with HIGH
-confidence of both validity and necessity — an invalid Seatbelt keyword fails
-the WHOLE profile closed, the identical symptom (silent, total, including on
-the positive control) that the path-canonicalization bug below produced, so
-an uncertain grant this repo cannot verify is worth less than the profile
-staying parseable. Filesystem is the one class actually
-scoped, because it is the one class the test can and does measure without
-macOS: reads via an allowlist, writes via `read_write` alone. This mirrors
-OpenAI Codex CLI's Seatbelt sandbox for the identical job (confining a
-subprocess that spawns further interpreters/toolchains to a workspace) —
-`(deny default)`, broad non-filesystem grants, a curated `file-read*`
-allowlist — rather than Bazel's `(allow default)` variant, which does not
-scope reads at all.
+fix-round-2 history, because the first two rounds were both wrong in
+instructive ways and the next reader should not repeat either mistake:
+
+  round 1 fixed a real bug (unresolved `/var/folders/...` paths never
+  matching Seatbelt's kernel-RESOLVED `/private/var/folders/...` form — see
+  `_canon()`) but ALSO replaced round-0's unverified bare `(allow
+  mach-lookup)` / `(allow sysctl-read)` / `(allow iokit-open)` with... still
+  unverified guesses, just fewer of them. Round 1 shipped anyway because an
+  invalid keyword and a too-narrow grant look IDENTICAL from a Linux dev box
+  (both abort the child silently) and there was no source to check against
+  yet.
+
+  round 2 (this one) replaces every non-filesystem grant AND the missing
+  file-map-executable rights below with lines copied or directly adapted
+  from OpenAI Codex CLI's ACTUAL shipped Seatbelt profile — a program that
+  runs the identical kind of job (a forked/exec'd interpreter under `(deny
+  default)`) in production, right down to a comment explicitly calling out
+  Python multiprocessing. Pinned source, commit
+  e13c1d569d953ecac06a09cf5663fb3cd405636d:
+    https://github.com/openai/codex/blob/e13c1d569d953ecac06a09cf5663fb3cd405636d/codex-rs/sandboxing/src/seatbelt_base_policy.sbpl
+    https://github.com/openai/codex/blob/e13c1d569d953ecac06a09cf5663fb3cd405636d/codex-rs/sandboxing/src/restricted_read_only_platform_defaults.sbpl
+    https://github.com/openai/codex/blob/e13c1d569d953ecac06a09cf5663fb3cd405636d/codex-rs/sandboxing/src/seatbelt_network_policy.sbpl
+  (Codex's own base policy says it is in turn "inspired by Chrome's sandbox
+  policy".) Every grant below traces to one of those three files or is
+  marked as this module's own addition.
+
+  The one likely ROOT CAUSE round 2 found that round 1 could not: dyld needs
+  `file-map-executable` to mmap a shared library as executable pages, which
+  is a DIFFERENT right from `file-read*` — round 1's profile granted broad
+  `file-read*` over every system library path but never granted
+  `file-map-executable` anywhere, so dyld could see its own dependencies but
+  not load them. That fails during interpreter startup, before any of this
+  module's own script code runs — a silent SIGABRT with empty stderr
+  (Seatbelt denials go to the unified log, not the child's stderr) is
+  exactly what CI measured.
+
+  round 2 also fixes a SECOND, independent bug round 1's diagnostics
+  surfaced: `tests/test_package_isolation.py`'s canary lived under
+  `tempfile.mkdtemp()`, i.e. under `/private/var/folders/...` once
+  resolved — the SAME tree round 1's `read_only` list granted blanket
+  `file-read*` over (`/private/var`) so dyld/Python startup could read
+  `/private/var/db`. Once the interpreter can actually start, that blanket
+  grant would make the canary READABLE, failing the "canary outside is
+  unreadable" assertion as a false negative on the real security property.
+  Fixed two ways: `read_only` no longer includes blanket `/private/var`
+  (only the specific `/private/var/db` subpath startup needs — baked into
+  this module rather than caller-supplied, see `build_profile()`), and the
+  test moves its canary under `$HOME`, nowhere near any grant.
 
 SCOPE, matching Landlock's on Linux: this confines filesystem writes to
-`read_write`, and reads additionally to `read_write | read_only`. Process
-exec/fork and network are left open — an install needs both (npm execs
-node, uv may exec a python probe, and every one of them needs the network to
-fetch the package) — and metadata syscalls (stat, chmod, chown, utime,
-xattr-read) are left open too, matching Landlock's own documented inability
-to restrict them on Linux. `unenforced_reasons()` below says exactly what is
-NOT covered, on every outcome, so "confined" here never means "confined to
-everything a reader might assume".
+`read_write`, and reads (plus the mapping needed to load and execute code
+from them) additionally to `read_write | read_only`. Metadata syscalls
+(stat, chmod, chown, utime, xattr-read) are left open everywhere, matching
+Landlock's own documented inability to restrict them on Linux, and network
+is left fully open — an install needs it. `unenforced_reasons()` below says
+exactly what is NOT covered, on every outcome, so "confined" here never
+means "confined to everything a reader might assume".
 """
 
 from __future__ import annotations
@@ -66,6 +92,152 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+
+#: Process/signal/IPC/IOKit/mach-lookup/sysctl baseline. Every line here is
+#: copied or directly adapted from OpenAI Codex CLI's shipped Seatbelt
+#: profile (see the module docstring for the pinned source) — NOT a guess.
+#: This is what lets a forked/exec'd interpreter (Codex's own comments call
+#: out Python multiprocessing and PyTorch/libomp by name) actually start
+#: under `(deny default)`, independent of anything workspace-specific.
+_STARTUP_BASELINE = """\
+; ---- process / signal / IPC baseline ----
+; seatbelt_base_policy.sbpl: "child processes inherit the policy of their
+; parent" — needed so the installer can exec its own subprocesses (npm execs
+; node; uv may exec a probe) under the SAME confinement, not a wider one.
+(allow process-exec)
+(allow process-fork)
+(allow signal (target same-sandbox))
+(allow process-info* (target same-sandbox))
+
+; seatbelt_base_policy.sbpl: "Needed for python multiprocessing on MacOS for
+; the SemLock" — python3 is one of the interpreters this module confines.
+(allow ipc-posix-sem)
+
+; seatbelt_base_policy.sbpl + restricted_read_only_platform_defaults.sbpl
+(allow iokit-open (iokit-registry-entry-class "RootDomainUserClient"))
+
+; mach-lookup: union of seatbelt_base_policy.sbpl,
+; restricted_read_only_platform_defaults.sbpl and seatbelt_network_policy.sbpl
+; (the last group only matters once a process actually dials out, which an
+; install always does). Directory/preference/logging/trust services an
+; interpreter's own startup and TLS stack reach for.
+(allow mach-lookup
+    (global-name "com.apple.system.opendirectoryd.libinfo")
+    (global-name "com.apple.system.opendirectoryd.membership")
+    (global-name "com.apple.system.DirectoryService.libinfo_v1")
+    (global-name "com.apple.cfprefsd.agent")
+    (global-name "com.apple.cfprefsd.daemon")
+    (global-name "com.apple.logd")
+    (global-name "com.apple.logd.events")
+    (global-name "com.apple.system.notification_center")
+    (global-name "com.apple.trustd")
+    (global-name "com.apple.trustd.agent")
+    (global-name "com.apple.PowerManagement.control")
+    (global-name "com.apple.bsd.dirhelper")
+    (global-name "com.apple.SecurityServer")
+    (global-name "com.apple.networkd")
+    (global-name "com.apple.ocspd")
+    (global-name "com.apple.SystemConfiguration.DNSConfiguration")
+    (global-name "com.apple.SystemConfiguration.configd")
+    (local-name "com.apple.cfprefsd.agent"))
+
+; seatbelt_base_policy.sbpl's full sysctl-read allowlist, verbatim — CPU
+; topology/feature detection every interpreter's runtime probes at startup.
+(allow sysctl-read
+    (sysctl-name "hw.activecpu")
+    (sysctl-name "hw.busfrequency_compat")
+    (sysctl-name "hw.byteorder")
+    (sysctl-name "hw.cacheconfig")
+    (sysctl-name "hw.cachelinesize_compat")
+    (sysctl-name "hw.cpufamily")
+    (sysctl-name "hw.cpufrequency_compat")
+    (sysctl-name "hw.cputype")
+    (sysctl-name "hw.l1dcachesize_compat")
+    (sysctl-name "hw.l1icachesize_compat")
+    (sysctl-name "hw.l2cachesize_compat")
+    (sysctl-name "hw.l3cachesize_compat")
+    (sysctl-name "hw.logicalcpu_max")
+    (sysctl-name "hw.machine")
+    (sysctl-name "hw.model")
+    (sysctl-name "hw.memsize")
+    (sysctl-name "hw.ncpu")
+    (sysctl-name "hw.nperflevels")
+    (sysctl-name-prefix "hw.optional.arm.")
+    (sysctl-name-prefix "hw.optional.armv8_")
+    (sysctl-name "hw.packages")
+    (sysctl-name "hw.pagesize_compat")
+    (sysctl-name "hw.pagesize")
+    (sysctl-name "hw.physicalcpu")
+    (sysctl-name "hw.physicalcpu_max")
+    (sysctl-name "hw.logicalcpu")
+    (sysctl-name "hw.cpufrequency")
+    (sysctl-name "hw.tbfrequency_compat")
+    (sysctl-name "hw.vectorunit")
+    (sysctl-name "machdep.cpu.brand_string")
+    (sysctl-name "kern.argmax")
+    (sysctl-name "kern.hostname")
+    (sysctl-name "kern.maxfilesperproc")
+    (sysctl-name "kern.maxproc")
+    (sysctl-name "kern.osproductversion")
+    (sysctl-name "kern.osrelease")
+    (sysctl-name "kern.ostype")
+    (sysctl-name "kern.osvariant_status")
+    (sysctl-name "kern.osversion")
+    (sysctl-name "kern.secure_kernel")
+    (sysctl-name "kern.usrstack64")
+    (sysctl-name "kern.version")
+    (sysctl-name "sysctl.proc_cputype")
+    (sysctl-name "vm.loadavg")
+    (sysctl-name-prefix "hw.perflevel")
+    (sysctl-name-prefix "kern.proc.pgrp.")
+    (sysctl-name-prefix "kern.proc.pid.")
+    (sysctl-name-prefix "net.routetable."))
+(allow sysctl-read (sysctl-name-regex #"^net.routetable"))
+; "misclassified as a write because userspace passes a memory buffer to the
+; sysctl, but conceptually it is a read" — seatbelt_base_policy.sbpl's own
+; comment, verbatim rule.
+(allow sysctl-write (sysctl-name "kern.grade_cputype"))
+
+; ---- read-only platform defaults (restricted_read_only_platform_defaults.sbpl) ----
+; file-map-executable is a SEPARATE right from file-read* — dyld needs it to
+; mmap a shared library as EXECUTABLE pages. Missing here in fix-round-1 is
+; the most likely reason the confined interpreter SIGABRT'd during its own
+; startup, before any script code ran: file-read* let dyld see its
+; dependencies but not load them.
+(allow file-map-executable
+    (subpath "/usr/lib")
+    (subpath "/System/Library/Frameworks")
+    (subpath "/System/Library/PrivateFrameworks")
+    (subpath "/System/Library/SubFrameworks")
+    (subpath "/System/Library/Extensions"))
+(allow file-read* file-test-existence
+    (subpath "/usr/lib")
+    (subpath "/usr/share")
+    (subpath "/Library/Preferences")
+    (subpath "/private/var/db")
+    (subpath "/usr/local"))
+(allow file-read-data (subpath "/bin"))
+(allow file-read-metadata (subpath "/bin"))
+(allow file-read-data (subpath "/sbin"))
+(allow file-read-metadata (subpath "/sbin"))
+(allow file-read-data (subpath "/usr/bin"))
+(allow file-read-metadata (subpath "/usr/bin"))
+(allow file-read-data (subpath "/usr/sbin"))
+(allow file-read-metadata (subpath "/usr/sbin"))
+(allow file-read-data (subpath "/usr/libexec"))
+(allow file-read-metadata (subpath "/usr/libexec"))
+(allow file-read* (subpath "/etc"))
+(allow file-read* (subpath "/private/etc"))
+(allow file-read* file-test-existence (literal "/"))
+
+; Metadata (stat/access/xattr-read) unrestricted everywhere — matching
+; landlock.py's identical, documented gap on Linux, not a wider hole: this
+; covers existence/permission checks, never file CONTENT. Deliberately
+; broader than restricted_read_only_platform_defaults.sbpl's own
+; metadata-only `/var`/`/private/var` rules (this repo already made that
+; call before fix-round-2 and it is unrelated to what fix-round-2 changed).
+(allow file-read-metadata (subpath "/"))
+"""
 
 
 def available() -> bool:
@@ -136,16 +308,22 @@ def _canon(path: str) -> str:
 
 def build_profile(read_write: list[str], read_only: list[str]) -> str:
     """A `(deny default)` Seatbelt profile: writes confined to `read_write`,
-    reads confined to `read_write | read_only`, everything else on the
-    filesystem untouched by either allowance. See the module docstring for
-    why process/mach/sysctl stay unqualified while filesystem is the one
-    class actually scoped.
+    reads (and the execute-mapping needed to actually load code) confined to
+    `read_write | read_only` plus the fixed system baseline in
+    `_STARTUP_BASELINE`, everything else on the filesystem untouched by any
+    of it.
 
     Nonexistent paths are included anyway — `subpath` matching a path that is
     not there yet is inert, not an error, so a cache directory created lazily
     by the installer is still covered. Every path is passed through
     `_canon()` first — see its docstring for why an unresolved path silently
     matches nothing.
+
+    `read_only` gets BOTH `file-read*` and `file-map-executable`: a caller's
+    toolchain prefix (e.g. a venv's own `lib/` holding `libpython*.dylib`)
+    needs its shared libraries mapped executable exactly the same way the
+    system frameworks in `_STARTUP_BASELINE` do — see the module docstring
+    for why `file-read*` alone was fix-round-1's bug.
     """
     rw = " ".join(f'(subpath "{_quote(_canon(p))}")' for p in read_write)
     ro = " ".join(f'(subpath "{_quote(_canon(p))}")' for p in read_only)
@@ -153,43 +331,13 @@ def build_profile(read_write: list[str], read_only: list[str]) -> str:
         "(version 1)",
         "(deny default)",
         "",
-        "; Non-filesystem operation classes: left open. Layer 1 (packages.py)",
-        "; stops hostile install-time code from running at all; this profile",
-        "; bounds WHERE the installer — and anything it spawns — may write, not",
-        "; what it may run, look up or introspect. See the module docstring for",
-        "; why these stay unqualified rather than a service-name allowlist this",
-        "; repo cannot verify without a macOS host.",
-        "; ",
-        "; fix-round-1: trimmed to the operations this repo has HIGH confidence",
-        "; are both valid Seatbelt keywords and load-bearing for a forked/exec'd",
-        "; interpreter to start at all (process creation, dyld/libSystem's mach",
-        "; lookups, sysctl-based runtime probing, IOKit hardware queries some",
-        "; frameworks make even headless). `process-exec*` (wildcard, not the",
-        "; bare `process-exec`) so the interpreter-arguments sub-operation a",
-        "; shebang re-exec triggers is covered too. Two narrower, lower-value",
-        "; grants (mach-priv-host-port, ipc-posix-shm) were dropped rather than",
-        "; kept on uncertain footing — an invalid keyword fails the WHOLE",
-        "; profile closed, same symptom (empty output, even on the positive",
-        "; control) as the path-canonicalization bug this round actually fixed,",
-        "; so unverifiable-from-here grants are cut unless something is known",
-        "; to need them.",
-        "(allow process-fork)",
-        "(allow process-exec*)",
-        "(allow signal (target self))",
-        "(allow sysctl-read)",
-        "(allow mach-lookup)",
-        "(allow iokit-open)",
-        "",
-        "; Metadata (stat/access/xattr-read) unrestricted everywhere — matching",
-        "; landlock.py's identical, documented gap on Linux, not a wider hole:",
-        "; this covers existence/permission checks, never file CONTENT.",
-        '(allow file-read-metadata (subpath "/"))',
-        "",
+        _STARTUP_BASELINE,
         "; Read-only: the installer's own runtime (interpreter/toolchain prefix,",
-        "; the dynamic linker's shared libraries, DNS/TLS trust config).",
+        "; the dynamic linker's shared libraries it needs beyond the fixed",
+        "; system baseline above, DNS/TLS trust config).",
     ]
     if ro:
-        lines.append(f"(allow file-read* {ro})")
+        lines.append(f"(allow file-read* file-map-executable {ro})")
     lines += [
         "",
         "; Read-write: ONLY the workspace, its redirected caches and its",

@@ -465,8 +465,19 @@ def _macos_confinement(bin_: str, workspace: str, env: dict, language: str) -> t
     # DERIVED plus the resolved binary's own toolchain prefix, same reasoning
     # as the Linux path: an installer needs its own runtime (node for npm,
     # the toolchain prefix for uv) and those live wherever the host put them.
+    #
+    # fix-round-2: NOT blanket "/private/var". That tree is also where every
+    # workspace and canary in this file's own confinement test live (both
+    # come from tempfile.mkdtemp()), so granting it here would make the
+    # canary readable and turn "confined: a same-UID canary outside it is
+    # unreadable" into a false negative on the real security property the
+    # moment the interpreter could actually start. The one /private/var
+    # subpath startup genuinely needs (/private/var/db) is baked into
+    # sandbox_macos._STARTUP_BASELINE instead of listed here, precisely so
+    # it cannot be widened back to the whole tree by a future edit to this
+    # function.
     readable = ["/usr", "/bin", "/sbin", "/System", "/Library",
-                "/private/etc", "/private/var", "/dev", "/opt"]
+                "/private/etc", "/dev", "/opt"]
     resolved = shutil.which(bin_, path=executor.registry.runtime_path()) or shutil.which(bin_)
     if resolved:
         real = pathlib.Path(resolved).resolve()

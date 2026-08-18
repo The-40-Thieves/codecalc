@@ -194,7 +194,15 @@ from codecalc import sandbox_macos as _sm
 
 if _sys.platform == "darwin" and _sm.available():
     _ws_mac = _tf.mkdtemp()
-    _canary_mac_dir = pathlib.Path(_tf.mkdtemp())
+    # fix-round-2: under $HOME, NOT tempfile.mkdtemp()'s default location.
+    # The default (/var/folders/... -> /private/var/folders/... resolved) is
+    # the SAME tree _RO_mac must grant /private/var/db from for the
+    # interpreter to start at all — a canary living anywhere else in that
+    # tree would have been readable the moment startup worked, a false
+    # negative on the actual security property, not a real one. $HOME
+    # (/Users/<runner> on macOS CI) is same-UID and outside every _RO_mac
+    # entry below; verified by construction right after _RO_mac exists.
+    _canary_mac_dir = pathlib.Path(_tf.mkdtemp(dir=str(pathlib.Path("~").expanduser())))
     _canary_mac = _canary_mac_dir / "secret.canary"
     _canary_mac.write_text("SECRET-CANARY")
     _outside_mac = str(pathlib.Path(_tf.gettempdir()) / "codecalc-escape-probe-macos")
@@ -210,9 +218,30 @@ print(t(lambda: open({_ws_mac!r}+"/in.txt","w").write("ok")),
       t(lambda: open(_outside, "w").write("x")),
       t(lambda: open({str(_canary_mac)!r}).read()))
 '''
+    # fix-round-2: NOT blanket "/private/var" — sandbox_macos.py's own
+    # _STARTUP_BASELINE now grants only the narrow /private/var/db subpath
+    # startup needs; see its docstring and packages._macos_confinement's
+    # matching comment for why re-adding the whole tree here would be the
+    # same false-negative bug this round fixed.
     _RO_mac = ["/usr", "/bin", "/sbin", "/System", "/Library", "/private/etc",
-               "/private/var", "/dev", "/opt", _sys.prefix, _sys.base_prefix,
+               "/dev", "/opt", _sys.prefix, _sys.base_prefix,
                _sysconfig.get_paths()["purelib"]]
+    # Verify by construction, not just by inspection: the canary must not be
+    # a subpath of the workspace or of any _RO_mac entry, in RESOLVED form
+    # (the same form fix-round-1 established Seatbelt actually matches
+    # against) — otherwise "canary outside is unreadable" below would be
+    # asserting a property that was never actually being tested.
+    _canary_real_mac = str(pathlib.Path(_canary_mac).resolve())
+    _ws_real_mac = _os.path.realpath(_ws_mac)
+    _ro_real_mac = [_os.path.realpath(_p) for _p in _RO_mac]
+    _canary_covered_mac = (
+        _canary_real_mac == _ws_real_mac
+        or _canary_real_mac.startswith(_ws_real_mac.rstrip("/") + "/")
+        or any(_canary_real_mac == _r or _canary_real_mac.startswith(_r.rstrip("/") + "/")
+               for _r in _ro_real_mac))
+    check("fix-round-2: the canary is NOT under the workspace or any read-allowed path",
+          not _canary_covered_mac,
+          f"-> canary={_canary_real_mac} ws={_ws_real_mac} ro={_ro_real_mac}")
     _profile_path_mac = pathlib.Path(_ws_mac) / "probe.sb"
     _profile_path_mac.write_text(
         _sm.build_profile(read_write=[_ws_mac], read_only=_RO_mac), encoding="utf-8")
