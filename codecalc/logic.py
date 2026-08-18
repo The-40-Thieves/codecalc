@@ -452,6 +452,14 @@ def z3_check(smt2: str, timeout_ms: int = 5000) -> dict:
 def _solve_linear(system: str, variables: str | list[str]) -> dict:
     """Solve a ';'-separated system of equations ('x + y = 10; x - y = 2')."""
     try:
+        # The DoS length cap, same as _evaluate_expression and truth_table above
+        # (THE-844). solve_linear reached sp.sympify below with only reject_unsafe
+        # (a safety screen, not a length gate), so a 120k-char system blew the
+        # parser's recursion limit and rode the "stack overflow" message hint to
+        # resource_exhausted — the fragile, interpreter-wording-dependent path the
+        # cap exists to eliminate. Cap the whole system string before any parse.
+        if len(system) > _MAX_EXPR_LEN:
+            return {"ok": False, "error": f"expression too long (max {_MAX_EXPR_LEN} chars)"}
         sp = _sympy()
         if isinstance(variables, str):
             variables = [v.strip() for v in variables.split(",") if v.strip()]

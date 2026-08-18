@@ -239,6 +239,17 @@ jobs:
       - name: error-code taxonomy (result contract codes)
         shell: bash
         run: uv run --no-sync python tests/test_error_codes.py
+      # THE-844 behavioral floor: every public sympy-backed tool must reject an
+      # oversized expression VIA THE LENGTH CAP (before sp.sympify), not via the
+      # "stack overflow" message backstop. Pure logic over the tool surface (no
+      # sandbox, no runtimes), and it belongs on the full matrix for the same
+      # reason test_error_codes does — the cap is what keeps the code stable
+      # across the py3.11/py3.14 interpreter-wording split. It caught solve_linear
+      # riding the backstop uncapped, which the taxonomy suite's code-only check
+      # let through.
+      - name: expression length cap (every sympy entry point, before parse)
+        shell: bash
+        run: uv run --no-sync python tests/test_expr_length_cap.py
       # The run-lifecycle state machine (THE-778/THE-831): identity, cancel,
       # cleanup and crash-recovery journalling, all against fake providers —
       # no sandbox, no native executor, so it belongs on the full matrix
@@ -485,16 +496,21 @@ jobs:
         run: uv run --no-sync python tests/test_runtimes_mcp.py
       # MCP-stdio round-trips that EXECUTE code (python3) and drive sessions,
       # files, artifacts, streaming, packages and units through the real server.
-      # They live here, not in the matrix job, for the same reason test_mcp_all
-      # below does: they need the built executor and a working python3 runtime,
-      # and the matrix's fallback-backend Windows/macOS legs are the wrong place
-      # for a suite that round-trips real code execution. Neither ran in CI
-      # before — they were gated on one developer's machine.
+      # They need the built executor and a working python3 runtime. This job is
+      # itself an OS matrix (ubuntu/macos/windows), and their python3-execution
+      # portability there is UNVERIFIED — test_features in particular reads
+      # execution stdout that CRLF-shifts on Windows — so they are pinned to
+      # Linux with `if: runner.os == 'Linux'` rather than risking the exact
+      # cross-platform whack-a-mole this repo keeps fighting. Neither ran in CI
+      # before; they were gated on one developer's machine.
       - name: MCP feature surface (sessions, files, artifacts, streaming)
+        if: runner.os == 'Linux'
         run: uv run --no-sync python tests/test_features.py
       - name: MCP resources + session_run + units (gap items 1-4)
+        if: runner.os == 'Linux'
         run: uv run --no-sync python tests/test_gap4.py
       - name: MCP stdio surface answers (values, not just non-empty)
+        if: runner.os == 'Linux'
         run: uv run --no-sync python tests/test_mcp.py
       - name: MCP stdio round-trip
         shell: bash
