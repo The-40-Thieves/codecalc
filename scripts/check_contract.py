@@ -10,7 +10,7 @@ README correctly said 47, because the gate could only reach the README
 the README misleads a reader, a wrong schema makes a strictly-validating client
 reject results that are correct.
 
-So this asserts four things, all of them by re-deriving rather than by reading:
+So this asserts five things, all of them by re-deriving rather than by reading:
 
   1. The committed schema is byte-identical to what contract.py produces now.
      `--write` regenerates it; CI runs without the flag and fails on a diff.
@@ -30,6 +30,15 @@ So this asserts four things, all of them by re-deriving rather than by reading:
 
   4. `CONTRACT_VERSION` appears in the docs that explain the versioning policy.
      A version constant nobody documents is a number, not a policy.
+
+  5. THE REQUEST half (THE-793). `docs/contract/computation-spec-v1.schema.json`
+     matches `providers.ComputationSpec` field for field, and the golden vectors
+     in `computation-spec-v1.vectors.json` still reproduce their canonical bytes
+     and their sha256. The vectors are the only thing here that can see a change
+     to the ENCODING — the field set does not move when someone flips
+     `ensure_ascii` or drops `sort_keys`, so every schema check stays green while
+     every hash already handed out starts meaning something else. That is why
+     `--write` regenerates the schema and refuses to touch the vectors.
 
 STDLIB ONLY, DELIBERATELY.
 Gates in this repo run on a bare checkout, before dependencies exist, because
@@ -53,15 +62,18 @@ import ast
 import json
 import re
 import sys
+from dataclasses import fields
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from codecalc import contract, errors  # noqa: E402  (after sys.path)
+from codecalc import contract, errors, providers, spec_identity  # noqa: E402
 
 SCHEMA_PATH = REPO / "docs" / "contract" / "result-v1.schema.json"
 DOCTOR_SCHEMA_PATH = REPO / "docs" / "contract" / "doctor-v1.schema.json"
+SPEC_SCHEMA_PATH = REPO / "docs" / "contract" / "computation-spec-v1.schema.json"
+SPEC_VECTORS_PATH = REPO / "docs" / "contract" / "computation-spec-v1.vectors.json"
 DOCS_PATH = REPO / "docs" / "contract" / "README.md"
 RUST_SRC = REPO / "executor" / "src" / "main.rs"
 PY_SRC = REPO / "codecalc" / "executor.py"
@@ -87,6 +99,13 @@ DOCTOR_SCHEMA_ID = (
     "https://raw.githubusercontent.com/The-40-Thieves/codecalc/main/"
     "docs/contract/doctor-v1.schema.json"
 )
+SPEC_SCHEMA_ID = (
+    "https://raw.githubusercontent.com/The-40-Thieves/codecalc/main/"
+    "docs/contract/computation-spec-v1.schema.json"
+)
+
+#: Fewer vectors than this and the corpus is an example, not a pin.
+MIN_SPEC_VECTORS = 5
 
 failures: list[str] = []
 
@@ -110,12 +129,35 @@ doctor_generated = json.dumps(
                                  schema_id=DOCTOR_SCHEMA_ID),
     indent=2, sort_keys=False) + "\n"
 
+# The generator refuses to publish a field it cannot type or document. Caught
+# rather than allowed to traceback so the message arrives as a FAIL line beside
+# the others — and so `--write` reports it instead of half-writing the set.
+try:
+    spec_generated = json.dumps(
+        providers.build_spec_schema(dialect=JSON_SCHEMA_DIALECT,
+                                    schema_id=SPEC_SCHEMA_ID),
+        indent=2, sort_keys=False, ensure_ascii=False) + "\n"
+except spec_identity.UncanonicalizableValue as exc:
+    spec_generated = None
+    fail(f"the request schema cannot be generated — {exc}")
+
 if "--write" in sys.argv:
+    if spec_generated is None:
+        print("\n=== refusing to write: the request schema is not generatable ===")
+        sys.exit(1)
     SCHEMA_PATH.parent.mkdir(parents=True, exist_ok=True)
     SCHEMA_PATH.write_text(generated, encoding="utf-8")
     DOCTOR_SCHEMA_PATH.write_text(doctor_generated, encoding="utf-8")
+    SPEC_SCHEMA_PATH.write_text(spec_generated, encoding="utf-8")
     print(f"wrote {SCHEMA_PATH.relative_to(REPO)}")
     print(f"wrote {DOCTOR_SCHEMA_PATH.relative_to(REPO)}")
+    print(f"wrote {SPEC_SCHEMA_PATH.relative_to(REPO)}")
+    # `computation-spec-v1.vectors.json` is deliberately NOT written here. It is
+    # the anchor the encoding is measured against, and an anchor its own
+    # generator can move is not an anchor — regenerate it and every change to
+    # the canonicalization rules becomes invisible in exactly the same commit
+    # that made it. Changing those bytes is a deliberate, hand-edited act that
+    # bumps COMPUTATION_SPEC_VERSION with it.
     sys.exit(0)
 
 # The doctor schema drifts the same way and for the same reason: generated, and
@@ -340,6 +382,152 @@ else:
              "component is allowed to change; that statement IS the policy")
     else:
         ok(f"versioning policy documents {contract.CONTRACT_VERSION}")
+
+
+# ── 6. the request's identity: schema, field coverage, golden vectors ───────
+# THE-793. The result contract above says what comes BACK. This says what a
+# request IS: a canonical byte encoding and a sha256 over it, published so a
+# second implementation can reproduce both.
+#
+# Three separate things can rot here and they fail differently on purpose:
+#   * the published schema falling behind the dataclass (a client validates a
+#     correct request as invalid),
+#   * the schema's property set drifting from the FIELDS (read out of the
+#     committed file, not the in-memory dict — the same self-certification trap
+#     check 2 above documents),
+#   * the canonical ENCODING changing under a hash that was already handed out,
+#     which no schema check can see because the field set never moved.
+if spec_generated is None:
+    spec_published = None  # already reported; there is nothing to diff against
+elif not SPEC_SCHEMA_PATH.exists():
+    fail(f"{SPEC_SCHEMA_PATH.relative_to(REPO)} does not exist — run "
+         "`python scripts/check_contract.py --write` and commit it")
+    spec_published = None
+else:
+    spec_committed = SPEC_SCHEMA_PATH.read_text(encoding="utf-8")
+    try:
+        spec_published = json.loads(spec_committed)
+    except ValueError as exc:
+        spec_published = None
+        fail(f"{SPEC_SCHEMA_PATH.relative_to(REPO)} is not parseable JSON: {exc}")
+    if spec_committed != spec_generated:
+        fail(f"{SPEC_SCHEMA_PATH.relative_to(REPO)} is stale — regenerate with "
+             "`python scripts/check_contract.py --write`. A published request "
+             "schema that lags the dataclass makes a strict client reject a "
+             "request codecalc would have run.")
+    else:
+        ok(f"published spec schema matches the dataclass "
+           f"({len(spec_generated)} bytes)")
+
+spec_field_names = sorted(f.name for f in fields(providers.ComputationSpec))
+if spec_published is not None:
+    try:
+        spec_properties = sorted(
+            spec_published["$defs"]["computation_spec"]["properties"])
+        spec_required = sorted(spec_published["$defs"]["computation_spec"]["required"])
+        spec_closed = spec_published["$defs"]["computation_spec"]["additionalProperties"]
+    except (KeyError, TypeError):
+        spec_properties, spec_required, spec_closed = [], [], None
+    if len(spec_properties) < 5:
+        fail(f"the published spec schema declares {len(spec_properties)} "
+             "properties — its shape changed and this extractor no longer finds "
+             "them, which is a broken check and not a small dataclass")
+    elif spec_properties != spec_field_names:
+        fail(f"published spec properties {spec_properties} != ComputationSpec "
+             f"fields {spec_field_names}")
+    elif spec_required != spec_field_names:
+        fail(f"published spec `required` {spec_required} != every field "
+             f"{spec_field_names}. Canonicalization emits every field including "
+             "defaulted ones, so a field that is not required describes a "
+             "document the encoder never produces.")
+    elif spec_closed is not False:
+        fail("the published spec object is not closed "
+             f"(additionalProperties={spec_closed!r}). A request identity must "
+             "reject an unknown field: letting one through either hides a change "
+             "to the computation behind an unchanged hash, or admits a field that "
+             "does not belong in the canonical bytes.")
+    else:
+        ok(f"published spec schema is the dataclass, closed and fully required "
+           f"({len(spec_properties)} fields)")
+
+# The vectors. Recomputed from the committed KWARGS, compared to the committed
+# BYTES and the committed HASH. This is the only check here that can see a
+# changed encoding, and it is the reason `--write` refuses to touch this file.
+if not SPEC_VECTORS_PATH.exists():
+    fail(f"{SPEC_VECTORS_PATH.relative_to(REPO)} does not exist — the canonical "
+         "encoding has no anchor and a change to it would be invisible")
+else:
+    try:
+        vector_doc = json.loads(SPEC_VECTORS_PATH.read_text(encoding="utf-8"))
+        vectors = vector_doc["vectors"]
+    except (ValueError, KeyError, TypeError) as exc:
+        vectors = []
+        fail(f"{SPEC_VECTORS_PATH.relative_to(REPO)} is unreadable: {exc}")
+    if len(vectors) < MIN_SPEC_VECTORS:
+        fail(f"only {len(vectors)} golden vector(s); expected at least "
+             f"{MIN_SPEC_VECTORS}. A corpus this small cannot pin an encoding, "
+             "and an empty one compares nothing and reports success.")
+    else:
+        if vector_doc.get("schema_version") != spec_identity.COMPUTATION_SPEC_VERSION:
+            fail(f"the vector file pins schema_version "
+                 f"{vector_doc.get('schema_version')!r} but the code produces "
+                 f"{spec_identity.COMPUTATION_SPEC_VERSION!r}")
+        broken = []
+        for vector in vectors:
+            try:
+                spec = providers.ComputationSpec(**vector["kwargs"])
+            except TypeError as exc:
+                broken.append(f"{vector.get('name')}: kwargs no longer construct "
+                              f"a spec ({exc})")
+                continue
+            actual_bytes = spec_identity.canonical_bytes(spec).decode("utf-8")
+            actual_hash = spec_identity.spec_hash(spec)
+            if actual_bytes != vector["canonical"]:
+                broken.append(f"{vector['name']}: canonical bytes changed\n"
+                              f"      committed {vector['canonical']}\n"
+                              f"      produced  {actual_bytes}")
+            elif actual_hash != vector["spec_hash"]:
+                broken.append(f"{vector['name']}: same bytes, different hash "
+                              f"({vector['spec_hash']} -> {actual_hash})")
+        if broken:
+            for item in broken:
+                fail(f"golden vector {item}")
+            fail("the canonical encoding changed under hashes that were already "
+                 "published. If that is intended, bump COMPUTATION_SPEC_VERSION "
+                 "and hand-edit docs/contract/computation-spec-v1.vectors.json.")
+        else:
+            # Injective, not merely unique: the corpus deliberately contains two
+            # vectors that ARE the same request (defaults left alone vs passed
+            # explicitly), so equal bytes MUST share a hash. What must never
+            # happen is two different byte strings arriving at one hash.
+            by_bytes: dict[str, set[str]] = {}
+            for vector in vectors:
+                by_bytes.setdefault(vector["canonical"], set()).add(vector["spec_hash"])
+            ambiguous = [b for b, hashes in by_bytes.items() if len(hashes) > 1]
+            collisions = len({h for hashes in by_bytes.values() for h in hashes})
+            if ambiguous:
+                fail(f"{len(ambiguous)} canonical byte string(s) are pinned to more "
+                     "than one hash — the vector file contradicts itself")
+            elif collisions != len(by_bytes):
+                fail("two different canonical byte strings share a content hash")
+            else:
+                ok(f"all {len(vectors)} golden vectors reproduce their canonical "
+                   f"bytes and content hash ({len(by_bytes)} distinct requests)")
+
+# The spec version needs a policy for the same reason CONTRACT_VERSION does, and
+# it needs a LOUDER one: a bump here invalidates every stored hash.
+if DOCS_PATH.exists():
+    spec_docs = DOCS_PATH.read_text(encoding="utf-8")
+    if spec_identity.COMPUTATION_SPEC_VERSION not in spec_docs:
+        fail(f"COMPUTATION_SPEC_VERSION is "
+             f"{spec_identity.COMPUTATION_SPEC_VERSION} and "
+             f"{DOCS_PATH.relative_to(REPO)} never says so")
+    elif "computation-spec-v1.schema.json" not in spec_docs:
+        fail(f"{DOCS_PATH.relative_to(REPO)} does not point at the published "
+             "request schema, so a client has no way to find it")
+    else:
+        ok("the spec identity policy documents "
+           f"{spec_identity.COMPUTATION_SPEC_VERSION}")
 
 
 if failures:

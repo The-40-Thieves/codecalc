@@ -386,6 +386,108 @@ first place.
 
 ---
 
+## The request half: a canonical spec and its content hash
+
+Everything above describes what comes **back**. This section describes what a
+request **is**, so that two parties can agree on a name for one without shipping
+the whole object around. THE-793.
+
+`providers.ComputationSpec` is the canonical, transport-neutral request. Its
+identity is a byte encoding plus a digest over it:
+
+| Artifact | Where |
+|---|---|
+| Published schema | [`computation-spec-v1.schema.json`](computation-spec-v1.schema.json) |
+| Golden vectors | [`computation-spec-v1.vectors.json`](computation-spec-v1.vectors.json) |
+| Implementation | `codecalc/spec_identity.py` |
+| Version | `COMPUTATION_SPEC_VERSION` — **1.0.0** |
+
+The schema describes the **canonical document**, not the dataclass:
+
+```json
+{"schema_version":"1.0.0","spec":{"code":"print(1)","language":"python3","max_cpu":0,"max_memory_mb":0,"max_output_kb":0,"no_net":false,"stdin":"","timeout":10,"workdir":null}}
+```
+
+Serialize exactly that — UTF-8, object keys sorted, no insignificant whitespace —
+and `sha256` the bytes. The result is prefixed with its algorithm:
+
+```
+sha256:a5093b8724c9815a4d05452288027446d17416b4009dc1e1fde9e36aea163089
+```
+
+### The canonicalization rules
+
+They are stated here because a second implementation has to reproduce them, and
+every one of them is a place where two implementations could silently disagree.
+
+1. **JSON, UTF-8, sorted keys, `(",", ":")` separators.** This is RFC 8785 for
+   the value space a spec can hold. JCS orders keys by UTF-16 code unit and this
+   implementation by code point; the two can only differ above the BMP, and every
+   key is a dataclass field name.
+2. **Every field is emitted, defaults included.** There is no "absent". A spec
+   built with defaults and one with the same values passed explicitly produce
+   identical bytes, and the bytes reconstruct the request without consulting a
+   default table.
+3. **`null` is a value.** `workdir: null` (provider chooses) and `workdir: ""`
+   (an empty path) are different requests with different hashes.
+4. **Booleans are not integers.** `no_net: true` and `no_net: 1` do not collide.
+5. **Array order is kept; object key order is not.** A sequence's order was
+   asked for; a mapping's is an artifact of construction. Tuples and lists encode
+   identically — JSON has one array type.
+6. **`bytes` encode as `{"__bytes_b64__": "<base64>"}`.** A bare base64 string
+   would collide with a text field holding the same characters, so the tag is
+   reserved and a mapping may not use it as a key.
+7. **Floats are refused.** Shortest-round-trip IEEE-754 printing is where
+   canonicalizers diverge between runtimes, and NaN/Infinity are not JSON.
+8. **Anything with no rule is refused** — sets above all, which have no stable
+   iteration order.
+
+### Secrets are never part of an identity
+
+Canonical bytes are hashed, logged beside receipts and compared across
+processes, so a secret in them is a secret in all three. `ComputationSpec`
+carries **no** credential-bearing field today — `language`, `code`, `stdin`,
+`timeout`, `workdir`, `max_memory_mb`, `max_output_kb`, `max_cpu`, `no_net` — and
+the encoder keeps it that way: a field whose name matches
+`spec_identity.SECRET_BEARING_FIELD_NAMES` is **refused**, unless the dataclass
+declares it in `HASH_BY_NAME_FIELDS`, in which case only its sorted **key names**
+enter the content and the values never do. Changing a credential's value then
+does not change the request's identity; adding or removing one does.
+
+### Versioning policy for `COMPUTATION_SPEC_VERSION`
+
+Independent of `CONTRACT_VERSION`: they version different documents and are free
+to move apart.
+
+| Component | Means | Examples |
+|---|---|---|
+| **MAJOR** | An old canonical document is no longer valid, or a rule changed | Removing or renaming a field · retyping one · changing a canonicalization rule · changing a default |
+| **MINOR** | Additive: new optional field, new documented rule for a value kind that was previously refused | Adding a field with a default |
+| **PATCH** | Documentation and descriptions only; the bytes are untouched | Rewording a field description |
+
+**Read this before you store a hash.** Rule 2 means MINOR is additive for the
+*schema* but **not** hash-preserving: adding a field changes every canonical
+document, and therefore every hash. That is the price of bytes that stand alone,
+and it is stated rather than papered over. A consumer that persists spec hashes
+**must** persist `schema_version` beside them and treat hashes from different
+versions as incomparable rather than unequal.
+
+### Changing the request contract
+
+1. Edit `providers.ComputationSpec` and its entry in
+   `COMPUTATION_SPEC_FIELD_DOCS` — the schema generator refuses to publish an
+   undocumented field.
+2. `python scripts/check_contract.py --write` regenerates
+   `computation-spec-v1.schema.json`.
+3. Bump `COMPUTATION_SPEC_VERSION` per the table above and say so here.
+4. **Hand-edit** `computation-spec-v1.vectors.json`. Nothing regenerates it, on
+   purpose: a vector its own generator rewrites cannot detect a change to the
+   encoding, which is the one failure a schema check cannot see — the field set
+   never moves, and every previously published hash silently means something
+   else.
+
+---
+
 ## Changing this contract
 
 1. Edit `codecalc/contract.py`. It is the single source.

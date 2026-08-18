@@ -1,0 +1,87 @@
+{
+  "schema_version": "1.0.0",
+  "description": "Golden vectors for the canonical ComputationSpec encoding. Each entry gives the constructor kwargs, the exact canonical serialization those produce, and the sha256 content hash over those bytes. A second implementation is correct when it reproduces `canonical` byte-for-byte and `spec_hash` for every entry. HAND-MAINTAINED: no generator rewrites this file, because a vector its own generator regenerates cannot detect a change to the encoding. scripts/check_contract.py recomputes and diffs.",
+  "vectors": [
+    {
+      "name": "minimal-defaults",
+      "kwargs": {
+        "language": "python3",
+        "code": "print(1)"
+      },
+      "canonical": "{\"schema_version\":\"1.0.0\",\"spec\":{\"code\":\"print(1)\",\"language\":\"python3\",\"max_cpu\":0,\"max_memory_mb\":0,\"max_output_kb\":0,\"no_net\":false,\"stdin\":\"\",\"timeout\":10,\"workdir\":null}}",
+      "spec_hash": "sha256:a5093b8724c9815a4d05452288027446d17416b4009dc1e1fde9e36aea163089"
+    },
+    {
+      "name": "every-field-explicit",
+      "kwargs": {
+        "language": "rust",
+        "code": "fn main(){println!(\"hi\");}",
+        "stdin": "7\n",
+        "timeout": 30,
+        "workdir": "/workspace/run",
+        "max_memory_mb": 256,
+        "max_output_kb": 64,
+        "max_cpu": 5,
+        "no_net": true
+      },
+      "canonical": "{\"schema_version\":\"1.0.0\",\"spec\":{\"code\":\"fn main(){println!(\\\"hi\\\");}\",\"language\":\"rust\",\"max_cpu\":5,\"max_memory_mb\":256,\"max_output_kb\":64,\"no_net\":true,\"stdin\":\"7\\n\",\"timeout\":30,\"workdir\":\"/workspace/run\"}}",
+      "spec_hash": "sha256:6745d06e8896e2b0ea29005445c1ecb2915e5ac21e46cf0cc3552fde0fb8ca18"
+    },
+    {
+      "name": "defaults-passed-explicitly",
+      "kwargs": {
+        "language": "python3",
+        "code": "print(1)",
+        "stdin": "",
+        "timeout": 10,
+        "workdir": null,
+        "max_memory_mb": 0,
+        "max_output_kb": 0,
+        "max_cpu": 0,
+        "no_net": false
+      },
+      "canonical": "{\"schema_version\":\"1.0.0\",\"spec\":{\"code\":\"print(1)\",\"language\":\"python3\",\"max_cpu\":0,\"max_memory_mb\":0,\"max_output_kb\":0,\"no_net\":false,\"stdin\":\"\",\"timeout\":10,\"workdir\":null}}",
+      "spec_hash": "sha256:a5093b8724c9815a4d05452288027446d17416b4009dc1e1fde9e36aea163089"
+    },
+    {
+      "name": "workdir-empty-string-is-not-null",
+      "kwargs": {
+        "language": "python3",
+        "code": "print(1)",
+        "workdir": ""
+      },
+      "canonical": "{\"schema_version\":\"1.0.0\",\"spec\":{\"code\":\"print(1)\",\"language\":\"python3\",\"max_cpu\":0,\"max_memory_mb\":0,\"max_output_kb\":0,\"no_net\":false,\"stdin\":\"\",\"timeout\":10,\"workdir\":\"\"}}",
+      "spec_hash": "sha256:27b48026f158136ad1b8be925e3946860cedba9c6b4010fb044b420cfc81ce86"
+    },
+    {
+      "name": "non-ascii-source",
+      "kwargs": {
+        "language": "python3",
+        "code": "print(\"héllo — ✅ 日本語\")",
+        "stdin": "é\n"
+      },
+      "canonical": "{\"schema_version\":\"1.0.0\",\"spec\":{\"code\":\"print(\\\"héllo — ✅ 日本語\\\")\",\"language\":\"python3\",\"max_cpu\":0,\"max_memory_mb\":0,\"max_output_kb\":0,\"no_net\":false,\"stdin\":\"é\\n\",\"timeout\":10,\"workdir\":null}}",
+      "spec_hash": "sha256:76d6add3dd165f26df33bea026874148dc36e22875365ecc0b078845da1bacea"
+    },
+    {
+      "name": "control-characters-in-source",
+      "kwargs": {
+        "language": "python3",
+        "code": "print(\"a\tb\nc\\\"d\\\\e\u0000f\")"
+      },
+      "canonical": "{\"schema_version\":\"1.0.0\",\"spec\":{\"code\":\"print(\\\"a\\tb\\nc\\\\\\\"d\\\\\\\\e\\u0000f\\\")\",\"language\":\"python3\",\"max_cpu\":0,\"max_memory_mb\":0,\"max_output_kb\":0,\"no_net\":false,\"stdin\":\"\",\"timeout\":10,\"workdir\":null}}",
+      "spec_hash": "sha256:3cd1208dcfca1a28019bc1368eb478921764556e27228f5ad404e638dd584abf"
+    },
+    {
+      "name": "network-isolation-requested",
+      "kwargs": {
+        "language": "go",
+        "code": "package main\nfunc main(){}\n",
+        "no_net": true,
+        "max_cpu": 2
+      },
+      "canonical": "{\"schema_version\":\"1.0.0\",\"spec\":{\"code\":\"package main\\nfunc main(){}\\n\",\"language\":\"go\",\"max_cpu\":2,\"max_memory_mb\":0,\"max_output_kb\":0,\"no_net\":true,\"stdin\":\"\",\"timeout\":10,\"workdir\":null}}",
+      "spec_hash": "sha256:cd33443b9d63a7775baa284c6c23084889ea15434382af17e5e19ab05bc8493a"
+    }
+  ]
+}

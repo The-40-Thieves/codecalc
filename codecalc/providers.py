@@ -16,7 +16,7 @@ from dataclasses import asdict, dataclass
 from typing import Protocol, runtime_checkable
 from urllib.parse import urlsplit
 
-from . import __version__, contract, errors, executor
+from . import __version__, contract, errors, executor, spec_identity
 from .provider_adapters.piston import PistonHTTPTransport
 from .strict_runtime import ENFORCEMENT_CONTROLS, ISOLATION_PROFILE
 
@@ -27,6 +27,9 @@ PISTON_AUTHORIZATION_ENV = "CODECALC_PISTON_AUTHORIZATION"
 STRICT_URL_ENV = "CODECALC_STRICT_URL"
 STRICT_AUTHORIZATION_ENV = "CODECALC_STRICT_AUTHORIZATION"
 ProviderTransport = Callable[[str, str, dict[str, str], dict | None, int], object]
+#: Re-exported beside the dataclass it versions, the same way
+#: STRICT_ISOLATION_PROFILE is: callers already import `providers`.
+COMPUTATION_SPEC_VERSION = spec_identity.COMPUTATION_SPEC_VERSION
 STRICT_ISOLATION_PROFILE = ISOLATION_PROFILE
 STRICT_CONTROLS = ENFORCEMENT_CONTROLS
 
@@ -49,7 +52,19 @@ def _truncate_utf8(value: str, max_bytes: int) -> str:
 
 @dataclass(frozen=True, slots=True)
 class ComputationSpec:
-    """Canonical execution request shared by transports and providers."""
+    """Canonical execution request shared by transports and providers.
+
+    Its IDENTITY lives in `codecalc/spec_identity.py`: `canonical_bytes()` gives
+    a deterministic encoding and `spec_hash()` the sha256 over it, so a cache, a
+    receipt or a provenance record can name a request instead of carrying it.
+
+    NOTE FOR ANYONE ADDING A FIELD. Canonicalization emits every field, so a new
+    one changes every spec hash — that is a MINOR bump of
+    `COMPUTATION_SPEC_VERSION` and the golden vectors in
+    `docs/contract/computation-spec-v1.vectors.json` must be recomputed by hand.
+    Adding a credential-bearing field is refused outright unless it is declared
+    in `HASH_BY_NAME_FIELDS`; see spec_identity's SECRETS section.
+    """
 
     language: str
     code: str
@@ -60,6 +75,57 @@ class ComputationSpec:
     max_output_kb: int = 0
     max_cpu: int = 0
     no_net: bool = False
+
+    #: Fields whose VALUES must not enter the canonical bytes; only their key
+    #: names do. Empty because no field of this spec carries a credential —
+    #: `spec_identity.SECRET_BEARING_FIELD_NAMES` keeps it that way by refusing
+    #: to hash one that appears without being declared here.
+    #:
+    #: Deliberately UNANNOTATED: an annotation would make it a tenth dataclass
+    #: field, which would put the policy itself into the hashed content.
+    HASH_BY_NAME_FIELDS = ()
+
+    def canonical_bytes(self) -> bytes:
+        """The deterministic encoding this request hashes to."""
+        return spec_identity.canonical_bytes(self)
+
+    def spec_hash(self) -> str:
+        """`sha256:<hex>` over `canonical_bytes()`."""
+        return spec_identity.spec_hash(self)
+
+
+#: One line per published field. Kept next to the dataclass, and NOT optional:
+#: `spec_identity.build_spec_schema` refuses to generate a document with an
+#: undocumented field, so a field added without a description is a failing gate
+#: rather than a published schema with a blank in it.
+COMPUTATION_SPEC_FIELD_DOCS = {
+    "language": "Runtime key from codecalc's language registry, e.g. 'python3'.",
+    "code": "The program source to execute, verbatim.",
+    "stdin": "Text written to the process's standard input. '' means none.",
+    "timeout": "Wall-clock ceiling in seconds for the whole request.",
+    "workdir": (
+        "Working directory for the run, or null to let the provider choose an "
+        "ephemeral one. null and '' are different requests."
+    ),
+    "max_memory_mb": "Address-space ceiling in MiB; 0 means the provider default.",
+    "max_output_kb": "Combined stdout+stderr ceiling in KiB; 0 means uncapped.",
+    "max_cpu": "CPU-time ceiling in seconds; 0 means the provider default.",
+    "no_net": (
+        "Request network isolation. Providers that cannot enforce it disclose so "
+        "in the result's `unenforced` list rather than failing quietly."
+    ),
+}
+
+
+def build_spec_schema(dialect: str | None = None,
+                      schema_id: str | None = None) -> dict:
+    """The published JSON Schema for a canonical ComputationSpec document."""
+    return spec_identity.build_spec_schema(
+        ComputationSpec,
+        field_docs=COMPUTATION_SPEC_FIELD_DOCS,
+        dialect=dialect,
+        schema_id=schema_id,
+    )
 
 
 class UnsupportedCapability(RuntimeError):
