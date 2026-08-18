@@ -13,6 +13,7 @@ file tools (list/read/write) are strictly confined to that root.
 
 from __future__ import annotations
 
+import collections
 import contextlib
 import json
 import os
@@ -84,7 +85,31 @@ _LAST_ACTIVITY: dict[str, float] = {}
 #: None` and re-run as a fresh, unconfined workspace-only process — a SILENT
 #: RESPAWN, which is exactly what the ticket says a subsequent call must not
 #: do.
+#:
+#: BOUNDED (fix-round-1, IMPORTANT): "abandoned sessions are precisely the
+#: ones that never get session_stop" — so nothing ever removes their entry
+#: from this set on its own, and an idle-expiry-heavy deployment would grow
+#: it without limit. `_EXPIRED` is therefore a fast-path CACHE, capped at
+#: `_EXPIRED_CAP` with FIFO eviction (`_EXPIRED_ORDER`); the DURABLE record
+#: is a marker file written into the session's own workspace on reap
+#: (`_write_expired_marker`), which costs no unbounded process memory — one
+#: file per already-existing session directory, removed for free when
+#: `stop()` deletes that directory. A cache miss falls back to a stat() on
+#: the marker (`_is_expired_on_disk`) rather than assuming "not in the set"
+#: means "never expired", which would silently reopen the exact fall-through
+#: bug this set exists to close, just via memory pressure instead of a race.
 _EXPIRED: set[str] = set()
+_EXPIRED_ORDER: collections.deque[str] = collections.deque()
+_EXPIRED_CAP = 512
+
+#: Filename for the durable per-session expiry marker. Leading dot to match
+#: this module's other internal, non-artifact files (`.tmp` in
+#: `_worker_env`); `artifacts()` already excludes only a fixed set of
+#: runner-internal names, not dotfiles generally, so this can appear in
+#: `session_list`/`session_files` output — informational, not a defect: a
+#: caller inspecting an idle-expired session's files can see why the worker
+#: is gone without a separate lookup.
+_EXPIRED_MARKER_NAME = ".codecalc-session-expired"
 
 
 def _idle_ttl_seconds() -> float | None:
@@ -109,36 +134,149 @@ def _touch(session_id: str) -> None:
     _LAST_ACTIVITY[session_id] = time.monotonic()
 
 
+def _mark_expired_locked(session_id: str) -> None:
+    """Add `session_id` to the bounded in-memory expired cache.
+
+    Caller holds `_lock`. FIFO eviction once `_EXPIRED_CAP` is exceeded —
+    the durable marker file (written by the caller, OUTSIDE the lock, right
+    after this) is what an evicted lookup falls back to, so eviction here
+    does not reopen the silent-respawn hole.
+    """
+    if session_id in _EXPIRED:
+        return
+    _EXPIRED.add(session_id)
+    _EXPIRED_ORDER.append(session_id)
+    while len(_EXPIRED_ORDER) > _EXPIRED_CAP:
+        _EXPIRED.discard(_EXPIRED_ORDER.popleft())
+
+
+def _discard_expired_locked(session_id: str) -> None:
+    """Remove `session_id` from the bounded expired cache, if present.
+
+    Caller holds `_lock`. Used by `start()` (a fresh id should never inherit
+    a stale marker) and `stop()` (an explicitly torn-down session has
+    nothing left to remember). `deque.remove` is O(n), which is fine here —
+    neither caller is a hot path, unlike the per-call read in
+    `_get_worker_or_expired`.
+    """
+    if session_id not in _EXPIRED:
+        return
+    _EXPIRED.discard(session_id)
+    with contextlib.suppress(ValueError):
+        _EXPIRED_ORDER.remove(session_id)
+
+
+def _write_expired_marker(session_id: str) -> None:
+    """Best-effort durable record that `session_id`'s worker was reaped.
+
+    Best-effort deliberately: a failure to write it (a read-only mount, an
+    already-deleted directory raced by something else) must not fail the
+    reap itself. While the in-memory cache still holds the entry, callers
+    get the right answer regardless; losing the marker only narrows, rather
+    than removes, the protection an eviction later falls back on.
+    """
+    try:
+        d = _session_dir(session_id)
+        (d / _EXPIRED_MARKER_NAME).write_text(
+            f"reaped {time.time():.3f} (idle-expiry, {IDLE_TTL_ENV})\n",
+            encoding="utf-8")
+    except (OSError, ValueError):
+        pass
+
+
+def _is_expired_on_disk(session_id: str) -> bool:
+    """Durable fallback for a `session_id` evicted from the in-memory cache."""
+    try:
+        return (_session_dir(session_id) / _EXPIRED_MARKER_NAME).is_file()
+    except (OSError, ValueError):
+        return False
+
+
+def _maybe_reap_locked(session_id: str) -> Worker | None:
+    """If `session_id`'s worker is idle past the TTL, remove it from
+    `_workers`/`_LAST_ACTIVITY`, mark it expired, and return the worker for
+    the caller to `.close()` OUTSIDE the lock. None if there is nothing to
+    reap (no TTL configured, no worker, or not yet idle).
+
+    Caller holds `_lock`. Pure bookkeeping mutation only — no I/O, no
+    process teardown — so this is safe to run inside the critical section.
+    """
+    ttl = _idle_ttl_seconds()
+    if ttl is None:
+        return None
+    w = _workers.get(session_id)
+    last = _LAST_ACTIVITY.get(session_id)
+    if w is None or last is None:
+        return None
+    if time.monotonic() - last <= ttl:
+        return None
+    del _workers[session_id]
+    del _LAST_ACTIVITY[session_id]
+    _mark_expired_locked(session_id)
+    return w
+
+
 def _reap_if_idle(session_id: str) -> bool:
     """Kill `session_id`'s worker if it has been idle past the TTL.
 
     Lazy check-on-access: no timer, no thread, nothing that can outlive the
     process the way an un-unref()'d watcher does (this repo's own history on
     the Node side). The cost is that an idle worker is not reaped until
-    SOMETHING calls this — `execute()` does, on every call, for the session
-    being called — which is the "lazy-on-access" half the ticket asks for.
-    `sweep_idle_sessions()` below is the other half: an explicit hook a
-    caller can invoke without waiting on a particular session's next call.
-
-    `Worker.close()` is called OUTSIDE the lock: it waits (up to 3s) for the
-    process to exit, and holding `_lock` across that would block every other
-    session's calls for the duration.
+    SOMETHING calls this — `sweep_idle_sessions()` below is the explicit
+    hook for a caller that wants to reap without waiting on a particular
+    session's next call. `execute()` uses `_get_worker_or_expired` instead
+    of this function directly — see its docstring for why.
     """
-    ttl = _idle_ttl_seconds()
-    if ttl is None:
-        return False
     with _lock:
-        w = _workers.get(session_id)
-        last = _LAST_ACTIVITY.get(session_id)
-        if w is None or last is None:
-            return False
-        if time.monotonic() - last <= ttl:
-            return False
-        del _workers[session_id]
-        del _LAST_ACTIVITY[session_id]
-        _EXPIRED.add(session_id)
+        w = _maybe_reap_locked(session_id)
+    if w is None:
+        return False
     w.close()  # the existing teardown path — no new kill logic
+    _write_expired_marker(session_id)
     return True
+
+
+def _get_worker_or_expired(session_id: str) -> tuple[Worker | None, bool]:
+    """(worker, is_expired) for `execute()` — ONE critical section.
+
+    fix-round-1 CRITICAL: the previous shape called `_reap_if_idle()` (lock
+    acquisition #1), then checked `if session_id in _EXPIRED` UNLOCKED, then
+    separately did `with _lock: w = _workers.get(session_id)` (lock
+    acquisition #2). A concurrent reap landing in the window between the
+    unlocked `_EXPIRED` check and the second lock acquisition left a caller
+    holding a STALE "not expired" answer from the first read alongside a
+    FRESH "no worker" answer from the second — which fell through to the
+    workspace-only branch and silently re-ran the call as a fresh,
+    unconfined process. Reviewer reproduced it live: PID confirmed dead, yet
+    ok=True from a fresh unconfined process.
+
+    Collapsing the `_EXPIRED` check and the worker lookup/reap into ONE
+    `with _lock:` block removes the window structurally: by mutual
+    exclusion, nothing else can observe or mutate `_EXPIRED`/`_workers`
+    between the two reads, because there is no longer a gap between them for
+    anything to land in. `Worker.close()` still runs OUTSIDE the lock
+    (unchanged reasoning: it waits up to 3s, and holding `_lock` across that
+    would block every other session's calls) — but by the time it runs, the
+    bookkeeping this function answers FROM is already fully committed.
+    """
+    to_close: Worker | None = None
+    with _lock:
+        if session_id in _EXPIRED:
+            return None, True
+        to_close = _maybe_reap_locked(session_id)
+        if to_close is None:
+            w = _workers.get(session_id)
+    if to_close is not None:
+        to_close.close()
+        _write_expired_marker(session_id)
+        return None, True
+    if w is None and _idle_ttl_seconds() is not None and _is_expired_on_disk(session_id):
+        # No worker, and this call did not just reap one. Could be a
+        # genuine workspace-only session — OR a stateful session whose
+        # expired-cache entry was evicted (bounded `_EXPIRED`, see above).
+        # The marker file is the durable answer eviction cannot lose.
+        return None, True
+    return w, False
 
 
 def sweep_idle_sessions() -> list[str]:
@@ -203,7 +341,7 @@ def start(language: str = "python3", name: str | None = None) -> dict:
         # A fresh uuid4-derived id will not collide with a previously-expired
         # one in practice, but a hygienic start() should not leave a stale
         # _EXPIRED entry a future id could theoretically inherit.
-        _EXPIRED.discard(session_id)
+        _discard_expired_locked(session_id)
     return {
         "ok": True, "session_id": session_id, "language": name,
         "stateful": True, "workdir": str(d), "files": _list(d),
@@ -228,7 +366,11 @@ def stop(session_id: str) -> dict:
         w = _workers.pop(session_id, None)
         created = _SESSION_DIR_IDENTITY.pop(session_id, None)
         _LAST_ACTIVITY.pop(session_id, None)
-        _EXPIRED.discard(session_id)
+        # The marker file itself is removed for free below, when the whole
+        # workspace directory is deleted — nothing left to fall back to on
+        # disk, so the in-memory cache entry (if the eviction cap hasn't
+        # already dropped it) has nothing left to duplicate either.
+        _discard_expired_locked(session_id)
     if w is not None:
         w.close()
     d = _session_dir(session_id)
@@ -339,21 +481,21 @@ def execute(session_id: str, code: str, language: str | None = None,
     if not d.is_dir():
         return {"ok": False, "error": f"unknown session '{session_id}'"}
     # Lazy check-on-access (THE-779): reap this session's worker if it has
-    # sat idle past the configured TTL. A no-op when IDLE_TTL_ENV is unset.
-    _reap_if_idle(session_id)
-    if session_id in _EXPIRED:
-        # NOT a fall-through to the workspace-only branch below. `_workers`
-        # no longer has this id after a reap, and workspace-only execution
-        # would otherwise run the call as a fresh, unconfined process — a
-        # silent respawn of exactly the state guarantee the caller lost.
+    # sat idle past the configured TTL, and learn whether it already had
+    # been. ONE call, ONE critical section — see `_get_worker_or_expired`'s
+    # docstring for the fix-round-1 CRITICAL this replaced (two separate
+    # lock acquisitions let a concurrent reap land in between them).
+    w, expired = _get_worker_or_expired(session_id)
+    if expired:
+        # NOT a fall-through to the workspace-only branch below. Running the
+        # call there would be a silent respawn of exactly the state
+        # guarantee the caller lost when its worker was reaped.
         ttl = _idle_ttl_seconds()
         window = f"{ttl:g}s" if ttl is not None else "its configured TTL"
         return errors.error_result(
             errors.WORKER_FAILURE,
             f"session '{session_id}' expired after sitting idle past {window}; "
             "call session_stop and start a new one")
-    with _lock:
-        w = _workers.get(session_id)
     if w is not None:
         if language and registry.canonical(language) != w.language:
             return {"ok": False, "error": f"session is {w.language}, not {language}"}
