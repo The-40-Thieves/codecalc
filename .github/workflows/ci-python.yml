@@ -235,6 +235,17 @@ jobs:
       - name: run supervisor lifecycle
         shell: bash
         run: uv run --no-sync python tests/test_run_supervisor.py
+      # THE-831 sixth criterion: output backpressure cannot deadlock the payload
+      # or supervisor. Unlike the lifecycle suite above (fake providers, no real
+      # output), this drives the REAL path — RunSupervisor's thread pool ->
+      # executor.execute -> the bounded output capture — with a portable python3
+      # producer flooding several MiB past the pipe buffer and the cap, single
+      # and concurrent, under a wait() watchdog that turns a hang into a failed
+      # check rather than a hung job. Portable producer so it runs on the native
+      # backend here and the pure-Python fallback the matrix leg uses.
+      - name: run supervisor output backpressure (no deadlock)
+        shell: bash
+        run: uv run --no-sync python tests/test_run_supervisor_backpressure.py
       # doctor in the environments it exists to diagnose: no native executor, no
       # runtimes, a resolved-but-unrunnable command, an unwritable workspace. A
       # diagnostic is only worth having if it is right about a BROKEN host, and a
