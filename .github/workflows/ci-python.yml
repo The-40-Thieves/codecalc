@@ -228,6 +228,13 @@ jobs:
       - name: result contract (schema validity + product conformance)
         shell: bash
         run: uv run --no-sync python tests/test_contract.py
+      # The run-lifecycle state machine (THE-778/THE-831): identity, cancel,
+      # cleanup and crash-recovery journalling, all against fake providers —
+      # no sandbox, no native executor, so it belongs on the full matrix
+      # alongside the other protocol-neutral suites rather than in `sandbox`.
+      - name: run supervisor lifecycle
+        shell: bash
+        run: uv run --no-sync python tests/test_run_supervisor.py
       # doctor in the environments it exists to diagnose: no native executor, no
       # runtimes, a resolved-but-unrunnable command, an unwritable workspace. A
       # diagnostic is only worth having if it is right about a BROKEN host, and a
@@ -266,6 +273,11 @@ jobs:
         # letters, case-insensitive paths and a different separator, and the
         # boundary check must hold under all of them.
         run: uv run --no-sync python tests/test_session_jail.py
+      # tests/test_execution_service.py already runs above ("provider boundary
+      # and execution service (spec identity + receipt)") — that step now also
+      # covers run_submit/run_inspect/run_cancel (THE-778, fake providers, no
+      # sandbox) and session output spill (THE-783, real bash sessions), added
+      # to the same file rather than wired a second time here.
       # The sweeps below were written on Linux and gated only there. Both carry
       # POSIX-only sections that skip themselves, and both are the kind of thing
       # a platform difference breaks quietly — session workers, file

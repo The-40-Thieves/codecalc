@@ -2,147 +2,23 @@
 
 from __future__ import annotations
 
-from . import contract, errors, executor, registry, sessions, spec_identity
+from . import contract, errors, executor, providers, registry, sessions
 from .providers import (
     ComputationSpec,
     ProviderOperationFailure,
     ProviderRegistry,
     UnknownProvider,
     UnsupportedCapability,
+    attach_receipt,
 )
 from .run_supervisor import RunSupervisor
 
-#: Semver of the execution receipt (THE-782). Separate from CONTRACT_VERSION
-#: and from COMPUTATION_SPEC_VERSION: those version what a result LOOKS like and
-#: what a request IS. This versions the provenance block attached to a result, so
-#: a reader can tell "this receipt predates source hashes" from "this run had no
-#: source", which are not the same fact.
-#:
-#: MAJOR removes or retypes a key · MINOR adds one · PATCH changes descriptions.
-RECEIPT_VERSION = "1.0.0"
-
-#: The determinism inputs the receipt has a slot for. Every one of them appears
-#: EITHER with a value OR in `unrecorded` — never as a bare null, because a null
-#: with no explanation reads identically to "the value was empty" and to "this
-#: key was never populated", and those are different facts about a run.
-DETERMINISM_INPUTS = ("locale.LANG", "locale.LC_ALL", "timezone", "seed")
-
-#: The provider whose executions run through codecalc's OWN sandbox, and are
-#: therefore the only ones whose environment codecalc can honestly describe.
-#: `execute_session` already keys on this same identifier.
-_SANDBOXED_PROVIDER_ID = "local"
-
-
-def _determinism_value(receipt: dict, dotted: str) -> object:
-    node: object = receipt
-    for part in dotted.split("."):
-        node = node[part]  # type: ignore[index]
-    return node
-
-
-def _determinism_receipt(provider_id: str) -> dict:
-    """Locale, timezone and seed — as the run will actually see them.
-
-    DERIVED, NOT TRANSCRIBED. `executor._env()` is the single function that
-    builds the child's environment from the allowlist, and both the sandbox and
-    the session worker call it. Reading the answer back out of it means this
-    block cannot drift from what is really forwarded: add TZ to the allowlist and
-    `timezone` starts being populated here with no edit, which is the whole
-    point of not copying the list.
-
-    THREE THINGS ARE HONEST HERE RATHER THAN CONVENIENT:
-
-      * `TZ` is NOT in the env allowlist today, so the child inherits the host's
-        system zone and codecalc cannot name it. Reported as unrecorded rather
-        than guessed from the server's own `time.tzname`, which would describe
-        the wrong process.
-      * codecalc has NO seed concept — no tool accepts one and no runtime is
-        seeded — so `seed` is null on every run, and says why.
-      * A provider other than `local` runs somewhere codecalc does not control.
-        Reporting this server's locale for a run that happened on someone else's
-        host would be a confident lie, so nothing is reported at all.
-    """
-    if provider_id == _SANDBOXED_PROVIDER_ID:
-        forwarded = executor._env()
-        receipt = {
-            "source": "env_allowlist",
-            "locale": {"LANG": forwarded.get("LANG"),
-                       "LC_ALL": forwarded.get("LC_ALL")},
-            "timezone": forwarded.get("TZ"),
-            "seed": None,
-        }
-    else:
-        receipt = {
-            "source": "provider_owned",
-            "locale": {"LANG": None, "LC_ALL": None},
-            "timezone": None,
-            "seed": None,
-        }
-    receipt["unrecorded"] = sorted(
-        name for name in DETERMINISM_INPUTS
-        if _determinism_value(receipt, name) is None
-    )
-    return receipt
-
-
-def _execution_receipt(spec: ComputationSpec, descriptor: dict,
-                       result: dict) -> dict:
-    """Provider identity, content hashes, determinism inputs, limits (THE-782).
-
-    THE-790 attached provider identity and the limits receipt. Those answer
-    "who ran it" and "what did you ask for"; they do not answer the question
-    someone re-reading a result a week later actually has, which is WHICH
-    request this was. `spec_hash` answers it by content, `source_sha256` names
-    the program independently of the limits wrapped around it, and
-    `spec_schema_version` records the canonical form both were taken under —
-    without it a stored hash is a number whose meaning has an expiry date
-    nobody wrote down.
-
-    NOTHING MACHINE-SPECIFIC GOES IN. `workdir` may be an absolute path on the
-    operator's disk; it reaches the receipt only through `spec_hash`, never as
-    text. The determinism block reads exactly three names out of the forwarded
-    environment rather than copying it, so PATH and HOME cannot ride along.
-    """
-    return {
-        "receipt_version": RECEIPT_VERSION,
-        "interface_version": descriptor["interface_version"],
-        "provider_id": descriptor["provider_id"],
-        "provider_version": descriptor["provider_version"],
-        "host_class": descriptor["host_class"],
-        "spec_schema_version": spec_identity.COMPUTATION_SPEC_VERSION,
-        "spec_hash": spec_identity.spec_hash(spec),
-        "source_sha256": spec_identity.text_hash(spec.code),
-        "determinism": _determinism_receipt(descriptor["provider_id"]),
-        "limits": _limit_receipt(spec, result),
-    }
-
-
-def _limit_receipt(spec: ComputationSpec, result: dict) -> dict:
-    disclosures = [str(item) for item in result.get("unenforced") or []]
-    disclosure_text = "\n".join(disclosures).lower()
-    requested_controls = (
-        ("timeout", spec.timeout > 0, ("timeout",)),
-        ("max_memory_mb", spec.max_memory_mb > 0, ("memory",)),
-        ("max_output_kb", spec.max_output_kb > 0, ("output",)),
-        ("max_cpu", spec.max_cpu > 0, ("cpu",)),
-        ("no_net", spec.no_net, ("no_net", "network")),
-    )
-    reported_enforced = [
-        name
-        for name, requested, markers in requested_controls
-        if requested and not any(marker in disclosure_text for marker in markers)
-    ]
-    return {
-        "requested": {
-            "timeout_seconds": spec.timeout,
-            "max_memory_mb": spec.max_memory_mb,
-            "max_output_kb": spec.max_output_kb,
-            "max_cpu_seconds": spec.max_cpu,
-            "no_net": spec.no_net,
-        },
-        "provider_reported_enforced": reported_enforced,
-        "unenforced": disclosures,
-    }
+#: Re-exported beside the module that now builds the receipt (moved to
+#: providers.py in the THE-778 fix-round merge — see attach_receipt), the
+#: same way providers.py itself re-exports COMPUTATION_SPEC_VERSION from
+#: spec_identity: callers already import `execution_service`, and this
+#: keeps `execution_service.RECEIPT_VERSION` a stable name across the move.
+RECEIPT_VERSION = providers.RECEIPT_VERSION
 
 
 class ExecutionService:
@@ -205,9 +81,7 @@ class ExecutionService:
                 requested_provider=exc.provider_id,
                 capability=exc.capability,
             ))
-        descriptor = provider.describe()
-        result["provider"] = _execution_receipt(spec, descriptor, result)
-        return contract.stamp(result)
+        return contract.stamp(attach_receipt(spec, provider, result))
 
     def execute_session(self, session_service: SessionService, session_id: str,
                         spec: ComputationSpec, *,
@@ -233,9 +107,7 @@ class ExecutionService:
                 capability=exc.capability,
             ))
         result = dict(session_service.execute(session_id, spec))
-        descriptor = provider.describe()
-        result["provider"] = _execution_receipt(spec, descriptor, result)
-        return contract.stamp(result)
+        return contract.stamp(attach_receipt(spec, provider, result))
 
     async def execute_stream(self, spec: ComputationSpec, *, provider_id: str | None = None,
                              on_progress=None) -> dict:
@@ -260,9 +132,7 @@ class ExecutionService:
                 requested_provider=exc.provider_id,
                 capability=exc.capability,
             ))
-        descriptor = provider.describe()
-        result["provider"] = _execution_receipt(spec, descriptor, result)
-        return contract.stamp(result)
+        return contract.stamp(attach_receipt(spec, provider, result))
 
     def verify_across_providers(self, spec: ComputationSpec,
                                 first_provider_id: str,
@@ -376,13 +246,19 @@ class SessionService:
             extension = entry_file.rsplit(".", 1)[-1] if "." in entry_file else ""
             by_extension = {value: key for key, value in registry.EXTENSIONS.items()}
             language = by_extension.get(extension, "python3")
+        # THE-783: captured at the larger spill ceiling and re-truncated to
+        # the executor's own default cap, same as sessions.execute()'s
+        # workspace branch — session_run has no caller-facing max_output_kb
+        # of its own to honour instead (see sessions.SPILL_CAPTURE_KB).
         result = executor.execute(
             language,
             data.decode(errors="replace"),
             stdin=stdin,
             timeout=timeout,
             workdir=str(workdir),
+            max_output_kb=sessions.SPILL_CAPTURE_KB,
         )
+        result = sessions.spill_if_truncated(session_id, result, 0)
         result["entry_file"] = entry_file
         result["language"] = language
         return result

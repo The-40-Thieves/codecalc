@@ -218,7 +218,7 @@ tests/test_smoke.py       → 31 passed, 0 failed (all languages via Rust execut
 tests/test_features.py    → ALL NEW-FEATURE TESTS PASS (sessions/files/artifacts/packages/verdicts/streaming/compact)
 tests/test_gap4.py        → ITEMS 1-4 ALL PASS (resources, inline images, multi-file, units)
 tests/test_calc_port.py   → ALL 19 PORTED FEATURES PASS (calc skill parity: exact, bitop, float, radix, ...)
-tests/test_mcp_all.py     → 48/48 tools round-trip over stdio + session file resources
+tests/test_mcp_all.py     → 51/51 tools round-trip over stdio + session file resources
 tests/test_runtimes_mcp.py → runtimes_status: dry-run safe, summary agrees with
                              the per-language detail (the counts are whatever
                              that machine has installed)
