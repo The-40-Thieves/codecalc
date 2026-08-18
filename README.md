@@ -323,7 +323,7 @@ analysis, binary64 introspection.
 | `list_units` | All 140+ unit aliases for convert_units |
 | `evaluate_expression` | Symbolic math: `integrate(x**2, x)`, `sqrt(144) + 2**10` |
 | `truth_table` | Boolean algebra: `a and b or not c`, `p xor q`, `a implies b` |
-| `z3_check` | SMT-LIB2 satisfiability + model. A decisive verdict (sat/unsat) is graded `solver_proven` |
+| `z3_check` | SMT-LIB2 satisfiability + model. An `unsat` verdict is graded `solver_proven`; `sat` is graded `ungraded` (decided, but not proof-shaped — see [Grade vocabulary](#grade-vocabulary)) |
 | `solve_linear` | Systems of equations: `x + y = 10; x - y = 2` |
 | `analyze_complexity` | Static Big-O estimate from code structure, parsed with **tree-sitter** (every supported language). Reports `analysis: tree-sitter\|regex-fallback` so you can tell a parse from a guess |
 | `benchmark` | Empirical Big-O: runs code at increasing N, fits growth curve |
@@ -342,18 +342,27 @@ never assign their own grade.
 | Grade | Means | Emitted by |
 |---|---|---|
 | `cross_checked` | Two independently authored programs were both actually run and their outputs agreed. `grade_basis` names the runtime(s) that did the checking. | `verify_translation` (source vs. port), `verify_optimization` (original vs. candidate) |
-| `solver_proven` | Z3 decided satisfiability (sat or unsat) within its timeout — a machine-checked verdict, not a heuristic. `grade_basis` names the engine version and the timeout bound. | `z3_check` |
+| `solver_proven` | Z3 returned `unsat` within its timeout — a machine-checked refutation, not a heuristic. `grade_basis` names the engine version and the timeout bound. **Not** `sat`: see below. | `z3_check` |
 | `executed` | Reserved: the claimed computation ran and produced the reported result, with no independent second opinion. Not currently emitted by any tool above — every one of them also clears the `cross_checked`/`solver_proven` bar. | — |
-| `ungraded` | Explicit non-grade for a mismatch, an inconclusive comparison, a rejected optimisation candidate, a measurement failure, or a Z3 `unknown` verdict. A real value on `grade`, never an absent key. **Never** a softened stand-in for one of the three grades above. | any of the above, on a non-success |
+| `ungraded` | Explicit non-grade for a mismatch, an inconclusive comparison, a rejected optimisation candidate, a measurement failure, a Z3 `unknown` verdict, and — deliberately — a Z3 `sat` verdict. A real value on `grade`, never an absent key. **Never** a softened stand-in for one of the three grades above. | any of the above, on a non-success |
+
+`z3_check`'s `sat` verdicts are graded `ungraded`, not `solver_proven`, even
+though `sat` is just as decisive a verdict as `unsat`. The ticket's motivating
+pattern is proving a property P by asserting not-P and checking `unsat`; a
+caller running that pattern who gets `sat` back has learned P is FALSE, and
+`solver_proven` on that result would let a reader who skims `grade` without
+`result` mistake a counterexample for a proof. `sat`'s `grade_basis` says so
+explicitly: satisfiability was decided, but `solver_proven` is reserved for
+`unsat` so a counterexample can never wear a proof grade. Widening `sat` back
+into `solver_proven` later is additive; narrowing it after callers depend on
+the wider behaviour would not be, so this ships narrow now. Full reasoning:
+`codecalc/grades.py`'s module docstring.
 
 `algebraic_equiv` is deliberately NOT graded: it compares two expressions via
 `sympy.simplify(a - b) == 0`, a CAS transformation rather than a decision
 procedure with a checkable certificate, and it is one simplifier's opinion
 rather than two independent implementations agreeing. None of the three
-grades describes that evidence honestly. Full rationale, including why a
-Z3 `sat` verdict is graded `solver_proven` alongside `unsat` even though the
-ticket's own example is unsat-shaped: `codecalc/grades.py`'s module
-docstring.
+grades describes that evidence honestly.
 
 ## Runtime self-update
 

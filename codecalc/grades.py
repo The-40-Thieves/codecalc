@@ -37,34 +37,37 @@ and had nowhere else to come from. None of them compute a grade inline.
                    independence being certified is of the IMPLEMENTATION,
                    not necessarily the interpreter.
 
-  solver_proven   Z3 decided satisfiability of the given formula — sat or
-                   unsat — within its timeout. Both are machine-checked
-                   verdicts from a bounded decision procedure: unsat is
-                   Z3's own refutation, sat is a concrete witness model a
-                   caller can plug back in and check by hand. Only Z3's
-                   third possible verdict, "unknown", produces no proof
-                   either way and stays ungraded. `grade_basis` always
+  solver_proven   Z3 returned `unsat` for the given formula within its
+                   timeout — Z3's own refutation, a machine-checked verdict
+                   from a bounded decision procedure. `grade_basis` always
                    records the engine version and the timeout bound.
 
-                   The ticket's own phrasing for this grade is "z3 returned
-                   unsat for the negation / proof" — the classic pattern for
-                   proving a property P by showing not-P is unsat. z3_check
-                   has no way to know whether a caller's script encodes a
-                   negation; it only ever sees an arbitrary SMT-LIB2 script.
-                   Grading here therefore generalises to ANY decisive Z3
-                   verdict on the script it was actually given, which is the
-                   most that can be derived from the evidence z3_check emits
-                   without guessing at caller intent. This is a documented,
-                   deliberate reading — see the THE-785 report for the
-                   alternative (unsat-only) considered and why it was
-                   rejected as strictly narrower with no offsetting safety
-                   benefit (a "sat" verdict is exactly as checkable as an
-                   "unsat" one).
+                   ONLY `unsat`. This is deliberately NARROWER than "any
+                   decisive Z3 verdict": an earlier version of this module
+                   graded `sat` `solver_proven` too, reasoning that a
+                   witness model is exactly as checkable by hand as a
+                   refutation. That is true in isolation, but it does not
+                   survive the ticket's own motivating pattern — proving a
+                   property P by asserting not-P and checking unsat. A
+                   caller running exactly that pattern who gets back `sat`
+                   has learned P is FALSE, and a reader skimming `grade`
+                   without also reading `result` would see `solver_proven`
+                   on a result that just found a counterexample to what
+                   they were trying to prove. `sat` is graded `ungraded`
+                   instead (see below) — a real, checkable answer, just not
+                   a proof-shaped one. Widening `sat` back to
+                   `solver_proven` later is additive and safe to reconsider;
+                   narrowing it after callers exist would be a breaking
+                   semantic change to a grade already in use, so this ships
+                   narrow. Only Z3's third possible verdict, "unknown",
+                   also stays ungraded — it produces no proof either way.
 
   ungraded        Explicit non-grade for every non-success state: a
                    translation mismatch or inconclusive run, a rejected
-                   optimisation candidate, a measurement failure, or a Z3
-                   "unknown" verdict. `ungraded` is a real value on `grade`,
+                   optimisation candidate, a measurement failure, a Z3
+                   "unknown" verdict, and — deliberately — a Z3 `sat`
+                   verdict (see "solver_proven" above for why `sat` does
+                   not qualify). `ungraded` is a real value on `grade`,
                    never an absent key — a caller can tell "graded and found
                    no evidence" apart from "this result predates grading"
                    only if the key is always present with an honest value.
@@ -173,24 +176,41 @@ def grade_verify_optimization(result: dict, language: str) -> dict:
     return _graded(result, CROSS_CHECKED, basis)
 
 
+#: `sat`'s ungraded basis. NOT folded into `solver_proven` alongside `unsat`:
+#: the ticket's motivating pattern is proving P by asserting not-P and
+#: checking unsat, and under that pattern a `sat` result means P is FALSE —
+#: grading it `solver_proven` would let a reader who skims `grade` without
+#: `result` read a counterexample as a proof. Narrowing (this) is safe to
+#: widen later; widening first and narrowing after callers exist would be a
+#: breaking semantic change, so this ships narrow. See the module docstring's
+#: "solver_proven" section for the full reasoning.
+_SAT_BASIS = ("sat: a model was found — satisfiability is decided, but "
+             "solver_proven is reserved for unsat verdicts so a counterexample "
+             "can never wear a proof grade; widening sat to solver_proven "
+             "would be a deliberate, separate decision")
+
+
 def grade_z3_check(result: dict) -> dict:
     """Grade a `logic.z3_check` result.
 
-    Only a decisive verdict (`sat` or `unsat`) is `solver_proven` — see the
-    module docstring's "solver_proven" section for why both directions
-    qualify. `unknown` (the solver ran out of its timeout budget without
-    deciding) is an explicit non-success and stays ungraded, same as an
-    outright rejection (empty script, missing `(check-sat)`, or a solver
-    error). `engine`/`timeout_ms` are EVIDENCE `logic.z3_check` itself now
-    records — this function only reads them, it does not compute them.
+    Only `unsat` is `solver_proven` — see `_SAT_BASIS` above and the module
+    docstring's "solver_proven" section for why `sat`, despite also being a
+    decisive verdict, is graded `ungraded` instead. `unknown` (the solver ran
+    out of its timeout budget without deciding) is an explicit non-success
+    and stays ungraded too, same as an outright rejection (empty script,
+    missing `(check-sat)`, or a solver error). `engine`/`timeout_ms` are
+    EVIDENCE `logic.z3_check` itself records — this function only reads
+    them, it does not compute them.
     """
     if not result.get("ok"):
         return _graded(result, UNGRADED, f"not graded: {result.get('error')}")
     verdict = result.get("result")
-    if verdict not in ("sat", "unsat"):
-        return _graded(result, UNGRADED,
-                       f"not graded: z3 returned {verdict!r}, which decides nothing")
-    engine = result.get("engine") or "z3 (version unknown)"
-    timeout_ms = result.get("timeout_ms")
-    basis = f"{engine} returned {verdict} within its {timeout_ms}ms timeout"
-    return _graded(result, SOLVER_PROVEN, basis)
+    if verdict == "unsat":
+        engine = result.get("engine") or "z3 (version unknown)"
+        timeout_ms = result.get("timeout_ms")
+        basis = f"{engine} returned unsat within its {timeout_ms}ms timeout"
+        return _graded(result, SOLVER_PROVEN, basis)
+    if verdict == "sat":
+        return _graded(result, UNGRADED, _SAT_BASIS)
+    return _graded(result, UNGRADED,
+                   f"not graded: z3 returned {verdict!r}, which decides nothing")

@@ -12,8 +12,11 @@ Two rules are load-bearing and get their own section below:
   1. NEVER OVER-GRADE. A result never gets a stronger grade than its evidence
      supports. Tested by feeding grade_verify_translation/optimization/z3_check
      synthetic evidence dicts shaped exactly like a REAL failure (mismatch,
-     rejected candidate, solver timeout) and asserting the grade is
-     `ungraded`, never one of the three real grades.
+     rejected candidate, solver timeout) — and, deliberately, a z3 `sat`
+     verdict, which is a real DECIDED answer and not a failure at all but is
+     still excluded from `solver_proven` (narrowed post-review: see
+     codecalc/grades.py's "solver_proven" docstring section) — and asserting
+     the grade is `ungraded`, never one of the two real positive grades.
 
   2. NON-SUCCESS STAYS UNGRADED. Same evidence, restated as its own section so
      a reader looking for "what happens to a failure" does not have to infer
@@ -164,10 +167,14 @@ check("z3 grade_basis names engine version AND the timeout bound",
       "5.0.0.0" in g["grade_basis"] and "5000" in g["grade_basis"], f"-> {g['grade_basis']}")
 
 g = grades.grade_z3_check(z3_sat())
-check("z3 sat -> solver_proven too (a witness model is exactly as checkable "
-      "as a refutation — see grades.py's module docstring for why this "
-      "reads the ticket's 'unsat' example as illustrative, not exclusive)",
-      g["grade"] == grades.SOLVER_PROVEN, f"-> {g['grade']}")
+check("z3 sat -> ungraded, NOT solver_proven (narrowed: solver_proven is "
+      "reserved for unsat so a counterexample can never wear a proof grade "
+      "— see grades.py's module docstring 'solver_proven' section)",
+      g["grade"] == grades.UNGRADED, f"-> {g['grade']}")
+check("z3 sat's grade_basis states BOTH facts: decided, and why reserved",
+      "sat" in g["grade_basis"] and "decided" in g["grade_basis"]
+      and "solver_proven is reserved for unsat" in g["grade_basis"],
+      f"-> {g['grade_basis']}")
 
 g = grades.grade_z3_check(z3_unknown())
 check("z3 unknown -> ungraded (no proof either way)", g["grade"] == grades.UNGRADED, f"-> {g['grade']}")
@@ -194,6 +201,13 @@ _NON_SUCCESS_FIXTURES = [
      grades.grade_verify_optimization(optimization_measurement_failed(), "python3")),
     ("z3_check: unknown", grades.grade_z3_check(z3_unknown())),
     ("z3_check: rejected", grades.grade_z3_check(z3_rejected())),
+    # sat is a real, DECIDED answer (not a failure the way the others above
+    # are) but it is deliberately excluded from solver_proven — narrowed
+    # per the fix round below. It belongs in this sweep precisely because a
+    # grader that folded it back into solver_proven would pass every check
+    # above except this one.
+    ("z3_check: sat (decided, but not solver_proven — narrowed on purpose)",
+     grades.grade_z3_check(z3_sat())),
 ]
 for _label, _graded in _NON_SUCCESS_FIXTURES:
     check(f"never-over-grade: {_label} never outranks ungraded",
@@ -204,7 +218,6 @@ for _label, _graded in _NON_SUCCESS_FIXTURES:
 _ALL_GRADED = [g for _, g in _NON_SUCCESS_FIXTURES] + [
     grades.grade_verify_translation(translation_pass(), "python3", "node"),
     grades.grade_verify_optimization(optimization_accepted(), "python3"),
-    grades.grade_z3_check(z3_sat()),
     grades.grade_z3_check(z3_unsat()),
 ]
 check("every graded result has a non-empty grade_basis",

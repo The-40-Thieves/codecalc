@@ -179,6 +179,16 @@ jobs:
       - name: translation verification gate
         shell: bash
         run: uv run --no-sync python tests/test_translation_verify.py
+      # THE-785: the grade vocabulary (cross_checked / solver_proven / ungraded,
+      # plus the reserved executed) derived from evidence verify_translation,
+      # verify_optimization and z3_check already emit. Mostly pure — fixtures are
+      # hand-built evidence dicts, same reasoning as the translation verification
+      # gate above — with a handful of real z3_check calls at the end to prove the
+      # engine/timeout_ms evidence actually flows through. Needs the sympy/z3
+      # extras this job's `--all-extras` install already provides.
+      - name: grade vocabulary derivation rules
+        shell: bash
+        run: uv run --no-sync python tests/test_grades.py
       # Session workspace confinement. Also sandbox-free: _jail() is path logic over a tempdir, so
       # the boundary can be checked on any runner rather than only where a session can be started.
       # The protocol gate. Asserts the NEGOTIATED version from a real connection,
