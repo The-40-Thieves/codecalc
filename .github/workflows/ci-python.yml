@@ -169,6 +169,15 @@ jobs:
         run: |
           uv run --no-sync python tests/test_strict_providers.py
           uv run --no-sync python tests/test_gvisor_runtime.py
+      # THE-828, image residual: the published-image digest lock resolves to the
+      # digest publish-executor-image.yml pins, and the digest-required EXECUTION
+      # path fails closed when nothing is published yet — never falling back to
+      # the mutable local diagnostic tag. Pure logic over a temp lock file and
+      # injected env, so it runs on the full OS matrix alongside the launch
+      # contract above.
+      - name: strict published-image digest lock (fail-closed execution path)
+        shell: bash
+        run: uv run --no-sync python tests/test_strict_image_lock.py
       # The REAL hostile-workload conformance (THE-828). It launches the executor
       # image under `--runtime=runsc` and drives fork/memory bombs, descendant
       # escape, egress and filesystem escape through real containers. GitHub

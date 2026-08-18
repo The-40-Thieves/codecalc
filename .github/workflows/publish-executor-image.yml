@@ -1,0 +1,133 @@
+name: publish-executor-image
+
+# THE-828, image residual: build, push, and DIGEST-PIN the trusted strict
+# executor image. This is the release step docker/executor.Dockerfile and
+# scripts/build_executor_image.sh deliberately do NOT do — they build a LOCAL
+# tag (codecalc-exec:strict) for doctor and the conformance suite. The
+# production strict EXECUTION path is digest-required (codecalc/strict_runtime.py:
+# GVisorConfig refuses a mutable tag), and this workflow is what produces the
+# digest it pins.
+#
+# What one dispatch does, end to end:
+#   1. builds docker/executor.Dockerfile for linux/amd64 AND linux/arm64 (QEMU +
+#      buildx), so the same image runs on x86_64 and ARM64 strict hosts;
+#   2. pushes it to ghcr.io/the-40-thieves/codecalc-exec (lowercase org, GHCR)
+#      authenticated with the built-in GITHUB_TOKEN — NO external secret;
+#   3. captures the IMMUTABLE index digest build-push-action reports, and commits
+#      ghcr.io/the-40-thieves/codecalc-exec@sha256:<digest> into the committed
+#      lock file docker/executor-image.lock, pushing it back to the branch.
+#
+# After the first dispatch the repo HOLDS the real published digest, and
+# published_strict_image() resolves it for the execution path. Committing the
+# digest from CI (rather than opening a PR) is the simpler robust option: the
+# digest is a machine fact with one correct value, there is nothing to review in
+# it, and the DCO sign-off + a named commit keep it auditable.
+#
+# The REAL multi-arch push only ever happens on an operator workflow_dispatch —
+# there is no push/PR trigger, so it cannot fire from ordinary CI.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: >-
+          Human tag to publish alongside the immutable digest (also tagged
+          :latest). The execution path pins the DIGEST, not this tag; the tag is
+          for humans reading the registry. Default: strict.
+        type: string
+        default: strict
+
+permissions:
+  contents: write   # commit the pinned digest back to the branch
+  packages: write   # push the image to GHCR
+
+concurrency:
+  # NOT cancel-in-progress: a push cancelled mid-upload can leave the registry
+  # with one platform of a two-platform manifest. Same reasoning as release.yml.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: build+push multi-arch, then pin the digest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/the-40-thieves/codecalc-exec
+          tags: |
+            type=raw,value=${{ inputs.tag }}
+            type=raw,value=latest
+
+      - id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: docker/executor.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Supply-chain metadata, the same shape release.yml attaches to the
+          # wheels: a provenance attestation and an SBOM embedded in the image
+          # index. Both are buildx-native (no id-token needed).
+          provenance: true
+          sbom: true
+
+      # The whole point of the workflow: turn the ephemeral push into a durable,
+      # committed digest the execution path can pin. build-push-action's `digest`
+      # output is the IMMUTABLE index digest of the multi-arch manifest.
+      - name: pin the published digest into the committed lock
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          # Via env, never interpolated into the shell — an operator-supplied tag
+          # must not be able to break out of the commit-message string.
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          # FLOOR: a build that pushed nothing (or an action change that stopped
+          # emitting `digest`) must fail here, not commit an empty ref.
+          if ! printf '%s' "$DIGEST" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+            echo "::error::build-push-action returned no sha256 digest (got '$DIGEST')"
+            exit 1
+          fi
+          ref="ghcr.io/the-40-thieves/codecalc-exec@${DIGEST}"
+          echo "pinning $ref"
+          lock=docker/executor-image.lock
+          # Keep the committed comment header; replace whatever content line
+          # (placeholder or a previous digest) followed it. Same file the code's
+          # published_strict_image() reads.
+          {
+            grep '^#' "$lock" || true
+            echo ""
+            echo "$ref"
+          } > "$lock.new"
+          mv "$lock.new" "$lock"
+          echo "--- $lock ---"
+          cat "$lock"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$lock"
+          if git diff --cached --quiet; then
+            echo "digest unchanged — nothing to commit"
+            exit 0
+          fi
+          # -s: DCO sign-off, required by the dco workflow on every non-merge commit.
+          git commit -s -m "THE-828: pin published strict executor image digest
+
+          ${ref}
+
+          Published to GHCR by the publish-executor-image workflow
+          (run ${GITHUB_RUN_ID}, tag '${TAG}')."
+          git push origin "HEAD:${GITHUB_REF_NAME}"

@@ -61,9 +61,24 @@ compatible addition bumps MINOR, it does not leave the version unchanged. A
   and proves fork-bomb/memory-bomb/descendant-escape/egress/filesystem
   containment on a runsc host, verifying the runtime OUT OF BAND. It skips
   without `runsc` (GitHub CI), and runs via `scripts/gvisor_conformance.sh` on
-  Cave / a runsc host. Residual: the registry-published, multi-arch,
-  digest-pinned image (a release step) and GitHub-CI-under-runsc are not
-  delivered here — see `docs/contract/provider-v1.md`.
+  Cave / a runsc host. The registry-published image residual is now closed (see
+  the next entry); GitHub-CI-under-runsc remains out of reach — see
+  `docs/contract/provider-v1.md`.
+
+- **Published, digest-pinned strict executor image** (THE-828, image residual).
+  The `publish-executor-image` workflow (`workflow_dispatch`) builds
+  `docker/executor.Dockerfile` for `linux/amd64` + `linux/arm64` (buildx + QEMU),
+  pushes it to `ghcr.io/the-40-thieves/codecalc-exec` (GHCR, `GITHUB_TOKEN` with
+  `packages: write` — no external secret), and commits the immutable index digest
+  into `docker/executor-image.lock`, pushing it back to the branch. New
+  `strict_runtime.published_strict_image()` resolves that lock (then a
+  digest-pinned `CODECALC_STRICT_IMAGE`) as the production default, and
+  `strict_execution_config()` builds the `GVisorConfig` from it. When no digest is
+  published yet — the shipped state until the first dispatch — the execution path
+  **fails closed** with `StrictImageUnavailable`, never falling back to the mutable
+  local diagnostic tag `codecalc-exec:strict`, which `doctor` and the conformance
+  suite keep using unchanged. The actual publish and first digest-pin still require
+  an operator `workflow_dispatch` (there is no push/PR trigger).
 
 - **Background runs: `run_submit`, `run_inspect`, `run_cancel`** (THE-778).
   Submit code and get a `run_id` back immediately instead of holding an MCP
