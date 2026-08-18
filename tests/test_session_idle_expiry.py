@@ -360,6 +360,47 @@ try:
 finally:
     sessions._EXPIRED_CAP = _orig_cap
 
+# ── 8. EVERY session entry point is activity, not just execute() ───────────
+# The first version updated the clock in `execute()` alone, so a session
+# being actively used through session_write_file / session_files /
+# session_read_file / session_artifacts aged out and had its worker reaped
+# underneath a caller that had never stopped using it — while the README
+# described the knob as reaping a session "untouched for longer than this".
+# Each touch point below is exercised on its own: two waits that each sit
+# under the TTL but together exceed it, with only that one call in between.
+# Pre-fix every one of these reaped; only the `execute` control passed.
+_TOUCH_POINTS = [
+    ("write_file", lambda s: sessions.write_file(s, "staged.txt", "x")),
+    ("list_files", lambda s: sessions.list_files(s)),
+    ("resource_read", lambda s: sessions.resource_read(s, "staged.txt")),
+    ("artifacts", lambda s: sessions.artifacts(s)),
+    # The control: the ONE entry point that always counted. If this ever
+    # fails, the timings below are wrong and the others prove nothing.
+    ("execute", lambda s: sessions.execute(s, "1")),
+]
+for lang in WORKER_LANGS[:1]:
+    for _name, _touch_call in _TOUCH_POINTS:
+        def _run(lang=lang, _name=_name, _touch_call=_touch_call):
+            s = sessions.start(lang)["session_id"]
+            try:
+                # `resource_read` needs something to read; staging it here
+                # rather than inside the timed window keeps every touch point
+                # on the same clock.
+                sessions.write_file(s, "staged.txt", "x")
+                pid = sessions._workers[s].proc.pid
+                time.sleep(0.12)
+                _touch_call(s)
+                time.sleep(0.12)
+                r = sessions.execute(s, MARKER[lang])
+                check(f"{lang}: {_name}() counts as activity — the session survives "
+                      f"0.24s of use under a 0.2s TTL",
+                      r.get("ok") is True, f"-> {r}")
+                check(f"{lang}: ...and {_name}() left the worker process alive",
+                      not _pid_gone(pid))
+            finally:
+                sessions.stop(s)
+        _with_ttl("0.2", _run)
+
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== SESSION IDLE-EXPIRY REAPS THE WORKER, NOT JUST THE BOOKKEEPING ===")
 sys.exit(1 if FAILS else 0)

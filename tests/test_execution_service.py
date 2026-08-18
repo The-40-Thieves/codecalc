@@ -410,9 +410,13 @@ def test_receipt_records_the_determinism_inputs_it_can_observe() -> None:
     check("every unrecorded entry is genuinely null",
           all(_determinism_value(determinism, name) is None
               for name in determinism["unrecorded"]))
+    # Imported, not spelled out: a fifth determinism input added to
+    # providers.DETERMINISM_INPUTS would be silently exempt from this
+    # assertion if the tuple lived here too. Same single-source rule the
+    # `server._RUN_EXTRA_KEYS` check above follows.
     check("nothing is both recorded and unrecorded",
           all(_determinism_value(determinism, name) is not None
-              for name in ("locale.LANG", "locale.LC_ALL", "timezone", "seed")
+              for name in providers.DETERMINISM_INPUTS
               if name not in determinism["unrecorded"]))
 
 
@@ -1470,6 +1474,56 @@ def test_session_run_also_spills_oversized_output() -> None:
             sessions.SESSION_ROOT = old_root
 
 
+def test_a_spill_the_server_writes_is_always_readable_back() -> None:
+    """The capture cap and the resource READ cap have to agree, or the
+    feature writes files nobody can fetch.
+
+    Measured before the fix: the capture ceiling is SPILL_CAPTURE_KB (4 MiB)
+    of RAW stream bytes, but what gets WRITTEN is the errors="replace"
+    RE-ENCODING of an already-decoded str, where one invalid input byte
+    becomes a 3-byte U+FFFD. 1.5 MB of 0xFF therefore captured fine and
+    spilled 4.5 MB — past `resource_read`'s 4 MiB cap, which refuses
+    outright (returns None, not a short read). The spill existed, the
+    result advertised its URI, and every fetch of it failed. This asserts
+    the invariant directly rather than the arithmetic: whatever the server
+    writes, the resource route hands back in full.
+    """
+    old_root = sessions.SESSION_ROOT
+    with tempfile.TemporaryDirectory(prefix="codecalc-spill-readback-") as root:
+        sessions.SESSION_ROOT = Path(root)
+        try:
+            session_id = sessions.start("bash")["session_id"]
+            # 1.5 MB of 0xFF: valid as bytes, invalid as UTF-8 everywhere, so
+            # every single byte expands 3x on the way back out.
+            code = "head -c 1500000 /dev/zero | tr '\\0' '\\377'"
+            result = sessions.execute(session_id, code, language="bash")
+            spill_uri = result.get("stdout_spill")
+            check("U+FFFD-expanding output still spills", isinstance(spill_uri, str))
+            if not isinstance(spill_uri, str):
+                return
+            rel = spill_uri.split("/files/", 1)[1]
+            on_disk = (sessions._session_dir(session_id) / rel).stat().st_size
+            check(f"the spill written ({on_disk} B) is never larger than the "
+                  f"resource read cap ({sessions.RESOURCE_MAX_BYTES} B)",
+                  on_disk <= sessions.RESOURCE_MAX_BYTES)
+            fetched = sessions.resource_read(session_id, rel)
+            check("the spill resource can actually be read back", fetched is not None)
+            if fetched is not None:
+                check("and comes back whole, not silently short",
+                      len(fetched[0]) == on_disk)
+            check("a spill trimmed to the read cap says so rather than reading complete",
+                  result.get("stdout_spill_capped") is True)
+
+            # And the ordinary case is untouched: an under-cap spill is not
+            # marked capped, or the flag above would mean nothing.
+            small = sessions.execute(
+                session_id, "head -c 100000 /dev/zero | tr '\\0' 'A'", language="bash")
+            check("a spill that fits is not flagged as capped",
+                  "stdout_spill_capped" not in small)
+        finally:
+            sessions.SESSION_ROOT = old_root
+
+
 def test_spill_files_are_retained_up_to_a_bounded_count() -> None:
     old_root = sessions.SESSION_ROOT
     old_retention = sessions._SPILL_RETENTION
@@ -1534,5 +1588,6 @@ if __name__ == "__main__":
     test_session_output_spills_past_the_default_cap_instead_of_dropping_it()
     test_session_output_spill_is_faithful_to_the_pipelines_str_representation()
     test_session_run_also_spills_oversized_output()
+    test_a_spill_the_server_writes_is_always_readable_back()
     test_spill_files_are_retained_up_to_a_bounded_count()
     sys.exit(1 if FAILS else 0)

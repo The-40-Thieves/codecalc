@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -260,6 +262,39 @@ def test_admission_cap_rejects_a_submission_past_the_limit() -> None:
               raised.active == 1 and raised.limit == 1)
 
 
+def test_a_set_but_empty_admission_cap_does_not_crash_the_server_at_import() -> None:
+    """`CODECALC_MAX_ACTIVE_RUNS=""` used to raise at module import.
+
+    `int(os.environ.get(NAME, "64"))` only defaults when the variable is
+    ABSENT. Set-but-empty is the shape a shell produces for
+    `export CODECALC_MAX_ACTIVE_RUNS=` or a compose file with a blank value,
+    and it reaches `int("")` -> ValueError with no handler above it, so the
+    whole MCP server fails to start — the same fail-shape as the allowlist
+    empty-string bug, one module over. Asserted by IMPORTING in a
+    subprocess, because an import-time crash is not observable from inside a
+    process that already imported the module successfully.
+    """
+    repo = Path(__file__).resolve().parents[1]
+    for label, value, want in (
+        ("empty", "", 64),
+        ("whitespace", "   ", 64),
+        ("non-numeric", "lots", 64),
+        ("zero", "0", 64),
+        ("negative", "-5", 64),
+        ("valid", "7", 7),
+    ):
+        env = dict(os.environ, CODECALC_MAX_ACTIVE_RUNS=value)
+        proc = subprocess.run(
+            [sys.executable, "-c",
+             "from codecalc import server; print(server._max_active_runs)"],
+            cwd=repo, env=env, capture_output=True, text=True, timeout=180,
+        )
+        check(f"CODECALC_MAX_ACTIVE_RUNS={label!r} imports the server without raising",
+              proc.returncode == 0)
+        got = proc.stdout.strip().splitlines()[-1] if proc.returncode == 0 else None
+        check(f"CODECALC_MAX_ACTIVE_RUNS={label!r} resolves to {want}", got == str(want))
+
+
 class _StuckProvider(providers.LocalExecutionProvider):
     """Blocks forever (within the test) — always the OLDEST journal by
     mtime, and always still active."""
@@ -380,6 +415,7 @@ if __name__ == "__main__":
     test_cleanup_is_capability_gated_and_does_not_crash_on_a_provider_without_it()
     test_cancel_on_a_provider_that_cannot_cancel_leaves_the_run_collectible()
     test_admission_cap_rejects_a_submission_past_the_limit()
+    test_a_set_but_empty_admission_cap_does_not_crash_the_server_at_import()
     test_prune_never_deletes_a_still_active_runs_journal()
     test_prune_runs_on_terminal_collection_not_only_cleanup()
     sys.exit(1 if FAILS else 0)

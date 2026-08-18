@@ -43,6 +43,7 @@ from . import (
     providers,
     run_supervisor,
     runtimes,
+    sessions,
     tools,
     translation,
     units,
@@ -116,6 +117,42 @@ _provider_registry = providers.configured_registry()
 _run_state_dir = Path(os.environ.get(
     "CODECALC_RUN_STATE_DIR", Path.home() / ".codecalc" / "runs"
 ))
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    """A positive integer from the environment, or `default` — never a raise.
+
+    `int(os.environ.get(NAME, "64"))` defaults only when the variable is
+    ABSENT. Set-but-EMPTY is a different thing and a common one: `export
+    CODECALC_MAX_ACTIVE_RUNS=` in a shell profile, a blank value in a compose
+    file or a systemd `Environment=` line all produce it, and it reached
+    `int("")` -> ValueError at MODULE IMPORT with nothing above it to catch —
+    the server did not start at all. Non-numeric and non-positive values did
+    the same thing one line later, since RunSupervisor rejects a
+    max_active_runs that is not positive.
+
+    Falls back rather than refusing to start, because the failure this
+    replaces was itself a refusal to start over a knob nobody has to set —
+    but LOUDLY on stderr, so an operator who meant to raise the cap is not
+    left believing a typo took effect. Same shape as the allowlist
+    empty-string handling in `packages`, which treats a blank entry as absent
+    instead of as a value.
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value <= 0:
+        import sys
+        print(f"codecalc: ignoring {name}={raw!r} — expected a positive "
+              f"integer; using the default of {default}", file=sys.stderr)
+        return default
+    return value
+
+
 #: Admission cap for run_submit (THE-778 fix round, review Important #3a).
 #: Bounds RunSupervisor's in-memory run table and thread pool against an
 #: unbounded burst of submissions, or a caller that never inspects/cancels
@@ -123,7 +160,7 @@ _run_state_dir = Path(os.environ.get(
 #: matches RunSupervisor's own constructor default; the env var lets an
 #: operator raise or lower it without a code change, same pattern as
 #: CODECALC_RUN_STATE_DIR above.
-_max_active_runs = int(os.environ.get("CODECALC_MAX_ACTIVE_RUNS", "64"))
+_max_active_runs = _positive_int_env("CODECALC_MAX_ACTIVE_RUNS", 64)
 _run_supervisor = run_supervisor.RunSupervisor(
     _provider_registry, state_dir=_run_state_dir, max_active_runs=_max_active_runs
 )
@@ -837,7 +874,7 @@ def update_runtimes(languages: str = "", apply: bool = False, timeout: int = 600
 def session_file_resource(session_id: str, path: str):
     """MCP resource: session workspace file. str for text, bytes for binary."""
     result = _session_service.read_file(
-        session_id, path, max_bytes=4 * 1024 * 1024
+        session_id, path, max_bytes=sessions.RESOURCE_MAX_BYTES
     )
     if not result.get("ok"):
         raise ValueError(f"no such file: {path}")

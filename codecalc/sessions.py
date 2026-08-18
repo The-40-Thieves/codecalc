@@ -62,6 +62,15 @@ _SAFE_NAME = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 #: FSIZE_LIMIT_BYTES's ceiling.
 SPILL_CAPTURE_KB = 4096  # 4 MiB per stream
 
+#: Ceiling on a single session file served back as an MCP resource. Named
+#: rather than repeated as a literal because the SPILL write path is now
+#: bounded by the very same number: `resource_read` REFUSES an over-cap file
+#: outright (returns None — not a short read), so a spill written above this
+#: is a file the server advertises a URI for and can never serve. Two copies
+#: of "4 MiB" in two files is exactly how those two caps drifted apart in the
+#: first place.
+RESOURCE_MAX_BYTES = 4 * 1024 * 1024
+
 #: Spill files live in this subdirectory of a session workspace.
 _SPILL_DIRNAME = ".codecalc-spill"
 
@@ -167,6 +176,29 @@ def _idle_ttl_seconds() -> float | None:
 def _touch(session_id: str) -> None:
     """Record activity, resetting the idle clock. Caller holds `_lock`."""
     _LAST_ACTIVITY[session_id] = time.monotonic()
+
+
+def _note_activity(session_id: str) -> None:
+    """Reset the idle clock from any session entry point. Takes `_lock`.
+
+    "Idle" has to mean "nothing has called into this session", not "nothing
+    has EXECUTED in it". The first version updated the clock only in
+    `execute()`, so a session being actively used through
+    `session_write_file` / `session_files` / `session_read_file` /
+    `session_artifacts` — staging inputs, polling for an artifact a long
+    background job is producing — aged out and had its worker reaped
+    underneath a caller that had never stopped using it. The README already
+    described the knob as reaping a session "untouched for longer than
+    this", and that is the behaviour worth having, so the code moved to meet
+    it rather than the sentence being narrowed to match the code.
+
+    Only worker sessions are tracked (`_LAST_ACTIVITY`), so the membership
+    test is what keeps a workspace-only session — which holds no long-lived
+    process and is not the leak this exists for — out of the table entirely.
+    """
+    with _lock:
+        if session_id in _workers:
+            _touch(session_id)
 
 
 def _mark_expired_locked(session_id: str) -> None:
@@ -546,12 +578,11 @@ def execute(session_id: str, code: str, language: str | None = None,
         asked = {"max_memory_mb": max_memory_mb, "max_cpu": max_cpu,
                  "no_net": no_net, "max_output_kb": max_output_kb}
         out = w.run(code, stdin=stdin, timeout=timeout)
-        with _lock:
-            # Any call is activity, whether the executed code itself
-            # succeeded or not — an idle SESSION is one nothing has called
-            # into, not one whose last call happened to error.
-            if session_id in _workers:
-                _touch(session_id)
+        # Any call is activity, whether the executed code itself succeeded or
+        # not — an idle SESSION is one nothing has called into, not one whose
+        # last call happened to error. Shared with every other entry point:
+        # see `_note_activity`.
+        _note_activity(session_id)
         # Two lists, deliberately: what the caller asked for and did not get,
         # and what the caller never asked for because it did not know it was
         # being dropped. `no_net` appears in both vocabularies; dict ordering
@@ -686,13 +717,29 @@ def spill_if_truncated(session_id: str, result: dict, requested_cap_kb: int) -> 
         data = text.encode("utf-8", errors="replace")
         if len(data) <= cap:
             continue
+        # The capture itself may have hit ITS OWN ceiling, and the re-encoding
+        # here may exceed what the resource route will ever serve. Either way
+        # the spill is fuller than the inline value but is not proven to be
+        # the WHOLE stream, which is what this one flag says.
+        capped = len(data) >= SPILL_CAPTURE_KB * 1024
+        if len(data) > RESOURCE_MAX_BYTES:
+            # A spill nobody can fetch is not a spill. The capture ceiling is
+            # SPILL_CAPTURE_KB of RAW stream bytes, but what lands on disk is
+            # this errors="replace" RE-ENCODING of an already-decoded str,
+            # where one invalid input byte becomes a 3-byte U+FFFD — so a
+            # capture well under its own ceiling can still encode to 3x that.
+            # `resource_read` refuses anything over RESOURCE_MAX_BYTES
+            # OUTRIGHT (None, not a short read), so past this point the URI
+            # below would name a file every fetch fails on. Bounding the
+            # WRITE by the same constant the READ enforces makes "everything
+            # this writes is fully readable back" true by construction,
+            # instead of true only for output that happens to be ASCII.
+            data = data[:RESOURCE_MAX_BYTES]
+            capped = True
         rel = _write_spill(d, stream, data)
         result[f"{stream}_spill"] = f"codecalc://session/{session_id}/files/{rel}"
         result[stream] = data[:cap].decode("utf-8", errors="replace") + "\n…[truncated]"
-        if len(data) >= SPILL_CAPTURE_KB * 1024:
-            # The capture itself hit ITS OWN ceiling: the spill is fuller
-            # than the inline value but is not proven to be the WHOLE
-            # stream. Said outright rather than presented as complete.
+        if capped:
             result[f"{stream}_spill_capped"] = True
         spilled = True
     if spilled:
@@ -704,6 +751,7 @@ def write_file(session_id: str, path: str, content: str) -> dict:
     d = _session_dir(session_id)
     if not d.is_dir():
         return {"ok": False, "error": f"unknown session '{session_id}'"}
+    _note_activity(session_id)
     target = _jail(d, path)
     target.parent.mkdir(parents=True, exist_ok=True)
     _write_nofollow(target, content)
@@ -714,13 +762,15 @@ def list_files(session_id: str, path: str = "") -> dict:
     d = _session_dir(session_id)
     if not d.is_dir():
         return {"ok": False, "error": f"unknown session '{session_id}'"}
+    _note_activity(session_id)
     base = _jail(d, path)
     if not base.is_dir():
         return {"ok": False, "error": f"no such directory: {path}"}
     return {"ok": True, "path": path or ".", "files": _list(base)}
 
 
-def resource_read(session_id: str, path: str, max_bytes: int = 4 * 1024 * 1024) -> tuple[bytes, str] | None:
+def resource_read(session_id: str, path: str,
+                  max_bytes: int = RESOURCE_MAX_BYTES) -> tuple[bytes, str] | None:
     """Serve a session file as an MCP resource: (bytes, mime_type) or None.
 
     Image files are served as image/png|jpeg|gif|webp so MCP clients render
@@ -728,6 +778,7 @@ def resource_read(session_id: str, path: str, max_bytes: int = 4 * 1024 * 1024) 
     """
     import mimetypes
     d = _session_dir(session_id)
+    _note_activity(session_id)
     target = _jail(d, path)
     data = _read_nofollow(target, max_bytes)
     if data is None:
@@ -743,6 +794,7 @@ def artifacts(session_id: str) -> dict:
     d = _session_dir(session_id)
     if not d.is_dir():
         return {"ok": False, "error": f"unknown session '{session_id}'"}
+    _note_activity(session_id)
     files = []
     for p in sorted(d.rglob("*")):
         if "__pycache__" in p.parts or p.name.endswith(".pyc"):
