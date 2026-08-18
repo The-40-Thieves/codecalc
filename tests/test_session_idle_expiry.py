@@ -114,15 +114,22 @@ for _lang in ("python3", "node"):
 MARKER = {"python3": "print('alive')", "node": "console.log('alive')"}
 
 
-def _pid_gone(pid: int) -> bool:
-    """OS-level: is `pid` actually gone, not just absent from our bookkeeping?"""
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return True
-    except PermissionError:
-        return False  # exists, owned by someone else — should not happen here
-    return False
+def _proc_gone(proc) -> bool:
+    """OS-level: is the worker's process actually gone, not just absent from our
+    bookkeeping?
+
+    Probes the worker's own `subprocess.Popen` handle rather than a bare pid:
+    `poll()` calls `waitpid()`/`GetExitCodeProcess()` under the hood (not our
+    `_workers` dict), so it still asserts the OS-level PROCESS state these tests
+    turn on — `None` means alive, an exit code means gone. `os.kill(pid, 0)`
+    cannot serve here: on Windows it maps to `TerminateProcess` (it would KILL
+    the worker) and raises `OSError` instead of probing liveness, so the POSIX
+    `ProcessLookupError` idiom is not portable. The Popen object stays valid
+    after its `_workers[s]` entry is deleted and after `Worker.close()`
+    (terminate + `wait()`), so callers capture the proc reference before the
+    reap and this reads the post-reap exit code cleanly.
+    """
+    return proc.poll() is not None
 
 
 def _with_ttl(seconds: str | None, fn):
@@ -145,13 +152,13 @@ for lang in WORKER_LANGS:
     def _run(lang=lang):
         s = sessions.start(lang)["session_id"]
         try:
-            pid = sessions._workers[s].proc.pid
+            proc = sessions._workers[s].proc
             _CLOCK.advance(0.3)
             r = sessions.execute(s, MARKER[lang])
             check(f"{lang}: unset TTL never expires an idle session",
                   r.get("ok") is True, f"-> {r}")
             check(f"{lang}: unset TTL: the worker process is still running",
-                  not _pid_gone(pid))
+                  not _proc_gone(proc))
         finally:
             sessions.stop(s)
     _with_ttl(None, _run)
@@ -160,9 +167,9 @@ for lang in WORKER_LANGS:
 for lang in WORKER_LANGS:
     def _run(lang=lang):
         s = sessions.start(lang)["session_id"]
-        pid = sessions._workers[s].proc.pid
+        proc = sessions._workers[s].proc
         check(f"{lang}: worker process exists right after session_start",
-              not _pid_gone(pid))
+              not _proc_gone(proc))
         _CLOCK.advance(0.3)  # idle past the 0.05s TTL configured below
         try:
             r = sessions.execute(s, MARKER[lang])
@@ -173,9 +180,9 @@ for lang in WORKER_LANGS:
             check(f"{lang}: expiry is NOT a silent respawn "
                   f"(no verdict claiming the code above actually ran)",
                   "verdict" not in r or r.get("verdict") != "OK", f"-> {r}")
-            gone = _pid_gone(pid)
+            gone = _proc_gone(proc)
             check(f"{lang}: the worker PROCESS is actually gone (not just the dict entry)",
-                  gone, f"-> pid {pid} {'gone' if gone else 'still alive'}")
+                  gone, f"-> pid {proc.pid} {'gone' if gone else 'still alive'}")
         finally:
             sessions.stop(s)
     _with_ttl("0.05", _run)
@@ -185,7 +192,7 @@ for lang in WORKER_LANGS:
     def _run(lang=lang):
         s = sessions.start(lang)["session_id"]
         try:
-            pid = sessions._workers[s].proc.pid
+            proc = sessions._workers[s].proc
             # Two calls, each well under the TTL, spanning MORE than the TTL
             # in total — if activity did not reset the clock, this would
             # still expire.
@@ -198,7 +205,7 @@ for lang in WORKER_LANGS:
             check(f"{lang}: activity resets the idle clock (second call still succeeds)",
                   r2.get("ok") is True, f"-> {r2}")
             check(f"{lang}: ...and the worker was never reaped in between",
-                  not _pid_gone(pid))
+                  not _proc_gone(proc))
         finally:
             sessions.stop(s)
     _with_ttl("0.2", _run)
@@ -207,13 +214,13 @@ for lang in WORKER_LANGS:
 for lang in WORKER_LANGS[:1]:
     def _run(lang=lang):
         s = sessions.start(lang)["session_id"]
-        pid = sessions._workers[s].proc.pid
+        proc = sessions._workers[s].proc
         _CLOCK.advance(0.15)
         reaped = sessions.sweep_idle_sessions()
         check(f"{lang}: sweep_idle_sessions() reaps an idle worker directly",
               s in reaped, f"-> {reaped}")
         check(f"{lang}: ...and the process is gone",
-              _pid_gone(pid))
+              _proc_gone(proc))
         sessions.stop(s)
     _with_ttl("0.05", _run)
 
@@ -303,7 +310,7 @@ check("6a. execute() calls the atomic helper for its worker-or-expired decision"
 for lang in WORKER_LANGS[:1]:
     def _run(lang=lang):
         s = sessions.start(lang)["session_id"]
-        pid = sessions._workers[s].proc.pid
+        proc = sessions._workers[s].proc
         _CLOCK.advance(0.15)  # idle past the 0.05s TTL configured below
 
         n = 40
@@ -328,7 +335,7 @@ for lang in WORKER_LANGS[:1]:
               f"-> {len(respawned)}/{n} were NOT the expired error, "
               f"e.g. {respawned[0] if respawned else None}")
         check(f"6b. {lang}: ...and the worker process is (still) actually gone",
-              _pid_gone(pid))
+              _proc_gone(proc))
         sessions.stop(s)
     _with_ttl("0.05", _run)
 
@@ -422,7 +429,7 @@ for lang in WORKER_LANGS[:1]:
                 # rather than inside the timed window keeps every touch point
                 # on the same clock.
                 sessions.write_file(s, "staged.txt", "x")
-                pid = sessions._workers[s].proc.pid
+                proc = sessions._workers[s].proc
                 _CLOCK.advance(0.12)
                 _touch_call(s)
                 _CLOCK.advance(0.12)
@@ -431,7 +438,7 @@ for lang in WORKER_LANGS[:1]:
                       f"0.24s of use under a 0.2s TTL",
                       r.get("ok") is True, f"-> {r}")
                 check(f"{lang}: ...and {_name}() left the worker process alive",
-                      not _pid_gone(pid))
+                      not _proc_gone(proc))
             finally:
                 sessions.stop(s)
         _with_ttl("0.2", _run)
@@ -457,13 +464,13 @@ for lang in WORKER_LANGS[:1]:
             s = sessions.start(lang)["session_id"]
             try:
                 sessions.write_file(s, "staged.txt", "x")
-                pid = sessions._workers[s].proc.pid
+                proc = sessions._workers[s].proc
                 _CLOCK.advance(0.10)  # idle past the 0.05s TTL configured below
                 _touch_call(s)    # a touch AFTER expiry
-                gone = _pid_gone(pid)
+                gone = _proc_gone(proc)
                 check(f"{lang}: {_name}() after expiry REAPS the idle worker "
                       f"instead of reviving it",
-                      gone, f"-> pid {pid} {'gone' if gone else 'still alive'}")
+                      gone, f"-> pid {proc.pid} {'gone' if gone else 'still alive'}")
                 r = sessions.execute(s, MARKER[lang])
                 check(f"{lang}: after {_name}() the next execute() gets the expiry "
                       f"error, not a run in the original worker",
