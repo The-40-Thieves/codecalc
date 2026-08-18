@@ -685,7 +685,7 @@ def run_submit(
     try:
         handle = _run_supervisor.start(
             run_spec, provider_id=provider_obj.provider_id,
-            capability_decision=decision)
+            capability_decision=decision, receipt_spec=spec)
     except run_supervisor.TooManyActiveRuns as exc:
         return errors.error_result(
             errors.RESOURCE_EXHAUSTED,

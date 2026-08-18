@@ -152,7 +152,8 @@ class ExecutionService:
                         requested_provider=provider.provider_id,
                     ))
                 handle = self.supervisor.start(run_spec, provider_id=provider.provider_id,
-                                               capability_decision=decision)
+                                               capability_decision=decision,
+                                               receipt_spec=spec)
                 cleanup_failure = None
                 try:
                     result = dict(self.supervisor.wait(

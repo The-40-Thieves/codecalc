@@ -210,6 +210,37 @@ try:
     check("the background receipt shows network requested but denied",
           _bg_caps and _bg_caps["denied"] == ["network"]
           and _bg_caps["approved"] == [] and _bg_caps["brokered"] is True)
+
+    # PROVENANCE INVARIANT (fix round 2): the receipt must name the REQUEST as
+    # written, not the enforced spec. run_submit built the spec with no_net=False
+    # (network requested) and timeout defaulting to 30; deny-network narrowed it
+    # to no_net=True for EXECUTION, but the receipt's spec_hash and
+    # limits.requested must still describe what the caller ASKED. Otherwise a
+    # background receipt cannot be reconciled to its request by hash, and it
+    # falsely claims the caller requested isolation.
+    _request = providers.ComputationSpec(
+        language="python3", code="print(1)", stdin="", timeout=30,
+        max_memory_mb=0, max_output_kb=0, max_cpu=0, no_net=False)
+    _bg_provider_receipt = _term["provider"]
+    check("the background receipt hashes the REQUEST, not the enforced spec",
+          _bg_provider_receipt["spec_hash"] == _request.spec_hash())
+    check("limits.requested reflects what the caller ASKED (no_net False)",
+          _bg_provider_receipt["limits"]["requested"]["no_net"] is False)
+    check("the enforced spec's hash is DIFFERENT (the bug would have reported it)",
+          _request.spec_hash()
+          != providers.ComputationSpec(
+              language="python3", code="print(1)", stdin="", timeout=30,
+              no_net=True).spec_hash())
+
+    # And the invariant across paths: the SAME request produces the SAME
+    # spec_hash and limits.requested whether run synchronously or in background.
+    _sync = server.execute_code("python3", "print(1)", timeout=30,
+                                provider="net-policy-bg")
+    check("run_submit and execute_code share one spec_hash for one request",
+          _sync["provider"]["spec_hash"] == _bg_provider_receipt["spec_hash"])
+    check("both paths report the same requested limits",
+          _sync["provider"]["limits"]["requested"]
+          == _bg_provider_receipt["limits"]["requested"])
 finally:
     os.environ.pop(capabilities.POLICY_ENV, None)
 
