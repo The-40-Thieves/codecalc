@@ -579,18 +579,51 @@ def execute(session_id: str, code: str, language: str | None = None,
 
 
 def _spill_dir(d: Path) -> Path:
-    spill = d / _SPILL_DIRNAME
+    """The session's spill subdirectory, jailed like every other session path.
+
+    `_jail` FIRST, `mkdir` second, and that order is the whole fix. The first
+    version composed the path by hand (`d / _SPILL_DIRNAME`) and never jailed
+    it, which was an arbitrary-directory write AND delete in the UNSANDBOXED
+    server process:
+
+    - `mkdir(exist_ok=True)` does not follow a symlink at the final component
+      — it just swallows the EEXIST the link produces — so a `.codecalc-spill`
+      SYMLINK survived it intact and every later operation resolved through it.
+    - `O_NOFOLLOW` on the spill FILE guards only the final component. It never
+      saw the swapped directory — and a parent component is exactly what
+      `_jail`'s resolve() does check.
+    - Executed code runs with the workspace as its cwd, so replacing
+      `.codecalc-spill` with a symlink to anywhere the server user can reach
+      is something a session can simply do.
+
+    Routed through the same `_jail` that already guards write_file,
+    list_files and resource_read rather than a bespoke check, so there is one
+    definition of "inside this workspace" for every path in this module. A
+    refusal raises ValueError, which is what `_jail` raises everywhere else
+    and what `guarded_call` already classifies for callers.
+    """
+    spill = _jail(d, _SPILL_DIRNAME)
     spill.mkdir(exist_ok=True)
     return spill
 
 
-def _prune_spill(spill: Path) -> None:
+def _prune_spill(d: Path) -> None:
     """Keep only the _SPILL_RETENTION most recently written spill files.
 
     Same shape as run_supervisor.RunSupervisor._prune: a bounded count,
     oldest first, used here because no other quota governs this artifact
     class (see SPILL_CAPTURE_KB's docstring).
+
+    Takes the SESSION directory and re-derives the jailed spill path itself
+    rather than accepting one a caller already resolved: the delete path is
+    held to the same strictness as the write path (this module's rule), so it
+    cannot become a standalone arbitrary-unlink primitive if some future
+    caller reaches it without jailing first. `glob` is one level deep and
+    `unlink` removes a symlink rather than its target, so with the directory
+    itself jailed there is nothing left here that can name a file outside the
+    workspace.
     """
+    spill = _jail(d, _SPILL_DIRNAME)
     files = sorted(spill.glob("*.bin"), key=lambda p: p.stat().st_mtime, reverse=True)
     for stale in files[_SPILL_RETENTION:]:
         stale.unlink(missing_ok=True)
@@ -602,8 +635,10 @@ def _write_spill(d: Path, stream: str, data: bytes) -> str:
     Returns the path RELATIVE to the session dir — readable through the same
     `_jail`-guarded routes (resource_read, session_files) as any other
     workspace file. The filename is generated HERE (uuid4), never taken from
-    a caller, so there is no traversal surface for this write to defend
-    against beyond `d` itself already being the jailed session root.
+    a caller, so the only traversal surface is the DIRECTORY, which
+    `_spill_dir` jails. The earlier version of this docstring argued that `d`
+    already being the jailed session root left nothing to defend; that was
+    wrong, because the component UNDER `d` is one executed code controls.
     """
     spill = _spill_dir(d)
     name = f"{uuid.uuid4().hex}-{stream}.bin"
@@ -612,7 +647,7 @@ def _write_spill(d: Path, stream: str, data: bytes) -> str:
     fd = os.open(target, flags, 0o600)
     with os.fdopen(fd, "wb") as fh:
         fh.write(data)
-    _prune_spill(spill)
+    _prune_spill(d)
     return f"{_SPILL_DIRNAME}/{name}"
 
 
