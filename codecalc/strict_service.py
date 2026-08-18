@@ -159,7 +159,7 @@ class StrictService:
         A record still ``"running"`` is never evicted: ``_execute`` is
         synchronous, so ``"running"`` only exists for the duration of another
         thread's in-flight call, not as an accumulated leak — the leak this
-        guards against is a client that submits and never DELETEs.
+        guards against is a client that submits and never issues a DELETE.
         """
         if len(self._runs) <= MAX_TRACKED_RUNS:
             return
