@@ -1449,6 +1449,13 @@ def main() -> None:
         # not exist, because a script wraps it and parses prose forever.
         rest = sys.argv[2:]
         raise SystemExit(_doctor(as_json="--json" in rest, deep="--deep" in rest))
+    if len(sys.argv) > 1 and sys.argv[1] == "serve-strict":
+        # THE-830: the authenticated `/v1` strict execution service — the server
+        # half of RemoteStrictExecutionProvider. Its own module and stdlib
+        # http.server transport, separate from the MCP serve-http transport
+        # above; it does its own bearer-required / non-loopback handling.
+        from . import strict_service
+        raise SystemExit(strict_service.main(sys.argv[2:]))
     if len(sys.argv) > 1 and sys.argv[1] == "serve-http":
         rest = sys.argv[2:]
         host = (rest[rest.index("--host") + 1]
