@@ -169,6 +169,16 @@ jobs:
         run: |
           uv run --no-sync python tests/test_strict_providers.py
           uv run --no-sync python tests/test_gvisor_runtime.py
+      # THE-830: the SERVER half of the strict protocol — the authenticated `/v1`
+      # service RemoteStrictExecutionProvider talks to. The protocol and auth
+      # planes drive the REAL client against an in-process http.server over a
+      # loopback socket with an injected (mock) runtime, so they need no Docker
+      # and run on the full OS matrix. The file also carries a real-runsc
+      # end-to-end that SELF-SKIPS without a registered runsc runtime (as here on
+      # GitHub) and RUNS on Cave, the same posture as the conformance suite below.
+      - name: strict execution service (protocol + auth; real runsc skips)
+        shell: bash
+        run: uv run --no-sync python tests/test_strict_service.py
       # THE-828, image residual: the published-image digest lock resolves to the
       # digest publish-executor-image.yml pins, and the digest-required EXECUTION
       # path fails closed when nothing is published yet — never falling back to
