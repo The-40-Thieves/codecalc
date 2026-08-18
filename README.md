@@ -314,8 +314,8 @@ analysis, binary64 introspection.
 | `session_run` | **Multi-file programs**: execute an entry file that imports other session files (helper.py, data/...) in the workspace |
 | `session_artifacts` | List files created by executed code (results, images, CSVs) |
 | `install_package` | Install packages (uv pip/npm/gem/go/cargo...) into a session or shared cache |
-| `verify_translation` | **Prove a port is equivalent**: you write the translation, the executor runs both versions on the same inputs and reports match / diverged / inconclusive per input |
-| `verify_optimization` | **Prove an optimisation**: you write the candidate, the executor confirms it still agrees with the original AND times both — accepted only if equivalent and measurably faster |
+| `verify_translation` | **Prove a port is equivalent**: you write the translation, the executor runs both versions on the same inputs and reports match / diverged / inconclusive per input. A pass is graded `cross_checked` (see [Grade vocabulary](#grade-vocabulary)) |
+| `verify_optimization` | **Prove an optimisation**: you write the candidate, the executor confirms it still agrees with the original AND times both — accepted only if equivalent and measurably faster. Accepted is graded `cross_checked` |
 | `extract_function` | Pull a named function + its dependency closure (imports, referenced helpers) into a standalone program and run it (ast-exact for python3, best-effort elsewhere) |
 | `compare_edge_cases` | Run the same logic in N languages on edge-case inputs (empty, zero, negative, float precision) and flag behavioral divergence |
 | `convert_units` | Dimensional unit conversion via sympy: length, mass, time, speed, energy, power, force, pressure, temperature (°C/°F/K), volume, area, data, frequency |
@@ -323,13 +323,46 @@ analysis, binary64 introspection.
 | `list_units` | All 140+ unit aliases for convert_units |
 | `evaluate_expression` | Symbolic math: `integrate(x**2, x)`, `sqrt(144) + 2**10` |
 | `truth_table` | Boolean algebra: `a and b or not c`, `p xor q`, `a implies b` |
-| `z3_check` | SMT-LIB2 satisfiability + model |
+| `z3_check` | SMT-LIB2 satisfiability + model. An `unsat` verdict is graded `solver_proven`; `sat` is graded `ungraded` (decided, but not proof-shaped — see [Grade vocabulary](#grade-vocabulary)) |
 | `solve_linear` | Systems of equations: `x + y = 10; x - y = 2` |
 | `analyze_complexity` | Static Big-O estimate from code structure, parsed with **tree-sitter** (every supported language). Reports `analysis: tree-sitter\|regex-fallback` so you can tell a parse from a guess |
 | `benchmark` | Empirical Big-O: runs code at increasing N, fits growth curve |
 | `compare_execution` | Same code across N languages side-by-side |
 | `runtimes_status` | **Non-mutating** update check: current vs latest for every language runtime, which package manager owns it, and the command that would run |
 | `update_runtimes` | Update runtimes. **Dry-run by default** (`apply=False` returns the commands); `apply=True` executes them |
+
+## Grade vocabulary
+
+`verify_translation`, `verify_optimization` and `z3_check` return `grade` +
+`grade_basis` (+ `grade_rules_version`) on top of their own result. The grade
+names how strong the evidence for a success actually is; it is derived from
+evidence those tools already emit, in `codecalc/grades.py` — the verifiers
+never assign their own grade.
+
+| Grade | Means | Emitted by |
+|---|---|---|
+| `cross_checked` | Two independently authored programs were both actually run and their outputs agreed. `grade_basis` names the runtime(s) that did the checking. | `verify_translation` (source vs. port), `verify_optimization` (original vs. candidate) |
+| `solver_proven` | Z3 returned `unsat` within its timeout — a machine-checked refutation, not a heuristic. `grade_basis` names the engine version and the timeout bound. **Not** `sat`: see below. | `z3_check` |
+| `executed` | Reserved: the claimed computation ran and produced the reported result, with no independent second opinion. Not currently emitted by any tool above — every one of them also clears the `cross_checked`/`solver_proven` bar. | — |
+| `ungraded` | Explicit non-grade for a mismatch, an inconclusive comparison, a rejected optimisation candidate, a measurement failure, a Z3 `unknown` verdict, and — deliberately — a Z3 `sat` verdict. A real value on `grade`, never an absent key. **Never** a softened stand-in for one of the three grades above. | any of the above, on a non-success |
+
+`z3_check`'s `sat` verdicts are graded `ungraded`, not `solver_proven`, even
+though `sat` is just as decisive a verdict as `unsat`. The ticket's motivating
+pattern is proving a property P by asserting not-P and checking `unsat`; a
+caller running that pattern who gets `sat` back has learned P is FALSE, and
+`solver_proven` on that result would let a reader who skims `grade` without
+`result` mistake a counterexample for a proof. `sat`'s `grade_basis` says so
+explicitly: satisfiability was decided, but `solver_proven` is reserved for
+`unsat` so a counterexample can never wear a proof grade. Widening `sat` back
+into `solver_proven` later is additive; narrowing it after callers depend on
+the wider behaviour would not be, so this ships narrow now. Full reasoning:
+`codecalc/grades.py`'s module docstring.
+
+`algebraic_equiv` is deliberately NOT graded: it compares two expressions via
+`sympy.simplify(a - b) == 0`, a CAS transformation rather than a decision
+procedure with a checkable certificate, and it is one simplifier's opinion
+rather than two independent implementations agreeing. None of the three
+grades describes that evidence honestly.
 
 ## Runtime self-update
 
@@ -529,7 +562,7 @@ PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py         # every tool over MC
 PYTHONPATH=. .venv/bin/python tests/test_executor_sweep.py  # sandbox regressions
 ```
 
-28 test files and 11 gate scripts, **1222 assertions**. Nothing in the suite
+29 test files and 11 gate scripts, **1222 assertions**. Nothing in the suite
 needs the internet, so none of it is ever skipped for lack of a network.
 
 It **can** skip for lack of a *capability*, and that is correct rather than a
