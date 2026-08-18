@@ -22,6 +22,7 @@ Two planes:
 from __future__ import annotations
 
 import json
+import socket
 import subprocess
 import sys
 import threading
@@ -30,6 +31,7 @@ import urllib.error
 import urllib.request
 import uuid
 from http import HTTPStatus
+from urllib.parse import urlsplit
 
 from codecalc import providers
 from codecalc.strict_runtime import (
@@ -38,6 +40,10 @@ from codecalc.strict_runtime import (
     published_strict_image,
 )
 from codecalc.strict_service import (
+    MAX_CONCURRENT_RUNS,
+    MAX_CONTENT_LENGTH,
+    MAX_TIMEOUT_SECONDS,
+    MAX_TRACKED_RUNS,
     STRICT_SERVICE_PROVIDER_ID,
     StrictHTTPServer,
     StrictService,
@@ -58,11 +64,14 @@ class FakeRuntime:
     """Records lifecycle calls and returns container-shaped results."""
 
     def __init__(self, *, enforcement_ok: bool = True, probe_raises: str | None = None,
-                 execute_result: dict | None = None) -> None:
+                 execute_result: dict | None = None,
+                 execute_raises: BaseException | None = None) -> None:
         self.enforcement_ok = enforcement_ok
         self.probe_raises = probe_raises
         self.execute_result = execute_result
+        self.execute_raises = execute_raises
         self.calls: list[tuple[str, str]] = []
+        self.last_timeout: int | None = None
 
     def probe(self) -> dict:
         if self.probe_raises is not None:
@@ -82,6 +91,9 @@ class FakeRuntime:
 
     def execute(self, run_id, *, language, source, timeout, **kwargs) -> dict:
         self.calls.append(("execute", run_id))
+        self.last_timeout = timeout
+        if self.execute_raises is not None:
+            raise self.execute_raises
         if self.execute_result is not None:
             return dict(self.execute_result)
         return {
@@ -126,6 +138,49 @@ def raw_status(base_url: str, path: str, *, method: str = "GET",
             return response.status
     except urllib.error.HTTPError as exc:
         return exc.code
+
+
+def raw_oversized_request(
+    base_url: str, path: str, *, declared_length: int, sent_body: bytes,
+    token: str | None,
+) -> tuple[int, float]:
+    """Send a request whose ``Content-Length`` LIES about the body size — far
+    fewer bytes actually follow than declared. ``urllib`` always sends a
+    correct ``Content-Length``, so this needs a raw socket to prove the fix:
+    if the handler ever calls ``rfile.read(declared_length)`` before checking
+    the ceiling, it blocks waiting for bytes that never arrive, and this
+    times out instead of returning a fast 413.
+    """
+    parts = urlsplit(base_url)
+    lines = [
+        f"POST {path} HTTP/1.1",
+        f"Host: {parts.hostname}:{parts.port}",
+        "Content-Type: application/json",
+        f"Content-Length: {declared_length}",
+        "Connection: close",
+    ]
+    if token is not None:
+        lines.append(f"Authorization: Bearer {token}")
+    header = ("\r\n".join(lines) + "\r\n\r\n").encode()
+    started = time.time()
+    response = b""
+    with socket.create_connection((parts.hostname, parts.port), timeout=5) as sock:
+        sock.sendall(header + sent_body)
+        sock.settimeout(5)
+        try:
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                response += chunk
+        except TimeoutError:
+            pass
+    elapsed = time.time() - started
+    try:
+        status = int(response.split(b"\r\n", 1)[0].split(b" ")[1])
+    except (IndexError, ValueError):
+        status = 0
+    return status, elapsed
 
 
 # ── PROTOCOL + AUTH (always runs) ────────────────────────────────────────────
@@ -211,6 +266,191 @@ def test_broken_health_makes_client_refuse_before_payload() -> None:
               result["provider_error"] == "strict_attestation_failed")
         check("no payload was executed after a failed handshake",
               not any(call[0] == "execute" for call in runtime.calls))
+    finally:
+        server.shutdown()
+
+
+def test_oversized_content_length_rejected_before_read_and_before_auth() -> None:
+    # A pre-auth, unbounded body read is a memory-exhaustion DoS: an
+    # unauthenticated caller could force a giant allocation before the 401.
+    # Declare a body far over MAX_CONTENT_LENGTH but only ever SEND a few
+    # bytes, and omit the Authorization header entirely — if the handler read
+    # the declared length before checking the ceiling (or before the auth
+    # gate), it would block waiting on bytes that never arrive, and this test
+    # would time out instead of getting a fast 413.
+    server, url = serve(FakeRuntime())
+    try:
+        status, elapsed = raw_oversized_request(
+            url, "/v1/runs/oversized-run/execute",
+            declared_length=MAX_CONTENT_LENGTH + 4096,
+            sent_body=b'{"language": "python3"}',
+            token=None,
+        )
+        check("an oversized unauthenticated body is rejected with 413",
+              status == HTTPStatus.REQUEST_ENTITY_TOO_LARGE, f"status={status}")
+        check("the oversized body was refused promptly, never read",
+              elapsed < 4, f"elapsed={elapsed:.2f}s")
+        check("the run was never admitted to the registry",
+              "oversized-run" not in server.service._runs)
+    finally:
+        server.shutdown()
+
+
+def test_run_registry_does_not_grow_without_bound() -> None:
+    runtime = FakeRuntime()
+    service = StrictService(token=TOKEN, runtime=runtime)
+    total = MAX_TRACKED_RUNS + 50
+    for i in range(total):
+        status, _ = service.dispatch(
+            "POST", f"/v1/runs/run-cap-{i:05d}/execute",
+            {"Authorization": f"Bearer {TOKEN}"},
+            json.dumps({"language": "python3", "code": "x"}).encode(),
+        )
+        if status != HTTPStatus.OK:
+            check(f"submission {i} succeeded", False, f"status={status}")
+            break
+    check("the run registry never exceeds MAX_TRACKED_RUNS",
+          len(service._runs) <= MAX_TRACKED_RUNS, f"len={len(service._runs)}")
+    check("the newest run is retained, not evicted",
+          f"run-cap-{total - 1:05d}" in service._runs)
+    check("an old run beyond the cap was evicted",
+          "run-cap-00000" not in service._runs)
+
+
+def test_concurrent_run_cap_returns_429() -> None:
+    runtime = FakeRuntime()
+    service = StrictService(token=TOKEN, runtime=runtime)
+    with service._lock:
+        for i in range(MAX_CONCURRENT_RUNS):
+            service._runs[f"in-flight-{i}"] = {
+                "run_id": f"in-flight-{i}", "status": "running",
+            }
+    status, _ = service.dispatch(
+        "POST", "/v1/runs/one-more/execute",
+        {"Authorization": f"Bearer {TOKEN}"},
+        json.dumps({"language": "python3", "code": "x"}).encode(),
+    )
+    check("a run submitted above the concurrency cap is refused",
+          status == HTTPStatus.TOO_MANY_REQUESTS, f"status={status}")
+    check("the refused run was never handed to the runtime",
+          not any(call == ("execute", "one-more") for call in runtime.calls))
+    check("the refused run was not admitted to the registry",
+          "one-more" not in service._runs)
+
+
+def test_non_strict_runtime_exception_releases_the_concurrency_slot() -> None:
+    # A failure from runtime.execute() that is NOT StrictRuntimeUnavailable —
+    # subprocess.TimeoutExpired and OSError are the real cases, from
+    # strict_runtime's `subprocess.run(..., timeout=timeout+5)` — must still
+    # settle the record to a terminal state and free its concurrency slot.
+    # Leaving it "running" forever would let MAX_CONCURRENT_RUNS hung
+    # containers wedge the service at 429 permanently: the exact
+    # availability DoS the concurrency cap exists to close, moved one
+    # exception type over.
+    timeout_exc = subprocess.TimeoutExpired(cmd="docker run codecalc-exec", timeout=15)
+    runtime = FakeRuntime(execute_raises=timeout_exc)
+    service = StrictService(token=TOKEN, runtime=runtime)
+
+    for i in range(MAX_CONCURRENT_RUNS):
+        status, _ = service.dispatch(
+            "POST", f"/v1/runs/wedge-{i}/execute",
+            {"Authorization": f"Bearer {TOKEN}"},
+            json.dumps({"language": "python3", "code": "x"}).encode(),
+        )
+        check(f"wedge run {i}: a non-StrictRuntimeUnavailable failure still returns a "
+              f"definitive 500, not a hang", status == HTTPStatus.INTERNAL_SERVER_ERROR,
+              f"status={status}")
+    check("(a) every wedge run's record is terminal, none stuck 'running'",
+          all(r.get("status") != "running" for r in service._runs.values()),
+          f"statuses={[r.get('status') for r in service._runs.values()]}")
+
+    # (b) the slot was released: a fresh run is NOT wedged at 429 even though
+    # MAX_CONCURRENT_RUNS runs just "failed" without ever completing.
+    service._runtime = FakeRuntime()
+    status, _ = service.dispatch(
+        "POST", "/v1/runs/after-wedge/execute",
+        {"Authorization": f"Bearer {TOKEN}"},
+        json.dumps({"language": "python3", "code": "x"}).encode(),
+    )
+    check("(b) a run submitted after N terminal failures is not wedged at 429",
+          status == HTTPStatus.OK, f"status={status}")
+
+    # (c) _evict_oldest_locked can reclaim a record the exception path left
+    # behind: push the registry past its cap and confirm the earliest
+    # wedge-run record — terminal, never "completed" — is gone.
+    for i in range(MAX_TRACKED_RUNS):
+        service.dispatch(
+            "POST", f"/v1/runs/fill-{i:05d}/execute",
+            {"Authorization": f"Bearer {TOKEN}"},
+            json.dumps({"language": "python3", "code": "x"}).encode(),
+        )
+    check("(c) a terminal record left by the exception path is reclaimed by eviction",
+          "wedge-0" not in service._runs, f"len={len(service._runs)}")
+
+
+def test_timeout_above_ceiling_is_clamped() -> None:
+    runtime = FakeRuntime()
+    service = StrictService(token=TOKEN, runtime=runtime)
+    huge = MAX_TIMEOUT_SECONDS * 10
+    status, _ = service.dispatch(
+        "POST", "/v1/runs/clamp-run/execute",
+        {"Authorization": f"Bearer {TOKEN}"},
+        json.dumps({"language": "python3", "code": "x", "timeout": huge}).encode(),
+    )
+    check("a run with an oversized timeout still executes", status == HTTPStatus.OK)
+    check("the timeout handed to the runtime is clamped to the ceiling",
+          runtime.last_timeout == MAX_TIMEOUT_SECONDS,
+          f"last_timeout={runtime.last_timeout}")
+
+
+def test_empty_controls_receipt_yields_empty_enforcement() -> None:
+    # A runtime that ever returns a receipt with missing/empty controls must
+    # not have the server synthesize the full control set as True — that is
+    # fail-OPEN. It must come back empty (fail-CLOSED); a genuinely partial
+    # (non-empty) list is untouched, since the client already rejects it.
+    empty = {
+        "ok": True, "verdict": "OK", "stdout": "", "stderr": "", "exit_code": 0,
+        "unenforced": [],
+        "strict_receipt": {"verified": True, "isolation_profile": ISOLATION_PROFILE,
+                            "runtime": "runsc", "controls": []},
+    }
+    missing = {
+        "ok": True, "verdict": "OK", "stdout": "", "stderr": "", "exit_code": 0,
+        "unenforced": [],
+        "strict_receipt": {"verified": True, "isolation_profile": ISOLATION_PROFILE,
+                            "runtime": "runsc"},  # no "controls" key at all
+    }
+    for label, tainted in (("empty controls list", empty), ("missing controls key", missing)):
+        service = StrictService(token=TOKEN, runtime=FakeRuntime(execute_result=tainted))
+        status, payload = service.dispatch(
+            "POST", "/v1/runs/no-controls/execute",
+            {"Authorization": f"Bearer {TOKEN}"},
+            json.dumps({"language": "python3", "code": "x"}).encode(),
+        )
+        check(f"{label}: response is still 200", status == HTTPStatus.OK)
+        check(f"{label}: enforcement is EMPTY, not synthesized all-True",
+              payload.get("enforcement") == {}, f"enforcement={payload.get('enforcement')!r}")
+
+
+def test_empty_controls_fails_client_attestation() -> None:
+    # Close the loop end-to-end through the real client: fail-closed
+    # enforcement must make execute_managed refuse the receipt, exactly like
+    # test_broken_health_makes_client_refuse_before_payload does for health.
+    tainted = {
+        "ok": True, "verdict": "OK", "stdout": "42\n", "stderr": "", "exit_code": 0,
+        "unenforced": [],
+        "strict_receipt": {"verified": True, "isolation_profile": ISOLATION_PROFILE,
+                            "runtime": "runsc", "controls": []},
+    }
+    server, url = serve(FakeRuntime(execute_result=tainted))
+    try:
+        remote = client(url)
+        run_id = "run-" + uuid.uuid4().hex
+        result = remote.execute_managed(
+            run_id, providers.ComputationSpec("python3", "print(42)", no_net=True))
+        check("an empty-controls receipt fails the client's attestation",
+              result["ok"] is False
+              and result["provider_error"] == "strict_attestation_failed")
     finally:
         server.shutdown()
 
@@ -373,6 +613,13 @@ if __name__ == "__main__":
     test_cleanup_is_idempotent()
     test_bearer_auth_is_required()
     test_broken_health_makes_client_refuse_before_payload()
+    test_oversized_content_length_rejected_before_read_and_before_auth()
+    test_run_registry_does_not_grow_without_bound()
+    test_concurrent_run_cap_returns_429()
+    test_non_strict_runtime_exception_releases_the_concurrency_slot()
+    test_timeout_above_ceiling_is_clamped()
+    test_empty_controls_receipt_yields_empty_enforcement()
+    test_empty_controls_fails_client_attestation()
     test_unavailable_runtime_reports_not_ready()
     test_service_never_leaks_the_credential()
     test_missing_authorization_never_reaches_the_runtime()

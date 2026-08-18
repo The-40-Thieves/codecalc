@@ -75,6 +75,33 @@ STRICT_SERVICE_TOKEN_ENV = "CODECALC_STRICT_SERVICE_TOKEN"  # noqa: S105 -- env 
 #: service runs on Linux (it is the host that can run gVisor), so this is fixed.
 STRICT_SERVICE_PROVIDER_ID = "linux-strict"
 
+#: Ceiling on a request body the strict service will read into memory, checked
+#: against the declared ``Content-Length`` BEFORE any bytes are read and BEFORE
+#: the auth gate runs (a declared size is not a secret) — an unauthenticated
+#: caller sending a huge ``Content-Length`` must never force a giant allocation.
+#: A code-execution payload has no legitimate reason to approach this; 1 MiB is
+#: generous headroom over any real ``language``/``code`` pair. Only the
+#: ``Content-Length``-declared path is guarded: ``_StrictRequestHandler`` never
+#: negotiates chunked ``Transfer-Encoding`` and ``rfile.read(length)`` is its
+#: only body read, so there is no unbounded-chunked path to close here.
+MAX_CONTENT_LENGTH = 1024 * 1024  # 1 MiB
+
+#: Ceiling on retained run records. ``_runs`` only shrinks on an explicit
+#: DELETE; a client that submits and never cleans up would otherwise grow the
+#: registry without bound. The oldest TERMINAL (non-"running") record is
+#: evicted once this is exceeded — see ``StrictService._evict_oldest_locked``.
+MAX_TRACKED_RUNS = 512
+
+#: Ceiling on runs with status "running" at once. Refused with 429 rather than
+#: queued, so a burst of submissions cannot pile up unbounded concurrent gVisor
+#: containers.
+MAX_CONCURRENT_RUNS = 8
+
+#: Ceiling on a client-supplied ``timeout`` (seconds), clamped rather than
+#: rejected — matching how a non-positive timeout is already treated as "use
+#: the default" (see ``_positive_int``) rather than an error.
+MAX_TIMEOUT_SECONDS = 300
+
 
 class _HttpError(Exception):
     """An early return carrying an HTTP status and a JSON body."""
@@ -124,6 +151,23 @@ class StrictService:
 
     def _redact(self, value: Any) -> Any:
         return _redact_secrets(value, self._secrets)
+
+    def _evict_oldest_locked(self) -> None:
+        """Drop terminal-state run records, oldest first, until ``_runs`` is
+        back under ``MAX_TRACKED_RUNS``. Caller MUST hold ``self._lock``.
+
+        A record still ``"running"`` is never evicted: ``_execute`` is
+        synchronous, so ``"running"`` only exists for the duration of another
+        thread's in-flight call, not as an accumulated leak — the leak this
+        guards against is a client that submits and never DELETEs.
+        """
+        if len(self._runs) <= MAX_TRACKED_RUNS:
+            return
+        for stale_id, record in list(self._runs.items()):
+            if len(self._runs) <= MAX_TRACKED_RUNS:
+                break
+            if record.get("status") != "running":
+                self._runs.pop(stale_id, None)
 
     def authorized(self, headers: Mapping[str, str]) -> bool:
         presented = headers.get("Authorization", "") or ""
@@ -249,7 +293,9 @@ class StrictService:
         memory_mb = _positive_int(spec.get("max_memory_mb"))
         if memory_mb:
             kwargs["memory_mb"] = memory_mb
-        timeout = _positive_int(spec.get("timeout")) or 10
+        # Clamped, not rejected: a client-supplied timeout above the ceiling
+        # degrades to "runs as long as we'll allow" rather than erroring.
+        timeout = min(_positive_int(spec.get("timeout")) or 10, MAX_TIMEOUT_SECONDS)
 
         runtime = self._resolve_runtime()
         record: dict[str, Any] = {
@@ -259,7 +305,18 @@ class StrictService:
             "created_at": time.time(),
         }
         with self._lock:
+            in_flight = sum(1 for r in self._runs.values() if r.get("status") == "running")
+            if in_flight >= MAX_CONCURRENT_RUNS:
+                raise _HttpError(
+                    HTTPStatus.TOO_MANY_REQUESTS,
+                    {
+                        "ok": False,
+                        "error": "strict service is at its concurrent-run limit",
+                        "run_id": run_id,
+                    },
+                )
             self._runs[run_id] = record
+            self._evict_oldest_locked()
         try:
             result = runtime.execute(
                 run_id, language=language, source=code, timeout=timeout, **kwargs
@@ -273,14 +330,39 @@ class StrictService:
                 HTTPStatus.INTERNAL_SERVER_ERROR,
                 {"ok": False, "error": message, "run_id": run_id},
             ) from None
+        except Exception as exc:
+            # ANY other failure — subprocess.TimeoutExpired, OSError, or
+            # anything else strict_runtime's own except BaseException:...raise
+            # lets through — must still settle the record to a terminal state.
+            # MAX_CONCURRENT_RUNS is derived by counting "running" records
+            # live (see the in_flight sum above); leaving one stuck at
+            # "running" forever (no `finally`, no catch-all) would let a
+            # handful of hung containers wedge the service at the cap
+            # permanently — the exact availability DoS this cap exists to
+            # close, just moved one exception type over. Treated the same as
+            # StrictRuntimeUnavailable: no reason to distinguish "failed"
+            # reasons here.
+            message = self._redact(f"strict execution failed: {exc}")
+            with self._lock:
+                record["status"] = "failed"
+                record["error"] = message
+            raise _HttpError(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {"ok": False, "error": message, "run_id": run_id},
+            ) from None
 
         result = dict(result)
         # The client's execute_managed VERIFIES this block: every strict control
         # must be present and True or it refuses the receipt. It is derived from
         # the controls the runtime's own receipt records applying (== the strict
-        # launch's full set), not a second hand-maintained list.
+        # launch's full set), not a second hand-maintained list. A receipt with
+        # missing/empty controls must NOT synthesize the full set as True — that
+        # would fail OPEN for a runtime bug or malformed receipt. It becomes
+        # empty enforcement instead, which the client already rejects as an
+        # incomplete set (fail CLOSED); a genuinely partial (non-empty) list is
+        # left as-is for the same rejection.
         receipt = result.get("strict_receipt") or {}
-        controls = receipt.get("controls") or list(ENFORCEMENT_CONTROLS)
+        controls = receipt.get("controls") or []
         result["enforcement"] = dict.fromkeys(controls, True)
         result.setdefault("run_id", run_id)
         with self._lock:
@@ -346,11 +428,37 @@ class _StrictRequestHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "codecalc-strict/1"
 
+    def _reject_oversized(self, length: int) -> None:
+        """Refuse a declared body size we will not buffer, WITHOUT reading it.
+
+        This runs before ``dispatch()`` — before the auth gate — deliberately:
+        a declared ``Content-Length`` is not a secret, and the whole point is
+        that an unauthenticated caller can never force a giant allocation. The
+        connection is then closed rather than kept alive: the unread body is
+        still sitting in the socket, and there is no bound on it to safely
+        drain, so persistence is not attempted.
+        """
+        data = json.dumps({
+            "ok": False,
+            "error": f"request body of {length} bytes exceeds the "
+                     f"{MAX_CONTENT_LENGTH} byte ceiling",
+        }).encode()
+        self.send_response(int(HTTPStatus.REQUEST_ENTITY_TOO_LARGE))
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(data)
+        self.close_connection = True
+
     def _handle(self, method: str) -> None:
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             length = 0
+        if length > MAX_CONTENT_LENGTH:
+            self._reject_oversized(length)
+            return
         body = self.rfile.read(length) if length > 0 else b""
         status, payload = self.server.service.dispatch(  # type: ignore[attr-defined]
             method, self.path, self.headers, body
