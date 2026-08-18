@@ -138,7 +138,20 @@ class RunSupervisor:
             run = self._get(run_id)
             if run.cleaned:
                 return {"run_id": run_id, "cleaned": True, "already_cleaned": True}
-            run.provider.cleanup(run_id)
+            # Capability-gated, mirroring recover_orphans() below — which has
+            # always checked this before calling provider.cleanup(). This site
+            # did not, and every provider that does not advertise `cleanup`
+            # (LocalExecutionProvider among them: capabilities={"cleanup":
+            # False, ...}) raises UnsupportedCapability unconditionally, so
+            # calling this against anything but a managed remote provider
+            # crashed. Latent rather than caught earlier: cleanup() was only
+            # ever reached from ExecutionService.execute()'s managed-provider
+            # branch, where managed_runs=True happened to always pair with
+            # cleanup=True for the one provider that implements it. THE-778's
+            # run_submit/run_inspect/run_cancel tools call this for ANY
+            # provider a caller selects, which is what surfaced it.
+            if run.provider.describe()["capabilities"].get("cleanup"):
+                run.provider.cleanup(run_id)
             run.cleaned = True
             run.state = "cleaned"
             self._write(run)
@@ -163,8 +176,25 @@ class RunSupervisor:
                     continue
                 provider = self.registry.select(str(record["provider_id"]))
                 run_id = str(record["run_id"])
-                provider.cancel(run_id)
-                if provider.describe()["capabilities"].get("cleanup"):
+                capabilities = provider.describe()["capabilities"]
+                # Capability-gated (THE-778), same reasoning as the `cleanup`
+                # check two lines below, which this file already had and
+                # `cancel` did not: a provider that does not advertise
+                # `cancel` (LocalExecutionProvider among them) raises
+                # UnsupportedCapability unconditionally, and the `except`
+                # below does not catch that (deliberately — a RuntimeError
+                # there is a real defect, not unreadable journal state), so
+                # an orphaned LOCAL-provider run left over from a crash
+                # aborted THIS loop entirely — which is called at server.py
+                # IMPORT time, so it took the whole server down on the very
+                # restart the journal exists to survive. For a provider that
+                # cannot cancel, there is also nothing TO signal: a `local`
+                # run is a subprocess of the now-dead PARENT process, already
+                # gone with it, so recovery here is "nothing to do", not
+                # "failed to do it".
+                if capabilities.get("cancel"):
+                    provider.cancel(run_id)
+                if capabilities.get("cleanup"):
                     provider.cleanup(run_id)
                 record["state"] = "recovered"
                 record["cleaned"] = True

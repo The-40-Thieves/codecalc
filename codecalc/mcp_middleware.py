@@ -84,6 +84,18 @@ TOOL_TIMEOUTS: dict[str, float] = {
     # additionally times each at four sizes. No network, but real execution.
     "verify_translation": 120,
     "verify_optimization": 180,
+    # run_submit/run_inspect/run_cancel (THE-778) are RunSupervisor control-
+    # plane calls: submit-and-return, a non-blocking status read, and a
+    # cancellation signal. None of them wait for the submitted computation to
+    # finish — that is what polling run_inspect is FOR — so they get a short
+    # deadline like the in-process calls above, rather than execute_code's
+    # generous DEFAULT_TIMEOUT_SECONDS fallback, which exists because THAT
+    # tool's own `timeout` argument already bounds the work it waits on.
+    # Named explicitly rather than left to the default specifically because
+    # THE-809 is exactly this table silently going quiet for an unlisted name.
+    "run_submit": 15,
+    "run_inspect": 10,
+    "run_cancel": 15,
 }
 
 #: Applied to any tool not named above. Generous on purpose: `execute_code` and

@@ -119,6 +119,32 @@ async def main():
         check("execute_code returns 6*7 = 42", (r.get("stdout") or "").strip() == "mcp ok 42",
               f"-> {(r.get('stdout') or '').strip()!r}")
 
+        # ── run_submit / run_inspect / run_cancel ──────────────────────────
+        submitted = data(await client.call_tool(
+            "run_submit", {"language": "python3", "code": "print('run ok', 6*7)"}))
+        check("run_submit returns ok with a run_id immediately",
+              submitted.get("ok") is True and bool(submitted.get("run_id")),
+              f"-> {submitted}")
+        run_id = submitted.get("run_id", "")
+        terminal = {}
+        for _ in range(100):
+            inspected = data(await client.call_tool("run_inspect", {"run_id": run_id}))
+            if inspected.get("state") in {"finished", "cleaned"}:
+                terminal = inspected
+                break
+            await asyncio.sleep(0.05)
+        check("run_inspect reaches a terminal state and collects the result",
+              (terminal.get("stdout") or "").strip() == "run ok 42",
+              f"-> {terminal}")
+        cancelled = data(await client.call_tool("run_cancel", {"run_id": run_id}))
+        check("run_cancel on an already-finished run is idempotent, not an error",
+              cancelled.get("ok") is True and cancelled.get("cancelled") is False,
+              f"-> {cancelled}")
+        unknown = data(await client.call_tool("run_inspect", {"run_id": "no-such-run"}))
+        check("run_inspect on an unknown run_id is a validation error",
+              unknown.get("ok") is False and unknown.get("code") == "validation",
+              f"-> {unknown}")
+
         # ── evaluate_expression ───────────────────────────────────────────
         r = data(await client.call_tool("evaluate_expression",
                                         {"expression": "integrate(x**2, x)"}))

@@ -48,7 +48,7 @@ implementation and the one that was a defect (#117).
 > Both were wrong, and a cross-vendor review found it: compact results, native
 > streaming and session workers all returned shapes the published schema
 > rejected. The version is now stamped at the MCP tool boundary, which is the
-> only place that actually reaches all 48 tools.
+> only place that actually reaches all 51 tools.
 
 Padding the short shapes with nulls so one schema fits everything was considered
 and rejected. It would have made "we could not tell you the exit code" and "the
@@ -116,7 +116,7 @@ practice, so matching it is the only number that means anything.
 ### How a client discovers the version
 
 Read `contract_version` off any result. It is stamped at the **MCP tool
-boundary**, which is the only place that reaches all 48 tools — so it is present
+boundary**, which is the only place that reaches all 51 tools — so it is present
 on success, on failure, on timeout, on a rejected request, on a compact result
 and on a session result alike. `executor.execute()` stamps it too, for callers
 using codecalc as a library rather than over MCP; the stamp uses `setdefault`,

@@ -8,11 +8,13 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 from mcp.types import ImageContent
 
-from codecalc import contract, execution_service, providers, server, sessions
+from codecalc import contract, execution_service, executor, providers, run_supervisor, server, sessions
 
 FAILS: list[str] = []
 
@@ -668,7 +670,7 @@ def test_main_runs_the_same_server_over_explicit_streamable_http() -> None:
 
 def test_serve_http_refuses_a_non_loopback_bind_without_a_token() -> None:
     """THE-786 residual: fail CLOSED. serve-http on a non-loopback host with no
-    CODECALC_HTTP_TOKEN would expose 48 unauthenticated code-execution tools to
+    CODECALC_HTTP_TOKEN would expose 51 unauthenticated code-execution tools to
     whatever network the interface reaches. Refusing to start is the only
     answer that cannot be misconfigured into an open server."""
     calls: list[dict] = []
@@ -755,6 +757,334 @@ def test_http_auth_is_wired_into_the_server_at_import_when_the_token_is_set() ->
           proc.returncode == 0)
 
 
+# ── THE-778: run_submit / run_inspect / run_cancel ──────────────────────────
+
+class _FakeRunProvider(providers.LocalExecutionProvider):
+    """A provider that finishes fast and deterministically, so run_submit/
+    run_inspect tests do not depend on the real sandbox or on timing."""
+
+    provider_id = "fake-run"
+
+    def describe(self) -> dict:
+        result = super().describe()
+        result["provider_id"] = self.provider_id
+        return result
+
+    def execute(self, spec: providers.ComputationSpec) -> dict:
+        return contract.stamp({
+            "ok": True, "verdict": "OK", "stdout": spec.code,
+            "stderr": "", "exit_code": 0, "unenforced": [],
+        })
+
+
+class _FakeCancellableProvider(_FakeRunProvider):
+    """Like _FakeRunProvider, but blocks until cancelled and DOES advertise
+    `cancel`/`cleanup` — the branch a provider like RemoteStrictExecution-
+    Provider takes, as opposed to the built-in `local` provider."""
+
+    provider_id = "fake-cancellable"
+
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.cancelled: list[str] = []
+
+    def describe(self) -> dict:
+        result = super().describe()
+        result["capabilities"]["cancel"] = True
+        result["capabilities"]["cleanup"] = True
+        return result
+
+    def execute(self, spec: providers.ComputationSpec) -> dict:
+        self.entered.set()
+        self.release.wait(5)
+        return contract.stamp({
+            "ok": True, "verdict": "OK", "stdout": spec.code,
+            "stderr": "", "exit_code": 0, "unenforced": [],
+        })
+
+    def cancel(self, run_id: str) -> None:
+        self.cancelled.append(run_id)
+        self.release.set()
+
+    def cleanup(self, run_id: str) -> None:
+        pass
+
+
+def _run_registry(*provs) -> providers.ProviderRegistry:
+    registry = providers.ProviderRegistry(default_provider_id=provs[0].provider_id)
+    for p in provs:
+        registry.register(p)
+    return registry
+
+
+def test_run_submit_returns_a_run_id_immediately_and_run_inspect_polls_to_terminal() -> None:
+    registry = _run_registry(_FakeRunProvider())
+    old = server._run_supervisor
+    with tempfile.TemporaryDirectory(prefix="codecalc-run-tools-") as root:
+        server._run_supervisor = run_supervisor.RunSupervisor(registry, state_dir=Path(root))
+        try:
+            submitted = server.run_submit("python3", "collected-output")
+            check("run_submit succeeds and returns a run_id",
+                  submitted.get("ok") is True and bool(submitted.get("run_id")))
+            check("run_submit reports the selected provider and a running state",
+                  submitted.get("provider_id") == "fake-run" and submitted.get("state") == "running")
+            run_id = submitted.get("run_id", "")
+
+            terminal = None
+            for _ in range(100):
+                inspected = server.run_inspect(run_id)
+                if inspected.get("state") in {"finished", "cleaned"}:
+                    terminal = inspected
+                    break
+                time.sleep(0.02)
+            check("run_inspect eventually reaches a terminal state", terminal is not None)
+            if terminal is not None:
+                check("a terminal run_inspect carries the execute_code result shape",
+                      terminal.get("stdout") == "collected-output"
+                      and terminal.get("verdict") == "OK"
+                      and terminal.get("ok") is True)
+                check("a terminal run_inspect still carries its own run_id",
+                      terminal.get("run_id") == run_id)
+                again = server.run_inspect(run_id)
+                check("a finished run stays inspectable on a second read (retention)",
+                      again.get("stdout") == "collected-output")
+        finally:
+            server._run_supervisor = old
+
+
+def test_run_inspect_reports_a_validation_error_for_an_unknown_run_id() -> None:
+    registry = _run_registry(_FakeRunProvider())
+    old = server._run_supervisor
+    with tempfile.TemporaryDirectory(prefix="codecalc-run-tools-unknown-") as root:
+        server._run_supervisor = run_supervisor.RunSupervisor(registry, state_dir=Path(root))
+        try:
+            result = server.run_inspect("does-not-exist")
+            check("unknown run_id is a validation error, not a crash",
+                  result.get("ok") is False and result.get("code") == "validation")
+            check("unknown run_id names the provider_error",
+                  result.get("provider_error") == "unknown_run")
+        finally:
+            server._run_supervisor = old
+
+
+def test_run_cancel_is_idempotent_on_an_already_terminal_run() -> None:
+    registry = _run_registry(_FakeRunProvider())
+    old = server._run_supervisor
+    with tempfile.TemporaryDirectory(prefix="codecalc-run-tools-cancel-terminal-") as root:
+        server._run_supervisor = run_supervisor.RunSupervisor(registry, state_dir=Path(root))
+        try:
+            submitted = server.run_submit("python3", "x")
+            run_id = submitted["run_id"]
+            for _ in range(100):
+                if server.run_inspect(run_id).get("state") == "finished":
+                    break
+                time.sleep(0.02)
+            result = server.run_cancel(run_id)
+            check("cancelling an already-finished run is a no-op, not an error",
+                  result.get("ok") is True and result.get("cancelled") is False)
+        finally:
+            server._run_supervisor = old
+
+
+class _FakeUncancellableRunningProvider(_FakeRunProvider):
+    """Like _FakeRunProvider, but blocks until released — so a cancel races a
+    REAL running state, not a terminal one — while still not advertising
+    `cancel` (LocalExecutionProvider's own shape)."""
+
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def execute(self, spec: providers.ComputationSpec) -> dict:
+        self.entered.set()
+        self.release.wait(5)
+        return super().execute(spec)
+
+
+def test_run_cancel_honestly_reports_a_provider_that_cannot_cancel() -> None:
+    """The built-in `local` provider (LocalExecutionProvider) does not
+    advertise `cancel` and its cancel() raises UnsupportedCapability. This
+    must not escape run_cancel as an unhandled exception, and must not be
+    reported as a fake success either — see run_cancel's own docstring."""
+    provider = _FakeUncancellableRunningProvider()
+    registry = _run_registry(provider)
+    old = server._run_supervisor
+    with tempfile.TemporaryDirectory(prefix="codecalc-run-tools-uncancellable-") as root:
+        server._run_supervisor = run_supervisor.RunSupervisor(registry, state_dir=Path(root))
+        try:
+            submitted = server.run_submit("python3", "x", timeout=5)
+            run_id = submitted["run_id"]
+            provider.entered.wait(2)
+            result = server.run_cancel(run_id)
+            provider.release.set()
+            check("cancelling an uncancellable provider is a validation error, not a crash",
+                  result.get("ok") is False and result.get("code") == "validation")
+            check("the error names the provider that could not cancel",
+                  result.get("requested_provider") == provider.provider_id)
+        finally:
+            server._run_supervisor = old
+
+
+def test_run_cancel_reaches_a_provider_that_supports_it() -> None:
+    provider = _FakeCancellableProvider()
+    registry = _run_registry(provider)
+    old = server._run_supervisor
+    with tempfile.TemporaryDirectory(prefix="codecalc-run-tools-cancellable-") as root:
+        server._run_supervisor = run_supervisor.RunSupervisor(registry, state_dir=Path(root))
+        try:
+            submitted = server.run_submit("python3", "x", timeout=5)
+            run_id = submitted["run_id"]
+            provider.entered.wait(2)
+            result = server.run_cancel(run_id)
+            check("a provider that supports cancel reports cancelled=True",
+                  result.get("ok") is True and result.get("cancelled") is True)
+            check("the cancel reaches the owning provider",
+                  provider.cancelled == [run_id])
+        finally:
+            server._run_supervisor = old
+
+
+def test_run_tools_return_an_internal_error_when_no_supervisor_is_wired() -> None:
+    old = server._run_supervisor
+    server._run_supervisor = None
+    try:
+        submitted = server.run_submit("python3", "x")
+        inspected = server.run_inspect("whatever")
+        cancelled = server.run_cancel("whatever")
+    finally:
+        server._run_supervisor = old
+    check("run_submit fails cleanly with no supervisor wired",
+          submitted.get("ok") is False and submitted.get("code") == "internal")
+    check("run_inspect fails cleanly with no supervisor wired",
+          inspected.get("ok") is False and inspected.get("code") == "internal")
+    check("run_cancel fails cleanly with no supervisor wired",
+          cancelled.get("ok") is False and cancelled.get("code") == "internal")
+
+
+# ── THE-783: session output spills to a workspace artifact ─────────────────
+
+def _spill_read(session_id: str, spill_uri: str) -> bytes:
+    rel = spill_uri.split("/files/", 1)[1]
+    data, _mime = sessions.resource_read(session_id, rel)
+    return data
+
+
+def test_session_output_spills_past_the_default_cap_instead_of_dropping_it() -> None:
+    old_root = sessions.SESSION_ROOT
+    with tempfile.TemporaryDirectory(prefix="codecalc-spill-") as root:
+        sessions.SESSION_ROOT = Path(root)
+        try:
+            session_id = sessions.start("bash")["session_id"]
+            # 100000 bytes of 'A', generated by bash itself — no nested-quote
+            # surface with a second interpreter.
+            code = "head -c 100000 /dev/zero | tr '\\0' 'A'"
+            result = sessions.execute(session_id, code, language="bash")
+            full = b"A" * 100_000
+
+            check("oversized session output is reported truncated",
+                  result.get("output_truncated") is True)
+            marker = "\n…[truncated]"
+            check("the inline stdout stays at the default cap plus the truncation marker",
+                  len(result["stdout"]) == executor.MAX_OUTPUT_BYTES + len(marker))
+            check("the inline stdout is a real PREFIX of the full output",
+                  full.decode().startswith(result["stdout"][:-len(marker)]))
+            spill_uri = result.get("stdout_spill")
+            check("a spill resource URI is returned",
+                  isinstance(spill_uri, str)
+                  and spill_uri.startswith(f"codecalc://session/{session_id}/files/"))
+            data = _spill_read(session_id, spill_uri) if spill_uri else None
+            check("the spill file is byte-identical to the FULL output", data == full)
+
+            below = sessions.execute(session_id, "echo below-threshold", language="bash")
+            check("output at/under the cap is never spilled",
+                  below.get("output_truncated") is False and "stdout_spill" not in below)
+
+            explicit = sessions.execute(session_id, code, language="bash", max_output_kb=1)
+            # <= 1024 + a short truncation-marker allowance — the exact
+            # marker text is a per-backend detail (executor.py appends
+            # "…[truncated]"; the Rust binary appends "...[truncated]", two
+            # bytes longer) and is not what this assertion is about.
+            check("an EXPLICIT max_output_kb caps output literally, with no spill",
+                  "stdout_spill" not in explicit
+                  and len(explicit["stdout"]) <= 1024 + 20)
+        finally:
+            sessions.SESSION_ROOT = old_root
+
+
+def test_session_output_spill_is_binary_safe() -> None:
+    old_root = sessions.SESSION_ROOT
+    with tempfile.TemporaryDirectory(prefix="codecalc-spill-binary-") as root:
+        sessions.SESSION_ROOT = Path(root)
+        try:
+            session_id = sessions.start("bash")["session_id"]
+            # A NUL byte embedded past the truncation point — valid UTF-8 (it
+            # is U+0000), so it survives codecalc's existing decode/encode
+            # boundary exactly, which is the fidelity spill_if_truncated
+            # documents it inherits rather than promising a stronger one.
+            code = (
+                "head -c 70000 /dev/zero | tr '\\0' 'B'; "
+                "printf '\\0'; "
+                "head -c 10 /dev/zero | tr '\\0' 'C'"
+            )
+            result = sessions.execute(session_id, code, language="bash")
+            spill_uri = result.get("stdout_spill")
+            check("a binary payload with an embedded NUL still triggers a spill",
+                  isinstance(spill_uri, str))
+            if spill_uri:
+                data = _spill_read(session_id, spill_uri)
+                expected = b"B" * 70_000 + b"\x00" + b"C" * 10
+                check("the spilled NUL-containing content round-trips byte-identical",
+                      data == expected)
+        finally:
+            sessions.SESSION_ROOT = old_root
+
+
+def test_session_run_also_spills_oversized_output() -> None:
+    """execution_service.SessionService.run_file() (the session_run MCP tool)
+    calls executor.execute() directly rather than through sessions.execute(),
+    so it needs its own wiring — this is that wiring's test."""
+    old_root = sessions.SESSION_ROOT
+    with tempfile.TemporaryDirectory(prefix="codecalc-spill-run-") as root:
+        sessions.SESSION_ROOT = Path(root)
+        try:
+            service = execution_service.SessionService()
+            session_id = service.start("bash")["session_id"]
+            service.write_file(
+                session_id, "main.sh",
+                "head -c 100000 /dev/zero | tr '\\0' 'A'",
+            )
+            result = service.run_file(session_id, "main.sh", timeout=10)
+            check("session_run spills oversized output the same way execute_code does",
+                  result.get("output_truncated") is True
+                  and isinstance(result.get("stdout_spill"), str))
+            data = _spill_read(session_id, result["stdout_spill"])
+            check("session_run's spill is byte-identical to the full output",
+                  data == b"A" * 100_000)
+        finally:
+            sessions.SESSION_ROOT = old_root
+
+
+def test_spill_files_are_retained_up_to_a_bounded_count() -> None:
+    old_root = sessions.SESSION_ROOT
+    old_retention = sessions._SPILL_RETENTION
+    sessions._SPILL_RETENTION = 3
+    with tempfile.TemporaryDirectory(prefix="codecalc-spill-retention-") as root:
+        sessions.SESSION_ROOT = Path(root)
+        try:
+            session_id = sessions.start("bash")["session_id"]
+            code = "head -c 100000 /dev/zero | tr '\\0' 'A'"
+            for _ in range(6):
+                sessions.execute(session_id, code, language="bash")
+            spill_dir = sessions._session_dir(session_id) / sessions._SPILL_DIRNAME
+            remaining = list(spill_dir.glob("*.bin"))
+            check("spill retention prunes to the bounded count",
+                  len(remaining) <= sessions._SPILL_RETENTION)
+        finally:
+            sessions.SESSION_ROOT = old_root
+            sessions._SPILL_RETENTION = old_retention
+
+
 if __name__ == "__main__":
     test_service_routes_a_canonical_spec_and_records_provider_identity()
     test_service_rejects_an_unknown_provider_without_falling_back()
@@ -780,4 +1110,14 @@ if __name__ == "__main__":
     test_serve_http_allows_non_loopback_with_a_token_and_loopback_range_without()
     test_http_auth_verifier_accepts_only_the_exact_token()
     test_http_auth_is_wired_into_the_server_at_import_when_the_token_is_set()
+    test_run_submit_returns_a_run_id_immediately_and_run_inspect_polls_to_terminal()
+    test_run_inspect_reports_a_validation_error_for_an_unknown_run_id()
+    test_run_cancel_is_idempotent_on_an_already_terminal_run()
+    test_run_cancel_honestly_reports_a_provider_that_cannot_cancel()
+    test_run_cancel_reaches_a_provider_that_supports_it()
+    test_run_tools_return_an_internal_error_when_no_supervisor_is_wired()
+    test_session_output_spills_past_the_default_cap_instead_of_dropping_it()
+    test_session_output_spill_is_binary_safe()
+    test_session_run_also_spills_oversized_output()
+    test_spill_files_are_retained_up_to_a_bounded_count()
     sys.exit(1 if FAILS else 0)

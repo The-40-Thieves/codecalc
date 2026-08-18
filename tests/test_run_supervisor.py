@@ -110,7 +110,59 @@ def test_journal_is_bounded_and_orphans_are_reconciled() -> None:
     check("completed run journal is bounded", len(journals) <= 1)
 
 
+class NoCleanupCapabilityProvider(providers.LocalExecutionProvider):
+    """A provider that does NOT advertise `cleanup` — the shape LocalExecution-
+    Provider itself is: capabilities={"cleanup": False, ...}, and its own
+    cleanup() raises UnsupportedCapability unconditionally if ever called."""
+
+    provider_id = "no-cleanup"
+
+    def describe(self) -> dict:
+        result = super().describe()
+        result["provider_id"] = self.provider_id
+        result["capabilities"]["managed_runs"] = True
+        # cleanup stays False — inherited from LocalExecutionProvider.describe()
+        return result
+
+    def execute_managed(self, run_id: str, spec: providers.ComputationSpec) -> dict:
+        from codecalc import contract as _contract
+        return _contract.stamp({
+            "ok": True, "verdict": "OK", "stdout": spec.code,
+            "stderr": "", "exit_code": 0, "unenforced": [],
+        })
+
+
+def test_cleanup_is_capability_gated_and_does_not_crash_on_a_provider_without_it() -> None:
+    """THE-778 residual: run_supervisor.cleanup() unconditionally called
+    provider.cleanup(), and LocalExecutionProvider.cleanup() raises
+    UnsupportedCapability (its own `cleanup` capability is False). That was
+    latent as long as cleanup() was only reached from ExecutionService's
+    managed-provider branch, where the one managed provider happens to also
+    advertise cleanup=True. run_submit/run_inspect/run_cancel call cleanup()
+    for ANY selected provider, which is what surfaces it — this is the
+    regression test for the capability guard added alongside them."""
+    provider = NoCleanupCapabilityProvider()
+    registry = providers.ProviderRegistry(default_provider_id=provider.provider_id)
+    registry.register(provider)
+    with tempfile.TemporaryDirectory(prefix="codecalc-runs-nocleanup-") as root:
+        supervisor = run_supervisor.RunSupervisor(registry, state_dir=Path(root))
+        handle = supervisor.start(providers.ComputationSpec("python3", "no crash"))
+        supervisor.wait(handle.run_id, timeout=5)
+        raised = None
+        try:
+            result = supervisor.cleanup(handle.run_id)
+        except Exception as exc:
+            raised = exc
+            result = None
+
+    check("cleanup() does not raise for a provider that does not advertise cleanup",
+          raised is None)
+    check("cleanup() still marks the run cleaned",
+          result is not None and result["cleaned"] is True)
+
+
 if __name__ == "__main__":
     test_lifecycle_is_provider_bound_and_cleanup_is_idempotent()
     test_journal_is_bounded_and_orphans_are_reconciled()
+    test_cleanup_is_capability_gated_and_does_not_crash_on_a_provider_without_it()
     sys.exit(1 if FAILS else 0)

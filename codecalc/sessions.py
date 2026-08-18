@@ -34,6 +34,41 @@ _WORKER_LANGS = {"python3", "node"}
 
 _SAFE_NAME = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
+#: Spill capture ceiling per stream (THE-783): bounded, not unbounded. When a
+#: session-scoped execution would otherwise truncate and drop the tail, the
+#: FULL stream is captured up to this cap (instead of the smaller default
+#: truncation cap) and, if it is still larger than what stays inline, written
+#: to a workspace file rather than discarded.
+#:
+#: This only ever REPLACES the DEFAULT truncation cap (`max_output_kb`
+#: unset/0). A caller who passes an EXPLICIT `max_output_kb` gets exactly
+#: that cap honoured, with no spill: #25 made `max_output_kb` a genuine
+#: memory ceiling (`_BoundedDrain` — "a truncation applied after the fact,
+#: not a ceiling"), and silently substituting a larger internal capture cap
+#: for an explicit caller-chosen one would quietly undo that fix for session
+#: calls specifically. Spilling on the UNSET default carries no such risk: a
+#: caller who never asked for a tight ceiling had no memory expectation to
+#: violate.
+#:
+#: No PER-SESSION total-disk quota exists to defer to instead — grepping
+#: quota/disk_usage/statvfs/FSIZE across codecalc/*.py, README.md,
+#: SECURITY.md and AUDIT.md finds none. The closest existing thing is
+#: executor.FSIZE_LIMIT_BYTES (256 MiB), a PER-PROCESS single-file rlimit
+#: applied to the SANDBOXED CHILD via preexec_fn — it does not bound the
+#: SERVER process writing a spill file. So this constant, plus
+#: _SPILL_RETENTION below, ARE the quota this feature adds, kept well under
+#: FSIZE_LIMIT_BYTES's ceiling.
+SPILL_CAPTURE_KB = 4096  # 4 MiB per stream
+
+#: Spill files live in this subdirectory of a session workspace.
+_SPILL_DIRNAME = ".codecalc-spill"
+
+#: Spill files retained per session before the oldest is pruned — bounds the
+#: total disk this feature can add over a session's lifetime, the same shape
+#: of protection run_supervisor.RunSupervisor.max_completed gives its own
+#: on-disk journal.
+_SPILL_RETENTION = 20
+
 _lock = threading.Lock()
 _workers: dict[str, Worker] = {}
 #: Session workdir identity (device, inode), recorded the moment each session
@@ -149,6 +184,15 @@ _WORKER_CANNOT_ENFORCE = {
     "max_output_kb": "the worker caps at 64 KiB; a custom cap needs a fresh process",
 }
 
+#: The spill mechanism below (THE-783, see SPILL_CAPTURE_KB) is scoped to
+#: this same "needs a fresh process" boundary: a stateful worker's own 64 KiB
+#: cap is hardcoded inside its bootstrap protocol script and applied BEFORE
+#: the bytes ever cross into this process, so there is nothing here to
+#: capture a larger version of without changing that protocol — same reason
+#: `max_output_kb` above cannot be honoured for a worker either. A caller
+#: whose worker output is oversized gets the same remedy: session_run (or a
+#: workspace session) instead of the stateful worker.
+
 #: Guarantees a ONE-SHOT execution carries that a stateful worker does not,
 #: keyed by the name `check_parity.py` matches against the executor.
 #:
@@ -245,9 +289,102 @@ def execute(session_id: str, code: str, language: str | None = None,
         return out
     # workspace-only session: fresh process in the session dir, fully sandboxed
     lang = registry.canonical(language) if language else "python3"
-    return executor.execute(lang, code, stdin=stdin, timeout=timeout, workdir=str(d),
-                            max_memory_mb=max_memory_mb, max_output_kb=max_output_kb,
-                            max_cpu=max_cpu, no_net=no_net)
+    if max_output_kb > 0:
+        # An EXPLICIT caller ceiling is honoured exactly — see SPILL_CAPTURE_KB.
+        return executor.execute(lang, code, stdin=stdin, timeout=timeout, workdir=str(d),
+                                max_memory_mb=max_memory_mb, max_output_kb=max_output_kb,
+                                max_cpu=max_cpu, no_net=no_net)
+    result = executor.execute(lang, code, stdin=stdin, timeout=timeout, workdir=str(d),
+                              max_memory_mb=max_memory_mb, max_output_kb=SPILL_CAPTURE_KB,
+                              max_cpu=max_cpu, no_net=no_net)
+    return spill_if_truncated(session_id, result, 0)
+
+
+def _spill_dir(d: Path) -> Path:
+    spill = d / _SPILL_DIRNAME
+    spill.mkdir(exist_ok=True)
+    return spill
+
+
+def _prune_spill(spill: Path) -> None:
+    """Keep only the _SPILL_RETENTION most recently written spill files.
+
+    Same shape as run_supervisor.RunSupervisor._prune: a bounded count,
+    oldest first, used here because no other quota governs this artifact
+    class (see SPILL_CAPTURE_KB's docstring).
+    """
+    files = sorted(spill.glob("*.bin"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for stale in files[_SPILL_RETENTION:]:
+        stale.unlink(missing_ok=True)
+
+
+def _write_spill(d: Path, stream: str, data: bytes) -> str:
+    """Write one stream's captured bytes into the session workspace.
+
+    Returns the path RELATIVE to the session dir — readable through the same
+    `_jail`-guarded routes (resource_read, session_files) as any other
+    workspace file. The filename is generated HERE (uuid4), never taken from
+    a caller, so there is no traversal surface for this write to defend
+    against beyond `d` itself already being the jailed session root.
+    """
+    spill = _spill_dir(d)
+    name = f"{uuid.uuid4().hex}-{stream}.bin"
+    target = spill / name
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW
+    fd = os.open(target, flags, 0o600)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(data)
+    _prune_spill(spill)
+    return f"{_SPILL_DIRNAME}/{name}"
+
+
+def _requested_cap_bytes(max_output_kb: int) -> int:
+    """The cap a caller asked for, or the executor's own default."""
+    return max_output_kb * 1024 if max_output_kb > 0 else executor.MAX_OUTPUT_BYTES
+
+
+def spill_if_truncated(session_id: str, result: dict, requested_cap_kb: int) -> dict:
+    """Move oversized stdout/stderr from an inline truncation to a workspace
+    artifact instead of dropping it (THE-783).
+
+    Call this AFTER executing at a CAPTURE cap (SPILL_CAPTURE_KB) that is
+    `>=` the caller's own requested cap, so `result['stdout']`/`['stderr']`
+    may already hold more than the caller asked to see inline. This
+    re-applies the caller's cap for the INLINE value — so a caller reading
+    `stdout` sees exactly what it always would have, truncated at exactly
+    the same length — and, only where that trims something real, writes the
+    captured bytes to a session file and references it instead of the
+    prefix being all a caller can ever get back.
+    """
+    d = _session_dir(session_id)
+    if not d.is_dir():
+        return result
+    cap = _requested_cap_bytes(requested_cap_kb)
+    spilled = False
+    for stream in ("stdout", "stderr"):
+        text = result.get(stream)
+        if not isinstance(text, str):
+            continue
+        # Re-encoded rather than compared as a Python string length: the cap
+        # (and the executor's own truncation this mirrors) is a BYTE budget,
+        # and codecalc's whole pipeline already represents output as text
+        # decoded with errors="replace" — this inherits that same fidelity
+        # rather than promising a stronger one nothing upstream provides.
+        data = text.encode("utf-8", errors="replace")
+        if len(data) <= cap:
+            continue
+        rel = _write_spill(d, stream, data)
+        result[f"{stream}_spill"] = f"codecalc://session/{session_id}/files/{rel}"
+        result[stream] = data[:cap].decode("utf-8", errors="replace") + "\n…[truncated]"
+        if len(data) >= SPILL_CAPTURE_KB * 1024:
+            # The capture itself hit ITS OWN ceiling: the spill is fuller
+            # than the inline value but is not proven to be the WHOLE
+            # stream. Said outright rather than presented as complete.
+            result[f"{stream}_spill_capped"] = True
+        spilled = True
+    if spilled:
+        result["output_truncated"] = True
+    return result
 
 
 def write_file(session_id: str, path: str, content: str) -> dict:

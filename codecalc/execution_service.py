@@ -290,13 +290,19 @@ class SessionService:
             extension = entry_file.rsplit(".", 1)[-1] if "." in entry_file else ""
             by_extension = {value: key for key, value in registry.EXTENSIONS.items()}
             language = by_extension.get(extension, "python3")
+        # THE-783: captured at the larger spill ceiling and re-truncated to
+        # the executor's own default cap, same as sessions.execute()'s
+        # workspace branch — session_run has no caller-facing max_output_kb
+        # of its own to honour instead (see sessions.SPILL_CAPTURE_KB).
         result = executor.execute(
             language,
             data.decode(errors="replace"),
             stdin=stdin,
             timeout=timeout,
             workdir=str(workdir),
+            max_output_kb=sessions.SPILL_CAPTURE_KB,
         )
+        result = sessions.spill_if_truncated(session_id, result, 0)
         result["entry_file"] = entry_file
         result["language"] = language
         return result

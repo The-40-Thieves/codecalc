@@ -269,7 +269,7 @@ carries on without one; `--no-net` then reports itself in `unenforced` rather
 than pretending), and [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild)
 for the static cross-builds (zig is used as the linker; no x86_64 GCC needed).
 
-## MCP tools (48) + MCP resources
+## MCP tools (51) + MCP resources
 
 Every session file is also exposed as an MCP resource:
 `codecalc://session/<session_id>/files/<path>` — images render inline for the
@@ -306,8 +306,11 @@ analysis, binary64 introspection.
 |---|---|
 | `list_languages` | 31 languages with extension, compile flag, runtime availability |
 | `list_execution_providers` | Execution-provider identity, interface version, host class, and machine-readable capabilities |
-| `execute_code` | Run code in any language → stdout/stderr/exit_code/**verdict** (OK/TLE/MLE/OLE/RTE)/cpu_ms/peak_memory_kb; per-call limits (`max_memory_mb`, `max_output_kb`, `max_cpu`), `no_net`, `compact` |
+| `execute_code` | Run code in any language → stdout/stderr/exit_code/**verdict** (OK/TLE/MLE/OLE/RTE)/cpu_ms/peak_memory_kb; per-call limits (`max_memory_mb`, `max_output_kb`, `max_cpu`), `no_net`, `compact`. With a session and no explicit `max_output_kb`, oversized output **spills** into the session workspace (`stdout_spill`/`stderr_spill`) instead of just truncating |
 | `execute_code_stream` | Provider-selected execution using the same canonical limits as `execute_code`, with progress + partial output when the provider supports streaming |
+| `run_submit` | Submit code for **background execution**; returns a `run_id` immediately instead of holding the call open |
+| `run_inspect` | Poll a background run: status while running, the full `execute_code` result shape once terminal |
+| `run_cancel` | Cancel a background run; idempotent on an already-terminal run, honest about providers that cannot cancel mid-flight |
 | `session_start` | Persistent session; python3/node get a stateful REPL worker (variables/imports persist across calls), other languages a workspace dir |
 | `session_stop` / `session_list` | Session lifecycle |
 | `session_files` / `session_read_file` / `session_write_file` | Workspace file tools, jailed to the session dir; listings support `page_size`/`cursor`, and reads return images inline (`as_image`) |
@@ -479,13 +482,13 @@ way back into the default.
 
 ## Tool-definition token cost
 
-codecalc's `tools/list` returns 48 definitions. Measured with `o200k_base` as a
-proxy, that is roughly 7,600 tokens of descriptions and input schemas, and every
+codecalc's `tools/list` returns 51 definitions. Measured with `o200k_base` as a
+proxy, that is roughly 9,200 tokens of descriptions and input schemas, and every
 client pays it before the first user message.
 
 codecalc does not hide its tools behind a discovery facade, and that is
 deliberate: the tool surface is where per-operation approval prompts, audit
-names and typed schemas live, and collapsing 48 tools into one dispatcher makes
+names and typed schemas live, and collapsing 51 tools into one dispatcher makes
 `install_package` and `percentage` look like the same permission to a client
 that approves by tool name. The cost is real, but the client is the better place
 to solve it, because the client can defer definitions **without** giving up the
@@ -500,7 +503,7 @@ If you are paying too much for codecalc's definitions:
   toolset's `default_config`, or per tool in `configs`. Deferred definitions stay
   out of the system-prompt prefix, prompt caching is preserved, and a matching
   tool is expanded into its full definition when the model searches for it.
-- **Any client** can filter which of the 48 tools it exposes to the model.
+- **Any client** can filter which of the 51 tools it exposes to the model.
   Nothing here requires codecalc to change.
 
 A server-side facade remains under consideration for clients with no such
