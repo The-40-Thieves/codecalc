@@ -29,6 +29,7 @@ from mcp.types import ImageContent
 
 from . import (
     __version__,
+    capabilities,
     complexity,
     contract,
     doctor,
@@ -47,6 +48,9 @@ from . import (
     tools,
     translation,
     units,
+)
+from . import (
+    audit as audit_module,
 )
 from .mcp_middleware import timeout_middleware
 
@@ -165,8 +169,33 @@ _run_supervisor = run_supervisor.RunSupervisor(
     _provider_registry, state_dir=_run_state_dir, max_active_runs=_max_active_runs
 )
 _run_supervisor.recover_orphans()
+# THE-787: one append-only audit sink for broker decisions and security-relevant
+# side effects (denied capability, refused install, cleanup). Defaults to
+# ~/.codecalc/audit/audit.log; CODECALC_AUDIT_LOG relocates it, or disables it
+# when set empty. Best effort — a write failure never fails a run.
+def _audit_secrets() -> tuple[str, ...]:
+    """The provider-auth credential VALUES to redact by value from audit events.
+
+    Events carry only metadata today, so nothing leaks — but the "redacted of
+    secrets" guarantee has to be ARMED to exist. The same env vars the providers
+    read for their Authorization headers are registered here, both the whole
+    header value and its credential portion (after the scheme), mirroring how
+    PistonExecutionProvider / RemoteStrictExecutionProvider build their own
+    redaction sets.
+    """
+    values: set[str] = set()
+    for env_name in (providers.STRICT_AUTHORIZATION_ENV,
+                     providers.PISTON_AUTHORIZATION_ENV, HTTP_TOKEN_ENV):
+        raw = os.environ.get(env_name, "").strip()
+        if raw:
+            values.add(raw)
+            values.add(raw.split(maxsplit=1)[-1])  # the credential after "Bearer "
+    return tuple(v for v in values if v)
+
+
+_audit_log = audit_module.from_env(secrets=_audit_secrets())
 _execution_service = execution_service.ExecutionService(
-    _provider_registry, supervisor=_run_supervisor
+    _provider_registry, supervisor=_run_supervisor, audit=_audit_log
 )
 _session_service = execution_service.SessionService()
 
@@ -515,7 +544,8 @@ def install_package(language: str, package: str, session_id: str | None = None,
     filesystem is not confined. Do not point this at untrusted input. See
     SECURITY.md and issue #23.
     """
-    return packages.install(language, package, session_id=session_id, version=version)
+    return packages.install(language, package, session_id=session_id,
+                            version=version, audit=_audit_log)
 
 
 @mcp.tool()
@@ -629,13 +659,33 @@ def run_submit(
         max_memory_mb=max_memory_mb, max_output_kb=max_output_kb,
         max_cpu=max_cpu, no_net=no_net,
     )
+    # THE-787 fix round (CRITICAL): broker the background run through the SAME
+    # path execute_code uses, BEFORE any work starts. Previously run_submit
+    # called start(spec) directly, so a policy the sync path enforced
+    # (deny-network, strict) was silently bypassed on the background path. The
+    # provider is resolved here so the broker can read its enforcement
+    # capabilities; a rejection (escalation / strict-unenforceable) returns
+    # pre-start with no run created, and the decision is threaded into the run
+    # so run_inspect's terminal receipt carries the same `capabilities` block.
+    # Resolve against the SUPERVISOR's own registry (not the module-level one):
+    # start() selects from `self.registry`, so brokering the same registry keeps
+    # the two consistent — in production they are the same object; a test that
+    # swaps in a fake supervisor with its own registry must broker that one.
     try:
-        handle = _run_supervisor.start(spec, provider_id=provider)
+        provider_obj = _run_supervisor.registry.select(provider, spec=spec)
     except providers.UnknownProvider as exc:
         return errors.error_result(
             errors.VALIDATION, str(exc), provider_error=exc.code,
             requested_provider=exc.provider_id, available_providers=list(exc.available),
         )
+    run_spec, decision, rejection = execution_service.broker_run(
+        spec, provider_obj, policy=capabilities.policy_from_env(), audit=_audit_log)
+    if rejection is not None:
+        return rejection
+    try:
+        handle = _run_supervisor.start(
+            run_spec, provider_id=provider_obj.provider_id,
+            capability_decision=decision, receipt_spec=spec)
     except run_supervisor.TooManyActiveRuns as exc:
         return errors.error_result(
             errors.RESOURCE_EXHAUSTED,

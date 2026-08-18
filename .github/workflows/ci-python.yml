@@ -306,6 +306,20 @@ jobs:
       - name: package install allowlist (deny-by-default)
         shell: bash
         run: uv run --no-sync python tests/test_package_allowlist.py
+      # THE-787: the capability broker (approved never exceeds requested),
+      # deny-by-default network as a policy option, and the append-only audit
+      # stream. All three run against synthetic providers / injected clocks —
+      # no sandbox, no native executor — so they belong on the full OS matrix
+      # alongside the other protocol-neutral policy suites. The network-policy
+      # suite deliberately covers BOTH a network-controlling provider and one
+      # that cannot enforce no_net, so the python-fallback matrix job exercises
+      # the fail-open-but-disclosed branch the native backend never takes.
+      - name: capability broker, network policy, and audit stream (THE-787)
+        shell: bash
+        run: |
+          uv run --no-sync python tests/test_capability_broker.py
+          uv run --no-sync python tests/test_network_policy.py
+          uv run --no-sync python tests/test_audit_log.py
       # Regressions from the 2026-08-08 bug sweep: lost exactness, wrong widths,
       # crashes on ordinary inputs, a dead ns path, and documented constant
       # names that resolved to nothing.
