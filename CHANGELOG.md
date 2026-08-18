@@ -31,11 +31,72 @@ behind it.
 
 ---
 
-## [0.1.0] — unreleased
+## [Unreleased]
 
-First public release. The tag will be `v0.1.0`; nothing has been published to
-PyPI or crates.io before it, so there is no upgrade path to describe — only what
-the thing is.
+Everything below has landed on `main` since `0.1.0` and is not yet tagged. It
+changes the **tool surface** (48 tools → 51) and adds fields to the **result
+contract**, so it is a MINOR bump when it is cut, not a patch. The
+`contract_version` itself stays `1.0.0`: every field named here is additive and
+optional, which the contract's own policy defines as MINOR-compatible.
+
+### Added
+
+- **Background runs: `run_submit`, `run_inspect`, `run_cancel`** (THE-778).
+  Submit code and get a `run_id` back immediately instead of holding an MCP
+  call open for the whole computation; poll with `run_inspect`, stop early with
+  `run_cancel`. Cancellation is honest about a provider that cannot cancel, and
+  a cancelled run's result is still collectible rather than stranded. Admission
+  is capped (`CODECALC_MAX_ACTIVE_RUNS`, default 64) and past the cap a
+  submission is refused with `resource_exhausted` rather than growing the run
+  table without bound.
+- **Oversized session output spills to a workspace artifact** (THE-783).
+  Session output that the default 64 KiB cap would have truncated and DROPPED
+  is captured up to 4 MiB and written into the session workspace instead;
+  `stdout_spill` / `stderr_spill` carry a `codecalc://session/{id}/files/...`
+  URI, and `stdout_spill_capped` / `stderr_spill_capped` say outright when the
+  spill is fuller than the inline value but still not the whole stream. The
+  inline value is byte-for-byte what it always was.
+- **An execution receipt** naming WHAT ran and under WHICH conditions
+  (THE-782), alongside a published `ComputationSpec` schema with a content hash
+  (THE-793), so two runs of the same request are identifiable as such.
+- **A grade vocabulary for `verify_*` results** (THE-785). `z3_check`'s grading
+  is narrowed to unsat-only rather than reading a `sat` answer as a proof.
+- **Idle-expiry for abandoned stateful sessions** (THE-779).
+  `CODECALC_SESSION_IDLE_TTL_SECONDS`, unset by default: a session untouched
+  for longer than this has its worker reaped on the next access, and a
+  subsequent call gets `ok: false` with the stable `worker_failure` code —
+  never a silent respawn. Every session entry point counts as a touch, not only
+  `execute`.
+- **A deny-by-default operator allowlist for package installs** (THE-791).
+- **A gate on the README's own gate-script count** (THE-842), so the count of
+  CI-invoked scripts cannot drift from the workflows the way the tool count
+  once did.
+
+### Fixed
+
+- **The spill path wrote and deleted outside the session workspace.** The three
+  spill helpers resolved the `.codecalc-spill` directory without the `_jail`
+  guard every other session path uses. `mkdir(exist_ok=True)` does not follow a
+  symlink at the final component, so executed code — which owns the workspace
+  as its cwd — could replace that directory with a symlink and get both an
+  arbitrary-location file CREATE and, through the retention prune's `*.bin`
+  glob, an arbitrary `*.bin` UNLINK, in the unsandboxed server process.
+- **A spill the server wrote could be impossible to read back.** The capture
+  ceiling counts raw stream bytes; the file written is the `errors="replace"`
+  re-encoding, where one invalid byte becomes a 3-byte U+FFFD. The write is
+  now bounded by the same constant the resource read enforces, so any spill
+  that exists is fetchable in full.
+- **`CODECALC_MAX_ACTIVE_RUNS` set-but-empty crashed the server at import.**
+  Empty, non-numeric and non-positive values now fall back to the default with
+  a message on stderr, instead of `int("")` raising where nothing catches it.
+- **A set-but-empty package allowlist denied all rather than allowing all.**
+
+---
+
+## [0.1.0] — 2026-08-17
+
+First public release. Nothing had been published to PyPI or crates.io before
+it, so there was no upgrade path to describe — only what the thing is.
 
 ### Corrected before first publication
 
@@ -66,7 +127,7 @@ the thing is.
   `no-new-privileges`. It supports the x86_64 and ARM64 architectures supported
   by gVisor and fails closed when Docker, cgroup v2, or `runsc` is absent.
 
-- **47 MCP tools across 31 languages.** Code execution, symbolic mathematics
+- **48 MCP tools across 31 languages.** Code execution, symbolic mathematics
   (SymPy), logic and SMT solving (Z3), exact decimal arithmetic, unit
   conversion, complexity analysis and benchmarking.
 - **A Rust sandbox executor** (`codecalc-exec`) with rlimits, wall-clock and CPU

@@ -497,7 +497,7 @@ All optional. codecalc runs with none of these set.
 | `CODECALC_STRICT_URL` | *(unset)* | Activate the current OS's `<host>-strict` provider as an authenticated client of the Linux strict execution service. Without it, strict selection fails closed. The adapter verifies the remote enforcement handshake before sending source. |
 | `CODECALC_STRICT_AUTHORIZATION` | *(unset)* | Exact value for the strict service's `Authorization` header. It is never published in descriptors, doctor output, errors, or receipts. |
 | `CODECALC_RUN_STATE_DIR` | `~/.codecalc/runs` | Durable metadata-only journal backing `run_submit`/`run_inspect`/`run_cancel`, for every provider (not only managed strict runs). Source, stdin, output, and credentials are never written there. On restart, recorded orphan runs are cancelled and cleaned through their owning provider where it supports that; where it does not (the built-in `local` provider), there is nothing to signal and the record is simply marked recovered. |
-| `CODECALC_MAX_ACTIVE_RUNS` | `64` | Admission cap for `run_submit`: how many runs may be running/cancelling at once before further submissions are refused with a `resource_exhausted` error. Bounds the in-memory run table and its thread pool against an unbounded burst or a caller that never inspects/cancels what it starts. |
+| `CODECALC_MAX_ACTIVE_RUNS` | `64` | Admission cap for `run_submit`: how many runs may be running/cancelling at once before further submissions are refused with a `resource_exhausted` error. Bounds the in-memory run table and its thread pool against an unbounded burst or a caller that never inspects/cancels what it starts. An empty, non-numeric or non-positive value falls back to `64` with a message on stderr — a set-but-empty variable is a shell and compose-file commonplace, and it used to abort the server's import. |
 | `CODECALC_ALLOW_RUNTIME_APPLY` | *(unset)* | Permit `update_runtimes(apply=True)` to run the **elevated** update commands (apt, via `sudo`). Unset, they are skipped with `ok: false` naming this variable, and the unprivileged managers still run. Deliberately an environment variable rather than a tool argument: `apply` is something a connected model can flip, and this is not. Accepts `1`/`true`/`yes`/`on`; an empty value is not consent. |
 | `CODECALC_SESSION_ROOT` | `~/.codecalc/sessions` | Where session workspaces live. |
 | `CODECALC_PACKAGE_ALLOWLIST` | *(unset)* | Deny-by-default allowlist for `install_package`. Unset, any syntactically valid package name may be installed (today's behaviour). Set, only listed packages install — anything else is refused before any subprocess or network work, with the stable `permission_denied` code. Comma-separated; each entry is `<language>:<name>` (scoped to one ecosystem) or a bare `<name>` (every ecosystem). Matches the bare name, ignoring `[extras]` and `==version` pins. |
@@ -568,7 +568,7 @@ PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py         # every tool over MC
 PYTHONPATH=. .venv/bin/python tests/test_executor_sweep.py  # sandbox regressions
 ```
 
-31 test files and 11 CI-invoked scripts, **1222 assertions**. "CI-invoked"
+31 test files and 11 CI-invoked scripts, **1830 assertions**. "CI-invoked"
 means referenced by path (`scripts/<name>.py`) from a job in
 `.github/workflows/*.yml` — `scripts/check_claims.py` derives the count that
 way and gates it, so a script wired into a workflow without this sentence
