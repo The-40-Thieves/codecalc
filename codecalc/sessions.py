@@ -22,10 +22,11 @@ import stat
 import subprocess
 import tempfile
 import threading
+import time
 import uuid
 from pathlib import Path
 
-from . import executor, landlock, registry
+from . import errors, executor, landlock, registry
 
 SESSION_ROOT = Path(os.environ.get("CODECALC_SESSION_ROOT", "~/.codecalc/sessions")).expanduser()
 
@@ -47,6 +48,114 @@ _workers: dict[str, Worker] = {}
 #: predate this process (found by `list_sessions()` but never `start()`-ed
 #: here) are simply absent, which `stop()` treats as "no identity to compare".
 _SESSION_DIR_IDENTITY: dict[str, tuple[int, int] | None] = {}
+
+# ── THE-779 residual: idle-expiry for abandoned stateful sessions ──────────
+#: "the one operational gap: a leaked session holds a worker process
+#: forever." UNSET (default) is unchanged behaviour: no expiry, ever, same
+#: as before this existed. SET (seconds, float-parseable) makes an idle
+#: worker session get reaped the next time anything touches it.
+#:
+#: Default OFF, not a conservative-but-nonzero number, and that is a
+#: decision worth stating rather than leaving implicit: every other
+#: behaviour-changing knob in this module (CODECALC_SESSION_ROOT aside, which
+#: only relocates a path) and its neighbours default to preserving current
+#: behaviour until an operator opts in — runtimes.ALLOW_ELEVATED_ENV,
+#: executor.REQUIRE_NATIVE_ENV, packages.ALLOWLIST_ENV all do this. A session
+#: is explicitly the "calculator that remembers" primitive (module
+#: docstring); an agentic caller can legitimately go quiet for minutes
+#: between turns (thinking time, a human in the loop) without that being
+#: "abandoned". Picking any specific default TTL risks silently killing a
+#: live, wanted session for someone whose pacing it did not anticipate — a
+#: worse failure than a slow leak of processes an operator can already see
+#: and reap manually via `session_stop`/`session_list`. Unset costs nothing
+#: to anyone not already opting in.
+IDLE_TTL_ENV = "CODECALC_SESSION_IDLE_TTL_SECONDS"
+
+#: Last-activity clock per WORKER session, `time.monotonic()`. Only sessions
+#: with a worker are tracked: a workspace-only session holds no long-lived
+#: process, so it is not the leak this ticket names, and monotonic rather
+#: than wall-clock so a host clock adjustment cannot resurrect or age out a
+#: session early.
+_LAST_ACTIVITY: dict[str, float] = {}
+
+#: Session ids reaped for idle timeout, kept distinct from "never existed" and
+#: from "worker died for some other reason". Without this, `execute()` on a
+#: reaped session_id would fall through to `_workers.get(session_id) is
+#: None` and re-run as a fresh, unconfined workspace-only process — a SILENT
+#: RESPAWN, which is exactly what the ticket says a subsequent call must not
+#: do.
+_EXPIRED: set[str] = set()
+
+
+def _idle_ttl_seconds() -> float | None:
+    """The configured idle TTL, or None when unset/invalid/non-positive.
+
+    Read per call, not cached at import — same reasoning as
+    runtimes.elevated_apply_allowed(): an operator's change should apply
+    without a server restart.
+    """
+    raw = os.environ.get(IDLE_TTL_ENV, "").strip()
+    if not raw:
+        return None
+    try:
+        ttl = float(raw)
+    except ValueError:
+        return None
+    return ttl if ttl > 0 else None
+
+
+def _touch(session_id: str) -> None:
+    """Record activity, resetting the idle clock. Caller holds `_lock`."""
+    _LAST_ACTIVITY[session_id] = time.monotonic()
+
+
+def _reap_if_idle(session_id: str) -> bool:
+    """Kill `session_id`'s worker if it has been idle past the TTL.
+
+    Lazy check-on-access: no timer, no thread, nothing that can outlive the
+    process the way an un-unref()'d watcher does (this repo's own history on
+    the Node side). The cost is that an idle worker is not reaped until
+    SOMETHING calls this — `execute()` does, on every call, for the session
+    being called — which is the "lazy-on-access" half the ticket asks for.
+    `sweep_idle_sessions()` below is the other half: an explicit hook a
+    caller can invoke without waiting on a particular session's next call.
+
+    `Worker.close()` is called OUTSIDE the lock: it waits (up to 3s) for the
+    process to exit, and holding `_lock` across that would block every other
+    session's calls for the duration.
+    """
+    ttl = _idle_ttl_seconds()
+    if ttl is None:
+        return False
+    with _lock:
+        w = _workers.get(session_id)
+        last = _LAST_ACTIVITY.get(session_id)
+        if w is None or last is None:
+            return False
+        if time.monotonic() - last <= ttl:
+            return False
+        del _workers[session_id]
+        del _LAST_ACTIVITY[session_id]
+        _EXPIRED.add(session_id)
+    w.close()  # the existing teardown path — no new kill logic
+    return True
+
+
+def sweep_idle_sessions() -> list[str]:
+    """Reap every worker session idle past the configured TTL right now.
+
+    A sweep hook, not a background thread: nothing here runs unless a caller
+    invokes it (an operator's health check, a periodic MCP tool, a test —
+    this module does not schedule one itself), so it cannot leak a thread
+    that keeps the process alive after every session is stopped.
+
+    Returns the session ids reaped.
+    """
+    if _idle_ttl_seconds() is None:
+        return []
+    with _lock:
+        candidates = list(_workers)
+    return [sid for sid in candidates if _reap_if_idle(sid)]
 
 
 def _session_dir(session_id: str) -> Path:
@@ -90,6 +199,11 @@ def start(language: str = "python3", name: str | None = None) -> dict:
                 "error": f"failed to start {name} REPL worker: {why or 'unknown cause'}"}
     with _lock:
         _workers[session_id] = w
+        _touch(session_id)
+        # A fresh uuid4-derived id will not collide with a previously-expired
+        # one in practice, but a hygienic start() should not leave a stale
+        # _EXPIRED entry a future id could theoretically inherit.
+        _EXPIRED.discard(session_id)
     return {
         "ok": True, "session_id": session_id, "language": name,
         "stateful": True, "workdir": str(d), "files": _list(d),
@@ -113,6 +227,8 @@ def stop(session_id: str) -> dict:
     with _lock:
         w = _workers.pop(session_id, None)
         created = _SESSION_DIR_IDENTITY.pop(session_id, None)
+        _LAST_ACTIVITY.pop(session_id, None)
+        _EXPIRED.discard(session_id)
     if w is not None:
         w.close()
     d = _session_dir(session_id)
@@ -222,6 +338,20 @@ def execute(session_id: str, code: str, language: str | None = None,
     d = _session_dir(session_id)
     if not d.is_dir():
         return {"ok": False, "error": f"unknown session '{session_id}'"}
+    # Lazy check-on-access (THE-779): reap this session's worker if it has
+    # sat idle past the configured TTL. A no-op when IDLE_TTL_ENV is unset.
+    _reap_if_idle(session_id)
+    if session_id in _EXPIRED:
+        # NOT a fall-through to the workspace-only branch below. `_workers`
+        # no longer has this id after a reap, and workspace-only execution
+        # would otherwise run the call as a fresh, unconfined process — a
+        # silent respawn of exactly the state guarantee the caller lost.
+        ttl = _idle_ttl_seconds()
+        window = f"{ttl:g}s" if ttl is not None else "its configured TTL"
+        return errors.error_result(
+            errors.WORKER_FAILURE,
+            f"session '{session_id}' expired after sitting idle past {window}; "
+            "call session_stop and start a new one")
     with _lock:
         w = _workers.get(session_id)
     if w is not None:
@@ -230,6 +360,12 @@ def execute(session_id: str, code: str, language: str | None = None,
         asked = {"max_memory_mb": max_memory_mb, "max_cpu": max_cpu,
                  "no_net": no_net, "max_output_kb": max_output_kb}
         out = w.run(code, stdin=stdin, timeout=timeout)
+        with _lock:
+            # Any call is activity, whether the executed code itself
+            # succeeded or not — an idle SESSION is one nothing has called
+            # into, not one whose last call happened to error.
+            if session_id in _workers:
+                _touch(session_id)
         # Two lists, deliberately: what the caller asked for and did not get,
         # and what the caller never asked for because it did not know it was
         # being dropped. `no_net` appears in both vocabularies; dict ordering
