@@ -531,7 +531,12 @@ PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py         # every tool over MC
 PYTHONPATH=. .venv/bin/python tests/test_executor_sweep.py  # sandbox regressions
 ```
 
-28 test files and 11 gate scripts, **1222 assertions**. Nothing in the suite
+30 test files and 11 CI-invoked scripts, **1222 assertions**. "CI-invoked"
+means referenced by path (`scripts/<name>.py`) from a job in
+`.github/workflows/*.yml` — `scripts/check_claims.py` derives the count that
+way and gates it, so a script wired into a workflow without this sentence
+changing, or this sentence bumped without a workflow change, fails the build.
+Nothing in the suite
 needs the internet, so none of it is ever skipped for lack of a network.
 
 It **can** skip for lack of a *capability*, and that is correct rather than a
