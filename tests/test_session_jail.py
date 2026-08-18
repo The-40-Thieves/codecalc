@@ -27,7 +27,7 @@ import time
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from codecalc import sessions
+from codecalc import executor, sessions
 
 FAILS = []
 SKIPS = []
@@ -609,22 +609,40 @@ else:
 
     # End-to-end through the real entry point: oversized output from executed
     # code, spilled by `sessions.execute`, with the trap already in place.
-    _e2e = sessions.execute(_spill_sid, "echo probe", language="bash")
-    if not _e2e.get("ok"):
+    #
+    # This is a REDUNDANT confirmation over the direct `_write_spill`/
+    # `_prune_spill` calls above, which already assert the security
+    # invariant unconditionally (they hand it synthetic bytes and never go
+    # through the executor). This e2e leg needs a real over-cap `bash` run to
+    # mean anything: on the python fallback the same `head | tr` pipeline
+    # measured out at `stdout_bytes=0` (no spill attempted at all, see
+    # test_execution_service.py's spill tests for the same trap), which would
+    # make "not escaped" pass here vacuously — true because nothing was
+    # written, not because the guard refused it. Gated to the backend that is
+    # actually known to produce the spill this checks the refusal of.
+    if executor.backend() != "rust":
         skip("an oversized session run cannot write through a symlinked spill dir",
-             f"no usable bash runtime here: {str(_e2e.get('error'))[:120]}")
+             "no native executor; python fallback's bash execution does not "
+             "reliably produce spill-worthy output for this probe (the "
+             "direct _write_spill/_prune_spill checks above already assert "
+             "the security invariant on any backend)")
     else:
-        _big = "head -c 100000 /dev/zero | tr '\\0' 'A'"
-        try:
-            _res = sessions.execute(_spill_sid, _big, language="bash")
-            _e2e_escaped = "stdout_spill" in _res
-        except ValueError:
-            _e2e_escaped = False
-        check("an oversized session run cannot write through a symlinked spill dir",
-              not _e2e_escaped
-              and [p.name for p in sorted(_victim.glob("*.bin"))] == ["pre-existing.bin"],
-              f"-> escaped={_e2e_escaped} "
-              f"victim={[p.name for p in sorted(_victim.glob('*.bin'))]}")
+        _e2e = sessions.execute(_spill_sid, "echo probe", language="bash")
+        if not _e2e.get("ok"):
+            skip("an oversized session run cannot write through a symlinked spill dir",
+                 f"no usable bash runtime here: {str(_e2e.get('error'))[:120]}")
+        else:
+            _big = "head -c 100000 /dev/zero | tr '\\0' 'A'"
+            try:
+                _res = sessions.execute(_spill_sid, _big, language="bash")
+                _e2e_escaped = "stdout_spill" in _res
+            except ValueError:
+                _e2e_escaped = False
+            check("an oversized session run cannot write through a symlinked spill dir",
+                  not _e2e_escaped
+                  and [p.name for p in sorted(_victim.glob("*.bin"))] == ["pre-existing.bin"],
+                  f"-> escaped={_e2e_escaped} "
+                  f"victim={[p.name for p in sorted(_victim.glob('*.bin'))]}")
 
     # The legitimate case still works: a real directory, no symlink.
     _ok_sid = sessions.start("bash")["session_id"]

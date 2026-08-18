@@ -1605,6 +1605,18 @@ def test_a_spill_the_server_writes_is_always_readable_back() -> None:
     the invariant directly rather than the arithmetic: whatever the server
     writes, the resource route hands back in full.
     """
+    if executor.backend() != "rust":
+        # No skip() helper in this file (see test_bug_sweep.py's own note on
+        # the same gap); named here so "not exercised" cannot be mistaken for
+        # "exercised and fine". The python fallback's `bash` execution does
+        # not reproduce the overflow this test targets — a 1.5 MB run of
+        # 0xFF comes back with stdout_bytes=0 and no spill at all here, so
+        # every assertion below would either be vacuous or fail for the
+        # wrong reason (measured on the macOS/Windows CI fallback runners).
+        print("SKIP a spill trimmed to the read cap says so rather than "
+              "reading complete (no native executor; python fallback's bash "
+              "execution does not produce a spill for this probe)")
+        return
     old_root = sessions.SESSION_ROOT
     with tempfile.TemporaryDirectory(prefix="codecalc-spill-readback-") as root:
         sessions.SESSION_ROOT = Path(root)
@@ -1642,6 +1654,15 @@ def test_a_spill_the_server_writes_is_always_readable_back() -> None:
 
 
 def test_spill_files_are_retained_up_to_a_bounded_count() -> None:
+    if executor.backend() != "rust":
+        # Same gap as the readback test above: the python fallback's `bash`
+        # does not reliably produce a spill for this probe, so an empty
+        # `spill_dir` would satisfy "<= retention" vacuously and never
+        # exercise the prune at all.
+        print("SKIP spill retention prunes to the bounded count (no native "
+              "executor; python fallback's bash execution does not produce "
+              "spills for this probe)")
+        return
     old_root = sessions.SESSION_ROOT
     old_retention = sessions._SPILL_RETENTION
     sessions._SPILL_RETENTION = 3
