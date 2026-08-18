@@ -20,6 +20,7 @@ from codecalc import (
     execution_service,
     executor,
     providers,
+    registry,
     run_supervisor,
     server,
     sessions,
@@ -655,21 +656,36 @@ def test_session_service_reads_bounded_files_and_runs_workspace_entries() -> Non
     if service_type is None:
         return
 
+    # Extension->language inference is pure registry logic and needs no
+    # execution, so the `.sh`->bash coverage this test exists for is asserted
+    # directly against the same reversed-EXTENSIONS map run_file() uses. This
+    # keeps that coverage on EVERY matrix OS, where actually RUNNING a `.sh`
+    # entry would fail: on the Windows git-bash fallback a `bash <path>` run
+    # dies (MSYS eats the `\` separators, exit 127 — see registry.py's
+    # POSIX_ARGV_LANGUAGES note), so the RUN itself is exercised below with a
+    # portable python3 entry instead, which runs identically on ubuntu, macos
+    # and windows. The two together preserve the original substance —
+    # extension->language inference AND a workspace entry that actually runs.
+    by_extension = {value: key for key, value in registry.EXTENSIONS.items()}
+
     old_root = sessions.SESSION_ROOT
     with tempfile.TemporaryDirectory(prefix="codecalc-session-read-run-") as root:
         sessions.SESSION_ROOT = Path(root)
         try:
             service = service_type()
-            started = service.start("bash")
+            started = service.start("python3")
             session_id = started["session_id"]
             service.write_file(session_id, "message.txt", "abcdef")
-            service.write_file(session_id, "main.sh", 'printf "workspace-run\\n"')
+            service.write_file(session_id, "main.py", 'print("workspace-run")')
             read = service.read_file(session_id, "message.txt", max_bytes=3)
-            run = service.run_file(session_id, "main.sh", timeout=10)
+            run = service.run_file(session_id, "main.py", timeout=10)
             stopped = service.stop(session_id)
         finally:
             sessions.SESSION_ROOT = old_root
 
+    check("a `.sh` entry infers the bash language (pure registry inference, "
+          "no execution — the coverage a bash RUN cannot carry on Windows)",
+          by_extension.get("sh") == "bash")
     check("session service returns a protocol-neutral bounded read", read == {
         "ok": True,
         "path": "message.txt",
@@ -683,8 +699,8 @@ def test_session_service_reads_bounded_files_and_runs_workspace_entries() -> Non
     })
     check("session service infers and runs a workspace entry",
           run["ok"] is True and run["stdout"] == "workspace-run\n")
-    check("workspace run reports its canonical entry and language",
-          run["entry_file"] == "main.sh" and run["language"] == "bash")
+    check("workspace run reports its canonical entry and inferred language",
+          run["entry_file"] == "main.py" and run["language"] == "python3")
     check("read/run test cleans up its workspace", stopped["deleted"] is True)
 
 

@@ -123,6 +123,16 @@ IDLE_TTL_ENV = "CODECALC_SESSION_IDLE_TTL_SECONDS"
 #: session early.
 _LAST_ACTIVITY: dict[str, float] = {}
 
+#: The idle clock's single source, indirected through one name so the two
+#: sites that read it (`_touch` records last-activity, `_maybe_reap_locked`
+#: compares against it) share one seam. Production is `time.monotonic`;
+#: tests substitute a deterministic fake clock (test_session_idle_expiry)
+#: so idle expiry is exercised without real sleeps — the flake-free way to
+#: drive the under-TTL/over-TTL boundary. Only these two call sites use it,
+#: so a fake clock controls ONLY the idle decision and leaves real
+#: subprocess execution (and its own wall-clock timeouts) untouched.
+_now = time.monotonic
+
 #: Session ids reaped for idle timeout, kept distinct from "never existed" and
 #: from "worker died for some other reason". Without this, `execute()` on a
 #: reaped session_id would fall through to `_workers.get(session_id) is
@@ -175,7 +185,7 @@ def _idle_ttl_seconds() -> float | None:
 
 def _touch(session_id: str) -> None:
     """Record activity, resetting the idle clock. Caller holds `_lock`."""
-    _LAST_ACTIVITY[session_id] = time.monotonic()
+    _LAST_ACTIVITY[session_id] = _now()
 
 
 def _note_activity(session_id: str) -> None:
@@ -300,7 +310,7 @@ def _maybe_reap_locked(session_id: str) -> Worker | None:
     last = _LAST_ACTIVITY.get(session_id)
     if w is None or last is None:
         return None
-    if time.monotonic() - last <= ttl:
+    if _now() - last <= ttl:
         return None
     del _workers[session_id]
     del _LAST_ACTIVITY[session_id]
@@ -780,7 +790,11 @@ def write_file(session_id: str, path: str, content: str) -> dict:
     target = _jail(d, path)
     target.parent.mkdir(parents=True, exist_ok=True)
     _write_nofollow(target, content)
-    return {"ok": True, "path": str(target.relative_to(d))}
+    # `.as_posix()` for the same protocol-path reason as artifacts(): the
+    # returned path is a caller-facing identity that must read back the same
+    # on Windows, where `str(relative_to)` would emit backslashes for a nested
+    # write while read_file/run_file speak forward slashes.
+    return {"ok": True, "path": target.relative_to(d).as_posix()}
 
 
 def list_files(session_id: str, path: str = "") -> dict:
@@ -826,7 +840,16 @@ def artifacts(session_id: str) -> dict:
             continue
         if p.is_file() and p.name not in {"main.py", "main.js", "run.out", "run.err", "run.in",
                                           "compile.out", "compile.err", "compile.in", "a.out"}:
-            rel = str(p.relative_to(d))
+            # `.as_posix()`, not `str()`: the workspace path is a
+            # protocol-facing identity (it composes the file's
+            # `codecalc://session/.../files/<path>` resource URI and is what a
+            # caller passes back to read_file/run_file). `str(relative_to)`
+            # emits the OS separator, so a nested artifact reported "data\\x"
+            # on Windows while write_file/read_file take "data/x" — the same
+            # value the fallback matrix asserts. Forward slashes keep the
+            # identity identical on ubuntu, macos and windows; pathlib accepts
+            # "/" as input on every platform, so the reported path round-trips.
+            rel = p.relative_to(d).as_posix()
             files.append({"path": rel, "size": p.stat().st_size})
     return {"ok": True, "session_id": session_id, "artifacts": files}
 

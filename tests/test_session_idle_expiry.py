@@ -33,12 +33,47 @@ import re as _re
 import shutil
 import sys
 import threading
-import time
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from codecalc import errors, sessions
+
+
+class _FakeClock:
+    """Deterministic stand-in for `sessions._now`, so idle expiry is driven by
+    explicit advances instead of real `time.sleep()`.
+
+    The prior version aged sessions with real sleeps against tiny TTLs (0.05s
+    TTL, 0.12s gaps): on a loaded CI runner an operation could overrun the TTL
+    and a session that should have stayed alive got reaped — timing luck, not a
+    logic bug (it passed on Linux and macos-py3.14, flaked on macos-py3.11).
+    Advancing this clock is instantaneous and EXACT, so the under-TTL / over-TTL
+    boundary each test asserts is decided the same way on every runner.
+
+    `sessions._now` feeds ONLY the idle-expiry decision (last-activity stamp and
+    the reap comparison), so substituting it leaves the real worker subprocess —
+    spawn, execute, teardown, and the OS-level PID checks these tests turn on —
+    running in real time and fully exercised. `advance()` never moves the clock
+    backwards, preserving the monotonic contract the production clock has.
+    """
+
+    def __init__(self, start: float = 1000.0) -> None:
+        self._t = start
+
+    def __call__(self) -> float:
+        return self._t
+
+    def advance(self, seconds: float) -> None:
+        assert seconds >= 0, "monotonic clock never moves backwards"
+        self._t += seconds
+
+
+# Install before any session activity below (WORKER_LANGS probing starts real
+# workers): with no TTL set during probing, the clock is never consulted for a
+# reap, but the seam must already point at the fake before the timed sections.
+_CLOCK = _FakeClock()
+sessions._now = _CLOCK
 
 FAILS: list[str] = []
 SKIPS: list[str] = []
@@ -111,7 +146,7 @@ for lang in WORKER_LANGS:
         s = sessions.start(lang)["session_id"]
         try:
             pid = sessions._workers[s].proc.pid
-            time.sleep(0.3)
+            _CLOCK.advance(0.3)
             r = sessions.execute(s, MARKER[lang])
             check(f"{lang}: unset TTL never expires an idle session",
                   r.get("ok") is True, f"-> {r}")
@@ -128,7 +163,7 @@ for lang in WORKER_LANGS:
         pid = sessions._workers[s].proc.pid
         check(f"{lang}: worker process exists right after session_start",
               not _pid_gone(pid))
-        time.sleep(0.3)  # idle past the 0.05s TTL configured below
+        _CLOCK.advance(0.3)  # idle past the 0.05s TTL configured below
         try:
             r = sessions.execute(s, MARKER[lang])
             check(f"{lang}: a call on an expired session gets ok=False, not a hang",
@@ -154,9 +189,9 @@ for lang in WORKER_LANGS:
             # Two calls, each well under the TTL, spanning MORE than the TTL
             # in total — if activity did not reset the clock, this would
             # still expire.
-            time.sleep(0.12)
+            _CLOCK.advance(0.12)
             r1 = sessions.execute(s, MARKER[lang])
-            time.sleep(0.12)
+            _CLOCK.advance(0.12)
             r2 = sessions.execute(s, MARKER[lang])
             check(f"{lang}: activity resets the idle clock (first call still succeeds)",
                   r1.get("ok") is True, f"-> {r1}")
@@ -173,7 +208,7 @@ for lang in WORKER_LANGS[:1]:
     def _run(lang=lang):
         s = sessions.start(lang)["session_id"]
         pid = sessions._workers[s].proc.pid
-        time.sleep(0.15)
+        _CLOCK.advance(0.15)
         reaped = sessions.sweep_idle_sessions()
         check(f"{lang}: sweep_idle_sessions() reaps an idle worker directly",
               s in reaped, f"-> {reaped}")
@@ -269,7 +304,7 @@ for lang in WORKER_LANGS[:1]:
     def _run(lang=lang):
         s = sessions.start(lang)["session_id"]
         pid = sessions._workers[s].proc.pid
-        time.sleep(0.15)  # idle past the 0.05s TTL configured below
+        _CLOCK.advance(0.15)  # idle past the 0.05s TTL configured below
 
         n = 40
         barrier = threading.Barrier(n)
@@ -313,7 +348,7 @@ try:
         def _run(lang=lang):
             evicted_sid = sessions.start(lang)["session_id"]
             marker_path = sessions._session_dir(evicted_sid) / sessions._EXPIRED_MARKER_NAME
-            time.sleep(0.15)
+            _CLOCK.advance(0.15)
             # A call on it reaps it (test 2's mechanism) — this is the entry
             # that gets evicted once enough OTHER sessions expire after it.
             sessions.execute(evicted_sid, MARKER[lang])
@@ -333,7 +368,7 @@ try:
             filler_sids = []
             for _ in range(sessions._EXPIRED_CAP + 1):
                 sid = sessions.start(lang)["session_id"]
-                time.sleep(0.15)
+                _CLOCK.advance(0.15)
                 sessions.execute(sid, MARKER[lang])
                 filler_sids.append(sid)
 
@@ -388,9 +423,9 @@ for lang in WORKER_LANGS[:1]:
                 # on the same clock.
                 sessions.write_file(s, "staged.txt", "x")
                 pid = sessions._workers[s].proc.pid
-                time.sleep(0.12)
+                _CLOCK.advance(0.12)
                 _touch_call(s)
-                time.sleep(0.12)
+                _CLOCK.advance(0.12)
                 r = sessions.execute(s, MARKER[lang])
                 check(f"{lang}: {_name}() counts as activity — the session survives "
                       f"0.24s of use under a 0.2s TTL",
@@ -423,7 +458,7 @@ for lang in WORKER_LANGS[:1]:
             try:
                 sessions.write_file(s, "staged.txt", "x")
                 pid = sessions._workers[s].proc.pid
-                time.sleep(0.10)  # idle past the 0.05s TTL configured below
+                _CLOCK.advance(0.10)  # idle past the 0.05s TTL configured below
                 _touch_call(s)    # a touch AFTER expiry
                 gone = _pid_gone(pid)
                 check(f"{lang}: {_name}() after expiry REAPS the idle worker "
