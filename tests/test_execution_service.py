@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import os
 import subprocess
 import sys
@@ -12,7 +13,15 @@ from pathlib import Path
 
 from mcp.types import ImageContent
 
-from codecalc import contract, execution_service, providers, server, sessions
+from codecalc import (
+    contract,
+    execution_service,
+    executor,
+    providers,
+    server,
+    sessions,
+    spec_identity,
+)
 
 FAILS: list[str] = []
 
@@ -294,6 +303,227 @@ def test_service_receipt_reports_requested_and_provider_enforced_limits() -> Non
               "max_output_kb_enforced_after_provider_response",
               "no_net_unavailable_on_test_provider",
           ])
+
+
+# ═══ the receipt names WHAT ran and under WHICH conditions (THE-782) ═══════
+#
+# The limits half above answers "what did you ask for and what did the provider
+# claim to enforce". It does not answer the two questions someone re-reading a
+# result a week later actually has: WHICH request was this, and what did the
+# environment look like. Content hashes answer the first; the determinism block
+# answers the second, including — loudly — the parts codecalc cannot observe.
+
+
+def _receipt_provider(**overrides: object):
+    class ReceiptProvider(providers.LocalExecutionProvider):
+        # Deliberately NOT "local": this provider stands in for anything that
+        # runs its workload somewhere codecalc does not control.
+        provider_id = "receipt"
+
+        def describe(self) -> dict:
+            descriptor = super().describe()
+            descriptor["provider_id"] = self.provider_id
+            descriptor.update(overrides)
+            return descriptor
+
+        def execute(self, spec: providers.ComputationSpec) -> dict:
+            del spec
+            return contract.stamp({"ok": True, "verdict": "OK", "stdout": "",
+                                   "stderr": "", "exit_code": 0, "unenforced": []})
+
+    return ReceiptProvider
+
+
+def _receipt_for(spec: providers.ComputationSpec, **overrides: object) -> dict:
+    registry = providers.ProviderRegistry(default_provider_id="receipt")
+    registry.register(_receipt_provider(**overrides)())
+    return execution_service.ExecutionService(registry).execute(spec)["provider"]
+
+
+def test_receipt_names_the_request_and_the_source_by_content() -> None:
+    spec = providers.ComputationSpec(language="python3", code='print("receipt")',
+                                     stdin="1\n", timeout=7, no_net=True)
+    receipt = _receipt_for(spec)
+
+    check("the receipt is versioned so a reader can evolve",
+          receipt["receipt_version"] == execution_service.RECEIPT_VERSION)
+    check("the receipt version is semver",
+          len(execution_service.RECEIPT_VERSION.split(".")) == 3)
+    check("the receipt names the request by content hash",
+          receipt["spec_hash"] == spec.spec_hash()
+          and receipt["spec_hash"].startswith("sha256:"))
+    check("the receipt names the canonical form the hash was taken under",
+          receipt["spec_schema_version"] == providers.COMPUTATION_SPEC_VERSION)
+    check("the receipt hashes the source that was actually executed",
+          receipt["source_sha256"]
+          == spec_identity.text_hash('print("receipt")'))
+    check("the source hash is not the spec hash",
+          receipt["source_sha256"] != receipt["spec_hash"])
+    check("the requested-vs-enforced distinction is untouched",
+          receipt["limits"]["requested"]["timeout_seconds"] == 7
+          and "provider_reported_enforced" in receipt["limits"]
+          and "unenforced" in receipt["limits"])
+
+
+def test_receipt_is_stable_for_identical_inputs_and_moves_for_different_ones() -> None:
+    spec = providers.ComputationSpec(language="python3", code="pass", timeout=3)
+    first = _receipt_for(spec)
+    second = _receipt_for(providers.ComputationSpec(
+        timeout=3, code="pass", language="python3"))
+    other = _receipt_for(providers.ComputationSpec(
+        language="python3", code="pass", timeout=4))
+
+    stable = ("receipt_version", "spec_hash", "spec_schema_version",
+              "source_sha256", "determinism")
+    check("two identical requests produce an identical receipt",
+          {k: first[k] for k in stable} == {k: second[k] for k in stable})
+    check("a different request produces a different spec hash",
+          other["spec_hash"] != first["spec_hash"])
+    check("the same source under a different request keeps one source hash",
+          other["source_sha256"] == first["source_sha256"])
+
+
+def test_receipt_records_the_determinism_inputs_it_can_observe() -> None:
+    # The real local provider, because the determinism block describes the
+    # environment codecalc's OWN sandbox forwards — which is a claim only the
+    # provider that actually runs through that sandbox is entitled to make.
+    determinism = _service().execute(providers.ComputationSpec(
+        language="python3", code="pass"))["provider"]["determinism"]
+    forwarded = executor._env()
+
+    check("determinism names where its values came from",
+          determinism["source"] == "env_allowlist")
+    check("locale is what the env allowlist actually forwards",
+          determinism["locale"] == {"LANG": forwarded.get("LANG"),
+                                    "LC_ALL": forwarded.get("LC_ALL")})
+    check("timezone is what the env allowlist actually forwards",
+          determinism["timezone"] == forwarded.get("TZ"))
+    check("TZ is not in the allowlist today, so timezone is unrecorded",
+          "TZ" not in executor._ENV_ALLOWLIST
+          and "timezone" in determinism["unrecorded"])
+    check("codecalc has no seed concept, and the receipt says so rather than "
+          "reporting a null nobody can interpret",
+          determinism["seed"] is None and "seed" in determinism["unrecorded"])
+    check("every unrecorded entry is genuinely null",
+          all(_determinism_value(determinism, name) is None
+              for name in determinism["unrecorded"]))
+    check("nothing is both recorded and unrecorded",
+          all(_determinism_value(determinism, name) is not None
+              for name in ("locale.LANG", "locale.LC_ALL", "timezone", "seed")
+              if name not in determinism["unrecorded"]))
+
+
+def _determinism_value(determinism: dict, dotted: str) -> object:
+    node: object = determinism
+    for part in dotted.split("."):
+        node = node[part]  # type: ignore[index]
+    return node
+
+
+def test_receipt_determinism_does_not_claim_a_remote_environment() -> None:
+    """CodeCalc controls the local sandbox's environment. It does not control a
+    remote provider's, and a receipt that reported the client's locale for a run
+    that happened on someone else's host would be a confident lie."""
+    remote = _receipt_for(
+        providers.ComputationSpec(language="python3", code="pass"))["determinism"]
+
+    check("a non-sandboxed provider does not borrow the client's environment",
+          remote["source"] == "provider_owned")
+    check("a remote run records nothing it did not observe",
+          remote["locale"] == {"LANG": None, "LC_ALL": None}
+          and remote["timezone"] is None and remote["seed"] is None)
+    check("and says so, rather than leaving four bare nulls",
+          sorted(remote["unrecorded"])
+          == ["locale.LANG", "locale.LC_ALL", "seed", "timezone"])
+
+
+def test_receipt_carries_no_secret_and_no_machine_specific_path() -> None:
+    """A receipt travels: it is logged, pasted into tickets, and returned to a
+    caller. It must be portable JSON with nothing in it that identifies a host."""
+    # THE REAL LOCAL PROVIDER, not the stand-in. An earlier version of this test
+    # used the stand-in and therefore exercised the `provider_owned` branch,
+    # which reads no environment at all — so it passed with the entire forwarded
+    # environment spliced into the determinism block. Found by seeding exactly
+    # that defect and watching nothing go red.
+    with tempfile.TemporaryDirectory() as workdir:
+        spec = providers.ComputationSpec(language="python3", code="pass",
+                                         workdir=workdir)
+        receipt = _service().execute(spec)["provider"]
+        serialized = json.dumps(receipt)
+        check("the workdir path never reaches the receipt, only its hash",
+              workdir not in serialized)
+
+    check("the receipt is JSON-serializable", isinstance(serialized, str))
+    check("the determinism block came from the sandbox, so this is the branch "
+          "that could leak",
+          receipt["determinism"]["source"] == "env_allowlist")
+    check("no absolute home-directory path appears anywhere in the receipt",
+          str(Path.home()) not in serialized)
+    forwarded = executor._env()
+    check("the forwarded PATH does not leak through the determinism block",
+          forwarded["PATH"] not in serialized)
+    check("HOME does not leak through the determinism block",
+          not forwarded.get("HOME") or forwarded["HOME"] not in serialized)
+    check("the determinism block carries only the three named inputs",
+          set(receipt["determinism"])
+          == {"source", "locale", "timezone", "seed", "unrecorded"})
+
+
+def test_every_receipt_bearing_path_carries_the_same_receipt() -> None:
+    """A receipt on one path and not another is worse than none: a reader cannot
+    tell "no hash" from "this path forgot". execute, execute_stream and session
+    execution all attach it."""
+    spec = providers.ComputationSpec(language="python3", code='print("paths")')
+    service = _service()
+
+    plain = service.execute(spec)["provider"]
+    streamed = asyncio.run(service.execute_stream(spec))["provider"]
+    session = server.session_start("python3")
+    try:
+        in_session = execution_service.ExecutionService(
+            service.registry).execute_session(
+                execution_service.SessionService(), session["session_id"], spec
+            )["provider"]
+    finally:
+        server.session_stop(session["session_id"])
+
+    required = {"receipt_version", "spec_hash", "spec_schema_version",
+                "source_sha256", "determinism", "limits"}
+    check("execute() attaches the full receipt", required <= set(plain))
+    check("execute_stream() attaches the full receipt", required <= set(streamed))
+    check("execute_session() attaches the full receipt", required <= set(in_session))
+    check("all three agree on the request identity",
+          plain["spec_hash"] == streamed["spec_hash"] == in_session["spec_hash"]
+          == spec.spec_hash())
+    check("all three agree on the source identity",
+          plain["source_sha256"] == streamed["source_sha256"]
+          == in_session["source_sha256"])
+
+
+def test_compact_mode_keeps_the_actionable_half_of_the_receipt() -> None:
+    """A receipt that doubles a compact reply defeats the mode it rides in.
+
+    Copied wholesale, THE-782's additions took a compact result from 603 to
+    1019 bytes — measured, and past the bar server.py already set when it called
+    a 171-of-199-token disclosure a defect. What a caller must ACT on stays;
+    what is descriptive and one call away is named and dropped.
+    """
+    full = server.execute_code("python3", 'print("c")', provider="local")["provider"]
+    terse = server.execute_code(
+        "python3", 'print("c")', provider="local", compact=True)["provider"]
+
+    check("compact keeps the request identity", terse["spec_hash"] == full["spec_hash"])
+    check("compact keeps the receipt version",
+          terse["receipt_version"] == execution_service.RECEIPT_VERSION)
+    check("compact keeps provider identity", terse["provider_id"] == "local")
+    check("compact keeps the whole limits receipt", terse["limits"] == full["limits"])
+    check("compact drops the descriptive half",
+          "determinism" not in terse and "source_sha256" not in terse)
+    check("compact names every key it dropped rather than truncating silently",
+          all(key in terse["receipt_detail"]
+              for key in set(full) - set(terse) - {"receipt_detail"}))
+    check("the compact receipt is smaller than the full one",
+          len(json.dumps(terse)) < len(json.dumps(full)))
 
 
 def test_session_service_owns_protocol_neutral_lifecycle_and_artifacts() -> None:
@@ -767,6 +997,13 @@ if __name__ == "__main__":
     test_service_rejects_unsupported_streaming_without_fallback()
     test_service_normalizes_unsupported_synchronous_capabilities()
     test_service_receipt_reports_requested_and_provider_enforced_limits()
+    test_receipt_names_the_request_and_the_source_by_content()
+    test_receipt_is_stable_for_identical_inputs_and_moves_for_different_ones()
+    test_receipt_records_the_determinism_inputs_it_can_observe()
+    test_receipt_determinism_does_not_claim_a_remote_environment()
+    test_receipt_carries_no_secret_and_no_machine_specific_path()
+    test_every_receipt_bearing_path_carries_the_same_receipt()
+    test_compact_mode_keeps_the_actionable_half_of_the_receipt()
     test_session_service_owns_protocol_neutral_lifecycle_and_artifacts()
     test_session_service_reads_bounded_files_and_runs_workspace_entries()
     test_session_file_pagination_is_shared_and_cursor_based()
