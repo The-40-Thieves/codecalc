@@ -28,8 +28,7 @@ use windows_sys::Win32::Security::Authorization::{
     SetEntriesInAclW, SetNamedSecurityInfoW, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN,
 };
 use windows_sys::Win32::Security::Isolation::{
-    CreateAppContainerProfile, DeleteAppContainerProfile,
-    DeriveAppContainerSidFromAppContainerName,
+    CreateAppContainerProfile, DeleteAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
 use windows_sys::Win32::Security::{
     ACL, DACL_SECURITY_INFORMATION, FreeSid, PSECURITY_DESCRIPTOR, PSID, SECURITY_CAPABILITIES,
@@ -53,8 +52,8 @@ use windows_sys::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
     GetExitCodeProcess, InitializeProcThreadAttributeList, OpenThread,
     PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST,
-    PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION,
-    ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW, THREAD_SUSPEND_RESUME,
+    PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION, ResumeThread,
+    STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW, THREAD_SUSPEND_RESUME,
     UpdateProcThreadAttribute, WaitForSingleObject,
 };
 
@@ -512,9 +511,7 @@ fn create_appcontainer() -> io::Result<AppContainer> {
         // Profile call reported success but gave no SID: delete what we may have
         // created and refuse rather than launch unconfined.
         unsafe { DeleteAppContainerProfile(name_w.as_ptr()) };
-        return Err(io::Error::other(
-            "AppContainer profile returned a null SID",
-        ));
+        return Err(io::Error::other("AppContainer profile returned a null SID"));
     }
     Ok(AppContainer { name_w, sid })
 }
@@ -606,18 +603,15 @@ fn grant_sid_path_access(sid: PSID, path: &std::path::Path, access: u32) -> io::
 /// caller for the whole spawn+wait, because `CreateProcessW` reads the struct
 /// (and the SID it points at) during creation. FAILS CLOSED: any error here
 /// aborts the launch instead of dropping to an unconfined process.
-fn prepare_appcontainer(
-    cmd: &Command,
-) -> io::Result<(AppContainer, Box<SECURITY_CAPABILITIES>)> {
+fn prepare_appcontainer(cmd: &Command) -> io::Result<(AppContainer, Box<SECURITY_CAPABILITIES>)> {
     let ac = create_appcontainer()?;
 
     // The one directory the payload may write: its sandbox workdir. Full access,
     // inherited by anything it creates inside. Errors are labelled so a
     // FAIL-CLOSED launch is attributable to the appcontainer ACL path.
     if let Some(work) = cmd.get_current_dir() {
-        grant_sid_path_access(ac.sid, work, GENERIC_ALL).map_err(|e| {
-            io::Error::other(format!("appcontainer workdir ACL grant failed: {e}"))
-        })?;
+        grant_sid_path_access(ac.sid, work, GENERIC_ALL)
+            .map_err(|e| io::Error::other(format!("appcontainer workdir ACL grant failed: {e}")))?;
     }
     // Read-only runtime assets: the interpreter/compiler must be able to load
     // itself. Grant read+execute on its own directory and NOTHING else — not the
@@ -906,14 +900,14 @@ pub fn spawn_and_wait(
         // Reported, never silently downgraded to the weaker path: a fallback
         // would put us back in the topology this exists to escape, while the
         // caller believed otherwise.
-        let (p, thread) =
-            spawn_with_job_at_creation(&cmd, stdio, job.0, breakaway, sec_caps_ptr).map_err(|e| {
-                // Names the appcontainer flag so a FAIL-CLOSED launch is
-                // attributable to the strict path rather than a bare OS error.
-                io::Error::other(format!(
-                    "creation-time strict launch failed (appcontainer={appcontainer}): {e}"
-                ))
-            })?;
+        let (p, thread) = spawn_with_job_at_creation(&cmd, stdio, job.0, breakaway, sec_caps_ptr)
+            .map_err(|e| {
+            // Names the appcontainer flag so a FAIL-CLOSED launch is
+            // attributable to the strict path rather than a bare OS error.
+            io::Error::other(format!(
+                "creation-time strict launch failed (appcontainer={appcontainer}): {e}"
+            ))
+        })?;
         unsafe { ResumeThread(thread) };
         unsafe { CloseHandle(thread) };
         process = p;
