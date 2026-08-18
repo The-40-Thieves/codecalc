@@ -36,6 +36,7 @@ from . import (
     exact,
     execution_service,
     executor,
+    grades,
     logic,
     optimization,
     packages,
@@ -483,8 +484,14 @@ def truth_table(expression: str) -> dict:
 
 @mcp.tool()
 def z3_check(smt2: str) -> dict:
-    """Check an SMT-LIB2 formula with Z3: sat/unsat/unknown plus a model. Example: '(declare-const x Int)(assert (> x 5))(check-sat)'."""
-    return logic.z3_check(smt2)
+    """Check an SMT-LIB2 formula with Z3: sat/unsat/unknown plus a model. Example:
+    '(declare-const x Int)(assert (> x 5))(check-sat)'.
+
+    A decisive verdict (sat or unsat) is graded `solver_proven` — see
+    `grade_basis` for the engine version and timeout bound it was decided
+    within. `unknown` carries no proof either way and is graded `ungraded`.
+    """
+    return grades.grade_z3_check(logic.z3_check(smt2))
 
 
 @mcp.tool()
@@ -829,8 +836,12 @@ def verify_translation(source_code: str, source_language: str,
     Use it after porting anything: python3 -> go, node -> rust, a rewritten
     function against the original. Pair with compare_edge_cases to find the
     inputs worth testing.
+
+    A pass is graded `cross_checked` (two independent implementations, run
+    and agreeing — see `grade_basis` for which runtimes). A non-pass is
+    graded `ungraded`: never a softer positive grade.
     """
-    return translation.verify_translation(
+    result = translation.verify_translation(
         source_language, source_code, target_language, target_code,
     # The FULL set, not DEFAULT_EDGE_INPUTS[:4]. The slice kept '', '0', '1', '-1'
         # and discarded '10', '100' and '0.1\n0.2' — the multi-digit cases and the
@@ -848,6 +859,7 @@ def verify_translation(source_code: str, source_language: str,
         #
         # Cost of the change, measured: 0.38s -> 0.67s per call.
         test_inputs if test_inputs else translation.DEFAULT_EDGE_INPUTS)
+    return grades.grade_verify_translation(result, source_language, target_language)
 
 
 @mcp.tool()
@@ -879,10 +891,16 @@ def verify_optimization(original: str, candidate: str, language: str,
     1.09x" is the answer an optimiser that fabricates wins cannot give. A
     candidate that is faster but wrong fails the first gate, and its speed is
     never measured, because a faster wrong answer is not an optimisation.
+
+    An accepted result is graded `cross_checked` (see `grade_basis` for the
+    runtime and the measured speedup). A rejection — wrong OR merely not
+    faster enough — is graded `ungraded`: correctness alone does not earn a
+    grade for the optimisation claim this tool exists to answer.
     """
-    return optimization.verify_optimization(
+    result = optimization.verify_optimization(
         original, candidate, language, test_inputs=test_inputs,
         sizes=sizes, min_speedup=min_speedup)
+    return grades.grade_verify_optimization(result, result.get("language", language))
 
 
 @mcp.tool()
