@@ -217,6 +217,13 @@ jobs:
       - name: package install isolation
         shell: bash
         run: uv run --no-sync python tests/test_package_isolation.py
+      # THE-791: CODECALC_PACKAGE_ALLOWLIST is unset by default (no behaviour
+      # change) but deny-by-default once configured, with subprocess.run
+      # stubbed so a denial is asserted PRE-side-effect rather than trusted
+      # from the return value alone.
+      - name: package install allowlist (deny-by-default)
+        shell: bash
+        run: uv run --no-sync python tests/test_package_allowlist.py
       # Regressions from the 2026-08-08 bug sweep: lost exactness, wrong widths,
       # crashes on ordinary inputs, a dead ns path, and documented constant
       # names that resolved to nothing.
@@ -235,6 +242,13 @@ jobs:
       # descriptors, subprocess semantics — so they run on all three.
       - name: session + worker regressions
         run: uv run --no-sync python tests/test_python_sweep.py
+      # THE-779: CODECALC_SESSION_IDLE_TTL_SECONDS is unset by default (no
+      # expiry, ever) but reaps an idle worker on next access once
+      # configured. Covers both worker languages and asserts on the OS-level
+      # PID, not just the in-memory bookkeeping — same platform reasoning as
+      # the sweep above.
+      - name: session idle-expiry
+        run: uv run --no-sync python tests/test_session_idle_expiry.py
       # No network needed and none permitted: this asserts the package cannot
       # make an outbound request at all, so it cannot flake on connectivity.
       - name: offline guarantee (no network calls anywhere)
