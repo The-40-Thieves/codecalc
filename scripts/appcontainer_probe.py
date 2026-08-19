@@ -79,6 +79,18 @@ def _token_facts() -> dict[str, object]:
             return None
         return ctypes.cast(buf, ctypes.POINTER(buf_type)).contents
 
+    def query_raw(info_class: int) -> bytes | None:
+        size = wintypes.DWORD(0)
+        advapi.GetTokenInformation(htok, info_class, None, 0, ctypes.byref(size))
+        if size.value == 0:
+            return None
+        buf = (ctypes.c_byte * size.value)()
+        if not advapi.GetTokenInformation(
+            htok, info_class, buf, size.value, ctypes.byref(size)
+        ):
+            return None
+        return bytes(buf)
+
     facts: dict[str, object] = {}
 
     is_ac = query(TokenIsAppContainer, wintypes.DWORD)
@@ -99,9 +111,40 @@ def _token_facts() -> dict[str, object]:
             kernel.LocalFree(ctypes.cast(p, ctypes.c_void_p))
     facts["appcontainer_sid"] = sid_str
 
-    # TOKEN_PRIVILEGES { DWORD PrivilegeCount; ... } — count is the first DWORD.
-    priv = query(TokenPrivileges, wintypes.DWORD)
-    facts["privilege_count"] = int(priv.value) if priv is not None else None
+    # TOKEN_PRIVILEGES { DWORD PrivilegeCount; LUID_AND_ATTRIBUTES Privileges[]; }
+    # The count alone is not the criterion — an AppContainer legitimately keeps a
+    # couple of benign privileges (SeChangeNotify is Everyone's; SeIncreaseWorkingSet
+    # rides along). What matters is that no DANGEROUS/ambient privilege survives, so
+    # the names are enumerated for the harness to assert against.
+    class LUID(ctypes.Structure):
+        _fields_ = [("LowPart", wintypes.DWORD), ("HighPart", wintypes.LONG)]
+
+    priv_raw = query_raw(TokenPrivileges)
+    if priv_raw is not None and len(priv_raw) >= 4:
+        count = int.from_bytes(priv_raw[0:4], "little")
+        facts["privilege_count"] = count
+        lookup = advapi.LookupPrivilegeNameW
+        lookup.restype = wintypes.BOOL
+        names: list[str] = []
+        offset = 4
+        for _ in range(count):
+            if offset + 12 > len(priv_raw):
+                break
+            luid = LUID(
+                int.from_bytes(priv_raw[offset : offset + 4], "little"),
+                int.from_bytes(priv_raw[offset + 4 : offset + 8], "little", signed=True),
+            )
+            need = wintypes.DWORD(0)
+            lookup(None, ctypes.byref(luid), None, ctypes.byref(need))
+            if need.value:
+                name = ctypes.create_unicode_buffer(need.value + 1)
+                have = wintypes.DWORD(need.value + 1)
+                if lookup(None, ctypes.byref(luid), name, ctypes.byref(have)):
+                    names.append(name.value)
+            offset += 12
+        facts["privilege_names"] = names
+    else:
+        facts["privilege_count"] = None
 
     return facts
 

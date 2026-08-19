@@ -111,10 +111,22 @@ Check "control: not an AppContainer token"      ($ctl.inner.is_appcontainer -eq 
 # Acceptance criterion 1: AppContainer SID + no ambient privileges.
 Check "AC: token IS an AppContainer"            ($ac.inner.is_appcontainer -eq $true)   ("-> sid=" + $ac.inner.appcontainer_sid)
 Check "AC: has an AppContainer SID"             ([string]::IsNullOrEmpty([string]$ac.inner.appcontainer_sid) -eq $false) ("-> " + $ac.inner.appcontainer_sid)
-# An AppContainer token keeps at most SeChangeNotifyPrivilege (granted to
-# Everyone); the powerful ambient privileges the user token carries are gone. So
-# the bar is "far fewer than the control, and <= 1", not literally zero.
-Check "AC: ambient privileges stripped (<= 1 and < control)" (([int]$ac.inner.privilege_count -le 1) -and ([int]$ac.inner.privilege_count -lt [int]$ctl.inner.privilege_count)) ("-> AC=" + $ac.inner.privilege_count + " control=" + $ctl.inner.privilege_count)
+# "No ambient user token privileges" means no DANGEROUS/ambient privilege
+# survives — asserted BY NAME so it is not flaky across boxes. An AppContainer
+# legitimately retains two benign, unavoidable ones (SeChangeNotify: Everyone has
+# it, bypass-traverse; SeIncreaseWorkingSet: grow its own working set), so a bare
+# count bar is wrong. Also require the set to have shrunk vs the unconfined control.
+$dangerous = @(
+    "SeDebugPrivilege", "SeBackupPrivilege", "SeRestorePrivilege", "SeTakeOwnershipPrivilege",
+    "SeTcbPrivilege", "SeLoadDriverPrivilege", "SeImpersonatePrivilege", "SeAssignPrimaryTokenPrivilege",
+    "SeSecurityPrivilege", "SeCreateTokenPrivilege", "SeManageVolumePrivilege",
+    "SeSystemEnvironmentPrivilege", "SeShutdownPrivilege", "SeUndockPrivilege", "SeTimeZonePrivilege"
+)
+$acPrivs = @($ac.inner.privilege_names)
+$leaked = @($acPrivs | Where-Object { $dangerous -contains $_ })
+Check "AC: token privileges enumerated" ($null -ne $ac.inner.privilege_names) "-> names readable, not a token error"
+Check "AC: no dangerous/ambient privilege survives" ($leaked.Count -eq 0) ("-> leaked=[" + ($leaked -join ",") + "] AC=[" + ($acPrivs -join ",") + "]")
+Check "AC: privilege set reduced vs control" ([int]$ac.inner.privilege_count -lt [int]$ctl.inner.privilege_count) ("-> AC=" + $ac.inner.privilege_count + " control=" + $ctl.inner.privilege_count)
 
 # Acceptance criterion 2: cannot read user-profile secrets / write outside workdir.
 Check "AC: CANNOT read the user-profile secret" ($ac.inner.can_read_secret -eq $false)  ("-> read_err=" + $ac.inner.read_err)
