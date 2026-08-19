@@ -22,7 +22,7 @@
 //! here, which is why `Wait::unenforced` exists: every caller is told which
 //! guarantees did NOT apply, rather than being left to assume they all did.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[cfg(unix)]
@@ -177,6 +177,200 @@ pub fn quote_arg(arg: &std::ffi::OsStr) -> String {
     }
     out.push('"');
     out
+}
+
+/// Does `path` traverse the Windows Store app-execution alias directory,
+/// `…\Microsoft\WindowsApps\…`?
+///
+/// Those aliases are zero-length reparse stubs that hand off to the Store
+/// activation broker, which launches the real program OUTSIDE the caller's job
+/// object — escaping every sandbox limit. The Windows backend refuses a runtime
+/// that resolves to one (THE-818). Matching is the `Microsoft`→`WindowsApps`
+/// PAIR, never a bare `WindowsApps`: the real package store at
+/// `Program Files\WindowsApps` holds legitimate executables and must not match.
+///
+/// Split on BOTH separators so the check is byte-identical on the Linux CI that
+/// tests it and the Windows host that runs it. `Path::components` treats `\` as
+/// an ordinary character off-Windows, so a backslash alias path would collapse
+/// to one component there and the pair would never be seen — the same
+/// `os.path` vs `ntpath` platform split THE-817 was. Kept compiled and TESTED on
+/// every platform for exactly that reason; only the Windows backend calls it.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn is_windowsapps_alias_path(path: &Path) -> bool {
+    let display = path.to_string_lossy();
+    let mut prev_is_microsoft = false;
+    for part in display.split(['/', '\\']).filter(|p| !p.is_empty()) {
+        if prev_is_microsoft && part.eq_ignore_ascii_case("WindowsApps") {
+            return true;
+        }
+        prev_is_microsoft = part.eq_ignore_ascii_case("Microsoft");
+    }
+    false
+}
+
+/// Outcome of choosing a runtime executable from an ordered candidate list.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub enum RuntimeChoice {
+    /// A real, launchable executable — the first candidate that is a file and
+    /// is not an app-execution alias.
+    Found(PathBuf),
+    /// Every matching candidate was a Store app-execution alias. Carries the
+    /// FIRST one seen, so the caller can fail closed naming a concrete path.
+    OnlyAlias(PathBuf),
+    /// Nothing on the candidate list was a file at all.
+    None,
+}
+
+/// Choose a runtime executable from `candidates`, scanning in order.
+///
+/// The security-critical resolution decision behind THE-818, kept here —
+/// separate from Windows filesystem I/O — so the Linux CI can exercise the
+/// control flow with injected classifiers. A candidate that is a file but an
+/// app-execution alias is SKIPPED rather than returned, so an alias early on
+/// PATH cannot shadow a real interpreter later on it; if every file found was an
+/// alias, the first is returned as `OnlyAlias` for a specific fail-closed error
+/// instead of a bare "not found". `is_file` and `is_alias` are injected so the
+/// same logic is driven by real Windows checks in production and by fakes in the
+/// tests below.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn choose_runtime<I, F, G>(candidates: I, is_file: F, is_alias: G) -> RuntimeChoice
+where
+    I: IntoIterator<Item = PathBuf>,
+    F: Fn(&Path) -> bool,
+    G: Fn(&Path) -> bool,
+{
+    let mut first_alias: Option<PathBuf> = None;
+    for candidate in candidates {
+        if !is_file(&candidate) {
+            continue;
+        }
+        if is_alias(&candidate) {
+            if first_alias.is_none() {
+                first_alias = Some(candidate);
+            }
+            continue;
+        }
+        return RuntimeChoice::Found(candidate);
+    }
+    match first_alias {
+        Some(alias) => RuntimeChoice::OnlyAlias(alias),
+        None => RuntimeChoice::None,
+    }
+}
+
+#[cfg(test)]
+mod choose_runtime_tests {
+    use super::{RuntimeChoice, choose_runtime};
+    use std::path::{Path, PathBuf};
+
+    // The candidate ordering is PATH order; the classifiers stand in for the
+    // real Windows `is_file`/`is_app_execution_alias` so the branch logic — not
+    // the filesystem — is what these tests pin down.
+    fn cands(list: &[&str]) -> Vec<PathBuf> {
+        list.iter().map(PathBuf::from).collect()
+    }
+    fn is(p: &Path, name: &str) -> bool {
+        p.to_str() == Some(name)
+    }
+
+    #[test]
+    fn a_real_file_after_an_alias_is_preferred_and_the_alias_skipped() {
+        // The THE-818 case: the alias sorts first on PATH, a real interpreter
+        // sits behind it. The real one must win.
+        let r = choose_runtime(cands(&["alias", "real"]), |_| true, |p| is(p, "alias"));
+        assert!(matches!(r, RuntimeChoice::Found(p) if p == Path::new("real")));
+    }
+
+    #[test]
+    fn a_real_file_before_an_alias_wins_immediately() {
+        let r = choose_runtime(cands(&["real", "alias"]), |_| true, |p| is(p, "alias"));
+        assert!(matches!(r, RuntimeChoice::Found(p) if p == Path::new("real")));
+    }
+
+    #[test]
+    fn only_aliases_fails_closed_naming_the_first() {
+        // Fail closed, and name the FIRST alias (what an operator's PATH hits).
+        let r = choose_runtime(cands(&["alias1", "alias2"]), |_| true, |_| true);
+        assert!(matches!(r, RuntimeChoice::OnlyAlias(p) if p == Path::new("alias1")));
+    }
+
+    #[test]
+    fn no_file_match_is_none_not_alias() {
+        // Nothing is a file → None, never a spurious alias refusal.
+        let r = choose_runtime(cands(&["a", "b"]), |_| false, |_| true);
+        assert!(matches!(r, RuntimeChoice::None));
+    }
+
+    #[test]
+    fn missing_candidates_are_stepped_over_to_reach_a_real_file() {
+        // PATHEXT / multiple dirs produce candidates that are not files; the
+        // scan must step past them to the real hit.
+        let r = choose_runtime(cands(&["missing", "real"]), |p| is(p, "real"), |_| false);
+        assert!(matches!(r, RuntimeChoice::Found(p) if p == Path::new("real")));
+    }
+
+    #[test]
+    fn a_run_of_aliases_never_masks_a_later_real_interpreter() {
+        let r = choose_runtime(
+            cands(&["a1", "a2", "real", "a3"]),
+            |_| true,
+            |p| !is(p, "real"),
+        );
+        assert!(matches!(r, RuntimeChoice::Found(p) if p == Path::new("real")));
+    }
+}
+
+#[cfg(test)]
+mod alias_path_tests {
+    use super::is_windowsapps_alias_path;
+    use std::path::Path;
+
+    fn is_alias(s: &str) -> bool {
+        is_windowsapps_alias_path(Path::new(s))
+    }
+
+    #[test]
+    fn the_real_store_alias_path_is_detected() {
+        // The shape THE-818 measured `python3` resolving to on a Win11 box.
+        assert!(is_alias(
+            r"C:\Users\alice\AppData\Local\Microsoft\WindowsApps\python3.EXE"
+        ));
+    }
+
+    #[test]
+    fn the_package_store_is_not_an_alias() {
+        // Program Files\WindowsApps holds REAL installed Store binaries. A bare
+        // `WindowsApps` match would wrongly refuse these — the pair guards it.
+        assert!(!is_alias(
+            r"C:\Program Files\WindowsApps\SomeVendor.App\python.exe"
+        ));
+    }
+
+    #[test]
+    fn a_normal_interpreter_is_not_an_alias() {
+        assert!(!is_alias(r"C:\Python312\python.exe"));
+        assert!(!is_alias(r"C:\Users\alice\venv\Scripts\python.exe"));
+    }
+
+    #[test]
+    fn case_is_ignored_on_both_components() {
+        // Windows paths are case-insensitive; the drive may hand back any casing.
+        assert!(is_alias(
+            r"c:\users\x\appdata\local\microsoft\windowsapps\PYTHON3.EXE"
+        ));
+    }
+
+    #[test]
+    fn forward_slashes_are_matched_too() {
+        // The env/PATH can carry either separator; both must split identically.
+        assert!(is_alias("C:/opt/Local/Microsoft/WindowsApps/python3.exe"));
+    }
+
+    #[test]
+    fn microsoft_without_windowsapps_is_not_an_alias() {
+        // Microsoft appears all over Program Files; only the adjacency matters.
+        assert!(!is_alias(r"C:\Program Files\Microsoft\dotnet\dotnet.exe"));
+    }
 }
 
 #[cfg(test)]

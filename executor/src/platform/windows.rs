@@ -16,7 +16,7 @@
 use std::io;
 use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 
 use windows_sys::Win32::Foundation::{
@@ -34,6 +34,7 @@ use windows_sys::Win32::Security::{
     ACL, DACL_SECURITY_INFORMATION, FreeSid, PSECURITY_DESCRIPTOR, PSID, SECURITY_CAPABILITIES,
     SUB_CONTAINERS_AND_OBJECTS_INHERIT,
 };
+use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
 };
@@ -348,21 +349,83 @@ fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// Is `path` a Windows Store *app-execution alias* rather than a real program?
+///
+/// `%LOCALAPPDATA%\Microsoft\WindowsApps` holds zero-length reparse stubs that,
+/// when executed, hand off to the Store activation broker. The broker starts the
+/// real program OUTSIDE the caller's process tree and job object, so a runtime
+/// resolved to one of these escapes EVERY Job-Object control the sandbox relies
+/// on — the process ceiling, the memory caps, and the timeout tree-kill all go
+/// silently void. This was the root cause of THE-818: a bare `python3` PATH-
+/// resolved to `...\Microsoft\WindowsApps\python3.EXE`, and measured escape on a
+/// real Windows 11 box was not a job-topology bug at all but this hand-off.
+///
+/// Detected two independent ways, either sufficient:
+///   * the alias directory — `super::is_windowsapps_alias_path`, a `Microsoft`
+///     component immediately followed by `WindowsApps`. That pure path check
+///     lives in the cross-platform module so the Linux CI actually exercises it
+///     (`Path::components` treats `\` as ordinary off-Windows — the THE-817
+///     platform split a Windows-only test would silently miss).
+///   * a zero-length reparse stub — the exact app-execution-alias signature: a
+///     FILE (not a directory — a directory reports len 0 on NTFS), of zero
+///     length (a real PE never is), that is a reparse point (the alias is one).
+///     All three are required so a plain empty file or a directory is not
+///     misreported as an alias; this catches an alias reached by a path form the
+///     `Microsoft\WindowsApps` name match misses (an 8.3 short path, a junction).
+fn is_app_execution_alias(path: &Path) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    super::is_windowsapps_alias_path(path)
+        || std::fs::metadata(path)
+            .map(|m| {
+                m.is_file()
+                    && m.len() == 0
+                    && m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            })
+            .unwrap_or(false)
+}
+
+/// Fail closed on a resolved app-execution alias with an actionable message.
+///
+/// Running untrusted code through the Store broker is strictly worse than not
+/// running it: it executes fully UNCONFINED, outside the sandbox job. So the
+/// resolver refuses rather than launch it, and tells the operator how to supply
+/// a real interpreter instead. (THE-818.)
+fn alias_refused_error(alias: &Path) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!(
+            "refusing to launch {}: it is a Windows Store app-execution alias that runs \
+             outside the sandbox job object, defeating every resource limit. Install a real \
+             interpreter (e.g. from python.org) or configure its absolute path.",
+            alias.display()
+        ),
+    )
+}
+
 /// Resolve the program using the environment attached to `cmd`.
 ///
 /// `CreateProcessW` performs executable lookup before applying the child's
 /// environment block, so a null `lpApplicationName` searches the executor's
 /// PATH rather than the deliberately configured sandbox PATH. Rust's normal
 /// `Command` path resolves this for us; the raw creation-time path must do it.
+///
+/// A resolved Windows Store app-execution alias is refused (`is_app_execution_
+/// alias`): it would broker-launch outside the job and escape the sandbox.
 fn resolve_command_program(cmd: &Command) -> io::Result<PathBuf> {
     let requested = PathBuf::from(cmd.get_program());
     if requested.is_absolute() || requested.components().count() > 1 {
-        return requested.is_file().then_some(requested).ok_or_else(|| {
-            io::Error::new(
+        // Existence first, so a missing path or a directory gets the correct
+        // "does not exist" error rather than being mislabelled an alias.
+        if !requested.is_file() {
+            return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 "configured executable does not exist",
-            )
-        });
+            ));
+        }
+        if is_app_execution_alias(&requested) {
+            return Err(alias_refused_error(&requested));
+        }
+        return Ok(requested);
     }
 
     let command_env = |name: &str| {
@@ -387,21 +450,22 @@ fn resolve_command_program(cmd: &Command) -> io::Result<PathBuf> {
         }
     }
 
-    for directory in std::env::split_paths(&path) {
-        for name in &names {
-            let candidate = directory.join(name);
-            if candidate.is_file() {
-                return Ok(candidate);
-            }
-        }
+    // Each PATH directory crossed with each PATHEXT name, in order. The skip-
+    // alias / prefer-real / fail-closed decision is `super::choose_runtime`,
+    // tested cross-platform; here it is driven by the real filesystem checks.
+    let candidates =
+        std::env::split_paths(&path).flat_map(|dir| names.iter().map(move |name| dir.join(name)));
+    match super::choose_runtime(candidates, |p| p.is_file(), is_app_execution_alias) {
+        super::RuntimeChoice::Found(program) => Ok(program),
+        super::RuntimeChoice::OnlyAlias(alias) => Err(alias_refused_error(&alias)),
+        super::RuntimeChoice::None => Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "{} was not found on the configured runtime PATH",
+                requested.display()
+            ),
+        )),
     }
-    Err(io::Error::new(
-        io::ErrorKind::NotFound,
-        format!(
-            "{} was not found on the configured runtime PATH",
-            requested.display()
-        ),
-    ))
 }
 
 // ── THE-829: least-privilege AppContainer strict backend ─────────────────────
