@@ -7,11 +7,29 @@
 # -- and checks the two results against the ticket's acceptance criteria.
 #
 # PowerShell 5.1 safe: ASCII only, no '&&', explicit $LASTEXITCODE / Test-Path.
-# Run from the repo root:  powershell -ExecutionPolicy Bypass -File scripts\verify_appcontainer.ps1
+# The AppContainer grants its SID only the workdir and the RESOLVED interpreter's
+# own directory. So AppContainer mode needs a SELF-CONTAINED interpreter -- exe,
+# DLLs and stdlib all under one directory. A PyManager/pythoncore install whose
+# stdlib lives in a separate redirected install tree, or a Store alias, cannot
+# load under the AppContainer (fails closed, 0x0005 access denied). Pass
+# -PythonDir <dir> at a self-contained interpreter (e.g. a uv-managed cpython
+# dir); it is prepended to PATH so BOTH arms use the same interpreter.
+#
+# Run from the repo root:
+#   powershell -ExecutionPolicy Bypass -File scripts\verify_appcontainer.ps1 -PythonDir C:\path\to\selfcontained-python
+param([string]$PythonDir = "")
 
 $ErrorActionPreference = "Continue"
 $repo = (Resolve-Path "$PSScriptRoot\..").Path
 Set-Location -LiteralPath $repo -ErrorAction Stop
+
+if ($PythonDir -ne "") {
+    if (-not (Test-Path -LiteralPath (Join-Path $PythonDir "python3.exe"))) {
+        Write-Host "WARNING: no python3.exe under -PythonDir '$PythonDir'; AppContainer arm may fail closed"
+    }
+    $env:PATH = $PythonDir + ";" + $env:PATH
+    Write-Host "PATH prepended with self-contained interpreter dir: $PythonDir"
+}
 
 $fails = New-Object System.Collections.Generic.List[string]
 function Check($name, $cond, $detail) {
@@ -42,8 +60,9 @@ function Run-Arm($appcontainer) {
     Remove-Item Env:\CODECALC_WIN_APPCONTAINER -ErrorAction SilentlyContinue
     $outer = $null; $inner = $null
     try { $outer = $raw | ConvertFrom-Json } catch {}
-    if ($null -ne $outer -and $outer.output) {
-        try { $inner = $outer.output | ConvertFrom-Json } catch {}
+    # The executor carries the payload's stdout in the "stdout" field.
+    if ($null -ne $outer -and $outer.stdout) {
+        try { $inner = $outer.stdout | ConvertFrom-Json } catch {}
     }
     return [pscustomobject]@{ outer = $outer; inner = $inner; raw = $raw }
 }

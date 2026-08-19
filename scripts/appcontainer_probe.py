@@ -35,6 +35,27 @@ def _token_facts() -> dict[str, object]:
     advapi = ctypes.WinDLL("advapi32", use_last_error=True)
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
 
+    # Pin prototypes. Without restype=HANDLE, GetCurrentProcess()'s (HANDLE)-1
+    # pseudo-handle is truncated to 32 bits and OpenProcessToken then fails with
+    # ERROR_INVALID_HANDLE (6) on 64-bit Python. This is the whole reason the
+    # first box run reported "token_error": "OpenProcessToken 6".
+    kernel.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel.GetCurrentProcess.argtypes = []
+    kernel.LocalFree.restype = ctypes.c_void_p
+    kernel.LocalFree.argtypes = [ctypes.c_void_p]
+    advapi.OpenProcessToken.restype = wintypes.BOOL
+    advapi.OpenProcessToken.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.HANDLE),
+    ]
+    advapi.GetTokenInformation.restype = wintypes.BOOL
+    advapi.ConvertSidToStringSidW.restype = wintypes.BOOL
+    advapi.ConvertSidToStringSidW.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_wchar_p),
+    ]
+
     TOKEN_QUERY = 0x0008
     TokenPrivileges = 3
     TokenIsAppContainer = 29
