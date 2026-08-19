@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import pathlib
 import socket
 
 result: dict[str, object] = {"platform": os.name}
@@ -157,29 +158,26 @@ if os.name == "nt":
 
 # ── reach probes: read a planted secret, write outside, write inside, network ──
 home = os.environ.get("USERPROFILE") or os.environ.get("HOME") or ""
-secret_path = os.path.join(home, "codecalc-ac-secret.txt")
-outside_path = os.path.join(home, "codecalc-ac-escape.txt")
+secret_path = pathlib.Path(home) / "codecalc-ac-secret.txt"
+outside_path = pathlib.Path(home) / "codecalc-ac-escape.txt"
 
 try:
-    with open(secret_path, encoding="utf-8") as fh:
-        fh.read()
+    secret_path.read_text(encoding="utf-8")
     result["can_read_secret"] = True
 except Exception as exc:
     result["can_read_secret"] = False
     result["read_err"] = type(exc).__name__
 
 try:
-    with open(outside_path, "w", encoding="utf-8") as fh:
-        fh.write("escaped")
+    outside_path.write_text("escaped", encoding="utf-8")
     result["can_write_outside"] = True
-    os.remove(outside_path)
+    outside_path.unlink()
 except Exception as exc:
     result["can_write_outside"] = False
     result["write_outside_err"] = type(exc).__name__
 
 try:
-    with open("ac-probe-inside.txt", "w", encoding="utf-8") as fh:
-        fh.write("ok")
+    pathlib.Path("ac-probe-inside.txt").write_text("ok", encoding="utf-8")
     result["can_write_workdir"] = True
 except Exception as exc:
     result["can_write_workdir"] = False
