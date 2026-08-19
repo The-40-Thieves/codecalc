@@ -720,25 +720,35 @@ runtime executable. `CODECALC_WIN_JOB_AT_CREATION=0` retains the old path only
 as an explicitly unverified compatibility escape hatch.
 
 **AppContainer security isolation is a DIFFERENT guarantee from the Job Object's
-resource limits, and is UNVERIFIED on real Windows 11.** The Job Object above
-caps *resources* — memory, process count, user-mode CPU — and each run names in
-`unenforced` which of those did not bind. The optional AppContainer backend adds
-a *security* boundary layered on the same creation-time topology: a
-least-privilege AppContainer profile (`CreateAppContainerProfile`, no capability
-SIDs, so no network) whose SID is granted — by an explicit ACL — only the
-sandbox workdir plus read+execute on the runtime's own directory, launched with
+resource limits.** The Job Object above caps *resources* — memory, process count,
+user-mode CPU — and each run names in `unenforced` which of those did not bind.
+The optional AppContainer backend adds a *security* boundary layered on the same
+creation-time topology: a least-privilege AppContainer profile
+(`CreateAppContainerProfile`, no capability SIDs, so no network), launched with
 `SECURITY_CAPABILITIES` in the same `STARTUPINFOEX` attribute list as the job
-assignment. The intended property is that a payload cannot read the user profile
-or write outside its workdir. It is **OFF by default** (opt in with
-`CODECALC_WIN_APPCONTAINER=1`) and **fails closed** — if profile creation, SID
-derivation or the ACL grant fails, the launch is refused rather than dropped to
-an unconfined process. Because those isolation properties are only observable on
-a real Windows 11 desktop, which codecalc's authors cannot run, every run that
-takes this path emits `appcontainer_isolation_unverified_on_windows` and the
-boundary is disclosed as implemented-but-unverified. A Server-SKU CI runner can
-confirm only that the path compiles, runs and discloses — not that the isolation
-holds; that remains a Windows-11-box acceptance item, exactly like
-`CODECALC_WIN_JOB_AT_CREATION`.
+assignment. Access is granted two ways, deliberately split. The sandbox
+**workdir** is granted to the run's *own* AppContainer SID — per-run, so
+concurrent runs cannot reach each other's workdirs, and it vanishes with the
+ephemeral directory. The **interpreter directory** is granted read+execute to the
+fixed *ALL APPLICATION PACKAGES* SID (`S-1-15-2-1`) as an explicit,
+non-inheritable ACE applied per file across the tree — because a real
+interpreter's pre-existing files are inheritance-protected and no inheritable
+grant reaches them. That interpreter grant is **persistent and cached** (a marker
+in codecalc's own state dir; the several-thousand-file walk runs once per
+interpreter): a deliberate trade-off that leaves a read-only ACE, readable by any
+AppContainer on the machine, on a public interpreter — rather than re-walking
+every run. The intended property is that a payload cannot read the user profile,
+write outside its workdir, or reach the network. It is **OFF by default** (opt in
+with `CODECALC_WIN_APPCONTAINER=1`) and **fails closed** — if profile creation,
+SID derivation or an ACL grant fails, the launch is refused rather than dropped
+to an unconfined process. The isolation has been verified on a Windows 11 box
+(AppContainer SID present, user-profile secrets unreadable, writes confined to
+the workdir, network denied, ambient privileges reduced to the two benign ones
+Windows keeps), yet every run that takes this path still emits
+`appcontainer_isolation_unverified_on_windows`: a Server-SKU CI runner cannot
+exhibit AppContainer behaviour, and the guarantee ultimately depends on the
+deployment's OS and configuration, so the shipped default stays conservatively
+disclosed rather than claiming a universal proof.
 
 Two things degrade rather than fail on a given platform: languages whose runtime
 is absent (`list_languages` reports `available: false`), and the shell-wrapped

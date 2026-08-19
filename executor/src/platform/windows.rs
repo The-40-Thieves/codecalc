@@ -24,15 +24,16 @@ use windows_sys::Win32::Foundation::{
     WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Security::Authorization::{
-    EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW, NO_MULTIPLE_TRUSTEE, SE_FILE_OBJECT,
-    SetEntriesInAclW, SetNamedSecurityInfoW, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN,
+    ConvertStringSidToSidW, EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW,
+    NO_MULTIPLE_TRUSTEE, SE_FILE_OBJECT, SetEntriesInAclW, SetNamedSecurityInfoW, TRUSTEE_IS_SID,
+    TRUSTEE_IS_UNKNOWN,
 };
 use windows_sys::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeleteAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
 use windows_sys::Win32::Security::{
-    ACL, DACL_SECURITY_INFORMATION, FreeSid, PSECURITY_DESCRIPTOR, PSID, SECURITY_CAPABILITIES,
-    SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+    ACL, DACL_SECURITY_INFORMATION, FreeSid, NO_INHERITANCE, PSECURITY_DESCRIPTOR, PSID,
+    SECURITY_CAPABILITIES, SUB_CONTAINERS_AND_OBJECTS_INHERIT,
 };
 use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
@@ -509,7 +510,9 @@ impl Drop for AppContainer {
     fn drop(&mut self) {
         // Delete first, then free: DeleteAppContainerProfile takes the NAME, not
         // the SID, so ordering is independent, but freeing last keeps the SID
-        // valid for the whole teardown.
+        // valid for the whole teardown. The interpreter grant is NOT reverted
+        // here — it is a persistent, cached grant to the fixed ALL APPLICATION
+        // PACKAGES SID (not this per-run SID), so there is no per-run residue.
         unsafe { DeleteAppContainerProfile(self.name_w.as_ptr()) };
         if !self.sid.is_null() {
             unsafe { FreeSid(self.sid) };
@@ -580,12 +583,35 @@ fn create_appcontainer() -> io::Result<AppContainer> {
     Ok(AppContainer { name_w, sid })
 }
 
-/// ADD an allow-ACE for `sid` on `path`, preserving the directory's existing
-/// ACL. Additive on purpose: the executor still has to write into and later
-/// delete a temp workdir, and inherited ACEs (the operator's own access) must
-/// survive — replacing the DACL wholesale would strip both. So the current DACL
-/// is read, the one entry merged in, and the result written back unprotected.
+/// ADD an inheritable allow-ACE for `sid` on `path`, preserving the object's
+/// existing ACL. Thin wrapper for the workdir grant: the workdir is a freshly
+/// created, empty directory, so an inheritable ACE covers everything the payload
+/// later creates inside it.
 fn grant_sid_path_access(sid: PSID, path: &std::path::Path, access: u32) -> io::Result<()> {
+    set_sid_path_access(sid, path, access, true)
+}
+
+/// Add an allow-ACE for `sid` on `path` (one object, not a tree), preserving the
+/// object's existing ACL. Additive on purpose: inherited ACEs (the operator's own
+/// access) must survive — replacing the DACL wholesale would strip them. So the
+/// current DACL is read, the one entry merged in, and the result written back
+/// unprotected.
+///
+/// `inherit` sets the ACE's inheritance flags, and the `false` case is
+/// load-bearing for THE-829. `true` (workdir) makes the ACE inheritable so the
+/// payload's future files are covered. `false` (interpreter files) makes it an
+/// EXPLICIT, NON-inheritable ACE on exactly this object — measured on real
+/// Windows 11 as the only form that grants an AppContainer read on an
+/// interpreter's PRE-EXISTING, inheritance-protected files. An inheritable ACE,
+/// however applied (SetNamedSecurityInfoW, TreeSetNamedSecurityInfoW, or even
+/// `icacls /T`), never reaches them, so the interpreter tree is granted by
+/// applying this per node in `grant_tree_explicit_read`.
+fn set_sid_path_access(
+    sid: PSID,
+    path: &std::path::Path,
+    access: u32,
+    inherit: bool,
+) -> io::Result<()> {
     let path_w = to_wide(&path.to_string_lossy());
 
     // 1. Read the existing DACL (and the security descriptor that backs it).
@@ -617,12 +643,16 @@ fn grant_sid_path_access(sid: PSID, path: &std::path::Path, access: u32) -> io::
     }
     let _sd_guard = LocalMem(sd);
 
-    // 2. Describe the single ACE: this SID, this access, inherited by the files
-    // and subdirectories the payload creates underneath.
+    // 2. Describe the single allow-ACE for this SID. Inheritable (workdir) or an
+    // explicit, non-inheritable ACE on exactly this object (interpreter files).
     let mut ea: EXPLICIT_ACCESS_W = unsafe { std::mem::zeroed() };
     ea.grfAccessPermissions = access;
     ea.grfAccessMode = GRANT_ACCESS;
-    ea.grfInheritance = SUB_CONTAINERS_AND_OBJECTS_INHERIT;
+    ea.grfInheritance = if inherit {
+        SUB_CONTAINERS_AND_OBJECTS_INHERIT
+    } else {
+        NO_INHERITANCE
+    };
     ea.Trustee.MultipleTrusteeOperation = NO_MULTIPLE_TRUSTEE;
     ea.Trustee.pMultipleTrustee = std::ptr::null_mut();
     ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
@@ -638,9 +668,9 @@ fn grant_sid_path_access(sid: PSID, path: &std::path::Path, access: u32) -> io::
     }
     let _new_dacl_guard = LocalMem(new_dacl as *mut core::ffi::c_void);
 
-    // 4. Write it back. DACL_SECURITY_INFORMATION without the PROTECTED flag
-    // means "merge with inheritance", so this ADDS the ACE rather than replacing
-    // the object's protection.
+    // 4. Write it back on this one object. DACL_SECURITY_INFORMATION without the
+    // PROTECTED flag means "merge", so this ADDS the ACE rather than replacing the
+    // object's protection. Applied per node by the caller when a tree is meant.
     let rc = unsafe {
         SetNamedSecurityInfoW(
             path_w.as_ptr(),
@@ -658,6 +688,118 @@ fn grant_sid_path_access(sid: PSID, path: &std::path::Path, access: u32) -> io::
     Ok(())
 }
 
+/// Owns a SID allocated by `ConvertStringSidToSidW` (LocalAlloc'd → LocalFree).
+struct SidBox(PSID);
+
+impl Drop for SidBox {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { LocalFree(self.0) };
+        }
+    }
+}
+
+/// The well-known "ALL APPLICATION PACKAGES" SID (S-1-15-2-1). Every AppContainer
+/// is a member of it, so a read grant to this fixed SID lets any AppContainer —
+/// including this executor's per-run one — read the object, with no per-run grant.
+fn all_application_packages_sid() -> io::Result<SidBox> {
+    let s = to_wide("S-1-15-2-1");
+    let mut sid: PSID = std::ptr::null_mut();
+    if unsafe { ConvertStringSidToSidW(s.as_ptr(), &mut sid) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(SidBox(sid))
+}
+
+/// Cache marker recording that `dir`'s tree has been granted AAP read, so the
+/// several-thousand-file walk runs ONCE per interpreter rather than per execution.
+/// Kept in codecalc's own state dir — never inside the interpreter dir — and keyed
+/// by the dir path plus the interpreter's size and mtime, so an interpreter update
+/// invalidates it and the tree is re-granted.
+fn ac_grant_marker(program: &std::path::Path, dir: &std::path::Path) -> Option<PathBuf> {
+    use std::hash::{Hash, Hasher};
+    let base = std::env::var_os("LOCALAPPDATA")?;
+    let meta = std::fs::metadata(program).ok()?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    dir.hash(&mut hasher);
+    meta.len().hash(&mut hasher);
+    mtime.hash(&mut hasher);
+    Some(
+        PathBuf::from(base)
+            .join("codecalc")
+            .join("ac-granted")
+            .join(format!("{:016x}", hasher.finish())),
+    )
+}
+
+/// Grant "ALL APPLICATION PACKAGES" read+execute on every node of `dir`'s tree —
+/// an EXPLICIT, non-inheritable ACE per node, the only form that reaches an
+/// interpreter's pre-existing, inheritance-protected files (THE-829). Returns the
+/// number of per-node failures: the root grant is a hard error (fail closed), but
+/// a single locked or odd descendant must not abort the whole grant, matching
+/// `icacls /T /C`. A non-zero count means the cache is NOT written, so the next
+/// run retries rather than trusting a partial grant.
+fn grant_tree_explicit_read(sid: PSID, dir: &std::path::Path) -> io::Result<usize> {
+    const RX: u32 = GENERIC_READ | GENERIC_EXECUTE;
+    set_sid_path_access(sid, dir, RX, false)?;
+    let mut failures = 0usize;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let entries = match std::fs::read_dir(&d) {
+            Ok(entries) => entries,
+            Err(_) => {
+                failures += 1;
+                continue;
+            }
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if set_sid_path_access(sid, &path, RX, false).is_err() {
+                failures += 1;
+            }
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                stack.push(path);
+            }
+        }
+    }
+    Ok(failures)
+}
+
+/// Ensure the interpreter tree is readable by AppContainers, ONCE per interpreter.
+/// Grants AAP read across the tree (cached via `ac_grant_marker`) so the per-run
+/// AppContainer can load the interpreter and its libraries without a per-run tree
+/// walk. FAILS CLOSED: if the SID cannot be built or the root grant fails, the
+/// caller aborts rather than launching a payload that cannot run.
+fn ensure_interpreter_ac_readable(
+    program: &std::path::Path,
+    dir: &std::path::Path,
+) -> io::Result<()> {
+    let marker = ac_grant_marker(program, dir);
+    if let Some(m) = &marker
+        && m.is_file()
+    {
+        return Ok(());
+    }
+    let aap = all_application_packages_sid()?;
+    let failures = grant_tree_explicit_read(aap.0, dir)?;
+    // Only cache a CLEAN grant; a partial one is retried next run.
+    if failures == 0
+        && let Some(m) = marker
+    {
+        if let Some(parent) = m.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&m, b"");
+    }
+    Ok(())
+}
+
 /// Build the least-privilege AppContainer, grant it ONLY the sandbox workdir
 /// (read/write) plus read+execute on the resolved runtime's own directory, and
 /// return the profile guard together with a boxed `SECURITY_CAPABILITIES` whose
@@ -671,21 +813,25 @@ fn prepare_appcontainer(cmd: &Command) -> io::Result<(AppContainer, Box<SECURITY
     let ac = create_appcontainer()?;
 
     // The one directory the payload may write: its sandbox workdir. Full access,
-    // inherited by anything it creates inside. Errors are labelled so a
+    // inherited by anything it creates inside. Granted to THIS run's SID only, so
+    // concurrent runs cannot reach each other's workdirs. Errors are labelled so a
     // FAIL-CLOSED launch is attributable to the appcontainer ACL path.
     if let Some(work) = cmd.get_current_dir() {
         grant_sid_path_access(ac.sid, work, GENERIC_ALL)
             .map_err(|e| io::Error::other(format!("appcontainer workdir ACL grant failed: {e}")))?;
     }
     // Read-only runtime assets: the interpreter/compiler must be able to load
-    // itself. Grant read+execute on its own directory and NOTHING else — not the
-    // user profile, not the rest of the disk. Comprehensive per-asset grants
-    // (e.g. a full interpreter install tree) are a Win11-box verification item.
+    // itself AND its libraries. Grant "ALL APPLICATION PACKAGES" read+execute on
+    // the interpreter's directory tree and NOTHING else — not the user profile,
+    // not the rest of the disk. Granted to that fixed SID (not this run's) and
+    // cached, so the several-thousand-file walk runs once per interpreter, and an
+    // interpreter's pre-existing, inheritance-protected files are reached by an
+    // explicit per-node ACE (an inheritable one never propagates to them; THE-829).
     if let Ok(program) = resolve_command_program(cmd)
         && let Some(dir) = program.parent()
     {
-        grant_sid_path_access(ac.sid, dir, GENERIC_READ | GENERIC_EXECUTE).map_err(|e| {
-            io::Error::other(format!("appcontainer runtime-dir ACL grant failed: {e}"))
+        ensure_interpreter_ac_readable(&program, dir).map_err(|e| {
+            io::Error::other(format!("appcontainer interpreter AAP grant failed: {e}"))
         })?;
     }
 
