@@ -34,6 +34,7 @@ use windows_sys::Win32::Security::{
     ACL, DACL_SECURITY_INFORMATION, FreeSid, PSECURITY_DESCRIPTOR, PSID, SECURITY_CAPABILITIES,
     SUB_CONTAINERS_AND_OBJECTS_INHERIT,
 };
+use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
 };
@@ -365,11 +366,22 @@ fn to_wide(s: &str) -> Vec<u16> {
 ///     lives in the cross-platform module so the Linux CI actually exercises it
 ///     (`Path::components` treats `\` as ordinary off-Windows — the THE-817
 ///     platform split a Windows-only test would silently miss).
-///   * a zero-length stub — a real PE image is never 0 bytes, and the aliases
-///     are, so this also catches an alias relocated outside the usual directory.
+///   * a zero-length reparse stub — the exact app-execution-alias signature: a
+///     FILE (not a directory — a directory reports len 0 on NTFS), of zero
+///     length (a real PE never is), that is a reparse point (the alias is one).
+///     All three are required so a plain empty file or a directory is not
+///     misreported as an alias; this catches an alias reached by a path form the
+///     `Microsoft\WindowsApps` name match misses (an 8.3 short path, a junction).
 fn is_app_execution_alias(path: &Path) -> bool {
+    use std::os::windows::fs::MetadataExt;
     super::is_windowsapps_alias_path(path)
-        || std::fs::metadata(path).map(|m| m.len() == 0).unwrap_or(false)
+        || std::fs::metadata(path)
+            .map(|m| {
+                m.is_file()
+                    && m.len() == 0
+                    && m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            })
+            .unwrap_or(false)
 }
 
 /// Fail closed on a resolved app-execution alias with an actionable message.
@@ -402,15 +414,18 @@ fn alias_refused_error(alias: &Path) -> io::Error {
 fn resolve_command_program(cmd: &Command) -> io::Result<PathBuf> {
     let requested = PathBuf::from(cmd.get_program());
     if requested.is_absolute() || requested.components().count() > 1 {
+        // Existence first, so a missing path or a directory gets the correct
+        // "does not exist" error rather than being mislabelled an alias.
+        if !requested.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "configured executable does not exist",
+            ));
+        }
         if is_app_execution_alias(&requested) {
             return Err(alias_refused_error(&requested));
         }
-        return requested.is_file().then_some(requested).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                "configured executable does not exist",
-            )
-        });
+        return Ok(requested);
     }
 
     let command_env = |name: &str| {
@@ -435,33 +450,22 @@ fn resolve_command_program(cmd: &Command) -> io::Result<PathBuf> {
         }
     }
 
-    // A Store alias earlier on PATH must not shadow a real interpreter later on
-    // it, so aliases are skipped rather than returned. The first one skipped is
-    // remembered: if nothing real is found, the error names it and tells the
-    // operator what to do, instead of a bare "not found" that hides the cause.
-    let mut skipped_alias: Option<PathBuf> = None;
-    for directory in std::env::split_paths(&path) {
-        for name in &names {
-            let candidate = directory.join(name);
-            if candidate.is_file() {
-                if is_app_execution_alias(&candidate) {
-                    skipped_alias.get_or_insert(candidate);
-                    continue;
-                }
-                return Ok(candidate);
-            }
-        }
+    // Each PATH directory crossed with each PATHEXT name, in order. The skip-
+    // alias / prefer-real / fail-closed decision is `super::choose_runtime`,
+    // tested cross-platform; here it is driven by the real filesystem checks.
+    let candidates =
+        std::env::split_paths(&path).flat_map(|dir| names.iter().map(move |name| dir.join(name)));
+    match super::choose_runtime(candidates, |p| p.is_file(), is_app_execution_alias) {
+        super::RuntimeChoice::Found(program) => Ok(program),
+        super::RuntimeChoice::OnlyAlias(alias) => Err(alias_refused_error(&alias)),
+        super::RuntimeChoice::None => Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "{} was not found on the configured runtime PATH",
+                requested.display()
+            ),
+        )),
     }
-    if let Some(alias) = skipped_alias {
-        return Err(alias_refused_error(&alias));
-    }
-    Err(io::Error::new(
-        io::ErrorKind::NotFound,
-        format!(
-            "{} was not found on the configured runtime PATH",
-            requested.display()
-        ),
-    ))
 }
 
 // ── THE-829: least-privilege AppContainer strict backend ─────────────────────

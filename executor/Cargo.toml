@@ -55,6 +55,10 @@ windows-sys = { version = "0.61", features = [
     # the initial thread handle, so the thread to resume is found by snapshotting
     # and filtering on the owning PID. See platform/windows.rs::resume_process.
     "Win32_System_Diagnostics_ToolHelp",
+    # FILE_ATTRIBUTE_REPARSE_POINT — the zero-length-stub fallback in
+    # resolve_command_program refuses a Store app-execution alias reached by a
+    # path form the Microsoft\WindowsApps name match misses (THE-818).
+    "Win32_Storage_FileSystem",
 ] }
 
 # ── Older-computer optimizations ──────────────────────────────────────────
