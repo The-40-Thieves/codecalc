@@ -294,6 +294,11 @@ jobs:
         with:
           version: '0.12.1'
           python-version: '3.12'
+          # win-arm64's runner leaves the uv cache dir uncreated, and setup-uv's
+          # post-run cache-save then FAILS the job on "cache path does not exist"
+          # (a warning everywhere else). Tolerate the empty case; the other five
+          # targets still cache normally.
+          ignore-nothing-to-cache: true
 
       # --wheel, deliberately not plain `uv build`: a plain build round-trips
       # the wheel through an sdist first, and hatchling's VCS-ignore file
@@ -432,6 +437,11 @@ jobs:
         with:
           version: '0.12.1'
           python-version: '3.12'
+          # win-arm64's runner leaves the uv cache dir uncreated, and setup-uv's
+          # post-run cache-save then FAILS the job on "cache path does not exist"
+          # (a warning everywhere else). Tolerate the empty case; the other five
+          # targets still cache normally.
+          ignore-nothing-to-cache: true
       - name: uv venv + uv pip install, exactly as a user would
         if: matrix.mode != 'archive'
         shell: bash
