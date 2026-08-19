@@ -102,6 +102,19 @@ MAX_CONCURRENT_RUNS = 8
 #: the default" (see ``_positive_int``) rather than an error.
 MAX_TIMEOUT_SECONDS = 300
 
+#: Wall-clock ceiling on receiving a request body once its declared
+#: ``Content-Length`` has already cleared ``MAX_CONTENT_LENGTH`` (THE-851).
+#: Enforced as a TOTAL deadline across the whole read, not a per-recv idle
+#: gap: a bare ``socket.settimeout`` only bounds the silence between reads,
+#: so a client trickling one byte in just under that gap, forever, would
+#: never trip it and would still pin a ``ThreadingHTTPServer`` worker thread
+#: indefinitely — the exact slowloris case ``MAX_CONTENT_LENGTH`` alone does
+#: not close. See ``_StrictRequestHandler._read_body``. 10s is generous
+#: headroom for a legitimate caller sending up to ``MAX_CONTENT_LENGTH``
+#: bytes over a real network — a genuine client writes its whole body in one
+#: shot, so this is not expected to ever bind ordinary traffic.
+MAX_BODY_READ_SECONDS = 10.0
+
 
 class _HttpError(Exception):
     """An early return carrying an HTTP status and a JSON body."""
@@ -451,6 +464,56 @@ class _StrictRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
         self.close_connection = True
 
+    def _read_body(self, length: int) -> bytes:
+        """Read exactly ``length`` bytes against a TOTAL wall-clock deadline.
+
+        ``rfile.read(length)`` alone blocks the worker thread until either
+        ``length`` bytes arrive or the connection dies — a client that
+        declared a legitimate, sub-``MAX_CONTENT_LENGTH`` size and then
+        dribbles it slowly (or stalls entirely) pins the thread forever,
+        unbounded by ``MAX_CONCURRENT_RUNS`` since this runs before
+        ``dispatch()`` ever sees the request (THE-851).
+
+        A single ``socket.settimeout`` would not fix this: it bounds the gap
+        between individual reads, not the whole transfer, so a slow-enough
+        trickle still never times out. Each iteration here instead
+        recomputes the remaining budget against a fixed deadline and shrinks
+        the socket timeout to match, so the deadline holds across the ENTIRE
+        read no matter how the bytes are paced. ``self.rfile.read1`` issues
+        at most one underlying recv per call (unlike ``.read()``, which loops
+        to fill), so each iteration's timeout applies to exactly one recv.
+
+        Expiry (or the peer closing mid-body) raises ``TimeoutError`` — the
+        same type ``socket.timeout`` is an alias of, and the one
+        ``http.server.BaseHTTPRequestHandler.handle_one_request`` already
+        catches to drop the connection and free the thread, never a 200.
+        """
+        deadline = time.monotonic() + MAX_BODY_READ_SECONDS
+        chunks: list[bytes] = []
+        remaining = length
+        try:
+            while remaining > 0:
+                budget = deadline - time.monotonic()
+                if budget <= 0:
+                    raise TimeoutError(
+                        f"strict service: body read exceeded "
+                        f"{MAX_BODY_READ_SECONDS}s"
+                    )
+                self.connection.settimeout(budget)
+                chunk = self.rfile.read1(min(65536, remaining))
+                if not chunk:
+                    raise TimeoutError(
+                        "strict service: connection closed mid-body"
+                    )
+                chunks.append(chunk)
+                remaining -= len(chunk)
+        finally:
+            # Restore the handler's default (None == blocking) so a later
+            # request on the same keep-alive connection isn't left with a
+            # near-zero timeout from this read's final iteration.
+            self.connection.settimeout(self.timeout)
+        return b"".join(chunks)
+
     def _handle(self, method: str) -> None:
         try:
             length = int(self.headers.get("Content-Length") or 0)
@@ -459,7 +522,7 @@ class _StrictRequestHandler(BaseHTTPRequestHandler):
         if length > MAX_CONTENT_LENGTH:
             self._reject_oversized(length)
             return
-        body = self.rfile.read(length) if length > 0 else b""
+        body = self._read_body(length) if length > 0 else b""
         status, payload = self.server.service.dispatch(  # type: ignore[attr-defined]
             method, self.path, self.headers, body
         )

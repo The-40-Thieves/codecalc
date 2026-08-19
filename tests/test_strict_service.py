@@ -33,7 +33,7 @@ import uuid
 from http import HTTPStatus
 from urllib.parse import urlsplit
 
-from codecalc import providers
+from codecalc import providers, strict_service
 from codecalc.strict_runtime import (
     ENFORCEMENT_CONTROLS,
     ISOLATION_PROFILE,
@@ -183,6 +183,48 @@ def raw_oversized_request(
     return status, elapsed
 
 
+def raw_stalled_body_request(
+    base_url: str, path: str, *, declared_length: int, sent_body: bytes,
+    token: str, client_wait: float,
+) -> tuple[bytes, float]:
+    """Send headers with a legitimate, SUB-ceiling ``Content-Length``, write
+    only ``sent_body``, then never send another byte and never close our end
+    — the slowloris shape THE-851 closes. Returns whatever the server sent
+    back (empty if it just dropped the connection) and the elapsed wall time.
+
+    ``client_wait`` must exceed the server's own body-read deadline so this
+    proves the SERVER's bound fires, not the client giving up first; it is
+    a generous fallback (so a regression fails fast instead of hanging the
+    suite forever), not a race against the server's timeout.
+    """
+    parts = urlsplit(base_url)
+    lines = [
+        f"POST {path} HTTP/1.1",
+        f"Host: {parts.hostname}:{parts.port}",
+        "Content-Type: application/json",
+        f"Content-Length: {declared_length}",
+        f"Authorization: Bearer {token}",
+    ]
+    header = ("\r\n".join(lines) + "\r\n\r\n").encode()
+    started = time.time()
+    response = b""
+    with socket.create_connection(
+        (parts.hostname, parts.port), timeout=client_wait
+    ) as sock:
+        sock.sendall(header + sent_body)
+        sock.settimeout(client_wait)
+        try:
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                response += chunk
+        except TimeoutError:
+            pass
+    elapsed = time.time() - started
+    return response, elapsed
+
+
 # ── PROTOCOL + AUTH (always runs) ────────────────────────────────────────────
 def test_full_client_flow_against_inprocess_service() -> None:
     runtime = FakeRuntime()
@@ -293,6 +335,40 @@ def test_oversized_content_length_rejected_before_read_and_before_auth() -> None
         check("the run was never admitted to the registry",
               "oversized-run" not in server.service._runs)
     finally:
+        server.shutdown()
+
+
+def test_stalled_body_read_is_bounded_by_a_deadline() -> None:
+    # THE-851: MAX_CONTENT_LENGTH alone only closes the OVERSIZED-body DoS.
+    # A client that declares a legitimate, sub-ceiling Content-Length and
+    # then dribbles/stalls the body must not pin a worker thread past a
+    # bounded deadline (unbounded by MAX_CONCURRENT_RUNS: this runs before
+    # dispatch() ever sees the request). The server's own deadline is
+    # patched small so the test proves the SERVER's bound fires quickly,
+    # not the (deliberately generous) client-side fallback.
+    original = strict_service.MAX_BODY_READ_SECONDS
+    strict_service.MAX_BODY_READ_SECONDS = 1.0
+    server, url = serve(FakeRuntime())
+    try:
+        response, elapsed = raw_stalled_body_request(
+            url, "/v1/runs/stalled-run/execute",
+            declared_length=1000,  # well under MAX_CONTENT_LENGTH
+            sent_body=b'{"lang',  # a handful of bytes, then silence forever
+            token=TOKEN,
+            client_wait=strict_service.MAX_BODY_READ_SECONDS + 10,
+        )
+        check("a stalled sub-ceiling body does not pin the worker past the "
+              "server's deadline",
+              elapsed < strict_service.MAX_BODY_READ_SECONDS + 5,
+              f"elapsed={elapsed:.2f}s")
+        check("the stalled connection is dropped, never answered with a 200",
+              not response.startswith(b"HTTP/1.1 200"),
+              f"response={response[:80]!r}")
+        check("the stalled run was never admitted to the registry "
+              "(dispatch() never ran)",
+              "stalled-run" not in server.service._runs)
+    finally:
+        strict_service.MAX_BODY_READ_SECONDS = original
         server.shutdown()
 
 
@@ -614,6 +690,7 @@ if __name__ == "__main__":
     test_bearer_auth_is_required()
     test_broken_health_makes_client_refuse_before_payload()
     test_oversized_content_length_rejected_before_read_and_before_auth()
+    test_stalled_body_read_is_bounded_by_a_deadline()
     test_run_registry_does_not_grow_without_bound()
     test_concurrent_run_cap_returns_429()
     test_non_strict_runtime_exception_releases_the_concurrency_slot()
