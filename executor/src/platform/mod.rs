@@ -179,6 +179,84 @@ pub fn quote_arg(arg: &std::ffi::OsStr) -> String {
     out
 }
 
+/// Does `path` traverse the Windows Store app-execution alias directory,
+/// `…\Microsoft\WindowsApps\…`?
+///
+/// Those aliases are zero-length reparse stubs that hand off to the Store
+/// activation broker, which launches the real program OUTSIDE the caller's job
+/// object — escaping every sandbox limit. The Windows backend refuses a runtime
+/// that resolves to one (THE-818). Matching is the `Microsoft`→`WindowsApps`
+/// PAIR, never a bare `WindowsApps`: the real package store at
+/// `Program Files\WindowsApps` holds legitimate executables and must not match.
+///
+/// Split on BOTH separators so the check is byte-identical on the Linux CI that
+/// tests it and the Windows host that runs it. `Path::components` treats `\` as
+/// an ordinary character off-Windows, so a backslash alias path would collapse
+/// to one component there and the pair would never be seen — the same
+/// `os.path` vs `ntpath` platform split THE-817 was. Kept compiled and TESTED on
+/// every platform for exactly that reason; only the Windows backend calls it.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn is_windowsapps_alias_path(path: &Path) -> bool {
+    let display = path.to_string_lossy();
+    let mut prev_is_microsoft = false;
+    for part in display.split(['/', '\\']).filter(|p| !p.is_empty()) {
+        if prev_is_microsoft && part.eq_ignore_ascii_case("WindowsApps") {
+            return true;
+        }
+        prev_is_microsoft = part.eq_ignore_ascii_case("Microsoft");
+    }
+    false
+}
+
+#[cfg(test)]
+mod alias_path_tests {
+    use super::is_windowsapps_alias_path;
+    use std::path::Path;
+
+    fn is_alias(s: &str) -> bool {
+        is_windowsapps_alias_path(Path::new(s))
+    }
+
+    #[test]
+    fn the_real_store_alias_path_is_detected() {
+        // The exact path THE-818 measured `python3` resolving to on a Win11 box.
+        assert!(is_alias(
+            r"C:\Users\misla\AppData\Local\Microsoft\WindowsApps\python3.EXE"
+        ));
+    }
+
+    #[test]
+    fn the_package_store_is_not_an_alias() {
+        // Program Files\WindowsApps holds REAL installed Store binaries. A bare
+        // `WindowsApps` match would wrongly refuse these — the pair guards it.
+        assert!(!is_alias(r"C:\Program Files\WindowsApps\SomeVendor.App\python.exe"));
+    }
+
+    #[test]
+    fn a_normal_interpreter_is_not_an_alias() {
+        assert!(!is_alias(r"C:\Python312\python.exe"));
+        assert!(!is_alias(r"C:\Users\misla\venv\Scripts\python.exe"));
+    }
+
+    #[test]
+    fn case_is_ignored_on_both_components() {
+        // Windows paths are case-insensitive; the drive may hand back any casing.
+        assert!(is_alias(r"c:\users\x\appdata\local\microsoft\windowsapps\PYTHON3.EXE"));
+    }
+
+    #[test]
+    fn forward_slashes_are_matched_too() {
+        // The env/PATH can carry either separator; both must split identically.
+        assert!(is_alias("C:/Users/x/AppData/Local/Microsoft/WindowsApps/python3.exe"));
+    }
+
+    #[test]
+    fn microsoft_without_windowsapps_is_not_an_alias() {
+        // Microsoft appears all over Program Files; only the adjacency matters.
+        assert!(!is_alias(r"C:\Program Files\Microsoft\dotnet\dotnet.exe"));
+    }
+}
+
 #[cfg(test)]
 mod quoting_tests {
     use super::quote_arg;
