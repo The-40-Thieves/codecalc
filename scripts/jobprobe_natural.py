@@ -138,7 +138,9 @@ first_error = ""
 try:
     while len(kids) < SPAWN:
         kids.append(subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"]))
-except Exception as exc:  # noqa: BLE001 -- the point is to catch the spawn refusal
+except OSError as exc:
+    # A job-object spawn refusal surfaces as OSError on Windows; that is exactly
+    # the signal this probe is looking for.
     first_error = f"{type(exc).__name__}: {exc}"
 
 acct = ACCT()
