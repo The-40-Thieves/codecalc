@@ -50,21 +50,15 @@ discoverable before it matters rather than after a tool call degrades.
 
 ## Install
 
-> [!IMPORTANT]
-> **Nothing has been published yet, so the two commands below do not work today.**
-> `codecalc` is **not registered on PyPI** — `pip install codecalc` gets a 404,
-> not this project. Until the first release, install from source (below).
->
-> This warning is here rather than the commands being quietly left in place
-> because the name is free for anyone to claim. A public README advertising an
-> exact install command for an unregistered name is the setup for a
-> supply-chain attack: someone registers `codecalc`, publishes anything, and
-> every reader who followed these instructions installs it having done
-> everything right. Tracked as
-> [#91](https://github.com/The-40-Thieves/codecalc/issues/91), which is what
-> claims the name and deletes this box.
+> [!NOTE]
+> Published as **`codecalc` 0.2.0** on PyPI (`pip install codecalc`) and the
+> **`codecalc-exec` 0.2.0** executor on crates.io
+> ([#91](https://github.com/The-40-Thieves/codecalc/issues/91)). Every release
+> artifact carries a keyless sigstore **build-provenance attestation** — verify
+> one with `gh attestation verify <file> --repo The-40-Thieves/codecalc`; PyPI
+> wheels additionally carry PEP 740 attestations.
 
-**From source**, which is the supported path today:
+**From source**, if you would rather build the executor yourself:
 
 ```bash
 git clone https://github.com/The-40-Thieves/codecalc
