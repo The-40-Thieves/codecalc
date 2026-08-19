@@ -73,27 +73,24 @@ Note ("  python: " + $venvPy)
 # deadlock), restore env, return exit code + output path.
 function Invoke-Probe($name, $pyArgs, $envMap) {
     $outFile = Join-Path $results ($name + ".txt")
-    $errFile = Join-Path $results ($name + ".err")
     $saved = @{}
     foreach ($k in $envMap.Keys) {
         $saved[$k] = [Environment]::GetEnvironmentVariable($k)
         Set-Item -Path ("Env:" + $k) -Value ([string]$envMap[$k])
     }
+    $rc = $null
     try {
-        $p = Start-Process -FilePath $venvPy -ArgumentList $pyArgs -WorkingDirectory $Repo `
-             -RedirectStandardOutput $outFile -RedirectStandardError $errFile -PassThru -NoNewWindow
-        $p.WaitForExit()
-        $rc = $p.ExitCode
+        # Call operator + 2>&1 | Out-File: $LASTEXITCODE reliably reflects the
+        # native exit code (Start-Process -PassThru .ExitCode comes back null with
+        # redirected output). Under $ErrorActionPreference=Continue the merged
+        # stderr does not throw.
+        & $venvPy $pyArgs 2>&1 | Out-File -FilePath $outFile -Encoding utf8
+        $rc = $LASTEXITCODE
     } finally {
         foreach ($k in $envMap.Keys) {
             if ($null -eq $saved[$k]) { Remove-Item -Path ("Env:" + $k) -ErrorAction SilentlyContinue }
             else { Set-Item -Path ("Env:" + $k) -Value $saved[$k] }
         }
-    }
-    if (Test-Path $errFile) {
-        Add-Content -Path $outFile -Value "`n--- stderr ---"
-        Get-Content $errFile | Add-Content -Path $outFile
-        Remove-Item $errFile -ErrorAction SilentlyContinue
     }
     Add-Content -Path $outFile -Value ("--- exit " + $rc + " ---")
     return @{ rc = $rc; out = $outFile }
