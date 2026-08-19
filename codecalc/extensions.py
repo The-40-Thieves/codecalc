@@ -268,13 +268,26 @@ class ExtensionRegistry(Generic[T]):
         self.policy = policy or ExtensionPolicy.from_env()
         self._by_id: dict[str, T] = {}
 
-    def register(self, extension: T) -> None:
+    def register(self, extension: T, *, payload: bytes | None = None) -> None:
+        """Admit an extension after the identity/version/permission/disable
+        gates. `payload` is the extension's own bytes: when the manifest PINS an
+        `integrity` digest it is verified here, and pinning WITHOUT a payload to
+        check against is itself refused — an unverifiable pin must never pass as
+        if it had been verified. A manifest with `integrity=None` is unpinned and
+        needs no payload."""
         manifest = _manifest_of(extension)
         if manifest.kind != self.kind:
             raise ExtensionIdentityConflict(
                 manifest.extension_id,
                 f"declares kind {manifest.kind.value!r}, this registry is {self.kind.value!r}",
             )
+        # Integrity is enforced at the admission point, not merely recorded.
+        if manifest.integrity is not None:
+            if payload is None:
+                raise ExtensionIntegrityFailure(
+                    manifest.extension_id, manifest.integrity, "no payload supplied to verify"
+                )
+            verify_integrity(manifest, payload)
         if _major(manifest.interface_version) != _major(self.interface_version):
             raise ExtensionInterfaceMismatch(
                 manifest.extension_id, manifest.interface_version, self.interface_version

@@ -85,9 +85,12 @@ class ExtensionManifest:
 - **Disable third-party entirely.** `CODECALC_DISABLE_THIRD_PARTY_EXTENSIONS=1`
   sets `allow_third_party=False`; any `third_party` registration then fails
   `extension_disabled`. Built-ins are unaffected.
-- **Integrity + trust model.** If `manifest.integrity` is set, the loader
-  recomputes the payload sha256 and refuses on mismatch
-  (`extension_integrity_failure`). The documented distribution trust model
+- **Integrity + trust model.** Enforced at the admission point: `register(ext,
+  payload=...)` recomputes the payload sha256 when the manifest pins
+  `integrity`, refuses on mismatch, and ALSO refuses a pinned manifest with no
+  payload to check against (an unverifiable pin must not pass as verified) —
+  `extension_integrity_failure` in both cases. A built-in (no pin) needs no
+  payload. The documented distribution trust model
   reuses the release story: third-party extensions SHOULD be distributed with a
   sigstore attestation (same mechanism as codecalc's own artifacts) and pinned
   by digest; the loader verifies the declared digest and the operator pins which
@@ -113,9 +116,12 @@ class ExtensionManifest:
   each extension's `{kind, extension_id, name, version, origin, health,
   supported_operations}` — the machine-readable capability document.
 
-`ExtensionRegistry` is a small generic base (`register`, `get`, `select`,
-`descriptors`) that the per-kind registries subclass; `ProviderRegistry` is
-refactored to sit on it without changing its public surface.
+`ExtensionRegistry` is a small generic base (`register`, `get`, `descriptors`,
+`guard`) that the three NEW per-kind registries subclass. The shipped
+`ProviderRegistry` predates this base and is deliberately left untouched (its own
+identity/version checks keep working); unifying it onto the shared base is
+optional future cleanup, not part of this change — the two implementations agree
+in behaviour but are, for now, maintained separately.
 
 ## The three new kind interfaces (each mirrors `providers.py`)
 
@@ -215,7 +221,8 @@ trust model (integrity digest + documented signing); discovery
 
 ## Build phases
 1. Shared `extensions.py` (manifest, policy, registry base, error codes,
-   discovery) + refactor `ProviderRegistry` onto it (no surface change) + tests.
+   discovery) as NEW code the three new kinds use; `ProviderRegistry` is left
+   as-is (unifying it is optional future cleanup) + tests.
 2. Language packs: interface + BuiltinLanguagePack + conformance + reference ext.
 3. Renderers: interface + Text/MarkdownTable + conformance + reference ext.
 4. Verifiers: interface + built-ins (evidence-only) + conformance + reference ext.

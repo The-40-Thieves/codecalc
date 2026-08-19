@@ -128,6 +128,18 @@ check("the disable switch leaves builtins unaffected", "builtin:still-ok" in r_o
 ok, det = raises("extension_disabled", lambda: r_off.register(FakeExt(manifest(origin="third_party", extension_id="acme.blocked", declared_permissions=("render",)))))
 check("the disable switch refuses third-party extensions", ok, det)
 
+# ── registration: integrity is ENFORCED at admission ────────────────────────
+_pay = b"the extension source bytes"
+_dg = ext.compute_integrity(_pay)
+registry().register(FakeExt(manifest(extension_id="builtin:pinned", integrity=_dg)), payload=_pay)
+check("a pinned extension registers when the payload matches the digest", True)
+ok, det = raises("extension_integrity_failure", lambda: registry().register(FakeExt(manifest(extension_id="builtin:pinned2", integrity=_dg)), payload=b"tampered"))
+check("a pinned extension with a TAMPERED payload is refused at registration", ok, det)
+ok, det = raises("extension_integrity_failure", lambda: registry().register(FakeExt(manifest(extension_id="builtin:pinned3", integrity=_dg))))
+check("a pinned extension with NO payload is refused (an unverifiable pin != verified)", ok, det)
+registry().register(FakeExt(manifest(extension_id="builtin:unpinned")))  # integrity=None → no payload needed
+check("an UNPINNED extension registers with no payload", True)
+
 # ── lookup ───────────────────────────────────────────────────────────────────
 ok, det = raises("unknown_extension", lambda: registry().get("nope"))
 check("get() of an unregistered id raises unknown_extension", ok, det)

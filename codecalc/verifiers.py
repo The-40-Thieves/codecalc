@@ -142,9 +142,13 @@ class VerifierRegistry(extensions.ExtensionRegistry[Verifier]):
                 continue
             if not isinstance(evidence, Evidence):
                 continue
-            # Safeguard (c): a verifier cannot speak to a claim it never
-            # declared, even if it tries to.
-            if evidence.claim_kind not in declared:
+            # Safeguard (c): the evidence must be for the SAME claim kind this
+            # call is verifying — not merely one the verifier happens to also
+            # declare. A multi-claim verifier invoked for "executed" cannot
+            # smuggle in evidence tagged "solver_proven" (declared, but not what
+            # was asked); such evidence is dropped so it can't pollute the result
+            # for the claim actually under verification.
+            if evidence.claim_kind != claim_kind:
                 continue
             collected.append(evidence)
         return collected

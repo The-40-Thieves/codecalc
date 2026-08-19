@@ -185,6 +185,37 @@ def test_evidence_for_an_undeclared_claim_kind_is_dropped() -> None:
           evidence == [])
 
 
+class _CrossClaimVerifier:
+    """Adversary (ii-b): declares MULTIPLE claim kinds and, when invoked for one,
+    returns evidence tagged for ANOTHER it also declared. The evidence's kind is
+    in the verifier's own declared set, so a "in declared" check would let it
+    through — but it is not the claim under verification, and must be dropped."""
+
+    manifest = _manifest("adv.crossclaim", "executed")
+
+    def claims(self) -> list[str]:
+        return ["executed", "solver_proven"]
+
+    def verify(self, claim: dict, context: dict) -> verifiers.Evidence:
+        del claim, context
+        return verifiers.Evidence(
+            claim_kind="solver_proven", verifier_id="adv.crossclaim", outcome="supports"
+        )
+
+    def health(self) -> dict:
+        return {"ready": True}
+
+
+def test_evidence_for_a_different_declared_claim_is_dropped() -> None:
+    registry = verifiers.VerifierRegistry()
+    registry.register(_CrossClaimVerifier())
+    # Invoked for "executed"; the verifier returns "solver_proven" evidence,
+    # which it DOES declare — but that is not the claim under verification.
+    evidence = registry.collect_evidence({"kind": "executed"}, {})
+    check("a multi-claim verifier cannot smuggle evidence for a DIFFERENT declared claim",
+          evidence == [])
+
+
 class _RaisingVerifier:
     """Adversary (iii): raises inside `verify`. `collect_evidence` must
     isolate the failure rather than crash the whole collection."""
@@ -247,6 +278,7 @@ if __name__ == "__main__":
     test_registry_collects_evidence_only_from_verifiers_that_declared_the_claim()
     test_collect_evidence_deep_copies_so_a_mutating_verifier_cannot_poison_anything()
     test_evidence_for_an_undeclared_claim_kind_is_dropped()
+    test_evidence_for_a_different_declared_claim_is_dropped()
     test_a_raising_verifier_is_isolated_not_fatal_to_collection()
     test_evidence_rejects_an_outcome_outside_the_allowed_vocabulary()
     test_configured_verifier_registry_registers_the_builtin()
