@@ -215,9 +215,13 @@ jobs:
       # Running them on all three OSes is the point for THE-793 specifically:
       # the golden vectors claim the canonical bytes are identical everywhere,
       # and a Linux-only run cannot make that claim.
-      - name: extension framework (identity, permissions, isolation, discovery)
+      - name: extension SDK (framework + language packs, renderers, verifiers)
         shell: bash
-        run: uv run --no-sync python tests/test_extensions.py
+        run: |
+          uv run --no-sync python tests/test_extensions.py
+          uv run --no-sync python tests/test_language_packs.py
+          uv run --no-sync python tests/test_renderers.py
+          uv run --no-sync python tests/test_verifiers.py
       - name: provider boundary and execution service (spec identity + receipt)
         shell: bash
         run: |
