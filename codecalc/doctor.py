@@ -171,6 +171,37 @@ def _windows_isolation() -> dict:
     }
 
 
+def _extensions() -> dict:
+    """Capability discovery for the extension SDK (THE-794).
+
+    Lists every LOADED extension across kinds — id, kind, name, version, origin,
+    health, supported operations — plus the operator policy in effect. Built-in
+    extensions are always present; whether third-party ones may load is the
+    operator's `CODECALC_DISABLE_THIRD_PARTY_EXTENSIONS` decision, surfaced here
+    so the trust posture is discoverable from the machine-readable report.
+    """
+    from codecalc import extensions as ext
+    from codecalc.language_packs import configured_language_pack_registry
+    from codecalc.renderers import configured_renderer_registry
+    from codecalc.verifiers import configured_verifier_registry
+
+    policy = ext.ExtensionPolicy.from_env()
+    registries = [
+        configured_language_pack_registry(),
+        configured_renderer_registry(),
+        configured_verifier_registry(),
+    ]
+    return {
+        "framework_version": ext.EXTENSION_FRAMEWORK_VERSION,
+        "policy": {
+            "allow_third_party": policy.allow_third_party,
+            "disable_switch": "CODECALC_DISABLE_THIRD_PARTY_EXTENSIONS",
+            "allowed_permissions": sorted(policy.allowed_permissions),
+        },
+        "loaded": ext.describe_extensions(*registries),
+    }
+
+
 def _grammar_cache() -> dict:
     """Is the tree-sitter grammar cache warm? (THE-821)
 
@@ -378,6 +409,9 @@ def report(deep: bool = False) -> dict:
         # workdir, and the network) — a separate thing, opt-in and OFF by
         # default, and IMPLEMENTED-BUT-UNVERIFIED on real Windows 11.
         "windows_isolation": _windows_isolation(),
+        # Extension SDK capability discovery (THE-794): what's loaded, of what
+        # origin, and the operator's third-party policy.
+        "extensions": _extensions(),
         "extras": extras,
         # Where analyze_complexity's grammars come from, and whether they are
         # here yet. Not an extra and not a runtime: it is a network dependency
