@@ -331,9 +331,9 @@ mod alias_path_tests {
 
     #[test]
     fn the_real_store_alias_path_is_detected() {
-        // The exact path THE-818 measured `python3` resolving to on a Win11 box.
+        // The shape THE-818 measured `python3` resolving to on a Win11 box.
         assert!(is_alias(
-            r"C:\Users\misla\AppData\Local\Microsoft\WindowsApps\python3.EXE"
+            r"C:\Users\alice\AppData\Local\Microsoft\WindowsApps\python3.EXE"
         ));
     }
 
@@ -341,25 +341,29 @@ mod alias_path_tests {
     fn the_package_store_is_not_an_alias() {
         // Program Files\WindowsApps holds REAL installed Store binaries. A bare
         // `WindowsApps` match would wrongly refuse these — the pair guards it.
-        assert!(!is_alias(r"C:\Program Files\WindowsApps\SomeVendor.App\python.exe"));
+        assert!(!is_alias(
+            r"C:\Program Files\WindowsApps\SomeVendor.App\python.exe"
+        ));
     }
 
     #[test]
     fn a_normal_interpreter_is_not_an_alias() {
         assert!(!is_alias(r"C:\Python312\python.exe"));
-        assert!(!is_alias(r"C:\Users\misla\venv\Scripts\python.exe"));
+        assert!(!is_alias(r"C:\Users\alice\venv\Scripts\python.exe"));
     }
 
     #[test]
     fn case_is_ignored_on_both_components() {
         // Windows paths are case-insensitive; the drive may hand back any casing.
-        assert!(is_alias(r"c:\users\x\appdata\local\microsoft\windowsapps\PYTHON3.EXE"));
+        assert!(is_alias(
+            r"c:\users\x\appdata\local\microsoft\windowsapps\PYTHON3.EXE"
+        ));
     }
 
     #[test]
     fn forward_slashes_are_matched_too() {
         // The env/PATH can carry either separator; both must split identically.
-        assert!(is_alias("C:/Users/x/AppData/Local/Microsoft/WindowsApps/python3.exe"));
+        assert!(is_alias("C:/opt/Local/Microsoft/WindowsApps/python3.exe"));
     }
 
     #[test]
