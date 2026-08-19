@@ -77,6 +77,23 @@ Write-Host ("appcontainer unenforced: " + ($ac.outer.unenforced -join ", "))
 
 Remove-Item -LiteralPath $secret -ErrorAction SilentlyContinue
 
+# Diagnostic: if the AppContainer arm could not execute the payload (0xC0000135
+# STATUS_DLL_NOT_FOUND = the AC child could not read the interpreter's DLLs),
+# show whether the AC-SID grant actually reached the interpreter's files. The
+# grant is not reverted on teardown, so an orphaned S-1-15-2-* ACE here means the
+# inheritable grant DID propagate to existing files (bug is elsewhere); its
+# ABSENCE means propagation to existing files is the bug.
+if ($PythonDir -ne "" -and $ac.outer.exit_code -eq 3221225781) {
+    Write-Host "== AC arm exited 0xC0000135 (DLL_NOT_FOUND). ACL on interpreter files =="
+    Write-Host "   (an S-1-15-2-* entry with (R) = an AppContainer read ACE reached the file)"
+    foreach ($f in @("python3.exe", "python.exe", "python311.dll")) {
+        $p = Join-Path $PythonDir $f
+        if (Test-Path -LiteralPath $p) { & icacls $p 2>&1 | Out-Host }
+    }
+    Write-Host "== directory ACL (inheritance flags on the granted dir) =="
+    & icacls $PythonDir 2>&1 | Out-Host
+}
+
 if ($null -eq $ctl.inner -or $null -eq $ac.inner) {
     Write-Host "ABORT: one arm produced no parseable probe JSON (see raw above)"
     Write-Host ("control raw:      " + $ctl.raw)
