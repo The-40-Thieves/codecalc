@@ -28,14 +28,17 @@ param(
     [switch]$SkipBuild
 )
 
-$ErrorActionPreference = "Stop"
+# Continue, not Stop: native tools (uv, cargo) write normal progress to stderr,
+# and under Stop a `2>&1` merge would turn that into a terminating error. Native
+# failures are detected by $LASTEXITCODE below; critical cmdlets get -EA Stop.
+$ErrorActionPreference = "Continue"
 function Section($t) { Write-Host ("`n==================== " + $t + " ====================") -ForegroundColor Cyan }
 function Note($t)    { Write-Host $t -ForegroundColor DarkGray }
 
-Set-Location $Repo
+Set-Location -Path $Repo -ErrorAction Stop
 $stamp   = Get-Date -Format "yyyyMMdd-HHmmss"
 $results = Join-Path $Repo ("win-verify-results\" + $stamp)
-New-Item -ItemType Directory -Force -Path $results | Out-Null
+New-Item -ItemType Directory -Force -Path $results -ErrorAction Stop | Out-Null
 Write-Host ("Results dir: " + $results) -ForegroundColor Green
 
 # ---- 0. prerequisites -------------------------------------------------------
@@ -50,9 +53,11 @@ if (-not $ok) { Write-Host "Install the missing tool(s) and re-run." -Foreground
 
 # ---- 1. build + place the executor (mirrors CI) -----------------------------
 Section "1. build executor into bin (fresh: a stale bin binary would be measured silently)"
-uv sync --locked --all-extras 2>&1 | Tee-Object -FilePath (Join-Path $results "uv-sync.log") | Out-Null
+Note "  uv sync..."
+uv sync --locked --all-extras 2>&1 | Out-File -FilePath (Join-Path $results "uv-sync.log")
 if (-not $SkipBuild) {
-    cargo build --release --manifest-path executor\Cargo.toml 2>&1 | Tee-Object -FilePath (Join-Path $results "cargo-build.log")
+    Note "  building executor (first build can take a couple of minutes; progress in cargo-build.log)..."
+    cargo build --release --manifest-path executor\Cargo.toml 2>&1 | Out-File -FilePath (Join-Path $results "cargo-build.log")
     if ($LASTEXITCODE -ne 0) { Write-Host "cargo build FAILED - see cargo-build.log" -ForegroundColor Red; exit 2 }
 }
 $exe = "executor\target\release\codecalc-exec.exe"
