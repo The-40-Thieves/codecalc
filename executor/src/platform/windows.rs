@@ -24,8 +24,9 @@ use windows_sys::Win32::Foundation::{
     WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Security::Authorization::{
-    EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW, NO_MULTIPLE_TRUSTEE, SE_FILE_OBJECT,
-    SetEntriesInAclW, SetNamedSecurityInfoW, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN,
+    ACCESS_MODE, EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW, NO_MULTIPLE_TRUSTEE,
+    ProgressInvokeNever, REVOKE_ACCESS, SE_FILE_OBJECT, SetEntriesInAclW, SetNamedSecurityInfoW,
+    TREE_SEC_INFO_SET, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN, TreeSetNamedSecurityInfoW,
 };
 use windows_sys::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeleteAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
@@ -503,13 +504,25 @@ const HRESULT_ALREADY_EXISTS: i32 = 0x8007_00B7u32 as i32;
 struct AppContainer {
     name_w: Vec<u16>,
     sid: PSID,
+    /// The interpreter directory this profile's SID was granted read access on,
+    /// if any. It is a PERSISTENT, user-owned directory (not the ephemeral
+    /// workdir), so the planted ACEs must be removed on teardown or they
+    /// accumulate one dead-SID entry per execution. Set by `prepare_appcontainer`
+    /// once the recursive grant succeeds; reverted in `Drop`.
+    runtime_dir: Option<std::path::PathBuf>,
 }
 
 impl Drop for AppContainer {
     fn drop(&mut self) {
-        // Delete first, then free: DeleteAppContainerProfile takes the NAME, not
-        // the SID, so ordering is independent, but freeing last keeps the SID
-        // valid for the whole teardown.
+        // Remove the ACEs we planted on the shared interpreter tree FIRST, while
+        // the SID is still valid — best effort, since the SID is about to be
+        // freed and any residue is inert (a dead SID grants nothing), but leaving
+        // it grows a user's DACL by one entry per run.
+        if let Some(dir) = self.runtime_dir.take() {
+            let _ = set_sid_path_access(self.sid, &dir, 0, REVOKE_ACCESS, true);
+        }
+        // Delete the profile, then free the SID last so it stays valid for the
+        // revoke above and the delete. DeleteAppContainerProfile takes the NAME.
         unsafe { DeleteAppContainerProfile(self.name_w.as_ptr()) };
         if !self.sid.is_null() {
             unsafe { FreeSid(self.sid) };
@@ -577,15 +590,43 @@ fn create_appcontainer() -> io::Result<AppContainer> {
         unsafe { DeleteAppContainerProfile(name_w.as_ptr()) };
         return Err(io::Error::other("AppContainer profile returned a null SID"));
     }
-    Ok(AppContainer { name_w, sid })
+    Ok(AppContainer {
+        name_w,
+        sid,
+        runtime_dir: None,
+    })
 }
 
-/// ADD an allow-ACE for `sid` on `path`, preserving the directory's existing
-/// ACL. Additive on purpose: the executor still has to write into and later
-/// delete a temp workdir, and inherited ACEs (the operator's own access) must
-/// survive — replacing the DACL wholesale would strip both. So the current DACL
-/// is read, the one entry merged in, and the result written back unprotected.
+/// ADD an allow-ACE for `sid` on `path` (non-recursive), preserving the object's
+/// existing ACL. Thin wrapper over `set_sid_path_access` for the workdir grant,
+/// which targets a freshly created, empty directory — an inheritable ACE there
+/// covers everything the payload later creates, so no tree walk is needed.
 fn grant_sid_path_access(sid: PSID, path: &std::path::Path, access: u32) -> io::Result<()> {
+    set_sid_path_access(sid, path, access, GRANT_ACCESS, false)
+}
+
+/// Add (`GRANT_ACCESS`) or remove (`REVOKE_ACCESS`) an ACE for `sid` on `path`,
+/// preserving the object's existing ACL. Additive/subtractive on purpose:
+/// inherited ACEs (the operator's own access) must survive — replacing the DACL
+/// wholesale would strip them. So the current DACL is read, the one entry merged
+/// in (or dropped, for REVOKE), and the result written back unprotected.
+///
+/// `recursive` selects the write-back API, and it is load-bearing for THE-829.
+/// A plain `SetNamedSecurityInfoW` sets only the named object; an inheritable ACE
+/// it adds reaches only children created AFTERWARD. The interpreter's own files
+/// (python311.dll, the stdlib) PREDATE the grant, so they never inherited it and
+/// the AppContainer child died in the loader with STATUS_DLL_NOT_FOUND. When
+/// `recursive`, `TreeSetNamedSecurityInfoW(TREE_SEC_INFO_SET)` propagates the
+/// change through the EXISTING subtree (merging, preserving each node's explicit
+/// ACEs), so the pre-existing DLLs become readable — and the same call with a
+/// REVOKE-built DACL strips those inherited ACEs back off on teardown.
+fn set_sid_path_access(
+    sid: PSID,
+    path: &std::path::Path,
+    access: u32,
+    mode: ACCESS_MODE,
+    recursive: bool,
+) -> io::Result<()> {
     let path_w = to_wide(&path.to_string_lossy());
 
     // 1. Read the existing DACL (and the security descriptor that backs it).
@@ -621,7 +662,9 @@ fn grant_sid_path_access(sid: PSID, path: &std::path::Path, access: u32) -> io::
     // and subdirectories the payload creates underneath.
     let mut ea: EXPLICIT_ACCESS_W = unsafe { std::mem::zeroed() };
     ea.grfAccessPermissions = access;
-    ea.grfAccessMode = GRANT_ACCESS;
+    // GRANT_ACCESS to add, REVOKE_ACCESS to remove. For REVOKE, SetEntriesInAclW
+    // drops every ACE for this trustee and ignores the mask/inheritance fields.
+    ea.grfAccessMode = mode;
     ea.grfInheritance = SUB_CONTAINERS_AND_OBJECTS_INHERIT;
     ea.Trustee.MultipleTrusteeOperation = NO_MULTIPLE_TRUSTEE;
     ea.Trustee.pMultipleTrustee = std::ptr::null_mut();
@@ -640,17 +683,36 @@ fn grant_sid_path_access(sid: PSID, path: &std::path::Path, access: u32) -> io::
 
     // 4. Write it back. DACL_SECURITY_INFORMATION without the PROTECTED flag
     // means "merge with inheritance", so this ADDS the ACE rather than replacing
-    // the object's protection.
-    let rc = unsafe {
-        SetNamedSecurityInfoW(
-            path_w.as_ptr(),
-            SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            new_dacl as *const ACL,
-            std::ptr::null(),
-        )
+    // the object's protection. Recursive uses the tree API so the change reaches
+    // pre-existing descendants (THE-829); non-recursive touches only this object.
+    let rc = if recursive {
+        unsafe {
+            TreeSetNamedSecurityInfoW(
+                path_w.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                new_dacl as *const ACL,
+                std::ptr::null(),
+                TREE_SEC_INFO_SET,
+                None,
+                ProgressInvokeNever,
+                std::ptr::null(),
+            )
+        }
+    } else {
+        unsafe {
+            SetNamedSecurityInfoW(
+                path_w.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                new_dacl as *const ACL,
+                std::ptr::null(),
+            )
+        }
     };
     if rc != 0 {
         return Err(io::Error::from_raw_os_error(rc as i32));
@@ -668,7 +730,7 @@ fn grant_sid_path_access(sid: PSID, path: &std::path::Path, access: u32) -> io::
 /// (and the SID it points at) during creation. FAILS CLOSED: any error here
 /// aborts the launch instead of dropping to an unconfined process.
 fn prepare_appcontainer(cmd: &Command) -> io::Result<(AppContainer, Box<SECURITY_CAPABILITIES>)> {
-    let ac = create_appcontainer()?;
+    let mut ac = create_appcontainer()?;
 
     // The one directory the payload may write: its sandbox workdir. Full access,
     // inherited by anything it creates inside. Errors are labelled so a
@@ -678,15 +740,23 @@ fn prepare_appcontainer(cmd: &Command) -> io::Result<(AppContainer, Box<SECURITY
             .map_err(|e| io::Error::other(format!("appcontainer workdir ACL grant failed: {e}")))?;
     }
     // Read-only runtime assets: the interpreter/compiler must be able to load
-    // itself. Grant read+execute on its own directory and NOTHING else — not the
-    // user profile, not the rest of the disk. Comprehensive per-asset grants
-    // (e.g. a full interpreter install tree) are a Win11-box verification item.
+    // itself AND its libraries. Grant read+execute on its own directory TREE and
+    // NOTHING else — not the user profile, not the rest of the disk. The grant is
+    // recursive because the interpreter's files (its DLLs and stdlib) already
+    // exist and would not inherit a plain directory ACE; the directory is
+    // recorded so `Drop` removes the planted ACEs afterward.
     if let Ok(program) = resolve_command_program(cmd)
         && let Some(dir) = program.parent()
     {
-        grant_sid_path_access(ac.sid, dir, GENERIC_READ | GENERIC_EXECUTE).map_err(|e| {
-            io::Error::other(format!("appcontainer runtime-dir ACL grant failed: {e}"))
-        })?;
+        set_sid_path_access(
+            ac.sid,
+            dir,
+            GENERIC_READ | GENERIC_EXECUTE,
+            GRANT_ACCESS,
+            true,
+        )
+        .map_err(|e| io::Error::other(format!("appcontainer runtime-dir ACL grant failed: {e}")))?;
+        ac.runtime_dir = Some(dir.to_path_buf());
     }
 
     let caps = Box::new(SECURITY_CAPABILITIES {
