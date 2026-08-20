@@ -44,18 +44,25 @@ def _missing_runtime(r: dict) -> bool:
     program ran and misbehaved. That is a fact about the machine, and must
     read as SKIP, never as a false FAIL.
 
-    Detects both backends' spawn-failure shape: the pure-Python fallback's
+    Detects three spawn-failure shapes: the pure-Python fallback's
     `_runtime_unavailable_result` (exit_code None, stderr says "runtime
-    unavailable") and the Rust executor's spawn failure (exit_code -2,
-    stderr says "spawn failed"). A genuine wrong-output failure always
-    carries a real exit_code from the interpreter/compiler that DID run,
-    never one of these two spawn-failure sentinels.
+    unavailable"), the Rust executor's spawn failure (exit_code -2, stderr
+    says "spawn failed"), and both backends' structural refusal for a
+    SHELL_WRAPPED language (gleam, haskell) on Windows — `plan_supported()`
+    returns False there regardless of what is installed, and that refusal
+    carries no `exit_code`/`stderr` at all, only an `error` saying
+    "unsupported on this platform". Missing that shape is exactly what let a
+    platform-unsupported language read as a smoke-suite FAIL. A genuine
+    wrong-output failure always carries a real exit_code from the
+    interpreter/compiler that DID run, never one of these sentinels.
     """
     if r.get("ok") or r.get("timed_out"):
         return False
-    stderr = r.get("stderr") or ""
+    text = (r.get("stderr") or "") + (r.get("error") or "")
     return r.get("exit_code") in (None, -2) and (
-        "runtime unavailable" in stderr or "spawn failed" in stderr)
+        "runtime unavailable" in text
+        or "spawn failed" in text
+        or "unsupported on this platform" in text)
 
 
 def skip(name: str, why: str) -> None:
@@ -70,7 +77,8 @@ def main():
         ok = r.get("ok") and "hello from" in combined
         if not ok and _missing_runtime(r):
             skipped.append((lang, r))
-            skip(f"{lang} smoke", (r.get("stderr") or "")[:160].replace("\n", " "))
+            skip(f"{lang} smoke",
+                 (r.get("stderr") or r.get("error") or "")[:160].replace("\n", " "))
             continue
         (passed if ok else failed).append((lang, r))
         status = "PASS" if ok else "FAIL"
