@@ -45,6 +45,28 @@ service that owns the real gVisor boundary
 (`codecalc/strict_service.py`, `codecalc/strict_runtime.py`). Every other
 platform's strict provider is a client of this service.
 
+### Quick start (one command)
+
+`scripts/setup-strict.sh` automates §2.1–§2.4 below: it checks the
+prerequisites (and prints the exact fix if one is missing, rather than
+installing anything), pulls the digest-pinned executor image, generates
+`CODECALC_STRICT_SERVICE_TOKEN` if you haven't set one, and runs the deep
+`doctor` canary against that exact image before it will let you launch.
+
+```bash
+scripts/setup-strict.sh --check-only   # preflight + pull + canary only (default; nothing is left running)
+scripts/setup-strict.sh --serve        # ...then start serve-strict on 127.0.0.1:8000 in the foreground
+scripts/setup-strict.sh --help         # every flag, incl. --host/--port
+```
+
+It never runs `apt`/`sudo` or installs Docker/gVisor for you — registering
+the `runsc` runtime is still your explicit step (§2.1) — and it never
+containerizes `serve-strict` itself: the service needs the **host** Docker
+daemon to spawn `runsc` containers, so a socket-in-container setup would only
+broaden the attack surface. Safe to re-run. The rest of this section is the
+manual reference the script is built from, for auditing or when you need to
+deviate from a default.
+
 ### 2.1 Prerequisites
 
 - **Docker Engine**, with **cgroup v2**. `DockerGVisorRuntime.probe()` and
