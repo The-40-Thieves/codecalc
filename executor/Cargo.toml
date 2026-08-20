@@ -1,6 +1,6 @@
 [package]
 name = "codecalc-exec"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 # Declared, not merely implied. rust-toolchain.toml pins 1.97.1 for anyone
 # building IN this repo, but it is not Cargo metadata and does not reach a

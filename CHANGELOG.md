@@ -33,6 +33,46 @@ behind it.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-08-20
+
+### Added
+
+- **A versioned extension SDK — language packs, renderers, verifiers**
+  (THE-794). Every extension kind now has a versioned `Protocol`, a registry
+  enforcing identity/no-impersonation, interface-major compatibility, a
+  permission allowlist and a `CODECALC_DISABLE_THIRD_PARTY_EXTENSIONS` kill
+  switch, plus integrity verification wired into `register()`. Each kind
+  ships a built-in reference implementation and a reference third-party
+  extension as its own second-consumer conformance check; `doctor` gains an
+  `extensions` discovery block and `docs/extensions/README.md` documents the
+  trust model (trusted-by-installation, not a sandbox).
+- **Strict gVisor runtime forwards program `stdin` to the guest** (THE-859),
+  mirroring the local Rust executor path via a read-only bind-mounted
+  per-run file.
+- **One-command Linux strict bootstrap**, `scripts/setup-strict.sh`
+  (THE-869) — preflight, pull the pinned image, run the deep `gvisor-v1`
+  canary, then launch.
+- **MCP registry metadata** — `server.json`, an `mcp-name` PyPI-ownership
+  marker, and a `uvx codecalc` client install snippet (THE-867), preparing
+  repo-side discovery readiness for the registry publish (the
+  `mcp-publisher` publish itself is owner-gated and separate).
+- **Operator deployment runbook**, `docs/deployment/README.md` (THE-864),
+  covering all three strict backends (Linux/gVisor+Docker,
+  Windows/AppContainer, macOS/remote-Linux) plus startup canary, orphan
+  recovery, fail-closed causes and quota tuning.
+- **`scripts/win-verify.ps1`**, a one-command native-Windows verification
+  bootstrap that builds the executor and runs every Windows sandbox probe
+  with timestamped output.
+
+### Changed
+
+- **Strict service forwards `max_cpu` to the guest's `cpu_count`, clamped to
+  `MAX_CPU_COUNT`** (THE-866). It previously silently dropped the field, so
+  every remote strict run used the default `cpu_count=1.0`.
+- **README leads with a value proposition and a "when to use codecalc"
+  section** (THE-868), honest about when a hosted sandbox or the vendor's
+  own interpreter is the better fit.
+
 ### Fixed
 
 - `compare_execution` (THE-802): a cold-start timeout on one language no
@@ -51,6 +91,19 @@ behind it.
   timeout remains an unchanged hard limit — only `compare_execution`'s
   handling of a `timed_out` result changed. A deterministic non-timeout
   failure (e.g. a compile error) is never retried.
+- **Windows CI Defender path exclusions** (THE-865) cut interpreter
+  cold-start scanning, the dominant contributor to the THE-802 flake class.
+
+### Docs
+
+- README no longer carries the pre-publish warning — it reflects the live
+  `0.2.0` release on PyPI and crates.io.
+
+### Removed
+
+- **Dropped the unused `serde` direct dependency from the executor crate**
+  (THE-863) — only `serde_json` was ever used directly; trims the
+  untrusted-code binary's dependency surface.
 
 ## [0.2.0] — 2026-08-19
 
@@ -500,6 +553,7 @@ it, so there was no upgrade path to describe — only what the thing is.
   `ok: false` through the sandbox. Tracked, with a dated reproduction, at
   [#42](https://github.com/The-40-Thieves/codecalc/issues/42).
 
-[Unreleased]: https://github.com/The-40-Thieves/codecalc/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/The-40-Thieves/codecalc/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.3.0
 [0.2.0]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.2.0
 [0.1.0]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.1.0
