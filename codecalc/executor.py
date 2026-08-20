@@ -358,6 +358,49 @@ def _kill_group(proc: subprocess.Popen) -> None:
             pass
 
 
+def _reap_group(proc: subprocess.Popen) -> None:
+    """SIGKILL the child's whole process group/job, unconditionally.
+
+    Called after the payload has already finished, on EVERY exit path —
+    normal, overflow, or timeout — so a descendant it left running does not
+    outlive the run (#207: `subprocess.Popen(['sleep', '1000'])` then
+    `sys.exit(0)` used to leave `sleep` alive with no clock on it at all,
+    because `_kill_group` above was only ever reached from the timeout/
+    overflow branches, never after a normal exit).
+
+    `_kill_group` escalates from SIGTERM because it targets a still-RUNNING
+    process it wants to shut down cleanly. By the time THIS runs there is
+    nothing left to be graceful with — proc has already exited — so it goes
+    straight to SIGKILL rather than reusing `_kill_group`'s TERM-then-wait
+    dance: `proc.wait()` on an already-reaped child returns immediately
+    regardless of whether the signal reached anything, so that escalation
+    logic can never actually reach its own SIGKILL fallback here, and a
+    descendant that ignored SIGTERM would survive. Calling this after
+    `_kill_group` already ran (the timeout/overflow paths) is a harmless
+    no-op: the group is already empty, and killpg on an empty group just
+    raises ProcessLookupError, caught below.
+
+    `proc.pid` IS the process group id: `start_new_session=True` at spawn (or
+    `CREATE_NEW_PROCESS_GROUP` on Windows) makes this child a new session/job
+    leader, so pgid == pid by construction. That is what makes this safe to
+    call after `proc.poll()` has already reaped the leader on the normal-exit
+    path — `os.getpgid(proc.pid)` would raise ProcessLookupError on an
+    already-reaped pid before the signal was ever sent; the numeric id needs
+    no live process to look up.
+    """
+    if IS_WINDOWS:
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True, timeout=15, check=False)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
 # ── identity-checked workdir deletion (mirrors executor/src/main.rs) ───────
 #
 # The Rust executor's cleanup guard used to key on how the pathname
@@ -592,16 +635,24 @@ def _run_step(argv: list[str], cwd: str, timeout: int, stdin: str,
         # counted here too — which is why the docstring says approximate rather
         # than claiming a per-process measurement this path cannot make.
         cpu_before = _children_cpu_seconds()
-        proc = subprocess.Popen(
-            argv,
-            cwd=cwd,
-            env=_env(),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=True,
-            preexec_fn=_limits(timeout, max_memory_mb, max_cpu),
-        )
+        # Same platform split as _popen_group above, and for the same reason:
+        # `start_new_session` is POSIX-only and is silently a no-op on
+        # Windows (CPython's Windows _execute_child never reads it), so
+        # without CREATE_NEW_PROCESS_GROUP here the payload was never
+        # actually made the root of its own process tree there at all.
+        popen_kwargs: dict = {
+            "cwd": cwd,
+            "env": _env(),
+            "stdin": subprocess.PIPE,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "preexec_fn": _limits(timeout, max_memory_mb, max_cpu),
+        }
+        if IS_WINDOWS:
+            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            popen_kwargs["start_new_session"] = True
+        proc = subprocess.Popen(argv, **popen_kwargs)
         overflow = threading.Event()
         out_reader = _BoundedDrain(proc.stdout, max_output_bytes)
         err_reader = _BoundedDrain(proc.stderr, max_output_bytes)
@@ -637,6 +688,24 @@ def _run_step(argv: list[str], cwd: str, timeout: int, stdin: str,
                 proc.wait()
                 break
             time.sleep(0.02)
+
+        # #207: reap the whole group here, unconditionally, covering the
+        # NORMAL-exit case the loop above never touches — `proc.poll()` turns
+        # non-None almost immediately for a payload that just backgrounds a
+        # child and returns 0, so neither branch above ever runs.
+        #
+        # Placed BEFORE the thread joins below, not after: a descendant that
+        # does not redirect its own stdout/stderr inherits proc's pipe fds
+        # (that is what subprocess.Popen does by default), so a drain thread's
+        # blocking BufferedReader.read() cannot see EOF — and therefore cannot
+        # return the bytes it already buffered — until that descendant exits
+        # on its own or this SIGKILL closes its fd. Measured before this fix:
+        # a payload that backgrounded a 30s sleep and returned instantly took
+        # ~10s end to end (two drain threads each hitting their own 5s join
+        # cap in turn) and reported completely EMPTY stdout despite having
+        # printed something, because the buffered read that would have
+        # returned it was still blocked when the 5s cap gave up on it.
+        _reap_group(proc)
 
         for t in threads:
             t.join(timeout=5)
