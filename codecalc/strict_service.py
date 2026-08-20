@@ -297,6 +297,12 @@ class StrictService:
                 HTTPStatus.BAD_REQUEST,
                 {"ok": False, "error": "spec requires string 'language' and 'code'"},
             )
+        stdin = spec.get("stdin", "")
+        if not isinstance(stdin, str):
+            raise _HttpError(
+                HTTPStatus.BAD_REQUEST,
+                {"ok": False, "error": "spec 'stdin' must be a string"},
+            )
         if spec.get("workdir") not in (None, ""):
             raise _HttpError(
                 HTTPStatus.BAD_REQUEST,
@@ -332,7 +338,8 @@ class StrictService:
             self._evict_oldest_locked()
         try:
             result = runtime.execute(
-                run_id, language=language, source=code, timeout=timeout, **kwargs
+                run_id, language=language, source=code, timeout=timeout,
+                stdin=stdin, **kwargs
             )
         except StrictRuntimeUnavailable as exc:
             message = self._redact(str(exc))
