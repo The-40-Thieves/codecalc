@@ -25,11 +25,14 @@ RENDERER_INTERFACE_VERSION = "1.0.0"
 #: reused by the reference third-party extension so the example does not drift
 #: from what codecalc actually ships. Matches the pattern test_extensions.py
 #: uses for its own fixture manifests: MAJOR.MINOR of the running codecalc and
-#: of the result contract, open-ended on patch/minor. Public (no leading
-#: underscore) so `examples/extensions/csv_renderer` can reuse it rather than
-#: hand-copying a version range that could then drift from this one.
-COMPATIBLE_CODECALC = f">={'.'.join(__version__.split('.')[:2])},<0.3"
-COMPATIBLE_CONTRACT = f">={'.'.join(contract.CONTRACT_VERSION.split('.')[:2])},<2"
+#: of the result contract, open-ended on the next minor/major. Public (no
+#: leading underscore) so `examples/extensions/csv_renderer` can reuse it
+#: rather than hand-copying a version range that could then drift from this
+#: one. Computed via `extensions.codecalc_compat_range`/`contract_compat_range`
+#: (THE-872) rather than hardcoded — a hardcoded upper bound goes stale the
+#: moment the running MINOR reaches it.
+COMPATIBLE_CODECALC = extensions.codecalc_compat_range(__version__)
+COMPATIBLE_CONTRACT = extensions.contract_compat_range(contract.CONTRACT_VERSION)
 
 
 @dataclass(frozen=True, slots=True)

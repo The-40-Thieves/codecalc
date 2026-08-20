@@ -20,12 +20,15 @@ from __future__ import annotations
 
 from codecalc import extensions, verifiers
 
-#: This reference targets the interface/version ranges published alongside
-#: codecalc 0.2.0 / result contract 1.2.0 (see `docs/design/2026-08-19-
-#: extension-sdk.md`). A real third-party author pins the range they tested
-#: against, the same way a `pip` package pins its own dependency bounds.
-_COMPATIBLE_CODECALC = ">=0.2,<0.3"
-_COMPATIBLE_CONTRACT = ">=1.2,<2"
+#: Reuses `verifiers.COMPATIBLE_CODECALC`/`COMPATIBLE_CONTRACT` (computed from
+#: the running codecalc/contract versions, THE-872) rather than hand-copying a
+#: version range that could then drift from what codecalc actually ships — the
+#: same reasoning as `examples/extensions/csv_renderer`. A real third-party
+#: author instead pins the range they tested against, the same way a `pip`
+#: package pins its own dependency bounds; this reference reuses the built-in's
+#: range so the example does not go stale on its own.
+_COMPATIBLE_CODECALC = verifiers.COMPATIBLE_CODECALC
+_COMPATIBLE_CONTRACT = verifiers.COMPATIBLE_CONTRACT
 
 
 class ParityVerifier:
