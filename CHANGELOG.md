@@ -33,6 +33,22 @@ behind it.
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-08-20
+
+### Fixed
+
+- MCP registry publishing (THE-867): `server.json`'s `description` shortened
+  to the registry's 100-char limit (was 117, causing a 422), the namespace
+  corrected to the GitHub org's actual casing (`io.github.The-40-Thieves/codecalc`,
+  the OIDC grant is case-sensitive and rejected the lowercase form with a
+  403), and the release workflow's `publish-mcp-registry` job made
+  retriable — it now runs whenever the PyPI publish succeeded or was
+  already skipped, so a registry-only re-dispatch can publish against an
+  already-live PyPI release. This release exists to carry the corrected
+  `mcp-name` marker into a fresh PyPI package description, since the
+  marker check the registry runs against the published description is
+  case-sensitive and the 0.3.0 description still had the old casing.
+
 ## [0.3.0] — 2026-08-20
 
 ### Added
@@ -553,7 +569,8 @@ it, so there was no upgrade path to describe — only what the thing is.
   `ok: false` through the sandbox. Tracked, with a dated reproduction, at
   [#42](https://github.com/The-40-Thieves/codecalc/issues/42).
 
-[Unreleased]: https://github.com/The-40-Thieves/codecalc/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/The-40-Thieves/codecalc/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.3.1
 [0.3.0]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.3.0
 [0.2.0]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.2.0
 [0.1.0]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.1.0
