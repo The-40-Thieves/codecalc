@@ -42,6 +42,7 @@ from codecalc.strict_runtime import (
 from codecalc.strict_service import (
     MAX_CONCURRENT_RUNS,
     MAX_CONTENT_LENGTH,
+    MAX_CPU_COUNT,
     MAX_TIMEOUT_SECONDS,
     MAX_TRACKED_RUNS,
     STRICT_SERVICE_PROVIDER_ID,
@@ -72,6 +73,7 @@ class FakeRuntime:
         self.execute_raises = execute_raises
         self.calls: list[tuple[str, str]] = []
         self.last_timeout: int | None = None
+        self.last_kwargs: dict | None = None
 
     def probe(self) -> dict:
         if self.probe_raises is not None:
@@ -92,6 +94,7 @@ class FakeRuntime:
     def execute(self, run_id, *, language, source, timeout, **kwargs) -> dict:
         self.calls.append(("execute", run_id))
         self.last_timeout = timeout
+        self.last_kwargs = kwargs
         if self.execute_raises is not None:
             raise self.execute_raises
         if self.execute_result is not None:
@@ -479,6 +482,60 @@ def test_timeout_above_ceiling_is_clamped() -> None:
           f"last_timeout={runtime.last_timeout}")
 
 
+def test_max_cpu_is_forwarded_and_clamped() -> None:
+    # max_cpu = 2 (below the ceiling) forwards as-is.
+    runtime = FakeRuntime()
+    service = StrictService(token=TOKEN, runtime=runtime)
+    status, _ = service.dispatch(
+        "POST", "/v1/runs/cpu-below-ceiling/execute",
+        {"Authorization": f"Bearer {TOKEN}"},
+        json.dumps({"language": "python3", "code": "x", "max_cpu": 2}).encode(),
+    )
+    check("a run with max_cpu below the ceiling still executes", status == HTTPStatus.OK)
+    check("cpu_count handed to the runtime matches the requested max_cpu",
+          runtime.last_kwargs is not None and runtime.last_kwargs.get("cpu_count") == 2,
+          f"last_kwargs={runtime.last_kwargs}")
+
+    # max_cpu = 100 (above the ceiling) is clamped, not rejected.
+    runtime = FakeRuntime()
+    service = StrictService(token=TOKEN, runtime=runtime)
+    status, _ = service.dispatch(
+        "POST", "/v1/runs/cpu-above-ceiling/execute",
+        {"Authorization": f"Bearer {TOKEN}"},
+        json.dumps({"language": "python3", "code": "x", "max_cpu": 100}).encode(),
+    )
+    check("a run with an oversized max_cpu still executes", status == HTTPStatus.OK)
+    check("cpu_count handed to the runtime is clamped to MAX_CPU_COUNT",
+          runtime.last_kwargs is not None and runtime.last_kwargs.get("cpu_count") == MAX_CPU_COUNT,
+          f"last_kwargs={runtime.last_kwargs}")
+
+    # max_cpu absent entirely: no cpu_count kwarg, runtime default applies.
+    runtime = FakeRuntime()
+    service = StrictService(token=TOKEN, runtime=runtime)
+    status, _ = service.dispatch(
+        "POST", "/v1/runs/cpu-absent/execute",
+        {"Authorization": f"Bearer {TOKEN}"},
+        json.dumps({"language": "python3", "code": "x"}).encode(),
+    )
+    check("a run with no max_cpu still executes", status == HTTPStatus.OK)
+    check("no cpu_count kwarg is forwarded when max_cpu is absent",
+          runtime.last_kwargs is not None and "cpu_count" not in runtime.last_kwargs,
+          f"last_kwargs={runtime.last_kwargs}")
+
+    # max_cpu = 0: same as absent — _positive_int treats it as "use the default".
+    runtime = FakeRuntime()
+    service = StrictService(token=TOKEN, runtime=runtime)
+    status, _ = service.dispatch(
+        "POST", "/v1/runs/cpu-zero/execute",
+        {"Authorization": f"Bearer {TOKEN}"},
+        json.dumps({"language": "python3", "code": "x", "max_cpu": 0}).encode(),
+    )
+    check("a run with max_cpu=0 still executes", status == HTTPStatus.OK)
+    check("no cpu_count kwarg is forwarded when max_cpu is 0",
+          runtime.last_kwargs is not None and "cpu_count" not in runtime.last_kwargs,
+          f"last_kwargs={runtime.last_kwargs}")
+
+
 def test_empty_controls_receipt_yields_empty_enforcement() -> None:
     # A runtime that ever returns a receipt with missing/empty controls must
     # not have the server synthesize the full control set as True — that is
@@ -695,6 +752,7 @@ if __name__ == "__main__":
     test_concurrent_run_cap_returns_429()
     test_non_strict_runtime_exception_releases_the_concurrency_slot()
     test_timeout_above_ceiling_is_clamped()
+    test_max_cpu_is_forwarded_and_clamped()
     test_empty_controls_receipt_yields_empty_enforcement()
     test_empty_controls_fails_client_attestation()
     test_unavailable_runtime_reports_not_ready()

@@ -102,6 +102,12 @@ MAX_CONCURRENT_RUNS = 8
 #: the default" (see ``_positive_int``) rather than an error.
 MAX_TIMEOUT_SECONDS = 300
 
+#: Ceiling on a client-supplied ``max_cpu`` (guest ``cpu_count``), clamped
+#: rather than rejected — a request above it is clamped, mirroring
+#: ``MAX_TIMEOUT_SECONDS`` (``docker --cpus`` is a soft CFS quota, so this
+#: bounds a single run's share without over-provisioning the host).
+MAX_CPU_COUNT = 4
+
 #: Wall-clock ceiling on receiving a request body once its declared
 #: ``Content-Length`` has already cleared ``MAX_CONTENT_LENGTH`` (THE-851).
 #: Enforced as a TOTAL deadline across the whole read, not a per-recv idle
@@ -312,6 +318,9 @@ class StrictService:
         memory_mb = _positive_int(spec.get("max_memory_mb"))
         if memory_mb:
             kwargs["memory_mb"] = memory_mb
+        cpu_count = _positive_int(spec.get("max_cpu"))
+        if cpu_count:
+            kwargs["cpu_count"] = min(cpu_count, MAX_CPU_COUNT)
         # Clamped, not rejected: a client-supplied timeout above the ceiling
         # degrades to "runs as long as we'll allow" rather than erroring.
         timeout = min(_positive_int(spec.get("timeout")) or 10, MAX_TIMEOUT_SECONDS)
