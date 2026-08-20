@@ -99,6 +99,18 @@ on:
           path the real release will not use.
         type: boolean
         default: false
+      publish_to_mcp_registry:
+        description: >-
+          Also publish server.json to the official MCP Registry
+          (registry.modelcontextprotocol.io) via GitHub OIDC — no stored
+          secret. Same safety-first, owner-opt-in posture as the other
+          publish_to_* switches: leave false to validate the rest of the
+          pipeline without touching the registry. Runs only after PyPI has
+          published (see publish-mcp-registry's `needs`), because the
+          registry validates the `mcp-name` ownership marker against the
+          LIVE PyPI package description, not the wheel built in this run.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -881,3 +893,70 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
         run: cargo publish --manifest-path executor/Cargo.toml
+
+  publish-mcp-registry:
+    name: publish server.json to the MCP Registry (OIDC)
+    # MUST come after PyPI, not just be scheduled after it: the registry
+    # validates the `mcp-name: io.github.the-40-thieves/codecalc` ownership
+    # marker (see README.md) against the LIVE PyPI project description, so a
+    # publish attempted before publish-pypi finishes would 404/mismatch even
+    # though this job itself has nothing to do with PyPI's API. `needs:
+    # publish-pypi` also pulls in build+verify transitively, since
+    # publish-pypi already needs both.
+    needs: publish-pypi
+    # THE-867: server.json (repo root, official registry schema) already
+    # exists — see that commit. This job is the automation half: same
+    # opt-in-only, dispatch-gated posture as publish-pypi/testpypi/crates
+    # above, so a tag push can never reach it on its own.
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_to_mcp_registry
+    runs-on: ubuntu-latest
+    # Mirrors publish-pypi/publish-testpypi/publish-crates above: an
+    # `environment:` scopes the OIDC token's `sub` claim to
+    # `...:environment:mcp-registry` instead of the bare ref, and lets the
+    # owner attach required-reviewer / branch-or-tag protection rules to it
+    # later. Auto-created on first use — nothing to provision up front.
+    environment: mcp-registry
+    # Job-scoped, not workflow-wide: id-token mints the OIDC token
+    # mcp-publisher exchanges for a short-lived registry credential (GitHub
+    # OIDC — no MCP_GITHUB_TOKEN/PAT and no secret stored in this repo, per
+    # https://modelcontextprotocol.io/registry/github-actions, "OIDC
+    # authentication (recommended)"). contents: read is only for the
+    # checkout of server.json.
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Pinned binary + checksum, matching how this repo installs syft and
+      # actionlint elsewhere in this workflow/repo rather than the
+      # `curl .../latest/...` the upstream docs show — a release tag can move
+      # under an unpinned URL, and this is the tool that authenticates and
+      # publishes, not a read-only report.
+      - name: install mcp-publisher v1.8.1 (pinned binary + checksum)
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -sSL --fail -o "$RUNNER_TEMP/mcp-publisher.tar.gz" \
+            https://github.com/modelcontextprotocol/registry/releases/download/v1.8.1/mcp-publisher_linux_amd64.tar.gz
+          echo "a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc  $RUNNER_TEMP/mcp-publisher.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/mcp-publisher.tar.gz" -C "$RUNNER_TEMP" mcp-publisher
+          "$RUNNER_TEMP/mcp-publisher" --version
+
+      # No secret exchanged here on purpose: this trades the job's own GitHub
+      # OIDC token for a short-lived MCP Registry credential, the same shape
+      # as publish-crates' OIDC exchange with crates.io above.
+      - name: authenticate to the MCP Registry (GitHub OIDC)
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/mcp-publisher" login github-oidc
+
+      # Reads server.json from the repo root (checked out above) by default —
+      # no path argument. Must run after publish-pypi: see this job's `needs`
+      # and the comment at the top of this job.
+      - name: publish server.json to the MCP Registry
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/mcp-publisher" publish
