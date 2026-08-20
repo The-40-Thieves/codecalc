@@ -29,6 +29,10 @@ the number.
 | You are about to state that a rewrite is **faster** | `verify_optimization` |
 | You are about to say two languages **behave the same** | `compare_edge_cases` |
 | You are about to state a **Big-O** | `analyze_complexity` (inferred) or `benchmark` (measured) — and say which |
+| Any **bitwise op, shift, or mask** result you will state | `bitop`, `bit_analysis` |
+| Any value you will state in **hex, binary, or another base** | `radix_convert`, `base_repr` |
+| Any **summary statistic** (mean, median, stdev, percentile) you will state | `calc_stats`, `percentiles` |
+| Before stating the **solution to an equation or system** | `solve_expression`, `solve_linear` |
 
 **2^53 is not academic.** `float_repr(9007199254740993)` reports
 `stored: "9007199254740992"`. The value changed and nothing raised. That is the

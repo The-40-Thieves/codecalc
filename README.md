@@ -90,6 +90,26 @@ python scripts/prefetch_grammars.py --print-cache-dir  # the directory to copy
 `codecalc doctor` reports whether that cache is populated, so this is
 discoverable before it matters rather than after a tool call degrades.
 
+## codecalc vs. the alternatives
+
+codecalc is not a general cloud sandbox and not a vendor code interpreter. It
+overlaps with several things and beats them in only one narrow place — forcing a
+model to *measure* a claim instead of asserting it. Where that isn't what you
+need, one of these is the better tool, and this table says so plainly.
+
+| You want… | Better fit | Why |
+|---|---|---|
+| To just run some Python/JS quickly, zero setup | Your model vendor's built-in interpreter | Already there, already sandboxed, nothing to install |
+| Heavy or multi-tenant workloads, managed scale | A cloud sandbox (E2B, Modal, Daytona) | Per-tenant Firecracker/gVisor isolation codecalc does not claim by default |
+| Pure arithmetic or symbolic math, nothing else | A small calculator or SymPy MCP | Lower token cost; none of the 31-language runtime machinery |
+| **A model to stop _guessing_ numbers, equivalence, and speedups — locally, privately, with graded evidence** | **codecalc** | Exact rationals, `verify_translation`/`verify_optimization`, and `unenforced`/grade honesty — offline, no account |
+
+**Do not reach for codecalc if** you need multi-tenant or network-exposed
+isolation (its threat model is explicitly single-operator, local, stdio), if
+zero-setup convenience matters more than measurement, or if a hosted interpreter
+already covers your case. It earns its keep only when the *correctness of the
+claim* — not just "it ran" — is the point.
+
 ## Install
 
 > [!NOTE]
