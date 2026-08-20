@@ -149,6 +149,35 @@ check("repro: variance_note reports high sibling variance / runner-wide slowness
 check("repro: variance_note reports ~104x", d is not None and "104." in d["variance_note"],
       f"-> {d.get('variance_note') if d else None}")
 
+# ── 3b. SINGLE slow ok sibling: the spread ratio is 1.0, but its ABSOLUTE
+#        time is a big fraction of the same ceiling → runner-wide, NOT
+#        "specific" (the tightened single-sibling case #42) ─────────────────
+fake, calls = make_fake({
+    "node": [timeout_result(15000), timeout_result(15000)],
+    "python3": [ok_result("42", 8000)],  # lone sibling, itself slow
+})
+tools.executor.execute = fake
+r = tools.compare_execution({"node": "console.log(42)", "python3": "print(42)"})
+d = disc(r["discrepancies"], "node")
+check("single slow sibling: node flagged", d is not None, f"-> {r['discrepancies']}")
+check("single slow sibling: variance_note is runner-wide via the absolute-time signal, not 'looks specific'",
+      d is not None and "runner-wide slowness" in d["variance_note"]
+      and "% of the" in d["variance_note"]
+      and "looks specific to" not in d["variance_note"],
+      f"-> {d.get('variance_note') if d else None}")
+
+# ── 3c. SINGLE fast ok sibling: ratio 1.0 AND fast → correctly "specific" ──
+fake, calls = make_fake({
+    "node": [timeout_result(15000), timeout_result(15000)],
+    "python3": [ok_result("42", 30)],
+})
+tools.executor.execute = fake
+r = tools.compare_execution({"node": "console.log(42)", "python3": "print(42)"})
+d = disc(r["discrepancies"], "node")
+check("single fast sibling: variance_note reads specific to node",
+      d is not None and "looks specific to node" in d["variance_note"],
+      f"-> {d.get('variance_note') if d else None}")
+
 # ── 4. a non-timeout ok=False (e.g. compile error) is NOT retried ──────────
 fake, calls = make_fake({
     "perl": [fail_result("syntax error at -e line 1.")],

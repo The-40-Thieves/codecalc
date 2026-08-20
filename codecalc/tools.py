@@ -107,32 +107,39 @@ def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 
             hi_lang = max(siblings, key=lambda k: siblings[k])
             lo_lang = min(siblings, key=lambda k: siblings[k])
             hi, lo = siblings[hi_lang], siblings[lo_lang]
-            if lo > 0:
-                ratio = hi / lo
-                if ratio >= 10.0:
-                    variance_note = (
-                        f"high sibling variance ({ratio:.1f}x: slowest {hi_lang} "
-                        f"{hi}ms vs fastest {lo_lang} {lo}ms) — consistent with "
-                        f"runner-wide slowness/cold-start pressure rather than a "
-                        f"defect specific to {r['language']}")
-                else:
-                    variance_note = (
-                        f"siblings ran within a tight band ({ratio:.1f}x) — this "
-                        f"timeout looks specific to {r['language']}")
-            elif hi == 0:
-                # every sibling finished in 0ms — a tight band, not a divide
-                # by zero.
+            # Two independent signals that the RUNNER, not this language, was
+            # the cause: (1) a high spread between siblings, and (2) a sibling
+            # that itself ate a large fraction of the same wall-clock ceiling
+            # this row hit. Signal (2) is what a lone ok sibling needs — with
+            # one sibling the spread ratio is always 1.0 and would otherwise
+            # always read "specific", even when that single sibling was
+            # plainly slow. It also subsumes the lo==0 divide-by-zero cases:
+            # a 0ms sibling can never look slow, and a genuinely slow one
+            # trips signal (2) on its absolute time, not the ratio.
+            timeout_ms = timeout * 1000
+            high_variance = lo > 0 and hi / lo >= 10.0
+            slow_sibling = hi >= 0.25 * timeout_ms
+            if high_variance or slow_sibling:
+                reasons = []
+                if high_variance:
+                    reasons.append(
+                        f"high sibling variance ({hi / lo:.1f}x: slowest "
+                        f"{hi_lang} {hi}ms vs fastest {lo_lang} {lo}ms)")
+                if slow_sibling:
+                    reasons.append(
+                        f"slowest sibling {hi_lang} took {hi}ms "
+                        f"({hi / timeout_ms * 100:.0f}% of the {timeout_ms}ms "
+                        f"ceiling)")
                 variance_note = (
-                    f"siblings ran within a tight band (0ms each) — this "
-                    f"timeout looks specific to {r['language']}")
+                    "; ".join(reasons) + " — consistent with runner-wide "
+                    "slowness/cold-start pressure rather than a defect "
+                    f"specific to {r['language']}")
             else:
-                # lo == 0 < hi: a genuine 0ms sibling beside a slower one
-                # makes hi/lo undefined rather than informative.
+                span = (f"{hi / lo:.1f}x spread" if lo > 0
+                        else f"slowest {hi_lang} {hi}ms")
                 variance_note = (
-                    f"one sibling ({lo_lang}) finished in 0ms while {hi_lang} "
-                    f"took {hi}ms — variance ratio is undefined, but the "
-                    f"spread is consistent with runner-wide slowness rather "
-                    f"than a defect specific to {r['language']}")
+                    f"siblings ran fast ({span}) — this timeout looks "
+                    f"specific to {r['language']}")
         else:
             variance_note = "no successful sibling to compare timings against"
         discrepancies.append({
