@@ -1,16 +1,18 @@
 """Security regression tests: the two confirmed exploits must stay dead,
 plus sandbox guarantees (env isolation, fork-bomb, output caps, var caps)."""
+import asyncio
 import json
 import os
 import pathlib
 import re
 import subprocess
 import sys
+import tempfile
 import time
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
-from codecalc import executor, logic, tools
+from codecalc import executor, logic, server, sessions, tools
 
 FAILS = []
 
@@ -19,6 +21,10 @@ def check(name, cond, detail=""):
     print(f"{'PASS' if cond else 'FAIL':4} {name} {detail}")
     if not cond:
         FAILS.append(name)
+
+
+def skip(name, why):
+    print(f"SKIP {name} ({why})")
 
 
 # 1. CVE-2026-codecalc-001: truth_table eval escape (host RCE via __subclasses__)
@@ -743,6 +749,241 @@ r = executor.execute("python3", _BOMB, timeout=10)
 check("fork-bomb stopped by RLIMIT_NPROC",
       not r.get("ok") or r.get("exit_code", 0) != 0 or r.get("timed_out"),
       f"exit={r.get('exit_code')} timed_out={r.get('timed_out')}")
+
+# 11. THE-879 GH #212(a): workspace-guard refusals carry the full result
+# contract. `_jail`/`_session_dir` REFUSE an out-of-workspace path or a
+# malformed session id by raising ValueError — before this fix that raise
+# crossed every layer above it (SessionService, the `@mcp.tool()` wrapper,
+# the SDK itself) uncaught, so the caller got a bare protocol-level error
+# instead of the `ok`/`code`/`remedy` shape every OTHER refusal in this
+# package carries. Driven through the actual `@mcp.tool()`-decorated
+# functions in server.py, not sessions.py's internals directly, because the
+# uncaught raise was only ever observable at THAT boundary — sessions.py's
+# own functions always returned a dict even before the fix, they just raised
+# past it.
+_s212 = sessions.start("python3")
+check("#212(a) setup: session starts", _s212.get("ok"), f"-> {_s212}")
+if _s212.get("ok"):
+    _sid212 = _s212["session_id"]
+
+    _r = server.session_write_file(_sid212, "../evil.txt", "pwned")
+    check("session_write_file on an out-of-workspace path returns the contract, "
+          "not a raised exception",
+          _r.get("ok") is False and _r.get("code") == "permission_denied" and _r.get("remedy"),
+          f"-> {_r}")
+
+    _r = server.session_files(_sid212, "../..")
+    check("session_files on an out-of-workspace path returns the contract",
+          _r.get("ok") is False and _r.get("code") == "permission_denied" and _r.get("remedy"),
+          f"-> {_r}")
+
+    _r = server.session_read_file(_sid212, "../../etc/passwd")
+    check("session_read_file on an out-of-workspace path returns the contract",
+          _r.get("ok") is False and _r.get("code") == "permission_denied" and _r.get("remedy"),
+          f"-> {_r}")
+
+    _r = server.session_run(_sid212, "../../etc/passwd")
+    check("session_run on an out-of-workspace entry_file returns the contract",
+          _r.get("ok") is False and _r.get("code") == "permission_denied" and _r.get("remedy"),
+          f"-> {_r}")
+
+    sessions.stop(_sid212)
+
+# A malformed session id is the OTHER guard `_session_dir` raises for — a
+# different code (VALIDATION: a bad argument, not a jail refusal) but the
+# same "must not raise past the tool boundary" property.
+_r = server.session_stop("../evil")
+check("session_stop with a malformed session id returns the contract",
+      _r.get("ok") is False and _r.get("code") == "validation" and _r.get("remedy"),
+      f"-> {_r}")
+_r = server.session_write_file("../evil", "x", "y")
+check("session_write_file with a malformed session id returns the contract",
+      _r.get("ok") is False and _r.get("code") == "validation" and _r.get("remedy"),
+      f"-> {_r}")
+
+
+# 12. THE-879 GH #212(b): a pydantic argument-validation error must not echo
+# the caller's raw value back. A wrong-typed argument never reaches a tool
+# body — the SDK's own arg-model validation rejects it first, and
+# `str(ValidationError)` includes `input_value=<exactly what was passed>` by
+# default. Driven through a REAL in-process MCP call (not the middleware
+# function in isolation) because the leak is in what the CLIENT receives:
+# `redact_validation_errors_middleware` operates on the already-serialised
+# wire dict, and the only way to prove that shape assumption still holds is
+# a real round trip.
+async def _check_validation_redaction() -> None:
+    from mcp import Client
+
+    secret = "MY-SECRET-TOKEN-should-never-appear-in-an-error-9f3c1a"  # noqa: S105 -- a FAKE secret, the fixture the redaction test asserts is not echoed  # gitleaks:allow -- fake fixture
+    async with Client(server.mcp, mode="auto") as client:
+        r = await client.call_tool(
+            "session_read_file",
+            {"session_id": "x", "path": "y", "max_bytes": secret},
+        )
+        text = "".join(getattr(b, "text", "") or "" for b in r.content)
+        check("a pydantic validation error is still reported as an error",
+              r.is_error, f"-> is_error={r.is_error}")
+        check("the caller's raw argument value does NOT appear in the error text",
+              secret not in text, f"-> {text[:200]!r}")
+        check("the redacted message still names the field that failed",
+              "max_bytes" in text, f"-> {text[:200]!r}")
+
+
+asyncio.run(_check_validation_redaction())
+
+
+# 13. THE-879 GH #211: `serve-http` rejects a DNS-rebinding Host header.
+#
+# Before the fix, codecalc decided a bind was loopback-safe using
+# `ipaddress`-based logic (the whole 127/8 block, "::1", "localhost",
+# "ip6-localhost"), while the SDK's OWN auto-enabled DNS-rebinding guard only
+# recognises the three literal strings "127.0.0.1"/"localhost"/"::1" — a
+# plain tuple membership test (mcp.server.lowlevel.server.py's
+# `streamable_http_app`). Anything codecalc accepted that fell outside that
+# tuple (127.0.0.2, for instance) got `transport_security=None`, and
+# `TransportSecurityMiddleware` defaults DNS-rebinding protection to OFF when
+# no settings object reaches it — codecalc believed the bind was safe while
+# the transport enforced nothing. This is a REAL subprocess + a real HTTP
+# request with a spoofed `Host:` header, not a mock of `mcp.run` — the leak
+# was in what the wire actually enforced, and only a real round trip proves
+# that.
+def _check_serve_http_rejects_rebinding_host() -> None:
+    import socket
+    import time
+    import urllib.error
+    import urllib.request
+
+    # 127.0.0.2 deliberately: it is loopback (accepted by codecalc's own
+    # `ipaddress`-based check, no CODECALC_HTTP_TOKEN required) but NOT one of
+    # the SDK's three hardcoded strings — exactly the gap #211 is about.
+    host = "127.0.0.2"
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.bind((host, 0))
+    except OSError as exc:
+        # macOS (and the BSDs) attach only 127.0.0.1 to the loopback
+        # interface, not the whole 127/8 that Linux and Windows route there,
+        # so 127.0.0.2 is not bindable here (EADDRNOTAVAIL). This probe needs a
+        # loopback address that is NOT one of the SDK's three hardcoded strings
+        # to exercise the #211 gap — 127.0.0.1 would be caught by the SDK's own
+        # default and prove nothing. The fix itself (building
+        # TransportSecuritySettings explicitly from the validated host) is
+        # platform-independent and IS exercised on Linux; skip the live
+        # reproduction only where the OS refuses to bind the alias.
+        probe.close()
+        print(f"SKIP serve-http DNS-rebinding probe (#211) — cannot bind {host} "
+              f"on {sys.platform}: {exc}")
+        return
+    port = probe.getsockname()[1]
+    probe.close()
+
+    env = {**os.environ, "PYTHONPATH": str(REPO_ROOT)}
+    env.pop("CODECALC_HTTP_TOKEN", None)
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "codecalc.server", "serve-http",
+         "--host", host, "--port", str(port)],
+        cwd=REPO_ROOT, env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+    )
+    try:
+        url = f"http://{host}:{port}/mcp"
+        body = json.dumps({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {},
+        }).encode()
+        base_headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        }
+
+        def _post(host_header: str) -> int | None:
+            req = urllib.request.Request(
+                url, data=body, method="POST",
+                headers={**base_headers, "Host": host_header},
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=2) as resp:  # noqa: S310
+                    return resp.status
+            except urllib.error.HTTPError as exc:
+                return exc.code
+            except (urllib.error.URLError, ConnectionError):
+                return None
+
+        # Poll for startup rather than a fixed sleep: a loaded CI runner can
+        # take longer than any single guess to import codecalc and bind.
+        deadline = time.monotonic() + 20
+        status = None
+        while time.monotonic() < deadline:
+            status = _post(f"{host}:{port}")
+            if status is not None:
+                break
+            if proc.poll() is not None:
+                break
+            time.sleep(0.2)
+
+        if status is None:
+            out = proc.stdout.read().decode(errors="replace") if proc.stdout else ""
+            skip("serve-http DNS-rebinding checks",
+                 f"the server never became reachable on {host}:{port} "
+                 f"(exited={proc.poll()}) -> {out[-300:]!r}")
+            return
+
+        check("a request with the real bound Host header is served",
+              status == 200, f"-> {status}")
+
+        rebound = _post("evil.example")
+        check("a request with a spoofed Host header is rejected (421)",
+              rebound == 421, f"-> {rebound}")
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+
+
+_check_serve_http_rejects_rebinding_host()
+
+
+# 14. THE-879 GH #208: session_files must not stat through a symlink.
+#
+# `_list()` used to build each entry with `p.is_dir()`/`p.stat().st_size` —
+# both FOLLOW a symlink. A session can plant one pointing anywhere the server
+# user can read (`ln -s /etc/shadow leak` or a canary file outside the
+# workspace here), and the old listing reported the TARGET's size —
+# disclosing the existence and size of a path `session_read_file` already
+# refuses to touch (its `_jail` resolves the same symlink and REJECTS once it
+# sees the target is outside the workspace, rather than reporting on it).
+_s208 = sessions.start("python3")
+check("#208 setup: session starts", _s208.get("ok"), f"-> {_s208}")
+if _s208.get("ok"):
+    _sid208 = _s208["session_id"]
+    _wdir208 = pathlib.Path(_s208["workdir"])
+    _outside_dir208 = tempfile.mkdtemp(prefix="codecalc-208-canary-")
+    _canary208 = pathlib.Path(_outside_dir208) / "top-secret.bin"
+    _canary208.write_bytes(b"X" * 123456)
+
+    try:
+        (_wdir208 / "leak").symlink_to(_canary208)
+    except OSError as exc:
+        skip("session_files does not stat through a symlink", f"symlink unsupported: {exc}")
+    else:
+        _listed = sessions.list_files(_sid208)
+        _entry = next((e for e in _listed.get("files", []) if e["path"] == "leak"), None)
+        check("session_files reports the symlink, not the outside target's size",
+              _entry is not None and "size" not in _entry,
+              f"-> {_entry}")
+        check("the target's actual size (123456) is not disclosed anywhere in the listing",
+              "123456" not in json.dumps(_listed),
+              f"-> {_listed}")
+
+        # And the boundary this must MATCH: session_read_file already refuses
+        # the identical symlink.
+        _read = server.session_read_file(_sid208, "leak")
+        check("session_read_file refuses the same symlink (the behavior session_files now matches)",
+              _read.get("ok") is False, f"-> {_read}")
+
+    sessions.stop(_sid208)
 
 print(f"\n=== {len(FAILS)} failures ===" if FAILS else "\n=== ALL SECURITY TESTS PASS ===")
 sys.exit(1 if FAILS else 0)

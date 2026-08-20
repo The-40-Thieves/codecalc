@@ -13,6 +13,7 @@ import threading
 import time
 from pathlib import Path
 
+from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ImageContent
 
 from codecalc import (
@@ -1003,6 +1004,16 @@ def test_main_runs_the_same_server_over_explicit_streamable_http() -> None:
               "port": 8123,
               "json_response": True,
               "stateless_http": True,
+              # THE-879 GH #211: built from the SAME host this process just
+              # validated as loopback-safe, not left to the SDK's own
+              # auto-default — which only recognises the three literal
+              # strings "127.0.0.1"/"localhost"/"::1" and would have left
+              # DNS-rebinding protection OFF entirely for "127.0.0.2".
+              "transport_security": TransportSecuritySettings(
+                  enable_dns_rebinding_protection=True,
+                  allowed_hosts=["127.0.0.2:*"],
+                  allowed_origins=["http://127.0.0.2:*"],
+              ),
           }])
 
 

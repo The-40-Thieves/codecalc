@@ -412,6 +412,29 @@ def _session_dir(session_id: str) -> Path:
     return d
 
 
+def _guard_error(exc: ValueError) -> dict:
+    """`_session_dir`/`_jail` refusals, converted to the result contract.
+
+    Both raise rather than return `{"ok": False, ...}` — the ordinary Python
+    idiom for a defensive check reused from many call sites — but every
+    PUBLIC session function in this module returns a result dict like the
+    rest of it, never an exception. Before this (#212), the raise crossed
+    every layer above it — SessionService, the `@mcp.tool()` wrapper, the SDK
+    itself — uncaught, so the caller got a bare protocol-level error instead
+    of the `ok`/`code`/`remedy` shape every other refusal here carries.
+
+    "invalid session id" is a malformed argument (VALIDATION, the same
+    bucket a bad expression or an unknown language lands in); the
+    traversal/escape guards (`_jail`'s "path escapes session workspace",
+    `_session_dir`'s defence-in-depth "session path escapes session root")
+    are jail refusals (PERMISSION_DENIED) — the two codes errors.py already
+    documents for exactly these situations.
+    """
+    message = str(exc)
+    code = errors.VALIDATION if "invalid session id" in message else errors.PERMISSION_DENIED
+    return errors.error_result(code, message)
+
+
 def start(language: str = "python3", name: str | None = None) -> dict:
     """Create a session: fresh workspace dir; REPL worker for supported langs."""
     name = registry.canonical(language) or "python3"
@@ -475,7 +498,10 @@ def stop(session_id: str) -> dict:
         _discard_expired_locked(session_id)
     if w is not None:
         w.close()
-    d = _session_dir(session_id)
+    try:
+        d = _session_dir(session_id)
+    except ValueError as exc:
+        return _guard_error(exc)
     deleted = executor._rmtree_checked(d, created)
     return {"ok": True, "session_id": session_id, "deleted": deleted}
 
@@ -588,7 +614,10 @@ def execute(session_id: str, code: str, language: str | None = None,
     cannot, so anything it cannot apply comes back in `unenforced` rather than
     being dropped on the floor.
     """
-    d = _session_dir(session_id)
+    try:
+        d = _session_dir(session_id)
+    except ValueError as exc:
+        return _guard_error(exc)
     if not d.is_dir():
         return {"ok": False, "error": f"unknown session '{session_id}'"}
     # Lazy check-on-access (THE-779): reap this session's worker if it has
@@ -783,11 +812,18 @@ def spill_if_truncated(session_id: str, result: dict, requested_cap_kb: int) -> 
 
 
 def write_file(session_id: str, path: str, content: str) -> dict:
-    d = _session_dir(session_id)
-    if not d.is_dir():
-        return {"ok": False, "error": f"unknown session '{session_id}'"}
-    _reap_then_note(session_id)  # F4: reap an expired worker, never revive it
-    target = _jail(d, path)
+    try:
+        d = _session_dir(session_id)
+        if not d.is_dir():
+            return {"ok": False, "error": f"unknown session '{session_id}'"}
+        _reap_then_note(session_id)  # F4: reap an expired worker, never revive it
+        target = _jail(d, path)
+    except ValueError as exc:
+        # #212: `_jail`/`_session_dir` REFUSE an out-of-workspace or malformed
+        # request by raising, same as every other guard in this module — but
+        # this is a PUBLIC session function, which returns `{"ok": False,
+        # ...}` like the rest of them, never an exception.
+        return _guard_error(exc)
     target.parent.mkdir(parents=True, exist_ok=True)
     _write_nofollow(target, content)
     # `.as_posix()` for the same protocol-path reason as artifacts(): the
@@ -798,11 +834,14 @@ def write_file(session_id: str, path: str, content: str) -> dict:
 
 
 def list_files(session_id: str, path: str = "") -> dict:
-    d = _session_dir(session_id)
-    if not d.is_dir():
-        return {"ok": False, "error": f"unknown session '{session_id}'"}
-    _reap_then_note(session_id)  # F4: reap an expired worker, never revive it
-    base = _jail(d, path)
+    try:
+        d = _session_dir(session_id)
+        if not d.is_dir():
+            return {"ok": False, "error": f"unknown session '{session_id}'"}
+        _reap_then_note(session_id)  # F4: reap an expired worker, never revive it
+        base = _jail(d, path)
+    except ValueError as exc:
+        return _guard_error(exc)  # #212, see write_file's comment above
     if not base.is_dir():
         return {"ok": False, "error": f"no such directory: {path}"}
     return {"ok": True, "path": path or ".", "files": _list(base)}
@@ -830,7 +869,10 @@ def resource_read(session_id: str, path: str,
 
 def artifacts(session_id: str) -> dict:
     """Files created by executed code (anything beyond the runner's own files)."""
-    d = _session_dir(session_id)
+    try:
+        d = _session_dir(session_id)
+    except ValueError as exc:
+        return _guard_error(exc)  # #212, see write_file's comment
     if not d.is_dir():
         return {"ok": False, "error": f"unknown session '{session_id}'"}
     _reap_then_note(session_id)  # F4: reap an expired worker, never revive it
@@ -838,8 +880,23 @@ def artifacts(session_id: str) -> dict:
     for p in sorted(d.rglob("*")):
         if "__pycache__" in p.parts or p.name.endswith(".pyc"):
             continue
-        if p.is_file() and p.name not in {"main.py", "main.js", "run.out", "run.err", "run.in",
-                                          "compile.out", "compile.err", "compile.in", "a.out"}:
+        # lstat, not is_file()/stat(): those FOLLOW a symlink, and a session
+        # can plant one pointing outside the workspace (`ln -s /etc/shadow
+        # leak`) to make this listing disclose the target's size or
+        # existence — the same class of leak #208 fixed in `_list()` below,
+        # and exactly what `session_read_file` already refuses via `_jail`'s
+        # resolve()-then-boundary-check. A symlink is excluded rather than
+        # reported: this function's contract is "files created inside the
+        # workspace", and following a link to describe what may lie outside
+        # it is not that.
+        try:
+            st = p.lstat()
+        except OSError:
+            continue
+        if not stat.S_ISREG(st.st_mode):
+            continue
+        if p.name not in {"main.py", "main.js", "run.out", "run.err", "run.in",
+                          "compile.out", "compile.err", "compile.in", "a.out"}:
             # `.as_posix()`, not `str()`: the workspace path is a
             # protocol-facing identity (it composes the file's
             # `codecalc://session/.../files/<path>` resource URI and is what a
@@ -850,17 +907,31 @@ def artifacts(session_id: str) -> dict:
             # identity identical on ubuntu, macos and windows; pathlib accepts
             # "/" as input on every platform, so the reported path round-trips.
             rel = p.relative_to(d).as_posix()
-            files.append({"path": rel, "size": p.stat().st_size})
+            files.append({"path": rel, "size": st.st_size})
     return {"ok": True, "session_id": session_id, "artifacts": files}
 
 
 def _list(d: Path) -> list[dict]:
+    """The directory listing behind `session_files`.
+
+    #208: `p.is_dir()`/`p.stat()` FOLLOW a symlink, so a session could plant
+    one pointing outside the workspace (`ln -s /etc/shadow leak`) and this
+    listing would disclose the target's size or existence — leaking
+    information about a path `session_read_file` already refuses to touch
+    (that refusal comes from `_jail`'s resolve()-then-boundary-check, which
+    also follows the symlink, just to REJECT rather than report). `lstat`
+    never follows, so a symlink entry is reported as a symlink — never as
+    whatever it happens to point at, inside the workspace or out.
+    """
     out = []
     for p in sorted(d.iterdir()):
-        if p.is_dir():
+        st = p.lstat()
+        if stat.S_ISLNK(st.st_mode):
+            out.append({"path": p.name, "type": "symlink"})
+        elif stat.S_ISDIR(st.st_mode):
             out.append({"path": p.name + "/", "type": "dir"})
         else:
-            out.append({"path": p.name, "type": "file", "size": p.stat().st_size})
+            out.append({"path": p.name, "type": "file", "size": st.st_size})
     return out
 
 

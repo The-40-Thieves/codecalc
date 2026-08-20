@@ -52,7 +52,7 @@ from . import (
 from . import (
     audit as audit_module,
 )
-from .mcp_middleware import timeout_middleware
+from .mcp_middleware import redact_validation_errors_middleware, timeout_middleware
 
 #: Bearer token for the Streamable HTTP transport (THE-786). Unset means the
 #: transport is loopback-only: `serve-http` REFUSES a non-loopback bind
@@ -219,7 +219,11 @@ mcp = MCPServer(
         "resources/read": CacheHint(ttl_ms=0, scope="private"),
         "server/discover": CacheHint(ttl_ms=60_000, scope="public"),
     },
-    middleware=[timeout_middleware],
+    # Redaction outermost: it is the last thing to see a result before it
+    # leaves this process, so it runs on whatever the timeout middleware (or
+    # anything else in the chain) ultimately returns, not just what the
+    # tool handler itself produced.
+    middleware=[redact_validation_errors_middleware, timeout_middleware],
     # Bearer auth for the HTTP transport, absent unless CODECALC_HTTP_TOKEN is
     # set. Inert over stdio either way — see _http_auth.
     **_http_auth(),
@@ -235,7 +239,7 @@ mcp = MCPServer(
     # actually has, not a static claim that can drift from it.
     instructions=(
         "Universal coding & logic calculator. Tools: list_languages (available "
-        "runtimes), execute_code (run code in 30+ languages, returns stdout/"
+        "runtimes), execute_code (run code in 31 languages, returns stdout/"
         "stderr/exit/time), evaluate_expression (symbolic math via SymPy), "
         "truth_table (boolean logic), z3_check (SMT-LIB2 satisfiability), "
         "solve_linear (systems of equations), analyze_complexity (static Big-O), "
@@ -1500,9 +1504,12 @@ def main() -> None:
         # it; anything else is treated as routable, which errs closed.
         import ipaddress
         try:
-            loopback = ipaddress.ip_address(host).is_loopback
+            parsed_host = ipaddress.ip_address(host)
+            loopback = parsed_host.is_loopback
+            is_ipv6 = parsed_host.version == 6
         except ValueError:
             loopback = host in ("localhost", "ip6-localhost")
+            is_ipv6 = False
         if not loopback and not os.environ.get(HTTP_TOKEN_ENV):
             print(
                 f"codecalc serve-http: refusing to bind {host}: it is not a "
@@ -1513,12 +1520,36 @@ def main() -> None:
                 file=sys.stderr,
             )
             raise SystemExit(2)
+        # THE-879 GH #211: the SDK's OWN DNS-rebinding auto-default
+        # (mcp.server.lowlevel.server.py's `streamable_http_app`) only fires
+        # for the three literal strings "127.0.0.1"/"localhost"/"::1" — a
+        # plain tuple membership test, not the `ipaddress`-based check above.
+        # Every OTHER address this process just decided is loopback-safe
+        # (127.0.0.2, any other 127/8 address, "ip6-localhost") falls through
+        # that tuple, leaves `transport_security=None`, and
+        # `TransportSecurityMiddleware.__init__` then defaults DNS-rebinding
+        # protection to OFF entirely ("disable... by default for backwards
+        # compatibility") — codecalc believed the bind was safe while the
+        # transport it handed the request to enforced nothing. Building the
+        # settings explicitly from the SAME `host` this process already
+        # validated closes the gap by construction: there is no longer a
+        # second, narrower definition of "safe" for the SDK to silently fall
+        # back to. IPv6 literals are bracketed ("[::1]:*") to match the Host
+        # header's own wire form, same as the SDK's own hardcoded default.
+        host_for_header = f"[{host}]" if is_ipv6 else host
+        from mcp.server.transport_security import TransportSecuritySettings
+        transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=[f"{host_for_header}:*"],
+            allowed_origins=[f"http://{host_for_header}:*"],
+        )
         mcp.run(
             transport="streamable-http",
             host=host,
             port=int(port_text),
             json_response=True,
             stateless_http=True,
+            transport_security=transport_security,
         )
         return
     mcp.run(transport="stdio")

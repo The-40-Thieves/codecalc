@@ -37,6 +37,10 @@ check("cmp 6>=6", r["holds"] is True)
 # percentage
 r = exact.percentage("3", "8")
 check("pct 3/8", r["ok"] and abs(r["percent"] - 37.5) < 1e-6)
+# THE-879 GH #213(c): `percent` is a rounded float sitting right next to the
+# EXACT `share` fraction — nothing used to say which of the two was which.
+check("pct discloses percent is rounded, and to how many digits",
+      r.get("rounding") == {"percent": 6}, f"-> {r}")
 
 # stats
 r = exact.stats([1, 2, 3, 4, 5])
@@ -48,20 +52,38 @@ check("stats cv", abs(r["cv"] - 0.527046) < 1e-4)
 r = exact.percentiles(list(range(1, 101)))
 check("pctl p50 nearest", r["percentiles"]["p50"]["nearest_rank"] == 50)
 check("pctl warning n=100 none", r["warning"] is None)
+# THE-879 GH #213(c): `interpolated` is rounded; `nearest_rank` is an exact
+# value straight out of the input, so only the former is named.
+check("pctl discloses interpolated is rounded, nearest_rank is not",
+      r["percentiles"]["p50"].get("rounding") == {"interpolated": 6},
+      f"-> {r['percentiles']['p50']}")
 r = exact.percentiles([1, 2, 3])
 check("pctl warns n<100", r["warning"] is not None)
 
 # collision
 r = exact.collision_prob(100000, 32)
 check("collide 1e5/32 ~0.69", abs(r["probability"] - 0.6878) < 0.01)
+# THE-879 GH #213(c): `percent` is rounded; `probability` (the full float) is
+# not, so only `percent` is named.
+check("collision_prob discloses percent is rounded, probability is not",
+      r.get("rounding") == {"percent": 6}, f"-> {r}")
 r = exact.collision_prob(1000000, 64)
 check("collide 1e6/64 ~2.7e-8", abs(r["probability"] - 2.71e-8) < 1e-9)
 
 # bytes / duration / epoch
 r = exact.data_sizes(291 * 1024 * 1024)
 check("bytes MiB vs MB", abs(r["binary"]["MiB"] - 291) < 1e-6 and abs(r["decimal"]["MB"] - 305.135) < 0.01)
+# THE-879 GH #213(b): a negative byte count used to divide through cleanly
+# and report negative KiB/MB instead of being rejected, same bug shape
+# human_duration already guards against for a negative duration.
+r = exact.data_sizes(-1024)
+check("bytes rejects a negative n", r["ok"] is False and "negative" in r.get("error", ""), f"-> {r}")
 r = exact.human_duration(90061)
 check("dur humanized", "1d" in r["human"] and "1h" in r["human"] and "1m" in r["human"] and "1s" in r["human"])
+# THE-879 GH #213(c): per_day/per_30d are rounded; `seconds` (echoed input)
+# is not, so only the two rates are named.
+check("dur discloses per_day/per_30d are rounded, seconds is not",
+      r.get("rounding") == {"per_day": 6, "per_30d": 6}, f"-> {r}")
 # THE-876/#198: human_duration(0.5) used to report "0s", silently dropping
 # the only information a sub-second call carried. Sub-second input now
 # carries a ms/us component instead of flooring away.

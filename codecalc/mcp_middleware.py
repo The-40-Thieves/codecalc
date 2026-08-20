@@ -30,6 +30,7 @@ Only the z3 one actually stops computation, because z3 checks its own deadline.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from typing import Any
 
@@ -145,3 +146,96 @@ async def timeout_middleware(ctx: ServerRequestContext, call_next: CallNext) -> 
             ),
             data={"tool": name, "timeout_seconds": limit, "elapsed_seconds": round(elapsed, 2)},
         ) from exc
+
+
+# ── THE-879 GH #212(b): pydantic argument-validation errors echoed raw ─────
+#
+# A call with a wrong-typed argument never reaches a tool body at all: the
+# SDK validates `arguments` against the tool's pydantic arg-model BEFORE
+# `fn(**kwargs)` runs (`FuncMetadata.call_fn_with_arg_validation`), and a
+# failure there raises `pydantic.ValidationError`. `Tool.run` (mcp SDK) wraps
+# whatever it catches as `ToolError(f"Error executing tool {name}: {e}")`,
+# and `_handle_call_tool` flattens THAT into `CallToolResult(is_error=True,
+# content=[TextContent(text=str(exc))])` — str(e) on a pydantic
+# ValidationError includes `input_value=<the caller's actual argument>`
+# verbatim, e.g. passing a string where `max_bytes: int` was declared echoes
+# that exact string back in the error text.
+#
+# Every OTHER rejection in this package either never carries the caller's
+# raw value (errors.py's VALIDATION bucket names the field, not the value)
+# or redacts it deliberately (audit.py's secret redaction) — this is the one
+# path where it leaks, and it leaks BEFORE codecalc's own code ever sees the
+# call: there is no earlier seam inside this package to catch it at, because
+# the failure happens one layer up, inside the SDK's own arg-model
+# validation. This middleware is therefore the last point before the text
+# leaves the process — it does not (and cannot) stop pydantic from building
+# the message, only strip the caller-supplied value back out of it before a
+# client, a log, or a transcript ever sees it.
+_PYDANTIC_CONTEXT_RE = re.compile(r"\[type=.*\]")
+
+
+def _is_argument_validation_error(text: str) -> bool:
+    """True for the specific SDK message shape this middleware redacts.
+
+    Both substrings are pydantic's own vocabulary (`"N validation error(s)
+    for <Model>"`, `"input_value=..."`), so an ordinary codecalc tool error
+    that happens to contain one word or the other is not enough to match —
+    matching an unrelated message would strip legitimate diagnostic text for
+    no reason, which is the failure mode `errors.py`'s own message-hint list
+    already warns is worse than missing a case.
+    """
+    return "validation error for" in text and "input_value=" in text
+
+
+def _redact_argument_validation_error(text: str) -> str:
+    """Strip the caller-supplied value out of a pydantic validation message.
+
+    Keeps the field name and the reason ("which field, what kind of value
+    was expected" — both harmless and useful for fixing the call) and
+    replaces only the bracketed diagnostic that carries the actual input.
+    Greedy `.*` is deliberate: it matches to the LAST `]` on the line, which
+    is where pydantic always closes this bracket even when the input's own
+    repr contains a `]` of its own (a list, a dict, a path) — a lazy match
+    would stop at the first one and leave the tail of the raw value exposed.
+    """
+    return _PYDANTIC_CONTEXT_RE.sub("[redacted]", text)
+
+
+async def redact_validation_errors_middleware(
+    ctx: ServerRequestContext, call_next: CallNext
+) -> HandlerResult:
+    """Strip caller-supplied argument values out of validation-error text.
+
+    Runs for every `tools/call`; everything else (and every OTHER shape of
+    tool failure — codecalc's own `{"ok": false, ...}` results never reach
+    here as `is_error`, only a pre-tool-body validation failure does) passes
+    through untouched.
+
+    Operates on the WIRE dict, not a `CallToolResult` object: `_inner`
+    (mcp.server.runner.ServerRunner) already serialises the handler's result
+    via `model_dump(by_alias=True, mode="json")` before it ever reaches this
+    middleware — this is the innermost of the two custom entries in
+    `server.py`'s `middleware=[...]` list, so by the time `call_next` returns,
+    `result` is the same `{"content": [...], "isError": true, ...}` shape
+    that goes out over the wire, camelCase keys included. Measured: an
+    `isinstance(result, CallToolResult)` check here never once matched.
+    """
+    if ctx.method != "tools/call":
+        return await call_next(ctx)
+    result = await call_next(ctx)
+    if not isinstance(result, dict) or not result.get("isError"):
+        return result
+    content = result.get("content")
+    if not isinstance(content, list):
+        return result
+    changed = False
+    new_content = []
+    for block in content:
+        text = block.get("text") if isinstance(block, dict) else None
+        if isinstance(text, str) and _is_argument_validation_error(text):
+            block = {**block, "text": _redact_argument_validation_error(text)}
+            changed = True
+        new_content.append(block)
+    if not changed:
+        return result
+    return {**result, "content": new_content}

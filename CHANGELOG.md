@@ -35,6 +35,40 @@ behind it.
 
 ### Security
 
+- **A workspace-guard refusal (an out-of-workspace path, a malformed session
+  id) now carries the full result contract** (THE-879, #212a). Before this,
+  `session_write_file`/`session_files`/`session_read_file`/`session_run`/
+  `session_stop`/`execute_code(session_id=...)` REFUSED such a request by
+  raising, uncaught, all the way past `SessionService` and the `@mcp.tool()`
+  wrapper — a caller got a bare protocol-level error instead of the
+  `ok`/`code`/`remedy` shape every other rejection in this package carries.
+  These now return `{"ok": false, "code": "permission_denied"` (an escape) or
+  `"validation"` (a malformed id) `, "remedy": ...}`, same as any other
+  refusal.
+- **A pydantic argument-validation error no longer echoes the caller's raw
+  value** (THE-879, #212b). A wrong-typed tool argument is rejected by the
+  MCP SDK's own schema validation before a tool body ever runs, and its
+  error text included `input_value=<exactly what was passed>` verbatim — a
+  potential info leak into logs/transcripts. A new server middleware strips
+  that bracketed diagnostic from the error text before it leaves the
+  process; the field name and reason are kept.
+- **`serve-http`'s DNS-rebinding protection now matches codecalc's own
+  loopback allowlist** (THE-879, #211). codecalc accepts any address in
+  127.0.0.0/8 plus `::1`/`localhost`/`ip6-localhost` as loopback-safe (no
+  `CODECALC_HTTP_TOKEN` required), but the MCP SDK's own DNS-rebinding
+  auto-default only recognises the three literal strings
+  `"127.0.0.1"`/`"localhost"`/`"::1"` — anything else codecalc accepted (for
+  example `127.0.0.2`) silently got NO DNS-rebinding protection at all.
+  `serve-http` now builds `TransportSecuritySettings` explicitly from the
+  same host it just validated, so a rebinding `Host:` header is rejected
+  (421) on every bind codecalc itself considers safe.
+- **`session_files` no longer stats through a symlink** (THE-879, #208). A
+  session could plant a symlink pointing outside the workspace, and the
+  listing reported the TARGET's size — disclosing the existence and size of
+  a path `session_read_file` already refuses to touch. A symlink entry is
+  now reported as `{"type": "symlink"}`, never followed to describe what it
+  points at; `session_artifacts` excludes symlinks from its listing for the
+  same reason.
 - **A backgrounded descendant survived a NORMAL exit** (THE-878, GH #207). The
   process-group/job kill only ever ran on the timeout/overflow path — a
   payload that spawned a detached child (`subprocess.Popen(['sleep',
@@ -48,7 +82,6 @@ behind it.
   fallback's spawn also picked up `CREATE_NEW_PROCESS_GROUP` on Windows,
   where it was previously relying on `start_new_session`, a POSIX-only flag
   that Windows silently ignores.
-
 - **`max_output_kb` enforced a ~1 MiB floor regardless of the request** (THE-878,
   GH #206). The Rust executor's RLIMIT_FSIZE — the ceiling on how much the
   sandboxed child is actually allowed to write before being stopped — was
@@ -62,6 +95,23 @@ behind it.
   any `max_output_kb >= 1` (the existing 4x headroom always clears it on its
   own), so the enforced ceiling stays a small, proportional multiple of the
   request.
+
+### Fixed
+
+- The MCP server's `instructions=` metadata said "30+ languages"; every
+  other surface (README, SECURITY.md, the repo description) said the actual
+  count, 31. `scripts/check_claims.py` now gates this string too (THE-879,
+  #213a).
+- `data_sizes(n)` accepted a negative `n` and reported negative KiB/MB
+  instead of rejecting it — the same bug shape `human_duration` already
+  guards against for a negative duration. It now returns a validation error
+  (THE-879, #213b).
+- `percentage`, `percentiles`, `collision_probability` and `human_duration`
+  presented a `round()`ed float beside an exact one (a fraction string, an
+  unrounded probability, the echoed input) with nothing marking which was
+  which. Each result now carries a `"rounding"` field naming exactly which
+  of its own keys were rounded and to how many decimal digits (THE-879,
+  #213c).
 
 ## [0.3.1] — 2026-08-20
 
