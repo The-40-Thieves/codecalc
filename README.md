@@ -1,7 +1,38 @@
 # codecalc — universal code & logic calculator for AI models
 
-Run code in **31 languages**, evaluate symbolic math, solve logic problems, and
-measure complexity — all exposed as MCP tools any AI model or agent can call.
+**codecalc is an offline, self-hosted MCP server that gives an AI agent a
+calculator, a code runner, and a logic checker — so it gets a *correct* answer
+instead of a guessed one.** It runs code in **31 languages**, does exact
+symbolic math, solves SMT/logic problems, and measures complexity, all exposed
+as **51 MCP tools**.
+
+Three things nobody else offers together cleanly:
+
+- **Offline-core** — ships no model, no API key, no gateway, no telemetry.
+  The core opens no sockets; network access is opt-in and only where a
+  specific tool's job needs it (the Piston provider, `install_package`, the
+  runtime-update tools, executed code unless `no_net`, and a one-time
+  in-process grammar download on first `analyze_complexity` — full breakdown
+  in the network-boundary table below).
+- **Safe execution of untrusted code** — an opt-in *strict* isolation
+  boundary (gVisor+Docker on Linux, AppContainer on Windows) layered above
+  the default rlimit sandbox, fail-closed and attested.
+- **Verification tools** — `verify_translation` proves a port to another
+  language behaves identically, `verify_optimization` proves an optimization
+  preserved behavior, and `z3_check` proves or refutes logic with an SMT
+  solver.
+
+## When to use codecalc
+
+Use it when you want a free, local, private, hardened code-runner and
+verifier that an MCP agent can call directly — no vendor account, no cloud
+spend, nothing leaving the machine except where a tool's job explicitly
+requires it.
+
+Reach for something else when you want managed cloud scale instead of
+self-hosting (a hosted sandbox like E2B or Modal), or when you're not
+self-hosting at all and the model vendor's built-in code interpreter already
+covers what you need.
 
 **CodeCalc's core opens no sockets.** No model gateway or telemetry is built
 in. `tests/test_offline.py` asserts this for the top-level core modules. The
