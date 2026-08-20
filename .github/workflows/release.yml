@@ -910,6 +910,12 @@ jobs:
     # above, so a tag push can never reach it on its own.
     if: github.event_name == 'workflow_dispatch' && inputs.publish_to_mcp_registry
     runs-on: ubuntu-latest
+    # Mirrors publish-pypi/publish-testpypi/publish-crates above: an
+    # `environment:` scopes the OIDC token's `sub` claim to
+    # `...:environment:mcp-registry` instead of the bare ref, and lets the
+    # owner attach required-reviewer / branch-or-tag protection rules to it
+    # later. Auto-created on first use — nothing to provision up front.
+    environment: mcp-registry
     # Job-scoped, not workflow-wide: id-token mints the OIDC token
     # mcp-publisher exchanges for a short-lived registry credential (GitHub
     # OIDC — no MCP_GITHUB_TOKEN/PAT and no secret stored in this repo, per
