@@ -334,6 +334,19 @@ def compare_threshold(a: str, op: str, b: str) -> dict:
             "shortfall": None if holds else str(-diff)}
 
 
+#: THE-879 GH #213(c): a `round()`ed float presented alongside an exact value
+#: (a fraction string, an unrounded probability, ...) read as if it carried
+#: the same precision as its neighbour — nothing in the result said it had
+#: been rounded at all, let alone to how many places. `"rounding"` on a
+#: result names exactly which of ITS OWN keys were rounded and to how many
+#: decimal digits, so a caller comparing two results (or re-deriving one from
+#: the other) knows which field to treat as approximate. 6 matches the digit
+#: count already used at every one of these call sites before this fix; kept
+#: as one shared constant so a future change to the precision cannot update
+#: the `round()` call without updating what it discloses.
+ROUND_DIGITS = 6
+
+
 def percentage(part: str, total: str) -> dict:
     """Exact share and percentage of PART / TOTAL."""
     try:
@@ -345,8 +358,11 @@ def percentage(part: str, total: str) -> dict:
     share = p / t
     d = Decimal(share.numerator) / Decimal(share.denominator)
     return {"ok": True, "part": str(p), "total": str(t),
+            # `share` is the exact fraction; `percent` is a rounded float
+            # derived from it — `rounding` says which of the two is which.
             "share": f"{share.numerator}/{share.denominator}",
-            "percent": round(float(d) * 100, 6)}
+            "percent": round(float(d) * 100, ROUND_DIGITS),
+            "rounding": {"percent": ROUND_DIGITS}}
 
 
 # ─────────────────────────────── stats / pctl ──────────────────────────────
@@ -414,7 +430,10 @@ def percentiles(nums: list[float]) -> dict:
         idx = p / 100 * (n - 1)
         lo, hi = math.floor(idx), math.ceil(idx)
         interp = vals[lo] + (vals[hi] - vals[lo]) * (idx - lo)
-        out[f"p{p}"] = {"nearest_rank": nr, "interpolated": round(interp, 6)}
+        # `nearest_rank` is a value straight out of `vals`, exact; only
+        # `interpolated` is rounded, so only it is named in `rounding` (#213c).
+        out[f"p{p}"] = {"nearest_rank": nr, "interpolated": round(interp, ROUND_DIGITS),
+                        "rounding": {"interpolated": ROUND_DIGITS}}
     warn = "n < 100: p99 is just the maximum wearing a label" if n < 100 else None
     return {"ok": True, "n": n, "percentiles": out, "warning": warn}
 
@@ -427,8 +446,11 @@ def collision_prob(items: int, bits: int) -> dict:
     if n < 2:
         return {"ok": True, "probability": 0.0, "items": n, "bits": b}
     p = 1.0 - math.exp(-(n * n) / (2.0 * (2 ** b)))
+    # `probability` is the full, unrounded float; `percent` is derived and
+    # rounded for display — `rounding` says which (#213c).
     return {"ok": True, "items": n, "bits": b, "probability": p,
-            "percent": round(p * 100, 6)}
+            "percent": round(p * 100, ROUND_DIGITS),
+            "rounding": {"percent": ROUND_DIGITS}}
 
 
 # ────────────────────────────── bytes / dur / time ─────────────────────────
@@ -436,6 +458,15 @@ def collision_prob(items: int, bits: int) -> dict:
 def data_sizes(n: int) -> dict:
     """Byte sizes both ways: binary (KiB/MiB) and decimal (KB/MB)."""
     n = int(n)
+    if n < 0:
+        # THE-879 GH #213(b): negative bytes used to divide through cleanly
+        # and report a negative KiB/MB, same shape of bug human_duration
+        # above already guards against for a negative duration. Tools here
+        # return the validation contract, they do not raise (errors.py); the
+        # "negative" phrasing matches `_MESSAGE_HINTS` so `ensure_code`
+        # classifies it VALIDATION, same as every other bad-argument
+        # rejection in this module.
+        return {"ok": False, "error": f"n = {n} is negative; byte counts are >= 0"}
     return {"ok": True, "bytes": n,
             "binary": {"KiB": n / 1024, "MiB": n / 1024 ** 2,
                        "GiB": n / 1024 ** 3, "TiB": n / 1024 ** 4},
@@ -468,15 +499,18 @@ def human_duration(seconds: float) -> dict:
         return {"ok": False, "error": f"seconds = {s!r} is not finite"}
     if s < 0:
         return {"ok": False, "error": "negative duration"}
-    per_day = round(s / 86400, 6) if s else 0.0
-    per_30d = round(s / 2592000, 6) if s else 0.0
+    per_day = round(s / 86400, ROUND_DIGITS) if s else 0.0
+    per_30d = round(s / 2592000, ROUND_DIGITS) if s else 0.0
+    # Both rates are rounded for display; `seconds` (the input, echoed back)
+    # is not — `rounding` says which (#213c).
+    _rounding = {"per_day": ROUND_DIGITS, "per_30d": ROUND_DIGITS}
     if s >= _DURATION_EXACT_LIMIT:
         return {"ok": True, "seconds": s,
                 "human": f"~{s:.6e}s (too large for an exact day/hour "
                          f"breakdown: a float64 carries ~15-17 significant "
                          f"digits and this value needs more; per_day/per_30d "
                          f"below carry the same limit)",
-                "per_day": per_day, "per_30d": per_30d}
+                "per_day": per_day, "per_30d": per_30d, "rounding": _rounding}
     whole = int(s)
     frac = s - whole
     units = [("d", 86400), ("h", 3600), ("m", 60), ("s", 1)]
@@ -500,7 +534,7 @@ def human_duration(seconds: float) -> dict:
             else:
                 parts.append(sub)
     return {"ok": True, "seconds": s, "human": " ".join(parts),
-            "per_day": per_day, "per_30d": per_30d}
+            "per_day": per_day, "per_30d": per_30d, "rounding": _rounding}
 
 
 def epoch_time(n: str) -> dict:

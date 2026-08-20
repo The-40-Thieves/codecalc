@@ -108,6 +108,27 @@ else:
     else:
         print(f"ok   languages: README and registry agree on {actual_langs}")
 
+# ── 2b. server.py's OWN instructions string (THE-879 GH #213) ──────────────
+# The MCP `instructions=` field is metadata every client sees on connect,
+# before it has called a single tool — and it drifted to "30+ languages"
+# while README/SECURITY.md/the repo description all said "31", because none
+# of THOSE regexes match it: `(\d+)\s+languages` requires whitespace right
+# after the digits, and "30+ languages" has a `+` there instead. A claim only
+# the README extractor covers is exactly the shape check 6/7's own history
+# (in this file's module docstring) warns about — the surface nobody gates is
+# the one that rots. `\+?` makes the same regex match "30+" too, so a FUTURE
+# reversion to the vaguer phrasing fails loudly instead of silently un-gating
+# itself again.
+_srv_langs = [int(n) for n in re.findall(r"(\d+)\+?\s+languages", SERVER)]
+if not _srv_langs:
+    fail("server.py's instructions= no longer states 'N languages' — the "
+         "extractor matched nothing, so this gate proves nothing rather than passing")
+elif any(n != actual_langs for n in _srv_langs):
+    fail(f"server.py's instructions= claims {sorted(set(_srv_langs))} languages; "
+         f"the registry defines {actual_langs}")
+else:
+    print(f"ok   server.py instructions=: language count matches the registry ({actual_langs})")
+
 # ── 3. license coherence ────────────────────────────────────────────────────
 # The crate shipped `license = "MIT"` while the repo LICENSE and pyproject were
 # Apache-2.0. A compiled artifact distributed under the wrong licence is the

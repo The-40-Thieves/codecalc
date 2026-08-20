@@ -238,14 +238,16 @@ else:
         except OSError as exc:
             skip("write_file symlink swap", f"symlink unsupported: {exc}")
         else:
-            try:
-                sessions.write_file(_sid, "planted.txt", "pwned")
-                _jail_caught = False
-            except ValueError:
-                _jail_caught = True
+            # #212: write_file used to let `_jail`'s ValueError escape
+            # uncaught; it now catches it and returns the same {"ok": False,
+            # "code": "permission_denied", ...} contract every other refusal
+            # in this module carries (see sessions._guard_error).
+            _write_result = sessions.write_file(_sid, "planted.txt", "pwned")
+            _jail_caught = (_write_result.get("ok") is False
+                            and _write_result.get("code") == "permission_denied")
             check("a symlink present before the call is refused by _jail",
                   _jail_caught and not _outside.exists(),
-                  f"-> escaped={_outside.exists()}")
+                  f"-> escaped={_outside.exists()} result={_write_result}")
 
             # The post-resolve case: hand _write_nofollow the exact path state
             # the race leaves behind and require it to refuse.

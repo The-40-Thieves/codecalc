@@ -124,9 +124,17 @@ for var in ("CODECALC_LLM_GATEWAY", "CODECALC_LLM_API_KEY", "CODECALC_LLM_MODEL"
 
 # No hardcoded endpoint can survive either — check_portability.py already bans
 # private addresses; this bans public ones in the package itself.
+#
+# `"{" not in u` excludes an f-string TEMPLATE, not a literal: this regex runs
+# over raw SOURCE text, so `f"http://{host}:*"` (server.py's serve-http
+# DNS-rebinding allowed_hosts/origins, built from whatever `--host` the
+# operator actually bound — THE-879 GH #211) is captured with its `{host}`
+# placeholder still unresolved. No genuine hardcoded phone-home URL can
+# contain an unresolved `{...}`, so this narrows the ban to what it is meant
+# to catch without exempting anything a literal endpoint could hide behind.
 urls = sorted({u for u in re.findall(r"https?://[^\s\"'`)]+", ALL_SRC)
                if "example.com" not in u and "localhost" not in u
-               and "127.0.0.1" not in u})
+               and "127.0.0.1" not in u and "{" not in u})
 check("no outbound URL is embedded in the package", not urls, f"-> {urls[:3]}")
 
 # ═══ the tools that replaced them need no network ══════════════════════════

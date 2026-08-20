@@ -341,9 +341,16 @@ class SessionService:
         """Read a workspace file without exposing MCP content types."""
         if max_bytes < 0:
             return {"ok": False, "error": "max_bytes must be non-negative"}
-        if not sessions._session_dir(session_id).is_dir():
-            return {"ok": False, "error": f"unknown session '{session_id}'"}
-        resource = sessions.resource_read(session_id, path)
+        try:
+            if not sessions._session_dir(session_id).is_dir():
+                return {"ok": False, "error": f"unknown session '{session_id}'"}
+            resource = sessions.resource_read(session_id, path)
+        except ValueError as exc:
+            # #212: `_session_dir`/`_jail` (inside resource_read) REFUSE a
+            # malformed session id or an out-of-workspace path by raising —
+            # this tool-facing method returns the result contract like every
+            # other branch here, never an exception.
+            return sessions._guard_error(exc)
         if resource is None:
             return {"ok": False, "error": f"no such file or file too large: {path}"}
         data, mime_type = resource
@@ -364,10 +371,13 @@ class SessionService:
                  language: str | None = None, stdin: str = "",
                  timeout: int = 30) -> dict:
         """Run a workspace entry file as a fresh process in its session."""
-        workdir = sessions._session_dir(session_id)
-        if not workdir.is_dir():
-            return {"ok": False, "error": f"unknown session '{session_id}'"}
-        resource = sessions.resource_read(session_id, entry_file)
+        try:
+            workdir = sessions._session_dir(session_id)
+            if not workdir.is_dir():
+                return {"ok": False, "error": f"unknown session '{session_id}'"}
+            resource = sessions.resource_read(session_id, entry_file)
+        except ValueError as exc:
+            return sessions._guard_error(exc)  # #212, see read_file's comment above
         if resource is None:
             return {"ok": False, "error": f"no such file or file too large: {entry_file}"}
         data, _mime_type = resource
