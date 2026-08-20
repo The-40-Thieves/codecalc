@@ -33,7 +33,24 @@ behind it.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- `compare_execution` (THE-802): a cold-start timeout on one language no
+  longer ends the story for that language. If a run comes back `timed_out`,
+  it gets exactly one warm retry with the same arguments; a recovered retry
+  is reported as the row's result (with `cold_retry`, `cold_retry_recovered`,
+  and `first_attempt_ms` added). A timeout that persists after the retry is
+  always surfaced in `discrepancies`, with `sibling_durations_ms` for every
+  other successful language and a `variance_note` that compares them — a
+  wide spread (>=10x) reads as runner-wide slowness/cold-start pressure
+  rather than a defect in the timed-out language's snippet, a tight band
+  reads as specific to it. This addresses the case where `node`, the
+  heaviest cold-starter, is first to cross the fixed wall-clock deadline on
+  a globally slow GitHub Actions windows-latest runner (one repro: ruby at
+  3452ms vs python at 33ms for a trivial snippet). `executor.execute`'s
+  timeout remains an unchanged hard limit — only `compare_execution`'s
+  handling of a `timed_out` result changed. A deterministic non-timeout
+  failure (e.g. a compile error) is never retried.
 
 ## [0.2.0] — 2026-08-19
 

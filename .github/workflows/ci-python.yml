@@ -222,6 +222,7 @@ jobs:
           uv run --no-sync python tests/test_language_packs.py
           uv run --no-sync python tests/test_renderers.py
           uv run --no-sync python tests/test_verifiers.py
+          uv run --no-sync python tests/test_compare_execution_retry.py
       - name: provider boundary and execution service (spec identity + receipt)
         shell: bash
         run: |
