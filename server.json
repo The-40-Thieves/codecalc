@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.the-40-thieves/codecalc",
   "title": "codecalc",
-  "description": "Universal code + logic calculator: execute 31 languages, symbolic math, SMT/logic, complexity analysis, verification.",
+  "description": "Code & logic calculator for AI agents: run 31 languages, symbolic math, SMT logic, complexity.",
   "repository": { "url": "https://github.com/The-40-Thieves/codecalc", "source": "github" },
   "version": "0.3.0",
   "packages": [
