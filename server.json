@@ -1,6 +1,6 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.the-40-thieves/codecalc",
+  "name": "io.github.The-40-Thieves/codecalc",
   "title": "codecalc",
   "description": "Code & logic calculator for AI agents: run 31 languages, symbolic math, SMT logic, complexity.",
   "repository": { "url": "https://github.com/The-40-Thieves/codecalc", "source": "github" },
