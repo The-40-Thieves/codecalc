@@ -443,24 +443,64 @@ def data_sizes(n: int) -> dict:
                         "GB": n / 1000 ** 3, "TB": n / 1000 ** 4}}
 
 
+#: Largest integer a float64 still represents exactly. Past this, int(s) is
+#: still an EXACT integer, but its low digits are an artifact of float64's
+#: binary encoding rather than measured precision — a double only carries
+#: ~15-17 significant decimal digits. human_duration(1e30) used to floor that
+#: into a day/hour breakdown and print ~26 digits of "days", almost all of
+#: them noise past the 17th. Same threshold int_widths() already uses for its
+#: "cannot round-trip through a JS number" note, reused here rather than
+#: picked fresh.
+_DURATION_EXACT_LIMIT = 2 ** 53
+
+
 def human_duration(seconds: float) -> dict:
-    """Humanised duration plus per-day and per-30d rates."""
+    """Humanised duration plus per-day and per-30d rates.
+
+    Sub-second input carries a ms/us component instead of flooring to "0s":
+    human_duration(0.5) used to report "0s", silently losing the only
+    information the call had. Durations at or beyond _DURATION_EXACT_LIMIT
+    switch to a capped scientific-notation report instead of a day/hour
+    breakdown, since a float64 cannot back up that many decimal digits.
+    """
     s = float(seconds)
     if not math.isfinite(s):
         return {"ok": False, "error": f"seconds = {s!r} is not finite"}
     if s < 0:
         return {"ok": False, "error": "negative duration"}
+    per_day = round(s / 86400, 6) if s else 0.0
+    per_30d = round(s / 2592000, 6) if s else 0.0
+    if s >= _DURATION_EXACT_LIMIT:
+        return {"ok": True, "seconds": s,
+                "human": f"~{s:.6e}s (too large for an exact day/hour "
+                         f"breakdown: a float64 carries ~15-17 significant "
+                         f"digits and this value needs more; per_day/per_30d "
+                         f"below carry the same limit)",
+                "per_day": per_day, "per_30d": per_30d}
+    whole = int(s)
+    frac = s - whole
     units = [("d", 86400), ("h", 3600), ("m", 60), ("s", 1)]
     parts = []
+    remaining = whole
     for name, size in units:
-        if s >= size or name == "s":
-            q = int(s // size)
+        if remaining >= size or name == "s":
+            q, remaining = divmod(remaining, size)
             parts.append(f"{q}{name}")
-            s -= q * size
-    return {"ok": True, "seconds": float(seconds),
-            "human": " ".join(parts),
-            "per_day": round(float(seconds) / 86400, 6) if seconds else 0.0,
-            "per_30d": round(float(seconds) / 2592000, 6) if seconds else 0.0}
+    if frac > 0:
+        us = round(frac * 1_000_000)
+        if us >= 1000:
+            sub = f"{us / 1000:.3f}".rstrip("0").rstrip(".") + "ms"
+        elif us > 0:
+            sub = f"{us}us"
+        else:
+            sub = None  # sub-microsecond remainder: below reportable resolution
+        if sub is not None:
+            if parts == ["0s"]:
+                parts = [sub]
+            else:
+                parts.append(sub)
+    return {"ok": True, "seconds": s, "human": " ".join(parts),
+            "per_day": per_day, "per_30d": per_30d}
 
 
 def epoch_time(n: str) -> dict:
@@ -719,15 +759,34 @@ def int_widths(n: int) -> dict:
 
 
 def bit_analysis(n: int, align: int | None = None) -> dict:
-    """popcount, trailing zeros, next pow2, alignment padding."""
+    """popcount, trailing zeros, next pow2, alignment padding.
+
+    n must be >= 0. popcount/is_power_of_two/next_power_of_two are magnitude
+    concepts with no single meaning for a negative int absent a fixed width —
+    Python's int.bit_count() silently counts the ABSOLUTE VALUE's bits, so
+    bit_analysis(-1) used to report popcount=1 (identical to bit_analysis(1))
+    while is_power_of_two correctly said False for the same input, and
+    next_power_of_two (defined here only for n>0) vanished from the result
+    with no field saying why. Rejecting negatives as a validation error
+    removes all three inconsistencies at once; use bitop(n, ..., width=W) for
+    two's-complement bits at an explicit width instead.
+    """
     n = int(n)
+    if n < 0:
+        return {"ok": False,
+                "error": "bit_analysis requires n >= 0 (bit semantics are "
+                         "undefined for a negative int without a fixed "
+                         "width); use bitop(n, ..., width=W) for "
+                         "two's-complement bits at a specific width"}
     out = {"ok": True, "value": n,
            "popcount": n.bit_count(),
-           "bit_length": n.bit_length() if n >= 0 else None,
+           "bit_length": n.bit_length(),
            "trailing_zeros": (n & -n).bit_length() - 1 if n else None,
-           "is_power_of_two": n > 0 and (n & (n - 1)) == 0}
-    if n > 0:
-        out["next_power_of_two"] = 1 << (n - 1).bit_length()
+           "is_power_of_two": n > 0 and (n & (n - 1)) == 0,
+           # n=0 has no next power of two under this definition (the formula
+           # below is undefined at n=0) — disclosed explicitly as None rather
+           # than the key silently missing from the result.
+           "next_power_of_two": (1 << (n - 1).bit_length()) if n > 0 else None}
     if align is not None:
         a = int(align)
         if a <= 0:

@@ -31,6 +31,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from jsonschema import Draft202012Validator
 
+from codecalc import __version__ as _codecalc_version
 from codecalc import contract, doctor, executor, registry
 
 FAILS: list[str] = []
@@ -272,6 +273,42 @@ check("the text rendering names the contract version the JSON reports",
 # --json was before THE-780: accepted, ignored, prose printed anyway.
 check("`--json` actually changes the output",
       _js.stdout != _txt.stdout and _js.stdout.lstrip().startswith("{"))
+
+# ── --help / --version (THE-876/#201) ───────────────────────────────────────
+# main() dispatches doctor/serve-strict/serve-http and otherwise falls through
+# to `mcp.run(transport="stdio")`, which blocks reading stdin. --help/--version
+# used to fall into that same "unrecognised argument" path: no output, exit
+# code 0 only once something closed stdin for it — indistinguishable from a
+# hang for a human at a terminal. A short timeout here is the assertion: if
+# the fix regresses to falling through to the stdio server again, this
+# subprocess blocks on its closed stdin and TimeoutExpired makes that a
+# reported FAIL rather than the whole suite hanging.
+for _flag in ("--help", "-h", "--version", "-V"):
+    try:
+        _r = subprocess.run([sys.executable, "-m", "codecalc", _flag],
+                            capture_output=True, text=True, cwd=REPO_ROOT, env=_env,
+                            stdin=subprocess.DEVNULL, timeout=15)
+    except subprocess.TimeoutExpired:
+        check(f"`{_flag}` exits promptly instead of starting the stdio server",
+              False, "-> timed out; it fell through to mcp.run(transport='stdio')")
+        continue
+    check(f"`{_flag}` exits 0 without starting the server",
+          _r.returncode == 0, f"-> rc={_r.returncode} {_r.stderr[-200:]}")
+    check(f"`{_flag}` prints something (not the silent no-op it used to be)",
+          bool(_r.stdout.strip()), f"-> stdout={_r.stdout!r}")
+_help = subprocess.run([sys.executable, "-m", "codecalc", "--help"],
+                       capture_output=True, text=True, cwd=REPO_ROOT, env=_env,
+                       stdin=subprocess.DEVNULL, timeout=15)
+check("`--help` names the doctor/serve-strict/serve-http subcommands",
+      all(cmd in _help.stdout for cmd in ("doctor", "serve-strict", "serve-http")),
+      f"-> {_help.stdout!r}")
+check("`--help` says the no-args default is the stdio MCP server",
+      "stdio" in _help.stdout, f"-> {_help.stdout!r}")
+_ver = subprocess.run([sys.executable, "-m", "codecalc", "--version"],
+                      capture_output=True, text=True, cwd=REPO_ROOT, env=_env,
+                      stdin=subprocess.DEVNULL, timeout=15)
+check("`--version` reports codecalc's actual version",
+      _codecalc_version in _ver.stdout, f"-> {_ver.stdout!r} vs {_codecalc_version!r}")
 
 # ── runtime VERSIONS (THE-780) ─────────────────────────────────────────────
 #

@@ -1439,9 +1439,37 @@ def main() -> None:
     break that in a way that looks like a protocol error. Unrecognised
     arguments are therefore IGNORED and the server starts, which is the
     behaviour that was always there.
+
+    `--help`/`-h` and `--version`/`-V` are the one deliberate exception: a
+    human running `codecalc --help` at a shell got no output and a hung
+    stdio server instead of usage text (THE-876/#201) — the "ignore and
+    start" rule is right for an MCP client, but silently wrong for a person
+    at a terminal. Both are intercepted here, print to stdout, and exit
+    WITHOUT starting the server; every other unrecognised argument still
+    falls through to the stdio server exactly as before.
     """
     import sys
 
+    if len(sys.argv) > 1 and sys.argv[1] in ("--help", "-h"):
+        print(
+            "codecalc: universal coding & logic calculator (MCP server)\n"
+            "\n"
+            "Usage: codecalc [COMMAND]\n"
+            "\n"
+            "Commands:\n"
+            "  doctor [--json] [--deep]           environment/runtime health report\n"
+            "  serve-strict [ARGS]                authenticated HTTP execution service\n"
+            "  serve-http [--host H] [--port P]   MCP over streamable HTTP\n"
+            "  -h, --help                         show this message and exit\n"
+            "  -V, --version                      show the codecalc version and exit\n"
+            "\n"
+            "With no command (the default), codecalc speaks MCP over stdio — the way an\n"
+            "MCP client spawns it."
+        )
+        raise SystemExit(0)
+    if len(sys.argv) > 1 and sys.argv[1] in ("--version", "-V"):
+        print(f"codecalc {__version__}")
+        raise SystemExit(0)
     if len(sys.argv) > 1 and sys.argv[1] in ("doctor", "--check", "--check-install"):
         # Flags read from the REST of argv, still without a parser. `--json`
         # previously did nothing at all: it was accepted, ignored, and the human
