@@ -109,6 +109,33 @@ for _label, _call, _want in [
     check(f"{_label} -> {_want}", _r.get("code") == _want, f"-> {_r.get('code')}")
     check("  ...and carries an actionable remedy", bool(_r.get("remedy")))
 
+# THE-875: argument-validation rejections were blaming the USER for their own
+# bad input. `_from_message`'s hint list had no vocabulary for "is zero",
+# "need at least", "negative" or ">=", so every one of these landed on
+# INTERNAL — whose remedy tells the caller "a defect in codecalc; the message
+# is worth reporting verbatim". A caller who passed a zero total or a
+# negative duration was being told to go file a bug about someone else's
+# mistake. None of these raise a typed exception (they `return {"ok": False,
+# ...}` directly, same as the THE-781 cases above), so classify()'s type
+# dispatch never sees them — only ensure_code()'s message match does.
+for _label, _call in [
+    ("benchmark: too few sizes", lambda: server.benchmark("x", sizes="1,2")),
+    ("compare_threshold: bad operator", lambda: server.compare_threshold("1", "~=", "2")),
+    ("percentage: zero total", lambda: server.percentage("1", "0")),
+    ("calc_stats: too few numbers", lambda: server.calc_stats([1.0])),
+    ("percentiles: no numbers", lambda: server.percentiles([])),
+    ("collision_probability: zero bits", lambda: server.collision_probability(10, 0)),
+    ("human_duration: negative seconds", lambda: server.human_duration(-5)),
+    ("epoch_time: negative epoch", lambda: server.epoch_time("-5")),
+    ("bitop: negative shift count", lambda: server.bitop(1, "shl", -1)),
+    ("bitop: unknown op", lambda: server.bitop(1, "zzz", 2)),
+    ("compare_edge_cases: no snippets", lambda: server.compare_edge_cases({})),
+]:
+    _r = _call()
+    check(f"{_label} -> validation, not internal",
+          _r.get("code") == errors.VALIDATION,
+          f"-> code={_r.get('code')} err={_r.get('error')!r}")
+
 # THE-844: the length cap must gate EVERY sympify entry point, not only the one
 # in _eval_exact. Before the fix, algebraic_equiv / solve_expression /
 # limit_expression reached sp.sympify with a 120k-char string, blew the
