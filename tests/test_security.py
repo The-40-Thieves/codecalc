@@ -6,6 +6,7 @@ import pathlib
 import re
 import subprocess
 import sys
+import time
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
@@ -145,6 +146,48 @@ check("infinite loop killed by timeout", r.get("timed_out") is True)
 # 7. output cap
 r = executor.execute("python3", "print('x' * 200000)")
 check("output capped at 64KiB", len(r.get("stdout", "")) < 70_000)
+
+# 7b. GH #206: a SMALL max_output_kb must not silently let the sandboxed
+# child produce (and be measured as having produced) far more than requested.
+#
+# The RETURNED `stdout` text was already correctly capped at the literal
+# request before this fix — `read_capped` truncates it at
+# `max_output_kb * 1024`, no floor involved. What was wrong is the ceiling
+# that governs how much the child is actually ALLOWED TO WRITE before being
+# stopped (RLIMIT_FSIZE on the Rust executor): it had a 1 MiB floor
+# unrelated to the request and undisclosed in `unenforced`. Measured before
+# this fix: `max_output_kb=1` against a 5 MB program reported
+# `stdout_bytes: 1048576` — a 1024x gap from the 1 KB asked for. The floor is
+# now 4 KiB, which never actually binds for any max_output_kb >= 1 (the
+# existing 4x headroom always clears it on its own), so the enforced ceiling
+# stays a small, proportional multiple of the request instead of a fixed
+# constant nowhere near it.
+if executor._rust:
+    r = executor.execute("python3", 'print("x"*5_000_000)', max_output_kb=1, timeout=15)
+    unenforced = r.get("unenforced") or []
+    # Windows has no RLIMIT_FSIZE: the write ceiling this fix corrects does
+    # not exist there, so the child IS allowed to write the whole 5 MB — but
+    # that is DISCLOSED (`file_size_limit_unavailable_on_windows` in
+    # `unenforced`), not silent, which is the contract this repo keeps
+    # (SKILL.md: a non-empty `unenforced` means the guarantee did not hold).
+    # Assert the disclosure there rather than a byte cap the platform never
+    # claimed to enforce. The #206 bug was a SILENT 1 MiB floor on the path
+    # that DOES enforce it (POSIX) — that is the branch below.
+    if any("file_size_limit" in u for u in unenforced):
+        check("max_output_kb: write ceiling unavailable here but DISCLOSED (#206)",
+              True, f"-> unenforced={unenforced}")
+    else:
+        check("a small max_output_kb caps actual output near the request, "
+              "not at a fixed MiB floor (#206)",
+              r.get("stdout_bytes") is not None and r["stdout_bytes"] <= 8192,
+              f"-> stdout_bytes={r.get('stdout_bytes')} unenforced={unenforced}")
+    check("  ...and the RETURNED stdout text is still capped at the literal request",
+          len(r.get("stdout", "")) <= 1024 + 20,
+          f"-> len={len(r.get('stdout') or '')}")
+    check("  ...and the overflow is still detected (OLE), same as before the fix",
+          r.get("verdict") == "OLE", f"-> verdict={r.get('verdict')}")
+else:
+    print("SKIP max_output_kb floor probe (#206) — no native executor built")
 
 # 8. no eval/exec/shell=True anywhere in the package (excluding docstrings).
 # Exception: _worker_bootstrap.py's `exec()` runs user code inside the
@@ -314,6 +357,95 @@ if _HAVE_SYMPY:
                   f"-> ok={_r.get('ok')} reached_parser={_reached_parser}")
     finally:
         _spp.parse_expr = _real_parse_expr
+
+# 9b. GH #207: a background child must not survive a NORMAL exit (exit code
+# 0). The process-group kill used to run ONLY on the timeout/overflow path —
+# a payload that spawns a detached child and returns 0 hit neither, so the
+# whole group (Rust: the sandboxed child's own group; Python fallback: the
+# payload process's group) outlived the run with no wall clock on it at all.
+#
+# The probe spawns a second python process, prints its pid, and exits 0
+# immediately. It also incidentally proves the fix does not reintroduce a
+# hang: before this fix, the SAME probe on the Python fallback took ~10
+# seconds and reported an EMPTY stdout — both drain threads blocked reading
+# the pipe fd the grandchild had inherited, until their own 5s join cap gave
+# up — even though the leak itself, not the hang, is the property this test
+# is named for.
+_LEAK_PROBE = """import subprocess, sys
+p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(20)"])
+print("BG_PID", p.pid, flush=True)
+sys.exit(0)
+"""
+
+
+def _pid_alive(pid: int) -> bool:
+    """POSIX existence probe. `os.kill(pid, 0)` sends no signal — it only asks
+    the kernel whether this pid exists and this uid can see it. Not portable
+    to Windows (there `os.kill` maps to `TerminateProcess`, so it would KILL
+    rather than probe), which is fine: this whole test is POSIX-only, guarded
+    below the same way the fork-bomb probes later in this file guard
+    os.fork/os.killpg — none of which exist on Windows either.
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, just owned by someone else
+    return True
+
+
+def _wait_gone(pid: int, budget: float = 2.0) -> bool:
+    """Poll up to `budget` seconds for `pid` to disappear, rather than one
+    fixed sleep — SIGKILL delivery and reaping are near-instant but not
+    zero-cost, and a single short sleep would make this flaky on a loaded CI
+    runner instead of just slow on a quiet one."""
+    deadline = time.monotonic() + budget
+    while time.monotonic() < deadline:
+        if not _pid_alive(pid):
+            return True
+        time.sleep(0.05)
+    return not _pid_alive(pid)
+
+
+if os.name == "nt":
+    print("SKIP normal-exit descendant leak probe (#207) — os.kill(pid, 0) is "
+          "not a portable liveness check on Windows; the guarantee there is a "
+          "job object with KILL_ON_JOB_CLOSE, a different primitive entirely, "
+          "already covered by the platform code and not exercised by this file")
+else:
+    if executor._rust:
+        _r = executor.execute("python3", _LEAK_PROBE, timeout=10)
+        _m = re.search(r"BG_PID (\d+)", _r.get("stdout") or "")
+        check("normal-exit leak probe (rust backend) printed a child pid",
+              _m is not None, f"-> stdout={_r.get('stdout')!r}")
+        if _m:
+            _pid = int(_m.group(1))
+            _gone = _wait_gone(_pid)
+            check("a background child does not survive a NORMAL exit — rust backend (#207)",
+                  _gone, f"-> pid {_pid} gone={_gone}")
+            if not _gone:
+                os.kill(_pid, 9)
+    else:
+        print("SKIP normal-exit descendant leak probe (rust backend, #207) — "
+              "no native executor built")
+
+    _saved_rust = executor._rust
+    try:
+        executor._rust = None
+        _r = executor.execute("python3", _LEAK_PROBE, timeout=10)
+    finally:
+        executor._rust = _saved_rust
+    _m = re.search(r"BG_PID (\d+)", _r.get("stdout") or "")
+    check("normal-exit leak probe (python fallback) printed a child pid",
+          _m is not None, f"-> stdout={_r.get('stdout')!r}")
+    if _m:
+        _pid = int(_m.group(1))
+        _gone = _wait_gone(_pid)
+        check("a background child does not survive a NORMAL exit — python fallback (#207)",
+              _gone, f"-> pid {_pid} gone={_gone}")
+        if not _gone:
+            os.kill(_pid, 9)
 
 # 10. fork-bomb guard. LAST IN THE FILE, and that placement is load-bearing.
 #

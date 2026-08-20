@@ -872,8 +872,24 @@ fn resolve_limits(limits: &Limits) -> ResolvedLimits {
         // Headroom, not the 256 MiB default: FSIZE is still a disk guard, and a
         // caller asking for a small cap should not thereby be allowed to fill
         // the workdir.
+        //
+        // The floor used to be 1 MiB (GH #206): for `--max-output-kb 1` that
+        // meant the sandbox actually let the child write up to 1024x the
+        // requested cap before SIGXFSZ ever intervened — silently, nothing in
+        // `unenforced` said so. Measured before this fix: a 5 MB program
+        // capped at 1 KiB still reported `stdout_bytes: 1048576`. The
+        // returned `stdout` text was always correctly capped (`read_capped`
+        // truncates it at the literal `max_output_kb * 1024`, no floor there)
+        // — this floor governs only how much the child is ALLOWED TO WRITE
+        // before being stopped, i.e. the resource ceiling `max_output_kb` is
+        // documented as, not merely what gets echoed back.
+        //
+        // 4 KiB is enough slack on its own for any max_output_kb >= 1 (4 *
+        // 1024 = 4096), so the floor below no longer binds for a real
+        // request — it exists only to keep a degenerate value (0 handled
+        // separately above) from producing a ceiling smaller than one page.
         fsize_bytes: if limits.max_output_kb > 0 {
-            (limits.max_output_kb * 1024 * 4).clamp(1024 * 1024, FSIZE_LIMIT_BYTES)
+            (limits.max_output_kb * 1024 * 4).clamp(4096, FSIZE_LIMIT_BYTES)
         } else {
             FSIZE_LIMIT_BYTES
         },

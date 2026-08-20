@@ -33,6 +33,36 @@ behind it.
 
 ## [Unreleased]
 
+### Security
+
+- **A backgrounded descendant survived a NORMAL exit** (THE-878, GH #207). The
+  process-group/job kill only ever ran on the timeout/overflow path — a
+  payload that spawned a detached child (`subprocess.Popen(['sleep',
+  '1000'])`) and returned 0 hit neither, so the child outlived the run with
+  no wall clock on it at all. Both backends now reap the whole group after
+  EVERY exit, not only a timed-out one: the Rust executor unconditionally
+  `killpg`s the child's process group after its `wait4` loop, on Unix, and
+  the Python fallback does the same via a new `_reap_group` (Windows job
+  objects were already correct here — `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`
+  reaps the whole job when its handle closes, on any exit path). The Python
+  fallback's spawn also picked up `CREATE_NEW_PROCESS_GROUP` on Windows,
+  where it was previously relying on `start_new_session`, a POSIX-only flag
+  that Windows silently ignores.
+
+- **`max_output_kb` enforced a ~1 MiB floor regardless of the request** (THE-878,
+  GH #206). The Rust executor's RLIMIT_FSIZE — the ceiling on how much the
+  sandboxed child is actually allowed to write before being stopped — was
+  computed as `max_output_kb * 1024 * 4` clamped to a **1 MiB floor**. A
+  caller passing `--max-output-kb 1` got an enforced ceiling near 1 MiB
+  (1024x the request), undisclosed in `unenforced`; measured, `stdout_bytes`
+  came back `1048576` for a program that printed 5 MB. The RETURNED `stdout`
+  text was always correctly capped at the literal request (`read_capped`
+  truncates independently, with no floor) — only the underlying write
+  ceiling was wrongly sized. The floor is now 4 KiB, which no longer binds for
+  any `max_output_kb >= 1` (the existing 4x headroom always clears it on its
+  own), so the enforced ceiling stays a small, proportional multiple of the
+  request.
+
 ## [0.3.1] — 2026-08-20
 
 ### Fixed

@@ -326,6 +326,23 @@ pub fn spawn_and_wait(
         }
     }
 
+    // #207: reap the whole group on a NORMAL exit too, not just a timeout.
+    // The loop above only killpg'd on the timeout branch — a payload that
+    // backgrounds a child (e.g. `subprocess.Popen(['sleep', '1000'])`) and
+    // returns 0 hits neither branch, `wait4` reaps only the direct child, and
+    // the grandchild — still in this same process group, since it never
+    // called setsid itself — outlives the run with no wall clock on it at
+    // all. Unconditional and best-effort: on the timeout path the group is
+    // already empty, so this second killpg just returns ESRCH, which the
+    // kernel does not even report back to a fire-and-forget call like this
+    // one — same as every other kill in this file, the return value is not
+    // checked. `pid > 1` guard for the same reason as terminate_child_group
+    // above: a pid of 1 would turn this into `kill(-1, ...)`, which is not
+    // "this group" but "every process the caller may signal".
+    if pid > 1 {
+        unsafe { libc::killpg(pid, libc::SIGKILL) };
+    }
+
     let (exit_code, signal) = if libc::WIFEXITED(status) {
         (libc::WEXITSTATUS(status) as i64, None)
     } else if libc::WIFSIGNALED(status) {
