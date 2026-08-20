@@ -908,7 +908,16 @@ jobs:
     # exists — see that commit. This job is the automation half: same
     # opt-in-only, dispatch-gated posture as publish-pypi/testpypi/crates
     # above, so a tag push can never reach it on its own.
-    if: github.event_name == 'workflow_dispatch' && inputs.publish_to_mcp_registry
+    # Runs when PyPI published in THIS run (normal release) OR was skipped
+    # (a registry-only re-dispatch — publish_to_pypi=false — relying on an
+    # already-live PyPI package + marker). `needs.publish-pypi.result` +
+    # always() is required because a plain `needs:` skips this job whenever
+    # publish-pypi is skipped. Never runs if publish-pypi actually failed.
+    if: >-
+      always()
+      && github.event_name == 'workflow_dispatch'
+      && inputs.publish_to_mcp_registry
+      && (needs.publish-pypi.result == 'success' || needs.publish-pypi.result == 'skipped')
     runs-on: ubuntu-latest
     # Mirrors publish-pypi/publish-testpypi/publish-crates above: an
     # `environment:` scopes the OIDC token's `sub` claim to
