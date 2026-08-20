@@ -16,9 +16,15 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from typing import Protocol, runtime_checkable
 
-from . import __version__, extensions, registry
+from . import __version__, contract, extensions, registry
 
 LANGUAGE_PACK_INTERFACE_VERSION = "1.0.0"
+
+#: This kind's declared compatibility, computed from the running codecalc and
+#: contract versions (THE-872) — see `codecalc.extensions.codecalc_compat_range`
+#: for why this must be computed rather than hardcoded.
+COMPATIBLE_CODECALC = extensions.codecalc_compat_range(__version__)
+COMPATIBLE_CONTRACT = extensions.contract_compat_range(contract.CONTRACT_VERSION)
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,8 +111,8 @@ class BuiltinLanguagePack:
             version=__version__,
             interface_version=LANGUAGE_PACK_INTERFACE_VERSION,
             origin="builtin",
-            compatible_codecalc=">=0.2,<0.3",
-            compatible_contract=">=1.2,<2",
+            compatible_codecalc=COMPATIBLE_CODECALC,
+            compatible_contract=COMPATIBLE_CONTRACT,
             declared_permissions=("execute",),
             supported_operations=("run_plan", "compile_plan", "normalize_diagnostics"),
         )

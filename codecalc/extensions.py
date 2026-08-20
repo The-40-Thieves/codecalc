@@ -67,6 +67,23 @@ def _major(version: str) -> str:
     return version.split(".", 1)[0].strip()
 
 
+def codecalc_compat_range(version: str) -> str:
+    """The ``compatible_codecalc`` range an extension should advertise, computed
+    from the running codecalc `version` (e.g. ``"0.3.1"``) rather than hardcoded:
+    ``">=MAJOR.MINOR,<MAJOR.(MINOR+1)"``. A hardcoded upper bound goes stale the
+    moment the running MINOR reaches it — at 0.3.1, a literal ``"<0.3"`` computes
+    to ``">=0.3,<0.3"``, an empty range no version satisfies (THE-872)."""
+    major, minor, *_patch = version.split(".")
+    return f">={major}.{minor},<{major}.{int(minor) + 1}"
+
+
+def contract_compat_range(contract_version: str) -> str:
+    """The ``compatible_contract`` range an extension should advertise, computed
+    from `contract_version` (e.g. ``"1.2.0"``): ``">=MAJOR.MINOR,<MAJOR+1"``."""
+    major, minor, *_patch = contract_version.split(".")
+    return f">={major}.{minor},<{int(major) + 1}"
+
+
 @dataclass(frozen=True, slots=True)
 class ExtensionManifest:
     """The machine-readable capability document for one extension."""

@@ -11,7 +11,12 @@ can assert its shape the same way it does for the built-in pack.
 from __future__ import annotations
 
 from codecalc import extensions
-from codecalc.language_packs import LANGUAGE_PACK_INTERFACE_VERSION, LanguageEntry
+from codecalc.language_packs import (
+    COMPATIBLE_CODECALC,
+    COMPATIBLE_CONTRACT,
+    LANGUAGE_PACK_INTERFACE_VERSION,
+    LanguageEntry,
+)
 
 LOLCODE_LANGUAGE_ID = "lolcode"
 
@@ -27,8 +32,8 @@ class LolcodePack:
             version="1.0.0",
             interface_version=LANGUAGE_PACK_INTERFACE_VERSION,
             origin="third_party",
-            compatible_codecalc=">=0.2,<0.3",
-            compatible_contract=">=1.2,<2",
+            compatible_codecalc=COMPATIBLE_CODECALC,
+            compatible_contract=COMPATIBLE_CONTRACT,
             declared_permissions=("execute",),
             supported_operations=("run_plan", "normalize_diagnostics"),
         )

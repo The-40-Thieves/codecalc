@@ -154,14 +154,13 @@ class VerifierRegistry(extensions.ExtensionRegistry[Verifier]):
         return collected
 
 
-def _codecalc_compat_range() -> str:
-    major, minor, _patch = __version__.split(".")
-    return f">={major}.{minor},<{major}.{int(minor) + 1}"
-
-
-def _contract_compat_range() -> str:
-    major, minor, _patch = contract.CONTRACT_VERSION.split(".")
-    return f">={major}.{minor},<{int(major) + 1}"
+#: This kind's declared compatibility, computed from the running codecalc and
+#: contract versions (THE-872) — see `codecalc.extensions.codecalc_compat_range`
+#: for why this must be computed rather than hardcoded. Kept as module-level
+#: constants (rather than called inline below) so `ExecutedVerifier.manifest`
+#: reads the same as the other kinds' built-ins.
+COMPATIBLE_CODECALC = extensions.codecalc_compat_range(__version__)
+COMPATIBLE_CONTRACT = extensions.contract_compat_range(contract.CONTRACT_VERSION)
 
 
 class ExecutedVerifier:
@@ -183,8 +182,8 @@ class ExecutedVerifier:
         version="1.0.0",
         interface_version=VERIFIER_INTERFACE_VERSION,
         origin="builtin",
-        compatible_codecalc=_codecalc_compat_range(),
-        compatible_contract=_contract_compat_range(),
+        compatible_codecalc=COMPATIBLE_CODECALC,
+        compatible_contract=COMPATIBLE_CONTRACT,
         declared_permissions=("verify",),
         supported_operations=("verify",),
     )
