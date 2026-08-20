@@ -1,0 +1,11 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.the-40-thieves/codecalc",
+  "title": "codecalc",
+  "description": "Universal code + logic calculator: execute 31 languages, symbolic math, SMT/logic, complexity analysis, verification.",
+  "repository": { "url": "https://github.com/The-40-Thieves/codecalc", "source": "github" },
+  "version": "0.2.0",
+  "packages": [
+    { "registryType": "pypi", "registryBaseUrl": "https://pypi.org", "identifier": "codecalc", "version": "0.2.0", "runtimeHint": "uvx", "transport": { "type": "stdio" } }
+  ]
+}
