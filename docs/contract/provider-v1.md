@@ -7,6 +7,12 @@ backend. MCP, HTTP, CLI, and library adapters compile their inputs into a
 `ComputationSpec`; providers return CodeCalc's existing execution-result
 contract. Transport types do not cross this boundary.
 
+This document is the *interface* a provider implements. For provisioning and
+running a strict backend in production — the Linux gVisor+Docker host,
+Windows AppContainer hardening, and configuring a macOS/Windows client of the
+remote service — see the operator runbook at
+[`docs/deployment/README.md`](../deployment/README.md).
+
 ## Request
 
 `ComputationSpec` contains the language, source, stdin, timeout, optional

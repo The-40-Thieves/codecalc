@@ -126,9 +126,28 @@ def tag_version() -> str | None:
     return ref.removeprefix("refs/tags/").lstrip("v")
 
 
+def init_version() -> str | None:
+    """The `__version__` in `codecalc/__init__.py`, exposed as
+    `codecalc.__version__`. A SEPARATE hardcode from pyproject's, so it drifts
+    silently unless gated — and it did: it sat at `0.1.0` through the `0.2.0` cut,
+    which is exactly the class of miss this gate exists to catch."""
+    init = REPO / "codecalc" / "__init__.py"
+    try:
+        text = init.read_text(encoding="utf-8")
+    except OSError as exc:
+        fail(f"could not read codecalc/__init__.py: {exc}")
+        return None
+    m = re.search(r'^__version__\s*=\s*"([^"]+)"', text, re.M)
+    if not m:
+        fail("codecalc/__init__.py declares no __version__")
+        return None
+    return m.group(1)
+
+
 sources: dict[str, str | None] = {
     "pyproject.toml": pyproject_version(),
     "executor/Cargo.toml": cargo_version(),
+    "codecalc/__init__.py": init_version(),
     "CHANGELOG.md": changelog_version(),
 }
 tag = tag_version()

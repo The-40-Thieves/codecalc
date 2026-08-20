@@ -3,16 +3,22 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import tempfile
+import uuid
+from pathlib import Path
 
 from codecalc.strict_runtime import (
     _GVISOR_HOST_OVERHEAD,
     DockerGVisorRuntime,
     GVisorConfig,
+    StrictImageUnavailable,
     StrictRuntimeUnavailable,
     _effective_pids_limit,
     check_prerequisites,
     host_prerequisites,
+    strict_execution_config,
 )
 
 IMAGE = "registry.example/codecalc-exec@sha256:" + "a" * 64
@@ -115,6 +121,147 @@ def test_launch_is_shell_free_and_applies_every_outer_limit() -> None:
     check("result carries gvisor-v1 receipt", result["strict_receipt"]["isolation_profile"] == "gvisor-v1")
     check("container is removed after collection",
           calls[-1][0][1:] == ["rm", "--force", "--volumes", "codecalc-0123456789abcdef"])
+
+
+def test_empty_stdin_launch_is_unchanged_from_before_the_bind_mount(tmp_path=None) -> None:
+    """THE-859. With no `stdin`, the launch must be byte-identical to before:
+    no `-v` mount, no `--stdin-file`, and `source` still travels alone over the
+    container's stdin pipe exactly as it always did."""
+    calls: list[tuple[list[str], dict]] = []
+
+    def runner(argv, **kwargs):
+        calls.append((argv, kwargs))
+        if argv[1] == "info":
+            return completed(argv, json.dumps({
+                "Runtimes": {"runsc": {}}, "CgroupVersion": "2",
+            }))
+        if argv[1] == "inspect":
+            return completed(argv, json.dumps({
+                "io.codecalc.owner": "codecalc-strict",
+                "io.codecalc.run-id": "0123456789abcdef",
+            }))
+        return completed(argv, '{"ok":true,"verdict":"OK"}')
+
+    runtime = DockerGVisorRuntime(GVisorConfig(image=IMAGE), runner=runner)
+    runtime.execute(
+        "0123456789abcdef", language="python3", source="print(42)", timeout=7,
+    )
+    argv, kwargs = next(call for call in calls if call[0][1] == "run")
+
+    check("no stdin: no bind mount is added", "-v" not in argv)
+    check("no stdin: no --stdin-file is appended", "--stdin-file" not in argv)
+    check("no stdin: source is still the only thing sent over the pipe",
+          kwargs["input"] == "print(42)")
+
+
+def test_nonempty_stdin_is_bind_mounted_read_only_and_named_on_argv() -> None:
+    """THE-859. Program `stdin` must be written to a HOST temp file INSIDE A
+    PRIVATE (0700) per-run directory, bind-mounted read-only into the
+    container, and named via `--stdin-file` — mirroring the local Rust path's
+    own `--stdin-file` pattern (executor.py), never put on argv (an E2BIG
+    ceiling large stdin could exceed) and never merged into the stdin pipe
+    that still carries `source` alone.
+
+    The private parent directory is the fix for a follow-up finding: a
+    world-readable file sitting in the SHARED, world-traversable system temp
+    dir would let any other local host user read the caller's own program
+    stdin for the run's duration. The directory (0700) blocks that; the file
+    itself stays 0644 because that is what the guest's own read needs (see
+    the comment on `DockerGVisorRuntime.execute`)."""
+    if os.name != "posix":
+        # The strict gVisor runtime is Linux + Docker + runsc; the 0700/0644
+        # guarantees it asserts are POSIX file-mode semantics Windows does not
+        # honor (os.chmod only toggles the read-only bit there), and the host
+        # temp path is not a POSIX path. Skip where the runtime never runs.
+        print("SKIP host-stdin-file permission contract — POSIX-only file semantics")
+        return
+    calls: list[tuple[list[str], dict]] = []
+    seen_host_path: list[str] = []
+
+    def runner(argv, **kwargs):
+        calls.append((argv, kwargs))
+        if argv[1] == "info":
+            return completed(argv, json.dumps({
+                "Runtimes": {"runsc": {}}, "CgroupVersion": "2",
+            }))
+        if argv[1] == "inspect":
+            return completed(argv, json.dumps({
+                "io.codecalc.owner": "codecalc-strict",
+                "io.codecalc.run-id": "0123456789abcdef",
+            }))
+        if argv[1] == "run":
+            mount = next(a for a in argv if a.startswith("/") and ":" in a and a.endswith(":ro"))
+            host_path = Path(mount.split(":", 1)[0])
+            seen_host_path.append(str(host_path))
+            check("the host temp file exists while the container is launched",
+                  host_path.exists())
+            check("the host temp file holds exactly the caller's stdin",
+                  host_path.read_text(encoding="utf-8") == "hello\n")
+            check("the host temp file is o+r for the guest's read",
+                  (host_path.stat().st_mode & 0o777) == 0o644)
+            check("the host temp file's PARENT DIRECTORY is private (0700)",
+                  (host_path.parent.stat().st_mode & 0o777) == 0o700)
+            check("the parent directory is NOT the shared system temp dir",
+                  host_path.parent != Path(tempfile.gettempdir()))
+        return completed(argv, '{"ok":true,"verdict":"OK"}')
+
+    runtime = DockerGVisorRuntime(GVisorConfig(image=IMAGE), runner=runner)
+    runtime.execute(
+        "0123456789abcdef", language="python3", source="print(42)", timeout=7,
+        stdin="hello\n",
+    )
+    argv, kwargs = next(call for call in calls if call[0][1] == "run")
+
+    check("source still travels alone over the container's stdin pipe",
+          kwargs["input"] == "print(42)")
+    check("--stdin-file is appended after --lang/--timeout",
+          "--stdin-file" in argv and argv.index("--stdin-file") > argv.index("--timeout"))
+    check("the bind mount targets a fixed, non-tmpfs guest path",
+          any(a.endswith(":/codecalc-stdin:ro") for a in argv))
+    check("the guest path named by --stdin-file matches the bind mount target",
+          argv[argv.index("--stdin-file") + 1] == "/codecalc-stdin")
+    check("host temp file path was captured from the mount flag", len(seen_host_path) == 1)
+    check("the host temp file is removed once execute() returns",
+          bool(seen_host_path) and not Path(seen_host_path[0]).exists())
+    check("the host temp file's private PARENT DIRECTORY is also removed "
+          "(no leftover dir, not just the file)",
+          bool(seen_host_path) and not Path(seen_host_path[0]).parent.exists())
+
+
+def test_host_stdin_temp_file_is_cleaned_up_even_when_the_run_fails() -> None:
+    """THE-859. A failed launch must not leak the host stdin temp file OR its
+    private directory — the same cleanup discipline the container itself gets
+    on the failure path."""
+    if os.name != "posix":
+        # POSIX-only: the host stdin path and its 0700 directory are POSIX
+        # filesystem semantics; the strict runtime is Linux + Docker + runsc.
+        print("SKIP host-stdin-file cleanup contract — POSIX-only file semantics")
+        return
+    seen_host_path: list[str] = []
+
+    def runner(argv, **_kwargs):
+        if argv[1] == "info":
+            return completed(argv, json.dumps({
+                "Runtimes": {"runsc": {}}, "CgroupVersion": "2",
+            }))
+        if argv[1] == "run":
+            mount = next(a for a in argv if a.startswith("/") and ":" in a and a.endswith(":ro"))
+            seen_host_path.append(mount.split(":", 1)[0])
+            return completed(argv, "", returncode=1)  # simulate a launch failure
+        if argv[1] == "inspect":
+            return completed(argv, "", returncode=1)  # nothing to remove
+        raise AssertionError(f"unexpected call: {argv}")
+
+    runtime = DockerGVisorRuntime(GVisorConfig(image=IMAGE), runner=runner)
+    expect_raises(
+        "failed launch still raises", StrictRuntimeUnavailable, "failed",
+        lambda: runtime.execute("0123456789abcdef", language="python3",
+                                source="x", timeout=7, stdin="hello\n"),
+    )
+    check("the host stdin temp file is removed on the failure path too",
+          bool(seen_host_path) and not Path(seen_host_path[0]).exists())
+    check("the private parent directory is removed on the failure path too",
+          bool(seen_host_path) and not Path(seen_host_path[0]).parent.exists())
 
 
 def test_effective_pids_limit_adds_sandbox_overhead_and_floors_the_smallest_budget() -> None:
@@ -416,11 +563,93 @@ def test_recover_orphans_fails_closed_when_it_cannot_enumerate() -> None:
     )
 
 
+# ── REAL runsc end-to-end (Cave-only, SKIPS without it) ─────────────────────
+def _live_strict_image() -> tuple[str | None, str | None]:
+    """The resolvable, LOCALLY-PRESENT digest-pinned strict image for a live
+    round-trip, or (None, a skip reason). Mirrors the gating in
+    `test_gvisor_conformance.py` / `test_strict_service.py`'s
+    `test_real_runsc_end_to_end`: this suite needs a real `runsc` runtime,
+    which GitHub-hosted runners do not have, so it SKIPS (not fails) off Cave.
+    """
+    try:
+        config = strict_execution_config()
+    except StrictImageUnavailable as exc:
+        return None, f"no published strict image ({exc})"
+    facts = host_prerequisites()
+    if not facts["docker_present"]:
+        return None, "Docker Engine is unavailable"
+    if not facts["runtime_registered"]:
+        return None, "the 'runsc' runtime is not registered with Docker"
+    proc = subprocess.run(
+        ["docker", "image", "inspect", config.image],
+        capture_output=True, text=True, timeout=15, check=False,
+    )
+    if proc.returncode != 0:
+        return None, f"strict image {config.image!r} is not present locally"
+    return config.image, None
+
+
+def test_execute_delivers_program_stdin_to_a_real_gvisor_guest() -> None:
+    """THE-859. LIVE against real runsc — the bug lived entirely in the
+    `docker run` argv `DockerGVisorRuntime.execute` builds (no bind mount, no
+    `--stdin-file`), so a fake runner cannot observe it; only a real container
+    reading real guest stdin can. WATCH-IT-FAIL-FIRST evidence (run manually
+    against the pre-fix `execute`, before `--stdin-file`/the bind mount
+    existed): a `python3 -c "import sys; sys.stdout.write(sys.stdin.read())"`
+    payload driven the same way `DockerGVisorRuntime.execute` drives it
+    (`source` alone piped to the container's stdin, nothing else) produced
+    empty stdout — the guest saw immediate EOF, never the caller's `stdin`.
+    This test asserts the FIXED behavior: the guest's stdout is exactly the
+    bytes handed in via `stdin=`.
+    """
+    image, skip_reason = _live_strict_image()
+    if image is None:
+        print(f"SKIP live stdin delivery — {skip_reason}")
+        return
+    runtime = DockerGVisorRuntime(strict_execution_config())
+    run_id = "the859-" + uuid.uuid4().hex[:16]
+    payload = "import sys; sys.stdout.write(sys.stdin.read())"
+    result = runtime.execute(
+        run_id, language="python3", source=payload, timeout=15,
+        stdin="hello from the caller\n",
+    )
+    check(f"the guest received exactly the caller's program stdin (got {result.get('stdout')!r})",
+          result.get("stdout") == "hello from the caller\n")
+    check(f"the run still succeeds (result={result})", result.get("ok") is True)
+    check("the run still carries a verified gvisor-v1 strict receipt",
+          result.get("strict_receipt", {}).get("verified") is True)
+
+
+def test_execute_with_no_stdin_still_sees_eof_live() -> None:
+    """THE-859. The empty-stdin case must be UNCHANGED: no `stdin=` still means
+    the guest sees immediate EOF, and the run still succeeds with a verified
+    strict receipt — proving the fix is additive, not a behavior change on the
+    path every existing caller already uses."""
+    image, skip_reason = _live_strict_image()
+    if image is None:
+        print(f"SKIP live empty-stdin check — {skip_reason}")
+        return
+    runtime = DockerGVisorRuntime(strict_execution_config())
+    run_id = "the859-empty-" + uuid.uuid4().hex[:16]
+    payload = "import sys; sys.stdout.write('GOT:' + sys.stdin.read())"
+    result = runtime.execute(run_id, language="python3", source=payload, timeout=15)
+    check(f"no stdin: the guest still sees EOF (unchanged behavior; got {result.get('stdout')!r})",
+          result.get("stdout") == "GOT:")
+    check(f"no stdin: the run still succeeds (result={result})",
+          result.get("ok") is True)
+    check("no stdin: the strict receipt/isolation profile is unchanged",
+          result.get("strict_receipt", {}).get("verified") is True
+          and result["strict_receipt"]["isolation_profile"] == "gvisor-v1")
+
+
 if __name__ == "__main__":
     test_config_requires_digest_pinned_image()
     test_probe_requires_registered_runsc_and_cgroup_v2()
     test_probe_reports_versioned_gvisor_attestation()
     test_launch_is_shell_free_and_applies_every_outer_limit()
+    test_empty_stdin_launch_is_unchanged_from_before_the_bind_mount()
+    test_nonempty_stdin_is_bind_mounted_read_only_and_named_on_argv()
+    test_host_stdin_temp_file_is_cleaned_up_even_when_the_run_fails()
     test_effective_pids_limit_adds_sandbox_overhead_and_floors_the_smallest_budget()
     test_strict_receipt_discloses_the_guest_to_host_pid_translation()
     test_run_id_cannot_become_a_docker_option_or_foreign_container_name()
@@ -436,6 +665,8 @@ if __name__ == "__main__":
     test_recover_orphans_removes_owned_containers_and_returns_run_ids()
     test_recover_orphans_never_removes_a_container_that_lost_our_label_in_a_race()
     test_recover_orphans_fails_closed_when_it_cannot_enumerate()
+    test_execute_delivers_program_stdin_to_a_real_gvisor_guest()
+    test_execute_with_no_stdin_still_sees_eof_live()
     for failure in FAILS:
         print(f"FAIL {failure}")
     raise SystemExit(1 if FAILS else 0)

@@ -294,6 +294,11 @@ jobs:
         with:
           version: '0.12.1'
           python-version: '3.12'
+          # win-arm64's runner leaves the uv cache dir uncreated, and setup-uv's
+          # post-run cache-save then FAILS the job on "cache path does not exist"
+          # (a warning everywhere else). Tolerate the empty case; the other five
+          # targets still cache normally.
+          ignore-nothing-to-cache: true
 
       # --wheel, deliberately not plain `uv build`: a plain build round-trips
       # the wheel through an sdist first, and hatchling's VCS-ignore file
@@ -432,6 +437,11 @@ jobs:
         with:
           version: '0.12.1'
           python-version: '3.12'
+          # win-arm64's runner leaves the uv cache dir uncreated, and setup-uv's
+          # post-run cache-save then FAILS the job on "cache path does not exist"
+          # (a warning everywhere else). Tolerate the empty case; the other five
+          # targets still cache normally.
+          ignore-nothing-to-cache: true
       - name: uv venv + uv pip install, exactly as a user would
         if: matrix.mode != 'archive'
         shell: bash
@@ -633,6 +643,11 @@ jobs:
     # release itself, and only reaches the upload step on a real tag push.
     permissions:
       contents: write
+      # Keyless build-provenance attestations for the released artifacts
+      # (closes the "no signed release artifacts" gap, #24). id-token mints the
+      # OIDC token sigstore signs against; attestations:write records it.
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -725,6 +740,20 @@ jobs:
           # format — the same principle as every other gate in this repo:
           # "it wrote a file that looks like checksums" is not the claim.
           ( cd dist && sha256sum -c SHA256SUMS )
+
+      - name: sign — build-provenance attestation for the release artifacts
+        # Keyless signing via sigstore + GitHub OIDC: every released file gets a
+        # verifiable provenance attestation ("this run, this repo, produced this
+        # exact artifact"), checkable by anyone with
+        #   gh attestation verify <file> --repo The-40-Thieves/codecalc
+        # Closes #24 ("no signed release artifacts yet"). Tag-only, like the
+        # attach below — a dispatch validation run has no release to sign for,
+        # and the PyPI wheels additionally carry PEP 740 attestations from the
+        # trusted-publishing upload.
+        if: github.event_name == 'push'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
 
       - name: attach to the GitHub release
         # Only on an actual tag push. workflow_dispatch is how this workflow

@@ -6,7 +6,9 @@ import contextlib
 import json
 import os
 import re
+import shutil
 import subprocess
+import tempfile
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -31,6 +33,12 @@ _DIGEST_IMAGE = re.compile(r"^[^\s]+@sha256:[0-9a-fA-F]{64}$")
 _RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 # This is the container's private, bounded tmpfs mount point, not a host temp path.
 _TMP_DIRECTORY = "/tmp"  # noqa: S108
+#: Guest path program stdin is bind-mounted to (THE-859). Fixed and deliberately
+#: NOT under `_TMP_DIRECTORY`: that mount is the workload's own noexec/nosuid
+#: tmpfs, and stacking a caller-controlled read-only bind on top of it would
+#: blur two different mounts under one path. This one is its own mount point,
+#: read-only, and unrelated to the workload's writable scratch space.
+_STDIN_GUEST_PATH = "/codecalc-stdin"
 
 #: The immutable ownership labels stamped on every container codecalc launches.
 #: Discovery, ownership verification, and orphan recovery all key on these — the
@@ -248,6 +256,7 @@ class DockerGVisorRuntime:
         memory_mb: int = 512,
         process_limit: int = 24,
         cpu_count: float = 1.0,
+        stdin: str = "",
     ) -> dict[str, Any]:
         if not _RUN_ID.fullmatch(run_id):
             raise ValueError("run_id is not a safe strict container identity")
@@ -255,6 +264,50 @@ class DockerGVisorRuntime:
             raise ValueError("strict execution limits must be positive")
         self.probe()
         name = f"codecalc-{run_id}"
+        # Program stdin (THE-859), distinct from `source` (the guest's own
+        # program under test, which still travels over the container's stdin
+        # PIPE exactly as before). It cannot follow `source` down that same
+        # pipe: `codecalc-exec` reads source from stdin and takes program
+        # stdin only via `--stdin-file`. And it cannot go on argv either — the
+        # local Rust path already avoids that (executor.py) because argv has an
+        # ~E2BIG ceiling a large stdin can blow past and putting caller data on
+        # argv leaks it into the host process table. So it goes the same way
+        # executor.py sends it: written to a HOST temp file, bind-mounted
+        # READ-ONLY into the container at a fixed guest path, and named with
+        # `--stdin-file`. A read-only bind is compatible with `--read-only`
+        # (it is its own mount, layered on top of the read-only root) and adds
+        # no new write surface — it is the caller's own input, read back only
+        # by the caller's own sandboxed process.
+        #
+        # The FILE and its PARENT DIRECTORY get deliberately different modes,
+        # because two different readers are being reasoned about:
+        #   - the GUEST (uid 65534 inside the container) opens the bind-mount
+        #     TARGET, `_STDIN_GUEST_PATH` — gVisor's gofer checks the guest uid
+        #     against the FILE's own mode, and the host parent directory is not
+        #     on that path at all, so the file must be o+r (0644) or the guest
+        #     gets denied and silently sees empty stdin (measured on Cave: no
+        #     error, just an empty read).
+        #   - every OTHER local user on the host reaches the file only via the
+        #     real host path, `<private_dir>/<file>`, which DOES require
+        #     traversing the parent directory — so a 0700 parent (mkdtemp's
+        #     default) blocks them before they ever get to the 0644 file.
+        # Net: the sandboxed guest can still read it; no other local host user
+        # can. A world-readable FILE in the shared, world-traversable system
+        # temp dir (the earlier version of this fix) would have made the
+        # caller's own program stdin readable by any local user for the
+        # duration of the run — this per-run private directory closes that.
+        stdin_dir: str | None = None
+        mount_args: list[str] = []
+        stdin_args: list[str] = []
+        if stdin:
+            stdin_dir = tempfile.mkdtemp(prefix="codecalc-strict-stdin-")
+            stdin_dir_path = Path(stdin_dir)
+            stdin_dir_path.chmod(0o700)  # mkdtemp's default; asserted, not assumed
+            stdin_path = stdin_dir_path / "stdin.txt"
+            stdin_path.write_text(stdin, encoding="utf-8")
+            stdin_path.chmod(0o644)
+            mount_args = ["-v", f"{stdin_path}:{_STDIN_GUEST_PATH}:ro"]
+            stdin_args = ["--stdin-file", _STDIN_GUEST_PATH]
         argv = [
             self.config.docker, "run", "--name", name,
             f"--label={RUN_ID_LABEL}={run_id}",
@@ -271,9 +324,11 @@ class DockerGVisorRuntime:
             f"--memory={memory_mb}m",
             f"--cpus={cpu_count:g}",
             "--tmpfs", f"{_TMP_DIRECTORY}:rw,noexec,nosuid,nodev,size={self.config.tmpfs_mb}m",
+            *mount_args,
             "--interactive",
             self.config.image,
             "codecalc-exec", "--lang", language, "--timeout", str(timeout),
+            *stdin_args,
         ]
         # Cleanup is OWNERSHIP-VERIFIED on both exits (THE-834). It used to be
         # `verify_ownership=False` in a finally, which force-removed whatever
@@ -286,42 +341,51 @@ class DockerGVisorRuntime:
         # it; on the success path a refusal propagates, because our own
         # container having foreign labels is the story.
         try:
-            proc = self._runner(
-                argv, input=source, capture_output=True, text=True,
-                timeout=timeout + 5, check=False, shell=False,
-            )
-            if proc.returncode != 0:
-                raise StrictRuntimeUnavailable(
-                    f"strict container failed before returning a result: {proc.stderr.strip()}"
-                )
             try:
-                result = json.loads(proc.stdout)
-            except json.JSONDecodeError as exc:
-                raise StrictRuntimeUnavailable("strict container returned invalid JSON") from exc
-            if not isinstance(result, dict):
-                raise StrictRuntimeUnavailable("strict container result must be an object")
-            result["strict_receipt"] = {
-                "verified": True,
-                "isolation_profile": ISOLATION_PROFILE,
-                "runtime": self.config.runtime,
-                "image": self.config.image,
-                "controls": list(ENFORCEMENT_CONTROLS),
-                # THE-850: disclose the guest->host PID translation THE-849
-                # applies. `process_limit` is the caller's GUEST budget as
-                # requested; `pids_limit` is the effective HOST
-                # `--pids-limit` actually passed to `docker run`; the
-                # difference is `gvisor_host_overhead`, so an auditor can see
-                # the translation instead of just its result.
-                "process_limit": process_limit,
-                "pids_limit": _effective_pids_limit(process_limit),
-                "gvisor_host_overhead": _GVISOR_HOST_OVERHEAD,
-            }
-        except BaseException:
-            with contextlib.suppress(StrictRuntimeUnavailable):
-                self.cleanup(run_id)
-            raise
-        self.cleanup(run_id)
-        return result
+                proc = self._runner(
+                    argv, input=source, capture_output=True, text=True,
+                    timeout=timeout + 5, check=False, shell=False,
+                )
+                if proc.returncode != 0:
+                    raise StrictRuntimeUnavailable(
+                        f"strict container failed before returning a result: {proc.stderr.strip()}"
+                    )
+                try:
+                    result = json.loads(proc.stdout)
+                except json.JSONDecodeError as exc:
+                    raise StrictRuntimeUnavailable("strict container returned invalid JSON") from exc
+                if not isinstance(result, dict):
+                    raise StrictRuntimeUnavailable("strict container result must be an object")
+                result["strict_receipt"] = {
+                    "verified": True,
+                    "isolation_profile": ISOLATION_PROFILE,
+                    "runtime": self.config.runtime,
+                    "image": self.config.image,
+                    "controls": list(ENFORCEMENT_CONTROLS),
+                    # THE-850: disclose the guest->host PID translation THE-849
+                    # applies. `process_limit` is the caller's GUEST budget as
+                    # requested; `pids_limit` is the effective HOST
+                    # `--pids-limit` actually passed to `docker run`; the
+                    # difference is `gvisor_host_overhead`, so an auditor can see
+                    # the translation instead of just its result.
+                    "process_limit": process_limit,
+                    "pids_limit": _effective_pids_limit(process_limit),
+                    "gvisor_host_overhead": _GVISOR_HOST_OVERHEAD,
+                }
+            except BaseException:
+                with contextlib.suppress(StrictRuntimeUnavailable):
+                    self.cleanup(run_id)
+                raise
+            self.cleanup(run_id)
+            return result
+        finally:
+            # The host temp DIRECTORY (file + its private 0700 parent) is ours
+            # alone (unique name, never reused by run_id) and must go on both
+            # the success and failure paths, or a crashed/refused run leaks
+            # it forever — `ignore_errors` so a cleanup race is never allowed
+            # to mask the run's own result/exception.
+            if stdin_dir:
+                shutil.rmtree(stdin_dir, ignore_errors=True)
 
     def _name(self, run_id: str) -> str:
         if not _RUN_ID.fullmatch(run_id):

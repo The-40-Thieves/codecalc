@@ -33,9 +33,30 @@ behind it.
 
 ## [Unreleased]
 
-Everything below has landed on `main` since `0.1.0` and is not yet tagged. It
-changes the **tool surface** (48 tools → 51) and adds to the **result
-contract**, so it is a MINOR bump when it is cut, not a patch. The
+### Fixed
+
+- `compare_execution` (THE-802): a cold-start timeout on one language no
+  longer ends the story for that language. If a run comes back `timed_out`,
+  it gets exactly one warm retry with the same arguments; a recovered retry
+  is reported as the row's result (with `cold_retry`, `cold_retry_recovered`,
+  and `first_attempt_ms` added). A timeout that persists after the retry is
+  always surfaced in `discrepancies`, with `sibling_durations_ms` for every
+  other successful language and a `variance_note` that compares them — a
+  wide spread (>=10x) reads as runner-wide slowness/cold-start pressure
+  rather than a defect in the timed-out language's snippet, a tight band
+  reads as specific to it. This addresses the case where `node`, the
+  heaviest cold-starter, is first to cross the fixed wall-clock deadline on
+  a globally slow GitHub Actions windows-latest runner (one repro: ruby at
+  3452ms vs python at 33ms for a trivial snippet). `executor.execute`'s
+  timeout remains an unchanged hard limit — only `compare_execution`'s
+  handling of a `timed_out` result changed. A deterministic non-timeout
+  failure (e.g. a compile error) is never retried.
+
+## [0.2.0] — 2026-08-19
+
+The first release cut for publication to PyPI and crates.io. It changes the
+**tool surface** (48 tools → 51) and adds to the **result
+contract**, so it is a MINOR bump, not a patch. The
 `contract_version` moves `1.0.0` → **`1.2.0`** for the same reason: `1.1.0`
 ADDED a fifth result shape (`run_lifecycle`, for the background-run tools) and
 fields (an execution receipt with `session_id`, grade metadata), and `1.2.0`
@@ -156,6 +177,16 @@ compatible addition bumps MINOR, it does not leave the version unchanged. A
 
 ### Fixed
 
+- **Strict `/v1` service pinned a worker thread on a slow-drip body (slowloris)**
+  (THE-851). The pre-auth body read (`rfile.read(length)`, after the 1 MiB
+  `MAX_CONTENT_LENGTH` check) had no read timeout, so a client that declared a
+  legitimate sub-cap `Content-Length` then dribbled the bytes blocked a
+  `ThreadingHTTPServer` worker indefinitely — before `dispatch()`, and unbounded
+  by `MAX_CONCURRENT_RUNS`. `_read_body` now enforces a TOTAL wall-clock deadline
+  (`MAX_BODY_READ_SECONDS`, 10s), recomputed each iteration over `rfile.read1()`
+  so a slow trickle cannot slip under a per-`recv` gap; expiry drops the
+  connection and frees the thread. The 413 oversized path and auth-gate ordering
+  are unchanged.
 - **Non-strict `deny-network` hard-errored on a provider that cannot enforce it**
   (THE-847). The broker forced `no_net` onto the run whenever `network` was
   denied, regardless of whether the selected provider could enforce it. A
@@ -469,4 +500,6 @@ it, so there was no upgrade path to describe — only what the thing is.
   `ok: false` through the sandbox. Tracked, with a dated reproduction, at
   [#42](https://github.com/The-40-Thieves/codecalc/issues/42).
 
+[Unreleased]: https://github.com/The-40-Thieves/codecalc/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.2.0
 [0.1.0]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.1.0
