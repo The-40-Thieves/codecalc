@@ -169,6 +169,23 @@ _MESSAGE_HINTS = (
     ("invalid", VALIDATION),
     ("must be", VALIDATION),
     ("empty", VALIDATION),
+    # THE-875: a batch of argument-validation rejections (percentage's zero
+    # total, calc_stats/percentiles/benchmark/compare_edge_cases' "need N
+    # more" inputs, collision_probability/compare_threshold/bitop's range and
+    # operator checks, human_duration/epoch_time/bitop's sign checks,
+    # convert_units/physical_constants/bitop's "unknown X" lookups) carried
+    # none of the vocabulary above and fell to INTERNAL — telling a caller who
+    # passed a zero total or a negative duration to go file a bug about
+    # codecalc's own defect. Every hint below is bad-argument phrasing, never
+    # used for a true internal failure (checked against every `"error":`
+    # literal in the package before adding them). "unknown" broadens the two
+    # specific `unknown language`/`unknown session` entries above rather than
+    # replacing them, so their history stays intact.
+    ("at least", VALIDATION),
+    ("is zero", VALIDATION),
+    ("negative", VALIDATION),
+    (">=", VALIDATION),
+    ("unknown", VALIDATION),
 )
 
 
