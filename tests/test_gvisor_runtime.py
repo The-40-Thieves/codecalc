@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
 import uuid
@@ -167,6 +168,13 @@ def test_nonempty_stdin_is_bind_mounted_read_only_and_named_on_argv() -> None:
     stdin for the run's duration. The directory (0700) blocks that; the file
     itself stays 0644 because that is what the guest's own read needs (see
     the comment on `DockerGVisorRuntime.execute`)."""
+    if os.name != "posix":
+        # The strict gVisor runtime is Linux + Docker + runsc; the 0700/0644
+        # guarantees it asserts are POSIX file-mode semantics Windows does not
+        # honor (os.chmod only toggles the read-only bit there), and the host
+        # temp path is not a POSIX path. Skip where the runtime never runs.
+        print("SKIP host-stdin-file permission contract — POSIX-only file semantics")
+        return
     calls: list[tuple[list[str], dict]] = []
     seen_host_path: list[str] = []
 
@@ -224,6 +232,11 @@ def test_host_stdin_temp_file_is_cleaned_up_even_when_the_run_fails() -> None:
     """THE-859. A failed launch must not leak the host stdin temp file OR its
     private directory — the same cleanup discipline the container itself gets
     on the failure path."""
+    if os.name != "posix":
+        # POSIX-only: the host stdin path and its 0700 directory are POSIX
+        # filesystem semantics; the strict runtime is Linux + Docker + runsc.
+        print("SKIP host-stdin-file cleanup contract — POSIX-only file semantics")
+        return
     seen_host_path: list[str] = []
 
     def runner(argv, **_kwargs):
