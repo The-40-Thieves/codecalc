@@ -1,5 +1,6 @@
 """Parity tests: every ported calc feature vs known-good values."""
 import pathlib
+import re
 import sys
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -61,6 +62,25 @@ r = exact.data_sizes(291 * 1024 * 1024)
 check("bytes MiB vs MB", abs(r["binary"]["MiB"] - 291) < 1e-6 and abs(r["decimal"]["MB"] - 305.135) < 0.01)
 r = exact.human_duration(90061)
 check("dur humanized", "1d" in r["human"] and "1h" in r["human"] and "1m" in r["human"] and "1s" in r["human"])
+# THE-876/#198: human_duration(0.5) used to report "0s", silently dropping
+# the only information a sub-second call carried. Sub-second input now
+# carries a ms/us component instead of flooring away.
+r = exact.human_duration(0.5)
+check("dur 0.5s -> 500ms, not the old silent '0s'", r["ok"] and r["human"] == "500ms", f"-> {r}")
+r = exact.human_duration(0.00025)
+check("dur 250us sub-millisecond duration", r["ok"] and r["human"] == "250us", f"-> {r}")
+r = exact.human_duration(1.5)
+check("dur 1.5s keeps the whole-second part alongside the fraction",
+      r["ok"] and r["human"] == "1s 500ms", f"-> {r}")
+# THE-876/#198: human_duration(1e30) used to floor a float64 into
+# int(s)//86400 and print ~26 digits of "days" — far past the ~15-17
+# significant decimal digits a float64 actually carries. Above the exactness
+# threshold it must report scientific notation instead of garbage digits.
+r = exact.human_duration(1e30)
+check("dur 1e30s does not print a day count with 20+ digits",
+      r["ok"] and not re.search(r"\d{18,}d", r["human"]), f"-> {r['human']!r}")
+check("dur 1e30s uses scientific notation instead",
+      r["ok"] and "e+30" in r["human"], f"-> {r['human']!r}")
 r = exact.epoch_time("1700000000")
 check("epoch seconds->ISO", "2023-11-14T22:13:20" in r["interpretations"]["seconds"])
 
@@ -92,6 +112,23 @@ check("bits next pow2(12)=16", r["next_power_of_two"] == 16)
 check("bits trailing zeros(12)=2", r["trailing_zeros"] == 2)
 r = exact.bit_analysis(7, align=8)
 check("bits align pad 7->8", r["padding_needed"] == 1 and r["aligned_value"] == 8)
+# THE-876/#197: bit_analysis(-1) used to report popcount=1 (int.bit_count()
+# silently counts the ABSOLUTE VALUE's bits) while is_power_of_two correctly
+# said False for the same input, and next_power_of_two vanished from the
+# result with no field explaining why. Negative n is now a validation error.
+r = exact.bit_analysis(-1)
+check("bit_analysis(-1) is a validation error, not a self-contradicting result",
+      r.get("ok") is False and "error" in r, f"-> {r}")
+check("  ...it's a validation-style error (not an internal one)",
+      "n >= 0" in r.get("error", ""), f"-> {r.get('error')!r}")
+r = exact.bit_analysis(-(2 ** 70))
+check("bit_analysis rejects any negative n, not just -1", r.get("ok") is False, f"-> {r}")
+# next_power_of_two must never be silently dropped: n=0 discloses None
+# instead of the key being absent.
+r = exact.bit_analysis(0)
+check("bit_analysis(0): next_power_of_two is disclosed as None, not omitted",
+      r.get("ok") is True and "next_power_of_two" in r and r["next_power_of_two"] is None,
+      f"-> {r}")
 
 # bitop programmer mode
 r = exact.bitop(0x80, "shr", 1, 8)
