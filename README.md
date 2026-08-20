@@ -1,6 +1,6 @@
 # codecalc — universal code & logic calculator for AI models
 
-<!-- mcp-name: io.github.the-40-thieves/codecalc -->
+<!-- mcp-name: io.github.The-40-Thieves/codecalc -->
 
 **codecalc is an offline, self-hosted MCP server that gives an AI agent a
 calculator, a code runner, and a logic checker — so it gets a *correct* answer
