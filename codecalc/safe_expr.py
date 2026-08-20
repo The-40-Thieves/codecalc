@@ -194,14 +194,30 @@ def _heavy_call_violation(tokens: list) -> str | None:
     return None
 
 
-def reject_unsafe(expression: str) -> str | None:
-    """Reason this string must not reach SymPy, or None if it may.
+#: Categories `classify_unsafe` hands back, for a CALLER to map to its own
+#: error taxonomy (THE-881). Deliberately neutral strings rather than
+#: `errors.PERMISSION_DENIED` etc.: this module has no business knowing the
+#: result-contract's taxonomy, only which of three DIFFERENT KINDS of "no" an
+#: expression got. Conflating them under one code was the bug — `factorial(
+#: 100000)` (CATEGORY_CEILING) and `__import__(...)` (CATEGORY_SECURITY) are
+#: both refusals but not the same refusal: one is "this will not succeed on
+#: retry because it is a jail", the other is "raise the ceiling and retry".
+CATEGORY_VALIDATION = "validation"
+CATEGORY_SECURITY = "security"
+CATEGORY_CEILING = "ceiling"
 
-    Returns a message rather than raising so callers can fold it into the
-    structured `{"ok": False, "error": ...}` shape every tool already uses.
+
+def classify_unsafe(expression: str) -> tuple[str, str] | None:
+    """(category, reason) this string must not reach SymPy, or None if it may.
+
+    The single source of truth for what `reject_unsafe` also returns — see
+    that function, kept as a thin wrapper so its existing `str | None`
+    contract (and the exact message text callers/tests already match on)
+    does not change.
     """
     if not isinstance(expression, str):
-        return f"expression must be a string, got {type(expression).__name__}"
+        return (CATEGORY_VALIDATION,
+                f"expression must be a string, got {type(expression).__name__}")
     try:
         tokens = list(tokenize.generate_tokens(io.StringIO(expression).readline))
     except (tokenize.TokenError, SyntaxError, IndentationError) as exc:
@@ -209,24 +225,44 @@ def reject_unsafe(expression: str) -> str | None:
         # accepts things Python does not — so say what happened and let the
         # caller's own parse error be the verdict, rather than claiming this
         # was an attack.
-        return f"expression could not be tokenised: {exc}"
+        return (CATEGORY_VALIDATION, f"expression could not be tokenised: {exc}")
 
     for tok in tokens:
         if tok.type == tokenize.NAME:
             if tok.string.startswith("_"):
-                return (f"identifier {tok.string!r} is not permitted: leading "
-                        "underscores reach Python internals")
+                return (CATEGORY_SECURITY,
+                        (f"identifier {tok.string!r} is not permitted: leading "
+                         "underscores reach Python internals"))
             if tok.string in _DENIED_KEYWORDS:
-                return f"keyword {tok.string!r} is not permitted in an expression"
+                return (CATEGORY_SECURITY,
+                        f"keyword {tok.string!r} is not permitted in an expression")
         elif tok.type in _STRING_TOKENS:
-            return "string literals are not permitted in an expression"
+            return (CATEGORY_SECURITY, "string literals are not permitted in an expression")
         elif tok.type == tokenize.OP and tok.string in _DENIED_OPS:
             if tok.string == ".":
-                return "attribute access is not permitted in an expression"
-            return f"{tok.string!r} is not permitted in an expression"
+                return (CATEGORY_SECURITY, "attribute access is not permitted in an expression")
+            return (CATEGORY_SECURITY, f"{tok.string!r} is not permitted in an expression")
     # Last, because reach beats cost: an expression that is both hostile and
     # expensive should be reported as hostile.
-    return _heavy_call_violation(tokens)
+    violation = _heavy_call_violation(tokens)
+    if violation:
+        return (CATEGORY_CEILING, violation)
+    return None
+
+
+def reject_unsafe(expression: str) -> str | None:
+    """Reason this string must not reach SymPy, or None if it may.
+
+    Returns a message rather than raising so callers can fold it into the
+    structured `{"ok": False, "error": ...}` shape every tool already uses.
+    A caller that also needs to know WHICH kind of refusal this is (a jail, a
+    ceiling, or a plain validation mistake — they are not interchangeable,
+    see THE-881) should call `classify_unsafe` instead; this wrapper exists
+    so the message-only contract callers and tests already depend on does
+    not change.
+    """
+    result = classify_unsafe(expression)
+    return result[1] if result else None
 
 
 def safe_global_dict() -> dict:

@@ -10,9 +10,10 @@ from __future__ import annotations
 import itertools
 import re
 
+from . import errors
 from .guarded import guarded_call
 from .optional import require
-from .safe_expr import reject_explosive, reject_unsafe, safe_global_dict
+from .safe_expr import classify_unsafe, reject_explosive, safe_global_dict
 
 _MATH_TRANSFORMS = None
 _BOOL_TRANSFORMS = None
@@ -97,17 +98,22 @@ def _evaluate_expression(expression: str, **variables) -> dict:
     # parse_expr EVALUATES what it parses, and its default global_dict is
     # populated from vars(builtins) on purpose — 967 names on sympy 1.14.0,
     # __import__ among them. The length cap above bounds work, not reach:
-    # `__import__('os').system('id')` is 31 characters. See safe_expr.
-    bad = reject_unsafe(expression)
-    if bad:
-        return {"ok": False, "error": bad}
+    # `__import__('os').system('id')` is 31 characters. See safe_expr. A
+    # SUCCESSFUL block is a policy refusal, not a codecalc defect (THE-881) —
+    # but the screen returns TWO different kinds of "no" (a jail refusal like
+    # `__import__` vs a heavy-argument ceiling like `factorial(100000)`, see
+    # classify_unsafe's own comment), so the code is chosen from WHICH kind
+    # this is rather than assumed.
+    _cls = classify_unsafe(expression)
+    if _cls:
+        return errors.error_result(errors.code_for_safe_expr_category(_cls[0]), _cls[1])
     sp = _sympy()
     from sympy.parsing.sympy_parser import parse_expr
 
     # Look at the shape BEFORE doing the arithmetic. `evaluate=False` builds
     # the tree without evaluating operators, so a power tower costs 1ms to
     # inspect and nothing to reject. It does not stop FUNCTION evaluation —
-    # that hazard is handled at the token level in reject_unsafe, above.
+    # that hazard is handled at the token level in classify_unsafe, above.
     try:
         shape = parse_expr(expression, transformations=_math_transforms(),
                            local_dict=variables, global_dict=safe_global_dict(),
@@ -116,7 +122,10 @@ def _evaluate_expression(expression: str, **variables) -> dict:
         return {"ok": False, "error": f"parse error: {exc}"}
     explosive = reject_explosive(shape)
     if explosive:
-        return {"ok": False, "error": explosive}
+        # A ceiling, not a defect (THE-881): a power tower or an oversized
+        # exponent/result is exactly "memory, output or process ceiling hit",
+        # errors.RESOURCE_EXHAUSTED's own definition — not internal.
+        return errors.error_result(errors.RESOURCE_EXHAUSTED, explosive)
 
     try:
         expr = parse_expr(expression, transformations=_math_transforms(),
@@ -453,7 +462,7 @@ def _solve_linear(system: str, variables: str | list[str]) -> dict:
     """Solve a ';'-separated system of equations ('x + y = 10; x - y = 2')."""
     try:
         # The DoS length cap, same as _evaluate_expression and truth_table above
-        # (THE-844). solve_linear reached sp.sympify below with only reject_unsafe
+        # (THE-844). solve_linear reached sp.sympify below with only classify_unsafe
         # (a safety screen, not a length gate), so a 120k-char system blew the
         # parser's recursion limit and rode the "stack overflow" message hint to
         # resource_exhausted — the fragile, interpreter-wording-dependent path the
@@ -475,14 +484,16 @@ def _solve_linear(system: str, variables: str | list[str]) -> dict:
             if "=" in raw:
                 lhs, rhs = raw.split("=", 1)
                 for _part in (lhs, rhs):
-                    _bad = reject_unsafe(_part)
-                    if _bad:
-                        return {"ok": False, "error": _bad}
+                    _cls = classify_unsafe(_part)
+                    if _cls:
+                        return errors.error_result(
+                            errors.code_for_safe_expr_category(_cls[0]), _cls[1])
                 eqs.append(sp.Eq(sp.sympify(lhs), sp.sympify(rhs)))
             else:
-                _bad = reject_unsafe(raw)
-                if _bad:
-                    return {"ok": False, "error": _bad}
+                _cls = classify_unsafe(raw)
+                if _cls:
+                    return errors.error_result(
+                        errors.code_for_safe_expr_category(_cls[0]), _cls[1])
                 eqs.append(sp.sympify(raw, evaluate=False))
         sol = sp.solve(eqs, list(syms), dict=True)
         # A variable the caller ASKED for and the system does not constrain is

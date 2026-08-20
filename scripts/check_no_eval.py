@@ -83,7 +83,12 @@ if scanned < MIN_FILES:
 #
 # A gate that only knows the names of the evaluators IT expects cannot see a
 # third-party parser that evaluates internally. So this asserts the screen
-# instead: any module reaching a SymPy parser must import reject_unsafe.
+# instead: any module reaching a SymPy parser must import reject_unsafe OR
+# classify_unsafe — THE-881 split the screen into a thin `reject_unsafe`
+# (message-only, kept for its existing str|None callers) over a
+# `classify_unsafe` that also names WHICH kind of refusal this is (a jail vs.
+# a resource ceiling), and a module doing its own error-code mapping now
+# imports the latter directly rather than the former.
 #
 # File-scoped on purpose. Proving each individual call site sits behind a
 # guard needs flow analysis, and a check that claims more precision than it
@@ -110,15 +115,16 @@ if len(sympy_sites) < 8:
 else:
     unguarded = sorted({
         name for name, _ in sympy_sites
-        if "reject_unsafe" not in (REPO / "codecalc" / name).read_text(encoding="utf-8")
+        if not any(marker in (REPO / "codecalc" / name).read_text(encoding="utf-8")
+                   for marker in ("reject_unsafe", "classify_unsafe"))
     })
     if unguarded:
         print(f"::error::module(s) {unguarded} reach a SymPy parser with no "
-              "reject_unsafe screen; SymPy evaluates what it parses")
+              "reject_unsafe/classify_unsafe screen; SymPy evaluates what it parses")
         sys.exit(1)
     else:
         print(f"ok   sympy screen: {len(sympy_sites)} parser call sites, every "
-              "module importing reject_unsafe")
+              "module importing reject_unsafe or classify_unsafe")
 
 for name in EXEC_ALLOWED:
     if not (PKG / name).is_file():

@@ -17,9 +17,10 @@ from datetime import UTC, datetime
 from decimal import Decimal, getcontext
 from fractions import Fraction
 
+from . import errors
 from .guarded import guarded_call
 from .optional import require
-from .safe_expr import reject_unsafe
+from .safe_expr import classify_unsafe
 
 getcontext().prec = 50
 
@@ -95,6 +96,22 @@ _MAX_POW_EXPONENT = 10_000
 _MAX_POW_RESULT_BITS = 50_000
 
 
+class _CeilingExceeded(ValueError):
+    """A ValueError raised specifically by a size/resource ceiling in this
+    module (THE-881), not by a syntax or argument mistake.
+
+    Still a ValueError — every other `except (ValueError, ...)` in this file
+    and in errors.classify() keeps working by isinstance — but `_eval_exact`
+    catches this subtype BEFORE its generic `except Exception` so a ceiling
+    hit gets `resource_exhausted` at the point it is raised, rather than
+    falling through as a bare `{"ok": False, "error": ...}` for `ensure_code`
+    to guess back at the server boundary. "exponent 387420489 exceeds the
+    limit (10000)" contains none of `_MESSAGE_HINTS`' vocabulary ("exceeded",
+    not "exceeds") and landed on `internal` — the same defect-vs-refusal
+    confusion THE-881 exists to close for guard rejections.
+    """
+
+
 def _pow_exact(a: Fraction, b: Fraction) -> Fraction:
     """a ** b, bounded before the computation runs rather than after.
 
@@ -106,14 +123,14 @@ def _pow_exact(a: Fraction, b: Fraction) -> Fraction:
     too.
     """
     if abs(b) > _MAX_POW_EXPONENT:
-        raise ValueError(
+        raise _CeilingExceeded(
             f"exponent {b} exceeds the limit ({_MAX_POW_EXPONENT}) for exact exponentiation"
         )
     if b.denominator == 1 and a != 0:
         base_bits = max(abs(a.numerator).bit_length(), abs(a.denominator).bit_length())
         predicted_bits = base_bits * abs(int(b))
         if predicted_bits > _MAX_POW_RESULT_BITS:
-            raise ValueError(
+            raise _CeilingExceeded(
                 f"{a}**{b} would need ~{predicted_bits} bits to represent, "
                 f"exceeding the limit ({_MAX_POW_RESULT_BITS}) for exact exponentiation"
             )
@@ -243,10 +260,15 @@ def _eval_exact(expr: str) -> dict:
         return {"ok": False, "error": f"expression too long (max {_MAX_EXPR_LEN} chars)"}
     # The screen the other four functions in this file already call, and this
     # one never did. It carries the heavy-argument cap, which is what stops
-    # factorial(<huge>) before the evaluator reaches math.factorial.
-    _bad = reject_unsafe(expr)
-    if _bad:
-        return {"ok": False, "error": _bad}
+    # factorial(<huge>) before the evaluator reaches math.factorial — a
+    # DIFFERENT refusal than the RCE screen's (THE-881): a heavy-argument cap
+    # is a ceiling ("resource_exhausted", retry after reducing the work), not
+    # a jail ("permission_denied", will never succeed). classify_unsafe
+    # names which one this is at the point it is decided, rather than
+    # leaving it to be guessed back out of prose at the server boundary.
+    _cls = classify_unsafe(expr)
+    if _cls:
+        return errors.error_result(errors.code_for_safe_expr_category(_cls[0]), _cls[1])
     try:
         tree = ast.parse(expr, mode="eval")
     except SyntaxError as exc:
@@ -255,6 +277,19 @@ def _eval_exact(expr: str) -> dict:
     _FLOAT_FUNCS_USED.clear()
     try:
         result = _ev(tree)
+    except _CeilingExceeded as exc:
+        # A ceiling is a ceiling (THE-881): _pow_exact's own comment on
+        # RESOURCE_EXHAUSTED is "memory, output or process ceiling hit", and
+        # an exponent/result-size cap is exactly that — not a defect.
+        return errors.error_result(errors.RESOURCE_EXHAUSTED, str(exc))
+    except ZeroDivisionError:
+        # `Fraction(1, 1) / Fraction(0, 1)` raises ZeroDivisionError whose
+        # message IS `str(Fraction(1, 0))` — the constructor arg the stdlib
+        # built to format the exception, not a sentence for a human (THE-881).
+        # `//` and `%` on Fraction already say "division by zero"; `/` alone
+        # leaks the repr, so it is worth a real message here rather than
+        # forwarding whatever CPython happened to construct.
+        return errors.error_result(errors.VALIDATION, "division by zero")
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
     approx_consts = sorted(set(_APPROX_CONSTS_USED))
@@ -941,9 +976,10 @@ def _algebraic_equiv(a: str, b: str) -> dict:
     if (_long := _too_long(a, b)):
         return _long
     for _name, _val in (("a", a), ("b", b)):
-        _bad = reject_unsafe(_val)
-        if _bad:
-            return {"ok": False, "error": f"{_name}: {_bad}"}
+        _cls = classify_unsafe(_val)
+        if _cls:
+            return errors.error_result(
+                errors.code_for_safe_expr_category(_cls[0]), f"{_name}: {_cls[1]}")
     sp = _sympy()
     try:
         ea = sp.sympify(a)
@@ -968,9 +1004,9 @@ def _solve_expression(expr: str, var: str = "x") -> dict:
     if (_long := _too_long(expr)):
         return _long
     for _part in (expr.split("=", 1) if ("=" in expr and "==" not in expr) else [expr]):
-        _bad = reject_unsafe(_part)
-        if _bad:
-            return {"ok": False, "error": _bad}
+        _cls = classify_unsafe(_part)
+        if _cls:
+            return errors.error_result(errors.code_for_safe_expr_category(_cls[0]), _cls[1])
     sp = _sympy()
     try:
         if "=" in expr and "==" not in expr:
@@ -993,9 +1029,10 @@ def _limit_expression(expr: str, var: str = "x", point: str = "oo") -> dict:
     if (_long := _too_long(expr, point)):
         return _long
     for _name, _val in (("expr", expr), ("point", point)):
-        _bad = reject_unsafe(_val)
-        if _bad:
-            return {"ok": False, "error": f"{_name}: {_bad}"}
+        _cls = classify_unsafe(_val)
+        if _cls:
+            return errors.error_result(
+                errors.code_for_safe_expr_category(_cls[0]), f"{_name}: {_cls[1]}")
     sp = _sympy()
     try:
         e = sp.sympify(expr)
@@ -1014,9 +1051,9 @@ def _simplify_expression(expr: str) -> dict:
     # caller's string BEFORE it reaches sympify, not after.
     if (_long := _too_long(expr)):
         return _long
-    _bad = reject_unsafe(expr)
-    if _bad:
-        return {"ok": False, "error": _bad}
+    _cls = classify_unsafe(expr)
+    if _cls:
+        return errors.error_result(errors.code_for_safe_expr_category(_cls[0]), _cls[1])
     sp = _sympy()
     try:
         e = sp.sympify(expr)

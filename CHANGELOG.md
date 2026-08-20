@@ -98,6 +98,33 @@ behind it.
 
 ### Fixed
 
+- **A guard or policy refusal classified as `internal`, indistinguishable from
+  an unhandled crash** (THE-881, GH #214, the follow-up to THE-875's
+  argument-validation half). `evaluate_expression`/`simplify_expression`/
+  `solve_expression`/`solve_linear`'s guarded-evaluation allowlist
+  successfully blocking a sandbox-escape attempt (`__import__(...)`,
+  `.__class__.__bases__`, a string literal) now returns `"code":
+  "permission_denied"` instead of `"internal"` — `INTERNAL`'s remedy is "a
+  defect in codecalc; the message is worth reporting verbatim", which told an
+  operator that a successfully blocked attack was a bug to file. A power-tower
+  or oversized-exponent refusal (`evaluate_expression("9**9**9")`,
+  `calc_exact("9**9**9")`) now returns `"resource_exhausted"` — a ceiling, not
+  a defect. `calc_exact("1/0")` now returns `"validation"` with the message
+  "division by zero" instead of leaking `ZeroDivisionError`'s constructor
+  argument (`"Fraction(1, 0)"`) as if it were a sentence.
+  `install_package(language="ruby", ...)`'s documented unsupported-language
+  refusal now returns `"permission_denied"` instead of `"internal"`. The
+  guarded-evaluation allowlist's screen (`safe_expr.py`) actually refuses two
+  DIFFERENT things through one message string — the RCE token/keyword screen
+  above, and, separately, a heavy-argument ceiling (`factorial(100000)`,
+  `binomial(200000, 100000)`) that was already correctly `resource_exhausted`
+  before this change and still is: `classify_unsafe` now names which of the
+  two a given rejection is, so the security half moved to
+  `permission_denied` without dragging the ceiling half along with it. Each
+  code is chosen at the point the refusal is decided, not guessed back out of
+  the message by `ensure_code` — the same raise-site principle THE-781
+  established, so a future refusal worded a new way cannot silently default
+  to claiming a codecalc defect again.
 - The MCP server's `instructions=` metadata said "30+ languages"; every
   other surface (README, SECURITY.md, the repo description) said the actual
   count, 31. `scripts/check_claims.py` now gates this string too (THE-879,
