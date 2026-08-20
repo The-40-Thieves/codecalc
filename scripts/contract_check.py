@@ -48,6 +48,11 @@ def run(args: list[str], stdin: str = "", timeout: int = 120) -> dict:
 
 if not BIN.is_file():
     print(f"::error::executor binary not found at {BIN}")
+    print("::error::contract_check asserts the BUILT executor's JSON contract — "
+          "build it first (see CONTRIBUTING.md 'Build the Rust core'), e.g. "
+          "`cargo build --release --manifest-path executor/Cargo.toml` then copy "
+          "the binary + its --no-net shim into bin/. Unlike the other scripts/ "
+          "gates, this one is not a bare-checkout gate.")
     sys.exit(1)
 print(f"binary : {BIN}")
 print(f"platform: {sys.platform}")

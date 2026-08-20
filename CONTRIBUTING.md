@@ -60,7 +60,7 @@ why wrapping the exits would be worse than the current behaviour. If you add a
 suite, follow the existing shape — one script, one `sys.exit`, a printed line
 per property.
 
-The `scripts/` gates run on a bare checkout with no network, no token, and no built binary. That is deliberate: the test suites need the Rust executor and 31 language runtimes, so they cannot run everywhere, and an invariant that only holds on one machine is not an invariant. Keep new gates in that class if you can.
+Most `scripts/` gates run on a bare checkout with no network, no token, and no built binary — `check_no_eval`, `check_parity`, `check_claims`, `check_portability` and friends. The one exception in the list above is `contract_check.py`: it asserts the *built* executor's JSON contract, so it needs the Rust binary present (CI builds it in the `executor contract` job first, and it prints where it looked if it is missing). That bare-checkout property is deliberate for the rest: the test suites need the Rust executor and 31 language runtimes, so they cannot run everywhere, and an invariant that only holds on one machine is not an invariant. Keep new gates in the bare-checkout class if you can.
 
 The Rust executor:
 
