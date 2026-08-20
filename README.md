@@ -1,5 +1,7 @@
 # codecalc — universal code & logic calculator for AI models
 
+<!-- mcp-name: io.github.the-40-thieves/codecalc -->
+
 **codecalc is an offline, self-hosted MCP server that gives an AI agent a
 calculator, a code runner, and a logic checker — so it gets a *correct* answer
 instead of a guessed one.** It runs code in **31 languages**, does exact
@@ -228,6 +230,31 @@ taken.
 
 Building the Rust core yourself, or running from a checkout? See "Build the
 Rust core" and "Run the server" below.
+
+### Use it from an MCP client
+
+The shortest version of the config above — this registers codecalc as a
+stdio MCP server. The console entry point is `codecalc`, so `uvx codecalc`
+launches it directly:
+
+```json
+{
+  "mcpServers": {
+    "codecalc": { "command": "uvx", "args": ["codecalc"] }
+  }
+}
+```
+
+Installed with `pip install codecalc` instead? Point at the resolved
+command with no args:
+
+```json
+{
+  "mcpServers": {
+    "codecalc": { "command": "codecalc" }
+  }
+}
+```
 
 ## Architecture (language-per-strength)
 
