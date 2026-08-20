@@ -80,9 +80,18 @@ for _lang in ("python3", "node"):
         skip(f"{_lang} worker regressions", "no working stateful worker on this platform")
 
 #: (language, code that spawns a child writing to fd 1 directly)
+#: Spawns the language's own interpreter rather than `echo` — a shell builtin
+#: on Windows, not an executable — so the fixture stays portable while still
+#: exercising a real child process inheriting fd 1. `sys.executable` names it
+#: for python3; the node worker's vm sandbox does not expose `process.execPath`
+#: (see _WORKER_BOOTSTRAP_NODE's restricted `sb.process`), so node names itself
+#: by the bare command it was already spawned with — it has to be on PATH for
+#: this worker to exist at all.
 FD1_ESCAPE = {
-    "python3": "import subprocess; subprocess.run(['echo', 'FROM_FD1'])",
-    "node": "require('child_process').execSync('echo FROM_FD1', {stdio: 'inherit'})",
+    "python3": "import subprocess, sys; "
+               "subprocess.run([sys.executable, '-c', 'print(\"FROM_FD1\")'])",
+    "node": "require('child_process').execFileSync('node', "
+            "['-e', \"console.log('FROM_FD1')\"], {stdio: 'inherit'})",
 }
 SET_STATE = {"python3": "x = 41", "node": "var x = 41"}
 USE_STATE = {"python3": "print('state', x + 1)", "node": "console.log('state', x + 1)"}

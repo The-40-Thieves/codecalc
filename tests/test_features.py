@@ -137,7 +137,7 @@ import re as _re2
 from codecalc import registry as _reg2
 
 _readme_n = int(_re2.search(r"\*\*(\d+) languages\*\*",
-                            pathlib.Path("README.md").read_text()).group(1))
+                            pathlib.Path("README.md").read_text(encoding="utf-8")).group(1))
 _m = _re2.search(r"runtimes\s+(\d+)/(\d+)", _r.stdout)
 check("doctor's language count matches the README's",
       _m is not None and int(_m.group(2)) == _readme_n,
@@ -270,13 +270,13 @@ import pathlib as _pl2
 
 for _mod in ("logic.py", "exact.py", "units.py", "parsing.py"):
     _src = _pl2.Path("codecalc") / _mod
-    _text = _src.read_text()
+    _text = _src.read_text(encoding="utf-8")
     _raw = [l.strip() for l in _text.splitlines()
             if l.strip().startswith(("import sympy", "import z3", "import tree_sitter"))]
     check(f"{_mod}: no raw import of a heavy dependency", not _raw, f"-> {_raw}")
 
 check("pyproject declares the extras",
-      all(x in _pl2.Path("pyproject.toml").read_text()
+      all(x in _pl2.Path("pyproject.toml").read_text(encoding="utf-8")
           for x in ("[project.optional-dependencies]", "symbolic", "parsing", "full")),
       "-> optional-dependencies missing")
 
