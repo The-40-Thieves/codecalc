@@ -19,7 +19,26 @@ def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 
     results = []
     for language, code in snippets.items():
         r = executor.execute(language, code, stdin=stdin, timeout=timeout)
-        results.append({
+        # THE-802: a language can lose the wall-clock race to a globally slow
+        # runner rather than to a defect in its own snippet — one repro had
+        # ruby at 3452ms against python's 33ms for the same trivial script, a
+        # 100x spread, with node (the heaviest cold-starter) first to cross
+        # the fixed timeout. executor.execute's timeout stays a hard limit
+        # (that boundary is load-bearing elsewhere); what changes here is
+        # that ONE cold-start timeout no longer ends the story for a
+        # language. Exactly one retry, only on timed_out — a deterministic
+        # failure (compile error, non-zero exit) gets no retry, since
+        # retrying it wastes 2x wall time and cannot change the answer.
+        cold_retry = False
+        cold_retry_recovered = False
+        first_attempt_ms = None
+        if r.get("timed_out"):
+            cold_retry = True
+            first_attempt_ms = r.get("duration_ms")
+            retry = executor.execute(language, code, stdin=stdin, timeout=timeout)
+            cold_retry_recovered = not retry.get("timed_out")
+            r = retry
+        row = {
             "language": language,
             "ok": r.get("ok"),
             "stdout": r.get("stdout", ""),
@@ -27,7 +46,12 @@ def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 
             "exit_code": r.get("exit_code"),
             "duration_ms": r.get("duration_ms"),
             "timed_out": r.get("timed_out", False),
-        })
+            "cold_retry": cold_retry,
+        }
+        if cold_retry:
+            row["cold_retry_recovered"] = cold_retry_recovered
+            row["first_attempt_ms"] = first_attempt_ms
+        results.append(row)
     # `fastest` must mean the fastest run that WORKED. It used to be the minimum
     # duration over all results, so a language that failed instantly won: perl
     # dying in 25ms beat a working python3 at 344ms, and the tool's headline
@@ -61,8 +85,79 @@ def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 
     produced = [r for r in results if (r["stdout"] or "").strip()]
     silent = [r for r in results if not (r["stdout"] or "").strip()]
     discrepancies = []
+    flagged_languages: set[str] = set()
+
+    # THE-802, classification half. A row still timed_out after the one warm
+    # retry above is treated as authoritative here — it is ALWAYS flagged
+    # (not only when a sibling produced output), and it carries the sibling
+    # timing comparison that discriminates the ticket's two hypotheses:
+    # (1) this language's snippet is actually slow/broken, vs. (2) the whole
+    # runner was under cold-start pressure and everything was slow. A row
+    # entered here must not be re-added by the produced/silent loop below.
+    ok_siblings_by_lang = {
+        r["language"]: r["duration_ms"] for r in results
+        if r["ok"] and isinstance(r["duration_ms"], (int, float))
+    }
+    for r in results:
+        if not r["timed_out"]:
+            continue
+        siblings = {lang: ms for lang, ms in ok_siblings_by_lang.items()
+                    if lang != r["language"]}
+        if siblings:
+            hi_lang = max(siblings, key=lambda k: siblings[k])
+            lo_lang = min(siblings, key=lambda k: siblings[k])
+            hi, lo = siblings[hi_lang], siblings[lo_lang]
+            # Two independent signals that the RUNNER, not this language, was
+            # the cause: (1) a high spread between siblings, and (2) a sibling
+            # that itself ate a large fraction of the same wall-clock ceiling
+            # this row hit. Signal (2) is what a lone ok sibling needs — with
+            # one sibling the spread ratio is always 1.0 and would otherwise
+            # always read "specific", even when that single sibling was
+            # plainly slow. It also subsumes the lo==0 divide-by-zero cases:
+            # a 0ms sibling can never look slow, and a genuinely slow one
+            # trips signal (2) on its absolute time, not the ratio.
+            timeout_ms = timeout * 1000
+            high_variance = lo > 0 and hi / lo >= 10.0
+            slow_sibling = hi >= 0.25 * timeout_ms
+            if high_variance or slow_sibling:
+                reasons = []
+                if high_variance:
+                    reasons.append(
+                        f"high sibling variance ({hi / lo:.1f}x: slowest "
+                        f"{hi_lang} {hi}ms vs fastest {lo_lang} {lo}ms)")
+                if slow_sibling:
+                    reasons.append(
+                        f"slowest sibling {hi_lang} took {hi}ms "
+                        f"({hi / timeout_ms * 100:.0f}% of the {timeout_ms}ms "
+                        f"ceiling)")
+                variance_note = (
+                    "; ".join(reasons) + " — consistent with runner-wide "
+                    "slowness/cold-start pressure rather than a defect "
+                    f"specific to {r['language']}")
+            else:
+                span = (f"{hi / lo:.1f}x spread" if lo > 0
+                        else f"slowest {hi_lang} {hi}ms")
+                variance_note = (
+                    f"siblings ran fast ({span}) — this timeout looks "
+                    f"specific to {r['language']}")
+        else:
+            variance_note = "no successful sibling to compare timings against"
+        discrepancies.append({
+            "language": r["language"],
+            "ok": False,
+            "timed_out": True,
+            "issue": "timed out and stayed timed out after one warm retry",
+            "sibling_durations_ms": siblings,
+            "variance_note": variance_note,
+            "detail": ("a warm retry was attempted and also timed out; see "
+                       "sibling_durations_ms/variance_note"),
+        })
+        flagged_languages.add(r["language"])
+
     if produced and silent:
         for r in silent:
+            if r["language"] in flagged_languages:
+                continue
             discrepancies.append({
                 "language": r["language"],
                 "issue": "no stdout while another language produced some",
