@@ -393,14 +393,15 @@ What a caller of the remote service can actually move, versus what is fixed:
 |---|---|---|---|
 | `timeout` | `ComputationSpec.timeout` | 10s | Yes — clamped server-side to `MAX_TIMEOUT_SECONDS` (300s); a request above that runs for as long as the ceiling allows rather than erroring (`strict_service.py::_execute`). |
 | `memory_mb` | `ComputationSpec.max_memory_mb` | 512 MiB | Yes, when the spec sets `max_memory_mb > 0`; otherwise the runtime default of 512 applies. |
-| `process_limit` (guest budget; host `--pids-limit` adds a fixed +48 gVisor overhead) | `DockerGVisorRuntime.execute`'s own default | 24 | **No** — `strict_service.py::_execute` does not read anything from the request into this parameter, so every run through the remote service gets the runtime's built-in default regardless of what the client asks. Tune it by editing the `serve-strict` call site if your workload needs a different guest process budget. |
-| `cpu_count` | `DockerGVisorRuntime.execute`'s own default | 1.0 | **No**, for the same reason — `ComputationSpec.max_cpu` exists on the wire but the strict service never forwards it. |
+| `process_limit` (guest budget; host `--pids-limit` adds a fixed +48 gVisor overhead) | `DockerGVisorRuntime.execute`'s own default | 24 | **No** — fixed by design, not a dropped field: `ComputationSpec` carries no `process_limit` knob at all (its fields are `language`, `code`, `stdin`, `timeout`, `workdir`, `max_memory_mb`, `max_output_kb`, `max_cpu`, `no_net`), so there is nothing on the wire for the strict service to forward. Tune it by editing the `serve-strict` call site if your workload needs a different guest process budget. |
+| `cpu_count` | `DockerGVisorRuntime.execute`'s own default | 1.0 | **Yes** — clamped server-side to `MAX_CPU_COUNT` (4); a request above that runs with as much CPU share as the ceiling allows rather than erroring (`strict_service.py::_execute`). Driven by `ComputationSpec.max_cpu` on the wire. |
 | `MAX_CONCURRENT_RUNS` | `strict_service.py` module constant | 8 | No — fixed in code, not an environment variable. Raise it by editing the constant if your host can sustain more concurrent gVisor sandboxes. |
 | `MAX_TRACKED_RUNS` | `strict_service.py` module constant | 512 | No — oldest terminal-state run record is evicted once exceeded; a run still `"running"` is never evicted. |
 
-The two "No" rows are a real, disclosed gap as of this writing, not a design
-choice worth hiding: the wire protocol and the `ComputationSpec` already
-carry `max_cpu`, but nothing on the strict path reads it yet.
+`max_cpu` is now forwarded end-to-end, closing the gap this section used to
+flag. `process_limit`'s "No" is fixed-by-design rather than a gap: there is
+no wire knob for it, so a deliberate limit — not an oversight — keeps it at
+the runtime's built-in default.
 
 ---
 
