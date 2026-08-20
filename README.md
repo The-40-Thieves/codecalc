@@ -71,7 +71,16 @@ it is cached, and it never happens again for that language. But "the package
 itself never reaches the network" was not true, and this row used to say it was.
 
 **For an offline or egress-restricted install**, warm the cache first — it is one
-command, and afterwards nothing here reaches the network:
+command, and afterwards nothing here reaches the network. If you installed
+codecalc (`pip install`/`uvx`, not a source checkout), `scripts/` did not come
+with it, so use the shipped console script instead:
+
+```bash
+codecalc-prefetch-grammars                    # installed: fetch all 28 grammars
+codecalc-prefetch-grammars --print-cache-dir  # installed: the directory to copy
+```
+
+Building from source? The script still works and calls the same code:
 
 ```bash
 python scripts/prefetch_grammars.py                    # fetch all 28 grammars
@@ -84,8 +93,8 @@ discoverable before it matters rather than after a tool call degrades.
 ## Install
 
 > [!NOTE]
-> Published as **`codecalc` 0.2.0** on PyPI (`pip install codecalc`) and the
-> **`codecalc-exec` 0.2.0** executor on crates.io
+> Published as **`codecalc` 0.3.1** on PyPI (`pip install codecalc`) and the
+> **`codecalc-exec` 0.3.1** executor on crates.io
 > ([#91](https://github.com/The-40-Thieves/codecalc/issues/91)). Every release
 > artifact carries a keyless sigstore **build-provenance attestation** — verify
 > one with `gh attestation verify <file> --repo The-40-Thieves/codecalc`; PyPI
@@ -98,6 +107,7 @@ git clone https://github.com/The-40-Thieves/codecalc
 cd codecalc
 uv sync --all-extras                 # or: pip install -e '.[full]'
 cargo build --release --manifest-path executor/Cargo.toml
+mkdir -p bin                         # bin/ is gitignored, so a fresh clone has none
 cp executor/target/release/codecalc-exec bin/
 uv run codecalc doctor               # verify: backend should read `rust`
 ```
@@ -313,6 +323,7 @@ cargo zigbuild --release --target aarch64-unknown-linux-musl  # static arm64
 # BINARY, so installing only the binary leaves the previous shim in place — and
 # a stale shim silently enforces the old policy while every "is it there?"
 # check still passes. Copy both or neither.
+mkdir -p ../bin                                # bin/ is gitignored, so a fresh clone has none
 cp target/release/codecalc-exec target/release/blocknet.so ../bin/
 ```
 

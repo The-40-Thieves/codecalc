@@ -20,6 +20,12 @@ WHAT IS COMPARED
   pyproject.toml        [project] version
   executor/Cargo.toml   [package] version
   CHANGELOG.md          the newest `## [x.y.z]` heading
+  README.md             "Published as **`codecalc` X.Y.Z**" and
+                         "**`codecalc-exec` X.Y.Z**" (THE-877 — this drifted
+                         to 0.2.0 while pyproject.toml had already moved to
+                         0.3.1, because nothing compared the README's own
+                         install instructions against the version they claim
+                         to install)
   the git tag           only when running on a tag (CI sets GITHUB_REF)
 
 The changelog is included because a release whose notes describe a different
@@ -47,6 +53,7 @@ REPO = Path(__file__).resolve().parents[1]
 PYPROJECT = REPO / "pyproject.toml"
 CARGO = REPO / "executor" / "Cargo.toml"
 CHANGELOG = REPO / "CHANGELOG.md"
+README = REPO / "README.md"
 
 #: A version has to look like one. This is the floor against an extractor that
 #: silently matches an empty string: `""` would satisfy "they are all equal".
@@ -144,11 +151,42 @@ def init_version() -> str | None:
     return m.group(1)
 
 
+def readme_versions() -> tuple[str | None, str | None]:
+    """The Install section's "Published as **`codecalc` X.Y.Z**" note and its
+    "**`codecalc-exec` X.Y.Z**" companion — the two version numbers a reader
+    who follows README.md's own install instructions is trusting.
+
+    THE-877: this drifted to 0.2.0 while pyproject.toml had already moved to
+    0.3.1, and nothing compared the README's claim against the version it
+    actually describes. Read as a pair, not merged into one regex, because a
+    fix that only updates one of the two names would still leave the other
+    silently wrong.
+    """
+    try:
+        text = README.read_text(encoding="utf-8")
+    except OSError as exc:
+        fail(f"could not read {README}: {exc}")
+        return None, None
+    pkg = re.search(r"Published as \*\*`codecalc`\s+([0-9][^\s*]*)\*\*", text)
+    exe = re.search(r"\*\*`codecalc-exec`\s+([0-9][^\s*]*)\*\*", text)
+    if not pkg:
+        fail(f"{README.name} has no 'Published as **`codecalc` X.Y.Z**' claim — "
+             "the extractor matched nothing")
+    if not exe:
+        fail(f"{README.name} has no '**`codecalc-exec` X.Y.Z**' claim — "
+             "the extractor matched nothing")
+    return (pkg.group(1) if pkg else None, exe.group(1) if exe else None)
+
+
+readme_pkg_version, readme_exec_version = readme_versions()
+
 sources: dict[str, str | None] = {
     "pyproject.toml": pyproject_version(),
     "executor/Cargo.toml": cargo_version(),
     "codecalc/__init__.py": init_version(),
     "CHANGELOG.md": changelog_version(),
+    "README.md (codecalc)": readme_pkg_version,
+    "README.md (codecalc-exec)": readme_exec_version,
 }
 tag = tag_version()
 if tag is not None:

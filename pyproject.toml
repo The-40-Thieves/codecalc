@@ -73,6 +73,12 @@ full = [
 
 [project.scripts]
 codecalc = "codecalc.server:main"
+# THE-877: an installed user has no `scripts/` directory to run
+# `prefetch_grammars.py` from — it is not in the wheel — so the offline-warm-up
+# instructions need a shipped entry point instead. `codecalc.prefetch` is the
+# 'parsing' extra's own README-documented command; it still works (and returns
+# exit 2) without the extra installed, per its own docstring.
+codecalc-prefetch-grammars = "codecalc.prefetch:main"
 
 # Placed AFTER every array in [project], not before them. A `[project.urls]`
 # header opens a new TOML table, so everything following it belongs to that

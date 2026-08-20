@@ -62,3 +62,34 @@ jobs:
           echo "$RUNNER_TEMP/typos-bin" >> "$GITHUB_PATH"
       - name: typos
         run: typos
+
+  readme-install-smoke:
+    # THE-877 (#199, #200): nothing in CI ever ran the README's own "From
+    # source" install block, so it drifted from working — `cp
+    # executor/target/release/codecalc-exec bin/` with no `mkdir -p bin` first,
+    # against a fresh clone where `bin/` (gitignored) does not exist. This job
+    # is what would have caught that: it extracts the block FROM README.md
+    # (scripts/readme_install_smoke.sh — not a hand-copied transcript, so a
+    # future edit to the steps is what gets proven, not a maintainer's memory
+    # of them), runs it against this checkout, and asserts `codecalc doctor`
+    # comes back with the rust backend.
+    #
+    # Scoped to the from-source path on the toolchain this runner already has
+    # (uv + the pinned Rust toolchain) — it does not attempt the other 30
+    # optional runtimes `execute_code` can reach; `ci-python.yml`'s `tests` job
+    # explicitly documents why that full matrix does not belong on a hosted
+    # runner. `doctor` reporting a healthy rust backend with python3 resolved
+    # is the from-source install's own documented success criterion.
+    name: README install (from-source block, clean workdir)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: executor
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: '0.12.1'
+      - name: run the README's own from-source install block
+        run: bash scripts/readme_install_smoke.sh

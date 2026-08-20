@@ -216,7 +216,8 @@ def _grammar_cache() -> dict:
     planning an air-gapped install otherwise has no way to find out.
 
     `cached: false` is not an error. It means the first analysis of each
-    language will reach the network; `scripts/prefetch_grammars.py` warms it.
+    language will reach the network; `codecalc-prefetch-grammars` (or, from a
+    source checkout, `scripts/prefetch_grammars.py`) warms it.
     """
     if not optional.have("tree_sitter_language_pack"):
         return {"extra_installed": False, "cached": False, "path": None,
@@ -248,8 +249,9 @@ def _grammar_cache() -> dict:
         "grammars": count,
         "detail": None if count else (
             "no grammars cached — the first analyze_complexity call per "
-            "language will DOWNLOAD one. Run scripts/prefetch_grammars.py to "
-            "warm it, which is what an offline install needs"),
+            "language will DOWNLOAD one. Run `codecalc-prefetch-grammars` "
+            "(installed) or `python scripts/prefetch_grammars.py` (from "
+            "source) to warm it, which is what an offline install needs"),
     }
 
 
