@@ -515,6 +515,13 @@ suite keep using. The default `systrap` platform works without KVM, so the same
 authenticated service can be used from Linux, macOS, and Windows; strict clients
 never fall back to native local execution.
 
+Provisioning and running any of the three strict backends in production —
+the gVisor+Docker host, Windows AppContainer hardening, and the macOS/Windows
+remote-client configuration — is covered in
+[`docs/deployment/README.md`](docs/deployment/README.md), separate from the
+provider interface itself in
+[`docs/contract/provider-v1.md`](docs/contract/provider-v1.md).
+
 Both backends resolve `CODECALC_RUNTIME_PATH` identically, and
 `scripts/check_parity.py` fails CI if the Rust and Python copies of that
 contract ever drift — including if a machine-specific home directory finds its
