@@ -111,6 +111,24 @@ jobs:
           python-version: '3.12'
       - run: python scripts/check_parity.py
 
+  runtime-tiers:
+    # THE-895. `list_languages`/`doctor` present every resolved runtime as equally
+    # operational, but resolution ("its command is on PATH") is not reliability
+    # ("codecalc's CI actually ran it") — a review's own smoke test found the rust
+    # and csharp HOST toolchains failing on a machine where both commands resolved
+    # cleanly. registry.RELIABILITY_TIERS makes that claim explicit per language;
+    # this gate keeps the `tested` tier honest by deriving it from the literal
+    # source of the two files that actually wire a language into CI, rather than
+    # trusting a hand-maintained list that could drift from what CI runs.
+    name: runtime reliability tiers match what CI actually exercises
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - run: python scripts/check_runtime_tiers.py
+
   claims:
     # The README's headline numbers are counts, and counts rot. The first commit shipped README,
     # AUDIT.md and the registry claiming 31, 33 and 32 languages, and a Cargo.toml declaring MIT

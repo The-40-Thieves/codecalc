@@ -10,9 +10,9 @@ This project versions **two** things, and they are not the same number.
 | What | Where | Current |
 |---|---|---|
 | The **package** — the tool surface, the CLI, the Python API | `pyproject.toml`, `executor/Cargo.toml`, this file | `0.1.0` |
-| The **result contract** — the shape every tool result comes back in | `docs/contract/README.md`, `contract_version` on every result | `1.2.0` |
+| The **result contract** — the shape every tool result comes back in | `docs/contract/README.md`, `contract_version` on every result | `1.3.0` |
 
-The contract is at `1.2.0` and the package is at `0.1.0` because those claims are
+The contract is at `1.3.0` and the package is at `0.1.0` because those claims are
 genuinely different. The result contract has a published JSON Schema, a
 documented MAJOR/MINOR/PATCH policy, a twelve-month deprecation window, and a
 gate that fails if the schema drifts from the code — it is stable and says so.
@@ -34,6 +34,36 @@ behind it.
 ## [Unreleased]
 
 ### Added
+
+- **Per-language RELIABILITY tiers** (THE-895), orthogonal to the existing
+  resolution states (`supported`/`installed`/`unhealthy`/`available`). A
+  runtime could report `installed` (its command resolved on PATH) while its
+  toolchain was actually broken — a review's own smoke test found the rust
+  and csharp host toolchains failing on a machine where both commands
+  resolved cleanly — and codecalc presented every resolved executable as
+  equally operational. Every `codecalc/registry.py` language now carries a
+  `tier`: `tested` (a CI job genuinely executes it and asserts on real
+  output, on every PR — currently `python3` and `node` only, kept
+  deliberately conservative), `best_effort` (declared, plausibly works on a
+  normal install, never CI-checked — every other language, `rust` and
+  `csharp` included), or `plan_only` (never validated on any runner, none
+  today). Surfaced as a new `tier` field on `list_languages`,
+  `runtimes_status`, and `codecalc doctor`'s `runtimes`/`tier_summary`
+  (`list_execution_providers`' docstring now cross-references it — provider
+  descriptors are about execution BACKENDS, not per-language reliability, so
+  there is no per-provider field to add); `codecalc doctor`'s text output
+  prints a `reliability tier` block naming every non-`tested` runtime as
+  "toolchain may be broken; not exercised by codecalc's CI" so a resolved
+  runtime never reads as equally trustworthy to a genuinely CI-verified one.
+  Gated by the new `scripts/check_runtime_tiers.py`, wired into CI: it
+  derives the `tested` set from the literal source of the two files that
+  actually wire a language into CI (`tests/test_python_sweep.py`'s
+  `WORKER_LANGS`, `scripts/contract_check.py`'s `CANDIDATES`) rather than
+  trusting a hand-maintained list, so a language cannot claim `tested`
+  without a CI check backing it, or silently drop out of CI while still
+  claiming it. `contract_version` moves `1.2.0` → **`1.3.0`** (a MINOR add):
+  `tier` on every `doctor` `runtimes` entry, plus a `tier_summary` block —
+  the execution result shape itself is unchanged.
 
 - **Per-session and global disk quotas for sessions** (THE-894). Nothing
   previously bounded the TOTAL disk a session accumulates — only per-stream

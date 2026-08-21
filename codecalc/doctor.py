@@ -351,10 +351,11 @@ def report(deep: bool = False) -> dict:
         # deciding would report gleam `installed` on a Windows box where the
         # plan is structurally unable to run (THE-835): a stronger claim than
         # was measured, which is the defect this file's docstring is about.
+        tier = registry.LANGUAGES[name]["tier"]
         if not registry.plan_supported(name, windows=os.name == "nt"):
             runtimes.append({
                 "name": name, "command": cmd, "status": "supported",
-                "path": None, "version": None,
+                "path": None, "version": None, "tier": tier,
                 "detail": "the canonical plan needs a POSIX shell to scaffold "
                           "a project; unsupported on Windows",
             })
@@ -370,7 +371,15 @@ def report(deep: bool = False) -> dict:
         # the key's existence, and is None unless it was actually read. Under
         # --deep only, for the same reason `available` is: asking 31 runtimes
         # their version is a build, not a diagnostic.
+        #
+        # `tier` (THE-895) is the RELIABILITY axis, orthogonal to `status`
+        # here: `status` is what THIS run resolved/executed just now, `tier`
+        # is what codecalc's own CI has verified project-wide. A row can read
+        # `status: available` (this host ran it fine under --deep) while
+        # `tier: best_effort` (no CI job checks it) — that combination is
+        # exactly "works here, but nothing stops it silently breaking".
         row = {"name": name, "command": cmd, "status": status, "path": path,
+               "tier": tier,
                "version": _runtime_version(cmd, path) if deep else None}
         # Only languages with a hello program are promoted. Running the others
         # with an EMPTY source would execute a no-op, find no "codecalc" in its
@@ -389,6 +398,11 @@ def report(deep: bool = False) -> dict:
 
     summary = {state: sum(1 for r in runtimes if r["status"] == state)
                for state in RUNTIME_STATES}
+    # THE-895: the reliability-tier mirror of `summary` above. Same shape,
+    # different axis — this counts by how much CI has verified each language,
+    # not by what this host just resolved.
+    tier_summary = {tier: sum(1 for r in runtimes if r["tier"] == tier)
+                    for tier in registry.RELIABILITY_TIERS}
     workspace = _workspace_check()
     provider_registry = providers.configured_registry()
     execution_providers = []
@@ -472,6 +486,7 @@ def report(deep: bool = False) -> dict:
         "status_basis": "executed" if deep else "resolved",
         "runtimes": runtimes,
         "runtime_summary": summary,
+        "tier_summary": tier_summary,
         "workspace": workspace,
         "skill_file": _skill_path(),
         "remedies": _remedies(backend, extras, runtimes, workspace),

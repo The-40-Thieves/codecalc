@@ -333,6 +333,13 @@ jobs:
       - name: doctor diagnostics (degraded environments)
         shell: bash
         run: uv run --no-sync python tests/test_doctor.py
+      # THE-895. `tier` (resolution vs reliability) on list_languages/runtimes_status,
+      # plus the fail-first proof that scripts/check_runtime_tiers.py actually goes
+      # red on a seeded wrong tier — run here, not just as its own CI job, so the
+      # gate's own correctness is asserted rather than merely invoked.
+      - name: runtime reliability tiers (resolution vs CI-verified reliability)
+        shell: bash
+        run: uv run --no-sync python tests/test_runtime_tiers.py
       # tree-sitter vs the regex heuristic it replaced. Pure: parsing only, no
       # sandbox, so it runs on all three OSes — which also proves the
       # pre-compiled grammar wheels resolve on each of them.

@@ -22,6 +22,8 @@ import re
 import subprocess
 from dataclasses import dataclass
 
+from . import registry
+
 #: language (registry name) -> package manager that owns its runtime
 LANGUAGE_MANAGER: dict[str, str] = {
     # mise-managed runtimes
@@ -372,6 +374,15 @@ def status(languages: str | list[str] | None = None) -> dict:
             if want is None or lang in want or info.get("tool") in want:
                 results[lang] = info
             matched.update({lang, info.get("tool")} & (want or set()))
+
+    # THE-895: `tier` rides along wherever the row's key is a codecalc
+    # language (registry.LANGUAGES) rather than a manager-side extra like
+    # "duckdb"/"gradle"/"tsc" that this module tracks but codecalc cannot
+    # execute — those get `tier: None` rather than a fabricated value, since
+    # RELIABILITY_TIERS is a claim about EXECUTING a language, and codecalc
+    # never executes them.
+    for lang, info in results.items():
+        info["tier"] = registry.LANGUAGES.get(lang, {}).get("tier")
 
     for info in results.values():
         mgr = info.get("manager")

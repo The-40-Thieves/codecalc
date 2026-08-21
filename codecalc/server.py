@@ -312,13 +312,29 @@ mcp.tool = _tool
 
 @mcp.tool()
 def list_languages() -> list[dict]:
-    """List every language codecalc can execute, with extension, compile flag, and what this machine resolved. `status` is `installed` (its command was found on the sandbox PATH) or `supported` (nothing for it here); `status_basis` is `resolved`, meaning nothing was executed to check. Run `codecalc doctor --deep` to promote a runtime to `available` by actually running it."""
+    """List every language codecalc can execute, with extension, compile flag, and what this machine resolved. `status` is `installed` (its command was found on the sandbox PATH) or `supported` (nothing for it here); `status_basis` is `resolved`, meaning nothing was executed to check. Run `codecalc doctor --deep` to promote a runtime to `available` by actually running it.
+
+    `tier` is a DIFFERENT axis from `status`: `status` says whether THIS
+    machine resolved the command (resolution); `tier` says whether codecalc's
+    own CI has actually executed this language and asserted on its output
+    (reliability) — `tested`, `best_effort` (declared, plausibly works, never
+    CI-checked), or `plan_only` (never validated anywhere). A language can be
+    `installed` here and still be `best_effort` or worse — that combination is
+    exactly "the toolchain resolved and may still be broken"."""
     return executor.catalog()
 
 
 @mcp.tool()
 def list_execution_providers() -> list[dict]:
-    """List execution providers and their machine-readable capabilities."""
+    """List execution providers (execution BACKENDS — local subprocess, gVisor-strict, remote) and their machine-readable capabilities.
+
+    This is about which BACKEND runs your code, not which LANGUAGE it runs —
+    a provider's `ready`/`strict` fields are resolution facts about the
+    backend itself. Per-language reliability (how much codecalc's CI has
+    actually verified a given language's toolchain, vs merely resolved it) is
+    a separate axis reported by `list_languages`/`runtimes_status`/`codecalc
+    doctor` as `tier`; a `ready` provider says nothing about whether a
+    specific language running through it has ever been execution-tested."""
     return _provider_registry.descriptors()
 
 
@@ -921,6 +937,13 @@ def runtimes_status(languages: str = "") -> dict:
     it (mise/rustup/swiftly/apt/npm/uv), and the exact command that would run.
     Optional `languages` = comma-separated subset, e.g. "python3,node,rust".
 
+    Each entry also carries `tier` (registry.RELIABILITY_TIERS) when the name
+    is a codecalc language: `tested` (a CI job executes it and checks its
+    output), `best_effort` (declared, never CI-checked), or `plan_only`
+    (never validated anywhere). This is about codecalc's OWN verification, not
+    about whether the update check below found a newer version — a current,
+    up-to-date toolchain can still be `best_effort`.
+
     NETWORK: yes. Non-mutating refers to this machine's runtimes, not to
     traffic — each package manager is asked what the latest version is, and
     they answer by contacting their own remote index.
@@ -1404,6 +1427,33 @@ def _doctor(as_json: bool = False, deep: bool = False) -> int:
             label = {"available": "verified", "unhealthy": "BROKEN",
                      "supported": "missing"}[state]
             print(f"    {label:14} {', '.join(names)}")
+
+    # THE-895: RELIABILITY, a different axis from the resolution block just
+    # printed above. `installed`/`available` there says what THIS host
+    # resolved or ran; `tier` here says how much codecalc's own CI has
+    # verified — a language can be `installed` above and still be
+    # `best_effort` or `plan_only` here, which is exactly "resolves fine,
+    # nothing stops it silently breaking". Made visually distinct rather than
+    # folded into the block above, because that combination is the whole
+    # point of THE-895 and a reader skimming for BROKEN/missing would
+    # otherwise never see it.
+    ts = rep["tier_summary"]
+    print(f"  reliability tier  {ts.get('tested', 0)} tested, "
+          f"{ts.get('best_effort', 0)} best_effort, "
+          f"{ts.get('plan_only', 0)} plan_only (codecalc's own CI "
+          f"verification — independent of resolution above)")
+    _TIER_CAUTION = {
+        "tested": None,
+        "best_effort": "best_effort — toolchain may be broken; not exercised by codecalc's CI",
+        "plan_only": "plan_only — never validated on ANY runner, not even locally",
+    }
+    for tier in ("tested", "best_effort", "plan_only"):
+        names = sorted(r["name"] for r in rep["runtimes"] if r.get("tier") == tier)
+        if not names:
+            continue
+        caution = _TIER_CAUTION[tier]
+        suffix = f" — {caution}" if caution else ""
+        print(f"    {tier:14} {', '.join(names)}{suffix}")
 
     # Versions are only read under --deep, so this block is silent without it
     # rather than printing a column of blanks that reads as "no version".

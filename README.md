@@ -529,7 +529,7 @@ exactly what codecalc's `session_id` already is.
 
 ## The result contract
 
-Every result carries `contract_version`, currently **1.2.0**. The published
+Every result carries `contract_version`, currently **1.3.0**. The published
 schema is [`docs/contract/result-v1.schema.json`](docs/contract/result-v1.schema.json)
 and the policy behind it — what MAJOR/MINOR/PATCH may change, the twelve-month
 deprecation window, worked success/failure/timeout examples, and the migration
@@ -674,7 +674,7 @@ PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py         # every tool over MC
 PYTHONPATH=. .venv/bin/python tests/test_executor_sweep.py  # sandbox regressions
 ```
 
-48 test files and 12 CI-invoked scripts, **2139 assertions**. "CI-invoked"
+49 test files and 13 CI-invoked scripts, **2139 assertions**. "CI-invoked"
 means referenced by path (`scripts/<name>.py`) from a job in
 `.github/workflows/*.yml` — `scripts/check_claims.py` derives the count that
 way and gates it, so a script wired into a workflow without this sentence
@@ -852,6 +852,28 @@ plans — `gleam` and `haskell` — which need a POSIX shell to scaffold a proje
 and report `available: false` on Windows outright rather than resolving through
 a bash that cannot run them. `csharp` left that set: .NET 10 runs a single `.cs`
 file directly, so it is shell-free on every platform.
+
+### Reliability tiers
+
+`available`/`status` above is a claim about **resolution**: did this machine
+find the command on PATH. It is not a claim about **reliability**: has
+codecalc's own CI ever actually run this language and checked the output. The
+two are orthogonal, and they disagree in practice — a review's own smoke test
+found the rust and csharp *host toolchains* failing on a machine where both
+`rustc` and `dotnet` resolved cleanly. `list_languages`, `runtimes_status`, and
+`codecalc doctor` all report a `tier` alongside resolution to make that gap
+visible instead of silent:
+
+| Tier | Meaning |
+|---|---|
+| `tested` | A CI job genuinely **executes** this language and asserts on its real output, on every PR. Currently `python3` and `node` only — kept deliberately conservative, and gated by `scripts/check_runtime_tiers.py` so a language cannot claim it without a CI check backing it, or silently drop out of CI while still claiming it. |
+| `best_effort` | Declared, with a local smoke fixture (`tests/test_smoke.py`), and plausibly works on a normal install with the right toolchain — but no CI job runs it, so nothing would notice it silently breaking. Every other language, including `rust`, `csharp`, `go`, `java`, and the rest. |
+| `plan_only` | A registry entry never validated on any runner, anywhere, not even locally. None today. |
+
+`codecalc doctor`'s text output prints both axes side by side rather than
+folding tier into the resolution summary, so a `best_effort` runtime that
+happens to be `installed` on your machine reads as exactly what it is:
+resolved, unverified by codecalc, may be broken.
 
 ## Sandbox guarantees
 
