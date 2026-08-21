@@ -1,0 +1,2 @@
+{"role": "user", "content": "What's the time complexity of this nested loop?"}
+{"role": "assistant", "content": "This algorithm runs in O(n^2) time because of the nested loop over the input."}

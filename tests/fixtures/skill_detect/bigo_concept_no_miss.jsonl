@@ -1,0 +1,2 @@
+{"role": "user", "content": "explain complexity notation"}
+{"role": "assistant", "content": "Big-O notation like O(n) is taught in every CS course; it describes asymptotic growth, not a specific program.", "tool_calls": []}
