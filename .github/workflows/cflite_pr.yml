@@ -1,8 +1,9 @@
 name: ClusterFuzzLite PR fuzzing
 
 # Coverage-guided DISCOVERY (libFuzzer + atheris), complementing rather than
-# replacing ci-python.yml's deterministic `fuzz-smoke` job (THE-899,
-# scripts/fuzz.py) — see fuzz/README.md for the split. Runs the two
+# replacing ci-python.yml's deterministic `fuzz-smoke` job (THE-899, the
+# `fuzz.py` mutation fuzzer under scripts/) — see fuzz/README.md for the
+# split. Runs the two
 # harnesses in fuzz/ against every PR for a bounded time budget so a crash
 # this engine finds blocks the PR that can reproduce it, not a scheduled run
 # days later.

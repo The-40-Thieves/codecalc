@@ -220,19 +220,26 @@ def classify_unsafe(expression: str) -> tuple[str, str] | None:
                 f"expression must be a string, got {type(expression).__name__}")
     try:
         tokens = list(tokenize.generate_tokens(io.StringIO(expression).readline))
-    except (tokenize.TokenError, SyntaxError, IndentationError, UnicodeEncodeError) as exc:
+    except (tokenize.TokenError, SyntaxError, IndentationError,
+            UnicodeEncodeError, UnicodeDecodeError) as exc:
         # Unparsable at the token level is not automatically hostile — SymPy
         # accepts things Python does not — so say what happened and let the
         # caller's own parse error be the verdict, rather than claiming this
         # was an attack.
         #
-        # UnicodeEncodeError found by scripts/fuzz.py (THE-899): a lone UTF-16
-        # surrogate (e.g. "\ud800") tokenises via CPython's C tokenizer, which
-        # encodes the source to UTF-8 internally and raises rather than
-        # returning a token error — an uncaught exception out of a function
-        # every caller treats as returning `None` or `(category, message)`,
-        # never raising. A lone surrogate is exactly as "unparsable, not
-        # hostile" as the three exceptions already caught here.
+        # Both Unicode errors are the same shape, found the same way — CPython's
+        # C tokenizer round-trips the source through UTF-8 internally and raises
+        # rather than returning a token error, escaping a function every caller
+        # treats as returning `None` or `(category, message)`, never raising:
+        #   - UnicodeEncodeError — a lone UTF-16 surrogate (e.g. "\ud800"), found
+        #     by scripts/fuzz.py (THE-899);
+        #   - UnicodeDecodeError — a bare replacement char / truncated multibyte
+        #     shape (e.g. "�\r�"), found by the ClusterFuzzLite
+        #     coverage-guided harness (THE-899 follow-up) that the seeded mutator
+        #     never reached — the exact case that infra exists to catch.
+        # Both are as "unparsable, not hostile" as the three parser exceptions
+        # already caught here, and get the same validation verdict — never passed
+        # on to SymPy as safe.
         return (CATEGORY_VALIDATION, f"expression could not be tokenised: {exc}")
 
     for tok in tokens:

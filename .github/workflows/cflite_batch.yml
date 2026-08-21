@@ -3,8 +3,9 @@ name: ClusterFuzzLite batch fuzzing
 # Scheduled, longer coverage-guided runs (`mode: batch`, not `code-change`:
 # it does NOT exit on the first crash, so one run can find more than one
 # finding and keeps mutating the corpus for the full budget). Complements
-# cflite_pr.yml the same way scripts/fuzz.py's deep manual campaign
-# complements its own PR-sized `fuzz-smoke` slice — see fuzz/README.md.
+# cflite_pr.yml the same way the `fuzz.py` deep manual campaign (under
+# scripts/) complements its own PR-sized `fuzz-smoke` slice — see
+# fuzz/README.md.
 on:
   schedule:
     - cron: '0 0/6 * * *' # every 6 hours
