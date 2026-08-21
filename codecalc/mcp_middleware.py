@@ -81,6 +81,7 @@ TOOL_TIMEOUTS: dict[str, float] = {
     "solve_expression": 20,
     "limit_expression": 20,
     "simplify_expression": 20,
+    "matrix": 20,
     # Verification gates: they run BOTH programs, and verify_optimization
     # additionally times each at four sizes. No network, but real execution.
     "verify_translation": 120,

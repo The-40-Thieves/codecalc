@@ -33,6 +33,35 @@ behind it.
 
 ## [Unreleased]
 
+### Added
+
+- **`matrix` — structured matrix operations** (THE-887, GH #223): det,
+  inverse, eigenvalues, transpose, rank, trace. `evaluate_expression` has
+  always refused `Matrix([[1,2],[3,4]])` with `"'[' is not permitted in an
+  expression"` — `[`/`]` are denied at the token level to block a
+  subscript-based RCE escape (`().__class__.__bases__[0]`), and a matrix
+  literal was collateral from that correctly-aimed screen. `matrix` is the
+  structured fix: `rows` arrives as a JSON array of arrays, never a caller
+  string parsed through sympify, so the RCE screen never applies to it in
+  the first place. Each entry is either a JSON number, used directly, or a
+  scalar expression string screened individually through the same
+  `classify_unsafe` check `evaluate_expression` uses, before it ever reaches
+  SymPy — a malicious entry like `"().__class__"` is refused per entry with
+  `permission_denied`, exactly as `evaluate_expression` refuses the same
+  string. Non-rectangular and non-square (for det/inverse/eigenvalues/trace)
+  input is rejected with a clear message; a singular matrix passed to
+  `inverse` returns a clean `validation` error instead of a traceback.
+  **51 → 52 MCP tools.**
+
+### Changed
+
+- **`evaluate_expression`'s `'[' is not permitted` refusal now names the
+  `matrix` tool** (THE-887, GH #223, modelled on GH #209's `bit_analysis`
+  message style). What is refused is unchanged — `[`/`]` are still denied
+  for the same RCE reason — only the message improves, from a bare `"'['
+  is not permitted in an expression"` to one that says a matrix literal
+  belongs in the new `matrix` tool instead.
+
 ## [0.3.2] — 2026-08-20
 
 ### Added

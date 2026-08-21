@@ -241,6 +241,20 @@ def classify_unsafe(expression: str) -> tuple[str, str] | None:
         elif tok.type == tokenize.OP and tok.string in _DENIED_OPS:
             if tok.string == ".":
                 return (CATEGORY_SECURITY, "attribute access is not permitted in an expression")
+            if tok.string in ("[", "]"):
+                # Named explicitly (THE-887, GH #223) rather than left to the
+                # generic message below: `[`/`]` are denied to block a
+                # subscript escape (`().__class__.__bases__[0]`), and a matrix
+                # literal like `Matrix([[1,2],[3,4]])` is the collateral from
+                # that correctly-aimed screen. The underlying refusal is
+                # unchanged — this only tells the caller where to go instead
+                # of leaving them staring at a bare "'[' is not permitted".
+                return (CATEGORY_SECURITY,
+                        ("matrices can't be written in evaluate_expression "
+                         "(the [ ] used for a subscript escape are refused here "
+                         "for the same reason a list literal is); use the "
+                         "matrix tool instead (det/inverse/eigenvalues/"
+                         "transpose/rank/trace)"))
             return (CATEGORY_SECURITY, f"{tok.string!r} is not permitted in an expression")
     # Last, because reach beats cost: an expression that is both hostile and
     # expensive should be reported as hostile.
