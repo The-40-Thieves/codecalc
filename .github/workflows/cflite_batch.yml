@@ -1,0 +1,55 @@
+name: ClusterFuzzLite batch fuzzing
+
+# Scheduled, longer coverage-guided runs (`mode: batch`, not `code-change`:
+# it does NOT exit on the first crash, so one run can find more than one
+# finding and keeps mutating the corpus for the full budget). Complements
+# cflite_pr.yml the same way scripts/fuzz.py's deep manual campaign
+# complements its own PR-sized `fuzz-smoke` slice — see fuzz/README.md.
+on:
+  schedule:
+    - cron: '0 0/6 * * *' # every 6 hours
+  workflow_dispatch:
+
+permissions: read-all
+
+jobs:
+  BatchFuzzing:
+    name: ClusterFuzzLite batch fuzzing (${{ matrix.sanitizer }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # address only — see cflite_pr.yml's matrix comment for why the
+        # Python guide's sanitizer set (not the C++ default) applies here.
+        sanitizer: [address]
+    steps:
+      - name: Build Fuzzers (${{ matrix.sanitizer }})
+        # Pin rationale: see cflite_pr.yml's Build Fuzzers step comment.
+        uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          language: python
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          sanitizer: ${{ matrix.sanitizer }}
+        # HONEST LIMITATION: no `storage-repo` is wired here. Upstream's
+        # corpus/crash persistence across batch runs needs a SEPARATE git
+        # repo (an empty one is enough) plus a `PERSONAL_ACCESS_TOKEN`
+        # secret with write access to it — the default `GITHUB_TOKEN`
+        # cannot write to another repo. That repo/secret do not exist yet
+        # for codecalc, so this workflow does NOT claim persistence it
+        # cannot deliver: each scheduled run starts from
+        # fuzz/_make_seed_corpus.py's generated seed corpus (built fresh
+        # every run), not an accumulated corpus from the previous one.
+        #
+        # To enable persistence once a storage repo exists, add to BOTH
+        # steps below:
+        #   storage-repo: https://${{ secrets.PERSONAL_ACCESS_TOKEN }}@github.com/OWNER/STORAGE-REPO.git
+        #   storage-repo-branch: main
+        #   storage-repo-branch-coverage: gh-pages
+      - name: Run Fuzzers (${{ matrix.sanitizer }})
+        uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          fuzz-seconds: 3600 # 1 hour, matches upstream's own batch-fuzzing default
+          mode: 'batch'
+          sanitizer: ${{ matrix.sanitizer }}
+          output-sarif: true
