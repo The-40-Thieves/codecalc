@@ -32,7 +32,7 @@ def _write_zip(path: Path, strings: list[str]) -> None:
         for i, s in enumerate(strings):
             # errors="surrogatepass": SEED_CORPUS_EXPR intentionally includes a
             # lone surrogate ("\ud800") — the exact shape that crashes the screen
-            # (THE-899) and so exactly the byte pattern this seed should carry.
+            # and so exactly the byte pattern this seed should carry.
             # A plain .encode("utf-8") raises UnicodeEncodeError on it, which
             # under build.sh's `bash -eu` would fail the whole fuzzer build.
             # A seed file is raw libFuzzer byte fodder (the harness re-derives a

@@ -84,7 +84,7 @@ if scanned < MIN_FILES:
 # A gate that only knows the names of the evaluators IT expects cannot see a
 # third-party parser that evaluates internally. So this asserts the screen
 # instead: any module reaching a SymPy parser must import reject_unsafe OR
-# classify_unsafe — THE-881 split the screen into a thin `reject_unsafe`
+# classify_unsafe — split the screen into a thin `reject_unsafe`
 # (message-only, kept for its existing str|None callers) over a
 # `classify_unsafe` that also names WHICH kind of refusal this is (a jail vs.
 # a resource ceiling), and a module doing its own error-code mapping now

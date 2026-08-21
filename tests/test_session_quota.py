@@ -1,4 +1,4 @@
-"""Per-session and global disk quotas for sessions (THE-894).
+"""Per-session and global disk quotas for sessions.
 
 The gap this closes, in `sessions.py`'s own words before this ticket: no
 per-session total-disk quota existed — only `SPILL_CAPTURE_KB` (4 MiB/stream),

@@ -52,7 +52,7 @@ marker = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN", "SECRET_SHOULD_NOT_LEAK"
 r = executor.execute("python3", "import os; print('LEAK' if os.environ.get('GITHUB_PERSONAL_ACCESS_TOKEN') else 'CLEAN')")
 check("executed code sees NO host secrets", "CLEAN" in r.get("stdout", ""), f"-> {r.get('stdout','')[:40]!r}")
 
-# 4b. the allowlist has to survive the FILTER, not merely be declared (THE-802)
+# 4b. the allowlist has to survive the FILTER, not merely be declared
 #
 # `os.environ` UPPER-CASES every key on Windows — CPython's os.py does
 # `data[encodekey(key)] = value` with `encodekey = key.upper()` — so a
@@ -216,7 +216,7 @@ check("zero eval/exec/shell=True in codebase", not bad, f"-> {bad}")
 # noisy at small sizes — the security-relevant property is that it detects
 # polynomial growth (not O(1)/O(log n)); exact degree may wobble.
 #
-# THE-808: the largest size was n=8000, which is 64 million iterations of a
+# the largest size was n=8000, which is 64 million iterations of a
 # pure-Python double loop. Measured at 8.6s against this call's own 15s
 # timeout on an unloaded 4-core ARM box: a margin of 1.7x. The one observed
 # failure was macos-latest on 3.11, the slowest leg in the matrix, while 3.14
@@ -233,7 +233,7 @@ check("zero eval/exec/shell=True in codebase", not bad, f"-> {bad}")
 # n=4000 measures 2.1s, a 7.2x margin, classifies identically as O(n^2), and
 # takes 9s instead of 35s per matrix leg.
 # FIVE sizes, not four, and the reason is structural rather than a tolerance
-# nudge (THE-808).
+# nudge.
 #
 # `benchmark` subtracts a baseline before computing doubling ratios:
 #
@@ -364,7 +364,7 @@ if _HAVE_SYMPY:
     finally:
         _spp.parse_expr = _real_parse_expr
 
-# 8c. THE-899 + its ClusterFuzzLite follow-up: two Unicode shapes crash
+# 8c. + its ClusterFuzzLite follow-up: two Unicode shapes crash
 # CPython's C tokenizer from inside classify_unsafe (it round-trips the source
 # through UTF-8 and raises rather than returning a token error). The screen is
 # contracted to RETURN — None or a (category, message) tuple — never to raise;
@@ -473,7 +473,7 @@ else:
         if not _gone:
             os.kill(_pid, 9)
 
-# 11. THE-879 GH #212(a): workspace-guard refusals carry the full result
+# 11. GH #212(a): workspace-guard refusals carry the full result
 # contract. `_jail`/`_session_dir` REFUSE an out-of-workspace path or a
 # malformed session id by raising ValueError — before this fix that raise
 # crossed every layer above it (SessionService, the `@mcp.tool()` wrapper,
@@ -525,7 +525,7 @@ check("session_write_file with a malformed session id returns the contract",
       f"-> {_r}")
 
 
-# 12. THE-879 GH #212(b): a pydantic argument-validation error must not echo
+# 12. GH #212(b): a pydantic argument-validation error must not echo
 # the caller's raw value back. A wrong-typed argument never reaches a tool
 # body — the SDK's own arg-model validation rejects it first, and
 # `str(ValidationError)` includes `input_value=<exactly what was passed>` by
@@ -555,7 +555,7 @@ async def _check_validation_redaction() -> None:
 asyncio.run(_check_validation_redaction())
 
 
-# 13. THE-879 GH #211: `serve-http` rejects a DNS-rebinding Host header.
+# 13. GH #211: `serve-http` rejects a DNS-rebinding Host header.
 #
 # Before the fix, codecalc decided a bind was loopback-safe using
 # `ipaddress`-based logic (the whole 127/8 block, "::1", "localhost",
@@ -668,7 +668,7 @@ def _check_serve_http_rejects_rebinding_host() -> None:
 _check_serve_http_rejects_rebinding_host()
 
 
-# 14. THE-879 GH #208: session_files must not stat through a symlink.
+# 14. GH #208: session_files must not stat through a symlink.
 #
 # `_list()` used to build each entry with `p.is_dir()`/`p.stat().st_size` —
 # both FOLLOW a symlink. A session can plant one pointing anywhere the server
@@ -847,7 +847,7 @@ print("SPAWNED", len(kids), flush=True)
 for k in kids:
     k.kill()
 """
-# THE-775: this probe is the ONLY thing covering the process limit on Windows.
+# this probe is the ONLY thing covering the process limit on Windows.
 #
 # The fork probe below is guarded by `_POSIX` and skips there, correctly. So if
 # THIS one is ever skipped on Windows too, the platform has no process-limit

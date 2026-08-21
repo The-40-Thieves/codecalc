@@ -1,5 +1,5 @@
 """RELIABILITY tiers: every language claims one, and the CI-honesty gate that
-keeps the strong claim (`tested`) from rotting actually fires (THE-895).
+keeps the strong claim (`tested`) from rotting actually fires.
 
 Three things checked:
 
@@ -101,7 +101,7 @@ else:
         check("runtimes_status: python3 is tier `tested`",
               _rows["python3"].get("tier") == "tested", f"-> {_rows['python3'].get('tier')}")
     if "rust" in _rows:
-        check("runtimes_status: rust is tier `best_effort` (THE-895 — resolved != reliable)",
+        check("runtimes_status: rust is tier `best_effort` (resolved != reliable)",
               _rows["rust"].get("tier") == "best_effort", f"-> {_rows['rust'].get('tier')}")
 
 # ═══ 3a. the gate passes on the real, unmodified repo ══════════════════════

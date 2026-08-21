@@ -1,4 +1,4 @@
-"""`codecalc setup` (THE-897): guided onboarding, and its non-destructive
+"""`codecalc setup`: guided onboarding, and its non-destructive
 default above everything else.
 
 The property this file exists to prove: default mode is READ-ONLY. Every
@@ -137,7 +137,7 @@ with tempfile.TemporaryDirectory(prefix="codecalc-setup-test-") as d:
 # A config that parses, and IS an object, but whose OWN client section is not
 # an object (`{"mcpServers": [1, 2, 3]}`) must also be refused — and refused
 # BEFORE the backup is written, or a malformed section leaves an orphan
-# `.codecalc-bak` next to a file that was never actually touched (THE-897
+# `.codecalc-bak` next to a file that was never actually touched (
 # review, FIX 2).
 with tempfile.TemporaryDirectory(prefix="codecalc-setup-test-") as d:
     shape_path = pathlib.Path(d) / "bad-shape.mcp.json"
@@ -168,7 +168,7 @@ with tempfile.TemporaryDirectory(prefix="codecalc-setup-test-") as d:
 
 
 # ── 3c. the write is ATOMIC: temp-file-then-replace, never a truncating ────
-# in-place write (THE-897 review, FIX 1). Proven two ways: (a) a normal
+# in-place write (review, FIX 1). Proven two ways: (a) a normal
 # write leaves no stray .tmp file behind and the config is correct, and (b)
 # instrumenting Path.replace shows the write actually landed in a SIBLING
 # temp file in the SAME directory, with the real target still holding its

@@ -258,7 +258,7 @@ async def main():
         check("compare_execution's winner is one of the languages run",
               r.get("fastest") in snippets, f"-> {r.get('fastest')!r}")
         results = r.get("results") or []
-        # THE-802: `node` intermittently comes back with empty stdout and
+        # `node` intermittently comes back with empty stdout and
         # ok=false on windows-latest. Three occurrences went by reporting only
         # (language, stdout) and (language, ok), which cannot separate "node
         # never started" from "node started and printed nothing" from "node was
@@ -300,7 +300,7 @@ async def main():
               isinstance(r.get("discrepancies"), list),
               f"-> {type(r.get('discrepancies')).__name__}")
         # On a healthy runner every language prints, so the list is empty. If
-        # THE-802 fires here, this is the assertion that names it rather than
+        # fires here, this is the assertion that names it rather than
         # leaving it to "every language produced 42".
         check("...and it is empty when every language printed",
               not r.get("discrepancies") if produced_42 else True,

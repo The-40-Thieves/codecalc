@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# README from-source install smoke test (THE-877).
+# README from-source install smoke test.
 #
 # WHY THIS EXISTS. Issue #199: the "From source" block in README.md's Install
 # section did `cp executor/target/release/codecalc-exec bin/` with no `mkdir -p

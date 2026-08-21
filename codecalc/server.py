@@ -56,7 +56,7 @@ from . import (
 )
 from .mcp_middleware import redact_validation_errors_middleware, timeout_middleware
 
-#: Bearer token for the Streamable HTTP transport (THE-786). Unset means the
+#: Bearer token for the Streamable HTTP transport. Unset means the
 #: transport is loopback-only: `serve-http` REFUSES a non-loopback bind
 #: without it, because a token-less bind on a routable interface exposes 52
 #: unauthenticated code-execution tools to whatever the interface reaches.
@@ -111,7 +111,7 @@ def _http_auth() -> dict:
 
 
 _provider_registry = providers.configured_registry()
-# Unconditional (THE-778). Previously built only when a "managed_runs"
+# Unconditional. Previously built only when a "managed_runs"
 # provider (today: RemoteStrictExecutionProvider) was configured, because the
 # only consumer was ExecutionService.execute()'s managed-provider branch,
 # which itself checks `self.supervisor is None` before using it — so building
@@ -159,7 +159,7 @@ def _positive_int_env(name: str, default: int) -> int:
     return value
 
 
-#: Admission cap for run_submit (THE-778 fix round, review Important #3a).
+#: Admission cap for run_submit (fix round, review Important #3a).
 #: Bounds RunSupervisor's in-memory run table and thread pool against an
 #: unbounded burst of submissions, or a caller that never inspects/cancels
 #: what it starts — nothing else on this path rejects a submission. 64
@@ -171,7 +171,7 @@ _run_supervisor = run_supervisor.RunSupervisor(
     _provider_registry, state_dir=_run_state_dir, max_active_runs=_max_active_runs
 )
 _run_supervisor.recover_orphans()
-# THE-787: one append-only audit sink for broker decisions and security-relevant
+# one append-only audit sink for broker decisions and security-relevant
 # side effects (denied capability, refused install, cleanup). Defaults to
 # ~/.codecalc/audit/audit.log; CODECALC_AUDIT_LOG relocates it, or disables it
 # when set empty. Best effort — a write failure never fails a run.
@@ -462,7 +462,7 @@ _COMPACT_ALWAYS = ("ok", "verdict", "stdout", "exit_code")
 #: not. An empty `unenforced` is omitted because it costs tokens to say
 #: nothing; a non-empty one is the entire point of the field.
 #:
-#: The `stdout_spill`/`stderr_spill` pair (THE-783) belongs here for the same
+#: The `stdout_spill`/`stderr_spill` pair belongs here for the same
 #: reason: compact mode already keeps a truncated `stdout` prefix via
 #: _COMPACT_ALWAYS, and dropping the pointer to the FULL stream on top of
 #: that would make "spill instead of just truncating" true for every caller
@@ -476,7 +476,7 @@ _COMPACT_DISCLOSURE = (
 
 #: The receipt keys compact mode keeps, in the order they are emitted.
 #:
-#: THE-782 grew the receipt from provider identity to provider identity PLUS
+#: grew the receipt from provider identity to provider identity PLUS
 #: content hashes and determinism inputs. Copied wholesale, that took a compact
 #: result from 603 to 1019 bytes — a 69% increase in the one mode whose entire
 #: purpose is not spending tokens, and past the bar this file already set when
@@ -485,7 +485,7 @@ _COMPACT_DISCLOSURE = (
 #: So the same split applies here as to `unenforced`: keep what a caller must
 #: ACT on, drop what they can fetch. `limits` stays whole because it is the
 #: unapplied-guarantee half that #117 exists for, and `spec_hash` stays because
-#: naming which request this was is what THE-782 added. `provider_version`,
+#: naming which request this was is what added. `provider_version`,
 #: `interface_version`, `host_class`, `source_sha256`, `spec_schema_version` and
 #: the determinism block are descriptive, unchanged between calls, and one
 #: non-compact call away — which the caller is told, rather than left to notice.
@@ -531,7 +531,7 @@ def compact_result(result: dict) -> dict:
         out["unenforced"] = [e.split(":", 1)[0].strip() for e in terse]
         out["unenforced_detail"] = "call without compact=True for the reason and remedy of each"
 
-    # Same treatment for the execution receipt (THE-782). See _COMPACT_RECEIPT.
+    # Same treatment for the execution receipt. See _COMPACT_RECEIPT.
     receipt = out.get("provider")
     if isinstance(receipt, dict):
         dropped = [key for key in receipt if key not in _COMPACT_RECEIPT]
@@ -572,7 +572,7 @@ def execute_code(
       not applied, a compact result still says so.
 
     With `session_id` set and `max_output_kb` left at its default, output that
-    would otherwise be truncated is instead SPILLED (THE-783): the inline
+    would otherwise be truncated is instead SPILLED: the inline
     `stdout`/`stderr` still carry the same truncated prefix as before, and
     `stdout_spill`/`stderr_spill` name a `codecalc://session/{sid}/files/...`
     resource carrying the fuller stream (session_read_file or the resource
@@ -728,7 +728,7 @@ async def execute_code_stream(
 
 
 #: Keys a terminal run_inspect() result carries BEYOND execute_code's own
-#: result shape (THE-778 fix round, review Important #2): RunHandle's own
+#: result shape (fix round, review Important #2): RunHandle's own
 #: fields, RunSupervisor's state bookkeeping, and the one best-effort
 #: disclosure (`cleanup_error`) that appears only if a provider's own
 #: cleanup() fails. Named explicitly, not left implicit, so the key-set
@@ -785,7 +785,7 @@ def run_submit(
         max_memory_mb=max_memory_mb, max_output_kb=max_output_kb,
         max_cpu=max_cpu, no_net=no_net,
     )
-    # THE-787 fix round (CRITICAL): broker the background run through the SAME
+    # fix round (CRITICAL): broker the background run through the SAME
     # path execute_code uses, BEFORE any work starts. Previously run_submit
     # called start(spec) directly, so a policy the sync path enforced
     # (deny-network, strict) was silently bypassed on the background path. The
@@ -1476,7 +1476,7 @@ def _doctor(as_json: bool = False, deep: bool = False) -> int:
     exit code is the report's own `healthy`, which is deliberately narrow: a
     missing extra or an uninstalled Haskell is a fact about a host, not a
     fault, and exiting non-zero for either would make this useless as the
-    install check THE-780 wants it to be.
+    install check wants it to be.
 
     Writes to STDOUT, which is safe here and nowhere else in this file: stdout
     is the MCP transport, so anything printed during a normal run corrupts the
@@ -1559,14 +1559,14 @@ def _doctor(as_json: bool = False, deep: bool = False) -> int:
                      "supported": "missing"}[state]
             print(f"    {label:14} {', '.join(names)}")
 
-    # THE-895: RELIABILITY, a different axis from the resolution block just
+    # RELIABILITY, a different axis from the resolution block just
     # printed above. `installed`/`available` there says what THIS host
     # resolved or ran; `tier` here says how much codecalc's own CI has
     # verified — a language can be `installed` above and still be
     # `best_effort` or `plan_only` here, which is exactly "resolves fine,
     # nothing stops it silently breaking". Made visually distinct rather than
     # folded into the block above, because that combination is the whole
-    # point of THE-895 and a reader skimming for BROKEN/missing would
+    # point of and a reader skimming for BROKEN/missing would
     # otherwise never see it.
     ts = rep["tier_summary"]
     print(f"  reliability tier  {ts.get('tested', 0)} tested, "
@@ -1610,7 +1610,7 @@ def _doctor(as_json: bool = False, deep: bool = False) -> int:
     print(f"  workspace         {ws['path']}"
           f"{'' if ws['writable'] else '  NOT WRITABLE — ' + str(ws['error'])}")
 
-    # THE-894: printed unconditionally, same reasoning as the grammar-cache
+    # printed unconditionally, same reasoning as the grammar-cache
     # line above — an operator sizing a shared host needs the configured
     # ceilings AND the current usage before a session hits one, not after.
     dq = rep["disk_quota"]
@@ -1624,13 +1624,13 @@ def _doctor(as_json: bool = False, deep: bool = False) -> int:
           f"{len(dq['sessions'])} session(s)"
           + (f", {dq['host_free_bytes']} bytes free on host"
              if dq["host_free_bytes"] is not None else ""))
-    # THE-894 fix round 4: named here too, not just in the refusal message —
+    # fix round 4: named here too, not just in the refusal message —
     # an operator reading doctor BEFORE anything is stuck should see the
     # recovery path exists, same reasoning as the rest of this section.
     print(f"    recovery        if a session is stuck over quota: "
           f"{sessions._QUOTA_RECOVERY_HINT}")
 
-    # THE-896: the tool-surface reduction. Printed even when nothing is
+    # the tool-surface reduction. Printed even when nothing is
     # configured — same reasoning as the grammar-cache and disk-quota lines
     # above — so an operator wondering "why does list_tools only show 25?"
     # gets the answer from doctor rather than from re-reading the README.
@@ -1781,7 +1781,7 @@ def main() -> None:
 
     `--help`/`-h` and `--version`/`-V` are the one deliberate exception: a
     human running `codecalc --help` at a shell got no output and a hung
-    stdio server instead of usage text (THE-876/#201) — the "ignore and
+    stdio server instead of usage text (#201) — the "ignore and
     start" rule is right for an MCP client, but silently wrong for a person
     at a terminal. Both are intercepted here, print to stdout, and exit
     WITHOUT starting the server; every other unrecognised argument still
@@ -1823,7 +1823,7 @@ def main() -> None:
         rest = sys.argv[2:]
         raise SystemExit(_doctor(as_json="--json" in rest, deep="--deep" in rest))
     if len(sys.argv) > 1 and sys.argv[1] == "setup":
-        # THE-897: guided onboarding, built and rendered in codecalc/setup.py
+        # guided onboarding, built and rendered in codecalc/setup.py
         # for the same reason doctor's report is built there and only
         # rendered here — a script and a human must not be able to disagree
         # about what setup found. `--client` accepts both `--client=NAME` and
@@ -1849,7 +1849,7 @@ def main() -> None:
         raise SystemExit(_cleanup_cmd(write="--write" in rest,
                                       include_unmarked="--include-unmarked" in rest))
     if len(sys.argv) > 1 and sys.argv[1] == "serve-strict":
-        # THE-830: the authenticated `/v1` strict execution service — the server
+        # the authenticated `/v1` strict execution service — the server
         # half of RemoteStrictExecutionProvider. Its own module and stdlib
         # http.server transport, separate from the MCP serve-http transport
         # above; it does its own bearer-required / non-loopback handling.
@@ -1863,7 +1863,7 @@ def main() -> None:
         port_text = (rest[rest.index("--port") + 1]
                      if "--port" in rest and rest.index("--port") + 1 < len(rest)
                      else "8000")
-        # FAIL CLOSED on a routable bind with no auth (THE-786). The whole
+        # FAIL CLOSED on a routable bind with no auth. The whole
         # 127/8 block and ::1 are loopback — `ipaddress` decides, not a string
         # compare, because 127.0.0.2 is exactly as loopback as 127.0.0.1 and a
         # list of spellings would refuse it wrongly. An unparsable host
@@ -1887,7 +1887,7 @@ def main() -> None:
                 file=sys.stderr,
             )
             raise SystemExit(2)
-        # THE-879 GH #211: the SDK's OWN DNS-rebinding auto-default
+        # GH #211: the SDK's OWN DNS-rebinding auto-default
         # (mcp.server.lowlevel.server.py's `streamable_http_app`) only fires
         # for the three literal strings "127.0.0.1"/"localhost"/"::1" — a
         # plain tuple membership test, not the `ipaddress`-based check above.

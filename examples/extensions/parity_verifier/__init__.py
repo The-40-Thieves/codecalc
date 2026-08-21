@@ -1,4 +1,4 @@
-"""Reference THIRD-PARTY verifier (THE-794).
+"""Reference THIRD-PARTY verifier.
 
 `ParityVerifier` is the second consumer of `codecalc.verifiers.Verifier` —
 proof the interface is usable by code outside `codecalc/` itself, not just a
@@ -21,7 +21,7 @@ from __future__ import annotations
 from codecalc import extensions, verifiers
 
 #: Reuses `verifiers.COMPATIBLE_CODECALC`/`COMPATIBLE_CONTRACT` (computed from
-#: the running codecalc/contract versions, THE-872) rather than hand-copying a
+#: the running codecalc/contract versions) rather than hand-copying a
 #: version range that could then drift from what codecalc actually ships — the
 #: same reasoning as `examples/extensions/csv_renderer`. A real third-party
 #: author instead pins the range they tested against, the same way a `pip`

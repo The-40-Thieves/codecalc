@@ -167,7 +167,7 @@ jobs:
             shim: none
             exe_ext: '.exe'
             wheel_tags: 'py3-none-win_amd64'
-          # Windows ARM64 (THE-836): STANDALONE ARCHIVE ONLY, no wheel. This
+          # Windows ARM64: STANDALONE ARCHIVE ONLY, no wheel. This
           # is upstream, not policy: codecalc -> mcp 2.0 -> pyjwt[crypto] ->
           # cryptography, and pyca/cryptography publishes no win_arm64 wheel
           # (verified against PyPI, latest 50.0.0), so `pip install` of ANY
@@ -324,7 +324,7 @@ jobs:
         shell: bash
         env:
           WHEEL_TAGS: ${{ matrix.wheel_tags }}
-          # FAIL CLOSED (THE-836): a release build with the executor or its
+          # FAIL CLOSED: a release build with the executor or its
           # shim missing must refuse, not degrade to a warn-and-publish
           # pure-Python wheel. The `inspect the wheel` step below catches the
           # binary's absence AFTER a wheel exists; this refuses to make one.
@@ -904,7 +904,7 @@ jobs:
     # publish-pypi` also pulls in build+verify transitively, since
     # publish-pypi already needs both.
     needs: publish-pypi
-    # THE-867: server.json (repo root, official registry schema) already
+    # server.json (repo root, official registry schema) already
     # exists — see that commit. This job is the automation half: same
     # opt-in-only, dispatch-gated posture as publish-pypi/testpypi/crates
     # above, so a tag push can never reach it on its own.

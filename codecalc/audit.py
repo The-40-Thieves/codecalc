@@ -1,4 +1,4 @@
-"""Append-only structured audit stream for security-relevant decisions (THE-787).
+"""Append-only structured audit stream for security-relevant decisions.
 
 Before this, the provenance of a brokered denial or a refused install was
 reconstructible only by correlating a result receipt with the run-supervisor
@@ -25,7 +25,7 @@ disk or an unwritable directory drops the event (and says so on stderr once) but
 the execution it describes still returns its result. The trail is provenance,
 not a transaction log the product depends on.
 
-CREATE-ON-WRITE, NOT ON CONSTRUCTION (THE-848)
+CREATE-ON-WRITE, NOT ON CONSTRUCTION
 `AuditLog.__init__` does not touch the filesystem. The directory is created
 lazily, on the first `emit()` that actually has a line to write. Before this,
 `__init__` did the `mkdir`, which meant merely *constructing* an `AuditLog` —
@@ -34,9 +34,9 @@ created `~/.codecalc/audit/` as a side effect of import. An import must be
 free of that: a CI runner or a test that only imports `codecalc.server`
 should not leave a directory behind in the real home.
 
-SIZE-BASED ROTATION (THE-898)
+SIZE-BASED ROTATION
 An append-only file that nothing ever trims grows without bound — the same
-gap THE-894 closed for session workspaces, here for the one file every
+gap closed for session workspaces, here for the one file every
 session and every broker decision writes into. `CODECALC_AUDIT_MAX_MB` caps
 the LIVE file; crossing it rotates `audit.log` -> `audit.log.1` -> ... up to
 `_AUDIT_KEEP_N` (a small, fixed generation count — the same "bounded count,
@@ -66,7 +66,7 @@ INSTALL_DENIED = "install_denied"
 STRICT_PROVIDER_REJECTED = "strict_provider_rejected"
 CLEANUP = "cleanup"
 
-#: THE-898: the live-file size ceiling that triggers a rotation.
+#: the live-file size ceiling that triggers a rotation.
 AUDIT_MAX_MB_ENV = "CODECALC_AUDIT_MAX_MB"
 
 #: Generous, not unlimited — same "bounded by default" reasoning
@@ -131,7 +131,7 @@ class AuditLog:
         # substring is redacted whole rather than partially.
         self._secrets = tuple(sorted({s for s in secrets if s}, key=len, reverse=True))
         self._warned = False
-        # THE-898: guards the "check size, maybe rotate, then append" sequence
+        # guards the "check size, maybe rotate, then append" sequence
         # in `emit()` — without it, two threads racing past the size check
         # together could both decide to rotate (or one could append between
         # the other's rotate-check and its rename), corrupting the generation
@@ -195,10 +195,10 @@ class AuditLog:
             line = self._redact(json.dumps(event, sort_keys=True))
             try:
                 # Created here, on first use, not in __init__ — see the module
-                # docstring's CREATE-ON-WRITE note (THE-848).
+                # docstring's CREATE-ON-WRITE note.
                 self.path.parent.mkdir(parents=True, exist_ok=True)
                 with self._rotate_lock:
-                    # THE-898: rotate BEFORE appending, checked on the file as
+                    # rotate BEFORE appending, checked on the file as
                     # it stands right now rather than a cached size — an
                     # operator lowering CODECALC_AUDIT_MAX_MB mid-run (no
                     # server restart, same reasoning as `_audit_max_bytes`'s

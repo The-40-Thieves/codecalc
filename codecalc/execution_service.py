@@ -1,4 +1,4 @@
-"""Protocol-neutral execution application service (THE-790)."""
+"""Protocol-neutral execution application service."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from .providers import (
 from .run_supervisor import RunSupervisor
 
 #: Re-exported beside the module that now builds the receipt (moved to
-#: providers.py in the THE-778 fix-round merge — see attach_receipt), the
+#: providers.py in the fix-round merge — see attach_receipt), the
 #: same way providers.py itself re-exports COMPUTATION_SPEC_VERSION from
 #: spec_identity: callers already import `execution_service`, and this
 #: keeps `execution_service.RECEIPT_VERSION` a stable name across the move.
@@ -40,7 +40,7 @@ def broker_run(spec: ComputationSpec, provider, *,
     Shared by `ExecutionService` (the sync execute/stream/session paths) and by
     `server.run_submit` (the background path), so a policy the sync path enforces
     cannot be bypassed by submitting the same job to the background — the CRITICAL
-    THE-787 fix-round bug. Returns `(run_spec, decision, rejection_or_None)`:
+    fix-round bug. Returns `(run_spec, decision, rejection_or_None)`:
 
     - `run_spec` is the possibly-narrowed spec to actually run (a denied network
       forces `no_net` only where the provider can enforce it — see
@@ -100,7 +100,7 @@ class ExecutionService:
         # An explicit AuditLog wins; otherwise a no-op sink, so brokering never
         # depends on a configured audit (server.py passes the real one).
         self.audit = audit if audit is not None else audit_module.AuditLog(None)
-        # THE-787 capability policy. An explicit `policy` pins it (tests); else
+        # capability policy. An explicit `policy` pins it (tests); else
         # it is read from CODECALC_CAPABILITY_POLICY per call unless
         # `policy_from_env=False` forces brokering fully off. Read per call, not
         # cached, so an operator's change takes effect without a restart — same
@@ -119,7 +119,7 @@ class ExecutionService:
                 session_id: str | None = None):
         """Broker `spec` against the active policy. Thin wrapper over the shared
         `broker_run` so the sync service and the background `run_submit` path
-        enforce identically (THE-787 fix round: run_submit used to bypass this)."""
+        enforce identically (fix round: run_submit used to bypass this)."""
         return broker_run(spec, provider, policy=self._policy(),
                           audit=self.audit, session_id=session_id)
 
@@ -135,7 +135,7 @@ class ExecutionService:
                 available_providers=list(exc.available),
             ))
 
-        # THE-787: broker capabilities BEFORE any side effect. `run_spec` is the
+        # broker capabilities BEFORE any side effect. `run_spec` is the
         # possibly-narrowed spec that actually runs (network denied -> no_net
         # where the provider can enforce it; THE-847: left as-asked and disclosed
         # as effective where it cannot); `spec` (the request as written) still
@@ -219,7 +219,7 @@ class ExecutionService:
                 requested_provider=exc.provider_id,
                 capability=exc.capability,
             ))
-        # THE-787: broker before the worker runs; a denied network forces no_net
+        # broker before the worker runs; a denied network forces no_net
         # on the spec the session worker receives where the provider can enforce
         # it (the local provider on the rust backend does; THE-847).
         run_spec, decision, rejection = self._broker(spec, provider,
@@ -375,7 +375,7 @@ class SessionService:
             workdir = sessions._session_dir(session_id)
             if not workdir.is_dir():
                 return {"ok": False, "error": f"unknown session '{session_id}'"}
-            # THE-894: refused before the entry file even runs. `entry_file`
+            # refused before the entry file even runs. `entry_file`
             # is about to run as a fresh process that can write anything into
             # the workspace, same as sessions.execute()'s workspace branch —
             # see `quota_precheck`'s docstring for why re-measuring here
@@ -394,7 +394,7 @@ class SessionService:
             extension = entry_file.rsplit(".", 1)[-1] if "." in entry_file else ""
             by_extension = {value: key for key, value in registry.EXTENSIONS.items()}
             language = by_extension.get(extension, "python3")
-        # THE-783: captured at the larger spill ceiling and re-truncated to
+        # captured at the larger spill ceiling and re-truncated to
         # the executor's own default cap, same as sessions.execute()'s
         # workspace branch — session_run has no caller-facing max_output_kb
         # of its own to honour instead (see sessions.SPILL_CAPTURE_KB).
@@ -409,7 +409,7 @@ class SessionService:
         result = sessions.spill_if_truncated(session_id, result, 0)
         result["entry_file"] = entry_file
         result["language"] = language
-        # THE-894 point 4: the entry file just ran arbitrary code with the
+        # point 4: the entry file just ran arbitrary code with the
         # workspace as its cwd — measure what it left behind and disclose an
         # over-quota session rather than let it grow silently forever.
         return sessions.quota_postcheck(session_id, result)

@@ -1,4 +1,4 @@
-"""Execution-provider contract and first local implementation (THE-790)."""
+"""Execution-provider contract and first local implementation."""
 
 from __future__ import annotations
 
@@ -728,9 +728,9 @@ def test_piston_execution_returns_a_redacted_transport_error_contract() -> None:
           and "[REDACTED]" in serialized)
 
 
-# ═══ spec identity: canonical bytes, content hash, published schema (THE-793) ═══
+# ═══ spec identity: canonical bytes, content hash, published schema ═══
 #
-# THE-790 built the canonical REQUEST. What was missing was its IDENTITY: two
+# built the canonical REQUEST. What was missing was its IDENTITY: two
 # callers building the same request could not agree on a name for it, so nothing
 # downstream — a cache, a receipt, a provenance record — could say "this is the
 # same computation" without comparing whole objects.

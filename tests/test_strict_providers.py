@@ -1,4 +1,4 @@
-"""Shared fail-closed contract for native strict providers (THE-828..830)."""
+"""Shared fail-closed contract for native strict providers (..830)."""
 
 from __future__ import annotations
 

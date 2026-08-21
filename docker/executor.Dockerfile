@@ -1,4 +1,4 @@
-# The trusted CodeCalc executor image for the Linux strict boundary (THE-828).
+# The trusted CodeCalc executor image for the Linux strict boundary.
 #
 # This is the artifact `DockerGVisorRuntime` launches under `--runtime=runsc`:
 # it carries `codecalc-exec` (the sandboxed multi-language executor) and its

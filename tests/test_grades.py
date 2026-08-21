@@ -1,4 +1,4 @@
-"""Derivation-table tests for codecalc/grades.py (THE-785).
+"""Derivation-table tests for codecalc/grades.py.
 
 codecalc's verify_* tools already refuse to fabricate confidence — see
 tests/test_translation_verify.py for the classify_case/aggregate rules this

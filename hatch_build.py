@@ -45,7 +45,7 @@ except ImportError:  # pragma: no cover — test environments without hatchling
 
 _EXE_NAME = "codecalc-exec.exe" if os.name == "nt" else "codecalc-exec"
 
-#: Release-only fail-closed switch (THE-836). The warn-and-degrade behaviour
+#: Release-only fail-closed switch. The warn-and-degrade behaviour
 #: below is right for a dev checkout — a missing compiler must not block
 #: `pip install` — and wrong for a release build, where the same degradation
 #: silently publishes a pure-Python artifact whose installs cannot enforce

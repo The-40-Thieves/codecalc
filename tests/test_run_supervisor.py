@@ -1,4 +1,4 @@
-"""Provider-neutral run lifecycle contract (THE-831)."""
+"""Provider-neutral run lifecycle contract."""
 
 from __future__ import annotations
 

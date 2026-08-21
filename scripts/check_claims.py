@@ -16,7 +16,7 @@ Checked here:
   5. the size of the env allowlist AUDIT.md describes
   6. the post-fix suite snapshot AUDIT.md quotes
   7. the GitHub repo description, when CI supplies it with --description
-  8. the CI-invoked gate-script count the README quotes (THE-842)
+  8. the CI-invoked gate-script count the README quotes
 
 The last two were added after both drifted in a single day: the README's
 "18 test files … 689 assertions" survived three PRs that changed both numbers,
@@ -108,7 +108,7 @@ else:
     else:
         print(f"ok   languages: README and registry agree on {actual_langs}")
 
-# ── 2b. server.py's OWN instructions string (THE-879 GH #213) ──────────────
+# ── 2b. server.py's OWN instructions string (GH #213) ──────────────
 # The MCP `instructions=` field is metadata every client sees on connect,
 # before it has called a single tool — and it drifted to "30+ languages"
 # while README/SECURITY.md/the repo description all said "31", because none
@@ -204,7 +204,7 @@ else:
     # #13), and a total-shaped check could not have caught them, because a suite
     # that asserts nothing subtracts from a number that was never measured.
     #
-    # This is the part of THE-776 that can run on a bare checkout. The measured
+    # This is the part of that can run on a bare checkout. The measured
     # total cannot: no CI job runs all 21 suites (ci-python splits them across
     # `tests` and `sandbox + security`), and manufacturing one by teeing each step
     # would silently disable them, since GitHub's default shell is `bash -e` and
@@ -244,7 +244,7 @@ else:
         print(f"ok   all {len(per_file)} test files can fail the build "
               f"({len(HANDROLLED)} hand-rolled, checked for a nonzero exit instead)")
 
-# ── 4b. CI-invoked script count (THE-842) ───────────────────────────────────
+# ── 4b. CI-invoked script count ───────────────────────────────────
 # The README said "11 gate scripts", and nothing tied that number to any
 # property of the repo — the same shape as the test-file/assertion counts
 # above before check 4 existed. Three ways to derive "gate script" were

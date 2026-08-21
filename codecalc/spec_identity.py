@@ -1,4 +1,4 @@
-"""Canonical serialization and content identity for a computation request (THE-793).
+"""Canonical serialization and content identity for a computation request.
 
 THE-790 built the canonical REQUEST: `providers.ComputationSpec` is a frozen,
 transport-neutral dataclass that every provider, the execution service, the

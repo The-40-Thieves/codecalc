@@ -1,7 +1,7 @@
-"""Capability broker: policy-approved capabilities never exceed requested (THE-787).
+"""Capability broker: policy-approved capabilities never exceed requested.
 
-The residual THE-787 leaves after receipts (THE-782), the deny-by-default
-install allowlist (THE-791) and the strict-provider attestation (THE-790) are
+The residual leaves after receipts, the deny-by-default
+install allowlist and the strict-provider attestation are
 already shipped: a small policy layer between a request and its execution, whose
 one load-bearing invariant is that the set of capabilities policy APPROVES for a
 job can never exceed the set the requester REQUESTED. Policy may narrow; it may
@@ -270,7 +270,7 @@ def enforced_spec(spec, decision: BrokerDecision):
     declared `network_control` (it is in `decision.provider_supported`). Forcing
     `no_net` onto a provider that CANNOT enforce it is dishonest — and against a
     provider that RAISES on an unenforceable `no_net` (e.g. Piston) it converts a
-    disclosable leak into a hard `validation` error (THE-847). So under a
+    disclosable leak into a hard `validation` error. So under a
     NON-strict policy an unenforceable denial leaves the request AS-ASKED and the
     leak is disclosed through `decision.effective` (network stays effective, the
     contract's "disclosed as still effective where it cannot"); under a STRICT

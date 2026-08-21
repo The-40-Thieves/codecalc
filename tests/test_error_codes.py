@@ -1,4 +1,4 @@
-"""Stable error codes on the result contract (THE-781).
+"""Stable error codes on the result contract.
 
 Every failing tool result carried prose and nothing else — 121 distinct
 `"error":` strings across the package. A caller could show one to a human and
@@ -45,7 +45,7 @@ def check(name, cond, detail=""):
 check("every code has a remedy and every remedy a code",
       set(errors.REMEDIES) == errors.ALL_CODES,
       f"-> {sorted(set(errors.REMEDIES) ^ errors.ALL_CODES)}")
-check("the taxonomy is the 8 categories THE-781 names",
+check("the taxonomy is the 8 categories names",
       len(errors.ALL_CODES) == 8, f"-> {len(errors.ALL_CODES)}")
 
 # A typo'd code must not pass through. A caller branching on it takes the wrong
@@ -82,7 +82,7 @@ check("an inferred code is MARKED inferred",
 check("a code chosen at the raise site is not overwritten or relabelled",
       errors.ensure_code({"ok": False, "code": errors.TIMEOUT, "error": "x"}).get("code_inferred") is None)
 
-# THE-844 backstop: CPython >=3.14 reworded the interpreter-level recursion
+# backstop: CPython >=3.14 reworded the interpreter-level recursion
 # failure to "stack overflow" (older versions said "maximum recursion depth
 # exceeded"). classify() already maps RecursionError by TYPE (tested above), but
 # if a message ever reaches message-classification instead — a sympify site that
@@ -109,14 +109,14 @@ for _label, _call, _want in [
     check(f"{_label} -> {_want}", _r.get("code") == _want, f"-> {_r.get('code')}")
     check("  ...and carries an actionable remedy", bool(_r.get("remedy")))
 
-# THE-875: argument-validation rejections were blaming the USER for their own
+# argument-validation rejections were blaming the USER for their own
 # bad input. `_from_message`'s hint list had no vocabulary for "is zero",
 # "need at least", "negative" or ">=", so every one of these landed on
 # INTERNAL — whose remedy tells the caller "a defect in codecalc; the message
 # is worth reporting verbatim". A caller who passed a zero total or a
 # negative duration was being told to go file a bug about someone else's
 # mistake. None of these raise a typed exception (they `return {"ok": False,
-# ...}` directly, same as the THE-781 cases above), so classify()'s type
+# ...}` directly, same as the cases above), so classify()'s type
 # dispatch never sees them — only ensure_code()'s message match does.
 for _label, _call in [
     ("benchmark: too few sizes", lambda: server.benchmark("x", sizes="1,2")),
@@ -136,7 +136,7 @@ for _label, _call in [
           _r.get("code") == errors.VALIDATION,
           f"-> code={_r.get('code')} err={_r.get('error')!r}")
 
-# THE-844: the length cap must gate EVERY sympify entry point, not only the one
+# the length cap must gate EVERY sympify entry point, not only the one
 # in _eval_exact. Before the fix, algebraic_equiv / solve_expression /
 # limit_expression reached sp.sympify with a 120k-char string, blew the
 # recursion limit, and — because RecursionError's message wording is
@@ -161,8 +161,8 @@ for _label, _call in [
           and "too long" in str(_r.get("error")),
           f"-> code={_r.get('code')} err={str(_r.get('error'))[:50]!r}")
 
-# THE-881: the GUARD/POLICY half of THE-875's error-classification bug
-# (GH #214). THE-875 fixed argument-validation refusals landing on
+# the GUARD/POLICY half of THE-875's error-classification bug
+# (GH #214). fixed argument-validation refusals landing on
 # `internal`; this is the other 8 of 10 reachable cases — a guarded-eval
 # allowlist SUCCESSFULLY blocking a sandbox-escape attempt, a ceiling, a
 # leaked exception repr and a documented policy refusal, all of which
@@ -192,7 +192,7 @@ for _label, _call in [
     check(f"{_label} -> permission_denied",
           _r.get("code") == errors.PERMISSION_DENIED, f"-> {_r.get('code')}")
 
-# THE-881 Group 2: a ceiling is a ceiling, not a defect. RESOURCE_EXHAUSTED's
+# Group 2: a ceiling is a ceiling, not a defect. RESOURCE_EXHAUSTED's
 # own comment is "memory, output or process ceiling hit" — an exponent tower
 # or an oversized result is exactly that.
 for _label, _call in [
@@ -204,7 +204,7 @@ for _label, _call in [
           _r.get("code") == errors.RESOURCE_EXHAUSTED,
           f"-> code={_r.get('code')} err={str(_r.get('error'))[:60]!r}")
 
-# THE-881 REGRESSION CAUGHT IN REVIEW: safe_expr.reject_unsafe screens for TWO
+# REGRESSION CAUGHT IN REVIEW: safe_expr.reject_unsafe screens for TWO
 # different things through one message-string return — the RCE token/keyword
 # screen (a jail: `permission_denied`) and, in its own last line
 # (`_heavy_call_violation`), a heavy-argument CEILING like `factorial(100000)`
@@ -229,7 +229,7 @@ for _label, _call in [
           _r.get("code") == errors.RESOURCE_EXHAUSTED,
           f"-> code={_r.get('code')} err={str(_r.get('error'))[:60]!r}")
 
-# THE-881 Group 3: `Fraction(1, 1) / Fraction(0, 1)` raises ZeroDivisionError
+# Group 3: `Fraction(1, 1) / Fraction(0, 1)` raises ZeroDivisionError
 # whose message IS `str(Fraction(1, 0))` — the constructor argument, not a
 # sentence. It reached the caller verbatim as `"error": "Fraction(1, 0)"`.
 _r = server.calc_exact("1/0")
@@ -238,7 +238,7 @@ check("calc_exact('1/0') -> validation, not internal",
 check("  ...with a human message, not the exception's constructor arg",
       _r.get("error") == "division by zero", f"-> {_r.get('error')!r}")
 
-# THE-881 Group 4: install_package's unsupported-language refusal is a
+# Group 4: install_package's unsupported-language refusal is a
 # documented POLICY decision (packages.py's _UNSUPPORTED/_DECLINED_REASON),
 # same taxonomy as the allowlist denial a few lines below it in packages.py
 # that already returned permission_denied.

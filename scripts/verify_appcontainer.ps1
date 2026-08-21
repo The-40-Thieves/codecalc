@@ -1,6 +1,6 @@
-# THE-829 AppContainer isolation — real-Windows-11 acceptance harness.
+# AppContainer isolation — real-Windows-11 acceptance harness.
 #
-# Builds the executor from the current checkout (must include the THE-818 alias
+# Builds the executor from the current checkout (must include the alias
 # fix, or the AppContainer child broker-escapes the same way), plants a secret in
 # the user profile, then runs scripts\appcontainer_probe.py through codecalc TWICE
 # -- a control arm (no flag) and an AppContainer arm (CODECALC_WIN_APPCONTAINER=1)
@@ -140,7 +140,7 @@ Check "AC: network egress is BLOCKED"           ($ac.inner.can_network -eq $fals
 Check "AC: path was taken (disclosure present)" ($ac.outer.unenforced -contains "appcontainer_isolation_unverified_on_windows") "-> honesty token emitted"
 
 if ($fails.Count -eq 0) {
-    Write-Host "`n=== THE-829 AppContainer isolation VERIFIED on this box ==="
+    Write-Host "`n=== AppContainer isolation VERIFIED on this box ==="
     exit 0
 } else {
     Write-Host ("`n=== " + $fails.Count + " FAILURE(S): " + ($fails -join "; ") + " ===")

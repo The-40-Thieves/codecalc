@@ -265,7 +265,7 @@ fn ambient_job_allows_breakaway() -> Option<bool> {
     Some(silent)
 }
 
-/// Append a line to the path in `CODECALC_DIAG_JOB`, or do nothing (THE-818).
+/// Append a line to the path in `CODECALC_DIAG_JOB`, or do nothing.
 ///
 /// A FILE rather than stderr, deliberately: the executor's stderr IS the
 /// sandboxed program's stderr, and a diagnostic that contaminates the thing it
@@ -390,7 +390,7 @@ fn is_app_execution_alias(path: &Path) -> bool {
 /// Running untrusted code through the Store broker is strictly worse than not
 /// running it: it executes fully UNCONFINED, outside the sandbox job. So the
 /// resolver refuses rather than launch it, and tells the operator how to supply
-/// a real interpreter instead. (THE-818.)
+/// a real interpreter instead. (.)
 fn alias_refused_error(alias: &Path) -> io::Error {
     io::Error::new(
         io::ErrorKind::PermissionDenied,
@@ -540,7 +540,7 @@ fn create_appcontainer() -> io::Result<AppContainer> {
         .collect();
     let name_w = to_wide(&name);
     let display_w = to_wide("codecalc executor sandbox");
-    let desc_w = to_wide("codecalc least-privilege execution AppContainer (THE-829, unverified)");
+    let desc_w = to_wide("codecalc least-privilege execution AppContainer (unverified)");
 
     let mut sid: PSID = std::ptr::null_mut();
     let hr = unsafe {
@@ -740,7 +740,7 @@ fn ac_grant_marker(program: &std::path::Path, dir: &std::path::Path) -> Option<P
 
 /// Grant "ALL APPLICATION PACKAGES" read+execute on every node of `dir`'s tree —
 /// an EXPLICIT, non-inheritable ACE per node, the only form that reaches an
-/// interpreter's pre-existing, inheritance-protected files (THE-829). Returns the
+/// interpreter's pre-existing, inheritance-protected files. Returns the
 /// number of per-node failures: the root grant is a hard error (fail closed), but
 /// a single locked or odd descendant must not abort the whole grant, matching
 /// `icacls /T /C`. A non-zero count means the cache is NOT written, so the next
@@ -864,9 +864,9 @@ fn prepare_appcontainer(cmd: &Command) -> io::Result<(AppContainer, Box<SECURITY
 /// unverified.
 /// `sec_caps`, when `Some`, adds `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES`
 /// as a THIRD attribute in the SAME list, so the child is launched inside the
-/// AppContainer (THE-829) while still being assigned to `job` at creation
-/// (THE-818). The pointer and the struct it addresses must outlive this call —
-/// the caller owns both. `None` reproduces the two-attribute THE-818 topology
+/// AppContainer while still being assigned to `job` at creation
+///. The pointer and the struct it addresses must outlive this call —
+/// the caller owns both. `None` reproduces the two-attribute topology
 /// exactly.
 #[allow(clippy::too_many_arguments)]
 fn spawn_with_job_at_creation(
@@ -904,7 +904,7 @@ fn spawn_with_job_at_creation(
     let cwd_w = cmd.get_current_dir().map(|d| to_wide(&d.to_string_lossy()));
 
     // Attribute count: JOB_LIST + HANDLE_LIST always, plus SECURITY_CAPABILITIES
-    // when the AppContainer path (THE-829) supplied it. All live in ONE list.
+    // when the AppContainer path supplied it. All live in ONE list.
     let attr_count: u32 = if sec_caps.is_some() { 3 } else { 2 };
 
     // Two-call pattern: ask the size, allocate, initialise.
@@ -963,8 +963,8 @@ fn spawn_with_job_at_creation(
         return Err(e);
     }
 
-    // THE-829: the AppContainer's SECURITY_CAPABILITIES, in the same list. When
-    // absent this is skipped and the topology is byte-for-byte the THE-818 one.
+    // the AppContainer's SECURITY_CAPABILITIES, in the same list. When
+    // absent this is skipped and the topology is byte-for-byte the one.
     if let Some(caps) = sec_caps {
         let ok = unsafe {
             UpdateProcThreadAttribute(
@@ -1070,10 +1070,10 @@ pub fn spawn_and_wait(
     // disclosure below is untouched and still fires exactly when it did.
     //
     // CREATE_NO_WINDOW keeps console runtimes from flashing a window per run.
-    // THE-818: build the topology at creation so OUR job is the child's
+    // build the topology at creation so OUR job is the child's
     // IMMEDIATE job and its ActiveProcessLimit is the one consulted. The old
     // post-creation route remains only as an explicit compatibility escape.
-    // THE-829: the AppContainer strict backend, OFF by default and UNVERIFIED on
+    // the AppContainer strict backend, OFF by default and UNVERIFIED on
     // real Windows 11. It REQUIRES the creation-time path (it rides the same
     // STARTUPINFOEX attribute list), so requesting it forces `at_creation`.
     let appcontainer = std::env::var("CODECALC_WIN_APPCONTAINER")
@@ -1167,7 +1167,7 @@ pub fn spawn_and_wait(
     // unapplied is a documented platform limitation — a completely different
     // thing to build on.
     //
-    // ── AND NONE OF THE CHECKS BELOW CAN SEE THE FAILURE (THE-818) ───────────
+    // ── AND NONE OF THE CHECKS BELOW CAN SEE THE FAILURE ───────────
     //
     // Measured on Windows 11 Pro with the executor instrumented via
     // CODECALC_DIAG_JOB, three processes in one spawn chain reported three

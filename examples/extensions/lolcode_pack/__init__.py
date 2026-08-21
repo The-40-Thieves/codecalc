@@ -1,4 +1,4 @@
-"""Reference third-party language pack (THE-794).
+"""Reference third-party language pack.
 
 Proves the third-party registration + discovery path for
 ``codecalc.language_packs``: one toy language, LOLCODE, registered under a

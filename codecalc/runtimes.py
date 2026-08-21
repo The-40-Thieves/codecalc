@@ -375,7 +375,7 @@ def status(languages: str | list[str] | None = None) -> dict:
                 results[lang] = info
             matched.update({lang, info.get("tool")} & (want or set()))
 
-    # THE-895: `tier` rides along wherever the row's key is a codecalc
+    # `tier` rides along wherever the row's key is a codecalc
     # language (registry.LANGUAGES) rather than a manager-side extra like
     # "duckdb"/"gradle"/"tsc" that this module tracks but codecalc cannot
     # execute — those get `tier: None` rather than a fabricated value, since

@@ -1,4 +1,4 @@
-"""Renderer extension kind (THE-794): result envelope -> representation.
+"""Renderer extension kind: result envelope -> representation.
 
 Mirrors `providers.py`'s shape (a `Protocol`, a frozen result record, a
 registry that subclasses the shared `extensions.ExtensionRegistry`) per
@@ -29,7 +29,7 @@ RENDERER_INTERFACE_VERSION = "1.0.0"
 #: leading underscore) so `examples/extensions/csv_renderer` can reuse it
 #: rather than hand-copying a version range that could then drift from this
 #: one. Computed via `extensions.codecalc_compat_range`/`contract_compat_range`
-#: (THE-872) rather than hardcoded — a hardcoded upper bound goes stale the
+#: rather than hardcoded — a hardcoded upper bound goes stale the
 #: moment the running MINOR reaches it.
 COMPATIBLE_CODECALC = extensions.codecalc_compat_range(__version__)
 COMPATIBLE_CONTRACT = extensions.contract_compat_range(contract.CONTRACT_VERSION)

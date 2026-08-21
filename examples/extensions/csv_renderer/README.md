@@ -1,7 +1,7 @@
 # example.csv-renderer
 
 A reference **third-party** renderer for codecalc's renderer extension kind
-(THE-794). It is not registered by codecalc itself — it exists to prove the
+. It is not registered by codecalc itself — it exists to prove the
 third-party path: an `origin="third_party"` extension with a non-`builtin:`
 id registers into a `codecalc.renderers.RendererRegistry` and renders through
 it exactly like the built-in `TextRenderer` / `MarkdownTableRenderer` do.

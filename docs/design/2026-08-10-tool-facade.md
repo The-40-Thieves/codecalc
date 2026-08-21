@@ -163,7 +163,7 @@ required even though both are public today.
 
 ## Before this is built
 
-1. THE-781 freezes the v1 result contract, so the facade adopts an envelope rather than inventing or
+1. freezes the v1 result contract, so the facade adopts an envelope rather than inventing or
    competing with one.
 2. An MCP-independent `CapabilityRegistry` with `list` / `describe` / `invoke`. It serves the facade
    and the larger endpoint below equally, so it is not throwaway work under either outcome.

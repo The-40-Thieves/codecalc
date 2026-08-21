@@ -100,7 +100,7 @@ check(
     "the raw Windows spawn inherits only its three standard handles",
     "PROC_THREAD_ATTRIBUTE_HANDLE_LIST" in creation_time_job_path
     and "let inherited_handles = [" in creation_time_job_path
-    # THE-829 made the attribute count a variable (2, or 3 with the AppContainer
+    # made the attribute count a variable (2, or 3 with the AppContainer
     # SECURITY_CAPABILITIES attribute in the same list), so the literal `2` is
     # now `attr_count`. The property — the list is initialised before use — holds.
     and "InitializeProcThreadAttributeList(std::ptr::null_mut(), attr_count"
@@ -169,7 +169,7 @@ KNOWN_UNENFORCED = {
     "process_limit_not_enforced_ambient_job_allows_breakaway",
     "process_limit_membership_unverifiable_on_windows",
     "process_limit_enforcement_unknown_on_windows",
-    # THE-818: emitted on EVERY Windows run that assigns the child to the job
+    # emitted on EVERY Windows run that assigns the child to the job
     # after creation. Not a detected failure — an admission that no parent-side
     # call can verify the ceiling applied. The four strings above can each prove
     # a failure; none of them can prove success, so silence stopped meaning
@@ -189,7 +189,7 @@ KNOWN_UNENFORCED = {
     # default. Records that the run was launched inside a least-privilege
     # AppContainer (a SECURITY isolation boundary — payload denied the user
     # profile, the disk outside its workdir, and the network) layered on the
-    # THE-818 creation-time Job Object. It sits in `unenforced` because the
+    # creation-time Job Object. It sits in `unenforced` because the
     # boundary is IMPLEMENTED but UNVERIFIED on real Windows 11: the author
     # cannot run Win11, and a Server-SKU CI runner can confirm the path compiles,
     # runs and discloses but NOT that the isolation holds. Distinct from the
@@ -404,7 +404,7 @@ else:
     # Two different claims live in this array now. The shim being genuinely
     # UNAVAILABLE (main.rs's/windows.rs's own markers — no blocking happened
     # at all) is not the same as the shim being APPLIED but only best-effort
-    # (executor.py's own disclosure, E-1/THE-902 below) — only the first
+    # (executor.py's own disclosure, E-1 below) — only the first
     # should skip the "did it actually block" assertion.
     shim_absent = any(u in net_unenforced_list for u in
                        ("no_net_unavailable_on_windows",
@@ -416,7 +416,7 @@ else:
         check("--no-net blocks egress when the shim was applied",
               "EGRESS REACHED" not in (net.get("stdout") or ""),
               f"-> {(net.get('stdout') or '').strip()[:60]!r}")
-        # E-1 (THE-902): blocknet.c's LD_PRELOAD/dyld shim is a bypassable
+        # E-1: blocknet.c's LD_PRELOAD/dyld shim is a bypassable
         # symbol interposition, not a kernel egress block, so the result must
         # say so whenever it is what satisfied no_net — never a silent
         # unenforced=[] that reads as "fully enforced".
@@ -424,14 +424,14 @@ else:
               executor._NO_NET_BEST_EFFORT in net_unenforced_list,
               f"-> {net_unenforced_list}")
 
-    # ── E-1 (THE-902): the shim is bypassable via ctypes/dlsym ─────────────
+    # ── E-1: the shim is bypassable via ctypes/dlsym ─────────────
     # blocknet.c intercepts socket()/connect() via ELF symbol interposition,
     # which only covers calls that resolve those names through the ordinary
     # dynamic symbol table. `ctypes.CDLL(find_library("c")).socket` pulls the
     # symbol out of libc's OWN table via dlsym on a specific handle, which
     # does not consult LD_PRELOAD's global-scope override for that lookup —
     # so it reaches a real socket() even with the shim loaded. Verified live
-    # during the THE-900 audit (socket.socket(AF_INET) -> EACCES(13), but
+    # during the audit (socket.socket(AF_INET) -> EACCES(13), but
     # ctypes.CDLL(find_library("c")).socket(2, 1, 0) -> a working fd, same
     # process, same no_net=True). Guarded to skip cleanly rather than fail
     # where the probe cannot mean anything: no rust backend, no shim applied,

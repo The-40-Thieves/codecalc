@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""The published contract matches the code that produces it (THE-781).
+"""The published contract matches the code that produces it.
 
 `docs/contract/result-v1.schema.json` is what a client programs against. It is
 generated from `codecalc/contract.py`, and a generated document that nobody
 regenerates is a document that drifts — this repo has already shipped a repo
 description and an AUDIT.md snapshot that said "48 tools" for a day while the
 README correctly said 47, because the gate could only reach the README
-(THE-777). A published schema is the same failure with a worse blast radius:
+. A published schema is the same failure with a worse blast radius:
 the README misleads a reader, a wrong schema makes a strictly-validating client
 reject results that are correct.
 
@@ -31,7 +31,7 @@ So this asserts five things, all of them by re-deriving rather than by reading:
   4. `CONTRACT_VERSION` appears in the docs that explain the versioning policy.
      A version constant nobody documents is a number, not a policy.
 
-  5. THE REQUEST half (THE-793). `docs/contract/computation-spec-v1.schema.json`
+  5. THE REQUEST half. `docs/contract/computation-spec-v1.schema.json`
      matches `providers.ComputationSpec` field for field, and the golden vectors
      in `computation-spec-v1.vectors.json` still reproduce their canonical bytes
      and their sha256. The vectors are the only thing here that can see a change
@@ -161,7 +161,7 @@ if "--write" in sys.argv:
     sys.exit(0)
 
 # The doctor schema drifts the same way and for the same reason: generated, and
-# published for a client to program against. THE-780 asked for "a documented,
+# published for a client to program against. asked for "a documented,
 # versioned schema"; it is versioned by THIS contract rather than a third number.
 if not DOCTOR_SCHEMA_PATH.exists():
     fail(f"{DOCTOR_SCHEMA_PATH.relative_to(REPO)} does not exist — run "

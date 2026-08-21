@@ -182,7 +182,7 @@ _outside = {_outside!r}\nprint(t(lambda: open({_ws!r}+"/in.txt","w").write("ok")
 else:
     print(f"SKIP Landlock confinement probes — unavailable on {_sys.platform}")
 
-# THE-819: the macOS counterpart, via sandbox-exec (Seatbelt) rather than
+# the macOS counterpart, via sandbox-exec (Seatbelt) rather than
 # Landlock. Same shape as the Landlock probe above, on purpose — a write
 # outside the workspace refused, a same-UID canary outside it unreadable —
 # and gated to run its POSITIVE assertions only on darwin, where the real
@@ -340,7 +340,7 @@ _confinable = set(_pkgs._CONFINABLE)
 check("every declared installer is confined",
       _declared <= _confinable, f"-> unconfined: {sorted(_declared - _confinable)}")
 
-# THE-819: same claim, same warrant, for the macOS mechanism.
+# same claim, same warrant, for the macOS mechanism.
 _confinable_darwin = set(_pkgs._CONFINABLE_DARWIN)
 check("every declared installer is confined on macOS too",
       _declared <= _confinable_darwin,
@@ -372,7 +372,7 @@ if _ll.available():
         _f.rmdir() if _f.is_dir() else _f.unlink()
     pathlib.Path(_ws2).rmdir()
 
-# THE-819 Deliverable C: the Windows OFF-by-default flag is a documented
+# Deliverable C: the Windows OFF-by-default flag is a documented
 # NO-OP. There is no real Windows box here, so this is tested the way
 # tests/test_platform_contract.py tests Windows-only Rust source from
 # Linux — by exercising the LOGIC directly rather than needing the platform.

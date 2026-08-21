@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# README installed-path install smoke test (THE-882, GH #215).
+# README installed-path install smoke test (GH #215).
 #
 # WHY THIS EXISTS. `readme_install_smoke.sh` runs the README's **From source**
 # block, but the commands that actually broke in #199/#200/#201 are the

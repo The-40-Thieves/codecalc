@@ -26,7 +26,7 @@ one:
     executor is present to apply the shim
 
 AND A FOURTH PATH THAT IS NOT A CHILD PROCESS, which is why it went unnoticed
-for so long (THE-821):
+for so long:
 
   - analyze_complexity triggers a GRAMMAR DOWNLOAD, in-process, the first time a
     language is analysed. `tree-sitter-language-pack` ships a ~5 MB extension
@@ -128,7 +128,7 @@ for var in ("CODECALC_LLM_GATEWAY", "CODECALC_LLM_API_KEY", "CODECALC_LLM_MODEL"
 # `"{" not in u` excludes an f-string TEMPLATE, not a literal: this regex runs
 # over raw SOURCE text, so `f"http://{host}:*"` (server.py's serve-http
 # DNS-rebinding allowed_hosts/origins, built from whatever `--host` the
-# operator actually bound — THE-879 GH #211) is captured with its `{host}`
+# operator actually bound — GH #211) is captured with its `{host}`
 # placeholder still unresolved. No genuine hardcoded phone-home URL can
 # contain an unresolved `{...}`, so this narrows the ban to what it is meant
 # to catch without exempting anything a literal endpoint could hide behind.

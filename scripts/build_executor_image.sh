@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the trusted CodeCalc executor image for the strict boundary (THE-828).
+# Build the trusted CodeCalc executor image for the strict boundary.
 #
 # Produces a LOCAL image tagged `codecalc-exec:strict` (override with
 # CODECALC_STRICT_IMAGE) from docker/executor.Dockerfile. This is the image the

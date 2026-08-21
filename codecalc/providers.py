@@ -1,4 +1,4 @@
-"""Versioned execution-provider boundary (THE-790).
+"""Versioned execution-provider boundary.
 
 Providers receive a protocol-neutral :class:`ComputationSpec` and return the
 existing execution result contract unchanged.  The interface is intentionally
@@ -140,7 +140,7 @@ def build_spec_schema(dialect: str | None = None,
     )
 
 
-#: Semver of the execution receipt (THE-782). Separate from CONTRACT_VERSION
+#: Semver of the execution receipt. Separate from CONTRACT_VERSION
 #: and from COMPUTATION_SPEC_VERSION: those version what a result LOOKS like and
 #: what a request IS. This versions the provenance block attached to a result, so
 #: a reader can tell "this receipt predates source hashes" from "this run had no
@@ -152,7 +152,7 @@ def build_spec_schema(dialect: str | None = None,
 #: session (from `execute_session`) or null for a session-less run. Adding a key
 #: is MINOR.
 #:
-#: 1.2.0 (THE-787): added `capabilities` — the capability broker's four sets
+#: 1.2.0: added `capabilities` — the capability broker's four sets
 #: (requested / approved / provider_supported / effective, plus denied and the
 #: policy that produced them). Present whenever a decision is threaded through
 #: `attach_receipt` (every ExecutionService path), absent for an un-brokered
@@ -254,9 +254,9 @@ def _limit_receipt(spec: ComputationSpec, result: dict) -> dict:
 def _execution_receipt(spec: ComputationSpec, descriptor: dict,
                        result: dict, session_id: str | None = None,
                        capability_decision: object | None = None) -> dict:
-    """Provider identity, content hashes, determinism inputs, limits (THE-782).
+    """Provider identity, content hashes, determinism inputs, limits.
 
-    THE-790 attached provider identity and the limits receipt. Those answer
+    attached provider identity and the limits receipt. Those answer
     "who ran it" and "what did you ask for"; they do not answer the question
     someone re-reading a result a week later actually has, which is WHICH
     request this was. `spec_hash` answers it by content, `source_sha256` names
@@ -297,7 +297,7 @@ def _execution_receipt(spec: ComputationSpec, descriptor: dict,
         "determinism": _determinism_receipt(descriptor["provider_id"]),
         "limits": _limit_receipt(spec, result),
     }
-    # THE-787: the capability broker's four sets. Attached only when a decision
+    # the capability broker's four sets. Attached only when a decision
     # was threaded through (every ExecutionService path); an un-brokered
     # background run omits it rather than claiming a brokering that did not
     # happen. `to_receipt()` is duck-typed to avoid importing capabilities here.

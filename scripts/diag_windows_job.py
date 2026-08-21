@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-r"""Why the Windows process ceiling does not bind (THE-818), in one command.
+r"""Why the Windows process ceiling does not bind, in one command.
 
 Windows-only. Pure `ctypes` — no build beyond `codecalc-exec.exe` itself, which
 is the point: the reproduction has to be runnable on a box that has the binary

@@ -245,7 +245,7 @@ check("THE-843: an unmeasurable speedup is never accepted",
 # were CERTIFIED "verified faster" — a flaky false accept, not a bug in the
 # accept logic (those runs genuinely MEASURED >1.15; an epsilon over min_speedup
 # would not have caught 1.53x and would only harm genuine small wins). The fix
-# is to assert the DECISION against an INJECTED within-noise ratio (THE-808
+# is to assert the DECISION against an INJECTED within-noise ratio (
 # pattern), so the guarantee never depends on runner jitter. A realistic default
 # threshold (1.15) already rejects a within-noise ratio: the accept logic is
 # sound — what was flaky was measuring noise and feeding it back in.
@@ -284,7 +284,7 @@ if executor._rust:
           (o.get("verification") or {}).get("passed") is True)
 
     # The unchanged-candidate rejection is asserted DETERMINISTICALLY in the
-    # THE-845 block above, not here: a live FAST-vs-FAST timing measures noise
+    # block above, not here: a live FAST-vs-FAST timing measures noise
     # (identical O(1) code, runtime dominated by process-startup jitter) and its
     # median ratio occasionally exceeds min_speedup, flaking this assertion. The
     # rejections below carry what an optimiser that fabricates wins cannot: WHICH

@@ -1,4 +1,4 @@
-"""Language-pack extension kind (THE-794).
+"""Language-pack extension kind.
 
 A :class:`LanguagePack` describes how a set of languages is discovered,
 compiled, invoked, and how their diagnostics normalize — mirroring the shape
@@ -21,7 +21,7 @@ from . import __version__, contract, extensions, registry
 LANGUAGE_PACK_INTERFACE_VERSION = "1.0.0"
 
 #: This kind's declared compatibility, computed from the running codecalc and
-#: contract versions (THE-872) — see `codecalc.extensions.codecalc_compat_range`
+#: contract versions — see `codecalc.extensions.codecalc_compat_range`
 #: for why this must be computed rather than hardcoded.
 COMPATIBLE_CODECALC = extensions.codecalc_compat_range(__version__)
 COMPATIBLE_CONTRACT = extensions.contract_compat_range(contract.CONTRACT_VERSION)

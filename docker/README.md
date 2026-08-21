@@ -3,7 +3,7 @@
 Two different Dockerfiles live in this directory, for two different jobs.
 Do not conflate them.
 
-## `mcp-server.Dockerfile` — the MCP server (THE-870)
+## `mcp-server.Dockerfile` — the MCP server
 
 Packages codecalc itself as a container: `pip install codecalc` plus a
 handful of language runtimes, run as the stdio MCP server. This is the image

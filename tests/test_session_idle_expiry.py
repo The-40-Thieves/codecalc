@@ -1,4 +1,4 @@
-"""Idle-expiry for abandoned stateful sessions (THE-779 residual).
+"""Idle-expiry for abandoned stateful sessions (residual).
 
 "the one operational gap: a leaked session holds a worker process forever."
 `session_start` on python3/node spawns a real subprocess (see sessions.py's

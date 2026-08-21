@@ -1,4 +1,4 @@
-"""Verifier extension kind (THE-794).
+"""Verifier extension kind.
 
 A :class:`Verifier` inspects a claim and submits **evidence**; it never
 assigns a grade. ``codecalc/grades.py`` alone maps evidence to a grade — see
@@ -155,7 +155,7 @@ class VerifierRegistry(extensions.ExtensionRegistry[Verifier]):
 
 
 #: This kind's declared compatibility, computed from the running codecalc and
-#: contract versions (THE-872) — see `codecalc.extensions.codecalc_compat_range`
+#: contract versions — see `codecalc.extensions.codecalc_compat_range`
 #: for why this must be computed rather than hardcoded. Kept as module-level
 #: constants (rather than called inline below) so `ExecutedVerifier.manifest`
 #: reads the same as the other kinds' built-ins.

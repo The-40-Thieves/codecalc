@@ -39,9 +39,9 @@ windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     # CreateJobObjectW takes a SECURITY_ATTRIBUTES pointer, so it is gated behind
     # this feature even though we pass null. Also carries SECURITY_CAPABILITIES,
-    # SID_AND_ATTRIBUTES, PSID/ACL and FreeSid for the THE-829 AppContainer path.
+    # SID_AND_ATTRIBUTES, PSID/ACL and FreeSid for the AppContainer path.
     "Win32_Security",
-    # THE-829 (OFF by default, UNVERIFIED on real Windows 11): least-privilege
+    # (OFF by default, UNVERIFIED on real Windows 11): least-privilege
     # AppContainer profile create/derive/delete lives here...
     "Win32_Security_Isolation",
     # ...and the explicit-ACL grant (SetNamedSecurityInfoW / SetEntriesInAclW,
@@ -56,7 +56,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Diagnostics_ToolHelp",
     # FILE_ATTRIBUTE_REPARSE_POINT — the zero-length-stub fallback in
     # resolve_command_program refuses a Store app-execution alias reached by a
-    # path form the Microsoft\WindowsApps name match misses (THE-818).
+    # path form the Microsoft\WindowsApps name match misses.
     "Win32_Storage_FileSystem",
 ] }
 

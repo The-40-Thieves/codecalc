@@ -64,7 +64,7 @@ jobs:
         run: typos
 
   readme-install-smoke:
-    # THE-877 (#199, #200): nothing in CI ever ran the README's own "From
+    # (#199, #200): nothing in CI ever ran the README's own "From
     # source" install block, so it drifted from working — `cp
     # executor/target/release/codecalc-exec bin/` with no `mkdir -p bin` first,
     # against a fresh clone where `bin/` (gitignored) does not exist. This job
@@ -95,7 +95,7 @@ jobs:
         run: bash scripts/readme_install_smoke.sh
 
   installed-paths-smoke:
-    # THE-882 (#215): the from-source smoke above never covered the *installed*
+    # (#215): the from-source smoke above never covered the *installed*
     # paths — a built wheel's console commands (`codecalc --help`/`--version`,
     # `codecalc-prefetch-grammars`). Those are exactly what broke in #200/#201,
     # and #215 was the same class one layer up: main documented a command under
@@ -116,9 +116,9 @@ jobs:
         run: bash scripts/installed_paths_smoke.sh
 
   changelog:
-    # THE-885: CONTRIBUTING.md's "Changelog entries" section says a change a
+    # CONTRIBUTING.md's "Changelog entries" section says a change a
     # caller can observe needs a line in CHANGELOG.md in the same PR, and
-    # nothing enforced it — THE-875/876/877 all merged caller-observable
+    # nothing enforced it — all merged caller-observable
     # changes (new CLI flags, a new console script, error-code
     # reclassifications) with zero changelog lines, and the 0.3.2 release had
     # to reconstruct the notes from the commit log after the fact.
@@ -151,7 +151,7 @@ jobs:
         run: python scripts/check_changelog.py "$BASE_SHA"
 
   fuzz-smoke:
-    # THE-899: the standalone fuzzer (fuzz.py, under scripts/) mutation-fuzzes
+    # the standalone fuzzer (fuzz.py, under scripts/) mutation-fuzzes
     # safe_expr.classify_unsafe/safe_parse and sessions._jail/_session_dir,
     # asserting no uncaught exception, no blocking-builtin invocation, and no
     # unbounded hang. It earned this job the way CONTRIBUTING.md's "rule that

@@ -287,7 +287,7 @@ def _quote(path: str) -> str:
 def _canon(path: str) -> str:
     """Resolve symlinks BEFORE a path reaches a `(subpath ...)` rule.
 
-    THE-819 fix-round-1: Seatbelt matches a process's paths in their
+    fix-round-1: Seatbelt matches a process's paths in their
     kernel-RESOLVED (symlink-free) form, regardless of what string the
     process itself used to open() them. macOS's own temp directory is the
     textbook case that broke this: `tempfile.mkdtemp()` returns something

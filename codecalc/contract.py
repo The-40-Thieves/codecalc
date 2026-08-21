@@ -1,4 +1,4 @@
-"""The published result contract: one version number, one schema (THE-781).
+"""The published result contract: one version number, one schema.
 
 Slices 1 and 2 built the contract. Slice 1 (#120) made the two backends agree
 on a key set and gated it. Slice 2 (#121) replaced 121 free-form error strings
@@ -477,7 +477,7 @@ RESULT_SCHEMA = build_schema()
 
 
 def build_doctor_schema(dialect: str | None = None, schema_id: str | None = None) -> dict:
-    """The schema for `codecalc doctor --json` (THE-780).
+    """The schema for `codecalc doctor --json`.
 
     Under THIS contract's version and policy rather than a third number of its
     own. The doctor payload is machine-readable output a client programs
@@ -568,7 +568,7 @@ def build_doctor_schema(dialect: str | None = None, schema_id: str | None = None
                              "canary", "detail"],
                 "description": (
                     "The gVisor strict-execution boundary's MEASURED "
-                    "prerequisites (THE-828). Doctor calls the same host probe "
+                    "prerequisites. Doctor calls the same host probe "
                     "the runtime uses. `available` is fail-closed: false with a "
                     "named `detail` on any host that cannot prove the boundary "
                     "(no Docker, no cgroup v2, no runsc, or no executor image) — "
@@ -615,7 +615,7 @@ def build_doctor_schema(dialect: str | None = None, schema_id: str | None = None
                 "description": (
                     "tree-sitter grammars are NOT in the wheel: the pack fetches "
                     "each one on first use, in-process, into a local cache "
-                    "(THE-821). Reported so an offline or egress-restricted "
+                    ". Reported so an offline or egress-restricted "
                     "install can see it BEFORE analyze_complexity degrades to "
                     "regex-fallback. `cached: false` is not a fault."
                 ),

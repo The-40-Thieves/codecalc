@@ -111,7 +111,7 @@ def test_launch_is_shell_free_and_applies_every_outer_limit() -> None:
     check("launch drops every capability", "--cap-drop=ALL" in argv)
     check("launch forbids privilege gain", "no-new-privileges:true" in argv)
     # process_limit=24 is the GUEST budget; the host --pids-limit adds the gVisor
-    # sandbox overhead so the sandbox can boot at all (THE-849): 24 + 48 = 72.
+    # sandbox overhead so the sandbox can boot at all: 24 + 48 = 72.
     check("launch applies the effective PID limit", "--pids-limit=72" in argv)
     check("launch applies the memory limit", "--memory=256m" in argv)
     check("launch applies the CPU limit", "--cpus=1.5" in argv)
@@ -266,7 +266,7 @@ def test_host_stdin_temp_file_is_cleaned_up_even_when_the_run_fails() -> None:
 
 def test_effective_pids_limit_adds_sandbox_overhead_and_floors_the_smallest_budget() -> None:
     # The measured gVisor sandbox boot floor on Cave is ~30 host tasks and a
-    # trivial workload runs from ~34 (THE-849). The overhead must clear that even
+    # trivial workload runs from ~34. The overhead must clear that even
     # for the smallest possible guest budget, so process_limit=1 still boots.
     check("overhead clears the measured boot floor", _GVISOR_HOST_OVERHEAD >= 34)
     check("guest budget is preserved additively", _effective_pids_limit(24) == 24 + _GVISOR_HOST_OVERHEAD)
@@ -300,7 +300,7 @@ def test_effective_pids_limit_adds_sandbox_overhead_and_floors_the_smallest_budg
 
 
 def test_strict_receipt_discloses_the_guest_to_host_pid_translation() -> None:
-    """THE-850. THE-849 makes the host --pids-limit = process_limit + overhead,
+    """THE-850. makes the host --pids-limit = process_limit + overhead,
     but the strict receipt recorded neither the requested guest budget nor the
     effective host limit — so the translation was invisible to an auditor. The
     receipt must disclose both, plus the overhead applied, additively."""

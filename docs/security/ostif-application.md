@@ -105,7 +105,7 @@ An adversarial source-and-runtime review of, in rough priority order:
   `no_net` as best-effort on the symbol-shim path. A cross-vendor pass was attempted
   and **blocked by the other vendor's own security content filter** — recorded, and
   part of why an independent human review is wanted.
-- **Fuzzing** — `scripts/fuzz.py` (THE-899), a deterministic mutation fuzzer over
+- **Fuzzing** — `scripts/fuzz.py`, a deterministic mutation fuzzer over
   the safe-expression screen and the session path guards, wired into CI as a smoke
   gate, with coverage-guided continuous fuzzing (ClusterFuzzLite) added on top. It
   has already surfaced two DoS-shaped findings, since fixed.

@@ -5,7 +5,7 @@ Source of truth: [`codecalc/contract.py`](../../codecalc/contract.py)
 
 `1.3.0` is a MINOR bump over `1.2.0`: it ADDS a `tier` field to every entry in
 the `doctor` diagnostic document's `runtimes` array, plus a `tier_summary`
-block alongside the existing `runtime_summary` (THE-895). `tier` is a
+block alongside the existing `runtime_summary`. `tier` is a
 RELIABILITY claim — how much codecalc's own CI has verified a language's
 toolchain actually works — orthogonal to the existing `status` field, which is
 a RESOLUTION claim about what this one machine found on PATH. The execution

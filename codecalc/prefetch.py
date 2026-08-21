@@ -1,6 +1,6 @@
 """Download every tree-sitter grammar codecalc uses, before anything needs one.
 
-WHY THIS EXISTS (THE-820). `tree-sitter-language-pack` does not bundle grammars.
+WHY THIS EXISTS. `tree-sitter-language-pack` does not bundle grammars.
 It ships a ~4.7 MB native extension and downloads each grammar on FIRST USE into
 a versioned on-disk cache — measured: deleting `libtree_sitter_elixir.so` and
 asking for `elixir` again brought the file back, byte for byte, in 0.47s.
@@ -27,7 +27,7 @@ the cache is warm for every later run. `--print-cache-dir` emits the directory
 to preserve — that is what CI keys its cache on, and what an operator would
 copy into an air-gapped environment.
 
-THE-877: this used to live only at `scripts/prefetch_grammars.py`, which is
+this used to live only at `scripts/prefetch_grammars.py`, which is
 NOT in the wheel (`[tool.hatch.build.targets.wheel] packages = ["codecalc"]`
 does not carry `scripts/`), so an installed user (`uv tool install codecalc`)
 had no way to run it — the README told them to, and the command did not exist.

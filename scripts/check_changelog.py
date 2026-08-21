@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CHANGELOG gate: caller-facing source changed, `[Unreleased]` did not (THE-885).
+"""CHANGELOG gate: caller-facing source changed, `[Unreleased]` did not.
 
 CONTRIBUTING.md's "Changelog entries" section says a change a caller can
 observe needs a line in `CHANGELOG.md` in the same PR. Nothing enforced that:

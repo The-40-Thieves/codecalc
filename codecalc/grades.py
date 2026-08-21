@@ -1,4 +1,4 @@
-"""A small, versioned grade vocabulary for verify_* results (THE-785).
+"""A small, versioned grade vocabulary for verify_* results.
 
 The verifiers in this repo already refuse to fabricate confidence:
 `translation.classify_case` returns match/mismatch/inconclusive rather than
@@ -178,7 +178,7 @@ def grade_verify_optimization(result: dict, language: str) -> dict:
     # F7 (cross-vendor): `cross_checked` folds a correctness check AND a real
     # speedup into ONE grade, so it may not be issued unless the speedup is
     # real. optimization.py now refuses accepted=True unless min_speedup > 1 AND
-    # the measured ratio > 1 (THE-843, fixed on this branch), so an accepted
+    # the measured ratio > 1 (fixed on this branch), so an accepted
     # result can no longer carry a measured SLOWDOWN. This branch is kept as a
     # defensive floor at the grade boundary: even if a future caller of
     # grade_verify_optimization hands in an accepted result with ratio <= 1, a

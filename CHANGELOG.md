@@ -36,7 +36,7 @@ behind it.
 ### Security
 
 - **`no_net`'s result now discloses that the Rust executor's block is a
-  best-effort symbol shim, not a kernel egress block** (E-1, THE-900/THE-902).
+  best-effort symbol shim, not a kernel egress block** (E-1).
   `--no-net` intercepts `socket()`/`connect()` via `LD_PRELOAD` on Linux and
   `DYLD_INSERT_LIBRARIES` on macOS — ELF/dyld symbol interposition, which only
   covers calls that resolve those names through the ordinary dynamic symbol
@@ -56,7 +56,7 @@ behind it.
 
 ### Added
 
-- **`scripts/fuzz.py`** (THE-899): a mutation fuzzer over codecalc's two
+- **`scripts/fuzz.py`**: a mutation fuzzer over codecalc's two
   highest-risk caller-string surfaces — `safe_expr.classify_unsafe`/
   `safe_parse` (the screen between a caller expression and SymPy's
   `parse_expr`) and `sessions._jail`/`_session_dir` (the traversal guard
@@ -97,14 +97,14 @@ behind it.
   — such a reference resolves to a SymPy `FunctionClass`, whose `.args`
   attribute is an unbound `property` object rather than a tuple. Found by
   `scripts/fuzz.py`.
-- **`sessions._jail`** (THE-901) now refuses a session file `path` whose raw
+- **`sessions._jail`** now refuses a session file `path` whose raw
   length exceeds 4096 chars or whose segment count exceeds 256, BEFORE
   calling `Path.resolve()` on it — a `resource_exhausted` refusal in
   microseconds instead of the multi-second-to-tens-of-seconds server CPU cost
   `Path.resolve()` itself takes on a many-segment string (measured: ~1.3s at
   10k segments, ~3.4s at 20k, worse than linear). Reachable from
   `session_write_file`, `session_files`, and `session_read_file` (via
-  `_jail`), all caller-controlled. Found by `scripts/fuzz.py` (THE-899). A
+  `_jail`), all caller-controlled. Found by `scripts/fuzz.py`. A
   legitimate session path is a handful of segments; both caps sit far above
   any real use.
 
@@ -112,7 +112,7 @@ behind it.
 
 ### Added
 
-- **`codecalc setup [--client=NAME] [--write]`** (THE-897): guided onboarding
+- **`codecalc setup [--client=NAME] [--write]`**: guided onboarding
   from a clean install to a working MCP connection in one command, ending in
   a single verdict (`ready`/`degraded`/`not-ready`). Detects the calling
   client (`claude-desktop`/`claude-code`/`cursor`/`vscode`/`zed`) by probing
@@ -131,7 +131,7 @@ behind it.
   EXISTING config (every other server/setting passes through unchanged) and
   backs up the original to `<path>.codecalc-bak` first; an existing config
   file that is not valid JSON is refused rather than risked.
-- **`CODECALC_TOOLS`: register a slice of the 52-tool surface** (THE-896).
+- **`CODECALC_TOOLS`: register a slice of the 52-tool surface**.
   `tools/list` costs ~9.2k tokens up front (see README "Tool-definition token
   cost"), and the fix that stayed deliberately unbuilt is a facade
   (`docs/design/2026-08-10-tool-facade.md`) — collapsing every tool behind one
@@ -157,7 +157,7 @@ behind it.
   registers all 52, so the filter mechanism cannot silently shrink the
   no-configuration case the rest of CI's tool-count gates depend on.
 
-- **Per-language RELIABILITY tiers** (THE-895), orthogonal to the existing
+- **Per-language RELIABILITY tiers**, orthogonal to the existing
   resolution states (`supported`/`installed`/`unhealthy`/`available`). A
   runtime could report `installed` (its command resolved on PATH) while its
   toolchain was actually broken — a review's own smoke test found the rust
@@ -187,7 +187,7 @@ behind it.
   `tier` on every `doctor` `runtimes` entry, plus a `tier_summary` block —
   the execution result shape itself is unchanged.
 
-- **Per-session and global disk quotas for sessions** (THE-894). Nothing
+- **Per-session and global disk quotas for sessions**. Nothing
   previously bounded the TOTAL disk a session accumulates — only per-stream
   (`SPILL_CAPTURE_KB`, 4 MiB) and per-served-file (`RESOURCE_MAX_BYTES`,
   4 MiB) ceilings existed, so a session could fill the operator's disk one
@@ -229,7 +229,7 @@ behind it.
   makes `session_stop` no longer the only way out of a stuck session.
 
 - **`codecalc status` and `codecalc cleanup`: operator-facing session
-  disk-usage commands** (THE-898), the operational half of THE-894's disk
+  disk-usage commands**, the operational half of THE-894's disk
   quotas. `status [--json]` is a read-only snapshot — `SESSION_ROOT`,
   session count, per-session/global workspace disk usage, which sessions
   are idle-expired (the on-disk `.codecalc-session-expired` marker), the
@@ -279,7 +279,7 @@ behind it.
   codecalc-private — the "looks like a session dir" name filter is loose,
   not strict.
 
-- **Audit-log size-based rotation** (THE-898). `AuditLog` (`codecalc/audit.py`)
+- **Audit-log size-based rotation**. `AuditLog` (`codecalc/audit.py`)
   appended to one file forever — the same unbounded-growth gap THE-894
   closed for session workspaces, here for the append-only broker-decision
   trail. `CODECALC_AUDIT_MAX_MB` (default 10 MiB, read fresh per call, same
@@ -290,20 +290,20 @@ behind it.
   starts a fresh file. Checked and performed inside `emit()`'s own existing
   try/except: a rotation failure is swallowed exactly like an ordinary
   write failure — it can never fail the run it is describing.
-- **`codecalc --help` and `codecalc --version`** (THE-876, GH #201). Both used
+- **`codecalc --help` and `codecalc --version`** (GH #201). Both used
   to print nothing and exit 0 — `main()` recognised `doctor`/`serve-strict`/
   `serve-http` but treated the flags as "no subcommand" and started the stdio
   MCP server. They now print a usage block (naming the subcommands and that the
   default with no argument is the stdio server) / the version, and exit 0
   without starting anything.
 - **`codecalc-prefetch-grammars`, a console script that warms the tree-sitter
-  grammar cache** (THE-877, GH #200). The offline warm-up the README told
+  grammar cache** (GH #200). The offline warm-up the README told
   installed users to run lived only in `scripts/`, which the wheel does not
   ship — so the documented command did not exist for anyone who `pip
   install`ed rather than cloning. It now ships as a `[project.scripts]` entry
   point (`codecalc-prefetch-grammars`, `--print-cache-dir`) calling the same
   code the source script does.
-- **`matrix` — structured matrix operations** (THE-887, GH #223): det,
+- **`matrix` — structured matrix operations** (GH #223): det,
   inverse, eigenvalues, transpose, rank, trace. `evaluate_expression` has
   always refused `Matrix([[1,2],[3,4]])` with `"'[' is not permitted in an
   expression"` — `[`/`]` are denied at the token level to block a
@@ -324,7 +324,7 @@ behind it.
 ### Changed
 
 - **`evaluate_expression`'s `'[' is not permitted` refusal now names the
-  `matrix` tool** (THE-887, GH #223, modelled on GH #209's `bit_analysis`
+  `matrix` tool** (GH #223, modelled on GH #209's `bit_analysis`
   message style). What is refused is unchanged — `[`/`]` are still denied
   for the same RCE reason — only the message improves, from a bare `"'['
   is not permitted in an expression"` to one that says a matrix literal
@@ -333,7 +333,7 @@ behind it.
 ### Security
 
 - **A workspace-guard refusal (an out-of-workspace path, a malformed session
-  id) now carries the full result contract** (THE-879, #212a). Before this,
+  id) now carries the full result contract** (#212a). Before this,
   `session_write_file`/`session_files`/`session_read_file`/`session_run`/
   `session_stop`/`execute_code(session_id=...)` REFUSED such a request by
   raising, uncaught, all the way past `SessionService` and the `@mcp.tool()`
@@ -343,14 +343,14 @@ behind it.
   `"validation"` (a malformed id) `, "remedy": ...}`, same as any other
   refusal.
 - **A pydantic argument-validation error no longer echoes the caller's raw
-  value** (THE-879, #212b). A wrong-typed tool argument is rejected by the
+  value** (#212b). A wrong-typed tool argument is rejected by the
   MCP SDK's own schema validation before a tool body ever runs, and its
   error text included `input_value=<exactly what was passed>` verbatim — a
   potential info leak into logs/transcripts. A new server middleware strips
   that bracketed diagnostic from the error text before it leaves the
   process; the field name and reason are kept.
 - **`serve-http`'s DNS-rebinding protection now matches codecalc's own
-  loopback allowlist** (THE-879, #211). codecalc accepts any address in
+  loopback allowlist** (#211). codecalc accepts any address in
   127.0.0.0/8 plus `::1`/`localhost`/`ip6-localhost` as loopback-safe (no
   `CODECALC_HTTP_TOKEN` required), but the MCP SDK's own DNS-rebinding
   auto-default only recognises the three literal strings
@@ -359,14 +359,14 @@ behind it.
   `serve-http` now builds `TransportSecuritySettings` explicitly from the
   same host it just validated, so a rebinding `Host:` header is rejected
   (421) on every bind codecalc itself considers safe.
-- **`session_files` no longer stats through a symlink** (THE-879, #208). A
+- **`session_files` no longer stats through a symlink** (#208). A
   session could plant a symlink pointing outside the workspace, and the
   listing reported the TARGET's size — disclosing the existence and size of
   a path `session_read_file` already refuses to touch. A symlink entry is
   now reported as `{"type": "symlink"}`, never followed to describe what it
   points at; `session_artifacts` excludes symlinks from its listing for the
   same reason.
-- **A backgrounded descendant survived a NORMAL exit** (THE-878, GH #207). The
+- **A backgrounded descendant survived a NORMAL exit** (GH #207). The
   process-group/job kill only ever ran on the timeout/overflow path — a
   payload that spawned a detached child (`subprocess.Popen(['sleep',
   '1000'])`) and returned 0 hit neither, so the child outlived the run with
@@ -379,7 +379,7 @@ behind it.
   fallback's spawn also picked up `CREATE_NEW_PROCESS_GROUP` on Windows,
   where it was previously relying on `start_new_session`, a POSIX-only flag
   that Windows silently ignores.
-- **`max_output_kb` enforced a ~1 MiB floor regardless of the request** (THE-878,
+- **`max_output_kb` enforced a ~1 MiB floor regardless of the request** (
   GH #206). The Rust executor's RLIMIT_FSIZE — the ceiling on how much the
   sandboxed child is actually allowed to write before being stopped — was
   computed as `max_output_kb * 1024 * 4` clamped to a **1 MiB floor**. A
@@ -393,7 +393,7 @@ behind it.
   own), so the enforced ceiling stays a small, proportional multiple of the
   request.
 - **`solve_linear` no longer parses caller input through a live-builtins
-  `sympify`** (THE-888). Each side of each equation (and the single-expression
+  `sympify`**. Each side of each equation (and the single-expression
   no-`=` path) reached `sp.sympify(...)` directly, which uses SymPy's DEFAULT
   `global_dict` (`vars(builtins)` copied in) and skipped the unevaluated-shape
   check `evaluate_expression` already runs. `solve_linear('x = input()', 'x')`
@@ -402,15 +402,15 @@ behind it.
   seconds evaluating a power tower blind, riding the guard's own timeout
   instead of a fast refusal. Both pieces now parse via `parse_expr(global_dict=
   safe_global_dict())` with `reject_explosive` run on the unevaluated shape
-  first — the same fix THE-887 gave the `matrix` tool's per-cell parse.
+  first — the same fix gave the `matrix` tool's per-cell parse.
   `input()`/`breakpoint()`/`quit()` now parse to a clean error (matching
   `evaluate_expression`'s own outcome for the same string) instead of being
   called, and a power tower is now `resource_exhausted` in milliseconds
   instead of burning CPU seconds.
 - **`algebraic_equiv`, `solve_expression`, `limit_expression` (including its
   `point` argument) and `simplify_expression` no longer parse caller input
-  through a live-builtins `sympify`** (THE-889). Each reached a bare
-  `sp.sympify(...)` after `classify_unsafe` — the same gap THE-887/888 closed
+  through a live-builtins `sympify`**. Each reached a bare
+  `sp.sympify(...)` after `classify_unsafe` — the same gap closed
   in `matrix` and `solve_linear`: a screened, non-denylisted NAME can still
   be a live Python builtin. `simplify_expression('input()')` called the REAL
   `input()`, reading the child's stdin — shared fd 0 with a stdio MCP
@@ -419,8 +419,8 @@ behind it.
   `safe_expr.safe_parse()` — `parse_expr(global_dict=safe_global_dict())`
   with `reject_explosive` run on the unevaluated shape first — extracted
   from the three near-identical copies of this same pipeline that
-  `logic._evaluate_expression`, `logic._parse_solve_piece` (THE-888) and
-  `linalg._parse_entry` (THE-887) each hand-rolled; all three now delegate
+  `logic._evaluate_expression`, `logic._parse_solve_piece` and
+  `linalg._parse_entry` each hand-rolled; all three now delegate
   to the shared helper too, dropping the duplication (their own result
   shapes are unchanged), so `safe_parse` is the single place in the package
   that hands a caller string to SymPy's parser and a future caller cannot
@@ -446,7 +446,7 @@ behind it.
 ### Fixed
 
 - **A guard or policy refusal classified as `internal`, indistinguishable from
-  an unhandled crash** (THE-881, GH #214, the follow-up to THE-875's
+  an unhandled crash** (GH #214, the follow-up to THE-875's
   argument-validation half). `evaluate_expression`/`simplify_expression`/
   `solve_expression`/`solve_linear`'s guarded-evaluation allowlist
   successfully blocking a sandbox-escape attempt (`__import__(...)`,
@@ -474,19 +474,19 @@ behind it.
   to claiming a codecalc defect again.
 - The MCP server's `instructions=` metadata said "30+ languages"; every
   other surface (README, SECURITY.md, the repo description) said the actual
-  count, 31. `scripts/check_claims.py` now gates this string too (THE-879,
+  count, 31. `scripts/check_claims.py` now gates this string too (
   #213a).
 - `data_sizes(n)` accepted a negative `n` and reported negative KiB/MB
   instead of rejecting it — the same bug shape `human_duration` already
   guards against for a negative duration. It now returns a validation error
-  (THE-879, #213b).
+  (#213b).
 - `percentage`, `percentiles`, `collision_probability` and `human_duration`
   presented a `round()`ed float beside an exact one (a fraction string, an
   unrounded probability, the echoed input) with nothing marking which was
   which. Each result now carries a `"rounding"` field naming exactly which
-  of its own keys were rounded and to how many decimal digits (THE-879,
+  of its own keys were rounded and to how many decimal digits (
   #213c).
-- **Ten tools blamed the caller for their own bad input** (THE-875, GH #196).
+- **Ten tools blamed the caller for their own bad input** (GH #196).
   An argument-validation rejection — `percentage(total=0)`, `percentiles([])`,
   `calc_stats([5])`, `collision_probability(bits=0)`, `human_duration(-5)`,
   `epoch_time(-1)` among them — returned `code: internal`, whose remedy reads
@@ -495,18 +495,18 @@ behind it.
   matching is the classification layer; its hint list gained the missing
   validation phrases ("at least"/"is zero"/"negative"/">="/"unknown") so a
   caller's bad argument classifies as `validation`, not a codecalc defect.
-  (THE-881 above finished the other half — the guard/policy refusals.)
-- **`bit_analysis` on a negative `n`** (THE-876, GH #197). `bit_analysis(-1)`
+  (above finished the other half — the guard/policy refusals.)
+- **`bit_analysis` on a negative `n`** (GH #197). `bit_analysis(-1)`
   counted `abs(n)` — reporting `popcount: 1` while its own `is_power_of_two`
   said false — and silently dropped `next_power_of_two`. A negative `n` is now
   a validation error pointing at `bitop(width=W)`; `n=0` discloses
   `next_power_of_two: None` rather than omitting the key.
-- **`human_duration` sub-second and very-large inputs** (THE-876, GH #198).
+- **`human_duration` sub-second and very-large inputs** (GH #198).
   `human_duration(0.5)` returned `"0s"` (losing everything under a second) and
   `human_duration(1e30)` emitted 26 digits off a 17-digit float — precision the
   float never held. Sub-second inputs now surface as `ms`/`µs`, and values at
   or beyond 2^53 are capped to a scientific form instead of fabricating digits.
-- **`solve_linear` crashed on a single-variable system** (THE-890):
+- **`solve_linear` crashed on a single-variable system**:
   `solve_linear('2*x = 4', 'x')` raised `'Symbol' object is not iterable`.
   `sp.symbols(names)` returns a bare `Symbol` rather than a 1-tuple unless
   given more than one name or a trailing comma, and the code downstream
@@ -519,7 +519,7 @@ behind it.
 
 ### Fixed
 
-- MCP registry publishing (THE-867): `server.json`'s `description` shortened
+- MCP registry publishing: `server.json`'s `description` shortened
   to the registry's 100-char limit (was 117, causing a 422), the namespace
   corrected to the GitHub org's actual casing (`io.github.The-40-Thieves/codecalc`,
   the OIDC grant is case-sensitive and rejected the lowercase form with a
@@ -536,7 +536,7 @@ behind it.
 ### Added
 
 - **A versioned extension SDK — language packs, renderers, verifiers**
-  (THE-794). Every extension kind now has a versioned `Protocol`, a registry
+ . Every extension kind now has a versioned `Protocol`, a registry
   enforcing identity/no-impersonation, interface-major compatibility, a
   permission allowlist and a `CODECALC_DISABLE_THIRD_PARTY_EXTENSIONS` kill
   switch, plus integrity verification wired into `register()`. Each kind
@@ -544,17 +544,17 @@ behind it.
   extension as its own second-consumer conformance check; `doctor` gains an
   `extensions` discovery block and `docs/extensions/README.md` documents the
   trust model (trusted-by-installation, not a sandbox).
-- **Strict gVisor runtime forwards program `stdin` to the guest** (THE-859),
+- **Strict gVisor runtime forwards program `stdin` to the guest**,
   mirroring the local Rust executor path via a read-only bind-mounted
   per-run file.
 - **One-command Linux strict bootstrap**, `scripts/setup-strict.sh`
-  (THE-869) — preflight, pull the pinned image, run the deep `gvisor-v1`
+  — preflight, pull the pinned image, run the deep `gvisor-v1`
   canary, then launch.
 - **MCP registry metadata** — `server.json`, an `mcp-name` PyPI-ownership
-  marker, and a `uvx codecalc` client install snippet (THE-867), preparing
+  marker, and a `uvx codecalc` client install snippet, preparing
   repo-side discovery readiness for the registry publish (the
   `mcp-publisher` publish itself is owner-gated and separate).
-- **Operator deployment runbook**, `docs/deployment/README.md` (THE-864),
+- **Operator deployment runbook**, `docs/deployment/README.md`,
   covering all three strict backends (Linux/gVisor+Docker,
   Windows/AppContainer, macOS/remote-Linux) plus startup canary, orphan
   recovery, fail-closed causes and quota tuning.
@@ -565,15 +565,15 @@ behind it.
 ### Changed
 
 - **Strict service forwards `max_cpu` to the guest's `cpu_count`, clamped to
-  `MAX_CPU_COUNT`** (THE-866). It previously silently dropped the field, so
+  `MAX_CPU_COUNT`**. It previously silently dropped the field, so
   every remote strict run used the default `cpu_count=1.0`.
 - **README leads with a value proposition and a "when to use codecalc"
-  section** (THE-868), honest about when a hosted sandbox or the vendor's
+  section**, honest about when a hosted sandbox or the vendor's
   own interpreter is the better fit.
 
 ### Fixed
 
-- `compare_execution` (THE-802): a cold-start timeout on one language no
+- `compare_execution`: a cold-start timeout on one language no
   longer ends the story for that language. If a run comes back `timed_out`,
   it gets exactly one warm retry with the same arguments; a recovered retry
   is reported as the row's result (with `cold_retry`, `cold_retry_recovered`,
@@ -589,8 +589,8 @@ behind it.
   timeout remains an unchanged hard limit — only `compare_execution`'s
   handling of a `timed_out` result changed. A deterministic non-timeout
   failure (e.g. a compile error) is never retried.
-- **Windows CI Defender path exclusions** (THE-865) cut interpreter
-  cold-start scanning, the dominant contributor to the THE-802 flake class.
+- **Windows CI Defender path exclusions** cut interpreter
+  cold-start scanning, the dominant contributor to the flake class.
 
 ### Docs
 
@@ -600,7 +600,7 @@ behind it.
 ### Removed
 
 - **Dropped the unused `serde` direct dependency from the executor crate**
-  (THE-863) — only `serde_json` was ever used directly; trims the
+  — only `serde_json` was ever used directly; trims the
   untrusted-code binary's dependency surface.
 
 ## [0.2.0] — 2026-08-19
@@ -618,7 +618,7 @@ compatible addition bumps MINOR, it does not leave the version unchanged. A
 
 ### Added
 
-- **`install_package` confinement extended to macOS** (THE-819). Layer 2 of
+- **`install_package` confinement extended to macOS**. Layer 2 of
   the #23 mitigation — bounding what the installer *binary itself* can reach
   on disk, on top of Layer 1's "do not run its install-time code at all" —
   was Linux-only (`landlock.abi_version()` returns 0 off Linux), leaving
@@ -635,13 +635,13 @@ compatible addition bumps MINOR, it does not leave the version unchanged. A
   Landlock probe uses, gated to execute on `darwin` (CI's `macos-latest` leg)
   and to SKIP with a recorded reason everywhere else — the mechanism is
   proven by macOS CI, not argued from documentation. Windows gets no claimed
-  confinement (THE-818's job-object work is unverified on real Windows 11)
+  confinement ('s job-object work is unverified on real Windows 11)
   but a documented no-op opt-in, `CODECALC_WIN_INSTALL_CONFINE`, adds a
   `package_install_confinement_unverified_on_windows` disclosure without
   claiming enforcement; the base `package_install_not_confined_no_landlock`
   disclosure keeps firing on Windows exactly as before.
 
-- **Linux strict gVisor boundary made real** (THE-828). A real executor
+- **Linux strict gVisor boundary made real**. A real executor
   container image (`docker/executor.Dockerfile`, multi-stage/minimal/non-root,
   carrying `codecalc-exec` + `blocknet.so` + python3);
   `DockerGVisorRuntime.recover_orphans()` reconciles owned strict containers by
@@ -660,7 +660,7 @@ compatible addition bumps MINOR, it does not leave the version unchanged. A
   the next entry); GitHub-CI-under-runsc remains out of reach — see
   `docs/contract/provider-v1.md`.
 
-- **Published, digest-pinned strict executor image** (THE-828, image residual).
+- **Published, digest-pinned strict executor image** (image residual).
   The `publish-executor-image` workflow (`workflow_dispatch`) builds
   `docker/executor.Dockerfile` for `linux/amd64` + `linux/arm64` (buildx + QEMU),
   pushes it to `ghcr.io/the-40-thieves/codecalc-exec` (GHCR, `GITHUB_TOKEN` with
@@ -675,7 +675,7 @@ compatible addition bumps MINOR, it does not leave the version unchanged. A
   suite keep using unchanged. The actual publish and first digest-pin still require
   an operator `workflow_dispatch` (there is no push/PR trigger).
 
-- **Background runs: `run_submit`, `run_inspect`, `run_cancel`** (THE-778).
+- **Background runs: `run_submit`, `run_inspect`, `run_cancel`**.
   Submit code and get a `run_id` back immediately instead of holding an MCP
   call open for the whole computation; poll with `run_inspect`, stop early with
   `run_cancel`. Cancellation is honest about a provider that cannot cancel, and
@@ -683,7 +683,7 @@ compatible addition bumps MINOR, it does not leave the version unchanged. A
   is capped (`CODECALC_MAX_ACTIVE_RUNS`, default 64) and past the cap a
   submission is refused with `resource_exhausted` rather than growing the run
   table without bound.
-- **Oversized session output spills to a workspace artifact** (THE-783).
+- **Oversized session output spills to a workspace artifact**.
   Session output that the default 64 KiB cap would have truncated and DROPPED
   is captured up to 4 MiB and written into the session workspace instead;
   `stdout_spill` / `stderr_spill` carry a `codecalc://session/{id}/files/...`
@@ -691,18 +691,18 @@ compatible addition bumps MINOR, it does not leave the version unchanged. A
   spill is fuller than the inline value but still not the whole stream. The
   inline value is byte-for-byte what it always was.
 - **An execution receipt** naming WHAT ran and under WHICH conditions
-  (THE-782), alongside a published `ComputationSpec` schema with a content hash
-  (THE-793), so two runs of the same request are identifiable as such.
-- **A grade vocabulary for `verify_*` results** (THE-785). `z3_check`'s grading
+ , alongside a published `ComputationSpec` schema with a content hash
+ , so two runs of the same request are identifiable as such.
+- **A grade vocabulary for `verify_*` results**. `z3_check`'s grading
   is narrowed to unsat-only rather than reading a `sat` answer as a proof.
-- **Idle-expiry for abandoned stateful sessions** (THE-779).
+- **Idle-expiry for abandoned stateful sessions**.
   `CODECALC_SESSION_IDLE_TTL_SECONDS`, unset by default: a session untouched
   for longer than this has its worker reaped on the next access, and a
   subsequent call gets `ok: false` with the stable `worker_failure` code —
   never a silent respawn. Every session entry point counts as a touch, not only
   `execute`.
-- **A deny-by-default operator allowlist for package installs** (THE-791).
-- **A capability broker, deny-by-default network, and an audit stream** (THE-787).
+- **A deny-by-default operator allowlist for package installs**.
+- **A capability broker, deny-by-default network, and an audit stream**.
   A small policy layer whose one invariant is that the capabilities policy
   APPROVES for a job never exceed the ones the requester REQUESTED. Applied
   identically on the synchronous (`execute_code`/stream/session) and background
@@ -722,14 +722,14 @@ compatible addition bumps MINOR, it does not leave the version unchanged. A
   are appended to an audit stream at `~/.codecalc/audit/audit.log`
   (`CODECALC_AUDIT_LOG` relocates or disables it), each event source-safe
   (injected clock) and redacted of secrets.
-- **A gate on the README's own gate-script count** (THE-842), so the count of
+- **A gate on the README's own gate-script count**, so the count of
   CI-invoked scripts cannot drift from the workflows the way the tool count
   once did.
 
 ### Fixed
 
 - **Strict `/v1` service pinned a worker thread on a slow-drip body (slowloris)**
-  (THE-851). The pre-auth body read (`rfile.read(length)`, after the 1 MiB
+ . The pre-auth body read (`rfile.read(length)`, after the 1 MiB
   `MAX_CONTENT_LENGTH` check) had no read timeout, so a client that declared a
   legitimate sub-cap `Content-Length` then dribbled the bytes blocked a
   `ThreadingHTTPServer` worker indefinitely — before `dispatch()`, and unbounded
@@ -739,7 +739,7 @@ compatible addition bumps MINOR, it does not leave the version unchanged. A
   connection and frees the thread. The 413 oversized path and auth-gate ordering
   are unchanged.
 - **Non-strict `deny-network` hard-errored on a provider that cannot enforce it**
-  (THE-847). The broker forced `no_net` onto the run whenever `network` was
+ . The broker forced `no_net` onto the run whenever `network` was
   denied, regardless of whether the selected provider could enforce it. A
   provider that RAISES on an unenforceable `no_net` — the Piston adapter, whose
   network toggle is a server setting, not a per-request control — then returned a
@@ -1010,7 +1010,7 @@ it, so there was no upgrade path to describe — only what the thing is.
   `process_limit_not_enforced_ambient_job_allows_breakaway`,
   `process_limit_membership_unverifiable_on_windows` or
   `process_limit_enforcement_unknown_on_windows`. The ceiling is **not** repaired
-  — the root cause is open (THE-818) — but a caller can now tell an applied
+  — the root cause is open — but a caller can now tell an applied
   guarantee from an absent one, which is the difference that matters. GitHub's
   Server-SKU runner does bind it, which is why CI never showed this.
 

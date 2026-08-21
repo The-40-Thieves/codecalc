@@ -1,4 +1,4 @@
-# ClusterFuzzLite build image (THE-899 follow-up: coverage-guided discovery
+# ClusterFuzzLite build image (follow-up: coverage-guided discovery
 # to complement scripts/fuzz.py's deterministic seeded-mutation gate — see
 # fuzz/README.md for the split between the two).
 #

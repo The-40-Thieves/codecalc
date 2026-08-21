@@ -1,4 +1,4 @@
-# The codecalc MCP server image, for the Docker MCP Catalog (THE-870).
+# The codecalc MCP server image, for the Docker MCP Catalog.
 #
 # This is NOT docker/executor.Dockerfile. That image is the trusted artifact
 # the STRICT gVisor boundary launches (`DockerGVisorRuntime`, runtime=runsc)

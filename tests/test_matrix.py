@@ -1,4 +1,4 @@
-"""matrix (THE-887, GH #223): det/inverse/eigenvalues/transpose/rank/trace,
+"""matrix (GH #223): det/inverse/eigenvalues/transpose/rank/trace,
 validation, and per-entry RCE screening — values checkable by hand.
 
 `evaluate_expression` refuses `Matrix([[1,2],[3,4]])` because `[`/`]` are
@@ -102,7 +102,7 @@ check("a singular matrix's inverse is a clean refusal",
       and "singular" in r["error"], f"-> {r}")
 
 # ── the whole point: a malicious ENTRY is refused exactly like              ──
-# ── evaluate_expression refuses the same string (THE-887's safety model)    ──
+# ── evaluate_expression refuses the same string ('s safety model)    ──
 
 for _payload in ("().__class__", "__import__('os').system('id')", "x.__class__"):
     r = linalg.matrix([[1, _payload], [3, 4]], "det")
@@ -131,7 +131,7 @@ check("a boolean entry is rejected rather than silently coerced to 0/1",
       r["ok"] is False and r["code"] == errors.VALIDATION, f"-> {r}")
 
 # ── defense-in-depth gaps closed to match evaluate_expression's own bound ──
-# (adversarial review, THE-887): classify_unsafe alone waves `input`/
+# (adversarial review): classify_unsafe alone waves `input`/
 # `breakpoint`/`9**9**9**9` through — none of them carry '.', '[', a leading
 # underscore or a denied keyword. What stops them is parsing string entries
 # through safe_global_dict() (no live Python builtins in it) and running

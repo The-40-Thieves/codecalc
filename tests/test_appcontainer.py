@@ -6,7 +6,7 @@ observable on a real Windows 11 desktop. This suite therefore asserts EXACTLY
 what is checkable from where it runs, and NOTHING it cannot see:
 
   * everywhere (source-scan): the AppContainer path is present, fails closed,
-    cleans up, composes with the THE-818 job topology, and discloses itself as
+    cleans up, composes with the job topology, and discloses itself as
     UNVERIFIED via `appcontainer_isolation_unverified_on_windows`.
   * on Windows with the native executor (runtime): setting
     CODECALC_WIN_APPCONTAINER=1 makes the executor still produce valid JSON and
@@ -58,7 +58,7 @@ appc_path = WINDOWS_RS.split("fn prepare_appcontainer", 1)
 check(
     "the AppContainer strict backend exists in the source",
     len(appc_path) == 2 and "fn create_appcontainer" in WINDOWS_RS,
-    "-> THE-829 code is present",
+    "-> code is present",
 )
 check(
     "it is gated OFF by default behind CODECALC_WIN_APPCONTAINER",
@@ -105,7 +105,7 @@ check(
     "-> the `?` propagates the error instead of downgrading",
 )
 check(
-    "it preserves the THE-818 creation-time job assignment",
+    "it preserves the creation-time job assignment",
     "PROC_THREAD_ATTRIBUTE_JOB_LIST" in WINDOWS_RS
     and "spawn_with_job_at_creation" in WINDOWS_RS,
     "-> both attributes ride one attribute list",

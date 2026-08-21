@@ -1,4 +1,4 @@
-"""Protocol-neutral execution service and MCP adapter parity (THE-790)."""
+"""Protocol-neutral execution service and MCP adapter parity."""
 
 from __future__ import annotations
 
@@ -357,7 +357,7 @@ def test_service_receipt_reports_requested_and_provider_enforced_limits() -> Non
           ])
 
 
-# ═══ the receipt names WHAT ran and under WHICH conditions (THE-782) ═══════
+# ═══ the receipt names WHAT ran and under WHICH conditions ═══════
 #
 # The limits half above answers "what did you ask for and what did the provider
 # claim to enforce". It does not answer the two questions someone re-reading a
@@ -1004,7 +1004,7 @@ def test_main_runs_the_same_server_over_explicit_streamable_http() -> None:
               "port": 8123,
               "json_response": True,
               "stateless_http": True,
-              # THE-879 GH #211: built from the SAME host this process just
+              # GH #211: built from the SAME host this process just
               # validated as loopback-safe, not left to the SDK's own
               # auto-default — which only recognises the three literal
               # strings "127.0.0.1"/"localhost"/"::1" and would have left
@@ -1535,7 +1535,7 @@ def test_session_output_spills_past_the_default_cap_instead_of_dropping_it() -> 
 
 
 def test_session_output_spill_is_faithful_to_the_pipelines_str_representation() -> None:
-    """NOT "binary-safe" (THE-778/783 fix round, review Important #4):
+    """NOT "binary-safe" (fix round, review Important #4):
     codecalc's WHOLE pipeline already decodes stdout/stderr with
     errors="replace" before spill_if_truncated's code ever sees a `str` —
     both backends do this (executor.py's `_trim`, the Rust binary's own

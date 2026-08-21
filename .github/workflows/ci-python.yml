@@ -72,7 +72,7 @@ jobs:
         with:
           version: '0.12.1'
           python-version: ${{ matrix.python }}
-      # THE-802: Defender first-spawn scanning of interpreters is the #1 cold-start latency amplifier on windows-latest
+      # Defender first-spawn scanning of interpreters is the #1 cold-start latency amplifier on windows-latest
       - name: Defender path exclusions (cold-start scan mitigation)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -109,7 +109,7 @@ jobs:
       # the lock — that step is what proves the extras are actually optional.
       - name: install (locked, with extras)
         run: uv sync --locked --all-extras
-      # ── tree-sitter grammars are DOWNLOADED, not bundled (THE-820) ──────────────────────────────
+      # ── tree-sitter grammars are DOWNLOADED, not bundled ──────────────────────────────
       #
       # `tree-sitter-language-pack` ships a ~4.7 MB native extension and fetches each grammar on
       # FIRST USE into a versioned on-disk cache. Measured: a cold cache pulls 28 grammars / 89 MB
@@ -154,7 +154,7 @@ jobs:
         # The cheapest possible Windows regression test. Before the platform
         # split this raised ModuleNotFoundError: no module named 'resource'.
         run: uv run --no-sync python -c "import codecalc, codecalc.executor, codecalc.sessions, codecalc.server; print('import ok on', __import__('sys').platform)"
-      # THE-780: doctor is the documented install-verification step, so it has to
+      # doctor is the documented install-verification step, so it has to
       # work on every OS a user installs on — and its exit code is load-bearing
       # (0 = can execute, 1 = cannot), which means a Dockerfile or provisioning
       # script depends on it being right here. This job has no built binary and
@@ -187,7 +187,7 @@ jobs:
         run: |
           uv run --no-sync python tests/test_strict_providers.py
           uv run --no-sync python tests/test_gvisor_runtime.py
-      # THE-830: the SERVER half of the strict protocol — the authenticated `/v1`
+      # the SERVER half of the strict protocol — the authenticated `/v1`
       # service RemoteStrictExecutionProvider talks to. The protocol and auth
       # planes drive the REAL client against an in-process http.server over a
       # loopback socket with an injected (mock) runtime, so they need no Docker
@@ -206,7 +206,7 @@ jobs:
       - name: strict published-image digest lock (fail-closed execution path)
         shell: bash
         run: uv run --no-sync python tests/test_strict_image_lock.py
-      # The REAL hostile-workload conformance (THE-828). It launches the executor
+      # The REAL hostile-workload conformance. It launches the executor
       # image under `--runtime=runsc` and drives fork/memory bombs, descendant
       # escape, egress and filesystem escape through real containers. GitHub
       # runners have NO runsc registered, so this SELF-SKIPS here (exit 0, with a
@@ -220,7 +220,7 @@ jobs:
         run: uv run --no-sync python tests/test_gvisor_conformance.py
       # The provider boundary and the execution service. Neither ran in CI at
       # all before this — seven suites do not, and these two are where the
-      # ComputationSpec identity (THE-793) and the execution receipt (THE-782)
+      # ComputationSpec identity and the execution receipt
       # are asserted, so every claim they make was verified on one developer's
       # Linux box and nowhere else. A test that never runs is a comment.
       #
@@ -230,7 +230,7 @@ jobs:
       # run. Sessions are already exercised here by test_session_jail.py and
       # test_contract.py, so the Windows leg is not new ground.
       #
-      # Running them on all three OSes is the point for THE-793 specifically:
+      # Running them on all three OSes is the point for specifically:
       # the golden vectors claim the canonical bytes are identical everywhere,
       # and a Linux-only run cannot make that claim.
       - name: extension SDK (framework + language packs, renderers, verifiers)
@@ -257,7 +257,7 @@ jobs:
       - name: translation verification gate
         shell: bash
         run: uv run --no-sync python tests/test_translation_verify.py
-      # THE-785: the grade vocabulary (cross_checked / solver_proven / ungraded,
+      # the grade vocabulary (cross_checked / solver_proven / ungraded,
       # plus the reserved executed) derived from evidence verify_translation,
       # verify_optimization and z3_check already emit. Mostly pure — fixtures are
       # hand-built evidence dicts, same reasoning as the translation verification
@@ -286,10 +286,10 @@ jobs:
       - name: result contract (schema validity + product conformance)
         shell: bash
         run: uv run --no-sync python tests/test_contract.py
-      # THE-781/THE-844: the stable error-code taxonomy. Pure logic over
+      # the stable error-code taxonomy. Pure logic over
       # classify()/ensure_code() plus a handful of symbolic calls (sympy, from
       # --all-extras) — no sandbox, no runtimes — so it runs on the full matrix.
-      # The full matrix is the point for THE-844 specifically: RecursionError's
+      # The full matrix is the point for specifically: RecursionError's
       # message wording is interpreter-specific ("maximum recursion depth
       # exceeded" on <3.14, "stack overflow" on >=3.14), so an oversized
       # expression classified as `resource_exhausted` on 3.11 and `internal` on
@@ -297,7 +297,7 @@ jobs:
       - name: error-code taxonomy (result contract codes)
         shell: bash
         run: uv run --no-sync python tests/test_error_codes.py
-      # THE-844 behavioral floor: every public sympy-backed tool must reject an
+      # behavioral floor: every public sympy-backed tool must reject an
       # oversized expression VIA THE LENGTH CAP (before sp.sympify), not via the
       # "stack overflow" message backstop. Pure logic over the tool surface (no
       # sandbox, no runtimes), and it belongs on the full matrix for the same
@@ -308,14 +308,14 @@ jobs:
       - name: expression length cap (every sympy entry point, before parse)
         shell: bash
         run: uv run --no-sync python tests/test_expr_length_cap.py
-      # The run-lifecycle state machine (THE-778/THE-831): identity, cancel,
+      # The run-lifecycle state machine: identity, cancel,
       # cleanup and crash-recovery journalling, all against fake providers —
       # no sandbox, no native executor, so it belongs on the full matrix
       # alongside the other protocol-neutral suites rather than in `sandbox`.
       - name: run supervisor lifecycle
         shell: bash
         run: uv run --no-sync python tests/test_run_supervisor.py
-      # THE-831 sixth criterion: output backpressure cannot deadlock the payload
+      # sixth criterion: output backpressure cannot deadlock the payload
       # or supervisor. Unlike the lifecycle suite above (fake providers, no real
       # output), this drives the REAL path — RunSupervisor's thread pool ->
       # executor.execute -> the bounded output capture — with a portable python3
@@ -352,14 +352,14 @@ jobs:
       - name: package install isolation
         shell: bash
         run: uv run --no-sync python tests/test_package_isolation.py
-      # THE-791: CODECALC_PACKAGE_ALLOWLIST is unset by default (no behaviour
+      # CODECALC_PACKAGE_ALLOWLIST is unset by default (no behaviour
       # change) but deny-by-default once configured, with subprocess.run
       # stubbed so a denial is asserted PRE-side-effect rather than trusted
       # from the return value alone.
       - name: package install allowlist (deny-by-default)
         shell: bash
         run: uv run --no-sync python tests/test_package_allowlist.py
-      # THE-787: the capability broker (approved never exceeds requested),
+      # the capability broker (approved never exceeds requested),
       # deny-by-default network as a policy option, and the append-only audit
       # stream. All three run against synthetic providers / injected clocks —
       # no sandbox, no native executor — so they belong on the full OS matrix
@@ -367,13 +367,13 @@ jobs:
       # suite deliberately covers BOTH a network-controlling provider and one
       # that cannot enforce no_net, so the python-fallback matrix job exercises
       # the fail-open-but-disclosed branch the native backend never takes.
-      - name: capability broker, network policy, and audit stream (THE-787)
+      - name: capability broker, network policy, and audit stream
         shell: bash
         run: |
           uv run --no-sync python tests/test_capability_broker.py
           uv run --no-sync python tests/test_network_policy.py
           uv run --no-sync python tests/test_audit_log.py
-      # THE-896: CODECALC_TOOLS group filtering. Protocol-neutral (spawns
+      # CODECALC_TOOLS group filtering. Protocol-neutral (spawns
       # `python -c` importing codecalc.server under a controlled environment,
       # no sandbox or native executor needed), so it belongs beside the suite
       # above rather than the sandbox-only jobs.
@@ -394,8 +394,8 @@ jobs:
         run: uv run --no-sync python tests/test_session_jail.py
       # tests/test_execution_service.py already runs above ("provider boundary
       # and execution service (spec identity + receipt)") — that step now also
-      # covers run_submit/run_inspect/run_cancel (THE-778, fake providers, no
-      # sandbox) and session output spill (THE-783, real bash sessions), added
+      # covers run_submit/run_inspect/run_cancel (fake providers, no
+      # sandbox) and session output spill (real bash sessions), added
       # to the same file rather than wired a second time here.
       # The sweeps below were written on Linux and gated only there. Both carry
       # POSIX-only sections that skip themselves, and both are the kind of thing
@@ -403,20 +403,20 @@ jobs:
       # descriptors, subprocess semantics — so they run on all three.
       - name: session + worker regressions
         run: uv run --no-sync python tests/test_python_sweep.py
-      # THE-779: CODECALC_SESSION_IDLE_TTL_SECONDS is unset by default (no
+      # CODECALC_SESSION_IDLE_TTL_SECONDS is unset by default (no
       # expiry, ever) but reaps an idle worker on next access once
       # configured. Covers both worker languages and asserts on the OS-level
       # PID, not just the in-memory bookkeeping — same platform reasoning as
       # the sweep above.
       - name: session idle-expiry
         run: uv run --no-sync python tests/test_session_idle_expiry.py
-      # THE-894: per-session/global disk quotas, per-artifact size/count caps,
+      # per-session/global disk quotas, per-artifact size/count caps,
       # the host-free-space floor, and doctor's reporting of all of them.
       # Platform-neutral (only shutil.disk_usage and plain file I/O), so this
       # runs on all three the same way the sweeps above do.
       - name: session disk quotas
         run: uv run --no-sync python tests/test_session_quota.py
-      # THE-898: `codecalc status`/`cleanup` (read-only snapshot + the
+      # `codecalc status`/`cleanup` (read-only snapshot + the
       # dry-run-by-default disk reclaimer) and audit-log size rotation.
       # Platform-neutral (plain file I/O, subprocess, no sandbox or native
       # executor), so this runs on all three the same way the quota suite
@@ -552,7 +552,7 @@ jobs:
         with:
           version: '0.12.1'
           python-version: '3.12'
-      # THE-802: Defender first-spawn scanning of interpreters is the #1 cold-start latency amplifier on windows-latest
+      # Defender first-spawn scanning of interpreters is the #1 cold-start latency amplifier on windows-latest
       - name: Defender path exclusions (cold-start scan mitigation)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -667,9 +667,9 @@ jobs:
           # does not have. Both are fixed in scripts/check_tool_names.py: it compares NAME SETS
           # (a count passes when one tool is lost and another gained — THE-811), and it asserts
           # against the silent path that actually exists, a duplicate name that add_tool discards
-          # with a warning nothing reads, rather than a schema failure, which RAISES (THE-810).
+          # with a warning nothing reads, rather than a schema failure, which RAISES.
           uv run --no-sync python scripts/check_tool_names.py /tmp/mcp.out
-      # THE-896: every declared tool names a real CODECALC_TOOLS group, and the default
+      # every declared tool names a real CODECALC_TOOLS group, and the default
       # (unset) configuration still registers all of them — the tool-surface-reduction
       # analogue of the check just above. Needs `mcp` installed to import codecalc.server,
       # which is why it lives here rather than the stdlib-only ci-security gates.

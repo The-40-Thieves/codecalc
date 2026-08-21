@@ -1,4 +1,4 @@
-"""Provider-neutral execution lifecycle and crash-recovery journal (THE-831)."""
+"""Provider-neutral execution lifecycle and crash-recovery journal."""
 
 from __future__ import annotations
 
@@ -47,12 +47,12 @@ class _Run:
     state: str = "running"
     result: dict | None = None
     cleaned: bool = False
-    #: THE-787: the capability broker's decision for this run, threaded through
+    #: the capability broker's decision for this run, threaded through
     #: so `_collect`'s receipt carries the same `capabilities` block a sync
     #: execute_code result does. In-memory only (not journalled): a recovered
     #: orphan is cancelled/cleaned, never re-collected into a receipt.
     capability_decision: object | None = None
-    #: THE-787 fix round 2: the ORIGINAL request spec, when the broker narrowed
+    #: fix round 2: the ORIGINAL request spec, when the broker narrowed
     #: `spec` for execution (a denied network forces `no_net`). The receipt must
     #: name the request AS WRITTEN — same invariant the sync path holds in
     #: execution_service.execute, which re-attaches with the original spec — so
@@ -135,7 +135,7 @@ class RunSupervisor:
         managed = provider.describe()["capabilities"].get("managed_runs", False)
         operation = provider.execute_managed if managed else provider.execute
         arguments = (handle.run_id, spec) if managed else (spec,)
-        # Admission cap (THE-778 fix round, review Important #3a): nothing
+        # Admission cap (fix round, review Important #3a): nothing
         # else here rejects a submission, so an unbounded burst of
         # run_submit calls — or a caller that never inspects/cancels —
         # grows `_runs` and the thread pool without limit. Counted and
@@ -176,7 +176,7 @@ class RunSupervisor:
     def inspect(self, run_id: str) -> dict:
         with self._lock:
             run = self._get(run_id)
-            # BOTH active states, not just "running" (THE-778 fix round,
+            # BOTH active states, not just "running" (fix round,
             # review Critical #1). A run that was asked to cancel — whether
             # the attempt succeeded, failed, or was never actually made
             # because the provider does not support it — sits in
@@ -202,7 +202,7 @@ class RunSupervisor:
         if run.result is None:
             try:
                 result = dict(run.future.result())
-                # Same receipt execute_code always carries (THE-778 fix round,
+                # Same receipt execute_code always carries (fix round,
                 # review Important #2): start() bypasses ExecutionService.execute(),
                 # which is the only other place this gets attached, so without
                 # this a run_inspect terminal result was missing `provider`
@@ -230,7 +230,7 @@ class RunSupervisor:
                 run.result = self._failed_result(run, exc)
             run.state = "finished"
             self._write(run)
-            # THE-778 fix round, review Important #3b: pruning on every
+            # fix round, review Important #3b: pruning on every
             # terminal collection, not only from cleanup()/recover_orphans().
             # A caller that only ever calls run_submit + run_inspect (never
             # cleanup() directly) previously left the on-disk journal
@@ -287,7 +287,7 @@ class RunSupervisor:
             run = self._get(run_id)
             if run.state not in _ACTIVE_STATES:
                 return {"run_id": run_id, "cancelled": False, "state": run.state}
-            # Capability-checked BEFORE any state mutation (THE-778 fix
+            # Capability-checked BEFORE any state mutation (fix
             # round, review Critical #1). A provider that does not
             # advertise `cancel` — LocalExecutionProvider among them — has
             # nothing to signal in the first place: raising here, with the
@@ -350,7 +350,7 @@ class RunSupervisor:
 
     def _prune(self) -> None:
         """Delete the oldest journal files beyond `max_completed` — but ONLY
-        ones recorded as terminal (THE-778 fix round, review Important #3b).
+        ones recorded as terminal (fix round, review Important #3b).
 
         Before this, every `*.json` in `state_dir` was sorted by mtime and
         anything past `max_completed` was deleted, with no read of what
@@ -392,7 +392,7 @@ class RunSupervisor:
                 try:
                     provider = self.registry.select(str(record["provider_id"]))
                 except UnknownProvider:
-                    # THE-846: the journal names a provider not registered THIS
+                    # the journal names a provider not registered THIS
                     # boot (a config change, a plugin not loaded yet). select()
                     # raises UnknownProvider — a LookupError NOT in the except
                     # tuple below — and recover_orphans() runs at server IMPORT
@@ -406,7 +406,7 @@ class RunSupervisor:
                     continue
                 run_id = str(record["run_id"])
                 capabilities = provider.describe()["capabilities"]
-                # Capability-gated (THE-778), same reasoning as the `cleanup`
+                # Capability-gated, same reasoning as the `cleanup`
                 # check two lines below, which this file already had and
                 # `cancel` did not: a provider that does not advertise
                 # `cancel` (LocalExecutionProvider among them) raises

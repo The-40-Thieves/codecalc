@@ -1,6 +1,6 @@
-"""Operational commands: `codecalc status` and `codecalc cleanup` (THE-898).
+"""Operational commands: `codecalc status` and `codecalc cleanup`.
 
-W3a (THE-894) gave sessions per-session/global disk quotas plus the on-disk
+W3a gave sessions per-session/global disk quotas plus the on-disk
 `.codecalc-session-expired` marker for a reaped idle worker — but nothing
 LOOKS at either from outside a running server, and nothing RECLAIMS what an
 abandoned session left on disk. This module is the operator-facing half:
@@ -91,7 +91,7 @@ import stat
 import time
 from pathlib import Path
 
-#: THE-898: the mtime floor below which a directory is NEVER a cleanup
+#: the mtime floor below which a directory is NEVER a cleanup
 #: candidate, marker or no marker, age threshold or no age threshold, LOCK
 #: or no lock. A BACKSTOP, not a liveness proof — see the module docstring's
 #: "DIRECTORY MTIME IS NOT A LIVENESS SIGNAL" section for why an in-memory-
@@ -108,7 +108,7 @@ from pathlib import Path
 #: quota does.
 _RECENT_MTIME_GUARD_SECONDS = 300.0
 
-#: THE-898: how old (and untouched) a MARKER-LESS, session-shaped directory
+#: how old (and untouched) a MARKER-LESS, session-shaped directory
 #: must be before cleanup() will consider it abandoned. A marker is a
 #: precise, durable signal (sessions.py wrote it because it reaped an idle
 #: worker); age alone is not — a workspace-only session (no worker, so no
@@ -187,7 +187,7 @@ def status_report() -> dict:
         try:
             audit_size = audit_log.path.stat().st_size
         except OSError:
-            audit_size = None  # not yet created (create-on-write, THE-848)
+            audit_size = None  # not yet created (create-on-write)
 
     return {
         "ok": True,
@@ -291,7 +291,7 @@ def _cleanup_candidates(*, include_unmarked: bool = False) -> list[dict]:
                                   f"{_RECENT_MTIME_GUARD_SECONDS:g}s active-session floor")})
             continue
 
-        # THE-898 fix-round CRITICAL: the liveness PROOF, checked before
+        # fix-round CRITICAL: the liveness PROOF, checked before
         # either eligibility path below runs — see the module docstring's
         # "DIRECTORY MTIME IS NOT A LIVENESS SIGNAL" section. A live
         # worker-session lock refuses this directory outright, full stop,

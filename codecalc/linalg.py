@@ -1,4 +1,4 @@
-"""Structured matrix operations (THE-887, GH #223).
+"""Structured matrix operations (GH #223).
 
 `evaluate_expression` refuses `Matrix([[1,2],[3,4]])` with `"'[' is not
 permitted in an expression"`. That is `safe_expr.classify_unsafe` doing its
@@ -140,7 +140,7 @@ def _parse_entry(value: str, row_i: int, col_i: int):
          parses to a harmless symbolic `Function('input')` rather than
          calling the real one.
 
-    THE-889: delegates to the shared `safe_expr.safe_parse`, which runs
+    delegates to the shared `safe_expr.safe_parse`, which runs
     exactly these two steps (`classify_unsafe` is re-run here too,
     redundantly but harmlessly, since the entry is already screened by
     `_screen_entry` before this is reached). Kept as a thin wrapper, adding

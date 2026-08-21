@@ -1,4 +1,4 @@
-"""Deny-by-default operator allowlist for package installs (THE-791 residual).
+"""Deny-by-default operator allowlist for package installs (residual).
 
 `install_package` already refused to write outside the workspace (#23) and
 refused argv injection via a leading `-` in the package name. What it never

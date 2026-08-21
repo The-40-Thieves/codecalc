@@ -1,4 +1,4 @@
-"""Stable error codes for the result contract (THE-781).
+"""Stable error codes for the result contract.
 
 Every failing tool result carried a free-form English sentence and nothing
 else — 121 distinct `"error":` strings across the package. A caller could show
@@ -169,7 +169,7 @@ _MESSAGE_HINTS = (
     ("invalid", VALIDATION),
     ("must be", VALIDATION),
     ("empty", VALIDATION),
-    # THE-875: a batch of argument-validation rejections (percentage's zero
+    # a batch of argument-validation rejections (percentage's zero
     # total, calc_stats/percentiles/benchmark/compare_edge_cases' "need N
     # more" inputs, collision_probability/compare_threshold/bitop's range and
     # operator checks, human_duration/epoch_time/bitop's sign checks,
@@ -198,7 +198,7 @@ def _from_message(message: str) -> str:
 
 
 #: Maps safe_expr.classify_unsafe()'s neutral categories to this taxonomy
-#: (THE-881). Lives HERE, not in safe_expr.py: safe_expr must not know this
+#:. Lives HERE, not in safe_expr.py: safe_expr must not know this
 #: module's codes (it screens caller strings and has no business owning a
 #: result-contract concern), so it hands back "security"/"ceiling"/
 #: "validation" and the CALLER decides what those mean. Keeping the mapping

@@ -270,7 +270,7 @@ network-blocking shim. Each has a security-relevant design decision:
    `ctypes`/`dlsym` pulling `socket()` straight out of libc, or a raw
    syscall, never resolves the name this shim replaces. Verified live:
    `ctypes.CDLL(find_library("c")).socket(2, 1, 0)` returns a working fd with
-   the shim loaded and `no_net=True` (E-1, THE-902) — `executor.py`'s result
+   the shim loaded and `no_net=True` (E-1) — `executor.py`'s result
    now discloses this in `unenforced` whenever the shim is what satisfied
    `no_net`, rather than reporting an empty list. Real isolation for
    multi-tenant still requires containers or a kernel-level egress block.
@@ -416,7 +416,7 @@ network-blocking shim. Each has a security-relevant design decision:
    but it is a speed bump, not isolation: it is a userspace SYMBOL shim, so it
    reaches only calls that resolve `socket()`/`connect()` through the ordinary
    dynamic symbol table — a dynamically-linked program using `ctypes`/`dlsym`
-   or a raw syscall bypasses it entirely (verified live, E-1/THE-902 —
+   or a raw syscall bypasses it entirely (verified live, E-1 —
    `unenforced` now discloses this whenever the shim is what satisfied
    `no_net`, rather than reporting `no_net` as fully applied), macOS strips it
    for SIP-protected and hardened binaries, and Windows has no equivalent
@@ -488,12 +488,12 @@ only appear when you compile for the target.
    reported through `unenforced` rather than assumed.
 
    **The Job Object is a RESOURCE boundary, not a SECURITY one — keep the two
-   apart.** An optional AppContainer backend (THE-829, opt-in via
+   apart.** An optional AppContainer backend (opt-in via
    `CODECALC_WIN_APPCONTAINER=1`, **OFF by default**) adds the security
    isolation the Job Object never claimed: a least-privilege AppContainer profile
    with no capability SIDs (no network), whose SID is granted by an explicit ACL
    only the workdir plus read+execute on the runtime directory, launched with
-   `SECURITY_CAPABILITIES` composed into the THE-818 creation-time attribute
+   `SECURITY_CAPABILITIES` composed into the creation-time attribute
    list. It **fails closed** (profile/SID/ACL failure refuses the launch, never
    an unconfined fallthrough) and is **UNVERIFIED on real Windows 11**: the
    isolation properties — payload cannot read the user profile or write outside

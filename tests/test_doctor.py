@@ -1,4 +1,4 @@
-"""`codecalc doctor`, in the environments it exists to diagnose (THE-780).
+"""`codecalc doctor`, in the environments it exists to diagnose.
 
 A diagnostic is only worth having if it is right about a BROKEN host, and a
 healthy dev box exercises none of the cases it was written for. So every check
@@ -104,7 +104,7 @@ check("without --deep, NOTHING claims to have been executed",
 # drift would make doctor and the executor disagree about what exists, which is
 # worse than either being wrong alone.
 # Compared through doctor's SHIPPED rows rather than by re-deriving
-# primary_command here: THE-835 made the deciding rule richer than one command
+# primary_command here: made the deciding rule richer than one command
 # (a wrapped plan needs its real tool AND a shell, and no Windows plan at all),
 # and a test that re-implements half of that rule passes wherever its half
 # happens to agree — which is exactly how the pre-fix version passed on a dev
@@ -119,7 +119,7 @@ for row in doctor.report()["runtimes"]:
 check("doctor and executor.probe agree on what resolves",
       not _mismatch, f"-> {_mismatch[:4]}")
 # And the deciding COMMAND is the real tool for wrapped plans, not bash —
-# the specific lie THE-835 removed.
+# the specific lie removed.
 check("a wrapped plan's deciding command is its tool, not bash",
       all(doctor.primary_command(registry.LANGUAGES[n], n) == registry.WRAPPED_TOOL[n]
           for n in registry.SHELL_WRAPPED))
@@ -274,7 +274,7 @@ check("the text rendering names the contract version the JSON reports",
 check("`--json` actually changes the output",
       _js.stdout != _txt.stdout and _js.stdout.lstrip().startswith("{"))
 
-# ── --help / --version (THE-876/#201) ───────────────────────────────────────
+# ── --help / --version (#201) ───────────────────────────────────────
 # main() dispatches doctor/serve-strict/serve-http and otherwise falls through
 # to `mcp.run(transport="stdio")`, which blocks reading stdin. --help/--version
 # used to fall into that same "unrecognised argument" path: no output, exit
@@ -310,9 +310,9 @@ _ver = subprocess.run([sys.executable, "-m", "codecalc", "--version"],
 check("`--version` reports codecalc's actual version",
       _codecalc_version in _ver.stdout, f"-> {_ver.stdout!r} vs {_codecalc_version!r}")
 
-# ── runtime VERSIONS (THE-780) ─────────────────────────────────────────────
+# ── runtime VERSIONS ─────────────────────────────────────────────
 #
-# THE-780 asks doctor to "report runtime paths and versions" and to cover
+# asks doctor to "report runtime paths and versions" and to cover
 # "invalid versions" in tests. Paths shipped; versions did not, and the ticket
 # stayed open on that half.
 #
@@ -371,7 +371,7 @@ check("an unreadable version leaves status alone",
 check("...and the published schema accepts a null version",
       not errors_for(rep), f"-> {errors_for(rep)[:2]}")
 
-# ── the grammar cache is a NETWORK dependency, and doctor says so (THE-821) ──
+# ── the grammar cache is a NETWORK dependency, and doctor says so ──
 #
 # tree-sitter grammars are not in the wheel. The pack fetches each one on first
 # use, in-process — 28 grammars, 89 MB, ~15s cold. That is a socket opened from

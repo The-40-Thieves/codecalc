@@ -1,4 +1,4 @@
-"""Reusable renderer conformance cases (THE-794).
+"""Reusable renderer conformance cases.
 
 Mirrors `_provider_conformance.py`'s shape: one function, `run_renderer_
 conformance(renderer, check)`, exercised against every built-in and every

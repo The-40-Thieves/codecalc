@@ -195,7 +195,7 @@ def _heavy_call_violation(tokens: list) -> str | None:
 
 
 #: Categories `classify_unsafe` hands back, for a CALLER to map to its own
-#: error taxonomy (THE-881). Deliberately neutral strings rather than
+#: error taxonomy. Deliberately neutral strings rather than
 #: `errors.PERMISSION_DENIED` etc.: this module has no business knowing the
 #: result-contract's taxonomy, only which of three DIFFERENT KINDS of "no" an
 #: expression got. Conflating them under one code was the bug — `factorial(
@@ -232,10 +232,10 @@ def classify_unsafe(expression: str) -> tuple[str, str] | None:
         # rather than returning a token error, escaping a function every caller
         # treats as returning `None` or `(category, message)`, never raising:
         #   - UnicodeEncodeError — a lone UTF-16 surrogate (e.g. "\ud800"), found
-        #     by scripts/fuzz.py (THE-899);
+        #     by scripts/fuzz.py;
         #   - UnicodeDecodeError — a bare replacement char / truncated multibyte
         #     shape (e.g. "�\r�"), found by the ClusterFuzzLite
-        #     coverage-guided harness (THE-899 follow-up) that the seeded mutator
+        #     coverage-guided harness (follow-up) that the seeded mutator
         #     never reached — the exact case that infra exists to catch.
         # Both are as "unparsable, not hostile" as the three parser exceptions
         # already caught here, and get the same validation verdict — never passed
@@ -257,7 +257,7 @@ def classify_unsafe(expression: str) -> tuple[str, str] | None:
             if tok.string == ".":
                 return (CATEGORY_SECURITY, "attribute access is not permitted in an expression")
             if tok.string in ("[", "]"):
-                # Named explicitly (THE-887, GH #223) rather than left to the
+                # Named explicitly (GH #223) rather than left to the
                 # generic message below: `[`/`]` are denied to block a
                 # subscript escape (`().__class__.__bases__[0]`), and a matrix
                 # literal like `Matrix([[1,2],[3,4]])` is the collateral from
@@ -334,7 +334,7 @@ MAX_NUMERIC_DIGITS = 4_000
 
 #: The `parse_expr` transformations every safe-parse call site enables:
 #: implicit multiplication (`2x`) and `^` as power. A single cached tuple
-#: (THE-889) rather than logic.py/linalg.py/exact.py each keeping their own
+#: rather than logic.py/linalg.py/exact.py each keeping their own
 #: copy — three copies is how one of them drifts unnoticed.
 _MATH_TRANSFORMS = None
 
@@ -355,12 +355,12 @@ def math_transforms():
 
 
 def safe_parse(expression: str, *, evaluate: bool = True, local_dict: dict | None = None):
-    """The full safe-parse pipeline, in one place (THE-889) — the ONLY place
+    """The full safe-parse pipeline, in one place — the ONLY place
     in this package that calls SymPy's `parse_expr` on a caller string.
     Every symbolic-parsing tool delegates to this: `logic._evaluate_expression`,
-    `logic._parse_solve_piece` (THE-888), `linalg._parse_entry` (THE-887), and
+    `logic._parse_solve_piece`, `linalg._parse_entry`, and
     `exact.py`'s `algebraic_equiv`/`solve_expression`/`limit_expression`/
-    `simplify_expression` (THE-889).
+    `simplify_expression`.
 
     Before THE-889, `logic._evaluate_expression`, `logic._parse_solve_piece`
     and `linalg._parse_entry` each hand-rolled the same three steps ahead of
@@ -438,7 +438,7 @@ def reject_explosive(tree) -> str | None:
     This is the half of the bound that the token screen cannot reach: `**` is
     an operator, so its cost is invisible until the operands are known.
 
-    THE-901: this is a FAST PATH for the power-tower shape, not a complete
+    this is a FAST PATH for the power-tower shape, not a complete
     bound on every way an expression can be expensive — worth stating
     explicitly, because "the shape guard" is an easy thing for a future
     reader to over-trust. `9**9**9**9` and `2**100000` are caught here
@@ -478,7 +478,7 @@ def reject_explosive(tree) -> str | None:
     (`scripts/fuzz.py`'s module docstring measured 3.5s at roughly 2x the
     length with no sign of levelling off) — which is exactly why every caller
     keeps the length cap AND the guarded_call backstop, rather than treating
-    either alone as sufficient. See `tests/test_bug_sweep.py`'s THE-901 block
+    either alone as sufficient. See `tests/test_bug_sweep.py`'s block
     for the assertion that the backstop actually holds for this shape.
     """
     from sympy import Float, Integer, Pow
@@ -549,7 +549,7 @@ def _walk(node):
             return
         yield current
         args = getattr(current, "args", ())
-        # Found by scripts/fuzz.py (THE-899): `parse_expr("binomial", ...)`
+        # Found by scripts/fuzz.py: `parse_expr("binomial", ...)`
         # (a heavy-function NAME used bare, with no call parens) resolves to
         # the sympy FunctionClass itself rather than an instance — and
         # `FunctionClass.args`, accessed on the class rather than an

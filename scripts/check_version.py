@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One version, in every place that declares one (THE-814).
+"""One version, in every place that declares one.
 
 `check_claims.py` gates LICENCE coherence across `LICENSE`, `pyproject.toml` and
 `executor/Cargo.toml`. It never gated VERSION, and both manifests are edited by
@@ -21,12 +21,12 @@ WHAT IS COMPARED
   executor/Cargo.toml   [package] version
   CHANGELOG.md          the newest `## [x.y.z]` heading
   README.md             "Published as **`codecalc` X.Y.Z**" and
-                         "**`codecalc-exec` X.Y.Z**" (THE-877 — this drifted
+                         "**`codecalc-exec` X.Y.Z**" (this drifted
                          to 0.2.0 while pyproject.toml had already moved to
                          0.3.1, because nothing compared the README's own
                          install instructions against the version they claim
                          to install)
-  docker/mcp-server.Dockerfile  `ARG CODECALC_VERSION=` (THE-892 — the image
+  docker/mcp-server.Dockerfile  `ARG CODECALC_VERSION=` (the image
                         pinned 0.3.1 while the manifests had moved to 0.3.2, so
                         it would `pip install codecalc==0.3.1` on a 0.3.2 cut)
   the git tag           only when running on a tag (CI sets GITHUB_REF)
@@ -160,7 +160,7 @@ def readme_versions() -> tuple[str | None, str | None]:
     "**`codecalc-exec` X.Y.Z**" companion — the two version numbers a reader
     who follows README.md's own install instructions is trusting.
 
-    THE-877: this drifted to 0.2.0 while pyproject.toml had already moved to
+    this drifted to 0.2.0 while pyproject.toml had already moved to
     0.3.1, and nothing compared the README's claim against the version it
     actually describes. Read as a pair, not merged into one regex, because a
     fix that only updates one of the two names would still leave the other
@@ -183,7 +183,7 @@ def readme_versions() -> tuple[str | None, str | None]:
 
 
 def dockerfile_version() -> str | None:
-    """The `ARG CODECALC_VERSION=X.Y.Z` the MCP-server image installs (THE-892).
+    """The `ARG CODECALC_VERSION=X.Y.Z` the MCP-server image installs.
 
     It drifted to 0.3.1 while the six manifests above moved to 0.3.2 — the
     image would `pip install codecalc==0.3.1` on a 0.3.2 release, because
