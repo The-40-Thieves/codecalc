@@ -8,6 +8,18 @@ Nine security-relevant reports arrived as public issues before this file existed
 
 Expect an acknowledgement within a week. This is a single-maintainer project with no SLA behind it; that sentence is the honest version rather than a number nobody is on call to meet.
 
+## Security researchers welcome
+
+codecalc is a sandbox whose entire job is running untrusted code — which makes it precisely the kind of target worth attacking. If you can break the isolation boundary, the maintainer would rather hear it from you than read about it later, and will credit you for it.
+
+**Safe harbor.** Good-faith security research on codecalc — conducted within the scope below, against an instance you run yourself, without harming anyone else's data or availability — is authorized. The maintainer will not pursue or support legal action over research that follows this policy, and will work with you on coordinated disclosure. If you are unsure whether something is in scope, ask first through the private advisory above.
+
+**Scope is the threat model below.** A sandbox escape, a host-file read or write outside the session workspace, egress past an enforced `no_net`, a cross-session leak, or anything that makes the server report a guarantee it did not apply — all in scope, all wanted. Executed code consuming resources up to the declared ceilings, or reaching the network when `no_net` was not requested, is documented behaviour rather than a finding (see "Explicitly out of scope").
+
+**Ground rules.** Report privately (the advisory link above — never a public issue for a real vulnerability); test against your own instance, not someone else's deployment; do not run denial-of-service against shared infrastructure; and give the maintainer a reasonable window before any public disclosure.
+
+**Recognition.** There is no paid bounty: this is a single-maintainer project, and a bounty would be a promise nobody is funded to keep. What there is — credit in the security advisory, a line in the CHANGELOG, and a place in the Hall of fame at the end of this file, unless you would rather stay anonymous. If a sponsor ever backs a hosted bounty (for example via [huntr](https://huntr.com)), it will be announced here.
+
 ## What this software is
 
 codecalc **runs untrusted code in 31 languages**. That is its function, not a side effect. Treat it as a remote code execution service, because it is one, and read the threat model below before deciding it is safe for your deployment.
@@ -128,3 +140,9 @@ These invariants are enforced in CI on every pull request, so a regression fails
 - `check_version.py` — one version across `pyproject.toml`, `executor/Cargo.toml`, `CHANGELOG.md`, and the git tag when running on one
 - `tests/test_security.py`, `tests/test_session_jail.py` — the audit's findings as permanent regression tests
 - `tests/test_platform_contract.py` — every ceiling NOT named in `unenforced` is made to bite, on **both** backends. The Rust one runs in the sandbox job, which asserts `backend == "rust"`; the pure-Python fallback runs in the test matrix, which asserts `backend == "python"`. Neither can be tested by accident ([#66](https://github.com/The-40-Thieves/codecalc/issues/66))
+
+## Hall of fame
+
+Security researchers who have responsibly disclosed issues in codecalc — reported privately, fixed, and credited here with their permission. Findings become permanent regression tests, so a name here also marks a hole that stays closed.
+
+- _Be the first. See "Security researchers welcome" above._
