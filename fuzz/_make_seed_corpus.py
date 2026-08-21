@@ -30,7 +30,15 @@ import fuzz as fuzz_corpus  # noqa: E402 — needs the path inserts above
 def _write_zip(path: Path, strings: list[str]) -> None:
     with zipfile.ZipFile(path, "w") as zf:
         for i, s in enumerate(strings):
-            zf.writestr(f"seed_{i:03d}", s.encode("utf-8"))
+            # errors="surrogatepass": SEED_CORPUS_EXPR intentionally includes a
+            # lone surrogate ("\ud800") — the exact shape that crashes the screen
+            # (THE-899) and so exactly the byte pattern this seed should carry.
+            # A plain .encode("utf-8") raises UnicodeEncodeError on it, which
+            # under build.sh's `bash -eu` would fail the whole fuzzer build.
+            # A seed file is raw libFuzzer byte fodder (the harness re-derives a
+            # string from it via FuzzedDataProvider), so its WTF-8 bytes are a
+            # valid, faithful seed rather than something that must round-trip.
+            zf.writestr(f"seed_{i:03d}", s.encode("utf-8", errors="surrogatepass"))
 
 
 def main(argv: list[str]) -> int:
