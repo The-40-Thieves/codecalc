@@ -6,7 +6,7 @@
 calculator, a code runner, and a logic checker — so it gets a *correct* answer
 instead of a guessed one.** It runs code in **31 languages**, does exact
 symbolic math, solves SMT/logic problems, and measures complexity, all exposed
-as **51 MCP tools**.
+as **52 MCP tools**.
 
 Three things nobody else offers together cleanly:
 
@@ -352,7 +352,7 @@ carries on without one; `--no-net` then reports itself in `unenforced` rather
 than pretending), and [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild)
 for the static cross-builds (zig is used as the linker; no x86_64 GCC needed).
 
-## MCP tools (51) + MCP resources
+## MCP tools (52) + MCP resources
 
 Every session file is also exposed as an MCP resource:
 `codecalc://session/<session_id>/files/<path>` — images render inline for the
@@ -411,6 +411,7 @@ analysis, binary64 introspection.
 | `truth_table` | Boolean algebra: `a and b or not c`, `p xor q`, `a implies b` |
 | `z3_check` | SMT-LIB2 satisfiability + model. An `unsat` verdict is graded `solver_proven`; `sat` is graded `ungraded` (decided, but not proof-shaped — see [Grade vocabulary](#grade-vocabulary)) |
 | `solve_linear` | Systems of equations: `x + y = 10; x - y = 2` |
+| `matrix` | Structured matrix ops: det/inverse/eigenvalues/transpose/rank/trace on a `rows` array — never a caller string through sympify, so `evaluate_expression`'s `[`/`]` RCE screen never applies. Each entry screened individually |
 | `analyze_complexity` | Static Big-O estimate from code structure, parsed with **tree-sitter** (every supported language). Reports `analysis: tree-sitter\|regex-fallback` so you can tell a parse from a guess |
 | `benchmark` | Empirical Big-O: runs code at increasing N, fits growth curve |
 | `compare_execution` | Same code across N languages side-by-side |
@@ -618,13 +619,13 @@ way back into the default.
 
 ## Tool-definition token cost
 
-codecalc's `tools/list` returns 51 definitions. Measured with `o200k_base` as a
+codecalc's `tools/list` returns 52 definitions. Measured with `o200k_base` as a
 proxy, that is roughly 9,200 tokens of descriptions and input schemas, and every
 client pays it before the first user message.
 
 codecalc does not hide its tools behind a discovery facade, and that is
 deliberate: the tool surface is where per-operation approval prompts, audit
-names and typed schemas live, and collapsing 51 tools into one dispatcher makes
+names and typed schemas live, and collapsing 52 tools into one dispatcher makes
 `install_package` and `percentage` look like the same permission to a client
 that approves by tool name. The cost is real, but the client is the better place
 to solve it, because the client can defer definitions **without** giving up the
@@ -639,7 +640,7 @@ If you are paying too much for codecalc's definitions:
   toolset's `default_config`, or per tool in `configs`. Deferred definitions stay
   out of the system-prompt prefix, prompt caching is preserved, and a matching
   tool is expanded into its full definition when the model searches for it.
-- **Any client** can filter which of the 51 tools it exposes to the model.
+- **Any client** can filter which of the 52 tools it exposes to the model.
   Nothing here requires codecalc to change.
 
 A server-side facade remains under consideration for clients with no such
@@ -668,7 +669,7 @@ PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py         # every tool over MC
 PYTHONPATH=. .venv/bin/python tests/test_executor_sweep.py  # sandbox regressions
 ```
 
-46 test files and 12 CI-invoked scripts, **2139 assertions**. "CI-invoked"
+47 test files and 12 CI-invoked scripts, **2139 assertions**. "CI-invoked"
 means referenced by path (`scripts/<name>.py`) from a job in
 `.github/workflows/*.yml` — `scripts/check_claims.py` derives the count that
 way and gates it, so a script wired into a workflow without this sentence

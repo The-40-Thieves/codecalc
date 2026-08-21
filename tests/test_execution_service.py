@@ -1019,7 +1019,7 @@ def test_main_runs_the_same_server_over_explicit_streamable_http() -> None:
 
 def test_serve_http_refuses_a_non_loopback_bind_without_a_token() -> None:
     """THE-786 residual: fail CLOSED. serve-http on a non-loopback host with no
-    CODECALC_HTTP_TOKEN would expose 51 unauthenticated code-execution tools to
+    CODECALC_HTTP_TOKEN would expose 52 unauthenticated code-execution tools to
     whatever network the interface reaches. Refusing to start is the only
     answer that cannot be misconfigured into an open server."""
     calls: list[dict] = []

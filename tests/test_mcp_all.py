@@ -184,6 +184,14 @@ async def main():
         check("solve_linear: y = 4", "y: 4" in solutions, f"-> {solutions[:60]}")
         check("solve_linear: exactly one solution", r.get("count") == 1, f"-> {r.get('count')}")
 
+        # ── matrix ────────────────────────────────────────────────────────
+        r = data(await client.call_tool("matrix", {"rows": [[1, 2], [3, 4]], "op": "det"}))
+        check("matrix: det([[1,2],[3,4]]) == -2", r.get("value") == "-2", f"-> {r}")
+        r = data(await client.call_tool(
+            "matrix", {"rows": [[1, 2], ["().__class__", 4]], "op": "det"}))
+        check("matrix: a malicious entry is refused, not evaluated",
+              r.get("ok") is False and r.get("code") == "permission_denied", f"-> {r}")
+
         # ── analyze_complexity ────────────────────────────────────────────
         r = data(await client.call_tool(
             "analyze_complexity",

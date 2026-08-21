@@ -38,6 +38,7 @@ from . import (
     execution_service,
     executor,
     grades,
+    linalg,
     logic,
     optimization,
     packages,
@@ -56,7 +57,7 @@ from .mcp_middleware import redact_validation_errors_middleware, timeout_middlew
 
 #: Bearer token for the Streamable HTTP transport (THE-786). Unset means the
 #: transport is loopback-only: `serve-http` REFUSES a non-loopback bind
-#: without it, because a token-less bind on a routable interface exposes 51
+#: without it, because a token-less bind on a routable interface exposes 52
 #: unauthenticated code-execution tools to whatever the interface reaches.
 #: stdio ignores this entirely — auth is HTTP middleware, and an MCP client
 #: spawning the server over stdio is already inside the trust boundary.
@@ -256,7 +257,7 @@ mcp = MCPServer(
 def _coded(fn):
     """Attach an error code to any failing dict a tool returns.
 
-    Wraps at REGISTRATION so all 51 tools are covered by one change instead of
+    Wraps at REGISTRATION so all 52 tools are covered by one change instead of
     121 edits at the return sites. The first attempt put this on
     `guarded_call`, which measured 0 of 8 on the most reachable failures
     because those paths return rather than raise — see errors.py.
@@ -276,7 +277,7 @@ def _coded(fn):
     # executor.execute at all. All three returned unversioned results while the
     # documentation said every result carries a version.
     #
-    # This wrapper is applied to all 51 tools, so stamping here makes that claim
+    # This wrapper is applied to all 52 tools, so stamping here makes that claim
     # true by construction. `stamp` uses setdefault, so the executor's own stamp
     # is not overwritten and the two cannot disagree.
     if inspect.iscoroutinefunction(fn):
@@ -291,9 +292,9 @@ def _coded(fn):
     return _sync
 
 
-# Rebind `mcp.tool` rather than renaming 51 decorator lines. The rename was the
+# Rebind `mcp.tool` rather than renaming 52 decorator lines. The rename was the
 # first attempt and broke four suites plus the CI round-trip check, all of which
-# count declarations with `grep -c '^@mcp\.tool'` and read 0 against 51 served.
+# count declarations with `grep -c '^@mcp\.tool'` and read 0 against 52 served.
 # That identity is load-bearing here, so the change that preserves it is the
 # right one: every `@mcp.tool()` below is unchanged and every counter still
 # works, while the wrapper is applied underneath.
@@ -863,6 +864,23 @@ def solve_linear(system: str, variables: str) -> dict:
     """Solve a system of equations; `system` is ';'-separated equations, `variables` comma-separated. Example: system='x + y = 10; x - y = 2', variables='x, y'."""
     vars_ = [v.strip() for v in variables.split(",") if v.strip()]
     return logic.solve_linear(system, vars_)
+
+
+@mcp.tool()
+def matrix(rows: list[list[int | float | str]], op: str) -> dict:
+    """Structured matrix operations: det, inverse, eigenvalues, transpose, rank, trace.
+
+    `evaluate_expression` refuses `Matrix([[1,2],[3,4]])` on purpose — `[`/`]`
+    are denied there to block subscript-based RCE escapes, and a matrix
+    literal is collateral from that (correctly aimed) screen. This tool is
+    the structured replacement: `rows` is a JSON array of arrays (row-major),
+    never a string to parse. Each entry is either a JSON number, used
+    directly, or a scalar expression string ('1/2', 'sqrt(2)', 'x+1'),
+    screened per-entry the same way evaluate_expression screens its input
+    before anything reaches SymPy. `op` is one of det/inverse/eigenvalues/
+    transpose/rank/trace. Example: rows=[[1,2],[3,4]], op='det' -> -2.
+    """
+    return linalg.matrix(rows, op)
 
 
 @mcp.tool()
