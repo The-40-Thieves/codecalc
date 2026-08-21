@@ -134,8 +134,8 @@ server stays exactly as it was) and backs up the original to
 `<path>.codecalc-bak` first. `codecalc --help` lists every subcommand.
 
 > [!NOTE]
-> Published as **`codecalc` 0.3.2** on PyPI (`pip install codecalc`) and the
-> **`codecalc-exec` 0.3.2** executor on crates.io
+> Published as **`codecalc` 0.4.0** on PyPI (`pip install codecalc`) and the
+> **`codecalc-exec` 0.4.0** executor on crates.io
 > ([#91](https://github.com/The-40-Thieves/codecalc/issues/91)). Every release
 > artifact carries a keyless sigstore **build-provenance attestation** — verify
 > one with `gh attestation verify <file> --repo The-40-Thieves/codecalc`; PyPI
