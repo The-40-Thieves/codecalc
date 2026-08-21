@@ -1,4 +1,4 @@
-"""THE-829: the Windows AppContainer strict backend, honestly bounded.
+"""The Windows AppContainer strict backend, honestly bounded.
 
 The isolation this backend is meant to deliver — a payload that cannot read the
 user profile, cannot write outside its workdir, and gets no network — is only

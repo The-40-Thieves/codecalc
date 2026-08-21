@@ -337,7 +337,7 @@ class RunSupervisor:
             # crashed. Latent rather than caught earlier: cleanup() was only
             # ever reached from ExecutionService.execute()'s managed-provider
             # branch, where managed_runs=True happened to always pair with
-            # cleanup=True for the one provider that implements it. THE-778's
+            # cleanup=True for the one provider that implements it. The
             # run_submit/run_inspect/run_cancel tools call this for ANY
             # provider a caller selects, which is what surfaced it.
             if run.provider.describe()["capabilities"].get("cleanup"):

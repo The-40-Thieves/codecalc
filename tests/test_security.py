@@ -273,7 +273,7 @@ est = r.get("estimate", "")
 def _bench_detail() -> str:
     """Everything needed to tell noise from a wrong curve, on failure only.
 
-    THE-808's first occurrence printed an EMPTY detail, so it could not say
+    Its first occurrence printed an EMPTY detail, so it could not say
     whether the classifier saw noise or the wrong shape. #125 added the class
     name; that was enough to show the answer was `O(c^n)` three times running
     and not enough to say WHY. The measurements are what say why: a ratio is a

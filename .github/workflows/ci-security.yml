@@ -112,7 +112,7 @@ jobs:
       - run: python scripts/check_parity.py
 
   runtime-tiers:
-    # THE-895. `list_languages`/`doctor` present every resolved runtime as equally
+    # `list_languages`/`doctor` present every resolved runtime as equally
     # operational, but resolution ("its command is on PATH") is not reliability
     # ("codecalc's CI actually ran it") — a review's own smoke test found the rust
     # and csharp HOST toolchains failing on a machine where both commands resolved

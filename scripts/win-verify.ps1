@@ -1,5 +1,5 @@
 <#
-  codecalc - Windows 11 verification bootstrap (/ / THE-802)
+  codecalc - Windows 11 verification bootstrap
 
   Runs on NATIVE Windows PowerShell (the job-object behaviour under test does
   NOT exist inside WSL2 - it must be measured on real Windows). One command:

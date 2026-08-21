@@ -13,7 +13,7 @@ workspace) reachable at all.
 
 THE FOUR-STATE RUNTIME VOCABULARY, AND WHY IT IS NOT FOUR STATES BY DEFAULT
 
-THE-780 asks doctor to distinguish `supported`, `installed`, `available` and
+Doctor is asked to distinguish `supported`, `installed`, `available` and
 `unhealthy`. The honest version of that distinction costs something:
 
     supported   codecalc knows this language; nothing for it resolves here
@@ -55,8 +55,8 @@ from . import (
 )
 
 #: The four states, ordered weakest to strongest claim. Defined in registry.py
-#: and re-exported here: `list_languages` reports the same vocabulary now
-#:, and registry is the module all three readers already import.
+#: and re-exported here: `list_languages` reports the same vocabulary,
+#: and registry is the module all three readers already import.
 #: contract.py's schema still imports it from this name.
 RUNTIME_STATES = registry.RUNTIME_STATES
 
@@ -276,8 +276,8 @@ def _workspace_check() -> dict:
 
 
 def _disk_quota() -> dict:
-    """Configured session-disk quotas + what is actually used right now
-   . Discoverable BEFORE a session hits the ceiling, the same
+    """Configured session-disk quotas + what is actually used right now.
+    Discoverable BEFORE a session hits the ceiling, the same
     shape `_grammar_cache` already gives the grammar cache: an operator
     wiring up a shared host should see these numbers here, not learn them
     from the first `resource_exhausted` a caller reports back.
@@ -530,8 +530,8 @@ _NO_VERSION = frozenset({"escript", "tclsh"})
 def _runtime_version(command: str, path: str | None) -> str | None:
     """The runtime's own version string, or None when it could not be read.
 
-    NONE MEANS NOT MEASURED, NEVER "no version". asks doctor to report
-    versions; it does not ask it to invent them. A runtime that has no version
+    NONE MEANS NOT MEASURED, NEVER "no version". Doctor is asked to report
+    versions; it is not asked to invent them. A runtime that has no version
     flag, times out, crashes, or answers with something unparsable all produce
     `None` here and leave `status` untouched — a version that could not be read
     says nothing about whether the runtime works, and demoting it would report a

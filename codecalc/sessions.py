@@ -96,7 +96,7 @@ _SPILL_DIRNAME = ".codecalc-spill"
 #: on-disk journal.
 _SPILL_RETENTION = 20
 
-# ── THE-894: per-session and global disk quotas ────────────────────────────
+# ── per-session and global disk quotas ─────────────────────────────────────
 #: The gap SPILL_CAPTURE_KB's own docstring named above: nothing bounded the
 #: TOTAL a session accumulates over its lifetime via session_write_file,
 #: artifacts a running program creates, files EXECUTED CODE writes into the
@@ -997,7 +997,7 @@ def _get_worker_or_expired(session_id: str) -> tuple[Worker | None, bool]:
     if to_close is not None:
         to_close.close()
         _write_expired_marker(session_id)
-        _remove_lock_file(session_id)  # THE-898: same reasoning as _reap_if_idle
+        _remove_lock_file(session_id)  # same reasoning as _reap_if_idle
         return None, True
     if w is None and _idle_ttl_seconds() is not None and _is_expired_on_disk(session_id):
         # No worker, and this call did not just reap one. Could be a

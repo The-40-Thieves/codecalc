@@ -12,7 +12,7 @@ in every one of these cases:
 
 Both sides of that comparison also came from the same assumption — that
 decorator sites and registered tools correspond one to one — so when THAT is
-what breaks, the check compared a wrong number to itself. THE-811.
+what breaks, the check compared a wrong number to itself.
 
 It also asserts the thing the old check's comment CLAIMED to protect against and
 did not. That comment said a tool whose type hints the SDK cannot schematise is
@@ -22,7 +22,7 @@ MCP SDK 2.0.0's behaviour: `Tool.from_function` RAISES (`ValueError`,
 path is a DUPLICATE NAME — `ToolManager.add_tool` logs a warning, returns the
 existing tool, and the served count quietly falls by one while the decorator
 count does not. Nothing read that warning in CI. So duplicates are now their own
-assertion, named as such. THE-810.
+assertion, named as such.
 
 Unlike the gates under ci-security, this one CANNOT run on a bare checkout: the
 served side comes from a live stdio round-trip. It consumes the captured stdout

@@ -614,8 +614,8 @@ def build_doctor_schema(dialect: str | None = None, schema_id: str | None = None
                              "detail"],
                 "description": (
                     "tree-sitter grammars are NOT in the wheel: the pack fetches "
-                    "each one on first use, in-process, into a local cache "
-                    ". Reported so an offline or egress-restricted "
+                    "each one on first use, in-process, into a local cache. "
+                    "Reported so an offline or egress-restricted "
                     "install can see it BEFORE analyze_complexity degrades to "
                     "regex-fallback. `cached: false` is not a fault."
                 ),
@@ -689,7 +689,7 @@ def build_doctor_schema(dialect: str | None = None, schema_id: str | None = None
                         "tier": {
                             "type": "string", "enum": list(RELIABILITY_TIERS),
                             "description": (
-                                "THE-895. RELIABILITY, orthogonal to `status` "
+                                "RELIABILITY, orthogonal to `status` "
                                 "above: `status` is what THIS machine just "
                                 "resolved or ran; `tier` is how much codecalc's "
                                 "own CI has verified this language, project-"
@@ -715,7 +715,7 @@ def build_doctor_schema(dialect: str | None = None, schema_id: str | None = None
             "tier_summary": {
                 "type": "object",
                 "description": (
-                    "THE-895. The RELIABILITY_TIERS mirror of runtime_summary "
+                    "The RELIABILITY_TIERS mirror of runtime_summary "
                     "above: counts by how much CI has verified each language, "
                     "not by what this host just resolved."
                 ),

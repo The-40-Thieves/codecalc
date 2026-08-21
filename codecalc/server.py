@@ -302,7 +302,7 @@ def _coded(fn):
 _mcp_tool = mcp.tool
 
 
-# ── THE-896: tool GROUPS, so a client can register a slice of the 52-tool
+# ── tool GROUPS, so a client can register a slice of the 52-tool ────────
 # surface instead of paying its full ~9.2k-token tools/list cost. This is NOT
 # the facade docs/design/2026-08-10-tool-facade.md rejected: every tool a
 # group activates keeps its own name, its own typed schema and its own
@@ -1438,7 +1438,7 @@ _ALIAS_ENTRIES = {"c++"}
 
 
 def _tool_groups_report() -> dict:
-    """THE-896: what CODECALC_TOOLS did to this process's registered surface.
+    """What CODECALC_TOOLS did to this process's registered surface.
 
     Built here rather than in codecalc/doctor.py because the group taxonomy
     (KNOWN_GROUPS/PRESETS/TOOL_GROUPS/_ACTIVE_GROUPS) lives in this module,

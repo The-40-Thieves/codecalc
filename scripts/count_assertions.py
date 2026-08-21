@@ -4,7 +4,7 @@
 `scripts/check_claims.py` compares the README's assertion total to the number of
 static `check(` sites. That is a plausibility check: loops multiply, so 624 sites
 could back 1062 assertions or 700 or 900, and it cannot tell which. Nothing
-compared the claim to what a run emits. THE-776.
+compared the claim to what a run emits.
 
 It matters here more than it would elsewhere, because these suites are not
 pytest. They count at runtime through a `check(name, cond, detail)` helper that

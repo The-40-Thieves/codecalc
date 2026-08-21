@@ -182,7 +182,7 @@ check("a first emit() creates the audit directory and writes the line",
 # redaction pass existed but was never armed against the real credentials. The
 # server now feeds the CODECALC_*_AUTHORIZATION / _HTTP_TOKEN values in.
 # Isolate the server's run-state dir AND audit log before importing it (keeps
-# this test off the shared ~/.codecalc/runs and ~/.codecalc/audit — THE-848).
+# this test off the shared ~/.codecalc/runs and ~/.codecalc/audit).
 os.environ["CODECALC_RUN_STATE_DIR"] = str(_tmp / "runs")
 os.environ["CODECALC_AUDIT_LOG"] = str(_tmp / "server-import.log")
 from codecalc import providers, server

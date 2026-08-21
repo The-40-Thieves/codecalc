@@ -1,6 +1,6 @@
 # Design: put the 47 tools behind a discovery facade
 
-Tracks GitHub [#118](https://github.com/The-40-Thieves/codecalc/issues/118) and THE-784.
+Tracks GitHub [#118](https://github.com/The-40-Thieves/codecalc/issues/118).
 Written 2026-08-10 against `main` at `fcd236f`.
 
 > [!important] Status: designed, reviewed, and deliberately NOT built yet
@@ -120,8 +120,8 @@ position: `_meta` gives correlation without inventing a competing envelope.
 
 What `_meta` does **not** give is insulation. Verbatim relay does not remove the eventual breaking
 change, it relocates it from 47 tools to `call_capability`, whose result is a polymorphic
-capability-dependent object. If a uniform envelope is wanted, it is THE-781's to define and the
-facade adopts it; the facade must not grow a competing one.
+capability-dependent object. If a uniform envelope is wanted, that is a separate piece of work to
+define and the facade adopts it; the facade must not grow a competing one.
 
 Error paths are not verbatim either, and the first draft claimed otherwise: `MCPError` propagates as
 a protocol error while other exceptions become `CallToolResult(is_error=True)` with text content.

@@ -189,7 +189,7 @@ else:
 # kernel/Seatbelt interaction can happen. `ci-python.yml`'s `tests` job runs
 # on `macos-latest`, so this is where the mechanism actually gets measured;
 # everywhere else it SKIPS with a recorded reason rather than silently
-# passing, per THE-819's own instruction not to fake a pass on Linux.
+# passing — this must not fake a pass on Linux.
 from codecalc import sandbox_macos as _sm
 
 if _sys.platform == "darwin" and _sm.available():

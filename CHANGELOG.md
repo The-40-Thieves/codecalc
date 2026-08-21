@@ -229,7 +229,7 @@ behind it.
   makes `session_stop` no longer the only way out of a stuck session.
 
 - **`codecalc status` and `codecalc cleanup`: operator-facing session
-  disk-usage commands**, the operational half of THE-894's disk
+  disk-usage commands**, the operational half of the per-session disk
   quotas. `status [--json]` is a read-only snapshot — `SESSION_ROOT`,
   session count, per-session/global workspace disk usage, which sessions
   are idle-expired (the on-disk `.codecalc-session-expired` marker), the
@@ -280,7 +280,7 @@ behind it.
   not strict.
 
 - **Audit-log size-based rotation**. `AuditLog` (`codecalc/audit.py`)
-  appended to one file forever — the same unbounded-growth gap THE-894
+  appended to one file forever — the same unbounded-growth gap already
   closed for session workspaces, here for the append-only broker-decision
   trail. `CODECALC_AUDIT_MAX_MB` (default 10 MiB, read fresh per call, same
   unset/invalid-safe shape as `CODECALC_SESSION_IDLE_TTL_SECONDS`) now caps
@@ -446,8 +446,8 @@ behind it.
 ### Fixed
 
 - **A guard or policy refusal classified as `internal`, indistinguishable from
-  an unhandled crash** (GH #214, the follow-up to THE-875's
-  argument-validation half). `evaluate_expression`/`simplify_expression`/
+  an unhandled crash** (GH #214, the follow-up to an earlier
+  argument-validation fix). `evaluate_expression`/`simplify_expression`/
   `solve_expression`/`solve_linear`'s guarded-evaluation allowlist
   successfully blocking a sandbox-escape attempt (`__import__(...)`,
   `.__class__.__bases__`, a string literal) now returns `"code":
@@ -469,7 +469,7 @@ behind it.
   two a given rejection is, so the security half moved to
   `permission_denied` without dragging the ceiling half along with it. Each
   code is chosen at the point the refusal is decided, not guessed back out of
-  the message by `ensure_code` — the same raise-site principle THE-781
+  the message by `ensure_code` — the same raise-site principle already
   established, so a future refusal worded a new way cannot silently default
   to claiming a codecalc defect again.
 - The MCP server's `instructions=` metadata said "30+ languages"; every
@@ -535,8 +535,8 @@ behind it.
 
 ### Added
 
-- **A versioned extension SDK — language packs, renderers, verifiers**
- . Every extension kind now has a versioned `Protocol`, a registry
+- **A versioned extension SDK — language packs, renderers, verifiers.**
+  Every extension kind now has a versioned `Protocol`, a registry
   enforcing identity/no-impersonation, interface-major compatibility, a
   permission allowlist and a `CODECALC_DISABLE_THIRD_PARTY_EXTENSIONS` kill
   switch, plus integrity verification wired into `register()`. Each kind
@@ -635,7 +635,7 @@ compatible addition bumps MINOR, it does not leave the version unchanged. A
   Landlock probe uses, gated to execute on `darwin` (CI's `macos-latest` leg)
   and to SKIP with a recorded reason everywhere else — the mechanism is
   proven by macOS CI, not argued from documentation. Windows gets no claimed
-  confinement ('s job-object work is unverified on real Windows 11)
+  confinement (the AppContainer job-object work is unverified on real Windows 11)
   but a documented no-op opt-in, `CODECALC_WIN_INSTALL_CONFINE`, adds a
   `package_install_confinement_unverified_on_windows` disclosure without
   claiming enforcement; the base `package_install_not_confined_no_landlock`
@@ -690,9 +690,9 @@ compatible addition bumps MINOR, it does not leave the version unchanged. A
   URI, and `stdout_spill_capped` / `stderr_spill_capped` say outright when the
   spill is fuller than the inline value but still not the whole stream. The
   inline value is byte-for-byte what it always was.
-- **An execution receipt** naming WHAT ran and under WHICH conditions
- , alongside a published `ComputationSpec` schema with a content hash
- , so two runs of the same request are identifiable as such.
+- **An execution receipt** naming WHAT ran and under WHICH conditions,
+  alongside a published `ComputationSpec` schema with a content hash,
+  so two runs of the same request are identifiable as such.
 - **A grade vocabulary for `verify_*` results**. `z3_check`'s grading
   is narrowed to unsat-only rather than reading a `sat` answer as a proof.
 - **Idle-expiry for abandoned stateful sessions**.
@@ -728,8 +728,8 @@ compatible addition bumps MINOR, it does not leave the version unchanged. A
 
 ### Fixed
 
-- **Strict `/v1` service pinned a worker thread on a slow-drip body (slowloris)**
- . The pre-auth body read (`rfile.read(length)`, after the 1 MiB
+- **Strict `/v1` service pinned a worker thread on a slow-drip body (slowloris)**.
+  The pre-auth body read (`rfile.read(length)`, after the 1 MiB
   `MAX_CONTENT_LENGTH` check) had no read timeout, so a client that declared a
   legitimate sub-cap `Content-Length` then dribbled the bytes blocked a
   `ThreadingHTTPServer` worker indefinitely — before `dispatch()`, and unbounded
@@ -738,8 +738,8 @@ compatible addition bumps MINOR, it does not leave the version unchanged. A
   so a slow trickle cannot slip under a per-`recv` gap; expiry drops the
   connection and frees the thread. The 413 oversized path and auth-gate ordering
   are unchanged.
-- **Non-strict `deny-network` hard-errored on a provider that cannot enforce it**
- . The broker forced `no_net` onto the run whenever `network` was
+- **Non-strict `deny-network` hard-errored on a provider that cannot enforce it**.
+  The broker forced `no_net` onto the run whenever `network` was
   denied, regardless of whether the selected provider could enforce it. A
   provider that RAISES on an unenforceable `no_net` — the Piston adapter, whose
   network toggle is a server setting, not a per-request control — then returned a

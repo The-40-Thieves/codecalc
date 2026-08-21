@@ -1067,7 +1067,7 @@ codecalc cleanup --write --include-unmarked   # ALSO sweep old, unmarked, sessio
 ```
 
 `status` reports `SESSION_ROOT`, how many sessions exist and which of them
-are idle-expired (the on-disk `.codecalc-session-expired` marker THE-894's
+are idle-expired (the on-disk `.codecalc-session-expired` marker the
 idle-TTL reaping leaves behind), per-session and global workspace disk
 usage, the configured disk quotas and current headroom, the audit log's
 path and size, and a one-line runtime reliability-tier summary. It changes

@@ -3,7 +3,7 @@
 
 CONTRIBUTING.md's "Changelog entries" section says a change a caller can
 observe needs a line in `CHANGELOG.md` in the same PR. Nothing enforced that:
-THE-875/876/877 each merged caller-observable changes — new CLI flags, a new
+several past PRs each merged caller-observable changes — new CLI flags, a new
 console script, error-code reclassifications — with zero changelog lines, and
 the 0.3.2 release had to reconstruct the notes from the commit log after the
 fact instead of from anything written at review time.

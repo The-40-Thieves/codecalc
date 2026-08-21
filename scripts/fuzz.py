@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Mutation fuzzer over codecalc's two highest-risk caller-string surfaces.
 
-THE-899. Two targets, both places a caller string reaches something that
+Two targets, both places a caller string reaches something that
 walks it structurally rather than just comparing bytes:
 
   1. `safe_expr.classify_unsafe` / `safe_expr.safe_parse` — the screen that
@@ -157,7 +157,7 @@ SEED_CORPUS_EXPR = [
     "((((((",
     # Unicode shapes that crash CPython's C tokenizer from inside
     # classify_unsafe (it round-trips source through UTF-8): the lone surrogate
-    # (UnicodeEncodeError, THE-899, originally found by the mutator) and the
+    # (UnicodeEncodeError, originally found by the mutator) and the
     # replacement/truncated-multibyte char (UnicodeDecodeError, found by the
     # ClusterFuzzLite harness). Seeded here so the deterministic gate covers
     # both directly, not only when the mutator happens to reconstruct them.

@@ -362,7 +362,7 @@ class DockerGVisorRuntime:
                     "runtime": self.config.runtime,
                     "image": self.config.image,
                     "controls": list(ENFORCEMENT_CONTROLS),
-                    # disclose the guest->host PID translation THE-849
+                    # disclose the guest->host PID translation this
                     # applies. `process_limit` is the caller's GUEST budget as
                     # requested; `pids_limit` is the effective HOST
                     # `--pids-limit` actually passed to `docker run`; the

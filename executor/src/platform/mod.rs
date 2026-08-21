@@ -134,13 +134,14 @@ pub fn apply_no_net(cmd: &mut Command, exe_dir: &Path) -> bool {
 /// Quote one argument the way the MSVC C runtime parses it back.
 ///
 /// `CreateProcessW` takes one STRING; the callee re-splits it. Getting this
-/// wrong corrupts every execution silently, which is exactly how THE-817
-/// happened one layer up. Rule, from Microsoft's own parser description:
-/// backslashes are literal EXCEPT immediately before a quote, where they are
-/// escapes and must be doubled — including the run before the closing quote.
+/// wrong corrupts every execution silently, which is exactly how a past
+/// mis-quoting bug happened one layer up. Rule, from Microsoft's own parser
+/// description: backslashes are literal EXCEPT immediately before a quote,
+/// where they are escapes and must be doubled — including the run before
+/// the closing quote.
 // Used by the Windows creation-time path; unused on Unix, where it is kept
 // compiled and TESTED anyway. A rule only one platform can check is a rule
-// nothing checks — the lesson from THE-817's `os.path` vs `ntpath` branch.
+// nothing checks — the lesson from an earlier `os.path` vs `ntpath` branch.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub fn quote_arg(arg: &std::ffi::OsStr) -> String {
     let s = arg.to_string_lossy();
@@ -223,7 +224,7 @@ pub enum RuntimeChoice {
 
 /// Choose a runtime executable from `candidates`, scanning in order.
 ///
-/// The security-critical resolution decision behind THE-818, kept here —
+/// The security-critical resolution decision behind interpreter selection, kept here —
 /// separate from Windows filesystem I/O — so the Linux CI can exercise the
 /// control flow with injected classifiers. A candidate that is a file but an
 /// app-execution alias is SKIPPED rather than returned, so an alias early on

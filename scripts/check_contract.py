@@ -5,8 +5,8 @@
 generated from `codecalc/contract.py`, and a generated document that nobody
 regenerates is a document that drifts — this repo has already shipped a repo
 description and an AUDIT.md snapshot that said "48 tools" for a day while the
-README correctly said 47, because the gate could only reach the README
-. A published schema is the same failure with a worse blast radius:
+README correctly said 47, because the gate could only reach the README.
+A published schema is the same failure with a worse blast radius:
 the README misleads a reader, a wrong schema makes a strictly-validating client
 reject results that are correct.
 
@@ -385,7 +385,7 @@ else:
 
 
 # ── 6. the request's identity: schema, field coverage, golden vectors ───────
-# THE-793. The result contract above says what comes BACK. This says what a
+# The result contract above says what comes BACK. This says what a
 # request IS: a canonical byte encoding and a sha256 over it, published so a
 # second implementation can reproduce both.
 #

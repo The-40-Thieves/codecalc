@@ -1370,7 +1370,7 @@ async def execute_stream(spec, on_progress=None) -> dict:
 def catalog() -> list[dict]:
     """The `list_languages` payload: the registry plus what was measured here.
 
-    THE-817. `available` used to be the whole answer, and it was computed from
+    `available` used to be the whole answer, and it was computed from
     RESOLUTION — `shutil.which` (or the Rust `--probe`) finding the command on
     PATH. That is a weaker fact than the name promises: on a desktop
     Git-for-Windows install `bash` resolved, was reported available, and failed

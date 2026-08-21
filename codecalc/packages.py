@@ -277,9 +277,9 @@ _CONFINABLE_DARWIN = {"python3", "node", "bun", "php", "go", "rust", "deno"}
 #: Read-WRITE because writing to /dev/null is what a redirect does.
 _DEVICE_NODES = ("/dev/null", "/dev/zero", "/dev/urandom", "/dev/random")
 
-#: / THE-818: Windows has NO shipped install-time filesystem
-#: confinement. The job-object machinery is building is unverified on
-#: real Windows 11 (that ticket was reopened) and a restricted-token/
+#: Windows has NO shipped install-time filesystem
+#: confinement. The job-object machinery this codebase is building is
+#: unverified on real Windows 11, and a restricted-token/
 #: AppContainer approach cannot be built or proven from a Linux dev box, so
 #: none is claimed here — the honest disclosure
 #: (`package_install_not_confined_no_landlock`, landlock's own token, since
@@ -287,7 +287,7 @@ _DEVICE_NODES = ("/dev/null", "/dev/zero", "/dev/urandom", "/dev/random")
 #: exactly as it does today.
 #:
 #: This is a documented NO-OP: setting it adds one extra disclosure string and
-#: changes no behaviour. It exists so an operator who has read THE-818
+#: changes no behaviour. It exists so an operator who has read this comment
 #: can say "I know this is unconfined on Windows" in a result rather than
 #: that fact being invisible until they read this source file. An
 #: empty-but-set value counts as set, same convention as every other
@@ -308,15 +308,15 @@ def _confinement(bin_: str, workspace: str, env: dict, language: str) -> tuple:
 
     Two mechanisms, dispatched by platform, because they attach to the child
     differently: Landlock (`_landlock_confinement`, Linux) applies in a
-    `preexec_fn` between fork and exec; `sandbox-exec` (`_macos_confinement`,
-    THE-819) is itself the process that execs the installer, so it has to be
+    `preexec_fn` between fork and exec; `sandbox-exec` (`_macos_confinement`)
+    is itself the process that execs the installer, so it has to be
     PREPENDED to argv instead. `cmd_prefix` is `[]` and `preexec_fn` is `None`
     on whichever half a given platform does not use, so `install()` can always
     do `cmd = cmd_prefix + cmd` and pass `preexec_fn=confine` unconditionally.
 
     Windows has neither: see `WIN_INSTALL_CONFINE_ENV`'s comment for why none
-    is claimed here, and for the unrelated, unverified job-object work
-    that is not this.
+    is claimed here. The unverified job-object work elsewhere in this codebase
+    is a separate, unrelated mechanism from this one.
     """
     if sys.platform == "darwin":
         return _macos_confinement(bin_, workspace, env, language)

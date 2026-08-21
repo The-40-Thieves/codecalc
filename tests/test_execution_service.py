@@ -594,7 +594,7 @@ def test_receipt_distinguishes_two_sessions_running_the_same_spec() -> None:
 def test_compact_mode_keeps_the_actionable_half_of_the_receipt() -> None:
     """A receipt that doubles a compact reply defeats the mode it rides in.
 
-    Copied wholesale, THE-782's additions took a compact result from 603 to
+    Copied wholesale, the receipt's additions took a compact result from 603 to
     1019 bytes — measured, and past the bar server.py already set when it called
     a 171-of-199-token disclosure a defect. What a caller must ACT on stays;
     what is descriptive and one call away is named and dropped.
@@ -1018,7 +1018,7 @@ def test_main_runs_the_same_server_over_explicit_streamable_http() -> None:
 
 
 def test_serve_http_refuses_a_non_loopback_bind_without_a_token() -> None:
-    """THE-786 residual: fail CLOSED. serve-http on a non-loopback host with no
+    """Residual: fail CLOSED. serve-http on a non-loopback host with no
     CODECALC_HTTP_TOKEN would expose 52 unauthenticated code-execution tools to
     whatever network the interface reaches. Refusing to start is the only
     answer that cannot be misconfigured into an open server."""
@@ -1106,7 +1106,7 @@ def test_http_auth_is_wired_into_the_server_at_import_when_the_token_is_set() ->
           proc.returncode == 0)
 
 
-# ── THE-778: run_submit / run_inspect / run_cancel ──────────────────────────
+# ── run_submit / run_inspect / run_cancel ───────────────────────────────────
 
 class _FakeRunProvider(providers.LocalExecutionProvider):
     """A provider that finishes fast and deterministically, so run_submit/
@@ -1318,7 +1318,7 @@ def _real_local_registry() -> providers.ProviderRegistry:
 
 
 def test_run_cancel_on_the_real_local_provider_does_not_strand_the_result() -> None:
-    """THE-778 fix round, review Critical #1 — the reviewer's own repro,
+    """fix round, review Critical #1 — the reviewer's own repro,
     against the ACTUAL LocalExecutionProvider (not a stand-in): submit ->
     run_cancel (gets the honest unsupported error) -> the run completes on
     its own -> run_inspect must reach a terminal state and return the FULL
@@ -1362,7 +1362,7 @@ def test_run_cancel_on_the_real_local_provider_does_not_strand_the_result() -> N
 
 
 def test_run_inspect_terminal_result_has_the_same_keys_as_execute_code() -> None:
-    """THE-778 fix round, review Important #2: run_submit bypasses
+    """fix round, review Important #2: run_submit bypasses
     ExecutionService.execute() — the only OTHER place the `provider`
     receipt was attached — so a terminal run_inspect result was missing it
     entirely. This is the gate that keeps the two surfaces from drifting
@@ -1440,7 +1440,7 @@ def test_first_terminal_run_inspect_reports_cleaned_state_accurately() -> None:
 
 
 def test_run_submit_admission_cap_returns_resource_exhausted() -> None:
-    """THE-778 fix round, review Important #3a: run_submit must refuse past
+    """fix round, review Important #3a: run_submit must refuse past
     CODECALC_MAX_ACTIVE_RUNS with a stable, tested error rather than
     growing the run table without bound."""
     provider = _FakeUncancellableRunningProvider()
@@ -1480,7 +1480,7 @@ def test_run_submit_admission_cap_returns_resource_exhausted() -> None:
             server._run_supervisor = old
 
 
-# ── THE-783: session output spills to a workspace artifact ─────────────────
+# ── session output spills to a workspace artifact ──────────────────────────
 
 def _spill_read(session_id: str, spill_uri: str) -> bytes:
     rel = spill_uri.split("/files/", 1)[1]

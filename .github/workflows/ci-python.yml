@@ -13,7 +13,7 @@ name: ci-python
 # runtimes (go, rust, java, swift, zig, elixir among them) that a hosted runner does not carry. This
 # line exists because its absence was NOT written down anywhere, while test_smoke.py's was — and an
 # undocumented exclusion is indistinguishable from an oversight. It also could not have failed a
-# build until THE-776: it printed `FAIL <lang>` and exited 0 regardless, with no accumulation
+# build until a fix landed: it printed `FAIL <lang>` and exited 0 regardless, with no accumulation
 # anywhere in the file. scripts/check_claims.py now asserts every suite can fail.
 
 on:
@@ -197,7 +197,7 @@ jobs:
       - name: strict execution service (protocol + auth; real runsc skips)
         shell: bash
         run: uv run --no-sync python tests/test_strict_service.py
-      # THE-828, image residual: the published-image digest lock resolves to the
+      # Image residual: the published-image digest lock resolves to the
       # digest publish-executor-image.yml pins, and the digest-required EXECUTION
       # path fails closed when nothing is published yet — never falling back to
       # the mutable local diagnostic tag. Pure logic over a temp lock file and
@@ -333,7 +333,7 @@ jobs:
       - name: doctor diagnostics (degraded environments)
         shell: bash
         run: uv run --no-sync python tests/test_doctor.py
-      # THE-895. `tier` (resolution vs reliability) on list_languages/runtimes_status,
+      # `tier` (resolution vs reliability) on list_languages/runtimes_status,
       # plus the fail-first proof that scripts/check_runtime_tiers.py actually goes
       # red on a seeded wrong tier — run here, not just as its own CI job, so the
       # gate's own correctness is asserted rather than merely invoked.
@@ -620,7 +620,7 @@ jobs:
       # like one that is enforced until something exceeds it.
       - name: platform contract (unenforced tells the truth)
         run: uv run --no-sync python tests/test_platform_contract.py
-      # THE-829. The AppContainer strict backend, bounded to what CI can see:
+      # The AppContainer strict backend, bounded to what CI can see:
       # the source contract runs on every OS here; on windows-latest the runtime
       # smoke sets CODECALC_WIN_APPCONTAINER=1 and confirms the executor still
       # emits valid JSON and either discloses the unverified isolation or fails
@@ -665,7 +665,7 @@ jobs:
           #
           # This used to compare COUNTS, and its comment named a failure mode that MCP SDK 2.0.0
           # does not have. Both are fixed in scripts/check_tool_names.py: it compares NAME SETS
-          # (a count passes when one tool is lost and another gained — THE-811), and it asserts
+          # (a count passes when one tool is lost and another gained), and it asserts
           # against the silent path that actually exists, a duplicate name that add_tool discards
           # with a warning nothing reads, rather than a schema failure, which RAISES.
           uv run --no-sync python scripts/check_tool_names.py /tmp/mcp.out

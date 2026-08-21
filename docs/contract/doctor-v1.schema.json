@@ -384,7 +384,7 @@
               "best_effort",
               "plan_only"
             ],
-            "description": "THE-895. RELIABILITY, orthogonal to `status` above: `status` is what THIS machine just resolved or ran; `tier` is how much codecalc's own CI has verified this language, project-wide. tested = a CI job genuinely executes it and checks its output, every PR \u00b7 best_effort = declared, plausibly works, never CI-checked \u00b7 plan_only = never validated anywhere. A row can read status=installed and tier=best_effort at once \u2014 resolution says nothing about whether the toolchain actually works."
+            "description": "RELIABILITY, orthogonal to `status` above: `status` is what THIS machine just resolved or ran; `tier` is how much codecalc's own CI has verified this language, project-wide. tested = a CI job genuinely executes it and checks its output, every PR \u00b7 best_effort = declared, plausibly works, never CI-checked \u00b7 plan_only = never validated anywhere. A row can read status=installed and tier=best_effort at once \u2014 resolution says nothing about whether the toolchain actually works."
           },
           "detail": {
             "type": "string"
@@ -421,7 +421,7 @@
     },
     "tier_summary": {
       "type": "object",
-      "description": "THE-895. The RELIABILITY_TIERS mirror of runtime_summary above: counts by how much CI has verified each language, not by what this host just resolved.",
+      "description": "The RELIABILITY_TIERS mirror of runtime_summary above: counts by how much CI has verified each language, not by what this host just resolved.",
       "required": [
         "tested",
         "best_effort",

@@ -137,7 +137,7 @@ class ExecutionService:
 
         # broker capabilities BEFORE any side effect. `run_spec` is the
         # possibly-narrowed spec that actually runs (network denied -> no_net
-        # where the provider can enforce it; THE-847: left as-asked and disclosed
+        # where the provider can enforce it; left as-asked and disclosed
         # as effective where it cannot); `spec` (the request as written) still
         # names the receipt, so `spec_hash`
         # and `limits.requested` describe what was asked, and the `capabilities`
@@ -221,7 +221,7 @@ class ExecutionService:
             ))
         # broker before the worker runs; a denied network forces no_net
         # on the spec the session worker receives where the provider can enforce
-        # it (the local provider on the rust backend does; THE-847).
+        # it (the local provider on the rust backend does).
         run_spec, decision, rejection = self._broker(spec, provider,
                                                      session_id=session_id)
         if rejection is not None:

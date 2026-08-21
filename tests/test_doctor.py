@@ -270,7 +270,7 @@ check("the text rendering names the contract version the JSON reports",
       _parses and parsed["contract_version"] in _txt.stdout)
 
 # A flag that no-ops is worse than one that does not exist. This is what
-# --json was before THE-780: accepted, ignored, prose printed anyway.
+# --json was before this: accepted, ignored, prose printed anyway.
 check("`--json` actually changes the output",
       _js.stdout != _txt.stdout and _js.stdout.lstrip().startswith("{"))
 

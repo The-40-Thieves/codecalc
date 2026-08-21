@@ -56,7 +56,7 @@ WINDOWS_RS = (REPO_ROOT / "executor" / "src" / "platform" / "windows.rs").read_t
     encoding="utf-8"
 )
 
-# THE-818. The raw CreateProcessW path bypasses std::process::Command's Windows
+# The raw CreateProcessW path bypasses std::process::Command's Windows
 # handle preparation. bInheritHandles=TRUE only copies handles that already
 # carry HANDLE_FLAG_INHERIT; files opened by Rust do not. The raw path must
 # therefore duplicate its three standard handles as inheritable and pass those
@@ -148,7 +148,7 @@ KNOWN_UNENFORCED = {
     "open_file_limit_unavailable_on_windows",
     "file_size_limit_unavailable_on_windows",
     "no_net_unavailable_on_windows",
-    # windows.rs — THE-775. The process ceiling is SET, both job-object calls
+    # windows.rs — The process ceiling is SET, both job-object calls
     # return success, and it still does not bind: measured on Windows 11 Pro
     # from two unrelated launchers (an agent harness, and Task Scheduler with no
     # agent in the parent chain), 400 of 400 spawns went through against a
@@ -177,7 +177,7 @@ KNOWN_UNENFORCED = {
     # own child reports 0x3000, so the ambient check is answering truthfully
     # about a topology the child is not in.
     "process_limit_enforcement_unverified_on_windows",
-    # THE-818, opt-in via CODECALC_WIN_JOB_AT_CREATION=1. NOT a limitation —
+    # Opt-in via CODECALC_WIN_JOB_AT_CREATION=1. NOT a limitation —
     # the opposite. It records that the job was supplied at CREATION
     # (PROC_THREAD_ATTRIBUTE_JOB_LIST) rather than assigned afterwards, so our
     # job is the child's IMMEDIATE one and its ActiveProcessLimit is the one
@@ -185,7 +185,7 @@ KNOWN_UNENFORCED = {
     # needs to know WHICH topology produced the run; without it, a measurement
     # cannot be attributed to the path that produced it.
     "process_limit_job_assigned_at_creation_on_windows",
-    # windows.rs — THE-829, opt-in via CODECALC_WIN_APPCONTAINER=1 and OFF by
+    # windows.rs — opt-in via CODECALC_WIN_APPCONTAINER=1 and OFF by
     # default. Records that the run was launched inside a least-privilege
     # AppContainer (a SECURITY isolation boundary — payload denied the user
     # profile, the disk outside its workdir, and the network) layered on the
@@ -497,7 +497,7 @@ else:
     check("  ...and the README no longer calls it unavailable",
           "| CPU-time ceiling | `RLIMIT_CPU` | `RLIMIT_CPU` | reported unenforced |" not in readme)
 
-# ── THE-817: a runtime advertised on a host where it cannot run ──────────────
+# ── a runtime advertised on a host where it cannot run ───────────────────────
 #
 # Two independent defects stacked, and only fixing both closes the ticket.
 #
@@ -575,7 +575,7 @@ _mismatch = [n for n, r in _doc.items()
 check("doctor and list_languages agree on every runtime's status",
       not _mismatch, f"-> {_mismatch[:5]}")
 
-# ── THE-835: shell-wrapped plans are a checkable fact, not an argv string ───
+# ── shell-wrapped plans are a checkable fact, not an argv string ────────────
 # `windows` is a parameter (the source_arg pattern), so every verdict below is
 # exercised on this leg regardless of what this leg runs on.
 
@@ -626,7 +626,7 @@ try:
 finally:
     executor.IS_WINDOWS = _saved_win
 
-# ── THE-836: release packaging fails closed, decided by a pure function ─────
+# ── release packaging fails closed, decided by a pure function ──────────────
 # The end-to-end (CODECALC_REQUIRE_BINARY=1 + `uv build` refusing on a hidden
 # binary/shim, degrading to a warned pure wheel without the switch) was proven
 # by hand and is exercised by every release build; this pins the DECISION so it

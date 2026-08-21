@@ -1,4 +1,4 @@
-"""THE-802: compare_execution's cold-start retry + timeout classification.
+"""compare_execution's cold-start retry + timeout classification.
 
 Standalone, like the other suites: a check() accumulator, sys.exit(1) on any
 failure. The bug this guards: `node` intermittently loses the wall-clock race

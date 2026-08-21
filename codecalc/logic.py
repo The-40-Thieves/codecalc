@@ -449,8 +449,8 @@ def _parse_solve_piece(piece: str, evaluate: bool):
     `9**9**9**9` is refused in milliseconds instead of burning CPU seconds
     (and eventually the 15s guarded_call timeout) evaluating it blind.
 
-    Mirrors `linalg._parse_entry`'s per-cell version of the same fix
-   ; this is solve_linear's per-piece version.
+    Mirrors `linalg._parse_entry`'s per-cell version of the same fix;
+    this is solve_linear's per-piece version.
 
     Returns (parsed value, error dict); exactly one of the two is not None.
     `evaluate` selects whether the returned value is the unevaluated shape

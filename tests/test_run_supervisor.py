@@ -136,7 +136,7 @@ class NoCleanupCapabilityProvider(providers.LocalExecutionProvider):
 
 
 def test_cleanup_is_capability_gated_and_does_not_crash_on_a_provider_without_it() -> None:
-    """THE-778 residual: run_supervisor.cleanup() unconditionally called
+    """Residual: run_supervisor.cleanup() unconditionally called
     provider.cleanup(), and LocalExecutionProvider.cleanup() raises
     UnsupportedCapability (its own `cleanup` capability is False). That was
     latent as long as cleanup() was only reached from ExecutionService's
@@ -190,7 +190,7 @@ class UncancellableBlockingProvider(providers.LocalExecutionProvider):
 
 
 def test_cancel_on_a_provider_that_cannot_cancel_leaves_the_run_collectible() -> None:
-    """THE-778 fix round, review Critical #1 — the reviewer's own repro:
+    """fix round, review Critical #1 — the reviewer's own repro:
     cancel() used to set state="cancelling" BEFORE calling provider.cancel(),
     and a provider that does not advertise `cancel` (LocalExecutionProvider)
     raises UnsupportedCapability there unconditionally. The state was never
@@ -238,7 +238,7 @@ def test_cancel_on_a_provider_that_cannot_cancel_leaves_the_run_collectible() ->
 
 
 def test_admission_cap_rejects_a_submission_past_the_limit() -> None:
-    """THE-778 fix round, review Important #3a."""
+    """fix round, review Important #3a."""
     provider = BlockingProvider()
     registry = providers.ProviderRegistry(default_provider_id=provider.provider_id)
     registry.register(provider)
@@ -337,7 +337,7 @@ class _FastProvider(providers.LocalExecutionProvider):
 
 
 def test_prune_never_deletes_a_still_active_runs_journal() -> None:
-    """THE-778 fix round, review Important #3b (first half — state-aware
+    """fix round, review Important #3b (first half — state-aware
     pruning): _prune() used to sort EVERY `*.json` by mtime with no read of
     its recorded state, so a long-running job's journal — written once at
     start() and untouched since, so often the OLDEST by mtime — could be
@@ -384,7 +384,7 @@ def test_prune_never_deletes_a_still_active_runs_journal() -> None:
 
 
 def test_prune_runs_on_terminal_collection_not_only_cleanup() -> None:
-    """THE-778 fix round, review Important #3b (second half — prune on
+    """fix round, review Important #3b (second half — prune on
     collection): before this, _prune() was reachable ONLY from
     cleanup()/recover_orphans(). A caller that only ever calls run_submit
     and polls run_inspect — never cleanup() directly, which is exactly how
@@ -503,7 +503,7 @@ def test_a_completed_but_uninspected_run_frees_its_admission_slot() -> None:
 
 
 def test_recover_orphans_skips_an_unregistered_provider_without_crashing() -> None:
-    """THE-846: a journalled active run naming a provider NOT registered this
+    """A journalled active run naming a provider NOT registered this
     boot must not crash recover_orphans() — which runs at server IMPORT time.
     registry.select() raises UnknownProvider (a LookupError) for such a run;
     the pre-fix except (KeyError, OSError, ValueError, TypeError,

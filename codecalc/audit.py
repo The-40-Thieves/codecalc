@@ -93,8 +93,8 @@ def _audit_max_bytes() -> int:
     restart) — but NOT the same fallback meaning. An idle TTL that is unset
     means "off, never expire"; this always resolves to a real ceiling; unset,
     empty, non-numeric or non-positive all fall back to the generous default
-    rather than to "unlimited", the same "bounded by default" rule THE-894's
-    own quota accessors (`sessions._env_positive_float`) already follow.
+    rather than to "unlimited", the same "bounded by default" rule the session
+    quota accessors (`sessions._env_positive_float`) already follow.
     """
     import os
 

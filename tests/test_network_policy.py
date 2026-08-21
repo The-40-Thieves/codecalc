@@ -196,7 +196,7 @@ check("allow-network parses to an explicit grant",
 # The counterpart to sections B/B2: where the provider genuinely controls the
 # network (the native Linux shim, backend == "rust"), deny-network is ENFORCED,
 # not merely disclosed. This drives the REAL LocalExecutionProvider end to end so
-# THE-847's "disclose where you can't" change did not weaken the "block where you
+# the "disclose where you can't" change did not weaken the "block where you
 # can" path. Skipped off the rust backend (the python fallback cannot enforce, so
 # it takes the section-B disclose path instead — its own suites cover that).
 if executor.backend() == "rust" and sys.platform.startswith("linux"):

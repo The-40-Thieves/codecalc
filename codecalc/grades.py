@@ -89,10 +89,10 @@ and had nowhere else to come from. None of them compute a grade inline.
                    implementations agreeing — it is one simplifier's opinion
                    about one difference expression. None of the three grades
                    describes that evidence honestly, so `algebraic_equiv`'s
-                   result shape is untouched by this ticket. (Making it
+                   result shape is left untouched here. (Making it
                    `solver_proven` by routing it through Z3 as well would be
                    a real capability change to the central claims engine,
-                   which THE-785's reconciled scope explicitly excludes.)
+                   which this change's reconciled scope explicitly excludes.)
 
 ## Versioning
 

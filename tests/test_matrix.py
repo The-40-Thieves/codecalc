@@ -179,7 +179,7 @@ for _bad in (float("inf"), float("-inf"), float("nan")):
           and "finite" in r["error"], f"-> {r}")
 
 # ── the improved refusal message on evaluate_expression's own '[' denial ───
-# option 3 of THE-887: name matrices and point at the new tool, without
+# option 3: name matrices and point at the new tool, without
 # changing what is refused (still CATEGORY_SECURITY -> permission_denied).
 
 _cls = safe_expr.classify_unsafe("Matrix([[1,2],[3,4]])")

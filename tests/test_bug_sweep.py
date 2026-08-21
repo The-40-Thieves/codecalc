@@ -903,7 +903,7 @@ check("  ...and still answers ordinary exact arithmetic",
       _ex2.eval_exact("0.1+0.2").get("value") == "3/10",
       f"-> {_ex2.eval_exact('0.1+0.2').get('value')!r}")
 
-# ═══ THE-888: solve_linear's own sympify was not screened the way the RCE ═══
+# ═══ solve_linear's own sympify was not screened the way the RCE ════════════
 # probe above proves evaluate_expression is — classify_unsafe is a syntax
 # DENYLIST, and a screened, non-denylisted NAME can still be a LIVE Python
 # builtin. `sp.sympify(lhs)`/`sp.sympify(rhs)` (the '=' path) and
@@ -954,7 +954,7 @@ _r = _logic.solve_linear("x - 5; y - 3", "x, y")
 check("solve_linear still solves the no-'=' (raw) path",
       _r.get("ok") is True and _r.get("solutions") == ["{x: 5, y: 3}"], f"-> {_r}")
 
-# ═══ THE-889: the same bare-sympify gap in exact.py's four remaining ═══════
+# ═══ the same bare-sympify gap in exact.py's four remaining ════════════════
 # symbolic tools. algebraic_equiv / solve_expression / limit_expression
 # (including its `point` argument) / simplify_expression each did
 # `classify_unsafe(...)` then a bare `sp.sympify(...)` — classify_unsafe is a
@@ -1028,7 +1028,7 @@ _r = _exact.simplify_expression("(x**2 - 1)/(x - 1)")
 check("simplify_expression still simplifies ordinary algebra",
       _r.get("ok") is True and _r.get("simplified") == "x + 1", f"-> {_r}")
 
-# ═══ THE-890: solve_linear crashed on a SINGLE-variable system ════════════
+# ═══ solve_linear crashed on a SINGLE-variable system ═════════════════════
 # sp.symbols("x") returns a bare Symbol, not a 1-tuple, unless given more
 # than one name or a trailing comma — the code downstream assumed a
 # sequence (`list(syms)`), so `solve_linear('2*x = 4', 'x')` raised
@@ -1045,7 +1045,7 @@ check("  ...and multi-variable systems are unaffected",
       _r.get("ok") is True and _r.get("solutions") == ["{x: 6, y: 4}"], f"-> {_r}")
 
 
-# ═══ THE-901: reject_explosive bounds Pow shapes, not nested-parens +      ═══
+# ═══ reject_explosive bounds Pow shapes, not nested-parens + ═════════════════
 # ═══ repeated-term chains — guarded_call is the actual backstop for those ═══
 # `scripts/fuzz.py` found that deeply nested parens combined with a
 # long chain of repeated terms costs multiple seconds of real CPU INSIDE

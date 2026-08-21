@@ -579,7 +579,7 @@ const POSIX_ARGV_LANGUAGES: &[&str] = &["bash", "zsh"];
 /// Languages whose canonical plan still needs a POSIX shell to scaffold a
 /// workspace. Before this set existed all wrapper languages probed
 /// as `bash`, so a Windows box with Git-for-Windows advertised them as
-/// available for plans that were structurally unable to run — THE-817's lie,
+/// available for plans that were structurally unable to run — the same lie,
 /// one level up. Mirrored in codecalc/registry.py; scripts/check_parity.py
 /// gates the two copies.
 const SHELL_WRAPPED: &[&str] = &["gleam", "haskell"];

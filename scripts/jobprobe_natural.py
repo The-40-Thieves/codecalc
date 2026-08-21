@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""THE-818 natural-inheritance probe (Windows-only, standalone ctypes).
+"""Natural-inheritance probe (Windows-only, standalone ctypes).
 
 The executor measurements settled everything except one question. codecalc puts
 the sandbox CHILD in its job (in_our_job=1), but that child's descendants never

@@ -1,4 +1,4 @@
-"""THE-872: every extension's compat ranges are non-empty and current.
+"""Every extension's compat ranges are non-empty and current.
 
 Standalone, like the other extension-SDK suites: a check() accumulator,
 sys.exit(1) on any failure.
@@ -18,7 +18,7 @@ extensions and asserts, for each manifest:
 
 This must fail on the pre-fix code (verified by temporarily reverting one
 range to `">=0.2,<0.3"` — see the PR description) and pass after
-THE-872's fix, which computes every range from the running version via
+the fix, which computes every range from the running version via
 `codecalc.extensions.codecalc_compat_range`/`contract_compat_range` instead of
 hardcoding it.
 """
@@ -99,7 +99,7 @@ for label, extension in EXTENSIONS:
                          contract.CONTRACT_VERSION)
 
 # ── every built-in + example advertises the SAME range (single source of
-# truth: THE-872's fix is shared helpers, not three independently-hardcoded
+# truth: the fix is shared helpers, not three independently-hardcoded
 # copies that could drift again) ─────────────────────────────────────────────
 codecalc_ranges = {label: extension.manifest.compatible_codecalc for label, extension in EXTENSIONS}
 contract_ranges = {label: extension.manifest.compatible_contract for label, extension in EXTENSIONS}

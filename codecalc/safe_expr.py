@@ -285,8 +285,8 @@ def reject_unsafe(expression: str) -> str | None:
     Returns a message rather than raising so callers can fold it into the
     structured `{"ok": False, "error": ...}` shape every tool already uses.
     A caller that also needs to know WHICH kind of refusal this is (a jail, a
-    ceiling, or a plain validation mistake — they are not interchangeable,
-    see THE-881) should call `classify_unsafe` instead; this wrapper exists
+    ceiling, or a plain validation mistake — they are not interchangeable)
+    should call `classify_unsafe` instead; this wrapper exists
     so the message-only contract callers and tests already depend on does
     not change.
     """
@@ -362,9 +362,9 @@ def safe_parse(expression: str, *, evaluate: bool = True, local_dict: dict | Non
     `exact.py`'s `algebraic_equiv`/`solve_expression`/`limit_expression`/
     `simplify_expression`.
 
-    Before THE-889, `logic._evaluate_expression`, `logic._parse_solve_piece`
-    and `linalg._parse_entry` each hand-rolled the same three steps ahead of
-    a caller string reaching SymPy — this is that logic, factored out:
+    `logic._evaluate_expression`, `logic._parse_solve_piece` and
+    `linalg._parse_entry` used to each hand-roll the same three steps ahead
+    of a caller string reaching SymPy — this is that logic, factored out:
 
       1. `classify_unsafe` — the syntax denylist above (attribute access,
          string literals, leading underscores, ...).
@@ -387,7 +387,7 @@ def safe_parse(expression: str, *, evaluate: bool = True, local_dict: dict | Non
       parse error instead of a live call.
 
     Three call sites doing this by hand is three chances for a fourth to do
-    it differently — THE-889's `exact.py` tools were the proof: each did
+    it differently — `exact.py`'s tools were the proof: each did
     `classify_unsafe` then a bare `sp.sympify`, skipping steps 2 and 3
     entirely. This is the anti-regression move: one entry point, so a future
     caller can't do classify_unsafe-but-forget-the-safe-parse.

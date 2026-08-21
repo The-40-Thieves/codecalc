@@ -101,7 +101,7 @@ from pathlib import Path
 #: never gets a lock) and as a second, independent guard even where the
 #: lock check already applies — erring toward "leave it" wherever any one
 #: signal is ambiguous is the only safe default for a command that deletes
-#: directories it did not create. Fixed, not an env knob: THE-894's own
+#: directories it did not create. Fixed, not an env knob: the session
 #: per-artifact/session caps are configurable because an operator may
 #: legitimately want a bigger or smaller BUDGET; this is a minimum safety
 #: margin, and the right value for it does not vary by deployment the way a
@@ -115,7 +115,7 @@ _RECENT_MTIME_GUARD_SECONDS = 300.0
 #: idle-expiry machinery ever runs against it) never gets a marker no
 #: matter how long it sits unused, and this is the only signal that can
 #: ever reclaim one. Generous by default for the same "bounded, not
-#: trigger-happy" reasoning THE-894's quota defaults state: a caller
+#: trigger-happy" reasoning the session quota defaults state: a caller
 #: legitimately staging a session across a long gap should not have its
 #: workspace vanish underneath it.
 CLEANUP_ABANDONED_AGE_HOURS_ENV = "CODECALC_CLEANUP_ABANDONED_AGE_HOURS"
@@ -274,7 +274,7 @@ def _cleanup_candidates(*, include_unmarked: bool = False) -> list[dict]:
                         "reason": "refused: not a direct child of SESSION_ROOT"})
             continue
 
-        # THE-894's own identity guard (executor._dir_identity mirrors
+        # The same identity guard (executor._dir_identity mirrors
         # sessions._SESSION_DIR_IDENTITY's bookkeeping): lstat-based, so a
         # symlink or a filesystem with no stable inode both come back None,
         # and this candidate is refused rather than treated as removable.

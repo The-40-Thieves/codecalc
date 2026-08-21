@@ -1,4 +1,4 @@
-"""THE-794: the language-pack extension kind (codecalc/language_packs.py).
+"""The language-pack extension kind (codecalc/language_packs.py).
 
 Standalone, like the other suites: a check() accumulator, sys.exit(1) on any
 failure. Runs the built-in pack and the reference third-party pack

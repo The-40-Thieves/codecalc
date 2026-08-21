@@ -12,7 +12,7 @@ the same version". Two manifests with two different numbers defeat that in the
 one place where it cannot be taken back — a version, once uploaded to PyPI, is
 burned even if the file is deleted.
 
-This is THE-777's defect one level up: a value that lives in more places than
+This is the same defect one level up: a value that lives in more places than
 the gate can reach. That one shipped a repo description reading "48 tools" for a
 day while the README correctly said 47.
 
@@ -113,7 +113,7 @@ def changelog_version() -> str | None:
     try:
         text = CHANGELOG.read_text(encoding="utf-8")
     except OSError:
-        fail(f"{CHANGELOG.name} does not exist — a release with no notes is THE-813")
+        fail(f"{CHANGELOG.name} does not exist — a release with no notes is a defect")
         return None
     for m in re.finditer(r"^##\s*\[([^\]]+)\]", text, re.M):
         candidate = m.group(1).strip()

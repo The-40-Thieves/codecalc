@@ -435,7 +435,7 @@ first place.
 
 Everything above describes what comes **back**. This section describes what a
 request **is**, so that two parties can agree on a name for one without shipping
-the whole object around. THE-793.
+the whole object around.
 
 `providers.ComputationSpec` is the canonical, transport-neutral request. Its
 identity is a byte encoding plus a digest over it:

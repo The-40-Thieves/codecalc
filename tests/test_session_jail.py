@@ -149,7 +149,7 @@ for bad in ("../evil", "a/b", "", "x" * 65, "we!rd"):
         rejected = True
     check(f"session id {bad[:14]!r} rejected", rejected)
 
-# ── THE-901: a many-segment path must be refused WITHOUT reaching resolve() ─
+# ── a many-segment path must be refused WITHOUT reaching resolve() ──────────
 # `_jail` used to run `Path.resolve()` on the raw caller string before doing
 # any shape check. resolve() is worse-than-linear in segment count, and this
 # runs in the SERVER process, outside `guarded_call`'s ceilings — a fuzzer
@@ -569,7 +569,7 @@ else:
             else:
                 os.environ["CODECALC_RUNTIME_PATH"] = _saved_runtime
 
-# ── C1: THE-783's spill helpers are jailed like every other session path ────
+# ── C1: spill helpers are jailed like every other session path ──────────────
 # Reproduced before the fix, both directions, in the UNSANDBOXED SERVER
 # process (the Rust sandbox has already returned by the time a spill is
 # written). `_spill_dir` resolved `.codecalc-spill` without `_jail`, and

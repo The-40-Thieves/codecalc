@@ -79,9 +79,9 @@ truthfully non-strict; selecting a strict provider never falls back to it.
 1. Extend `doctor --json`, schemas, README, AUDIT, and CHANGELOG with provider
    prerequisites and exact non-strict/strict boundaries.
 2. Run Python, Rust, claims, schema, and platform-contract suites.
-3. Commit in reviewable slices (`THE-831`, `THE-828`, `THE-829`, `THE-830`,
-   docs/CI), push this branch, open a PR, and attach verification evidence to
-   all four Linear issues.
+3. Commit in reviewable slices (per provider, plus docs/CI), push this
+   branch, open a PR, and attach verification evidence to each tracked
+   issue.
 
 ## Portability boundary
 

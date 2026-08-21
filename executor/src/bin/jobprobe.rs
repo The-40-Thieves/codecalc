@@ -1,6 +1,6 @@
 //! jobprobe — why does the process ceiling bind here and not there?
 //!
-//! THE-818. **This file was rewritten on 2026-08-12 because its first version
+//! **This file was rewritten on 2026-08-12 because its first version
 //! was measuring the wrong thing, and said so confidently.**
 //!
 //! WHAT WENT WRONG, because it is the reason this file now works the way it
@@ -504,7 +504,7 @@ mod imp {
             return run_child(args.spawns, &args.out.unwrap_or_default());
         }
 
-        println!("jobprobe — THE-818: what makes the ceiling bind here and not there?");
+        println!("jobprobe — what makes the ceiling bind here and not there?");
         println!("limit={} spawns={}", args.limit, args.spawns);
         println!("`production` calls platform::spawn_and_wait — the shipped path, not a model.\n");
         println!("ARM              SPAWNED    VERDICT  LIMIT_FLAGS APL   NOTE");
@@ -578,7 +578,7 @@ mod imp {
         if production_lied {
             println!(
                 "\nPRODUCTION SPAWNED PAST ITS CEILING AND REPORTED NOTHING. That is \
-                 THE-818's\nacceptance criterion 4 failing on this host — a false claim, \
+                 acceptance criterion 4 failing on this host — a false claim, \
                  not a missing one."
             );
         }

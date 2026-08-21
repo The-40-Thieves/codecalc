@@ -499,7 +499,7 @@ only appear when you compile for the target.
    isolation properties — payload cannot read the user profile or write outside
    the workdir — are only observable on a Win11 desktop, so every run that takes
    the path emits `appcontainer_isolation_unverified_on_windows`. Inherits the
-   unverified status of THE-818, on which it is layered.
+   unverified status of the creation-time job-object attach, on which it is layered.
 
    **CORRECTION 2026-08-13.** This paragraph read "(job-scoped, so strictly
    better than `RLIMIT_NPROC`'s uid-wide budget)". That was measured false:

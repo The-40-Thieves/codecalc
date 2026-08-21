@@ -108,7 +108,7 @@ class _CeilingExceeded(ValueError):
     to guess back at the server boundary. "exponent 387420489 exceeds the
     limit (10000)" contains none of `_MESSAGE_HINTS`' vocabulary ("exceeded",
     not "exceeds") and landed on `internal` — the same defect-vs-refusal
-    confusion exists to close for guard rejections.
+    confusion this type exists to close for guard rejections.
     """
 
 

@@ -1,4 +1,4 @@
-"""Reusable language-pack conformance cases for THE-794."""
+"""Reusable language-pack conformance cases for the extension framework."""
 
 from __future__ import annotations
 

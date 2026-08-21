@@ -156,7 +156,7 @@ def broker(requested: frozenset[str], *, policy: CapabilityPolicy,
            provider_supported: frozenset[str]) -> BrokerDecision:
     """Pure policy decision. `approved subset-of-or-equal requested` is guaranteed by construction.
 
-    Two rejection conditions, both from THE-787:
+    Two rejection conditions:
 
       1. The policy would GRANT a capability the request did not ask for. That is
          an escalation — the whole point of the broker is that policy narrows and

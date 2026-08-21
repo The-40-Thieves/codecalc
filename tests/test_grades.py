@@ -2,7 +2,7 @@
 
 codecalc's verify_* tools already refuse to fabricate confidence — see
 tests/test_translation_verify.py for the classify_case/aggregate rules this
-module NAMES rather than re-derives. What none of them did, before THE-785,
+module NAMES rather than re-derives. What none of them did, before this,
 was surface how strong that evidence is in one small, versioned vocabulary:
 `executed` / `cross_checked` / `solver_proven`, plus the explicit non-grade
 `ungraded`.

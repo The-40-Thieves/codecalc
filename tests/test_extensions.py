@@ -1,4 +1,4 @@
-"""THE-794: the shared extension framework (codecalc/extensions.py).
+"""The shared extension framework (codecalc/extensions.py).
 
 Standalone, like the other suites: a check() accumulator, sys.exit(1) on any
 failure. Exercises the registration rules (identity/no-impersonation, interface

@@ -161,8 +161,8 @@ for _label, _call in [
           and "too long" in str(_r.get("error")),
           f"-> code={_r.get('code')} err={str(_r.get('error'))[:50]!r}")
 
-# the GUARD/POLICY half of THE-875's error-classification bug
-# (GH #214). fixed argument-validation refusals landing on
+# the GUARD/POLICY half of an earlier error-classification bug
+# (GH #214) that fixed argument-validation refusals landing on
 # `internal`; this is the other 8 of 10 reachable cases — a guarded-eval
 # allowlist SUCCESSFULLY blocking a sandbox-escape attempt, a ceiling, a
 # leaked exception repr and a documented policy refusal, all of which

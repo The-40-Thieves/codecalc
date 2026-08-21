@@ -197,8 +197,8 @@ def _from_message(message: str) -> str:
     return INTERNAL
 
 
-#: Maps safe_expr.classify_unsafe()'s neutral categories to this taxonomy
-#:. Lives HERE, not in safe_expr.py: safe_expr must not know this
+#: Maps safe_expr.classify_unsafe()'s neutral categories to this taxonomy.
+#: Lives HERE, not in safe_expr.py: safe_expr must not know this
 #: module's codes (it screens caller strings and has no business owning a
 #: result-contract concern), so it hands back "security"/"ceiling"/
 #: "validation" and the CALLER decides what those mean. Keeping the mapping
@@ -207,7 +207,7 @@ def _from_message(message: str) -> str:
 #: A jail refusal ("security": `__import__`, attribute access, a string
 #: literal) is not the same failure as a ceiling ("ceiling": a heavy-argument
 #: cap like `factorial(100000)`) — one will never succeed on retry, the other
-#: succeeds if the caller reduces the work. Conflating them was THE-881's own
+#: succeeds if the caller reduces the work. Conflating them was a past
 #: regression: a blanket security mapping turned `factorial(100000)`'s
 #: correct `resource_exhausted` into `permission_denied`.
 _SAFE_EXPR_CATEGORY_CODES = {

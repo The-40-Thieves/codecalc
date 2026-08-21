@@ -87,10 +87,10 @@ def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 
     discrepancies = []
     flagged_languages: set[str] = set()
 
-    # THE-802, classification half. A row still timed_out after the one warm
+    # Classification half. A row still timed_out after the one warm
     # retry above is treated as authoritative here — it is ALWAYS flagged
     # (not only when a sibling produced output), and it carries the sibling
-    # timing comparison that discriminates the ticket's two hypotheses:
+    # timing comparison that discriminates the two hypotheses:
     # (1) this language's snippet is actually slow/broken, vs. (2) the whole
     # runner was under cold-start pressure and everything was slow. A row
     # entered here must not be re-added by the produced/silent loop below.

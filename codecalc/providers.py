@@ -310,12 +310,12 @@ def attach_receipt(spec: ComputationSpec, provider: ExecutionProvider,
                    result: dict, *, session_id: str | None = None,
                    capability_decision: object | None = None) -> dict:
     """Add the FULL execution receipt (identity, content hashes, determinism
-    inputs, limits enforcement — THE-782) every full execution result
+    inputs, limits enforcement) every full execution result
     carries, mutating and returning `result`.
 
     Moved here from execution_service.py (originally private to
     `ExecutionService.execute()`/`execute_session()`/`execute_stream()`) so
-    RunSupervisor's own background-run collection (`_collect()`, THE-778
+    RunSupervisor's own background-run collection (`_collect()`, a
     fix-round review) can produce the identical shape `execute_code` does
     instead of a caller being able to tell "ran through ExecutionService"
     from "ran through run_submit" by whether `provider` is present, or by
