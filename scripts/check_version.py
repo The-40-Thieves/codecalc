@@ -26,6 +26,9 @@ WHAT IS COMPARED
                          0.3.1, because nothing compared the README's own
                          install instructions against the version they claim
                          to install)
+  docker/mcp-server.Dockerfile  `ARG CODECALC_VERSION=` (THE-892 — the image
+                        pinned 0.3.1 while the manifests had moved to 0.3.2, so
+                        it would `pip install codecalc==0.3.1` on a 0.3.2 cut)
   the git tag           only when running on a tag (CI sets GITHUB_REF)
 
 The changelog is included because a release whose notes describe a different
@@ -54,6 +57,7 @@ PYPROJECT = REPO / "pyproject.toml"
 CARGO = REPO / "executor" / "Cargo.toml"
 CHANGELOG = REPO / "CHANGELOG.md"
 README = REPO / "README.md"
+DOCKERFILE = REPO / "docker" / "mcp-server.Dockerfile"
 
 #: A version has to look like one. This is the floor against an extractor that
 #: silently matches an empty string: `""` would satisfy "they are all equal".
@@ -178,6 +182,27 @@ def readme_versions() -> tuple[str | None, str | None]:
     return (pkg.group(1) if pkg else None, exe.group(1) if exe else None)
 
 
+def dockerfile_version() -> str | None:
+    """The `ARG CODECALC_VERSION=X.Y.Z` the MCP-server image installs (THE-892).
+
+    It drifted to 0.3.1 while the six manifests above moved to 0.3.2 — the
+    image would `pip install codecalc==0.3.1` on a 0.3.2 release, because
+    nothing compared the Dockerfile's pinned version against the rest. It is
+    part of the release surface a user installs from, so it is gated with the
+    others rather than left to drift until a report."""
+    try:
+        text = DOCKERFILE.read_text(encoding="utf-8")
+    except OSError as exc:
+        fail(f"could not read {DOCKERFILE}: {exc}")
+        return None
+    m = re.search(r"^ARG\s+CODECALC_VERSION=(\S+)", text, re.M)
+    if not m:
+        fail(f"{DOCKERFILE.name} declares no `ARG CODECALC_VERSION=` — "
+             "the extractor matched nothing")
+        return None
+    return m.group(1)
+
+
 readme_pkg_version, readme_exec_version = readme_versions()
 
 sources: dict[str, str | None] = {
@@ -187,6 +212,7 @@ sources: dict[str, str | None] = {
     "CHANGELOG.md": changelog_version(),
     "README.md (codecalc)": readme_pkg_version,
     "README.md (codecalc-exec)": readme_exec_version,
+    "docker/mcp-server.Dockerfile": dockerfile_version(),
 }
 tag = tag_version()
 if tag is not None:
