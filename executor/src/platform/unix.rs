@@ -263,11 +263,21 @@ mod seccomp {
 
     #[inline]
     fn stmt(code: u16, k: u32) -> libc::sock_filter {
-        libc::sock_filter { code, jt: 0, jf: 0, k }
+        libc::sock_filter {
+            code,
+            jt: 0,
+            jf: 0,
+            k,
+        }
     }
     #[inline]
     fn jeq(k: u32, jt: u8, jf: u8) -> libc::sock_filter {
-        libc::sock_filter { code: (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16, jt, jf, k }
+        libc::sock_filter {
+            code: (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
+            jt,
+            jf,
+            k,
+        }
     }
 
     /// Close EVERY unprivileged path that creates an `AF_INET`/`AF_INET6` socket,
@@ -292,22 +302,33 @@ mod seccomp {
         let ret = (libc::BPF_RET | libc::BPF_K) as u16;
         let jge = (libc::BPF_JMP | libc::BPF_JGE | libc::BPF_K) as u16;
         vec![
-            stmt(ld, OFF_ARCH),                                 // 0: A = arch
-            jeq(NATIVE_AUDIT_ARCH, 0, 13),                      // 1: arch != native      -> KILL (15)
-            stmt(ld, OFF_NR),                                   // 2: A = nr
-            libc::sock_filter { code: jge, jt: 11, jf: 0, k: 0x4000_0000 }, // 3: x32/compat bit -> KILL (15)
-            jeq(libc::SYS_io_uring_setup as u32, 7, 0),         // 4: io_uring_setup       -> ENOSYS (12)
-            jeq(libc::SYS_io_uring_enter as u32, 6, 0),         // 5: io_uring_enter       -> ENOSYS (12)
-            jeq(libc::SYS_io_uring_register as u32, 5, 0),      // 6: io_uring_register    -> ENOSYS (12)
-            jeq(libc::SYS_socket as u32, 0, 6),                 // 7: not socket           -> ALLOW (14)
-            stmt(ld, OFF_ARG0),                                 // 8: A = domain (args[0], low word)
-            jeq(libc::AF_INET as u32, 3, 0),                    // 9: AF_INET              -> EACCES (13)
-            jeq(libc::AF_INET6 as u32, 2, 0),                   // 10: AF_INET6            -> EACCES (13)
-            stmt(ret, libc::SECCOMP_RET_ALLOW),                 // 11: other domain        -> allow
-            stmt(ret, libc::SECCOMP_RET_ERRNO | (libc::ENOSYS as u32 & SECCOMP_RET_DATA)), // 12: ENOSYS (io_uring)
-            stmt(ret, libc::SECCOMP_RET_ERRNO | (libc::EACCES as u32 & SECCOMP_RET_DATA)), // 13: EACCES (inet)
-            stmt(ret, libc::SECCOMP_RET_ALLOW),                 // 14: ALLOW (non-socket)
-            stmt(ret, libc::SECCOMP_RET_KILL_PROCESS),          // 15: KILL (foreign arch / x32)
+            stmt(ld, OFF_ARCH),            // 0: A = arch
+            jeq(NATIVE_AUDIT_ARCH, 0, 13), // 1: arch != native      -> KILL (15)
+            stmt(ld, OFF_NR),              // 2: A = nr
+            libc::sock_filter {
+                code: jge,
+                jt: 11,
+                jf: 0,
+                k: 0x4000_0000,
+            }, // 3: x32/compat bit -> KILL (15)
+            jeq(libc::SYS_io_uring_setup as u32, 7, 0), // 4: io_uring_setup       -> ENOSYS (12)
+            jeq(libc::SYS_io_uring_enter as u32, 6, 0), // 5: io_uring_enter       -> ENOSYS (12)
+            jeq(libc::SYS_io_uring_register as u32, 5, 0), // 6: io_uring_register    -> ENOSYS (12)
+            jeq(libc::SYS_socket as u32, 0, 6), // 7: not socket           -> ALLOW (14)
+            stmt(ld, OFF_ARG0),            // 8: A = domain (args[0], low word)
+            jeq(libc::AF_INET as u32, 3, 0), // 9: AF_INET              -> EACCES (13)
+            jeq(libc::AF_INET6 as u32, 2, 0), // 10: AF_INET6            -> EACCES (13)
+            stmt(ret, libc::SECCOMP_RET_ALLOW), // 11: other domain        -> allow
+            stmt(
+                ret,
+                libc::SECCOMP_RET_ERRNO | (libc::ENOSYS as u32 & SECCOMP_RET_DATA),
+            ), // 12: ENOSYS (io_uring)
+            stmt(
+                ret,
+                libc::SECCOMP_RET_ERRNO | (libc::EACCES as u32 & SECCOMP_RET_DATA),
+            ), // 13: EACCES (inet)
+            stmt(ret, libc::SECCOMP_RET_ALLOW), // 14: ALLOW (non-socket)
+            stmt(ret, libc::SECCOMP_RET_KILL_PROCESS), // 15: KILL (foreign arch / x32)
         ]
     }
 
@@ -375,8 +396,11 @@ pub fn spawn_and_wait(
     // when the kernel supports seccomp; otherwise the LD_PRELOAD shim applied by
     // the caller is the (best-effort) fallback and this stays false.
     #[cfg(target_os = "linux")]
-    let net_filter: Option<Vec<libc::sock_filter>> =
-        if limits.no_net && seccomp::available() { Some(seccomp::program()) } else { None };
+    let net_filter: Option<Vec<libc::sock_filter>> = if limits.no_net && seccomp::available() {
+        Some(seccomp::program())
+    } else {
+        None
+    };
     #[cfg(target_os = "linux")]
     let no_net_seccomp_enforced = net_filter.is_some();
     #[cfg(not(target_os = "linux"))]
