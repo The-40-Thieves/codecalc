@@ -729,7 +729,7 @@ PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py         # every tool over MC
 PYTHONPATH=. .venv/bin/python tests/test_executor_sweep.py  # sandbox regressions
 ```
 
-50 test files and 14 CI-invoked scripts, **2159 assertions**. "CI-invoked"
+51 test files and 14 CI-invoked scripts, **2159 assertions**. "CI-invoked"
 means referenced by path (`scripts/<name>.py`) from a job in
 `.github/workflows/*.yml` — `scripts/check_claims.py` derives the count that
 way and gates it, so a script wired into a workflow without this sentence
@@ -1008,6 +1008,42 @@ the worker appends responses to a file whose path arrives in the environment.
 Either way a child spawned with inherited stdio writes to fd 1 and cannot reach
 the protocol. Tests force the file-backed channel on every platform, because an
 unexercised fallback is one that works until it is needed.
+
+### Local operations: status & cleanup
+
+Two CLI-only commands for an operator running a long-lived server, not MCP
+tools — they don't count toward the tool surface above:
+
+```bash
+codecalc status          # read-only snapshot: sessions, disk usage, quotas, audit log
+codecalc status --json   # the same report, for scripts
+
+codecalc cleanup                # DRY RUN (the default) — lists what would be reclaimed
+codecalc cleanup --write        # actually removes it
+```
+
+`status` reports `SESSION_ROOT`, how many sessions exist and which of them
+are idle-expired (the on-disk `.codecalc-session-expired` marker THE-894's
+idle-TTL reaping leaves behind), per-session and global workspace disk
+usage, the configured disk quotas and current headroom, the audit log's
+path and size, and a one-line runtime reliability-tier summary. It changes
+nothing — no session is started, stopped, reaped, or written to.
+
+`cleanup` reclaims disk from session directories that are either
+idle-expired (the marker) or old and abandoned-looking (untouched past
+`CODECALC_CLEANUP_ABANDONED_AGE_HOURS`, default 24h). `--dry-run` is the
+default — nothing is removed until `--write` is passed. Because `cleanup`
+runs as a separate process from any server that may be using `SESSION_ROOT`
+right now, it has none of that server's in-memory bookkeeping to consult —
+only what a directory's own contents and timestamps say — so it is
+deliberately conservative: only a direct child of `SESSION_ROOT` is ever a
+candidate (never `SESSION_ROOT` itself); a symlink there is refused, never
+followed; a directory modified within the last few minutes is never
+touched, marker or not, because a session could be live in a server this
+CLI invocation cannot see; and removal itself is identity-checked
+(device/inode, re-verified immediately before the delete) the same way
+`session_stop`'s own workspace teardown is, so a directory swapped out from
+under a stale scan is refused rather than deleted.
 
 ## Language list
 
