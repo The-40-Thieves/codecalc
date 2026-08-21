@@ -91,7 +91,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # image — `codecalc doctor` surfaces exactly that, by design (see
 # pyproject.toml). Rebuild with `--build-arg CODECALC_EXTRA=full` (x86_64
 # only, until the arm64 z3-solver wheel gap above closes) to get them.
-ARG CODECALC_VERSION=0.3.2
+ARG CODECALC_VERSION=0.4.0
 ARG CODECALC_EXTRA=
 RUN pip install --no-cache-dir "codecalc${CODECALC_EXTRA:+[$CODECALC_EXTRA]}==${CODECALC_VERSION}"
 

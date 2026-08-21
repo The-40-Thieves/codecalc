@@ -1,6 +1,6 @@
 [project]
 name = "codecalc"
-version = "0.3.2"
+version = "0.4.0"
 description = "Universal code + logic calculator for AI models: execute 31 languages, evaluate logic, analyze complexity. Exposed via MCP."
 license = "Apache-2.0"
 requires-python = ">=3.11"

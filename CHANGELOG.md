@@ -33,6 +33,8 @@ behind it.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-08-21
+
 ### Added
 
 - **`codecalc setup [--client=NAME] [--write]`** (THE-897): guided onboarding
@@ -213,11 +215,6 @@ behind it.
   starts a fresh file. Checked and performed inside `emit()`'s own existing
   try/except: a rotation failure is swallowed exactly like an ordinary
   write failure — it can never fail the run it is describing.
-
-## [0.3.2] — 2026-08-20
-
-### Added
-
 - **`codecalc --help` and `codecalc --version`** (THE-876, GH #201). Both used
   to print nothing and exit 0 — `main()` recognised `doctor`/`serve-strict`/
   `serve-http` but treated the flags as "no subcommand" and started the stdio
@@ -979,8 +976,8 @@ it, so there was no upgrade path to describe — only what the thing is.
   `ok: false` through the sandbox. Tracked, with a dated reproduction, at
   [#42](https://github.com/The-40-Thieves/codecalc/issues/42).
 
-[Unreleased]: https://github.com/The-40-Thieves/codecalc/compare/v0.3.2...HEAD
-[0.3.2]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.3.2
+[Unreleased]: https://github.com/The-40-Thieves/codecalc/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.4.0
 [0.3.1]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.3.1
 [0.3.0]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.3.0
 [0.2.0]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.2.0
