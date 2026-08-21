@@ -651,6 +651,61 @@ If you are paying too much for codecalc's definitions:
 A server-side facade remains under consideration for clients with no such
 mechanism (`docs/design/2026-08-10-tool-facade.md`), and is not implemented.
 
+## Reducing the tool surface
+
+For an operator who would rather not configure every client, codecalc also has
+a first-party knob: `CODECALC_TOOLS` registers only a chosen slice of the
+52-tool surface, so a client that never enables tool search still pays for a
+smaller `tools/list`.
+
+**This is not the facade** the section above declines to build. Every tool a
+group activates keeps its own name, its own typed input schema and its own
+per-tool approval prompt — a group that is not active simply never registers
+its tools with the MCP SDK at all, so they are absent from `tools/list` *and*
+rejected by `tools/call`, not merely hidden behind a dispatcher a client could
+still invoke by guessing the name.
+
+Every tool belongs to exactly one group:
+
+| Group | Tools |
+|---|---|
+| `calculator` (25) | `calc_exact`, `compare_threshold`, `percentage`, `calc_stats`, `percentiles`, `collision_probability`, `data_sizes`, `human_duration`, `epoch_time`, `base_repr`, `radix_convert`, `float_repr`, `int_widths`, `bit_analysis`, `bitop`, `solve_expression`, `limit_expression`, `simplify_expression`, `convert_units`, `physical_constants`, `list_units`, `evaluate_expression`, `truth_table`, `solve_linear`, `matrix` |
+| `verification` (5) | `verify_translation`, `verify_optimization`, `algebraic_equiv`, `compare_edge_cases`, `z3_check` |
+| `execution` (6) | `list_languages`, `list_execution_providers`, `execute_code`, `execute_code_stream`, `compare_execution`, `runtimes_status` |
+| `sessions` (11) | `session_start`, `session_stop`, `session_list`, `session_files`, `session_write_file`, `session_read_file`, `session_run`, `session_artifacts`, `run_submit`, `run_inspect`, `run_cancel` |
+| `analysis` (3) | `analyze_complexity`, `benchmark`, `extract_function` |
+| `admin` (2) | `install_package`, `update_runtimes` |
+
+`CODECALC_TOOLS` takes a comma-separated list of group names, preset names, or
+both:
+
+| Preset | Expands to |
+|---|---|
+| `core` | `calculator` |
+| `dev` | `calculator`, `execution`, `verification`, `analysis` |
+| `full` | every group (the default) |
+
+```bash
+CODECALC_TOOLS=calculator            # just the calculator (25 tools)
+CODECALC_TOOLS=core                  # same thing, by preset name
+CODECALC_TOOLS=calculator,execution  # two groups, unioned
+CODECALC_TOOLS=dev                   # a coding-assistant slice (39 tools)
+```
+
+Unset or empty registers every group — 52 tools, same as today —
+so nothing changes for an operator who does not set this. An unknown group or
+preset name is a loud startup failure naming the bad value and every known
+group/preset, never a silent fallback to "everything" or "nothing": either
+direction would turn a typo into a footgun nobody notices until it matters.
+`codecalc doctor` prints the active groups, the full group→tools mapping, and
+how many tools this process actually registered, whatever `CODECALC_TOOLS` is
+set to.
+
+Client-side deferred loading (the section above) and this env var compose
+cleanly: point a client with no deferred-loading mechanism at a
+`CODECALC_TOOLS`-restricted process, or use both — a smaller declared surface
+still benefits from being deferred.
+
 ## Test
 
 Each file is a standalone script that prints one `PASS`/`FAIL` line per
@@ -674,7 +729,7 @@ PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py         # every tool over MC
 PYTHONPATH=. .venv/bin/python tests/test_executor_sweep.py  # sandbox regressions
 ```
 
-49 test files and 13 CI-invoked scripts, **2139 assertions**. "CI-invoked"
+50 test files and 14 CI-invoked scripts, **2159 assertions**. "CI-invoked"
 means referenced by path (`scripts/<name>.py`) from a job in
 `.github/workflows/*.yml` — `scripts/check_claims.py` derives the count that
 way and gates it, so a script wired into a workflow without this sentence
