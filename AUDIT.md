@@ -274,6 +274,18 @@ network-blocking shim. Each has a security-relevant design decision:
    now discloses this in `unenforced` whenever the shim is what satisfied
    `no_net`, rather than reporting an empty list. Real isolation for
    multi-tenant still requires containers or a kernel-level egress block.
+
+   **CORRECTION 2026-08-21 — E-1's bypass is now closed on Linux, not just
+   disclosed.** The executor installs a seccomp-bpf filter in the sandboxed
+   child that refuses the `socket(AF_INET/AF_INET6)` SYSCALL directly — the
+   `ctypes`/`dlsym`/raw-syscall bypass above never reaches the shim's
+   symbol, but it cannot dodge a kernel-enforced syscall filter either.
+   Verified live on aarch64: the same `ctypes.CDLL(...).socket(2, 1, 0)`
+   probe that returned a working fd against the shim now fails, `AF_UNIX`
+   still works, and `executor.py` no longer appends the disclosure when
+   seccomp is what enforced `no_net`. The shim remains the mechanism on
+   macOS and the Linux fallback when the kernel refuses a seccomp filter —
+   the rest of this item is still accurate for those two cases.
 5. **Verdicts**: MLE is a heuristic (signal + RSS ≥ 50% of memory cap); the
    rlimits kill without a definitive "memory" flag. Documented as heuristic.
 6. **Streaming** (`execute_code_stream`): tails `run.out` in a temp workdir;
@@ -426,6 +438,14 @@ network-blocking shim. Each has a security-relevant design decision:
    arguably desirable; for multi-tenant or internet-facing exposure, the
    executor must move behind a container with `--network=none` or a
    gVisor/Firecracker microVM.
+
+   **CORRECTION 2026-08-21 — no longer true on Linux.** A seccomp-bpf filter
+   installed in the sandboxed child now refuses the `socket(AF_INET/AF_INET6)`
+   SYSCALL in-kernel, so the `ctypes`/`dlsym`/raw-syscall bypass described
+   above is closed there — not merely disclosed. `AF_UNIX` still works. The
+   shim above remains the mechanism, with the same bypass, on macOS and on
+   Linux when the kernel refuses a seccomp filter (disclosed via
+   `no_net_best_effort_shim` in `unenforced`); Windows is still unchanged.
 2. **Same-uid sandbox.** rlimits constrain, they don't isolate. A hostile
    program could read other files the `ubuntu` user can read (not the secrets
    in env — those are gone — but filesystem contents). Full isolation needs

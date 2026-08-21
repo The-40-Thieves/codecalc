@@ -851,7 +851,7 @@ backends.
 | CPU-time ceiling | `RLIMIT_CPU` | `RLIMIT_CPU` | Job `PerProcessUserTimeLimit`⁴ |
 | Open-file ceiling | `RLIMIT_NOFILE` | `RLIMIT_NOFILE` | reported unenforced |
 | Output cap | yes | yes | yes (on read) |
-| `no_net` | `LD_PRELOAD` shim² | `DYLD_INSERT_LIBRARIES`²˒³ | reported unenforced |
+| `no_net` | seccomp-bpf filter⁶ (falls back to `LD_PRELOAD` shim²) | `DYLD_INSERT_LIBRARIES`²˒³ | reported unenforced |
 | Stateful sessions | yes | yes | yes |
 
 ¹ Darwin accepts `setrlimit(RLIMIT_AS)` but does not enforce address space the
@@ -873,6 +873,13 @@ interpreters), and dyld interposing does not reach calls made *inside* the
 shared cache where libSystem lives — a program's own `connect()` is intercepted,
 a system framework opening a connection internally is not. Treat macOS `no_net`
 as a speed bump, never as isolation.
+
+⁶ Linux only. The executor installs a seccomp-bpf filter in the sandboxed
+child that refuses the `socket(AF_INET/AF_INET6)` SYSCALL in-kernel — not a
+libc symbol, so `ctypes`/`dlsym` and raw `syscall()` calls cannot route around
+it the way they can around the `LD_PRELOAD` shim. `AF_UNIX` still works. Falls
+back to the shim (with its symbol-level bypass, disclosed in `unenforced` as
+`no_net_best_effort_shim`) when the kernel refuses the filter.
 
 Both are exercised by the suite on every platform. The fork-bomb probe measures
 the EAGAIN boundary precisely but needs `os.fork`, so it is POSIX-only; a second
