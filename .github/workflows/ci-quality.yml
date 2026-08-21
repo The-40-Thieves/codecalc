@@ -114,3 +114,38 @@ jobs:
           version: '0.12.1'
       - name: build a wheel and run the README's installed-path commands
         run: bash scripts/installed_paths_smoke.sh
+
+  changelog:
+    # THE-885: CONTRIBUTING.md's "Changelog entries" section says a change a
+    # caller can observe needs a line in CHANGELOG.md in the same PR, and
+    # nothing enforced it — THE-875/876/877 all merged caller-observable
+    # changes (new CLI flags, a new console script, error-code
+    # reclassifications) with zero changelog lines, and the 0.3.2 release had
+    # to reconstruct the notes from the commit log after the fact.
+    # scripts/check_changelog.py is a REMINDER with an opt-out (a
+    # 'Skip-Changelog: <reason>' commit trailer), not a precise classifier of
+    # "caller-observable" — see its own docstring for what it can and cannot
+    # tell apart.
+    #
+    # pull_request only: it needs the PR's base ref, which push/schedule
+    # triggers do not carry the same way, and `fetch-depth: 0` below is what
+    # lets it walk the commit range at all.
+    name: changelog (CONTRIBUTING.md's own gate)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: check CHANGELOG.md's [Unreleased] section gained content
+        # BASE_SHA goes through `env:`, never interpolated into the run: line
+        # — same pattern as dco.yml's BASE_SHA/HEAD_SHA, for the same reason:
+        # a ${{ }} context value is expanded into the shell source BEFORE bash
+        # parses it, so any value carrying a quote plus metacharacters would
+        # execute on the runner with this job's token.
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python scripts/check_changelog.py "$BASE_SHA"

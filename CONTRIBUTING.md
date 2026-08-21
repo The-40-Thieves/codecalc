@@ -44,6 +44,7 @@ uv run python scripts/check_parity.py        # Rust and Python backends cannot d
 uv run python scripts/check_claims.py        # stated counts match the code
 uv run python scripts/check_portability.py   # no machine-specific paths
 uv run python scripts/contract_check.py      # tool contract
+uv run python scripts/check_changelog.py origin/main   # CHANGELOG.md gate (PR only, needs a base ref)
 
 # A bare `do uv run python "$t"; done` exits 0 whatever happens inside it — the
 # loop's status is its last command, so one red suite in the middle reported
@@ -95,6 +96,16 @@ application logic runs.
 
 `check_version.py` gates that the two manifests and the newest changelog heading
 all agree, and compares the git tag as well when running on one.
+
+`check_changelog.py` gates the entry itself: on a pull request, if any changed
+file matches `codecalc/**.py`, `[Unreleased]` must have gained content in the
+same diff, or a commit must carry a `Skip-Changelog: <reason>` trailer (same
+shape as `Signed-off-by:` — `git commit -s --trailer "Skip-Changelog=reason"`
+or a line added by hand). It is a reminder with an opt-out, not a precise
+classifier of "caller can observe" — read the script's docstring before
+widening or narrowing its trigger. The opt-out is a git trailer rather than a
+phrase anywhere in the message on purpose: a PR that merely discusses
+changelog policy in prose must not accidentally opt itself out.
 
 ## Adding a language or a tool
 
