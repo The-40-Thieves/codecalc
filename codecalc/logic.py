@@ -458,6 +458,58 @@ def z3_check(smt2: str, timeout_ms: int = 5000) -> dict:
         return {"ok": False, "error": f"z3 error: {exc}"}
 
 
+def _parse_solve_piece(piece: str, evaluate: bool):
+    """Parse one already-`classify_unsafe`-clean piece of a solve_linear
+    system through the same safe pipeline `_evaluate_expression` uses:
+    `parse_expr(global_dict=safe_global_dict())` instead of bare `sp.sympify`,
+    with `reject_explosive` run on the unevaluated shape before anything is
+    computed.
+
+    `classify_unsafe` refuses `.`/`[`/leading-underscore/string-literal
+    syntax, but a screened, non-denylisted NAME can still be a live Python
+    builtin: `input`/`breakpoint`/`quit` carry none of that syntax. A plain
+    `sp.sympify(piece)` parses with SymPy's DEFAULT global_dict (`vars(
+    builtins)` copied in), so `sympify("input()")` called the REAL `input()`
+    — reading the child's stdin, shared fd 0 with a stdio MCP server — and
+    `sympify("breakpoint()")` dropped into pdb and hung the child until the
+    wall clock killed it. `safe_global_dict()` has no Python builtins in it,
+    so parsing through it turns an undefined name into a harmless symbolic
+    Function or a clean parse error instead of a live call.
+
+    Separately, `evaluate=False` on the parse (cheap: 1ms on a power tower)
+    lets `reject_explosive` inspect the shape BEFORE any arithmetic runs, so
+    `9**9**9**9` is refused in milliseconds instead of burning CPU seconds
+    (and eventually the 15s guarded_call timeout) evaluating it blind.
+
+    Mirrors `linalg._parse_entry`'s per-cell version of the same fix
+    (THE-887); this is solve_linear's per-piece version (THE-888).
+
+    Returns (parsed value, error dict); exactly one of the two is not None.
+    `evaluate` selects whether the returned value is the unevaluated shape
+    (matching the original `sp.sympify(raw, evaluate=False)` path) or a
+    freshly-reparsed, evaluated value (matching the original bare
+    `sp.sympify(lhs)` / `sp.sympify(rhs)` default-evaluate path).
+    """
+    from sympy.parsing.sympy_parser import parse_expr
+
+    try:
+        shape = parse_expr(piece, transformations=_math_transforms(),
+                           global_dict=safe_global_dict(), evaluate=False)
+    except Exception as exc:
+        return None, {"ok": False, "error": f"parse error: {exc}"}
+    explosive = reject_explosive(shape)
+    if explosive:
+        return None, errors.error_result(errors.RESOURCE_EXHAUSTED, explosive)
+    if not evaluate:
+        return shape, None
+    try:
+        value = parse_expr(piece, transformations=_math_transforms(),
+                           global_dict=safe_global_dict())
+    except Exception as exc:
+        return None, {"ok": False, "error": f"parse error: {exc}"}
+    return value, None
+
+
 def _solve_linear(system: str, variables: str | list[str]) -> dict:
     """Solve a ';'-separated system of equations ('x + y = 10; x - y = 2')."""
     try:
@@ -488,13 +540,22 @@ def _solve_linear(system: str, variables: str | list[str]) -> dict:
                     if _cls:
                         return errors.error_result(
                             errors.code_for_safe_expr_category(_cls[0]), _cls[1])
-                eqs.append(sp.Eq(sp.sympify(lhs), sp.sympify(rhs)))
+                lhs_val, err = _parse_solve_piece(lhs, evaluate=True)
+                if err:
+                    return err
+                rhs_val, err = _parse_solve_piece(rhs, evaluate=True)
+                if err:
+                    return err
+                eqs.append(sp.Eq(lhs_val, rhs_val))
             else:
                 _cls = classify_unsafe(raw)
                 if _cls:
                     return errors.error_result(
                         errors.code_for_safe_expr_category(_cls[0]), _cls[1])
-                eqs.append(sp.sympify(raw, evaluate=False))
+                val, err = _parse_solve_piece(raw, evaluate=False)
+                if err:
+                    return err
+                eqs.append(val)
         sol = sp.solve(eqs, list(syms), dict=True)
         # A variable the caller ASKED for and the system does not constrain is
         # dropped by sympy without comment: solve("x+y=10; x-y=2", "x, y, z")
