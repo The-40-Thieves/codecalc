@@ -78,6 +78,28 @@ a permission outside it is refused for any origin.
   respond: pin/repin the `integrity` digest, narrow the permission allowlist, or
   disable third-party extensions entirely with the kill switch.
 
+## Compatibility, for an extension author
+
+What you can rely on across a `*_INTERFACE_VERSION` **minor** bump, without
+re-reading this document each time: your extension keeps loading and keeps
+working exactly as it does today. Minor bumps are additive only — a new
+optional manifest field, a new operation a kind's protocol supports, a new
+permission in `KNOWN_PERMISSIONS` — never a change to what an existing method
+signature means or a removal of one you already implement. The enforced gate
+is major-only (see Policies above): write your `interface_version` against
+the kind's current major and it is compatible with every minor released under
+that major, past or future, with no range to solve.
+
+What breaks it: a **major** bump on the kind you extend. That is the one
+change this framework does not paper over — a breaking interface change bumps
+the major, and the previous major keeps working for twelve months after
+(same window `docs/contract/README.md` uses for the result contract, and for
+the same reason: an extension author who gets less notice than a codecalc
+*result* client would be the worse-supported half of the same server).
+`codecalc doctor`'s `extensions` block reports the interface version your
+extension declared alongside the one codecalc currently ships, so a version
+skew is visible in discovery rather than only in a call failing.
+
 ## Verifiers submit evidence — they never grade
 
 A `Verifier.verify()` returns an immutable `Evidence` record (outcome ∈
