@@ -590,7 +590,7 @@ else:
     sessions._SPILL_RETENTION = 1
     try:
         _escaped_write = _escapes(
-            lambda: sessions._write_spill(_spill_d, "stdout", b"P" * 4096))
+            lambda: sessions._write_spill(_spill_sid, _spill_d, "stdout", b"P" * 4096))
     finally:
         sessions._SPILL_RETENTION = _old_retention
     check("_write_spill refuses a symlinked spill directory",
@@ -638,7 +638,7 @@ else:
     _ok_sid = sessions.start("bash")["session_id"]
     _ok_d = sessions._session_dir(_ok_sid)
     try:
-        _rel = sessions._write_spill(_ok_d, "stdout", b"Q" * 1024)
+        _rel = sessions._write_spill(_ok_sid, _ok_d, "stdout", b"Q" * 1024)
         _wrote_inside = (_ok_d / _rel).is_file()
     except ValueError:
         _wrote_inside = False
