@@ -40,6 +40,7 @@ from . import (
     grades,
     linalg,
     logic,
+    ops,
     optimization,
     packages,
     providers,
@@ -1667,6 +1668,107 @@ def _doctor(as_json: bool = False, deep: bool = False) -> int:
     return 0 if rep["healthy"] else 1
 
 
+def _status(as_json: bool = False) -> int:
+    """`codecalc status`: read-only operational snapshot. Changes NOTHING.
+
+    Same split as `_doctor`/doctor.py: the report is BUILT in ops.py and only
+    RENDERED here, so the text a human reads and the JSON a script parses
+    cannot drift apart. Always exits 0 — there is nothing here for a script
+    to gate on (no healthy/unhealthy distinction; that is `codecalc doctor`'s
+    job), only numbers to read.
+
+    Writes to STDOUT — safe here for the same reason it is safe in `_doctor`:
+    this path never starts the MCP server, so nothing is corrupting the
+    stdio transport.
+    """
+    import json
+
+    rep = ops.status_report()
+    if as_json:
+        print(json.dumps(rep, indent=2, sort_keys=True))
+        return 0
+
+    print(f"codecalc session status  ({rep['session_root']})")
+    print(f"  sessions          {rep['session_count']} total, "
+          f"{len(rep['idle_expired_session_ids'])} idle-expired")
+    for s in rep["sessions"]:
+        flag = "  [idle-expired]" if s["idle_expired"] else ""
+        print(f"    {s['session_id']:26} {s['language']:10} "
+              f"{s['usage_bytes']:>10} bytes{flag}")
+
+    q = rep["quota"]
+    print(f"  disk usage        {rep['global_usage_bytes']} bytes "
+          f"({q['total_headroom_bytes']} bytes headroom of "
+          f"{q['total_disk_quota_mb']:g} MB total quota)")
+    print(f"  per-session cap   {q['session_disk_quota_mb']:g} MB, "
+          f"{q['max_artifact_bytes']} bytes/artifact (max {q['max_artifact_count']}), "
+          f"{q['min_host_free_mb']:g} MB min host free")
+    if rep["host_free_bytes"] is not None:
+        print(f"  host free         {rep['host_free_bytes']} bytes")
+
+    al = rep["audit_log"]
+    if al["path"] is None:
+        print("  audit log         disabled (CODECALC_AUDIT_LOG='')")
+    else:
+        size = "not yet created" if al["size_bytes"] is None else f"{al['size_bytes']} bytes"
+        print(f"  audit log         {al['path']}  {size}  (rotates at {al['max_mb']:g} MB)")
+
+    ts = rep["runtime_tier_summary"]
+    print(f"  runtime tiers     {ts.get('tested', 0)} tested, "
+          f"{ts.get('best_effort', 0)} best_effort, {ts.get('plan_only', 0)} plan_only "
+          f"  backend={rep['backend']}")
+    return 0
+
+
+def _cleanup_cmd(write: bool = False, include_unmarked: bool = False) -> int:
+    """`codecalc cleanup [--dry-run|--write] [--include-unmarked]`: reclaim
+    disk from abandoned or idle-expired session workspaces under
+    SESSION_ROOT.
+
+    `--dry-run` is the DEFAULT (i.e. `write=False` unless `--write` was
+    passed): lists what would be removed and reclaims nothing. `--write`
+    actually removes. Without `--include-unmarked`, only the on-disk
+    `.codecalc-session-expired` marker makes a directory a candidate at
+    all — the path with no residual risk. `--include-unmarked` additionally
+    considers old, marker-less, session-shaped directories, a heuristic
+    with real residual risk for workspace-only sessions (no worker, so no
+    liveness lock ever protects them) — see ops.py's module docstring
+    before turning this on, and see it for the removal safety discipline
+    generally (identity-checked, symlink-refusing, recency-floored, and —
+    fix-round CRITICAL — liveness-lock-checked so a session any running
+    codecalc server is using is never deleted).
+
+    Always exits 0: a dry run finding nothing to reclaim, or a write that
+    reclaimed nothing, are both successful runs of the command, not
+    failures of it. `removal_errors` in the JSON (or the printed lines
+    above) is how a caller sees that something was refused.
+    """
+    rep = ops.cleanup(write=write, include_unmarked=include_unmarked)
+    mode = "--write" if write else "--dry-run (default; pass --write to actually remove)"
+    scope = "+ --include-unmarked" if include_unmarked else "(marker-only; pass --include-unmarked to also sweep old unmarked dirs)"
+    print(f"codecalc cleanup  ({rep['session_root']}, {mode}, {scope})")
+    for c in rep["candidates"]:
+        if c["eligible"]:
+            label = "removed" if write and any(
+                r["session_id"] == c["session_id"] for r in rep["removed"]) else (
+                "REFUSED" if write else "would remove")
+            print(f"  {label:12} {c['session_id']:26} {c['size_bytes']:>10} bytes  "
+                  f"{c['reason']}")
+        else:
+            print(f"  skip         {c['session_id']:26} {'':>10}         {c['reason']}")
+    if write:
+        print(f"\nreclaimed {rep['total_reclaimed_bytes']} bytes across "
+              f"{len(rep['removed'])} session(s)")
+        if rep["removal_errors"]:
+            print(f"{len(rep['removal_errors'])} eligible dir(s) could NOT be removed "
+                  f"— see the REFUSED lines above and stderr")
+    else:
+        print(f"\n{rep['eligible_count']} session(s) would be removed, "
+              f"{rep['total_candidate_bytes']} bytes reclaimable "
+              f"— pass --write to actually remove")
+    return 0
+
+
 def main() -> None:
     """stdio MCP server, or `doctor` when asked.
 
@@ -1698,6 +1800,9 @@ def main() -> None:
             "  setup [--client=NAME] [--write]    guided onboarding to a working MCP\n"
             "                                      connection; NAME one of claude-desktop,\n"
             "                                      claude-code, cursor, vscode, zed\n"
+            "  status [--json]                    session/workspace operational snapshot (read-only)\n"
+            "  cleanup [--dry-run|--write] [--include-unmarked]\n"
+            "                                      reclaim disk from abandoned session workspaces\n"
             "  serve-strict [ARGS]                authenticated HTTP execution service\n"
             "  serve-http [--host H] [--port P]   MCP over streamable HTTP\n"
             "  -h, --help                         show this message and exit\n"
@@ -1733,6 +1838,16 @@ def main() -> None:
             elif arg == "--client" and i + 1 < len(rest):
                 client = rest[i + 1]
         raise SystemExit(setup_module.run_setup(client=client, do_write="--write" in rest))
+    if len(sys.argv) > 1 and sys.argv[1] == "status":
+        rest = sys.argv[2:]
+        raise SystemExit(_status(as_json="--json" in rest))
+    if len(sys.argv) > 1 and sys.argv[1] == "cleanup":
+        rest = sys.argv[2:]
+        # --dry-run is the default (write=False); --write is the one flag
+        # that turns it on. A caller passing both gets --write, the same
+        # "the stronger flag wins" rule --deep/--json already follow above.
+        raise SystemExit(_cleanup_cmd(write="--write" in rest,
+                                      include_unmarked="--include-unmarked" in rest))
     if len(sys.argv) > 1 and sys.argv[1] == "serve-strict":
         # THE-830: the authenticated `/v1` strict execution service — the server
         # half of RemoteStrictExecutionProvider. Its own module and stdlib

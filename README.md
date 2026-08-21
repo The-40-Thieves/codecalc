@@ -604,7 +604,8 @@ All optional. codecalc runs with none of these set.
 | `CODECALC_RUN_STATE_DIR` | `~/.codecalc/runs` | Durable metadata-only journal backing `run_submit`/`run_inspect`/`run_cancel`, for every provider (not only managed strict runs). Source, stdin, output, and credentials are never written there. On restart, recorded orphan runs are cancelled and cleaned through their owning provider where it supports that; where it does not (the built-in `local` provider), there is nothing to signal and the record is simply marked recovered. |
 | `CODECALC_MAX_ACTIVE_RUNS` | `64` | Admission cap for `run_submit`: how many runs may be running/cancelling at once before further submissions are refused with a `resource_exhausted` error. Bounds the in-memory run table and its thread pool against an unbounded burst or a caller that never inspects/cancels what it starts. An empty, non-numeric or non-positive value falls back to `64` with a message on stderr — a set-but-empty variable is a shell and compose-file commonplace, and it used to abort the server's import. |
 | `CODECALC_ALLOW_RUNTIME_APPLY` | *(unset)* | Permit `update_runtimes(apply=True)` to run the **elevated** update commands (apt, via `sudo`). Unset, they are skipped with `ok: false` naming this variable, and the unprivileged managers still run. Deliberately an environment variable rather than a tool argument: `apply` is something a connected model can flip, and this is not. Accepts `1`/`true`/`yes`/`on`; an empty value is not consent. |
-| `CODECALC_SESSION_ROOT` | `~/.codecalc/sessions` | Where session workspaces live. |
+| `CODECALC_SESSION_ROOT` | `~/.codecalc/sessions` | Where session workspaces live. **Keep this codecalc-private.** `codecalc cleanup --write --include-unmarked` removes plain, session-shaped subdirectories under it on a heuristic (name shape + age) that is a loose filter, not a strong one — never point it at a directory anything else writes into. |
+| `CODECALC_CLEANUP_ABANDONED_AGE_HOURS` | `24` | How old (and untouched) a marker-less, session-shaped directory must be before `codecalc cleanup --include-unmarked` will consider it abandoned. Only consulted with `--include-unmarked`; the default `cleanup` invocation never reads it. |
 | `CODECALC_PACKAGE_ALLOWLIST` | *(unset)* | Deny-by-default allowlist for `install_package`. Unset, any syntactically valid package name may be installed (today's behaviour). Set, only listed packages install — anything else is refused before any subprocess or network work, with the stable `permission_denied` code. Comma-separated; each entry is `<language>:<name>` (scoped to one ecosystem) or a bare `<name>` (every ecosystem). Matches the bare name, ignoring `[extras]` and `==version` pins. |
 | `CODECALC_SESSION_IDLE_TTL_SECONDS` | *(unset)* | Idle-expiry for stateful (python3/node) session workers: a session untouched for longer than this is reaped — worker killed via the same teardown `session_stop` uses — on its next access. Unset, a session worker lives until `session_stop` or server exit, same as before this existed. A subsequent call on an expired session gets `ok: false` with the stable `worker_failure` code, never a silent respawn. |
 | `CODECALC_SESSION_DISK_QUOTA_MB` | `512` | Per-session ceiling on total workspace disk (THE-894). `session_write_file` and oversized-output spilling refuse BEFORE writing (`resource_exhausted`, no partial file); code run via `execute_code(session_id=...)`/`session_run` is checked before it starts and, since its own writes cannot be pre-checked, again after — an over-quota run still returns its result, now with `disk_quota_exceeded` plus usage/limit, and the session's next write/run is refused until usage (re-measured fresh each time) drops back under the line. |
@@ -750,7 +751,7 @@ PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py         # every tool over MC
 PYTHONPATH=. .venv/bin/python tests/test_executor_sweep.py  # sandbox regressions
 ```
 
-51 test files and 14 CI-invoked scripts, **2159 assertions**. "CI-invoked"
+52 test files and 14 CI-invoked scripts, **2159 assertions**. "CI-invoked"
 means referenced by path (`scripts/<name>.py`) from a job in
 `.github/workflows/*.yml` — `scripts/check_claims.py` derives the count that
 way and gates it, so a script wired into a workflow without this sentence
@@ -1029,6 +1030,69 @@ the worker appends responses to a file whose path arrives in the environment.
 Either way a child spawned with inherited stdio writes to fd 1 and cannot reach
 the protocol. Tests force the file-backed channel on every platform, because an
 unexercised fallback is one that works until it is needed.
+
+### Local operations: status & cleanup
+
+Two CLI-only commands for an operator running a long-lived server, not MCP
+tools — they don't count toward the tool surface above:
+
+```bash
+codecalc status          # read-only snapshot: sessions, disk usage, quotas, audit log
+codecalc status --json   # the same report, for scripts
+
+codecalc cleanup                          # DRY RUN (the default) — marker-based only
+codecalc cleanup --write                  # actually removes marker-based candidates
+codecalc cleanup --write --include-unmarked   # ALSO sweep old, unmarked, session-shaped dirs
+```
+
+`status` reports `SESSION_ROOT`, how many sessions exist and which of them
+are idle-expired (the on-disk `.codecalc-session-expired` marker THE-894's
+idle-TTL reaping leaves behind), per-session and global workspace disk
+usage, the configured disk quotas and current headroom, the audit log's
+path and size, and a one-line runtime reliability-tier summary. It changes
+nothing — no session is started, stopped, reaped, or written to.
+
+`cleanup` reclaims disk from session directories under `SESSION_ROOT`.
+`--dry-run` is the default — nothing is removed until `--write` is passed.
+Because `cleanup` runs as a SEPARATE process from any server that may be
+using `SESSION_ROOT` right now, it has none of that server's in-memory
+bookkeeping to consult — only what is on disk.
+
+**Directory mtime is deliberately NOT trusted as a liveness signal.** An
+earlier version of this feature did trust it, and an adversarial review
+proved that wrong live: a REPL worker doing purely in-memory work touches
+no file at all, and even an in-place file overwrite bumps only that file's
+own mtime, never its parent directory's — so a genuinely-active worker
+session can look, by directory mtime alone, identical to an abandoned one.
+The real signal is a per-worker-session **liveness lockfile**: the server
+writes its own pid into the session directory the moment a stateful
+(python3/node) worker starts, and removes it the moment that worker is
+actually gone (reaped or `session_stop`). `cleanup` checks this for every
+candidate and refuses outright — regardless of marker, age, or the mtime
+floor below — whenever the lockfile names a pid that is still alive. That
+is what makes **a session any running codecalc server is using is never
+deleted** true for worker sessions.
+
+By default, `cleanup` considers ONLY directories carrying the idle-expiry
+marker — the risk-free path, since a marker only ever exists after
+sessions.py's own idle-TTL reaper has already closed that specific worker
+for good (session ids are never reused). `--include-unmarked` additionally
+sweeps old (`CODECALC_CLEANUP_ABANDONED_AGE_HOURS`, default 24h),
+session-shaped, marker-less directories — the one path with real residual
+risk, because a **workspace-only** session (no worker) never gets a
+lockfile to check against, so this path falls back to age + a hard
+recency floor (nothing modified in the last few minutes is ever touched)
+as a heuristic, not a proof. Turn it on deliberately, and never point
+`CODECALC_SESSION_ROOT` at anything but a codecalc-private directory —
+the "looks like a session dir" name filter is loose, not strict.
+
+Other safety properties, unconditional on every path: only a direct child
+of `SESSION_ROOT` is ever a candidate (never `SESSION_ROOT` itself); a
+symlink there is refused, never followed; and removal itself is
+identity-checked (device/inode, re-verified immediately before the
+delete) the same way `session_stop`'s own workspace teardown is, so a
+directory swapped out from under a stale scan is refused rather than
+deleted.
 
 ## Language list
 

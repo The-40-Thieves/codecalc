@@ -33,12 +33,26 @@ including the one `codecalc.server` builds at import time via `from_env()` —
 created `~/.codecalc/audit/` as a side effect of import. An import must be
 free of that: a CI runner or a test that only imports `codecalc.server`
 should not leave a directory behind in the real home.
+
+SIZE-BASED ROTATION (THE-898)
+An append-only file that nothing ever trims grows without bound — the same
+gap THE-894 closed for session workspaces, here for the one file every
+session and every broker decision writes into. `CODECALC_AUDIT_MAX_MB` caps
+the LIVE file; crossing it rotates `audit.log` -> `audit.log.1` -> ... up to
+`_AUDIT_KEEP_N` (a small, fixed generation count — the same "bounded count,
+oldest dropped" shape `sessions._SPILL_RETENTION` already uses for spill
+files), and a fresh empty file takes over. Checked and performed inside
+`emit()`'s own existing try/except: a rotation failure (an unwritable
+directory, a race with something else touching the file) must never fail the
+run it is describing any more than an ordinary write failure may — see BEST
+EFFORT above, which this extends rather than replaces.
 """
 
 from __future__ import annotations
 
 import json
 import sys
+import threading
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -51,6 +65,48 @@ CAPABILITY_REJECTED = "capability_rejected"
 INSTALL_DENIED = "install_denied"
 STRICT_PROVIDER_REJECTED = "strict_provider_rejected"
 CLEANUP = "cleanup"
+
+#: THE-898: the live-file size ceiling that triggers a rotation.
+AUDIT_MAX_MB_ENV = "CODECALC_AUDIT_MAX_MB"
+
+#: Generous, not unlimited — same "bounded by default" reasoning
+#: sessions._DEFAULT_SESSION_DISK_QUOTA_MB states for its own defaults. An
+#: audit line is short structured JSON, so 10 MiB is tens of thousands of
+#: events before the first rotation, comfortably ahead of anything a normal
+#: install produces between restarts.
+_DEFAULT_AUDIT_MAX_MB = 10.0
+
+#: Rotated generations kept alongside the live file (`audit.log.1` ..
+#: `audit.log.{N}`), a SMALL fixed count rather than an env knob — the same
+#: shape sessions._SPILL_RETENTION already uses for its own bounded-history
+#: artifact class. Two generations plus the live file is enough history to
+#: diagnose "what happened before the last rotation" without turning this
+#: into an unbounded archive in its own right.
+_AUDIT_KEEP_N = 2
+
+
+def _audit_max_bytes() -> int:
+    """The configured rotation ceiling, in bytes.
+
+    Same per-call, unset/invalid-safe READ shape as sessions._idle_ttl_seconds
+    (no cache at import, so an operator's change applies without a server
+    restart) — but NOT the same fallback meaning. An idle TTL that is unset
+    means "off, never expire"; this always resolves to a real ceiling; unset,
+    empty, non-numeric or non-positive all fall back to the generous default
+    rather than to "unlimited", the same "bounded by default" rule THE-894's
+    own quota accessors (`sessions._env_positive_float`) already follow.
+    """
+    import os
+
+    raw = os.environ.get(AUDIT_MAX_MB_ENV, "").strip()
+    if raw:
+        try:
+            value = float(raw)
+        except ValueError:
+            value = 0.0
+        if value > 0:
+            return int(value * 1024 * 1024)
+    return int(_DEFAULT_AUDIT_MAX_MB * 1024 * 1024)
 
 
 def _iso(epoch: float) -> str:
@@ -75,6 +131,14 @@ class AuditLog:
         # substring is redacted whole rather than partially.
         self._secrets = tuple(sorted({s for s in secrets if s}, key=len, reverse=True))
         self._warned = False
+        # THE-898: guards the "check size, maybe rotate, then append" sequence
+        # in `emit()` — without it, two threads racing past the size check
+        # together could both decide to rotate (or one could append between
+        # the other's rotate-check and its rename), corrupting the generation
+        # chain. A plain Lock is enough: rotation + append is the entire
+        # critical section, and nothing here holds it across I/O a caller
+        # would notice blocking on.
+        self._rotate_lock = threading.Lock()
 
     def _warn(self) -> None:
         if not self._warned:
@@ -87,6 +151,27 @@ class AuditLog:
         for secret in self._secrets:
             line = line.replace(secret, "[REDACTED]")
         return line
+
+    def _rotate(self) -> None:
+        """Rotate `self.path` -> `.1` -> `.2` .. dropping the oldest beyond
+        `_AUDIT_KEEP_N`. Caller holds `_rotate_lock` and, more importantly,
+        this whole call sits inside `emit()`'s own `except OSError` — any
+        failure here (a rename racing something else, a read-only mount)
+        propagates up to that same handler and is swallowed there exactly
+        like an ordinary write failure. This function must never be called
+        outside that protection.
+        """
+        assert self.path is not None  # noqa: S101 -- only ever called from emit()'s own `if self.path is not None` branch
+        # Drop what would fall off the end BEFORE shifting anything into its
+        # place, so the shift below never has to overwrite a file it hasn't
+        # made room for yet.
+        oldest = self.path.with_name(f"{self.path.name}.{_AUDIT_KEEP_N}")
+        oldest.unlink(missing_ok=True)
+        for generation in range(_AUDIT_KEEP_N - 1, 0, -1):
+            src = self.path.with_name(f"{self.path.name}.{generation}")
+            if src.exists():
+                src.replace(self.path.with_name(f"{self.path.name}.{generation + 1}"))
+        self.path.replace(self.path.with_name(f"{self.path.name}.1"))
 
     def emit(self, event_type: str, *, run_id: str | None = None,
              session_id: str | None = None, decision: str | None = None,
@@ -112,8 +197,22 @@ class AuditLog:
                 # Created here, on first use, not in __init__ — see the module
                 # docstring's CREATE-ON-WRITE note (THE-848).
                 self.path.parent.mkdir(parents=True, exist_ok=True)
-                with self.path.open("a", encoding="utf-8") as handle:
-                    handle.write(line + "\n")
+                with self._rotate_lock:
+                    # THE-898: rotate BEFORE appending, checked on the file as
+                    # it stands right now rather than a cached size — an
+                    # operator lowering CODECALC_AUDIT_MAX_MB mid-run (no
+                    # server restart, same reasoning as `_audit_max_bytes`'s
+                    # per-call read) must see it take effect on the very next
+                    # emit, not the next time the file happens to be measured
+                    # some other way.
+                    try:
+                        oversized = self.path.stat().st_size >= _audit_max_bytes()
+                    except OSError:
+                        oversized = False  # e.g. FileNotFoundError: nothing to rotate yet
+                    if oversized:
+                        self._rotate()
+                    with self.path.open("a", encoding="utf-8") as handle:
+                        handle.write(line + "\n")
             except OSError:
                 self._warn()
         return event

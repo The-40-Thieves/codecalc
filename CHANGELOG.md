@@ -151,6 +151,69 @@ behind it.
   permitted regardless of current usage — the in-band recovery path that
   makes `session_stop` no longer the only way out of a stuck session.
 
+- **`codecalc status` and `codecalc cleanup`: operator-facing session
+  disk-usage commands** (THE-898), the operational half of THE-894's disk
+  quotas. `status [--json]` is a read-only snapshot — `SESSION_ROOT`,
+  session count, per-session/global workspace disk usage, which sessions
+  are idle-expired (the on-disk `.codecalc-session-expired` marker), the
+  configured quotas and current headroom, the audit log's path and size,
+  and a one-line runtime reliability-tier summary — that changes nothing.
+  `cleanup [--dry-run|--write] [--include-unmarked]` reclaims disk from
+  session directories under `SESSION_ROOT`; `--dry-run` is the DEFAULT and
+  removes nothing, `--write` is the one flag that actually deletes. Both
+  are CLI-only (`server.py`'s `main()` dispatch, logic in the new
+  `codecalc/ops.py`) — neither is an MCP tool, so neither counts against
+  the 52-tool surface.
+
+  An adversarial review of the first version found a CRITICAL bug: it
+  trusted session-directory MTIME as a liveness signal, and that signal is
+  false — a REPL worker doing purely in-memory work touches no file, and
+  even an in-place file overwrite bumps only the file's own mtime, never
+  its parent directory's. Proven live: a genuinely-active worker session's
+  workspace was removed out from under it. Fixed with a REAL liveness
+  signal, a per-worker-session lockfile (`sessions._LOCK_FILE_NAME`) the
+  server writes carrying its own pid at worker start and releases the
+  moment that worker is actually gone (reaped or `session_stop`); `cleanup`
+  refuses ANY candidate whose lock names a still-live pid, regardless of
+  marker, age, or the mtime floor, cross-platform (`os.kill(pid, 0)` on
+  POSIX, `OpenProcess`/`GetExitCodeProcess` on Windows — no `os.kill(pid,
+  0)` equivalent exists there). Since a workspace-only session never holds
+  a lock (no worker to protect), the marker-less age-based path is now
+  OPT-IN (`--include-unmarked`) rather than default: `cleanup` alone only
+  ever considers the on-disk `.codecalc-session-expired` marker, which
+  carries no such residual risk (a marker only exists once sessions.py's
+  own idle-TTL reaper has already closed that worker for good — session
+  ids are never reused). `--include-unmarked` additionally sweeps old
+  (`CODECALC_CLEANUP_ABANDONED_AGE_HOURS`, default 24h), session-shaped
+  directories, still gated by the same lockfile check plus a hard recency
+  floor (nothing modified in the last few minutes is ever touched).
+
+  `cleanup` runs as a separate process from any server using
+  `SESSION_ROOT`, so it has none of that server's in-memory bookkeeping to
+  consult beyond the lockfile above; it remains deliberately conservative
+  otherwise: only a direct child of `SESSION_ROOT` is ever a candidate,
+  never `SESSION_ROOT` itself; a symlink there is refused, not followed;
+  and removal goes through the same device/inode
+  identity-check-immediately-before-delete discipline `session_stop`'s own
+  workspace teardown already uses, re-verified at delete time rather than
+  trusted from the scan (inode reuse in that window is an accepted
+  residual, the same one `session_stop` already carries). README and
+  `--help` now warn explicitly: keep `CODECALC_SESSION_ROOT`
+  codecalc-private — the "looks like a session dir" name filter is loose,
+  not strict.
+
+- **Audit-log size-based rotation** (THE-898). `AuditLog` (`codecalc/audit.py`)
+  appended to one file forever — the same unbounded-growth gap THE-894
+  closed for session workspaces, here for the append-only broker-decision
+  trail. `CODECALC_AUDIT_MAX_MB` (default 10 MiB, read fresh per call, same
+  unset/invalid-safe shape as `CODECALC_SESSION_IDLE_TTL_SECONDS`) now caps
+  the live file; crossing it rotates `audit.log` → `audit.log.1` →
+  `audit.log.2` (a small, fixed 2-generation history — the same
+  bounded-count-oldest-dropped shape session spill files already use) and
+  starts a fresh file. Checked and performed inside `emit()`'s own existing
+  try/except: a rotation failure is swallowed exactly like an ordinary
+  write failure — it can never fail the run it is describing.
+
 ## [0.3.2] — 2026-08-20
 
 ### Added

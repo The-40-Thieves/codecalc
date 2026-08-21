@@ -629,6 +629,150 @@ _EXPIRED_CAP = 512
 #: is gone without a separate lookup.
 _EXPIRED_MARKER_NAME = ".codecalc-session-expired"
 
+# ── THE-898 fix-round CRITICAL: a REAL liveness signal for `codecalc cleanup` ─
+#: `cleanup` (codecalc/ops.py) is a SEPARATE CLI process with none of this
+#: module's in-memory `_workers`/`_LAST_ACTIVITY` to consult — proven by an
+#: adversarial review that had it delete a genuinely-live worker session's
+#: workspace out from under it. Directory MTIME is not a liveness signal and
+#: must never be trusted as one: a worker doing purely in-memory work
+#: (`x = compute()`) touches no file at all, and even a call that DOES write
+#: touches the workspace without necessarily aging it — `_write_nofollow`'s
+#: O_CREAT|O_TRUNC on an EXISTING filename overwrites in place, which bumps
+#: only that FILE's own mtime, not the parent DIRECTORY's (a directory's
+#: mtime changes when entries are added/removed/renamed, not when one's
+#: contents change). A worker that has run the same script against the same
+#: output filename for days looks, by directory mtime alone, identical to
+#: one nobody has touched since it started.
+#:
+#: The fix is a lockfile written BY the thing that actually knows: this
+#: server process, at the moment it spawns a worker, naming its OWN pid.
+#: `cleanup` treats a lockfile naming a still-live pid as proof a live
+#: server owns this session's worker and refuses the directory outright,
+#: independent of mtime, age threshold, or even the expiry marker.
+_LOCK_FILE_NAME = ".codecalc-session-lock"
+
+
+def _write_lock_file(d: Path) -> None:
+    """Record this server process's pid as the live owner of a just-spawned
+    worker's session directory. Best-effort: a write failure here must not
+    fail session startup, same "best effort, never fatal" rule the audit
+    log and the expiry marker already follow for their own on-disk
+    bookkeeping — losing the lock only narrows `cleanup`'s liveness proof
+    back to the mtime-based backstop it already has, it does not lose
+    anything this session had before.
+
+    Routed through `_write_nofollow` — already jailed and O_NOFOLLOW'd for
+    every other write in this module — rather than a bespoke open(), so
+    executed code cannot swap `.codecalc-session-lock` for a symlink and
+    make this write land somewhere outside the workspace.
+    """
+    try:
+        _write_nofollow(d / _LOCK_FILE_NAME, str(os.getpid()))
+    except OSError:
+        pass
+
+
+def _remove_lock_file(session_id: str) -> None:
+    """Release the liveness lock once a worker is actually gone — reaped
+    (idle-TTL) or stopped. Idempotent and best-effort.
+
+    Matters most for the REAP path, which does NOT delete the session
+    directory (only `stop()` does): a reaped session keeps its workspace —
+    and its new expiry marker — on disk, and a STALE lock left pointing at
+    this still-running server's own pid would make `cleanup` wrongly
+    believe this server still owns a worker it already closed, permanently
+    exempting an actually-idle-expired session from ever being reclaimed
+    for as long as this server process happens to stay up.
+    """
+    try:
+        d = _session_dir(session_id)
+        (d / _LOCK_FILE_NAME).unlink(missing_ok=True)
+    except (OSError, ValueError):
+        pass
+
+
+def _is_pid_alive(pid: int) -> bool:
+    """Cross-platform "is this pid CURRENTLY a live process" check.
+
+    Distinct from `Worker.alive()` (`Popen.poll()`) on purpose: `poll()`
+    only works on a handle THIS process itself spawned, and a lockfile's pid
+    was written by a DIFFERENT process (a server that may or may not still
+    be running) that the reader here never spawned and holds no handle for.
+    """
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        # No POSIX-style os.kill(pid, 0) on Windows. OpenProcess succeeds
+        # only while the pid still names a process (independent of whether
+        # THIS caller could signal it — PROCESS_QUERY_LIMITED_INFORMATION
+        # asks for nothing more than that), and GetExitCodeProcess's
+        # STILL_ACTIVE sentinel is what distinguishes "still running" from
+        # "exited, handle still valid" for the brief window a handle can
+        # outlive the process it named.
+        import ctypes
+
+        _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        _STILL_ACTIVE = 259
+        handle = ctypes.windll.kernel32.OpenProcess(  # type: ignore[attr-defined]
+            _PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return False
+        try:
+            exit_code = ctypes.c_ulong()
+            if not ctypes.windll.kernel32.GetExitCodeProcess(  # type: ignore[attr-defined]
+                    handle, ctypes.byref(exit_code)):
+                return False
+            return exit_code.value == _STILL_ACTIVE
+        finally:
+            ctypes.windll.kernel32.CloseHandle(handle)  # type: ignore[attr-defined]
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Exists, just not ours to signal — still alive, which is the
+        # question being asked. Same classification executor.py's own
+        # kill-path except-clauses already give this errno elsewhere.
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _lock_owner_alive(d: Path) -> bool:
+    """True only if `d` (a session workspace) carries a liveness lockfile
+    naming a pid that is a CURRENTLY live process. False for an absent
+    lock, an unreadable/malformed one, or one naming a pid that is no
+    longer running — all three read the same way to a caller: "no live
+    owner PROVEN", never "definitely dead". That direction matters:
+    treating a corrupted or unreadable lock as proof of liveness would make
+    a session immortal by accident; treating it as proof of absence is the
+    safe failure mode for a check whose only job is to REFUSE a removal.
+
+    Read via `_read_nofollow` — the same symlink-safe, size-capped read
+    every other session-controlled filename in this module goes through —
+    so executed code cannot fool this by swapping the lock for a symlink to
+    an arbitrary file elsewhere on disk.
+
+    RESIDUAL, stated rather than hidden: pid REUSE. If the server that
+    wrote this lock has since died and the OS has since handed the same pid
+    to an unrelated process, this reports "alive" for a server that is
+    actually gone — the same class of residual `_dir_identity`'s own
+    (device, inode) comparison already carries for inode reuse (see
+    executor._rmtree_checked's docstring). The failure direction is the
+    safe one either way: a false "alive" only makes `cleanup` too
+    conservative (skips something it could have reclaimed), never the
+    reverse.
+    """
+    data = _read_nofollow(d / _LOCK_FILE_NAME, 64)  # a pid is a handful of digits
+    if data is None:
+        return False
+    try:
+        pid = int(data.decode("ascii").strip())
+    except ValueError:
+        return False
+    return _is_pid_alive(pid)
+
 
 def _idle_ttl_seconds() -> float | None:
     """The configured idle TTL, or None when unset/invalid/non-positive.
@@ -799,6 +943,11 @@ def _reap_if_idle(session_id: str) -> bool:
         return False
     w.close()  # the existing teardown path — no new kill logic
     _write_expired_marker(session_id)
+    # THE-898: release the liveness lock in the SAME breath the worker is
+    # actually closed — see _remove_lock_file's docstring for why a stale
+    # lock here would make `cleanup` refuse a directory this server no
+    # longer has any claim to.
+    _remove_lock_file(session_id)
     return True
 
 
@@ -835,6 +984,7 @@ def _get_worker_or_expired(session_id: str) -> tuple[Worker | None, bool]:
     if to_close is not None:
         to_close.close()
         _write_expired_marker(session_id)
+        _remove_lock_file(session_id)  # THE-898: same reasoning as _reap_if_idle
         return None, True
     if w is None and _idle_ttl_seconds() is not None and _is_expired_on_disk(session_id):
         # No worker, and this call did not just reap one. Could be a
@@ -924,6 +1074,11 @@ def start(language: str = "python3", name: str | None = None) -> dict:
     if w is None:
         return {"ok": False,
                 "error": f"failed to start {name} REPL worker: {why or 'unknown cause'}"}
+    # THE-898: the liveness lockfile, written BEFORE this worker is published
+    # to `_workers` — a caller (or `cleanup`, in a separate process) must
+    # never be able to observe a worker session whose lock has not been
+    # written yet. See _write_lock_file's docstring for what this closes.
+    _write_lock_file(d)
     with _lock:
         _workers[session_id] = w
         _touch(session_id)
@@ -962,6 +1117,15 @@ def stop(session_id: str) -> dict:
         _discard_expired_locked(session_id)
     if w is not None:
         w.close()
+        # THE-898: released here too, not just on the reap path. The whole
+        # directory is normally deleted a few lines below (taking the lock
+        # file with it for free) — but `_rmtree_checked` can REFUSE
+        # (identity mismatch), in which case the directory survives while
+        # this server has already forgotten the session in every other way.
+        # Without this, a survived-refusal directory would keep a lock
+        # naming this still-running server's own pid, making `cleanup`
+        # wrongly treat it as live forever.
+        _remove_lock_file(session_id)
     try:
         d = _session_dir(session_id)
     except ValueError as exc:

@@ -416,6 +416,13 @@ jobs:
       # runs on all three the same way the sweeps above do.
       - name: session disk quotas
         run: uv run --no-sync python tests/test_session_quota.py
+      # THE-898: `codecalc status`/`cleanup` (read-only snapshot + the
+      # dry-run-by-default disk reclaimer) and audit-log size rotation.
+      # Platform-neutral (plain file I/O, subprocess, no sandbox or native
+      # executor), so this runs on all three the same way the quota suite
+      # above does.
+      - name: status/cleanup CLI + audit-log rotation
+        run: uv run --no-sync python tests/test_ops.py
       # No network needed and none permitted: this asserts the package cannot
       # make an outbound request at all, so it cannot flake on connectivity.
       - name: offline guarantee (no network calls anywhere)
