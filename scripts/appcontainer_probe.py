@@ -1,4 +1,4 @@
-"""THE-829 acceptance probe — the payload codecalc runs INSIDE the sandbox.
+"""AppContainer acceptance probe — the payload codecalc runs INSIDE the sandbox.
 
 Emits one JSON line describing what this process's token is and what it can
 actually reach, so a harness can compare a normal run against a

@@ -98,7 +98,7 @@ _MAX_POW_RESULT_BITS = 50_000
 
 class _CeilingExceeded(ValueError):
     """A ValueError raised specifically by a size/resource ceiling in this
-    module (THE-881), not by a syntax or argument mistake.
+    module, not by a syntax or argument mistake.
 
     Still a ValueError — every other `except (ValueError, ...)` in this file
     and in errors.classify() keeps working by isinstance — but `_eval_exact`
@@ -108,7 +108,7 @@ class _CeilingExceeded(ValueError):
     to guess back at the server boundary. "exponent 387420489 exceeds the
     limit (10000)" contains none of `_MESSAGE_HINTS`' vocabulary ("exceeded",
     not "exceeds") and landed on `internal` — the same defect-vs-refusal
-    confusion THE-881 exists to close for guard rejections.
+    confusion this type exists to close for guard rejections.
     """
 
 
@@ -214,7 +214,7 @@ _MAX_EXPR_LEN = 2000
 
 
 def _too_long(*parts: str) -> dict | None:
-    """Reject before sympify if any part exceeds the length cap (THE-844).
+    """Reject before sympify if any part exceeds the length cap.
 
     The cap used to be enforced in exactly one sympify entry point (_eval_exact).
     The others — _algebraic_equiv, _solve_expression, _limit_expression,
@@ -261,7 +261,7 @@ def _eval_exact(expr: str) -> dict:
     # The screen the other four functions in this file already call, and this
     # one never did. It carries the heavy-argument cap, which is what stops
     # factorial(<huge>) before the evaluator reaches math.factorial — a
-    # DIFFERENT refusal than the RCE screen's (THE-881): a heavy-argument cap
+    # DIFFERENT refusal than the RCE screen's: a heavy-argument cap
     # is a ceiling ("resource_exhausted", retry after reducing the work), not
     # a jail ("permission_denied", will never succeed). classify_unsafe
     # names which one this is at the point it is decided, rather than
@@ -278,14 +278,14 @@ def _eval_exact(expr: str) -> dict:
     try:
         result = _ev(tree)
     except _CeilingExceeded as exc:
-        # A ceiling is a ceiling (THE-881): _pow_exact's own comment on
+        # A ceiling is a ceiling: _pow_exact's own comment on
         # RESOURCE_EXHAUSTED is "memory, output or process ceiling hit", and
         # an exponent/result-size cap is exactly that — not a defect.
         return errors.error_result(errors.RESOURCE_EXHAUSTED, str(exc))
     except ZeroDivisionError:
         # `Fraction(1, 1) / Fraction(0, 1)` raises ZeroDivisionError whose
         # message IS `str(Fraction(1, 0))` — the constructor arg the stdlib
-        # built to format the exception, not a sentence for a human (THE-881).
+        # built to format the exception, not a sentence for a human.
         # `//` and `%` on Fraction already say "division by zero"; `/` alone
         # leaks the repr, so it is worth a real message here rather than
         # forwarding whatever CPython happened to construct.
@@ -369,7 +369,7 @@ def compare_threshold(a: str, op: str, b: str) -> dict:
             "shortfall": None if holds else str(-diff)}
 
 
-#: THE-879 GH #213(c): a `round()`ed float presented alongside an exact value
+#: GH #213(c): a `round()`ed float presented alongside an exact value
 #: (a fraction string, an unrounded probability, ...) read as if it carried
 #: the same precision as its neighbour — nothing in the result said it had
 #: been rounded at all, let alone to how many places. `"rounding"` on a
@@ -494,7 +494,7 @@ def data_sizes(n: int) -> dict:
     """Byte sizes both ways: binary (KiB/MiB) and decimal (KB/MB)."""
     n = int(n)
     if n < 0:
-        # THE-879 GH #213(b): negative bytes used to divide through cleanly
+        # GH #213(b): negative bytes used to divide through cleanly
         # and report a negative KiB/MB, same shape of bug human_duration
         # above already guards against for a negative duration. Tools here
         # return the validation contract, they do not raise (errors.py); the
@@ -971,7 +971,7 @@ def _algebraic_equiv(a: str, b: str) -> dict:
     Identity over symbolic reals says nothing about float rounding, integer
     truncation or modular overflow — usually where the real difference lives.
     """
-    # THE-889: parse through the shared safe pipeline (safe_expr.safe_parse)
+    # parse through the shared safe pipeline (safe_expr.safe_parse)
     # instead of a bare sp.sympify — see that function's docstring for why a
     # screened-but-live builtin (input()/breakpoint()) and a power tower both
     # needed more than classify_unsafe alone.
@@ -997,7 +997,7 @@ def _algebraic_equiv(a: str, b: str) -> dict:
 
 def _solve_expression(expr: str, var: str = "x") -> dict:
     """Solve for a root or crossover: `x**2 - 4 = 0`, `2*x + 1 = 7`."""
-    # THE-889: parse through the shared safe pipeline (safe_expr.safe_parse)
+    # parse through the shared safe pipeline (safe_expr.safe_parse)
     # instead of a bare sp.sympify — see that function's docstring. Parsed
     # per SIDE, because this splits on '=' before parsing and safe_parse's
     # own classify_unsafe screen refuses '=' — the parts are what reach the
@@ -1034,7 +1034,7 @@ def _solve_expression(expr: str, var: str = "x") -> dict:
 
 def _limit_expression(expr: str, var: str = "x", point: str = "oo") -> dict:
     """Asymptotic behaviour: limit of EXPR as var -> point (default oo)."""
-    # THE-889: parse through the shared safe pipeline (safe_expr.safe_parse)
+    # parse through the shared safe pipeline (safe_expr.safe_parse)
     # instead of a bare sp.sympify — see that function's docstring. `point`
     # is parsed too (a screened-but-live builtin or a power tower is exactly
     # as reachable through the second argument as through `expr`), except
@@ -1068,7 +1068,7 @@ def _limit_expression(expr: str, var: str = "x", point: str = "oo") -> dict:
 
 def _simplify_expression(expr: str) -> dict:
     """Simplified, factored and expanded forms of an expression."""
-    # THE-889: parse through the shared safe pipeline (safe_expr.safe_parse)
+    # parse through the shared safe pipeline (safe_expr.safe_parse)
     # instead of a bare sp.sympify — see that function's docstring.
     if (_long := _too_long(expr)):
         return _long

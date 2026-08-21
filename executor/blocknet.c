@@ -25,7 +25,7 @@
  * or a raw `syscall(SYS_socket, ...)`, never resolves the name this shim
  * replaces, so neither is seen here at all. Verified live: with this shim
  * loaded and `no_net=True`, `ctypes.CDLL(find_library("c")).socket(2, 1, 0)`
- * returns a working fd (E-1, THE-900/THE-902) — the executor's `unenforced`
+ * returns a working fd (E-1) — the executor's `unenforced`
  * now discloses this whenever the shim is what satisfied `no_net`, rather
  * than reporting it as fully applied. Containers or a real kernel-level
  * egress block (gVisor, network namespaces) are the fix for either gap; this

@@ -334,7 +334,7 @@ const LANGS: &[Lang] = &[
         run: &["java", "-jar", "{work}/out.jar"],
     },
     // project wrappers
-    // csharp is not one any more (THE-835): .NET 10 runs a single .cs file
+    // csharp is not one any more: .NET 10 runs a single .cs file
     // directly, implicit usings included, so the bash/cp scaffold — which made
     // C# structurally unsupported on Windows — is gone. Mirrored in
     // codecalc/registry.py; check_parity gates the registries.
@@ -486,7 +486,7 @@ fn probe() -> serde_json::Value {
     for lang in LANGS {
         // A shell-wrapped plan is available only when the REAL tool and the
         // shell both resolve, and never on a platform whose plan cannot run
-        // (THE-835). Probing bash alone claimed gleam was available on
+        //. Probing bash alone claimed gleam was available on
         // machines that had never seen gleam.
         let available = if let Some(tool) = wrapped_tool(lang.name) {
             plan_supported(lang.name, cfg!(windows)) && on_path(tool) && on_path("bash")
@@ -562,7 +562,7 @@ fn substitute(template: &str, file: &str, exe: &str, work: &str) -> String {
 }
 
 /// Languages whose runtime re-parses the raw Windows command line with POSIX
-/// escaping rules instead of taking argv as handed to it (THE-817).
+/// escaping rules instead of taking argv as handed to it.
 ///
 /// WINDOWS HAS NO ARGV. `CreateProcess` takes one command-line STRING and the
 /// child's C runtime splits it back up. MSVC-style parsing keeps a backslash
@@ -577,9 +577,9 @@ fn substitute(template: &str, file: &str, exe: &str, work: &str) -> String {
 const POSIX_ARGV_LANGUAGES: &[&str] = &["bash", "zsh"];
 
 /// Languages whose canonical plan still needs a POSIX shell to scaffold a
-/// workspace (THE-835). Before this set existed all wrapper languages probed
+/// workspace. Before this set existed all wrapper languages probed
 /// as `bash`, so a Windows box with Git-for-Windows advertised them as
-/// available for plans that were structurally unable to run — THE-817's lie,
+/// available for plans that were structurally unable to run — the same lie,
 /// one level up. Mirrored in codecalc/registry.py; scripts/check_parity.py
 /// gates the two copies.
 const SHELL_WRAPPED: &[&str] = &["gleam", "haskell"];
@@ -754,7 +754,7 @@ fn run_step(
         }
     }
     // Captured BEFORE `Stdio::from` consumes the Files. The Windows
-    // creation-time job path (THE-818) needs a raw CreateProcessW, which needs
+    // creation-time job path needs a raw CreateProcessW, which needs
     // these; `Stdio` does not give them back. The handles stay valid for the
     // lifetime of the Stdio values, which outlive the spawn.
     #[cfg(windows)]
@@ -1467,7 +1467,6 @@ mod tests {
         assert_eq!(remaining_run_timeout_secs(10, 5_000), Some(5));
     }
 
-    // ── THE-817 ─────────────────────────────────────────────────────────────
     //
     // These pass `windows` explicitly rather than relying on the build target,
     // so the Windows rendering is checked on the Linux and macOS legs too. The
@@ -1477,7 +1476,7 @@ mod tests {
     /// The repair, stated as the property that makes it safe: nothing left for
     /// the MSYS escape pass to eat. A spaced profile is in the fixture because
     /// the same re-parse splits on spaces, and `C:\Users\John Smith\` is the
-    /// untested case THE-817 flags as still open for every other runtime.
+    /// untested case flags as still open for every other runtime.
     #[test]
     fn posix_argv_languages_get_a_name_with_no_separator_on_windows() {
         let win = r"C:\Users\John Smith\AppData\Local\Temp\codecalc-ab12\main.sh";
@@ -1526,7 +1525,6 @@ mod tests {
         assert_eq!(out, r"C:\Temp\w\a.exe");
     }
 
-    // ── THE-835 ─────────────────────────────────────────────────────────────
     // `windows` is a parameter for the same reason source_arg's is: these run
     // on every CI leg, so the Windows verdicts are checked where Windows is
     // not available to check them.

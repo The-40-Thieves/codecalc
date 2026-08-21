@@ -1,4 +1,4 @@
-"""Reusable execution-provider conformance cases for THE-790."""
+"""Reusable execution-provider conformance cases."""
 
 from __future__ import annotations
 

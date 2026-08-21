@@ -1,4 +1,4 @@
-# Extension SDK — versioned language packs, renderers, verifiers (THE-794)
+# Extension SDK — versioned language packs, renderers, verifiers
 
 **Status:** design, 2026-08-19. Execution *providers* already ship this shape
 (`codecalc/providers.py`: `PROVIDER_INTERFACE_VERSION`, a `Protocol`, a frozen

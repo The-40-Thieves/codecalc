@@ -3,7 +3,7 @@
 `codecalc.sessions._jail` / `_session_dir` — the traversal guards between a
 caller-supplied relative path (or session id) and a filesystem write under a
 session workspace (see codecalc/sessions.py's own docstrings, in particular
-`_jail`'s record of the confirmed `str.startswith` bypass THE-901 fixed).
+`_jail`'s record of the confirmed `str.startswith` bypass fixed).
 
 COMPLEMENTS scripts/fuzz.py, does not replace it — see fuzz/README.md and
 fuzz/safe_expr_fuzzer.py's module docstring for the deterministic-gate vs.

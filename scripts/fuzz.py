@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Mutation fuzzer over codecalc's two highest-risk caller-string surfaces.
 
-THE-899. Two targets, both places a caller string reaches something that
+Two targets, both places a caller string reaches something that
 walks it structurally rather than just comparing bytes:
 
   1. `safe_expr.classify_unsafe` / `safe_expr.safe_parse` — the screen that
@@ -40,7 +40,7 @@ class of bug is still DETECTED here — it just leaks one parked daemon thread
 per hang instead of blocking the fuzzer — and daemon=True is what stops that
 leak from blocking process exit, same reasoning as `sessions._readline_timeout`.
 
-DETERMINISM. `random.Random(seed)` with a fixed default seed (THE-899's own
+DETERMINISM. `random.Random(seed)` with a fixed default seed ('s own
 requirement: no `Math.random`/unseeded time, so a crash reproduces). Pass
 `--seed` to explore a different stream; the crash report always echoes the
 seed that produced it.
@@ -54,7 +54,7 @@ Exit 0 with zero crashes; exit 1 and print every crash (input included, so it
 reproduces) otherwise. A crash found here is a REAL finding — report it, don't
 silence the input that triggered it.
 
-TWO KNOWN FINDINGS, neither fixed by this script (THE-899; filed for
+TWO KNOWN FINDINGS, neither fixed by this script (; filed for
 follow-up rather than papered over — see the ticket, not this comment, for
 disposition). Both are DoS-shaped (cost, not an escape). #1 sits entirely
 outside the space today's callers can reach (no guard bounds it at all); #2
@@ -125,7 +125,7 @@ from codecalc import safe_expr, sessions  # noqa: E402 — needs the path insert
 # before the parser" block (CVE-2026-codecalc-001 and its relatives) — the
 # fuzzer's mutations are meant to explore AROUND confirmed exploits, not
 # invent unrelated ones from scratch. `input()`/`breakpoint()`/`quit()`/
-# `exit()` are the builtins THE-899 explicitly names as must-never-execute;
+# `exit()` are the builtins explicitly names as must-never-execute;
 # they carry none of classify_unsafe's denied syntax (no dot, no bracket, no
 # leading underscore), so they are exactly the shape that only
 # `safe_global_dict()`'s empty `__builtins__` — not the token screen — stops.
@@ -157,7 +157,7 @@ SEED_CORPUS_EXPR = [
     "((((((",
     # Unicode shapes that crash CPython's C tokenizer from inside
     # classify_unsafe (it round-trips source through UTF-8): the lone surrogate
-    # (UnicodeEncodeError, THE-899, originally found by the mutator) and the
+    # (UnicodeEncodeError, originally found by the mutator) and the
     # replacement/truncated-multibyte char (UnicodeDecodeError, found by the
     # ClusterFuzzLite harness). Seeded here so the deterministic gate covers
     # both directly, not only when the mutator happens to reconstruct them.

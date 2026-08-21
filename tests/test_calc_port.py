@@ -37,7 +37,7 @@ check("cmp 6>=6", r["holds"] is True)
 # percentage
 r = exact.percentage("3", "8")
 check("pct 3/8", r["ok"] and abs(r["percent"] - 37.5) < 1e-6)
-# THE-879 GH #213(c): `percent` is a rounded float sitting right next to the
+# GH #213(c): `percent` is a rounded float sitting right next to the
 # EXACT `share` fraction — nothing used to say which of the two was which.
 check("pct discloses percent is rounded, and to how many digits",
       r.get("rounding") == {"percent": 6}, f"-> {r}")
@@ -52,7 +52,7 @@ check("stats cv", abs(r["cv"] - 0.527046) < 1e-4)
 r = exact.percentiles(list(range(1, 101)))
 check("pctl p50 nearest", r["percentiles"]["p50"]["nearest_rank"] == 50)
 check("pctl warning n=100 none", r["warning"] is None)
-# THE-879 GH #213(c): `interpolated` is rounded; `nearest_rank` is an exact
+# GH #213(c): `interpolated` is rounded; `nearest_rank` is an exact
 # value straight out of the input, so only the former is named.
 check("pctl discloses interpolated is rounded, nearest_rank is not",
       r["percentiles"]["p50"].get("rounding") == {"interpolated": 6},
@@ -63,7 +63,7 @@ check("pctl warns n<100", r["warning"] is not None)
 # collision
 r = exact.collision_prob(100000, 32)
 check("collide 1e5/32 ~0.69", abs(r["probability"] - 0.6878) < 0.01)
-# THE-879 GH #213(c): `percent` is rounded; `probability` (the full float) is
+# GH #213(c): `percent` is rounded; `probability` (the full float) is
 # not, so only `percent` is named.
 check("collision_prob discloses percent is rounded, probability is not",
       r.get("rounding") == {"percent": 6}, f"-> {r}")
@@ -73,18 +73,18 @@ check("collide 1e6/64 ~2.7e-8", abs(r["probability"] - 2.71e-8) < 1e-9)
 # bytes / duration / epoch
 r = exact.data_sizes(291 * 1024 * 1024)
 check("bytes MiB vs MB", abs(r["binary"]["MiB"] - 291) < 1e-6 and abs(r["decimal"]["MB"] - 305.135) < 0.01)
-# THE-879 GH #213(b): a negative byte count used to divide through cleanly
+# GH #213(b): a negative byte count used to divide through cleanly
 # and report negative KiB/MB instead of being rejected, same bug shape
 # human_duration already guards against for a negative duration.
 r = exact.data_sizes(-1024)
 check("bytes rejects a negative n", r["ok"] is False and "negative" in r.get("error", ""), f"-> {r}")
 r = exact.human_duration(90061)
 check("dur humanized", "1d" in r["human"] and "1h" in r["human"] and "1m" in r["human"] and "1s" in r["human"])
-# THE-879 GH #213(c): per_day/per_30d are rounded; `seconds` (echoed input)
+# GH #213(c): per_day/per_30d are rounded; `seconds` (echoed input)
 # is not, so only the two rates are named.
 check("dur discloses per_day/per_30d are rounded, seconds is not",
       r.get("rounding") == {"per_day": 6, "per_30d": 6}, f"-> {r}")
-# THE-876/#198: human_duration(0.5) used to report "0s", silently dropping
+# #198: human_duration(0.5) used to report "0s", silently dropping
 # the only information a sub-second call carried. Sub-second input now
 # carries a ms/us component instead of flooring away.
 r = exact.human_duration(0.5)
@@ -94,7 +94,7 @@ check("dur 250us sub-millisecond duration", r["ok"] and r["human"] == "250us", f
 r = exact.human_duration(1.5)
 check("dur 1.5s keeps the whole-second part alongside the fraction",
       r["ok"] and r["human"] == "1s 500ms", f"-> {r}")
-# THE-876/#198: human_duration(1e30) used to floor a float64 into
+# #198: human_duration(1e30) used to floor a float64 into
 # int(s)//86400 and print ~26 digits of "days" — far past the ~15-17
 # significant decimal digits a float64 actually carries. Above the exactness
 # threshold it must report scientific notation instead of garbage digits.
@@ -134,7 +134,7 @@ check("bits next pow2(12)=16", r["next_power_of_two"] == 16)
 check("bits trailing zeros(12)=2", r["trailing_zeros"] == 2)
 r = exact.bit_analysis(7, align=8)
 check("bits align pad 7->8", r["padding_needed"] == 1 and r["aligned_value"] == 8)
-# THE-876/#197: bit_analysis(-1) used to report popcount=1 (int.bit_count()
+# #197: bit_analysis(-1) used to report popcount=1 (int.bit_count()
 # silently counts the ABSOLUTE VALUE's bits) while is_power_of_two correctly
 # said False for the same input, and next_power_of_two vanished from the
 # result with no field explaining why. Negative n is now a validation error.

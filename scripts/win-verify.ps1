@@ -1,5 +1,5 @@
 <#
-  codecalc - Windows 11 verification bootstrap (THE-818 / THE-829 / THE-802)
+  codecalc - Windows 11 verification bootstrap
 
   Runs on NATIVE Windows PowerShell (the job-object behaviour under test does
   NOT exist inside WSL2 - it must be measured on real Windows). One command:
@@ -15,7 +15,7 @@
       powershell -ExecutionPolicy Bypass -File scripts\win-verify.ps1 -Repo E:\Projects\codecalc
 
   diag_windows_job.py exit contract:
-      0  ceiling BOUND        -> THE-818 fix WORKS (the win we want)
+      0  ceiling BOUND        -> fix WORKS (the win we want)
       3  ceiling did NOT bind -> bug reproduced; the table says how
       2  not Windows / binary missing -> nothing measured (setup problem)
       1  never returned (so a harness error cannot look like a finding)
@@ -102,23 +102,23 @@ $env818 = @{
     CODECALC_DIAG_JOB            = (Join-Path $results "jobdiag-ps.txt")
 }
 
-# ---- 2. THE-818 - ceiling binds? (plain PowerShell context) -----------------
-Section "2. THE-818 job-object ceiling probe (PowerShell context), JOB_AT_CREATION=1"
+# ---- 2. - ceiling binds? (plain PowerShell context) -----------------
+Section "2. job-object ceiling probe (PowerShell context), JOB_AT_CREATION=1"
 $r = Invoke-Probe "the818-powershell" "scripts\diag_windows_job.py" $env818
 switch ($r.rc) {
-    0 { Write-Host "  -> EXIT 0: CEILING BOUND. THE-818 fix WORKS in the PowerShell context." -ForegroundColor Green }
+    0 { Write-Host "  -> EXIT 0: CEILING BOUND. fix WORKS in the PowerShell context." -ForegroundColor Green }
     3 { Write-Host ("  -> EXIT 3: ceiling did NOT bind (bug reproduced). See " + $r.out) -ForegroundColor Red }
     default { Write-Host ("  -> EXIT " + $r.rc + ": setup problem (not Windows / binary missing). See " + $r.out) -ForegroundColor Yellow }
 }
 
-# ---- 2b. THE-818 - portable probe in the test suite -------------------------
-Section "2b. THE-818 tests\test_security.py (portable process-limit probe + fork-bomb)"
+# ---- 2b. - portable probe in the test suite -------------------------
+Section "2b. tests\test_security.py (portable process-limit probe + fork-bomb)"
 $rsec = Invoke-Probe "the818-test_security" "tests\test_security.py" $env818
 $c = if ($rsec.rc -eq 0) { "Green" } else { "Red" }
 Write-Host ("  test_security.py EXIT " + $rsec.rc + " (0 = pass). See " + $rsec.out) -ForegroundColor $c
 
-# ---- 3. THE-818 - Task Scheduler context (the decisive second launcher) ------
-Section "3. THE-818 same probe from Task Scheduler (no agent in the parent chain)"
+# ---- 3. - Task Scheduler context (the decisive second launcher) ------
+Section "3. same probe from Task Scheduler (no agent in the parent chain)"
 Note "  Writes a .bat, registers a one-shot task to run it, reads its exit code, removes it."
 $taskName = "codecalc-jobprobe-" + $stamp
 $tsOut    = Join-Path $results "the818-taskscheduler.txt"
@@ -158,8 +158,8 @@ switch ($rc) {
     default { Write-Host ("  -> Task Scheduler EXIT " + $rc + ": no clean result (see the note above / " + $tsOut + ")") -ForegroundColor Yellow }
 }
 
-# ---- 4. THE-829 - AppContainer path runs + discloses ------------------------
-Section "4. THE-829 tests\test_appcontainer.py (path taken + discloses unverified OR fails closed)"
+# ---- 4. - AppContainer path runs + discloses ------------------------
+Section "4. tests\test_appcontainer.py (path taken + discloses unverified OR fails closed)"
 Note "  Proves the AppContainer path RUNS and is honest; does NOT yet prove the deep"
 Note "  isolation (SID / can't-read-secrets / --no-net egress). Those probes come next."
 $rac = Invoke-Probe "the829-test_appcontainer" "tests\test_appcontainer.py" @{}
@@ -169,9 +169,9 @@ Write-Host ("  test_appcontainer.py EXIT " + $rac.rc + " (0 = contract holds). S
 # ---- summary ----------------------------------------------------------------
 function Verdict818($x) { if ($x -eq 0) { "BOUND (good)" } elseif ($x -eq 3) { "ESCAPED (bug)" } else { "setup/none" } }
 Section "SUMMARY"
-Write-Host ("  THE-818 PowerShell probe : EXIT {0}  {1}" -f $r.rc,   (Verdict818 $r.rc))
-Write-Host ("  THE-818 test_security    : EXIT {0}  {1}" -f $rsec.rc, $(if ($rsec.rc -eq 0) { "pass" } else { "fail" }))
-Write-Host ("  THE-818 TaskScheduler    : EXIT {0}  {1}" -f $rc,     (Verdict818 $rc))
-Write-Host ("  THE-829 test_appcontainer: EXIT {0}  {1}" -f $rac.rc, $(if ($rac.rc -eq 0) { "contract holds" } else { "fail" }))
+Write-Host ("  PowerShell probe : EXIT {0}  {1}" -f $r.rc,   (Verdict818 $r.rc))
+Write-Host ("  test_security    : EXIT {0}  {1}" -f $rsec.rc, $(if ($rsec.rc -eq 0) { "pass" } else { "fail" }))
+Write-Host ("  TaskScheduler    : EXIT {0}  {1}" -f $rc,     (Verdict818 $rc))
+Write-Host ("  test_appcontainer: EXIT {0}  {1}" -f $rac.rc, $(if ($rac.rc -eq 0) { "contract holds" } else { "fail" }))
 Write-Host ("`nAll outputs are in: " + $results) -ForegroundColor Green
 Write-Host "Paste that folder's *.txt back (or point the Cave session at it) and I'll read the measurements." -ForegroundColor Green

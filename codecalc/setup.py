@@ -1,4 +1,4 @@
-"""`codecalc setup`: guided onboarding to a working MCP connection (THE-897).
+"""`codecalc setup`: guided onboarding to a working MCP connection.
 
 The gap this fills: README.md documents every piece a stranger needs — which
 extra to install, which JSON key their client wants, where the config file
@@ -324,7 +324,7 @@ def write_config(path: Path, client: str) -> dict:
     merged = merge_config(existing, client)
     payload = json.dumps(merged, indent=2) + "\n"
 
-    # Atomic write (FIX for THE-897 review): mkstemp in the SAME directory as
+    # Atomic write (FIX for review): mkstemp in the SAME directory as
     # `path` guarantees the temp file and the target share a filesystem, which
     # is what makes `os.replace` below an atomic rename rather than a
     # cross-filesystem copy that could itself be interrupted. The descriptor
@@ -453,7 +453,7 @@ def run_setup(client: str | None = None, do_write: bool = False, *,
     # Validated FIRST, before doctor.report() or anything else runs: an
     # unknown --client is a typo, not a broken host, and should fail fast
     # with a one-line message rather than a ValueError traceback out of
-    # detect_client below (THE-897 review). No file is touched either way.
+    # detect_client below (review). No file is touched either way.
     if client is not None and client not in CLIENTS:
         p(f"codecalc setup: unknown client {client!r}; choose one of "
           f"{', '.join(CLIENTS)}")

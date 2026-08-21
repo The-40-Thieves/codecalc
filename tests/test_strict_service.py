@@ -1,4 +1,4 @@
-"""End-to-end protocol/auth suite for the strict execution SERVICE (THE-830).
+"""End-to-end protocol/auth suite for the strict execution SERVICE.
 
 Drives the REAL ``RemoteStrictExecutionProvider`` client against an in-process
 ``StrictService`` — the acceptance test is that the client's own handshake,
@@ -192,7 +192,7 @@ def raw_stalled_body_request(
 ) -> tuple[bytes, float]:
     """Send headers with a legitimate, SUB-ceiling ``Content-Length``, write
     only ``sent_body``, then never send another byte and never close our end
-    — the slowloris shape THE-851 closes. Returns whatever the server sent
+    — the slowloris shape closes. Returns whatever the server sent
     back (empty if it just dropped the connection) and the elapsed wall time.
 
     ``client_wait`` must exceed the server's own body-read deadline so this
@@ -342,7 +342,7 @@ def test_oversized_content_length_rejected_before_read_and_before_auth() -> None
 
 
 def test_stalled_body_read_is_bounded_by_a_deadline() -> None:
-    # THE-851: MAX_CONTENT_LENGTH alone only closes the OVERSIZED-body DoS.
+    # MAX_CONTENT_LENGTH alone only closes the OVERSIZED-body DoS.
     # A client that declares a legitimate, sub-ceiling Content-Length and
     # then dribbles/stalls the body must not pin a worker thread past a
     # bounded deadline (unbounded by MAX_CONCURRENT_RUNS: this runs before

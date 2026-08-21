@@ -77,7 +77,7 @@ if floor("rust LANGS", rust_langs, 10) and floor("python LANGUAGES", py_langs, 1
     else:
         print(f"ok   language registry: {len(py_langs)} entries, identical in both backends")
 
-# ── 1b. POSIX-argv languages (THE-817) ──────────────────────────────────────
+# ── 1b. POSIX-argv languages ──────────────────────────────────────
 #
 # Drift here is a SILENT correctness bug on exactly one platform. If a language
 # is listed in Rust only, the pure-Python fallback hands bash a Windows path
@@ -103,7 +103,7 @@ if floor("rust POSIX_ARGV_LANGUAGES", rust_posix_argv, 1) and \
     else:
         print(f"ok   POSIX-argv languages: {sorted(py_posix_argv)}, identical in both backends")
 
-# ── 1b. shell-wrapped languages (THE-835) ───────────────────────────────────
+# ── 1b. shell-wrapped languages ───────────────────────────────────
 # Same three-way rule as the POSIX-argv set, for the same reason: the set
 # decides per-platform availability in BOTH backends, so a copy that drifts
 # makes probe() and --probe disagree about which languages exist on Windows.

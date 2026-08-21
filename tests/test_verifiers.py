@@ -1,4 +1,4 @@
-"""THE-794: the verifier extension kind (codecalc/verifiers.py).
+"""The verifier extension kind (codecalc/verifiers.py).
 
 Standalone, like the other suites: a check() accumulator, sys.exit(1) on any
 failure. Runs the built-in (`ExecutedVerifier`) and the reference third-party

@@ -60,7 +60,7 @@ def grammar_name(language: str) -> str | None:
     return GRAMMAR_ALIASES.get(canon, canon)
 
 
-#: Why a grammar could not be loaded, keyed by grammar name (THE-820).
+#: Why a grammar could not be loaded, keyed by grammar name.
 #:
 #: The `except` below used to discard the exception, which made every possible
 #: failure — the extra not installed, an ABI mismatch, a missing shared object,

@@ -5,7 +5,7 @@ running third-party code at all (`--ignore-scripts` and friends in
 packages.py). This is for what still runs: the manager itself, and anything a
 future entry cannot disable. It is the macOS counterpart to `landlock.py`,
 which does the same job on Linux through a different kernel mechanism —
-THE-819 closed the gap `landlock.abi_version()` returning 0 on Darwin left
+this closes the gap `landlock.abi_version()` returning 0 on Darwin left
 open: an installer ran with the server user's full filesystem access on
 macOS, with only the honest disclosure token
 (`package_install_not_confined_no_landlock`) to say so.
@@ -287,7 +287,7 @@ def _quote(path: str) -> str:
 def _canon(path: str) -> str:
     """Resolve symlinks BEFORE a path reaches a `(subpath ...)` rule.
 
-    THE-819 fix-round-1: Seatbelt matches a process's paths in their
+    fix-round-1: Seatbelt matches a process's paths in their
     kernel-RESOLVED (symlink-free) form, regardless of what string the
     process itself used to open() them. macOS's own temp directory is the
     textbook case that broke this: `tempfile.mkdtemp()` returns something

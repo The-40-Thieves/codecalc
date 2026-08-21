@@ -903,7 +903,7 @@ check("  ...and still answers ordinary exact arithmetic",
       _ex2.eval_exact("0.1+0.2").get("value") == "3/10",
       f"-> {_ex2.eval_exact('0.1+0.2').get('value')!r}")
 
-# ═══ THE-888: solve_linear's own sympify was not screened the way the RCE ═══
+# ═══ solve_linear's own sympify was not screened the way the RCE ════════════
 # probe above proves evaluate_expression is — classify_unsafe is a syntax
 # DENYLIST, and a screened, non-denylisted NAME can still be a LIVE Python
 # builtin. `sp.sympify(lhs)`/`sp.sympify(rhs)` (the '=' path) and
@@ -917,7 +917,7 @@ check("  ...and still answers ordinary exact arithmetic",
 # evaluate_expression's identical input already is. solve_linear now parses
 # every piece via logic._parse_solve_piece: parse_expr(global_dict=
 # safe_global_dict()) instead of bare sympify, with reject_explosive run on
-# the unevaluated shape first — the same fix THE-887 gave linalg's per-cell
+# the unevaluated shape first — the same fix gave linalg's per-cell
 # parse.
 
 # input()/breakpoint()/quit() must not invoke the real builtin — compare
@@ -954,7 +954,7 @@ _r = _logic.solve_linear("x - 5; y - 3", "x, y")
 check("solve_linear still solves the no-'=' (raw) path",
       _r.get("ok") is True and _r.get("solutions") == ["{x: 5, y: 3}"], f"-> {_r}")
 
-# ═══ THE-889: the same bare-sympify gap in exact.py's four remaining ═══════
+# ═══ the same bare-sympify gap in exact.py's four remaining ════════════════
 # symbolic tools. algebraic_equiv / solve_expression / limit_expression
 # (including its `point` argument) / simplify_expression each did
 # `classify_unsafe(...)` then a bare `sp.sympify(...)` — classify_unsafe is a
@@ -967,7 +967,7 @@ check("solve_linear still solves the no-'=' (raw) path",
 # evaluator and burned real CPU instead of being caught by
 # reject_explosive's unevaluated-shape check the way evaluate_expression's
 # identical input already is. All four now route through the new
-# `safe_expr.safe_parse` (the same fix THE-887/888 gave `matrix` and
+# `safe_expr.safe_parse` (the same fix gave `matrix` and
 # `solve_linear`, extracted to one shared helper).
 
 # input()/breakpoint()/quit() must not invoke the real builtin — compare
@@ -1028,13 +1028,13 @@ _r = _exact.simplify_expression("(x**2 - 1)/(x - 1)")
 check("simplify_expression still simplifies ordinary algebra",
       _r.get("ok") is True and _r.get("simplified") == "x + 1", f"-> {_r}")
 
-# ═══ THE-890: solve_linear crashed on a SINGLE-variable system ════════════
+# ═══ solve_linear crashed on a SINGLE-variable system ═════════════════════
 # sp.symbols("x") returns a bare Symbol, not a 1-tuple, unless given more
 # than one name or a trailing comma — the code downstream assumed a
 # sequence (`list(syms)`), so `solve_linear('2*x = 4', 'x')` raised
 # "'Symbol' object is not iterable" rather than returning a result.
 _r = _logic.solve_linear("2*x = 4", "x")
-check("solve_linear solves a single-variable system (THE-890)",
+check("solve_linear solves a single-variable system",
       _r.get("ok") is True and _r.get("solutions") == ["{x: 2}"], f"-> {_r}")
 _r = _logic.solve_linear("x - 5", "x")
 check("  ...including the no-'=' single-variable path",
@@ -1045,9 +1045,9 @@ check("  ...and multi-variable systems are unaffected",
       _r.get("ok") is True and _r.get("solutions") == ["{x: 6, y: 4}"], f"-> {_r}")
 
 
-# ═══ THE-901: reject_explosive bounds Pow shapes, not nested-parens +      ═══
+# ═══ reject_explosive bounds Pow shapes, not nested-parens + ═════════════════
 # ═══ repeated-term chains — guarded_call is the actual backstop for those ═══
-# `scripts/fuzz.py` (THE-899) found that deeply nested parens combined with a
+# `scripts/fuzz.py` found that deeply nested parens combined with a
 # long chain of repeated terms costs multiple seconds of real CPU INSIDE
 # SymPy's own recursive-descent parser, raising a caught "maximum recursion
 # depth exceeded" before `safe_parse` ever has a tree to hand `reject_explosive`
@@ -1064,7 +1064,7 @@ check("  ...and multi-variable systems are unaffected",
 # 2000 chars, and costs the same multi-second class either way).
 _d, _k = 100, 900
 _nested_chain = "(" * _d + "2x" * _k + ")" * _d
-check("the THE-901 nested+repeated shape stays inside the 2000-char cap",
+check("the nested+repeated shape stays inside the 2000-char cap",
       len(_nested_chain) == 2000, f"-> {len(_nested_chain)} chars")
 
 _t0 = time.time()
@@ -1073,7 +1073,7 @@ _elapsed = time.time() - _t0
 # guarded.DEFAULT_WALL_SECONDS is 15 — asserted well under it (20s), not
 # exactly at it, so ordinary timing jitter on a loaded CI runner cannot flip
 # this from "the backstop held" to "flaky".
-check("evaluate_expression refuses the THE-901 shape rather than hanging",
+check("evaluate_expression refuses the shape rather than hanging",
       _r.get("ok") is False, f"-> {_r}")
 check("  ...and guarded_call's wall-clock backstop actually bounds it",
       _elapsed < 20.0, f"-> {_elapsed:.2f}s (guarded.DEFAULT_WALL_SECONDS=15)")

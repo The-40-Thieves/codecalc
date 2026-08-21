@@ -1,4 +1,4 @@
-"""The published contract is valid, and the product satisfies it (THE-781).
+"""The published contract is valid, and the product satisfies it.
 
 `scripts/check_contract.py` answers "does the published schema match the module
 that generates it". That check is structural and stdlib-only, because gates in
@@ -513,7 +513,7 @@ async def main() -> None:
 asyncio.run(main())
 
 
-# ── background-run responses validate too (THE-778 shapes, F2) ─────────────
+# ── background-run responses validate too (shapes, F2) ─────────────
 # run_submit / run_inspect (while active) / run_cancel return responses that are
 # stamped `contract_version` but matched NONE of the four published shapes: a
 # run_submit reply is {ok, run_id, provider_id, started_at, deadline, state} —
@@ -560,7 +560,7 @@ with _tempfile.TemporaryDirectory(prefix="codecalc-contract-run-") as _run_root:
         server._run_supervisor = _old_sup
 
 
-# ── the REQUEST contract, on every OS this runs on (THE-793) ──────────────
+# ── the REQUEST contract, on every OS this runs on ──────────────
 # `scripts/check_contract.py` recomputes the golden vectors too, but only ever
 # on a Linux gate runner. The vectors' central claim is that the canonical bytes
 # are the same EVERYWHERE — so recomputing them here, where the suite runs on

@@ -1,4 +1,4 @@
-"""THE-794: the renderer extension kind (codecalc/renderers.py).
+"""The renderer extension kind (codecalc/renderers.py).
 
 Standalone, like tests/test_extensions.py: a check() accumulator, sys.exit(1)
 on any failure. Runs every built-in renderer plus the reference third-party

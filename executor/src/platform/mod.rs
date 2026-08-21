@@ -35,7 +35,7 @@ mod windows;
 #[cfg(windows)]
 pub use windows::{current_uid_tasks, spawn_and_wait};
 
-/// Raw std handles, for the Windows creation-time job path (THE-818).
+/// Raw std handles, for the Windows creation-time job path.
 ///
 /// `std::process::Command` cannot pass `PROC_THREAD_ATTRIBUTE_JOB_LIST`, so
 /// that path needs a raw `CreateProcessW` — which needs the three handles
@@ -134,13 +134,14 @@ pub fn apply_no_net(cmd: &mut Command, exe_dir: &Path) -> bool {
 /// Quote one argument the way the MSVC C runtime parses it back.
 ///
 /// `CreateProcessW` takes one STRING; the callee re-splits it. Getting this
-/// wrong corrupts every execution silently, which is exactly how THE-817
-/// happened one layer up. Rule, from Microsoft's own parser description:
-/// backslashes are literal EXCEPT immediately before a quote, where they are
-/// escapes and must be doubled — including the run before the closing quote.
+/// wrong corrupts every execution silently, which is exactly how a past
+/// misquoting bug happened one layer up. Rule, from Microsoft's own parser
+/// description: backslashes are literal EXCEPT immediately before a quote,
+/// where they are escapes and must be doubled — including the run before
+/// the closing quote.
 // Used by the Windows creation-time path; unused on Unix, where it is kept
 // compiled and TESTED anyway. A rule only one platform can check is a rule
-// nothing checks — the lesson from THE-817's `os.path` vs `ntpath` branch.
+// nothing checks — the lesson from an earlier `os.path` vs `ntpath` branch.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub fn quote_arg(arg: &std::ffi::OsStr) -> String {
     let s = arg.to_string_lossy();
@@ -185,7 +186,7 @@ pub fn quote_arg(arg: &std::ffi::OsStr) -> String {
 /// Those aliases are zero-length reparse stubs that hand off to the Store
 /// activation broker, which launches the real program OUTSIDE the caller's job
 /// object — escaping every sandbox limit. The Windows backend refuses a runtime
-/// that resolves to one (THE-818). Matching is the `Microsoft`→`WindowsApps`
+/// that resolves to one. Matching is the `Microsoft`→`WindowsApps`
 /// PAIR, never a bare `WindowsApps`: the real package store at
 /// `Program Files\WindowsApps` holds legitimate executables and must not match.
 ///
@@ -193,7 +194,7 @@ pub fn quote_arg(arg: &std::ffi::OsStr) -> String {
 /// tests it and the Windows host that runs it. `Path::components` treats `\` as
 /// an ordinary character off-Windows, so a backslash alias path would collapse
 /// to one component there and the pair would never be seen — the same
-/// `os.path` vs `ntpath` platform split THE-817 was. Kept compiled and TESTED on
+/// `os.path` vs `ntpath` platform split was. Kept compiled and TESTED on
 /// every platform for exactly that reason; only the Windows backend calls it.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub fn is_windowsapps_alias_path(path: &Path) -> bool {
@@ -223,7 +224,7 @@ pub enum RuntimeChoice {
 
 /// Choose a runtime executable from `candidates`, scanning in order.
 ///
-/// The security-critical resolution decision behind THE-818, kept here —
+/// The security-critical resolution decision behind interpreter selection, kept here —
 /// separate from Windows filesystem I/O — so the Linux CI can exercise the
 /// control flow with injected classifiers. A candidate that is a file but an
 /// app-execution alias is SKIPPED rather than returned, so an alias early on
@@ -275,7 +276,7 @@ mod choose_runtime_tests {
 
     #[test]
     fn a_real_file_after_an_alias_is_preferred_and_the_alias_skipped() {
-        // The THE-818 case: the alias sorts first on PATH, a real interpreter
+        // The case: the alias sorts first on PATH, a real interpreter
         // sits behind it. The real one must win.
         let r = choose_runtime(cands(&["alias", "real"]), |_| true, |p| is(p, "alias"));
         assert!(matches!(r, RuntimeChoice::Found(p) if p == Path::new("real")));
@@ -331,7 +332,7 @@ mod alias_path_tests {
 
     #[test]
     fn the_real_store_alias_path_is_detected() {
-        // The shape THE-818 measured `python3` resolving to on a Win11 box.
+        // The shape measured `python3` resolving to on a Win11 box.
         assert!(is_alias(
             r"C:\Users\alice\AppData\Local\Microsoft\WindowsApps\python3.EXE"
         ));
@@ -395,7 +396,7 @@ mod quoting_tests {
 
     #[test]
     fn backslashes_not_before_a_quote_are_literal() {
-        // A Windows path must survive untouched. THE-817 inverted.
+        // A Windows path must survive untouched. inverted.
         assert_eq!(q(r"C:\Temp\main.py"), r"C:\Temp\main.py");
     }
 

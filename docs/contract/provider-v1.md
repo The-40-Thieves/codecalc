@@ -220,7 +220,7 @@ explicitly registered gVisor `runsc` runtime. It supports Linux x86_64 and
 ARM64; gVisor's default `systrap` platform avoids requiring KVM. Landlock may
 still harden local execution, but it is not evidence for the gVisor boundary.
 
-### Boundary evidence (THE-828), and what is measured where
+### Boundary evidence, and what is measured where
 
 The executor image is built by `docker/executor.Dockerfile` (multi-stage,
 minimal, non-root, tini as an init so `codecalc-exec` is never PID 1) and
@@ -251,7 +251,7 @@ containers by their immutable run-identity label; it is invoked by the remote
 strict execution service (which lives out of this repo) at that service's
 startup, not by codecalc itself.
 
-### Published, digest-pinned image (THE-828 image residual — CLOSED, operator-gated)
+### Published, digest-pinned image (image residual — CLOSED, operator-gated)
 
 A **registry-published, multi-architecture, DIGEST-PINNED image** is now produced
 by the `publish-executor-image` workflow. One operator `workflow_dispatch`:

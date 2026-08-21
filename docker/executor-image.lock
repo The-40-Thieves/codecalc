@@ -1,4 +1,4 @@
-# codecalc strict executor image — digest lock (THE-828)
+# codecalc strict executor image — digest lock
 #
 # The production strict EXECUTION path pins the executor image by an immutable
 # @sha256: digest, never by a mutable tag. This file records the digest of the

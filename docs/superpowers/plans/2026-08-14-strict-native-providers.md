@@ -6,7 +6,7 @@ Add a fail-closed, provider-neutral run lifecycle and three explicit strict
 provider adapters. The existing `local` provider remains available and
 truthfully non-strict; selecting a strict provider never falls back to it.
 
-## Contract first (THE-831)
+## Contract first
 
 1. Add failing provider/supervisor tests for `start`, `wait`, `cancel`,
    `collect`, and idempotent `cleanup`, provider-bound session identity,
@@ -20,7 +20,7 @@ truthfully non-strict; selecting a strict provider never falls back to it.
 
 ## Platform providers
 
-### Linux strict (THE-828)
+### Linux strict
 
 1. Add failing capability-probe and launch-receipt tests for a versioned
    `gvisor-v1` isolation profile.
@@ -47,7 +47,7 @@ truthfully non-strict; selecting a strict provider never falls back to it.
    escape, cancellation, cleanup, and an assertion that the workload really ran
    under `runsc`.
 
-### Windows strict (THE-829)
+### Windows strict
 
 1. Add failing source-contract and Windows integration tests.
 2. Extend the creation-time process path with a unique AppContainer profile,
@@ -56,7 +56,7 @@ truthfully non-strict; selecting a strict provider never falls back to it.
 3. Delete the profile and restore/remove ACL entries during idempotent cleanup.
 4. Add doctor prerequisites and Windows CI escape/egress/descendant tests.
 
-### macOS strict (THE-830)
+### macOS strict
 
 1. Implement `macos-strict` as an authenticated remote adapter to the Linux
    strict execution service; native macOS execution remains explicitly
@@ -79,9 +79,9 @@ truthfully non-strict; selecting a strict provider never falls back to it.
 1. Extend `doctor --json`, schemas, README, AUDIT, and CHANGELOG with provider
    prerequisites and exact non-strict/strict boundaries.
 2. Run Python, Rust, claims, schema, and platform-contract suites.
-3. Commit in reviewable slices (`THE-831`, `THE-828`, `THE-829`, `THE-830`,
-   docs/CI), push this branch, open a PR, and attach verification evidence to
-   all four Linear issues.
+3. Commit in reviewable slices (per provider, plus docs/CI), push this
+   branch, open a PR, and attach verification evidence to each tracked
+   issue.
 
 ## Portability boundary
 

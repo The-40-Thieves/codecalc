@@ -19,7 +19,7 @@ def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 
     results = []
     for language, code in snippets.items():
         r = executor.execute(language, code, stdin=stdin, timeout=timeout)
-        # THE-802: a language can lose the wall-clock race to a globally slow
+        # a language can lose the wall-clock race to a globally slow
         # runner rather than to a defect in its own snippet — one repro had
         # ruby at 3452ms against python's 33ms for the same trivial script, a
         # 100x spread, with node (the heaviest cold-starter) first to cross
@@ -63,7 +63,7 @@ def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 
     ok_runs = [r for r in results if r["ok"] and r["duration_ms"] is not None]
     fastest = min(ok_runs, key=lambda x: x["duration_ms"])["language"] if ok_runs else None
 
-    # VANISHED OUTPUT (THE-802 / #42).
+    # VANISHED OUTPUT (/ #42).
     #
     # translation.py already refuses to score an empty-but-ok result as
     # evidence, and `vanished_output_side` there names the reason: an exit-0 run
@@ -87,10 +87,10 @@ def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 
     discrepancies = []
     flagged_languages: set[str] = set()
 
-    # THE-802, classification half. A row still timed_out after the one warm
+    # Classification half. A row still timed_out after the one warm
     # retry above is treated as authoritative here — it is ALWAYS flagged
     # (not only when a sibling produced output), and it carries the sibling
-    # timing comparison that discriminates the ticket's two hypotheses:
+    # timing comparison that discriminates the two hypotheses:
     # (1) this language's snippet is actually slow/broken, vs. (2) the whole
     # runner was under cold-start pressure and everything was slow. A row
     # entered here must not be re-added by the produced/silent loop below.
@@ -249,7 +249,7 @@ def _classify_by_ratio(ratios: list[float]) -> str:
 
     That is not hypothetical. On a shared macOS runner under sustained load, one
     4x-slow largest measurement moved this from O(n^2) to O(c^n) — two classes —
-    three separate times (THE-808), because dividing by a small denominator can
+    three separate times, because dividing by a small denominator can
     only ever inflate. `ratio_confidence` in the result now says when the median
     is carrying less weight than it appears to.
     """

@@ -1,4 +1,4 @@
-# The codecalc MCP server image, for the Docker MCP Catalog (THE-870).
+# The codecalc MCP server image, for the Docker MCP Catalog.
 #
 # This is NOT docker/executor.Dockerfile. That image is the trusted artifact
 # the STRICT gVisor boundary launches (`DockerGVisorRuntime`, runtime=runsc)
@@ -30,8 +30,8 @@
 #
 # `go` was tried and dropped: `golang-go` on Debian bookworm pulls in
 # ~450MB (golang-1.19-go + golang-1.19-src) on its own — roughly a third of
-# this image's total size for one language — measured with `docker history`
-# during THE-870, not assumed.
+# this image's total size for one language — measured with `docker history`,
+# not assumed.
 #
 # Anything else (`go`, `rust`, `java`, `csharp`, `swift`, `kotlin`, `deno`,
 # `bun`, `typescript`, `r`, `elixir`, `erlang`, `zig`, `fortran`, `gleam`,

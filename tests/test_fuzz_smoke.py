@@ -1,4 +1,4 @@
-"""Smoke test for scripts/fuzz.py (THE-899): a small, fast, deterministic run
+"""Smoke test for scripts/fuzz.py: a small, fast, deterministic run
 that CI can afford on every PR, standing in for the full multi-thousand-
 iteration campaign a human runs before trusting a change to `safe_expr.py`'s
 screen or `sessions.py`'s path guards.

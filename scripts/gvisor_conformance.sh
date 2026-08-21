@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Reproduce the full gVisor strict-boundary conformance on a runsc-capable host
-# (THE-828). Builds the executor image, then runs the hostile-workload suite
+#. Builds the executor image, then runs the hostile-workload suite
 # against real containers under `--runtime=runsc`.
 #
 # This is the CAVE-runnable target: GitHub-hosted runners have no runsc, so CI

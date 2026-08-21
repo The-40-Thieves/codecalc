@@ -1,4 +1,4 @@
-"""Hostile-workload conformance for the gVisor strict boundary (THE-828).
+"""Hostile-workload conformance for the gVisor strict boundary.
 
 This is the criterion PR #155 could not meet: it does NOT mock Docker. It
 launches the real executor image under `--runtime=runsc` and drives five hostile

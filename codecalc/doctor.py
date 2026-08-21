@@ -1,4 +1,4 @@
-"""What this install actually resolved, as data (THE-780).
+"""What this install actually resolved, as data.
 
 `codecalc doctor` existed and printed prose. Prose is right for the operator
 reading it and useless to the installer script, the CI job or the agent that
@@ -13,7 +13,7 @@ workspace) reachable at all.
 
 THE FOUR-STATE RUNTIME VOCABULARY, AND WHY IT IS NOT FOUR STATES BY DEFAULT
 
-THE-780 asks doctor to distinguish `supported`, `installed`, `available` and
+Doctor is asked to distinguish `supported`, `installed`, `available` and
 `unhealthy`. The honest version of that distinction costs something:
 
     supported   codecalc knows this language; nothing for it resolves here
@@ -55,8 +55,8 @@ from . import (
 )
 
 #: The four states, ordered weakest to strongest claim. Defined in registry.py
-#: and re-exported here: `list_languages` reports the same vocabulary now
-#: (THE-817), and registry is the module all three readers already import.
+#: and re-exported here: `list_languages` reports the same vocabulary,
+#: and registry is the module all three readers already import.
 #: contract.py's schema still imports it from this name.
 RUNTIME_STATES = registry.RUNTIME_STATES
 
@@ -84,7 +84,7 @@ def primary_command(entry: dict, name: str | None = None) -> str:
     which runtimes exist, which is worse than either being wrong on its own.
 
     For a shell-wrapped language the deciding command is the REAL tool, not
-    `bash` (THE-835): `bash` resolving says nothing about whether gleam is
+    `bash`: `bash` resolving says nothing about whether gleam is
     installed, and probing it advertised wrapper languages on machines that
     had never seen them. `name` is optional only for callers that predate the
     wrapper distinction; passing it is what makes the answer honest.
@@ -132,7 +132,7 @@ def _runtime_status(cmd: str) -> tuple[str, str | None]:
 
 
 def _windows_isolation() -> dict:
-    """Job Object RESOURCE limits vs AppContainer SECURITY isolation (THE-829).
+    """Job Object RESOURCE limits vs AppContainer SECURITY isolation.
 
     An operator reading doctor on Windows must not conflate the two guarantees.
     The Job Object caps memory, process count and user-mode CPU, and every run
@@ -172,7 +172,7 @@ def _windows_isolation() -> dict:
 
 
 def _extensions() -> dict:
-    """Capability discovery for the extension SDK (THE-794).
+    """Capability discovery for the extension SDK.
 
     Lists every LOADED extension across kinds — id, kind, name, version, origin,
     health, supported operations — plus the operator policy in effect. Built-in
@@ -203,7 +203,7 @@ def _extensions() -> dict:
 
 
 def _grammar_cache() -> dict:
-    """Is the tree-sitter grammar cache warm? (THE-821)
+    """Is the tree-sitter grammar cache warm?
 
     `analyze_complexity` parses with tree-sitter, and the grammars are NOT in
     the wheel — `tree-sitter-language-pack` ships a ~5 MB extension and fetches
@@ -276,8 +276,8 @@ def _workspace_check() -> dict:
 
 
 def _disk_quota() -> dict:
-    """Configured session-disk quotas + what is actually used right now
-    (THE-894). Discoverable BEFORE a session hits the ceiling, the same
+    """Configured session-disk quotas + what is actually used right now.
+    Discoverable BEFORE a session hits the ceiling, the same
     shape `_grammar_cache` already gives the grammar cache: an operator
     wiring up a shared host should see these numbers here, not learn them
     from the first `resource_exhausted` a caller reports back.
@@ -349,7 +349,7 @@ def report(deep: bool = False) -> dict:
         # this language, nothing FOR IT here" — with the reason in `detail`,
         # BEFORE any resolution happens. Resolving the tool first and then
         # deciding would report gleam `installed` on a Windows box where the
-        # plan is structurally unable to run (THE-835): a stronger claim than
+        # plan is structurally unable to run: a stronger claim than
         # was measured, which is the defect this file's docstring is about.
         tier = registry.LANGUAGES[name]["tier"]
         if not registry.plan_supported(name, windows=os.name == "nt"):
@@ -372,7 +372,7 @@ def report(deep: bool = False) -> dict:
         # --deep only, for the same reason `available` is: asking 31 runtimes
         # their version is a build, not a diagnostic.
         #
-        # `tier` (THE-895) is the RELIABILITY axis, orthogonal to `status`
+        # `tier` is the RELIABILITY axis, orthogonal to `status`
         # here: `status` is what THIS run resolved/executed just now, `tier`
         # is what codecalc's own CI has verified project-wide. A row can read
         # `status: available` (this host ran it fine under --deep) while
@@ -398,7 +398,7 @@ def report(deep: bool = False) -> dict:
 
     summary = {state: sum(1 for r in runtimes if r["status"] == state)
                for state in RUNTIME_STATES}
-    # THE-895: the reliability-tier mirror of `summary` above. Same shape,
+    # the reliability-tier mirror of `summary` above. Same shape,
     # different axis — this counts by how much CI has verified each language,
     # not by what this host just resolved.
     tier_summary = {tier: sum(1 for r in runtimes if r["tier"] == tier)
@@ -422,8 +422,8 @@ def report(deep: bool = False) -> dict:
 
     # `healthy` is deliberately NARROW. A missing optional extra and an
     # uninstalled Haskell are ordinary facts about a host, not faults, and
-    # exiting non-zero for them would make `doctor` useless as an install check
-    # — the thing THE-780 wants it to be. What makes an install unhealthy is
+    # exiting non-zero for them would make `doctor` useless as the install
+    # check it is meant to be. What makes an install unhealthy is
     # that it cannot execute anything: no workspace to run in, or no backend.
     healthy = bool(workspace["writable"]) and backend in ("rust", "python")
 
@@ -447,7 +447,7 @@ def report(deep: bool = False) -> dict:
                 "make this a startup failure instead of a weaker sandbox."),
         },
         "execution_providers": execution_providers,
-        # The gVisor strict boundary's MEASURED prerequisites (THE-828). Doctor
+        # The gVisor strict boundary's MEASURED prerequisites. Doctor
         # calls the same host probe the runtime uses, so a `runsc` that doctor
         # says is registered is the one the boundary attests. Cheap by default —
         # `docker info` and an image lookup, resolution not execution, the same
@@ -469,7 +469,7 @@ def report(deep: bool = False) -> dict:
         # workdir, and the network) — a separate thing, opt-in and OFF by
         # default, and IMPLEMENTED-BUT-UNVERIFIED on real Windows 11.
         "windows_isolation": _windows_isolation(),
-        # Extension SDK capability discovery (THE-794): what's loaded, of what
+        # Extension SDK capability discovery: what's loaded, of what
         # origin, and the operator's third-party policy.
         "extensions": _extensions(),
         "extras": extras,
@@ -477,7 +477,7 @@ def report(deep: bool = False) -> dict:
         # here yet. Not an extra and not a runtime: it is a network dependency
         # of a tool, which neither of those blocks describes.
         "grammar_cache": _grammar_cache(),
-        # Session disk quotas (THE-894): configured ceilings plus current
+        # Session disk quotas: configured ceilings plus current
         # usage, so an operator can see how close to them a host already is.
         "disk_quota": _disk_quota(),
         # Which measurement produced the statuses above. Without this a reader
@@ -530,8 +530,8 @@ _NO_VERSION = frozenset({"escript", "tclsh"})
 def _runtime_version(command: str, path: str | None) -> str | None:
     """The runtime's own version string, or None when it could not be read.
 
-    NONE MEANS NOT MEASURED, NEVER "no version". THE-780 asks doctor to report
-    versions; it does not ask it to invent them. A runtime that has no version
+    NONE MEANS NOT MEASURED, NEVER "no version". Doctor is asked to report
+    versions; it is not asked to invent them. A runtime that has no version
     flag, times out, crashes, or answers with something unparsable all produce
     `None` here and leave `status` untouched — a version that could not be read
     says nothing about whether the runtime works, and demoting it would report a

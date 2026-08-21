@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Assert the `tier` claim on every LANGUAGES entry is honest (THE-895).
+"""Assert the `tier` claim on every LANGUAGES entry is honest.
 
 registry.RELIABILITY_TIERS ("tested" / "best_effort" / "plan_only") is a claim
 about codecalc's OWN CI, kept next to — but never confused with — the

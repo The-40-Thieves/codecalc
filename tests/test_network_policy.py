@@ -1,4 +1,4 @@
-"""Deny-by-default network as a policy option (THE-787, Residual 2).
+"""Deny-by-default network as a policy option (Residual 2).
 
 `no_net` is opt-in and defaults False — a job reaches the network unless it asks
 not to. This adds a policy that FLIPS that default: with the policy on, a job
@@ -87,7 +87,7 @@ check("an ENFORCED denial leaves network out of the effective set",
       caps_a["effective"] == [])
 
 # ── B. NON-strict policy ON + a provider that cannot control the network ───
-# THE-847: no_net is NOT forced onto a provider that cannot enforce it. Forcing a
+# no_net is NOT forced onto a provider that cannot enforce it. Forcing a
 # `no_net` the provider will ignore is dishonest, and against a provider that
 # RAISES on `no_net` (section B2, the real Piston shape) it turns a disclosable
 # leak into a hard `validation` error. The non-strict contract is DISCLOSE: run
@@ -108,7 +108,7 @@ check("an UNENFORCEABLE denial discloses network as still effective (leak, discl
       caps_b["effective"] == ["network"] and caps_b["provider_supported"] == [])
 
 # ── B2. NON-strict policy ON + a provider that RAISES on no_net (Piston shape)
-# This is the exact bug THE-847 fixes: PistonExecutionProvider raises
+# This is the exact bug fixes: PistonExecutionProvider raises
 # UnsupportedCapability on no_net=True (network is a server-side setting, not a
 # per-request control). Before the fix the broker forced no_net onto it and
 # `execute` raised, so a network-requesting job hard-errored with a `validation`
@@ -196,7 +196,7 @@ check("allow-network parses to an explicit grant",
 # The counterpart to sections B/B2: where the provider genuinely controls the
 # network (the native Linux shim, backend == "rust"), deny-network is ENFORCED,
 # not merely disclosed. This drives the REAL LocalExecutionProvider end to end so
-# THE-847's "disclose where you can't" change did not weaken the "block where you
+# the "disclose where you can't" change did not weaken the "block where you
 # can" path. Skipped off the rust backend (the python fallback cannot enforce, so
 # it takes the section-B disclose path instead — its own suites cover that).
 if executor.backend() == "rust" and sys.platform.startswith("linux"):
@@ -229,7 +229,7 @@ else:
 
 
 # ── F. the BACKGROUND path (run_submit) is brokered identically ────────────
-# THE-787 fix round, CRITICAL: run_submit used to call RunSupervisor.start
+# fix round, CRITICAL: run_submit used to call RunSupervisor.start
 # directly, bypassing the broker entirely — a deny-network policy the sync
 # execute_code path enforced was silently void on the background path (network
 # reached), and a strict-unenforceable job ran to completion instead of being

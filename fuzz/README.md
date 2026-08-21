@@ -16,14 +16,14 @@ Each fuzzer targets exactly one of scripts/fuzz.py's two logical targets:
 | `safe_expr_fuzzer.py` | `codecalc.safe_expr` | `classify_unsafe` / `safe_parse` — the denylist screen before SymPy's eval-based parser |
 | `sessions_path_fuzzer.py` | `codecalc.sessions` | `_jail` / `_session_dir` — the path-traversal guard |
 
-## This is NOT a replacement for `scripts/fuzz.py` (THE-899)
+## This is NOT a replacement for `scripts/fuzz.py`
 
 The two are complementary, not redundant:
 
 - **`scripts/fuzz.py`** is a fast, deterministic, seeded-mutation **gate**. A
   small fixed slice of it (`tests/test_fuzz_smoke.py`) runs on every PR in
   seconds; a deeper multi-thousand-iteration run is a manual/CI-opt-in pass.
-  Deterministic on purpose (THE-899): a crash reproduces exactly from the
+  Deterministic on purpose: a crash reproduces exactly from the
   seed it printed.
 - **ClusterFuzzLite (this directory)** is coverage-guided **discovery**.
   libFuzzer's mutation engine is steered by which branches an input actually

@@ -1,4 +1,4 @@
-"""Structured, auditable events for broker decisions and side effects (THE-787, Residual 3).
+"""Structured, auditable events for broker decisions and side effects (Residual 3).
 
 Before this, the provenance of a brokered denial or a refused install was
 reconstructible only by correlating a receipt with the run-supervisor journal.
@@ -137,7 +137,7 @@ check("CODECALC_AUDIT_LOG=<path> honours it",
 
 
 # ── importing codecalc.server must be free of filesystem side effects ──────
-# THE-848: `AuditLog.__init__` used to `mkdir` the audit directory, so just
+# `AuditLog.__init__` used to `mkdir` the audit directory, so just
 # IMPORTING codecalc.server (which builds the process audit log at module
 # scope via `from_env()`) created `~/.codecalc/audit/` on every CI runner and
 # every test that imports it. Run the import in a subprocess with a fake HOME
@@ -178,11 +178,11 @@ check("a first emit() creates the audit directory and writes the line",
 
 
 # ── the server ARMS redaction with the provider-auth secret values ─────────
-# THE-787 fix round, IMPORTANT: from_env() was called with no secrets=, so the
+# fix round, IMPORTANT: from_env() was called with no secrets=, so the
 # redaction pass existed but was never armed against the real credentials. The
 # server now feeds the CODECALC_*_AUTHORIZATION / _HTTP_TOKEN values in.
 # Isolate the server's run-state dir AND audit log before importing it (keeps
-# this test off the shared ~/.codecalc/runs and ~/.codecalc/audit — THE-848).
+# this test off the shared ~/.codecalc/runs and ~/.codecalc/audit).
 os.environ["CODECALC_RUN_STATE_DIR"] = str(_tmp / "runs")
 os.environ["CODECALC_AUDIT_LOG"] = str(_tmp / "server-import.log")
 from codecalc import providers, server

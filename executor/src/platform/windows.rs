@@ -265,7 +265,7 @@ fn ambient_job_allows_breakaway() -> Option<bool> {
     Some(silent)
 }
 
-/// Append a line to the path in `CODECALC_DIAG_JOB`, or do nothing (THE-818).
+/// Append a line to the path in `CODECALC_DIAG_JOB`, or do nothing.
 ///
 /// A FILE rather than stderr, deliberately: the executor's stderr IS the
 /// sandboxed program's stderr, and a diagnostic that contaminates the thing it
@@ -357,7 +357,7 @@ fn to_wide(s: &str) -> Vec<u16> {
 /// real program OUTSIDE the caller's process tree and job object, so a runtime
 /// resolved to one of these escapes EVERY Job-Object control the sandbox relies
 /// on — the process ceiling, the memory caps, and the timeout tree-kill all go
-/// silently void. This was the root cause of THE-818: a bare `python3` PATH-
+/// silently void. This was the root cause of a bare `python3` PATH-
 /// resolved to `...\Microsoft\WindowsApps\python3.EXE`, and measured escape on a
 /// real Windows 11 box was not a job-topology bug at all but this hand-off.
 ///
@@ -365,7 +365,7 @@ fn to_wide(s: &str) -> Vec<u16> {
 ///   * the alias directory — `super::is_windowsapps_alias_path`, a `Microsoft`
 ///     component immediately followed by `WindowsApps`. That pure path check
 ///     lives in the cross-platform module so the Linux CI actually exercises it
-///     (`Path::components` treats `\` as ordinary off-Windows — the THE-817
+///     (`Path::components` treats `\` as ordinary off-Windows — the exact
 ///     platform split a Windows-only test would silently miss).
 ///   * a zero-length reparse stub — the exact app-execution-alias signature: a
 ///     FILE (not a directory — a directory reports len 0 on NTFS), of zero
@@ -390,7 +390,7 @@ fn is_app_execution_alias(path: &Path) -> bool {
 /// Running untrusted code through the Store broker is strictly worse than not
 /// running it: it executes fully UNCONFINED, outside the sandbox job. So the
 /// resolver refuses rather than launch it, and tells the operator how to supply
-/// a real interpreter instead. (THE-818.)
+/// a real interpreter instead. (.)
 fn alias_refused_error(alias: &Path) -> io::Error {
     io::Error::new(
         io::ErrorKind::PermissionDenied,
@@ -469,10 +469,10 @@ fn resolve_command_program(cmd: &Command) -> io::Result<PathBuf> {
     }
 }
 
-// ── THE-829: least-privilege AppContainer strict backend ─────────────────────
+// ── least-privilege AppContainer strict backend ──────────────────────────────
 //
 // OFF by default (CODECALC_WIN_APPCONTAINER=1 opts in) and IMPLEMENTED-BUT-
-// UNVERIFIED on real Windows 11, exactly like THE-818's creation-time job
+// UNVERIFIED on real Windows 11, exactly like the creation-time job
 // topology it layers on. The isolation properties this is meant to provide — a
 // payload that cannot read the user profile, cannot write outside the workdir,
 // and gets no network — are only observable on a real Win11 desktop, which the
@@ -540,7 +540,7 @@ fn create_appcontainer() -> io::Result<AppContainer> {
         .collect();
     let name_w = to_wide(&name);
     let display_w = to_wide("codecalc executor sandbox");
-    let desc_w = to_wide("codecalc least-privilege execution AppContainer (THE-829, unverified)");
+    let desc_w = to_wide("codecalc least-privilege execution AppContainer (unverified)");
 
     let mut sid: PSID = std::ptr::null_mut();
     let hr = unsafe {
@@ -598,8 +598,9 @@ fn grant_sid_path_access(sid: PSID, path: &std::path::Path, access: u32) -> io::
 /// unprotected.
 ///
 /// `inherit` sets the ACE's inheritance flags, and the `false` case is
-/// load-bearing for THE-829. `true` (workdir) makes the ACE inheritable so the
-/// payload's future files are covered. `false` (interpreter files) makes it an
+/// load-bearing for the AppContainer per-node grant. `true` (workdir) makes
+/// the ACE inheritable so the payload's future files are covered. `false`
+/// (interpreter files) makes it an
 /// EXPLICIT, NON-inheritable ACE on exactly this object — measured on real
 /// Windows 11 as the only form that grants an AppContainer read on an
 /// interpreter's PRE-EXISTING, inheritance-protected files. An inheritable ACE,
@@ -740,7 +741,7 @@ fn ac_grant_marker(program: &std::path::Path, dir: &std::path::Path) -> Option<P
 
 /// Grant "ALL APPLICATION PACKAGES" read+execute on every node of `dir`'s tree —
 /// an EXPLICIT, non-inheritable ACE per node, the only form that reaches an
-/// interpreter's pre-existing, inheritance-protected files (THE-829). Returns the
+/// interpreter's pre-existing, inheritance-protected files. Returns the
 /// number of per-node failures: the root grant is a hard error (fail closed), but
 /// a single locked or odd descendant must not abort the whole grant, matching
 /// `icacls /T /C`. A non-zero count means the cache is NOT written, so the next
@@ -826,7 +827,7 @@ fn prepare_appcontainer(cmd: &Command) -> io::Result<(AppContainer, Box<SECURITY
     // not the rest of the disk. Granted to that fixed SID (not this run's) and
     // cached, so the several-thousand-file walk runs once per interpreter, and an
     // interpreter's pre-existing, inheritance-protected files are reached by an
-    // explicit per-node ACE (an inheritable one never propagates to them; THE-829).
+    // explicit per-node ACE (an inheritable one never propagates to them).
     if let Ok(program) = resolve_command_program(cmd)
         && let Some(dir) = program.parent()
     {
@@ -846,7 +847,7 @@ fn prepare_appcontainer(cmd: &Command) -> io::Result<(AppContainer, Box<SECURITY
 
 /// Create the child with `J` supplied at CREATION, so it is the IMMEDIATE job.
 ///
-/// THE-818. Post-creation `AssignProcessToJobObject` puts us SOMEWHERE in the
+/// Post-creation `AssignProcessToJobObject` puts us SOMEWHERE in the
 /// child's job chain but not necessarily at its end, and `ActiveProcessLimit`
 /// is not one of the limits combined across a chain — it comes from the
 /// immediate job. Measured on Windows 11 Pro: the child's immediate job
@@ -864,9 +865,9 @@ fn prepare_appcontainer(cmd: &Command) -> io::Result<(AppContainer, Box<SECURITY
 /// unverified.
 /// `sec_caps`, when `Some`, adds `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES`
 /// as a THIRD attribute in the SAME list, so the child is launched inside the
-/// AppContainer (THE-829) while still being assigned to `job` at creation
-/// (THE-818). The pointer and the struct it addresses must outlive this call —
-/// the caller owns both. `None` reproduces the two-attribute THE-818 topology
+/// AppContainer while still being assigned to `job` at creation
+///. The pointer and the struct it addresses must outlive this call —
+/// the caller owns both. `None` reproduces the two-attribute topology
 /// exactly.
 #[allow(clippy::too_many_arguments)]
 fn spawn_with_job_at_creation(
@@ -904,7 +905,7 @@ fn spawn_with_job_at_creation(
     let cwd_w = cmd.get_current_dir().map(|d| to_wide(&d.to_string_lossy()));
 
     // Attribute count: JOB_LIST + HANDLE_LIST always, plus SECURITY_CAPABILITIES
-    // when the AppContainer path (THE-829) supplied it. All live in ONE list.
+    // when the AppContainer path supplied it. All live in ONE list.
     let attr_count: u32 = if sec_caps.is_some() { 3 } else { 2 };
 
     // Two-call pattern: ask the size, allocate, initialise.
@@ -963,8 +964,8 @@ fn spawn_with_job_at_creation(
         return Err(e);
     }
 
-    // THE-829: the AppContainer's SECURITY_CAPABILITIES, in the same list. When
-    // absent this is skipped and the topology is byte-for-byte the THE-818 one.
+    // the AppContainer's SECURITY_CAPABILITIES, in the same list. When
+    // absent this is skipped and the topology is byte-for-byte the one.
     if let Some(caps) = sec_caps {
         let ok = unsafe {
             UpdateProcThreadAttribute(
@@ -1060,20 +1061,20 @@ pub fn spawn_and_wait(
     // thread resume keeps Command's pipes, env, cwd and argument quoting while
     // closing the window to zero.
     //
-    // WHAT THIS DOES NOT DO: it does not fix THE-818. That failure is the
-    // ceiling not binding at all under an ambient job carrying
+    // WHAT THIS DOES NOT DO: it does not fix the failure where the
+    // ceiling does not bind at all under an ambient job carrying
     // SILENT_BREAKAWAY_OK, which is a different question from when the child
     // joins the job, and it has not been reproducible on any measured launcher
     // since. `suspended_assign` was the one candidate in jobprobe that bound
     // under every launcher measured and errored under none — that is why it is
-    // safe to ship, not evidence that it repairs anything. The THE-775
+    // safe to ship, not evidence that it repairs anything. The
     // disclosure below is untouched and still fires exactly when it did.
     //
     // CREATE_NO_WINDOW keeps console runtimes from flashing a window per run.
-    // THE-818: build the topology at creation so OUR job is the child's
+    // build the topology at creation so OUR job is the child's
     // IMMEDIATE job and its ActiveProcessLimit is the one consulted. The old
     // post-creation route remains only as an explicit compatibility escape.
-    // THE-829: the AppContainer strict backend, OFF by default and UNVERIFIED on
+    // the AppContainer strict backend, OFF by default and UNVERIFIED on
     // real Windows 11. It REQUIRES the creation-time path (it rides the same
     // STARTUPINFOEX attribute list), so requesting it forces `at_creation`.
     let appcontainer = std::env::var("CODECALC_WIN_APPCONTAINER")
@@ -1149,7 +1150,7 @@ pub fn spawn_and_wait(
         }
     }
 
-    // ── THE-775: the ceiling is set; is it BINDING? ──────────────────────────
+    // ── the ceiling is set; is it BINDING? ───────────────────────────────────
     //
     // Everything above can succeed and the process limit still not apply. Both
     // API calls return success, `nproc_limit()` puts the right number in the
@@ -1167,7 +1168,7 @@ pub fn spawn_and_wait(
     // unapplied is a documented platform limitation — a completely different
     // thing to build on.
     //
-    // ── AND NONE OF THE CHECKS BELOW CAN SEE THE FAILURE (THE-818) ───────────
+    // ── AND NONE OF THE CHECKS BELOW CAN SEE THE FAILURE ─────────────────────
     //
     // Measured on Windows 11 Pro with the executor instrumented via
     // CODECALC_DIAG_JOB, three processes in one spawn chain reported three

@@ -39,7 +39,7 @@ def _missing_runtime(r: dict) -> bool:
 #: still exited 0. That is the pattern PR #13 removed from three other suites,
 #: surviving here because nothing looked for it: scripts/check_claims.py counted
 #: `check(` sites and this file has none, and no workflow runs it, so CI never
-#: had an exit code to ignore. Found by the per-suite floor added for THE-776.
+#: had an exit code to ignore. Found by the per-suite floor added afterward.
 FAILED: list[str] = []
 
 

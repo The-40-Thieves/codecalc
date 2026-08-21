@@ -1,6 +1,6 @@
-"""`codecalc status` / `codecalc cleanup` + audit-log rotation (THE-898).
+"""`codecalc status` / `codecalc cleanup` + audit-log rotation.
 
-W3a (THE-894, merged) gave sessions a per-session/global disk quota and the
+W3a (merged) gave sessions a per-session/global disk quota and the
 on-disk `.codecalc-session-expired` idle-expiry marker — but nothing outside
 a running server could SEE either, and nothing reclaimed what an abandoned
 session left behind. This is the operational half: `codecalc status` (a
@@ -87,7 +87,7 @@ def _mkdir_session(root: pathlib.Path, name: str, *, content: bytes = b"",
     — these tests are about a directory tree cleanup() finds cold, exactly
     as a separate CLI process would).
 
-    Both files are written with `write_bytes`, never `write_text`: THE-898
+    Both files are written with `write_bytes`, never `write_text`:
     Windows CI failed here first — `write_text`'s default text-mode newline
     translation turns an embedded `\\n` into `\\r\\n` on Windows, so a marker
     written with `write_text("reaped (test)\\n")` is 15 bytes there and 14
@@ -135,7 +135,7 @@ with _isolated_root() as (root, tmp):
           rep["idle_expired_session_ids"] == [])
     check("status's audit_log.path is set even though nothing was written yet",
           rep["audit_log"]["path"] is not None)
-    check("status does not create the audit log file (create-on-write, THE-848)",
+    check("status does not create the audit log file (create-on-write)",
           rep["audit_log"]["size_bytes"] is None)
     check("status reports the configured quota limits",
           rep["quota"]["session_disk_quota_mb"] > 0 and rep["quota"]["total_disk_quota_mb"] > 0)
@@ -259,7 +259,7 @@ with _isolated_root() as (root, tmp):
           root.is_dir())
 
 
-# ── 4b. THE-898 CRITICAL: a REAL live-pid lock beats a stale directory mtime ─
+# ── 4b. CRITICAL: a REAL live-pid lock beats a stale directory mtime ─
 # Direct reproduction of the adversarial-review finding: a directory whose
 # mtime looks abandoned (backdated, exactly the shape a genuinely-idle
 # in-memory-only worker leaves) must NOT be removed while its liveness
@@ -331,7 +331,7 @@ with _isolated_root() as (root, tmp):
           not locked_dir.exists())
 
 
-# ── 4c. THE-898 CRITICAL, integration: sessions.start() writes/removes the
+# ── 4c. CRITICAL, integration: sessions.start() writes/removes the
 # lock for real, and cleanup honours it end to end (no manually-crafted
 # lockfile — this exercises the actual _write_lock_file/_remove_lock_file
 # call sites in sessions.py: start()'s worker branch, and stop()).
@@ -380,7 +380,7 @@ with tempfile.TemporaryDirectory(prefix="codecalc-audit-rotate-") as _d:
         for i in range(300):
             _log.emit(audit_module.CLEANUP, run_id=f"r{i}", reason="x" * 40)
         check("rotation: the live file exists after many emits", _p.is_file())
-        # The cap is checked BEFORE each append (see AuditLog.emit's THE-898
+        # The cap is checked BEFORE each append (see AuditLog.emit's rotation
         # comment), so the live file may sit up to one line's worth OVER the
         # cap right after the write that crossed it — rotation is what the
         # NEXT emit does. One more emit forces that pending rotation, and

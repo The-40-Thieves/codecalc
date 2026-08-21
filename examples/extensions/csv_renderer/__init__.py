@@ -1,4 +1,4 @@
-"""Reference third-party renderer (THE-794): proves the non-builtin path.
+"""Reference third-party renderer: proves the non-builtin path.
 
 `CsvRenderer` is not wired into codecalc's own registration; it exists so the
 renderer interface has a second, independently-authored implementation to

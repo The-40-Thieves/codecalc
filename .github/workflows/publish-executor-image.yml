@@ -1,6 +1,6 @@
 name: publish-executor-image
 
-# THE-828, image residual: build, push, and DIGEST-PIN the trusted strict
+# Image residual: build, push, and DIGEST-PIN the trusted strict
 # executor image. This is the release step docker/executor.Dockerfile and
 # scripts/build_executor_image.sh deliberately do NOT do — they build a LOCAL
 # tag (codecalc-exec:strict) for doctor and the conformance suite. The
@@ -124,7 +124,7 @@ jobs:
             exit 0
           fi
           # -s: DCO sign-off, required by the dco workflow on every non-merge commit.
-          git commit -s -m "THE-828: pin published strict executor image digest
+          git commit -s -m "ci: pin published strict executor image digest
 
           ${ref}
 

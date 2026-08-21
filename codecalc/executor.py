@@ -777,7 +777,7 @@ _FALLBACK_UNMEASURED: list[str] = [
 #: when the LD_PRELOAD/dyld shim could not be applied at all, but stays empty
 #: whenever the shim WAS applied — reading as "no_net: fully enforced" even
 #: though the shim is a userspace symbol interposition, not a kernel egress
-#: block. Verified live (E-1, THE-900/THE-902): with `no_net=True` and the
+#: block. Verified live (E-1): with `no_net=True` and the
 #: shim loaded, `socket.socket(AF_INET)` gets EACCES as expected, but
 #: `ctypes.CDLL(find_library("c")).socket(2, 1, 0)` — which resolves `socket()`
 #: straight out of libc rather than through the shimmed symbol — returns a
@@ -1026,7 +1026,7 @@ def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10
         # Windows needs the .exe extension on the compiled artifact.
         exe_name = "a.exe" if IS_WINDOWS else "a.out"
         # `{file}` is rendered per-language: a runtime that re-parses the raw
-        # Windows command line gets a name with no separator in it (THE-817).
+        # Windows command line gets a name with no separator in it.
         # `{exe}` stays absolute — it is spawned, not read, and a bare name
         # would be looked up on PATH rather than in the workdir.
         fmt = {"file": registry.source_arg(name, str(src), windows=IS_WINDOWS),
@@ -1271,7 +1271,7 @@ def _execute_uncontracted(language: str, code: str, stdin: str = "", timeout: in
 def execute(language: str, code: str, stdin: str = "", timeout: int = 10,
             workdir: str | None = None, max_memory_mb: int = 0,
             max_output_kb: int = 0, max_cpu: int = 0, no_net: bool = False) -> dict:
-    """Run `code` and return a result carrying the contract version (THE-781).
+    """Run `code` and return a result carrying the contract version.
 
     The stamp goes here for the same reason `backend` does: this is the one
     place both backends' results pass through before a caller sees them, so it
@@ -1370,7 +1370,7 @@ async def execute_stream(spec, on_progress=None) -> dict:
 def catalog() -> list[dict]:
     """The `list_languages` payload: the registry plus what was measured here.
 
-    THE-817. `available` used to be the whole answer, and it was computed from
+    `available` used to be the whole answer, and it was computed from
     RESOLUTION — `shutil.which` (or the Rust `--probe`) finding the command on
     PATH. That is a weaker fact than the name promises: on a desktop
     Git-for-Windows install `bash` resolved, was reported available, and failed
@@ -1387,7 +1387,7 @@ def catalog() -> list[dict]:
     `available` is kept, unchanged, because clients read it. It is now the
     boolean shadow of `status` rather than the only thing on offer.
 
-    THE-895: each entry also carries `tier` (registry.RELIABILITY_TIERS),
+    each entry also carries `tier` (registry.RELIABILITY_TIERS),
     already attached by `registry.all_languages()`. `status` is what THIS
     machine resolved just now; `tier` is what codecalc's own CI has actually
     verified, project-wide. The two are orthogonal on purpose — `status`
@@ -1421,7 +1421,7 @@ def probe() -> dict:
         # A plan the platform cannot run is unavailable regardless of what is
         # installed, and a shell-wrapped plan is available only when BOTH the
         # real tool and the shell resolve — probing bash alone advertised
-        # gleam on machines that had never seen gleam (THE-835).
+        # gleam on machines that had never seen gleam.
         if not registry.plan_supported(name, windows=IS_WINDOWS):
             out[name] = False
             continue

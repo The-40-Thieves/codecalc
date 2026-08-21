@@ -149,7 +149,7 @@
         "canary",
         "detail"
       ],
-      "description": "The gVisor strict-execution boundary's MEASURED prerequisites (THE-828). Doctor calls the same host probe the runtime uses. `available` is fail-closed: false with a named `detail` on any host that cannot prove the boundary (no Docker, no cgroup v2, no runsc, or no executor image) \u2014 a fact about the host, never a broken install. `canary` is null unless --deep, when it launches the image under runsc and confirms the runtime OUT OF BAND (docker inspect), not from anything the workload printed.",
+      "description": "The gVisor strict-execution boundary's MEASURED prerequisites. Doctor calls the same host probe the runtime uses. `available` is fail-closed: false with a named `detail` on any host that cannot prove the boundary (no Docker, no cgroup v2, no runsc, or no executor image) \u2014 a fact about the host, never a broken install. `canary` is null unless --deep, when it launches the image under runsc and confirms the runtime OUT OF BAND (docker inspect), not from anything the workload printed.",
       "properties": {
         "available": {
           "type": "boolean"
@@ -268,7 +268,7 @@
         "grammars",
         "detail"
       ],
-      "description": "tree-sitter grammars are NOT in the wheel: the pack fetches each one on first use, in-process, into a local cache (THE-821). Reported so an offline or egress-restricted install can see it BEFORE analyze_complexity degrades to regex-fallback. `cached: false` is not a fault.",
+      "description": "tree-sitter grammars are NOT in the wheel: the pack fetches each one on first use, in-process, into a local cache. Reported so an offline or egress-restricted install can see it BEFORE analyze_complexity degrades to regex-fallback. `cached: false` is not a fault.",
       "properties": {
         "extra_installed": {
           "type": "boolean"
@@ -384,7 +384,7 @@
               "best_effort",
               "plan_only"
             ],
-            "description": "THE-895. RELIABILITY, orthogonal to `status` above: `status` is what THIS machine just resolved or ran; `tier` is how much codecalc's own CI has verified this language, project-wide. tested = a CI job genuinely executes it and checks its output, every PR \u00b7 best_effort = declared, plausibly works, never CI-checked \u00b7 plan_only = never validated anywhere. A row can read status=installed and tier=best_effort at once \u2014 resolution says nothing about whether the toolchain actually works."
+            "description": "RELIABILITY, orthogonal to `status` above: `status` is what THIS machine just resolved or ran; `tier` is how much codecalc's own CI has verified this language, project-wide. tested = a CI job genuinely executes it and checks its output, every PR \u00b7 best_effort = declared, plausibly works, never CI-checked \u00b7 plan_only = never validated anywhere. A row can read status=installed and tier=best_effort at once \u2014 resolution says nothing about whether the toolchain actually works."
           },
           "detail": {
             "type": "string"
@@ -421,7 +421,7 @@
     },
     "tier_summary": {
       "type": "object",
-      "description": "THE-895. The RELIABILITY_TIERS mirror of runtime_summary above: counts by how much CI has verified each language, not by what this host just resolved.",
+      "description": "The RELIABILITY_TIERS mirror of runtime_summary above: counts by how much CI has verified each language, not by what this host just resolved.",
       "required": [
         "tested",
         "best_effort",

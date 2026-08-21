@@ -1,4 +1,4 @@
-"""Fail-closed Docker + gVisor runtime contract for THE-828."""
+"""Fail-closed Docker + gVisor runtime contract."""
 
 from __future__ import annotations
 
@@ -111,7 +111,7 @@ def test_launch_is_shell_free_and_applies_every_outer_limit() -> None:
     check("launch drops every capability", "--cap-drop=ALL" in argv)
     check("launch forbids privilege gain", "no-new-privileges:true" in argv)
     # process_limit=24 is the GUEST budget; the host --pids-limit adds the gVisor
-    # sandbox overhead so the sandbox can boot at all (THE-849): 24 + 48 = 72.
+    # sandbox overhead so the sandbox can boot at all: 24 + 48 = 72.
     check("launch applies the effective PID limit", "--pids-limit=72" in argv)
     check("launch applies the memory limit", "--memory=256m" in argv)
     check("launch applies the CPU limit", "--cpus=1.5" in argv)
@@ -124,7 +124,7 @@ def test_launch_is_shell_free_and_applies_every_outer_limit() -> None:
 
 
 def test_empty_stdin_launch_is_unchanged_from_before_the_bind_mount(tmp_path=None) -> None:
-    """THE-859. With no `stdin`, the launch must be byte-identical to before:
+    """With no `stdin`, the launch must be byte-identical to before:
     no `-v` mount, no `--stdin-file`, and `source` still travels alone over the
     container's stdin pipe exactly as it always did."""
     calls: list[tuple[list[str], dict]] = []
@@ -155,7 +155,7 @@ def test_empty_stdin_launch_is_unchanged_from_before_the_bind_mount(tmp_path=Non
 
 
 def test_nonempty_stdin_is_bind_mounted_read_only_and_named_on_argv() -> None:
-    """THE-859. Program `stdin` must be written to a HOST temp file INSIDE A
+    """Program `stdin` must be written to a HOST temp file INSIDE A
     PRIVATE (0700) per-run directory, bind-mounted read-only into the
     container, and named via `--stdin-file` — mirroring the local Rust path's
     own `--stdin-file` pattern (executor.py), never put on argv (an E2BIG
@@ -229,7 +229,7 @@ def test_nonempty_stdin_is_bind_mounted_read_only_and_named_on_argv() -> None:
 
 
 def test_host_stdin_temp_file_is_cleaned_up_even_when_the_run_fails() -> None:
-    """THE-859. A failed launch must not leak the host stdin temp file OR its
+    """A failed launch must not leak the host stdin temp file OR its
     private directory — the same cleanup discipline the container itself gets
     on the failure path."""
     if os.name != "posix":
@@ -266,7 +266,7 @@ def test_host_stdin_temp_file_is_cleaned_up_even_when_the_run_fails() -> None:
 
 def test_effective_pids_limit_adds_sandbox_overhead_and_floors_the_smallest_budget() -> None:
     # The measured gVisor sandbox boot floor on Cave is ~30 host tasks and a
-    # trivial workload runs from ~34 (THE-849). The overhead must clear that even
+    # trivial workload runs from ~34. The overhead must clear that even
     # for the smallest possible guest budget, so process_limit=1 still boots.
     check("overhead clears the measured boot floor", _GVISOR_HOST_OVERHEAD >= 34)
     check("guest budget is preserved additively", _effective_pids_limit(24) == 24 + _GVISOR_HOST_OVERHEAD)
@@ -300,7 +300,7 @@ def test_effective_pids_limit_adds_sandbox_overhead_and_floors_the_smallest_budg
 
 
 def test_strict_receipt_discloses_the_guest_to_host_pid_translation() -> None:
-    """THE-850. THE-849 makes the host --pids-limit = process_limit + overhead,
+    """gVisor's host --pids-limit = process_limit + overhead,
     but the strict receipt recorded neither the requested guest budget nor the
     effective host limit — so the translation was invisible to an auditor. The
     receipt must disclose both, plus the overhead applied, additively."""
@@ -353,7 +353,7 @@ def test_cancel_refuses_container_without_matching_ownership_labels() -> None:
 
 
 def test_cleanup_never_removes_a_foreign_container_even_after_a_failed_run() -> None:
-    """THE-834. The name `codecalc-<run_id>` can be squatted BEFORE our run:
+    """The name `codecalc-<run_id>` can be squatted BEFORE our run:
     `docker run --name` then fails with a conflict, and the old cleanup path
     (`verify_ownership=False` in execute's finally) force-removed whatever
     held the name — a container codecalc never created. The refusal has to
@@ -590,7 +590,7 @@ def _live_strict_image() -> tuple[str | None, str | None]:
 
 
 def test_execute_delivers_program_stdin_to_a_real_gvisor_guest() -> None:
-    """THE-859. LIVE against real runsc — the bug lived entirely in the
+    """LIVE against real runsc — the bug lived entirely in the
     `docker run` argv `DockerGVisorRuntime.execute` builds (no bind mount, no
     `--stdin-file`), so a fake runner cannot observe it; only a real container
     reading real guest stdin can. WATCH-IT-FAIL-FIRST evidence (run manually
@@ -621,7 +621,7 @@ def test_execute_delivers_program_stdin_to_a_real_gvisor_guest() -> None:
 
 
 def test_execute_with_no_stdin_still_sees_eof_live() -> None:
-    """THE-859. The empty-stdin case must be UNCHANGED: no `stdin=` still means
+    """The empty-stdin case must be UNCHANGED: no `stdin=` still means
     the guest sees immediate EOF, and the run still succeeds with a verified
     strict receipt — proving the fix is additive, not a behavior change on the
     path every existing caller already uses."""

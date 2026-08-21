@@ -1,4 +1,4 @@
-"""Published-image digest lock + fail-closed execution path (THE-828).
+"""Published-image digest lock + fail-closed execution path.
 
 The production strict EXECUTION path is digest-required: it pins the executor
 image `ghcr.io/the-40-thieves/codecalc-exec` by an immutable `@sha256:` digest,

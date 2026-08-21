@@ -1,4 +1,4 @@
-"""The capability broker: approved never exceeds requested (THE-787, Residual 1).
+"""The capability broker: approved never exceeds requested (Residual 1).
 
 The one load-bearing invariant of the broker is a subset relation — the set of
 capabilities policy APPROVES for a job can never exceed the set the requester

@@ -73,7 +73,7 @@ full = [
 
 [project.scripts]
 codecalc = "codecalc.server:main"
-# THE-877: an installed user has no `scripts/` directory to run
+# an installed user has no `scripts/` directory to run
 # `prefetch_grammars.py` from — it is not in the wheel — so the offline-warm-up
 # instructions need a shipped entry point instead. `codecalc.prefetch` is the
 # 'parsing' extra's own README-documented command; it still works (and returns

@@ -374,7 +374,7 @@ shell_invariant(registry.LANGUAGES, "python")
 
 # Where a script IS used, the paths have to arrive as positional parameters.
 # Keyed on SHELL_WRAPPED rather than a hand-list: csharp left the wrapper set
-# when .NET 10 made a shell unnecessary (THE-835), and a hand-list here is how
+# when .NET 10 made a shell unnecessary, and a hand-list here is how
 # a test keeps asserting yesterday's registry.
 for lang in sorted(registry.SHELL_WRAPPED):
     argv = registry.LANGUAGES[lang]["run"]

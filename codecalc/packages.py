@@ -76,7 +76,7 @@ from . import errors, executor, registry
 #: so those were never the risk. The leading-hyphen check above is.
 _PACKAGE_NAME_RE = re.compile(r"[A-Za-z0-9._@/\[\]+~=<>!,\- ]+")
 
-#: THE-791 residual: an operator opt-in, deny-by-default allowlist.
+#: residual: an operator opt-in, deny-by-default allowlist.
 #:
 #: UNSET (default) is today's behaviour — every syntactically valid name
 #: passes, same as before this existed. SET makes install() deny-by-default:
@@ -258,7 +258,7 @@ CACHE_ROOT = Path("~/.codecalc/pkgs").expanduser()
 #: has to be measured under the ruleset before it is claimed to be confined.
 _CONFINABLE = {"python3", "node", "bun", "php", "go", "rust", "deno"}
 
-#: THE-819: the macOS counterpart to `_CONFINABLE`, for `sandbox-exec`
+#: the macOS counterpart to `_CONFINABLE`, for `sandbox-exec`
 #: (`sandbox_macos.py`) rather than Landlock. Populated the same way and for
 #: the same reason `_CONFINABLE` is "all of them": the mechanism being tested
 #: is generic — a subprocess either can or cannot write outside the paths a
@@ -277,9 +277,9 @@ _CONFINABLE_DARWIN = {"python3", "node", "bun", "php", "go", "rust", "deno"}
 #: Read-WRITE because writing to /dev/null is what a redirect does.
 _DEVICE_NODES = ("/dev/null", "/dev/zero", "/dev/urandom", "/dev/random")
 
-#: THE-819 / THE-818: Windows has NO shipped install-time filesystem
-#: confinement. The job-object machinery THE-818 is building is unverified on
-#: real Windows 11 (that ticket was reopened) and a restricted-token/
+#: Windows has NO shipped install-time filesystem
+#: confinement. The job-object machinery this codebase is building is
+#: unverified on real Windows 11, and a restricted-token/
 #: AppContainer approach cannot be built or proven from a Linux dev box, so
 #: none is claimed here — the honest disclosure
 #: (`package_install_not_confined_no_landlock`, landlock's own token, since
@@ -287,7 +287,7 @@ _DEVICE_NODES = ("/dev/null", "/dev/zero", "/dev/urandom", "/dev/random")
 #: exactly as it does today.
 #:
 #: This is a documented NO-OP: setting it adds one extra disclosure string and
-#: changes no behaviour. It exists so an operator who has read THE-818/THE-819
+#: changes no behaviour. It exists so an operator who has read this comment
 #: can say "I know this is unconfined on Windows" in a result rather than
 #: that fact being invisible until they read this source file. An
 #: empty-but-set value counts as set, same convention as every other
@@ -308,15 +308,15 @@ def _confinement(bin_: str, workspace: str, env: dict, language: str) -> tuple:
 
     Two mechanisms, dispatched by platform, because they attach to the child
     differently: Landlock (`_landlock_confinement`, Linux) applies in a
-    `preexec_fn` between fork and exec; `sandbox-exec` (`_macos_confinement`,
-    THE-819) is itself the process that execs the installer, so it has to be
+    `preexec_fn` between fork and exec; `sandbox-exec` (`_macos_confinement`)
+    is itself the process that execs the installer, so it has to be
     PREPENDED to argv instead. `cmd_prefix` is `[]` and `preexec_fn` is `None`
     on whichever half a given platform does not use, so `install()` can always
     do `cmd = cmd_prefix + cmd` and pass `preexec_fn=confine` unconditionally.
 
     Windows has neither: see `WIN_INSTALL_CONFINE_ENV`'s comment for why none
-    is claimed here, and THE-818 for the unrelated, unverified job-object work
-    that is not this.
+    is claimed here. The unverified job-object work elsewhere in this codebase
+    is a separate, unrelated mechanism from this one.
     """
     if sys.platform == "darwin":
         return _macos_confinement(bin_, workspace, env, language)
@@ -497,7 +497,7 @@ def install(language: str, package: str, session_id: str | None = None,
             version: str | None = None, audit: object | None = None) -> dict:
     """Install a package for a language. Returns where it was installed.
 
-    `audit` (THE-787), when given, is an `audit.AuditLog`: a deny-by-default
+    `audit`, when given, is an `audit.AuditLog`: a deny-by-default
     allowlist refusal emits an `install_denied` event carrying the ecosystem and
     the bare package name — never a credential or the install output. Default
     None keeps every existing caller unchanged.
@@ -506,7 +506,7 @@ def install(language: str, package: str, session_id: str | None = None,
     if name in _UNSUPPORTED:
         reason = _DECLINED_REASON.get(name)
         msg = f"package install not supported for '{name}'"
-        # A documented policy refusal (THE-881), same taxonomy as the
+        # A documented policy refusal, same taxonomy as the
         # allowlist denial below — not a codecalc defect just because the
         # message names no jail or ACL by name.
         return errors.error_result(
@@ -569,7 +569,7 @@ def install(language: str, package: str, session_id: str | None = None,
                 "error": f"invalid version {version!r}: a space followed by "
                          "'-' looks like an embedded command-line flag"}
 
-    # THE-791: deny-by-default operator allowlist. Checked after the format
+    # deny-by-default operator allowlist. Checked after the format
     # validation above (so a malformed name is reported as malformed, not as
     # "not allowed") and before every remaining side-effecting step: no
     # session-dir lookup, no cache-dir mkdir, no subprocess.run. (The
@@ -596,7 +596,7 @@ def install(language: str, package: str, session_id: str | None = None,
         d = sessions._session_dir(session_id)
         if not d.is_dir():
             return {"ok": False, "error": f"unknown session '{session_id}'"}
-        # THE-894 (fix round 2): this is the LARGEST write vector into a
+        # (fix round 2): this is the LARGEST write vector into a
         # session workspace — packages run MB to GB, dwarfing anything
         # `session_write_file` writes one call at a time — and it previously
         # ran with NO quota check at all: a session already far over its
@@ -636,7 +636,7 @@ def install(language: str, package: str, session_id: str | None = None,
         someone asks "was this thing contained?" — and a return added later
         that forgot it would answer by omission.
 
-        THE-894 (fix round 2): also the ONE place every outcome of a session
+        (fix round 2): also the ONE place every outcome of a session
         install passes through — success, a non-zero exit, and a timeout all
         return through here — so it is where the post-install disk-usage
         disclosure belongs. A package's on-disk footprint cannot be

@@ -180,7 +180,7 @@ finally:
     translation._run = _orig_run
 
 
-# ═══ THE-843: verify_optimization must not certify a MEASURED slowdown ══════
+# ═══ verify_optimization must not certify a MEASURED slowdown ═══════════════
 # The accept decision used to be `ratio >= min_speedup`, with neither the
 # threshold nor the measured ratio required to be an actual speedup. With
 # min_speedup=0 a measured ratio of 0.5 — a 2x SLOWDOWN — cleared `0.5 >= 0` and
@@ -215,28 +215,28 @@ def _run843(ratio, min_speedup):
 
 
 _slow843 = _run843(0.5, 0.0)
-check("THE-843: a measured 2x slowdown (ratio 0.5, min_speedup=0) is NOT accepted",
+check("a measured 2x slowdown (ratio 0.5, min_speedup=0) is NOT accepted",
       _slow843.get("accepted") is False,
       f"-> accepted={_slow843.get('accepted')} {_slow843.get('reason')!r}")
 _slow843b = _run843(0.5, 1.15)
-check("THE-843: a measured slowdown is refused even under a real threshold",
+check("a measured slowdown is refused even under a real threshold",
       _run843(0.5, 1.15).get("accepted") is False, f"-> {_slow843b.get('reason')!r}")
 _tie843 = _run843(1.0, 1.0)
-check("THE-843: an exact tie (ratio 1.0) is NOT a speedup and is not accepted",
+check("an exact tie (ratio 1.0) is NOT a speedup and is not accepted",
       _tie843.get("accepted") is False, f"-> {_tie843.get('reason')!r}")
 _nothr843 = _run843(2.0, 1.0)
-check("THE-843: min_speedup<=1 can never accept, even a genuine 2x ratio",
+check("min_speedup<=1 can never accept, even a genuine 2x ratio",
       _nothr843.get("accepted") is False, f"-> {_nothr843.get('reason')!r}")
 _win843 = _run843(2.0, 1.15)
-check("THE-843: a genuine 2x win clearing a real min_speedup>1 IS accepted",
+check("a genuine 2x win clearing a real min_speedup>1 IS accepted",
       _win843.get("accepted") is True and _win843.get("reason") == "verified faster",
       f"-> accepted={_win843.get('accepted')} {_win843.get('reason')!r}")
 # The pure decision, checked directly for the unmeasurable case.
-check("THE-843: an unmeasurable speedup is never accepted",
+check("an unmeasurable speedup is never accepted",
       optimization._accept_decision({"ratio": None, "measurable": False}, 1.15)[0] is False)
 
 
-# ═══ THE-845: identical code plus timing noise is never certified ═══════════
+# ═══ identical code plus timing noise is never certified ════════════════════
 # The unchanged-candidate guarantee used to be checked through a LIVE timing
 # measurement of FAST vs. FAST (identical O(1) code). That program does almost
 # no work, so its runtime is dominated by fixed process-startup jitter and its
@@ -245,16 +245,16 @@ check("THE-843: an unmeasurable speedup is never accepted",
 # were CERTIFIED "verified faster" — a flaky false accept, not a bug in the
 # accept logic (those runs genuinely MEASURED >1.15; an epsilon over min_speedup
 # would not have caught 1.53x and would only harm genuine small wins). The fix
-# is to assert the DECISION against an INJECTED within-noise ratio (THE-808
+# is to assert the DECISION against an INJECTED within-noise ratio (
 # pattern), so the guarantee never depends on runner jitter. A realistic default
 # threshold (1.15) already rejects a within-noise ratio: the accept logic is
 # sound — what was flaky was measuring noise and feeding it back in.
 _noise845 = _run843(1.03, 1.15)
-check("THE-845: a within-noise ratio (1.03) under a realistic threshold is NOT accepted",
+check("a within-noise ratio (1.03) under a realistic threshold is NOT accepted",
       _noise845.get("accepted") is False, f"-> {_noise845.get('reason')!r}")
-check("THE-845: an unchanged/noisy candidate is never certified 'verified faster'",
+check("an unchanged/noisy candidate is never certified 'verified faster'",
       _noise845.get("reason") != "verified faster")
-check("THE-845: and it is never graded cross_checked",
+check("and it is never graded cross_checked",
       grades.grade_verify_optimization(_noise845, "python3").get("grade") != grades.CROSS_CHECKED)
 
 
@@ -284,7 +284,7 @@ if executor._rust:
           (o.get("verification") or {}).get("passed") is True)
 
     # The unchanged-candidate rejection is asserted DETERMINISTICALLY in the
-    # THE-845 block above, not here: a live FAST-vs-FAST timing measures noise
+    # block above, not here: a live FAST-vs-FAST timing measures noise
     # (identical O(1) code, runtime dominated by process-startup jitter) and its
     # median ratio occasionally exceeds min_speedup, flaking this assertion. The
     # rejections below carry what an optimiser that fabricates wins cannot: WHICH

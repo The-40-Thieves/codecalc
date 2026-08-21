@@ -1,6 +1,6 @@
-"""Canonical serialization and content identity for a computation request (THE-793).
+"""Canonical serialization and content identity for a computation request.
 
-THE-790 built the canonical REQUEST: `providers.ComputationSpec` is a frozen,
+`providers.ComputationSpec` is the canonical REQUEST: a frozen,
 transport-neutral dataclass that every provider, the execution service, the
 supervisor and the strict clients consume. What it did not have was an
 IDENTITY. Two callers could build the same request and had no name for it, so

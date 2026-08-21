@@ -1,4 +1,4 @@
-"""Reusable verifier conformance cases for THE-794.
+"""Reusable verifier conformance cases for the extension framework.
 
 Standalone, like `_provider_conformance.py`: `run_verifier_conformance(impl,
 check)` runs backend-independent requirements against one verifier instance,

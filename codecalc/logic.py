@@ -83,13 +83,13 @@ def _evaluate_expression(expression: str, **variables) -> dict:
     # populated from vars(builtins) on purpose — 967 names on sympy 1.14.0,
     # __import__ among them. The length cap above bounds work, not reach:
     # `__import__('os').system('id')` is 31 characters. See safe_expr. A
-    # SUCCESSFUL block is a policy refusal, not a codecalc defect (THE-881) —
+    # SUCCESSFUL block is a policy refusal, not a codecalc defect —
     # but the screen returns TWO different kinds of "no" (a jail refusal like
     # `__import__` vs a heavy-argument ceiling like `factorial(100000)`, see
     # classify_unsafe's own comment), so the code is chosen from WHICH kind
     # this is rather than assumed.
     #
-    # THE-889: this used to hand-roll its own copy of classify_unsafe ->
+    # this used to hand-roll its own copy of classify_unsafe ->
     # parse_expr(evaluate=False) -> reject_explosive -> parse_expr — the same
     # three steps `safe_parse` now does in one place. `local_dict=variables`
     # carries this function's own **variables kwargs through unchanged (the
@@ -416,7 +416,7 @@ def z3_check(smt2: str, timeout_ms: int = 5000) -> dict:
             "result": str(verdict),
             "model": model,
             "assertions": len(solver.assertions()),
-            # Evidence for codecalc/grades.py (THE-785): WHICH engine decided
+            # Evidence for codecalc/grades.py: WHICH engine decided
             # this and within WHAT bound. Recorded here because z3_check is
             # the only place that knows either — grades.py only reads them.
             "engine": f"z3 {z3.get_version_string()}",
@@ -449,8 +449,8 @@ def _parse_solve_piece(piece: str, evaluate: bool):
     `9**9**9**9` is refused in milliseconds instead of burning CPU seconds
     (and eventually the 15s guarded_call timeout) evaluating it blind.
 
-    Mirrors `linalg._parse_entry`'s per-cell version of the same fix
-    (THE-887); this is solve_linear's per-piece version (THE-888).
+    Mirrors `linalg._parse_entry`'s per-cell version of the same fix;
+    this is solve_linear's per-piece version.
 
     Returns (parsed value, error dict); exactly one of the two is not None.
     `evaluate` selects whether the returned value is the unevaluated shape
@@ -458,7 +458,7 @@ def _parse_solve_piece(piece: str, evaluate: bool):
     freshly-reparsed, evaluated value (matching the original bare
     `sp.sympify(lhs)` / `sp.sympify(rhs)` default-evaluate path).
 
-    THE-889: delegates to the shared `safe_expr.safe_parse`, which runs
+    delegates to the shared `safe_expr.safe_parse`, which runs
     exactly these steps (`classify_unsafe` is re-run here too, redundantly
     but harmlessly, since the piece is already screened by the caller before
     this is reached — see `_solve_linear` below). Kept as a thin wrapper so
@@ -487,7 +487,7 @@ def _solve_linear(system: str, variables: str | list[str]) -> dict:
     """Solve a ';'-separated system of equations ('x + y = 10; x - y = 2')."""
     try:
         # The DoS length cap, same as _evaluate_expression and truth_table above
-        # (THE-844). solve_linear reached sp.sympify below with only classify_unsafe
+        #. solve_linear reached sp.sympify below with only classify_unsafe
         # (a safety screen, not a length gate), so a 120k-char system blew the
         # parser's recursion limit and rode the "stack overflow" message hint to
         # resource_exhausted — the fragile, interpreter-wording-dependent path the
@@ -497,7 +497,7 @@ def _solve_linear(system: str, variables: str | list[str]) -> dict:
         sp = _sympy()
         if isinstance(variables, str):
             variables = [v.strip() for v in variables.split(",") if v.strip()]
-        # THE-890: sp.symbols("x") returns a bare Symbol, not a 1-tuple —
+        # sp.symbols("x") returns a bare Symbol, not a 1-tuple —
         # only a MULTI-name string ("x,y") or a trailing comma ("x,") gets a
         # tuple back. `list(syms)` below then raised `'Symbol' object is not
         # iterable` for the single-variable case, which is not a rare shape:

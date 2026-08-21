@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # One-command bootstrap for the Linux gVisor+Docker strict execution backend
-# (THE-869). Automates the manual steps in docs/deployment/README.md §2:
+#. Automates the manual steps in docs/deployment/README.md §2:
 #
 #   1. preflight — Docker present, cgroup v2 active, the `runsc` runtime
 #      registered with Docker (codecalc/strict_runtime.py::host_prerequisites)

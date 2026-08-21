@@ -33,7 +33,7 @@ _DIGEST_IMAGE = re.compile(r"^[^\s]+@sha256:[0-9a-fA-F]{64}$")
 _RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 # This is the container's private, bounded tmpfs mount point, not a host temp path.
 _TMP_DIRECTORY = "/tmp"  # noqa: S108
-#: Guest path program stdin is bind-mounted to (THE-859). Fixed and deliberately
+#: Guest path program stdin is bind-mounted to. Fixed and deliberately
 #: NOT under `_TMP_DIRECTORY`: that mount is the workload's own noexec/nosuid
 #: tmpfs, and stacking a caller-controlled read-only bind on top of it would
 #: blur two different mounts under one path. This one is its own mount point,
@@ -58,7 +58,7 @@ RUN_ID_LABEL = "io.codecalc.run-id"
 STRICT_IMAGE_ENV = "CODECALC_STRICT_IMAGE"
 DEFAULT_STRICT_IMAGE = "codecalc-exec:strict"
 
-#: The committed digest lock for the PUBLISHED strict executor image (THE-828).
+#: The committed digest lock for the PUBLISHED strict executor image.
 #: `.github/workflows/publish-executor-image.yml` builds the multi-arch image,
 #: pushes it to `ghcr.io/the-40-thieves/codecalc-exec`, and rewrites this file
 #: with the immutable `@sha256:` digest it got back. Until that first dispatch
@@ -124,7 +124,7 @@ class StrictRuntimeUnavailable(RuntimeError):
 
 
 class StrictImageUnavailable(StrictRuntimeUnavailable):
-    """No published, digest-pinned strict image is available yet (THE-828).
+    """No published, digest-pinned strict image is available yet.
 
     Raised on the execution path when neither the committed digest lock nor a
     digest-pinned `CODECALC_STRICT_IMAGE` names one — the fail-closed refusal
@@ -170,7 +170,7 @@ class GVisorConfig:
             raise ValueError("strict runtime name is invalid")
 
 
-#: Host-side task overhead of a gVisor sandbox (THE-849). Docker's
+#: Host-side task overhead of a gVisor sandbox. Docker's
 #: `--pids-limit` bounds HOST-side tasks, and under runsc that cgroup also holds
 #: the sandbox process, the gofer, and the platform's own threads — none of
 #: which exist under runc. So a limit that is a fine GUEST budget under runc is
@@ -264,7 +264,7 @@ class DockerGVisorRuntime:
             raise ValueError("strict execution limits must be positive")
         self.probe()
         name = f"codecalc-{run_id}"
-        # Program stdin (THE-859), distinct from `source` (the guest's own
+        # Program stdin, distinct from `source` (the guest's own
         # program under test, which still travels over the container's stdin
         # PIPE exactly as before). It cannot follow `source` down that same
         # pipe: `codecalc-exec` reads source from stdin and takes program
@@ -319,7 +319,7 @@ class DockerGVisorRuntime:
             "--security-opt", "no-new-privileges:true",
             f"--user={self.config.user}",
             # `process_limit` is the GUEST budget; the host `--pids-limit` must
-            # also cover the gVisor sandbox's own tasks or it cannot boot (THE-849).
+            # also cover the gVisor sandbox's own tasks or it cannot boot.
             f"--pids-limit={_effective_pids_limit(process_limit)}",
             f"--memory={memory_mb}m",
             f"--cpus={cpu_count:g}",
@@ -330,7 +330,7 @@ class DockerGVisorRuntime:
             "codecalc-exec", "--lang", language, "--timeout", str(timeout),
             *stdin_args,
         ]
-        # Cleanup is OWNERSHIP-VERIFIED on both exits (THE-834). It used to be
+        # Cleanup is OWNERSHIP-VERIFIED on both exits. It used to be
         # `verify_ownership=False` in a finally, which force-removed whatever
         # held the name — and the name `codecalc-<run_id>` can be squatted
         # BEFORE this run, in which case `docker run --name` fails with a
@@ -362,7 +362,7 @@ class DockerGVisorRuntime:
                     "runtime": self.config.runtime,
                     "image": self.config.image,
                     "controls": list(ENFORCEMENT_CONTROLS),
-                    # THE-850: disclose the guest->host PID translation THE-849
+                    # disclose the guest->host PID translation this
                     # applies. `process_limit` is the caller's GUEST budget as
                     # requested; `pids_limit` is the effective HOST
                     # `--pids-limit` actually passed to `docker run`; the
@@ -393,7 +393,7 @@ class DockerGVisorRuntime:
         return f"codecalc-{run_id}"
 
     def _owned(self, run_id: str) -> bool | None:
-        """Tri-state, and the middle value is load-bearing (THE-834).
+        """Tri-state, and the middle value is load-bearing.
 
         True   the container exists and carries codecalc's ownership labels
         False  the container EXISTS and is someone else's — never touch it
@@ -433,7 +433,7 @@ class DockerGVisorRuntime:
             raise StrictRuntimeUnavailable("failed to cancel owned strict container")
 
     def cleanup(self, run_id: str) -> None:
-        """Remove the run's container — OURS, verified, every time (THE-834).
+        """Remove the run's container — OURS, verified, every time.
 
         There is deliberately no opt-out parameter any more. The one caller
         that used `verify_ownership=False` (execute's teardown) was the one

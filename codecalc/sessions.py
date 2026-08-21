@@ -36,7 +36,7 @@ _WORKER_LANGS = {"python3", "node"}
 
 _SAFE_NAME = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
-#: THE-901: `_jail` resolves a CALLER-CONTROLLED path (session_write_file's
+#: `_jail` resolves a CALLER-CONTROLLED path (session_write_file's
 #: `path` arg, among others) via `Path.resolve()`, which is worse-than-linear
 #: in segment count — measured on this host: ~1.3s server CPU for a ~10k-
 #: segment path, ~3.4s for ~20k, growing faster than the segment count. `_jail`
@@ -49,7 +49,7 @@ _SAFE_NAME = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 _MAX_JAIL_PATH_LEN = 4096
 _MAX_JAIL_PATH_SEGMENTS = 256
 
-#: Spill capture ceiling per stream (THE-783): bounded, not unbounded. When a
+#: Spill capture ceiling per stream: bounded, not unbounded. When a
 #: session-scoped execution would otherwise truncate and drop the tail, the
 #: FULL stream is captured up to this cap (instead of the smaller default
 #: truncation cap) and, if it is still larger than what stays inline, written
@@ -65,7 +65,7 @@ _MAX_JAIL_PATH_SEGMENTS = 256
 #: caller who never asked for a tight ceiling had no memory expectation to
 #: violate.
 #:
-#: A per-session total-disk quota now DOES exist (THE-894, below) — this
+#: A per-session total-disk quota now DOES exist (below) — this
 #: paragraph used to say it did not, and grepping quota/disk_usage/statvfs/
 #: FSIZE across codecalc/*.py, README.md, SECURITY.md and AUDIT.md found
 #: none. The closest existing thing is executor.FSIZE_LIMIT_BYTES (256 MiB),
@@ -96,7 +96,7 @@ _SPILL_DIRNAME = ".codecalc-spill"
 #: on-disk journal.
 _SPILL_RETENTION = 20
 
-# ── THE-894: per-session and global disk quotas ────────────────────────────
+# ── per-session and global disk quotas ─────────────────────────────────────
 #: The gap SPILL_CAPTURE_KB's own docstring named above: nothing bounded the
 #: TOTAL a session accumulates over its lifetime via session_write_file,
 #: artifacts a running program creates, files EXECUTED CODE writes into the
@@ -342,7 +342,7 @@ def _artifact_cap_refusal(session_id: str, d: Path, incoming_bytes: int, *,
 
 
 #: Named once so the refusal message and `codecalc doctor`'s text (server.py)
-#: cannot say two different things about the one in-band way out (THE-894
+#: cannot say two different things about the one in-band way out (
 #: fix round 4): `execute()`/`run_file()` are themselves refused by
 #: `quota_precheck` once a session is over quota, so executed code cannot
 #: `rm` its way out, and `session_stop` (which destroys the whole session)
@@ -364,7 +364,7 @@ def _disk_quota_refusal(session_id: str, incoming_bytes: int) -> dict | None:
     otherwise the refusal to return verbatim.
 
     `incoming_bytes` is a NET delta, not a gross write size: `write_file`
-    computes `new_size - existing_size` for an overwrite (THE-894 fix round
+    computes `new_size - existing_size` for an overwrite (fix round
     3 — `_session_dir_size` already counts the file being overwritten at
     its CURRENT size, so comparing against the full new size double-counted
     it and wrongly refused a same-size or SHRINKING overwrite near quota).
@@ -430,7 +430,7 @@ def _artifact_count_refusal(session_id: str) -> dict | None:
     """None unless `session_id` already has MORE artifact files than
     `CODECALC_MAX_ARTIFACT_COUNT` allows right now; otherwise the refusal.
 
-    THE-894 fix round 2: `_artifact_cap_refusal` above only runs from this
+    fix round 2: `_artifact_cap_refusal` above only runs from this
     module's OWN writes (`write_file`, the spill write), each of which adds
     at most one new file per call — checking there catches a caller creating
     files one at a time, which is all it was ever asked to catch. Code
@@ -465,7 +465,7 @@ def _artifact_count_refusal(session_id: str) -> dict | None:
 
 def _write_guard(session_id: str, d: Path, incoming_bytes: int, net_bytes: int, *,
                  is_new_file: bool) -> dict | None:
-    """The combined THE-894 gate every server-side write goes through.
+    """The combined gate every server-side write goes through.
 
     `incoming_bytes` is the GROSS size of what is being written — what the
     per-artifact size cap cares about, since that cap bounds the size of the
@@ -482,7 +482,7 @@ def _write_guard(session_id: str, d: Path, incoming_bytes: int, net_bytes: int, 
     if refusal is not None:
         return refusal
     if net_bytes <= 0:
-        # THE-894 fix round 4: the in-band recovery path. A write that can
+        # fix round 4: the in-band recovery path. A write that can
         # only hold usage steady or SHRINK it must never be refused by the
         # byte-quota checks, even while the session is currently over
         # quota — otherwise, once execute()/run_file() are themselves
@@ -506,7 +506,7 @@ def quota_precheck(session_id: str) -> dict | None:
     `execution_service.SessionService.run_file`) rather than only before this
     module's OWN writes: code a session runs can write files straight into
     the workspace, which no pre-write check on a specific call can bound
-    (THE-894 point 4 — a stateful worker's `open("x", "w")` or a fresh
+    (point 4 — a stateful worker's `open("x", "w")` or a fresh
     process's own output files never go through `write_file` at all).
 
     Reusing `_disk_quota_refusal(..., incoming_bytes=0)` — "is this session
@@ -516,7 +516,7 @@ def quota_precheck(session_id: str) -> dict | None:
     and starts working again the moment something frees enough space,
     without a separate sticky flag that could go stale relative to the disk
     it is supposed to describe. `_artifact_count_refusal` is the same shape
-    for the count cap (THE-894 fix round 2) — checked second, after the byte
+    for the count cap (fix round 2) — checked second, after the byte
     quotas, for the same "smallest blast radius first" reason
     `_disk_quota_refusal` orders its own two checks.
     """
@@ -528,7 +528,7 @@ def quota_precheck(session_id: str) -> dict | None:
 
 def quota_postcheck(session_id: str, result: dict) -> dict:
     """Disclose in `result` when a run just left `session_id` over its disk
-    quota OR its artifact-count cap (THE-894 point 4; count cap added in fix
+    quota OR its artifact-count cap (point 4; count cap added in fix
     round 2). Mutates and returns `result`.
 
     Never refuses and never touches stdout/exit_code/verdict — the run
@@ -571,7 +571,7 @@ _workers: dict[str, Worker] = {}
 #: here) are simply absent, which `stop()` treats as "no identity to compare".
 _SESSION_DIR_IDENTITY: dict[str, tuple[int, int] | None] = {}
 
-# ── THE-779 residual: idle-expiry for abandoned stateful sessions ──────────
+# ── residual: idle-expiry for abandoned stateful sessions ──────────
 #: "the one operational gap: a leaked session holds a worker process
 #: forever." UNSET (default) is unchanged behaviour: no expiry, ever, same
 #: as before this existed. SET (seconds, float-parseable) makes an idle
@@ -642,7 +642,7 @@ _EXPIRED_CAP = 512
 #: is gone without a separate lookup.
 _EXPIRED_MARKER_NAME = ".codecalc-session-expired"
 
-# ── THE-898 fix-round CRITICAL: a REAL liveness signal for `codecalc cleanup` ─
+# ── fix-round CRITICAL: a REAL liveness signal for `codecalc cleanup` ─
 #: `cleanup` (codecalc/ops.py) is a SEPARATE CLI process with none of this
 #: module's in-memory `_workers`/`_LAST_ACTIVITY` to consult — proven by an
 #: adversarial review that had it delete a genuinely-live worker session's
@@ -833,7 +833,7 @@ def _note_activity(session_id: str) -> None:
 
 
 def _reap_then_note(session_id: str) -> None:
-    """Run the idle-expiry gate, THEN record activity (THE-779 fix wave, F4).
+    """Run the idle-expiry gate, THEN record activity (fix wave, F4).
 
     The non-execute entry points — write_file / list_files / resource_read /
     artifacts — recorded activity by calling `_note_activity` directly, which
@@ -956,7 +956,7 @@ def _reap_if_idle(session_id: str) -> bool:
         return False
     w.close()  # the existing teardown path — no new kill logic
     _write_expired_marker(session_id)
-    # THE-898: release the liveness lock in the SAME breath the worker is
+    # release the liveness lock in the SAME breath the worker is
     # actually closed — see _remove_lock_file's docstring for why a stale
     # lock here would make `cleanup` refuse a directory this server no
     # longer has any claim to.
@@ -997,7 +997,7 @@ def _get_worker_or_expired(session_id: str) -> tuple[Worker | None, bool]:
     if to_close is not None:
         to_close.close()
         _write_expired_marker(session_id)
-        _remove_lock_file(session_id)  # THE-898: same reasoning as _reap_if_idle
+        _remove_lock_file(session_id)  # same reasoning as _reap_if_idle
         return None, True
     if w is None and _idle_ttl_seconds() is not None and _is_expired_on_disk(session_id):
         # No worker, and this call did not just reap one. Could be a
@@ -1026,7 +1026,7 @@ def sweep_idle_sessions() -> list[str]:
 
 
 def _session_dir(session_id: str) -> Path:
-    # THE-901: no length/segment cap needed here the way `_jail` needed one.
+    # no length/segment cap needed here the way `_jail` needed one.
     # `_SAFE_NAME` already bounds `session_id` to <=64 chars and forbids '/'
     # and '\\' before this ever reaches `.resolve()`, so the resolved path
     # gains at most ONE extra segment over `root` — nowhere near the segment
@@ -1062,7 +1062,7 @@ def _guard_error(exc: ValueError) -> dict:
     are jail refusals (PERMISSION_DENIED) — the two codes errors.py already
     documents for exactly these situations.
 
-    THE-901: `_jail`'s length/segment caps are a third case, and neither of
+    `_jail`'s length/segment caps are a third case, and neither of
     the above fits. It is not malformed the way a bad session id is (any
     length is syntactically fine; it is only too much of it), and it is not a
     jail decision either — nothing about the path's target is being judged, it
@@ -1106,7 +1106,7 @@ def start(language: str = "python3", name: str | None = None) -> dict:
     if w is None:
         return {"ok": False,
                 "error": f"failed to start {name} REPL worker: {why or 'unknown cause'}"}
-    # THE-898: the liveness lockfile, written BEFORE this worker is published
+    # the liveness lockfile, written BEFORE this worker is published
     # to `_workers` — a caller (or `cleanup`, in a separate process) must
     # never be able to observe a worker session whose lock has not been
     # written yet. See _write_lock_file's docstring for what this closes.
@@ -1149,7 +1149,7 @@ def stop(session_id: str) -> dict:
         _discard_expired_locked(session_id)
     if w is not None:
         w.close()
-        # THE-898: released here too, not just on the reap path. The whole
+        # released here too, not just on the reap path. The whole
         # directory is normally deleted a few lines below (taking the lock
         # file with it for free) — but `_rmtree_checked` can REFUSE
         # (identity mismatch), in which case the directory survives while
@@ -1195,7 +1195,7 @@ _WORKER_CANNOT_ENFORCE = {
     "max_output_kb": "the worker caps at 64 KiB; a custom cap needs a fresh process",
 }
 
-#: The spill mechanism below (THE-783, see SPILL_CAPTURE_KB) is scoped to
+#: The spill mechanism below (see SPILL_CAPTURE_KB) is scoped to
 #: this same "needs a fresh process" boundary: a stateful worker's own 64 KiB
 #: cap is hardcoded inside its bootstrap protocol script and applied BEFORE
 #: the bytes ever cross into this process, so there is nothing here to
@@ -1280,7 +1280,7 @@ def execute(session_id: str, code: str, language: str | None = None,
         return _guard_error(exc)
     if not d.is_dir():
         return {"ok": False, "error": f"unknown session '{session_id}'"}
-    # THE-894: refused BEFORE anything runs, not just before this module's
+    # refused BEFORE anything runs, not just before this module's
     # own writes — executed code can write straight into the workspace
     # (open("x", "w") in a worker, or a fresh process's own output files),
     # which no per-write check below can bound. See `quota_precheck`'s
@@ -1289,7 +1289,7 @@ def execute(session_id: str, code: str, language: str | None = None,
     quota_refusal = quota_precheck(session_id)
     if quota_refusal is not None:
         return quota_refusal
-    # Lazy check-on-access (THE-779): reap this session's worker if it has
+    # Lazy check-on-access: reap this session's worker if it has
     # sat idle past the configured TTL, and learn whether it already had
     # been. ONE call, ONE critical section — see `_get_worker_or_expired`'s
     # docstring for the fix-round-1 CRITICAL this replaced (two separate
@@ -1328,7 +1328,7 @@ def execute(session_id: str, code: str, language: str | None = None,
         out.setdefault("unenforced", []).extend(unenforced)
         out["backend"] = "session-worker"
         out["confined"] = w.confined
-        # THE-894 point 4: the worker just ran arbitrary code with the
+        # point 4: the worker just ran arbitrary code with the
         # workspace as its cwd — measure what it left behind and disclose an
         # over-quota session rather than let it grow silently forever.
         return quota_postcheck(session_id, out)
@@ -1409,7 +1409,7 @@ def _write_spill(session_id: str, d: Path, stream: str, data: bytes) -> str | No
     already being the jailed session root left nothing to defend; that was
     wrong, because the component UNDER `d` is one executed code controls.
 
-    THE-894: returns None, writing nothing, if this write would exceed the
+    returns None, writing nothing, if this write would exceed the
     per-artifact or disk-quota ceilings (`_write_guard`), checked and written
     under `_disk_lock` as one step — see that lock's docstring. A spill is a
     best-effort EXTRA copy of output an execution already captured and
@@ -1441,7 +1441,7 @@ def _requested_cap_bytes(max_output_kb: int) -> int:
 
 def spill_if_truncated(session_id: str, result: dict, requested_cap_kb: int) -> dict:
     """Move oversized stdout/stderr from an inline truncation to a workspace
-    artifact instead of dropping it (THE-783).
+    artifact instead of dropping it.
 
     Call this AFTER executing at a CAPTURE cap (SPILL_CAPTURE_KB) that is
     `>=` the caller's own requested cap, so `result['stdout']`/`['stderr']`
@@ -1491,7 +1491,7 @@ def spill_if_truncated(session_id: str, result: dict, requested_cap_kb: int) -> 
         rel = _write_spill(session_id, d, stream, data)
         result[stream] = data[:cap].decode("utf-8", errors="replace") + "\n…[truncated]"
         if rel is None:
-            # THE-894: the disk-quota/artifact-cap gate refused the spill
+            # the disk-quota/artifact-cap gate refused the spill
             # WRITE. The execution already succeeded and already has a real
             # (truncated) inline value above — that stands; this only says
             # the fuller copy could not be kept on disk, and why, so a
@@ -1524,7 +1524,7 @@ def write_file(session_id: str, path: str, content: str) -> dict:
         # ...}` like the rest of them, never an exception.
         return _guard_error(exc)
     data = content.encode("utf-8", errors="replace")
-    # THE-894: the quota check and the write are ONE critical section under
+    # the quota check and the write are ONE critical section under
     # `_disk_lock` — see that lock's docstring for why a race here would
     # otherwise let two concurrent writes both pass the check and together
     # exceed the quota. Never a partial write: refused entirely, or written
@@ -1610,7 +1610,7 @@ def artifacts(session_id: str) -> dict:
     # resolve()-then-boundary-check. A symlink is excluded rather than
     # reported: this function's contract is "files created inside the
     # workspace", and following a link to describe what may lie outside it is
-    # not that. `_artifact_entries` (shared with the THE-894 artifact-count
+    # not that. `_artifact_entries` (shared with the artifact-count
     # cap, so the two never define "artifact" differently) applies this rule.
     files = [
         # `.as_posix()`, not `str()`: the workspace path is a protocol-facing
@@ -1780,7 +1780,7 @@ def _jail(d: Path, path: str) -> Path:
     resolve() first, so a symlink planted inside the workspace by executed code
     is followed BEFORE the comparison and cannot be used as a write primitive.
 
-    THE-901: the length/segment check runs BEFORE that resolve() — see
+    the length/segment check runs BEFORE that resolve() — see
     `_MAX_JAIL_PATH_LEN`/`_MAX_JAIL_PATH_SEGMENTS`'s comment for why `.resolve()`
     itself is the thing being bounded here, not just an odd input being
     rejected for its own sake. Segments are counted on the raw string (both

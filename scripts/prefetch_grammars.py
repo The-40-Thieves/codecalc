@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """From-source entry point for the grammar prefetch. See `codecalc.prefetch`.
 
-THE-877: the actual logic now lives in `codecalc/prefetch.py` so it ships in
+the actual logic now lives in `codecalc/prefetch.py` so it ships in
 the wheel and gets a console script (`codecalc-prefetch-grammars`) an
 installed user can run — `scripts/` is not packaged
 (`[tool.hatch.build.targets.wheel] packages = ["codecalc"]`), so this file

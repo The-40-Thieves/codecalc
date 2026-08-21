@@ -43,7 +43,7 @@ def runtime_path() -> str:
             or DEFAULT_RUNTIME_PATH)
 
 
-#: The three RELIABILITY tiers, orthogonal to RUNTIME_STATES below (THE-895).
+#: The three RELIABILITY tiers, orthogonal to RUNTIME_STATES below.
 #:
 #: RUNTIME_STATES answers "did this machine resolve the command" — a fact
 #: about THIS HOST, recomputed on every probe. RELIABILITY_TIERS answers "how
@@ -117,7 +117,7 @@ RUNTIME_STATES = ("supported", "installed", "unhealthy", "available")
 
 
 #: Languages whose runtime re-parses the raw Windows command line with POSIX
-#: escaping rules instead of taking argv as handed to it (THE-817).
+#: escaping rules instead of taking argv as handed to it.
 #:
 #: WINDOWS HAS NO ARGV. `CreateProcess` takes one command-line STRING and each
 #: child's C runtime decides how to split it back up. MSVC-style parsing treats
@@ -146,7 +146,7 @@ RUNTIME_STATES = ("supported", "installed", "unhealthy", "available")
 POSIX_ARGV_LANGUAGES = frozenset({"bash", "zsh"})
 
 #: Languages whose CANONICAL PLAN still needs a POSIX shell to prepare its
-#: workspace — the `bash -c` wrappers (THE-835). csharp left this set when
+#: workspace — the `bash -c` wrappers. csharp left this set when
 #: .NET 10's file-based execution made a shell unnecessary; these two remain:
 #: gleam has no single-file mode (a project must be scaffolded), and haskell's
 #: plan runs through `nix-shell`, which is a POSIX-only environment manager.
@@ -155,7 +155,7 @@ POSIX_ARGV_LANGUAGES = frozenset({"bash", "zsh"})
 #: string buried in an argv template. Before it, all three wrapper languages
 #: probed as `bash` — so on a Windows box with Git-for-Windows they advertised
 #: `available: true` for plans that were structurally unable to run (the same
-#: lie THE-817 fixed for bash itself, one level up). Mirrored in
+#: lie fixed for bash itself, one level up). Mirrored in
 #: executor/src/main.rs; scripts/check_parity.py gates the two copies.
 SHELL_WRAPPED = frozenset({"gleam", "haskell"})
 
@@ -228,7 +228,7 @@ LANGUAGES: dict[str, dict] = {
     # ── compilers (compile -> run) ───────────────────────────────────────
     # rust is best_effort, not tested, DESPITE being the executor's own build
     # toolchain — a review's smoke test found the rust HOST toolchain failing
-    # here even though `rustc` resolves cleanly (THE-895). contract_check.py's
+    # here even though `rustc` resolves cleanly. contract_check.py's
     # COMPILED_BROKEN case only proves a bad program is REJECTED correctly; it
     # never compiles and runs a VALID rust program, so it is not execution
     # evidence for this tier.
@@ -247,7 +247,7 @@ LANGUAGES: dict[str, dict] = {
         "best_effort",
     ),
     # ── project-wrapper runtimes ──────────────────────────────────────────
-    # csharp is NOT a wrapper any more (THE-835). .NET 10 runs a single .cs
+    # csharp is NOT a wrapper any more. .NET 10 runs a single .cs
     # file directly ("file-based apps"), implicit usings included — verified
     # with this registry's own smoke snippet under the executor's env
     # allowlist. The old plan shelled out to `dotnet new console` + `cp`,
@@ -255,7 +255,7 @@ LANGUAGES: dict[str, dict] = {
     # the runtime itself resolved fine.
     #
     # best_effort, not tested: the same review that found rust's host
-    # toolchain broken found csharp's broken too (THE-895), and no CI job
+    # toolchain broken found csharp's broken too, and no CI job
     # executes a .cs file at all.
     "csharp": _c(None, "dotnet run {file}", "best_effort"),
     "gleam": _c(

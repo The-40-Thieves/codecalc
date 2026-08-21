@@ -1,4 +1,4 @@
-"""CODECALC_TOOLS: registering a SLICE of the 52-tool surface (THE-896).
+"""CODECALC_TOOLS: registering a SLICE of the 52-tool surface.
 
 The tool-definition token cost (README: "Tool-definition token cost") is real,
 and the fix that stayed unbuilt on purpose is a facade

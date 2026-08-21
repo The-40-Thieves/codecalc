@@ -52,7 +52,7 @@ def declared_tool_names() -> list[str]:
     Names, not a count. This used to return `sum(1 for line in src ... )` and the
     assertion below compared it to `len(names)`, which proves the same NUMBER of
     tools arrived and never that they are the same tools — it passes when one is
-    lost and another gained. THE-811.
+    lost and another gained.
 
     A list rather than a set, because two decorators declaring the same name is
     the one silent registration path and a set would hide it.
@@ -86,7 +86,7 @@ async def main():
         # tool the SDK cannot schematise "is dropped at registration, silently".
         # It is not: Tool.from_function RAISES, so such a tool fails loudly at
         # import. The silent path is a DUPLICATE NAME, which add_tool discards
-        # after logging a warning nothing reads. THE-810.
+        # after logging a warning nothing reads.
         declared = declared_tool_names()
         dupes = sorted({n for n in declared if declared.count(n) > 1})
         check("no tool name is declared twice in server.py", not dupes,
@@ -258,7 +258,7 @@ async def main():
         check("compare_execution's winner is one of the languages run",
               r.get("fastest") in snippets, f"-> {r.get('fastest')!r}")
         results = r.get("results") or []
-        # THE-802: `node` intermittently comes back with empty stdout and
+        # `node` intermittently comes back with empty stdout and
         # ok=false on windows-latest. Three occurrences went by reporting only
         # (language, stdout) and (language, ok), which cannot separate "node
         # never started" from "node started and printed nothing" from "node was
@@ -290,7 +290,7 @@ async def main():
               f"-> {[(res.get('language'), res.get('ok')) for res in results]}"
               if all_ok else f"-> {_diag(results)}")
 
-        # THE-802, the guard half. The diagnostic above makes an occurrence
+        # The guard half. The diagnostic above makes an occurrence
         # readable; this makes it VISIBLE TO A CALLER, which is the part that
         # matters outside CI. A caller reads `fastest` and a table of outputs;
         # nothing pointed at the row that printed nothing while its siblings
@@ -300,7 +300,7 @@ async def main():
               isinstance(r.get("discrepancies"), list),
               f"-> {type(r.get('discrepancies')).__name__}")
         # On a healthy runner every language prints, so the list is empty. If
-        # THE-802 fires here, this is the assertion that names it rather than
+        # fires here, this is the assertion that names it rather than
         # leaving it to "every language produced 42".
         check("...and it is empty when every language printed",
               not r.get("discrepancies") if produced_42 else True,

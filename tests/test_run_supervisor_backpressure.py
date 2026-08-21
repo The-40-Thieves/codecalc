@@ -1,6 +1,6 @@
-"""Output backpressure cannot deadlock the payload or supervisor (THE-831).
+"""Output backpressure cannot deadlock the payload or supervisor.
 
-THE-831's sixth acceptance criterion — the one property the lifecycle suite
+The sixth acceptance criterion — the one property the lifecycle suite
 (test_run_supervisor.py) leaves untested because it runs against fake providers
 with no real output — is that a run producing far more output than any pipe
 buffer, and more than the output cap, still reaches a terminal state and its

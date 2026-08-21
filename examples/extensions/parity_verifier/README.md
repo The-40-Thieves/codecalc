@@ -1,7 +1,7 @@
 # `parity_verifier` — reference third-party verifier
 
 A minimal, third-party implementation of `codecalc.verifiers.Verifier`
-(THE-794's verifier extension kind). It exists to prove the interface is
+('s verifier extension kind). It exists to prove the interface is
 usable by code outside `codecalc/` itself — the "second consumer" the
 extension SDK design requires alongside every built-in.
 

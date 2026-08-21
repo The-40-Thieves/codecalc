@@ -80,7 +80,7 @@ def _speedup(before: dict, after: dict) -> dict:
 def _accept_decision(sp: dict, min_speedup: float) -> tuple[bool, str]:
     """Decide accept/reject from a MEASURED speedup and the caller's threshold.
 
-    Accepted (THE-843) requires the speedup to be REAL, not merely to clear an
+    Accepted requires the speedup to be REAL, not merely to clear an
     arithmetic comparison. `ratio >= min_speedup` alone certified a measured
     SLOWDOWN: with min_speedup=0 a measured 0.5x — a 2x slowdown — cleared
     `0.5 >= 0` and was returned accepted=True. So all three must hold:

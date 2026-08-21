@@ -1,5 +1,5 @@
 """Behavioral floor: EVERY public sympy-backed tool caps oversized input BEFORE
-it reaches sp.sympify (THE-844).
+it reaches sp.sympify.
 
 The length cap (`_MAX_EXPR_LEN`, 2000) is the load-bearing gate: it rejects an
 oversized expression as "expression too long" on every interpreter, before any
@@ -12,7 +12,7 @@ wording differs across CPython versions ("maximum recursion depth exceeded" on
 The cap was first added to `_eval_exact` only, then to the four exact.py sympy
 tools, and STILL missed `solve_linear` in logic.py — which reached sp.sympify
 uncapped and only returned `resource_exhausted` by riding the "stack overflow"
-message hint, the exact fragile mechanism THE-844 exists to eliminate.
+message hint, the exact fragile mechanism exists to eliminate.
 
 So this floor enumerates every public sympy-backed tool and asserts each rejects
 oversized input VIA THE CAP, not via the message backstop. The distinction is

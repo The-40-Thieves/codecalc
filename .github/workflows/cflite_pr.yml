@@ -1,7 +1,7 @@
 name: ClusterFuzzLite PR fuzzing
 
 # Coverage-guided DISCOVERY (libFuzzer + atheris), complementing rather than
-# replacing ci-quality.yml's deterministic `fuzz-smoke` job (THE-899, the
+# replacing ci-quality.yml's deterministic `fuzz-smoke` job (the
 # `fuzz.py` mutation fuzzer under scripts/) — see fuzz/README.md for the
 # split. Runs the two
 # harnesses in fuzz/ against every PR for a bounded time budget so a crash

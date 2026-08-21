@@ -1,4 +1,4 @@
-"""Authenticated HTTP `/v1` service for gVisor-sandboxed strict execution (THE-830).
+"""Authenticated HTTP `/v1` service for gVisor-sandboxed strict execution.
 
 This is the SERVER half of the strict execution protocol whose client is
 ``providers.RemoteStrictExecutionProvider`` (a macOS/Windows host that cannot run
@@ -19,7 +19,7 @@ Fail-closed everywhere it can be:
 
   * BEARER AUTH IS REQUIRED. Every request is rejected with 401 unless it carries
     the exact ``Authorization: Bearer <token>``; the comparison is constant-time
-    (``hmac.compare_digest``), mirroring ``server.py``'s THE-786 posture. The
+    (``hmac.compare_digest``), mirroring ``server.py``'s posture. The
     entrypoint refuses to start without a token at all — the service exists to
     authenticate a REMOTE caller, so a token-less bind (on any interface, and
     especially a routable one) would expose sandboxed code execution to whatever
@@ -109,7 +109,7 @@ MAX_TIMEOUT_SECONDS = 300
 MAX_CPU_COUNT = 4
 
 #: Wall-clock ceiling on receiving a request body once its declared
-#: ``Content-Length`` has already cleared ``MAX_CONTENT_LENGTH`` (THE-851).
+#: ``Content-Length`` has already cleared ``MAX_CONTENT_LENGTH``.
 #: Enforced as a TOTAL deadline across the whole read, not a per-recv idle
 #: gap: a bare ``socket.settimeout`` only bounds the silence between reads,
 #: so a client trickling one byte in just under that gap, forever, would
@@ -488,7 +488,7 @@ class _StrictRequestHandler(BaseHTTPRequestHandler):
         declared a legitimate, sub-``MAX_CONTENT_LENGTH`` size and then
         dribbles it slowly (or stalls entirely) pins the thread forever,
         unbounded by ``MAX_CONCURRENT_RUNS`` since this runs before
-        ``dispatch()`` ever sees the request (THE-851).
+        ``dispatch()`` ever sees the request.
 
         A single ``socket.settimeout`` would not fix this: it bounds the gap
         between individual reads, not the whole transfer, so a slow-enough
