@@ -54,6 +54,32 @@ behind it.
   EXISTING config (every other server/setting passes through unchanged) and
   backs up the original to `<path>.codecalc-bak` first; an existing config
   file that is not valid JSON is refused rather than risked.
+- **`CODECALC_TOOLS`: register a slice of the 52-tool surface** (THE-896).
+  `tools/list` costs ~9.2k tokens up front (see README "Tool-definition token
+  cost"), and the fix that stayed deliberately unbuilt is a facade
+  (`docs/design/2026-08-10-tool-facade.md`) — collapsing every tool behind one
+  dispatcher erases per-tool typed schemas and per-tool approval prompts. This
+  is a different mechanism: every `@mcp.tool()` in `server.py` now declares a
+  `group=` (`calculator`/`verification`/`execution`/`sessions`/`analysis`/
+  `admin`, 52 tools total, mapping in the new README section "Reducing the
+  tool surface"), and `CODECALC_TOOLS` (comma-separated group and/or preset
+  names — presets `core`/`dev`/`full`) restricts, at import, which groups
+  `_tool()` actually hands to the MCP SDK. A tool outside the active set is
+  never registered at all: absent from `tools/list` **and** rejected by
+  `tools/call`, not a name a client could still guess and invoke through a
+  hidden facade path. Unset/empty registers every group — 52 tools, unchanged
+  default behaviour — and an unknown group or preset name is a loud
+  `ValueError` at startup naming the bad value and every known group/preset,
+  never a silent fallback to "everything" or "nothing" (either direction turns
+  a typo into a footgun). `codecalc doctor` gained a `tool groups` block:
+  active groups, the full group→tools mapping, and how many tools this
+  process actually registered. Gated by the new
+  `scripts/check_tool_groups.py`, wired into CI: statically asserts every
+  declared tool names a known group, then re-derives — from a live subprocess
+  import with `CODECALC_TOOLS` unset — that the default configuration still
+  registers all 52, so the filter mechanism cannot silently shrink the
+  no-configuration case the rest of CI's tool-count gates depend on.
+
 - **Per-language RELIABILITY tiers** (THE-895), orthogonal to the existing
   resolution states (`supported`/`installed`/`unhealthy`/`available`). A
   runtime could report `installed` (its command resolved on PATH) while its

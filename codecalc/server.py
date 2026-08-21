@@ -301,8 +301,112 @@ def _coded(fn):
 _mcp_tool = mcp.tool
 
 
+# ── THE-896: tool GROUPS, so a client can register a slice of the 52-tool
+# surface instead of paying its full ~9.2k-token tools/list cost. This is NOT
+# the facade docs/design/2026-08-10-tool-facade.md rejected: every tool a
+# group activates keeps its own name, its own typed schema and its own
+# approval boundary. A group that is not active simply never calls
+# `_mcp_tool(...)` for its tools — they do not exist on this server at all,
+# so a client cannot invoke one it cannot see either (the facade's flaw #2:
+# hiding a tool from list_tools does not hide it from call_tool). See the
+# README's "Reducing the tool surface" section.
+KNOWN_GROUPS = frozenset({
+    "calculator",   # exact/symbolic arithmetic, units, bit/programmer-mode
+    "verification", # equivalence/optimisation proofs, SMT, edge-case diff
+    "execution",    # language/runtime discovery, one-shot code execution
+    "sessions",     # persistent sessions, workspace files, background runs
+    "analysis",     # complexity + benchmarking + function extraction
+    "admin",        # package installs, runtime updates
+})
+
+#: A named bundle of groups, so an operator can write one word instead of
+#: enumerating groups. Preset names are deliberately disjoint from
+#: KNOWN_GROUPS — see `_active_groups` — so `CODECALC_TOOLS=core` can never
+#: be mistaken for a (nonexistent) group literally named "core".
+PRESETS: dict[str, frozenset[str]] = {
+    "core": frozenset({"calculator"}),
+    "dev": frozenset({"calculator", "execution", "verification", "analysis"}),
+    "full": frozenset(KNOWN_GROUPS),  # explicit spelling of the default
+}
+
+#: Comma-separated group and/or preset names. Empty/unset = every group, which
+#: is also what makes the default registration count 52 — the invariant
+#: scripts/check_tool_groups.py and the round-trip tests both depend on.
+TOOLS_ENV = "CODECALC_TOOLS"
+
+#: tool name -> its group, populated by `_tool` below as each `@mcp.tool()`
+#: line executes. Covers every declared tool regardless of whether its group
+#: is active, so `doctor` can describe the groups a caller is NOT seeing —
+#: complete only once this module has finished importing.
+TOOL_GROUPS: dict[str, str] = {}
+
+
+def _active_groups() -> frozenset[str]:
+    """The groups this process registers tools for.
+
+    Read once at import (mirrors executor._require_native_or_die: a variable
+    that changes what gets REGISTERED has to be decided before the first
+    `@mcp.tool()` line runs, not re-read per call like `_idle_ttl_seconds`).
+
+    Unset or blank -> every known group, so a bare checkout with nothing
+    configured still serves all 52 tools. An unknown group or preset name is
+    a loud `ValueError` that kills the import — never a warning, and never
+    "falls back to all" or "falls back to none" — because either silent
+    fallback turns a typo into a footgun: one exposes everything the operator
+    meant to restrict, the other exposes nothing and looks like a hung
+    server.
+    """
+    raw = os.environ.get(TOOLS_ENV, "").strip()
+    if not raw:
+        return frozenset(KNOWN_GROUPS)
+    names = [n.strip() for n in raw.split(",") if n.strip()]
+    groups: set[str] = set()
+    unknown: list[str] = []
+    for name in names:
+        if name in KNOWN_GROUPS:
+            groups.add(name)
+        elif name in PRESETS:
+            groups.update(PRESETS[name])
+        else:
+            unknown.append(name)
+    if unknown:
+        raise ValueError(
+            f"{TOOLS_ENV} names unknown group/preset {unknown!r}. Known "
+            f"groups: {sorted(KNOWN_GROUPS)}. Known presets: {sorted(PRESETS)}. "
+            f"Fix the value, or unset {TOOLS_ENV} to expose every tool."
+        )
+    return frozenset(groups)
+
+
+_ACTIVE_GROUPS = _active_groups()
+
+
 def _tool(*d_args, **d_kwargs):
+    """Wrap `mcp.tool`, stamping the group taxonomy on registration.
+
+    `group=` is REQUIRED and popped before the real decorator ever sees the
+    kwargs — `mcp.tool()` itself does not know this keyword. A missing or
+    unknown group is a loud `ValueError` at import, same reasoning as an
+    unknown `CODECALC_TOOLS` entry above: scripts/check_tool_groups.py gates
+    this statically too, but a change that never runs that gate should still
+    fail rather than silently register an ungrouped tool nothing can filter.
+    """
+    group = d_kwargs.pop("group", None)
+    if group not in KNOWN_GROUPS:
+        raise ValueError(
+            f"@mcp.tool(group=...) got {group!r}, expected one of "
+            f"{sorted(KNOWN_GROUPS)}. Every tool must declare a group so "
+            f"{TOOLS_ENV} can filter it."
+        )
+
     def deco(fn):
+        name = d_kwargs.get("name", fn.__name__)
+        TOOL_GROUPS[name] = group
+        if group not in _ACTIVE_GROUPS:
+            # Recorded above for doctor's benefit, never registered: this is
+            # the whole of the enforcement. No entry in `_tool_manager`
+            # means absent from `tools/list` AND rejected by `tools/call`.
+            return _coded(fn)
         return _mcp_tool(*d_args, **d_kwargs)(_coded(fn))
     return deco
 
@@ -310,7 +414,7 @@ def _tool(*d_args, **d_kwargs):
 mcp.tool = _tool
 
 
-@mcp.tool()
+@mcp.tool(group="execution")
 def list_languages() -> list[dict]:
     """List every language codecalc can execute, with extension, compile flag, and what this machine resolved. `status` is `installed` (its command was found on the sandbox PATH) or `supported` (nothing for it here); `status_basis` is `resolved`, meaning nothing was executed to check. Run `codecalc doctor --deep` to promote a runtime to `available` by actually running it.
 
@@ -324,7 +428,7 @@ def list_languages() -> list[dict]:
     return executor.catalog()
 
 
-@mcp.tool()
+@mcp.tool(group="execution")
 def list_execution_providers() -> list[dict]:
     """List execution providers (execution BACKENDS — local subprocess, gVisor-strict, remote) and their machine-readable capabilities.
 
@@ -438,7 +542,7 @@ def compact_result(result: dict) -> dict:
     return out
 
 
-@mcp.tool()
+@mcp.tool(group="execution")
 def execute_code(
     language: str,
     code: str,
@@ -503,7 +607,7 @@ def execute_code(
     return result
 
 
-@mcp.tool()
+@mcp.tool(group="sessions")
 def session_start(language: str = "python3") -> dict:
     """Start a persistent session. python3/node get a stateful REPL worker
     (variables/imports persist across execute_code calls); other languages get
@@ -511,19 +615,19 @@ def session_start(language: str = "python3") -> dict:
     return _session_service.start(language)
 
 
-@mcp.tool()
+@mcp.tool(group="sessions")
 def session_stop(session_id: str) -> dict:
     """Stop a session: kill its REPL worker (if any) and delete its workspace."""
     return _session_service.stop(session_id)
 
 
-@mcp.tool()
+@mcp.tool(group="sessions")
 def session_list() -> dict:
     """List active sessions and their languages/state."""
     return _session_service.list_sessions()
 
 
-@mcp.tool()
+@mcp.tool(group="sessions")
 def session_files(session_id: str, path: str = "", page_size: int | None = None,
                   cursor: str | None = None) -> dict:
     """List workspace files, optionally using a bounded cursor page."""
@@ -532,21 +636,21 @@ def session_files(session_id: str, path: str = "", page_size: int | None = None,
     )
 
 
-@mcp.tool()
+@mcp.tool(group="sessions")
 def session_write_file(session_id: str, path: str, content: str) -> dict:
     """Write a file into a session workspace (relative path, no escapes).
     Use this to seed input data for executed code."""
     return _session_service.write_file(session_id, path, content)
 
 
-@mcp.tool()
+@mcp.tool(group="sessions")
 def session_artifacts(session_id: str) -> dict:
     """List files created by executed code in a session (excluding runner
     internals like main.py/run.out)."""
     return _session_service.artifacts(session_id)
 
 
-@mcp.tool()
+@mcp.tool(group="admin")
 def install_package(language: str, package: str, session_id: str | None = None,
                     version: str | None = None) -> dict:
     """Install a package for a language (uv pip / npm / gem / go get / cargo add...).
@@ -569,7 +673,7 @@ def install_package(language: str, package: str, session_id: str | None = None,
                             version=version, audit=_audit_log)
 
 
-@mcp.tool()
+@mcp.tool(group="execution")
 async def execute_code_stream(
     language: str,
     code: str,
@@ -638,7 +742,7 @@ _RUN_EXTRA_KEYS = frozenset({
 })
 
 
-@mcp.tool()
+@mcp.tool(group="sessions")
 def run_submit(
     language: str,
     code: str,
@@ -722,7 +826,7 @@ def run_submit(
     }
 
 
-@mcp.tool()
+@mcp.tool(group="sessions")
 def run_inspect(run_id: str) -> dict:
     """Poll a background run started with run_submit.
 
@@ -799,7 +903,7 @@ def run_inspect(run_id: str) -> dict:
     return {**result, **status}
 
 
-@mcp.tool()
+@mcp.tool(group="sessions")
 def run_cancel(run_id: str) -> dict:
     """Cancel a background run started with run_submit.
 
@@ -848,19 +952,19 @@ def run_cancel(run_id: str) -> dict:
     return {"ok": True, **result}
 
 
-@mcp.tool()
+@mcp.tool(group="calculator")
 def evaluate_expression(expression: str) -> dict:
     """Symbolically evaluate or simplify a math expression, e.g. 'integrate(x**2, x)' or 'sqrt(144) + 2**10'."""
     return logic.evaluate_expression(expression)
 
 
-@mcp.tool()
+@mcp.tool(group="calculator")
 def truth_table(expression: str) -> dict:
     """Build the truth table for a boolean expression: 'a and b or not c', 'p xor q', 'a implies b'."""
     return logic.truth_table(expression)
 
 
-@mcp.tool()
+@mcp.tool(group="verification")
 def z3_check(smt2: str) -> dict:
     """Check an SMT-LIB2 formula with Z3: sat/unsat/unknown plus a model. Example:
     '(declare-const x Int)(assert (> x 5))(check-sat)'.
@@ -875,14 +979,14 @@ def z3_check(smt2: str) -> dict:
     return grades.grade_z3_check(logic.z3_check(smt2))
 
 
-@mcp.tool()
+@mcp.tool(group="calculator")
 def solve_linear(system: str, variables: str) -> dict:
     """Solve a system of equations; `system` is ';'-separated equations, `variables` comma-separated. Example: system='x + y = 10; x - y = 2', variables='x, y'."""
     vars_ = [v.strip() for v in variables.split(",") if v.strip()]
     return logic.solve_linear(system, vars_)
 
 
-@mcp.tool()
+@mcp.tool(group="calculator")
 def matrix(rows: list[list[int | float | str]], op: str) -> dict:
     """Structured matrix operations: det, inverse, eigenvalues, transpose, rank, trace.
 
@@ -899,13 +1003,13 @@ def matrix(rows: list[list[int | float | str]], op: str) -> dict:
     return linalg.matrix(rows, op)
 
 
-@mcp.tool()
+@mcp.tool(group="analysis")
 def analyze_complexity(code: str, language: str = "python3") -> dict:
     """Estimate the asymptotic (Big-O) time complexity of a code snippet via structural analysis."""
     return complexity.analyze(code, language)
 
 
-@mcp.tool()
+@mcp.tool(group="analysis")
 def benchmark(code: str, language: str = "python3", sizes: str = "100,1000,10000,100000",
               timeout: int = 30) -> dict:
     """Empirically measure time complexity by running code at increasing input sizes.
@@ -918,7 +1022,7 @@ def benchmark(code: str, language: str = "python3", sizes: str = "100,1000,10000
     return tools.benchmark(code, language=language, sizes=sizes, timeout=timeout)
 
 
-@mcp.tool()
+@mcp.tool(group="execution")
 def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 15) -> dict:
     """Run the same code in multiple languages side by side.
 
@@ -929,7 +1033,7 @@ def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 
     return tools.compare_execution(snippets, stdin=stdin, timeout=timeout)
 
 
-@mcp.tool()
+@mcp.tool(group="execution")
 def runtimes_status(languages: str = "") -> dict:
     """Check every language runtime for available updates (NON-MUTATING).
 
@@ -951,7 +1055,7 @@ def runtimes_status(languages: str = "") -> dict:
     return runtimes.status(languages or None)
 
 
-@mcp.tool()
+@mcp.tool(group="admin")
 def update_runtimes(languages: str = "", apply: bool = False, timeout: int = 600) -> dict:
     """Update language runtimes. SAFE BY DEFAULT: with apply=False this is a
     dry run — it returns the update commands that WOULD run without changing
@@ -995,7 +1099,7 @@ def session_file_resource(session_id: str, path: str):
         return data
 
 
-@mcp.tool()
+@mcp.tool(group="sessions")
 def session_read_file(session_id: str, path: str, max_bytes: int = 65536,
                       as_image: bool = False):
     """Read a file from a session workspace.
@@ -1026,7 +1130,7 @@ def session_read_file(session_id: str, path: str, max_bytes: int = 65536,
     return result
 
 
-@mcp.tool()
+@mcp.tool(group="sessions")
 def session_run(session_id: str, entry_file: str, language: str | None = None,
                 stdin: str = "", timeout: int = 30) -> dict:
     """Run a multi-file program in a session: execute `entry_file`, which may
@@ -1043,7 +1147,7 @@ def session_run(session_id: str, entry_file: str, language: str | None = None,
     )
 
 
-@mcp.tool()
+@mcp.tool(group="calculator")
 def convert_units(value: float, from_unit: str, to_unit: str) -> dict:
     """Convert a value between units (dimensional analysis via sympy).
 
@@ -1055,14 +1159,14 @@ def convert_units(value: float, from_unit: str, to_unit: str) -> dict:
     return units.convert(value, from_unit, to_unit)
 
 
-@mcp.tool()
+@mcp.tool(group="calculator")
 def physical_constants(name: str | None = None) -> dict:
     """Look up a physical constant (speed_of_light, planck, avogadro,
     gravity, electron_mass, gas_constant, ...) or list all 22 with values."""
     return units.constants(name)
 
 
-@mcp.tool()
+@mcp.tool(group="calculator")
 def list_units() -> dict:
     """List every supported unit alias for convert_units."""
     return units.list_units()
@@ -1070,7 +1174,7 @@ def list_units() -> dict:
 
 # ── exact arithmetic & programmer-mode (ported from the Claude calc skill) ──
 
-@mcp.tool()
+@mcp.tool(group="calculator")
 def calc_exact(expr: str) -> dict:
     """EXACT arithmetic: 0.1 + 0.2 == 0.3 is True here (False in plain Python).
 
@@ -1083,7 +1187,7 @@ def calc_exact(expr: str) -> dict:
     return exact.eval_exact(expr)
 
 
-@mcp.tool()
+@mcp.tool(group="calculator")
 def compare_threshold(a: str, op: str, b: str) -> dict:
     """Exact threshold check with a verdict and the shortfall when it fails.
 
@@ -1094,13 +1198,13 @@ def compare_threshold(a: str, op: str, b: str) -> dict:
     return exact.compare_threshold(a, op, b)
 
 
-@mcp.tool()
+@mcp.tool(group="calculator")
 def percentage(part: str, total: str) -> dict:
     """Exact share and percentage of PART / TOTAL (rationals accepted)."""
     return exact.percentage(part, total)
 
 
-@mcp.tool()
+@mcp.tool(group="calculator")
 def calc_stats(nums: list[float]) -> dict:
     """mean, median, sample stdev, and coefficient of variation (CV).
 
@@ -1110,7 +1214,7 @@ def calc_stats(nums: list[float]) -> dict:
     return exact.stats(nums)
 
 
-@mcp.tool()
+@mcp.tool(group="calculator")
 def percentiles(nums: list[float]) -> dict:
     """p50/p90/p95/p99 by nearest-rank AND linear interpolation.
 
@@ -1119,7 +1223,7 @@ def percentiles(nums: list[float]) -> dict:
     return exact.percentiles(nums)
 
 
-@mcp.tool()
+@mcp.tool(group="calculator")
 def collision_probability(items: int, bits: int) -> dict:
     """Birthday-bound hash collision probability: 1 - exp(-n^2 / (2*2^b)).
 
@@ -1129,7 +1233,7 @@ def collision_probability(items: int, bits: int) -> dict:
     return exact.collision_prob(items, bits)
 
 
-@mcp.tool()
+@mcp.tool(group="calculator")
 def data_sizes(n: int) -> dict:
     """Byte sizes both ways: binary (KiB/MiB/GiB) AND decimal (KB/MB/GB).
 
@@ -1138,27 +1242,27 @@ def data_sizes(n: int) -> dict:
     return exact.data_sizes(n)
 
 
-@mcp.tool()
+@mcp.tool(group="calculator")
 def human_duration(seconds: float) -> dict:
     """Humanised duration plus per-day and per-30d rates."""
     return exact.human_duration(seconds)
 
 
-@mcp.tool()
+@mcp.tool(group="calculator")
 def epoch_time(n: str) -> dict:
     """Epoch seconds/millis/micros/nanos to ISO 8601 UTC (implausible readings
     suppressed)."""
     return exact.epoch_time(n)
 
 
-@mcp.tool()
+@mcp.tool(group="calculator")
 def base_repr(n: int, width: int | None = None) -> dict:
     """hex/oct/bin of N; with WIDTH, two's complement and signed-overflow
     detection. `base_repr(3000000000, 32)` says plainly it does not fit i32."""
     return exact.base_repr(n, width)
 
 
-@mcp.tool()
+@mcp.tool(group="calculator")
 def radix_convert(value: str, from_base: int = 10, to_base: int = 10) -> dict:
     """Convert a value between ANY bases 2..36, fractions included; bases that
     cannot represent the fraction (e.g. 0.1 in base 2) are flagged
@@ -1166,7 +1270,7 @@ def radix_convert(value: str, from_base: int = 10, to_base: int = 10) -> dict:
     return exact.radix_convert(value, from_base, to_base)
 
 
-@mcp.tool()
+@mcp.tool(group="calculator")
 def float_repr(x: float) -> dict:
     """What binary64 actually stores for X: exact value, raw bits, ULP, both
     neighbours, and whether the literal is representable. `float_repr(0.1)`
@@ -1175,7 +1279,7 @@ def float_repr(x: float) -> dict:
     return exact.float_repr(x)
 
 
-@mcp.tool()
+@mcp.tool(group="calculator")
 def int_widths(n: int) -> dict:
     """Which widths (i8..i64/u8..u64) hold N, and the wrapped value where they
     do not. Flags anything past 2^53 as unable to round-trip through a JS
@@ -1183,14 +1287,14 @@ def int_widths(n: int) -> dict:
     return exact.int_widths(n)
 
 
-@mcp.tool()
+@mcp.tool(group="calculator")
 def bit_analysis(n: int, align: int | None = None) -> dict:
     """popcount, bit length, trailing zeros, power-of-two check, next power of
     two, and (with align) padding needed to reach an alignment boundary."""
     return exact.bit_analysis(n, align)
 
 
-@mcp.tool()
+@mcp.tool(group="calculator")
 def bitop(a: int, op: str, b: int | None = None, width: int = 64) -> dict:
     """Programmer-mode bit ops: and or xor nand nor xnor not shl shr sar rol ror
     at width 8/16/32/64. Every result shows unsigned, signed (two's complement),
@@ -1201,7 +1305,7 @@ def bitop(a: int, op: str, b: int | None = None, width: int = 64) -> dict:
     return exact.bitop(a, op, b, width)
 
 
-@mcp.tool()
+@mcp.tool(group="verification")
 def algebraic_equiv(a: str, b: str) -> dict:
     """Are two expressions algebraically identical? Refs: 'is (a*b)/c the same
     as a*(b/c)?' answered exactly. Caveat: symbolic identity says nothing
@@ -1209,13 +1313,13 @@ def algebraic_equiv(a: str, b: str) -> dict:
     return exact.algebraic_equiv(a, b)
 
 
-@mcp.tool()
+@mcp.tool(group="calculator")
 def solve_expression(expr: str, var: str = "x") -> dict:
     """Solve for a root or crossover: 'x**2 - 4 = 0', '2*x + 1 = 7'."""
     return exact.solve_expression(expr, var)
 
 
-@mcp.tool()
+@mcp.tool(group="calculator")
 def limit_expression(expr: str, var: str = "x", point: str = "oo") -> dict:
     """Asymptotic behaviour: limit of EXPR as var -> point (default oo).
     'limit_expression(\"n*log(n)/n**2\", \"n\")' returns 0 — settles complexity
@@ -1223,13 +1327,13 @@ def limit_expression(expr: str, var: str = "x", point: str = "oo") -> dict:
     return exact.limit_expression(expr, var, point)
 
 
-@mcp.tool()
+@mcp.tool(group="calculator")
 def simplify_expression(expr: str) -> dict:
     """Simplified, factored and expanded forms of an expression."""
     return exact.simplify_expression(expr)
 
 
-@mcp.tool()
+@mcp.tool(group="verification")
 def verify_translation(source_code: str, source_language: str,
                        target_code: str, target_language: str,
                        test_inputs: list[str] | None = None) -> dict:
@@ -1269,7 +1373,7 @@ def verify_translation(source_code: str, source_language: str,
     return grades.grade_verify_translation(result, source_language, target_language)
 
 
-@mcp.tool()
+@mcp.tool(group="verification")
 def compare_edge_cases(snippets: dict[str, str],
                        inputs: list[str] | None = None) -> dict:
     """Run the same logic in N languages on edge-case inputs and flag divergence.
@@ -1283,7 +1387,7 @@ def compare_edge_cases(snippets: dict[str, str],
     return translation.compare_edge_cases(snippets, inputs=inputs)
 
 
-@mcp.tool()
+@mcp.tool(group="verification")
 def verify_optimization(original: str, candidate: str, language: str,
                         test_inputs: list[str] | None = None,
                         sizes: list[int] | None = None,
@@ -1310,7 +1414,7 @@ def verify_optimization(original: str, candidate: str, language: str,
     return grades.grade_verify_optimization(result, result.get("language", language))
 
 
-@mcp.tool()
+@mcp.tool(group="analysis")
 def extract_function(code: str, language: str, function_name: str,
                      call: str | None = None,
                      test_inputs: list[str] | None = None) -> dict:
@@ -1330,6 +1434,31 @@ def extract_function(code: str, language: str, function_name: str,
 #: — the count this command prints has to agree with the one the README states
 #: and the gate enforces, or it is just a fourth opinion.
 _ALIAS_ENTRIES = {"c++"}
+
+
+def _tool_groups_report() -> dict:
+    """THE-896: what CODECALC_TOOLS did to this process's registered surface.
+
+    Built here rather than in codecalc/doctor.py because the group taxonomy
+    (KNOWN_GROUPS/PRESETS/TOOL_GROUPS/_ACTIVE_GROUPS) lives in this module,
+    next to the `_tool` wrapper that populates it — doctor.py has no reason
+    to import server.py, and making it do so for one field would be a
+    circular import for a field this module already has for free.
+    """
+    by_group: dict[str, list[str]] = {g: [] for g in KNOWN_GROUPS}
+    for name, group in TOOL_GROUPS.items():
+        by_group[group].append(name)
+    for names in by_group.values():
+        names.sort()
+    return {
+        "env_var": TOOLS_ENV,
+        "configured": os.environ.get(TOOLS_ENV, "").strip() or None,
+        "active_groups": sorted(_ACTIVE_GROUPS),
+        "groups": by_group,
+        "presets": {name: sorted(members) for name, members in PRESETS.items()},
+        "declared_count": len(TOOL_GROUPS),
+        "registered_count": len(mcp._tool_manager._tools),
+    }
 
 
 def _doctor(as_json: bool = False, deep: bool = False) -> int:
@@ -1357,6 +1486,7 @@ def _doctor(as_json: bool = False, deep: bool = False) -> int:
     import sys
 
     rep = doctor.report(deep=deep)
+    rep["tool_groups"] = _tool_groups_report()
 
     if as_json:
         print(json.dumps(rep, indent=2, sort_keys=True))
@@ -1498,6 +1628,21 @@ def _doctor(as_json: bool = False, deep: bool = False) -> int:
     # recovery path exists, same reasoning as the rest of this section.
     print(f"    recovery        if a session is stuck over quota: "
           f"{sessions._QUOTA_RECOVERY_HINT}")
+
+    # THE-896: the tool-surface reduction. Printed even when nothing is
+    # configured — same reasoning as the grammar-cache and disk-quota lines
+    # above — so an operator wondering "why does list_tools only show 25?"
+    # gets the answer from doctor rather than from re-reading the README.
+    tg = rep["tool_groups"]
+    print(f"  tool groups       {tg['registered_count']}/{tg['declared_count']} "
+          f"tools registered ({tg['env_var']}="
+          f"{tg['configured'] or '(unset — every group)'})")
+    for group in sorted(tg["groups"]):
+        marker = "*" if group in tg["active_groups"] else " "
+        names = tg["groups"][group]
+        print(f"    {marker} {group:12} {len(names)} tool(s): {', '.join(names)}")
+    print("    presets         " + ", ".join(
+        f"{name}={{{','.join(members)}}}" for name, members in sorted(tg["presets"].items())))
 
     # Where the shipped skill is, because a skill nobody can find is a skill
     # nobody installs. It travels inside the wheel, so this path is correct for

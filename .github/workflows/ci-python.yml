@@ -373,6 +373,13 @@ jobs:
           uv run --no-sync python tests/test_capability_broker.py
           uv run --no-sync python tests/test_network_policy.py
           uv run --no-sync python tests/test_audit_log.py
+      # THE-896: CODECALC_TOOLS group filtering. Protocol-neutral (spawns
+      # `python -c` importing codecalc.server under a controlled environment,
+      # no sandbox or native executor needed), so it belongs beside the suite
+      # above rather than the sandbox-only jobs.
+      - name: tool-surface groups (CODECALC_TOOLS)
+        shell: bash
+        run: uv run --no-sync python tests/test_tool_groups.py
       # Regressions from the 2026-08-08 bug sweep: lost exactness, wrong widths,
       # crashes on ordinary inputs, a dead ns path, and documented constant
       # names that resolved to nothing.
@@ -655,6 +662,12 @@ jobs:
           # against the silent path that actually exists, a duplicate name that add_tool discards
           # with a warning nothing reads, rather than a schema failure, which RAISES (THE-810).
           uv run --no-sync python scripts/check_tool_names.py /tmp/mcp.out
+      # THE-896: every declared tool names a real CODECALC_TOOLS group, and the default
+      # (unset) configuration still registers all of them — the tool-surface-reduction
+      # analogue of the check just above. Needs `mcp` installed to import codecalc.server,
+      # which is why it lives here rather than the stdlib-only ci-security gates.
+      - name: tool groups (CODECALC_TOOLS invariant)
+        run: uv run --no-sync python scripts/check_tool_groups.py
       # LAST STEP IN THE JOB, deliberately. The fork-bomb assertions are the only
       # destructive thing here: they drive the process count to the limit, and on
       # a 3-core macOS runner the reaping is slow enough that the NEXT step's
