@@ -400,14 +400,77 @@ else:
         "except OSError as e:\n"
         "    print('blocked', e.errno)\n",
         no_net=True, timeout=25)
-    net_unenforced = any("no_net" in u for u in (net.get("unenforced") or []))
-    if net_unenforced:
+    net_unenforced_list = net.get("unenforced") or []
+    # Two different claims live in this array now. The shim being genuinely
+    # UNAVAILABLE (main.rs's/windows.rs's own markers — no blocking happened
+    # at all) is not the same as the shim being APPLIED but only best-effort
+    # (executor.py's own disclosure, E-1/THE-902 below) — only the first
+    # should skip the "did it actually block" assertion.
+    shim_absent = any(u in net_unenforced_list for u in
+                       ("no_net_unavailable_on_windows",
+                        "no_net_requested_but_no_shim_available"))
+    if shim_absent:
         check("--no-net says so when it cannot be applied", True,
-              f"-> {net.get('unenforced')}")
+              f"-> {net_unenforced_list}")
     else:
-        check("--no-net blocks egress when it does NOT report itself unenforced",
+        check("--no-net blocks egress when the shim was applied",
               "EGRESS REACHED" not in (net.get("stdout") or ""),
               f"-> {(net.get('stdout') or '').strip()[:60]!r}")
+        # E-1 (THE-902): blocknet.c's LD_PRELOAD/dyld shim is a bypassable
+        # symbol interposition, not a kernel egress block, so the result must
+        # say so whenever it is what satisfied no_net — never a silent
+        # unenforced=[] that reads as "fully enforced".
+        check("  ...and discloses the shim is best-effort, not unenforced=[]",
+              executor._NO_NET_BEST_EFFORT in net_unenforced_list,
+              f"-> {net_unenforced_list}")
+
+    # ── E-1 (THE-902): the shim is bypassable via ctypes/dlsym ─────────────
+    # blocknet.c intercepts socket()/connect() via ELF symbol interposition,
+    # which only covers calls that resolve those names through the ordinary
+    # dynamic symbol table. `ctypes.CDLL(find_library("c")).socket` pulls the
+    # symbol out of libc's OWN table via dlsym on a specific handle, which
+    # does not consult LD_PRELOAD's global-scope override for that lookup —
+    # so it reaches a real socket() even with the shim loaded. Verified live
+    # during the THE-900 audit (socket.socket(AF_INET) -> EACCES(13), but
+    # ctypes.CDLL(find_library("c")).socket(2, 1, 0) -> a working fd, same
+    # process, same no_net=True). Guarded to skip cleanly rather than fail
+    # where the probe cannot mean anything: no rust backend, no shim applied,
+    # or a platform this bypass was not verified on.
+    if not IS_LINUX:
+        skip("ctypes/dlsym no_net bypass (E-1)",
+             f"verified on Linux; not probed on {sys.platform}")
+    elif shim_absent:
+        skip("ctypes/dlsym no_net bypass (E-1)",
+             f"the shim itself was not applied on this run: {net_unenforced_list}")
+    else:
+        bypass = executor.execute(
+            "python3",
+            "import ctypes, ctypes.util, os\n"
+            "libc = ctypes.CDLL(ctypes.util.find_library('c'), use_errno=True)\n"
+            "fd = libc.socket(2, 1, 0)\n"
+            "if fd >= 0:\n"
+            "    print('BYPASS', fd)\n"
+            "    os.close(fd)\n"
+            "else:\n"
+            "    print('BLOCKED', ctypes.get_errno())\n",
+            no_net=True, timeout=15)
+        bypass_stdout = bypass.get("stdout") or ""
+        if "BLOCKED" in bypass_stdout:
+            # libc's own socket() refused too: nothing to demonstrate a
+            # bypass with on this host (e.g. a network namespace with no
+            # AF_INET support at all). Not the class of failure this test
+            # exists to catch, so skip rather than fail.
+            skip("ctypes/dlsym no_net bypass (E-1)",
+                 f"libc socket() itself failed on this host: {bypass_stdout!r}")
+        else:
+            check("ctypes/dlsym socket() bypasses the no_net shim (E-1)",
+                  "BYPASS" in bypass_stdout,
+                  f"-> stdout={bypass_stdout.strip()!r} "
+                  f"stderr={(bypass.get('stderr') or '')[:200]!r}")
+            check("  ...and the result DISCLOSES no_net as best-effort, "
+                  "not unenforced=[]",
+                  executor._NO_NET_BEST_EFFORT in (bypass.get("unenforced") or []),
+                  f"-> {bypass.get('unenforced')}")
 
     # ── the env allowlist must not make one platform second-class ──────────
     # It held 11 POSIX-oriented names and no Windows plumbing, so a process

@@ -264,9 +264,16 @@ network-blocking shim. Each has a security-relevant design decision:
    forwarded to the real call. It used to refuse every family, which took out
    `AF_UNIX` local IPC — no network involved — and broke ordinary libraries
    under a flag that says "no net". Built by `executor/build.rs` so it cannot
-   lag its source. Best-effort: affects
-   dynamically-linked programs only; statically-linked binaries ignore
-   LD_PRELOAD. Real isolation for multi-tenant still requires containers.
+   lag its source. Best-effort in two ways: it affects dynamically-linked
+   programs only (statically-linked binaries ignore LD_PRELOAD), and even a
+   dynamically-linked program can route around the interposed symbol —
+   `ctypes`/`dlsym` pulling `socket()` straight out of libc, or a raw
+   syscall, never resolves the name this shim replaces. Verified live:
+   `ctypes.CDLL(find_library("c")).socket(2, 1, 0)` returns a working fd with
+   the shim loaded and `no_net=True` (E-1, THE-902) — `executor.py`'s result
+   now discloses this in `unenforced` whenever the shim is what satisfied
+   `no_net`, rather than reporting an empty list. Real isolation for
+   multi-tenant still requires containers or a kernel-level egress block.
 5. **Verdicts**: MLE is a heuristic (signal + RSS ≥ 50% of memory cap); the
    rlimits kill without a definitive "memory" flag. Documented as heuristic.
 6. **Streaming** (`execute_code_stream`): tails `run.out` in a temp workdir;
@@ -406,10 +413,15 @@ network-blocking shim. Each has a security-relevant design decision:
 
 1. **No network isolation.** `--no-net` exists and blocks `AF_INET`/`AF_INET6`
    via an `LD_PRELOAD`/`DYLD_INSERT_LIBRARIES` shim, leaving `AF_UNIX` alone —
-   but it is a speed bump, not isolation: it reaches dynamically-linked programs
-   only, macOS strips it for SIP-protected and hardened binaries, and Windows
-   has no equivalent (reported as `no_net_unavailable_on_windows`). Without the
-   flag, executed code reaches the network (DNS, outbound HTTP) freely. For a
+   but it is a speed bump, not isolation: it is a userspace SYMBOL shim, so it
+   reaches only calls that resolve `socket()`/`connect()` through the ordinary
+   dynamic symbol table — a dynamically-linked program using `ctypes`/`dlsym`
+   or a raw syscall bypasses it entirely (verified live, E-1/THE-902 —
+   `unenforced` now discloses this whenever the shim is what satisfied
+   `no_net`, rather than reporting `no_net` as fully applied), macOS strips it
+   for SIP-protected and hardened binaries, and Windows has no equivalent
+   (reported as `no_net_unavailable_on_windows`). Without the flag, executed
+   code reaches the network (DNS, outbound HTTP) freely. For a
    single-operator local tool this is acceptable and
    arguably desirable; for multi-tenant or internet-facing exposure, the
    executor must move behind a container with `--network=none` or a
