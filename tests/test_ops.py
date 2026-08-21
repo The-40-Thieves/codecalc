@@ -10,13 +10,16 @@ size-based rotation for the audit log so it does not grow unbounded either.
 `cleanup` is the dangerous half — it `rm`s directories a SEPARATE CLI process
 did not create, with none of sessions.py's in-memory bookkeeping to consult.
 Most of this file is therefore SAFETY tests: dry-run removes nothing; write
-removes ONLY a directory carrying the on-disk expiry marker (or old enough
-and session-shaped, per the age threshold); a symlink at SESSION_ROOT's top
-level is refused, never followed; anything outside SESSION_ROOT — sibling
-directories, a symlink's target — is untouched regardless of what is inside
-it; and a directory touched within the last few minutes is NEVER removed
-even carrying the marker, because a live server this CLI process cannot see
-could still be using it.
+removes ONLY a directory carrying the on-disk expiry marker by default (the
+marker-less, age-based path is opt-in via `include_unmarked=`); a symlink at
+SESSION_ROOT's top level is refused, never followed; anything outside
+SESSION_ROOT — sibling directories, a symlink's target — is untouched
+regardless of what is inside it; a directory touched within the last few
+minutes is never removed; and — fix-round CRITICAL, sections 4b/4c below —
+directory MTIME is NOT trusted as liveness: a session whose worker is
+GENUINELY alive is refused via its on-disk pid lockfile even when its
+directory looks old and abandoned by every other signal, which an
+adversarial review proved was not true of an earlier version of this file.
 
 Standalone runner (check()/FAILS/sys.exit), no pytest — the repo convention.
 """
@@ -82,13 +85,21 @@ def _mkdir_session(root: pathlib.Path, name: str, *, content: bytes = b"",
                    marker: bool = False, age_seconds: float | None = None) -> pathlib.Path:
     """Build a fake session directory directly on disk (no sessions.start()
     — these tests are about a directory tree cleanup() finds cold, exactly
-    as a separate CLI process would)."""
+    as a separate CLI process would).
+
+    Both files are written with `write_bytes`, never `write_text`: THE-898
+    Windows CI failed here first — `write_text`'s default text-mode newline
+    translation turns an embedded `\\n` into `\\r\\n` on Windows, so a marker
+    written with `write_text("reaped (test)\\n")` is 15 bytes there and 14
+    everywhere else. `write_bytes` never translates, so the marker's
+    on-disk size is the same fixed number of bytes on every platform.
+    """
     d = root / name
     d.mkdir(parents=True)
     if content:
         (d / "data.bin").write_bytes(content)
     if marker:
-        (d / sessions._EXPIRED_MARKER_NAME).write_text("reaped (test)\n", encoding="utf-8")
+        (d / sessions._EXPIRED_MARKER_NAME).write_bytes(b"reaped (test)\n")
     if age_seconds is not None:
         stamp = time.time() - age_seconds
         for p in [d, *d.rglob("*")]:
@@ -96,12 +107,21 @@ def _mkdir_session(root: pathlib.Path, name: str, *, content: bytes = b"",
     return d
 
 
-#: The exact byte length of the marker text `_mkdir_session` writes, so size
-#: assertions below account for it rather than assuming a session's usage is
-#: only its `data.bin` — `_session_dir_size` correctly counts EVERY regular
-#: file in the workspace, the marker included, and a test that ignored that
-#: would be asserting the wrong number rather than testing the real one.
-_MARKER_BYTES = len(b"reaped (test)\n")
+def _dir_actual_bytes(d: pathlib.Path) -> int:
+    """Sum the ACTUAL on-disk `stat().st_size` of every regular file under
+    `d` — ground truth for a byte-count assertion below, computed here
+    independently of `sessions._iter_regular_files`/`_session_dir_size`
+    (even though it walks the same tree) so the assertion is a real check
+    against the filesystem rather than the code checking itself.
+
+    Call this BEFORE any assertion that reads it, and before `cleanup`
+    might have removed the directory it names — there is nothing left to
+    stat afterwards. Never assume a size from the length of a Python
+    string/bytes object handed to a write call instead: see
+    `_mkdir_session`'s own docstring for why that assumption broke on
+    Windows CI.
+    """
+    return sum(p.stat().st_size for p in d.rglob("*") if p.is_file())
 
 
 # ── 1. status(): read-only, creates nothing ─────────────────────────────────
@@ -129,22 +149,27 @@ with _isolated_root() as (root, tmp):
     fresh = _mkdir_session(root, "python3-freshaaa", content=b"x" * 100)
     old = _mkdir_session(root, "python3-oldbbb", content=b"y" * 250, marker=True,
                          age_seconds=2 * 86400)
+    # Ground truth from the ACTUAL on-disk sizes — see _dir_actual_bytes'
+    # docstring for why this must never be assumed from content length.
+    fresh_bytes = _dir_actual_bytes(fresh)
+    old_bytes = _dir_actual_bytes(old)
     rep = ops.status_report()
     check("status counts both session directories",
           rep["session_count"] == 2, f"-> {rep['session_count']}")
     by_id = {s["session_id"]: s for s in rep["sessions"]}
     check("the fresh session's usage matches its actual bytes on disk",
-          by_id["python3-freshaaa"]["usage_bytes"] == 100)
+          by_id["python3-freshaaa"]["usage_bytes"] == fresh_bytes,
+          f"-> {by_id['python3-freshaaa']['usage_bytes']} vs {fresh_bytes}")
     check("the marked session's usage matches its actual bytes on disk "
           "(data.bin + the marker file itself, both real files)",
-          by_id["python3-oldbbb"]["usage_bytes"] == 250 + _MARKER_BYTES,
-          f"-> {by_id['python3-oldbbb']['usage_bytes']}")
+          by_id["python3-oldbbb"]["usage_bytes"] == old_bytes,
+          f"-> {by_id['python3-oldbbb']['usage_bytes']} vs {old_bytes}")
     check("only the marked session is reported idle-expired",
           rep["idle_expired_session_ids"] == ["python3-oldbbb"])
     check("the fresh session is NOT reported idle-expired",
           by_id["python3-freshaaa"]["idle_expired"] is False)
     check("global_usage_bytes sums both sessions",
-          rep["global_usage_bytes"] == 100 + 250 + _MARKER_BYTES,
+          rep["global_usage_bytes"] == fresh_bytes + old_bytes,
           f"-> {rep['global_usage_bytes']}")
 
 
@@ -162,6 +187,7 @@ with _isolated_root() as (root, tmp):
     outside_sibling = tmp / "outside-sibling-with-marker"
     _mkdir_session(tmp, "outside-sibling-with-marker", content=b"z" * 999,
                    marker=True, age_seconds=3 * 86400)
+    old_bytes = _dir_actual_bytes(old)  # ground truth, computed from real stat() sizes
 
     rep = ops.cleanup(write=False)
     check("dry-run reports write=False", rep["write"] is False)
@@ -179,8 +205,8 @@ with _isolated_root() as (root, tmp):
           rep["eligible_count"] == 1, f"-> {rep['eligible_count']}")
     check("dry-run: the eligible candidate's size matches the expired dir's bytes "
           "(data.bin + the marker file)",
-          rep["total_candidate_bytes"] == 512 + _MARKER_BYTES,
-          f"-> {rep['total_candidate_bytes']}")
+          rep["total_candidate_bytes"] == old_bytes,
+          f"-> {rep['total_candidate_bytes']} vs {old_bytes}")
     by_id = {c["session_id"]: c for c in rep["candidates"]}
     check("the fresh dir is reported ineligible (active-session recency floor)",
           by_id["python3-freshaaa"]["eligible"] is False)
@@ -208,6 +234,7 @@ with _isolated_root() as (root, tmp):
     # recency floor overrides the marker: touched just now, must survive
     recent_but_marked = _mkdir_session(root, "python3-recentccc", content=b"c" * 77,
                                        marker=True)
+    old_bytes = _dir_actual_bytes(old)  # ground truth, BEFORE removal
 
     rep = ops.cleanup(write=True)
     check("write=True reports write=True", rep["write"] is True)
@@ -224,12 +251,123 @@ with _isolated_root() as (root, tmp):
           [r["session_id"] for r in rep["removed"]] == ["python3-oldbbb"],
           f"-> {rep['removed']}")
     check("--write reports the correct bytes reclaimed",
-          rep["total_reclaimed_bytes"] == 512 + _MARKER_BYTES,
-          f"-> {rep['total_reclaimed_bytes']}")
+          rep["total_reclaimed_bytes"] == old_bytes,
+          f"-> {rep['total_reclaimed_bytes']} vs {old_bytes}")
     check("--write reports no removal errors on a clean run",
           rep["removal_errors"] == [])
     check("SESSION_ROOT itself still exists after cleanup",
           root.is_dir())
+
+
+# ── 4b. THE-898 CRITICAL: a REAL live-pid lock beats a stale directory mtime ─
+# Direct reproduction of the adversarial-review finding: a directory whose
+# mtime looks abandoned (backdated, exactly the shape a genuinely-idle
+# in-memory-only worker leaves) must NOT be removed while its liveness
+# lockfile names a pid that is actually still running — and must become
+# removable the moment that pid is confirmed dead. A REAL child process
+# stands in for "a live codecalc server", not a guessed pid number, so this
+# is a genuine repro rather than a mocked assertion.
+with _isolated_root() as (root, tmp):
+    root.mkdir(parents=True)
+    _stamp = time.time() - 2 * 86400
+    live_proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    try:
+        locked_dir = _mkdir_session(root, "python3-liveworker", content=b"s" * 40,
+                                    age_seconds=2 * 86400)  # stale mtime — the exact bug shape
+        (locked_dir / sessions._LOCK_FILE_NAME).write_bytes(str(live_proc.pid).encode("ascii"))
+        # Writing the LOCK FILE for the first time creates a NEW directory
+        # entry, which — unlike an in-place overwrite — DOES bump the parent
+        # directory's mtime (exactly the asymmetry this whole fix is about).
+        # Re-backdate after it so the directory is stale by the time cleanup
+        # looks at it, matching the real bug shape rather than accidentally
+        # defeating the recency floor with this test's own setup.
+        os.utime(locked_dir, (_stamp, _stamp))
+
+        check("sessions._lock_owner_alive() reports the REAL live pid as alive",
+              sessions._lock_owner_alive(locked_dir) is True)
+
+        dry = ops.cleanup(write=False, include_unmarked=True)  # the most permissive mode
+        by_id = {c["session_id"]: c for c in dry["candidates"]}
+        check("CRITICAL repro: a stale-mtime dir with a LIVE-pid lock is NOT eligible "
+              "even under --include-unmarked",
+              by_id["python3-liveworker"]["eligible"] is False
+              and "live" in by_id["python3-liveworker"]["reason"],
+              f"-> {by_id.get('python3-liveworker')}")
+
+        write_rep = ops.cleanup(write=True, include_unmarked=True)
+        check("CRITICAL repro: --write --include-unmarked does NOT delete a "
+              "genuinely-live session's workspace",
+              locked_dir.is_dir())
+        check("...and it is not reported removed",
+              "python3-liveworker" not in
+              [r["session_id"] for r in write_rep["removed"]])
+    finally:
+        live_proc.terminate()
+        live_proc.wait(timeout=10)
+
+    # Same directory, same stale mtime — but now the lock names a pid this
+    # test KNOWS is dead (the process above, confirmed exited via wait()
+    # above). Nothing else about the directory changed.
+    dead_pid = live_proc.pid
+    (locked_dir / sessions._LOCK_FILE_NAME).write_bytes(str(dead_pid).encode("ascii"))
+    # This second write OVERWRITES an existing filename (O_TRUNC in place),
+    # which should NOT bump the directory's mtime — but re-backdate anyway
+    # rather than lean on that assumption holding identically across every
+    # filesystem this suite runs on; the point of this section is the lock
+    # check, not a second proof of the mtime asymmetry.
+    os.utime(locked_dir, (_stamp, _stamp))
+    check("sessions._lock_owner_alive() reports a STALE (dead-pid) lock as not alive",
+          sessions._lock_owner_alive(locked_dir) is False)
+
+    dry2 = ops.cleanup(write=False, include_unmarked=True)
+    by_id2 = {c["session_id"]: c for c in dry2["candidates"]}
+    check("a stale (dead-pid) lock does NOT block eligibility",
+          by_id2["python3-liveworker"]["eligible"] is True,
+          f"-> {by_id2.get('python3-liveworker')}")
+
+    write_rep2 = ops.cleanup(write=True, include_unmarked=True)
+    check("once the lock's pid is confirmed dead, --write --include-unmarked "
+          "DOES reclaim the directory",
+          not locked_dir.exists())
+
+
+# ── 4c. THE-898 CRITICAL, integration: sessions.start() writes/removes the
+# lock for real, and cleanup honours it end to end (no manually-crafted
+# lockfile — this exercises the actual _write_lock_file/_remove_lock_file
+# call sites in sessions.py: start()'s worker branch, and stop()).
+with _isolated_root() as (root, tmp):
+    started = sessions.start("python3")
+    check("sessions.start('python3') succeeds (needed for this integration check)",
+          started.get("ok") is True, f"-> {started}")
+    if started.get("ok"):
+        sid = started["session_id"]
+        try:
+            d = sessions._session_dir(sid)
+            lock_path = d / sessions._LOCK_FILE_NAME
+            check("a WORKER session gets a liveness lockfile at start()",
+                  lock_path.is_file())
+            check("the lockfile names THIS process's own pid (the server)",
+                  lock_path.read_text(encoding="utf-8").strip() == str(os.getpid()))
+            check("sessions._lock_owner_alive() reports this session's worker as live",
+                  sessions._lock_owner_alive(d) is True)
+
+            # Reproduce the bug shape directly: backdate the DIRECTORY (never
+            # touched by pure in-memory worker activity) while the worker
+            # itself is genuinely still running.
+            stamp = time.time() - 2 * 86400
+            os.utime(d, (stamp, stamp))
+            rep = ops.cleanup(write=True, include_unmarked=True)  # most aggressive mode
+            by_id = {c["session_id"]: c for c in rep["candidates"]}
+            check("CRITICAL: an ACTUALLY-live worker's session (stale dir mtime) is "
+                  "refused even by cleanup --write --include-unmarked",
+                  by_id[sid]["eligible"] is False, f"-> {by_id.get(sid)}")
+            check("...and its workspace genuinely still exists on disk", d.is_dir())
+        finally:
+            stopped = sessions.stop(sid)
+        check("sessions.stop() reports a clean teardown",
+              stopped.get("ok") is True and stopped.get("deleted") is True,
+              f"-> {stopped}")
+        check("after stop(), the directory (and its lock) is gone", not d.exists())
 
 
 # ── 5. audit log rotation: caps the live file, keeps a bounded history ─────

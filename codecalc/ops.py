@@ -22,20 +22,67 @@ count toward the tool-surface gates this module has no business touching.
 SAFETY, cleanup() specifically: this runs as a SEPARATE process from any
 server that may be using SESSION_ROOT right now, so it has none of
 sessions.py's in-memory bookkeeping (`_workers`, `_SESSION_DIR_IDENTITY`,
-`_LAST_ACTIVITY`) to consult — only what is on disk. Every removal decision
-is therefore keyed on the same durable signals `sessions.py` itself falls
-back to when its own in-memory cache has nothing (the expiry marker,
-mtime), plus a hard recency floor (`_RECENT_MTIME_GUARD_SECONDS`) that
-applies regardless of marker or age: a directory touched in the last few
-minutes is never a cleanup candidate, because a session using it could be
-live in a server this process cannot see. Removal itself goes through
-`executor._rmtree_checked` with the identity recorded at scan time,
-re-verified immediately before the delete — the exact discipline
-`sessions.stop()` applies to its own workspace teardown, just without a
-creation-time record to compare against (there is none to have, in a
-separate process) — so a directory swapped out from under a stale scan is
-refused rather than deleted, same as it would be for a live server's own
-`stop()`.
+`_LAST_ACTIVITY`) to consult — only what is on disk.
+
+DIRECTORY MTIME IS NOT A LIVENESS SIGNAL — fix-round CRITICAL, proven by an
+adversarial review that had an earlier version of this module delete a
+genuinely-live worker session's workspace. This module's own first
+docstring claimed "a session actively in use touches its workspace far
+more often than [the recency floor]" — that claim is FALSE and the review
+disproved it live: a REPL worker doing purely in-memory work
+(`x = compute()`) touches no file at all, and even a call that DOES write
+touches the workspace without necessarily aging the DIRECTORY —
+`sessions._write_nofollow`'s O_CREAT|O_TRUNC on an EXISTING filename
+overwrites in place, which bumps only that file's own mtime, not its
+parent directory's (a directory's mtime changes when entries are
+added/removed/renamed, not when one's contents change). A worker that has
+run the same script against the same output filename for days is, by
+directory mtime alone, indistinguishable from one nobody has touched since
+it started.
+
+The REAL liveness signal is `sessions._lock_owner_alive`: a per-WORKER-
+session lockfile (`sessions._LOCK_FILE_NAME`) written by the server at the
+moment it spawns a worker, naming the server's own pid, and released the
+moment that worker is actually gone (reaped or stopped — see
+`sessions._remove_lock_file`'s call sites). `cleanup` checks this for
+EVERY candidate, marker-based or age-based, before either path's own
+reasoning runs: a lockfile naming a still-live pid refuses the directory
+outright, independent of mtime, age threshold, or even the expiry marker.
+This is what makes the guarantee "a session any running codecalc server is
+using is never deleted" true for worker sessions.
+
+Workspace-only sessions (no worker, so no lockfile is ever written for
+them — see `_WORKER_LANGS`) have no such proof available, which is why the
+marker-less, age-based candidate path is OPT-IN (`include_unmarked=`/
+`--include-unmarked`), not part of the default scan: without a worker to
+lock, directory mtime plus a generous age threshold plus the hard recency
+floor (`_RECENT_MTIME_GUARD_SECONDS`, applying regardless of marker, age,
+or lock) is the best available signal, and it is a heuristic, not a proof
+— an operator opts into it deliberately rather than getting it by default.
+Marker-based (idle-expired) candidates need no such caveat: a marker only
+ever exists because sessions.py's own idle-TTL reaper already closed that
+specific worker and released its lock (irreversibly — session ids are
+never reused), so a marked directory has no live owner to protect against
+by construction, independent of the lockfile check that still runs
+against it anyway as defense in depth.
+
+Removal itself goes through `executor._rmtree_checked` with the identity
+recorded at scan time, re-verified immediately before the delete — the
+same discipline `sessions.stop()` applies to its own workspace teardown,
+just without a creation-time record to compare against (there is none to
+have, in a separate process) — so a directory swapped out from under a
+stale scan is refused rather than deleted. RESIDUAL (accepted, no code
+change; same shape `sessions.stop()` already carries): inode reuse between
+the scan-time identity capture and the delete is a TOCTOU window this
+cannot structurally close without a creation-time record, same as
+`executor._rmtree_checked`'s own docstring already states for `stop()`.
+
+WARNING for an operator pointing `CODECALC_SESSION_ROOT` somewhere new:
+`cleanup --write` is safe only while SESSION_ROOT is codecalc-private.
+`sessions._SAFE_NAME` (the "looks like a session dir" gate for the
+age-based path) matches almost any plain alphanumeric/`-`/`_` directory
+name — it is not a strong filter. Never point SESSION_ROOT at a shared or
+already-populated directory.
 """
 
 from __future__ import annotations
@@ -45,16 +92,20 @@ import time
 from pathlib import Path
 
 #: THE-898: the mtime floor below which a directory is NEVER a cleanup
-#: candidate, marker or no marker, age threshold or no age threshold. A
-#: session actively in use touches its workspace (session_run, a worker's
-#: own writes, session_write_file) far more often than this, and this
-#: process — running as a standalone CLI invocation — has no way to ask a
-#: live server "is anyone using this right now". Erring toward "leave it"
-#: is the only safe default for a command that deletes directories it did
-#: not create. Fixed, not an env knob: THE-894's own per-artifact/session
-#: caps are configurable because an operator may legitimately want a
-#: bigger or smaller BUDGET; this is a minimum safety margin, and the
-#: right value for it does not vary by deployment the way a quota does.
+#: candidate, marker or no marker, age threshold or no age threshold, LOCK
+#: or no lock. A BACKSTOP, not a liveness proof — see the module docstring's
+#: "DIRECTORY MTIME IS NOT A LIVENESS SIGNAL" section for why an in-memory-
+#: only worker or an in-place file overwrite never bumps a directory's
+#: mtime at all, which this floor cannot see through. It exists for the
+#: cases the lockfile check cannot cover (a workspace-only session, which
+#: never gets a lock) and as a second, independent guard even where the
+#: lock check already applies — erring toward "leave it" wherever any one
+#: signal is ambiguous is the only safe default for a command that deletes
+#: directories it did not create. Fixed, not an env knob: THE-894's own
+#: per-artifact/session caps are configurable because an operator may
+#: legitimately want a bigger or smaller BUDGET; this is a minimum safety
+#: margin, and the right value for it does not vary by deployment the way a
+#: quota does.
 _RECENT_MTIME_GUARD_SECONDS = 300.0
 
 #: THE-898: how old (and untouched) a MARKER-LESS, session-shaped directory
@@ -163,10 +214,22 @@ def status_report() -> dict:
     }
 
 
-def _cleanup_candidates() -> list[dict]:
+def _cleanup_candidates(*, include_unmarked: bool = False) -> list[dict]:
     """Every direct child of SESSION_ROOT `cleanup()` would consider,
     classified. `dry_run` and `write` share this ONE scan so the two can
     never disagree about what qualifies — see the module docstring.
+
+    `include_unmarked=False` (the default `cleanup()` also defaults to)
+    considers ONLY marker-based (idle-expired) candidates — the path that
+    needs no age heuristic because a marker only exists once sessions.py's
+    own idle-TTL reaper has already closed that worker for good. Passing
+    `include_unmarked=True` additionally considers marker-less,
+    session-shaped directories past the age threshold — see the module
+    docstring for why that path is opt-in rather than default.
+
+    Every candidate, marker-based or age-based, is FIRST checked against
+    `sessions._lock_owner_alive` — a live worker-session lock refuses the
+    directory outright before either path's own reasoning runs.
 
     Each entry carries `eligible` (bool) and `reason` (str); an eligible
     entry additionally carries `size_bytes`, `age_seconds`, and an internal
@@ -228,16 +291,33 @@ def _cleanup_candidates() -> list[dict]:
                                   f"{_RECENT_MTIME_GUARD_SECONDS:g}s active-session floor")})
             continue
 
+        # THE-898 fix-round CRITICAL: the liveness PROOF, checked before
+        # either eligibility path below runs — see the module docstring's
+        # "DIRECTORY MTIME IS NOT A LIVENESS SIGNAL" section. A live
+        # worker-session lock refuses this directory outright, full stop,
+        # regardless of marker or age.
+        if sessions._lock_owner_alive(candidate_path):
+            out.append({"session_id": name, "path": str(candidate_path), "eligible": False,
+                        "reason": "refused: a live codecalc server process still holds "
+                                  "this session's worker lock"})
+            continue
+
         try:
             marker_st = (candidate_path / sessions._EXPIRED_MARKER_NAME).lstat()
             has_marker = stat.S_ISREG(marker_st.st_mode)
         except OSError:
             has_marker = False
-        looks_like_session = bool(sessions._SAFE_NAME.match(name))
 
         if has_marker:
             reason = "idle-expired (on-disk marker present)"
-        elif looks_like_session and age >= age_threshold:
+        elif not include_unmarked:
+            out.append({"session_id": name, "path": str(candidate_path), "eligible": False,
+                        "reason": "skipped: no expiry marker (pass include_unmarked=True / "
+                                  "--include-unmarked to also consider old, unmarked, "
+                                  "session-shaped directories — see the module docstring "
+                                  "for why that path is opt-in)"})
+            continue
+        elif bool(sessions._SAFE_NAME.match(name)) and age >= age_threshold:
             reason = (f"abandoned (untouched {age / 3600:.1f}h, over the "
                       f"{age_threshold / 3600:g}h threshold, "
                       f"{CLEANUP_ABANDONED_AGE_HOURS_ENV})")
@@ -258,7 +338,7 @@ def _cleanup_candidates() -> list[dict]:
     return out
 
 
-def cleanup(write: bool = False) -> dict:
+def cleanup(write: bool = False, include_unmarked: bool = False) -> dict:
     """Reclaim disk from abandoned/idle-expired session directories under
     SESSION_ROOT.
 
@@ -270,14 +350,24 @@ def cleanup(write: bool = False) -> dict:
     from under this scan (the same rename-race `_rmtree_checked`'s own
     docstring describes) is refused rather than deleted.
 
-    See the module docstring for what makes a directory "eligible" at all —
-    the on-disk `.codecalc-session-expired` marker, or a session-shaped name
-    past a generous age threshold — and the hard recency floor that
-    overrides both.
+    `include_unmarked=False` (the default) considers ONLY the on-disk
+    `.codecalc-session-expired` marker — the path with no residual risk,
+    since a marker only exists once sessions.py's own idle-TTL reaper has
+    already closed and released that worker for good. `include_unmarked=True`
+    additionally considers session-shaped, marker-less directories past a
+    generous age threshold — see the module docstring's "DIRECTORY MTIME IS
+    NOT A LIVENESS SIGNAL" section for why that path is opt-in rather than
+    default. EVERY candidate on EITHER path is first checked against
+    `sessions._lock_owner_alive`: a live worker-session lock refuses the
+    directory outright before either path's own reasoning runs, which is
+    what makes "a session any running codecalc server is using is never
+    deleted" true for worker sessions specifically (see the module
+    docstring for the case that check does not cover: a workspace-only
+    session, which never holds a lock).
     """
     from . import executor, sessions
 
-    candidates = _cleanup_candidates()
+    candidates = _cleanup_candidates(include_unmarked=include_unmarked)
     eligible = [c for c in candidates if c["eligible"]]
     total_candidate_bytes = sum(c["size_bytes"] for c in eligible)
 
@@ -303,6 +393,7 @@ def cleanup(write: bool = False) -> dict:
     return {
         "ok": True,
         "write": write,
+        "include_unmarked": include_unmarked,
         "session_root": str(sessions.SESSION_ROOT.resolve()),
         # `_identity` is this module's own bookkeeping, not a caller-facing
         # field — stripped here rather than never collected, so eligible/

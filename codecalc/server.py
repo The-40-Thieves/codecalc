@@ -1720,23 +1720,33 @@ def _status(as_json: bool = False) -> int:
     return 0
 
 
-def _cleanup_cmd(write: bool = False) -> int:
-    """`codecalc cleanup [--dry-run|--write]`: reclaim disk from abandoned or
-    idle-expired session workspaces under SESSION_ROOT.
+def _cleanup_cmd(write: bool = False, include_unmarked: bool = False) -> int:
+    """`codecalc cleanup [--dry-run|--write] [--include-unmarked]`: reclaim
+    disk from abandoned or idle-expired session workspaces under
+    SESSION_ROOT.
 
     `--dry-run` is the DEFAULT (i.e. `write=False` unless `--write` was
     passed): lists what would be removed and reclaims nothing. `--write`
-    actually removes. See ops.cleanup for the removal safety discipline
-    (identity-checked, symlink-refusing, recency-floored).
+    actually removes. Without `--include-unmarked`, only the on-disk
+    `.codecalc-session-expired` marker makes a directory a candidate at
+    all — the path with no residual risk. `--include-unmarked` additionally
+    considers old, marker-less, session-shaped directories, a heuristic
+    with real residual risk for workspace-only sessions (no worker, so no
+    liveness lock ever protects them) — see ops.py's module docstring
+    before turning this on, and see it for the removal safety discipline
+    generally (identity-checked, symlink-refusing, recency-floored, and —
+    fix-round CRITICAL — liveness-lock-checked so a session any running
+    codecalc server is using is never deleted).
 
     Always exits 0: a dry run finding nothing to reclaim, or a write that
     reclaimed nothing, are both successful runs of the command, not
     failures of it. `removal_errors` in the JSON (or the printed lines
     above) is how a caller sees that something was refused.
     """
-    rep = ops.cleanup(write=write)
-    print(f"codecalc cleanup  ({rep['session_root']}, "
-          f"{'--write' if write else '--dry-run (default; pass --write to actually remove)'})")
+    rep = ops.cleanup(write=write, include_unmarked=include_unmarked)
+    mode = "--write" if write else "--dry-run (default; pass --write to actually remove)"
+    scope = "+ --include-unmarked" if include_unmarked else "(marker-only; pass --include-unmarked to also sweep old unmarked dirs)"
+    print(f"codecalc cleanup  ({rep['session_root']}, {mode}, {scope})")
     for c in rep["candidates"]:
         if c["eligible"]:
             label = "removed" if write and any(
@@ -1791,7 +1801,8 @@ def main() -> None:
             "                                      connection; NAME one of claude-desktop,\n"
             "                                      claude-code, cursor, vscode, zed\n"
             "  status [--json]                    session/workspace operational snapshot (read-only)\n"
-            "  cleanup [--dry-run|--write]        reclaim disk from abandoned session workspaces\n"
+            "  cleanup [--dry-run|--write] [--include-unmarked]\n"
+            "                                      reclaim disk from abandoned session workspaces\n"
             "  serve-strict [ARGS]                authenticated HTTP execution service\n"
             "  serve-http [--host H] [--port P]   MCP over streamable HTTP\n"
             "  -h, --help                         show this message and exit\n"
@@ -1835,7 +1846,8 @@ def main() -> None:
         # --dry-run is the default (write=False); --write is the one flag
         # that turns it on. A caller passing both gets --write, the same
         # "the stronger flag wins" rule --deep/--json already follow above.
-        raise SystemExit(_cleanup_cmd(write="--write" in rest))
+        raise SystemExit(_cleanup_cmd(write="--write" in rest,
+                                      include_unmarked="--include-unmarked" in rest))
     if len(sys.argv) > 1 and sys.argv[1] == "serve-strict":
         # THE-830: the authenticated `/v1` strict execution service — the server
         # half of RemoteStrictExecutionProvider. Its own module and stdlib
