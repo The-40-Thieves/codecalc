@@ -43,11 +43,63 @@ def runtime_path() -> str:
             or DEFAULT_RUNTIME_PATH)
 
 
-def _c(compile_: str | None, run: str) -> dict:
-    """Build a registry entry from shell strings (compile may be None)."""
+#: The three RELIABILITY tiers, orthogonal to RUNTIME_STATES below (THE-895).
+#:
+#: RUNTIME_STATES answers "did this machine resolve the command" — a fact
+#: about THIS HOST, recomputed on every probe. RELIABILITY_TIERS answers "how
+#: much has codecalc's own CI actually verified this language's toolchain
+#: works" — a fact about THE PROJECT, fixed per language until the evidence
+#: changes. The two can and do disagree: a review's own smoke test found the
+#: rust and csharp host toolchains FAILING on a machine where `rustc` and
+#: `dotnet` both resolved cleanly — `installed` was true and the toolchain was
+#: still broken. Resolution says nothing about that; only a real execution
+#: does, and codecalc's CI only really executes a couple of these languages.
+#:
+#:     tested        A CI job genuinely EXECUTES this language and asserts on
+#:                   its real output, on every PR. Evidence, not aspiration —
+#:                   scripts/check_runtime_tiers.py derives this set from the
+#:                   CI-wired source files themselves (test_python_sweep.py's
+#:                   WORKER_LANGS, contract_check.py's first CANDIDATES entry)
+#:                   rather than trusting a hand-maintained list that could
+#:                   drift from what CI actually runs.
+#:     best_effort   Declared and plausibly works on a normal install with the
+#:                   right toolchain present — codecalc ships a plan for it
+#:                   and a local smoke fixture exists (tests/test_smoke.py) —
+#:                   but no CI job runs it, so nothing would notice it
+#:                   silently breaking.
+#:     plan_only     A registry entry that has never been validated on any
+#:                   runner, anywhere, not even locally. Empty today: every
+#:                   declared language has at least a local smoke exercise.
+#:                   The tier exists so a FUTURE language added without one is
+#:                   forced to say so instead of quietly borrowing
+#:                   best_effort's implied "probably fine".
+#:
+#: Kept deliberately conservative on `tested`. contract_check.py's CANDIDATES
+#: list also names ruby/perl/php/lua/deno, but it picks the FIRST available
+#: candidate and python3 is unconditionally installed on every CI leg before
+#: that probe runs (actions/setup-python) — so those five are never actually
+#: the one exercised. A candidate CI never reaches is not evidence. `node`
+#: earns `tested` from a DIFFERENT harness: tests/test_python_sweep.py
+#: dynamically probes a real node worker session on every PR and asserts real
+#: stdout from it (state round-trips, a captured fd-1 escape) — not from
+#: contract_check.py, where it is equally a dead candidate.
+RELIABILITY_TIERS = ("tested", "best_effort", "plan_only")
+
+
+def _c(compile_: str | None, run: str, tier: str) -> dict:
+    """Build a registry entry from shell strings (compile may be None).
+
+    `tier` is a required argument, not a default: RELIABILITY_TIERS above is
+    the only definition of what the three values mean, and a call site must
+    not be able to add a language to the registry without taking a position
+    on how much codecalc has actually verified it works.
+    """
+    if tier not in RELIABILITY_TIERS:
+        raise ValueError(f"unknown reliability tier {tier!r}; must be one of {RELIABILITY_TIERS}")
     return {
         "compile": shlex.split(compile_) if compile_ else None,
         "run": shlex.split(run),
+        "tier": tier,
     }
 
 
@@ -149,38 +201,50 @@ def source_arg(language: str, path: str, *, windows: bool) -> str:
     return path
 
 
+#: python3 and node are the ONLY two languages a CI job actually executes and
+#: asserts real output from, on every PR — see RELIABILITY_TIERS above for the
+#: evidence trail and scripts/check_runtime_tiers.py for the gate that keeps
+#: this claim honest. Every other language below is `best_effort`: declared,
+#: with a local smoke fixture (tests/test_smoke.py), never exercised in CI.
 LANGUAGES: dict[str, dict] = {
     # ── interpreters ─────────────────────────────────────────────────────
-    "python3": _c(None, "python3 {file}"),
-    "node":    _c(None, "node {file}"),
-    "bun":     _c(None, "bun run {file}"),
-    "deno":    _c(None, "deno run {file}"),
-    "typescript": _c(None, "deno run {file}"),      # deno runs TS natively
-    "ruby":    _c(None, "ruby {file}"),
-    "php":     _c(None, "php {file}"),
-    "perl":    _c(None, "perl {file}"),
-    "lua":     _c(None, "lua {file}"),
-    "tcl":     _c(None, "tclsh {file}"),
-    "r":       _c(None, "Rscript {file}"),
-    "elixir":  _c(None, "elixir {file}"),
-    "erlang":  _c(None, "escript {file}"),
-    "bash":    _c(None, "bash {file}"),
-    "zsh":     _c(None, "zsh {file}"),
-    "mojo":    _c(None, "mojo run {file}"),
-    "swift":   _c(None, "swift {file}"),
+    "python3": _c(None, "python3 {file}", "tested"),
+    "node":    _c(None, "node {file}", "tested"),
+    "bun":     _c(None, "bun run {file}", "best_effort"),
+    "deno":    _c(None, "deno run {file}", "best_effort"),
+    "typescript": _c(None, "deno run {file}", "best_effort"),  # deno runs TS natively
+    "ruby":    _c(None, "ruby {file}", "best_effort"),
+    "php":     _c(None, "php {file}", "best_effort"),
+    "perl":    _c(None, "perl {file}", "best_effort"),
+    "lua":     _c(None, "lua {file}", "best_effort"),
+    "tcl":     _c(None, "tclsh {file}", "best_effort"),
+    "r":       _c(None, "Rscript {file}", "best_effort"),
+    "elixir":  _c(None, "elixir {file}", "best_effort"),
+    "erlang":  _c(None, "escript {file}", "best_effort"),
+    "bash":    _c(None, "bash {file}", "best_effort"),
+    "zsh":     _c(None, "zsh {file}", "best_effort"),
+    "mojo":    _c(None, "mojo run {file}", "best_effort"),
+    "swift":   _c(None, "swift {file}", "best_effort"),
     # ── compilers (compile -> run) ───────────────────────────────────────
-    "c":       _c("gcc -O2 -o {exe} {file}", "{exe}"),
-    "cpp":     _c("g++ -O2 -o {exe} {file}", "{exe}"),
-    "c++":     _c("g++ -O2 -o {exe} {file}", "{exe}"),
-    "rust":    _c("rustc -O -o {exe} {file}", "{exe}"),
-    "go":      _c(None, "go run {file}"),
-    "fortran": _c("gfortran -O2 -o {exe} {file}", "{exe}"),
-    "zig":     _c(None, "zig run {file}"),
+    # rust is best_effort, not tested, DESPITE being the executor's own build
+    # toolchain — a review's smoke test found the rust HOST toolchain failing
+    # here even though `rustc` resolves cleanly (THE-895). contract_check.py's
+    # COMPILED_BROKEN case only proves a bad program is REJECTED correctly; it
+    # never compiles and runs a VALID rust program, so it is not execution
+    # evidence for this tier.
+    "c":       _c("gcc -O2 -o {exe} {file}", "{exe}", "best_effort"),
+    "cpp":     _c("g++ -O2 -o {exe} {file}", "{exe}", "best_effort"),
+    "c++":     _c("g++ -O2 -o {exe} {file}", "{exe}", "best_effort"),
+    "rust":    _c("rustc -O -o {exe} {file}", "{exe}", "best_effort"),
+    "go":      _c(None, "go run {file}", "best_effort"),
+    "fortran": _c("gfortran -O2 -o {exe} {file}", "{exe}", "best_effort"),
+    "zig":     _c(None, "zig run {file}", "best_effort"),
     # Java 11+ single-file source launch (JEP 330) — works with JDK 26.
-    "java":    _c(None, "java {file}"),
+    "java":    _c(None, "java {file}", "best_effort"),
     "kotlin":  _c(
         "kotlinc {file} -include-runtime -d {work}/out.jar",
         "java -jar {work}/out.jar",
+        "best_effort",
     ),
     # ── project-wrapper runtimes ──────────────────────────────────────────
     # csharp is NOT a wrapper any more (THE-835). .NET 10 runs a single .cs
@@ -189,21 +253,27 @@ LANGUAGES: dict[str, dict] = {
     # allowlist. The old plan shelled out to `dotnet new console` + `cp`,
     # which made C# structurally unsupported on Windows for want of bash while
     # the runtime itself resolved fine.
-    "csharp": _c(None, "dotnet run {file}"),
+    #
+    # best_effort, not tested: the same review that found rust's host
+    # toolchain broken found csharp's broken too (THE-895), and no CI job
+    # executes a .cs file at all.
+    "csharp": _c(None, "dotnet run {file}", "best_effort"),
     "gleam": _c(
         None,
         'bash -c \'gleam new "$2/proj" --name prog --skip-git && cp "$1" "$2/proj/src/prog.gleam" && cd "$2/proj" && gleam run\' codecalc {file} {work}',
+        "best_effort",
     ),
     "haskell": _c(
         None,
         'bash -c \'f=$(printf %q "$1"); e=$(printf %q "$3"); nix-shell -p ghc --run "ghc -O2 -o $e $f && $e"\' codecalc {file} {work} {exe}',
+        "best_effort",
     ),
     # ── data / query DSLs ─────────────────────────────────────────────────
     # `.read` as a SQL argument rather than a shell redirect: the only wrapper
     # language that did not need a shell, so it works on Windows too.
-    "sqlite": _c(None, 'sqlite3 :memory: ".read {file}"'),
-    "jq":     _c(None, "jq -n -f {file}"),
-    "awk":    _c(None, "awk -f {file}"),
+    "sqlite": _c(None, 'sqlite3 :memory: ".read {file}"', "best_effort"),
+    "jq":     _c(None, "jq -n -f {file}", "best_effort"),
+    "awk":    _c(None, "awk -f {file}", "best_effort"),
 }
 
 #: canonical name -> aliases
@@ -242,7 +312,14 @@ def canonical(name: str) -> str | None:
 
 
 def all_languages() -> list[dict]:
-    """Human-readable catalog for the MCP list_languages tool."""
+    """Human-readable catalog for the MCP list_languages tool.
+
+    `tier` (RELIABILITY_TIERS) rides along with every entry: it is a static
+    fact about how much codecalc's own CI has verified this language, which
+    is orthogonal to the `status`/`available` fields `executor.catalog()`
+    layers on top from a live probe of THIS machine. See RELIABILITY_TIERS'
+    comment for why the two can and do disagree.
+    """
     out = []
     for name, entry in sorted(LANGUAGES.items()):
         out.append({
@@ -250,5 +327,6 @@ def all_languages() -> list[dict]:
             "extension": EXTENSIONS[name],
             "compiled": entry["compile"] is not None,
             "run": " ".join(entry["run"]).replace("{work}/", ""),
+            "tier": entry["tier"],
         })
     return out

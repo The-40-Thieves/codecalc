@@ -51,7 +51,7 @@ from . import errors
 #: each component is allowed to change — the short form is that MAJOR is the
 #: only one that may break a reader, and it carries a twelve-month deprecation
 #: window before anything is removed.
-CONTRACT_VERSION = "1.2.0"
+CONTRACT_VERSION = "1.3.0"
 
 # THE `$schema` AND `$id` URIs ARE NOT HERE ON PURPOSE.
 #
@@ -491,6 +491,7 @@ def build_doctor_schema(dialect: str | None = None, schema_id: str | None = None
     application logic can degrade it.
     """
     from .doctor import RUNTIME_STATES
+    from .registry import RELIABILITY_TIERS
 
     identifiers = {}
     if dialect:
@@ -510,7 +511,8 @@ def build_doctor_schema(dialect: str | None = None, schema_id: str | None = None
                      "backend", "execution_providers", "strict_runtime",
                      "install_sandbox", "extras", "grammar_cache",
                      "status_basis",
-                     "runtimes", "runtime_summary", "workspace", "remedies"],
+                     "runtimes", "runtime_summary", "tier_summary",
+                     "workspace", "remedies"],
         "properties": {
             "contract_version": {"type": "string", "pattern": r"^\d+\.\d+\.\d+$"},
             "codecalc_version": {"type": "string"},
@@ -659,7 +661,8 @@ def build_doctor_schema(dialect: str | None = None, schema_id: str | None = None
                 "type": "array",
                 "items": {
                     "type": "object",
-                    "required": ["name", "command", "status", "path", "version"],
+                    "required": ["name", "command", "status", "path", "version",
+                                 "tier"],
                     "properties": {
                         "name": {"type": "string"},
                         "command": {"type": "string"},
@@ -683,6 +686,22 @@ def build_doctor_schema(dialect: str | None = None, schema_id: str | None = None
                                 "unreadable answer — never 'no version'."
                             ),
                         },
+                        "tier": {
+                            "type": "string", "enum": list(RELIABILITY_TIERS),
+                            "description": (
+                                "THE-895. RELIABILITY, orthogonal to `status` "
+                                "above: `status` is what THIS machine just "
+                                "resolved or ran; `tier` is how much codecalc's "
+                                "own CI has verified this language, project-"
+                                "wide. tested = a CI job genuinely executes it "
+                                "and checks its output, every PR · best_effort "
+                                "= declared, plausibly works, never CI-checked "
+                                "· plan_only = never validated anywhere. A row "
+                                "can read status=installed and tier=best_effort "
+                                "at once — resolution says nothing about "
+                                "whether the toolchain actually works."
+                            ),
+                        },
                         "detail": {"type": "string"},
                     },
                 },
@@ -692,6 +711,17 @@ def build_doctor_schema(dialect: str | None = None, schema_id: str | None = None
                 "required": list(RUNTIME_STATES),
                 "properties": {s: {"type": "integer", "minimum": 0}
                                for s in RUNTIME_STATES},
+            },
+            "tier_summary": {
+                "type": "object",
+                "description": (
+                    "THE-895. The RELIABILITY_TIERS mirror of runtime_summary "
+                    "above: counts by how much CI has verified each language, "
+                    "not by what this host just resolved."
+                ),
+                "required": list(RELIABILITY_TIERS),
+                "properties": {t: {"type": "integer", "minimum": 0}
+                              for t in RELIABILITY_TIERS},
             },
             "workspace": {
                 "type": "object", "required": ["path", "writable", "error"],

@@ -1342,6 +1342,14 @@ def catalog() -> list[dict]:
 
     `available` is kept, unchanged, because clients read it. It is now the
     boolean shadow of `status` rather than the only thing on offer.
+
+    THE-895: each entry also carries `tier` (registry.RELIABILITY_TIERS),
+    already attached by `registry.all_languages()`. `status` is what THIS
+    machine resolved just now; `tier` is what codecalc's own CI has actually
+    verified, project-wide. The two are orthogonal on purpose — `status`
+    can read `installed` for a language whose `tier` is `best_effort` or
+    worse, which is precisely the case a resolved-but-broken toolchain
+    produces (see RELIABILITY_TIERS for why that gap matters).
     """
     langs = registry.all_languages()
     resolved = probe()
