@@ -56,14 +56,19 @@ behind it.
 - **`no_net` is now enforced in the kernel on Linux by a seccomp-bpf filter,
   not just the bypassable symbol shim** (the strong close of E-1).
   The executor installs a seccomp filter in the child, in the async-signal-safe
-  `pre_exec` alongside the rlimits, that refuses the `socket(AF_INET/AF_INET6)`
-  SYSCALL — so the `ctypes`/`dlsym`/raw-syscall call that bypassed `blocknet.so`
-  (E-1) now takes `EACCES` at the kernel boundary, which no userspace call can
-  dodge. `AF_UNIX` is left alone (runtimes use it). Verified live on aarch64:
-  `libc.socket(2, 1, 0)` → `EACCES`, `socket.socketpair()` still works. When the
-  seccomp filter enforces `no_net`, the result reports it as genuinely applied —
-  no best-effort disclosure, because the guarantee is now real; on macOS, or a
-  Linux kernel without seccomp, it falls back to the symbol shim and keeps the
+  `pre_exec` alongside the rlimits, that refuses — in the kernel — every
+  syscall-level way unprivileged code can open an inet socket: `socket()` by
+  domain, **`io_uring`** (which can open and connect a socket inside the kernel
+  without a `socket()`/`connect()` syscall — the path an adversarial review
+  caught the first cut missing), and the **x32**/foreign-arch compat range. So
+  the `ctypes`/`dlsym`/raw-syscall call that walked around `blocknet.so` (E-1)
+  now takes `EACCES` at the kernel boundary. `AF_UNIX` and other domains are left
+  alone (runtimes use them). Verified live on aarch64: `libc.socket(2, 1, 0)` →
+  `EACCES`, `io_uring_setup` → `ENOSYS`, `socket.socketpair()` and `asyncio`
+  still work. When the seccomp filter enforces `no_net`, the result reports it as
+  genuinely applied — no best-effort disclosure, because the guarantee is now
+  real; on macOS, or a Linux kernel without seccomp, it falls back to the symbol
+  shim and keeps the
   E-1 disclosure. **Fail-closed:** a requested `no_net` the kernel refuses to
   enforce fails the run rather than executing the caller's code unprotected.
   The strict (gVisor) backend remains the stronger tier (egress blocked for the

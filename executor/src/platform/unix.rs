@@ -233,9 +233,13 @@ fn maxrss_to_kb(ru_maxrss: i64) -> u64 {
 /// `no_net` via a seccomp-bpf syscall filter (Linux). The LD_PRELOAD shim
 /// (`blocknet.so`) only interposes libc SYMBOLS, so a dynamically-linked
 /// `ctypes`/`dlsym` call or a raw `syscall` bypasses it — verified live in the
-/// 2026-08-21 audit (E-1). A seccomp filter refuses the `socket()` SYSCALL for
-/// `AF_INET`/`AF_INET6` in the kernel, which no userspace call can get around,
-/// while leaving `AF_UNIX` (runtimes use it for internal plumbing) alone.
+/// 2026-08-21 audit (E-1). A seccomp filter refuses, in the kernel, every
+/// syscall-level way unprivileged code can open an `AF_INET`/`AF_INET6` socket:
+/// `socket()` by domain, `io_uring` (which can open/connect a socket inside the
+/// kernel without a `socket()`/`connect()` syscall), the x32 ABI and foreign-arch
+/// compat range (see `seccomp::filter`). A raw `syscall` cannot get around it the
+/// way it walks around the symbol shim, while `AF_UNIX` and other domains (runtimes
+/// use them for internal plumbing) are left alone.
 ///
 /// Installed in `pre_exec` alongside the rlimits, before `execve`. It needs
 /// `NO_NEW_PRIVS` (so an unprivileged process may install it) and survives the
@@ -266,24 +270,44 @@ mod seccomp {
         libc::sock_filter { code: (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16, jt, jf, k }
     }
 
-    /// Refuse `socket(AF_INET|AF_INET6, …)` with EACCES; kill the process on a
-    /// foreign `arch` (closes a 32-bit-compat `socketcall` bypass); allow
-    /// everything else — `AF_UNIX`, `socketpair`, and every non-`socket` call.
+    /// Close EVERY unprivileged path that creates an `AF_INET`/`AF_INET6` socket,
+    /// not just the `socket()` syscall — a raw syscall can reach the network by
+    /// other doors that a naive socket-only filter leaves open (found in review):
+    ///   - `socket(AF_INET|AF_INET6, …)`            → EACCES
+    ///   - `io_uring_setup`/`enter`/`register`       → ENOSYS. io_uring dispatches
+    ///     `IORING_OP_SOCKET`/`IORING_OP_CONNECT` INSIDE the kernel, so seccomp
+    ///     never sees a `socket`/`connect` syscall for them; refusing ring
+    ///     creation is the only syscall-level way to stop it. ENOSYS (not EACCES)
+    ///     so a runtime that merely probes io_uring falls back to epoll cleanly.
+    ///   - the x32/compat syscall range (`nr >= 0x4000_0000`) → KILL. An x32
+    ///     process carries `arch == AUDIT_ARCH_X86_64` yet issues `socket` as
+    ///     `__X32_SYSCALL_BIT | 41`, which would miss the `SYS_socket` check
+    ///     below; no valid native syscall on either supported arch is that high.
+    ///   - a foreign `arch` (32-bit-compat `socketcall`) → KILL.
+    ///
+    /// Everything else — `AF_UNIX`, `AF_NETLINK` (NSS), `socketpair`, `connect`,
+    /// and every non-`socket` syscall — is allowed.
     fn filter() -> Vec<libc::sock_filter> {
         let ld = (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16;
         let ret = (libc::BPF_RET | libc::BPF_K) as u16;
+        let jge = (libc::BPF_JMP | libc::BPF_JGE | libc::BPF_K) as u16;
         vec![
-            stmt(ld, OFF_ARCH),                      // 0: A = arch
-            jeq(NATIVE_AUDIT_ARCH, 0, 8),            // 1: arch != native  -> KILL (10)
-            stmt(ld, OFF_NR),                        // 2: A = nr
-            jeq(libc::SYS_socket as u32, 0, 5),      // 3: nr != socket    -> ALLOW (9)
-            stmt(ld, OFF_ARG0),                      // 4: A = domain (args[0], low word)
-            jeq(libc::AF_INET as u32, 2, 0),         // 5: AF_INET         -> BLOCK (8)
-            jeq(libc::AF_INET6 as u32, 1, 0),        // 6: AF_INET6        -> BLOCK (8)
-            stmt(ret, libc::SECCOMP_RET_ALLOW),      // 7: other domain    -> allow
-            stmt(ret, libc::SECCOMP_RET_ERRNO | (libc::EACCES as u32 & SECCOMP_RET_DATA)), // 8: BLOCK
-            stmt(ret, libc::SECCOMP_RET_ALLOW),      // 9: ALLOW (non-socket)
-            stmt(ret, libc::SECCOMP_RET_KILL_PROCESS), // 10: KILL (foreign arch)
+            stmt(ld, OFF_ARCH),                                 // 0: A = arch
+            jeq(NATIVE_AUDIT_ARCH, 0, 13),                      // 1: arch != native      -> KILL (15)
+            stmt(ld, OFF_NR),                                   // 2: A = nr
+            libc::sock_filter { code: jge, jt: 11, jf: 0, k: 0x4000_0000 }, // 3: x32/compat bit -> KILL (15)
+            jeq(libc::SYS_io_uring_setup as u32, 7, 0),         // 4: io_uring_setup       -> ENOSYS (12)
+            jeq(libc::SYS_io_uring_enter as u32, 6, 0),         // 5: io_uring_enter       -> ENOSYS (12)
+            jeq(libc::SYS_io_uring_register as u32, 5, 0),      // 6: io_uring_register    -> ENOSYS (12)
+            jeq(libc::SYS_socket as u32, 0, 6),                 // 7: not socket           -> ALLOW (14)
+            stmt(ld, OFF_ARG0),                                 // 8: A = domain (args[0], low word)
+            jeq(libc::AF_INET as u32, 3, 0),                    // 9: AF_INET              -> EACCES (13)
+            jeq(libc::AF_INET6 as u32, 2, 0),                   // 10: AF_INET6            -> EACCES (13)
+            stmt(ret, libc::SECCOMP_RET_ALLOW),                 // 11: other domain        -> allow
+            stmt(ret, libc::SECCOMP_RET_ERRNO | (libc::ENOSYS as u32 & SECCOMP_RET_DATA)), // 12: ENOSYS (io_uring)
+            stmt(ret, libc::SECCOMP_RET_ERRNO | (libc::EACCES as u32 & SECCOMP_RET_DATA)), // 13: EACCES (inet)
+            stmt(ret, libc::SECCOMP_RET_ALLOW),                 // 14: ALLOW (non-socket)
+            stmt(ret, libc::SECCOMP_RET_KILL_PROCESS),          // 15: KILL (foreign arch / x32)
         ]
     }
 

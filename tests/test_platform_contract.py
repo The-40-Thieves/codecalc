@@ -464,13 +464,29 @@ else:
             no_net=True, timeout=15)
         bypass_stdout = bypass.get("stdout") or ""
         if not best_effort:
-            # Seccomp path: the filter refuses socket(AF_INET) at the
-            # syscall boundary, so the raw ctypes call that bypassed the shim is
-            # now blocked. THIS assertion is the regression that proves the fix.
-            check("ctypes/raw socket() is BLOCKED under seccomp no_net",
-                  "BLOCKED" in bypass_stdout,
-                  f"-> stdout={bypass_stdout.strip()!r} "
-                  f"stderr={(bypass.get('stderr') or '')[:200]!r}")
+            # Seccomp path: the filter refuses socket(AF_INET) at the syscall
+            # boundary, so the raw ctypes call that bypassed the shim is now
+            # blocked. Positive control: only assert BLOCKED-under-no_net if a raw
+            # inet socket actually WORKS without no_net here (a netns with no
+            # AF_INET would make the assertion vacuous — a broken filter also
+            # yields EAFNOSUPPORT and would false-pass).
+            inet_free = executor.execute(
+                "python3",
+                "import ctypes, ctypes.util\n"
+                "libc = ctypes.CDLL(ctypes.util.find_library('c'), use_errno=True)\n"
+                "fd = libc.socket(2, 1, 0)\n"
+                "print('OK', fd) if fd >= 0 else print('NO', ctypes.get_errno())\n",
+                timeout=15)  # deliberately NOT no_net
+            if "OK" not in (inet_free.get("stdout") or ""):
+                skip("ctypes/raw socket() BLOCKED under seccomp no_net",
+                     f"raw inet socket not reachable here: {(inet_free.get('stdout') or '').strip()!r}")
+            else:
+                check("ctypes/raw socket() is BLOCKED under seccomp no_net (the E-1 "
+                      "bypass, closed at the syscall)",
+                      "BLOCKED" in bypass_stdout,
+                      f"-> stdout={bypass_stdout.strip()!r} "
+                      f"stderr={(bypass.get('stderr') or '')[:200]!r}")
+            # AF_UNIX must survive — the filter blocks inet, not all sockets.
             unix_ok = executor.execute(
                 "python3",
                 "import socket\na, b = socket.socketpair()\nprint('AF_UNIX ok')\n",
@@ -478,6 +494,28 @@ else:
             check("  ...and AF_UNIX still works (filter blocks inet, not all sockets)",
                   "AF_UNIX ok" in (unix_ok.get("stdout") or ""),
                   f"-> {(unix_ok.get('stdout') or '').strip()[:40]!r}")
+            # io_uring egress (found in review): a ring dispatches
+            # IORING_OP_SOCKET/CONNECT INSIDE the kernel, reaching the network
+            # without a socket()/connect() syscall the filter would see, so the
+            # filter refuses io_uring_setup (ENOSYS). io_uring_setup is syscall
+            # 425 on both x86_64 and aarch64. Positive control first: skip where
+            # io_uring is unavailable rather than false-pass.
+            iou_probe = (
+                "import ctypes\n"
+                "libc = ctypes.CDLL(None, use_errno=True)\n"
+                "params = (ctypes.c_ubyte * 120)()\n"
+                "fd = libc.syscall(425, 8, ctypes.byref(params))\n"
+                "print('IOURING_OK' if fd >= 0 else 'IOURING_BLOCKED %d' % ctypes.get_errno())\n")
+            iou_free = executor.execute("python3", iou_probe, timeout=15)  # not no_net
+            if "IOURING_OK" not in (iou_free.get("stdout") or ""):
+                skip("io_uring refused under seccomp no_net",
+                     f"io_uring not available here: {(iou_free.get('stdout') or '').strip()!r}")
+            else:
+                iou_net = executor.execute("python3", iou_probe, no_net=True, timeout=15)
+                check("io_uring is refused under seccomp no_net (no in-kernel inet "
+                      "socket around the filter)",
+                      "IOURING_OK" not in (iou_net.get("stdout") or ""),
+                      f"-> {(iou_net.get('stdout') or '').strip()!r}")
         elif "BLOCKED" in bypass_stdout:
             # Shim path, but libc's own socket() refused anyway (e.g. a netns
             # with no AF_INET at all): nothing to demonstrate a bypass with.
