@@ -33,6 +33,24 @@ behind it.
 
 ## [Unreleased]
 
+### Security
+
+- **`solve_linear` no longer parses caller input through a live-builtins
+  `sympify`** (THE-888). Each side of each equation (and the single-expression
+  no-`=` path) reached `sp.sympify(...)` directly, which uses SymPy's DEFAULT
+  `global_dict` (`vars(builtins)` copied in) and skipped the unevaluated-shape
+  check `evaluate_expression` already runs. `solve_linear('x = input()', 'x')`
+  called the REAL `input()`, reading the child's stdin — shared fd 0 with a
+  stdio MCP server — and `solve_linear('x = 9**9**9**9', 'x')` burned real CPU
+  seconds evaluating a power tower blind, riding the guard's own timeout
+  instead of a fast refusal. Both pieces now parse via `parse_expr(global_dict=
+  safe_global_dict())` with `reject_explosive` run on the unevaluated shape
+  first — the same fix THE-887 gave the `matrix` tool's per-cell parse.
+  `input()`/`breakpoint()`/`quit()` now parse to a clean error (matching
+  `evaluate_expression`'s own outcome for the same string) instead of being
+  called, and a power tower is now `resource_exhausted` in milliseconds
+  instead of burning CPU seconds.
+
 ## [0.3.2] — 2026-08-20
 
 ### Added

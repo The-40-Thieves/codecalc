@@ -903,6 +903,57 @@ check("  ...and still answers ordinary exact arithmetic",
       _ex2.eval_exact("0.1+0.2").get("value") == "3/10",
       f"-> {_ex2.eval_exact('0.1+0.2').get('value')!r}")
 
+# ═══ THE-888: solve_linear's own sympify was not screened the way the RCE ═══
+# probe above proves evaluate_expression is — classify_unsafe is a syntax
+# DENYLIST, and a screened, non-denylisted NAME can still be a LIVE Python
+# builtin. `sp.sympify(lhs)`/`sp.sympify(rhs)` (the '=' path) and
+# `sp.sympify(raw, evaluate=False)` (the no-'=' path) both used SymPy's
+# DEFAULT global_dict (vars(builtins) copied in): `input()` carries none of
+# classify_unsafe's denied syntax, so it reached sympify and CALLED the real
+# input() — reading the child's stdin, shared fd 0 with a stdio MCP server —
+# and `9**9**9**9` reached sympify's default evaluator and burned real CPU
+# (measured: ~18s, riding the guard's own 15s timeout) instead of being
+# caught by reject_explosive's unevaluated-shape check the way
+# evaluate_expression's identical input already is. solve_linear now parses
+# every piece via logic._parse_solve_piece: parse_expr(global_dict=
+# safe_global_dict()) instead of bare sympify, with reject_explosive run on
+# the unevaluated shape first — the same fix THE-887 gave linalg's per-cell
+# parse.
+
+# input()/breakpoint()/quit() must not invoke the real builtin — compare
+# against evaluate_expression's own outcome for the identical payload; they
+# must now agree.
+for _name in ("input()", "breakpoint()", "quit()"):
+    _direct = _logic.evaluate_expression(_name)
+    _sl = _logic.solve_linear(f"x = {_name}", "x")
+    check(f"solve_linear('x = {_name}', 'x') does not invoke the real builtin",
+          _sl.get("ok") is False and "parse error" in str(_sl.get("error")),
+          f"-> {_sl}")
+    check(f"  ...and matches evaluate_expression's own outcome for {_name!r}",
+          _direct.get("ok") is False and "parse error" in str(_direct.get("error")),
+          f"-> evaluate_expression={_direct}")
+
+# a power tower burns real CPU seconds if evaluated blind. reject_explosive
+# on the unevaluated shape now catches it before anything is evaluated —
+# assert BOTH the code and that it was actually fast, not just eventually
+# correct.
+_t0 = time.time()
+_r = _logic.solve_linear("x = 9**9**9**9", "x")
+_elapsed = time.time() - _t0
+check("solve_linear('x = 9**9**9**9', 'x') is resource_exhausted, not evaluated",
+      _r.get("ok") is False and _r.get("code") == "resource_exhausted", f"-> {_r}")
+check(f"  ...and rejected promptly ({_elapsed:.3f}s), not after a multi-second burn",
+      _elapsed < 2.0, f"-> {_elapsed:.3f}s")
+
+# ...and ordinary linear systems still solve correctly — both the '=' path
+# and the no-'=' (raw) path this fix touched.
+_r = _logic.solve_linear("x + y = 10; x - y = 2", "x, y")
+check("solve_linear still solves an ordinary 2x2 system",
+      _r.get("ok") is True and _r.get("solutions") == ["{x: 6, y: 4}"], f"-> {_r}")
+_r = _logic.solve_linear("x - 5; y - 3", "x, y")
+check("solve_linear still solves the no-'=' (raw) path",
+      _r.get("ok") is True and _r.get("solutions") == ["{x: 5, y: 3}"], f"-> {_r}")
+
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== ALL BUG-SWEEP REGRESSIONS FIXED ===")
 sys.exit(1 if FAILS else 0)
