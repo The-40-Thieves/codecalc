@@ -47,28 +47,7 @@ import math
 from . import errors
 from .guarded import guarded_call
 from .optional import require
-from .safe_expr import classify_unsafe, reject_explosive, safe_global_dict
-
-_MATH_TRANSFORMS = None
-
-
-def _math_transforms():
-    """The same enabled transformations logic.py's evaluate_expression uses:
-    implicit multiplication ('2x') and '^' as power, so a string matrix entry
-    parses the same shapes the sibling symbolic tools accept.
-    """
-    global _MATH_TRANSFORMS
-    if _MATH_TRANSFORMS is None:
-        from sympy.parsing.sympy_parser import (
-            convert_xor,
-            implicit_multiplication_application,
-            standard_transformations,
-        )
-        _MATH_TRANSFORMS = standard_transformations + (
-            implicit_multiplication_application,
-            convert_xor,
-        )
-    return _MATH_TRANSFORMS
+from .safe_expr import classify_unsafe, safe_parse
 
 #: Same DoS cap as logic.py/exact.py's expression-length guards, applied per
 #: CELL rather than to one big string — there is no single string here to cap.
@@ -160,26 +139,21 @@ def _parse_entry(value: str, row_i: int, col_i: int):
          Python builtins in it at all, so an undefined name like `input`
          parses to a harmless symbolic `Function('input')` rather than
          calling the real one.
-    """
-    from sympy.parsing.sympy_parser import parse_expr
 
-    try:
-        shape = parse_expr(value, transformations=_math_transforms(),
-                           global_dict=safe_global_dict(), evaluate=False)
-    except Exception as exc:
-        return None, errors.error_result(
-            errors.VALIDATION, f"entry [{row_i}][{col_i}]: parse error: {exc}")
-    explosive = reject_explosive(shape)
-    if explosive:
-        return None, errors.error_result(
-            errors.RESOURCE_EXHAUSTED, f"entry [{row_i}][{col_i}]: {explosive}")
-    try:
-        value = parse_expr(value, transformations=_math_transforms(),
-                           global_dict=safe_global_dict())
-    except Exception as exc:
-        return None, errors.error_result(
-            errors.VALIDATION, f"entry [{row_i}][{col_i}]: parse error: {exc}")
-    return value, None
+    THE-889: delegates to the shared `safe_expr.safe_parse`, which runs
+    exactly these two steps (`classify_unsafe` is re-run here too,
+    redundantly but harmlessly, since the entry is already screened by
+    `_screen_entry` before this is reached). Kept as a thin wrapper, adding
+    the `entry [i][j]:` cell context this function's callers already depend
+    on, so the result shape is unchanged.
+    """
+    parsed, err = safe_parse(value)
+    if err is None:
+        return parsed, None
+    category, message = err
+    return None, errors.error_result(
+        errors.code_for_safe_expr_category(category),
+        f"entry [{row_i}][{col_i}]: {message}")
 
 
 def _matrix(rows, op: str) -> dict:

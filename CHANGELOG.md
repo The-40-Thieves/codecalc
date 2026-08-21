@@ -79,6 +79,52 @@ behind it.
   `evaluate_expression`'s own outcome for the same string) instead of being
   called, and a power tower is now `resource_exhausted` in milliseconds
   instead of burning CPU seconds.
+- **`algebraic_equiv`, `solve_expression`, `limit_expression` (including its
+  `point` argument) and `simplify_expression` no longer parse caller input
+  through a live-builtins `sympify`** (THE-889). Each reached a bare
+  `sp.sympify(...)` after `classify_unsafe` — the same gap THE-887/888 closed
+  in `matrix` and `solve_linear`: a screened, non-denylisted NAME can still
+  be a live Python builtin. `simplify_expression('input()')` called the REAL
+  `input()`, reading the child's stdin — shared fd 0 with a stdio MCP
+  server — and `algebraic_equiv('9**9**9**9', '0')` burned real CPU seconds
+  evaluating a power tower blind. All four now parse via a new shared
+  `safe_expr.safe_parse()` — `parse_expr(global_dict=safe_global_dict())`
+  with `reject_explosive` run on the unevaluated shape first — extracted
+  from the three near-identical copies of this same pipeline that
+  `logic._evaluate_expression`, `logic._parse_solve_piece` (THE-888) and
+  `linalg._parse_entry` (THE-887) each hand-rolled; all three now delegate
+  to the shared helper too, dropping the duplication (their own result
+  shapes are unchanged), so `safe_parse` is the single place in the package
+  that hands a caller string to SymPy's parser and a future caller cannot
+  reintroduce this gap by doing `classify_unsafe` and forgetting the safe
+  parse. `input()`/`breakpoint()`/`quit()` now parse to a clean error
+  (matching `evaluate_expression`'s own outcome) instead of being called,
+  and a power tower is now `resource_exhausted` in milliseconds instead of
+  burning CPU seconds.
+- **Side effect of the above: the four `exact.py` tools now parse with
+  implicit multiplication**, the same `parse_expr` transformation
+  `evaluate_expression`/`matrix`/`solve_linear` already enable, in place of
+  `sp.sympify`'s stricter grammar. Ordinary input that used to require an
+  explicit `*` is now accepted and reinterpreted as multiplication:
+  `2(x+1)` (previously a parse error) now parses as `2*x + 2`, and
+  function-call notation on an undeclared name — `f(x)` (previously the
+  applied function `f(x)`) — now parses as `f*x`. Concretely,
+  `algebraic_equiv('x(x+1)', 'x*(x+1)')` now reports `identical: true`; on
+  the old `sp.sympify` grammar the left side was the applied function
+  `x(x+1)`, not a product, and the two were not identical. This mirrors
+  `evaluate_expression`'s existing behaviour for the same input and is a
+  side effect of closing the parse gap above, not an independent feature.
+
+### Fixed
+
+- **`solve_linear` crashed on a single-variable system** (THE-890):
+  `solve_linear('2*x = 4', 'x')` raised `'Symbol' object is not iterable`.
+  `sp.symbols(names)` returns a bare `Symbol` rather than a 1-tuple unless
+  given more than one name or a trailing comma, and the code downstream
+  assumed a sequence (`list(syms)`) unconditionally. `sp.symbols(...,
+  seq=True)` now always returns a sequence, one variable or many, so
+  single-variable systems solve like every other case; multi-variable
+  behaviour is unchanged.
 
 ## [0.3.2] — 2026-08-20
 

@@ -20,7 +20,7 @@ from fractions import Fraction
 from . import errors
 from .guarded import guarded_call
 from .optional import require
-from .safe_expr import classify_unsafe
+from .safe_expr import classify_unsafe, safe_parse
 
 getcontext().prec = 50
 
@@ -971,21 +971,22 @@ def _algebraic_equiv(a: str, b: str) -> dict:
     Identity over symbolic reals says nothing about float rounding, integer
     truncation or modular overflow — usually where the real difference lives.
     """
-    # SymPy evaluates what it parses (see codecalc/safe_expr.py). Screen the
-    # caller's string BEFORE it reaches sympify, not after.
+    # THE-889: parse through the shared safe pipeline (safe_expr.safe_parse)
+    # instead of a bare sp.sympify — see that function's docstring for why a
+    # screened-but-live builtin (input()/breakpoint()) and a power tower both
+    # needed more than classify_unsafe alone.
     if (_long := _too_long(a, b)):
         return _long
-    for _name, _val in (("a", a), ("b", b)):
-        _cls = classify_unsafe(_val)
-        if _cls:
-            return errors.error_result(
-                errors.code_for_safe_expr_category(_cls[0]), f"{_name}: {_cls[1]}")
     sp = _sympy()
-    try:
-        ea = sp.sympify(a)
-        eb = sp.sympify(b)
-    except Exception as exc:
-        return {"ok": False, "error": f"parse: {exc}"}
+    _parsed = {}
+    for _name, _val in (("a", a), ("b", b)):
+        _value, _err = safe_parse(_val)
+        if _err:
+            _category, _message = _err
+            return errors.error_result(
+                errors.code_for_safe_expr_category(_category), f"{_name}: {_message}")
+        _parsed[_name] = _value
+    ea, eb = _parsed["a"], _parsed["b"]
     diff = sp.simplify(ea - eb)
     identical = diff == 0
     return {"ok": True, "a": str(ea), "b": str(eb),
@@ -996,24 +997,33 @@ def _algebraic_equiv(a: str, b: str) -> dict:
 
 def _solve_expression(expr: str, var: str = "x") -> dict:
     """Solve for a root or crossover: `x**2 - 4 = 0`, `2*x + 1 = 7`."""
-    # SymPy evaluates what it parses (see codecalc/safe_expr.py). Screen the
-    # caller's string BEFORE it reaches sympify, not after.
-    # Screened per SIDE, because this splits on '=' before sympify and the
-    # screen refuses '=' — the parts are what reach the parser, so the parts
-    # are what must be checked.
+    # THE-889: parse through the shared safe pipeline (safe_expr.safe_parse)
+    # instead of a bare sp.sympify — see that function's docstring. Parsed
+    # per SIDE, because this splits on '=' before parsing and safe_parse's
+    # own classify_unsafe screen refuses '=' — the parts are what reach the
+    # parser, so the parts are what must be checked (unprefixed message, to
+    # match the pre-existing per-part screen this replaces).
     if (_long := _too_long(expr)):
         return _long
-    for _part in (expr.split("=", 1) if ("=" in expr and "==" not in expr) else [expr]):
-        _cls = classify_unsafe(_part)
-        if _cls:
-            return errors.error_result(errors.code_for_safe_expr_category(_cls[0]), _cls[1])
     sp = _sympy()
     try:
         if "=" in expr and "==" not in expr:
             lhs, rhs = expr.split("=", 1)
-            eq = sp.Eq(sp.sympify(lhs), sp.sympify(rhs))
+            lhs_val, _err = safe_parse(lhs)
+            if _err:
+                _category, _message = _err
+                return errors.error_result(errors.code_for_safe_expr_category(_category), _message)
+            rhs_val, _err = safe_parse(rhs)
+            if _err:
+                _category, _message = _err
+                return errors.error_result(errors.code_for_safe_expr_category(_category), _message)
+            eq = sp.Eq(lhs_val, rhs_val)
         else:
-            eq = sp.Eq(sp.sympify(expr), 0)
+            val, _err = safe_parse(expr)
+            if _err:
+                _category, _message = _err
+                return errors.error_result(errors.code_for_safe_expr_category(_category), _message)
+            eq = sp.Eq(val, 0)
         sym = sp.Symbol(var.strip())
         solutions = sp.solve(eq, sym)
     except Exception as exc:
@@ -1024,20 +1034,31 @@ def _solve_expression(expr: str, var: str = "x") -> dict:
 
 def _limit_expression(expr: str, var: str = "x", point: str = "oo") -> dict:
     """Asymptotic behaviour: limit of EXPR as var -> point (default oo)."""
-    # SymPy evaluates what it parses (see codecalc/safe_expr.py). Screen the
-    # caller's string BEFORE it reaches sympify, not after.
+    # THE-889: parse through the shared safe pipeline (safe_expr.safe_parse)
+    # instead of a bare sp.sympify — see that function's docstring. `point`
+    # is parsed too (a screened-but-live builtin or a power tower is exactly
+    # as reachable through the second argument as through `expr`), except
+    # for the literal "oo" sentinel, which never reaches sympify at all —
+    # sp.oo IS infinity, while parsing the two-character string "oo" would
+    # instead produce an unrelated symbol named oo.
     if (_long := _too_long(expr, point)):
         return _long
-    for _name, _val in (("expr", expr), ("point", point)):
-        _cls = classify_unsafe(_val)
-        if _cls:
-            return errors.error_result(
-                errors.code_for_safe_expr_category(_cls[0]), f"{_name}: {_cls[1]}")
     sp = _sympy()
     try:
-        e = sp.sympify(expr)
+        e, _err = safe_parse(expr)
+        if _err:
+            _category, _message = _err
+            return errors.error_result(
+                errors.code_for_safe_expr_category(_category), f"expr: {_message}")
         sym = sp.Symbol(var.strip())
-        pt = sp.oo if point.strip() == "oo" else sp.sympify(point.strip())
+        if point.strip() == "oo":
+            pt = sp.oo
+        else:
+            pt, _err = safe_parse(point.strip())
+            if _err:
+                _category, _message = _err
+                return errors.error_result(
+                    errors.code_for_safe_expr_category(_category), f"point: {_message}")
         result = sp.limit(e, sym, pt)
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
@@ -1047,16 +1068,16 @@ def _limit_expression(expr: str, var: str = "x", point: str = "oo") -> dict:
 
 def _simplify_expression(expr: str) -> dict:
     """Simplified, factored and expanded forms of an expression."""
-    # SymPy evaluates what it parses (see codecalc/safe_expr.py). Screen the
-    # caller's string BEFORE it reaches sympify, not after.
+    # THE-889: parse through the shared safe pipeline (safe_expr.safe_parse)
+    # instead of a bare sp.sympify — see that function's docstring.
     if (_long := _too_long(expr)):
         return _long
-    _cls = classify_unsafe(expr)
-    if _cls:
-        return errors.error_result(errors.code_for_safe_expr_category(_cls[0]), _cls[1])
     sp = _sympy()
+    e, _err = safe_parse(expr)
+    if _err:
+        _category, _message = _err
+        return errors.error_result(errors.code_for_safe_expr_category(_category), _message)
     try:
-        e = sp.sympify(expr)
         return {"ok": True, "original": str(e),
                 "simplified": str(sp.simplify(e)),
                 "factored": str(sp.factor(e)),

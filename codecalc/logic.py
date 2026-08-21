@@ -13,30 +13,14 @@ import re
 from . import errors
 from .guarded import guarded_call
 from .optional import require
-from .safe_expr import classify_unsafe, reject_explosive, safe_global_dict
+from .safe_expr import classify_unsafe, safe_parse
 
-_MATH_TRANSFORMS = None
 _BOOL_TRANSFORMS = None
 
 
 def _sympy():
     """Lazy sympy import; returns the module."""
     return require("sympy")
-
-
-def _math_transforms():
-    global _MATH_TRANSFORMS
-    if _MATH_TRANSFORMS is None:
-        from sympy.parsing.sympy_parser import (
-            convert_xor,
-            implicit_multiplication_application,
-            standard_transformations,
-        )
-        _MATH_TRANSFORMS = standard_transformations + (
-            implicit_multiplication_application,
-            convert_xor,
-        )
-    return _MATH_TRANSFORMS
 
 
 def evaluate_expression(expression: str, **variables) -> dict:
@@ -104,34 +88,18 @@ def _evaluate_expression(expression: str, **variables) -> dict:
     # `__import__` vs a heavy-argument ceiling like `factorial(100000)`, see
     # classify_unsafe's own comment), so the code is chosen from WHICH kind
     # this is rather than assumed.
-    _cls = classify_unsafe(expression)
-    if _cls:
-        return errors.error_result(errors.code_for_safe_expr_category(_cls[0]), _cls[1])
+    #
+    # THE-889: this used to hand-roll its own copy of classify_unsafe ->
+    # parse_expr(evaluate=False) -> reject_explosive -> parse_expr — the same
+    # three steps `safe_parse` now does in one place. `local_dict=variables`
+    # carries this function's own **variables kwargs through unchanged (the
+    # one thing `_parse_solve_piece`/`_parse_entry` never needed, which is
+    # why `safe_parse` grew that parameter).
     sp = _sympy()
-    from sympy.parsing.sympy_parser import parse_expr
-
-    # Look at the shape BEFORE doing the arithmetic. `evaluate=False` builds
-    # the tree without evaluating operators, so a power tower costs 1ms to
-    # inspect and nothing to reject. It does not stop FUNCTION evaluation —
-    # that hazard is handled at the token level in classify_unsafe, above.
-    try:
-        shape = parse_expr(expression, transformations=_math_transforms(),
-                           local_dict=variables, global_dict=safe_global_dict(),
-                           evaluate=False)
-    except Exception as exc:
-        return {"ok": False, "error": f"parse error: {exc}"}
-    explosive = reject_explosive(shape)
-    if explosive:
-        # A ceiling, not a defect (THE-881): a power tower or an oversized
-        # exponent/result is exactly "memory, output or process ceiling hit",
-        # errors.RESOURCE_EXHAUSTED's own definition — not internal.
-        return errors.error_result(errors.RESOURCE_EXHAUSTED, explosive)
-
-    try:
-        expr = parse_expr(expression, transformations=_math_transforms(),
-                          local_dict=variables, global_dict=safe_global_dict())
-    except Exception as exc:  # sympy raises many specific types
-        return {"ok": False, "error": f"parse error: {exc}"}
+    expr, _err = safe_parse(expression, local_dict=variables)
+    if _err:
+        _category, _message = _err
+        return errors.error_result(errors.code_for_safe_expr_category(_category), _message)
 
     # NOT EVERY SymPy CALL RETURNS A SymPy OBJECT. `nextprime(100)` returns a
     # plain int, `primefactors(60)` and `divisors(12)` return lists, and
@@ -489,25 +457,30 @@ def _parse_solve_piece(piece: str, evaluate: bool):
     (matching the original `sp.sympify(raw, evaluate=False)` path) or a
     freshly-reparsed, evaluated value (matching the original bare
     `sp.sympify(lhs)` / `sp.sympify(rhs)` default-evaluate path).
-    """
-    from sympy.parsing.sympy_parser import parse_expr
 
-    try:
-        shape = parse_expr(piece, transformations=_math_transforms(),
-                           global_dict=safe_global_dict(), evaluate=False)
-    except Exception as exc:
-        return None, {"ok": False, "error": f"parse error: {exc}"}
-    explosive = reject_explosive(shape)
-    if explosive:
-        return None, errors.error_result(errors.RESOURCE_EXHAUSTED, explosive)
-    if not evaluate:
-        return shape, None
-    try:
-        value = parse_expr(piece, transformations=_math_transforms(),
-                           global_dict=safe_global_dict())
-    except Exception as exc:
-        return None, {"ok": False, "error": f"parse error: {exc}"}
-    return value, None
+    THE-889: delegates to the shared `safe_expr.safe_parse`, which runs
+    exactly these steps (`classify_unsafe` is re-run here too, redundantly
+    but harmlessly, since the piece is already screened by the caller before
+    this is reached — see `_solve_linear` below). Kept as a thin wrapper so
+    this function's existing `(value, error dict)` return shape —
+    `errors.RESOURCE_EXHAUSTED` on an explosive shape, no `code` key on a
+    plain parse error (left for `ensure_code`'s message-match fallback, same
+    as before this change) — does not change for `_solve_linear`'s callers.
+    """
+    value, err = safe_parse(piece, evaluate=evaluate)
+    if err is None:
+        return value, None
+    category, message = err
+    if category == "ceiling":
+        return None, errors.error_result(errors.RESOURCE_EXHAUSTED, message)
+    if category == "security":
+        # Unreachable in normal use — the piece is already classify_unsafe-
+        # clean by the time `_solve_linear` calls this — kept as a correct
+        # fallback rather than silently mapping it wrong to a bare error.
+        return None, errors.error_result(errors.PERMISSION_DENIED, message)
+    # A parse error (category "validation"): the pre-889 shape for this path
+    # carried no explicit code, left for ensure_code's message-match fallback.
+    return None, {"ok": False, "error": message}
 
 
 def _solve_linear(system: str, variables: str | list[str]) -> dict:
@@ -524,7 +497,14 @@ def _solve_linear(system: str, variables: str | list[str]) -> dict:
         sp = _sympy()
         if isinstance(variables, str):
             variables = [v.strip() for v in variables.split(",") if v.strip()]
-        syms = sp.symbols(",".join(variables))
+        # THE-890: sp.symbols("x") returns a bare Symbol, not a 1-tuple —
+        # only a MULTI-name string ("x,y") or a trailing comma ("x,") gets a
+        # tuple back. `list(syms)` below then raised `'Symbol' object is not
+        # iterable` for the single-variable case, which is not a rare shape:
+        # it is the ordinary `solve_linear('2*x = 4', 'x')` call. `seq=True`
+        # makes symbols() always return a sequence, one name or many, so
+        # every downstream `list(syms)` / iteration is uniform.
+        syms = sp.symbols(",".join(variables), seq=True)
         eqs = []
         for raw in system.split(";"):
             raw = raw.strip()
