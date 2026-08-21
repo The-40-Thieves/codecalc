@@ -7,7 +7,16 @@
 #
 # `-eu`, not `set -euo pipefail`: this is verbatim the upstream shebang/flag
 # convention (no pipeline in this script needs pipefail).
-pip3 install .
+#
+# `.[symbolic]`, not a bare `.`: the safe_expr harness fuzzes `safe_parse`,
+# which lazy-imports SymPy (codecalc/safe_expr.py). A base install has no
+# SymPy, so `safe_parse` raises `ModuleNotFoundError` on the FIRST input —
+# atheris reports that as an uncaught crash and libFuzzer marks the target
+# broken, failing the build (observed in CI before this line changed). We want
+# the harness to exercise the real screen→SymPy path, not skip it, so SymPy
+# has to be present. The extra (not a pinned `sympy==`) tracks pyproject's own
+# `symbolic` bound so it cannot drift from what the package declares.
+pip3 install '.[symbolic]'
 
 # The loop variable is only ever a path under this repo's own fuzz/ dir
 # (COPY'd in by the Dockerfile), never externally-controlled input, so the
