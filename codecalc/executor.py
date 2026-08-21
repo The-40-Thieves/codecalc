@@ -787,8 +787,10 @@ _FALLBACK_UNMEASURED: list[str] = [
 #: `backend` itself is stamped here (see below).
 _NO_NET_BEST_EFFORT = (
     "no_net: best-effort LD_PRELOAD/dyld symbol shim — a dynamically-linked "
-    "ctypes/dlsym or raw-syscall network call bypasses it; use the strict "
-    "(gVisor) backend for a real egress block"
+    "ctypes/dlsym or raw-syscall network call bypasses it, and on macOS a "
+    "SIP-protected or hardened interpreter drops the DYLD insert entirely so "
+    "even an ordinary socket is unblocked; use the strict (gVisor) backend "
+    "for a real egress block"
 )
 
 #: The two ways the Rust binary itself already says the shim was never even
