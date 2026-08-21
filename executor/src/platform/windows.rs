@@ -1168,7 +1168,7 @@ pub fn spawn_and_wait(
     // unapplied is a documented platform limitation — a completely different
     // thing to build on.
     //
-    // ── AND NONE OF THE CHECKS BELOW CAN SEE THE FAILURE ───────────
+    // ── AND NONE OF THE CHECKS BELOW CAN SEE THE FAILURE ─────────────────────
     //
     // Measured on Windows 11 Pro with the executor instrumented via
     // CODECALC_DIAG_JOB, three processes in one spawn chain reported three

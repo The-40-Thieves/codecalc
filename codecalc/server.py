@@ -1476,7 +1476,7 @@ def _doctor(as_json: bool = False, deep: bool = False) -> int:
     exit code is the report's own `healthy`, which is deliberately narrow: a
     missing extra or an uninstalled Haskell is a fact about a host, not a
     fault, and exiting non-zero for either would make this useless as the
-    install check wants it to be.
+    install check it is meant to be.
 
     Writes to STDOUT, which is safe here and nowhere else in this file: stdout
     is the MCP transport, so anything printed during a normal run corrupts the

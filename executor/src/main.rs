@@ -1467,7 +1467,6 @@ mod tests {
         assert_eq!(remaining_run_timeout_secs(10, 5_000), Some(5));
     }
 
-    // ── ─────────────────────────────────────────────────────────────
     //
     // These pass `windows` explicitly rather than relying on the build target,
     // so the Windows rendering is checked on the Linux and macOS legs too. The
@@ -1526,7 +1525,6 @@ mod tests {
         assert_eq!(out, r"C:\Temp\w\a.exe");
     }
 
-    // ── ─────────────────────────────────────────────────────────────
     // `windows` is a parameter for the same reason source_arg's is: these run
     // on every CI leg, so the Windows verdicts are checked where Windows is
     // not available to check them.

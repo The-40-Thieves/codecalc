@@ -379,8 +379,8 @@ behind it.
   fallback's spawn also picked up `CREATE_NEW_PROCESS_GROUP` on Windows,
   where it was previously relying on `start_new_session`, a POSIX-only flag
   that Windows silently ignores.
-- **`max_output_kb` enforced a ~1 MiB floor regardless of the request** (
-  GH #206). The Rust executor's RLIMIT_FSIZE — the ceiling on how much the
+- **`max_output_kb` enforced a ~1 MiB floor regardless of the request**
+  (GH #206). The Rust executor's RLIMIT_FSIZE — the ceiling on how much the
   sandboxed child is actually allowed to write before being stopped — was
   computed as `max_output_kb * 1024 * 4` clamped to a **1 MiB floor**. A
   caller passing `--max-output-kb 1` got an enforced ceiling near 1 MiB
@@ -474,8 +474,8 @@ behind it.
   to claiming a codecalc defect again.
 - The MCP server's `instructions=` metadata said "30+ languages"; every
   other surface (README, SECURITY.md, the repo description) said the actual
-  count, 31. `scripts/check_claims.py` now gates this string too (
-  #213a).
+  count, 31. `scripts/check_claims.py` now gates this string too
+  (#213a).
 - `data_sizes(n)` accepted a negative `n` and reported negative KiB/MB
   instead of rejecting it — the same bug shape `human_duration` already
   guards against for a negative duration. It now returns a validation error
@@ -484,8 +484,8 @@ behind it.
   presented a `round()`ed float beside an exact one (a fraction string, an
   unrounded probability, the echoed input) with nothing marking which was
   which. Each result now carries a `"rounding"` field naming exactly which
-  of its own keys were rounded and to how many decimal digits (
-  #213c).
+  of its own keys were rounded and to how many decimal digits
+  (#213c).
 - **Ten tools blamed the caller for their own bad input** (GH #196).
   An argument-validation rejection — `percentage(total=0)`, `percentiles([])`,
   `calc_stats([5])`, `collision_probability(bits=0)`, `human_duration(-5)`,

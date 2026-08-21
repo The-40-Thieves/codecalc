@@ -422,8 +422,8 @@ def report(deep: bool = False) -> dict:
 
     # `healthy` is deliberately NARROW. A missing optional extra and an
     # uninstalled Haskell are ordinary facts about a host, not faults, and
-    # exiting non-zero for them would make `doctor` useless as an install check
-    # — the thing wants it to be. What makes an install unhealthy is
+    # exiting non-zero for them would make `doctor` useless as the install
+    # check it is meant to be. What makes an install unhealthy is
     # that it cannot execute anything: no workspace to run in, or no backend.
     healthy = bool(workspace["writable"]) and backend in ("rust", "python")
 

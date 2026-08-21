@@ -102,7 +102,7 @@ check("a singular matrix's inverse is a clean refusal",
       and "singular" in r["error"], f"-> {r}")
 
 # ── the whole point: a malicious ENTRY is refused exactly like              ──
-# ── evaluate_expression refuses the same string ('s safety model)    ──
+# ── evaluate_expression refuses the same string (same safety model) ────────
 
 for _payload in ("().__class__", "__import__('os').system('id')", "x.__class__"):
     r = linalg.matrix([[1, _payload], [3, 4]], "det")
