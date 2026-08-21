@@ -52,14 +52,17 @@ _SAFE_NAME = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 #: caller who never asked for a tight ceiling had no memory expectation to
 #: violate.
 #:
-#: No PER-SESSION total-disk quota exists to defer to instead — grepping
-#: quota/disk_usage/statvfs/FSIZE across codecalc/*.py, README.md,
-#: SECURITY.md and AUDIT.md finds none. The closest existing thing is
-#: executor.FSIZE_LIMIT_BYTES (256 MiB), a PER-PROCESS single-file rlimit
-#: applied to the SANDBOXED CHILD via preexec_fn — it does not bound the
-#: SERVER process writing a spill file. So this constant, plus
-#: _SPILL_RETENTION below, ARE the quota this feature adds, kept well under
-#: FSIZE_LIMIT_BYTES's ceiling.
+#: A per-session total-disk quota now DOES exist (THE-894, below) — this
+#: paragraph used to say it did not, and grepping quota/disk_usage/statvfs/
+#: FSIZE across codecalc/*.py, README.md, SECURITY.md and AUDIT.md found
+#: none. The closest existing thing is executor.FSIZE_LIMIT_BYTES (256 MiB),
+#: a PER-PROCESS single-file rlimit applied to the SANDBOXED CHILD via
+#: preexec_fn — it does not bound the SERVER process writing a spill file, or
+#: the SUM of everything a session accumulates over its lifetime. So this
+#: constant, plus _SPILL_RETENTION below, remain their own bound on the spill
+#: mechanism specifically, kept well under FSIZE_LIMIT_BYTES's ceiling; the
+#: session-wide and cross-session totals are enforced separately, see
+#: `_disk_quota_refusal` and the `CODECALC_*_DISK_QUOTA_MB` accessors below.
 SPILL_CAPTURE_KB = 4096  # 4 MiB per stream
 
 #: Ceiling on a single session file served back as an MCP resource. Named
@@ -79,6 +82,467 @@ _SPILL_DIRNAME = ".codecalc-spill"
 #: of protection run_supervisor.RunSupervisor.max_completed gives its own
 #: on-disk journal.
 _SPILL_RETENTION = 20
+
+# ── THE-894: per-session and global disk quotas ────────────────────────────
+#: The gap SPILL_CAPTURE_KB's own docstring named above: nothing bounded the
+#: TOTAL a session accumulates over its lifetime via session_write_file,
+#: artifacts a running program creates, files EXECUTED CODE writes into the
+#: workspace during session_run/execute, and packages `install_package`
+#: fetches straight into it (packages.install — the LARGEST of the four:
+#: MB to GB, where every other vector here writes one call's worth at a
+#: time) — only the per-stream and per-file ceilings elsewhere in this
+#: module. A session (or a caller opening many of them) could fill the
+#: operator's disk one write at a time and nothing here would notice.
+#:
+#: Five independent knobs, not one: a per-session ceiling bounds any ONE
+#: session; a global ceiling bounds the SUM across every session workspace on
+#: disk right now (a caller could otherwise stay under the per-session cap by
+#: opening many sessions); a per-artifact size/count pair bounds what a
+#: single write can create, independent of the running total (a session
+#: writing thousands of tiny files can sit under every byte ceiling here
+#: while still exhausting inodes / directory-listing sanity); and the
+#: host-free-space floor protects the disk even when every quota above is
+#: generous — a shared host can be driven low by something that is not a
+#: codecalc session at all. All five read their environment variable PER
+#: CALL, never cached — same reasoning as `_idle_ttl_seconds`: an operator's
+#: change should apply without a server restart.
+SESSION_DISK_QUOTA_MB_ENV = "CODECALC_SESSION_DISK_QUOTA_MB"
+TOTAL_DISK_QUOTA_MB_ENV = "CODECALC_TOTAL_DISK_QUOTA_MB"
+MAX_ARTIFACT_BYTES_ENV = "CODECALC_MAX_ARTIFACT_BYTES"
+MAX_ARTIFACT_COUNT_ENV = "CODECALC_MAX_ARTIFACT_COUNT"
+MIN_HOST_FREE_MB_ENV = "CODECALC_MIN_HOST_FREE_MB"
+
+#: Defaults are GENEROUS, not unlimited — "bounded by default" is the goal,
+#: not "unlimited by default with a knob nobody turns". 512 MiB/session and
+#: 8 GiB total are far above what a legitimate calculator session
+#: accumulates (the existing per-file/per-stream ceilings above already sit
+#: in the low single-digit MiB range) while still catching a runaway loop
+#: long before it threatens a shared host. 16 MiB/artifact and 500
+#: artifacts/session are deliberately generous relative to RESOURCE_MAX_BYTES
+#: (4 MiB, the SERVED-file read cap) — this is a WRITE-time ceiling, not a
+#: read one, and the two are allowed to differ, same as SPILL_CAPTURE_KB
+#: already differs from a caller's own max_output_kb. 256 MiB free-host floor
+#: is a small fraction of a typical disk, the same order-of-magnitude-
+#: generous shape as FSIZE_LIMIT_BYTES.
+_DEFAULT_SESSION_DISK_QUOTA_MB = 512.0
+_DEFAULT_TOTAL_DISK_QUOTA_MB = 8192.0
+_DEFAULT_MAX_ARTIFACT_BYTES = 16 * 1024 * 1024
+_DEFAULT_MAX_ARTIFACT_COUNT = 500
+_DEFAULT_MIN_HOST_FREE_MB = 256.0
+
+#: Files this module's own runner writes, excluded from what counts as a
+#: session's "artifacts" — same set `artifacts()` already excluded inline;
+#: named here so the disk-quota artifact-count cap (below) and `artifacts()`
+#: share ONE definition instead of two that can drift apart.
+_RUNNER_INTERNAL_NAMES = frozenset({
+    "main.py", "main.js", "run.out", "run.err", "run.in",
+    "compile.out", "compile.err", "compile.in", "a.out",
+})
+
+#: Guards the "measure usage, then write" critical section in every
+#: disk-quota-checked write path (`write_file`, the spill write in
+#: `spill_if_truncated`). Deliberately a SEPARATE lock from the module's
+#: `_lock` (worker/idle-expiry bookkeeping) rather than reusing it: computing
+#: usage walks the filesystem (`_session_dir_size`/`_global_disk_usage`),
+#: which can take real time on a large workspace, and `_reap_then_note` —
+#: called by every one of these write paths just before this lock is taken —
+#: already acquires `_lock` itself. `threading.Lock` is not reentrant, so
+#: nesting the quota check inside `_lock` would deadlock the very call that
+#: reaps an idle worker before writing; a dedicated lock removes that
+#: coupling entirely while still making "check current usage" and "perform
+#: this write" one atomic step, which is what closes the check-then-write
+#: race between two concurrent writes on the same (or different) session.
+_disk_lock = threading.Lock()
+
+
+def _env_positive_float(name: str, default: float) -> float:
+    """A positive float read from `name`, or `default` if unset/invalid/
+    non-positive. Same shape as `_idle_ttl_seconds`: one indirected read, no
+    crash on a bad value. Unlike the idle TTL, unset here does NOT mean "off"
+    — every quota this feeds is bounded-by-default, so an absent or
+    malformed value falls back to the generous default, never to unlimited.
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def _env_positive_int(name: str, default: int) -> int:
+    """Integer counterpart of `_env_positive_float`, for byte/count ceilings
+    that are naturally whole numbers rather than a size in MB."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def _session_disk_quota_bytes() -> int:
+    return int(_env_positive_float(SESSION_DISK_QUOTA_MB_ENV,
+                                   _DEFAULT_SESSION_DISK_QUOTA_MB) * 1024 * 1024)
+
+
+def _total_disk_quota_bytes() -> int:
+    return int(_env_positive_float(TOTAL_DISK_QUOTA_MB_ENV,
+                                   _DEFAULT_TOTAL_DISK_QUOTA_MB) * 1024 * 1024)
+
+
+def _max_artifact_bytes() -> int:
+    return _env_positive_int(MAX_ARTIFACT_BYTES_ENV, _DEFAULT_MAX_ARTIFACT_BYTES)
+
+
+def _max_artifact_count() -> int:
+    return _env_positive_int(MAX_ARTIFACT_COUNT_ENV, _DEFAULT_MAX_ARTIFACT_COUNT)
+
+
+def _min_host_free_bytes() -> int:
+    return int(_env_positive_float(MIN_HOST_FREE_MB_ENV,
+                                   _DEFAULT_MIN_HOST_FREE_MB) * 1024 * 1024)
+
+
+def _iter_regular_files(d: Path):
+    """`(path, lstat_result)` for every REGULAR file under `d`, recursively.
+
+    lstat, not stat — the same rule `artifacts()`/`_list()` already apply:
+    stat() FOLLOWS a symlink, and a session can plant one pointing outside
+    the workspace, which would make a size measurement either read an
+    unrelated file's size (inflating/deflating the quota check) or leak
+    whether some outside path exists at all. A symlink itself is not a
+    regular file, so `S_ISREG` simply skips it here rather than reporting a
+    bogus size for it.
+    """
+    for p in d.rglob("*"):
+        try:
+            st = p.lstat()
+        except OSError:
+            continue  # raced away between the listing and the lstat
+        if stat.S_ISREG(st.st_mode):
+            yield p, st
+
+
+def _session_dir_size(session_id: str) -> int:
+    """Total bytes `session_id`'s workspace occupies on disk right now.
+
+    A missing/invalid/vanished session directory is 0 bytes, not an error —
+    a quota check must never be the thing that raises for a caller who never
+    checked existence first; `write_file`/`execute` already report "unknown
+    session" on their own before this is ever consulted.
+    """
+    try:
+        d = _session_dir(session_id)
+    except ValueError:
+        return 0
+    if not d.is_dir():
+        return 0
+    return sum(st.st_size for _, st in _iter_regular_files(d))
+
+
+def _global_disk_usage() -> int:
+    """Sum of `_session_dir_size` across every session workspace ON DISK.
+
+    Walks SESSION_ROOT directly rather than only the sessions this PROCESS
+    remembers (`_workers`/`_SESSION_DIR_IDENTITY`): a workspace-only session
+    holds no worker and is never in either dict, and `list_sessions()`
+    already treats the on-disk directory listing as the ground truth this
+    module trusts over its own bookkeeping — the global quota has to agree
+    with that same ground truth, or a workspace-only session's disk usage
+    would silently not count toward it.
+    """
+    root = SESSION_ROOT.resolve()
+    if not root.is_dir():
+        return 0
+    total = 0
+    for entry in root.iterdir():
+        if entry.is_dir():
+            total += sum(st.st_size for _, st in _iter_regular_files(entry))
+    return total
+
+
+def _artifact_entries(d: Path) -> list[tuple[Path, int]]:
+    """`(path, size)` for every file `artifacts()` would list.
+
+    Factored out of `artifacts()` itself so the disk-quota artifact-count/
+    size caps below count exactly what a caller can already SEE via
+    `session_artifacts`, rather than a second, independently-drifting
+    definition of "artifact".
+    """
+    out = []
+    for p in sorted(d.rglob("*")):
+        if "__pycache__" in p.parts or p.name.endswith(".pyc"):
+            continue
+        try:
+            st = p.lstat()
+        except OSError:
+            continue
+        if not stat.S_ISREG(st.st_mode):
+            continue
+        if p.name not in _RUNNER_INTERNAL_NAMES:
+            out.append((p, st.st_size))
+    return out
+
+
+def _artifact_cap_refusal(session_id: str, d: Path, incoming_bytes: int, *,
+                          is_new_file: bool) -> dict | None:
+    """None if a write of `incoming_bytes` stays within the per-artifact
+    size/count ceilings; otherwise the refusal to return verbatim.
+
+    Independent of `_disk_quota_refusal` below: a single oversized write can
+    sit comfortably under a generous session quota and still be one runaway
+    file dominating the workspace, and a session writing one byte at a time
+    into thousands of tiny files can stay under every byte ceiling here while
+    exhausting inodes / directory-listing sanity — the count check is what
+    catches that shape. `is_new_file` is supplied by the caller (rather than
+    this function re-deriving it) because the two write paths that call this
+    know it for free: `write_file` already resolved its jailed target path,
+    and every spill file is unconditionally new (uuid4-named).
+    """
+    max_bytes = _max_artifact_bytes()
+    if incoming_bytes > max_bytes:
+        return errors.error_result(
+            errors.RESOURCE_EXHAUSTED,
+            f"write of {incoming_bytes} bytes exceeds the per-artifact size "
+            f"cap of {max_bytes} bytes ({MAX_ARTIFACT_BYTES_ENV})",
+            remedy=f"write a smaller file, or raise {MAX_ARTIFACT_BYTES_ENV}",
+            incoming_bytes=incoming_bytes, max_artifact_bytes=max_bytes,
+        )
+    if is_new_file:
+        max_count = _max_artifact_count()
+        count = len(_artifact_entries(d))
+        if count >= max_count:
+            return errors.error_result(
+                errors.RESOURCE_EXHAUSTED,
+                f"session '{session_id}' already has {count} artifact "
+                f"file(s), at the {max_count}-file cap ({MAX_ARTIFACT_COUNT_ENV})",
+                remedy=("delete unneeded files (session_files to see what's "
+                        f"there), or raise {MAX_ARTIFACT_COUNT_ENV}"),
+                artifact_count=count, max_artifact_count=max_count,
+            )
+    return None
+
+
+#: Named once so the refusal message and `codecalc doctor`'s text (server.py)
+#: cannot say two different things about the one in-band way out (THE-894
+#: fix round 4): `execute()`/`run_file()` are themselves refused by
+#: `quota_precheck` once a session is over quota, so executed code cannot
+#: `rm` its way out, and `session_stop` (which destroys the whole session)
+#: was the only recovery. A write whose NET effect on disk usage is <= 0 —
+#: overwriting an existing file with a same-size-or-smaller one — is always
+#: permitted regardless of current usage (see `write_file`'s `net_bytes`),
+#: which is the missing in-band path.
+_QUOTA_RECOVERY_HINT = (
+    "free space by overwriting a large file with a smaller one (a "
+    "same-size-or-shrinking write is always allowed, even over quota), "
+    "or session_stop"
+)
+
+
+def _disk_quota_refusal(session_id: str, incoming_bytes: int) -> dict | None:
+    """None if `incoming_bytes` more may be written into `session_id`'s
+    workspace right now under every disk ceiling except the per-artifact
+    ones (`_artifact_cap_refusal` is separate — see its own docstring);
+    otherwise the refusal to return verbatim.
+
+    `incoming_bytes` is a NET delta, not a gross write size: `write_file`
+    computes `new_size - existing_size` for an overwrite (THE-894 fix round
+    3 — `_session_dir_size` already counts the file being overwritten at
+    its CURRENT size, so comparing against the full new size double-counted
+    it and wrongly refused a same-size or SHRINKING overwrite near quota).
+    `incoming_bytes=0` is therefore a valid, meaningful call on its own: it
+    asks "is this session already over quota right now" with nothing being
+    added or removed, which is exactly what `quota_precheck` uses before
+    letting code start running at all — see its docstring for why that,
+    rather than a separate sticky flag, is what makes "refused until freed"
+    true. A net-non-positive write is NOT routed through this function at
+    all — see `_write_guard`'s fix-round-4 recovery-path comment.
+
+    Checked smallest blast radius first: a session over its OWN quota should
+    say so, not blame the shared global total it may not even be close to.
+    The host-free-space floor runs last and unconditionally — it protects
+    the host even when both quotas above are generous, because a shared host
+    can be driven low by something that is not a codecalc session at all.
+    """
+    session_usage = _session_dir_size(session_id)
+    session_quota = _session_disk_quota_bytes()
+    if session_usage + incoming_bytes > session_quota:
+        return errors.error_result(
+            errors.RESOURCE_EXHAUSTED,
+            f"session '{session_id}' disk quota exceeded: "
+            f"{session_usage + incoming_bytes} bytes would exceed the "
+            f"{session_quota}-byte per-session limit ({SESSION_DISK_QUOTA_MB_ENV})",
+            remedy=(f"delete files in this session's workspace (session_files "
+                    f"to see what's there), raise {SESSION_DISK_QUOTA_MB_ENV}, "
+                    f"or {_QUOTA_RECOVERY_HINT}"),
+            usage_bytes=session_usage, quota_bytes=session_quota, scope="session",
+        )
+    global_usage = _global_disk_usage()
+    global_quota = _total_disk_quota_bytes()
+    if global_usage + incoming_bytes > global_quota:
+        return errors.error_result(
+            errors.RESOURCE_EXHAUSTED,
+            f"global session disk quota exceeded: {global_usage + incoming_bytes} "
+            f"bytes across all sessions would exceed the {global_quota}-byte "
+            f"total limit ({TOTAL_DISK_QUOTA_MB_ENV})",
+            remedy=("stop idle sessions (session_stop) to free disk shared "
+                    f"across every session, or raise {TOTAL_DISK_QUOTA_MB_ENV}"),
+            usage_bytes=global_usage, quota_bytes=global_quota, scope="global",
+        )
+    try:
+        SESSION_ROOT.mkdir(parents=True, exist_ok=True)
+        free = shutil.disk_usage(SESSION_ROOT).free
+    except OSError:
+        # Cannot even measure the host — do not block on a check that could
+        # not run; the quota checks above already ran and still apply.
+        return None
+    min_free = _min_host_free_bytes()
+    if free < min_free:
+        return errors.error_result(
+            errors.RESOURCE_EXHAUSTED,
+            f"host free disk space ({free} bytes) is below the configured "
+            f"floor ({min_free} bytes, {MIN_HOST_FREE_MB_ENV})",
+            remedy=f"free disk space on the host, or lower {MIN_HOST_FREE_MB_ENV}",
+            free_bytes=free, min_free_bytes=min_free, scope="host",
+        )
+    return None
+
+
+def _artifact_count_refusal(session_id: str) -> dict | None:
+    """None unless `session_id` already has MORE artifact files than
+    `CODECALC_MAX_ARTIFACT_COUNT` allows right now; otherwise the refusal.
+
+    THE-894 fix round 2: `_artifact_cap_refusal` above only runs from this
+    module's OWN writes (`write_file`, the spill write), each of which adds
+    at most one new file per call — checking there catches a caller creating
+    files one at a time, which is all it was ever asked to catch. Code
+    executed via `execute()`/`run_file()`, or a package `install_package`
+    fetches, can create hundreds of files in ONE call, none of which go
+    through `write_file` at all, and each one can individually sit under
+    `CODECALC_MAX_ARTIFACT_BYTES` — so the byte-quota checks alone never
+    notice a session with a cap of 5 ending up with 1005 tiny files. This is
+    the count cap's own precheck/postcheck counterpart to
+    `_disk_quota_refusal`, consulted by `quota_precheck`/`quota_postcheck`
+    the same way and for the same reason.
+    """
+    try:
+        d = _session_dir(session_id)
+    except ValueError:
+        return None
+    if not d.is_dir():
+        return None
+    max_count = _max_artifact_count()
+    count = len(_artifact_entries(d))
+    if count > max_count:
+        return errors.error_result(
+            errors.RESOURCE_EXHAUSTED,
+            f"session '{session_id}' has {count} artifact file(s), over the "
+            f"{max_count}-file cap ({MAX_ARTIFACT_COUNT_ENV})",
+            remedy=("delete unneeded files (session_files to see what's "
+                    f"there), or raise {MAX_ARTIFACT_COUNT_ENV}"),
+            artifact_count=count, max_artifact_count=max_count,
+        )
+    return None
+
+
+def _write_guard(session_id: str, d: Path, incoming_bytes: int, net_bytes: int, *,
+                 is_new_file: bool) -> dict | None:
+    """The combined THE-894 gate every server-side write goes through.
+
+    `incoming_bytes` is the GROSS size of what is being written — what the
+    per-artifact size cap cares about, since that cap bounds the size of the
+    resulting FILE, not how much bigger the workspace got. `net_bytes` is
+    the workspace's actual size DELTA — what the disk-quota checks care
+    about (see `_disk_quota_refusal`'s docstring for why the two differ on
+    an overwrite). For a brand-new file the two are always equal.
+
+    Caller holds `_disk_lock` across this AND the write that follows it —
+    see the lock's own docstring for why.
+    """
+    refusal = _artifact_cap_refusal(session_id, d, incoming_bytes,
+                                    is_new_file=is_new_file)
+    if refusal is not None:
+        return refusal
+    if net_bytes <= 0:
+        # THE-894 fix round 4: the in-band recovery path. A write that can
+        # only hold usage steady or SHRINK it must never be refused by the
+        # byte-quota checks, even while the session is currently over
+        # quota — otherwise, once execute()/run_file() are themselves
+        # refused by quota_precheck, there is no way to free space from
+        # inside a session short of session_stop destroying it outright.
+        # The artifact-cap check above already ran and is UNAFFECTED by this
+        # early return: overwriting an EXISTING file is never a "new" file
+        # (the count cap cannot trip), and the per-artifact SIZE cap is
+        # about the resulting file's size, not the delta, so a
+        # still-oversized overwrite was already correctly refused above
+        # rather than let through here.
+        return None
+    return _disk_quota_refusal(session_id, net_bytes)
+
+
+def quota_precheck(session_id: str) -> dict | None:
+    """None if `session_id` may execute code / write right now; otherwise the
+    refusal to return verbatim, before anything runs.
+
+    Called before EXECUTING code (`execute()`'s both branches,
+    `execution_service.SessionService.run_file`) rather than only before this
+    module's OWN writes: code a session runs can write files straight into
+    the workspace, which no pre-write check on a specific call can bound
+    (THE-894 point 4 — a stateful worker's `open("x", "w")` or a fresh
+    process's own output files never go through `write_file` at all).
+
+    Reusing `_disk_quota_refusal(..., incoming_bytes=0)` — "is this session
+    already over quota" — is deliberate: it is the same measurement
+    `quota_postcheck` takes after a run, so a session a run just pushed over
+    stays refused on its NEXT call for exactly as long as it remains over,
+    and starts working again the moment something frees enough space,
+    without a separate sticky flag that could go stale relative to the disk
+    it is supposed to describe. `_artifact_count_refusal` is the same shape
+    for the count cap (THE-894 fix round 2) — checked second, after the byte
+    quotas, for the same "smallest blast radius first" reason
+    `_disk_quota_refusal` orders its own two checks.
+    """
+    refusal = _disk_quota_refusal(session_id, 0)
+    if refusal is not None:
+        return refusal
+    return _artifact_count_refusal(session_id)
+
+
+def quota_postcheck(session_id: str, result: dict) -> dict:
+    """Disclose in `result` when a run just left `session_id` over its disk
+    quota OR its artifact-count cap (THE-894 point 4; count cap added in fix
+    round 2). Mutates and returns `result`.
+
+    Never refuses and never touches stdout/exit_code/verdict — the run
+    already happened and produced a real result; the only thing added is
+    visibility, plus the fact (silent otherwise) that `quota_precheck` will
+    refuse the NEXT call on this session for as long as usage, measured
+    fresh, stays over either line.
+    """
+    usage = _session_dir_size(session_id)
+    quota = _session_disk_quota_bytes()
+    if usage > quota:
+        result["disk_quota_exceeded"] = True
+        result["disk_usage_bytes"] = usage
+        result["disk_quota_bytes"] = quota
+    global_usage = _global_disk_usage()
+    global_quota = _total_disk_quota_bytes()
+    if global_usage > global_quota:
+        result["global_disk_quota_exceeded"] = True
+        result["global_disk_usage_bytes"] = global_usage
+        result["global_disk_quota_bytes"] = global_quota
+    count_refusal = _artifact_count_refusal(session_id)
+    if count_refusal is not None:
+        result["artifact_count_exceeded"] = True
+        result["artifact_count"] = count_refusal["artifact_count"]
+        result["max_artifact_count"] = count_refusal["max_artifact_count"]
+    return result
+
 
 _lock = threading.Lock()
 _workers: dict[str, Worker] = {}
@@ -620,6 +1084,15 @@ def execute(session_id: str, code: str, language: str | None = None,
         return _guard_error(exc)
     if not d.is_dir():
         return {"ok": False, "error": f"unknown session '{session_id}'"}
+    # THE-894: refused BEFORE anything runs, not just before this module's
+    # own writes — executed code can write straight into the workspace
+    # (open("x", "w") in a worker, or a fresh process's own output files),
+    # which no per-write check below can bound. See `quota_precheck`'s
+    # docstring for why re-measuring here (rather than a sticky flag) is what
+    # makes "refused until freed" self-healing.
+    quota_refusal = quota_precheck(session_id)
+    if quota_refusal is not None:
+        return quota_refusal
     # Lazy check-on-access (THE-779): reap this session's worker if it has
     # sat idle past the configured TTL, and learn whether it already had
     # been. ONE call, ONE critical section — see `_get_worker_or_expired`'s
@@ -659,18 +1132,23 @@ def execute(session_id: str, code: str, language: str | None = None,
         out.setdefault("unenforced", []).extend(unenforced)
         out["backend"] = "session-worker"
         out["confined"] = w.confined
-        return out
+        # THE-894 point 4: the worker just ran arbitrary code with the
+        # workspace as its cwd — measure what it left behind and disclose an
+        # over-quota session rather than let it grow silently forever.
+        return quota_postcheck(session_id, out)
     # workspace-only session: fresh process in the session dir, fully sandboxed
     lang = registry.canonical(language) if language else "python3"
     if max_output_kb > 0:
         # An EXPLICIT caller ceiling is honoured exactly — see SPILL_CAPTURE_KB.
-        return executor.execute(lang, code, stdin=stdin, timeout=timeout, workdir=str(d),
-                                max_memory_mb=max_memory_mb, max_output_kb=max_output_kb,
-                                max_cpu=max_cpu, no_net=no_net)
+        result = executor.execute(lang, code, stdin=stdin, timeout=timeout, workdir=str(d),
+                                  max_memory_mb=max_memory_mb, max_output_kb=max_output_kb,
+                                  max_cpu=max_cpu, no_net=no_net)
+        return quota_postcheck(session_id, result)
     result = executor.execute(lang, code, stdin=stdin, timeout=timeout, workdir=str(d),
                               max_memory_mb=max_memory_mb, max_output_kb=SPILL_CAPTURE_KB,
                               max_cpu=max_cpu, no_net=no_net)
-    return spill_if_truncated(session_id, result, 0)
+    result = spill_if_truncated(session_id, result, 0)
+    return quota_postcheck(session_id, result)
 
 
 def _spill_dir(d: Path) -> Path:
@@ -724,7 +1202,7 @@ def _prune_spill(d: Path) -> None:
         stale.unlink(missing_ok=True)
 
 
-def _write_spill(d: Path, stream: str, data: bytes) -> str:
+def _write_spill(session_id: str, d: Path, stream: str, data: bytes) -> str | None:
     """Write one stream's captured bytes into the session workspace.
 
     Returns the path RELATIVE to the session dir — readable through the same
@@ -734,16 +1212,30 @@ def _write_spill(d: Path, stream: str, data: bytes) -> str:
     `_spill_dir` jails. The earlier version of this docstring argued that `d`
     already being the jailed session root left nothing to defend; that was
     wrong, because the component UNDER `d` is one executed code controls.
+
+    THE-894: returns None, writing nothing, if this write would exceed the
+    per-artifact or disk-quota ceilings (`_write_guard`), checked and written
+    under `_disk_lock` as one step — see that lock's docstring. A spill is a
+    best-effort EXTRA copy of output an execution already captured and
+    already returns (truncated) inline; refusing the disk write must not
+    turn an execution that already succeeded into a failed one, so the
+    caller (`spill_if_truncated`) treats None as "kept the truncated inline
+    value, skipped the extra copy on disk", never as an error to propagate.
     """
-    spill = _spill_dir(d)
-    name = f"{uuid.uuid4().hex}-{stream}.bin"
-    target = spill / name
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW
-    fd = os.open(target, flags, 0o600)
-    with os.fdopen(fd, "wb") as fh:
-        fh.write(data)
-    _prune_spill(d)
-    return f"{_SPILL_DIRNAME}/{name}"
+    with _disk_lock:
+        # A spill file is always brand-new (uuid4-named), so its net effect
+        # on disk usage always equals its full size — no overwrite case here.
+        if _write_guard(session_id, d, len(data), len(data), is_new_file=True) is not None:
+            return None
+        spill = _spill_dir(d)
+        name = f"{uuid.uuid4().hex}-{stream}.bin"
+        target = spill / name
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW
+        fd = os.open(target, flags, 0o600)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        _prune_spill(d)
+        return f"{_SPILL_DIRNAME}/{name}"
 
 
 def _requested_cap_bytes(max_output_kb: int) -> int:
@@ -800,11 +1292,22 @@ def spill_if_truncated(session_id: str, result: dict, requested_cap_kb: int) -> 
             # instead of true only for output that happens to be ASCII.
             data = data[:RESOURCE_MAX_BYTES]
             capped = True
-        rel = _write_spill(d, stream, data)
-        result[f"{stream}_spill"] = f"codecalc://session/{session_id}/files/{rel}"
+        rel = _write_spill(session_id, d, stream, data)
         result[stream] = data[:cap].decode("utf-8", errors="replace") + "\n…[truncated]"
-        if capped:
-            result[f"{stream}_spill_capped"] = True
+        if rel is None:
+            # THE-894: the disk-quota/artifact-cap gate refused the spill
+            # WRITE. The execution already succeeded and already has a real
+            # (truncated) inline value above — that stands; this only says
+            # the fuller copy could not be kept on disk, and why, so a
+            # caller does not have to guess why `..._spill` is absent this
+            # time when it was present on an earlier, smaller run.
+            result[f"{stream}_spill_refused"] = (
+                f"disk-quota ceiling reached; only the truncated inline "
+                f"{stream} above is available for this run")
+        else:
+            result[f"{stream}_spill"] = f"codecalc://session/{session_id}/files/{rel}"
+            if capped:
+                result[f"{stream}_spill_capped"] = True
         spilled = True
     if spilled:
         result["output_truncated"] = True
@@ -824,8 +1327,35 @@ def write_file(session_id: str, path: str, content: str) -> dict:
         # this is a PUBLIC session function, which returns `{"ok": False,
         # ...}` like the rest of them, never an exception.
         return _guard_error(exc)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    _write_nofollow(target, content)
+    data = content.encode("utf-8", errors="replace")
+    # THE-894: the quota check and the write are ONE critical section under
+    # `_disk_lock` — see that lock's docstring for why a race here would
+    # otherwise let two concurrent writes both pass the check and together
+    # exceed the quota. Never a partial write: refused entirely, or written
+    # entirely, nothing in between.
+    with _disk_lock:
+        is_new = not target.exists()
+        # fix round 3: `_session_dir_size` (inside `_disk_quota_refusal`)
+        # already counts a PRE-EXISTING `target` at its current size, so
+        # checking the FULL new size double-counts it and wrongly refuses a
+        # same-size or SHRINKING overwrite near quota. The NET delta — new
+        # size minus what is already there — is what actually changes
+        # workspace usage. `lstat`, not `stat`: this must never be inflated
+        # by following a symlink to an unrelated file's size, the same rule
+        # `_iter_regular_files`/`_artifact_entries` apply everywhere else in
+        # this module. A missing/unreadable target (races away, or is not a
+        # plain file `_write_nofollow` can size this way) falls back to 0 —
+        # the existing behaviour for a genuinely new file.
+        try:
+            existing_size = 0 if is_new else target.lstat().st_size
+        except OSError:
+            existing_size = 0
+        net_bytes = len(data) - existing_size
+        refusal = _write_guard(session_id, d, len(data), net_bytes, is_new_file=is_new)
+        if refusal is not None:
+            return refusal
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _write_nofollow(target, content)
     # `.as_posix()` for the same protocol-path reason as artifacts(): the
     # returned path is a caller-facing identity that must read back the same
     # on Windows, where `str(relative_to)` would emit backslashes for a nested
@@ -876,38 +1406,29 @@ def artifacts(session_id: str) -> dict:
     if not d.is_dir():
         return {"ok": False, "error": f"unknown session '{session_id}'"}
     _reap_then_note(session_id)  # F4: reap an expired worker, never revive it
-    files = []
-    for p in sorted(d.rglob("*")):
-        if "__pycache__" in p.parts or p.name.endswith(".pyc"):
-            continue
-        # lstat, not is_file()/stat(): those FOLLOW a symlink, and a session
-        # can plant one pointing outside the workspace (`ln -s /etc/shadow
-        # leak`) to make this listing disclose the target's size or
-        # existence — the same class of leak #208 fixed in `_list()` below,
-        # and exactly what `session_read_file` already refuses via `_jail`'s
-        # resolve()-then-boundary-check. A symlink is excluded rather than
-        # reported: this function's contract is "files created inside the
-        # workspace", and following a link to describe what may lie outside
-        # it is not that.
-        try:
-            st = p.lstat()
-        except OSError:
-            continue
-        if not stat.S_ISREG(st.st_mode):
-            continue
-        if p.name not in {"main.py", "main.js", "run.out", "run.err", "run.in",
-                          "compile.out", "compile.err", "compile.in", "a.out"}:
-            # `.as_posix()`, not `str()`: the workspace path is a
-            # protocol-facing identity (it composes the file's
-            # `codecalc://session/.../files/<path>` resource URI and is what a
-            # caller passes back to read_file/run_file). `str(relative_to)`
-            # emits the OS separator, so a nested artifact reported "data\\x"
-            # on Windows while write_file/read_file take "data/x" — the same
-            # value the fallback matrix asserts. Forward slashes keep the
-            # identity identical on ubuntu, macos and windows; pathlib accepts
-            # "/" as input on every platform, so the reported path round-trips.
-            rel = p.relative_to(d).as_posix()
-            files.append({"path": rel, "size": st.st_size})
+    # lstat, not is_file()/stat(): those FOLLOW a symlink, and a session can
+    # plant one pointing outside the workspace (`ln -s /etc/shadow leak`) to
+    # make this listing disclose the target's size or existence — the same
+    # class of leak #208 fixed in `_list()` below, and exactly what
+    # `session_read_file` already refuses via `_jail`'s
+    # resolve()-then-boundary-check. A symlink is excluded rather than
+    # reported: this function's contract is "files created inside the
+    # workspace", and following a link to describe what may lie outside it is
+    # not that. `_artifact_entries` (shared with the THE-894 artifact-count
+    # cap, so the two never define "artifact" differently) applies this rule.
+    files = [
+        # `.as_posix()`, not `str()`: the workspace path is a protocol-facing
+        # identity (it composes the file's `codecalc://session/.../files/<path>`
+        # resource URI and is what a caller passes back to read_file/run_file).
+        # `str(relative_to)` emits the OS separator, so a nested artifact
+        # reported "data\\x" on Windows while write_file/read_file take
+        # "data/x" — the same value the fallback matrix asserts. Forward
+        # slashes keep the identity identical on ubuntu, macos and windows;
+        # pathlib accepts "/" as input on every platform, so the reported path
+        # round-trips.
+        {"path": p.relative_to(d).as_posix(), "size": size}
+        for p, size in _artifact_entries(d)
+    ]
     return {"ok": True, "session_id": session_id, "artifacts": files}
 
 

@@ -275,6 +275,50 @@ def _workspace_check() -> dict:
                 "error": f"{type(exc).__name__}: {exc}"}
 
 
+def _disk_quota() -> dict:
+    """Configured session-disk quotas + what is actually used right now
+    (THE-894). Discoverable BEFORE a session hits the ceiling, the same
+    shape `_grammar_cache` already gives the grammar cache: an operator
+    wiring up a shared host should see these numbers here, not learn them
+    from the first `resource_exhausted` a caller reports back.
+
+    Per-session usage is measured for every session `list_sessions()` can
+    see — the same on-disk-is-ground-truth reasoning `sessions._global_disk_
+    usage` already uses, so a workspace-only session (no worker, so absent
+    from `sessions._workers`) still shows up here.
+    """
+    from . import sessions
+
+    per_session = [
+        {"session_id": s["session_id"],
+         "usage_bytes": sessions._session_dir_size(s["session_id"])}
+        for s in sessions.list_sessions().get("sessions", [])
+    ]
+    try:
+        host_free_bytes = (shutil.disk_usage(sessions.SESSION_ROOT).free
+                           if sessions.SESSION_ROOT.exists() else None)
+    except OSError:
+        host_free_bytes = None
+    return {
+        "limits": {
+            "session_disk_quota_mb": sessions._env_positive_float(
+                sessions.SESSION_DISK_QUOTA_MB_ENV,
+                sessions._DEFAULT_SESSION_DISK_QUOTA_MB),
+            "total_disk_quota_mb": sessions._env_positive_float(
+                sessions.TOTAL_DISK_QUOTA_MB_ENV,
+                sessions._DEFAULT_TOTAL_DISK_QUOTA_MB),
+            "max_artifact_bytes": sessions._max_artifact_bytes(),
+            "max_artifact_count": sessions._max_artifact_count(),
+            "min_host_free_mb": sessions._env_positive_float(
+                sessions.MIN_HOST_FREE_MB_ENV,
+                sessions._DEFAULT_MIN_HOST_FREE_MB),
+        },
+        "global_usage_bytes": sessions._global_disk_usage(),
+        "host_free_bytes": host_free_bytes,
+        "sessions": per_session,
+    }
+
+
 def report(deep: bool = False) -> dict:
     """Everything `doctor` knows, as data.
 
@@ -419,6 +463,9 @@ def report(deep: bool = False) -> dict:
         # here yet. Not an extra and not a runtime: it is a network dependency
         # of a tool, which neither of those blocks describes.
         "grammar_cache": _grammar_cache(),
+        # Session disk quotas (THE-894): configured ceilings plus current
+        # usage, so an operator can see how close to them a host already is.
+        "disk_quota": _disk_quota(),
         # Which measurement produced the statuses above. Without this a reader
         # cannot tell `installed` ("found on PATH") from a --deep run that
         # simply found nothing runnable.

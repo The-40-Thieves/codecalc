@@ -375,6 +375,15 @@ class SessionService:
             workdir = sessions._session_dir(session_id)
             if not workdir.is_dir():
                 return {"ok": False, "error": f"unknown session '{session_id}'"}
+            # THE-894: refused before the entry file even runs. `entry_file`
+            # is about to run as a fresh process that can write anything into
+            # the workspace, same as sessions.execute()'s workspace branch —
+            # see `quota_precheck`'s docstring for why re-measuring here
+            # (rather than a sticky flag) is what makes "refused until freed"
+            # self-healing.
+            quota_refusal = sessions.quota_precheck(session_id)
+            if quota_refusal is not None:
+                return quota_refusal
             resource = sessions.resource_read(session_id, entry_file)
         except ValueError as exc:
             return sessions._guard_error(exc)  # #212, see read_file's comment above
@@ -400,4 +409,7 @@ class SessionService:
         result = sessions.spill_if_truncated(session_id, result, 0)
         result["entry_file"] = entry_file
         result["language"] = language
-        return result
+        # THE-894 point 4: the entry file just ran arbitrary code with the
+        # workspace as its cwd — measure what it left behind and disclose an
+        # over-quota session rather than let it grow silently forever.
+        return sessions.quota_postcheck(session_id, result)

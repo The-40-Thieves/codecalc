@@ -396,6 +396,12 @@ jobs:
       # the sweep above.
       - name: session idle-expiry
         run: uv run --no-sync python tests/test_session_idle_expiry.py
+      # THE-894: per-session/global disk quotas, per-artifact size/count caps,
+      # the host-free-space floor, and doctor's reporting of all of them.
+      # Platform-neutral (only shutil.disk_usage and plain file I/O), so this
+      # runs on all three the same way the sweeps above do.
+      - name: session disk quotas
+        run: uv run --no-sync python tests/test_session_quota.py
       # No network needed and none permitted: this asserts the package cannot
       # make an outbound request at all, so it cannot flake on connectivity.
       - name: offline guarantee (no network calls anywhere)

@@ -33,6 +33,49 @@ behind it.
 
 ## [Unreleased]
 
+### Added
+
+- **Per-session and global disk quotas for sessions** (THE-894). Nothing
+  previously bounded the TOTAL disk a session accumulates — only per-stream
+  (`SPILL_CAPTURE_KB`, 4 MiB) and per-served-file (`RESOURCE_MAX_BYTES`,
+  4 MiB) ceilings existed, so a session could fill the operator's disk one
+  small write at a time. Five new, generous-by-default knobs close it:
+  `CODECALC_SESSION_DISK_QUOTA_MB` (default 512), `CODECALC_TOTAL_DISK_QUOTA_MB`
+  (default 8192, across every session workspace), `CODECALC_MAX_ARTIFACT_BYTES`
+  (default 16 MiB, per write) and `CODECALC_MAX_ARTIFACT_COUNT` (default 500,
+  per session), and `CODECALC_MIN_HOST_FREE_MB` (default 256, refuses a write
+  when the host itself is low regardless of how generous the quotas above
+  are). `session_write_file` and oversized-output spilling are checked BEFORE
+  every write (`resource_exhausted`, no partial file ever written); code run
+  via `execute_code(session_id=...)` or `session_run` is checked before it
+  starts and, since executed code's own writes cannot be pre-checked, again
+  after it finishes — an over-quota run still returns its real result, now
+  carrying `disk_quota_exceeded` plus the measured usage/limit, and the
+  session's next write or run is refused for as long as it stays over the
+  line (re-measured fresh each time, so freeing space un-refuses it on its
+  own — no flag to reset). `codecalc doctor` reports the configured limits
+  and current per-session/global usage under a new `disk_quota` section.
+
+  An adversarial review of the above found four enforcement gaps, all
+  closed in the same change: `install_package` — the largest write vector
+  of all, MB to GB per call — carried no quota check whatsoever, so an
+  over-quota session installed freely; it now gets the same precheck (before
+  the package manager runs) and postcheck (disclosing an install that pushed
+  a session over quota) `execute_code`/`session_run` already had. The
+  per-session artifact-COUNT cap only ran from this module's own writes, so
+  code executed via `execute_code`/`session_run` could create arbitrarily
+  many files — each individually under the byte quota — with nothing to
+  catch the total; `disk_quota_exceeded`'s postcheck/precheck pair now
+  carries the same disclose-then-block shape for the file count. An
+  overwrite's disk-usage check compared the FULL new size against usage that
+  already counted the file being replaced, wrongly refusing a same-size or
+  shrinking overwrite near quota — fixed to compare the NET size delta.
+  Finally, since `execute_code`/`session_run` are themselves refused once a
+  session is over quota (so executed code cannot free space by running
+  `rm`), a net-non-positive write (shrinking or same-size) is now ALWAYS
+  permitted regardless of current usage — the in-band recovery path that
+  makes `session_stop` no longer the only way out of a stuck session.
+
 ## [0.3.2] — 2026-08-20
 
 ### Added

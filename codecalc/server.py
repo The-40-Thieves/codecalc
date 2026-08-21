@@ -1429,6 +1429,26 @@ def _doctor(as_json: bool = False, deep: bool = False) -> int:
     print(f"  workspace         {ws['path']}"
           f"{'' if ws['writable'] else '  NOT WRITABLE — ' + str(ws['error'])}")
 
+    # THE-894: printed unconditionally, same reasoning as the grammar-cache
+    # line above — an operator sizing a shared host needs the configured
+    # ceilings AND the current usage before a session hits one, not after.
+    dq = rep["disk_quota"]
+    limits = dq["limits"]
+    print(f"  disk quota        {limits['session_disk_quota_mb']:g} MB/session, "
+          f"{limits['total_disk_quota_mb']:g} MB total, "
+          f"{limits['max_artifact_bytes']} bytes/artifact "
+          f"(max {limits['max_artifact_count']}), "
+          f"{limits['min_host_free_mb']:g} MB min host free")
+    print(f"    usage           {dq['global_usage_bytes']} bytes across "
+          f"{len(dq['sessions'])} session(s)"
+          + (f", {dq['host_free_bytes']} bytes free on host"
+             if dq["host_free_bytes"] is not None else ""))
+    # THE-894 fix round 4: named here too, not just in the refusal message —
+    # an operator reading doctor BEFORE anything is stuck should see the
+    # recovery path exists, same reasoning as the rest of this section.
+    print(f"    recovery        if a session is stuck over quota: "
+          f"{sessions._QUOTA_RECOVERY_HINT}")
+
     # Where the shipped skill is, because a skill nobody can find is a skill
     # nobody installs. It travels inside the wheel, so this path is correct for
     # a uvx run, a venv, or a checkout without any of them differing.

@@ -596,6 +596,18 @@ def install(language: str, package: str, session_id: str | None = None,
         d = sessions._session_dir(session_id)
         if not d.is_dir():
             return {"ok": False, "error": f"unknown session '{session_id}'"}
+        # THE-894 (fix round 2): this is the LARGEST write vector into a
+        # session workspace — packages run MB to GB, dwarfing anything
+        # `session_write_file` writes one call at a time — and it previously
+        # ran with NO quota check at all: a session already far over its
+        # disk quota could keep installing freely. Refused up front like
+        # `execute()`/`run_file()`, the other entry points whose writes
+        # cannot be pre-sized before they run — see `quota_precheck`'s
+        # docstring for why re-measuring here (rather than a sticky flag) is
+        # what makes "refused until freed" self-healing.
+        quota_refusal = sessions.quota_precheck(session_id)
+        if quota_refusal is not None:
+            return quota_refusal
         cwd = d
     else:
         cwd = CACHE_ROOT
@@ -623,8 +635,21 @@ def install(language: str, package: str, session_id: str | None = None,
         paths people read least — a timeout or a non-zero exit is exactly when
         someone asks "was this thing contained?" — and a return added later
         that forgot it would answer by omission.
+
+        THE-894 (fix round 2): also the ONE place every outcome of a session
+        install passes through — success, a non-zero exit, and a timeout all
+        return through here — so it is where the post-install disk-usage
+        disclosure belongs. A package's on-disk footprint cannot be
+        known before the manager runs (that is exactly why this is a
+        POST-check, mirroring `sessions.execute()`'s own `quota_postcheck`
+        call for the same reason), and a failed or timed-out install can
+        still have written a partial tree worth disclosing.
         """
-        return {**result, "unenforced": unenforced} if unenforced else result
+        out = {**result, "unenforced": unenforced} if unenforced else dict(result)
+        if session_id:
+            from . import sessions
+            out = sessions.quota_postcheck(session_id, out)
+        return out
 
     try:
         p = subprocess.run(cmd, cwd=str(cwd), env=env, capture_output=True,
