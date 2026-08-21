@@ -1550,6 +1550,9 @@ def main() -> None:
             "\n"
             "Commands:\n"
             "  doctor [--json] [--deep]           environment/runtime health report\n"
+            "  setup [--client=NAME] [--write]    guided onboarding to a working MCP\n"
+            "                                      connection; NAME one of claude-desktop,\n"
+            "                                      claude-code, cursor, vscode, zed\n"
             "  serve-strict [ARGS]                authenticated HTTP execution service\n"
             "  serve-http [--host H] [--port P]   MCP over streamable HTTP\n"
             "  -h, --help                         show this message and exit\n"
@@ -1569,6 +1572,22 @@ def main() -> None:
         # not exist, because a script wraps it and parses prose forever.
         rest = sys.argv[2:]
         raise SystemExit(_doctor(as_json="--json" in rest, deep="--deep" in rest))
+    if len(sys.argv) > 1 and sys.argv[1] == "setup":
+        # THE-897: guided onboarding, built and rendered in codecalc/setup.py
+        # for the same reason doctor's report is built there and only
+        # rendered here — a script and a human must not be able to disagree
+        # about what setup found. `--client` accepts both `--client=NAME` and
+        # `--client NAME` (the two spellings README/CONTRIBUTING already use
+        # interchangeably for other flags in this repo).
+        from . import setup as setup_module
+        rest = sys.argv[2:]
+        client = None
+        for i, arg in enumerate(rest):
+            if arg.startswith("--client="):
+                client = arg.split("=", 1)[1]
+            elif arg == "--client" and i + 1 < len(rest):
+                client = rest[i + 1]
+        raise SystemExit(setup_module.run_setup(client=client, do_write="--write" in rest))
     if len(sys.argv) > 1 and sys.argv[1] == "serve-strict":
         # THE-830: the authenticated `/v1` strict execution service — the server
         # half of RemoteStrictExecutionProvider. Its own module and stdlib

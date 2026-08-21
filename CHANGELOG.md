@@ -35,6 +35,25 @@ behind it.
 
 ### Added
 
+- **`codecalc setup [--client=NAME] [--write]`** (THE-897): guided onboarding
+  from a clean install to a working MCP connection in one command, ending in
+  a single verdict (`ready`/`degraded`/`not-ready`). Detects the calling
+  client (`claude-desktop`/`claude-code`/`cursor`/`vscode`/`zed`) by probing
+  each one's known config path, or takes `--client` explicitly when none or
+  several are found; reuses `codecalc doctor`'s own executor-backend/extras/
+  grammar-cache checks rather than re-deriving them; prints the exact MCP
+  config block in the detected client's own shape (`mcpServers` for Claude
+  Desktop/Cursor/Claude Code, `servers` for VS Code, `context_servers` for
+  Zed) with absolute, machine-derived command/args (an absolute venv python
+  for a source checkout, the resolved `codecalc` console script, or `uvx
+  codecalc[full]`); runs a real `execute_code` and `evaluate_expression`
+  canary in-process (no server spawned) to prove the connection would
+  actually work. **Non-destructive by default**: without `--write` this only
+  prints — the config file, the grammar-cache prefetch, and the skill copy
+  are all untouched. `--write` merges the `codecalc` entry into the client's
+  EXISTING config (every other server/setting passes through unchanged) and
+  backs up the original to `<path>.codecalc-bak` first; an existing config
+  file that is not valid JSON is refused rather than risked.
 - **Per-language RELIABILITY tiers** (THE-895), orthogonal to the existing
   resolution states (`supported`/`installed`/`unhealthy`/`available`). A
   runtime could report `installed` (its command resolved on PATH) while its

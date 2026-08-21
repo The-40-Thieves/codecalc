@@ -112,6 +112,27 @@ claim* — not just "it ran" — is the point.
 
 ## Install
 
+### Quickstart with `codecalc setup`
+
+The fastest path to a working MCP connection, without reading the rest of
+this section:
+
+```bash
+uvx 'codecalc[full]' setup            # prints what it would do — nothing on disk changes
+uvx 'codecalc[full]' setup --write    # applies it: merges your client's config, copies the skill
+```
+
+It detects which MCP client is installed (Claude Desktop, Claude Code,
+Cursor, VS Code, Zed — pass `--client=NAME` if none or several are found),
+reuses `codecalc doctor`'s own backend/extras/grammar-cache checks, prints the
+exact config block in that client's own JSON shape with absolute paths
+already filled in, runs two real canaries (`execute_code`, `evaluate_expression`)
+to prove the connection would work, and ends in one verdict: `ready` /
+`degraded` / `not-ready`. `--write` is the only mode that changes anything —
+it MERGES the `codecalc` entry into your existing client config (every other
+server stays exactly as it was) and backs up the original to
+`<path>.codecalc-bak` first. `codecalc --help` lists every subcommand.
+
 > [!NOTE]
 > Published as **`codecalc` 0.3.2** on PyPI (`pip install codecalc`) and the
 > **`codecalc-exec` 0.3.2** executor on crates.io
@@ -674,7 +695,7 @@ PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py         # every tool over MC
 PYTHONPATH=. .venv/bin/python tests/test_executor_sweep.py  # sandbox regressions
 ```
 
-49 test files and 13 CI-invoked scripts, **2139 assertions**. "CI-invoked"
+50 test files and 13 CI-invoked scripts, **2139 assertions**. "CI-invoked"
 means referenced by path (`scripts/<name>.py`) from a job in
 `.github/workflows/*.yml` — `scripts/check_claims.py` derives the count that
 way and gates it, so a script wired into a workflow without this sentence
