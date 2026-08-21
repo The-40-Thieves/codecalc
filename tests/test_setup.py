@@ -18,6 +18,7 @@ from __future__ import annotations
 import io
 import json
 import pathlib
+import subprocess
 import sys
 import tempfile
 
@@ -132,6 +133,126 @@ with tempfile.TemporaryDirectory(prefix="codecalc-setup-test-") as d:
           f"-> {result}")
     check("...and leaves the file untouched",
           list_path.read_text(encoding="utf-8") == "[1, 2, 3]")
+
+# A config that parses, and IS an object, but whose OWN client section is not
+# an object (`{"mcpServers": [1, 2, 3]}`) must also be refused — and refused
+# BEFORE the backup is written, or a malformed section leaves an orphan
+# `.codecalc-bak` next to a file that was never actually touched (THE-897
+# review, FIX 2).
+with tempfile.TemporaryDirectory(prefix="codecalc-setup-test-") as d:
+    shape_path = pathlib.Path(d) / "bad-shape.mcp.json"
+    original = json.dumps({"mcpServers": [1, 2, 3]})
+    shape_path.write_text(original, encoding="utf-8")
+
+    result = setup.write_config(shape_path, "claude-code")
+    check("write_config refuses a non-object CLIENT SECTION",
+          result["ok"] is False, f"-> {result}")
+    check("...naming the bad key in the error",
+          "mcpServers" in (result["error"] or ""), f"-> {result['error']}")
+    check("no backup file was created (refused before backup, not after)",
+          not (pathlib.Path(d) / "bad-shape.mcp.json.codecalc-bak").exists())
+    check("the original file is byte-for-byte UNCHANGED",
+          shape_path.read_text(encoding="utf-8") == original,
+          f"-> {shape_path.read_text(encoding='utf-8')!r}")
+
+    # The string-section shape ({"servers": "x"}) is the same defect for a
+    # different client key — checked once more so the validation is proven
+    # keyed off THIS client's own section, not hardcoded to "mcpServers".
+    str_path = pathlib.Path(d) / "bad-shape.vscode.json"
+    str_path.write_text(json.dumps({"servers": "not an object"}), encoding="utf-8")
+    result = setup.write_config(str_path, "vscode")
+    check("write_config refuses a STRING client section too (vscode/'servers')",
+          result["ok"] is False, f"-> {result}")
+    check("no backup for the vscode case either",
+          not (pathlib.Path(d) / "bad-shape.vscode.json.codecalc-bak").exists())
+
+
+# ── 3c. the write is ATOMIC: temp-file-then-replace, never a truncating ────
+# in-place write (THE-897 review, FIX 1). Proven two ways: (a) a normal
+# write leaves no stray .tmp file behind and the config is correct, and (b)
+# instrumenting Path.replace shows the write actually landed in a SIBLING
+# temp file in the SAME directory, with the real target still holding its
+# OLD content right up until the atomic rename — the property that makes a
+# crash mid-write leave either the old file or the new file, never a
+# truncated one.
+with tempfile.TemporaryDirectory(prefix="codecalc-setup-test-") as d:
+    d_path = pathlib.Path(d)
+    target = d_path / ".mcp.json"
+    target.write_text(json.dumps({"mcpServers": {"other": {"command": "x"}}}),
+                      encoding="utf-8")
+
+    real_replace = pathlib.Path.replace
+    spy: dict = {}
+
+    def _spy_replace(self, dest, _real=real_replace, _spy=spy):
+        _spy["tmp_dir"] = self.parent
+        _spy["dest_dir"] = pathlib.Path(dest).parent
+        _spy["tmp_existed"] = self.exists()
+        _spy["dest_old_content"] = pathlib.Path(dest).read_text(encoding="utf-8")
+        return _real(self, dest)
+
+    pathlib.Path.replace = _spy_replace
+    try:
+        result = setup.write_config(target, "claude-code")
+    finally:
+        pathlib.Path.replace = real_replace
+
+    check("atomic write reports success", result["ok"] is True, f"-> {result}")
+    check("the temp file lived in the SAME directory as the target "
+          "(same filesystem -> os.replace is atomic)",
+          spy.get("tmp_dir") == spy.get("dest_dir"),
+          f"-> tmp_dir={spy.get('tmp_dir')} dest_dir={spy.get('dest_dir')}")
+    check("the temp file existed as a real file before the rename",
+          spy.get("tmp_existed") is True)
+    check("the TARGET still held its OLD content right up until the atomic "
+          "rename (proves the write went to a separate file, never in-place)",
+          "other" in spy.get("dest_old_content", "")
+          and "codecalc" not in spy.get("dest_old_content", ""),
+          f"-> {spy.get('dest_old_content')!r}")
+    check("no leftover .tmp file remains after a successful write",
+          list(d_path.glob("*.tmp")) == [], f"-> {list(d_path.glob('*.tmp'))}")
+    check("the target now holds the merged content",
+          "codecalc" in target.read_text(encoding="utf-8")
+          and "other" in target.read_text(encoding="utf-8"))
+
+
+# ── 3d. an unknown --client fails CLEANLY (no traceback, no file touched) ──
+with tempfile.TemporaryDirectory(prefix="codecalc-setup-test-") as d:
+    home = pathlib.Path(d) / "home"
+    cwd = pathlib.Path(d) / "cwd"
+    home.mkdir()
+    cwd.mkdir()
+    before = _all_files(pathlib.Path(d))
+
+    buf = io.StringIO()
+    code = setup.run_setup(client="not-a-real-client", do_write=True, out=buf,
+                           home=home, cwd=cwd, platform="linux")
+    out = buf.getvalue()
+    check("an unknown --client exits NON-ZERO", code != 0, f"-> exit {code}")
+    check("...specifically 2 (a usage error, distinct from not-ready's 1)",
+          code == 2, f"-> exit {code}")
+    check("...and names the valid clients in a ONE-LINE message",
+          all(c in out for c in setup.CLIENTS), f"-> {out!r}")
+    check("...with no traceback reaching the caller",
+          "Traceback" not in out, f"-> {out!r}")
+    check("...and NOTHING was written, even with --write requested",
+          _all_files(pathlib.Path(d)) == before,
+          f"-> {_all_files(pathlib.Path(d))}")
+
+# Same check at the real CLI boundary (subprocess, real stderr) — a unit
+# call into run_setup proves the function; this proves argv parsing in
+# server.py's dispatch doesn't reintroduce a traceback on the way in.
+_cli_bad_client = subprocess.run(
+    [sys.executable, "-m", "codecalc", "setup", "--client=not-a-real-client"],
+    capture_output=True, text=True, cwd=REPO_ROOT,
+)
+check("CLI: `codecalc setup --client=bogus` exits non-zero",
+      _cli_bad_client.returncode != 0, f"-> exit {_cli_bad_client.returncode}")
+check("CLI: ...with no traceback on stderr",
+      "Traceback" not in _cli_bad_client.stderr, f"-> {_cli_bad_client.stderr!r}")
+check("CLI: ...and a one-line message naming the valid clients",
+      all(c in _cli_bad_client.stdout for c in setup.CLIENTS),
+      f"-> {_cli_bad_client.stdout!r}")
 
 
 # ── 4. verdict is `degraded` when the backend is the python fallback ───────
@@ -375,8 +496,6 @@ check("unwritable workspace -> NOT-READY", verdict == "not-ready", f"-> {verdict
 
 
 # ── the CLI surface: `codecalc setup --help` lists it, subprocess round-trip ─
-import subprocess
-
 help_out = subprocess.run([sys.executable, "-m", "codecalc", "--help"],
                           capture_output=True, text=True, cwd=REPO_ROOT)
 check("`codecalc --help` lists the setup subcommand",

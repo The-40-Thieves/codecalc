@@ -37,6 +37,7 @@ import json
 import os
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 from . import doctor, executor, logic
@@ -234,19 +235,64 @@ def merge_config(existing: dict, client: str) -> dict:
     return merged
 
 
+#: The remedy line every refusal below ends with. `codecalc setup` (without
+#: `--write`) always prints the exact config block BEFORE attempting a write
+#: (see `run_setup`), so a refused write is never a dead end — the block to
+#: paste in by hand already went to the terminal.
+_MANUAL_REMEDY = ("fix it by hand, or run `codecalc setup` (without --write) "
+                  "and copy the printed config block into the file yourself")
+
+
+def _validate_client_section(existing: dict, client: str) -> str | None:
+    """None if `existing`'s section for `client` (its own top-level key) is
+    absent or a JSON object; otherwise an error string.
+
+    Checked BEFORE the backup is written. Without this, a config shaped like
+    `{"mcpServers": [1, 2, 3]}` passes the top-level-is-a-dict check, a
+    backup gets written, and `merge_config`'s `dict(merged.get(key) or {})`
+    raises `TypeError` on the list — leaving an orphan `.codecalc-bak` next
+    to a file that was never actually touched. Refusing here means the
+    caller never gets a backup for a write that was always going to fail.
+    """
+    key = _CLIENT_KEY[client]
+    section = existing.get(key)
+    if section is None or isinstance(section, dict):
+        return None
+    return (f"existing config's {key!r} key is a {type(section).__name__}, "
+            f"not a JSON object; refusing to write — {_MANUAL_REMEDY}")
+
+
 def write_config(path: Path, client: str) -> dict:
     """Write the merged config to `path`, backing up first. Refuses rather
-    than corrupts on unparsable existing JSON.
+    than corrupts on unparsable existing JSON, and writes ATOMICALLY so a
+    hard interruption mid-write can never leave `path` truncated.
 
     Three cases:
     - `path` does not exist: create it with just the codecalc entry.
-    - `path` exists and parses as JSON (or is empty): back it up to
-      `<path>.codecalc-bak`, THEN write the merge — the backup happens before
-      any byte of the real file changes.
-    - `path` exists and does NOT parse: refuse. Writing a best-effort guess
-      over a file this cannot understand is how a user's real config gets
-      corrupted; reporting the problem and touching nothing is the only safe
-      move (`ok: false`, no backup, no write).
+    - `path` exists, parses as JSON (or is empty), and its own client
+      section (if present) is a JSON object: back it up to
+      `<path>.codecalc-bak`, THEN write the merge — the backup happens
+      before any byte of the real file changes.
+    - `path` exists and either does NOT parse, or its top level or client
+      section is not a JSON object: refuse. Writing a best-effort guess over
+      a file this cannot understand is how a user's real config gets
+      corrupted; reporting the problem and touching nothing — no backup, no
+      write — is the only safe move (`ok: false`).
+
+      This is also the JSONC case: VS Code's `mcp.json` and Zed's
+      `settings.json` both routinely carry `//` comments and trailing
+      commas, which `json.loads` rejects. codecalc does not ship a JSONC
+      parser and does not strip comments — a JSONC file always lands in
+      this refusal branch, unmodified, comments and all. That refusal (not
+      a successful parse-and-merge) is *how* a commented file's comments
+      survive: this never claims to merge into one.
+
+    The write itself is temp-file-then-`os.replace`, not an in-place
+    truncating write: the merged JSON is written to a sibling temp file in
+    the SAME directory (so the replace is atomic on one filesystem) and only
+    then renamed over `path`. A crash between those two steps leaves the
+    temp file orphaned and `path` exactly as it was — never a half-written
+    `path`, which a plain `Path.write_text` cannot promise.
     """
     backup: Path | None = None
     if path.is_file():
@@ -256,11 +302,19 @@ def write_config(path: Path, client: str) -> dict:
         except json.JSONDecodeError as exc:
             return {"ok": False, "path": str(path), "backup": None,
                     "error": f"existing config is not valid JSON ({exc}); "
-                             "refusing to write — fix or remove it by hand first"}
+                             f"refusing to write — {_MANUAL_REMEDY} (this is "
+                             "expected for a JSONC file with comments or "
+                             "trailing commas, e.g. VS Code's mcp.json or "
+                             "Zed's settings.json — codecalc never strips or "
+                             "parses those, only refuses to touch them)"}
         if not isinstance(existing, dict):
             return {"ok": False, "path": str(path), "backup": None,
-                    "error": "existing config's top level is not a JSON object; "
-                             "refusing to write over an unrecognised shape"}
+                    "error": "existing config's top level is not a JSON "
+                             f"object; refusing to write — {_MANUAL_REMEDY}"}
+        section_error = _validate_client_section(existing, client)
+        if section_error is not None:
+            return {"ok": False, "path": str(path), "backup": None,
+                    "error": section_error}
         backup = path.with_name(path.name + ".codecalc-bak")
         backup.write_text(raw, encoding="utf-8")
     else:
@@ -268,7 +322,24 @@ def write_config(path: Path, client: str) -> dict:
         path.parent.mkdir(parents=True, exist_ok=True)
 
     merged = merge_config(existing, client)
-    path.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
+    payload = json.dumps(merged, indent=2) + "\n"
+
+    # Atomic write (FIX for THE-897 review): mkstemp in the SAME directory as
+    # `path` guarantees the temp file and the target share a filesystem, which
+    # is what makes `os.replace` below an atomic rename rather than a
+    # cross-filesystem copy that could itself be interrupted. The descriptor
+    # from mkstemp is used directly (os.fdopen) rather than reopening the
+    # path, so there is no window where the temp file exists un-owned.
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(payload)
+        tmp_path.replace(path)  # atomic on the same filesystem (POSIX + Windows)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
     return {"ok": True, "path": str(path), "backup": str(backup) if backup else None,
             "error": None}
 
@@ -370,12 +441,23 @@ def run_setup(client: str | None = None, do_write: bool = False, *,
     exactly what a person running `codecalc setup` at a shell wants.
 
     Returns the process exit code: 0 for `ready`/`degraded`, 1 for
-    `not-ready` — the same narrow-healthy convention `codecalc doctor`
-    already uses, so a script gating on this in CI needs no new convention.
+    `not-ready`, 2 for a bad `--client` value — the last mirrors
+    `codecalc-prefetch-grammars`' own use of 2 for "a different problem with
+    a different fix", distinct from the healthy/unhealthy 0/1 `codecalc
+    doctor` already uses.
     """
     out = out or sys.stdout
     p = lambda *a: print(*a, file=out)  # noqa: E731 — single call site below
     platform = platform if platform is not None else sys.platform
+
+    # Validated FIRST, before doctor.report() or anything else runs: an
+    # unknown --client is a typo, not a broken host, and should fail fast
+    # with a one-line message rather than a ValueError traceback out of
+    # detect_client below (THE-897 review). No file is touched either way.
+    if client is not None and client not in CLIENTS:
+        p(f"codecalc setup: unknown client {client!r}; choose one of "
+          f"{', '.join(CLIENTS)}")
+        return 2
 
     rep = doctor.report(deep=False)
 
