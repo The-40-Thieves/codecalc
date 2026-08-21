@@ -135,7 +135,7 @@ pub fn apply_no_net(cmd: &mut Command, exe_dir: &Path) -> bool {
 ///
 /// `CreateProcessW` takes one STRING; the callee re-splits it. Getting this
 /// wrong corrupts every execution silently, which is exactly how a past
-/// mis-quoting bug happened one layer up. Rule, from Microsoft's own parser
+/// misquoting bug happened one layer up. Rule, from Microsoft's own parser
 /// description: backslashes are literal EXCEPT immediately before a quote,
 /// where they are escapes and must be doubled — including the run before
 /// the closing quote.
