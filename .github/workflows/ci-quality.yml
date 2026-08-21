@@ -122,8 +122,8 @@ jobs:
     # changes (new CLI flags, a new console script, error-code
     # reclassifications) with zero changelog lines, and the 0.3.2 release had
     # to reconstruct the notes from the commit log after the fact.
-    # scripts/check_changelog.py is a REMINDER with an opt-out
-    # ('[skip changelog]' in a commit message), not a precise classifier of
+    # scripts/check_changelog.py is a REMINDER with an opt-out (a
+    # 'Skip-Changelog: <reason>' commit trailer), not a precise classifier of
     # "caller-observable" — see its own docstring for what it can and cannot
     # tell apart.
     #
