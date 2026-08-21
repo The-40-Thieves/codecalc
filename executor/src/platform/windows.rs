@@ -1305,6 +1305,8 @@ pub fn spawn_and_wait(
         timed_out,
         cpu_ms,
         peak_memory_kb,
+        // Windows has no seccomp; no_net is reported unavailable below.
+        no_net_seccomp_enforced: false,
         unenforced,
     })
 }

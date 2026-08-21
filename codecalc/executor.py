@@ -773,34 +773,23 @@ _FALLBACK_UNMEASURED: list[str] = [
     "peak_memory_kb: ru_maxrss is a high-water mark and cannot be attributed to one run",
 ]
 
-#: The Rust executor's own `unenforced` says "no_net_requested_but_no_shim_available"
-#: when the LD_PRELOAD/dyld shim could not be applied at all, but stays empty
-#: whenever the shim WAS applied — reading as "no_net: fully enforced" even
-#: though the shim is a userspace symbol interposition, not a kernel egress
-#: block. Verified live (E-1): with `no_net=True` and the
-#: shim loaded, `socket.socket(AF_INET)` gets EACCES as expected, but
-#: `ctypes.CDLL(find_library("c")).socket(2, 1, 0)` — which resolves `socket()`
-#: straight out of libc rather than through the shimmed symbol — returns a
-#: working fd, and the result still said `unenforced: []`. Disclosed here
-#: rather than in the Rust binary: this is the one place a caller-supplied
-#: `no_net` and the backend that satisfied it are both known, the same reason
-#: `backend` itself is stamped here (see below).
+#: Full best-effort disclosure for `no_net` on the SHIM path — the bypassable
+#: LD_PRELOAD/dyld symbol interposition (macOS, or a Linux kernel without
+#: seccomp). The Rust binary flags that path with a terse `no_net_best_effort_shim`
+#: marker, expanded into this sentence by the sender below. When a seccomp-bpf
+#: filter enforces `no_net` in the kernel (Linux), the binary emits NO
+#: no_net marker and this disclosure is correctly ABSENT — the guarantee is real.
+#: Verified live (E-1): with only the shim loaded, `socket.socket(AF_INET)` gets
+#: EACCES but `ctypes.CDLL(find_library("c")).socket(2, 1, 0)` returns a working
+#: fd — a raw symbol lookup the shim never sees, and exactly what the seccomp
+#: filter now closes at the syscall boundary.
 _NO_NET_BEST_EFFORT = (
     "no_net: best-effort LD_PRELOAD/dyld symbol shim — a dynamically-linked "
     "ctypes/dlsym or raw-syscall network call bypasses it, and on macOS a "
     "SIP-protected or hardened interpreter drops the DYLD insert entirely so "
-    "even an ordinary socket is unblocked; use the strict (gVisor) backend "
-    "for a real egress block"
+    "even an ordinary socket is unblocked; use the strict (gVisor) backend, or "
+    "run on a Linux kernel with seccomp, for a real egress block"
 )
-
-#: The two ways the Rust binary itself already says the shim was never even
-#: applied — a real absence, not a weak enforcement, so `_NO_NET_BEST_EFFORT`
-#: below must not pile onto either of them (that would read as "double
-#: unenforced" for a guarantee that was singly and clearly not applied).
-_NO_NET_SHIM_ABSENT = frozenset({
-    "no_net_requested_but_no_shim_available",
-    "no_net_unavailable_on_windows",
-})
 
 #: RLIMIT_NPROC does not bind a process whose EFFECTIVE uid is 0. The kernel
 #: exempts privileged processes, so as root the ceiling is computed, set, and
@@ -1240,20 +1229,24 @@ def _execute_uncontracted(language: str, code: str, stdin: str = "", timeout: in
                 # older build that never reported the field at all — a caller
                 # could not tell "rust, unreported" from "rust, not present".
                 result["backend"] = "rust"
-                # `no_net` was requested and the shim actually applied (the
-                # binary would have said so itself, via one of the markers
-                # in _NO_NET_SHIM_ABSENT, if it had not) — disclose that
-                # "applied" here means a bypassable symbol shim, not a kernel
-                # block. Without this, `unenforced` came back `[]` on exactly
-                # the path where the guarantee was weakest, the class of
-                # defect SECURITY.md's own threat model puts in scope: "the
-                # server report[ing] a guarantee it did not apply".
+                # `no_net` disclosure keys off the Rust binary's own verdict.
+                # The binary emits `no_net_best_effort_shim` when only
+                # the bypassable LD_PRELOAD/dyld symbol shim held (macOS, or a
+                # Linux kernel without seccomp); it emits NOTHING when a seccomp
+                # filter enforced no_net in-kernel, where a raw syscall cannot
+                # bypass it. So the full best-effort disclosure is expanded from
+                # that terse marker only on the shim path — and is correctly
+                # ABSENT when the guarantee is real, rather than inferred from
+                # `unenforced == []` (which used to read the seccomp-enforced and
+                # the silently-unenforced cases as the same thing).
                 if no_net:
                     unenforced = result.get("unenforced")
                     if not isinstance(unenforced, list):
                         unenforced = []
                         result["unenforced"] = unenforced
-                    if not (_NO_NET_SHIM_ABSENT & set(unenforced)):
+                    if "no_net_best_effort_shim" in unenforced:
+                        unenforced[:] = [u for u in unenforced
+                                         if u != "no_net_best_effort_shim"]
                         unenforced.append(_NO_NET_BEST_EFFORT)
                 return result
             return {"ok": False, "error": f"executor produced invalid output: {err[:200]!r}"}
