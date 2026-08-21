@@ -88,6 +88,12 @@ pub struct Wait {
     /// BYTES on macOS/BSD; Job accounting reports bytes), and reading one as the
     /// other is a silent 1024x error. See the unit conversion in each backend.
     pub peak_memory_kb: u64,
+    /// Linux only: `no_net` was enforced by an in-kernel seccomp-bpf filter (not
+    /// merely the LD_PRELOAD symbol shim, which a raw syscall bypasses). When
+    /// true the caller may report `no_net` as genuinely enforced; when false and
+    /// `no_net` was requested, the shim was the best it could do. Always false on
+    /// Windows/macOS, which have their own posture.
+    pub no_net_seccomp_enforced: bool,
     /// Limits this platform could not apply, by name. Surfaced in the JSON so a
     /// caller can tell "the limit held" from "there was no limit".
     pub unenforced: Vec<&'static str>,

@@ -808,10 +808,22 @@ fn run_step(
     };
 
     let mut unenforced = waited.unenforced;
-    if limits.no_net && !no_net_applied {
-        // The shim is missing or the platform has none. Saying nothing here
-        // would let `no_net: true` read as "network blocked" when nothing was.
-        unenforced.push("no_net_requested_but_no_shim_available");
+    if limits.no_net {
+        if waited.no_net_seccomp_enforced {
+            // Enforced in-kernel by a seccomp-bpf filter: a raw
+            // syscall cannot bypass it, so nothing is unenforced and no
+            // best-effort disclosure is warranted.
+        } else if no_net_applied {
+            // Only the LD_PRELOAD/dyld symbol shim held. It is best-effort — a
+            // dynamically-linked ctypes/dlsym or raw-syscall network call
+            // bypasses it (E-1). The Python layer expands this marker into the
+            // full disclosure sentence.
+            unenforced.push("no_net_best_effort_shim");
+        } else {
+            // No shim and no seccomp. Saying nothing would let `no_net: true`
+            // read as "network blocked" when nothing was.
+            unenforced.push("no_net_requested_but_no_shim_available");
+        }
     }
 
     let (stdout, out_trunc, out_err, out_bytes) = read_capped(&out_path, limits.max_output_kb);

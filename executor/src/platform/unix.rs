@@ -230,6 +230,156 @@ fn maxrss_to_kb(ru_maxrss: i64) -> u64 {
     }
 }
 
+/// `no_net` via a seccomp-bpf syscall filter (Linux). The LD_PRELOAD shim
+/// (`blocknet.so`) only interposes libc SYMBOLS, so a dynamically-linked
+/// `ctypes`/`dlsym` call or a raw `syscall` bypasses it — verified live in the
+/// 2026-08-21 audit (E-1). A seccomp filter refuses, in the kernel, every
+/// syscall-level way unprivileged code can open an `AF_INET`/`AF_INET6` socket:
+/// `socket()` by domain, `io_uring` (which can open/connect a socket inside the
+/// kernel without a `socket()`/`connect()` syscall), the x32 ABI and foreign-arch
+/// compat range (see `seccomp::filter`). A raw `syscall` cannot get around it the
+/// way it walks around the symbol shim, while `AF_UNIX` and other domains (runtimes
+/// use them for internal plumbing) are left alone.
+///
+/// Installed in `pre_exec` alongside the rlimits, before `execve`. It needs
+/// `NO_NEW_PRIVS` (so an unprivileged process may install it) and survives the
+/// exec, applying to the caller's program for its whole life.
+#[cfg(target_os = "linux")]
+mod seccomp {
+    // AUDIT_ARCH_* live in <linux/audit.h>, not the libc crate: EM value |
+    // __AUDIT_ARCH_64BIT (0x8000_0000) | __AUDIT_ARCH_LE (0x4000_0000).
+    #[cfg(target_arch = "x86_64")]
+    const NATIVE_AUDIT_ARCH: u32 = 0xC000_003E; // EM_X86_64 = 62
+    #[cfg(target_arch = "aarch64")]
+    const NATIVE_AUDIT_ARCH: u32 = 0xC000_00B7; // EM_AARCH64 = 183
+
+    // seccomp_data offsets (seccomp(2)): nr @0, arch @4, args[0] @16. Both
+    // supported arches are little-endian, so a socket domain (a small int)
+    // sits in the low 32-bit word loaded at offset 16.
+    const OFF_NR: u32 = 0;
+    const OFF_ARCH: u32 = 4;
+    const OFF_ARG0: u32 = 16;
+    const SECCOMP_RET_DATA: u32 = 0x0000_ffff; // errno lives in the low 16 bits
+
+    #[inline]
+    fn stmt(code: u16, k: u32) -> libc::sock_filter {
+        libc::sock_filter {
+            code,
+            jt: 0,
+            jf: 0,
+            k,
+        }
+    }
+    #[inline]
+    fn jeq(k: u32, jt: u8, jf: u8) -> libc::sock_filter {
+        libc::sock_filter {
+            code: (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
+            jt,
+            jf,
+            k,
+        }
+    }
+
+    /// Close EVERY unprivileged path that creates an `AF_INET`/`AF_INET6` socket,
+    /// not just the `socket()` syscall — a raw syscall can reach the network by
+    /// other doors that a naive socket-only filter leaves open (found in review):
+    ///   - `socket(AF_INET|AF_INET6, …)`            → EACCES
+    ///   - `io_uring_setup`/`enter`/`register`       → ENOSYS. io_uring dispatches
+    ///     `IORING_OP_SOCKET`/`IORING_OP_CONNECT` INSIDE the kernel, so seccomp
+    ///     never sees a `socket`/`connect` syscall for them; refusing ring
+    ///     creation is the only syscall-level way to stop it. ENOSYS (not EACCES)
+    ///     so a runtime that merely probes io_uring falls back to epoll cleanly.
+    ///   - the x32/compat syscall range (`nr >= 0x4000_0000`) → KILL. An x32
+    ///     process carries `arch == AUDIT_ARCH_X86_64` yet issues `socket` as
+    ///     `__X32_SYSCALL_BIT | 41`, which would miss the `SYS_socket` check
+    ///     below; no valid native syscall on either supported arch is that high.
+    ///   - a foreign `arch` (32-bit-compat `socketcall`) → KILL.
+    ///
+    /// Everything else — `AF_UNIX`, `AF_NETLINK` (NSS), `socketpair`, `connect`,
+    /// and every non-`socket` syscall — is allowed.
+    fn filter() -> Vec<libc::sock_filter> {
+        let ld = (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16;
+        let ret = (libc::BPF_RET | libc::BPF_K) as u16;
+        let jge = (libc::BPF_JMP | libc::BPF_JGE | libc::BPF_K) as u16;
+        vec![
+            stmt(ld, OFF_ARCH),            // 0: A = arch
+            jeq(NATIVE_AUDIT_ARCH, 0, 13), // 1: arch != native      -> KILL (15)
+            stmt(ld, OFF_NR),              // 2: A = nr
+            libc::sock_filter {
+                code: jge,
+                jt: 11,
+                jf: 0,
+                k: 0x4000_0000,
+            }, // 3: x32/compat bit -> KILL (15)
+            jeq(libc::SYS_io_uring_setup as u32, 7, 0), // 4: io_uring_setup       -> ENOSYS (12)
+            jeq(libc::SYS_io_uring_enter as u32, 6, 0), // 5: io_uring_enter       -> ENOSYS (12)
+            jeq(libc::SYS_io_uring_register as u32, 5, 0), // 6: io_uring_register    -> ENOSYS (12)
+            jeq(libc::SYS_socket as u32, 0, 6), // 7: not socket           -> ALLOW (14)
+            stmt(ld, OFF_ARG0),            // 8: A = domain (args[0], low word)
+            jeq(libc::AF_INET as u32, 3, 0), // 9: AF_INET              -> EACCES (13)
+            jeq(libc::AF_INET6 as u32, 2, 0), // 10: AF_INET6            -> EACCES (13)
+            stmt(ret, libc::SECCOMP_RET_ALLOW), // 11: other domain        -> allow
+            stmt(
+                ret,
+                libc::SECCOMP_RET_ERRNO | (libc::ENOSYS as u32 & SECCOMP_RET_DATA),
+            ), // 12: ENOSYS (io_uring)
+            stmt(
+                ret,
+                libc::SECCOMP_RET_ERRNO | (libc::EACCES as u32 & SECCOMP_RET_DATA),
+            ), // 13: EACCES (inet)
+            stmt(ret, libc::SECCOMP_RET_ALLOW), // 14: ALLOW (non-socket)
+            stmt(ret, libc::SECCOMP_RET_KILL_PROCESS), // 15: KILL (foreign arch / x32)
+        ]
+    }
+
+    /// Is the kernel able to take a seccomp filter at all? `PR_GET_SECCOMP`
+    /// returns the current mode (>= 0) when seccomp is compiled in, or fails
+    /// with EINVAL when it is not. Probed in the PARENT, before fork, so the
+    /// result decides both the child's path and the reported enforcement.
+    pub fn available() -> bool {
+        // PR_GET_SECCOMP == 21; not exported by the libc crate on every target.
+        unsafe { libc::prctl(21) >= 0 }
+    }
+
+    /// Build the program in the parent (allocation is not async-signal-safe);
+    /// the child only installs the already-built bytes.
+    pub fn program() -> Vec<libc::sock_filter> {
+        filter()
+    }
+
+    /// Async-signal-safe: two `prctl` calls, no allocation. `prog` must outlive
+    /// this call — it is built in the parent and copy-on-write inherited, so its
+    /// pointer is valid in the child's address space. Returns Err if the kernel
+    /// refuses the filter; the caller turns that into a failed spawn, so a
+    /// requested `no_net` that cannot be enforced never runs (fail-closed).
+    ///
+    /// # Safety
+    /// Runs between fork and execve in a child that must stay async-signal-safe.
+    pub unsafe fn install(prog: &[libc::sock_filter]) -> std::io::Result<()> {
+        let fprog = libc::sock_fprog {
+            len: prog.len() as u16,
+            filter: prog.as_ptr() as *mut libc::sock_filter,
+        };
+        // SAFETY: prctl is async-signal-safe; NO_NEW_PRIVS must precede an
+        // unprivileged filter install; `fprog` points at `prog`, which the
+        // caller guarantees outlives this call.
+        let rc = unsafe {
+            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            libc::prctl(
+                libc::PR_SET_SECCOMP,
+                libc::SECCOMP_MODE_FILTER as libc::c_ulong,
+                &fprog as *const libc::sock_fprog as libc::c_ulong,
+            )
+        };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
 pub fn spawn_and_wait(
     mut cmd: Command,
     limits: &ResolvedLimits,
@@ -240,6 +390,22 @@ pub fn spawn_and_wait(
     let (rlimits, unenforced) = resolve(limits);
     // Own process group, so a timeout can killpg the child's whole tree.
     cmd.process_group(0);
+
+    // no_net enforcement (Linux): build the seccomp program in the PARENT, since
+    // the child (pre_exec) must be async-signal-safe and cannot allocate. Only
+    // when the kernel supports seccomp; otherwise the LD_PRELOAD shim applied by
+    // the caller is the (best-effort) fallback and this stays false.
+    #[cfg(target_os = "linux")]
+    let net_filter: Option<Vec<libc::sock_filter>> = if limits.no_net && seccomp::available() {
+        Some(seccomp::program())
+    } else {
+        None
+    };
+    #[cfg(target_os = "linux")]
+    let no_net_seccomp_enforced = net_filter.is_some();
+    #[cfg(not(target_os = "linux"))]
+    let no_net_seccomp_enforced = false;
+
     unsafe {
         cmd.pre_exec(move || {
             apply(&rlimits);
@@ -272,6 +438,14 @@ pub fn spawn_and_wait(
             let mut empty: libc::sigset_t = std::mem::zeroed();
             libc::sigemptyset(&mut empty);
             libc::sigprocmask(libc::SIG_SETMASK, &empty, std::ptr::null_mut());
+            // no_net: install the seccomp filter LAST — after our own setup
+            // syscalls above, so none of them is ever subject to it — and
+            // fail-closed: a requested no_net the kernel refuses to enforce
+            // fails the spawn rather than running the caller's code unprotected.
+            #[cfg(target_os = "linux")]
+            if let Some(ref prog) = net_filter {
+                seccomp::install(prog)?;
+            }
             Ok(())
         });
     }
@@ -365,6 +539,7 @@ pub fn spawn_and_wait(
         timed_out,
         cpu_ms,
         peak_memory_kb: maxrss_to_kb(rusage.ru_maxrss as i64),
+        no_net_seccomp_enforced,
         unenforced,
     })
 }

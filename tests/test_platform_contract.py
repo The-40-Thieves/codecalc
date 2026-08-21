@@ -197,6 +197,11 @@ KNOWN_UNENFORCED = {
     "appcontainer_isolation_unverified_on_windows",
     # main.rs — the shim is missing, so --no-net would do nothing
     "no_net_requested_but_no_shim_available",
+    # main.rs — only the bypassable LD_PRELOAD/dyld SYMBOL shim held (macOS, or a
+    # Linux kernel without seccomp), not the in-kernel seccomp filter.
+    # The Python layer (executor.py) expands this terse marker into the full
+    # best-effort disclosure; seccomp-enforced runs emit NO no_net marker at all.
+    "no_net_best_effort_shim",
 }
 
 #: The fallback's vocabulary. Prose rather than the Rust backend's snake_case
@@ -401,46 +406,49 @@ else:
         "    print('blocked', e.errno)\n",
         no_net=True, timeout=25)
     net_unenforced_list = net.get("unenforced") or []
-    # Two different claims live in this array now. The shim being genuinely
-    # UNAVAILABLE (main.rs's/windows.rs's own markers — no blocking happened
-    # at all) is not the same as the shim being APPLIED but only best-effort
-    # (executor.py's own disclosure, E-1 below) — only the first
-    # should skip the "did it actually block" assertion.
+    # Three states the result can report for no_net, and they are not the same:
+    #   shim_absent  — no blocking happened at all (own markers below)
+    #   best_effort  — only the bypassable LD_PRELOAD/dyld SYMBOL shim held (E-1)
+    #   enforced     — a seccomp-bpf filter blocked it in the KERNEL,
+    #                  the strongest tier, and the ONLY one where no_net's
+    #                  unenforced is legitimately empty.
     shim_absent = any(u in net_unenforced_list for u in
                        ("no_net_unavailable_on_windows",
                         "no_net_requested_but_no_shim_available"))
+    best_effort = executor._NO_NET_BEST_EFFORT in net_unenforced_list
     if shim_absent:
         check("--no-net says so when it cannot be applied", True,
               f"-> {net_unenforced_list}")
     else:
-        check("--no-net blocks egress when the shim was applied",
+        check("--no-net blocks egress (shim or seccomp)",
               "EGRESS REACHED" not in (net.get("stdout") or ""),
               f"-> {(net.get('stdout') or '').strip()[:60]!r}")
-        # E-1: blocknet.c's LD_PRELOAD/dyld shim is a bypassable
-        # symbol interposition, not a kernel egress block, so the result must
-        # say so whenever it is what satisfied no_net — never a silent
-        # unenforced=[] that reads as "fully enforced".
-        check("  ...and discloses the shim is best-effort, not unenforced=[]",
-              executor._NO_NET_BEST_EFFORT in net_unenforced_list,
-              f"-> {net_unenforced_list}")
+        if best_effort:
+            # Shim path (macOS, or a Linux kernel without seccomp): a bypassable
+            # symbol interposition, so the result MUST say so — never a silent
+            # unenforced=[] that reads as "fully enforced".
+            check("  ...and discloses the shim is best-effort (E-1)",
+                  best_effort, f"-> {net_unenforced_list}")
+        else:
+            # Seccomp path: genuinely enforced in-kernel, so no_net
+            # contributes NOTHING to unenforced. The disclosure must be ABSENT —
+            # the guarantee is real, and claiming best-effort would now be a lie.
+            check("  ...and when seccomp enforces it, no best-effort disclosure",
+                  not best_effort, f"-> {net_unenforced_list}")
 
-    # ── E-1: the shim is bypassable via ctypes/dlsym ─────────────
-    # blocknet.c intercepts socket()/connect() via ELF symbol interposition,
-    # which only covers calls that resolve those names through the ordinary
-    # dynamic symbol table. `ctypes.CDLL(find_library("c")).socket` pulls the
-    # symbol out of libc's OWN table via dlsym on a specific handle, which
-    # does not consult LD_PRELOAD's global-scope override for that lookup —
-    # so it reaches a real socket() even with the shim loaded. Verified live
-    # during the audit (socket.socket(AF_INET) -> EACCES(13), but
-    # ctypes.CDLL(find_library("c")).socket(2, 1, 0) -> a working fd, same
-    # process, same no_net=True). Guarded to skip cleanly rather than fail
-    # where the probe cannot mean anything: no rust backend, no shim applied,
-    # or a platform this bypass was not verified on.
+    # ── the ctypes/raw-syscall bypass: it defeated the shim (E-1), a seccomp
+    #    filter closes it ────────────────────────────────────────────
+    # blocknet.c interposes socket()/connect() at the SYMBOL level, which a
+    # ctypes/dlsym call or a raw syscall resolves around — verified live in the
+    # audit (socket.socket(AF_INET) -> EACCES(13), but libc.socket(2, 1, 0) -> a
+    # working fd, same process, same no_net=True). A seccomp-bpf filter refuses
+    # the socket() SYSCALL itself, which no userspace call can dodge. So the SAME
+    # probe reaches a fd on the shim path and is BLOCKED on the seccomp path.
     if not IS_LINUX:
-        skip("ctypes/dlsym no_net bypass (E-1)",
-             f"verified on Linux; not probed on {sys.platform}")
+        skip("ctypes/raw no_net bypass (E-1)",
+             f"seccomp is Linux-only; not probed on {sys.platform}")
     elif shim_absent:
-        skip("ctypes/dlsym no_net bypass (E-1)",
+        skip("ctypes/raw no_net bypass (E-1)",
              f"the shim itself was not applied on this run: {net_unenforced_list}")
     else:
         bypass = executor.execute(
@@ -455,20 +463,77 @@ else:
             "    print('BLOCKED', ctypes.get_errno())\n",
             no_net=True, timeout=15)
         bypass_stdout = bypass.get("stdout") or ""
-        if "BLOCKED" in bypass_stdout:
-            # libc's own socket() refused too: nothing to demonstrate a
-            # bypass with on this host (e.g. a network namespace with no
-            # AF_INET support at all). Not the class of failure this test
-            # exists to catch, so skip rather than fail.
-            skip("ctypes/dlsym no_net bypass (E-1)",
+        if not best_effort:
+            # Seccomp path: the filter refuses socket(AF_INET) at the syscall
+            # boundary, so the raw ctypes call that bypassed the shim is now
+            # blocked. Positive control: only assert BLOCKED-under-no_net if a raw
+            # inet socket actually WORKS without no_net here (a netns with no
+            # AF_INET would make the assertion vacuous — a broken filter also
+            # yields EAFNOSUPPORT and would false-pass).
+            inet_free = executor.execute(
+                "python3",
+                "import ctypes, ctypes.util\n"
+                "libc = ctypes.CDLL(ctypes.util.find_library('c'), use_errno=True)\n"
+                "fd = libc.socket(2, 1, 0)\n"
+                "print('OK', fd) if fd >= 0 else print('NO', ctypes.get_errno())\n",
+                timeout=15)  # deliberately NOT no_net
+            if "OK" not in (inet_free.get("stdout") or ""):
+                skip("ctypes/raw socket() BLOCKED under seccomp no_net",
+                     f"raw inet socket not reachable here: {(inet_free.get('stdout') or '').strip()!r}")
+            else:
+                check("ctypes/raw socket() is BLOCKED under seccomp no_net (the E-1 "
+                      "bypass, closed at the syscall)",
+                      "BLOCKED" in bypass_stdout,
+                      f"-> stdout={bypass_stdout.strip()!r} "
+                      f"stderr={(bypass.get('stderr') or '')[:200]!r}")
+            # AF_UNIX must survive — the filter blocks inet, not all sockets.
+            unix_ok = executor.execute(
+                "python3",
+                "import socket\na, b = socket.socketpair()\nprint('AF_UNIX ok')\n",
+                no_net=True, timeout=15)
+            check("  ...and AF_UNIX still works (filter blocks inet, not all sockets)",
+                  "AF_UNIX ok" in (unix_ok.get("stdout") or ""),
+                  f"-> {(unix_ok.get('stdout') or '').strip()[:40]!r}")
+            # io_uring egress (found in review): a ring dispatches
+            # IORING_OP_SOCKET/CONNECT INSIDE the kernel, reaching the network
+            # without a socket()/connect() syscall the filter would see, so the
+            # filter refuses io_uring_setup (ENOSYS). io_uring_setup is syscall
+            # 425 on both x86_64 and aarch64. Positive control first: skip where
+            # io_uring is unavailable rather than false-pass.
+            iou_probe = (
+                "import ctypes\n"
+                "libc = ctypes.CDLL(None, use_errno=True)\n"
+                "params = (ctypes.c_ubyte * 120)()\n"
+                "fd = libc.syscall(425, 8, ctypes.byref(params))\n"
+                "print('IOURING_OK' if fd >= 0 else 'IOURING_BLOCKED %d' % ctypes.get_errno())\n")
+            iou_free = executor.execute("python3", iou_probe, timeout=15)  # not no_net
+            if "IOURING_OK" not in (iou_free.get("stdout") or ""):
+                skip("io_uring refused under seccomp no_net",
+                     f"io_uring not available here: {(iou_free.get('stdout') or '').strip()!r}")
+            else:
+                iou_net = executor.execute("python3", iou_probe, no_net=True, timeout=15)
+                # Assert the block POSITIVELY (the child printed IOURING_BLOCKED),
+                # not just "not IOURING_OK": the filter's contract is a graceful
+                # ENOSYS so runtimes fall back, and an empty stdout (a drift to
+                # KILL) must fail this, not silently pass.
+                check("io_uring is refused (ENOSYS) under seccomp no_net (no in-kernel "
+                      "inet socket around the filter)",
+                      "IOURING_BLOCKED" in (iou_net.get("stdout") or ""),
+                      f"-> {(iou_net.get('stdout') or '').strip()!r}")
+        elif "BLOCKED" in bypass_stdout:
+            # Shim path, but libc's own socket() refused anyway (e.g. a netns
+            # with no AF_INET at all): nothing to demonstrate a bypass with.
+            # Not this test's failure class, so skip rather than fail.
+            skip("ctypes/raw no_net bypass (E-1)",
                  f"libc socket() itself failed on this host: {bypass_stdout!r}")
         else:
+            # Shim path: the bypass reaches a real fd, and the result discloses
+            # the shim as best-effort (E-1), never unenforced=[].
             check("ctypes/dlsym socket() bypasses the no_net shim (E-1)",
                   "BYPASS" in bypass_stdout,
                   f"-> stdout={bypass_stdout.strip()!r} "
                   f"stderr={(bypass.get('stderr') or '')[:200]!r}")
-            check("  ...and the result DISCLOSES no_net as best-effort, "
-                  "not unenforced=[]",
+            check("  ...and the result DISCLOSES no_net as best-effort",
                   executor._NO_NET_BEST_EFFORT in (bypass.get("unenforced") or []),
                   f"-> {bypass.get('unenforced')}")
 

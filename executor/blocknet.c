@@ -68,6 +68,14 @@
  * cannot detect either of these at runtime. Treat macOS --no-net as a
  * best-effort speed bump, never as isolation. Containers are the answer for
  * anything stronger, on every platform.
+ *
+ * On Linux this shim is no longer the enforcement mechanism: the executor
+ * installs a seccomp-bpf filter in the child (see executor/src/platform/unix.rs)
+ * that refuses the socket(AF_INET/AF_INET6) SYSCALL in-kernel, closing the
+ * ctypes/dlsym/raw-syscall bypass described above. This shim remains the
+ * no_net path on macOS, and the Linux fallback when the kernel refuses a
+ * seccomp filter — everything above about it being best-effort is still true
+ * for those two cases.
  */
 #define _GNU_SOURCE
 #include <errno.h>
