@@ -68,6 +68,14 @@ behind it.
   script's own `--help` and module docstring, including two DoS-shaped
   findings it surfaced past the space today's callers can reach, filed for
   follow-up rather than fixed here).
+- **ClusterFuzzLite coverage-guided fuzzing** (`.clusterfuzzlite/`, `fuzz/`,
+  `.github/workflows/cflite_pr.yml`/`cflite_batch.yml`): the same OSS-Fuzz
+  engine (libFuzzer + atheris + sanitizers) run in this repo's own CI, the
+  complement to `scripts/fuzz.py`'s deterministic seeded smoke gate — one is a
+  fast reproducible gate, the other discovers new paths the seed corpus never
+  named. The atheris harnesses reuse `scripts/fuzz.py`'s seed corpus and
+  contract (no duplication); actions are SHA-pinned like the rest of the repo.
+  It found the `UnicodeDecodeError` crash fixed below on its first run.
 
 ### Fixed
 
@@ -75,6 +83,13 @@ behind it.
   `UnicodeEncodeError` on an expression containing a lone UTF-16 surrogate
   (e.g. `"\ud800"`); it now returns the same `(category, message)` refusal as
   any other unparsable input. Found by `scripts/fuzz.py`.
+- **`safe_expr.classify_unsafe`** likewise no longer raises an uncaught
+  `UnicodeDecodeError` on an expression containing a bare replacement or
+  truncated-multibyte char (e.g. `"�\r�"`) — the same class of C
+  tokenizer round-trip crash as the surrogate above, and now caught the same
+  way, with the same validation verdict (never passed to SymPy as safe). Found
+  by the new ClusterFuzzLite coverage-guided harness, which reached a shape the
+  seeded mutator never produced.
 - **`safe_expr._walk`** (used by `reject_explosive`, reached from every
   symbolic tool via `safe_parse`) no longer raises an uncaught `TypeError`
   when the parsed expression is a bare reference to a heavy-function name

@@ -12,7 +12,7 @@ import time
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
-from codecalc import executor, logic, server, sessions, tools
+from codecalc import executor, logic, safe_expr, server, sessions, tools
 
 FAILS = []
 
@@ -363,6 +363,26 @@ if _HAVE_SYMPY:
                   f"-> ok={_r.get('ok')} reached_parser={_reached_parser}")
     finally:
         _spp.parse_expr = _real_parse_expr
+
+# 8c. THE-899 + its ClusterFuzzLite follow-up: two Unicode shapes crash
+# CPython's C tokenizer from inside classify_unsafe (it round-trips the source
+# through UTF-8 and raises rather than returning a token error). The screen is
+# contracted to RETURN — None or a (category, message) tuple — never to raise;
+# an escaping exception is a DoS-shaped contract break. classify_unsafe runs
+# before SymPy, so this holds with or without the symbolic extra. The surrogate
+# was UnicodeEncodeError (scripts/fuzz.py); the replacement/truncated-multibyte
+# shape is UnicodeDecodeError, found by the coverage-guided harness the seeded
+# mutator never reached.
+for _label, _payload in (("lone surrogate (UnicodeEncodeError)", "\ud800"),
+                         ("replacement char (UnicodeDecodeError)", "�\r�")):
+    try:
+        _c = safe_expr.classify_unsafe(_payload)
+        _raised = None
+    except Exception as _e:
+        _c, _raised = None, type(_e).__name__
+    check(f"screen catches tokenizer-crash class, never raises: {_label}",
+          _raised is None and (_c is None or _c[0] == safe_expr.CATEGORY_VALIDATION),
+          f"-> raised={_raised} result={_c!r}")
 
 # 9b. GH #207: a background child must not survive a NORMAL exit (exit code
 # 0). The process-group kill used to run ONLY on the timeout/overflow path —

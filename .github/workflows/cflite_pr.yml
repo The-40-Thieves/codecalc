@@ -1,0 +1,73 @@
+name: ClusterFuzzLite PR fuzzing
+
+# Coverage-guided DISCOVERY (libFuzzer + atheris), complementing rather than
+# replacing ci-quality.yml's deterministic `fuzz-smoke` job (THE-899, the
+# `fuzz.py` mutation fuzzer under scripts/) — see fuzz/README.md for the
+# split. Runs the two
+# harnesses in fuzz/ against every PR for a bounded time budget so a crash
+# this engine finds blocks the PR that can reproduce it, not a scheduled run
+# days later.
+#
+# No `actions/checkout` step here, deliberately: google/clusterfuzzlite's
+# own build_fuzzers action clones the PR's head itself from the GitHub
+# Actions context (GITHUB_REPOSITORY / GITHUB_SHA), which is the documented
+# upstream shape (context7 /google/clusterfuzzlite docs — no checkout step
+# appears in any of their GitHub Actions examples).
+on:
+  pull_request:
+    paths:
+      - '**'
+
+permissions: read-all
+
+jobs:
+  PR:
+    name: ClusterFuzzLite PR fuzzing (${{ matrix.sanitizer }})
+    runs-on: ubuntu-latest
+    concurrency:
+      group: ${{ github.workflow }}-${{ matrix.sanitizer }}-${{ github.ref }}
+      cancel-in-progress: true
+    strategy:
+      fail-fast: false
+      matrix:
+        # Python's ClusterFuzzLite guide lists `address` and `undefined` as
+        # the supported sanitizers for this language (unlike the C++ default
+        # matrix, which also runs `memory`) — atheris fuzzing is
+        # libFuzzer-based over CPython, and ASan is the one that actually
+        # catches something on a pure-Python target (native extension
+        # boundaries, CPython itself); UBSan buys little extra here for a
+        # PR-latency budget, so it stays out of the PR matrix and can be
+        # added if a finding ever needs it.
+        sanitizer: [address]
+    steps:
+      - name: Build Fuzzers (${{ matrix.sanitizer }})
+        id: build
+        # google/clusterfuzzlite's only published tag (v1) — resolved and
+        # verified 2026-08-21 (`gh api repos/google/clusterfuzzlite/tags`).
+        # It has not moved since 2023; the only change on `main` since then
+        # (`gh api .../compare/<v1-sha>...main`) is two new optional inputs
+        # on run_fuzzers (`report-timeouts`/`report-ooms`, additive,
+        # default-on) — not a fix this workflow needs, so pinning to the
+        # tagged commit rather than an untagged `main` HEAD is the more
+        # conservative choice, not a stale one.
+        uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          language: python
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          sanitizer: ${{ matrix.sanitizer }}
+          upload-build: false
+      - name: Run Fuzzers (${{ matrix.sanitizer }})
+        id: run
+        uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          # 300s: the low end of a PR-latency-affordable budget for two
+          # small harnesses over pure-Python targets — deep, multi-hour
+          # exploration is cflite_batch.yml's job, not a PR gate's.
+          fuzz-seconds: 300
+          mode: 'code-change' # exits on the first crash found
+          sanitizer: ${{ matrix.sanitizer }}
+          output-sarif: true
+          parallel-fuzzing: false
+          minimize-crashes: false
+          report-unreproducible-crashes: false
