@@ -506,7 +506,11 @@ def install(language: str, package: str, session_id: str | None = None,
     if name in _UNSUPPORTED:
         reason = _DECLINED_REASON.get(name)
         msg = f"package install not supported for '{name}'"
-        return {"ok": False, "error": f"{msg}: {reason}" if reason else msg}
+        # A documented policy refusal (THE-881), same taxonomy as the
+        # allowlist denial below — not a codecalc defect just because the
+        # message names no jail or ACL by name.
+        return errors.error_result(
+            errors.PERMISSION_DENIED, f"{msg}: {reason}" if reason else msg)
 
     installer = _INSTALLERS.get(name)
     if installer is None:

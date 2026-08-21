@@ -161,6 +161,91 @@ for _label, _call in [
           and "too long" in str(_r.get("error")),
           f"-> code={_r.get('code')} err={str(_r.get('error'))[:50]!r}")
 
+# THE-881: the GUARD/POLICY half of THE-875's error-classification bug
+# (GH #214). THE-875 fixed argument-validation refusals landing on
+# `internal`; this is the other 8 of 10 reachable cases — a guarded-eval
+# allowlist SUCCESSFULLY blocking a sandbox-escape attempt, a ceiling, a
+# leaked exception repr and a documented policy refusal, all of which
+# `_from_message`'s hint list has no vocabulary for and so fell to
+# `internal` — indistinguishable from an unhandled crash, which is the exact
+# pair an operator needs to tell apart after an incident.
+#
+# The gate: no rejection from the guarded-evaluation allowlist may classify
+# as `internal`. Representative rather than exhaustive — one per screen rule
+# (leading underscore, attribute access, string literal) across more than
+# one tool, so a fix that only patched `evaluate_expression` would not pass.
+for _label, _call in [
+    ("evaluate_expression: __import__", lambda: server.evaluate_expression(
+        "__import__('os').system('x')")),
+    ("evaluate_expression: attribute access", lambda: server.evaluate_expression(
+        "().__class__.__bases__")),
+    ("simplify_expression: string literal", lambda: server.simplify_expression(
+        "open('/tmp/x','w')")),
+    ("solve_expression: attribute access", lambda: server.solve_expression(
+        "os.system('x')")),
+    ("solve_linear: attribute access", lambda: server.solve_linear(
+        "os.system(1) = 0", "x")),
+]:
+    _r = _call()
+    check(f"{_label} -> not internal", _r.get("code") != errors.INTERNAL,
+          f"-> code={_r.get('code')} err={str(_r.get('error'))[:60]!r}")
+    check(f"{_label} -> permission_denied",
+          _r.get("code") == errors.PERMISSION_DENIED, f"-> {_r.get('code')}")
+
+# THE-881 Group 2: a ceiling is a ceiling, not a defect. RESOURCE_EXHAUSTED's
+# own comment is "memory, output or process ceiling hit" — an exponent tower
+# or an oversized result is exactly that.
+for _label, _call in [
+    ("evaluate_expression: power tower", lambda: server.evaluate_expression("9**9**9")),
+    ("calc_exact: exponent ceiling", lambda: server.calc_exact("9**9**9")),
+]:
+    _r = _call()
+    check(f"{_label} -> resource_exhausted, not internal",
+          _r.get("code") == errors.RESOURCE_EXHAUSTED,
+          f"-> code={_r.get('code')} err={str(_r.get('error'))[:60]!r}")
+
+# THE-881 REGRESSION CAUGHT IN REVIEW: safe_expr.reject_unsafe screens for TWO
+# different things through one message-string return — the RCE token/keyword
+# screen (a jail: `permission_denied`) and, in its own last line
+# (`_heavy_call_violation`), a heavy-argument CEILING like `factorial(100000)`
+# (a resource cap: `resource_exhausted`, same family as the power-tower cases
+# just above). A first pass at this fix mapped every `reject_unsafe`
+# rejection to `permission_denied` uniformly, which flipped
+# `factorial(100000)` from its PRE-EXISTING correct `resource_exhausted`
+# (GH #214 names this case as one of the two that already worked) into a
+# wrong `permission_denied` — a resource ceiling reading as a security
+# refusal. `classify_unsafe` (safe_expr.py) now hands back which of the two
+# this is, and exact.py/logic.py map "ceiling" to RESOURCE_EXHAUSTED and
+# "security" to PERMISSION_DENIED separately, so this must never regress
+# again alongside Group 1's guard-refusal gate above.
+for _label, _call in [
+    ("calc_exact: factorial(100000) heavy-arg ceiling",
+     lambda: server.calc_exact("factorial(100000)")),
+    ("evaluate_expression: binomial heavy-arg ceiling",
+     lambda: server.evaluate_expression("binomial(200000, 100000)")),
+]:
+    _r = _call()
+    check(f"{_label} -> resource_exhausted, NOT permission_denied",
+          _r.get("code") == errors.RESOURCE_EXHAUSTED,
+          f"-> code={_r.get('code')} err={str(_r.get('error'))[:60]!r}")
+
+# THE-881 Group 3: `Fraction(1, 1) / Fraction(0, 1)` raises ZeroDivisionError
+# whose message IS `str(Fraction(1, 0))` — the constructor argument, not a
+# sentence. It reached the caller verbatim as `"error": "Fraction(1, 0)"`.
+_r = server.calc_exact("1/0")
+check("calc_exact('1/0') -> validation, not internal",
+      _r.get("code") == errors.VALIDATION, f"-> {_r.get('code')}")
+check("  ...with a human message, not the exception's constructor arg",
+      _r.get("error") == "division by zero", f"-> {_r.get('error')!r}")
+
+# THE-881 Group 4: install_package's unsupported-language refusal is a
+# documented POLICY decision (packages.py's _UNSUPPORTED/_DECLINED_REASON),
+# same taxonomy as the allowlist denial a few lines below it in packages.py
+# that already returned permission_denied.
+_r = server.install_package(language="ruby", package="nokogiri")
+check("install_package(ruby) -> permission_denied, not internal",
+      _r.get("code") == errors.PERMISSION_DENIED, f"-> {_r.get('code')}")
+
 print(f"\n=== {len(FAILS)} FAILURES ===" if FAILS else
       "\n=== ALL ERROR-CODE TESTS PASS ===")
 sys.exit(1 if FAILS else 0)

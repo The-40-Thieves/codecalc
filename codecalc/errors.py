@@ -197,6 +197,36 @@ def _from_message(message: str) -> str:
     return INTERNAL
 
 
+#: Maps safe_expr.classify_unsafe()'s neutral categories to this taxonomy
+#: (THE-881). Lives HERE, not in safe_expr.py: safe_expr must not know this
+#: module's codes (it screens caller strings and has no business owning a
+#: result-contract concern), so it hands back "security"/"ceiling"/
+#: "validation" and the CALLER decides what those mean. Keeping the mapping
+#: in one place rather than duplicated at every exact.py/logic.py call site
+#: is what makes it a single source of truth instead of two chances to drift.
+#: A jail refusal ("security": `__import__`, attribute access, a string
+#: literal) is not the same failure as a ceiling ("ceiling": a heavy-argument
+#: cap like `factorial(100000)`) — one will never succeed on retry, the other
+#: succeeds if the caller reduces the work. Conflating them was THE-881's own
+#: regression: a blanket security mapping turned `factorial(100000)`'s
+#: correct `resource_exhausted` into `permission_denied`.
+_SAFE_EXPR_CATEGORY_CODES = {
+    "security": PERMISSION_DENIED,
+    "ceiling": RESOURCE_EXHAUSTED,
+    "validation": VALIDATION,
+}
+
+
+def code_for_safe_expr_category(category: str) -> str:
+    """The taxonomy code for a safe_expr.classify_unsafe() category.
+
+    Falls back to INTERNAL for an unrecognised category rather than raising:
+    a typo'd category should degrade loudly the same way error_result's own
+    code validation does, not crash the caller that trusted it.
+    """
+    return _SAFE_EXPR_CATEGORY_CODES.get(category, INTERNAL)
+
+
 def error_result(code: str, message: str, **extra) -> dict:
     """The failing half of the result contract.
 
