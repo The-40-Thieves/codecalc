@@ -33,6 +33,24 @@ behind it.
 
 ## [Unreleased]
 
+## [0.3.2] — 2026-08-20
+
+### Added
+
+- **`codecalc --help` and `codecalc --version`** (THE-876, GH #201). Both used
+  to print nothing and exit 0 — `main()` recognised `doctor`/`serve-strict`/
+  `serve-http` but treated the flags as "no subcommand" and started the stdio
+  MCP server. They now print a usage block (naming the subcommands and that the
+  default with no argument is the stdio server) / the version, and exit 0
+  without starting anything.
+- **`codecalc-prefetch-grammars`, a console script that warms the tree-sitter
+  grammar cache** (THE-877, GH #200). The offline warm-up the README told
+  installed users to run lived only in `scripts/`, which the wheel does not
+  ship — so the documented command did not exist for anyone who `pip
+  install`ed rather than cloning. It now ships as a `[project.scripts]` entry
+  point (`codecalc-prefetch-grammars`, `--print-cache-dir`) calling the same
+  code the source script does.
+
 ### Security
 
 - **A workspace-guard refusal (an out-of-workspace path, a malformed session
@@ -139,6 +157,26 @@ behind it.
   which. Each result now carries a `"rounding"` field naming exactly which
   of its own keys were rounded and to how many decimal digits (THE-879,
   #213c).
+- **Ten tools blamed the caller for their own bad input** (THE-875, GH #196).
+  An argument-validation rejection — `percentage(total=0)`, `percentiles([])`,
+  `calc_stats([5])`, `collision_probability(bits=0)`, `human_duration(-5)`,
+  `epoch_time(-1)` among them — returned `code: internal`, whose remedy reads
+  "a defect in codecalc; the message is worth reporting verbatim". These tools
+  `return {ok:false}` rather than raise, so `errors._from_message`'s substring
+  matching is the classification layer; its hint list gained the missing
+  validation phrases ("at least"/"is zero"/"negative"/">="/"unknown") so a
+  caller's bad argument classifies as `validation`, not a codecalc defect.
+  (THE-881 above finished the other half — the guard/policy refusals.)
+- **`bit_analysis` on a negative `n`** (THE-876, GH #197). `bit_analysis(-1)`
+  counted `abs(n)` — reporting `popcount: 1` while its own `is_power_of_two`
+  said false — and silently dropped `next_power_of_two`. A negative `n` is now
+  a validation error pointing at `bitop(width=W)`; `n=0` discloses
+  `next_power_of_two: None` rather than omitting the key.
+- **`human_duration` sub-second and very-large inputs** (THE-876, GH #198).
+  `human_duration(0.5)` returned `"0s"` (losing everything under a second) and
+  `human_duration(1e30)` emitted 26 digits off a 17-digit float — precision the
+  float never held. Sub-second inputs now surface as `ms`/`µs`, and values at
+  or beyond 2^53 are capped to a scientific form instead of fabricating digits.
 
 ## [0.3.1] — 2026-08-20
 
@@ -676,7 +714,8 @@ it, so there was no upgrade path to describe — only what the thing is.
   `ok: false` through the sandbox. Tracked, with a dated reproduction, at
   [#42](https://github.com/The-40-Thieves/codecalc/issues/42).
 
-[Unreleased]: https://github.com/The-40-Thieves/codecalc/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/The-40-Thieves/codecalc/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.3.2
 [0.3.1]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.3.1
 [0.3.0]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.3.0
 [0.2.0]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.2.0
