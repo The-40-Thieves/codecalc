@@ -33,6 +33,35 @@ behind it.
 
 ## [Unreleased]
 
+### Added
+
+- **`scripts/fuzz.py`** (THE-899): a mutation fuzzer over codecalc's two
+  highest-risk caller-string surfaces — `safe_expr.classify_unsafe`/
+  `safe_parse` (the screen between a caller expression and SymPy's
+  `parse_expr`) and `sessions._jail`/`_session_dir` (the traversal guard
+  between a caller path and a session workspace write). Asserts, for every
+  generated input, that neither surface ever raises an uncaught exception,
+  invokes a blocking builtin, or hangs unboundedly. `tests/test_fuzz_smoke.py`
+  runs a small fixed-iteration pass in CI (wired into `ci-quality.yml`); the
+  full multi-thousand-iteration campaign is a manual/deeper run (see the
+  script's own `--help` and module docstring, including two DoS-shaped
+  findings it surfaced past the space today's callers can reach, filed for
+  follow-up rather than fixed here).
+
+### Fixed
+
+- **`safe_expr.classify_unsafe`** no longer raises an uncaught
+  `UnicodeEncodeError` on an expression containing a lone UTF-16 surrogate
+  (e.g. `"\ud800"`); it now returns the same `(category, message)` refusal as
+  any other unparsable input. Found by `scripts/fuzz.py`.
+- **`safe_expr._walk`** (used by `reject_explosive`, reached from every
+  symbolic tool via `safe_parse`) no longer raises an uncaught `TypeError`
+  when the parsed expression is a bare reference to a heavy-function name
+  with no call parens (e.g. the expression `"binomial"`, not `"binomial(5,2)"`)
+  — such a reference resolves to a SymPy `FunctionClass`, whose `.args`
+  attribute is an unbound `property` object rather than a tuple. Found by
+  `scripts/fuzz.py`.
+
 ## [0.4.0] — 2026-08-21
 
 ### Added

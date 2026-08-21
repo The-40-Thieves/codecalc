@@ -134,11 +134,23 @@ allowed to change:
 A client that follows both can be written against `1.0.0` and keep working
 across every `1.x` without changes.
 
-### Deprecation
+### Deprecation, and the compatibility window
 
 Nothing in a MAJOR is removed without notice. A field or enum member being
 retired is first marked deprecated in this document and in the schema
 description, and **keeps working for at least twelve months** from that mark.
+
+**The compatibility window is twelve months, full stop — the same number for
+every kind of deprecated thing this contract can carry:** a result field, a
+`code` enum member, and a `verdict` enum member. There is no shorter window for
+a smaller-looking change (e.g. one field) and no separate release-count clock
+running alongside it (e.g. "N minor releases") — a single duration, so a
+deprecation's expiry date is answerable by reading one mark and adding twelve
+months, not by also checking how many `MINOR` releases happened to ship in
+that time. Concretely: mark a member deprecated in this document and the
+schema description on day zero; it keeps returning exactly as before through
+every `MINOR` release for at least the next twelve months; only a `MAJOR`
+release on or after that date may remove it.
 
 That window is deliberately the same as
 [MCP's own deprecation policy](https://blog.modelcontextprotocol.io/posts/2026-07-28/),

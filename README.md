@@ -181,6 +181,27 @@ Nothing fails silently: a tool whose extra is missing returns
 extra: pip install 'codecalc[symbolic]' ..."}`, and `codecalc doctor` lists
 which extras are present before you make a call.
 
+### Editions
+
+Four names for the capability sets above, plus the two that live outside
+`pyproject.toml` entirely — a Docker image and an opt-in isolation boundary.
+**The invariant that makes "edition" a meaningful word here:** in the edition
+that lists a tool, that tool is functional — never listed-but-missing-its-extra.
+A tool an edition doesn't have returns the `dependency_missing` contract error
+naming the extra that provides it (see above), not a silent failure or a
+tool that appears to exist and doesn't work.
+
+| Edition | Install | What you get |
+|---|---|---|
+| **Full** | `uvx 'codecalc[full]'` / `pip install 'codecalc[full]'` | The recommended local product: the native (Rust) executor, symbolic tools (`evaluate_expression`, `solve_linear`, `z3_check`, …), and parsing (`analyze_complexity`). Everything this README documents actually runs. |
+| **Core** | `uvx codecalc` / `pip install codecalc` | Execution + non-symbolic tools only — the base install in the table above. Every symbolic/parsing tool is still *listed* by `tools/list` (MCP doesn't support per-install schemas), but calling one returns `dependency_missing` naming the extra, before any other work happens. |
+| **Docker** | `docker build -f docker/mcp-server.Dockerfile .` | The MCP server itself, packaged to run as an ordinary container. Core-shaped **by default**: ships `python3`/`node`/`ruby`/`php`/`perl`/`gawk`/`lua`/`c`/`cpp`/`jq`/`sqlite3` and the default rlimit sandbox — symbolic/parsing are absent by design (no `[full]` in the base image; see the Dockerfile's own comment for why, including an arm64 z3-solver wheel gap). `--build-arg CODECALC_EXTRA=full` adds them. This image cannot nest the Strict Host boundary below inside itself (no privileged docker-in-docker), and `codecalc doctor` inside it says so rather than claiming a boundary it doesn't have. |
+| **Strict Host** | opt-in; `CODECALC_STRICT_URL` (client) or the gVisor+Docker host itself (server) — see [`docs/deployment/README.md`](docs/deployment/README.md) | Not an install, a *boundary*: the gVisor `runsc` sandbox on Linux, or AppContainer hardening on Windows, layered above whichever install above is already running. Fails closed — no digest pinned, no fallback to unenforced local execution. |
+
+`codecalc doctor` reports which of these you're actually running (backend,
+extras present, `strict_runtime` prerequisites) — read it before assuming a
+capability rather than after a tool call surprises you.
+
 `.github/workflows/release.yml` publishes a platform-tagged wheel per target
 (Linux x86_64/aarch64 musl, macOS x86_64/aarch64, Windows x86_64), each
 carrying the matching `codecalc-exec` binary and — where the platform has
@@ -751,7 +772,7 @@ PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py         # every tool over MC
 PYTHONPATH=. .venv/bin/python tests/test_executor_sweep.py  # sandbox regressions
 ```
 
-52 test files and 14 CI-invoked scripts, **2159 assertions**. "CI-invoked"
+53 test files and 14 CI-invoked scripts, **2159 assertions**. "CI-invoked"
 means referenced by path (`scripts/<name>.py`) from a job in
 `.github/workflows/*.yml` — `scripts/check_claims.py` derives the count that
 way and gates it, so a script wired into a workflow without this sentence

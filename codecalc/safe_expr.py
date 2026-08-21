@@ -220,11 +220,19 @@ def classify_unsafe(expression: str) -> tuple[str, str] | None:
                 f"expression must be a string, got {type(expression).__name__}")
     try:
         tokens = list(tokenize.generate_tokens(io.StringIO(expression).readline))
-    except (tokenize.TokenError, SyntaxError, IndentationError) as exc:
+    except (tokenize.TokenError, SyntaxError, IndentationError, UnicodeEncodeError) as exc:
         # Unparsable at the token level is not automatically hostile — SymPy
         # accepts things Python does not — so say what happened and let the
         # caller's own parse error be the verdict, rather than claiming this
         # was an attack.
+        #
+        # UnicodeEncodeError found by scripts/fuzz.py (THE-899): a lone UTF-16
+        # surrogate (e.g. "\ud800") tokenises via CPython's C tokenizer, which
+        # encodes the source to UTF-8 internally and raises rather than
+        # returning a token error — an uncaught exception out of a function
+        # every caller treats as returning `None` or `(category, message)`,
+        # never raising. A lone surrogate is exactly as "unparsable, not
+        # hostile" as the three exceptions already caught here.
         return (CATEGORY_VALIDATION, f"expression could not be tokenised: {exc}")
 
     for tok in tokens:
@@ -491,4 +499,18 @@ def _walk(node):
             return
         yield current
         args = getattr(current, "args", ())
-        stack.extend(args)
+        # Found by scripts/fuzz.py (THE-899): `parse_expr("binomial", ...)`
+        # (a heavy-function NAME used bare, with no call parens) resolves to
+        # the sympy FunctionClass itself rather than an instance — and
+        # `FunctionClass.args`, accessed on the class rather than an
+        # instance, returns the unbound `property` DESCRIPTOR object, not a
+        # tuple. `getattr` above does not catch this: the attribute exists,
+        # it just is not the shape every other node's `.args` is. Without
+        # this check, `stack.extend(a_property_object)` raised an uncaught
+        # `TypeError: 'property' object is not iterable` for ANY bare
+        # reference to a name in `_HEAVY_FUNCTIONS` (binomial, factorial,
+        # gamma, ...) reachable through every symbolic tool that calls
+        # `safe_parse`. A node with a malformed `args` has no children this
+        # walk can trust, so it is treated as a leaf rather than expanded.
+        if isinstance(args, tuple):
+            stack.extend(args)

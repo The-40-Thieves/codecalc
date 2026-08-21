@@ -113,6 +113,17 @@ changelog policy in prose must not accidentally opt itself out.
 - Tools are `@mcp.tool` functions in `codecalc/server.py`. A new tool needs an entry in `TOOL_TIMEOUTS` (`codecalc/mcp_middleware.py`), coverage in `tests/test_mcp_all.py`, and the README count updated.
 - Anything touching the sandbox needs a regression test in `tests/test_security.py`.
 
+**Not during a declared stabilization cycle.** When one is in effect, the MCP
+tool surface is **frozen** — no new `@mcp.tool`, for any reason, including a
+narrowly-scoped one. The tool count `check_claims.py` gates (see "Counts are
+gated" above) is normally a floor that only ever moves up; during a
+stabilization cycle it is also a **ceiling** for that period, and a PR adding
+a tool should be redirected to widen an existing one, land after the cycle
+ends, or be declined. This is written down once, here, so it does not get
+re-litigated tool-by-tool: the point of a stabilization cycle is a fixed
+surface to stabilize, and a tool count that can still move during it is not
+fixed.
+
 ## Style
 
 Match the file you are editing. The prevailing idiom is a comment that explains **why**, and specifically what went wrong before, rather than what the line does. Corrections are written into the documents they correct rather than quietly patched, which is why `AUDIT.md` carries inline `CORRECTION` blocks.
