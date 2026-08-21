@@ -1668,12 +1668,23 @@ def _write_nofollow(target: Path, content: str) -> None:
     Reported alongside #104.
 
     O_NOFOLLOW closes the final component, which is the component `_jail`'s
-    resolve() cannot re-verify. Parent components are still a window in
-    principle: fully closing it needs openat2(RESOLVE_BENEATH), which is Linux
-    5.6+ and has no portable equivalent, and the parents here are inside a
-    workspace that resolve() already walked. On Windows the flag is absent
-    entirely and this degrades to an ordinary open — which is why the Landlock
-    confinement above matters even for a path this function guards.
+    resolve() cannot re-verify. Parent components are still a window: a
+    session's own executed code shares the workspace as its cwd, and between
+    `_jail`'s resolve() and this open() it can plant a symlink in a PARENT
+    directory the same way #104 planted one at the final component — swapping
+    a directory this write was headed into for one it was not. Closing that
+    fully needs openat2(RESOLVE_BENEATH), which is Linux 5.6+ and has no
+    portable equivalent; "resolve() already walked it" is not a mitigation,
+    only a description of where the race starts.
+    Landlock does NOT cover this either: it confines the WORKER (the process
+    that runs the session's own code — see `_session_unenforced`), not the
+    SERVER process this function runs in, so it has no bearing on the
+    server's own open(). This parent-component TOCTOU is an accepted residual
+    pending openat2, narrower than it sounds because it requires the
+    session's own code to win a race against the server between resolve()
+    and open() — not because anything here closes it. On Windows the flag is
+    absent entirely and this degrades to an ordinary open, with the same
+    residual.
     """
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _O_NOFOLLOW
     fd = os.open(target, flags, 0o600)
@@ -1691,7 +1702,8 @@ def _read_nofollow(target: Path, max_bytes: int) -> bytes | None:
     path in between. Here that would make the SERVER read a file outside the
     workspace and hand the bytes to the MCP client. The Landlock confinement
     added in #107 does not cover it: that confines the worker, and this read
-    happens in the server process.
+    happens in the server process. Same accepted parent-component TOCTOU as
+    `_write_nofollow` for the same reason — see its docstring.
 
     Three things this closes, not one:
 

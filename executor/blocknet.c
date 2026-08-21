@@ -1,7 +1,10 @@
 /* blocknet.c — preloaded shim that blocks network egress for sandboxed code.
  *
- * Fails socket() and connect() with EACCES for NETWORK address families only —
- * AF_INET and AF_INET6. Nothing else can reach a network.
+ * Fails socket() and connect() with EACCES for NETWORK address families only
+ * — AF_INET and AF_INET6 — for any call that resolves socket()/connect()
+ * through the symbol this shim replaces. That is not every way to reach the
+ * network; see "Best-effort by construction" below for the two classes of
+ * call that never touch this symbol at all.
  *
  * It used to block socket() unconditionally, which also killed AF_UNIX. A unix
  * socket is local IPC and cannot leave the machine, so blocking it bought no
@@ -14,9 +17,20 @@
  * it for internal signal and event plumbing, and blocking it crashes the
  * runtime rather than its network call.
  *
- * Best-effort by construction: it only affects dynamically-linked programs.
- * A statically linked binary — Go's default — never consults the dynamic
- * loader and ignores this entirely.
+ * Best-effort by construction, in two independent ways. It only affects
+ * dynamically-linked programs: a statically linked binary — Go's default —
+ * never consults the dynamic loader and ignores this entirely. And even a
+ * dynamically-linked program can route AROUND the interposed symbol rather
+ * than through it: `ctypes`/`dlsym` pulling `socket()` straight out of libc,
+ * or a raw `syscall(SYS_socket, ...)`, never resolves the name this shim
+ * replaces, so neither is seen here at all. Verified live: with this shim
+ * loaded and `no_net=True`, `ctypes.CDLL(find_library("c")).socket(2, 1, 0)`
+ * returns a working fd (E-1, THE-900/THE-902) — the executor's `unenforced`
+ * now discloses this whenever the shim is what satisfied `no_net`, rather
+ * than reporting it as fully applied. Containers or a real kernel-level
+ * egress block (gVisor, network namespaces) are the fix for either gap; this
+ * shim is a speed bump against the ordinary case, not a boundary against an
+ * adversarial one.
  *
  * Build:
  * Built automatically by executor/build.rs as part of `cargo build`, into the

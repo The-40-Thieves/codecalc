@@ -33,6 +33,27 @@ behind it.
 
 ## [Unreleased]
 
+### Security
+
+- **`no_net`'s result now discloses that the Rust executor's block is a
+  best-effort symbol shim, not a kernel egress block** (E-1, THE-900/THE-902).
+  `--no-net` intercepts `socket()`/`connect()` via `LD_PRELOAD` on Linux and
+  `DYLD_INSERT_LIBRARIES` on macOS — ELF/dyld symbol interposition, which only
+  covers calls that resolve those names through the ordinary dynamic symbol
+  table. Verified live: with the shim applied and `no_net=True`,
+  `socket.socket(AF_INET)` gets `EACCES` as documented, but
+  `ctypes.CDLL(find_library("c")).socket(2, 1, 0)` — which pulls the symbol
+  out of libc's own table via `dlsym` on a specific handle rather than through
+  that global scope — returns a working fd, and the result's `unenforced`
+  still came back `[]`, falsely reading as fully enforced. `executor.py` now
+  appends a disclosure to `unenforced` whenever `no_net` was requested and
+  satisfied by the shim (as opposed to the shim being altogether unavailable,
+  already disclosed separately): `"no_net: best-effort LD_PRELOAD/dyld symbol
+  shim — a dynamically-linked ctypes/dlsym or raw-syscall network call
+  bypasses it; use the strict (gVisor) backend for a real egress block"`.
+  `AUDIT.md` and `executor/blocknet.c`'s own comments corrected to name this
+  bypass alongside the already-documented static-linking one.
+
 ### Added
 
 - **`scripts/fuzz.py`** (THE-899): a mutation fuzzer over codecalc's two
