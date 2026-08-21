@@ -120,16 +120,25 @@ check("non_integer_arithmetic does NOT fire on '2 + 3 + 4' (integer-only chain)"
 check("non_integer_arithmetic does NOT fire on an estimate-guarded float claim",
       sd._rule_non_integer_arithmetic("roughly 1.5 + 2.3, an estimate") == [])
 
-check("non_decimal_base_value fires on '0x1F' and returns the exact literal",
-      sd._rule_non_decimal_base_value("the mask is 0x1F") == ["0x1F"])
+check("non_decimal_base_value fires on a base-CONVERSION claim, exact literal",
+      sd._rule_non_decimal_base_value("the value in hex is 0x1F") == ["0x1F"])
 
-check("non_decimal_base_value fires on a binary literal '0b1010'",
-      sd._rule_non_decimal_base_value("stored as 0b1010") == ["0b1010"])
+check("non_decimal_base_value fires on a binary conversion claim",
+      sd._rule_non_decimal_base_value("in binary that is 0b1010") == ["0b1010"])
+
+check("non_decimal_base_value does NOT fire on a bare literal used as a constant "
+      "(a mask/flag/address, not a computed conversion claim)",
+      sd._rule_non_decimal_base_value("set the flag to 0xFF to enable all bits") == []
+      and sd._rule_non_decimal_base_value("the mask 0b1010 selects those bits") == [])
 
 check("large_integer_2^53 fires on 9007199254740993 (one past 2^53) but not on "
       "9007199254740992 (exactly 2^53)",
       sd._rule_large_integer_2_53("value is 9007199254740993") == ["9007199254740993"]
       and sd._rule_large_integer_2_53("value is 9007199254740992") == [])
+
+check("large_integer_2^53 does NOT fire on the fractional tail of a float "
+      "(0.30000000000000004 is a non-integer, caught by the arithmetic rule)",
+      sd._rule_large_integer_2_53("the result is 0.30000000000000004") == [])
 
 check("speedup_claim fires on '30% faster' with no hedge nearby",
       sd._rule_speedup_claim("the new version is 30% faster") == ["30% faster"])
@@ -142,6 +151,11 @@ check("equivalence_or_port_claim does NOT fire on bare prose with no code fence"
 
 check("big_o_claim does NOT fire on lowercase 'o(' inside ordinary prose",
       sd._rule_big_o_claim("please look into(this) further") == [])
+
+check("big_o_claim does NOT fire when Big-O is DISCUSSED as a concept, but DOES "
+      "fire when claimed of a piece of code",
+      sd._rule_big_o_claim("Big-O notation like O(n) is taught in every CS course") == []
+      and sd._rule_big_o_claim("this loop is O(n^2) in the worst case") == ["O(n^2)"])
 
 # ── Miss.as_dict() carries every documented field ───────────────────────────
 

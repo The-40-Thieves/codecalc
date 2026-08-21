@@ -125,7 +125,11 @@ def _rule_non_integer_arithmetic(text: str) -> list[str]:
 #: avoids parsing every small integer in a message before the real
 #: comparison.
 _TWO_POW_53 = 2**53
-_LARGE_INT_RE = re.compile(r"\d{16,}")
+#: A 16+ digit run, but NOT one that is the fractional tail of a float
+#: (`0.30000000000000004`) or the middle of a longer digit string — that is a
+#: non-integer already caught by the arithmetic rule, and flagging it here as an
+#: "integer past 2^53" double-reports one claim and mislabels it.
+_LARGE_INT_RE = re.compile(r"(?<![\d.])\d{16,}")
 
 
 def _rule_large_integer_2_53(text: str) -> list[str]:
@@ -176,11 +180,22 @@ _BIG_O_RE = re.compile(r"O\(\s*[0-9a-zA-Z^*\s+!log]+\)")
 _TIME_COMPLEXITY_RE = re.compile(r"time complexity is", re.IGNORECASE)
 
 
+#: Concept-discussion markers. "O(n) notation is taught", "asymptotic notation",
+#: "the term O(1)" — the model is DISCUSSING Big-O, not claiming a piece of code's
+#: complexity, so it is not the "about to state a Big-O" trigger. Suppressing
+#: these is the conservatism the rule needs: firing on every `O(...)` in prose is
+#: exactly the false-positive class that gets a rule turned off.
+_BIG_O_CONCEPT_RE = re.compile(
+    r"notation|asymptotic|the term|concept of|is taught|textbook", re.IGNORECASE
+)
+
+
 def _rule_big_o_claim(text: str) -> list[str]:
     claims = []
     for pattern in (_BIG_O_RE, _TIME_COMPLEXITY_RE):
         for m in pattern.finditer(text):
-            if _looks_like_estimate(_window(text, m.start(), m.end())):
+            window = _window(text, m.start(), m.end())
+            if _looks_like_estimate(window) or _BIG_O_CONCEPT_RE.search(window):
                 continue
             claims.append(m.group(0))
     return claims
@@ -204,14 +219,26 @@ def _rule_speedup_claim(text: str) -> list[str]:
     return claims
 
 
-#: A hex or binary literal stated as a value.
+#: A hex or binary literal. On its own a literal is usually a CONSTANT — a flag,
+#: a mask, an address — not a value the model computed and is now claiming. The
+#: SKILL trigger is a value STATED in another base as a claim, which in practice
+#: carries a conversion cue nearby ("in hex", "= 0x..", "255 in binary is .."):
+#: requiring that cue is the conservatism. "Set the flag to 0xFF" must NOT fire;
+#: "255 in hex is 0xFF" must.
 _BASE_RE = re.compile(r"\b0x[0-9a-fA-F]+\b|\b0b[01]+\b")
+_BASE_CONVERSION_CUE_RE = re.compile(
+    r"\b(hex|hexadecimal|binary|decimal|base\s*\d+)\b|=\s*0[xb]", re.IGNORECASE
+)
 
 
 def _rule_non_decimal_base_value(text: str) -> list[str]:
     claims = []
     for m in _BASE_RE.finditer(text):
-        if _looks_like_estimate(_window(text, m.start(), m.end())):
+        window = _window(text, m.start(), m.end())
+        if _looks_like_estimate(window):
+            continue
+        # A bare literal with no conversion context is a constant, not a claim.
+        if not _BASE_CONVERSION_CUE_RE.search(window):
             continue
         claims.append(m.group(0))
     return claims

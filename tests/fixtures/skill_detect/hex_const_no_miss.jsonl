@@ -1,0 +1,2 @@
+{"role": "user", "content": "how do I enable all the bits?"}
+{"role": "assistant", "content": "Set the flag to 0xFF to enable all bits, or use the mask 0b1010 for a subset.", "tool_calls": []}
