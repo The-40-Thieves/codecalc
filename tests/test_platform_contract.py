@@ -512,9 +512,13 @@ else:
                      f"io_uring not available here: {(iou_free.get('stdout') or '').strip()!r}")
             else:
                 iou_net = executor.execute("python3", iou_probe, no_net=True, timeout=15)
-                check("io_uring is refused under seccomp no_net (no in-kernel inet "
-                      "socket around the filter)",
-                      "IOURING_OK" not in (iou_net.get("stdout") or ""),
+                # Assert the block POSITIVELY (the child printed IOURING_BLOCKED),
+                # not just "not IOURING_OK": the filter's contract is a graceful
+                # ENOSYS so runtimes fall back, and an empty stdout (a drift to
+                # KILL) must fail this, not silently pass.
+                check("io_uring is refused (ENOSYS) under seccomp no_net (no in-kernel "
+                      "inet socket around the filter)",
+                      "IOURING_BLOCKED" in (iou_net.get("stdout") or ""),
                       f"-> {(iou_net.get('stdout') or '').strip()!r}")
         elif "BLOCKED" in bypass_stdout:
             # Shim path, but libc's own socket() refused anyway (e.g. a netns
