@@ -33,8 +33,23 @@ behind it.
 
 ## [Unreleased]
 
+## [0.3.2] — 2026-08-20
+
 ### Added
 
+- **`codecalc --help` and `codecalc --version`** (THE-876, GH #201). Both used
+  to print nothing and exit 0 — `main()` recognised `doctor`/`serve-strict`/
+  `serve-http` but treated the flags as "no subcommand" and started the stdio
+  MCP server. They now print a usage block (naming the subcommands and that the
+  default with no argument is the stdio server) / the version, and exit 0
+  without starting anything.
+- **`codecalc-prefetch-grammars`, a console script that warms the tree-sitter
+  grammar cache** (THE-877, GH #200). The offline warm-up the README told
+  installed users to run lived only in `scripts/`, which the wheel does not
+  ship — so the documented command did not exist for anyone who `pip
+  install`ed rather than cloning. It now ships as a `[project.scripts]` entry
+  point (`codecalc-prefetch-grammars`, `--print-cache-dir`) calling the same
+  code the source script does.
 - **`matrix` — structured matrix operations** (THE-887, GH #223): det,
   inverse, eigenvalues, transpose, rank, trace. `evaluate_expression` has
   always refused `Matrix([[1,2],[3,4]])` with `"'[' is not permitted in an
@@ -61,88 +76,6 @@ behind it.
   for the same RCE reason — only the message improves, from a bare `"'['
   is not permitted in an expression"` to one that says a matrix literal
   belongs in the new `matrix` tool instead.
-
-### Security
-
-- **`solve_linear` no longer parses caller input through a live-builtins
-  `sympify`** (THE-888). Each side of each equation (and the single-expression
-  no-`=` path) reached `sp.sympify(...)` directly, which uses SymPy's DEFAULT
-  `global_dict` (`vars(builtins)` copied in) and skipped the unevaluated-shape
-  check `evaluate_expression` already runs. `solve_linear('x = input()', 'x')`
-  called the REAL `input()`, reading the child's stdin — shared fd 0 with a
-  stdio MCP server — and `solve_linear('x = 9**9**9**9', 'x')` burned real CPU
-  seconds evaluating a power tower blind, riding the guard's own timeout
-  instead of a fast refusal. Both pieces now parse via `parse_expr(global_dict=
-  safe_global_dict())` with `reject_explosive` run on the unevaluated shape
-  first — the same fix THE-887 gave the `matrix` tool's per-cell parse.
-  `input()`/`breakpoint()`/`quit()` now parse to a clean error (matching
-  `evaluate_expression`'s own outcome for the same string) instead of being
-  called, and a power tower is now `resource_exhausted` in milliseconds
-  instead of burning CPU seconds.
-- **`algebraic_equiv`, `solve_expression`, `limit_expression` (including its
-  `point` argument) and `simplify_expression` no longer parse caller input
-  through a live-builtins `sympify`** (THE-889). Each reached a bare
-  `sp.sympify(...)` after `classify_unsafe` — the same gap THE-887/888 closed
-  in `matrix` and `solve_linear`: a screened, non-denylisted NAME can still
-  be a live Python builtin. `simplify_expression('input()')` called the REAL
-  `input()`, reading the child's stdin — shared fd 0 with a stdio MCP
-  server — and `algebraic_equiv('9**9**9**9', '0')` burned real CPU seconds
-  evaluating a power tower blind. All four now parse via a new shared
-  `safe_expr.safe_parse()` — `parse_expr(global_dict=safe_global_dict())`
-  with `reject_explosive` run on the unevaluated shape first — extracted
-  from the three near-identical copies of this same pipeline that
-  `logic._evaluate_expression`, `logic._parse_solve_piece` (THE-888) and
-  `linalg._parse_entry` (THE-887) each hand-rolled; all three now delegate
-  to the shared helper too, dropping the duplication (their own result
-  shapes are unchanged), so `safe_parse` is the single place in the package
-  that hands a caller string to SymPy's parser and a future caller cannot
-  reintroduce this gap by doing `classify_unsafe` and forgetting the safe
-  parse. `input()`/`breakpoint()`/`quit()` now parse to a clean error
-  (matching `evaluate_expression`'s own outcome) instead of being called,
-  and a power tower is now `resource_exhausted` in milliseconds instead of
-  burning CPU seconds.
-- **Side effect of the above: the four `exact.py` tools now parse with
-  implicit multiplication**, the same `parse_expr` transformation
-  `evaluate_expression`/`matrix`/`solve_linear` already enable, in place of
-  `sp.sympify`'s stricter grammar. Ordinary input that used to require an
-  explicit `*` is now accepted and reinterpreted as multiplication:
-  `2(x+1)` (previously a parse error) now parses as `2*x + 2`, and
-  function-call notation on an undeclared name — `f(x)` (previously the
-  applied function `f(x)`) — now parses as `f*x`. Concretely,
-  `algebraic_equiv('x(x+1)', 'x*(x+1)')` now reports `identical: true`; on
-  the old `sp.sympify` grammar the left side was the applied function
-  `x(x+1)`, not a product, and the two were not identical. This mirrors
-  `evaluate_expression`'s existing behaviour for the same input and is a
-  side effect of closing the parse gap above, not an independent feature.
-
-### Fixed
-
-- **`solve_linear` crashed on a single-variable system** (THE-890):
-  `solve_linear('2*x = 4', 'x')` raised `'Symbol' object is not iterable`.
-  `sp.symbols(names)` returns a bare `Symbol` rather than a 1-tuple unless
-  given more than one name or a trailing comma, and the code downstream
-  assumed a sequence (`list(syms)`) unconditionally. `sp.symbols(...,
-  seq=True)` now always returns a sequence, one variable or many, so
-  single-variable systems solve like every other case; multi-variable
-  behaviour is unchanged.
-
-## [0.3.2] — 2026-08-20
-
-### Added
-
-- **`codecalc --help` and `codecalc --version`** (THE-876, GH #201). Both used
-  to print nothing and exit 0 — `main()` recognised `doctor`/`serve-strict`/
-  `serve-http` but treated the flags as "no subcommand" and started the stdio
-  MCP server. They now print a usage block (naming the subcommands and that the
-  default with no argument is the stdio server) / the version, and exit 0
-  without starting anything.
-- **`codecalc-prefetch-grammars`, a console script that warms the tree-sitter
-  grammar cache** (THE-877, GH #200). The offline warm-up the README told
-  installed users to run lived only in `scripts/`, which the wheel does not
-  ship — so the documented command did not exist for anyone who `pip
-  install`ed rather than cloning. It now ships as a `[project.scripts]` entry
-  point (`codecalc-prefetch-grammars`, `--print-cache-dir`) calling the same
-  code the source script does.
 
 ### Security
 
@@ -206,6 +139,56 @@ behind it.
   any `max_output_kb >= 1` (the existing 4x headroom always clears it on its
   own), so the enforced ceiling stays a small, proportional multiple of the
   request.
+- **`solve_linear` no longer parses caller input through a live-builtins
+  `sympify`** (THE-888). Each side of each equation (and the single-expression
+  no-`=` path) reached `sp.sympify(...)` directly, which uses SymPy's DEFAULT
+  `global_dict` (`vars(builtins)` copied in) and skipped the unevaluated-shape
+  check `evaluate_expression` already runs. `solve_linear('x = input()', 'x')`
+  called the REAL `input()`, reading the child's stdin — shared fd 0 with a
+  stdio MCP server — and `solve_linear('x = 9**9**9**9', 'x')` burned real CPU
+  seconds evaluating a power tower blind, riding the guard's own timeout
+  instead of a fast refusal. Both pieces now parse via `parse_expr(global_dict=
+  safe_global_dict())` with `reject_explosive` run on the unevaluated shape
+  first — the same fix THE-887 gave the `matrix` tool's per-cell parse.
+  `input()`/`breakpoint()`/`quit()` now parse to a clean error (matching
+  `evaluate_expression`'s own outcome for the same string) instead of being
+  called, and a power tower is now `resource_exhausted` in milliseconds
+  instead of burning CPU seconds.
+- **`algebraic_equiv`, `solve_expression`, `limit_expression` (including its
+  `point` argument) and `simplify_expression` no longer parse caller input
+  through a live-builtins `sympify`** (THE-889). Each reached a bare
+  `sp.sympify(...)` after `classify_unsafe` — the same gap THE-887/888 closed
+  in `matrix` and `solve_linear`: a screened, non-denylisted NAME can still
+  be a live Python builtin. `simplify_expression('input()')` called the REAL
+  `input()`, reading the child's stdin — shared fd 0 with a stdio MCP
+  server — and `algebraic_equiv('9**9**9**9', '0')` burned real CPU seconds
+  evaluating a power tower blind. All four now parse via a new shared
+  `safe_expr.safe_parse()` — `parse_expr(global_dict=safe_global_dict())`
+  with `reject_explosive` run on the unevaluated shape first — extracted
+  from the three near-identical copies of this same pipeline that
+  `logic._evaluate_expression`, `logic._parse_solve_piece` (THE-888) and
+  `linalg._parse_entry` (THE-887) each hand-rolled; all three now delegate
+  to the shared helper too, dropping the duplication (their own result
+  shapes are unchanged), so `safe_parse` is the single place in the package
+  that hands a caller string to SymPy's parser and a future caller cannot
+  reintroduce this gap by doing `classify_unsafe` and forgetting the safe
+  parse. `input()`/`breakpoint()`/`quit()` now parse to a clean error
+  (matching `evaluate_expression`'s own outcome) instead of being called,
+  and a power tower is now `resource_exhausted` in milliseconds instead of
+  burning CPU seconds.
+- **Side effect of the above: the four `exact.py` tools now parse with
+  implicit multiplication**, the same `parse_expr` transformation
+  `evaluate_expression`/`matrix`/`solve_linear` already enable, in place of
+  `sp.sympify`'s stricter grammar. Ordinary input that used to require an
+  explicit `*` is now accepted and reinterpreted as multiplication:
+  `2(x+1)` (previously a parse error) now parses as `2*x + 2`, and
+  function-call notation on an undeclared name — `f(x)` (previously the
+  applied function `f(x)`) — now parses as `f*x`. Concretely,
+  `algebraic_equiv('x(x+1)', 'x*(x+1)')` now reports `identical: true`; on
+  the old `sp.sympify` grammar the left side was the applied function
+  `x(x+1)`, not a product, and the two were not identical. This mirrors
+  `evaluate_expression`'s existing behaviour for the same input and is a
+  side effect of closing the parse gap above, not an independent feature.
 
 ### Fixed
 
@@ -270,6 +253,14 @@ behind it.
   `human_duration(1e30)` emitted 26 digits off a 17-digit float — precision the
   float never held. Sub-second inputs now surface as `ms`/`µs`, and values at
   or beyond 2^53 are capped to a scientific form instead of fabricating digits.
+- **`solve_linear` crashed on a single-variable system** (THE-890):
+  `solve_linear('2*x = 4', 'x')` raised `'Symbol' object is not iterable`.
+  `sp.symbols(names)` returns a bare `Symbol` rather than a 1-tuple unless
+  given more than one name or a trailing comma, and the code downstream
+  assumed a sequence (`list(syms)`) unconditionally. `sp.symbols(...,
+  seq=True)` now always returns a sequence, one variable or many, so
+  single-variable systems solve like every other case; multi-variable
+  behaviour is unchanged.
 
 ## [0.3.1] — 2026-08-20
 
