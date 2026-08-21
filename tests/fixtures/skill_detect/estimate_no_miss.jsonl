@@ -1,0 +1,2 @@
+{"role": "user", "content": "How much faster is the rewrite?"}
+{"role": "assistant", "content": "The rewrite is roughly 40% faster, just a rough estimate for now since I haven't benchmarked it."}

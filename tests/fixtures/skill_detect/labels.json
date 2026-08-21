@@ -1,0 +1,20 @@
+{
+  "float_arith_miss.jsonl": [
+    {
+      "turn": 1,
+      "rule_id": "non_integer_arithmetic"
+    }
+  ],
+  "equivalence_miss.jsonl": [
+    {
+      "turn": 1,
+      "rule_id": "equivalence_or_port_claim"
+    }
+  ],
+  "bigo_miss.jsonl": [
+    {
+      "turn": 1,
+      "rule_id": "big_o_claim"
+    }
+  ]
+}

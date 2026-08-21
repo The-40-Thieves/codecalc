@@ -297,6 +297,18 @@ jobs:
       - name: error-code taxonomy (result contract codes)
         shell: bash
         run: uv run --no-sync python tests/test_error_codes.py
+      # the offline skill-miss detector (a side-car module under scripts/,
+      # imported here the same way the fuzzer is by its own smoke test):
+      # finds a conversation turn whose text implies a SKILL.md-mandated
+      # tool call that was never made. Pure logic over a synthetic labeled
+      # fixture set (tests/fixtures/skill_detect/) — no sandbox, no
+      # runtimes, no MCP dependency — so it belongs on the full matrix with
+      # the rest of this block. This is a test that IMPORTS the module, not
+      # a gate run directly by path, so it does not add to check_claims.py's
+      # "CI-invoked scripts" count.
+      - name: skill-miss detector (offline SKILL.md-trigger measurement)
+        shell: bash
+        run: uv run --no-sync python tests/test_skill_detect.py
       # behavioral floor: every public sympy-backed tool must reject an
       # oversized expression VIA THE LENGTH CAP (before sp.sympify), not via the
       # "stack overflow" message backstop. Pure logic over the tool surface (no
