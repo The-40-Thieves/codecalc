@@ -430,6 +430,49 @@ def reject_explosive(tree) -> str | None:
     (1ms on a power tower) and, crucially, has not done the arithmetic yet.
     This is the half of the bound that the token screen cannot reach: `**` is
     an operator, so its cost is invisible until the operands are known.
+
+    THE-901: this is a FAST PATH for the power-tower shape, not a complete
+    bound on every way an expression can be expensive — worth stating
+    explicitly, because "the shape guard" is an easy thing for a future
+    reader to over-trust. `9**9**9**9` and `2**100000` are caught here
+    because their cost is invisible until AFTER a cheap, already-parsed tree
+    is inspected: the danger is in the VALUE two operands produce, not in
+    building the tree that holds them.
+
+    Deeply nested parens combined with a long chain of repeated terms
+    (`"("*130 + "1.5+2.3"*410 + ")"*130`, found by `scripts/fuzz.py`) is a
+    DIFFERENT shape of expensive, and this function cannot bound it: the cost
+    there is inside SymPy's own recursive-descent parser BUILDING the tree —
+    it shows up as a caught `RecursionError` ("maximum recursion depth
+    exceeded") that this function never gets a chance to inspect, because
+    `safe_parse` only calls `reject_explosive` on a tree that `parse_expr`
+    already finished constructing. A structural check here, however cheap,
+    cannot bound work that happens before there is a tree to check.
+
+    A pre-parse guard that estimated nesting depth x repeated-term count on
+    the RAW STRING was considered instead, to bound the recursion before
+    `parse_expr` ever runs. Measured, that interaction is noisy and
+    superlinear in ways that don't reduce to a safe closed-form cap without
+    either being toothless (too high to catch the slow cases) or rejecting
+    ordinary expressions with a handful of legitimate nested parens — the
+    same "denylist that has to anticipate everything" trade `guarded.py`'s
+    own module docstring already rejected for the *evaluation* side, here on
+    the *parsing* side instead.
+
+    What actually bounds this shape is measured, not assumed: every caller of
+    `safe_parse` (`evaluate_expression`, `algebraic_equiv`, `solve_expression`,
+    `limit_expression`, `simplify_expression`, `matrix`, `solve_linear`) runs
+    it through `guarded.guarded_call`, which enforces `RLIMIT_CPU` (10s) on
+    the forked child and a 15s wall-clock in the parent regardless — and the
+    2000-char `_MAX_EXPR_LEN` every one of those callers already enforces
+    before a string reaches here keeps the worst measured cost at this shape
+    (~5.3s, `scripts/fuzz.py --seed 777`) comfortably under both. Past that
+    length cap the same shape gets worse without an obvious ceiling
+    (`scripts/fuzz.py`'s module docstring measured 3.5s at roughly 2x the
+    length with no sign of levelling off) — which is exactly why every caller
+    keeps the length cap AND the guarded_call backstop, rather than treating
+    either alone as sufficient. See `tests/test_bug_sweep.py`'s THE-901 block
+    for the assertion that the backstop actually holds for this shape.
     """
     from sympy import Float, Integer, Pow
 

@@ -36,6 +36,19 @@ _WORKER_LANGS = {"python3", "node"}
 
 _SAFE_NAME = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
+#: THE-901: `_jail` resolves a CALLER-CONTROLLED path (session_write_file's
+#: `path` arg, among others) via `Path.resolve()`, which is worse-than-linear
+#: in segment count — measured on this host: ~1.3s server CPU for a ~10k-
+#: segment path, ~3.4s for ~20k, growing faster than the segment count. `_jail`
+#: runs in the SERVER process, not inside `guarded_call`, so nothing else
+#: bounds it: a caller can burn seconds of server CPU per call with a string
+#: that costs nothing to send. A legitimate session path is a handful of
+#: segments (`plots/out.png`, `data/2024/q1.csv`) — both caps sit far above
+#: any real use and are enforced BEFORE `.resolve()` ever runs, on the raw
+#: string, so the cost of refusing is O(len(path)), not O(resolve).
+_MAX_JAIL_PATH_LEN = 4096
+_MAX_JAIL_PATH_SEGMENTS = 256
+
 #: Spill capture ceiling per stream (THE-783): bounded, not unbounded. When a
 #: session-scoped execution would otherwise truncate and drop the tail, the
 #: FULL stream is captured up to this cap (instead of the smaller default
@@ -1013,6 +1026,11 @@ def sweep_idle_sessions() -> list[str]:
 
 
 def _session_dir(session_id: str) -> Path:
+    # THE-901: no length/segment cap needed here the way `_jail` needed one.
+    # `_SAFE_NAME` already bounds `session_id` to <=64 chars and forbids '/'
+    # and '\\' before this ever reaches `.resolve()`, so the resolved path
+    # gains at most ONE extra segment over `root` — nowhere near the segment
+    # count that makes `.resolve()`'s cost visible.
     if not _SAFE_NAME.match(session_id):
         raise ValueError("invalid session id")
     root = SESSION_ROOT.resolve()
@@ -1043,9 +1061,23 @@ def _guard_error(exc: ValueError) -> dict:
     `_session_dir`'s defence-in-depth "session path escapes session root")
     are jail refusals (PERMISSION_DENIED) — the two codes errors.py already
     documents for exactly these situations.
+
+    THE-901: `_jail`'s length/segment caps are a third case, and neither of
+    the above fits. It is not malformed the way a bad session id is (any
+    length is syntactically fine; it is only too much of it), and it is not a
+    jail decision either — nothing about the path's target is being judged, it
+    is refused before that question is ever asked. RESOURCE_EXHAUSTED is what
+    every other "too long"/"too many" ceiling in this package reports
+    (`linalg._screen_entry`, `exact`'s expression-length cap), so a path-shape
+    refusal reads the same way here.
     """
     message = str(exc)
-    code = errors.VALIDATION if "invalid session id" in message else errors.PERMISSION_DENIED
+    if "invalid session id" in message:
+        code = errors.VALIDATION
+    elif "too long" in message or "too many segments" in message:
+        code = errors.RESOURCE_EXHAUSTED
+    else:
+        code = errors.PERMISSION_DENIED
     return errors.error_result(code, message)
 
 
@@ -1735,7 +1767,23 @@ def _jail(d: Path, path: str) -> Path:
 
     resolve() first, so a symlink planted inside the workspace by executed code
     is followed BEFORE the comparison and cannot be used as a write primitive.
+
+    THE-901: the length/segment check runs BEFORE that resolve() — see
+    `_MAX_JAIL_PATH_LEN`/`_MAX_JAIL_PATH_SEGMENTS`'s comment for why `.resolve()`
+    itself is the thing being bounded here, not just an odd input being
+    rejected for its own sake. Segments are counted on the raw string (both
+    separators, since a caller on this server can hand either one regardless
+    of host OS) rather than via `Path(path).parts`, so the cost of refusing
+    stays a cheap `str.count()` and never constructs the object this is trying
+    to avoid resolving.
     """
+    if len(path) > _MAX_JAIL_PATH_LEN:
+        raise ValueError(
+            f"path too long ({len(path)} chars, max {_MAX_JAIL_PATH_LEN})")
+    segments = path.count("/") + path.count("\\") + 1
+    if segments > _MAX_JAIL_PATH_SEGMENTS:
+        raise ValueError(
+            f"path has too many segments ({segments}, max {_MAX_JAIL_PATH_SEGMENTS})")
     base = d.resolve()
     p = (base / path).resolve()
     if not p.is_relative_to(base):

@@ -61,6 +61,16 @@ behind it.
   — such a reference resolves to a SymPy `FunctionClass`, whose `.args`
   attribute is an unbound `property` object rather than a tuple. Found by
   `scripts/fuzz.py`.
+- **`sessions._jail`** (THE-901) now refuses a session file `path` whose raw
+  length exceeds 4096 chars or whose segment count exceeds 256, BEFORE
+  calling `Path.resolve()` on it — a `resource_exhausted` refusal in
+  microseconds instead of the multi-second-to-tens-of-seconds server CPU cost
+  `Path.resolve()` itself takes on a many-segment string (measured: ~1.3s at
+  10k segments, ~3.4s at 20k, worse than linear). Reachable from
+  `session_write_file`, `session_files`, and `session_read_file` (via
+  `_jail`), all caller-controlled. Found by `scripts/fuzz.py` (THE-899). A
+  legitimate session path is a handful of segments; both caps sit far above
+  any real use.
 
 ## [0.4.0] — 2026-08-21
 

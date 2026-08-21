@@ -149,6 +149,49 @@ for bad in ("../evil", "a/b", "", "x" * 65, "we!rd"):
         rejected = True
     check(f"session id {bad[:14]!r} rejected", rejected)
 
+# ── THE-901: a many-segment path must be refused WITHOUT reaching resolve() ─
+# `_jail` used to run `Path.resolve()` on the raw caller string before doing
+# any shape check. resolve() is worse-than-linear in segment count, and this
+# runs in the SERVER process, outside `guarded_call`'s ceilings — a fuzzer
+# input of `"a/" * 20000 + "x"` measured multiple seconds of server CPU per
+# call, unbounded by anything else in the stack. The fix rejects on raw
+# length/segment count BEFORE resolve() ever runs, so refusing an oversized
+# path costs microseconds, not seconds — asserted here as "well under a
+# second", not just "eventually returns", because a fix that merely made the
+# resolve() call itself would still leave the DoS.
+_many_segments = "a/" * 20000 + "x"
+_t0 = time.time()
+_many_segments_rejected = rejects(session, _many_segments)
+_many_segments_elapsed = time.time() - _t0
+check("a 20000-segment path is refused",
+      _many_segments_rejected, f"-> elapsed={_many_segments_elapsed:.4f}s")
+check("refusing a 20000-segment path takes well under a second",
+      _many_segments_elapsed < 1.0, f"-> elapsed={_many_segments_elapsed:.4f}s")
+
+_long_flat = "x" * 20000
+_t0 = time.time()
+_long_flat_rejected = rejects(session, _long_flat)
+_long_flat_elapsed = time.time() - _t0
+check("a 20000-char single-segment path is refused",
+      _long_flat_rejected, f"-> elapsed={_long_flat_elapsed:.4f}s")
+check("refusing a 20000-char path takes well under a second",
+      _long_flat_elapsed < 1.0, f"-> elapsed={_long_flat_elapsed:.4f}s")
+
+# The caps must not bite a legitimate deep-but-reasonable path.
+check("a path well under both caps is still allowed",
+      not rejects(session, "/".join(f"d{i}" for i in range(10)) + "/file.txt"))
+
+# `_session_dir` takes `session_id`, already bounded by `_SAFE_NAME` to <=64
+# chars with no separators — confirming the same DoS shape does not reach it.
+_session_dir_rejected = False
+try:
+    sessions._session_dir("x" * 65)
+    _session_dir_rejected = False
+except ValueError:
+    _session_dir_rejected = True
+check("_session_dir still rejects an over-length session id (via _SAFE_NAME)",
+      _session_dir_rejected)
+
 # ── #104: a stateful session does not carry the one-shot guarantees ─────────
 # `execute_code()` runs through codecalc-exec. `execute_code(session_id=...)`
 # on python3/node runs a long-lived `subprocess.Popen`, which cannot have the

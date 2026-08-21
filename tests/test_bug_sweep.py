@@ -1044,6 +1044,40 @@ _r = _logic.solve_linear("x + y = 10; x - y = 2", "x, y")
 check("  ...and multi-variable systems are unaffected",
       _r.get("ok") is True and _r.get("solutions") == ["{x: 6, y: 4}"], f"-> {_r}")
 
+
+# ═══ THE-901: reject_explosive bounds Pow shapes, not nested-parens +      ═══
+# ═══ repeated-term chains — guarded_call is the actual backstop for those ═══
+# `scripts/fuzz.py` (THE-899) found that deeply nested parens combined with a
+# long chain of repeated terms costs multiple seconds of real CPU INSIDE
+# SymPy's own recursive-descent parser, raising a caught "maximum recursion
+# depth exceeded" before `safe_parse` ever has a tree to hand `reject_explosive`
+# — so extending `reject_explosive` itself cannot bound this shape; see its
+# docstring for why. What DOES bound it, measured rather than assumed: every
+# caller of `safe_parse` runs through `guarded.guarded_call`, which kills a
+# forked child at `RLIMIT_CPU` (10s) and enforces a 15s wall-clock in the
+# parent regardless of what the child is doing.
+#
+# depth=100 parens wrapping 900 repetitions of the implicit-multiplication
+# term "2x" — exactly at `logic._MAX_EXPR_LEN`'s 2000-char cap, the shape
+# `scripts/fuzz.py --seed 777` found (that one used depth=130/410 reps of
+# "1.5 + 2.3"; this uses a shorter term so more repetitions fit in the same
+# 2000 chars, and costs the same multi-second class either way).
+_d, _k = 100, 900
+_nested_chain = "(" * _d + "2x" * _k + ")" * _d
+check("the THE-901 nested+repeated shape stays inside the 2000-char cap",
+      len(_nested_chain) == 2000, f"-> {len(_nested_chain)} chars")
+
+_t0 = time.time()
+_r = _logic.evaluate_expression(_nested_chain)
+_elapsed = time.time() - _t0
+# guarded.DEFAULT_WALL_SECONDS is 15 — asserted well under it (20s), not
+# exactly at it, so ordinary timing jitter on a loaded CI runner cannot flip
+# this from "the backstop held" to "flaky".
+check("evaluate_expression refuses the THE-901 shape rather than hanging",
+      _r.get("ok") is False, f"-> {_r}")
+check("  ...and guarded_call's wall-clock backstop actually bounds it",
+      _elapsed < 20.0, f"-> {_elapsed:.2f}s (guarded.DEFAULT_WALL_SECONDS=15)")
+
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== ALL BUG-SWEEP REGRESSIONS FIXED ===")
 sys.exit(1 if FAILS else 0)
