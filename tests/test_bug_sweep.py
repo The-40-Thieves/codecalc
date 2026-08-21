@@ -954,6 +954,96 @@ _r = _logic.solve_linear("x - 5; y - 3", "x, y")
 check("solve_linear still solves the no-'=' (raw) path",
       _r.get("ok") is True and _r.get("solutions") == ["{x: 5, y: 3}"], f"-> {_r}")
 
+# ═══ THE-889: the same bare-sympify gap in exact.py's four remaining ═══════
+# symbolic tools. algebraic_equiv / solve_expression / limit_expression
+# (including its `point` argument) / simplify_expression each did
+# `classify_unsafe(...)` then a bare `sp.sympify(...)` — classify_unsafe is a
+# syntax denylist, not a namespace: `input`/`breakpoint`/`quit` carry none of
+# its denied syntax (no '.', '[', leading underscore or denied keyword), so
+# they reached sympify's DEFAULT global_dict (vars(builtins) copied in) and
+# CALLED the real builtin — input() reading the child's stdin (fd 0, shared
+# with a stdio MCP server), breakpoint() dropping into pdb and hanging until
+# the wall clock killed it — and `9**9**9**9` reached sympify's default
+# evaluator and burned real CPU instead of being caught by
+# reject_explosive's unevaluated-shape check the way evaluate_expression's
+# identical input already is. All four now route through the new
+# `safe_expr.safe_parse` (the same fix THE-887/888 gave `matrix` and
+# `solve_linear`, extracted to one shared helper).
+
+# input()/breakpoint()/quit() must not invoke the real builtin — compare
+# against evaluate_expression's own outcome for the identical payload; they
+# must now agree.
+_THE_889_CALLS = [
+    ("algebraic_equiv", lambda p: _exact.algebraic_equiv(p, "1")),
+    ("solve_expression", lambda p: _exact.solve_expression(p)),
+    ("limit_expression (expr)", lambda p: _exact.limit_expression(p, "x", "oo")),
+    ("limit_expression (point)", lambda p: _exact.limit_expression("x", "x", p)),
+    ("simplify_expression", lambda p: _exact.simplify_expression(p)),
+]
+for _name in ("input()", "breakpoint()", "quit()"):
+    _direct = _logic.evaluate_expression(_name)
+    check(f"evaluate_expression({_name!r}) does not invoke the real builtin",
+          _direct.get("ok") is False and "parse error" in str(_direct.get("error")),
+          f"-> {_direct}")
+    for _label, _call in _THE_889_CALLS:
+        _r = _call(_name)
+        check(f"{_label}({_name!r}) does not invoke the real builtin",
+              _r.get("ok") is False and "parse error" in str(_r.get("error")),
+              f"-> {_r}")
+
+# A power tower burns real CPU seconds if evaluated blind. reject_explosive
+# on the unevaluated shape now catches it before anything is evaluated —
+# assert BOTH the code and that it was actually fast, not just eventually
+# correct.
+_THE_889_TOWER_CALLS = [
+    ("algebraic_equiv", lambda: _exact.algebraic_equiv("9**9**9**9", "0")),
+    ("solve_expression", lambda: _exact.solve_expression("9**9**9**9 - x")),
+    ("limit_expression (expr)", lambda: _exact.limit_expression("9**9**9**9 + x", "x", "oo")),
+    ("limit_expression (point)", lambda: _exact.limit_expression("x", "x", "9**9**9**9")),
+    ("simplify_expression", lambda: _exact.simplify_expression("9**9**9**9")),
+]
+for _label, _call in _THE_889_TOWER_CALLS:
+    _t0 = time.time()
+    _r = _call()
+    _elapsed = time.time() - _t0
+    check(f"{_label}('9**9**9**9') is resource_exhausted, not evaluated",
+          _r.get("ok") is False and _r.get("code") == "resource_exhausted", f"-> {_r}")
+    check(f"  ...and rejected promptly ({_elapsed:.3f}s), not after a multi-second burn",
+          _elapsed < 2.0, f"-> {_elapsed:.3f}s")
+
+# ...and ordinary symbolic work still answers correctly — the four tools'
+# own ported-feature assertions (tests/test_calc_port.py) cover the values;
+# this just proves the safe_parse swap did not silently break the common
+# path.
+_r = _exact.algebraic_equiv("(a+b)**2", "a**2 + 2*a*b + b**2")
+check("algebraic_equiv still proves an ordinary identity",
+      _r.get("ok") is True and _r.get("identical") is True, f"-> {_r}")
+_r = _exact.solve_expression("x**2 - 4 = 0")
+check("solve_expression still solves an ordinary equation",
+      _r.get("ok") is True and sorted(_r.get("solutions", [])) == ["-2", "2"], f"-> {_r}")
+_r = _exact.limit_expression("1/x", "x", "oo")
+check("limit_expression still answers an ordinary limit",
+      _r.get("ok") is True and _r.get("limit") == "0", f"-> {_r}")
+_r = _exact.simplify_expression("(x**2 - 1)/(x - 1)")
+check("simplify_expression still simplifies ordinary algebra",
+      _r.get("ok") is True and _r.get("simplified") == "x + 1", f"-> {_r}")
+
+# ═══ THE-890: solve_linear crashed on a SINGLE-variable system ════════════
+# sp.symbols("x") returns a bare Symbol, not a 1-tuple, unless given more
+# than one name or a trailing comma — the code downstream assumed a
+# sequence (`list(syms)`), so `solve_linear('2*x = 4', 'x')` raised
+# "'Symbol' object is not iterable" rather than returning a result.
+_r = _logic.solve_linear("2*x = 4", "x")
+check("solve_linear solves a single-variable system (THE-890)",
+      _r.get("ok") is True and _r.get("solutions") == ["{x: 2}"], f"-> {_r}")
+_r = _logic.solve_linear("x - 5", "x")
+check("  ...including the no-'=' single-variable path",
+      _r.get("ok") is True and _r.get("solutions") == ["{x: 5}"], f"-> {_r}")
+# The fix must not change multi-variable behaviour.
+_r = _logic.solve_linear("x + y = 10; x - y = 2", "x, y")
+check("  ...and multi-variable systems are unaffected",
+      _r.get("ok") is True and _r.get("solutions") == ["{x: 6, y: 4}"], f"-> {_r}")
+
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== ALL BUG-SWEEP REGRESSIONS FIXED ===")
 sys.exit(1 if FAILS else 0)

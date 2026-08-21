@@ -317,6 +317,104 @@ MAX_SYMBOLIC_EXPONENT = 200
 MAX_NUMERIC_DIGITS = 4_000
 
 
+#: The `parse_expr` transformations every safe-parse call site enables:
+#: implicit multiplication (`2x`) and `^` as power. A single cached tuple
+#: (THE-889) rather than logic.py/linalg.py/exact.py each keeping their own
+#: copy — three copies is how one of them drifts unnoticed.
+_MATH_TRANSFORMS = None
+
+
+def math_transforms():
+    global _MATH_TRANSFORMS
+    if _MATH_TRANSFORMS is None:
+        from sympy.parsing.sympy_parser import (
+            convert_xor,
+            implicit_multiplication_application,
+            standard_transformations,
+        )
+        _MATH_TRANSFORMS = standard_transformations + (
+            implicit_multiplication_application,
+            convert_xor,
+        )
+    return _MATH_TRANSFORMS
+
+
+def safe_parse(expression: str, *, evaluate: bool = True, local_dict: dict | None = None):
+    """The full safe-parse pipeline, in one place (THE-889) — the ONLY place
+    in this package that calls SymPy's `parse_expr` on a caller string.
+    Every symbolic-parsing tool delegates to this: `logic._evaluate_expression`,
+    `logic._parse_solve_piece` (THE-888), `linalg._parse_entry` (THE-887), and
+    `exact.py`'s `algebraic_equiv`/`solve_expression`/`limit_expression`/
+    `simplify_expression` (THE-889).
+
+    Before THE-889, `logic._evaluate_expression`, `logic._parse_solve_piece`
+    and `linalg._parse_entry` each hand-rolled the same three steps ahead of
+    a caller string reaching SymPy — this is that logic, factored out:
+
+      1. `classify_unsafe` — the syntax denylist above (attribute access,
+         string literals, leading underscores, ...).
+      2. `parse_expr(..., evaluate=False)` through `safe_global_dict()`, then
+         `reject_explosive` on the UNEVALUATED shape. Cheap (1ms on a power
+         tower) and, crucially, has not done the arithmetic yet — `9**9**9**9`
+         is refused in milliseconds instead of burning real CPU seconds.
+      3. A second, real parse — still through `safe_global_dict()`, never
+         SymPy's default builtins-populated dict — only if step 2 passed and
+         the caller wants the evaluated value.
+
+      `safe_global_dict()` is what step 3 buys beyond step 1: a screened,
+      non-denylisted NAME can still be a live Python builtin.
+      `input`/`breakpoint`/`quit` carry none of classify_unsafe's denied
+      syntax, so they pass step 1 — but SymPy's DEFAULT `global_dict` is
+      `vars(builtins)` copied in, so a bare `sympify("input()")` would CALL
+      the real `input()`, reading stdin (fd 0, shared with a stdio MCP
+      server). `safe_global_dict()` has no Python builtins in it at all, so
+      an undefined name parses to a harmless symbolic `Function` or a clean
+      parse error instead of a live call.
+
+    Three call sites doing this by hand is three chances for a fourth to do
+    it differently — THE-889's `exact.py` tools were the proof: each did
+    `classify_unsafe` then a bare `sp.sympify`, skipping steps 2 and 3
+    entirely. This is the anti-regression move: one entry point, so a future
+    caller can't do classify_unsafe-but-forget-the-safe-parse.
+
+    Returns `(value, None)` on success, or `(None, (category, message))` on
+    failure — the SAME `(category, message)` shape `classify_unsafe` returns
+    on its own, so a caller maps it to its own error code with
+    `errors.code_for_safe_expr_category(category)` exactly as it already
+    does for a bare `classify_unsafe` call. A parse-time exception and an
+    explosive shape are reported as `CATEGORY_VALIDATION` /
+    `CATEGORY_CEILING` respectively — the same two categories a caller
+    already maps for classify_unsafe's own findings.
+
+    `evaluate=False` returns the unevaluated shape from step 2 instead of
+    doing step 3 — the caller wants the tree, not a value (matches the
+    original `sp.sympify(raw, evaluate=False)` no-`=` path in
+    `logic._solve_linear`).
+    """
+    cls = classify_unsafe(expression)
+    if cls:
+        return None, cls
+    from sympy.parsing.sympy_parser import parse_expr
+
+    try:
+        shape = parse_expr(expression, transformations=math_transforms(),
+                           local_dict=local_dict, global_dict=safe_global_dict(),
+                           evaluate=False)
+    except Exception as exc:
+        return None, (CATEGORY_VALIDATION, f"parse error: {exc}")
+    explosive = reject_explosive(shape)
+    if explosive:
+        return None, (CATEGORY_CEILING, explosive)
+    if not evaluate:
+        return shape, None
+    try:
+        value = parse_expr(expression, transformations=math_transforms(),
+                           local_dict=local_dict, global_dict=safe_global_dict())
+    except Exception as exc:
+        return None, (CATEGORY_VALIDATION, f"parse error: {exc}")
+    return value, None
+
+
 def reject_explosive(tree) -> str | None:
     """Reason this PARSED expression must not be evaluated, or None.
 
