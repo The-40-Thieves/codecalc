@@ -33,6 +33,8 @@ behind it.
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-08-22
+
 ### Security
 
 - **BREAKING (strict-policy hole closed): `network_control` no longer means
@@ -1391,7 +1393,8 @@ it, so there was no upgrade path to describe — only what the thing is.
   `ok: false` through the sandbox. Tracked, with a dated reproduction, at
   [#42](https://github.com/The-40-Thieves/codecalc/issues/42).
 
-[Unreleased]: https://github.com/The-40-Thieves/codecalc/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/The-40-Thieves/codecalc/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.5.0
 [0.4.0]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.4.0
 [0.3.1]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.3.1
 [0.3.0]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.3.0
