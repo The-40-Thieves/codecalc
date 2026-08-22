@@ -47,6 +47,45 @@ def test_descriptor_is_versioned_and_machine_readable() -> None:
           encoded["capabilities"]["cancel"] is False)
 
 
+def test_local_provider_network_control_reflects_kernel_enforcement() -> None:
+    """`network_control` used to be `backend() == "rust"` alone, which is True
+    on ANY rust-backend host — including macOS and a Linux kernel without
+    seccomp, where `no_net` is only the bypassable LD_PRELOAD/dyld symbol
+    shim. The capability broker's `strict` policy trusts this flag to decide
+    whether a denial of `network` is enforceable, so an over-claim here let
+    `strict` approve a run it should have refused (codecalc/capabilities.py).
+
+    `no_net_kernel_enforcement_available()` is monkeypatched (reassigning the
+    module attribute, the repo's own `executor._rust` convention above) rather
+    than run on a second real kernel: the point under test is that
+    `describe()` propagates whatever it says, not that this box IS
+    seccomp-capable Linux — that live fact is exercised separately in
+    test_network_policy.py's strict positive control.
+    """
+    provider = providers.LocalExecutionProvider()
+    old_rust = providers.executor._rust
+    old_kernel_enforcement = providers.executor.no_net_kernel_enforcement_available
+    providers.executor._rust = "/fake/codecalc-exec"
+    try:
+        providers.executor.no_net_kernel_enforcement_available = lambda: True
+        check("rust backend + kernel enforcement available -> network_control True",
+              provider.describe()["capabilities"]["network_control"] is True)
+
+        providers.executor.no_net_kernel_enforcement_available = lambda: False
+        check("rust backend but NO kernel enforcement (shim-only host) "
+              "-> network_control False",
+              provider.describe()["capabilities"]["network_control"] is False)
+
+        providers.executor._rust = None
+        providers.executor.no_net_kernel_enforcement_available = lambda: True
+        check("python fallback backend never claims network_control, even if "
+              "the probe (stale from an earlier rust binary) says True",
+              provider.describe()["capabilities"]["network_control"] is False)
+    finally:
+        providers.executor._rust = old_rust
+        providers.executor.no_net_kernel_enforcement_available = old_kernel_enforcement
+
+
 def test_local_provider_preserves_the_execution_result_contract() -> None:
     provider = providers.LocalExecutionProvider()
     spec = providers.ComputationSpec(language="python3", code='print("provider")')
@@ -1143,6 +1182,7 @@ if __name__ == "__main__":
     test_field_docs_are_honest_about_the_output_cap_default()
     test_field_docs_scope_identity_to_the_request_as_spelled()
     test_descriptor_is_versioned_and_machine_readable()
+    test_local_provider_network_control_reflects_kernel_enforcement()
     test_local_provider_preserves_the_execution_result_contract()
     test_local_provider_owns_streaming_and_truthfully_falls_back()
     test_unsupported_provider_capability_fails_explicitly()

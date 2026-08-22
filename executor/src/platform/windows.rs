@@ -1318,3 +1318,10 @@ pub fn spawn_and_wait(
 pub fn current_uid_tasks() -> Option<u64> {
     None
 }
+
+/// `no_net` has no enforcement mechanism on Windows at all (see the module
+/// docstring: "there is no LD_PRELOAD equivalent to hang a socket shim on") —
+/// not even a best-effort one, let alone a kernel-enforced one. Always false.
+pub fn no_net_kernel_enforcement_available() -> bool {
+    false
+}

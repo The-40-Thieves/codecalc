@@ -1178,6 +1178,54 @@ def backend() -> str:
     return "rust" if _rust else "python"
 
 
+def _probe_no_net_kernel_enforcement() -> bool:
+    """Ask the Rust binary's `--capabilities` whether THIS host can enforce
+    `no_net` in the kernel (Linux seccomp), independent of any run.
+
+    `backend() == "rust"` alone is not that answer: the same binary falls back
+    to the bypassable LD_PRELOAD/dyld symbol shim on macOS and on a Linux
+    kernel without seccomp, and does not enforce `no_net` at all on Windows.
+    A caller that needs to advertise `network_control` truthfully (see
+    `providers.LocalExecutionProvider.describe`) needs THIS fact, not the
+    weaker "a native binary happens to be present" one.
+
+    False on any failure — missing binary, a build too old to know
+    `--capabilities`, a malformed response — matching `probe()`'s own
+    fail-quiet-to-the-weaker-answer shape: an executor that cannot say it
+    enforces `no_net` in the kernel is treated exactly like one that doesn't.
+    """
+    if not _rust:
+        return False
+    try:
+        proc = subprocess.run([_rust, "--capabilities"], capture_output=True,
+                              timeout=15)
+        data = json.loads(proc.stdout.decode())
+        if isinstance(data, dict):
+            return bool(data.get("no_net_kernel_enforcement"))
+    except Exception:
+        pass
+    return False
+
+
+# Probed once, at import — same convention as `_rust` above, and for the same
+# reason: this is read on every provider capability query
+# (`LocalExecutionProvider.describe`), and a host's kernel-seccomp posture
+# does not change over the life of a process, so re-spawning the executor per
+# read would only add a subprocess launch per read, never a different answer.
+_NO_NET_KERNEL_ENFORCEMENT = _probe_no_net_kernel_enforcement()
+
+
+def no_net_kernel_enforcement_available() -> bool:
+    """Whether this host can enforce `no_net` in the kernel right now.
+
+    A function, not a bare module constant, so a test can monkeypatch it to
+    fake a shim-only host (`executor.no_net_kernel_enforcement_available =
+    lambda: False`) without needing a second Linux kernel to prove the
+    strict-policy refusal path.
+    """
+    return _NO_NET_KERNEL_ENFORCEMENT
+
+
 def _execute_uncontracted(language: str, code: str, stdin: str = "", timeout: int = 10,
                           workdir: str | None = None, max_memory_mb: int = 0,
                           max_output_kb: int = 0, max_cpu: int = 0,

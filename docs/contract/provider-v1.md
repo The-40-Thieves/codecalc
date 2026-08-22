@@ -105,16 +105,18 @@ is rejected. When the variable is set, comma-separated directives configure it:
 
 - `deny-network` — flip the default to network-denied. The broker treats a
   capability as enforceable when the provider's descriptor says it supports
-  control over that capability (`network_control`, currently `true` for the
-  native executor backend whenever the Rust binary is in use — it does not
-  yet distinguish a run where the seccomp-bpf filter is actually active from
-  one where only the best-effort, bypassable symbol shim held; the shim
-  cannot itself enforce a denial, only apply it on a best-effort basis, and
-  that gap in `network_control` is tracked separately). Where the provider
-  reports support, the job runs with `no_net` forced on. Where it does not
-  (no native executor), a non-strict policy leaves the request as-asked and
-  discloses the leak — `network` stays in `effective` — rather than forcing a
-  `no_net` the provider would silently ignore or, like Piston, reject outright.
+  control over that capability (`network_control`, `true` for the native
+  executor backend only when the Rust binary is in use AND this host can
+  enforce `no_net` in the kernel — Linux with a seccomp-bpf filter available.
+  It is `false` on the same Rust binary when only the best-effort, bypassable
+  LD_PRELOAD/dyld symbol shim would hold: macOS, or a Linux kernel without
+  seccomp; the shim cannot itself enforce a denial, only apply it on a
+  best-effort basis, and `network_control` no longer claims otherwise). Where
+  the provider reports support, the job runs with `no_net` forced on. Where it
+  does not (no native executor, or a native executor without kernel
+  enforcement), a non-strict policy leaves the request as-asked and discloses
+  the leak — `network` stays in `effective` — rather than forcing a `no_net`
+  the provider would silently ignore or, like Piston, reject outright.
   Combine with `strict` to reject an unenforceable denial instead of disclosing
   it.
 - `allow-network` — explicitly grant network. Honoured only for a job that

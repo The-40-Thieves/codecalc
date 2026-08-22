@@ -380,6 +380,33 @@ mod seccomp {
     }
 }
 
+/// Whether this host can enforce `no_net` IN THE KERNEL, independent of any
+/// particular run — the fact a capability-broker caller needs to decide
+/// whether it may advertise network control truthfully. `true` only when a
+/// seccomp filter is actually installable (Linux with `PR_GET_SECCOMP`
+/// available); on a Linux kernel without seccomp the LD_PRELOAD symbol shim is
+/// the (bypassable, best-effort) fallback and this reports `false` so a caller
+/// does not mistake "some blocking happens" for "the kernel enforces it".
+///
+/// A per-run seccomp install can still independently fail after this reports
+/// `true` (kernel state can change between probe and spawn), which is why
+/// `spawn_and_wait` re-derives `no_net_seccomp_enforced` itself rather than
+/// trusting this probe's answer into the run — this function exists for a
+/// caller that needs the answer BEFORE any run exists to check, such as the
+/// provider descriptor's `network_control` capability declaration.
+#[cfg(target_os = "linux")]
+pub fn no_net_kernel_enforcement_available() -> bool {
+    seccomp::available()
+}
+
+/// macOS (and any other non-Linux Unix): no in-kernel `no_net` mechanism —
+/// `no_net` there is only the best-effort DYLD symbol shim, never enforced by
+/// the kernel. See the module-level table in `platform/mod.rs`.
+#[cfg(not(target_os = "linux"))]
+pub fn no_net_kernel_enforcement_available() -> bool {
+    false
+}
+
 pub fn spawn_and_wait(
     mut cmd: Command,
     limits: &ResolvedLimits,
