@@ -319,7 +319,29 @@ behind it.
   small safe grammar of cheap combinators (`Integer`, `Rational`, `Float`,
   `Add`, `Mul`, `Pow` with an integer exponent) and only after checking
   each combination's bit-length against a budget BEFORE performing it —
-  never after. Anything outside that grammar refuses rather than guesses.
+  never after.
+  A first version of this fix refused anything outside that grammar
+  outright, which turned out to be too broad: a cross-vendor differential
+  probe (main vs. the fix, over 17 inputs) found `2**cos(0)`, `2**(2*1.5)`,
+  `2**(1.5+1.5)`, `(1.5*2)**3` and `2**(2**10000*2**-10000)` — all of
+  which `main` evaluates fine (2, 8, 8, 27, 2) — got refused pre-parse
+  instead. Fixed two ways: (1) `_bounded_numeric_value` now distinguishes
+  returning `None` (INCONCLUSIVE — a `Function` call like `cos(0)`, an
+  irrational constant, or float-mode overflow; not evidence of anything,
+  so the caller falls through to the existing downstream screen rather
+  than refusing) from a new `_NumericTooLarge` sentinel (PROVED via exact
+  bit-length arithmetic to exceed the budget; still refused) — the earlier
+  version conflated the two; (2) `Add`/`Mul` now check the bit length of
+  the ACTUAL (SymPy auto-reduces via GCD) accumulator after each
+  combination rather than a pessimistic pre-sum of each factor's own
+  size, so `2**10000 * 2**-10000` (reciprocal factors, cancels to exactly
+  1) resolves correctly instead of tripping the budget on the way there —
+  and a `Float` anywhere in an `Add`/`Mul` chain now promotes the whole
+  combination to ordinary bounded `float` arithmetic instead of refusing
+  outright. The three genuine targets above still refuse; 12 additional
+  boundary/edge inputs from the same differential probe (`10**3999`,
+  `10**4000`, `2**10000`, `(1/2)**30000`, `sqrt(2)+1`, `(2/3)**5`,
+  `x**(2*3)`, ...) are unaffected either way.
 - **The same investigation found a separate parse-time memory bomb**:
   `"2**1000000^6c6/Me,"` returned the correct `('validation', 'parse
   error')` refusal, but only after allocating a 2977 MB tracemalloc peak

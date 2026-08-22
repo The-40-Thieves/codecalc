@@ -1262,6 +1262,65 @@ for _expr, _label in _FACE1_UNDER_CAP:
     check(f"safe_parse({_expr!r}) ({_label}, under cap) still evaluates",
           _value is not None and _err is None, f"-> value={_value!r} err={_err!r}")
 
+# ═══ the fail-closed choice above was ITSELF too broad — cross-vendor ══════
+# ═══ differential probe (main vs. this branch) found 5 benign expressions ══
+# ═══ that main evaluates fine but an earlier version of this fix refused ═══
+# `_bounded_numeric_value`'s FIRST version returned a single `None` for two
+# genuinely DIFFERENT situations: "proved too large" and "no idea, never
+# computed it" — and `reject_explosive` treated both as a refusal. That
+# conflation is the bug: a `Function` node (`cos(0)`) or a `Float` anywhere
+# in a Mul/Add chain (`2*1.5`) hit the same catch-all as an actually huge
+# value, so `2**cos(0)` (=2) and `2**(2*1.5)` (=8) got refused pre-parse —
+# worse than doing nothing, since main evaluates both fine. A fifth case,
+# `2**(2**10000*2**-10000)` (=2, the two factors cancel to exactly 1), was
+# refused for a DIFFERENT reason: the Mul accumulation bounded each
+# factor's bit length and summed them as if magnitude only ever GROWS
+# (`2**-10000`'s huge DENOMINATOR was counted the same as `2**10000`'s huge
+# NUMERATOR), never accounting for the sign of the exponent -- so two
+# reciprocal factors that exactly cancel tripped the budget check anyway.
+#
+# Fixed two ways, both in `_bounded_numeric_value`:
+#   1. A NEW distinction between returning `None` (inconclusive -- a
+#      Function call, an irrational constant, float-mode overflow: NOT
+#      evidence of anything, so `reject_explosive` now falls through
+#      rather than refusing) and a `_NumericTooLarge` sentinel (PROVED via
+#      exact bit-length arithmetic to exceed the budget: still refused).
+#   2. `Add`/`Mul` now check the bit length of the ACTUAL (SymPy
+#      auto-reduces via GCD) accumulator after each combination, not a
+#      pessimistic pre-sum of each factor's own size -- so `2**10000 *
+#      2**-10000` correctly resolves to the exact value `1` instead of
+#      tripping the budget on the way there. A `Float` anywhere in the
+#      chain now promotes the WHOLE combination to ordinary bounded
+#      `float` arithmetic (always O(1), the same int-then-float promotion
+#      Python itself does) instead of refusing outright.
+#
+# The three genuine targets above must still refuse — this block is
+# checking the OPPOSITE failure mode: these must NOT refuse.
+_FACE1_PREVIOUSLY_OVER_REFUSED = [
+    ("2**(2*1.5)", 8),          # Float in a Mul exponent
+    ("2**(1.5+1.5)", 8),        # Float in an Add exponent
+    ("(1.5*2)**3", 27),         # Float in a Mul base
+    ("2**(2**10000*2**-10000)", 2),  # reciprocal Pow factors cancel to 1 -- signed magnitude, not summed bit length
+    ("2**cos(0)", 2),           # a Function node -- inconclusive, must fall through, not refuse
+]
+for _expr, _want in _FACE1_PREVIOUSLY_OVER_REFUSED:
+    _value, _err = _boundary_parse(_expr)
+    check(f"safe_parse({_expr!r}) is NOT over-refused (main evaluates this fine)",
+          _value is not None and _err is None, f"-> value={_value!r} err={_err!r}")
+    if _err is None:
+        _eval_result = _logic.evaluate_expression(_expr)
+        check(f"  ...and evaluate_expression({_expr!r}) computes the right value ({_want})",
+              _eval_result.get("ok") is True and float(_eval_result.get("value") or "nan") == _want,
+              f"-> {_eval_result}")
+
+# ...and a handful more boundary/edge shapes from the same differential
+# probe that must also keep passing (none of these ever regressed, but the
+# probe checked them alongside the five above, so they are pinned here too).
+for _expr in ("2**(1/2+1/2)", "sqrt(2)+1", "(2/3)**5", "x**(2*3)"):
+    _value, _err = _boundary_parse(_expr)
+    check(f"safe_parse({_expr!r}) still evaluates (differential-probe pin)",
+          _value is not None and _err is None, f"-> value={_value!r} err={_err!r}")
+
 # ═══ reject_explosive did not descend into a bare Python `tuple` — the ═════
 # ═══ parse-time memory bomb behind ClusterFuzzLite's OOM (a SEPARATE gap ═══
 # ═══ from the ceiling-coverage one above, found investigating it) ══════════
