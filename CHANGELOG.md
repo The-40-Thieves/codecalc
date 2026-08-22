@@ -141,12 +141,15 @@ behind it.
   longer match what Linux actually does.** `execute_code`'s own docstring
   said `no_net` was "LD_PRELOAD shim; dynamic binaries only" with no mention
   of seccomp at all — the exact thing a model reads at tool-selection time.
-  Corrected there and in the two session-worker `unenforced` disclosure
+  Corrected there and in: the two session-worker `unenforced` disclosure
   messages in `codecalc/sessions.py` (a worker can't apply either mechanism
-  post-spawn, not specifically LD_PRELOAD), `docs/contract/README.md`,
-  `docs/contract/provider-v1.md`, `docs/deployment/README.md`,
-  `docker/README.md`, and the platform-guarantee table in
-  `executor/src/platform/mod.rs`'s module doc comment. `SECURITY.md`,
+  post-spawn, not specifically LD_PRELOAD); the three fallback-path
+  `unenforced` disclosures in `codecalc/executor.py`, said when there is no
+  native executor at all to apply either mechanism, now a single
+  `_NO_NET_NATIVE_MISSING` constant instead of three copy-pasted literals;
+  `docs/contract/README.md`, `docs/contract/provider-v1.md`,
+  `docs/deployment/README.md`, `docker/README.md`; and the platform-guarantee
+  table in `executor/src/platform/mod.rs`'s module doc comment. `SECURITY.md`,
   `AUDIT.md` and the README's own per-platform guarantee table already
   described the seccomp/shim split correctly and are unchanged.
 

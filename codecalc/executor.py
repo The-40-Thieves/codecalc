@@ -766,12 +766,22 @@ def _fallback_verdict(rc: int, timed_out: bool, truncated: bool) -> str:
 
 
 #: Sandbox features the pure-Python fallback cannot provide, reported rather
-#: than left for a caller to discover. `--no-net` needs the LD_PRELOAD shim the
-#: Rust executor applies, and peak RSS needs per-child rusage this path has no
-#: way to attribute.
+#: than left for a caller to discover. `--no-net` needs the native (Rust)
+#: executor to be present at all — it enforces the block via a seccomp-bpf
+#: filter on Linux, or the LD_PRELOAD/dyld symbol shim elsewhere — and peak
+#: RSS needs per-child rusage this path has no way to attribute.
 _FALLBACK_UNMEASURED: list[str] = [
     "peak_memory_kb: ru_maxrss is a high-water mark and cannot be attributed to one run",
 ]
+
+#: `no_net` disclosure on the fallback path, where there is no native executor
+#: at all to apply either of its two mechanisms. A module-level constant
+#: (rather than a literal at each of the three call sites) so the three
+#: cannot drift from each other the way a copy-pasted string would.
+_NO_NET_NATIVE_MISSING = (
+    "no_net: needs the native executor (seccomp on Linux, a symbol shim "
+    "elsewhere)"
+)
 
 #: Full best-effort disclosure for `no_net` on the SHIM path — the bypassable
 #: LD_PRELOAD/dyld symbol interposition (macOS, or a Linux kernel without
@@ -895,8 +905,8 @@ def _fallback_compile_failure(name: str, *, stdout: str, stderr: str,
             "cpu_ms": 0,
             "peak_memory_kb": None,
             "platform": sys.platform,
-            "unenforced": (["no_net: needs the native executor's LD_PRELOAD shim"]
-                           if no_net else []) + _unmeasured(max_memory_mb, max_cpu),
+            "unenforced": ([_NO_NET_NATIVE_MISSING] if no_net else []) +
+                          _unmeasured(max_memory_mb, max_cpu),
             "output_error": output_error,
             "stdout_bytes": seen[0],
             "stderr_bytes": seen[1],
@@ -936,8 +946,7 @@ def _runtime_unavailable_result(name: str, phase: str, argv: list[str], exc: OSE
         # No ceilings are named here: nothing spawned, so there is nothing
         # that could have been enforced or not. Disclaiming a limit for a run
         # that never happened is noise, not honesty.
-        "unenforced": (["no_net: needs the native executor's LD_PRELOAD shim"]
-                       if no_net else []) + _unmeasured(),
+        "unenforced": ([_NO_NET_NATIVE_MISSING] if no_net else []) + _unmeasured(),
         # None, not 0, for the same reason as `peak_memory_kb` above and the
         # Rust backend's spawn-failure return: nothing ran, so there is no
         # program output to have counted, and the `stderr` here is OUR sentence
@@ -1095,8 +1104,8 @@ def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10
                 # zero here would read as "used no memory".
                 "peak_memory_kb": None,
                 "platform": sys.platform,
-                "unenforced": (["no_net: needs the native executor's LD_PRELOAD shim"]
-                               if no_net else []) + _unmeasured(max_memory_mb, max_cpu),
+                "unenforced": ([_NO_NET_NATIVE_MISSING] if no_net else []) +
+                              _unmeasured(max_memory_mb, max_cpu),
                 "output_error": drain_error,
                 # What each stream actually produced, before the response cap.
                 # Taken from the drain's own running total, which it already
