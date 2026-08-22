@@ -97,6 +97,37 @@ behind it.
     class of bug `_popen_group`/`_kill_group` exist to close on every other
     path this module spawns the executor. The probe now uses those same
     process-group helpers.
+- **A second cross-vendor pass on the probe-hardening fix directly above
+  found three further defects in it, two of which defeated its own
+  fail-safe goal — all fixed here:**
+  - `bool(data.get("no_net_kernel_enforcement"))` read a malformed or failed
+    probe as truthy in cases that must be `False`: `bool("false")` and
+    `bool(1)` are both `True` in Python, and `proc.returncode` was never
+    checked at all, so a binary that printed `true` and then exited nonzero
+    was trusted anyway. `_probe_no_net_kernel_enforcement()` now requires
+    `proc.returncode == 0` **and** `data.get("no_net_kernel_enforcement")
+    is True` — an identity check, not a truthiness check.
+  - The timeout-handling fix directly above could itself hang: `_kill_group`
+    only `proc.wait()`s on the DIRECT child after SIGTERM, so it returns the
+    instant that one process exits — even while a descendant that ignores
+    SIGTERM is still alive holding the probe's captured stdout/stderr pipes
+    open, which left the following `proc.communicate()` blocking forever
+    waiting for an EOF that would never come (reproduced: direct child
+    exits `-15`, grandchild alive, drain hangs). Fixed by unconditionally
+    escalating to `_reap_group` (SIGKILL, which cannot be ignored) across
+    the whole process group before a now BOUNDED final drain.
+  - The cache-identity fix directly above published the new binary identity
+    and the answer the re-probe produced as two separate steps. A
+    concurrent reader could land in the window between them — a subprocess
+    call releases the GIL for the whole time it blocks — see the
+    already-updated identity, conclude no re-probe was needed, and hand back
+    the OLD cached answer while the fresh probe for that very identity was
+    still in flight (reproduced: a concurrent reader returned a stale `True`
+    while the real re-probe was producing `False`). Fixed by publishing the
+    identity and the answer together, inside
+    `_NO_NET_KERNEL_ENFORCEMENT_LOCK`, so a concurrent reader hitting a
+    changed identity now waits for the same fresh answer instead of racing
+    past it.
 - **`no_net`'s result now discloses that the Rust executor's block is a
   best-effort symbol shim, not a kernel egress block** (E-1).
   `--no-net` intercepts `socket()`/`connect()` via `LD_PRELOAD` on Linux and
