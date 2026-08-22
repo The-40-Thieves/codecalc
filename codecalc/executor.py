@@ -1193,13 +1193,29 @@ def _probe_no_net_kernel_enforcement() -> bool:
     `--capabilities`, a malformed response — matching `probe()`'s own
     fail-quiet-to-the-weaker-answer shape: an executor that cannot say it
     enforces `no_net` in the kernel is treated exactly like one that doesn't.
+
+    Spawned with `_popen_group`/`_kill_group`, not a bare `subprocess.run`:
+    `--capabilities` exits almost immediately on a well-behaved binary, but a
+    wrapped or faulty one could spawn descendants before answering, and
+    `subprocess.run(timeout=...)` on `TimeoutExpired` kills only the direct
+    child — exactly the leak `_kill_group` exists to close everywhere else
+    this module spawns the executor. See `_execute_uncontracted`'s rust path
+    for the same pattern.
     """
     if not _rust:
         return False
     try:
-        proc = subprocess.run([_rust, "--capabilities"], capture_output=True,
-                              timeout=15)
-        data = json.loads(proc.stdout.decode())
+        proc = _popen_group([_rust, "--capabilities"])
+    except OSError:
+        return False
+    try:
+        out, _err = proc.communicate(timeout=15)
+    except subprocess.TimeoutExpired:
+        _kill_group(proc)
+        proc.communicate()
+        return False
+    try:
+        data = json.loads(out.decode())
         if isinstance(data, dict):
             return bool(data.get("no_net_kernel_enforcement"))
     except Exception:
@@ -1207,22 +1223,51 @@ def _probe_no_net_kernel_enforcement() -> bool:
     return False
 
 
-# Probed once, at import — same convention as `_rust` above, and for the same
-# reason: this is read on every provider capability query
-# (`LocalExecutionProvider.describe`), and a host's kernel-seccomp posture
-# does not change over the life of a process, so re-spawning the executor per
-# read would only add a subprocess launch per read, never a different answer.
+def _binary_identity(path: str) -> tuple[int, int, int, float] | None:
+    """(device, inode, size, mtime) of the file at `path`, or None if it
+    cannot be stat'd.
+
+    What `no_net_kernel_enforcement_available()`'s cache below is bound to.
+    A probe result is a claim about a SPECIFIC binary; caching it against the
+    path alone, as the first version of this did, left the cache trusting a
+    stale `True` for the rest of the server's life if that path were ever
+    replaced (same-UID/deploy write access) with a weaker build — nothing
+    would re-probe. Comparing identity on every read is one `os.stat`, far
+    cheaper than the subprocess launch it guards against re-running.
+    """
+    try:
+        st = Path(path).stat()
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime)
+
+
+# Probed once, at import — same convention as `_rust` above — and re-probed
+# below whenever `_binary_identity(_rust)` no longer matches what was probed.
 _NO_NET_KERNEL_ENFORCEMENT = _probe_no_net_kernel_enforcement()
+_NO_NET_KERNEL_ENFORCEMENT_IDENTITY = _binary_identity(_rust) if _rust else None
 
 
 def no_net_kernel_enforcement_available() -> bool:
     """Whether this host can enforce `no_net` in the kernel right now.
+
+    Re-probes when the Rust binary's on-disk identity (device, inode, size,
+    mtime) has changed since the last probe, rather than trusting the
+    import-time answer for the rest of the process's life — see
+    `_binary_identity`'s docstring for why a path-only cache is not enough.
 
     A function, not a bare module constant, so a test can monkeypatch it to
     fake a shim-only host (`executor.no_net_kernel_enforcement_available =
     lambda: False`) without needing a second Linux kernel to prove the
     strict-policy refusal path.
     """
+    global _NO_NET_KERNEL_ENFORCEMENT, _NO_NET_KERNEL_ENFORCEMENT_IDENTITY
+    if not _rust:
+        return False
+    identity = _binary_identity(_rust)
+    if identity != _NO_NET_KERNEL_ENFORCEMENT_IDENTITY:
+        _NO_NET_KERNEL_ENFORCEMENT_IDENTITY = identity
+        _NO_NET_KERNEL_ENFORCEMENT = _probe_no_net_kernel_enforcement()
     return _NO_NET_KERNEL_ENFORCEMENT
 
 

@@ -62,7 +62,41 @@ behind it.
   `strict` (the run never reaches the provider), and the live positive
   control on seccomp-capable Linux still gets approved and genuinely
   enforced, with no `no_net` disclosure in `unenforced` — the broker and the
-  run's own disclosure now agree.
+  run's own disclosure now agree. (Hardened further below: the probe now
+  proves the filter is INSTALLABLE, not merely configured, and the Python
+  cache is bound to the binary's identity rather than its path.)
+- **The `--capabilities` no_net probe now proves the seccomp filter is
+  INSTALLABLE, and its Python-side cache no longer trusts a stale answer
+  after the binary it probed is replaced.** A cross-vendor security review of
+  the `network_control`-from-probe change above found no reportable
+  vulnerability — every path already failed closed — but flagged three
+  refinements, all fixed here:
+  - The Rust probe (`seccomp::available()`, `PR_GET_SECCOMP`) proved seccomp
+    was CONFIGURED, not that a filter was INSTALLABLE: `CONFIG_SECCOMP=y`
+    with `CONFIG_SECCOMP_FILTER=n`, or an inherited policy denying
+    `PR_SET_NO_NEW_PRIVS`, would report `true` while the real
+    `PR_SET_SECCOMP` install still failed (a real run still failed closed —
+    execution aborts pre-payload — but the *reported capability* would have
+    been wrong). `no_net_kernel_enforcement_available()` now goes through
+    `seccomp::installable()`: a disposable forked child installs the exact
+    program `spawn_and_wait` installs (`seccomp::program()`, never a
+    parallel copy) and reports success/failure via its exit code, running no
+    payload. Startup-only — once per `--capabilities` invocation, not on the
+    per-execution spawn path, which keeps using the cheaper `available()`
+    check and its own existing fail-closed re-derivation.
+  - `executor.py` cached the probe result once at import, keyed on nothing —
+    if the binary at that path were later replaced (same-UID/deploy write
+    access) with a weaker build, the stale answer would persist for the
+    server's remaining life. The cache is now bound to the binary's on-disk
+    identity (device, inode, size, mtime via `executor._binary_identity()`)
+    and re-probes whenever that identity changes; a stat call is cheap
+    enough to do on every read.
+  - The import-time probe used a bare `subprocess.run(timeout=15)`, which on
+    `TimeoutExpired` kills only the direct child — a wrapped or faulty
+    binary that had already spawned a descendant would leak it, the exact
+    class of bug `_popen_group`/`_kill_group` exist to close on every other
+    path this module spawns the executor. The probe now uses those same
+    process-group helpers.
 - **`no_net`'s result now discloses that the Rust executor's block is a
   best-effort symbol shim, not a kernel egress block** (E-1).
   `--no-net` intercepts `socket()`/`connect()` via `LD_PRELOAD` on Linux and
