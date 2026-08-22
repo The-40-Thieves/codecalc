@@ -768,7 +768,8 @@ def _fallback_verdict(rc: int, timed_out: bool, truncated: bool) -> str:
 #: Sandbox features the pure-Python fallback cannot provide, reported rather
 #: than left for a caller to discover. `--no-net` needs the native (Rust)
 #: executor to be present at all — it enforces the block via a seccomp-bpf
-#: filter on Linux, or the LD_PRELOAD/dyld symbol shim elsewhere — and peak
+#: filter where the Linux kernel supports it, or the LD_PRELOAD/dyld symbol
+#: shim otherwise (macOS, or a Linux kernel without seccomp) — and peak
 #: RSS needs per-child rusage this path has no way to attribute.
 _FALLBACK_UNMEASURED: list[str] = [
     "peak_memory_kb: ru_maxrss is a high-water mark and cannot be attributed to one run",
@@ -778,9 +779,16 @@ _FALLBACK_UNMEASURED: list[str] = [
 #: at all to apply either of its two mechanisms. A module-level constant
 #: (rather than a literal at each of the three call sites) so the three
 #: cannot drift from each other the way a copy-pasted string would.
+#:
+#: "seccomp where the Linux kernel supports it" — NOT "seccomp on Linux" —
+#: because a Linux kernel that refuses a seccomp filter mode also falls back
+#: to the symbol shim (executor/src/platform/unix.rs's `seccomp::available()`
+#: gate); an earlier version of this string said "seccomp on Linux, a symbol
+#: shim elsewhere", which read as if every Linux run got seccomp. Caught by
+#: cross-vendor review.
 _NO_NET_NATIVE_MISSING = (
-    "no_net: needs the native executor (seccomp on Linux, a symbol shim "
-    "elsewhere)"
+    "no_net: needs the native executor (seccomp where the Linux kernel "
+    "supports it, a symbol shim otherwise)"
 )
 
 #: Full best-effort disclosure for `no_net` on the SHIM path — the bypassable

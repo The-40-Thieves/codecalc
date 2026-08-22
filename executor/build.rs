@@ -6,11 +6,16 @@
 //! symbol checks passed — and the executor went on blocking AF_UNIX, because
 //! the .so sitting next to the binary was the previous build.
 //!
-//! A MISSING shim is already reported honestly (the executor emits
-//! `no_net_requested_but_no_shim_available` in `unenforced`). A STALE one
-//! cannot be: the file is there, so every check that asks "is the shim
-//! present?" says yes while the policy being enforced is the old one. Building
-//! it here removes the gap rather than adding another check for it.
+//! A MISSING shim is already reported honestly on macOS, or a Linux kernel
+//! without seccomp support — the only platforms that actually need it — where
+//! the executor emits `no_net_requested_but_no_shim_available` in
+//! `unenforced`. A Linux kernel WITH seccomp support enforces `--no-net`
+//! in-kernel regardless of whether the shim is present at all (see
+//! src/platform/unix.rs's `seccomp::available()` gate). A STALE shim
+//! cannot be caught by presence alone: the file is there, so every check that
+//! asks "is the shim present?" says yes while the policy being enforced is
+//! the old one. Building it here removes the gap rather than adding another
+//! check for it.
 //!
 //! Windows has no LD_PRELOAD equivalent, so there is nothing to build; the
 //! executor reports `--no-net` as unenforced there instead of pretending.
@@ -50,18 +55,20 @@ fn main() {
     match status {
         Ok(s) if s.success() => {}
         // Do NOT fail the build: the executor runs fine without the shim and
-        // says so (`no_net_requested_but_no_shim_available` in `unenforced`),
-        // whereas a hard failure would make a missing C compiler block every
-        // other language. Warn loudly instead.
+        // says so on macOS, or a Linux kernel without seccomp support
+        // (`no_net_requested_but_no_shim_available` in `unenforced`) — a Linux
+        // kernel WITH seccomp support enforces `--no-net` in-kernel regardless
+        // of the shim — whereas a hard failure would make a missing C
+        // compiler block every other language. Warn loudly instead.
         Ok(s) => {
             println!(
-                "cargo:warning=blocknet shim failed to build ({s}); --no-net will report itself unenforced"
+                "cargo:warning=blocknet shim failed to build ({s}); --no-net will report itself unenforced on macOS or a Linux kernel without seccomp support (seccomp-capable Linux still enforces it)"
             );
             return;
         }
         Err(e) => {
             println!(
-                "cargo:warning=could not run {cc} to build the blocknet shim ({e}); --no-net will report itself unenforced"
+                "cargo:warning=could not run {cc} to build the blocknet shim ({e}); --no-net will report itself unenforced on macOS or a Linux kernel without seccomp support (seccomp-capable Linux still enforces it)"
             );
             return;
         }

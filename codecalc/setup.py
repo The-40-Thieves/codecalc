@@ -564,27 +564,51 @@ def run_setup(client: str | None = None, do_write: bool = False, *,
       "on this host — see `codecalc doctor` for detail.")
 
     # 8. tool surface — a non-breaking nudge, not a change to the default
-    # (that stays CODECALC_TOOLS unset = every tool). Imported locally, not
-    # at module scope, for the same reason server.py imports THIS module
-    # lazily inside its own "setup" branch: importing codecalc.setup on its
-    # own (as tests do) should not pay for building server.py's full 52-tool
-    # registry just to print one line. Counts come from server.py's live
-    # TOOL_GROUPS/PRESETS, so they cannot drift from what CODECALC_TOOLS=core
-    # or =dev actually register.
-    from . import server as server_module
-    if not os.environ.get(server_module.TOOLS_ENV, "").strip():
-        total_n = len(server_module.TOOL_GROUPS)
-        core_n = sum(1 for g in server_module.TOOL_GROUPS.values()
-                     if g in server_module.PRESETS["core"])
-        dev_n = sum(1 for g in server_module.TOOL_GROUPS.values()
-                    if g in server_module.PRESETS["dev"])
-        p(f"\n  tool surface: {total_n} tools registered by default "
-          f"({server_module.TOOLS_ENV} unset). No need for sessions, package "
-          "installs or code execution? Set "
-          f"{server_module.TOOLS_ENV}=core ({core_n} tools, calculator only) "
-          f"or {server_module.TOOLS_ENV}=dev ({dev_n} tools, adds execution/"
-          "verification/analysis) to cut what the client loads on connect — "
-          "see README's \"Reducing the tool surface\".")
+    # (that stays CODECALC_TOOLS unset = every tool).
+    #
+    # The literal "CODECALC_TOOLS" below (matching server.TOOLS_ENV's own
+    # value) is checked BEFORE importing server.py, deliberately: importing
+    # it builds the full 52-tool MCP registry and needs the `mcp` package,
+    # which is heavier than anything else this module touches (module
+    # docstring: REUSE, NOT REIMPLEMENT — doctor/executor/logic only). A
+    # caller who already set CODECALC_TOOLS never pays for that import.
+    #
+    # The import itself is further scoped to a try/except: a caller using
+    # this module as a library, without codecalc.server ever having been
+    # imported first (no CLI entry point; `mcp` not installed), would
+    # otherwise crash `run_setup()` over a nudge. Silently skipping the tip
+    # is correct here — a recommendation is not something `codecalc setup`
+    # should ever fail over — whereas every OTHER finding in this function
+    # (client detection, canaries, verdict) is load-bearing and does not get
+    # this treatment.
+    #
+    # Preset MEMBERSHIP (which groups core/dev expand to) and the tool
+    # COUNTS are both read from server.py's live TOOL_GROUPS/PRESETS, not
+    # hardcoded, so a future change to what "core" or "dev" contains cannot
+    # leave this line describing a preset that no longer matches. Which TWO
+    # presets to recommend (core, dev) is still a deliberate editorial
+    # choice, not something to derive.
+    if not os.environ.get("CODECALC_TOOLS", "").strip():
+        try:
+            from . import server as server_module
+            total_n = len(server_module.TOOL_GROUPS)
+            core_groups = sorted(server_module.PRESETS["core"])
+            dev_groups = sorted(server_module.PRESETS["dev"])
+            core_n = sum(1 for g in server_module.TOOL_GROUPS.values()
+                         if g in server_module.PRESETS["core"])
+            dev_n = sum(1 for g in server_module.TOOL_GROUPS.values()
+                        if g in server_module.PRESETS["dev"])
+        except Exception:
+            pass
+        else:
+            p(f"\n  tool surface: {total_n} tools registered by default "
+              "(CODECALC_TOOLS unset). No need for sessions, package "
+              "installs or code execution? Set "
+              f"CODECALC_TOOLS=core ({core_n} tools: "
+              f"{', '.join(core_groups)}) or "
+              f"CODECALC_TOOLS=dev ({dev_n} tools: {', '.join(dev_groups)}) "
+              "to cut what the client loads on connect — see README's "
+              "\"Reducing the tool surface\".")
 
     verdict, reasons = compute_verdict(
         client=detected, canaries=canaries, backend_kind=backend_kind,

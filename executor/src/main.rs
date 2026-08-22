@@ -634,7 +634,7 @@ struct Limits {
     max_cpu: u64,       // RLIMIT_CPU seconds (0 = timeout + grace)
     max_memory_mb: u64, // RLIMIT_AS, 0 = 2 TiB default
     max_output_kb: u64, // stdout/stderr cap + FSIZE, 0 = 64 KiB
-    no_net: bool,       // LD_PRELOAD a socket-blocking shim
+    no_net: bool,       // block network egress: seccomp filter, or LD_PRELOAD shim fallback
                         // Precomputed in main() BEFORE any fork. apply_limits runs inside pre_exec,
                         // which must be async-signal-safe — it cannot walk /proc or allocate there.
 }

@@ -279,17 +279,22 @@ finally:
     executor._rust = _saved_rust
 
 
-# ── 4b. tool-surface recommendation names the real group counts, and is ────
-# suppressed once CODECALC_TOOLS is already set. Counts are read from
+# ── 4b. tool-surface recommendation names the real group counts AND real ───
+# group membership, and is suppressed once CODECALC_TOOLS is already set.
+# Counts AND the displayed membership are both read from
 # server.TOOL_GROUPS/PRESETS rather than hardcoded, so this test (like
 # setup.py's own line) tracks the real registry instead of a second,
-# driftable copy of "25"/"39".
+# driftable copy — cross-vendor review caught an earlier version of this test
+# that asserted only the counts, so a renamed/regrouped preset would have
+# passed silently even though the printed group LIST had gone stale.
 _saved_tools_env = os.environ.pop("CODECALC_TOOLS", None)
 try:
     _core_n = sum(1 for g in server.TOOL_GROUPS.values()
                   if g in server.PRESETS["core"])
     _dev_n = sum(1 for g in server.TOOL_GROUPS.values()
                  if g in server.PRESETS["dev"])
+    _core_groups = ", ".join(sorted(server.PRESETS["core"]))
+    _dev_groups = ", ".join(sorted(server.PRESETS["dev"]))
 
     with tempfile.TemporaryDirectory(prefix="codecalc-setup-test-") as d:
         home = pathlib.Path(d) / "home"
@@ -305,6 +310,11 @@ try:
               f"CODECALC_TOOLS=core ({_core_n} tools" in out, f"-> {out}")
         check("...and the dev preset with the real tool count",
               f"CODECALC_TOOLS=dev ({_dev_n} tools" in out, f"-> {out}")
+        check("...and the core preset's REAL group membership, not a "
+              "hardcoded description",
+              _core_groups in out, f"-> want {_core_groups!r} in {out!r}")
+        check("...and the dev preset's REAL group membership",
+              _dev_groups in out, f"-> want {_dev_groups!r} in {out!r}")
         check("...and points at the README section",
               "Reducing the tool surface" in out)
 
@@ -324,6 +334,49 @@ finally:
         os.environ.pop("CODECALC_TOOLS", None)
     else:
         os.environ["CODECALC_TOOLS"] = _saved_tools_env
+
+
+# ── 4c. a broken/absent codecalc.server import must not break setup ────────
+# The tip is a nudge, not core functionality: a library caller who reaches
+# run_setup() without codecalc.server ever having been imported (no CLI
+# entry point; `mcp` not installed) must still get a working `codecalc
+# setup` — the tip silently absent, everything else unaffected. Simulated by
+# swapping BOTH `sys.modules["codecalc.server"]` and the `codecalc.server`
+# attribute on the package object for a broken stand-in — `from . import
+# server` inside setup.py resolves via the package attribute first (already
+# set by every earlier test importing the real module), so patching only
+# sys.modules is not enough to make the swap take effect.
+# attribute swap described above
+import types  # local import: only this section needs it
+
+import codecalc  # local import: the package object itself, for the
+
+_fake_server = types.ModuleType("codecalc.server")  # no TOOL_GROUPS/PRESETS
+_saved_server_module = sys.modules["codecalc.server"]
+_saved_server_attr = codecalc.server
+sys.modules["codecalc.server"] = _fake_server
+codecalc.server = _fake_server
+try:
+    with tempfile.TemporaryDirectory(prefix="codecalc-setup-test-") as d:
+        home = pathlib.Path(d) / "home"
+        cwd = pathlib.Path(d) / "cwd"
+        home.mkdir()
+        cwd.mkdir()
+        buf = io.StringIO()
+        code = setup.run_setup(client="claude-code", do_write=False, out=buf,
+                               home=home, cwd=cwd, platform="linux")
+        out = buf.getvalue()
+        check("a broken codecalc.server import does not crash run_setup()",
+              code in (0, 1), f"-> exit {code}")
+        check("...the tool-surface tip is silently absent, not a traceback",
+              "tool surface" not in out and "Traceback" not in out,
+              f"-> {out}")
+        check("...and the rest of setup's output still completes (verdict "
+              "line present)",
+              "verdict:" in out, f"-> {out}")
+finally:
+    sys.modules["codecalc.server"] = _saved_server_module
+    codecalc.server = _saved_server_attr
 
 
 # ── 5. client auto-detect + explicit --client ───────────────────────────────

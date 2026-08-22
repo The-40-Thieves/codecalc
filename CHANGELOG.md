@@ -78,13 +78,19 @@ behind it.
 
 - **`codecalc setup` now recommends a leaner `CODECALC_TOOLS` group** when
   the variable is unset: a line naming the real, live per-preset tool counts
-  (`core` = calculator-only, `dev` = calculator + execution + verification +
-  analysis — read from `server.py`'s own group registry, so the numbers
-  cannot drift from what `CODECALC_TOOLS=core`/`=dev` actually register) for
-  callers that do not need sessions, package installs, or code execution.
-  Purely informational: the default surface (`CODECALC_TOOLS` unset = all 52
-  tools) is unchanged, and the line is suppressed once `CODECALC_TOOLS` is
-  already set. See README's "Reducing the tool surface".
+  AND real per-preset group membership (`core`/`dev` — both read from
+  `server.py`'s own `TOOL_GROUPS`/`PRESETS`, so neither the counts nor the
+  displayed group list can drift from what `CODECALC_TOOLS=core`/`=dev`
+  actually registers; cross-vendor review caught an earlier cut of this that
+  derived the counts but still hardcoded the group-membership description)
+  for callers that do not need sessions, package installs, or code
+  execution. Purely informational: the default surface (`CODECALC_TOOLS`
+  unset = all 52 tools) is unchanged, and the line is suppressed once
+  `CODECALC_TOOLS` is already set. The `server.py` import this needs is
+  scoped to exactly that branch and wrapped so a broken or absent import
+  (e.g. a library caller that never went through the CLI entry point, `mcp`
+  not installed) silently skips the tip rather than crashing `run_setup()`.
+  See README's "Reducing the tool surface".
 - **`scripts/fuzz.py`**: a mutation fuzzer over codecalc's two
   highest-risk caller-string surfaces — `safe_expr.classify_unsafe`/
   `safe_parse` (the screen between a caller expression and SymPy's
@@ -152,6 +158,31 @@ behind it.
   table in `executor/src/platform/mod.rs`'s module doc comment. `SECURITY.md`,
   `AUDIT.md` and the README's own per-platform guarantee table already
   described the seccomp/shim split correctly and are unchanged.
+- **Cross-vendor review of the fix above found it incomplete on both axes.**
+  First, several of the just-corrected strings themselves said "seccomp on
+  Linux, a symbol shim elsewhere" — true on most Linux hosts but wrong on a
+  Linux kernel that refuses a seccomp filter (`executor/src/platform/
+  unix.rs`'s `seccomp::available()` gate), which also falls back to the
+  shim; reworded to "seccomp where the Linux kernel supports it, a symbol
+  shim otherwise" in `codecalc/executor.py`, `codecalc/sessions.py`, and
+  `docs/contract/README.md`. Second, the "every stale instance" sweep had
+  missed build-time and CI text that claims a *missing shim* leaves `no_net`
+  unenforced with no platform qualifier — live-probed false on Linux with
+  seccomp support (`codecalc-exec` copied without `blocknet.so` still
+  returns `unenforced: []`, seccomp enforcing regardless of shim presence):
+  `hatch_build.py`, `executor/build.rs` (module doc comment plus both
+  build-warning strings), `executor/src/main.rs` (a field comment),
+  `README.md` (two spots), `.github/workflows/ci-rust.yml`,
+  `.github/workflows/release.yml`, and comments/check-labels in
+  `tests/test_executor_sweep.py` and `tests/test_network_policy.py` that
+  attributed clean enforcement to shim presence rather than to whichever
+  mechanism actually held. `docs/contract/provider-v1.md` also credited the
+  symbol shim with being able to "enforce" a network denial, which it
+  cannot (best-effort, bypassable, disclosed via `unenforced`) — reworded to
+  describe what the capability broker's `network_control` flag actually
+  reports (`codecalc/providers.py`/`capabilities.py` behavior itself is
+  unchanged; the flag does not yet distinguish real seccomp enforcement from
+  the shim, tracked as a separate issue).
 
 ## [0.4.0] — 2026-08-21
 

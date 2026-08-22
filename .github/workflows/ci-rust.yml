@@ -186,11 +186,14 @@ jobs:
     # lag blocknet.c; this job is the cross-platform gate on top of that — it proves the shim still
     # compiles -Werror on macOS as well as Linux, and that the override MECHANISM survives.
     #
-    # A broken shim degrades silently, so both halves matter: the executor checks `shim.is_file()`
-    # and skips LD_PRELOAD if it is missing, reporting `no_net_requested_but_no_shim_available` in
-    # `unenforced` (verified). A STALE shim is the case nothing can report — the file is there, so
-    # the policy being enforced is the previous build while every presence check passes. That is
-    # what build.rs removes.
+    # A broken shim degrades silently on macOS, or a Linux kernel without seccomp support — the
+    # executor checks `shim.is_file()` and skips LD_PRELOAD if it is missing, reporting
+    # `no_net_requested_but_no_shim_available` in `unenforced` there (verified). A Linux kernel WITH
+    # seccomp support enforces `--no-net` in-kernel regardless of the shim, so this half of the job
+    # exercises the shim itself, not whether no_net holds on seccomp-capable Linux (that's the
+    # platform-contract suite's job). A STALE shim is the case nothing can report — the file is
+    # there, so the policy being enforced is the previous build while every presence check passes.
+    # That is what build.rs removes.
     #
     # Linux and macOS only. Windows has no LD_PRELOAD equivalent to hang a socket
     # shim on, so `--no-net` is reported through the executor's `unenforced` field
