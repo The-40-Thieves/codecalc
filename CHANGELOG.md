@@ -147,13 +147,41 @@ behind it.
     raising like Python's own `int.__float__` does, so the digit estimate's
     `try/except OverflowError` never fired; the resulting `inf` then broke
     `int(digits)` in the refusal message.
-  All three now compute the digit/exponent magnitude via `bit_length()`-based
-  log10 estimates that never convert the full value to float or interpolate
-  it unbounded into a message, and correctly return a `resource_exhausted`
-  refusal instead of crashing — verified not to waive the shape through
-  (each is still refused, on 'digits'/'exponent' grounds) and not to
-  regress the existing digit estimate's precision (`2**10000`, ~3011 true
-  digits, still evaluates). Added to `scripts/fuzz.py`'s `SEED_CORPUS_EXPR`.
+  All three now compute the digit/exponent magnitude via a `_log10_of_int`
+  helper (exact to float precision — shifts an arbitrary-precision int down
+  to its top 53 bits before ever calling `float()`, rather than a cruder
+  `bit_length() * log10(2)` estimate, which was measured to flip some
+  ordinary, well-under-the-cap powers like `2**10000` to a false refusal)
+  and never interpolate the full value into a message, correctly returning
+  a `resource_exhausted` refusal instead of crashing — verified not to
+  waive the shape through (each is still refused, on 'digits'/'exponent'
+  grounds). Added to `scripts/fuzz.py`'s `SEED_CORPUS_EXPR`.
+
+  Cross-vendor (Codex) review of this fix caught two more in the same
+  class, both fixed alongside it:
+  - **off-by-one at `MAX_NUMERIC_DIGITS`**: the digit estimate IS
+    `log10(result)`, not the digit count — a value with N digits has
+    `log10` in `[N-1, N)`, so comparing the estimate itself against the cap
+    admitted equality at the boundary. `10**4000` has 4001 digits but
+    `log10(10**4000) == 4000` exactly, which is not `> 4000`, so it was
+    incorrectly *allowed* — one digit over the cap the refusal message
+    itself claims. Now compares `floor(digits) + 1` (the true count)
+    against the cap; `10**3999` (exactly 4000 digits, genuinely at the
+    boundary) is still correctly allowed.
+  - **`classify_unsafe`'s heavy-function-argument refusal had the same
+    unbounded int->str interpolation**, reachable independently of
+    `reject_explosive`: `int(s, 0)` (base-0 auto-detect) parses a
+    hex/octal/binary literal in linear time with no digit-count limit —
+    unlike decimal text<->int conversion, which is exactly what carries
+    the 4300-digit limit — so a short-looking token like `factorial(0x` +
+    `f`*4000 + `)` parses to a plain int with thousands of DECIMAL digits,
+    and the refusal message's own `str(value)` raised `ValueError` before
+    it could report the refusal. Now falls back to a digit-count
+    description only when `str(value)` would actually raise; an ordinary
+    (small) literal's message is unchanged. Reachable with no length cap
+    via `fuzz/safe_expr_fuzzer.py`'s atheris harness, which calls
+    `classify_unsafe` directly. Added to `scripts/fuzz.py`'s
+    `SEED_CORPUS_EXPR`.
 
 ## [0.4.0] — 2026-08-21
 

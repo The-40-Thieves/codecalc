@@ -1157,6 +1157,55 @@ _r911 = _logic.evaluate_expression("2**10000")
 check("2**10000 (~3011 digits, under the 4000 cap) still evaluates",
       _r911.get("ok") is True, f"-> {_r911}")
 
+# ═══ off-by-one at MAX_NUMERIC_DIGITS: `digits` IS log10(result), not the ═══
+# ═══ digit count — comparing it directly against the cap admits equality ═══
+# Cross-vendor (Codex) review of the fix above caught this: `10**4000` has
+# 4001 digits (a 1 followed by 4000 zeros) but log10(10**4000) == 4000
+# exactly, which is not `> MAX_NUMERIC_DIGITS` (4000) under the old
+# `digits > MAX_NUMERIC_DIGITS` comparison — so a 4001-digit result sailed
+# through as "allowed", one digit over the cap the refusal message itself
+# claims. The true count is `floor(digits) + 1`.
+from codecalc.safe_expr import MAX_NUMERIC_DIGITS as _MAX_ND
+
+_r911 = _sp911(f"10**{_MAX_ND}")[1]  # 10**4000 -> 4001 digits: must refuse
+check(f"10**{_MAX_ND} ({_MAX_ND + 1} digits, one over the cap) is refused",
+      _r911 is not None and "digits" in _r911[1], f"-> {_r911}")
+_r911 = _sp911(f"10**{_MAX_ND - 1}")[0]  # 10**3999 -> exactly 4000: at the cap
+check(f"10**{_MAX_ND - 1} (exactly {_MAX_ND} digits, AT the cap) is still allowed",
+      _r911 is not None, f"-> {_sp911(f'10**{_MAX_ND - 1}')}")
+
+# ═══ classify_unsafe's heavy-arg message had the identical unbounded ═══════
+# ═══ int->str interpolation reject_explosive's messages did ════════════════
+# `int(s, 0)` (base-0 auto-detect) parses hex/octal/binary text in linear
+# time with no digit-count limit — unlike decimal text<->int conversion,
+# which IS what str(value) does and exactly what carries Python's 4300-digit
+# limit. So a short-looking token like `factorial(0x` + `f`*4000 + `)`
+# parses to a plain int with thousands of DECIMAL digits, and the refusal
+# message's own `str(value)` raised ValueError before it could report the
+# refusal — the same crash class as the three THE-911 crash sites above,
+# just in `_heavy_call_violation` (reached from `classify_unsafe`, the FIRST
+# screening step, called on the raw string before any length cap in some
+# callers — e.g. `fuzz/safe_expr_fuzzer.py`'s atheris harness, which drives
+# `classify_unsafe` directly with up to 4096 bytes, past the 2000-char cap
+# every production `safe_parse` caller enforces).
+_hex_bomb = "factorial(0x" + "f" * 4000 + ")"
+try:
+    _msg911 = _scr(_hex_bomb)
+    _raised = None
+except Exception as _exc:
+    _msg911, _raised = None, _exc
+check("classify_unsafe does not raise on a 4000-hex-digit literal argument",
+      _raised is None, f"-> raised {_raised!r}" if _raised else "")
+if _raised is None:
+    check("  ...and refuses it on 'exceeds the limit' grounds",
+          _msg911 is not None and "exceeds the limit" in _msg911, f"-> {_msg911!r}")
+# ...and an ordinary (small) non-decimal literal still names the exact value,
+# unchanged from before this fix — the fallback only kicks in once str()
+# itself would actually raise.
+_msg911 = _scr("factorial(0xffffff)") or ""
+check("  ...while an ordinary hex literal's message still names the exact value",
+      "16777215" in _msg911, f"-> {_msg911!r}")
+
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== ALL BUG-SWEEP REGRESSIONS FIXED ===")
 sys.exit(1 if FAILS else 0)
