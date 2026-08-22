@@ -1078,6 +1078,134 @@ check("evaluate_expression refuses the shape rather than hanging",
 check("  ...and guarded_call's wall-clock backstop actually bounds it",
       _elapsed < 20.0, f"-> {_elapsed:.2f}s (guarded.DEFAULT_WALL_SECONDS=15)")
 
+
+# ═══ reject_explosive RAISED instead of refusing on 3 extreme-magnitude ═════
+# ═══ shapes — violating the "classify_unsafe/safe_parse never raise" ═══════
+# ═══ contract fuzz/safe_expr_fuzzer.py's own module docstring states ═══════
+# All three surfaced by the 2026-08-22 ClusterFuzzLite batch. Each is a huge
+# INTEGER value reaching either an int->float conversion or an f-string
+# interpolation that itself has no bound — a crash from *reporting* the
+# refusal, not from the refusal decision itself.
+from codecalc.safe_expr import safe_parse as _boundary_parse
+
+_EXPLOSIVE_CRASH_INPUTS = [
+    # exponent = factorial2(100000) (the `!!` double-factorial transform),
+    # an exact Integer with thousands of digits: `abs(exp_value) *
+    # math.log10(magnitude)` used to coerce that huge int to float first,
+    # raising OverflowError("int too large to convert to float").
+    "2**100000!!ubrNembeubrNember",
+    # same huge-exponent shape, but the base carries a free symbol (`x`), so
+    # reject_explosive takes the SYMBOLIC branch instead — and that branch's
+    # own refusal MESSAGE used to interpolate the raw exponent with an
+    # f-string, which raised ValueError past Python's int->str conversion
+    # limit (4300 digits) before the message could even be built.
+    "(x+1)**20000!!ubrNembeubrNember",
+    # a >308-digit base: SymPy's Integer.__float__ returns inf here rather
+    # than raising (unlike Python's own int.__float__), so the try/except
+    # around float(base) never fired; digits came out inf, and `int(digits)`
+    # in the refusal message raised OverflowError("cannot convert float
+    # infinity to integer").
+    "9" * 400 + "**12",
+]
+
+for _expr in _EXPLOSIVE_CRASH_INPUTS:
+    try:
+        _value, _err = _boundary_parse(_expr)
+        _raised = None
+    except Exception as _exc:  # the exact bug: this must never happen
+        _value, _err, _raised = None, None, _exc
+    check(f"safe_parse does not raise on {_expr[:45]!r}...",
+          _raised is None, f"-> raised {_raised!r}" if _raised else "")
+    if _raised is None:
+        check("  ...and refuses it rather than evaluating an explosive shape",
+              _value is None and _err is not None, f"-> value={_value!r} err={_err!r}")
+
+# ...and the same three inputs are unreachable from evaluate_expression too —
+# the caller-facing surface everything above is proxying for.
+for _expr in _EXPLOSIVE_CRASH_INPUTS:
+    try:
+        _eval_result = _logic.evaluate_expression(_expr)
+        _raised = None
+    except Exception as _exc:
+        _eval_result, _raised = None, _exc
+    check(f"evaluate_expression does not raise on {_expr[:45]!r}...",
+          _raised is None, f"-> raised {_raised!r}" if _raised else "")
+    if _raised is None:
+        check("  ...and returns a refusal, not a value",
+              _eval_result.get("ok") is False, f"-> {_eval_result}")
+
+# the fix must not waive an actually-explosive shape through just to avoid
+# crashing on it — each of the three above is refused for a real reason
+# (an astronomically huge digit count / exponent), not just "didn't raise".
+check("  ...2**100000!!... is refused on 'digits' grounds, not silently allowed",
+      _boundary_parse(_EXPLOSIVE_CRASH_INPUTS[0])[1] is not None
+      and "digits" in _boundary_parse(_EXPLOSIVE_CRASH_INPUTS[0])[1][1])
+check("  ...(x+1)**20000!!... is refused on 'exponent' grounds, not silently allowed",
+      _boundary_parse(_EXPLOSIVE_CRASH_INPUTS[1])[1] is not None
+      and "exponent" in _boundary_parse(_EXPLOSIVE_CRASH_INPUTS[1])[1][1])
+check("  ...'9'*400 + '**12' is refused on 'digits' grounds, not silently allowed",
+      _boundary_parse(_EXPLOSIVE_CRASH_INPUTS[2])[1] is not None
+      and "digits" in _boundary_parse(_EXPLOSIVE_CRASH_INPUTS[2])[1][1])
+
+# ...and the fix does not make the digit estimate so imprecise that it starts
+# refusing ordinary, well-under-the-cap powers: 2**10000 has ~3011 true
+# digits (comfortably under MAX_NUMERIC_DIGITS=4000) and must still evaluate.
+# A cruder `bit_length() * log10(2)` estimate (no -1/shift correction)
+# overestimates log10(2) by roughly 2x, which was measured to flip exactly
+# this case to a false refusal.
+_eval_result = _logic.evaluate_expression("2**10000")
+check("2**10000 (~3011 digits, under the 4000 cap) still evaluates",
+      _eval_result.get("ok") is True, f"-> {_eval_result}")
+
+# ═══ off-by-one at MAX_NUMERIC_DIGITS: `digits` IS log10(result), not the ═══
+# ═══ digit count — comparing it directly against the cap admits equality ═══
+# Cross-vendor (Codex) review of the fix above caught this: `10**4000` has
+# 4001 digits (a 1 followed by 4000 zeros) but log10(10**4000) == 4000
+# exactly, which is not `> MAX_NUMERIC_DIGITS` (4000) under the old
+# `digits > MAX_NUMERIC_DIGITS` comparison — so a 4001-digit result sailed
+# through as "allowed", one digit over the cap the refusal message itself
+# claims. The true count is `floor(digits) + 1`.
+from codecalc.safe_expr import MAX_NUMERIC_DIGITS as _MAX_DIGITS_CAP
+
+_boundary_refusal = _boundary_parse(f"10**{_MAX_DIGITS_CAP}")[1]  # 10**4000 -> 4001 digits: must refuse
+check(f"10**{_MAX_DIGITS_CAP} ({_MAX_DIGITS_CAP + 1} digits, one over the cap) is refused",
+      _boundary_refusal is not None and "digits" in _boundary_refusal[1], f"-> {_boundary_refusal}")
+_boundary_value = _boundary_parse(f"10**{_MAX_DIGITS_CAP - 1}")[0]  # 10**3999 -> exactly 4000: at the cap
+check(f"10**{_MAX_DIGITS_CAP - 1} (exactly {_MAX_DIGITS_CAP} digits, AT the cap) is still allowed",
+      _boundary_value is not None, f"-> {_boundary_parse(f'10**{_MAX_DIGITS_CAP - 1}')}")
+
+# ═══ classify_unsafe's heavy-arg message had the identical unbounded ═══════
+# ═══ int->str interpolation reject_explosive's messages did ════════════════
+# `int(s, 0)` (base-0 auto-detect) parses hex/octal/binary text in linear
+# time with no digit-count limit — unlike decimal text<->int conversion,
+# which IS what str(value) does and exactly what carries Python's 4300-digit
+# limit. So a short-looking token like `factorial(0x` + `f`*4000 + `)`
+# parses to a plain int with thousands of DECIMAL digits, and the refusal
+# message's own `str(value)` raised ValueError before it could report the
+# refusal — the same crash class as the explosive-Pow crash sites above,
+# just in `_heavy_call_violation` (reached from `classify_unsafe`, the FIRST
+# screening step, called on the raw string before any length cap in some
+# callers — e.g. `fuzz/safe_expr_fuzzer.py`'s atheris harness, which drives
+# `classify_unsafe` directly with up to 4096 bytes, past the 2000-char cap
+# every production `safe_parse` caller enforces).
+_hex_bomb = "factorial(0x" + "f" * 4000 + ")"
+try:
+    _hex_bomb_msg = _scr(_hex_bomb)
+    _raised = None
+except Exception as _exc:
+    _hex_bomb_msg, _raised = None, _exc
+check("classify_unsafe does not raise on a 4000-hex-digit literal argument",
+      _raised is None, f"-> raised {_raised!r}" if _raised else "")
+if _raised is None:
+    check("  ...and refuses it on 'exceeds the limit' grounds",
+          _hex_bomb_msg is not None and "exceeds the limit" in _hex_bomb_msg, f"-> {_hex_bomb_msg!r}")
+# ...and an ordinary (small) non-decimal literal still names the exact value,
+# unchanged from before this fix — the fallback only kicks in once str()
+# itself would actually raise.
+_hex_bomb_msg = _scr("factorial(0xffffff)") or ""
+check("  ...while an ordinary hex literal's message still names the exact value",
+      "16777215" in _hex_bomb_msg, f"-> {_hex_bomb_msg!r}")
+
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== ALL BUG-SWEEP REGRESSIONS FIXED ===")
 sys.exit(1 if FAILS else 0)

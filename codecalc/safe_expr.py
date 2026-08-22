@@ -71,6 +71,7 @@ no `safe=` to pass — code written against that PR raises TypeError.
 from __future__ import annotations
 
 import io
+import math
 import tokenize
 
 #: Keywords that would reintroduce evaluation or control flow. `and`, `or`,
@@ -151,6 +152,55 @@ _HEAVY_FUNCTIONS = frozenset({
 MAX_HEAVY_ARG = 1_463
 
 
+def _log10_of_int(n: int) -> float:
+    """log10(abs(n)) for an arbitrary-precision int, computed without ever
+    converting the full value to float.
+
+    `float(n)` is itself an unbounded operation once `n` has enough digits:
+    Python's own `int.__float__` raises `OverflowError`, but — measured
+    live, and a crash this exists to avoid — SymPy's `Integer.__float__`
+    instead returns `inf` WITHOUT raising, so a caller relying on the
+    `except OverflowError` that catches the former silently sails past the
+    latter.
+
+    Shifts `n` down to its top 53 bits first (the exact width a double's
+    mantissa holds, so `float()` of the shifted value loses nothing that
+    matters), then adds back log10 of the shifted-off power of two. Accurate
+    to within float precision for any size of `n`, unlike a cruder
+    `bit_length() * log10(2)` estimate, which is off by up to a full bit
+    (~0.3 decimal digits) — negligible on its own, but that error scales
+    with the EXPONENT wherever this feeds a `digits = exponent *
+    log10_magnitude` estimate, so a naive bit-count approximation here was
+    measured to flip some ordinary, well-under-the-cap powers (`2**10000`,
+    ~3011 true digits) to a false refusal.
+    """
+    n = abs(n)
+    if n == 0:
+        return float("-inf")
+    shift = max(n.bit_length() - 53, 0)
+    return math.log10(n >> shift) + shift * math.log10(2)
+
+
+def _approx_decimal_digits(n: int) -> int:
+    """~decimal digit count of `abs(n)`, without stringifying it.
+
+    `str(n)` is itself an unbounded operation on an arbitrary-precision int:
+    it hits Python's int->str conversion limit (4300 digits by default,
+    `sys.set_int_max_str_digits`) and raises `ValueError` past it — so a
+    refusal MESSAGE that interpolates a huge `n` directly can crash before
+    it finishes reporting the refusal. Used here (a heavy-function argument
+    literal — `factorial(0x` + `f`*4000 + `)` parses to a plain `int` with
+    thousands of decimal digits even though the source LITERAL is short,
+    because hex/octal/binary text->int conversion has no such length limit,
+    only the decimal str() this avoids does) and by `reject_explosive`
+    below. Used only for prose, not for gating a decision (`_log10_of_int`
+    above does that), so it does not need `_log10_of_int`'s float precision
+    — `int()` truncation is already "about N digits", not an exact count.
+    """
+    n = abs(n)
+    return int(_log10_of_int(n)) + 1 if n else 1
+
+
 def _heavy_call_violation(tokens: list) -> str | None:
     """A heavy function applied to an oversized integer LITERAL, if any.
 
@@ -184,11 +234,29 @@ def _heavy_call_violation(tokens: list) -> str | None:
                 except ValueError:
                     continue  # a float or complex literal — not this hazard
                 if value > MAX_HEAVY_ARG:
+                    # `str(value)` is safe and exact for the overwhelmingly
+                    # common case (a decimal literal, or a short hex/octal/
+                    # binary one) — but not in general. `int(s, 0)` parses a
+                    # hex/octal/binary LITERAL in linear time regardless of
+                    # length (unlike decimal text<->int conversion, which is
+                    # exactly what str() below does, and exactly what
+                    # carries a length limit), so a short-looking token like
+                    # `factorial(0x` + `f`*4000 + `)` parses to a plain int
+                    # with thousands of DECIMAL digits, and `str(value)`
+                    # itself raises ValueError past Python's int->str
+                    # conversion limit (4300 digits by default) before the
+                    # refusal message could even be built. Fall back to the
+                    # (cheap, bounded) digit count in that case — the same
+                    # fix as `reject_explosive`'s refusal messages below.
+                    try:
+                        value_desc = str(value)
+                    except ValueError:
+                        value_desc = f"(~{_approx_decimal_digits(value)} digits)"
                     # Names the ARGUMENT, not `func(value)`. The latter reads
                     # as the whole call, which is wrong the moment the function
                     # takes two: `binomial(200000, 100000)` was reporting
                     # itself as "binomial(200000)".
-                    return (f"argument {value} to {tok.string}() exceeds the limit "
+                    return (f"argument {value_desc} to {tok.string}() exceeds the limit "
                             f"of {MAX_HEAVY_ARG}: computing it would take an "
                             "unbounded amount of time and memory")
     return None
@@ -510,26 +578,77 @@ def reject_explosive(tree) -> str | None:
 
         if base.free_symbols:
             if exp_value > MAX_SYMBOLIC_EXPONENT:
-                return (f"a symbolic power with exponent {exp_value} exceeds the "
-                        f"limit of {MAX_SYMBOLIC_EXPONENT}: expanding it is "
-                        "superlinear in the exponent")
+                # NEVER interpolate exp_value itself: `2**100000!!` makes it
+                # `factorial2(100000)`, an exact Integer with thousands of
+                # digits, and formatting that directly hits Python's int->str
+                # conversion limit (4300 digits) — the refusal MESSAGE would
+                # raise before it could even report the refusal. Report the
+                # (cheap, bounded) digit count instead of the value.
+                return (f"a symbolic power with an exponent of about "
+                        f"{_approx_decimal_digits(exp_value)} digits exceeds "
+                        f"the limit of {MAX_SYMBOLIC_EXPONENT}: expanding it "
+                        "is superlinear in the exponent")
         elif isinstance(base, (Integer, Float)):
             # Cheap to compute, impossible to print. Estimated by digit count
             # rather than by computing it, which would be the very thing this
             # is here to avoid.
+            #
+            # `log10_magnitude` is computed via `_log10_of_int` for an
+            # `Integer` base rather than the previous `abs(float(base))`:
+            # for a base with hundreds of digits, `float(base)` either
+            # raises `OverflowError` (as Python's own `int` would) or — the
+            # crash this fixes — returns `inf` WITHOUT raising, because
+            # SymPy's `Integer.__float__` differs from `int.__float__` here.
+            # `_log10_of_int` gets to the same log10(magnitude) with no float
+            # conversion of the (potentially huge) base at all. A `Float`
+            # base is already double-precision internally, so converting it
+            # is the cheap, ordinary case.
             try:
-                magnitude = abs(float(base))
+                if isinstance(base, Integer):
+                    log10_magnitude = _log10_of_int(int(base))
+                else:
+                    magnitude = abs(float(base))
+                    log10_magnitude = (math.log10(magnitude) if magnitude
+                                        else float("-inf"))
             except (TypeError, ValueError, OverflowError):
                 continue
-            if magnitude > 1:
-                import math
+            if log10_magnitude > 0:  # equivalent to magnitude > 1
                 # abs() here too. A negative exponent produces a rational
                 # whose DENOMINATOR has that many digits, which costs the same
                 # to build; without it `digits` came out negative and every
                 # negative exponent compared under the cap.
-                digits = abs(exp_value) * math.log10(magnitude)
-                if digits > MAX_NUMERIC_DIGITS:
-                    return (f"the result would have about {int(digits)} digits, "
+                #
+                # `exp_value` itself can be an enormous Integer (again,
+                # `2**100000!!` — the exponent, not the base, is the huge one
+                # this time): `abs(exp_value) * log10_magnitude` is int-times-
+                # float, and Python resolves that by converting the int to
+                # float FIRST — which is the original `OverflowError` this
+                # fixes if `exp_value` doesn't fit a double. `bit_length()`
+                # again sidesteps ever attempting that conversion: past ~1000
+                # bits the result is already astronomically over
+                # `MAX_NUMERIC_DIGITS` for any `log10_magnitude > 0`, so
+                # there is nothing the exact product could add.
+                abs_exp = abs(exp_value)
+                if abs_exp.bit_length() > 1000:
+                    over_cap, digit_desc = True, "an unbounded number of"
+                else:
+                    digits = abs_exp * log10_magnitude
+                    if math.isfinite(digits):
+                        # `digits` IS log10(result), not the digit count: a
+                        # value with N digits has log10 in [N-1, N), so the
+                        # true count is floor(digits) + 1. Comparing `digits`
+                        # itself against the cap (the previous code) admits
+                        # EQUALITY at the boundary — `10**4000` has 4001
+                        # digits but log10(10**4000) == 4000 exactly, which
+                        # is not > MAX_NUMERIC_DIGITS(4000), so it slipped
+                        # through as "allowed" one digit over the stated cap.
+                        digit_count = int(digits) + 1
+                        over_cap = digit_count > MAX_NUMERIC_DIGITS
+                        digit_desc = f"about {digit_count}"
+                    else:
+                        over_cap, digit_desc = True, "an unbounded number of"
+                if over_cap:
+                    return (f"the result would have {digit_desc} digits, "
                             f"over the limit of {MAX_NUMERIC_DIGITS}: it cannot be "
                             "rendered as a decimal string")
     return None

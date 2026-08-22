@@ -163,6 +163,31 @@ SEED_CORPUS_EXPR = [
     # both directly, not only when the mutator happens to reconstruct them.
     "\ud800",
     "�\r�",
+    # `!!` (sympy's standard_transformations double-factorial) turns the
+    # exponent into a huge exact Integer — `factorial2(100000)` /
+    # `factorial2(20000)` — reaching an int->float conversion and an
+    # f-string interpolation in `reject_explosive` that neither bounded
+    # for a value that size. Found by the 2026-08-22 ClusterFuzzLite batch;
+    # `reject_explosive` raised (OverflowError / ValueError) instead of
+    # returning a refusal, the exact contract this fuzzer holds it to.
+    "2**100000!!ubrNembeubrNember",
+    "(x+1)**20000!!ubrNembeubrNember",
+    # a >308-digit base: SymPy's `Integer.__float__` returns `inf` here
+    # rather than raising like Python's own `int.__float__` does, so the
+    # digit estimate's `try/except OverflowError` never fired. Same batch.
+    "9" * 400 + "**12",
+    # cross-vendor (Codex) review of the fix above caught two siblings.
+    # `int(s, 0)` (base-0 auto-detect) parses hex/octal/binary literal TEXT
+    # in linear time with no digit-count limit -- unlike decimal text<->int
+    # conversion, which is exactly what carries Python's 4300-digit limit.
+    # So this short-looking hex literal parses to a plain int with
+    # thousands of DECIMAL digits, and `_heavy_call_violation`'s refusal
+    # message (`classify_unsafe`, the FIRST screening step -- reachable with
+    # no length cap via `fuzz/safe_expr_fuzzer.py`'s atheris harness, which
+    # calls it directly) used to interpolate that int raw, raising
+    # ValueError past the same limit before it could even report the
+    # refusal.
+    "factorial(0x" + "f" * 4000 + ")",
 ]
 
 # ── seed corpus: session paths ──────────────────────────────────────────────
