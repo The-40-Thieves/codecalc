@@ -28,12 +28,12 @@ use std::process::Command;
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
-pub use unix::{current_uid_tasks, spawn_and_wait};
+pub use unix::{current_uid_tasks, no_net_kernel_enforcement_available, spawn_and_wait};
 
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub use windows::{current_uid_tasks, spawn_and_wait};
+pub use windows::{current_uid_tasks, no_net_kernel_enforcement_available, spawn_and_wait};
 
 /// Raw std handles, for the Windows creation-time job path.
 ///

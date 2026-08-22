@@ -35,6 +35,34 @@ behind it.
 
 ### Security
 
+- **BREAKING (strict-policy hole closed): `network_control` no longer means
+  "a native executor binary is present" — it now means "this host can
+  enforce `no_net` in the kernel"**, and a `strict` capability policy that
+  used to approve a network denial on a host it could not actually enforce
+  now correctly rejects it with `CAPABILITY_UNENFORCEABLE`.
+  `providers.LocalExecutionProvider.describe()`'s `network_control` capability
+  was `executor.backend() == "rust"` alone — `true` for ANY host with the
+  Rust binary present, including macOS (`no_net` there is only the
+  best-effort DYLD symbol shim) and a Linux kernel without seccomp (the same
+  shim fallback). `codecalc/capabilities.py`'s `strict` policy trusts that
+  flag, unchecked, to decide whether a requested denial of `network` can be
+  enforced — so on exactly the hosts where enforcement is weakest, `strict`
+  APPROVED the run instead of refusing it, violating strict's own contract
+  ("refuse rather than run unenforced"), and the approved run could then come
+  back disclosing `no_net` in `unenforced` at the same time the broker's
+  receipt claimed the denial was enforced. The Rust executor now answers a
+  new `--capabilities` probe (`{"no_net_kernel_enforcement": bool}` — Linux
+  `seccomp::available()`, `false` on macOS/Windows), `executor.py` caches it
+  once at import the same way it caches `_rust`, and `network_control` is now
+  `backend() == "rust" AND` that flag. Non-strict `deny-network` is
+  unaffected — a host without kernel enforcement already took the
+  disclose-the-leak path, not a hard failure; this only changes what
+  `strict` does with a request it previously wrongly approved. Verified both
+  ways: a faked shim-only host now gets `CAPABILITY_UNENFORCEABLE` under
+  `strict` (the run never reaches the provider), and the live positive
+  control on seccomp-capable Linux still gets approved and genuinely
+  enforced, with no `no_net` disclosure in `unenforced` — the broker and the
+  run's own disclosure now agree.
 - **`no_net`'s result now discloses that the Rust executor's block is a
   best-effort symbol shim, not a kernel egress block** (E-1).
   `--no-net` intercepts `socket()`/`connect()` via `LD_PRELOAD` on Linux and

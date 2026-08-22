@@ -505,7 +505,22 @@ class LocalExecutionProvider:
                 "health": True,
                 "runtime_discovery": True,
                 "workdir": True,
-                "network_control": executor.backend() == "rust",
+                # `backend() == "rust"` alone used to be the whole answer, and
+                # it over-claimed: it is True for ANY rust-backend host,
+                # including macOS (no_net there is only the best-effort DYLD
+                # symbol shim) and a Linux kernel without seccomp (same shim
+                # fallback) — and the capability broker's `strict` policy
+                # trusts THIS flag to decide whether a denial of `network` is
+                # enforceable (codecalc/capabilities.py). A provider that
+                # cannot actually enforce it but claims it can turned strict's
+                # "refuse rather than run unenforced" contract into an
+                # approval, on exactly the hosts where enforcement is
+                # weakest. `no_net_kernel_enforcement_available()` asks the
+                # binary itself (Linux seccomp only; false on macOS/Windows),
+                # so this now reflects what will ACTUALLY be enforced
+                # in-kernel here, not merely that a native binary is present.
+                "network_control": (executor.backend() == "rust"
+                                    and executor.no_net_kernel_enforcement_available()),
             },
         ).to_dict()
 

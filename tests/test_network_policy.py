@@ -194,15 +194,22 @@ check("allow-network parses to an explicit grant",
 
 # ── G. the LOCAL rust provider CAN enforce: deny-network BLOCKS egress ──────
 # The counterpart to sections B/B2: where the provider genuinely controls the
-# network (the native executor — seccomp on this host if the kernel supports
-# it, the LD_PRELOAD/dyld symbol shim otherwise; gated here on backend ==
-# "rust", which is what the capability broker itself currently keys on),
-# deny-network is ENFORCED,
-# not merely disclosed. This drives the REAL LocalExecutionProvider end to end so
-# the "disclose where you can't" change did not weaken the "block where you
-# can" path. Skipped off the rust backend (the python fallback cannot enforce, so
-# it takes the section-B disclose path instead — its own suites cover that).
-if executor.backend() == "rust" and sys.platform.startswith("linux"):
+# network — gated here on `backend() == "rust" and
+# no_net_kernel_enforcement_available()`, which is what
+# `LocalExecutionProvider.describe()`'s `network_control` (and so the
+# capability broker) now keys on. NOT merely `backend() == "rust"`: that
+# alone is also true on a Linux kernel without seccomp or on macOS, where
+# `no_net` is only the bypassable LD_PRELOAD/dyld symbol shim, and running
+# THIS section's assertions there would be wrong — a shim-only host takes the
+# section-B/B2 disclose path instead once `network_control` is honestly
+# False, not the enforced path this section checks (see section H, which
+# exercises exactly that shim-only case with a faked probe result).
+# deny-network is ENFORCED, not merely disclosed. This drives the REAL
+# LocalExecutionProvider end to end so the "disclose where you can't" change
+# did not weaken the "block where you can" path. Skipped when kernel
+# enforcement is unavailable here (the shim/fallback path takes the
+# section-B disclose path instead — its own suites cover that).
+if executor.backend() == "rust" and executor.no_net_kernel_enforcement_available():
     _local = providers.LocalExecutionProvider()
     _registry_g = providers.ProviderRegistry(default_provider_id="local")
     _registry_g.register(_local)
@@ -227,8 +234,100 @@ if executor.backend() == "rust" and sys.platform.startswith("linux"):
           caps_g["denied"] == ["network"] and caps_g["effective"] == []
           and caps_g["provider_supported"] == ["network"])
 else:
-    check("rust-egress enforcement check ran (skipped: not the rust/linux backend)",
-          True, f"-> backend={executor.backend()!r} platform={sys.platform!r}")
+    check("rust-egress enforcement check ran (skipped: no kernel no_net enforcement here)",
+          True, f"-> backend={executor.backend()!r} "
+                f"kernel_enforcement={executor.no_net_kernel_enforcement_available()!r}")
+
+
+# ── H. `strict` must key on what will ACTUALLY be enforced ─────────────────
+# `network_control` used to be `backend() == "rust"` alone: True on ANY
+# rust-backend host, including macOS (no_net there is only the best-effort
+# DYLD symbol shim) and a Linux kernel without seccomp (same shim fallback).
+# Under `strict` policy, a provider that CLAIMS network_control is trusted to
+# enforce a denial without re-checking it (codecalc/capabilities.py `broker`);
+# the over-claim let `strict` APPROVE a job on exactly the hosts where
+# enforcement is weakest — the opposite of `strict`'s own contract ("refuse
+# rather than run unenforced").
+#
+# H1 fakes that shim-only host with the REAL LocalExecutionProvider (not a
+# RecordingProvider fake — the point is to exercise providers.py's own
+# derivation) by monkeypatching `no_net_kernel_enforcement_available()`, the
+# same reassign-and-restore convention `executor._rust` already uses in this
+# file and across the suite. H2 is the flip side, run live and unfaked: on
+# THIS host (this box IS seccomp-capable Linux — asserted, not assumed, as
+# its own precondition below) strict must still APPROVE the job, and the
+# disclosure-vs-broker consistency property must hold: an approved strict
+# denial must never come back with a `no_net` marker in `unenforced` — the
+# broker and the run's own disclosure must agree that the guarantee is real.
+_strict = capabilities.CapabilityPolicy(default_deny=frozenset({NET}), strict=True,
+                                        source="deny-network,strict")
+
+
+class _RealNetworkControlProvider(providers.LocalExecutionProvider):
+    """Unlike `RecordingProvider` above, does NOT override `network_control` —
+    its descriptor is whatever `LocalExecutionProvider.describe()` actually
+    derives, which is what section H needs to exercise the fix rather than a
+    fake standing in for it. Tracks whether `execute` was ever reached, the
+    same way `RecordingProvider.captured` does."""
+
+    def __init__(self) -> None:
+        self.provider_id = "real-network-control-probe"
+        self.reached = False
+
+    def describe(self) -> dict:
+        d = super().describe()
+        d["provider_id"] = self.provider_id
+        return d
+
+    def execute(self, spec: providers.ComputationSpec) -> dict:
+        self.reached = True
+        return super().execute(spec)
+
+
+if executor.backend() == "rust":
+    _old_kernel_enforcement = executor.no_net_kernel_enforcement_available
+    executor.no_net_kernel_enforcement_available = lambda: False
+    try:
+        prov_h1 = _RealNetworkControlProvider()
+        check("H1: a faked shim-only host makes network_control honestly False",
+              prov_h1.describe()["capabilities"]["network_control"] is False)
+        res_h1 = _service(prov_h1, _strict).execute(
+            providers.ComputationSpec(language="python3", code="print(1)"))
+        check("H1: strict REJECTS a network denial the (faked) provider cannot "
+              "enforce, rather than approving it on a stale backend==rust check",
+              res_h1.get("ok") is False
+              and res_h1.get("provider_error") == capabilities.CAPABILITY_UNENFORCEABLE)
+        check("H1: the rejected strict run never reached the provider (fail-closed)",
+              prov_h1.reached is False)
+    finally:
+        executor.no_net_kernel_enforcement_available = _old_kernel_enforcement
+else:
+    check("H1: strict-refusal-on-shim-only-host check ran "
+          "(skipped: not the rust backend)", True, f"-> backend={executor.backend()!r}")
+
+if executor.backend() == "rust" and executor.no_net_kernel_enforcement_available():
+    prov_h2 = _RealNetworkControlProvider()
+    check("H2 precondition: this host genuinely has kernel no_net enforcement "
+          "(the live positive control needs this to be true, not assumed)",
+          prov_h2.describe()["capabilities"]["network_control"] is True)
+    res_h2 = _service(prov_h2, _strict).execute(
+        providers.ComputationSpec(language="python3", code="print(1)"))
+    check("H2: strict APPROVES (does not reject) a network denial the provider "
+          "genuinely enforces",
+          res_h2.get("ok") is True and prov_h2.reached is True)
+    caps_h2 = res_h2["provider"]["capabilities"]
+    check("H2: the denial is enforced, not leaked (network out of effective)",
+          caps_h2["denied"] == ["network"] and caps_h2["effective"] == [])
+    unenforced_h2 = res_h2.get("unenforced") or []
+    check("H2: disclosure-vs-broker consistency — a run the broker approved "
+          "under strict does not come back with `no_net` in `unenforced`",
+          not any(u.startswith("no_net") for u in unenforced_h2),
+          f"-> {unenforced_h2}")
+else:
+    check("H2: strict-approval live positive control ran "
+          "(skipped: no kernel no_net enforcement here)", True,
+          f"-> backend={executor.backend()!r} "
+          f"kernel_enforcement={executor.no_net_kernel_enforcement_available()!r}")
 
 
 # ── F. the BACKGROUND path (run_submit) is brokered identically ────────────

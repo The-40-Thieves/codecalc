@@ -1351,6 +1351,23 @@ fn main() {
         println!("{}", json!(names));
         return;
     }
+    // --capabilities: static host facts the CLI can answer without executing
+    // anything, distinct from --probe's per-language runtime map so a new key
+    // here can never be misread as a language. Today just whether `no_net`
+    // gets an in-kernel guarantee on THIS host — the fact a capability broker
+    // needs to advertise `network_control` truthfully rather than assuming
+    // every rust-backend host enforces it (a Linux kernel without seccomp, or
+    // macOS, only has the bypassable symbol shim; Windows has no `no_net`
+    // mechanism at all).
+    if args.iter().any(|a| a == "--capabilities") {
+        println!(
+            "{}",
+            json!({
+                "no_net_kernel_enforcement": platform::no_net_kernel_enforcement_available(),
+            })
+        );
+        return;
+    }
 
     let mut lang = String::new();
     let mut stdin_data = String::new();
