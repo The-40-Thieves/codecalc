@@ -701,13 +701,23 @@ Trimming a description to cut this cost is exactly the change
 whether a deterministic lexical (BM25) selector still picks the right tool
 for a plain-language ask, scored against the live `tools/list` text.
 Measured v1 baseline (196 hand-labeled prompts, none containing their own
-target tool's name — see the script's own docstring): **60.2%** top-1 / 75.5%
-top-3 accuracy on the `full` surface (62.75% / 63.0% top-1 on `dev` / `core`
-respectively). It is a lexical proxy, not a model — see the script's module
-docstring for exactly what a green run does and does not prove — and
-`tests/test_tool_select_eval.py` wires its ablation self-check (a positive
-control: replacing real descriptions with a generic stub) into CI so the
-gate is proven live on every run, not just at the PR that added it.
+target tool's name — see the script's own docstring): **60.71%** top-1 /
+75.51% top-3 accuracy on the `full` surface (62.75% / 63.0% top-1 on `dev` /
+`core` respectively). It is a lexical proxy, not a model — see the script's
+module docstring for exactly what a green run does and does not prove.
+
+The checked-in baseline PINS the exact labeled corpus by content hash
+(`prompt_set_sha256`); a `--baseline` compare against a corpus that no
+longer hashes to it fails with a distinct "corpus changed" error rather than
+silently scoring a smaller, easier prompt set against the old numbers. And
+because a tool can be top-1-wrong against `full`'s 51 distractors (zero
+headroom to lose) while still having real headroom against `core`'s much
+smaller distractor set, both the regression compare and the ablation
+self-check (replacing real descriptions with a generic stub, one tool at a
+time, across every candidate tool — no sampling) run separately against all
+three of `full`/`dev`/`core`, wired into CI via
+`tests/test_tool_select_eval.py` so the gate is proven live, on every
+surface, on every run — not just at the PR that added it.
 
 ## Reducing the tool surface
 

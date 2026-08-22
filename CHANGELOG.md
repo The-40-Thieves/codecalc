@@ -109,21 +109,35 @@ behind it.
   the CURRENT `tools/list` names and descriptions. It is the gate a future
   tool-description trim (see "Tool-definition token cost" in the README) has
   to clear before it ships: v1 measured baseline is top-1/top-3 accuracy of
-  60.2%/75.5% on `--tools full` (62.75%/76.47% on `dev`, 63.0%/77.0% on
-  `core`), checked in at `scripts/data/tool_select_baseline.json`, and
-  `--baseline` fails a run whose top-1 accuracy drops more than 0.5pp against
-  it. Every labeled prompt is validated to exclude its own target tool's name
-  and underscore-tokens, so the eval cannot be gamed by echoing a tool name
-  back at it — it can only pass by the description carrying real
-  discriminating vocabulary. `--self-check` is the positive control: it
-  ablates >= 10 tools' descriptions to a generic stub and asserts top-1
-  accuracy on their own prompts drops by >= 15 points (measured: 59.45pp),
-  and exits non-zero if it does not — proof the gate can actually detect
-  description damage, not just report a number. `tests/test_tool_select_eval.py`
-  wires the eval, the self-check, and a baseline-regression smoke into CI
-  (`ci-quality.yml`). It is a lexical proxy for model tool-selection, not a
-  model — see the script's own module docstring for what it can and cannot
-  detect.
+  60.71%/75.51% on `--tools full` (62.75%/76.47% on `dev`, 63.0%/77.0% on
+  `core`), checked in at `scripts/data/tool_select_baseline.json` alongside a
+  `prompt_set_sha256` that PINS the exact labeled corpus — a `--baseline`
+  compare against a corpus that no longer hashes to it fails with a distinct
+  "corpus changed" error instead of silently scoring a smaller, easier
+  prompt set against the old numbers (a real gap: deleting every 4th prompt
+  from the 196-prompt v1 set still cleared the old "3 prompts/tool" floor
+  while RAISING measured accuracy). The compare itself is over exact integer
+  top-1 hit counts on that pinned corpus, not a float ratio, so a
+  non-numeric or negative `--epsilon` fails at argument-parsing rather than
+  silently comparing open. Every labeled prompt is validated to exclude its
+  own target tool's name and underscore-tokens (singular/plural matched both
+  directions), so the eval cannot be gamed by echoing a tool name back at
+  it — it can only pass by the description carrying real discriminating
+  vocabulary. `--self-check` is the positive control: a full one-at-a-time
+  ablation SWEEP over every candidate tool (no sampling — a fixed random
+  sample is exactly what let three real ablations pass CI unnoticed in an
+  earlier cut), run separately against each of `full`/`dev`/`core` since a
+  tool can be top-1-wrong against `full`'s 51 distractors (zero headroom to
+  lose) while still showing real, ablation-detectable headroom against
+  `core`'s much smaller distractor set. Measured pooled hit loss: 111/119
+  (`full`), 87/95 (`dev`), 51/63 (`core`) baseline hits lost across their
+  respective sweeps; exits non-zero if either pooled-loss or breadth floor
+  is not cleared — proof the gate can actually detect description damage,
+  not just report a number. `tests/test_tool_select_eval.py` wires the eval,
+  the self-check, and the baseline-regression compare into CI
+  (`ci-quality.yml`) for all three tool surfaces. It is a lexical proxy for
+  model tool-selection, not a model — see the script's own module docstring
+  for what it can and cannot detect.
 - **ClusterFuzzLite coverage-guided fuzzing** (`.clusterfuzzlite/`, `fuzz/`,
   `.github/workflows/cflite_pr.yml`/`cflite_batch.yml`): the same OSS-Fuzz
   engine (libFuzzer + atheris + sanitizers) run in this repo's own CI, the

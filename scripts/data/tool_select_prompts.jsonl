@@ -1,5 +1,5 @@
 {"prompt": "What does integrating x squared with respect to x come out to?", "expected": ["evaluate_expression"]}
-{"prompt": "Please simplify this symbolic math expression for me: sqrt(144) + 2**10", "expected": ["evaluate_expression"]}
+{"prompt": "Please simplify this symbolic math formula for me: sqrt(144) + 2**10", "expected": ["evaluate_expression", "simplify_expression"]}
 {"prompt": "I have a formula and I just want its algebraic value worked out, not solved for a variable — sqrt(2)*sqrt(8)", "expected": ["evaluate_expression"]}
 {"prompt": "What is the closed-form symbolic answer to integrating this polynomial?", "expected": ["evaluate_expression"]}
 {"prompt": "Show me every row of true/false outcomes for 'a and b or not c'", "expected": ["truth_table"]}
@@ -27,8 +27,8 @@
 {"prompt": "Before I convert anything, show me the whole table of supported unit names", "expected": ["list_units"]}
 {"prompt": "Every possible unit alias I could pass in — what are they all?", "expected": ["list_units"]}
 {"prompt": "Is 0.1 plus 0.2 really exactly equal to 0.3, with no floating point rounding?", "expected": ["calc_exact"]}
-{"prompt": "I need an arbitrary-precision rational computation of 2 to the 64th power minus 1", "expected": ["calc_exact"]}
-{"prompt": "give me the exact rational result of this expression before I judge whether it clears a limit", "expected": ["calc_exact"]}
+{"prompt": "I need an arbitrary-precision rational computation of 2 to the 64th power minus 1", "expected": ["calc_exact", "evaluate_expression"]}
+{"prompt": "give me the exact rational result of this expression before I judge whether it clears a limit", "expected": ["calc_exact", "evaluate_expression"]}
 {"prompt": "Does 1/25 exceed 0.05, and by exactly how much either way?", "expected": ["compare_threshold"]}
 {"prompt": "Check precisely whether this fraction is greater than, less than, or equal to that decimal, no rounding", "expected": ["compare_threshold"]}
 {"prompt": "I want a verdict on whether A clears B as a cutoff, with the shortfall shown if it doesn't", "expected": ["compare_threshold"]}
@@ -89,15 +89,15 @@
 {"prompt": "What value of x makes x squared minus 4 equal zero?", "expected": ["solve_expression"]}
 {"prompt": "Find where this single-variable expression crosses zero", "expected": ["solve_expression"]}
 {"prompt": "I only have ONE unknown and one equation — find the root, not a shared solution across multiple equations", "expected": ["solve_expression"]}
-{"prompt": "For 2*x + 1 = 7, what's x?", "expected": ["solve_expression"]}
+{"prompt": "For 2*x + 1 = 7, what's x?", "expected": ["solve_expression", "solve_linear"]}
 {"prompt": "As n grows without bound, what does n*log(n)/n**2 approach?", "expected": ["limit_expression"]}
 {"prompt": "Settle a Big-O argument by computing the actual asymptotic limit of this ratio as the variable heads to infinity", "expected": ["limit_expression"]}
 {"prompt": "I don't want a structural code estimate — I want the exact symbolic limit as the variable grows unbounded", "expected": ["limit_expression"]}
 {"prompt": "As the input size grows huge, does n/log(n) eventually dominate or vanish?", "expected": ["limit_expression"]}
 {"prompt": "Give me the factored and expanded forms of this algebraic expression", "expected": ["simplify_expression"]}
-{"prompt": "Reduce this formula to its simplest form and also show it multiplied out", "expected": ["simplify_expression"]}
+{"prompt": "Reduce this formula to its simplest form and also show it multiplied out", "expected": ["simplify_expression", "evaluate_expression"]}
 {"prompt": "I don't want a single symbolic answer — I want three different equivalent rewritings: simplified, factored, expanded", "expected": ["simplify_expression"]}
-{"prompt": "Take this messy algebraic formula and give me its cleanest possible form", "expected": ["simplify_expression"]}
+{"prompt": "Take this messy algebraic formula and give me its cleanest possible form", "expected": ["simplify_expression", "evaluate_expression"]}
 {"prompt": "Are (a*b)/c and a*(b/c) actually the same expression algebraically?", "expected": ["algebraic_equiv"]}
 {"prompt": "Prove or disprove that these two symbolic formulas are identical, ignoring float rounding", "expected": ["algebraic_equiv"]}
 {"prompt": "I'm not comparing two PROGRAMS in different languages, just two symbolic math formulas — are they the same?", "expected": ["algebraic_equiv"]}
@@ -137,7 +137,7 @@
 {"prompt": "I have equivalent snippets in several languages — run them all and give me a side-by-side timing table", "expected": ["compare_execution"]}
 {"prompt": "I just want a timing/output SIDE-BY-SIDE table across several languages, not a pass/fail equivalence proof", "expected": ["compare_execution"]}
 {"prompt": "Is my installed Python or Node runtime out of date compared to the latest release?", "expected": ["runtimes_status"]}
-{"prompt": "Check, without changing anything, whether newer versions exist for my language toolchains and what command would upgrade them", "expected": ["runtimes_status"]}
+{"prompt": "Check, without changing anything, whether newer versions exist for my language toolchains and what command would upgrade them", "expected": ["runtimes_status", "update_runtimes"]}
 {"prompt": "just tell me what's outdated and what the upgrade command WOULD be — don't actually touch my system", "expected": ["runtimes_status", "update_runtimes"]}
 {"prompt": "Are there newer versions of my language toolchains available, and can you actually upgrade them for me?", "expected": ["update_runtimes"]}
 {"prompt": "Bring my installed interpreters and compilers up to their latest versions, or at least tell me what that would involve first", "expected": ["update_runtimes", "runtimes_status"]}

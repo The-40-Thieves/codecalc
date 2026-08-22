@@ -47,16 +47,23 @@ top-1 against ANY description, including a one-word stub, because the name
 token alone would dominate — that would make this eval blind to exactly the
 description damage it exists to catch. `validate_prompts()` below rejects
 any labeled prompt containing its own expected tool's exact name, or every
-one of that name's underscore-split tokens as whole words. See "checked-in
+one of that name's underscore-split tokens as whole words (singular/plural
+normalized both directions — "list all unit aliases" is rejected for
+`list_units` exactly as "list all unit alias" would be). See "checked-in
 DATA" for how this is enforced on every run.
 
 CHECKED-IN DATA. `scripts/data/tool_select_prompts.jsonl` — one JSON object
 per line: `{"prompt": str, "expected": [tool_name, ...]}`, `expected[0]` is
 the primary answer, any later entries are additional acceptable tools for a
-genuinely ambiguous ask. `scripts/data/tool_select_baseline.json` is the
-v1 baseline this file's own `--baseline` mode compares against — regenerate
-it with `--tools <group> --json > ...` after an intentional description
-change, never to paper over a regression.
+genuinely ambiguous ask. `scripts/data/tool_select_baseline.json` is the v1
+baseline this file's own `--baseline` mode compares against, keyed by
+`--tools` group (`full`/`dev`/`core`) plus a top-level `prompt_set_sha256`
+PINNING the exact labeled corpus (see `prompts_content_hash`) — regenerate
+the whole file with `--tools <group> --json` after an intentional
+description OR corpus change, never to paper over a regression. A baseline
+compare against a corpus that no longer hashes to `prompt_set_sha256` fails
+loudly with a distinct "corpus changed" error rather than silently scoring
+a different, possibly easier, prompt set against the old numbers.
 
 USAGE
     python scripts/tool_select_eval.py                        # --tools full, human report
@@ -66,23 +73,39 @@ USAGE
                                                                  # regression-gate: exit 1 on a drop > epsilon
     python scripts/tool_select_eval.py --self-check             # positive control (ablation) — see below
 
+Every one of `full`/`dev`/`core` needs its OWN `--self-check` run and its
+OWN `--baseline` compare — a tool can already be top-1-WRONG against the
+`full` surface's 51 other distractors (zero headroom to lose) while still
+having real, ablation-detectable headroom against `core`'s much smaller
+distractor set. `tests/test_tool_select_eval.py` runs both for all three.
+
 SELF-CHECK (the positive control this gate needs to be trusted at all, per
 CONTRIBUTING.md's "a gate is not trusted until it has been watched
-failing"). `--self-check` samples >= 10 tools, replaces THEIR descriptions
-in-memory with a generic stub ("Runs a computation."), reruns the eval on
-just their prompts, and asserts top-1 accuracy drops by at least
-`SELF_CHECK_MIN_DELTA`. If it does not, the eval cannot be detecting
-description damage at all, and this exits non-zero rather than reporting a
-green, inert gate.
+failing"). `--self-check` runs a FULL one-at-a-time ablation SWEEP: every
+candidate tool, in turn, has ONLY its own description replaced with a
+generic stub ("Runs a computation.") — every sibling keeps its real
+description as a live confusor — and the eval reruns on just that tool's
+own prompts. No sampling: a fixed-size random sample is exactly what let
+three real ablations (`limit_expression`, `analyze_complexity`,
+`extract_function`) go completely unexercised by this gate in v1 — a fixed
+seed=0 draw of 10 tools out of 52 never once selected any of the three.
+Reported as POOLED INTEGER hit counts, not a float percentage: a per-tool
+percentage threshold is meaningless for a tool with only 3 prompts, and a
+tool BM25 already gets wrong with its REAL description has zero headroom to
+show a drop no matter how sensitive the eval is — pooling across the whole
+sweep is what stays a meaningful signal despite both effects. If the pooled
+loss (or the count of tools showing any loss at all) does not clear its
+documented floor, this exits non-zero rather than reporting a green, inert
+gate.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
-import random
 import re
 import subprocess
 import sys
@@ -108,19 +131,25 @@ TOOL_GROUPS = ("full", "dev", "core")
 #: description leaking through.
 ABLATION_STUB = "Runs a computation."
 
-#: `--self-check` must show at least this much of a top-1 accuracy drop on
-#: the ablated tools' own prompts, or the gate is reported inert. 0.15 (15
-#: points) is well below what ablating ~half the corpus's tools actually
-#: measures (see the module test for the real number) and well above noise
-#: from the handful of prompts a 10-15 tool sample carries.
-SELF_CHECK_MIN_DELTA = 0.15
-SELF_CHECK_MIN_SAMPLE = 10
+#: `--self-check` floors, set well below the TIGHTEST of the three measured
+#: v1 sweeps (`--tools core`: pooled_lost=51/63 baseline hits,
+#: tools_showing_loss=23/24 with headroom; `dev` and `full` both measure
+#: comfortably higher — see tests/test_tool_select_eval.py for the exact
+#: numbers on every preset). Both must clear, not either: a high pooled-loss
+#: count from just one or two very-confusable tools would still read as
+#: "inert" for everything else if `tools_showing_loss` were not checked too.
+SELF_CHECK_MIN_POOLED_LOST = 30
+SELF_CHECK_MIN_TOOLS_SHOWING_LOSS = 15
 
-#: `--baseline` regression gate: fail if top-1 accuracy drops by more than
-#: this many points relative to the checked-in baseline. 0.5pp — tight
-#: enough to catch a real regression, loose enough that BM25's own tie-
-#: breaking (alphabetical on an exact score tie) cannot flip it by chance.
-DEFAULT_EPSILON = 0.005
+#: `--baseline` regression gate: fail if top-1 HIT COUNT (an exact integer
+#: over the pinned corpus, never a float ratio — see `prompts_content_hash`
+#: and the module docstring) drops by more than this many prompts relative
+#: to the checked-in baseline. 1 prompt (~0.5pp on the 196-prompt `full`
+#: corpus) — tight enough to catch a real regression, loose enough that
+#: BM25's own alphabetical tie-break cannot flip it by chance. An integer,
+#: not a float: `--epsilon nan` is a `ValueError` at argument-parsing time
+#: (argparse's own `int("nan")`), not a comparison that fails open.
+DEFAULT_EPSILON_HITS = 1
 
 
 # ── tokenizer ─────────────────────────────────────────────────────────────
@@ -141,9 +170,12 @@ _STOPWORDS = frozenset({
 def tokenize(text: str) -> list[str]:
     """Lowercase word tokens, stopwords and single characters dropped.
 
-    Whole-word only — `"int"` never matches inside `"integer"` — which is
-    what makes `validate_prompts`' token-subset check meaningful rather than
-    a substring trap.
+    Whole-word only — `"int"` never matches inside `"integer"`. Used for
+    BOTH BM25 scoring and (via `_name_tokens`/`_normalize_plural` below)
+    the name-leak validator; the validator additionally normalizes plurals
+    on top of this, but never the other way around — BM25 itself stays
+    un-stemmed, since stemming the SCORER would change accuracy, not just
+    the leak check.
     """
     return [t for t in _TOKEN_RE.findall(text.lower())
             if t not in _STOPWORDS and len(t) > 1]
@@ -264,14 +296,82 @@ def load_prompts(path: Path = DEFAULT_PROMPTS) -> list[dict]:
     return prompts
 
 
-def _name_tokens(tool_name: str) -> set[str]:
-    return set(tool_name.split("_"))
+def prompts_content_hash(prompts: list[dict]) -> str:
+    """SHA-256 over the exact ORDERED `(prompt, expected)` sequence.
+
+    Pins the labeled corpus so `--baseline` compare cannot be satisfied by a
+    smaller or reordered file that still clears the ">= 3 prompts per tool"
+    floor: deleting every 4th prompt from the v1 196-prompt set leaves 156
+    (still >= 3/tool) and RAISES measured top-1 accuracy 0.602 -> 0.6346 —
+    i.e. the easiest way to make a shrunken, description-blind corpus look
+    like an improvement. A per-tool count floor alone cannot catch that;
+    this hash can, because it changes on ANY edit — an add, a delete, a
+    reorder, or a single character.
+
+    `json.dumps(..., sort_keys=True)` per line (not `sort_keys` across the
+    whole list — the list's OWN order is part of what is pinned, since a
+    reorder is exactly the kind of "same set, different corpus" edit this
+    exists to catch) gives a canonical per-entry serialization independent
+    of how the dict happened to be constructed in memory.
+    """
+    canon = "\n".join(
+        json.dumps({"prompt": e["prompt"], "expected": e["expected"]}, sort_keys=True)
+        for e in prompts
+    )
+    return hashlib.sha256(canon.encode("utf-8")).hexdigest()
+
+
+def _plural_variants(tok: str) -> frozenset[str]:
+    """Every plausible singular/plural spelling of `tok`, ADDITIVE rather
+    than a single lossy stem — used ONLY by the name-leak validator below,
+    never by `tokenize()`/BM25 scoring (which stays un-stemmed on purpose:
+    stemming the SCORER would change measured accuracy, not just what
+    counts as a leaked name).
+
+    A blind "strip a trailing s" stemmer was tried first and is WRONG: it
+    turns "status" (already singular) into a mangled 4-letter fragment, and separately turns
+    "runtimes" into "runtim" via an over-eager "-es" rule meant for
+    "statuses" -> "status" — two different bugs that between them made
+    `runtimes_status`'s own two name tokens fail to match EITHER form of
+    themselves. Generating variants ADDITIVELY (never stripping the
+    original token itself) avoids that class of bug entirely: "status"
+    always stays a valid member of its own variant set, so a comparison
+    against it can only ever gain matches, never lose the exact form.
+
+    Two tokens are considered the same word if `_plural_variants(a) &
+    _plural_variants(b)` is non-empty — see `_token_matches`.
+    """
+    v = {tok}
+    v.add(tok + "s")                                    # unit -> units
+    if tok.endswith(("s", "x", "z", "ch", "sh")):
+        v.add(tok + "es")                                # status -> statuses
+    # Strip a REGULAR trailing -s (units -> unit, runtimes -> runtime).
+    # Guarded so a word that merely ENDS in -s in its base form (status,
+    # class, bus) is never stripped to a shorter, wrong form — it keeps
+    # matching only via the ADDITIVE rules above instead.
+    if (len(tok) > 3 and tok.endswith("s")
+            and not tok.endswith(("ss", "us", "xs", "zs"))):
+        v.add(tok[:-1])                                  # units -> unit
+    # Strip a sibilant -es (statuses -> status, aliases -> alias).
+    if len(tok) > 5 and tok.endswith(("ses", "xes", "zes", "ches", "shes")):
+        v.add(tok[:-2])                                  # statuses -> status
+    return frozenset(v)
+
+
+def _token_matches(name_tok: str, prompt_tok: str) -> bool:
+    return bool(_plural_variants(name_tok) & _plural_variants(prompt_tok))
+
+
+def _name_tokens(tool_name: str) -> list[str]:
+    """Underscore-split tokens of a tool name, in order."""
+    return tool_name.split("_")
 
 
 def validate_prompts(prompts: list[dict]) -> list[str]:
     """Every violation of the "not gameable by tool names" rule (see module
     docstring): a prompt containing its own expected tool's exact name, or
-    every one of that name's underscore-split tokens as whole words.
+    every one of that name's underscore-split tokens as whole words
+    (singular/plural matched both directions via `_token_matches`).
 
     Checked against EVERY name in `expected`, not just the primary — an
     acceptable-alternate tool being named in the prompt text is exactly as
@@ -280,7 +380,7 @@ def validate_prompts(prompts: list[dict]) -> list[str]:
     violations = []
     for i, entry in enumerate(prompts):
         prompt_lower = entry["prompt"].lower()
-        prompt_tokens = set(tokenize(entry["prompt"]))
+        prompt_tokens = tokenize(entry["prompt"])
         for tool_name in entry["expected"]:
             if tool_name.lower() in prompt_lower:
                 violations.append(
@@ -288,10 +388,11 @@ def validate_prompts(prompts: list[dict]) -> list[str]:
                     f"{entry['prompt']!r}"
                 )
                 continue
-            if _name_tokens(tool_name) <= prompt_tokens:
+            name_toks = _name_tokens(tool_name)
+            if all(any(_token_matches(nt, pt) for pt in prompt_tokens) for nt in name_toks):
                 violations.append(
                     f"prompt #{i} contains every underscore-token of "
-                    f"{tool_name!r} ({sorted(_name_tokens(tool_name))}): "
+                    f"{tool_name!r} ({name_toks}, singular/plural matched): "
                     f"{entry['prompt']!r}"
                 )
     return violations
@@ -307,6 +408,11 @@ def evaluate(schemas: dict[str, dict], prompts: list[dict]) -> dict:
     entirely against `--tools core`, where no session tool is even a
     candidate. Skipped prompts are counted, never silently dropped from the
     report.
+
+    Returns both the float `top1`/`top3` ratios (for human/JSON reporting)
+    and the exact integer `top1_hits`/`top3_hits` counts — `--baseline`
+    compares the integers (see `DEFAULT_EPSILON_HITS`'s docstring for why a
+    float ratio comparison is the wrong tool for a regression gate).
     """
     docs = {name: _doc_text(name, info["description"]) for name, info in schemas.items()}
     bm25 = BM25(docs)
@@ -357,6 +463,8 @@ def evaluate(schemas: dict[str, dict], prompts: list[dict]) -> dict:
     return {
         "n": n,
         "skipped": skipped,
+        "top1_hits": top1_hits,
+        "top3_hits": top3_hits,
         "top1": round(top1_hits / n, 4) if n else None,
         "top3": round(top3_hits / n, 4) if n else None,
         "per_tool": per_tool_report,
@@ -364,44 +472,81 @@ def evaluate(schemas: dict[str, dict], prompts: list[dict]) -> dict:
     }
 
 
-def run_self_check(tools_group: str, prompts: list[dict], schemas: dict[str, dict],
-                    sample_size: int = SELF_CHECK_MIN_SAMPLE, seed: int = 0) -> dict:
-    """The positive control: ablate `sample_size` tools' descriptions to a
-    generic stub, in-memory, and prove top-1 accuracy on THEIR OWN prompts
-    drops by at least `SELF_CHECK_MIN_DELTA`. If it does not, this eval
-    cannot be trusted to detect real description damage — see the module
-    docstring's "SELF-CHECK".
+def run_self_check(tools_group: str, prompts: list[dict], schemas: dict[str, dict]) -> dict:
+    """Positive control: a full one-at-a-time ablation SWEEP over every
+    candidate tool — see the module docstring's "SELF-CHECK" for why this
+    replaced a fixed random sample. Returns pooled integer hit-loss counts
+    plus a per-tool breakdown; `inert` is True (and the CLI exits non-zero)
+    if either floor (`SELF_CHECK_MIN_POOLED_LOST`,
+    `SELF_CHECK_MIN_TOOLS_SHOWING_LOSS`) is not cleared.
     """
     candidates = sorted({e["expected"][0] for e in prompts if e["expected"][0] in schemas})
-    if len(candidates) < sample_size:
+    if not candidates:
         raise ValueError(
-            f"only {len(candidates)} candidate tool(s) have a primary-labeled "
-            f"prompt against --tools {tools_group!r}; need >= {sample_size} for "
-            f"a self-check sample"
+            f"no candidate tool has a primary-labeled prompt against "
+            f"--tools {tools_group!r} — nothing to sweep"
         )
-    rng = random.Random(seed)  # noqa: S311 — sample selection, not cryptography
-    sample = sorted(rng.sample(candidates, sample_size))
 
-    subset = [e for e in prompts if e["expected"][0] in sample]
+    docs = {name: _doc_text(name, info["description"]) for name, info in schemas.items()}
+    bm25_real = BM25(docs)
 
-    baseline = evaluate(schemas, subset)
+    per_tool: dict[str, dict] = {}
+    pooled_baseline_hits = 0
+    pooled_ablated_hits = 0
+    pooled_lost = 0
+    tools_with_headroom = 0
+    tools_showing_loss = 0
 
-    ablated_schemas = {
-        name: ({"description": ABLATION_STUB, "group": info["group"]} if name in sample else info)
-        for name, info in schemas.items()
-    }
-    ablated = evaluate(ablated_schemas, subset)
+    for name in candidates:
+        subset = [e for e in prompts
+                  if e["expected"][0] == name and any(t in schemas for t in e["expected"])]
+        if not subset:
+            continue
 
-    delta = (baseline["top1"] or 0.0) - (ablated["top1"] or 0.0)
-    inert = delta < SELF_CHECK_MIN_DELTA
+        base_hits = sum(
+            1 for e in subset
+            if bm25_real.rank(e["prompt"])[0][0] in (set(e["expected"]) & set(schemas))
+        )
+
+        ablated_docs = dict(docs)
+        ablated_docs[name] = _doc_text(name, ABLATION_STUB)
+        bm25_ablated = BM25(ablated_docs)
+        ablated_hits = sum(
+            1 for e in subset
+            if bm25_ablated.rank(e["prompt"])[0][0] in (set(e["expected"]) & set(schemas))
+        )
+
+        lost = base_hits - ablated_hits
+        per_tool[name] = {
+            "n": len(subset), "baseline_hits": base_hits,
+            "ablated_hits": ablated_hits, "lost": lost,
+        }
+        pooled_baseline_hits += base_hits
+        pooled_ablated_hits += ablated_hits
+        # A rare INCREASE (ablation accidentally helps a tool win a tie it
+        # was previously losing) never offsets a real loss found elsewhere
+        # in the sweep — clamped so one lucky tool cannot mask ten damaged
+        # ones in the pooled total.
+        pooled_lost += max(lost, 0)
+        if base_hits > 0:
+            tools_with_headroom += 1
+            if lost > 0:
+                tools_showing_loss += 1
+
+    inert = (pooled_lost < SELF_CHECK_MIN_POOLED_LOST
+             or tools_showing_loss < SELF_CHECK_MIN_TOOLS_SHOWING_LOSS)
 
     return {
-        "sample": sample,
-        "n_prompts": len(subset),
-        "baseline_top1": baseline["top1"],
-        "ablated_top1": ablated["top1"],
-        "delta": round(delta, 4),
-        "min_required_delta": SELF_CHECK_MIN_DELTA,
+        "tools_group": tools_group,
+        "n_candidates": len(per_tool),
+        "pooled_baseline_hits": pooled_baseline_hits,
+        "pooled_ablated_hits": pooled_ablated_hits,
+        "pooled_lost": pooled_lost,
+        "tools_with_headroom": tools_with_headroom,
+        "tools_showing_loss": tools_showing_loss,
+        "min_pooled_lost": SELF_CHECK_MIN_POOLED_LOST,
+        "min_tools_showing_loss": SELF_CHECK_MIN_TOOLS_SHOWING_LOSS,
+        "per_tool": per_tool,
         "inert": inert,
     }
 
@@ -411,7 +556,8 @@ def run_self_check(tools_group: str, prompts: list[dict], schemas: dict[str, dic
 def _print_report(tools_group: str, result: dict) -> None:
     print(f"tool-select-eval  --tools {tools_group}")
     print(f"  n={result['n']} (skipped={result['skipped']})  "
-          f"top1={result['top1']}  top3={result['top3']}")
+          f"top1={result['top1']} ({result['top1_hits']}/{result['n']})  "
+          f"top3={result['top3']} ({result['top3_hits']}/{result['n']})")
     if result["failures"]:
         print(f"  {len(result['failures'])} top-1 failure(s):")
         for f in result["failures"]:
@@ -437,15 +583,17 @@ def main(argv: list[str] | None = None) -> int:
                          help=f"labeled prompt file (default: {DEFAULT_PROMPTS})")
     parser.add_argument("--json", action="store_true", help="machine-readable report")
     parser.add_argument("--baseline", type=Path,
-                         help="compare top-1 accuracy against this baseline JSON; "
-                              "exit 1 on a drop > --epsilon")
-    parser.add_argument("--epsilon", type=float, default=DEFAULT_EPSILON,
-                         help=f"regression tolerance for --baseline, in accuracy "
-                              f"points (default: {DEFAULT_EPSILON})")
+                         help="compare top-1 hit count against this baseline JSON; "
+                              "exit 1 on a drop > --epsilon prompts, or on a corpus-hash "
+                              "mismatch")
+    parser.add_argument("--epsilon", type=int, default=DEFAULT_EPSILON_HITS,
+                         help="regression tolerance for --baseline, as an integer number "
+                              f"of prompts (default: {DEFAULT_EPSILON_HITS}). Must be >= 0; "
+                              "an int type means a non-numeric or NaN value fails at "
+                              "argument-parsing, never silently at comparison time.")
     parser.add_argument("--self-check", action="store_true",
-                         help="run the ablation positive control instead of a normal eval")
-    parser.add_argument("--self-check-sample", type=int, default=SELF_CHECK_MIN_SAMPLE)
-    parser.add_argument("--seed", type=int, default=0)
+                         help="run the full ablation-sweep positive control instead of a "
+                              "normal eval")
     args = parser.parse_args(argv)
 
     prompts = load_prompts(args.data)
@@ -459,44 +607,76 @@ def main(argv: list[str] | None = None) -> int:
     schemas = load_tool_schemas(args.tools)
 
     if args.self_check:
-        result = run_self_check(args.tools, prompts, schemas,
-                                 sample_size=args.self_check_sample, seed=args.seed)
+        result = run_self_check(args.tools, prompts, schemas)
         if args.json:
             print(json.dumps(result, indent=2))
         else:
-            print(f"self-check  --tools {args.tools}  sample={result['sample']}")
-            print(f"  n_prompts={result['n_prompts']}  "
-                  f"baseline_top1={result['baseline_top1']}  "
-                  f"ablated_top1={result['ablated_top1']}  delta={result['delta']}")
+            print(f"self-check (full sweep)  --tools {args.tools}  "
+                  f"n_candidates={result['n_candidates']}")
+            print(f"  pooled: baseline_hits={result['pooled_baseline_hits']} "
+                  f"ablated_hits={result['pooled_ablated_hits']} "
+                  f"lost={result['pooled_lost']} "
+                  f"(floor: {result['min_pooled_lost']})")
+            print(f"  tools_with_headroom={result['tools_with_headroom']}  "
+                  f"tools_showing_loss={result['tools_showing_loss']} "
+                  f"(floor: {result['min_tools_showing_loss']})")
         if result["inert"]:
-            print(f"::error::self-check FAILED: ablating {len(result['sample'])} tool(s)' "
-                  f"descriptions moved top-1 accuracy by only {result['delta']}, below the "
-                  f"required {result['min_required_delta']}. This eval is INERT — it cannot "
-                  f"be trusted to detect real description damage.")
+            print(f"::error::self-check FAILED for --tools {args.tools}: pooled_lost="
+                  f"{result['pooled_lost']} (need >= {result['min_pooled_lost']}) / "
+                  f"tools_showing_loss={result['tools_showing_loss']} (need >= "
+                  f"{result['min_tools_showing_loss']}). This eval is INERT for this tool "
+                  f"surface — it cannot be trusted to detect real description damage.")
             return 1
-        print(f"ok   self-check: ablation dropped top-1 accuracy by {result['delta']} "
-              f"(>= {result['min_required_delta']} required) — the gate is live")
+        print(f"ok   self-check (--tools {args.tools}): ablation sweep lost "
+              f"{result['pooled_lost']} hit(s) across {result['tools_showing_loss']} tool(s) "
+              f"— the gate is live")
         return 0
 
     result = evaluate(schemas, prompts)
 
     if args.baseline is not None:
-        base = json.loads(args.baseline.read_text(encoding="utf-8"))
-        base_entry = base.get(args.tools)
-        if base_entry is None:
-            print(f"::error::baseline {args.baseline} has no entry for --tools {args.tools!r}")
+        if args.epsilon < 0:
+            print(f"::error::--epsilon must be >= 0 (got {args.epsilon})")
             return 1
-        base_top1 = base_entry["top1"]
-        drop = base_top1 - (result["top1"] or 0.0)
+        base = json.loads(args.baseline.read_text(encoding="utf-8"))
+        current_hash = prompts_content_hash(prompts)
+        base_hash = base.get("prompt_set_sha256")
+        if not base_hash:
+            print(f"::error::baseline {args.baseline} has no 'prompt_set_sha256' — it "
+                  f"predates corpus pinning and cannot be trusted for a compare")
+            return 1
+        if current_hash != base_hash:
+            print(
+                f"::error::CORPUS CHANGED — re-baseline explicitly. {args.data} hashes to "
+                f"{current_hash[:16]}… but {args.baseline} was generated from a corpus "
+                f"hashing to {base_hash[:16]}…. Accuracy is not comparable across two "
+                f"different prompt sets — regenerate the baseline (--tools <group> --json) "
+                f"once the corpus change is reviewed and intentional; a hash mismatch is "
+                f"never something to pass through."
+            )
+            return 1
+        base_entry = base.get(args.tools)
+        if base_entry is None or "top1_hits" not in base_entry or "n" not in base_entry:
+            print(f"::error::baseline {args.baseline} has no usable entry for "
+                  f"--tools {args.tools!r} (need 'n' and 'top1_hits')")
+            return 1
+        if base_entry["n"] != result["n"]:
+            print(f"::error::baseline n={base_entry['n']} but current run n={result['n']} "
+                  f"for --tools {args.tools!r} — the corpus hash matched but the applicable "
+                  f"prompt count for this preset did not; this should be impossible and is a "
+                  f"bug, not a pass")
+            return 1
+        base_hits = base_entry["top1_hits"]
+        drop_hits = base_hits - result["top1_hits"]
         if args.json:
-            print(json.dumps({**result, "baseline_top1": base_top1, "drop": round(drop, 4),
-                               "epsilon": args.epsilon}, indent=2))
+            print(json.dumps({**result, "baseline_top1_hits": base_hits,
+                               "drop_hits": drop_hits, "epsilon": args.epsilon}, indent=2))
         else:
             _print_report(args.tools, result)
-            print(f"  baseline top1={base_top1}  drop={round(drop, 4)}  "
-                  f"epsilon={args.epsilon}")
-        if drop > args.epsilon:
-            print(f"::error::top-1 accuracy dropped by {round(drop, 4)}, more than "
+            print(f"  baseline top1_hits={base_hits}/{base_entry['n']}  "
+                  f"drop_hits={drop_hits}  epsilon={args.epsilon}")
+        if drop_hits > args.epsilon:
+            print(f"::error::top-1 hit count dropped by {drop_hits} prompt(s), more than "
                   f"epsilon={args.epsilon}, against baseline {args.baseline}")
             return 1
         print("ok   no regression against baseline")
