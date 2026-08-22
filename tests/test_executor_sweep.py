@@ -285,9 +285,10 @@ if blocknet.exists():
           "RTLD_NEXT" in b, "-> otherwise an allowed socket() still fails")
 
 if EXE.exists() and sys.platform.startswith("linux") and blocknet.exists():
-    # The AF_INET half is wrapped whole: the shim refuses at socket(), not at
-    # connect(), so a test that only guarded connect() dies on line 1 of its own
-    # try block and reports nothing either way.
+    # The AF_INET half is wrapped whole: no_net enforcement (seccomp on this
+    # host if the kernel supports it, the shim otherwise) refuses at
+    # socket(), not at connect(), so a test that only guarded connect() dies
+    # on line 1 of its own try block and reports nothing either way.
     r = run_exec("import socket\n"
                  "s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)\n"
                  "print('AF_UNIX ok'); s.close()\n"
@@ -301,12 +302,16 @@ if EXE.exists() and sys.platform.startswith("linux") and blocknet.exists():
     out = r.get("stdout", "")
     check("--no-net allows AF_UNIX (local IPC)", "AF_UNIX ok" in out, f"-> {out[:80]!r}")
     check("--no-net still blocks network egress", "EGRESS blocked" in out, f"-> {out[:80]!r}")
-    check("--no-net reports nothing unenforced when the shim is present",
+    check("--no-net reports nothing unenforced when it was genuinely "
+          "applied (seccomp on this host if the kernel supports it, the "
+          "shim otherwise)",
           r.get("unenforced") == [], f"-> {r.get('unenforced')}")
 
 # ═══ 8. a STALE shim enforces the old policy and nothing notices ═══════════
-# A MISSING shim is already honest — the executor emits
-# `no_net_requested_but_no_shim_available` in `unenforced`, verified. A stale
+# A MISSING shim is already honest on macOS, or a Linux kernel without
+# seccomp support — the executor emits `no_net_requested_but_no_shim_
+# available` in `unenforced` there, verified (a Linux kernel with seccomp
+# support enforces `--no-net` in-kernel regardless of the shim). A stale
 # one cannot be caught that way: the file exists, so every "is the shim there?"
 # check says yes while the policy actually running is the previous build.
 #

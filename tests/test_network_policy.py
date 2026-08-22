@@ -194,7 +194,10 @@ check("allow-network parses to an explicit grant",
 
 # ── G. the LOCAL rust provider CAN enforce: deny-network BLOCKS egress ──────
 # The counterpart to sections B/B2: where the provider genuinely controls the
-# network (the native Linux shim, backend == "rust"), deny-network is ENFORCED,
+# network (the native executor — seccomp on this host if the kernel supports
+# it, the LD_PRELOAD/dyld symbol shim otherwise; gated here on backend ==
+# "rust", which is what the capability broker itself currently keys on),
+# deny-network is ENFORCED,
 # not merely disclosed. This drives the REAL LocalExecutionProvider end to end so
 # the "disclose where you can't" change did not weaken the "block where you
 # can" path. Skipped off the rust backend (the python fallback cannot enforce, so

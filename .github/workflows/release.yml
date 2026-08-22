@@ -285,9 +285,11 @@ jobs:
           fi
           echo "ok: $so is glibc-linked and loads on this runner"
 
-      # The binary and its shim must travel together — a binary installed
-      # without its version-matched shim silently reports --no-net as
-      # unenforced instead of failing loudly. hatch_build.py force_includes
+      # The binary and its shim must travel together — on macOS, or a Linux
+      # kernel without seccomp support, a binary installed without its
+      # version-matched shim silently reports --no-net as unenforced instead
+      # of failing loudly (a Linux kernel with seccomp support enforces
+      # --no-net in-kernel regardless). hatch_build.py force_includes
       # whatever it finds in bin/, so both land here before the wheel builds.
       - name: assemble bin/
         shell: bash

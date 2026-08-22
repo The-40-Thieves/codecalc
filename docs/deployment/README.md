@@ -116,7 +116,8 @@ deviate from a default.
 
 The strict boundary launches a purpose-built image
 (`docker/executor.Dockerfile`: multi-stage, minimal, non-root, `tini` as
-init) carrying `codecalc-exec`, its `--no-net` shim, and a python3 runtime.
+init) carrying `codecalc-exec`, its `--no-net` seccomp filter (symbol-shim
+fallback), and a python3 runtime.
 Two different references matter, and codecalc keeps them deliberately
 separate:
 
