@@ -69,8 +69,10 @@ same for the *compile* path, which the parity gate cannot reach (it probes
 workdir, no fresh platform to report and no compile step, so those fields are
 absent rather than filled with plausible nulls. `unenforced` is required here
 and is the field that matters most: a worker cannot apply several ceilings a
-fresh sandbox can — the network shim is applied at exec and the worker is
-long-lived — and it says so, per call.
+fresh sandbox can — `no_net` enforcement (seccomp where the Linux kernel
+supports it, a symbol shim otherwise) is applied at exec and the worker is
+long-lived — and it says so,
+per call.
 
 **The compact shape** drops diagnostics to save tokens. It never drops
 `unenforced` or `output_error`, which is the difference between the current

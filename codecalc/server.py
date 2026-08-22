@@ -566,7 +566,10 @@ def execute_code(
       stateful session (python3/node) interpreter state persists across calls.
     - `max_memory_mb` / `max_cpu`: per-call resource ceilings.
     - `max_output_kb`: raise/lower the stdout cap (default 64 KiB).
-    - `no_net`: block network egress (LD_PRELOAD shim; dynamic binaries only).
+    - `no_net`: block network egress. Linux: enforced in-kernel via a
+      seccomp-bpf filter. macOS / no-seccomp kernel: best-effort symbol
+      shim, disclosed in `unenforced` when that's the only guarantee that
+      held. See SECURITY.md.
     - `compact`: drop the diagnostic fields (timings, workdir, platform). Never
       drops `unenforced` or `output_error` — if a guarantee you asked for was
       not applied, a compact result still says so.

@@ -119,12 +119,14 @@ class ExecutorBuildHook(BuildHookInterface):
             else:
                 self.app.display_warning(
                     f"{shim} not found — packaging codecalc-exec WITHOUT its "
-                    "--no-net shim. Every install from this wheel will report "
-                    "no_net=True as unenforced (no_net_requested_but_no_shim_"
-                    "available) regardless of platform support. Build both "
-                    "together: `cd executor && cargo build --release` builds "
-                    "the shim via build.rs, then copy both into bin/ (see "
-                    "README.md 'Build the Rust core')."
+                    "--no-net shim. On macOS, or a Linux kernel without "
+                    "seccomp support, every install from this wheel will "
+                    "report no_net=True as unenforced (no_net_requested_but_"
+                    "no_shim_available); a Linux kernel with seccomp support "
+                    "still enforces it in-kernel with no shim needed. Build "
+                    "both together anyway: `cd executor && cargo build "
+                    "--release` builds the shim via build.rs, then copy both "
+                    "into bin/ (see README.md 'Build the Rust core')."
                 )
 
         # A real platform tag instead of py3-none-any: this wheel carries a

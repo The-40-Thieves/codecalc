@@ -1182,8 +1182,11 @@ def list_sessions() -> dict:
 #: Per-call ceilings a STATEFUL worker cannot honour, and why.
 #:
 #: The worker is one long-lived process shared by every call in the session, so
-#: a per-call rlimit cannot be applied to it after the fact, and `--no-net` is
-#: an LD_PRELOAD decision taken at exec time. These used to be accepted and
+#: a per-call rlimit cannot be applied to it after the fact, and `--no-net`
+#: (a seccomp-bpf filter where the Linux kernel supports it, an
+#: LD_PRELOAD/dyld symbol shim otherwise — NOT "seccomp on Linux"
+#: unconditionally; a Linux kernel that refuses the filter also falls back to
+#: the shim) is a decision taken at exec time. These used to be accepted and
 #: silently dropped: `no_net=True` with a session_id reached the network, and
 #: `max_memory_mb=32` allocated 300 MB. Reported through `unenforced` — the same
 #: field the Rust executor already uses to say "asked for, not applied" —
@@ -1191,7 +1194,7 @@ def list_sessions() -> dict:
 _WORKER_CANNOT_ENFORCE = {
     "max_memory_mb": "fixed at worker start; use a workspace session or omit session_id",
     "max_cpu": "cumulative across a long-lived worker; the per-call wall clock applies instead",
-    "no_net": "LD_PRELOAD is applied at exec; start the session without a worker to use it",
+    "no_net": "enforcement (seccomp where the Linux kernel supports it, a symbol shim otherwise) is applied at exec; start the session without a worker to use it",
     "max_output_kb": "the worker caps at 64 KiB; a custom cap needs a fresh process",
 }
 
@@ -1223,8 +1226,9 @@ _SESSION_STRUCTURAL_GAPS = {
         "executor's ceilings, argv/env handling and its own unenforced "
         "reporting do not apply to this call"),
     "no_net": (
-        "the LD_PRELOAD network shim is applied at exec and a worker is "
-        "long-lived, so this session reaches the network"),
+        "enforcement (seccomp where the Linux kernel supports it, a symbol "
+        "shim otherwise) is applied at exec and a worker is long-lived, so "
+        "this session reaches the network"),
     "process_group_kill": (
         "applied per call on the one-shot path; here the worker's group is "
         "reaped at timeout or session_stop, so a background child outlives "

@@ -210,7 +210,7 @@ KNOWN_UNENFORCED = {
 #: and forcing one spelling on both would be a cosmetic parity that hides the
 #: real question, which is whether each backend discloses what IT cannot do.
 KNOWN_FALLBACK_UNENFORCED = {
-    "no_net: needs the native executor's LD_PRELOAD shim",
+    "no_net: needs the native executor (seccomp where the Linux kernel supports it, a symbol shim otherwise)",
     "peak_memory_kb: ru_maxrss is a high-water mark and cannot be attributed to one run",
     "max_processes: RLIMIT_NPROC does not bind a process running as uid 0",
     # Windows: no setrlimit and no fork, so there is no hook to apply anything

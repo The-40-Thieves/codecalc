@@ -45,8 +45,10 @@ architectures).
 
 Unrelated to the MCP server packaging above. This is the trusted artifact
 `DockerGVisorRuntime` launches under `--runtime=runsc` on a host that
-already has Docker + gVisor: `codecalc-exec` plus its `blocknet.so` shim,
-built from this repo's Rust source, published to
+already has Docker + gVisor: `codecalc-exec` (its `no_net` enforced in-kernel
+via a seccomp-bpf filter where the Linux kernel supports it; `blocknet.so`
+ships alongside as the fallback for a kernel that does not), built from this
+repo's Rust source, published to
 `ghcr.io/the-40-thieves/codecalc-exec` and pinned by digest in
 `executor-image.lock`. See that Dockerfile's own header for the full
 rationale. Building `mcp-server.Dockerfile` neither uses nor requires this

@@ -51,7 +51,7 @@ difference is worth stating rather than leaving a reader to discover:
 | configured Piston provider | **Yes, explicitly.** Calls only the operator-supplied `CODECALC_PISTON_URL`; credentials stay in its authorization header and are redacted from results |
 | `install_package` | **Yes, by design.** It runs uv / npm / gem / cargo, which fetch from their registries. Installer hooks also run *outside* the sandbox — see [SECURITY.md](SECURITY.md) |
 | `runtimes_status`, `update_runtimes` | **Yes.** They shell out to mise / rustup / swiftly / npm, which check remote versions |
-| code you execute | **Yes, unless `no_net=True`** — and that shim needs the native executor, so the pure-Python fallback reports it in `unenforced` instead of applying it. Set `CODECALC_REQUIRE_NATIVE=1` to turn "fallback in use" into a startup failure instead of a result you have to notice by reading `unenforced` |
+| code you execute | **Yes, unless `no_net=True`** — and that guarantee needs the native executor (seccomp-bpf where the Linux kernel supports it, a symbol shim otherwise; see the guarantee table below), so the pure-Python fallback reports it in `unenforced` instead of applying it. Set `CODECALC_REQUIRE_NATIVE=1` to turn "fallback in use" into a startup failure instead of a result you have to notice by reading `unenforced` |
 
 The earlier wording here was an unqualified "it makes no network calls", which
 the structural test cannot support and three of the tools above contradict. A
@@ -390,8 +390,10 @@ cp target/release/codecalc-exec target/release/blocknet.so ../bin/
 ```
 
 Requires: Rust 1.97+, a C compiler for the `--no-net` shim (the build warns and
-carries on without one; `--no-net` then reports itself in `unenforced` rather
-than pretending), and [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild)
+carries on without one; on macOS, or a Linux kernel without seccomp support,
+`--no-net` then reports itself in `unenforced` rather than pretending — a
+Linux kernel with seccomp support enforces it in-kernel either way), and
+[cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild)
 for the static cross-builds (zig is used as the linker; no x86_64 GCC needed).
 
 ## MCP tools (52) + MCP resources
