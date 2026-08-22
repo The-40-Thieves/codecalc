@@ -274,6 +274,29 @@ behind it.
     `classify_unsafe` directly. Added to `scripts/fuzz.py`'s
     `SEED_CORPUS_EXPR`.
 
+### Changed
+
+- **Trimmed dev-history/rationale prose out of 3 heavy tool docstrings**
+  (`execute_code_stream`, `install_package`, `runtimes_status`), gated by
+  `scripts/tool_select_eval.py --baseline` so the trim could not quietly cut
+  the vocabulary a model leans on to pick the right tool. Narrative moved to
+  `#` comments right at the call site rather than deleted. `runtimes_status`'s
+  `tier` paragraph, previously duplicated in full from `list_languages`, is
+  now a one-line pointer to it (`list_languages` keeps the full explanation —
+  it is the tool a model reaches for first to learn what `tier` means).
+  Measured on the 52 live tool descriptions with `o200k_base` (matching the
+  README's own "Tool-definition token cost" methodology): 4877 -> 4763
+  tokens (-114, -2.3%; 19674 -> 19139 chars). Two further candidates in
+  the same audit (`verify_translation`, `verify_optimization`) were trimmed
+  and reverted:
+  the removed prose scored as load-bearing for `tool_select_eval.py`'s
+  baseline once BM25's corpus-wide length normalization was accounted for
+  (`verify_translation` uniquely held the word "porting" in the entire
+  52-tool corpus; removing it flipped an unrelated `solve_linear` prompt),
+  so both stay unchanged. Full/dev/core eval: 118/96/63 top-1 hits
+  (baseline 119/96/63, epsilon 1) and 149/118/77 top-3 (baseline
+  148/117/77) — no regression under the gate's tolerance.
+
 ## [0.4.0] — 2026-08-21
 
 ### Added
