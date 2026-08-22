@@ -696,6 +696,19 @@ If you are paying too much for codecalc's definitions:
 A server-side facade remains under consideration for clients with no such
 mechanism (`docs/design/2026-08-10-tool-facade.md`), and is not implemented.
 
+Trimming a description to cut this cost is exactly the change
+`scripts/tool_select_eval.py` exists to gate: an offline, labeled eval of
+whether a deterministic lexical (BM25) selector still picks the right tool
+for a plain-language ask, scored against the live `tools/list` text.
+Measured v1 baseline (196 hand-labeled prompts, none containing their own
+target tool's name — see the script's own docstring): **60.2%** top-1 / 75.5%
+top-3 accuracy on the `full` surface (62.75% / 63.0% top-1 on `dev` / `core`
+respectively). It is a lexical proxy, not a model — see the script's module
+docstring for exactly what a green run does and does not prove — and
+`tests/test_tool_select_eval.py` wires its ablation self-check (a positive
+control: replacing real descriptions with a generic stub) into CI so the
+gate is proven live on every run, not just at the PR that added it.
+
 ## Reducing the tool surface
 
 For an operator who would rather not configure every client, codecalc also has
@@ -774,7 +787,7 @@ PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py         # every tool over MC
 PYTHONPATH=. .venv/bin/python tests/test_executor_sweep.py  # sandbox regressions
 ```
 
-54 test files and 14 CI-invoked scripts, **2184 assertions**. "CI-invoked"
+55 test files and 15 CI-invoked scripts, **2184 assertions**. "CI-invoked"
 means referenced by path (`scripts/<name>.py`) from a job in
 `.github/workflows/*.yml` — `scripts/check_claims.py` derives the count that
 way and gates it, so a script wired into a workflow without this sentence

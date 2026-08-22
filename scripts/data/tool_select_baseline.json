@@ -1,0 +1,23 @@
+{
+  "codecalc_version": "0.4.0",
+  "core": {
+    "n": 100,
+    "skipped": 96,
+    "top1": 0.63,
+    "top3": 0.77
+  },
+  "dev": {
+    "n": 153,
+    "skipped": 43,
+    "top1": 0.6275,
+    "top3": 0.7647
+  },
+  "full": {
+    "n": 196,
+    "skipped": 0,
+    "top1": 0.602,
+    "top3": 0.7551
+  },
+  "generated_at": "2026-08-22T09:31:35Z",
+  "prompt_count": 196
+}

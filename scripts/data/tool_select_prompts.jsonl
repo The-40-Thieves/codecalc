@@ -1,0 +1,196 @@
+{"prompt": "What does integrating x squared with respect to x come out to?", "expected": ["evaluate_expression"]}
+{"prompt": "Please simplify this symbolic math expression for me: sqrt(144) + 2**10", "expected": ["evaluate_expression"]}
+{"prompt": "I have a formula and I just want its algebraic value worked out, not solved for a variable — sqrt(2)*sqrt(8)", "expected": ["evaluate_expression"]}
+{"prompt": "What is the closed-form symbolic answer to integrating this polynomial?", "expected": ["evaluate_expression"]}
+{"prompt": "Show me every row of true/false outcomes for 'a and b or not c'", "expected": ["truth_table"]}
+{"prompt": "I need the full combinatorial truth breakdown of the boolean statement 'p xor q'", "expected": ["truth_table"]}
+{"prompt": "list out every combination of inputs and whether 'a implies b' holds for each", "expected": ["truth_table"]}
+{"prompt": "Enumerate every input combination for 'p implies q' and whether it holds", "expected": ["truth_table"]}
+{"prompt": "Solve this system: x + y = 10 and x - y = 2, for x and y", "expected": ["solve_linear"]}
+{"prompt": "I've got two simultaneous equations sharing variables x and y — find the values that satisfy both", "expected": ["solve_linear"]}
+{"prompt": "find x and y at the same time from a pair of coupled equations", "expected": ["solve_linear"]}
+{"prompt": "I need both unknowns pinned down from two equations that share them", "expected": ["solve_linear"]}
+{"prompt": "Given the 2x2 grid [[1,2],[3,4]], what's its determinant?", "expected": ["matrix"]}
+{"prompt": "Compute the eigenvalues of this square array of numbers", "expected": ["matrix"]}
+{"prompt": "I tried writing that grid of numbers directly into a symbolic algebra expression using bracket notation and it got refused for security reasons — how do I invert a square array of numbers structurally instead?", "expected": ["matrix"]}
+{"prompt": "What are the eigen-decomposition values and the rank of this square grid of numbers?", "expected": ["matrix"]}
+{"prompt": "How many kilometers per hour is 60 miles per hour?", "expected": ["convert_units"]}
+{"prompt": "Translate 100 degrees Celsius into Fahrenheit", "expected": ["convert_units"]}
+{"prompt": "turn 1 gigabyte into mebibytes", "expected": ["convert_units"]}
+{"prompt": "What's 500 grams in ounces?", "expected": ["convert_units"]}
+{"prompt": "What's the value of the speed of light?", "expected": ["physical_constants"]}
+{"prompt": "Give me Avogadro's number with its precise figure", "expected": ["physical_constants"]}
+{"prompt": "I want the exact numeric value codecalc has stored for gravitational acceleration, not a conversion", "expected": ["physical_constants"]}
+{"prompt": "List every fundamental constant this thing knows, with values", "expected": ["physical_constants"]}
+{"prompt": "What are all the unit spellings and aliases this thing understands for conversions?", "expected": ["list_units"]}
+{"prompt": "Enumerate every alias I can pass as a unit name", "expected": ["list_units"]}
+{"prompt": "Before I convert anything, show me the whole table of supported unit names", "expected": ["list_units"]}
+{"prompt": "Every possible unit alias I could pass in — what are they all?", "expected": ["list_units"]}
+{"prompt": "Is 0.1 plus 0.2 really exactly equal to 0.3, with no floating point rounding?", "expected": ["calc_exact"]}
+{"prompt": "I need an arbitrary-precision rational computation of 2 to the 64th power minus 1", "expected": ["calc_exact"]}
+{"prompt": "give me the exact rational result of this expression before I judge whether it clears a limit", "expected": ["calc_exact"]}
+{"prompt": "Does 1/25 exceed 0.05, and by exactly how much either way?", "expected": ["compare_threshold"]}
+{"prompt": "Check precisely whether this fraction is greater than, less than, or equal to that decimal, no rounding", "expected": ["compare_threshold"]}
+{"prompt": "I want a verdict on whether A clears B as a cutoff, with the shortfall shown if it doesn't", "expected": ["compare_threshold"]}
+{"prompt": "Is 3/7 strictly greater than 0.4, exactly, no float error?", "expected": ["compare_threshold"]}
+{"prompt": "What percent of 40 is 8?", "expected": ["percentage"]}
+{"prompt": "Work out the exact share PART represents of TOTAL as a fraction and a percent", "expected": ["percentage"]}
+{"prompt": "give me the ratio of these two rational numbers as a share, not a pass/fail check", "expected": ["percentage"]}
+{"prompt": "Out of a total of 250, what share does 37 represent?", "expected": ["percentage"]}
+{"prompt": "Give me the mean, median and standard deviation of these benchmark timings", "expected": ["calc_stats"]}
+{"prompt": "I have a list of numbers from repeated runs — summarize their central tendency and spread, and tell me if the noise is too high to trust them", "expected": ["calc_stats"]}
+{"prompt": "summarize the whole distribution's average and variability, not its ranked cutoffs", "expected": ["calc_stats"]}
+{"prompt": "These five benchmark runs are noisy — is the spread too large to trust a single number, and what's the average anyway?", "expected": ["calc_stats"]}
+{"prompt": "What's the p95 and p99 latency across these numbers?", "expected": ["percentiles"]}
+{"prompt": "Rank this list of measurements and tell me the value at the 90th and 99th cutoff", "expected": ["percentiles"]}
+{"prompt": "I don't want the average — I want to know what number 99 percent of these samples fall under", "expected": ["percentiles"]}
+{"prompt": "Out of these hundred response times, what's the tail latency most requests stay under — say the top 5%?", "expected": ["percentiles"]}
+{"prompt": "Summarize this batch of latency numbers for me", "expected": ["calc_stats", "percentiles"]}
+{"prompt": "If I hash 1 million items into a 64-bit space, what's the chance two collide?", "expected": ["collision_probability"]}
+{"prompt": "Estimate the odds of an accidental hash clash given this many items and this many bits of output", "expected": ["collision_probability"]}
+{"prompt": "before I decide whether 8 hex characters is safe as an ID, tell me the birthday-bound odds of a clash at that many bits", "expected": ["collision_probability"]}
+{"prompt": "With a 5-hex-char short ID space, how likely is an accidental clash across 100000 generated ids?", "expected": ["collision_probability"]}
+{"prompt": "How many MiB and MB is 3000000000 bytes, both ways?", "expected": ["data_sizes"]}
+{"prompt": "Show me this byte count expressed in both binary and decimal units side by side", "expected": ["data_sizes"]}
+{"prompt": "I specifically want the KiB/MiB/GiB AND KB/MB/GB breakdown for one integer count of bytes, not a general unit conversion", "expected": ["data_sizes"]}
+{"prompt": "For the number 5000000, show me every byte-unit reading, binary and decimal both", "expected": ["data_sizes"]}
+{"prompt": "Turn 93000 seconds into something readable, like days and hours", "expected": ["human_duration"]}
+{"prompt": "Give me a friendly readout of this many seconds, plus how that scales per day and per month", "expected": ["human_duration"]}
+{"prompt": "I have a raw seconds COUNT (a span, not a timestamp) — make it human-legible", "expected": ["human_duration"]}
+{"prompt": "What's a friendlier way to say 'seven million two hundred thousand seconds'?", "expected": ["human_duration"]}
+{"prompt": "What date does the Unix stamp 1732000000 correspond to in UTC?", "expected": ["epoch_time"]}
+{"prompt": "Convert this Unix timestamp, in whatever unit it's in, to an ISO 8601 UTC date", "expected": ["epoch_time"]}
+{"prompt": "This is a POINT in time, a raw numeric stamp — tell me the calendar date it refers to, not a length of time", "expected": ["epoch_time"]}
+{"prompt": "This raw numeric stamp — is it seconds, millis, or nanos, and what calendar date does it map to?", "expected": ["epoch_time"]}
+{"prompt": "Show me 3000000000 in hex, octal and binary, and whether it fits in a signed 32-bit int", "expected": ["base_repr"]}
+{"prompt": "I need the two's-complement view of this integer at a specific bit width, plus overflow detection", "expected": ["base_repr"]}
+{"prompt": "does this number fit as a signed 32-bit value, and what does it look like in hex either way", "expected": ["base_repr"]}
+{"prompt": "Show me every base representation of this integer at once — hex, octal and binary — plus whether it's a valid signed value at a given width", "expected": ["base_repr"]}
+{"prompt": "Convert 'zz' from base 36 into base 7", "expected": ["radix_convert"]}
+{"prompt": "I have a fractional value written in one arbitrary numeral base and need it re-expressed in a different arbitrary base", "expected": ["radix_convert"]}
+{"prompt": "this isn't hex/oct/bin specifically — I need an arbitrary base-to-base translation, any base from 2 to 36", "expected": ["radix_convert"]}
+{"prompt": "Translate the fractional value 0.1 from base 10 into base 2 and tell me if it terminates", "expected": ["radix_convert"]}
+{"prompt": "What does the computer actually store in memory for the number 0.1?", "expected": ["float_repr"]}
+{"prompt": "Show me the raw bits, exact stored value, and neighboring representable values for this floating point literal", "expected": ["float_repr"]}
+{"prompt": "I want to know if this decimal literal is EXACTLY representable in double precision, not which integer width holds it", "expected": ["float_repr"]}
+{"prompt": "Is 0.25 stored exactly in double precision, or does it lose precision like 0.1 does?", "expected": ["float_repr"]}
+{"prompt": "Which integer types — i8 through i64 — can actually hold the number 300?", "expected": ["int_widths"]}
+{"prompt": "Tell me every fixed-width signed and unsigned type that this value fits into, and how it wraps in the ones it doesn't", "expected": ["int_widths"]}
+{"prompt": "I don't need hex or binary output — just tell me every bit-width container this number fits or overflows", "expected": ["int_widths"]}
+{"prompt": "If I try to cram 3000000000 into a signed 32-bit slot, what value do I actually get after it overflows?", "expected": ["int_widths", "base_repr"]}
+{"prompt": "How many bits are set to 1 in the number 202, and what's its bit length?", "expected": ["bit_analysis"]}
+{"prompt": "Tell me the population count, trailing zero count, and whether this integer is a power of two", "expected": ["bit_analysis"]}
+{"prompt": "I want facts ABOUT one number's bit pattern, not an operation combining it with another number", "expected": ["bit_analysis"]}
+{"prompt": "Is 256 a power of two, and how many trailing zero bits does it have?", "expected": ["bit_analysis"]}
+{"prompt": "What's 12 XOR 10 at 8-bit width, shown in every base?", "expected": ["bitop"]}
+{"prompt": "Apply a logical shift right by 1 to 0x80 and also show me the arithmetic (sign-propagating) version", "expected": ["bitop"]}
+{"prompt": "I need the RESULT of combining two integers with a boolean operator, not properties of a single one", "expected": ["bitop"]}
+{"prompt": "Rotate this 32-bit value left by 4 positions and show me the hex result", "expected": ["bitop"]}
+{"prompt": "What value of x makes x squared minus 4 equal zero?", "expected": ["solve_expression"]}
+{"prompt": "Find where this single-variable expression crosses zero", "expected": ["solve_expression"]}
+{"prompt": "I only have ONE unknown and one equation — find the root, not a shared solution across multiple equations", "expected": ["solve_expression"]}
+{"prompt": "For 2*x + 1 = 7, what's x?", "expected": ["solve_expression"]}
+{"prompt": "As n grows without bound, what does n*log(n)/n**2 approach?", "expected": ["limit_expression"]}
+{"prompt": "Settle a Big-O argument by computing the actual asymptotic limit of this ratio as the variable heads to infinity", "expected": ["limit_expression"]}
+{"prompt": "I don't want a structural code estimate — I want the exact symbolic limit as the variable grows unbounded", "expected": ["limit_expression"]}
+{"prompt": "As the input size grows huge, does n/log(n) eventually dominate or vanish?", "expected": ["limit_expression"]}
+{"prompt": "Give me the factored and expanded forms of this algebraic expression", "expected": ["simplify_expression"]}
+{"prompt": "Reduce this formula to its simplest form and also show it multiplied out", "expected": ["simplify_expression"]}
+{"prompt": "I don't want a single symbolic answer — I want three different equivalent rewritings: simplified, factored, expanded", "expected": ["simplify_expression"]}
+{"prompt": "Take this messy algebraic formula and give me its cleanest possible form", "expected": ["simplify_expression"]}
+{"prompt": "Are (a*b)/c and a*(b/c) actually the same expression algebraically?", "expected": ["algebraic_equiv"]}
+{"prompt": "Prove or disprove that these two symbolic formulas are identical, ignoring float rounding", "expected": ["algebraic_equiv"]}
+{"prompt": "I'm not comparing two PROGRAMS in different languages, just two symbolic math formulas — are they the same?", "expected": ["algebraic_equiv"]}
+{"prompt": "Do these two rearranged fractions actually reduce to the same thing symbolically?", "expected": ["algebraic_equiv"]}
+{"prompt": "Is this SMT-LIB2 formula satisfiable: (declare-const x Int)(assert (> x 5))(check-sat)?", "expected": ["z3_check"]}
+{"prompt": "Run an SMT solver over this constraint and tell me sat, unsat, or unknown, with a model if satisfiable", "expected": ["z3_check"]}
+{"prompt": "I need a real constraint solver's verdict on Int/Real constraints, not an enumerated boolean truth table", "expected": ["z3_check"]}
+{"prompt": "Feed this SMT2 constraint set to a real solver and tell me if a satisfying assignment exists", "expected": ["z3_check"]}
+{"prompt": "I rewrote this Python function in Go — run both and confirm they actually agree on the same inputs", "expected": ["verify_translation"]}
+{"prompt": "Prove my port from node to rust behaves identically by executing both and diffing their output", "expected": ["verify_translation"]}
+{"prompt": "I have ONE original and ONE new rewrite — did the rewrite actually preserve behavior, run and checked, not just eyeballed?", "expected": ["verify_translation"]}
+{"prompt": "I converted this one script from ruby to python — actually run both and check they match, don't just eyeball the diff", "expected": ["verify_translation"]}
+{"prompt": "Run my three language implementations of the same function against tricky edge inputs like empty, zero, and negative, and tell me where they disagree", "expected": ["compare_edge_cases"]}
+{"prompt": "Feed boundary-case inputs into several language snippets of the same logic and flag any divergence between them", "expected": ["compare_edge_cases"]}
+{"prompt": "I want a full GRID across many snippets and many tricky inputs, not a single before/after equivalence check", "expected": ["compare_edge_cases"]}
+{"prompt": "Across all four of my language ports of this same routine, which one disagrees on a negative or empty input?", "expected": ["compare_edge_cases"]}
+{"prompt": "I sped up this function — prove the optimized version still produces the same output AND is measurably quicker", "expected": ["verify_optimization"]}
+{"prompt": "Confirm my rewritten candidate agrees with the original on every test input and beats it by a real, timed margin", "expected": ["verify_optimization"]}
+{"prompt": "I'm not asking for a growth curve — I need a pass/fail verdict that a candidate rewrite is both correct and actually faster than the original", "expected": ["verify_optimization"]}
+{"prompt": "My candidate is clearly correct — now prove it's ACTUALLY meaningfully quicker than the baseline, timed, not just by feel", "expected": ["verify_optimization"]}
+{"prompt": "Which programming languages can this thing actually run on this machine right now?", "expected": ["list_languages"]}
+{"prompt": "Enumerate every runtime you support, along with file extension and whether it's installed here", "expected": ["list_languages"]}
+{"prompt": "I want the roster of programming LANGUAGES available, not the sandbox backends that run them", "expected": ["list_languages"]}
+{"prompt": "Give me the full roster of every runtime you can execute code in, extension and all", "expected": ["list_languages"]}
+{"prompt": "What sandbox backends are available for running code — local, gVisor, or something remote?", "expected": ["list_execution_providers"]}
+{"prompt": "Tell me which execution BACKENDS exist and whether each is ready and strictly isolated", "expected": ["list_execution_providers"]}
+{"prompt": "I'm asking about the underlying execution engines themselves, not which programming languages they can run", "expected": ["list_execution_providers"]}
+{"prompt": "Run this Python snippet and give me its stdout", "expected": ["execute_code"]}
+{"prompt": "Execute the following program in a sandbox and return what it printed, its exit status, and how long it took", "expected": ["execute_code"]}
+{"prompt": "I want to wait right here for this program to finish and get the result back in this same call", "expected": ["execute_code"]}
+{"prompt": "Just run this one-liner right now and tell me what it printed and how long it took", "expected": ["execute_code"]}
+{"prompt": "Run this long-running script but show me its output as it goes, not just at the very end", "expected": ["execute_code_stream"]}
+{"prompt": "I want partial output and progress notifications while a program is still running, not just a final result", "expected": ["execute_code_stream"]}
+{"prompt": "I don't want to poll for this later — I want to stay connected and watch it progress live", "expected": ["execute_code_stream"]}
+{"prompt": "I need to see this program's output line by line as it happens, live, not all dumped at the end", "expected": ["execute_code_stream"]}
+{"prompt": "Run this same little program written in python and node side by side and tell me which finished faster", "expected": ["compare_execution"]}
+{"prompt": "I have equivalent snippets in several languages — run them all and give me a side-by-side timing table", "expected": ["compare_execution"]}
+{"prompt": "I just want a timing/output SIDE-BY-SIDE table across several languages, not a pass/fail equivalence proof", "expected": ["compare_execution"]}
+{"prompt": "Is my installed Python or Node runtime out of date compared to the latest release?", "expected": ["runtimes_status"]}
+{"prompt": "Check, without changing anything, whether newer versions exist for my language toolchains and what command would upgrade them", "expected": ["runtimes_status"]}
+{"prompt": "just tell me what's outdated and what the upgrade command WOULD be — don't actually touch my system", "expected": ["runtimes_status", "update_runtimes"]}
+{"prompt": "Are there newer versions of my language toolchains available, and can you actually upgrade them for me?", "expected": ["update_runtimes"]}
+{"prompt": "Bring my installed interpreters and compilers up to their latest versions, or at least tell me what that would involve first", "expected": ["update_runtimes", "runtimes_status"]}
+{"prompt": "I don't just want to know what's outdated — actually perform the upgrade this time", "expected": ["update_runtimes"]}
+{"prompt": "Start a persistent python workspace where variables stick around between calls", "expected": ["session_start"]}
+{"prompt": "I need a stateful REPL-like workspace I can keep reusing across several requests — set one up", "expected": ["session_start"]}
+{"prompt": "I don't want a one-shot run — open a long-lived workspace I can come back to", "expected": ["session_start"]}
+{"prompt": "Tear down that persistent workspace I opened earlier and free its resources", "expected": ["session_stop"]}
+{"prompt": "Kill the REPL worker behind that workspace id and wipe its files", "expected": ["session_stop"]}
+{"prompt": "I want to permanently shut down and delete an entire persistent workspace, not just interrupt one background job inside it", "expected": ["session_stop"]}
+{"prompt": "What persistent workspaces do I currently have open, and in which languages?", "expected": ["session_list"]}
+{"prompt": "Show me every live stateful workspace right now and its status", "expected": ["session_list"]}
+{"prompt": "I want an inventory of the WORKSPACES themselves, not the files inside any one of them", "expected": ["session_list"]}
+{"prompt": "What files exist inside my saved workspace right now?", "expected": ["session_files"]}
+{"prompt": "Browse the directory listing for everything currently sitting in that persistent workspace, page by page if needed", "expected": ["session_files"]}
+{"prompt": "I want EVERYTHING in there, including files I planted myself, not just what my program generated", "expected": ["session_files"]}
+{"prompt": "Show me a directory listing of my saved workspace, page by page", "expected": ["session_files"]}
+{"prompt": "Save this CSV data into my workspace so a later script can read it as input", "expected": ["session_write_file"]}
+{"prompt": "Drop a new file with this exact content into the persistent workspace, at a given relative path", "expected": ["session_write_file"]}
+{"prompt": "I need to PUT data into the workspace, not pull an existing file back out", "expected": ["session_write_file"]}
+{"prompt": "What output files did my program generate in that workspace, ignoring the runner's own internal files?", "expected": ["session_artifacts"]}
+{"prompt": "Show me only what the code I RAN produced, not the input files I planted myself", "expected": ["session_artifacts"]}
+{"prompt": "filter out the runner internals and any input data I seeded — I only want what my execution actually PRODUCED", "expected": ["session_artifacts"]}
+{"prompt": "Of everything sitting in my workspace, which parts did my LAST run actually produce, versus what I put there myself?", "expected": ["session_artifacts"]}
+{"prompt": "Pull the contents of that output file back out of my workspace so I can look at it", "expected": ["session_read_file"]}
+{"prompt": "Fetch a file from the persistent workspace, and if it's a picture, hand it back as something I can actually view", "expected": ["session_read_file"]}
+{"prompt": "I know exactly which single file I want the CONTENTS of — I don't need a whole listing", "expected": ["session_read_file"]}
+{"prompt": "Grab me the actual bytes of one specific output image so I can see it", "expected": ["session_read_file"]}
+{"prompt": "I have a main script that imports a helper module already sitting in my workspace — run the main one so it can find its import", "expected": ["session_run"]}
+{"prompt": "Execute the entry point of a multi-file program that lives in a persistent workspace, so relative imports resolve correctly", "expected": ["session_run"]}
+{"prompt": "This program is spread across SEVERAL files already saved in a workspace, not one self-contained snippet I'm pasting in", "expected": ["session_run"]}
+{"prompt": "Kick off this long computation in the background and give me an id I can check on later, don't make me wait", "expected": ["run_submit"]}
+{"prompt": "Queue this program for asynchronous execution so my call returns right away instead of blocking on the whole computation", "expected": ["run_submit"]}
+{"prompt": "I don't want to hold this connection open for the entire duration — hand me a ticket right away instead", "expected": ["run_submit"]}
+{"prompt": "Fire off this slow job and let me come back and check on it whenever — don't block my current request on it", "expected": ["run_submit"]}
+{"prompt": "Has that background job I kicked off earlier finished yet, and if so what was the result?", "expected": ["run_inspect"]}
+{"prompt": "Check on the status of a job running asynchronously, and once it's done, hand me the full output", "expected": ["run_inspect"]}
+{"prompt": "I already started that job — I'm asking about its CURRENT STATE now, not launching a new one", "expected": ["run_inspect"]}
+{"prompt": "Stop that background job I kicked off — I don't need its result anymore", "expected": ["run_cancel"]}
+{"prompt": "Try to abort an asynchronous job that's still in progress before it finishes on its own", "expected": ["run_cancel"]}
+{"prompt": "I'm not asking for its status, I want it actively STOPPED", "expected": ["run_cancel"]}
+{"prompt": "Install the requests library into my python session so I can import it", "expected": ["install_package"]}
+{"prompt": "Fetch and add a third-party package for this language, into my workspace's environment", "expected": ["install_package"]}
+{"prompt": "I want to add a brand-new LIBRARY dependency, not upgrade the language runtime itself", "expected": ["install_package"]}
+{"prompt": "Add a fresh dependency for node so my script can `require` it", "expected": ["install_package"]}
+{"prompt": "Just by reading this code, what's its rough time complexity — is it quadratic, linear?", "expected": ["analyze_complexity"]}
+{"prompt": "Estimate the asymptotic growth of this snippet from its structure alone, without actually running it", "expected": ["analyze_complexity"]}
+{"prompt": "I want a quick READ of the source to guess its growth class, not an empirical timing experiment", "expected": ["analyze_complexity"]}
+{"prompt": "Without running anything, can you eyeball this loop nest and guess whether it's quadratic or worse?", "expected": ["analyze_complexity"]}
+{"prompt": "Actually run this program at a bunch of increasing input sizes and tell me its measured growth curve", "expected": ["benchmark"]}
+{"prompt": "Time this code empirically as N scales up and fit the observed timings to a complexity class", "expected": ["benchmark"]}
+{"prompt": "don't just read the source — actually execute it repeatedly at growing sizes and measure the real timing curve", "expected": ["benchmark"]}
+{"prompt": "Feed this program bigger and bigger N and clock how the runtime actually scales", "expected": ["benchmark"]}
+{"prompt": "Pull just this one function, plus whatever it imports, out of my larger file and run it on its own", "expected": ["extract_function"]}
+{"prompt": "Isolate a single named function (with its helpers) from this codebase into a standalone runnable program", "expected": ["extract_function"]}
+{"prompt": "I don't have a clean snippet — I need you to CARVE one named function out of a bigger file first, then run it", "expected": ["extract_function"]}

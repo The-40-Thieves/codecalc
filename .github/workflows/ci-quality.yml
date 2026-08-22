@@ -176,3 +176,30 @@ jobs:
           version: '0.12.1'
       - run: uv sync --extra symbolic
       - run: uv run --no-sync python tests/test_fuzz_smoke.py
+
+  tool-select-eval:
+    # scripts/tool_select_eval.py: a labeled, offline eval of whether a
+    # deterministic lexical (BM25) selector picks the right codecalc tool for
+    # a plain-language ask, scored against the CURRENT tool descriptions —
+    # the gate a future tool-description trim (README: "Tool-definition
+    # token cost") has to clear before it ships, so a trim that deletes the
+    # vocabulary discriminating `calc_stats` from `percentiles` fails here
+    # instead of shipping unnoticed.
+    #
+    # tests/test_tool_select_eval.py earned this job CONTRIBUTING.md's way:
+    # watched failing first (an unreachable self-check threshold correctly
+    # reported the gate inert; a doctored, inflated baseline correctly failed
+    # the regression compare) before either was kept as a permanent lock. It
+    # also asserts the checked-in scripts/data/tool_select_baseline.json does
+    # not regress against the current tool descriptions — the same
+    # regression check `--baseline` performs from the CLI, run here as an
+    # assertion so CI fails even if nobody remembers to invoke the flag.
+    name: tool-select-eval (BM25 lexical selector + self-check ablation)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: '0.12.1'
+      - run: uv sync --extra symbolic
+      - run: uv run --no-sync python tests/test_tool_select_eval.py
