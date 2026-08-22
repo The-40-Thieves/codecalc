@@ -5,6 +5,10 @@ description: Use when about to state a number, claim two programs are equivalent
 
 # codecalc
 
+<!-- Human reader: this file tells the MODEL when to call codecalc and how to
+report results. To install the server and connect it to your AI client, see
+QUICKSTART.md / README.md — not this file. -->
+
 You are a language model. You are good at writing code and bad at arithmetic,
 and the failure is not that you are unsure — it is that you are confident. This
 file exists because "call a tool when you are uncertain" is worthless advice to

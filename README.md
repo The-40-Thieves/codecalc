@@ -295,10 +295,10 @@ difference is worth stating rather than leaving a reader to discover:
 | `runtimes_status`, `update_runtimes` | **Yes.** They shell out to mise / rustup / swiftly / npm, which check remote versions |
 | code you execute | **Yes, unless `no_net=True`** — and that guarantee needs the native executor (seccomp-bpf where the Linux kernel supports it, a symbol shim otherwise; see the guarantee table below), so the pure-Python fallback reports it in `unenforced` instead of applying it. Set `CODECALC_REQUIRE_NATIVE=1` to turn "fallback in use" into a startup failure instead of a result you have to notice by reading `unenforced` |
 
-The earlier wording here was an unqualified "it makes no network calls", which
-the structural test cannot support and three of the tools above contradict. A
-guarantee stated more broadly than it is enforced is the failure this repo keeps
-correcting, so it is corrected here too.
+These distinctions are stated precisely on purpose: a guarantee described more
+broadly than it is enforced is exactly the failure mode this project works to
+avoid, so "offline-core" is scoped to what the structural test can actually
+support rather than claimed as a blanket "no network calls".
 
 **The grammar download, stated plainly, because it is the one that is easy to
 miss.** The other three paths above go through a CHILD PROCESS, which is what
@@ -309,8 +309,10 @@ seconds on a cold cache. So the first `analyze_complexity` call for a given
 language opens a socket from inside the server.
 
 It is verified (the pack checks a signature and raises on a checksum mismatch),
-it is cached, and it never happens again for that language. But "the package
-itself never reaches the network" was not true, and this row used to say it was.
+it is cached, and it never happens again for that language. So the offline-core
+claim is scoped to steady state: this first-use grammar fetch is the one
+in-process exception, which is why it is called out here rather than glossed
+over.
 
 **For an offline or egress-restricted install**, warm the cache first — it is one
 command, and afterwards nothing here reaches the network. If you installed

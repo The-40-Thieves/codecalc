@@ -1,7 +1,12 @@
 # codecalc container images
 
-Two different Dockerfiles live in this directory, for two different jobs.
-Do not conflate them.
+codecalc is an offline MCP server that gives an AI agent a calculator, a code
+runner, and a logic checker — so it returns a correct answer instead of a
+guessed one (see the [README](../README.md) for the full picture). This
+directory holds its Docker images.
+
+Two different Dockerfiles live here, for two different jobs. Do not conflate
+them.
 
 ## `mcp-server.Dockerfile` — the MCP server
 
