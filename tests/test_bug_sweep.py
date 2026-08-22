@@ -1206,6 +1206,110 @@ _hex_bomb_msg = _scr("factorial(0xffffff)") or ""
 check("  ...while an ordinary hex literal's message still names the exact value",
       "16777215" in _hex_bomb_msg, f"-> {_hex_bomb_msg!r}")
 
+# ═══ reject_explosive's ceiling COVERAGE gap — Mul/Rational-shaped ════════
+# ═══ exponents and bases (the fix above's own "TRIAGED, NOT FIXED" item) ═══
+# `parse_expr(..., evaluate=False)` leaves `30000/2` as `Mul(30000,
+# Pow(2, -1))` and `3/2` as `Mul(3, Pow(2, -1))` rather than folding them to
+# a plain Integer/Rational — so the OLD `isinstance(exponent, (Integer,
+# Float))` / `isinstance(base, (Integer, Float))` checks skipped them
+# entirely, and the actual (explosive) power got computed with NO ceiling
+# ever applied: `safe_parse` returned a real 4,516-digit Integer / a
+# Rational with a 47,549-bit numerator, successfully, rather than a refusal.
+# Confirmed live on main before this fix (not assumed): all three of the
+# following returned a computed value with `err is None`. The six symbolic
+# tools survived only via each caller's own `_RESOURCE_ERRORS` catch at
+# stringification — a structured refusal, but at the wrong layer, after the
+# full cost was already paid.
+_FACE1_GAP_INPUTS = [
+    "2**(30000/2)",     # exponent = Mul(30000, Pow(2,-1)) -- a Mul, not Integer
+    "2**(-30000/2)",    # same shape, negative
+    "(3/2)**30000",     # base = Mul(3, Pow(2,-1)) -- a Mul, not Integer
+]
+for _expr in _FACE1_GAP_INPUTS:
+    _value, _err = _boundary_parse(_expr)
+    check(f"safe_parse({_expr!r}) is refused on ceiling grounds, not computed",
+          _value is None and _err is not None and _err[0] == "ceiling",
+          f"-> value={_value!r} err={_err!r}")
+    if _err is not None:
+        check("  ...naming a digit count, not silently waived through",
+              "digits" in _err[1], f"-> {_err[1]!r}")
+
+# ...and the same three are unreachable from evaluate_expression too — the
+# caller-facing surface, and where the previous behaviour's crash-avoidance
+# `_RESOURCE_ERRORS` catch used to be the only thing standing between this
+# gap and a caller. Now refused BEFORE that catch is ever needed.
+for _expr in _FACE1_GAP_INPUTS:
+    _eval_result = _logic.evaluate_expression(_expr)
+    check(f"evaluate_expression({_expr!r}) refuses rather than returning a huge value",
+          _eval_result.get("ok") is False, f"-> {_eval_result}")
+    # The value itself must never appear anywhere in the response — not just
+    # "ok is False": a huge digit string leaking into an error message would
+    # be the same class of problem this whole module exists to avoid.
+    check("  ...and no huge digit string leaked into the response",
+          len(json.dumps(_eval_result)) < 500, f"-> len={len(json.dumps(_eval_result))}")
+
+# ...and the fix does not turn into a blanket refusal of every Mul/Rational-
+# shaped exponent or base — only ones that are actually over the cap.
+_FACE1_UNDER_CAP = [
+    ("2**(19999/2)", "exponent"),   # 2**9999.5 truncates -- 9999 is under-cap, an ordinary compound exponent
+    ("(3/2)**100", "base"),         # a modest compound-Rational base
+    ("2**(3+2)", "Add exponent"),   # 2**5 -- exercises the Add branch, not just Mul
+    ("(1+1)**10", "Add base"),      # 2**10 -- ditto for the base side
+    ("2**(3/2)", "fractional exponent"),  # irrational result (2*sqrt(2)) -- not a huge integer, must not be refused
+]
+for _expr, _label in _FACE1_UNDER_CAP:
+    _value, _err = _boundary_parse(_expr)
+    check(f"safe_parse({_expr!r}) ({_label}, under cap) still evaluates",
+          _value is not None and _err is None, f"-> value={_value!r} err={_err!r}")
+
+# ═══ reject_explosive did not descend into a bare Python `tuple` — the ═════
+# ═══ parse-time memory bomb behind ClusterFuzzLite's OOM (a SEPARATE gap ═══
+# ═══ from the ceiling-coverage one above, found investigating it) ══════════
+# `"2**1000000^6c6/Me,"` looks like it should fail as a syntax error (the
+# trailing comma, `c6`, the unclosed `Me`) — and it DOES, eventually, but
+# only from the SECOND, real (`evaluate=True`) parse in `safe_parse`. Why:
+# a trailing comma is valid PYTHON tuple syntax (`x,` means `(x,)`), so
+# `parse_expr(..., evaluate=False)` succeeds and hands back a bare Python
+# `tuple` — `(Mul(2**(1000000**6), c, 6, 1/M, e),)` — not a SymPy node.
+# `_walk`'s `getattr(current, "args", ())` found no `.args` on a plain
+# tuple, fell through to the `()` default, and stopped there — so
+# `reject_explosive` never saw the `2**(1000000**6)` POWER TOWER buried
+# inside it (an exponent that is itself a `Pow`, the same shape
+# `9**9**9**9` is already refused for) and returned `None` as if the tree
+# held nothing dangerous. `safe_parse` then ran the real, evaluating parse,
+# which computed the actual value before the trailing comma's syntax error
+# ever got a chance to surface — measured live on main before this fix:
+# 2977 MB tracemalloc peak (under a 3 GB `ulimit -v`; ClusterFuzzLite's own
+# 2560 MB libFuzzer rss cap reported 1542 MB and OOM'd on a lighter box).
+# Fixed by making `_walk` descend into a bare tuple directly.
+_MEMORY_BOMB_EXPR = "2**1000000^6c6/Me,"
+import tracemalloc as _tracemalloc
+
+_tracemalloc.start()
+_t0 = time.time()
+try:
+    _bomb_value, _bomb_err = _boundary_parse(_MEMORY_BOMB_EXPR)
+    _bomb_raised = None
+except Exception as _exc:  # never-raise contract -- see the crash-inputs block above
+    _bomb_value, _bomb_err, _bomb_raised = None, None, _exc
+_bomb_elapsed = time.time() - _t0
+_bomb_current, _bomb_peak = _tracemalloc.get_traced_memory()
+_tracemalloc.stop()
+
+check("safe_parse does not raise on the parse-time memory-bomb input",
+      _bomb_raised is None, f"-> raised {_bomb_raised!r}" if _bomb_raised else "")
+if _bomb_raised is None:
+    check("  ...and refuses it rather than computing the value",
+          _bomb_value is None and _bomb_err is not None, f"-> value={_bomb_value!r} err={_bomb_err!r}")
+# A generous bound (measured before the fix: 2977 MB) -- robust against
+# ordinary variance while still catching the CLASS of regression: any future
+# change that reopens a path to the real evaluate=True parse running on this
+# input, unbounded, blows well past 50 MB.
+check(f"  ...within a bounded memory peak ({_bomb_peak / 1e6:.1f} MB, was ~2977 MB before the fix)",
+      _bomb_peak < 50 * 1_000_000, f"-> peak={_bomb_peak / 1e6:.1f} MB")
+check(f"  ...and refuses promptly ({_bomb_elapsed:.3f}s), not after a multi-second/GB burn",
+      _bomb_elapsed < 5.0, f"-> {_bomb_elapsed:.3f}s")
+
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== ALL BUG-SWEEP REGRESSIONS FIXED ===")
 sys.exit(1 if FAILS else 0)

@@ -201,6 +201,112 @@ def _approx_decimal_digits(n: int) -> int:
     return int(_log10_of_int(n)) + 1 if n else 1
 
 
+#: Bit-length ceiling for `_bounded_numeric_value`'s OWN intermediate work —
+#: not `MAX_NUMERIC_DIGITS` itself (~13,288 bits). Generous above it (20,000
+#: bits, ~6,021 decimal digits) so an ordinary over-the-cap result still
+#: resolves to an EXACT value — the refusal message can report a real digit
+#: count instead of just "cannot be bounded" — while staying small enough
+#: that computing it is milliseconds of arbitrary-precision arithmetic,
+#: never the unbounded blow-up this function exists to avoid.
+_SUBTREE_BIT_BUDGET = 20_000
+
+
+def _bounded_numeric_value(node, bit_budget: int = _SUBTREE_BIT_BUDGET):
+    """The exact SymPy `Rational` value of a NUMERIC-ONLY subtree (no
+    `free_symbols`), or `None` if it cannot be resolved within `bit_budget`
+    bits without doing the unbounded work this module exists to avoid.
+
+    `parse_expr(..., evaluate=False)` leaves `30000/2` as `Mul(30000,
+    Pow(2, -1))` and `3/2` as `Mul(3, Pow(2, -1))` rather than folding them
+    to a plain `Integer`/`Rational` — so `reject_explosive`'s own
+    `isinstance(exponent, (Integer, Float))` / `isinstance(base, (Integer,
+    Float))` checks skip them entirely, and the actual power gets computed
+    later with no ceiling ever applied: `safe_parse("2**(30000/2)")`
+    returned a computed 4,516-digit `Integer`, `safe_parse("(3/2)**30000")`
+    a Rational with a 47,549-bit numerator — no refusal at all. This walks
+    that kind of arithmetic-only subtree and resolves it — but ONLY through
+    a small safe grammar of cheap combinators (`Integer`, `Rational`,
+    `Float`, `Add`, `Mul`, `Pow` with an integer exponent), checking each
+    combination's SIZE against `bit_budget` before performing it, never
+    after. Anything outside that grammar — a `Function` call, a
+    `NumberSymbol` like `pi`, or a shape this has no case for — refuses
+    rather than evaluates it: fail-closed, not a guess. `Float` mixed into
+    an `Add`/`Mul` also refuses rather than tracked exactly — a documented,
+    narrow gap (no test in this repo exercises it), not an oversight.
+
+    Why the size check has to come FIRST: `factorial2(100000)/2` (this
+    module's own worked caution elsewhere) is `Mul(factorial2(100000),
+    Rational(1, 2))` structurally — and by the time this runs,
+    `factorial2(100000)` is *already* a concrete, thousands-of-digits
+    `Integer`: a function call on a literal evaluates during parsing (see
+    the `_HEAVY_FUNCTIONS` comment above), before `reject_explosive` ever
+    sees the tree. Multiplying that already-materialized Integer by `1/2`
+    is cheap either way — the actual danger is a `Pow` INSIDE the subtree
+    whose exponent is itself huge: `bit_length(base) * exponent` is checked
+    before `base ** exponent` is ever called, the same guard
+    `reject_explosive`'s own numeric-base branch already applies to the
+    OUTER power, applied here to every power inside this one too.
+    """
+    from sympy import Add, Float, Integer, Mul, Pow, Rational
+
+    if isinstance(node, Integer):
+        return node if int(node).bit_length() <= bit_budget else None
+    if isinstance(node, Rational):  # Integer is also a Rational; caught above
+        return node if max(node.p.bit_length(), node.q.bit_length()) <= bit_budget else None
+    if isinstance(node, Float):
+        return node  # fixed (double) precision -- never a size hazard alone
+
+    if isinstance(node, Mul):
+        acc = Rational(1)
+        for arg in node.args:
+            resolved = _bounded_numeric_value(arg, bit_budget)
+            if resolved is None or isinstance(resolved, Float):
+                return None
+            arg_bits = max(resolved.p.bit_length(), resolved.q.bit_length())
+            acc_bits = max(acc.p.bit_length(), acc.q.bit_length())
+            if acc_bits + arg_bits > bit_budget:
+                return None  # bit_length(a*b) <= bit_length(a)+bit_length(b) -- bound BEFORE multiplying
+            acc *= resolved
+        return acc
+
+    if isinstance(node, Add):
+        acc = Rational(0)
+        for arg in node.args:
+            resolved = _bounded_numeric_value(arg, bit_budget)
+            if resolved is None or isinstance(resolved, Float):
+                return None
+            arg_bits = max(resolved.p.bit_length(), resolved.q.bit_length())
+            if arg_bits > bit_budget:
+                return None
+            acc += resolved
+            if max(acc.p.bit_length(), acc.q.bit_length()) > bit_budget:
+                return None
+        return acc
+
+    if isinstance(node, Pow):
+        exp_resolved = _bounded_numeric_value(node.exp, bit_budget)
+        if (exp_resolved is None or isinstance(exp_resolved, Float)
+                or exp_resolved.q != 1):
+            return None  # a non-integer/unbounded exponent has no bounded closed form here
+        exp_int = int(exp_resolved)
+        if abs(exp_int).bit_length() > 32:  # an exponent this size is already disqualifying
+            return None
+        base_resolved = _bounded_numeric_value(node.base, bit_budget)
+        if base_resolved is None or isinstance(base_resolved, Float):
+            return None
+        if exp_int == 0:
+            return Rational(1)
+        base_bits = max(base_resolved.p.bit_length(), base_resolved.q.bit_length(), 1)
+        if base_bits * abs(exp_int) > bit_budget:
+            return None  # checked BEFORE base_resolved ** exp_int, not after
+        try:
+            return base_resolved ** exp_int
+        except (ZeroDivisionError, ValueError):
+            return None
+
+    return None  # a Function call, pi/E/I, or any other shape -- refuse rather than guess
+
+
 def _heavy_call_violation(tokens: list) -> str | None:
     """A heavy function applied to an oversized integer LITERAL, if any.
 
@@ -565,7 +671,24 @@ def reject_explosive(tree) -> str | None:
                     "evaluated: the result grows faster than any useful bound")
 
         if not isinstance(exponent, (Integer, Float)):
-            continue  # symbolic exponent, e.g. x**n — nothing to expand
+            if exponent.free_symbols:
+                continue  # symbolic exponent, e.g. x**n — nothing to expand
+            # A NUMERIC exponent that is not already a bare Integer/Float —
+            # `evaluate=False` leaves `30000/2` as `Mul(30000, Pow(2, -1))`
+            # rather than folding it to a plain Integer, even though its
+            # VALUE is the ordinary integer 15000. Resolve it through the
+            # same bit-length-bounded arithmetic as an already-huge
+            # exponent (see `_bounded_numeric_value` above) rather than
+            # `int(exponent)` directly, which — unbounded — is the exact
+            # mistake this module exists to avoid if the subtree turns out
+            # to hide something enormous.
+            resolved_exp = _bounded_numeric_value(exponent)
+            if resolved_exp is None:
+                return ("the exponent is a numeric expression that cannot be "
+                        "bounded cheaply enough to evaluate safely")
+            if resolved_exp.q != 1:
+                continue  # a genuinely fractional exponent — no huge-integer result to bound
+            exponent = resolved_exp
         try:
             exp_value = int(exponent)
         except (TypeError, ValueError, OverflowError):
@@ -588,7 +711,7 @@ def reject_explosive(tree) -> str | None:
                         f"{_approx_decimal_digits(exp_value)} digits exceeds "
                         f"the limit of {MAX_SYMBOLIC_EXPONENT}: expanding it "
                         "is superlinear in the exponent")
-        elif isinstance(base, (Integer, Float)):
+        else:
             # Cheap to compute, impossible to print. Estimated by digit count
             # rather than by computing it, which would be the very thing this
             # is here to avoid.
@@ -606,10 +729,31 @@ def reject_explosive(tree) -> str | None:
             try:
                 if isinstance(base, Integer):
                     log10_magnitude = _log10_of_int(int(base))
-                else:
+                elif isinstance(base, Float):
                     magnitude = abs(float(base))
                     log10_magnitude = (math.log10(magnitude) if magnitude
                                         else float("-inf"))
+                else:
+                    # A NUMERIC base that is not already a bare Integer/
+                    # Float — `evaluate=False` leaves `3/2` as `Mul(3,
+                    # Pow(2, -1))`, bypassing the isinstance checks above
+                    # even though its value is the ordinary Rational 3/2.
+                    # Same bounded resolution as the exponent case above;
+                    # `None` means it could not be bounded cheaply, so
+                    # refuse rather than guess at the magnitude.
+                    resolved_base = _bounded_numeric_value(base)
+                    if resolved_base is None:
+                        return ("the base is a numeric expression that cannot "
+                                "be bounded cheaply enough to evaluate safely")
+                    if isinstance(resolved_base, Float):
+                        magnitude = abs(float(resolved_base))
+                        log10_magnitude = (math.log10(magnitude) if magnitude
+                                            else float("-inf"))
+                    elif resolved_base.q == 1:
+                        log10_magnitude = _log10_of_int(int(resolved_base))
+                    else:
+                        log10_magnitude = (_log10_of_int(resolved_base.p)
+                                            - _log10_of_int(resolved_base.q))
             except (TypeError, ValueError, OverflowError):
                 continue
             if log10_magnitude > 0:  # equivalent to magnitude > 1
@@ -667,6 +811,24 @@ def _walk(node):
         if seen > 20_000:
             return
         yield current
+        # `parse_expr(expr, evaluate=False)` hands back a plain Python
+        # `tuple` — not a SymPy node — when `expr` ends in a trailing comma:
+        # `"2**1000000^6c6/Me,"` is valid Python tuple syntax (`x,` means
+        # `(x,)`), so it parses successfully as `(Mul(...),)` instead of
+        # raising the syntax error its later garbage (`c6`, the unclosed
+        # `Me`, ...) suggests it should. A bare `tuple` has no `.args` of
+        # its own, so `getattr` below fell through to the `()` default and
+        # the walk stopped at the tuple's surface without ever looking
+        # inside — silently skipping whatever Pow nodes it wrapped, no
+        # matter how explosive. Measured: this is what let
+        # `"2**1000000^6c6/Me,"` reach the SECOND, real (`evaluate=True`)
+        # parse in `safe_parse` with no ceiling ever applied — a 1.5+ GB
+        # tracemalloc peak computing `2**(1000000**6)` before the trailing
+        # comma's syntax error ever surfaced. Extend directly into a bare
+        # tuple's own elements rather than relying on `.args` to find them.
+        if isinstance(current, tuple):
+            stack.extend(current)
+            continue
         args = getattr(current, "args", ())
         # Found by scripts/fuzz.py: `parse_expr("binomial", ...)`
         # (a heavy-function NAME used bare, with no call parens) resolves to
