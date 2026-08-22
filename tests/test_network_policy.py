@@ -239,7 +239,7 @@ else:
                 f"kernel_enforcement={executor.no_net_kernel_enforcement_available()!r}")
 
 
-# ── H. THE_912 — `strict` must key on what will ACTUALLY be enforced ───────
+# ── H. `strict` must key on what will ACTUALLY be enforced ─────────────────
 # `network_control` used to be `backend() == "rust"` alone: True on ANY
 # rust-backend host, including macOS (no_net there is only the best-effort
 # DYLD symbol shim) and a Linux kernel without seccomp (same shim fallback).
