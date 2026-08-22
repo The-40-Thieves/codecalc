@@ -76,6 +76,15 @@ behind it.
 
 ### Added
 
+- **`codecalc setup` now recommends a leaner `CODECALC_TOOLS` group** when
+  the variable is unset: a line naming the real, live per-preset tool counts
+  (`core` = calculator-only, `dev` = calculator + execution + verification +
+  analysis — read from `server.py`'s own group registry, so the numbers
+  cannot drift from what `CODECALC_TOOLS=core`/`=dev` actually register) for
+  callers that do not need sessions, package installs, or code execution.
+  Purely informational: the default surface (`CODECALC_TOOLS` unset = all 52
+  tools) is unchanged, and the line is suppressed once `CODECALC_TOOLS` is
+  already set. See README's "Reducing the tool surface".
 - **`scripts/fuzz.py`**: a mutation fuzzer over codecalc's two
   highest-risk caller-string surfaces — `safe_expr.classify_unsafe`/
   `safe_parse` (the screen between a caller expression and SymPy's
@@ -127,6 +136,19 @@ behind it.
   `_jail`), all caller-controlled. Found by `scripts/fuzz.py`. A
   legitimate session path is a handful of segments; both caps sit far above
   any real use.
+- **`no_net`-mechanism descriptions that had gone stale after the seccomp-bpf
+  enforcement change above, unqualified "LD_PRELOAD shim" claims that no
+  longer match what Linux actually does.** `execute_code`'s own docstring
+  said `no_net` was "LD_PRELOAD shim; dynamic binaries only" with no mention
+  of seccomp at all — the exact thing a model reads at tool-selection time.
+  Corrected there and in the two session-worker `unenforced` disclosure
+  messages in `codecalc/sessions.py` (a worker can't apply either mechanism
+  post-spawn, not specifically LD_PRELOAD), `docs/contract/README.md`,
+  `docs/contract/provider-v1.md`, `docs/deployment/README.md`,
+  `docker/README.md`, and the platform-guarantee table in
+  `executor/src/platform/mod.rs`'s module doc comment. `SECURITY.md`,
+  `AUDIT.md` and the README's own per-platform guarantee table already
+  described the seccomp/shim split correctly and are unchanged.
 
 ## [0.4.0] — 2026-08-21
 

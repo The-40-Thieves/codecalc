@@ -13,7 +13,7 @@
 //! | Fork bomb            | RLIMIT_NPROC (uid)   | RLIMIT_NPROC (uid)   | Job ActiveProcessLimit (job!) |
 //! | Kill the whole tree  | killpg(SIGKILL)      | killpg(SIGKILL)      | TerminateJobObject            |
 //! | CPU + peak memory    | wait4 rusage         | wait4 rusage         | Job accounting                |
-//! | Block network        | LD_PRELOAD shim      | DYLD_… (SIP-limited) | — not implemented             |
+//! | Block network        | seccomp-bpf (LD_PRELOAD fallback) | DYLD_… (SIP-limited) | — not implemented |
 //!
 //! Two things are worth noticing in that table. Windows' ActiveProcessLimit is
 //! scoped to the JOB, which makes it a strictly better fork-bomb guard than

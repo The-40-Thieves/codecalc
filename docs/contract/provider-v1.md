@@ -104,8 +104,9 @@ runs exactly as before — the block still reports the four sets with
 is rejected. When the variable is set, comma-separated directives configure it:
 
 - `deny-network` — flip the default to network-denied. Where the provider can
-  enforce the denial (e.g. the native Linux shim), the job runs with `no_net`
-  forced on. Where it cannot, a non-strict policy leaves the request as-asked and
+  enforce the denial (e.g. the native executor's Linux seccomp filter, or its
+  symbol-shim fallback), the job runs with `no_net` forced on. Where it
+  cannot, a non-strict policy leaves the request as-asked and
   discloses the leak — `network` stays in `effective` — rather than forcing a
   `no_net` the provider would silently ignore or, like Piston, reject outright.
   Combine with `strict` to reject an unenforceable denial instead of disclosing

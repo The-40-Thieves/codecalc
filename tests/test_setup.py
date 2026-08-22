@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -25,7 +26,7 @@ import tempfile
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from codecalc import executor, setup
+from codecalc import executor, server, setup
 
 FAILS: list[str] = []
 
@@ -276,6 +277,53 @@ try:
               "no_net" in out, "-> no_net not mentioned")
 finally:
     executor._rust = _saved_rust
+
+
+# ── 4b. tool-surface recommendation names the real group counts, and is ────
+# suppressed once CODECALC_TOOLS is already set. Counts are read from
+# server.TOOL_GROUPS/PRESETS rather than hardcoded, so this test (like
+# setup.py's own line) tracks the real registry instead of a second,
+# driftable copy of "25"/"39".
+_saved_tools_env = os.environ.pop("CODECALC_TOOLS", None)
+try:
+    _core_n = sum(1 for g in server.TOOL_GROUPS.values()
+                  if g in server.PRESETS["core"])
+    _dev_n = sum(1 for g in server.TOOL_GROUPS.values()
+                 if g in server.PRESETS["dev"])
+
+    with tempfile.TemporaryDirectory(prefix="codecalc-setup-test-") as d:
+        home = pathlib.Path(d) / "home"
+        cwd = pathlib.Path(d) / "cwd"
+        home.mkdir()
+        cwd.mkdir()
+        buf = io.StringIO()
+        setup.run_setup(client="claude-code", do_write=False, out=buf,
+                        home=home, cwd=cwd, platform="linux")
+        out = buf.getvalue()
+        check("unset CODECALC_TOOLS: setup recommends the core preset with "
+              "the real tool count",
+              f"CODECALC_TOOLS=core ({_core_n} tools" in out, f"-> {out}")
+        check("...and the dev preset with the real tool count",
+              f"CODECALC_TOOLS=dev ({_dev_n} tools" in out, f"-> {out}")
+        check("...and points at the README section",
+              "Reducing the tool surface" in out)
+
+    os.environ["CODECALC_TOOLS"] = "core"
+    with tempfile.TemporaryDirectory(prefix="codecalc-setup-test-") as d:
+        home = pathlib.Path(d) / "home"
+        cwd = pathlib.Path(d) / "cwd"
+        home.mkdir()
+        cwd.mkdir()
+        buf = io.StringIO()
+        setup.run_setup(client="claude-code", do_write=False, out=buf,
+                        home=home, cwd=cwd, platform="linux")
+        check("CODECALC_TOOLS already set: the recommendation is not repeated",
+              "tool surface:" not in buf.getvalue())
+finally:
+    if _saved_tools_env is None:
+        os.environ.pop("CODECALC_TOOLS", None)
+    else:
+        os.environ["CODECALC_TOOLS"] = _saved_tools_env
 
 
 # ── 5. client auto-detect + explicit --client ───────────────────────────────
