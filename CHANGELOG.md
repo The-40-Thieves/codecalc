@@ -127,6 +127,33 @@ behind it.
   `_jail`), all caller-controlled. Found by `scripts/fuzz.py`. A
   legitimate session path is a handful of segments; both caps sit far above
   any real use.
+- **`safe_expr.reject_explosive`** no longer raises on three extreme-
+  magnitude `Pow` shapes, violating this module's own documented contract
+  that `classify_unsafe`/`safe_parse` never raise for hostile input. All
+  three were a huge Python `int` reaching an unbounded int->float conversion
+  or an unbounded int->str interpolation while the refusal itself was being
+  computed or reported — not a gap in the refusal DECISION, which was
+  already correct. Found by the 2026-08-22 ClusterFuzzLite batch:
+  - `2**100000!!...` (`!!` is SymPy's double-factorial transform) made the
+    exponent an exact Integer with thousands of digits; multiplying it by a
+    float digit-count estimate coerced the int to float first, raising
+    `OverflowError`.
+  - `(x+1)**20000!!...` hit the same huge-exponent shape on a SYMBOLIC base,
+    whose refusal MESSAGE interpolated the raw exponent directly — raising
+    `ValueError` past Python's int->str conversion limit (4300 digits)
+    before the message could even be built.
+  - a base of 400 nines (`"9"*400 + "**12"`) exposed that SymPy's
+    `Integer.__float__` returns `inf` for an oversized value instead of
+    raising like Python's own `int.__float__` does, so the digit estimate's
+    `try/except OverflowError` never fired; the resulting `inf` then broke
+    `int(digits)` in the refusal message.
+  All three now compute the digit/exponent magnitude via `bit_length()`-based
+  log10 estimates that never convert the full value to float or interpolate
+  it unbounded into a message, and correctly return a `resource_exhausted`
+  refusal instead of crashing — verified not to waive the shape through
+  (each is still refused, on 'digits'/'exponent' grounds) and not to
+  regress the existing digit estimate's precision (`2**10000`, ~3011 true
+  digits, still evaluates). Added to `scripts/fuzz.py`'s `SEED_CORPUS_EXPR`.
 
 ## [0.4.0] — 2026-08-21
 

@@ -1078,6 +1078,85 @@ check("evaluate_expression refuses the shape rather than hanging",
 check("  ...and guarded_call's wall-clock backstop actually bounds it",
       _elapsed < 20.0, f"-> {_elapsed:.2f}s (guarded.DEFAULT_WALL_SECONDS=15)")
 
+
+# ═══ reject_explosive RAISED instead of refusing on 3 extreme-magnitude ═════
+# ═══ shapes — violating the "classify_unsafe/safe_parse never raise" ═══════
+# ═══ contract fuzz/safe_expr_fuzzer.py's own module docstring states ═══════
+# All three surfaced by the 2026-08-22 ClusterFuzzLite batch. Each is a huge
+# INTEGER value reaching either an int->float conversion or an f-string
+# interpolation that itself has no bound — a crash from *reporting* the
+# refusal, not from the refusal decision itself.
+from codecalc.safe_expr import safe_parse as _sp911
+
+_THE_911_CRASH_INPUTS = [
+    # exponent = factorial2(100000) (the `!!` double-factorial transform),
+    # an exact Integer with thousands of digits: `abs(exp_value) *
+    # math.log10(magnitude)` used to coerce that huge int to float first,
+    # raising OverflowError("int too large to convert to float").
+    "2**100000!!ubrNembeubrNember",
+    # same huge-exponent shape, but the base carries a free symbol (`x`), so
+    # reject_explosive takes the SYMBOLIC branch instead — and that branch's
+    # own refusal MESSAGE used to interpolate the raw exponent with an
+    # f-string, which raised ValueError past Python's int->str conversion
+    # limit (4300 digits) before the message could even be built.
+    "(x+1)**20000!!ubrNembeubrNember",
+    # a >308-digit base: SymPy's Integer.__float__ returns inf here rather
+    # than raising (unlike Python's own int.__float__), so the try/except
+    # around float(base) never fired; digits came out inf, and `int(digits)`
+    # in the refusal message raised OverflowError("cannot convert float
+    # infinity to integer").
+    "9" * 400 + "**12",
+]
+
+for _expr in _THE_911_CRASH_INPUTS:
+    try:
+        _value, _err = _sp911(_expr)
+        _raised = None
+    except Exception as _exc:  # the exact bug: this must never happen
+        _value, _err, _raised = None, None, _exc
+    check(f"safe_parse does not raise on {_expr[:45]!r}...",
+          _raised is None, f"-> raised {_raised!r}" if _raised else "")
+    if _raised is None:
+        check("  ...and refuses it rather than evaluating an explosive shape",
+              _value is None and _err is not None, f"-> value={_value!r} err={_err!r}")
+
+# ...and the same three inputs are unreachable from evaluate_expression too —
+# the caller-facing surface everything above is proxying for.
+for _expr in _THE_911_CRASH_INPUTS:
+    try:
+        _r911 = _logic.evaluate_expression(_expr)
+        _raised = None
+    except Exception as _exc:
+        _r911, _raised = None, _exc
+    check(f"evaluate_expression does not raise on {_expr[:45]!r}...",
+          _raised is None, f"-> raised {_raised!r}" if _raised else "")
+    if _raised is None:
+        check("  ...and returns a refusal, not a value",
+              _r911.get("ok") is False, f"-> {_r911}")
+
+# the fix must not waive an actually-explosive shape through just to avoid
+# crashing on it — each of the three above is refused for a real reason
+# (an astronomically huge digit count / exponent), not just "didn't raise".
+check("  ...2**100000!!... is refused on 'digits' grounds, not silently allowed",
+      _sp911(_THE_911_CRASH_INPUTS[0])[1] is not None
+      and "digits" in _sp911(_THE_911_CRASH_INPUTS[0])[1][1])
+check("  ...(x+1)**20000!!... is refused on 'exponent' grounds, not silently allowed",
+      _sp911(_THE_911_CRASH_INPUTS[1])[1] is not None
+      and "exponent" in _sp911(_THE_911_CRASH_INPUTS[1])[1][1])
+check("  ...'9'*400 + '**12' is refused on 'digits' grounds, not silently allowed",
+      _sp911(_THE_911_CRASH_INPUTS[2])[1] is not None
+      and "digits" in _sp911(_THE_911_CRASH_INPUTS[2])[1][1])
+
+# ...and the fix does not make the digit estimate so imprecise that it starts
+# refusing ordinary, well-under-the-cap powers: 2**10000 has ~3011 true
+# digits (comfortably under MAX_NUMERIC_DIGITS=4000) and must still evaluate.
+# A cruder `bit_length() * log10(2)` estimate (no -1/shift correction)
+# overestimates log10(2) by roughly 2x, which was measured to flip exactly
+# this case to a false refusal.
+_r911 = _logic.evaluate_expression("2**10000")
+check("2**10000 (~3011 digits, under the 4000 cap) still evaluates",
+      _r911.get("ok") is True, f"-> {_r911}")
+
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== ALL BUG-SWEEP REGRESSIONS FIXED ===")
 sys.exit(1 if FAILS else 0)

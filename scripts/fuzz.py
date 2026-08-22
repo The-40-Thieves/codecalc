@@ -163,6 +163,19 @@ SEED_CORPUS_EXPR = [
     # both directly, not only when the mutator happens to reconstruct them.
     "\ud800",
     "�\r�",
+    # `!!` (sympy's standard_transformations double-factorial) turns the
+    # exponent into a huge exact Integer — `factorial2(100000)` /
+    # `factorial2(20000)` — reaching an int->float conversion and an
+    # f-string interpolation in `reject_explosive` that neither bounded
+    # for a value that size. Found by the 2026-08-22 ClusterFuzzLite batch;
+    # `reject_explosive` raised (OverflowError / ValueError) instead of
+    # returning a refusal, the exact contract this fuzzer holds it to.
+    "2**100000!!ubrNembeubrNember",
+    "(x+1)**20000!!ubrNembeubrNember",
+    # a >308-digit base: SymPy's `Integer.__float__` returns `inf` here
+    # rather than raising like Python's own `int.__float__` does, so the
+    # digit estimate's `try/except OverflowError` never fired. Same batch.
+    "9" * 400 + "**12",
 ]
 
 # ── seed corpus: session paths ──────────────────────────────────────────────
