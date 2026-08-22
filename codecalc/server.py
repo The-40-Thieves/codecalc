@@ -655,6 +655,10 @@ def session_artifacts(session_id: str) -> dict:
 
 
 @mcp.tool(group="admin")
+# NOT SANDBOXED is not a hypothetical: see SECURITY.md and issue #23 for the
+# original report of install-time hook risk (npm postinstall, Python build
+# backends, Cargo build scripts) that the docstring's warning below exists
+# to carry forward to every caller.
 def install_package(language: str, package: str, session_id: str | None = None,
                     version: str | None = None) -> dict:
     """Install a package for a language (uv pip / npm / gem / go get / cargo add...).
@@ -671,7 +675,7 @@ def install_package(language: str, package: str, session_id: str | None = None,
     scripts) execute with the server user's filesystem access. The environment
     is still restricted to the allowlist, so secrets do not leak, but the
     filesystem is not confined. Do not point this at untrusted input. See
-    SECURITY.md and issue #23.
+    SECURITY.md.
     """
     return packages.install(language, package, session_id=session_id,
                             version=version, audit=_audit_log)
@@ -694,20 +698,23 @@ async def execute_code_stream(
 
     Unlike execute_code (which returns only at exit), this reports progress
     notifications to the client while the program runs, so agents can see
-    output before the process finishes. Returns the same result shape.
+    output before the process finishes. Returns the same result shape and
+    applies the SAME ceilings: max_memory_mb, max_output_kb and max_cpu are
+    forwarded to the executor exactly as execute_code forwards them.
 
-    It also applies the SAME ceilings: max_memory_mb, max_output_kb and
-    max_cpu are forwarded to the executor exactly as execute_code forwards
-    them. That sentence used to say only "the same result shape", which was
-    true of the shape and false of the guarantees — this tool accepted
-    neither a memory nor a CPU bound, so a caller who set them on
-    execute_code and then switched to streaming silently lost both.
-
-    The one difference that remains, deliberately: the wall-clock cap is 300s
-    here against execute_code's 120s, because streaming exists for runs long
-    enough to want progress. That divergence is stated rather than left for a
-    reader to discover by comparing two min() calls.
+    One difference, deliberate: the wall-clock cap is 300s here against
+    execute_code's 120s, because streaming exists for runs long enough to
+    want progress.
     """
+    # `max_memory_mb`/`max_output_kb`/`max_cpu` used to be silently dropped on
+    # this path: the docstring claimed only "the same result shape" as
+    # execute_code, which was true of the shape and false of the guarantees —
+    # this tool accepted neither a memory nor a CPU bound, so a caller who set
+    # them on execute_code and then switched to streaming silently lost both
+    # (see the parity assertion in tests/test_bug_sweep.py, #61). The
+    # 300s-vs-120s wall-clock split is deliberate (streaming exists for runs
+    # long enough to want progress) and is called out in the docstring above
+    # rather than left for a reader to discover by comparing two min() calls.
     timeout = min(timeout, 300)
     spec = providers.ComputationSpec(
         language=language, code=code, stdin=stdin, timeout=timeout,
@@ -1045,12 +1052,10 @@ def runtimes_status(languages: str = "") -> dict:
     it (mise/rustup/swiftly/apt/npm/uv), and the exact command that would run.
     Optional `languages` = comma-separated subset, e.g. "python3,node,rust".
 
-    Each entry also carries `tier` (registry.RELIABILITY_TIERS) when the name
-    is a codecalc language: `tested` (a CI job executes it and checks its
-    output), `best_effort` (declared, never CI-checked), or `plan_only`
-    (never validated anywhere). This is about codecalc's OWN verification, not
-    about whether the update check below found a newer version — a current,
-    up-to-date toolchain can still be `best_effort`.
+    Each entry also carries `tier` (registry.RELIABILITY_TIERS) — see
+    list_languages for what `tested`/`best_effort`/`plan_only` mean. A
+    current, up-to-date toolchain can still be `best_effort`: `tier` is
+    orthogonal to whether the update check below found a newer version.
 
     NETWORK: yes. Non-mutating refers to this machine's runtimes, not to
     traffic — each package manager is asked what the latest version is, and
