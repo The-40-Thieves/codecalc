@@ -8,6 +8,8 @@ instead of a guessed one.** It runs code in **31 languages**, does exact
 symbolic math, solves SMT/logic problems, and measures complexity, all exposed
 as **52 MCP tools**.
 
+**Fastest path:** `uvx 'codecalc[full]' setup --write` registers codecalc with your MCP client automatically. New to MCP, or want more detail first? See [QUICKSTART.md](QUICKSTART.md), or the Install section below.
+
 Three things nobody else offers together cleanly:
 
 - **Offline-core** — ships no model, no API key, no gateway, no telemetry.
@@ -35,60 +37,6 @@ Reach for something else when you want managed cloud scale instead of
 self-hosting (a hosted sandbox like E2B or Modal), or when you're not
 self-hosting at all and the model vendor's built-in code interpreter already
 covers what you need.
-
-**CodeCalc's core opens no sockets.** No model gateway or telemetry is built
-in. `tests/test_offline.py` asserts this for the top-level core modules. The
-opt-in Piston provider is the deliberate exception: its wire client lives under
-`codecalc/provider_adapters/` and is registered only when
-`CODECALC_PISTON_URL` is configured.
-
-That is a claim about the **package**, not about every tool call, and the
-difference is worth stating rather than leaving a reader to discover:
-
-| layer | reaches the network? |
-|---|---|
-| CodeCalc core | **No HTTP client, model gateway, or telemetry.** One dependency exception: `analyze_complexity` may download a grammar on first use (see below) |
-| configured Piston provider | **Yes, explicitly.** Calls only the operator-supplied `CODECALC_PISTON_URL`; credentials stay in its authorization header and are redacted from results |
-| `install_package` | **Yes, by design.** It runs uv / npm / gem / cargo, which fetch from their registries. Installer hooks also run *outside* the sandbox — see [SECURITY.md](SECURITY.md) |
-| `runtimes_status`, `update_runtimes` | **Yes.** They shell out to mise / rustup / swiftly / npm, which check remote versions |
-| code you execute | **Yes, unless `no_net=True`** — and that guarantee needs the native executor (seccomp-bpf where the Linux kernel supports it, a symbol shim otherwise; see the guarantee table below), so the pure-Python fallback reports it in `unenforced` instead of applying it. Set `CODECALC_REQUIRE_NATIVE=1` to turn "fallback in use" into a startup failure instead of a result you have to notice by reading `unenforced` |
-
-The earlier wording here was an unqualified "it makes no network calls", which
-the structural test cannot support and three of the tools above contradict. A
-guarantee stated more broadly than it is enforced is the failure this repo keeps
-correcting, so it is corrected here too.
-
-**The grammar download, stated plainly, because it is the one that is easy to
-miss.** The other three paths above go through a CHILD PROCESS, which is what
-`tests/test_offline.py` says it cannot see. This one does not:
-`tree-sitter-language-pack` ships a ~5 MB extension and fetches each grammar on
-first use, **in-process**, into a local cache — 28 grammars, 89 MB, about 15
-seconds on a cold cache. So the first `analyze_complexity` call for a given
-language opens a socket from inside the server.
-
-It is verified (the pack checks a signature and raises on a checksum mismatch),
-it is cached, and it never happens again for that language. But "the package
-itself never reaches the network" was not true, and this row used to say it was.
-
-**For an offline or egress-restricted install**, warm the cache first — it is one
-command, and afterwards nothing here reaches the network. If you installed
-codecalc (`pip install`/`uvx`, not a source checkout), `scripts/` did not come
-with it, so use the shipped console script instead:
-
-```bash
-codecalc-prefetch-grammars                    # installed: fetch all 28 grammars
-codecalc-prefetch-grammars --print-cache-dir  # installed: the directory to copy
-```
-
-Building from source? The script still works and calls the same code:
-
-```bash
-python scripts/prefetch_grammars.py                    # fetch all 28 grammars
-python scripts/prefetch_grammars.py --print-cache-dir  # the directory to copy
-```
-
-`codecalc doctor` reports whether that cache is populated, so this is
-discoverable before it matters rather than after a tool call degrades.
 
 ## codecalc vs. the alternatives
 
@@ -141,6 +89,14 @@ server stays exactly as it was) and backs up the original to
 > one with `gh attestation verify <file> --repo The-40-Thieves/codecalc`; PyPI
 > wheels additionally carry PEP 740 attestations.
 
+**The published install** (simplest — no build step, and what most people want):
+
+```bash
+uvx 'codecalc[full]'          # run it directly, no environment to manage
+# or
+pip install 'codecalc[full]'  # into your own virtualenv
+```
+
 **From source**, if you would rather build the executor yourself:
 
 ```bash
@@ -155,14 +111,6 @@ uv run codecalc doctor               # verify: backend should read `rust`
 
 Without the `cargo build`, everything still runs on the pure-Python fallback —
 `doctor` will say so, and the network table below says what that costs.
-
-**After the first release**, this becomes the install:
-
-```bash
-uvx 'codecalc[full]'          # run it directly, no environment to manage
-# or
-pip install 'codecalc[full]'  # into your own virtualenv
-```
 
 **Why `[full]`.** The base install is the MCP surface and the sandbox executor:
 31 language runtimes, sessions, packages, ~32 MB. The symbolic half — sympy and
@@ -327,6 +275,62 @@ command with no args:
   }
 }
 ```
+
+## Network boundary
+
+**CodeCalc's core opens no sockets.** No model gateway or telemetry is built
+in. `tests/test_offline.py` asserts this for the top-level core modules. The
+opt-in Piston provider is the deliberate exception: its wire client lives under
+`codecalc/provider_adapters/` and is registered only when
+`CODECALC_PISTON_URL` is configured.
+
+That is a claim about the **package**, not about every tool call, and the
+difference is worth stating rather than leaving a reader to discover:
+
+| layer | reaches the network? |
+|---|---|
+| CodeCalc core | **No HTTP client, model gateway, or telemetry.** One dependency exception: `analyze_complexity` may download a grammar on first use (see below) |
+| configured Piston provider | **Yes, explicitly.** Calls only the operator-supplied `CODECALC_PISTON_URL`; credentials stay in its authorization header and are redacted from results |
+| `install_package` | **Yes, by design.** It runs uv / npm / gem / cargo, which fetch from their registries. Installer hooks also run *outside* the sandbox — see [SECURITY.md](SECURITY.md) |
+| `runtimes_status`, `update_runtimes` | **Yes.** They shell out to mise / rustup / swiftly / npm, which check remote versions |
+| code you execute | **Yes, unless `no_net=True`** — and that guarantee needs the native executor (seccomp-bpf where the Linux kernel supports it, a symbol shim otherwise; see the guarantee table below), so the pure-Python fallback reports it in `unenforced` instead of applying it. Set `CODECALC_REQUIRE_NATIVE=1` to turn "fallback in use" into a startup failure instead of a result you have to notice by reading `unenforced` |
+
+The earlier wording here was an unqualified "it makes no network calls", which
+the structural test cannot support and three of the tools above contradict. A
+guarantee stated more broadly than it is enforced is the failure this repo keeps
+correcting, so it is corrected here too.
+
+**The grammar download, stated plainly, because it is the one that is easy to
+miss.** The other three paths above go through a CHILD PROCESS, which is what
+`tests/test_offline.py` says it cannot see. This one does not:
+`tree-sitter-language-pack` ships a ~5 MB extension and fetches each grammar on
+first use, **in-process**, into a local cache — 28 grammars, 89 MB, about 15
+seconds on a cold cache. So the first `analyze_complexity` call for a given
+language opens a socket from inside the server.
+
+It is verified (the pack checks a signature and raises on a checksum mismatch),
+it is cached, and it never happens again for that language. But "the package
+itself never reaches the network" was not true, and this row used to say it was.
+
+**For an offline or egress-restricted install**, warm the cache first — it is one
+command, and afterwards nothing here reaches the network. If you installed
+codecalc (`pip install`/`uvx`, not a source checkout), `scripts/` did not come
+with it, so use the shipped console script instead:
+
+```bash
+codecalc-prefetch-grammars                    # installed: fetch all 28 grammars
+codecalc-prefetch-grammars --print-cache-dir  # installed: the directory to copy
+```
+
+Building from source? The script still works and calls the same code:
+
+```bash
+python scripts/prefetch_grammars.py                    # fetch all 28 grammars
+python scripts/prefetch_grammars.py --print-cache-dir  # the directory to copy
+```
+
+`codecalc doctor` reports whether that cache is populated, so this is
+discoverable before it matters rather than after a tool call degrades.
 
 ## Architecture (language-per-strength)
 

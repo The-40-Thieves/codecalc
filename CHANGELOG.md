@@ -33,6 +33,23 @@ behind it.
 
 ## [Unreleased]
 
+### Docs
+
+- **Novice on-ramp: README reordered, new QUICKSTART.md added.** The README's
+  top previously put ~50 lines of network-boundary caveats (prose, two
+  tables, the grammar-download deep-dive) between the pitch and the Install
+  section — a newcomer hit maintainer-facing detail before learning how to
+  install. That content moved, verbatim, to its own "## Network boundary"
+  section after Install; nothing was deleted or reworded for tone. A 2-line
+  quickstart pointer now follows the pitch. The stale "After the first
+  release, this becomes the install" wording (0.5.0 has been published since
+  #251) is now present-tense ("The published install"), and it's ordered
+  before "From source" so the simple path comes first. `QUICKSTART.md` is a
+  new, standalone ≤80-line first-timer doc: what it is, install, connect to
+  an MCP client (both `setup --write` and copy-paste JSON), `codecalc
+  doctor`, a prominent untrusted-code safety note linking SECURITY.md, and
+  where to go next.
+
 ## [0.5.0] — 2026-08-22
 
 ### Security
