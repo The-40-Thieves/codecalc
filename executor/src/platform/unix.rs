@@ -336,6 +336,17 @@ mod seccomp {
     /// returns the current mode (>= 0) when seccomp is compiled in, or fails
     /// with EINVAL when it is not. Probed in the PARENT, before fork, so the
     /// result decides both the child's path and the reported enforcement.
+    ///
+    /// This proves seccomp is CONFIGURED, not that a filter is INSTALLABLE:
+    /// `CONFIG_SECCOMP=y` with `CONFIG_SECCOMP_FILTER=n`, or an inherited
+    /// policy that denies `PR_SET_NO_NEW_PRIVS`, both pass this check while
+    /// the real `PR_SET_SECCOMP` install would still fail. `spawn_and_wait`
+    /// below is fine relying on this alone — it re-derives the real answer
+    /// per run and fails the spawn if the install actually fails, so a false
+    /// positive here costs it nothing but a wasted fork+exec attempt. A
+    /// caller reporting the *capability* ahead of any run (`--capabilities`)
+    /// cannot make that recovery, which is why it goes through
+    /// `installable()` below instead of this function.
     pub fn available() -> bool {
         // PR_GET_SECCOMP == 21; not exported by the libc crate on every target.
         unsafe { libc::prctl(21) >= 0 }
@@ -345,6 +356,57 @@ mod seccomp {
     /// the child only installs the already-built bytes.
     pub fn program() -> Vec<libc::sock_filter> {
         filter()
+    }
+
+    /// Installation canary: does the kernel actually let an unprivileged
+    /// process install `prog`, right now? `available()` only proves seccomp is
+    /// configured; this proves the filter is installable, by forking a
+    /// disposable child that attempts the real install and exits 0/1 to
+    /// report it. The child runs no payload — it installs and immediately
+    /// exits — so this is safe to call outside of any sandboxed execution.
+    ///
+    /// Startup-only: called once per `--capabilities` invocation
+    /// (`no_net_kernel_enforcement_available` below), never from the
+    /// per-execution `spawn_and_wait` path, which already fails a real run
+    /// closed on a genuine install failure and would pay for a second fork
+    /// for no benefit.
+    fn installable_with(prog: &[libc::sock_filter]) -> bool {
+        if !available() {
+            return false;
+        }
+        let pid = unsafe { libc::fork() };
+        if pid < 0 {
+            // Could not even fork a probe: report the weaker answer rather
+            // than assume the filter would have installed.
+            return false;
+        }
+        if pid == 0 {
+            // Child: async-signal-safe from here on, same discipline as the
+            // real pre_exec install below. Install the given program and
+            // report the result via exit code — nothing else runs here.
+            let rc = unsafe { install(prog) };
+            unsafe { libc::_exit(if rc.is_ok() { 0 } else { 1 }) };
+        }
+        let mut status: libc::c_int = 0;
+        loop {
+            let r = unsafe { libc::waitpid(pid, &mut status, 0) };
+            if r == pid {
+                break;
+            }
+            if r == -1 {
+                let e = std::io::Error::last_os_error();
+                if e.raw_os_error() != Some(libc::EINTR) {
+                    return false;
+                }
+            }
+        }
+        libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0
+    }
+
+    /// The canary against the SAME program the real path installs — never a
+    /// parallel filter that could drift from it.
+    pub fn installable() -> bool {
+        installable_with(&program())
     }
 
     /// Async-signal-safe: two `prctl` calls, no allocation. `prog` must outlive
@@ -378,6 +440,40 @@ mod seccomp {
         }
         Ok(())
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{installable, installable_with, program};
+
+        // Positive control: this host is seccomp-capable Linux (the box
+        // these tests run on), so the canary's success path is exercised
+        // live — it actually installs the real no_net filter in a
+        // throwaway child.
+        #[test]
+        fn the_real_program_installs_on_this_seccomp_capable_host() {
+            assert!(installable());
+        }
+
+        // The failure path cannot be reached by disabling
+        // CONFIG_SECCOMP_FILTER on this box, so it is exercised by handing
+        // the canary a program the kernel is guaranteed to refuse: an empty
+        // BPF program. `PR_SET_SECCOMP` requires at least one instruction,
+        // so `install()` gets a real EINVAL from the kernel in the child —
+        // this drives the exact "child's install failed" branch a
+        // filter-less kernel would also take, through the same fork/wait/
+        // exit-code plumbing `installable()` uses for the real program.
+        #[test]
+        fn an_uninstallable_program_reports_false() {
+            assert!(!installable_with(&[]));
+        }
+
+        // installable_with must be reusing the real program's bytes, not a
+        // parallel copy that could drift from what spawn_and_wait installs.
+        #[test]
+        fn installable_delegates_to_the_real_program() {
+            assert_eq!(installable(), installable_with(&program()));
+        }
+    }
 }
 
 /// Whether this host can enforce `no_net` IN THE KERNEL, independent of any
@@ -394,9 +490,18 @@ mod seccomp {
 /// trusting this probe's answer into the run — this function exists for a
 /// caller that needs the answer BEFORE any run exists to check, such as the
 /// provider descriptor's `network_control` capability declaration.
+///
+/// Goes through `seccomp::installable()`, not the cheaper `available()`:
+/// `available()` only proves `PR_GET_SECCOMP` reports a mode, which a kernel
+/// with `CONFIG_SECCOMP=y`/`CONFIG_SECCOMP_FILTER=n` (or an inherited policy
+/// that denies `PR_SET_NO_NEW_PRIVS`) would also pass while the real install
+/// still fails. `installable()` runs an actual disposable-child install of
+/// the real no_net program and reports what the kernel really did, which is
+/// what a caller advertising `network_control` needs — this is startup-only
+/// (once per `--capabilities` invocation), so the fork it costs is fine.
 #[cfg(target_os = "linux")]
 pub fn no_net_kernel_enforcement_available() -> bool {
-    seccomp::available()
+    seccomp::installable()
 }
 
 /// macOS (and any other non-Linux Unix): no in-kernel `no_net` mechanism —

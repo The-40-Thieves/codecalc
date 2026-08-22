@@ -107,11 +107,18 @@ is rejected. When the variable is set, comma-separated directives configure it:
   capability as enforceable when the provider's descriptor says it supports
   control over that capability (`network_control`, `true` for the native
   executor backend only when the Rust binary is in use AND this host can
-  enforce `no_net` in the kernel — Linux with a seccomp-bpf filter available.
-  It is `false` on the same Rust binary when only the best-effort, bypassable
-  LD_PRELOAD/dyld symbol shim would hold: macOS, or a Linux kernel without
-  seccomp; the shim cannot itself enforce a denial, only apply it on a
-  best-effort basis, and `network_control` no longer claims otherwise). Where
+  enforce `no_net` in the kernel — Linux, with the real no_net seccomp-bpf
+  program actually installable, verified at startup by forking a disposable
+  child that attempts the install and reports whether the kernel accepted
+  it (`executor/src/platform/unix.rs`'s `seccomp::installable`), not merely
+  that `PR_GET_SECCOMP` says seccomp is configured — a kernel with
+  `CONFIG_SECCOMP_FILTER=n`, or an inherited policy denying
+  `PR_SET_NO_NEW_PRIVS`, would pass the weaker check while the real install
+  still fails. It is `false` on the same Rust binary when only the
+  best-effort, bypassable LD_PRELOAD/dyld symbol shim would hold: macOS, or
+  a Linux kernel without an installable seccomp filter; the shim cannot
+  itself enforce a denial, only apply it on a best-effort basis, and
+  `network_control` no longer claims otherwise). Where
   the provider reports support, the job runs with `no_net` forced on. Where it
   does not (no native executor, or a native executor without kernel
   enforcement), a non-strict policy leaves the request as-asked and discloses

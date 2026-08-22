@@ -1178,9 +1178,15 @@ def backend() -> str:
     return "rust" if _rust else "python"
 
 
-def _probe_no_net_kernel_enforcement() -> bool:
+def _probe_no_net_kernel_enforcement(*, timeout: float = 15,
+                                     drain_timeout: float = 5) -> bool:
     """Ask the Rust binary's `--capabilities` whether THIS host can enforce
     `no_net` in the kernel (Linux seccomp), independent of any run.
+
+    `timeout`/`drain_timeout` default to production's 15s/5s; a test passes
+    smaller values to exercise the timeout branch itself against a real
+    (fast) subprocess instead of waiting out the production timeout or
+    reimplementing this function's logic against a mock.
 
     `backend() == "rust"` alone is not that answer: the same binary falls back
     to the bypassable LD_PRELOAD/dyld symbol shim on macOS and on a Linux
@@ -1190,40 +1196,139 @@ def _probe_no_net_kernel_enforcement() -> bool:
     weaker "a native binary happens to be present" one.
 
     False on any failure — missing binary, a build too old to know
-    `--capabilities`, a malformed response — matching `probe()`'s own
+    `--capabilities`, a malformed response, a NONZERO exit code even with
+    well-formed output on stdout — matching `probe()`'s own
     fail-quiet-to-the-weaker-answer shape: an executor that cannot say it
     enforces `no_net` in the kernel is treated exactly like one that doesn't.
+    This is a fail-SAFE check, not a fail-quiet one: `data.get(...) is True`
+    is an identity comparison, not `bool(...)` — `bool("false")` and
+    `bool(1)` are both `True` in Python, so a probe that answered with the
+    JSON string `"false"`, or any other non-boolean truthy value, must not
+    be read as an affirmative "yes, enforce". Found by cross-vendor review:
+    a probe binary printing a truthy-but-wrong value, or exiting nonzero
+    after printing `true`, was silently trusted.
+
+    Spawned with `_popen_group`/`_kill_group`, not a bare `subprocess.run`:
+    `--capabilities` exits almost immediately on a well-behaved binary, but a
+    wrapped or faulty one could spawn descendants before answering, and
+    `subprocess.run(timeout=...)` on `TimeoutExpired` kills only the direct
+    child — exactly the leak `_kill_group` exists to close everywhere else
+    this module spawns the executor. See `_execute_uncontracted`'s rust path
+    for the same pattern.
     """
     if not _rust:
         return False
     try:
-        proc = subprocess.run([_rust, "--capabilities"], capture_output=True,
-                              timeout=15)
-        data = json.loads(proc.stdout.decode())
-        if isinstance(data, dict):
-            return bool(data.get("no_net_kernel_enforcement"))
+        proc = _popen_group([_rust, "--capabilities"])
+    except OSError:
+        return False
+    try:
+        out, _err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # `_kill_group` alone is not enough here: it SIGTERMs the whole
+        # group but only `proc.wait()`s on the DIRECT child, so it returns
+        # the instant that one process exits — even if a descendant that
+        # ignores SIGTERM is still alive holding the pipes this function
+        # captured open. The `communicate()` right after it would then
+        # block forever waiting for an EOF that never comes (reproduced:
+        # direct child exits -15, grandchild alive, drain hangs). SIGKILL
+        # cannot be ignored, so `_reap_group`'s unconditional killpg closes
+        # that gap regardless of what `_kill_group` managed to reach, and
+        # the final drain is bounded so nothing outside this process's
+        # control — an fd held by something no longer even in the group —
+        # can wedge the probe indefinitely.
+        _kill_group(proc)
+        _reap_group(proc)
+        try:
+            proc.communicate(timeout=drain_timeout)
+        except subprocess.TimeoutExpired:
+            pass
+        return False
+    if proc.returncode != 0:
+        return False
+    try:
+        data = json.loads(out.decode())
     except Exception:
-        pass
-    return False
+        return False
+    if not isinstance(data, dict):
+        return False
+    return data.get("no_net_kernel_enforcement") is True
 
 
-# Probed once, at import — same convention as `_rust` above, and for the same
-# reason: this is read on every provider capability query
-# (`LocalExecutionProvider.describe`), and a host's kernel-seccomp posture
-# does not change over the life of a process, so re-spawning the executor per
-# read would only add a subprocess launch per read, never a different answer.
+def _binary_identity(path: str) -> tuple[int, int, int, float] | None:
+    """(device, inode, size, mtime) of the file at `path`, or None if it
+    cannot be stat'd.
+
+    What `no_net_kernel_enforcement_available()`'s cache below is bound to.
+    A probe result is a claim about a SPECIFIC binary; caching it against the
+    path alone, as the first version of this did, left the cache trusting a
+    stale `True` for the rest of the server's life if that path were ever
+    replaced (same-UID/deploy write access) with a weaker build — nothing
+    would re-probe. Comparing identity on every read is one `os.stat`, far
+    cheaper than the subprocess launch it guards against re-running.
+    """
+    try:
+        st = Path(path).stat()
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime)
+
+
+# Probed once, at import — same convention as `_rust` above — and re-probed
+# below whenever `_binary_identity(_rust)` no longer matches what was probed.
+# `_NO_NET_KERNEL_ENFORCEMENT_LOCK` guards both globals TOGETHER; see
+# `no_net_kernel_enforcement_available` for why the identity and the answer
+# it produced must be published as one atomic step, not two.
+_NO_NET_KERNEL_ENFORCEMENT_LOCK = threading.Lock()
 _NO_NET_KERNEL_ENFORCEMENT = _probe_no_net_kernel_enforcement()
+_NO_NET_KERNEL_ENFORCEMENT_IDENTITY = _binary_identity(_rust) if _rust else None
 
 
 def no_net_kernel_enforcement_available() -> bool:
     """Whether this host can enforce `no_net` in the kernel right now.
+
+    Re-probes when the Rust binary's on-disk identity (device, inode, size,
+    mtime) has changed since the last probe, rather than trusting the
+    import-time answer for the rest of the process's life — see
+    `_binary_identity`'s docstring for why a path-only cache is not enough.
+
+    The identity comparison-and-update and the re-probe it triggers run
+    under `_NO_NET_KERNEL_ENFORCEMENT_LOCK`, and the new identity is
+    published together with the answer it produced, inside that same lock —
+    not the identity first and the answer once the probe finishes. The first
+    version of this cache did that two-step publish, and it opened a window:
+    the probe subprocess call releases the GIL for the whole time it blocks
+    on I/O, so a second thread's read could land in that window, see the
+    ALREADY-updated identity, conclude the cache still matches, and hand
+    back the OLD (possibly wrong) cached answer while the fresh probe for
+    that very identity was still in flight — a concurrent reader could
+    observe a stale `True` at the exact moment the real answer was `False`.
+    Holding the lock across the whole probe forces a concurrent reader
+    hitting a changed identity to wait for the SAME fresh answer instead of
+    racing past it.
+    Cheap in the common case: the lock is only ever contended while a probe
+    is actually running, which happens once per binary replacement, not
+    once per read.
 
     A function, not a bare module constant, so a test can monkeypatch it to
     fake a shim-only host (`executor.no_net_kernel_enforcement_available =
     lambda: False`) without needing a second Linux kernel to prove the
     strict-policy refusal path.
     """
-    return _NO_NET_KERNEL_ENFORCEMENT
+    global _NO_NET_KERNEL_ENFORCEMENT, _NO_NET_KERNEL_ENFORCEMENT_IDENTITY
+    if not _rust:
+        return False
+    identity = _binary_identity(_rust)
+    with _NO_NET_KERNEL_ENFORCEMENT_LOCK:
+        # Re-check under the lock: two threads can both observe a changed
+        # identity from the unlocked stat above and both arrive here, but
+        # only the first should actually spawn a probe — by the time the
+        # second acquires the lock, the first has already published a fresh
+        # answer for this same identity.
+        if identity != _NO_NET_KERNEL_ENFORCEMENT_IDENTITY:
+            _NO_NET_KERNEL_ENFORCEMENT = _probe_no_net_kernel_enforcement()
+            _NO_NET_KERNEL_ENFORCEMENT_IDENTITY = identity
+        return _NO_NET_KERNEL_ENFORCEMENT
 
 
 def _execute_uncontracted(language: str, code: str, stdin: str = "", timeout: int = 10,
