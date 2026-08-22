@@ -188,6 +188,26 @@ SEED_CORPUS_EXPR = [
     # ValueError past the same limit before it could even report the
     # refusal.
     "factorial(0x" + "f" * 4000 + ")",
+    # a reject_explosive CEILING-COVERAGE gap: `evaluate=False` leaves
+    # `30000/2` as `Mul(30000, Pow(2, -1))` and `3/2` as `Mul(3, Pow(2,
+    # -1))` rather than folding them to a plain Integer/Rational, so the
+    # old `isinstance(exponent/base, (Integer, Float))` checks skipped them
+    # entirely and the real power got computed with no ceiling applied at
+    # all -- a 4,516-digit Integer / a Rational with a 47,549-bit numerator,
+    # successfully, not a refusal.
+    "2**(30000/2)",
+    "2**(-30000/2)",
+    "(3/2)**30000",
+    # a parse-time memory bomb, found investigating the gap above: a
+    # trailing comma is valid PYTHON tuple syntax, so `parse_expr(...,
+    # evaluate=False)` hands back a bare Python `tuple` (not a SymPy node)
+    # for this input -- `_walk`'s `getattr(current, "args", ())` found no
+    # `.args` on a plain tuple and stopped there, so `reject_explosive`
+    # never saw the `2**(1000000**6)` power tower buried inside and the
+    # real, evaluating parse computed it: measured 2977 MB tracemalloc peak
+    # (under a 3 GB ulimit) before `_walk` was fixed to descend into a bare
+    # tuple directly.
+    "2**1000000^6c6/Me,",
 ]
 
 # ── seed corpus: session paths ──────────────────────────────────────────────

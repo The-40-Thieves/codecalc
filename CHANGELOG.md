@@ -301,6 +301,42 @@ behind it.
     via `fuzz/safe_expr_fuzzer.py`'s atheris harness, which calls
     `classify_unsafe` directly. Added to `scripts/fuzz.py`'s
     `SEED_CORPUS_EXPR`.
+- **`safe_expr.reject_explosive` closes the ceiling-coverage gap the fix
+  above triaged and deliberately left open**: `2**(30000/2)`,
+  `2**(-30000/2)` and `(3/2)**30000` now correctly refuse instead of
+  silently computing an explosive value. `parse_expr(..., evaluate=False)`
+  leaves `30000/2` as `Mul(30000, Pow(2, -1))` and `3/2` as `Mul(3, Pow(2,
+  -1))` rather than folding them to a plain `Integer`/`Rational`, so the
+  old `isinstance(exponent/base, (Integer, Float))` checks skipped them
+  entirely and the real power got computed with no ceiling ever applied —
+  a computed 4,516-digit `Integer` / a `Rational` with a 47,549-bit
+  numerator, successfully, not a refusal. The six symbolic tools survived
+  this only via each caller's own resource-error catch at stringification —
+  a structured refusal, but at the wrong layer, after the full cost was
+  already paid. A new `_bounded_numeric_value` helper resolves a
+  numeric-only (no `free_symbols`) exponent or base subtree through the
+  same `_log10_of_int`-based ceiling as a bare literal, but only via a
+  small safe grammar of cheap combinators (`Integer`, `Rational`, `Float`,
+  `Add`, `Mul`, `Pow` with an integer exponent) and only after checking
+  each combination's bit-length against a budget BEFORE performing it —
+  never after. Anything outside that grammar refuses rather than guesses.
+- **The same investigation found a separate parse-time memory bomb**:
+  `"2**1000000^6c6/Me,"` returned the correct `('validation', 'parse
+  error')` refusal, but only after allocating a 2977 MB tracemalloc peak
+  (measured under a 3 GB `ulimit -v`; ClusterFuzzLite's own 2560 MB
+  libFuzzer rss cap reported 1542 MB and OOM'd). A trailing comma is valid
+  Python tuple syntax (`x,` means `(x,)`), so `parse_expr(..., evaluate=
+  False)` hands back a bare Python `tuple` — not a SymPy node — wrapping
+  the real `Mul(2**(1000000**6), ...)` shape. `safe_expr._walk`'s
+  `getattr(current, "args", ())` found no `.args` on a plain tuple and
+  stopped there, so `reject_explosive` never saw the `2**(1000000**6)`
+  power tower buried inside and returned `None` as if the tree held
+  nothing dangerous — the real, evaluating parse then computed
+  `2**(1000000**6)` before the trailing comma's syntax error ever got a
+  chance to surface. `_walk` now descends into a bare tuple's own elements
+  directly; the input now refuses in milliseconds on power-tower grounds,
+  under a 50 MB tracemalloc peak. All four inputs added to `scripts/
+  fuzz.py`'s `SEED_CORPUS_EXPR`.
 
 ### Changed
 
