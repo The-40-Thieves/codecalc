@@ -206,11 +206,12 @@ def source_arg(language: str, path: str, *, windows: bool) -> str:
     return path
 
 
-#: python3 and node are the ONLY two languages a CI job actually executes and
-#: asserts real output from, on every PR — see RELIABILITY_TIERS above for the
-#: evidence trail and scripts/check_runtime_tiers.py for the gate that keeps
-#: this claim honest. Every other language below is `best_effort`: declared,
-#: with a local smoke fixture (tests/test_smoke.py), never exercised in CI.
+#: python3, node, rust and go are the ONLY languages a CI job actually
+#: executes and asserts real output from, on every PR — see RELIABILITY_TIERS
+#: above for the evidence trail and scripts/check_runtime_tiers.py for the
+#: gate that keeps this claim honest. Every other language below is
+#: `best_effort`: declared, with a local smoke fixture (tests/test_smoke.py),
+#: never exercised in CI.
 LANGUAGES: dict[str, dict] = {
     # ── interpreters ─────────────────────────────────────────────────────
     "python3": _c(None, "python3 {file}", "tested"),

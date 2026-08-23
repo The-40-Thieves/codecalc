@@ -194,6 +194,18 @@ if _bad_run is not None:
     check("FAIL-FIRST: gate exits NONZERO when CI drops the skip-promoting flag",
           _bad_run.returncode != 0, f"-> exit={_bad_run.returncode}")
 
+# Seed 4: the step survives textually but is disabled — `if: false` leaves
+# every substring in place, which is exactly why the gate reads the step
+# BLOCK for the real Linux condition instead of grepping the whole file.
+_bad_run = _gate_on_mutated_copy(
+    ".github/workflows", "ci-python.yml",
+    "if: runner.os == 'Linux'",
+    "if: false",
+    "evidence step disabled")
+if _bad_run is not None:
+    check("FAIL-FIRST: gate exits NONZERO when the evidence step is if:-disabled",
+          _bad_run.returncode != 0, f"-> exit={_bad_run.returncode}")
+
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else "\n=== ALL PASS ===")
 if FAILS:
     sys.exit(1)

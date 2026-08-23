@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import random
 import shutil
 import sys
 
@@ -58,15 +59,19 @@ def skip(name: str, why: str) -> None:
 #: fails that gate.
 TIER_EVIDENCE_LANGS = ("rust", "go")
 
-#: Programs that COMPUTE their output (10! = 3628800), so a cached or echoed
-#: string cannot satisfy the assertion; each also prints a marker naming the
-#: language so a plan mix-up cannot pass one language's check with another's
-#: output.
+#: A fresh value every run, baked into each program's source. The program
+#: multiplies it into a computed base (10! = 3628800), so the expected stdout
+#: is different on every invocation — no fixed string a stale artifact, a
+#: cached result, or an echo of the source could reproduce. Each line also
+#: names the language, so a plan mix-up cannot pass one language's check with
+#: another's output.
+NONCE = random.randint(100, 999)  # noqa: S311 — freshness marker, not a secret
+
 PROGRAMS = {
     "rust": (
         "fn main() {\n"
-        "    let v: u64 = (1..=10u64).product();\n"
-        '    println!("tier-evidence rust {}", v);\n'
+        "    let f: u64 = (1..=10u64).product();\n"
+        f'    println!("tier-evidence rust {{}}", f * {NONCE});\n'
         "}\n"
     ),
     "go": (
@@ -77,7 +82,7 @@ PROGRAMS = {
         "    for i := 1; i <= 10; i++ {\n"
         "        v *= i\n"
         "    }\n"
-        '    fmt.Println("tier-evidence go", v)\n'
+        f'    fmt.Println("tier-evidence go", v*{NONCE})\n'
         "}\n"
     ),
 }
@@ -94,6 +99,7 @@ check("every TIER_EVIDENCE_LANGS entry has a program fixture",
       f"-> fixtures for {sorted(PROGRAMS)}")
 
 # ═══ 1. compile + run each language and assert its computed stdout ══════════
+executed: list[str] = []
 for lang in TIER_EVIDENCE_LANGS:
     entry = registry.LANGUAGES[lang]
     # The command whose PRESENCE gates skip-vs-run: the first token of the
@@ -106,14 +112,30 @@ for lang in TIER_EVIDENCE_LANGS:
         continue
 
     r = executor.execute(lang, PROGRAMS[lang], timeout=120)
-    expected = f"tier-evidence {lang} 3628800"
-    check(f"{lang}: execute() succeeds (backend={r.get('backend')})",
-          r.get("ok") is True,
+    executed.append(lang)
+    expected = f"tier-evidence {lang} {3628800 * NONCE}"
+    check(f"{lang}: execute() reached the run phase and succeeded "
+          f"(backend={r.get('backend')})",
+          r.get("ok") is True and r.get("phase") == "run",
           f"-> phase={r.get('phase')!r} exit={r.get('exit_code')!r} "
           f"stderr={str(r.get('stderr'))[:120]!r}")
-    check(f"{lang}: stdout carries the computed marker line",
-          expected in (r.get("stdout") or ""),
-          f"-> expected {expected!r} in {str(r.get('stdout'))[:120]!r}")
+    # EXACT single-line stdout, nonce included — `expected in stdout` would
+    # accept a stale or replayed result that happened to carry a fixed
+    # marker; nothing but this run's program knows this run's nonce.
+    check(f"{lang}: stdout is exactly this run's computed nonce line",
+          (r.get("stdout") or "").strip() == expected,
+          f"-> expected {expected!r}, got {str(r.get('stdout'))[:120]!r}")
+
+# ═══ 2. completeness: the loop covered what the tuple declares ══════════════
+# check_runtime_tiers.py reads TIER_EVIDENCE_LANGS as the evidence set, so a
+# future code path that leaves the tuple intact while quietly bypassing a
+# language (a filter, a `continue`, an early return) must be caught HERE —
+# the gate's static read cannot see it. Under the require flag every declared
+# language must actually have reached execute().
+if REQUIRE:
+    check("REQUIRED mode: every declared language was actually executed",
+          executed == list(TIER_EVIDENCE_LANGS),
+          f"-> declared {list(TIER_EVIDENCE_LANGS)}, executed {executed}")
 
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else "\n=== TIER EVIDENCE HOLDS ===")
 if FAILS:

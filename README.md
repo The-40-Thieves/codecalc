@@ -1002,7 +1002,7 @@ visible instead of silent:
 
 | Tier | Meaning |
 |---|---|
-| `tested` | A CI job genuinely **executes** this language and asserts on its real output, on every PR. Currently `python3`, `node`, `rust`, and `go` — kept deliberately conservative, and gated by `scripts/check_runtime_tiers.py` so a language cannot claim it without a CI check backing it, or silently drop out of CI while still claiming it. `python3`/`node` earn it from the stateful-worker sweep; `rust`/`go` from `tests/test_tier_evidence.py`, which compiles and runs a real program in each and asserts the computed stdout, with skips promoted to failures on the CI leg that carries the evidence. |
+| `tested` | A CI job genuinely **executes** this language and asserts on its real output, on every PR. Currently `python3`, `node`, `rust`, and `go` — kept deliberately conservative, and gated by `scripts/check_runtime_tiers.py` so a language cannot claim it without a CI check backing it, or silently drop out of CI while still claiming it. `python3`/`node` earn it from the stateful-worker sweep (all three OS legs); `rust`/`go` from `tests/test_tier_evidence.py`, which compiles and runs a real program in each and asserts a per-run computed stdout — on the **Linux** leg, where skips are promoted to failures. The tier claims "CI executes this on every PR", not per-platform coverage. |
 | `best_effort` | Declared, with a local smoke fixture (`tests/test_smoke.py`), and plausibly works on a normal install with the right toolchain — but no CI job runs it, so nothing would notice it silently breaking. Every other language, including `csharp`, `java`, and the rest. |
 | `plan_only` | A registry entry never validated on any runner, anywhere, not even locally. None today. |
 

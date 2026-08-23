@@ -34,10 +34,12 @@ equally a dead candidate. `rust` and `go` earn theirs from a third harness:
 tests/test_tier_evidence.py compiles and runs a real program in each through
 executor.execute() and asserts its computed stdout — and because that file
 skips per-language when a toolchain is absent, check 2b below also requires
-ci-python.yml to invoke it WITH CODECALC_REQUIRE_TIER_EVIDENCE set, the flag
-that promotes any skip to a failure. Without 2b the harness could silently
-drop out of CI (or run skip-permissive everywhere) while the tier claim
-stood on nothing.
+ci-python.yml's evidence STEP — the step block itself, not the file as a
+whole — to invoke it with CODECALC_REQUIRE_TIER_EVIDENCE set (the flag that
+promotes any skip to a failure), gate on the real Linux condition rather
+than a disabling `if:`, and carry no `continue-on-error`. Without 2b the
+harness could silently drop out of CI (or run skip-permissive, or run with
+its failure eaten) while the tier claim stood on nothing.
 
 FAIL-FIRST, proven by hand while writing this gate: flipping "node"'s tier
 in codecalc/registry.py from "tested" to "best_effort" makes check 2 report a
@@ -132,13 +134,36 @@ check("registry `tested` tier == CI-wired WORKER_LANGS + TIER_EVIDENCE_LANGS",
 # test_tier_evidence.py skips per-language when a toolchain is absent (it has
 # to, or no contributor could run the suite locally), so its mere existence
 # proves nothing: CI must invoke it with CODECALC_REQUIRE_TIER_EVIDENCE set,
-# the flag that turns any skip into a failure. Both asserted against the
-# literal workflow source, same as check 2 — delete the step, or drop the
-# env var from it, and this goes red while the registry claim still stands.
-check("ci-python.yml invokes tests/test_tier_evidence.py",
-      "tests/test_tier_evidence.py" in CI_PYTHON_YML)
-check("ci-python.yml sets CODECALC_REQUIRE_TIER_EVIDENCE: '1' on that step",
-      "CODECALC_REQUIRE_TIER_EVIDENCE: '1'" in CI_PYTHON_YML)
+# the flag that turns any skip into a failure. Asserted against the STEP
+# BLOCK, not the whole file — a bare substring search would still pass with
+# the path living in a comment, the env var moved to an unrelated step, the
+# step disabled by `if: false`, or its failure eaten by `continue-on-error`
+# (cross-vendor review finding). The block is every line more-indented than
+# the step's `- name:` line; the four properties below are checked inside it.
+_wf_lines = CI_PYTHON_YML.splitlines()
+_step_name = "- name: reliability-tier evidence (rust, go)"
+_starts = [i for i, ln in enumerate(_wf_lines) if ln.strip() == _step_name]
+check("ci-python.yml has exactly one reliability-tier evidence step",
+      len(_starts) == 1, f"-> found {len(_starts)}")
+if _starts:
+    _indent = len(_wf_lines[_starts[0]]) - len(_wf_lines[_starts[0]].lstrip())
+    _block: list[str] = []
+    for _ln in _wf_lines[_starts[0] + 1:]:
+        if _ln.strip() and (len(_ln) - len(_ln.lstrip())) <= _indent:
+            break  # next step / comment / dedent ends the block
+        _block.append(_ln)
+    _stripped = [ln.strip() for ln in _block]
+    check("  step gates on exactly `if: runner.os == 'Linux'` (not disabled)",
+          "if: runner.os == 'Linux'" in _stripped,
+          f"-> if-lines: {[ln for ln in _stripped if ln.startswith('if:')]}")
+    check("  step sets CODECALC_REQUIRE_TIER_EVIDENCE: '1' in ITS env block",
+          "CODECALC_REQUIRE_TIER_EVIDENCE: '1'" in _stripped)
+    check("  step's run: line actually invokes tests/test_tier_evidence.py",
+          any(ln.startswith("run:") and "tests/test_tier_evidence.py" in ln
+              for ln in _stripped),
+          f"-> run-lines: {[ln for ln in _stripped if ln.startswith('run:')]}")
+    check("  step carries no continue-on-error",
+          not any("continue-on-error" in ln for ln in _stripped))
 
 # ── 3. corroborating evidence for python3 specifically ─────────────────────
 # contract_check.py's CANDIDATES always resolves to whichever is FIRST and
