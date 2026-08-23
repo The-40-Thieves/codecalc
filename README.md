@@ -803,7 +803,7 @@ PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py         # every tool over MC
 PYTHONPATH=. .venv/bin/python tests/test_executor_sweep.py  # sandbox regressions
 ```
 
-56 test files and 15 CI-invoked scripts, **2184 assertions**. "CI-invoked"
+57 test files and 15 CI-invoked scripts, **2184 assertions**. "CI-invoked"
 means referenced by path (`scripts/<name>.py`) from a job in
 `.github/workflows/*.yml` — `scripts/check_claims.py` derives the count that
 way and gates it, so a script wired into a workflow without this sentence
@@ -1002,8 +1002,8 @@ visible instead of silent:
 
 | Tier | Meaning |
 |---|---|
-| `tested` | A CI job genuinely **executes** this language and asserts on its real output, on every PR. Currently `python3` and `node` only — kept deliberately conservative, and gated by `scripts/check_runtime_tiers.py` so a language cannot claim it without a CI check backing it, or silently drop out of CI while still claiming it. |
-| `best_effort` | Declared, with a local smoke fixture (`tests/test_smoke.py`), and plausibly works on a normal install with the right toolchain — but no CI job runs it, so nothing would notice it silently breaking. Every other language, including `rust`, `csharp`, `go`, `java`, and the rest. |
+| `tested` | A CI job genuinely **executes** this language and asserts on its real output, on every PR. Currently `python3`, `node`, `rust`, and `go` — kept deliberately conservative, and gated by `scripts/check_runtime_tiers.py` so a language cannot claim it without a CI check backing it, or silently drop out of CI while still claiming it. `python3`/`node` earn it from the stateful-worker sweep; `rust`/`go` from `tests/test_tier_evidence.py`, which compiles and runs a real program in each and asserts the computed stdout, with skips promoted to failures on the CI leg that carries the evidence. |
+| `best_effort` | Declared, with a local smoke fixture (`tests/test_smoke.py`), and plausibly works on a normal install with the right toolchain — but no CI job runs it, so nothing would notice it silently breaking. Every other language, including `csharp`, `java`, and the rest. |
 | `plan_only` | A registry entry never validated on any runner, anywhere, not even locally. None today. |
 
 `codecalc doctor`'s text output prints both axes side by side rather than

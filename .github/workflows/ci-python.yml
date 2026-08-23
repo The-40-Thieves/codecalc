@@ -415,6 +415,19 @@ jobs:
       # descriptors, subprocess semantics — so they run on all three.
       - name: session + worker regressions
         run: uv run --no-sync python tests/test_python_sweep.py
+      # Reliability-tier evidence for the compiled `tested` languages: compiles
+      # and runs a real rust and go program through the execute path and asserts
+      # the computed stdout. Linux leg only, and there a missing toolchain FAILS
+      # rather than skips (the env var below) — this step is the CI evidence
+      # scripts/check_runtime_tiers.py derives those languages' `tested` tier
+      # from, and a silent skip would leave that claim standing on nothing.
+      # Hosted ubuntu runners ship both toolchains. The gate greps this file for
+      # the step and the flag, so removing either goes red, not quiet.
+      - name: reliability-tier evidence (rust, go)
+        if: runner.os == 'Linux'
+        env:
+          CODECALC_REQUIRE_TIER_EVIDENCE: '1'
+        run: uv run --no-sync python tests/test_tier_evidence.py
       # CODECALC_SESSION_IDLE_TTL_SECONDS is unset by default (no
       # expiry, ever) but reaps an idle worker on next access once
       # configured. Covers both worker languages and asserts on the OS-level
