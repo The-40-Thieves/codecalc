@@ -59,9 +59,10 @@ def runtime_path() -> str:
 #:                   its real output, on every PR. Evidence, not aspiration —
 #:                   scripts/check_runtime_tiers.py derives this set from the
 #:                   CI-wired source files themselves (test_python_sweep.py's
-#:                   WORKER_LANGS, contract_check.py's first CANDIDATES entry)
-#:                   rather than trusting a hand-maintained list that could
-#:                   drift from what CI actually runs.
+#:                   WORKER_LANGS, test_tier_evidence.py's TIER_EVIDENCE_LANGS,
+#:                   contract_check.py's first CANDIDATES entry) rather than
+#:                   trusting a hand-maintained list that could drift from
+#:                   what CI actually runs.
 #:     best_effort   Declared and plausibly works on a normal install with the
 #:                   right toolchain present — codecalc ships a plan for it
 #:                   and a local smoke fixture exists (tests/test_smoke.py) —
@@ -82,7 +83,11 @@ def runtime_path() -> str:
 #: earns `tested` from a DIFFERENT harness: tests/test_python_sweep.py
 #: dynamically probes a real node worker session on every PR and asserts real
 #: stdout from it (state round-trips, a captured fd-1 escape) — not from
-#: contract_check.py, where it is equally a dead candidate.
+#: contract_check.py, where it is equally a dead candidate. `rust` and `go`
+#: earn it from a third: tests/test_tier_evidence.py compiles and runs a real
+#: program in each through executor.execute() and asserts its computed
+#: stdout, with skips promoted to failures on the CI leg that carries the
+#: evidence.
 RELIABILITY_TIERS = ("tested", "best_effort", "plan_only")
 
 
@@ -201,11 +206,12 @@ def source_arg(language: str, path: str, *, windows: bool) -> str:
     return path
 
 
-#: python3 and node are the ONLY two languages a CI job actually executes and
-#: asserts real output from, on every PR — see RELIABILITY_TIERS above for the
-#: evidence trail and scripts/check_runtime_tiers.py for the gate that keeps
-#: this claim honest. Every other language below is `best_effort`: declared,
-#: with a local smoke fixture (tests/test_smoke.py), never exercised in CI.
+#: python3, node, rust and go are the ONLY languages a CI job actually
+#: executes and asserts real output from, on every PR — see RELIABILITY_TIERS
+#: above for the evidence trail and scripts/check_runtime_tiers.py for the
+#: gate that keeps this claim honest. Every other language below is
+#: `best_effort`: declared, with a local smoke fixture (tests/test_smoke.py),
+#: never exercised in CI.
 LANGUAGES: dict[str, dict] = {
     # ── interpreters ─────────────────────────────────────────────────────
     "python3": _c(None, "python3 {file}", "tested"),
@@ -226,17 +232,20 @@ LANGUAGES: dict[str, dict] = {
     "mojo":    _c(None, "mojo run {file}", "best_effort"),
     "swift":   _c(None, "swift {file}", "best_effort"),
     # ── compilers (compile -> run) ───────────────────────────────────────
-    # rust is best_effort, not tested, DESPITE being the executor's own build
-    # toolchain — a review's smoke test found the rust HOST toolchain failing
-    # here even though `rustc` resolves cleanly. contract_check.py's
-    # COMPILED_BROKEN case only proves a bad program is REJECTED correctly; it
-    # never compiles and runs a VALID rust program, so it is not execution
-    # evidence for this tier.
+    # rust and go are `tested`: tests/test_tier_evidence.py compiles and runs
+    # a real program in each through executor.execute() and asserts its exact
+    # computed stdout, on every PR, with skips promoted to failures on the CI
+    # leg that carries the evidence (CODECALC_REQUIRE_TIER_EVIDENCE=1 in
+    # ci-python.yml). That is the execution evidence this tier demands —
+    # rust sat at best_effort DESPITE being the executor's own build
+    # toolchain, because contract_check.py's COMPILED_BROKEN case only proves
+    # a bad program is REJECTED correctly, and a review's smoke test once
+    # found the rust HOST toolchain failing while `rustc` resolved cleanly.
     "c":       _c("gcc -O2 -o {exe} {file}", "{exe}", "best_effort"),
     "cpp":     _c("g++ -O2 -o {exe} {file}", "{exe}", "best_effort"),
     "c++":     _c("g++ -O2 -o {exe} {file}", "{exe}", "best_effort"),
-    "rust":    _c("rustc -O -o {exe} {file}", "{exe}", "best_effort"),
-    "go":      _c(None, "go run {file}", "best_effort"),
+    "rust":    _c("rustc -O -o {exe} {file}", "{exe}", "tested"),
+    "go":      _c(None, "go run {file}", "tested"),
     "fortran": _c("gfortran -O2 -o {exe} {file}", "{exe}", "best_effort"),
     "zig":     _c(None, "zig run {file}", "best_effort"),
     # Java 11+ single-file source launch (JEP 330) — works with JDK 26.
@@ -254,9 +263,9 @@ LANGUAGES: dict[str, dict] = {
     # which made C# structurally unsupported on Windows for want of bash while
     # the runtime itself resolved fine.
     #
-    # best_effort, not tested: the same review that found rust's host
-    # toolchain broken found csharp's broken too, and no CI job
-    # executes a .cs file at all.
+    # best_effort, not tested: the review that found rust's host toolchain
+    # broken (rust has since earned `tested` via tests/test_tier_evidence.py)
+    # found csharp's broken too, and no CI job executes a .cs file at all.
     "csharp": _c(None, "dotnet run {file}", "best_effort"),
     "gleam": _c(
         None,

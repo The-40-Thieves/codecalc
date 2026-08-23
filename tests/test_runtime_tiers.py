@@ -13,10 +13,11 @@ Three things checked:
      proof, automated so it cannot rot into a comment nobody re-runs.
 
 Check 3 needs its own copy of the files the gate reads (codecalc/registry.py,
-tests/test_python_sweep.py, scripts/contract_check.py) rather than mutating
-this checkout in place: mutating codecalc/registry.py under a live test run
-would corrupt every OTHER suite that imports it, on this process or a parallel
-one, for the length of one subprocess call.
+tests/test_python_sweep.py, tests/test_tier_evidence.py,
+scripts/contract_check.py, .github/workflows/ci-python.yml) rather than
+mutating this checkout in place: mutating codecalc/registry.py under a live
+test run would corrupt every OTHER suite that imports it, on this process or
+a parallel one, for the length of one subprocess call.
 """
 
 from __future__ import annotations
@@ -62,8 +63,8 @@ check("executor.catalog() (the list_languages payload) carries `tier` on every e
       f"-> {len(_catalog)} entries")
 
 _tested_in_catalog = sorted(e["name"] for e in _catalog if e["tier"] == "tested")
-check("exactly python3 and node are `tested` in the catalog",
-      _tested_in_catalog == ["node", "python3"], f"-> {_tested_in_catalog}")
+check("exactly python3, node, rust and go are `tested` in the catalog",
+      _tested_in_catalog == ["go", "node", "python3", "rust"], f"-> {_tested_in_catalog}")
 
 # `status` (resolution, this machine) and `tier` (reliability, CI-wide) are
 # INDEPENDENT axes — asserting that directly, not just that both are present.
@@ -101,8 +102,11 @@ else:
         check("runtimes_status: python3 is tier `tested`",
               _rows["python3"].get("tier") == "tested", f"-> {_rows['python3'].get('tier')}")
     if "rust" in _rows:
-        check("runtimes_status: rust is tier `best_effort` (resolved != reliable)",
-              _rows["rust"].get("tier") == "best_effort", f"-> {_rows['rust'].get('tier')}")
+        check("runtimes_status: rust is tier `tested` (evidence: test_tier_evidence.py)",
+              _rows["rust"].get("tier") == "tested", f"-> {_rows['rust'].get('tier')}")
+    if "csharp" in _rows:
+        check("runtimes_status: csharp is tier `best_effort` (resolved != reliable)",
+              _rows["csharp"].get("tier") == "best_effort", f"-> {_rows['csharp'].get('tier')}")
 
 # ═══ 3a. the gate passes on the real, unmodified repo ══════════════════════
 _real = subprocess.run([sys.executable, "scripts/check_runtime_tiers.py"],
@@ -110,35 +114,97 @@ _real = subprocess.run([sys.executable, "scripts/check_runtime_tiers.py"],
 check("scripts/check_runtime_tiers.py exits 0 on the real registry",
       _real.returncode == 0, f"-> exit={_real.returncode}\n{_real.stdout[-400:]}")
 
-# ═══ 3b. FAIL-FIRST: a seeded wrong tier makes the gate go red ═════════════
+# ═══ 3b. FAIL-FIRST: each seeded defect makes the gate go red ══════════════
 # A scratch copy of only what the gate reads, so mutating it cannot corrupt
-# any other suite running in this process or a sibling one.
-with tempfile.TemporaryDirectory(prefix="codecalc-tier-gate-") as _scratch:
-    _scratch_root = pathlib.Path(_scratch)
-    (_scratch_root / "codecalc").mkdir()
-    (_scratch_root / "scripts").mkdir()
-    (_scratch_root / "tests").mkdir()
-    shutil.copy(REPO_ROOT / "codecalc" / "__init__.py", _scratch_root / "codecalc")
-    shutil.copy(REPO_ROOT / "codecalc" / "registry.py", _scratch_root / "codecalc")
-    shutil.copy(REPO_ROOT / "scripts" / "check_runtime_tiers.py", _scratch_root / "scripts")
-    shutil.copy(REPO_ROOT / "scripts" / "contract_check.py", _scratch_root / "scripts")
-    shutil.copy(REPO_ROOT / "tests" / "test_python_sweep.py", _scratch_root / "tests")
+# any other suite running in this process or a sibling one. One fresh copy
+# per seed: a shared copy would let an earlier mutation contaminate a later
+# seed's result, and the copies are five small files.
+_GATE_READS = (
+    ("codecalc", "__init__.py"),
+    ("codecalc", "registry.py"),
+    ("scripts", "check_runtime_tiers.py"),
+    ("scripts", "contract_check.py"),
+    ("tests", "test_python_sweep.py"),
+    ("tests", "test_tier_evidence.py"),
+    (".github/workflows", "ci-python.yml"),
+)
 
-    _reg_path = _scratch_root / "codecalc" / "registry.py"
-    _src = _reg_path.read_text(encoding="utf-8")
-    _needle = '"node":    _c(None, "node {file}", "tested"),'
-    _seeded = _src.replace(_needle, '"node":    _c(None, "node {file}", "best_effort"),')
-    check("seed setup: found the exact node-tier line to mutate",
-          _seeded != _src, "-> registry.py's node entry has changed shape; update the needle")
-    _reg_path.write_text(_seeded, encoding="utf-8")
 
-    _bad_run = subprocess.run([sys.executable, "scripts/check_runtime_tiers.py"],
-                              cwd=_scratch_root, capture_output=True, text=True, timeout=30)
+def _gate_on_mutated_copy(rel_dir: str, name: str, needle: str, replacement: str,
+                          seed_label: str) -> subprocess.CompletedProcess | None:
+    """Run the gate against a scratch repo with one seeded defect.
+
+    Returns the completed process, or None (with a failed check recorded) if
+    the needle no longer matches — a stale needle would otherwise "prove"
+    fail-first against an unmutated copy.
+    """
+    with tempfile.TemporaryDirectory(prefix="codecalc-tier-gate-") as _scratch:
+        _root = pathlib.Path(_scratch)
+        for _dir, _file in _GATE_READS:
+            (_root / _dir).mkdir(parents=True, exist_ok=True)
+            shutil.copy(REPO_ROOT / _dir / _file, _root / _dir)
+        _target = _root / rel_dir / name
+        _src = _target.read_text(encoding="utf-8")
+        _seeded = _src.replace(needle, replacement)
+        check(f"seed setup ({seed_label}): found the exact line to mutate in {name}",
+              _seeded != _src, f"-> {name} has changed shape; update the needle")
+        if _seeded == _src:
+            return None
+        _target.write_text(_seeded, encoding="utf-8")
+        return subprocess.run([sys.executable, "scripts/check_runtime_tiers.py"],
+                              cwd=_root, capture_output=True, text=True, timeout=30)
+
+
+# Seed 1: a worker language's registry tier goes quietly weak.
+_bad_run = _gate_on_mutated_copy(
+    "codecalc", "registry.py",
+    '"node":    _c(None, "node {file}", "tested"),',
+    '"node":    _c(None, "node {file}", "best_effort"),',
+    "node tier flipped")
+if _bad_run is not None:
     check("FAIL-FIRST: check_runtime_tiers.py exits NONZERO when node's tier is wrong",
           _bad_run.returncode != 0, f"-> exit={_bad_run.returncode}")
     check("  ...and names the actual mismatch, not just a generic failure",
           "MISMATCH" in _bad_run.stdout and "node" in _bad_run.stdout,
           f"-> {_bad_run.stdout[-400:]}")
+
+# Seed 2: rust drops out of the evidence harness while the registry still
+# claims `tested` — the exact drift THE tier system exists to catch.
+_bad_run = _gate_on_mutated_copy(
+    "tests", "test_tier_evidence.py",
+    'TIER_EVIDENCE_LANGS = ("rust", "go")',
+    'TIER_EVIDENCE_LANGS = ("go",)',
+    "rust dropped from harness")
+if _bad_run is not None:
+    check("FAIL-FIRST: gate exits NONZERO when rust leaves the evidence harness",
+          _bad_run.returncode != 0, f"-> exit={_bad_run.returncode}")
+    check("  ...and names rust as only-in-registry",
+          "MISMATCH" in _bad_run.stdout and "rust" in _bad_run.stdout,
+          f"-> {_bad_run.stdout[-400:]}")
+
+# Seed 3: the workflow keeps invoking the harness but loses the flag that
+# makes a skip a failure — the harness would still "run" while proving
+# nothing on a runner missing a toolchain.
+_bad_run = _gate_on_mutated_copy(
+    ".github/workflows", "ci-python.yml",
+    "CODECALC_REQUIRE_TIER_EVIDENCE: '1'",
+    "CODECALC_REQUIRE_TIER_EVIDENCE: ''",
+    "require flag stripped")
+if _bad_run is not None:
+    check("FAIL-FIRST: gate exits NONZERO when CI drops the skip-promoting flag",
+          _bad_run.returncode != 0, f"-> exit={_bad_run.returncode}")
+
+# Seed 4: the step survives textually but is disabled — `if: false` leaves
+# every substring in place, which is exactly why the gate reads the step
+# BLOCK for the real Linux condition instead of grepping the whole file.
+_bad_run = _gate_on_mutated_copy(
+    ".github/workflows", "ci-python.yml",
+    "if: runner.os == 'Linux'",
+    "if: false",
+    "evidence step disabled")
+if _bad_run is not None:
+    check("FAIL-FIRST: gate exits NONZERO when the evidence step is if:-disabled",
+          _bad_run.returncode != 0, f"-> exit={_bad_run.returncode}")
 
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else "\n=== ALL PASS ===")
 if FAILS:

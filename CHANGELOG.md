@@ -33,6 +33,27 @@ behind it.
 
 ## [Unreleased]
 
+### Changed
+
+- **`rust` and `go` promoted to the `tested` reliability tier** (from
+  `best_effort`), observable in `list_languages`, `runtimes_status`, and
+  `doctor`. Not a label flip: a new CI-wired harness
+  (`tests/test_tier_evidence.py`) compiles and runs a real program in each
+  through the execute path and asserts the computed stdout on every PR, and
+  on the Linux CI leg a missing toolchain **fails** rather than skips
+  (`CODECALC_REQUIRE_TIER_EVIDENCE=1`). `scripts/check_runtime_tiers.py` now
+  derives the `tested` set from that harness's literal source too, and
+  additionally asserts the evidence STEP itself is live — invokes the
+  harness, sets the skip-promoting flag in its own env, gates on the real
+  Linux condition, no `continue-on-error` — proven fail-first in
+  `tests/test_runtime_tiers.py` for a weakened registry claim, a dropped
+  language, a stripped flag, and an `if:`-disabled step. The harness bakes a
+  per-run nonce into each program and requires that exact computed line as
+  the entire stdout, so a stale artifact or replayed result cannot pass.
+  `csharp` deliberately stays `best_effort`: its recorded host-toolchain
+  breakage is the tier system's founding counterexample, and promoting it is
+  a separate decision.
+
 ### Docs
 
 - **Novice on-ramp: README reordered, new QUICKSTART.md added.** The README's
