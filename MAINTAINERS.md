@@ -11,12 +11,7 @@ disclaimer.
 
 | Area | Maintainer |
 |---|---|
-| Everything | `<maintainer GitHub handle>` (The 13th Letter / [The-40-Thieves](https://github.com/The-40-Thieves)) |
-
-<!-- Fill in the handle before this file goes out. It is left as a placeholder
-     deliberately: a MAINTAINERS.md should name a real, current, public
-     identity, and that is the owner's to confirm rather than an agent's to
-     assert. -->
+| Everything | [`suavecito585`](https://github.com/suavecito585) (The 13th Letter / [The-40-Thieves](https://github.com/The-40-Thieves)) |
 
 Security reports do **not** go here. Use
 [private vulnerability reporting](https://github.com/The-40-Thieves/codecalc/security/advisories/new)
