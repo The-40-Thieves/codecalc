@@ -1,7 +1,25 @@
 # The codecalc result contract
 
-**Current version: `1.3.0`** · Schema: [`result-v1.schema.json`](result-v1.schema.json) ·
+**Current version: `1.4.0`** · Schema: [`result-v1.schema.json`](result-v1.schema.json) ·
 Source of truth: [`codecalc/contract.py`](../../codecalc/contract.py)
+
+`1.4.0` is a MINOR bump over `1.3.0`: it ADDS `artifacts_created` to a
+session-scoped result — `session_run` and `execute_code(session_id=...)` —
+naming the files that run just created or modified in the session workspace,
+as `{path, size, mime, resource}` per file (`resource` is a
+`codecalc://session/{sid}/files/{path}` URI, also readable via
+`session_read_file`). `session_run` additionally adds `truncated_inline`,
+set `true` when more artifacts exist than the reply's inline-content budget
+(8 blocks / 4 MiB) could attach — the full list still appears in
+`artifacts_created` either way. Both fields are additions to the existing
+**session** shape (present on the envelope shape too, for a workspace-only
+session run) and to **compact**, which never drops them for the same reason
+it never drops `unenforced`. Neither field changes what an existing field
+means, so a `1.3.0` client is unaffected. The MCP content blocks
+`session_run` attaches alongside its JSON result (`ImageContent` for a small
+image, `EmbeddedResource` for a small text file, `ResourceLink` otherwise)
+are a TRANSPORT-level addition, not a result-v1 field — this document and
+the schema describe the JSON result only.
 
 `1.3.0` is a MINOR bump over `1.2.0`: it ADDS a `tier` field to every entry in
 the `doctor` diagnostic document's `runtimes` array, plus a `tier_summary`
@@ -84,8 +102,26 @@ supports it, a symbol shim otherwise) is applied at exec and the worker is
 long-lived — and it says so,
 per call.
 
+**`artifacts_created`** (added in `1.4.0`) is present on any session-scoped
+result — this shape from a stateful `python3`/`node` worker, or the envelope
+shape from a workspace-only session language — because both write into a
+workspace that outlives the call. It lists, as `{path, size, mime, resource}`,
+every file the run just created or modified; empty when nothing changed.
+Sessionless `execute_code` (no `session_id`) never carries it: it runs in a
+Rust-owned temp directory deleted the moment the call returns, so there is no
+workspace left to report on. `session_run` — a dedicated tool for running a
+workspace entry file, covered above under the run_lifecycle/envelope split —
+carries the same field, plus `truncated_inline` when its own inline-content
+budget (8 MCP content blocks / 4 MiB) could not attach every artifact; see
+`CHANGELOG.md` ([Unreleased]/"Inline artifacts") or the `_MAX_INLINE_*`
+constants in `codecalc/server.py` for the per-type caps (image/text/link)
+that decide what an artifact becomes on the wire — kept out of the tool's
+own docstring (the live `tools/list` description a client sees) to avoid
+diluting it with detail a lexical tool-selector never needs.
+
 **The compact shape** drops diagnostics to save tokens. It never drops
-`unenforced` or `output_error`, which is the difference between the current
+`unenforced` or `output_error` — or, since `1.4.0`, `artifacts_created` and
+`truncated_inline` — which is the difference between the current
 implementation and the one that was a defect (#117).
 
 > An earlier version of this document claimed there were two shapes and that

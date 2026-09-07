@@ -384,6 +384,11 @@ class SessionService:
             quota_refusal = sessions.quota_precheck(session_id)
             if quota_refusal is not None:
                 return quota_refusal
+            # Taken before the entry file runs, so quota_postcheck below can
+            # report which files it created or modified — see
+            # sessions.execute()'s own `before` for the same snapshot on the
+            # session-worker/workspace-execute path.
+            before = sessions._artifact_snapshot(workdir)
             resource = sessions.resource_read(session_id, entry_file)
         except ValueError as exc:
             return sessions._guard_error(exc)  # #212, see read_file's comment above
@@ -412,4 +417,4 @@ class SessionService:
         # point 4: the entry file just ran arbitrary code with the
         # workspace as its cwd — measure what it left behind and disclose an
         # over-quota session rather than let it grow silently forever.
-        return sessions.quota_postcheck(session_id, result)
+        return sessions.quota_postcheck(session_id, result, d=workdir, before=before)

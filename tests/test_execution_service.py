@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 
 from mcp.server.transport_security import TransportSecuritySettings
-from mcp.types import ImageContent
+from mcp.types import EmbeddedResource, ImageContent, ResourceLink
 
 from codecalc import (
     contract,
@@ -1711,6 +1711,187 @@ def test_spill_files_are_retained_up_to_a_bounded_count() -> None:
             sessions._SPILL_RETENTION = old_retention
 
 
+# ── session_run / execute_code(session_id=...) inline artifacts ───────────
+
+def test_session_run_inlines_oversized_artifact_as_a_link_not_an_image() -> None:
+    """An artifact past session_run's inline-image ceiling (1 MiB raw) comes
+    back as a ResourceLink — size and mime still reported, but no bytes
+    attached — rather than an ImageContent block or silent omission."""
+    old_root = sessions.SESSION_ROOT
+    with tempfile.TemporaryDirectory(prefix="codecalc-artifact-link-") as root:
+        sessions.SESSION_ROOT = Path(root)
+        try:
+            session_id = server.session_start("python3")["session_id"]
+            sessions.write_file(
+                session_id, "big.py",
+                "with open('big.png', 'wb') as f:\n"
+                "    f.write(b'\\x89PNG\\r\\n\\x1a\\n' + b'0' * (2 * 1024 * 1024))\n",
+            )
+            result = server.session_run(session_id, "big.py")
+            check("an oversize artifact still returns the list-with-blocks shape",
+                  isinstance(result, list))
+            blocks = result if isinstance(result, list) else []
+            check("no ImageContent for a 2 MiB PNG",
+                  not any(isinstance(b, ImageContent) for b in blocks))
+            links = [b for b in blocks if isinstance(b, ResourceLink)]
+            check("a ResourceLink stands in, with the real size",
+                  len(links) == 1 and links[0].size == 2 * 1024 * 1024 + 8)
+        finally:
+            server.session_stop(session_id)
+            sessions.SESSION_ROOT = old_root
+
+
+def test_session_run_charges_the_inline_budget_in_encoded_wire_bytes() -> None:
+    """`ImageContent` carries base64 on the wire — ~4/3 an image's raw size —
+    so the 4 MiB inline budget must be charged (and checked, before a file is
+    even read) against the ENCODED size, not the raw one. Four PNG files at
+    exactly the 1 MiB per-image raw ceiling sum to exactly 4 MiB raw (at the
+    budget) but ~5.33 MiB once base64-encoded: with a raw-bytes budget all
+    four would have inlined, actually attaching ~5.33 MiB against a 4 MiB
+    promise; with the encoded-bytes budget only the first two fit, and the
+    rest degrade to ResourceLinks."""
+    old_root = sessions.SESSION_ROOT
+    with tempfile.TemporaryDirectory(prefix="codecalc-artifact-wire-budget-") as root:
+        sessions.SESSION_ROOT = Path(root)
+        try:
+            session_id = server.session_start("python3")["session_id"]
+            header = repr(b"\x89PNG\r\n\x1a\n")
+            raw_size = 1024 * 1024  # exactly _MAX_INLINE_IMAGE_BYTES
+            filler = raw_size - len(b"\x89PNG\r\n\x1a\n")
+            code = "\n".join(
+                f"open('img{i}.png', 'wb').write({header} + b'0' * {filler})"
+                for i in range(4)
+            ) + "\n"
+            check("four 1 MiB images sum to exactly the 4 MiB reply budget, in raw bytes",
+                  4 * raw_size == 4 * 1024 * 1024)
+            sessions.write_file(session_id, "make_images.py", code)
+            result = server.session_run(session_id, "make_images.py")
+            check("four artifacts still return the list-with-blocks shape",
+                  isinstance(result, list))
+            blocks = result if isinstance(result, list) else []
+            images = [b for b in blocks if isinstance(b, ImageContent)]
+            links = [b for b in blocks if isinstance(b, ResourceLink)]
+            check("not all four fit once charged in encoded bytes",
+                  len(images) < 4 and len(links) >= 1)
+            check("the last artifact created (img3.png, also last alphabetically) degrades to a link",
+                  bool(links) and links[-1].name == "img3.png")
+            encoded_total = sum(len(img.data) for img in images)
+            check("the inlined images' ACTUAL wire bytes never exceed the 4 MiB budget",
+                  encoded_total <= 4 * 1024 * 1024)
+        finally:
+            server.session_stop(session_id)
+            sessions.SESSION_ROOT = old_root
+
+
+def test_session_run_inlines_a_small_csv_as_an_embedded_resource() -> None:
+    """A text artifact under the 64 KiB text cap comes back as an
+    EmbeddedResource carrying the actual text, not a link."""
+    old_root = sessions.SESSION_ROOT
+    with tempfile.TemporaryDirectory(prefix="codecalc-artifact-csv-") as root:
+        sessions.SESSION_ROOT = Path(root)
+        try:
+            session_id = server.session_start("python3")["session_id"]
+            sessions.write_file(
+                session_id, "csv.py",
+                "open('out.csv', 'w', newline='').write('a,b\\n1,2\\n')\n",
+            )
+            result = server.session_run(session_id, "csv.py")
+            check("a small CSV returns the list-with-blocks shape", isinstance(result, list))
+            embeds = [b for b in result if isinstance(b, EmbeddedResource)] if isinstance(result, list) else []
+            check("exactly one EmbeddedResource for the CSV", len(embeds) == 1)
+            check("its text is the file's actual content",
+                  bool(embeds) and embeds[0].resource.text == "a,b\n1,2\n")
+            check("its mime is text/csv",
+                  bool(embeds) and embeds[0].resource.mime_type == "text/csv")
+        finally:
+            server.session_stop(session_id)
+            sessions.SESSION_ROOT = old_root
+
+
+def test_session_run_caps_inline_blocks_at_eight_and_flags_truncation() -> None:
+    """Nine new artifacts in one run: the 9th gets no content block, but all
+    nine still appear in `artifacts_created`, and `truncated_inline` is set."""
+    old_root = sessions.SESSION_ROOT
+    with tempfile.TemporaryDirectory(prefix="codecalc-artifact-cap-") as root:
+        sessions.SESSION_ROOT = Path(root)
+        try:
+            session_id = server.session_start("python3")["session_id"]
+            code = "\n".join(f"open('f{i}.txt', 'w').write('x')" for i in range(9)) + "\n"
+            sessions.write_file(session_id, "nine.py", code)
+            result = server.session_run(session_id, "nine.py")
+            check("nine artifacts still return the list shape", isinstance(result, list))
+            check("exactly 8 artifact blocks plus the text block",
+                  isinstance(result, list) and len(result) == 9)
+            data = json.loads(result[0].text) if isinstance(result, list) and result else {}
+            check("truncated_inline is set", data.get("truncated_inline") is True)
+            check("all nine still named in artifacts_created",
+                  len(data.get("artifacts_created", [])) == 9)
+        finally:
+            server.session_stop(session_id)
+            sessions.SESSION_ROOT = old_root
+
+
+def test_execute_code_compact_mode_keeps_artifacts_created() -> None:
+    """execute_code(session_id=..., compact=True) still discloses new files —
+    dropping it in the mode built to save tokens would be #117 again, wearing
+    a different field. Unlike session_run, execute_code never builds content
+    blocks, so the result stays a plain dict either way."""
+    old_root = sessions.SESSION_ROOT
+    with tempfile.TemporaryDirectory(prefix="codecalc-artifact-compact-") as root:
+        sessions.SESSION_ROOT = Path(root)
+        try:
+            session_id = server.session_start("python3")["session_id"]
+            result = server.execute_code(
+                "python3", "open('a.txt', 'w').write('hi')",
+                session_id=session_id, compact=True,
+            )
+            check("a compact result is still a plain dict", isinstance(result, dict))
+            created = result.get("artifacts_created") or []
+            check("compact mode keeps artifacts_created",
+                  any(a.get("path") == "a.txt" for a in created))
+        finally:
+            server.session_stop(session_id)
+            sessions.SESSION_ROOT = old_root
+
+
+def test_session_run_stamps_the_wrapped_json_block_even_though_coded_cannot_see_it() -> None:
+    """`_coded` (server.py's tool-registration wrapper) stamps a DICT result;
+    session_run's inline-artifact reply is a LIST, so the stamp has to happen
+    inside the tool before wrapping. Checked both directions: a successful
+    run (contract_version) and a run that fails AFTER writing a file (code),
+    so the manually-stamped path is exercised for both, not just the
+    untouched plain-dict path a refusal or a no-artifact run still takes."""
+    old_root = sessions.SESSION_ROOT
+    with tempfile.TemporaryDirectory(prefix="codecalc-artifact-stamp-") as root:
+        sessions.SESSION_ROOT = Path(root)
+        try:
+            session_id = server.session_start("python3")["session_id"]
+            sessions.write_file(session_id, "ok.py", "open('x.txt', 'w').write('x')\n")
+            ok_result = server.session_run(session_id, "ok.py")
+            check("a successful artifact-bearing run returns the list shape",
+                  isinstance(ok_result, list))
+            ok_data = json.loads(ok_result[0].text) if isinstance(ok_result, list) and ok_result else {}
+            check("its JSON text block carries contract_version",
+                  ok_data.get("contract_version") == contract.CONTRACT_VERSION)
+
+            sessions.write_file(
+                session_id, "fail.py",
+                "open('y.txt', 'w').write('y')\nimport sys; sys.exit(1)\n",
+            )
+            fail_result = server.session_run(session_id, "fail.py")
+            check("a FAILING artifact-bearing run also returns the list shape",
+                  isinstance(fail_result, list))
+            fail_data = (json.loads(fail_result[0].text)
+                        if isinstance(fail_result, list) and fail_result else {})
+            check("its JSON text block still carries contract_version",
+                  fail_data.get("contract_version") == contract.CONTRACT_VERSION)
+            check("and a code, same as the untouched dict path would give it",
+                  fail_data.get("ok") is False and bool(fail_data.get("code")))
+        finally:
+            server.session_stop(session_id)
+            sessions.SESSION_ROOT = old_root
+
+
 if __name__ == "__main__":
     test_service_routes_a_canonical_spec_and_records_provider_identity()
     test_service_rejects_an_unknown_provider_without_falling_back()
@@ -1760,4 +1941,10 @@ if __name__ == "__main__":
     test_session_run_also_spills_oversized_output()
     test_a_spill_the_server_writes_is_always_readable_back()
     test_spill_files_are_retained_up_to_a_bounded_count()
+    test_session_run_inlines_oversized_artifact_as_a_link_not_an_image()
+    test_session_run_charges_the_inline_budget_in_encoded_wire_bytes()
+    test_session_run_inlines_a_small_csv_as_an_embedded_resource()
+    test_session_run_caps_inline_blocks_at_eight_and_flags_truncation()
+    test_execute_code_compact_mode_keeps_artifacts_created()
+    test_session_run_stamps_the_wrapped_json_block_even_though_coded_cannot_see_it()
     sys.exit(1 if FAILS else 0)
