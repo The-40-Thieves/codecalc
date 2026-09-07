@@ -4,6 +4,7 @@
   "display_name": "codecalc",
   "version": "0.5.0",
   "description": "Code & logic calculator for AI agents: 31 languages, symbolic math, SMT/logic solving, Big-O.",
+  "long_description": "First launch needs network access: it resolves and installs `codecalc[full]` (~120 MB, including the symbolic-math and parsing extras) from PyPI into an isolated environment. Offline at that point, it fails with a dependency-resolution error rather than starting in a degraded mode. After that first launch everything is cached locally, and nothing is re-downloaded unless the version changes. Windows on ARM64 is not supported: one of codecalc's own dependencies (cryptography) ships no wheel for that platform.",
   "author": {
     "name": "The 40 Thieves",
     "url": "https://github.com/The-40-Thieves"

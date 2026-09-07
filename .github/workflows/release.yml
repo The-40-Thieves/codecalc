@@ -679,6 +679,17 @@ jobs:
 
   release-assets:
     name: checksums + attach to GitHub release
+    # `build-mcpb` is a DELIBERATE coupling, not an oversight: this job is the
+    # one that actually drafts the GitHub release (checksums, provenance
+    # attestation, `gh release upload`), and a release without its MCPB
+    # bundle attached is exactly the kind of partial release this workflow's
+    # own header already refuses for a half-uploaded platform matrix. The
+    # trade-off this accepts: a persistently broken `npx` fetch of the
+    # packaging CLI (unlikely — scripts/build_mcpb.py retries it 3x — but not
+    # impossible) blocks the release even though every platform wheel built
+    # and verified cleanly. `publish-pypi`/`publish-testpypi`/`publish-crates`
+    # below do NOT depend on build-mcpb, so a stuck bundle build never blocks
+    # those two registries.
     needs: [build, verify, build-mcpb]
     runs-on: ubuntu-latest
     # write, unlike every job above — this is the only one that touches the

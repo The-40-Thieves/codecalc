@@ -29,14 +29,26 @@ The `@anthropic-ai/mcpb` CLI is pinned to an EXACT version below and run via
 change what a release-tagged commit produces with no diff anywhere in this
 repo to review.
 
+Both `npx` invocations retry on failure — 3 attempts, linear backoff — the
+same shape as codecalc/prefetch.py's grammar-download retry (see that
+module's own comment for the reasoning: one attempt is a coin flip on the
+network, not a measurement of it). This matters more here than it looks:
+release.yml's release-assets job (checksums, build-provenance attestation,
+`gh release upload`) depends on this script succeeding, so a transient `npx`
+fetch failure of the packaging CLI from the npm registry would otherwise
+skip drafting the entire GitHub release even though every platform wheel
+built and verified cleanly.
+
 Usage: python scripts/build_mcpb.py
 """
 
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
+import time
 import tomllib
 from pathlib import Path
 
@@ -49,6 +61,19 @@ DIST_DIR = REPO / "dist"
 #: deliberately, in a reviewable diff.
 MCPB_CLI_VERSION = "2.1.2"
 
+#: Same shape as codecalc/prefetch.py's ATTEMPTS/BACKOFF_SECONDS: 3 attempts,
+#: linear backoff, enough to distinguish "the network blipped" from "npm is
+#: actually down" without hanging a release build indefinitely.
+ATTEMPTS = 3
+BACKOFF_SECONDS = 2
+
+#: `codecalc[full]==X.Y.Z`, optionally followed by a PEP 508 environment
+#: marker (mcpb/pyproject.toml carries one to exclude Windows on ARM64 — see
+#: that file's own comment). Mirrors scripts/check_version.py's own
+#: extractor; this script only needs the VERSION out of it, not the marker
+#: text — tests/test_mcpb_manifest.py is what asserts the marker itself.
+_DEPENDENCY_PIN_RE = re.compile(r"^codecalc\[full\]==([^\s;]+)(?:\s*;.*)?$")
+
 
 def codecalc_version() -> str:
     return tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
@@ -56,7 +81,20 @@ def codecalc_version() -> str:
 
 def run(args: list[str]) -> None:
     print(f"$ {' '.join(args)}")
-    subprocess.run(args, check=True)
+    last_exc: subprocess.CalledProcessError | None = None
+    for attempt in range(1, ATTEMPTS + 1):
+        try:
+            subprocess.run(args, check=True)
+            return
+        except subprocess.CalledProcessError as exc:
+            last_exc = exc
+            if attempt < ATTEMPTS:
+                wait = BACKOFF_SECONDS * attempt
+                print(f"::warning::{args[0]} failed (attempt {attempt}/{ATTEMPTS}, "
+                      f"exit {exc.returncode}); retrying in {wait}s")
+                time.sleep(wait)
+    print(f"::error::{args[0]} failed after {ATTEMPTS} attempts")
+    raise last_exc
 
 
 def main() -> int:
@@ -72,10 +110,10 @@ def main() -> int:
 
     mcpb_pyproject = tomllib.loads((MCPB_DIR / "pyproject.toml").read_text(encoding="utf-8"))
     deps = mcpb_pyproject.get("project", {}).get("dependencies", [])
-    expected_pin = f"codecalc[full]=={version}"
-    if expected_pin not in deps:
-        print(f"::error::mcpb/pyproject.toml does not pin {expected_pin!r} "
-              f"(dependencies: {deps!r}) — run scripts/check_version.py")
+    pinned_version = next((m.group(1) for d in deps if (m := _DEPENDENCY_PIN_RE.match(d))), None)
+    if pinned_version != version:
+        print(f"::error::mcpb/pyproject.toml pins codecalc[full]=={pinned_version!r}, "
+              f"expected {version!r} (dependencies: {deps!r}) — run scripts/check_version.py")
         return 1
     print(f"ok   mcpb/manifest.json and mcpb/pyproject.toml agree on {version}")
 

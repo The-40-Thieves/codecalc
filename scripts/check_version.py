@@ -244,6 +244,16 @@ def mcpb_pyproject_version() -> str | None:
     return str(version)
 
 
+#: `codecalc[full]==X.Y.Z`, optionally followed by a PEP 508 environment
+#: marker (`; <marker expr>`) — mcpb/pyproject.toml carries one to exclude
+#: Windows on ARM64 (see that file's own comment for why). The marker's own
+#: TEXT is not this script's job to verify — tests/test_mcpb_manifest.py
+#: asserts that separately, since a wrong-but-present marker is a structural
+#: defect in the manifest, not a version mismatch. This only has to keep
+#: finding the VERSION through whatever marker is there.
+_DEPENDENCY_PIN_RE = re.compile(r"^codecalc\[full\]==([^\s;]+)(?:\s*;.*)?$")
+
+
 def mcpb_dependency_pin_version() -> str | None:
     """The pinned `"codecalc[full]==X.Y.Z"` dependency in mcpb/pyproject.toml.
 
@@ -259,8 +269,7 @@ def mcpb_dependency_pin_version() -> str | None:
         fail(f"could not read dependencies from {MCPB_PYPROJECT.relative_to(REPO)}: {exc}")
         return None
     deps = data.get("project", {}).get("dependencies", [])
-    m = next((re.match(r"^codecalc\[full\]==([^\s;]+)$", d) for d in deps if
-               re.match(r"^codecalc\[full\]==([^\s;]+)$", d)), None)
+    m = next((match for d in deps if (match := _DEPENDENCY_PIN_RE.match(d))), None)
     if not m:
         fail(f"{MCPB_PYPROJECT.relative_to(REPO)} has no 'codecalc[full]==X.Y.Z' "
              f"dependency pin — the extractor matched nothing among {deps!r}")
