@@ -1,0 +1,45 @@
+[project]
+# NOT the codecalc package itself — this is the tiny stub project the MCPB
+# "uv" runtime resolves via `uv run --directory <bundle> src/server.py`. Its
+# only job is to declare one dependency: the REAL, already-published
+# `codecalc[full]` wheel on PyPI (the same one `pip install 'codecalc[full]'`
+# gets, Rust executor binary included). Nothing here is vendored — `uv run`
+# builds an isolated venv on first launch and caches it, exactly as it would
+# for any other pyproject.toml.
+#
+# Kept version-pinned to the same value as the repo root's pyproject.toml.
+# scripts/check_version.py gates that as CI's version of the check;
+# scripts/build_mcpb.py CHECKS the same thing locally (it does not write to
+# either file) and refuses to pack a bundle if this file's dependency line or
+# the sibling manifest.json's "version" have drifted from that single source
+# of truth — both are hand-bumped alongside the other version sites on a
+# release, same as codecalc/__init__.py or the Dockerfile's ARG.
+#
+# The environment marker excludes Windows on ARM64: codecalc's own
+# dependency chain (mcp -> pyjwt[crypto] -> cryptography) ships no
+# `win_arm64` wheel on PyPI (confirmed against cryptography 50.0.1; this
+# repo's own release.yml documents the same gap for its windows-aarch64 leg,
+# which publishes a standalone archive but no wheel for exactly this reason).
+# Without this marker, `uv run` would try to build cryptography from an
+# sdist on that platform and fail deep inside a compiler error instead of a
+# clear message. `platform_machine`'s exact value here ('ARM64', uppercase)
+# is uv's own documented marker value for that platform — verified against
+# uv's "Common marker values" table (docs/concepts/resolution.md) via
+# context7, not guessed. The exclusion is written as
+# `sys_platform != 'win32' or platform_machine != 'ARM64'` (De Morgan's law)
+# rather than `not (sys_platform == 'win32' and platform_machine == 'ARM64')`
+# because PEP 508's marker grammar has no unary `not` — verified empirically:
+# `packaging.markers.Marker(...)` raises `InvalidMarker` on the `not (...)`
+# form, and `uv lock` against it fails too (setuptools rejects the
+# project's own pyproject.toml as "must be pep508" while trying to build
+# metadata for it). mcpb/src/server.py carries the matching runtime guard —
+# see that file — because on this one platform the marker means codecalc is
+# not installed at all, and importing it un-guarded would fail with a bare
+# ModuleNotFoundError instead of a message naming the cause.
+name = "codecalc-mcpb"
+version = "0.5.0"
+description = "MCPB bundle stub that resolves the published codecalc[full] package via uv"
+requires-python = ">=3.11"
+dependencies = [
+    "codecalc[full]==0.5.0; sys_platform != 'win32' or platform_machine != 'ARM64'",
+]

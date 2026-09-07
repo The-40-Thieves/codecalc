@@ -1,0 +1,43 @@
+{
+  "manifest_version": "0.4",
+  "name": "codecalc",
+  "display_name": "codecalc",
+  "version": "0.5.0",
+  "description": "Code & logic calculator for AI agents: 31 languages, symbolic math, SMT/logic solving, Big-O.",
+  "long_description": "First launch needs network access: it resolves and installs `codecalc[full]` (~120 MB, including the symbolic-math and parsing extras) from PyPI into an isolated environment. Offline at that point, it fails with a dependency-resolution error rather than starting in a degraded mode. After that first launch everything is cached locally, and nothing is re-downloaded unless the version changes. Windows on ARM64 is not supported: one of codecalc's own dependencies (cryptography) ships no wheel for that platform.",
+  "author": {
+    "name": "The 40 Thieves",
+    "url": "https://github.com/The-40-Thieves"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/The-40-Thieves/codecalc"
+  },
+  "homepage": "https://github.com/The-40-Thieves/codecalc",
+  "support": "https://github.com/The-40-Thieves/codecalc/issues",
+  "license": "Apache-2.0",
+  "keywords": ["mcp", "sandbox", "executor", "code-execution", "llm", "agent", "symbolic-math"],
+  "server": {
+    "type": "uv",
+    "entry_point": "src/server.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": ["run", "--directory", "${__dirname}", "src/server.py"],
+      "env": {
+        "CODECALC_RUNTIME_PATH": "${user_config.runtime_path}"
+      }
+    }
+  },
+  "compatibility": {
+    "platforms": ["darwin", "linux", "win32"],
+    "runtimes": { "python": ">=3.11" }
+  },
+  "user_config": {
+    "runtime_path": {
+      "type": "string",
+      "title": "Runtime PATH",
+      "description": "PATH executed code resolves language runtimes on (CODECALC_RUNTIME_PATH). Claude Desktop launches the server with a stripped environment, so an inherited PATH can miss a toolchain manager's shims (mise, nvm, rustup, ...) entirely and most languages silently become unavailable. Leave blank to fall back to the server's own PATH.",
+      "required": false
+    }
+  }
+}

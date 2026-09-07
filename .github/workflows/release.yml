@@ -413,6 +413,34 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  build-mcpb:
+    # The MCPB ("MCP Bundle") is Claude Desktop's one-click extension format.
+    # Independent of the five platform legs above: mcpb/manifest.json declares
+    # the "uv" server type (see that file's own comments), which vendors
+    # nothing — no site-packages, no copy of codecalc-exec — so this job needs
+    # no Rust toolchain and no per-platform matrix. scripts/build_mcpb.py packs
+    # mcpb/ as-is; the bundle's own `uv run` step, which resolves the pinned
+    # `codecalc[full]==<version>` dependency from PyPI, happens on an end
+    # user's machine, not here.
+    name: build the MCPB bundle (Claude Desktop extension)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Only `npx` is needed, to run the pinned `@anthropic-ai/mcpb` CLI (see
+      # scripts/build_mcpb.py). The runner's own system Python (ubuntu-latest
+      # ships 3.12+) already has stdlib tomllib for that script.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      - name: build mcpb/ -> dist/codecalc-<version>.mcpb
+        run: python3 scripts/build_mcpb.py
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-mcpb
+          path: dist/*.mcpb
+          if-no-files-found: error
+          retention-days: 14
+
   verify:
     # Issue #24's acceptance criterion: "CI installs the artifact exactly as
     # a user would and runs the contract suite against it." Not a rebuild —
@@ -651,7 +679,18 @@ jobs:
 
   release-assets:
     name: checksums + attach to GitHub release
-    needs: [build, verify]
+    # `build-mcpb` is a DELIBERATE coupling, not an oversight: this job is the
+    # one that actually drafts the GitHub release (checksums, provenance
+    # attestation, `gh release upload`), and a release without its MCPB
+    # bundle attached is exactly the kind of partial release this workflow's
+    # own header already refuses for a half-uploaded platform matrix. The
+    # trade-off this accepts: a persistently broken `npx` fetch of the
+    # packaging CLI (unlikely — scripts/build_mcpb.py retries it 3x — but not
+    # impossible) blocks the release even though every platform wheel built
+    # and verified cleanly. `publish-pypi`/`publish-testpypi`/`publish-crates`
+    # below do NOT depend on build-mcpb, so a stuck bundle build never blocks
+    # those two registries.
+    needs: [build, verify, build-mcpb]
     runs-on: ubuntu-latest
     # write, unlike every job above — this is the only one that touches the
     # release itself, and only reaches the upload step on a real tag push.
