@@ -301,11 +301,40 @@ difference is worth stating rather than leaving a reader to discover:
 | `install_package` | **Yes, by design.** It runs uv / npm / gem / cargo, which fetch from their registries. Installer hooks also run *outside* the sandbox — see [SECURITY.md](SECURITY.md) |
 | `runtimes_status`, `update_runtimes` | **Yes.** They shell out to mise / rustup / swiftly / npm, which check remote versions |
 | code you execute | **Yes, unless `no_net=True`** — and that guarantee needs the native executor (seccomp-bpf where the Linux kernel supports it, a symbol shim otherwise; see the guarantee table below), so the pure-Python fallback reports it in `unenforced` instead of applying it. Set `CODECALC_REQUIRE_NATIVE=1` to turn "fallback in use" into a startup failure instead of a result you have to notice by reading `unenforced` |
+| `execute_code` / `session_run` with declared `dependencies` | **Yes, before the sandboxed step, through the confined `install_package` path.** A PEP 723 block (python3) or the `dependencies` argument is installed BEFORE the code runs — never inside the sandbox — and refused (`capability_not_requested`, no fetch attempted) when `no_net=True` was requested or the capability policy denies or strictly limits network |
 
 These distinctions are stated precisely on purpose: a guarantee described more
 broadly than it is enforced is exactly the failure mode this project works to
 avoid, so "offline-core" is scoped to what the structural test can actually
 support rather than claimed as a blanket "no network calls".
+
+**A PEP 723 block alone, with no `dependencies` argument, can trigger the
+install above.** `execute_code`/`session_run` read the block out of the source
+text itself — a caller who passes no `dependencies` argument at all still gets
+a confined `uv`/`npm` subprocess and real egress if the code they submit
+happens to carry a `# /// script` block, whenever the refusal rule above does
+not apply. This is logged distinctly (`dependency_install_implicit` in the
+audit trail, alongside `install_denied`) so an operator can tell "source text
+alone triggered this" from an explicit `install_package`/`dependencies=` call.
+To disable it: `no_net=True` on the call, or a `deny-network`/`strict`
+`CODECALC_CAPABILITY_POLICY` — either one refuses before any fetch, block or
+no block. `execute_code_stream`, `run_submit`, and `compare_execution` never
+read this block at all: none of them accept a `dependencies` argument, so a
+`# /// script` block in code passed to any of them is inert text, not a
+trigger.
+
+**Two ceilings govern a dependency-bearing run, not one.** The run's own
+`timeout` bounds the sandboxed step; it says nothing about installing
+dependencies FIRST, outside the sandbox. A separate, fixed budget
+(`codecalc.dependencies.DEFAULT_DEPENDENCY_INSTALL_BUDGET_SECONDS`, 120s,
+aggregate across every dependency of one run) bounds that step instead —
+exceeding it refuses the run with a stamped `timeout` naming the budget,
+before the run's own `timeout` clock even starts. A sessionless run's
+dependency workdir is also held to a disk quota — reusing
+`CODECALC_SESSION_DISK_QUOTA_MB` (below), the same cap a session workspace
+already has — and a run that grows past it after a successful install is
+refused with a stamped `resource_exhausted` naming the measured size and the
+cap.
 
 **The grammar download, stated plainly, because it is the one that is easy to
 miss.** The other three paths above go through a CHILD PROCESS, which is what
@@ -652,7 +681,7 @@ All optional. codecalc runs with none of these set.
 | `CODECALC_CLEANUP_ABANDONED_AGE_HOURS` | `24` | How old (and untouched) a marker-less, session-shaped directory must be before `codecalc cleanup --include-unmarked` will consider it abandoned. Only consulted with `--include-unmarked`; the default `cleanup` invocation never reads it. |
 | `CODECALC_PACKAGE_ALLOWLIST` | *(unset)* | Deny-by-default allowlist for `install_package`. Unset, any syntactically valid package name may be installed (today's behaviour). Set, only listed packages install — anything else is refused before any subprocess or network work, with the stable `permission_denied` code. Comma-separated; each entry is `<language>:<name>` (scoped to one ecosystem) or a bare `<name>` (every ecosystem). Matches the bare name, ignoring `[extras]` and `==version` pins. |
 | `CODECALC_SESSION_IDLE_TTL_SECONDS` | *(unset)* | Idle-expiry for stateful (python3/node) session workers: a session untouched for longer than this is reaped — worker killed via the same teardown `session_stop` uses — on its next access. Unset, a session worker lives until `session_stop` or server exit, same as before this existed. A subsequent call on an expired session gets `ok: false` with the stable `worker_failure` code, never a silent respawn. |
-| `CODECALC_SESSION_DISK_QUOTA_MB` | `512` | Per-session ceiling on total workspace disk. `session_write_file` and oversized-output spilling refuse BEFORE writing (`resource_exhausted`, no partial file); code run via `execute_code(session_id=...)`/`session_run` is checked before it starts and, since its own writes cannot be pre-checked, again after — an over-quota run still returns its result, now with `disk_quota_exceeded` plus usage/limit, and the session's next write/run is refused until usage (re-measured fresh each time) drops back under the line. |
+| `CODECALC_SESSION_DISK_QUOTA_MB` | `512` | Per-session ceiling on total workspace disk. `session_write_file` and oversized-output spilling refuse BEFORE writing (`resource_exhausted`, no partial file); code run via `execute_code(session_id=...)`/`session_run` is checked before it starts and, since its own writes cannot be pre-checked, again after — an over-quota run still returns its result, now with `disk_quota_exceeded` plus usage/limit, and the session's next write/run is refused until usage (re-measured fresh each time) drops back under the line. Also the cap a SESSIONLESS run's per-run dependency workdir is held to (`codecalc/dependencies.py`, checked after each successful install) — reused rather than a second, independently-tunable constant, since it is the same kind of workspace in every way that matters here. |
 | `CODECALC_TOTAL_DISK_QUOTA_MB` | `8192` | Global ceiling on disk summed across every session workspace on this host — closes the gap where staying under the per-session quota by opening many sessions would otherwise be unbounded. Same enforcement points and `resource_exhausted` contract as `CODECALC_SESSION_DISK_QUOTA_MB`. |
 | `CODECALC_MAX_ARTIFACT_BYTES` | `16777216` (16 MiB) | Per-write size ceiling for anything a session write path creates — independent of the total quotas above, so one runaway file cannot hide under a generous session/global total. A WRITE-time cap; distinct from `RESOURCE_MAX_BYTES` (4 MiB), which caps what a *read* may serve back. |
 | `CODECALC_MAX_ARTIFACT_COUNT` | `500` | Per-session ceiling on the number of artifact files — catches a session writing one byte at a time into thousands of tiny files, a shape no byte-sized cap alone bounds. Only a write that creates a NEW file is checked; overwriting an existing one always succeeds regardless of the count. |
@@ -863,7 +892,7 @@ PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py         # every tool over MC
 PYTHONPATH=. .venv/bin/python tests/test_executor_sweep.py  # sandbox regressions
 ```
 
-61 test files and 16 CI-invoked scripts, **2184 assertions**. "CI-invoked"
+62 test files and 16 CI-invoked scripts, **2184 assertions**. "CI-invoked"
 means referenced by path (`scripts/<name>.py`) from a job in
 `.github/workflows/*.yml` — `scripts/check_claims.py` derives the count that
 way and gates it, so a script wired into a workflow without this sentence

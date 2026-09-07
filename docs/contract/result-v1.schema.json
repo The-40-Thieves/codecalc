@@ -177,6 +177,48 @@
         "workdir": {
           "type": "string"
         },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "spec",
+              "language",
+              "ok",
+              "installer",
+              "elapsed_ms"
+            ],
+            "properties": {
+              "spec": {
+                "type": "string",
+                "description": "The dependency as declared, verbatim."
+              },
+              "language": {
+                "type": "string"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "installer": {
+                "type": "string",
+                "description": "The package manager invoked (uv, npm, ...)."
+              },
+              "elapsed_ms": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Wall-clock time this ONE install took, milliseconds. Not the run's own `timeout`: a separate, fixed aggregate budget governs installs (see README/SECURITY.md); exceeding it fails the run before this array gains a further entry."
+              },
+              "unenforced": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "This install's own confinement disclosure \u2014 packages.install's `unenforced`, carried per-entry rather than merged into the run's own."
+              }
+            }
+          },
+          "description": "Present only when the run declared dependencies. Installed BEFORE the sandboxed step, through the confined install_package path \u2014 never inside the sandbox."
+        },
         "code": {
           "type": "string",
           "enum": [
@@ -258,6 +300,48 @@
           "items": {
             "type": "string"
           }
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "spec",
+              "language",
+              "ok",
+              "installer",
+              "elapsed_ms"
+            ],
+            "properties": {
+              "spec": {
+                "type": "string",
+                "description": "The dependency as declared, verbatim."
+              },
+              "language": {
+                "type": "string"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "installer": {
+                "type": "string",
+                "description": "The package manager invoked (uv, npm, ...)."
+              },
+              "elapsed_ms": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Wall-clock time this ONE install took, milliseconds. Not the run's own `timeout`: a separate, fixed aggregate budget governs installs (see README/SECURITY.md); exceeding it fails the run before this array gains a further entry."
+              },
+              "unenforced": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "This install's own confinement disclosure \u2014 packages.install's `unenforced`, carried per-entry rather than merged into the run's own."
+              }
+            }
+          },
+          "description": "Present only when the run declared dependencies. Installed BEFORE the sandboxed step, through the confined install_package path \u2014 never inside the sandbox."
         },
         "code": {
           "type": "string",

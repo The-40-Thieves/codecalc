@@ -150,6 +150,57 @@ def _error_properties() -> dict:
     }
 
 
+def _dependencies_property() -> dict:
+    """The optional `dependencies` field: 1.4.0's MINOR addition.
+
+    Present only when the run declared dependencies (a PEP 723 block or the
+    `dependencies` tool argument) — absent otherwise, so every existing
+    result is byte-for-byte unchanged. One entry per dependency ATTEMPTED,
+    in order; installation stops at the first failure, so a shorter-than-
+    requested list on a failing run means "these are as far as it got",
+    not "these are all that were declared".
+    """
+    return {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "required": ["spec", "language", "ok", "installer", "elapsed_ms"],
+            "properties": {
+                "spec": {"type": "string", "description": "The dependency as declared, verbatim."},
+                "language": {"type": "string"},
+                "ok": {"type": "boolean"},
+                "installer": {
+                    "type": "string",
+                    "description": "The package manager invoked (uv, npm, ...).",
+                },
+                "elapsed_ms": {
+                    "type": "integer", "minimum": 0,
+                    "description": (
+                        "Wall-clock time this ONE install took, milliseconds. "
+                        "Not the run's own `timeout`: a separate, fixed "
+                        "aggregate budget governs installs (see README/"
+                        "SECURITY.md); exceeding it fails the run before this "
+                        "array gains a further entry."
+                    ),
+                },
+                "unenforced": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": (
+                        "This install's own confinement disclosure — "
+                        "packages.install's `unenforced`, carried per-entry "
+                        "rather than merged into the run's own."
+                    ),
+                },
+            },
+        },
+        "description": (
+            "Present only when the run declared dependencies. Installed "
+            "BEFORE the sandboxed step, through the confined install_package "
+            "path — never inside the sandbox."
+        ),
+    }
+
+
 def build_schema(dialect: str | None = None, schema_id: str | None = None) -> dict:
     """The published schema, as a dict. Single source of truth.
 
@@ -344,6 +395,7 @@ def build_schema(dialect: str | None = None, schema_id: str | None = None) -> di
                         ),
                     },
                     "workdir": {"type": "string"},
+                    "dependencies": _dependencies_property(),
                     **{k: v for k, v in _error_properties().items() if k != "ok"},
                 },
             },
@@ -385,6 +437,7 @@ def build_schema(dialect: str | None = None, schema_id: str | None = None) -> di
                     "exit_code": {"type": ["integer", "null"]},
                     "output_truncated": {"type": "boolean"},
                     "unenforced": {"type": "array", "items": {"type": "string"}},
+                    "dependencies": _dependencies_property(),
                     **{k: v for k, v in _error_properties().items() if k != "ok"},
                 },
             },

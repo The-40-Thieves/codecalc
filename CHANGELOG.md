@@ -152,6 +152,48 @@ behind it.
   new JSON fields on the session/envelope/compact shapes — the same MINOR
   bump the annotations/`outputSchema`/`_meta` change above shares; both
   landed against the same `1.3.0` base, so there is one bump, not two.
+- **Per-run dependencies for `execute_code` and `session_run`.** A PEP 723
+  inline script metadata block (`# /// script` ... `# ///`, python3 only) or an
+  explicit `dependencies: list[str]` tool argument (the only mechanism for
+  node; a convenience for python3 that MERGES with the block, deduped by PEP
+  503 normalized name with the argument winning a conflict) installs packages
+  BEFORE the code runs. The fetch never runs inside the sandboxed step: every
+  dependency goes through the existing confined `install_package` path
+  (allowlist, argv-injection checks, `--only-binary=:all:`/`--ignore-scripts`,
+  Landlock/Seatbelt confinement) first, targeting the run's own workdir — a
+  sessionless run gets one pre-created for it and removed afterward via the
+  same identity-checked deletion the executor uses for its own temp
+  directories. A dependency-bearing run is refused (`capability_not_requested`,
+  no fetch attempted) when `no_net=True` was requested or the active
+  `CODECALC_CAPABILITY_POLICY` denies or strictly limits network — the
+  sandboxed step's own `--no-net` is unrelated and unchanged. Two more
+  ceilings, separate from the run's own `timeout`: a fixed, aggregate
+  install-time BUDGET across every dependency of one run (120s,
+  `DEFAULT_DEPENDENCY_INSTALL_BUDGET_SECONDS`; `packages.install()` gained a
+  `timeout` parameter, default 600s unchanged, so this can bound each
+  install by the remaining budget) — exceeding it refuses the run with a
+  stamped `timeout` naming the budget and how far it got, before the run's
+  own `timeout` clock even starts; and, for a sessionless run, a disk QUOTA
+  on the per-run dependency workdir, reusing `CODECALC_SESSION_DISK_QUOTA_MB`
+  (checked after each successful install) rather than a second constant —
+  exceeding it refuses with a stamped `resource_exhausted` naming the
+  measured size and the cap. A PEP 723 block ALONE, with no `dependencies`
+  argument, is enough to trigger an install — this is audited distinctly
+  (`audit.DEPENDENCY_INSTALL_IMPLICIT`) from an explicit
+  `install_package`/`dependencies=` call, and `SessionService` gained an
+  `audit` parameter (server.py now passes it) so `session_run`'s installs are
+  audited too. New optional `dependencies` field on the execution result,
+  landing under the SAME `1.4.0` (no further bump — an additional field on
+  the version the sibling entries above already moved to):
+  `[{spec, language, ok, installer, elapsed_ms, unenforced?}]`. New
+  `codecalc/dependencies.py`; `packages.install()` also gained a `workdir`
+  parameter for a sessionless target directory. `dependencies.refusal_result`
+  names `network` in `requested_capabilities` (not `[]`), matching
+  `capabilities.rejection_result`'s own shape. README's "Network boundary"
+  table (plus a paragraph on the implicit trigger and the two ceilings) and
+  SECURITY.md's "Explicitly out of scope" list each cover this;
+  `execute_code_stream`/`run_submit`/`compare_execution` docstrings now say
+  a PEP 723 block is inert there (none of them read one).
 
 ### Docs
 

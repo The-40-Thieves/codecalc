@@ -208,7 +208,7 @@ _audit_log = audit_module.from_env(secrets=_audit_secrets())
 _execution_service = execution_service.ExecutionService(
     _provider_registry, supervisor=_run_supervisor, audit=_audit_log
 )
-_session_service = execution_service.SessionService()
+_session_service = execution_service.SessionService(audit=_audit_log)
 
 mcp = MCPServer(
     name="codecalc",
@@ -707,10 +707,17 @@ _COMPACT_ALWAYS = ("ok", "verdict", "stdout", "exit_code")
 #: way (it has no full-envelope reply to fall back to reading), so dropping
 #: this disclosure specifically in the mode whose whole point is fewer tokens
 #: would be #117 again, wearing a different field.
+#:
+#: `dependencies` is the same shape again: it names what a declared install
+#: actually did (spec/ok/installer/elapsed_ms, and which entry failed a
+#: budget/quota/allowlist refusal), and `compact=True` runs the identical
+#: dependency-install path before the identical executor call — dropping it
+#: here would silently hide a failed OR unenforced install from the one
+#: caller with no full-envelope reply to fall back to reading.
 _COMPACT_DISCLOSURE = (
     "unenforced", "output_error", "provider",
     "stdout_spill", "stderr_spill", "stdout_spill_capped", "stderr_spill_capped",
-    "artifacts_created", "truncated_inline",
+    "artifacts_created", "truncated_inline", "dependencies",
 )
 
 #: The receipt keys compact mode keeps, in the order they are emitted.
@@ -795,6 +802,7 @@ def execute_code(
     no_net: bool = False,
     compact: bool = False,
     provider: str | None = None,
+    dependencies: list[str] | None = None,
 ) -> dict[str, Any]:
     """Execute `code` in `language` in a sandbox.
 
@@ -817,8 +825,23 @@ def execute_code(
       shim, disclosed in `unenforced` when that's the only guarantee that
       held. See SECURITY.md.
     - `compact`: drop the diagnostic fields (timings, workdir, platform). Never
-      drops `unenforced`, `output_error`, or `artifacts_created` — if a
-      guarantee you asked for was not applied, a compact result still says so.
+      drops `unenforced`, `output_error`, `artifacts_created`, or
+      `dependencies` — if a guarantee you asked for was not applied, or a
+      declared install failed, a compact result still says so.
+    - `dependencies`: packages to install before the code runs (merged with a
+      PEP 723 `# /// script` block for python3, deduped by normalized name with
+      this argument winning; the only source for node). A block ALONE, with no
+      `dependencies` argument, is enough to trigger an install — see
+      SECURITY.md. Installed BEFORE the sandboxed step, through the same
+      confined `install_package` path — never inside the sandbox — and
+      refused (`capability_not_requested`) without installing anything when
+      `no_net=True` or the capability policy denies or strictly limits
+      network. Bounded by a fixed install-time budget separate from
+      `timeout` (120s aggregate across every dependency;
+      `codecalc.dependencies.DEFAULT_DEPENDENCY_INSTALL_BUDGET_SECONDS`) and,
+      session-less, by `CODECALC_SESSION_DISK_QUOTA_MB` on the run's own
+      workdir — either one exceeded refuses the run with a stamped, coded
+      error naming the ceiling. See the `dependencies` field on the result.
 
     With `session_id` set and `max_output_kb` left at its default, output that
     would otherwise be truncated is instead SPILLED: the inline
@@ -848,10 +871,12 @@ def execute_code(
         # silently reached the network and `max_memory_mb` was ignored. What a
         # stateful worker genuinely cannot apply now comes back in `unenforced`.
         result = _execution_service.execute_session(
-            _session_service, session_id, spec, provider_id=provider
+            _session_service, session_id, spec, provider_id=provider,
+            dependencies=dependencies,
         )
     else:
-        result = _execution_service.execute(spec, provider_id=provider)
+        result = _execution_service.execute(spec, provider_id=provider,
+                                            dependencies=dependencies)
     if compact:
         return compact_result(result)
     return result
@@ -954,6 +979,10 @@ async def execute_code_stream(
     One difference, deliberate: the wall-clock cap is 300s here against
     execute_code's 120s, because streaming exists for runs long enough to
     want progress.
+
+    Unlike execute_code, this tool has no `dependencies` argument and never
+    reads a PEP 723 block out of `code`: a `# /// script` block here is inert
+    text, not a trigger — nothing here calls into codecalc/dependencies.py.
     """
     # `max_memory_mb`/`max_output_kb`/`max_cpu` used to be silently dropped on
     # this path: the docstring claimed only "the same result shape" as
@@ -1043,6 +1072,10 @@ def run_submit(
     run_inspect/run_cancel to make room, or wait for one to finish.
 
     Retention: see run_inspect.
+
+    Unlike execute_code, this tool has no `dependencies` argument and never
+    reads a PEP 723 block out of `code` — inert text here, same as
+    execute_code_stream.
     """
     if _run_supervisor is None:
         return errors.error_result(
@@ -1305,6 +1338,10 @@ def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 
     `snippets` maps language name -> code (each snippet must be valid in its own
     language). Returns per-language stdout/stderr/exit/duration plus which was fastest.
     Example: {"python3": "print(6*7)", "node": "console.log(6*7)"}
+
+    No `dependencies` argument and no PEP 723 block reading here — a
+    `# /// script` block in a snippet is inert text, same as
+    execute_code_stream/run_submit.
     """
     return tools.compare_execution(snippets, stdin=stdin, timeout=timeout)
 
@@ -1507,7 +1544,8 @@ def _inline_artifact_blocks(session_id: str, artifacts: list[dict]) -> tuple[lis
 # branches pass through unvalidated exactly as before.
 @mcp.tool(group="sessions")
 def session_run(session_id: str, entry_file: str, language: str | None = None,
-                stdin: str = "", timeout: int = 30):
+                stdin: str = "", timeout: int = 30,
+                dependencies: list[str] | None = None):
     """Run a multi-file program in a session: execute `entry_file`, which may
     import other files already in the session workspace (helper.py, data/...).
 
@@ -1519,10 +1557,12 @@ def session_run(session_id: str, entry_file: str, language: str | None = None,
 
     Reports `artifacts_created` and inlines small ones as extra content
     blocks (image/text/link), capped at 8 blocks / 4 MiB encoded;
-    `truncated_inline: true` past either cap.
+    `truncated_inline: true` past either cap. `dependencies` installs
+    packages before running, same rule as execute_code's — see its docstring.
     """
     result = _session_service.run_file(
-        session_id, entry_file, language=language, stdin=stdin, timeout=timeout
+        session_id, entry_file, language=language, stdin=stdin, timeout=timeout,
+        dependencies=dependencies,
     )
     created = result.get("artifacts_created")
     if not created:
