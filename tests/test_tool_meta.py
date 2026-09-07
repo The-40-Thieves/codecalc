@@ -38,8 +38,13 @@ REQUIRES_USER_INTERACTION = {"install_package", "update_runtimes"}
 ALWAYS_LOAD = {"calc_exact", "execute_code", "verify_translation", "verify_optimization",
                "list_languages"}
 MAX_RESULT_SIZE_CHARS_TOOLS = {"execute_code", "execute_code_stream", "session_run",
-                               "compare_execution"}
-EXPECTED_MAX_RESULT_SIZE_CHARS = 139_072  # 2 * executor.MAX_OUTPUT_BYTES (65536) + 8_000
+                               "compare_execution", "run_inspect"}
+# 240 KiB per stream: the largest static hint under Claude Code's documented
+# hard maximum of 500,000 characters for `anthropic/maxResultSizeChars`
+# (code.claude.com/docs/en/mcp) that this file can compute from a round KiB
+# figure — see server.py's `_MAX_OUTPUT_KB_CEILING` for the full derivation.
+MAX_OUTPUT_KB_CEILING = 240
+EXPECTED_MAX_RESULT_SIZE_CHARS = 2 * MAX_OUTPUT_KB_CEILING * 1024 + 8_000  # = 499_520
 
 
 async def main() -> None:
@@ -62,18 +67,22 @@ async def main() -> None:
         check("anthropic/alwaysLoad is set on exactly the 5 named tools",
               has_always == ALWAYS_LOAD, f"-> {sorted(has_always)}")
 
-        # ── maxResultSizeChars: exactly the 4 large-result tools, same value ──
+        # ── maxResultSizeChars: exactly the 5 large-result tools, same value ──
         has_cap = {n: meta_of(n).get("anthropic/maxResultSizeChars")
                   for n, t in listed.items()
                   if meta_of(n).get("anthropic/maxResultSizeChars") is not None}
-        check("anthropic/maxResultSizeChars is set on exactly the 4 named tools",
+        check("anthropic/maxResultSizeChars is set on exactly the 5 named tools",
               set(has_cap) == MAX_RESULT_SIZE_CHARS_TOOLS, f"-> {sorted(has_cap)}")
         wrong_values = {n: v for n, v in has_cap.items() if v != EXPECTED_MAX_RESULT_SIZE_CHARS}
         check(f"every maxResultSizeChars equals {EXPECTED_MAX_RESULT_SIZE_CHARS} "
-              "(derived from executor.MAX_OUTPUT_BYTES, not the 500,000 ceiling)",
+              "(derived from the 240 KiB per-stream ceiling, not codecalc's 64 KiB default)",
               not wrong_values, f"-> {wrong_values}")
-        check("maxResultSizeChars is well below Anthropic's 500,000 hard ceiling",
-              EXPECTED_MAX_RESULT_SIZE_CHARS < 500_000, f"-> {EXPECTED_MAX_RESULT_SIZE_CHARS}")
+        check("maxResultSizeChars equals 2 * ceiling_bytes + 8_000",
+              EXPECTED_MAX_RESULT_SIZE_CHARS == 2 * MAX_OUTPUT_KB_CEILING * 1024 + 8_000,
+              f"-> {EXPECTED_MAX_RESULT_SIZE_CHARS}")
+        check("maxResultSizeChars stays at or under Claude Code's documented hard maximum "
+              "of 500,000 characters for this _meta field",
+              EXPECTED_MAX_RESULT_SIZE_CHARS <= 500_000, f"-> {EXPECTED_MAX_RESULT_SIZE_CHARS}")
 
         # ── no other _meta keys leaked onto an unrelated tool ───────────────
         expected_meta_bearers = REQUIRES_USER_INTERACTION | ALWAYS_LOAD | MAX_RESULT_SIZE_CHARS_TOOLS

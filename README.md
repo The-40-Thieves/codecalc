@@ -746,6 +746,35 @@ If you are paying too much for codecalc's definitions:
   carry `_meta["anthropic/requiresUserInteraction"]`, which forces a
   permission prompt on every call regardless of the session's permission
   mode — both change the host and both fetch from a registry.
+  `execute_code`, `execute_code_stream`, `session_run`, `compare_execution`,
+  and `run_inspect` carry `_meta["anthropic/maxResultSizeChars"] = 499520`
+  (`2 * 240 KiB + 8_000`), the truncation hint for the one tool family whose
+  output can legitimately approach it — `run_inspect` carries it because
+  its terminal reply, once a `run_submit`-started run finishes, is the same
+  envelope `execute_code` returns. This bounds the serialized TEXT `content`
+  block only — the JSON result as the string a client renders as the tool's
+  reply — not the whole MCP response: every one of these five tools except
+  `session_run` also declares `outputSchema`, so the SDK additionally
+  attaches `structuredContent` with the same JSON ("MCP server developers
+  can configure custom output limits for individual tools by specifying
+  `_meta['anthropic/maxResultSizeChars']` in the tool's listing, up to a
+  hard maximum of 500,000 characters", same doc as above, describes the
+  text result specifically) — so a typed tool's total wire payload
+  approaches twice this hint. `session_run`'s inlined artifact content
+  blocks (image/text/link, up to 8 within a 4 MiB encoded budget — see its
+  own docstring) are likewise separate blocks outside this bound. 240 KiB
+  per stream is a hard CEILING `max_output_kb` is clamped to on every tool
+  that accepts it (`execute_code`, `execute_code_stream`, `run_submit`),
+  separate from the 64 KiB DEFAULT `0` selects — chosen as the largest
+  round-KiB ceiling that keeps the TEXT-block hint under that 500,000-char
+  limit; there is no other ceiling on that parameter today, and raising it
+  further would push the hint over that limit. A run whose real output
+  needs more than 240 KiB belongs in a session instead: leaving
+  `max_output_kb` at its default with `session_id` set spills oversized
+  output to a full-fidelity file, readable in full via `session_read_file`,
+  rather than truncating it. `compare_execution` takes no `max_output_kb`
+  of its own, but accepts an unbounded number of `snippets`, so a
+  many-language comparison can still legitimately exceed the hint.
 - **Claude API, via the MCP connector**, takes `defer_loading` once on the
   toolset's `default_config`, or per tool in `configs`. Deferred definitions stay
   out of the system-prompt prefix, prompt caching is preserved, and a matching

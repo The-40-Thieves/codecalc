@@ -45,6 +45,31 @@ behind it.
   smallest sizes. Fixed by giving the same O(n)->O(1) pair ~10x more work
   per element so every tested size clears the floor with margin, not by
   weakening `codecalc/optimization.py`'s acceptance rule.
+- `run_inspect` did not carry `_meta["anthropic/maxResultSizeChars"]`, even
+  though its terminal reply (once a `run_submit`-started run finishes) is the
+  same execution envelope `execute_code` returns and can approach the same
+  output cap — it now carries the same value the other four large-result
+  tools do.
+
+### Changed
+
+- A caller-supplied `max_output_kb` used to reach the executor unclamped and
+  push a tool's real output past the `anthropic/maxResultSizeChars` value it
+  advertises (`execute_code`/`execute_code_stream`/`run_submit`, noted as a
+  caveat in each docstring since 0.7.0); there was no other ceiling on this
+  parameter, so it is now clamped at the MCP boundary on all three tools to
+  a new hard ceiling of 240 KiB per stream — separate from the existing
+  64 KiB DEFAULT `max_output_kb=0` selects — chosen as the largest
+  round-KiB figure that keeps the advertised hint under Claude Code's
+  documented 500,000-character maximum for this `_meta` field's TEXT
+  content. `anthropic/maxResultSizeChars` moves from 139,072 to 499,520
+  (`2 * 240 KiB + 8_000`) on all five large-result tools accordingly, and
+  the docstrings' caveat has been rewritten to describe the ceiling rather
+  than the gap. That value bounds the serialized text `content` block only:
+  a typed tool (every one of the five except `session_run`) also carries an
+  equal-sized `structuredContent`, so its total wire payload approaches
+  twice this hint; `session_run`'s inlined artifact blocks are likewise
+  separate from it.
 
 ## [0.7.0] — 2026-09-07
 
