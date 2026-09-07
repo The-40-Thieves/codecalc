@@ -711,7 +711,33 @@ jobs:
       # before; they were gated on one developer's machine.
       - name: MCP feature surface (sessions, files, artifacts, streaming)
         if: runner.os == 'Linux'
-        run: uv run --no-sync python tests/test_features.py
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --no-sync python tests/test_features.py | tee /tmp/features.out
+
+          # FLOOR: main() (session lifecycle, files, artifacts, verdicts,
+          # compact mode, streaming, package install — the whole surface this
+          # step's name describes) used to be dead code, because
+          # `sys.exit(1 if FAILS else 0)` ran BEFORE `asyncio.run(main())` in
+          # the source, so every check inside main() looked gated and green
+          # while it had never executed once. Grepping the "N checks, M
+          # async" line the file now prints, from OUTSIDE the file, means a
+          # future reintroduction of the same bug (or deletion of the file's
+          # own internal floor check) still fails this step — the same
+          # "assert from outside, not just inside" pattern
+          # scripts/check_tool_names.py applies to test_mcp_all.py below.
+          line=$(grep -E '^[0-9]+ checks, [0-9]+ async$' /tmp/features.out || true)
+          if [ -z "$line" ]; then
+            echo "::error::test_features.py did not print its 'N checks, M async' floor line"
+            exit 1
+          fi
+          echo "floor line: $line"
+          async_n=$(echo "$line" | grep -oE '[0-9]+ async$' | grep -oE '^[0-9]+')
+          if [ "$async_n" -lt 1 ]; then
+            echo "::error::the async MCP section ran $async_n checks; sessions/files/artifacts/streaming/packages are untested again"
+            exit 1
+          fi
       - name: MCP resources + session_run + units (gap items 1-4)
         if: runner.os == 'Linux'
         run: uv run --no-sync python tests/test_gap4.py

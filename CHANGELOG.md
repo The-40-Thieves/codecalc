@@ -96,6 +96,29 @@ behind it.
   `GRADE_RULES_VERSION` unchanged — the evidence-to-grade mapping did not
   move, only `grade_basis`'s text gained an optional clause when sizes were
   excluded.
+- **`tests/test_features.py`'s entire async MCP section (session lifecycle,
+  file I/O, artifacts, verdicts, compact mode, streaming, package install —
+  everything the file's own docstring claims to cover except a handful of
+  module-level checks) had never run.** `sys.exit(1 if FAILS else 0)` sat
+  BEFORE `asyncio.run(main())` at the bottom of the file, and `sys.exit()`
+  raises `SystemExit` immediately — so `main()` was defined but never
+  awaited, in every CI run and every local run since it was added.
+  `asyncio.run(main())` now runs first. Fixing the ordering surfaced a
+  second, previously-invisible bug the dead code was hiding: a module-level
+  `_txt = _skill.read_text(...)` (added later, near the bottom of the file)
+  shadowed the async `_txt()` helper `main()` calls to extract MCP tool-call
+  text — Python resolves a global by name at call time, so every `await
+  _txt(...)` inside `main()` would have raised `TypeError: 'str' object is
+  not callable` the moment it actually ran. Renamed to `_skill_txt`. Every
+  check inside `main()` was re-verified against current tool behaviour on
+  both the native Rust backend and the Python fallback and needed no other
+  change — the checks already asserted the current documented shapes (e.g.
+  `execute_code_stream`'s `streamed`/`streamed_partial`/`note` fields); they
+  had just never been exercised. The file now prints an existence floor
+  ("N checks, M async") that fails if the async section ever runs zero
+  checks again, and `ci-python.yml`'s step for this file greps that line
+  independently so a future regression of the same shape cannot silently
+  disable it a second time.
 
 ## [0.8.0] — 2026-09-07
 

@@ -1,5 +1,16 @@
 """Verify the new feature set over MCP: sessions, files, artifacts, packages,
-verdicts, limits, streaming, compact mode."""
+verdicts, limits, streaming, compact mode.
+
+`main()` below drives the actual MCP round trip (session lifecycle, file I/O,
+artifacts, verdicts, compact mode, streaming, package install) — it used to
+be dead code: `sys.exit(1 if FAILS else 0)` ran BEFORE `asyncio.run(main())`
+at the bottom of the file, so `main()` was defined but never called and every
+check inside it (everything this docstring claims to cover except the
+module-level checks further down) never executed. `asyncio.run(main())` now
+runs first; the final line this file prints ("N checks, M async") is the
+floor a future regression of the same shape trips: it fails outright if the
+async count is ever 0 again.
+"""
 import asyncio
 import json
 import pathlib
@@ -11,9 +22,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _mcp_client import over_stdio
 
 FAILS = []
+#: Every check() call, pass or fail — the raw material for the "N checks, M
+#: async" floor line at the end of this file.
+TOTAL = 0
 
 
 def check(name, cond, detail=""):
+    global TOTAL
+    TOTAL += 1
     print(f"{'PASS' if cond else 'FAIL':4} {name} {detail}")
     if not cond:
         FAILS.append(name)
@@ -322,11 +338,19 @@ check("a failed benchmark claims no method at all",
 # travels with the tools rather than living in a README nobody pastes.
 _skill = pathlib.Path("codecalc/SKILL.md")
 check("the skill ships inside the package", _skill.is_file(), f"-> {_skill}")
-_txt = _skill.read_text(encoding="utf-8")
+# Named `_skill_txt`, not `_txt`: this used to be a MODULE-LEVEL `_txt`,
+# shadowing the async helper of the same name defined near the top of this
+# file for the whole rest of the module (Python resolves a global by NAME at
+# call time, not at def time). `main()`'s own `await _txt(s)` calls would
+# have raised `TypeError: 'str' object is not callable` the moment `main()`
+# actually ran — which it never did until the sys.exit-before-asyncio.run bug
+# above was fixed, so this second bug was invisible right alongside it.
+_skill_txt = _skill.read_text(encoding="utf-8")
 
 check("  ...with skill frontmatter a client can load",
-      _txt.startswith("---") and "name: codecalc" in _txt and "description:" in _txt,
-      f"-> {_txt[:40]!r}")
+      _skill_txt.startswith("---") and "name: codecalc" in _skill_txt
+      and "description:" in _skill_txt,
+      f"-> {_skill_txt[:40]!r}")
 
 # The two halves have different costs and different strictness, and the file
 # has to say so or it is just advice.
@@ -337,13 +361,13 @@ for _needle, _why in (
 ):
     # Detail on BOTH outcomes: a "-> missing X" printed next to PASS reads as
     # a broken check, which is how the first version of this looked.
-    check(f"the skill states {_why}", _needle in _txt,
-          f"-> {'found' if _needle in _txt else 'MISSING'} {_needle!r}")
+    check(f"the skill states {_why}", _needle in _skill_txt,
+          f"-> {'found' if _needle in _skill_txt else 'MISSING'} {_needle!r}")
 
 # Operand count was the WRONG threshold and the file must not reintroduce it:
 # 0.1 + 0.2 is two operands and the canonical failure; 2 + 3 + 4 is three and
 # never wrong. Type predicts error, length does not.
-_typed = "Operand count is **not** the test" in _txt and "0.1 + 0.2" in _txt
+_typed = "Operand count is **not** the test" in _skill_txt and "0.1 + 0.2" in _skill_txt
 check("  ...and keys on type rather than operand count", _typed,
       f"-> type-vs-length rule {'present' if _typed else 'MISSING'}")
 
@@ -412,8 +436,30 @@ check("doctor points at the skill file",
       "SKILL.md" in _doc.stdout and "(MISSING)" not in _doc.stdout,
       f"-> {[l for l in _doc.stdout.splitlines() if 'skill' in l.lower()]}")
 
-print(f"\n=== {len(FAILS)} failures ===" if FAILS else "\n=== ALL NEW-FEATURE TESTS PASS ===")
-sys.exit(1 if FAILS else 0)
-
-
+# THE BUG THIS FILE ONCE HAD: `sys.exit()` used to sit here, before
+# `asyncio.run(main())` — every check above this point is a module-level
+# statement that runs on import/exec, so they always ran; `main()` is a
+# function whose body only runs when awaited, and `sys.exit()` raises
+# `SystemExit` immediately, so the process exited before `main()` was ever
+# called. Every MCP-session check this file's own docstring claims to cover
+# (session lifecycle, files, artifacts, verdicts, compact mode, streaming,
+# package install) lived inside `main()` and had never actually executed.
+#
+# `asyncio.run(main())` now runs FIRST, so its checks land in `FAILS`/`TOTAL`
+# before the summary below reads them.
+_sync_checks = TOTAL
 asyncio.run(main())
+_async_checks = TOTAL - _sync_checks
+
+# The existence floor for the bug above: a future regression of the same
+# shape (an early return/exit reinserted before this line) makes this trip
+# rather than pass silently — `_async_checks` would go back to 0. ci-python.yml
+# greps the "N checks, M async" line printed below for exactly this number, so
+# the floor holds even if this in-file check is itself the thing removed.
+check("the async MCP section actually ran (main() was awaited, not skipped)",
+      _async_checks > 0,
+      f"-> {_async_checks} checks ran inside main()")
+
+print(f"\n=== {len(FAILS)} failures ===" if FAILS else "\n=== ALL NEW-FEATURE TESTS PASS ===")
+print(f"{TOTAL} checks, {_async_checks} async")
+sys.exit(1 if FAILS else 0)
