@@ -78,6 +78,17 @@ shapes, and a client discriminates them in this order:
 | **compact** | `verdict` present, no `backend` | `execute_code(compact=True)`. |
 | **envelope** | `verdict` present, `backend` in `rust`/`python` | A fresh sandboxed run. All 21 fields. |
 
+These five are **execution** shapes — the discriminator column above only
+ever fires for something that ran code (or explicitly refused to). A
+verify-family result (`verify_translation`, `verify_optimization`, …) is
+stamped with the same `contract_version` by the same `stamp()` at the MCP
+tool boundary — every tool gets that, not just these five — but its own
+shape (`accepted`/`reason`/`speedup`/`inference`/`verification`/…, or
+`passed`/`matched`/`cases`/…) matches none of the five above and is not
+itself in `result-v1.schema.json`'s `oneOf`: it is additive, and undocumented
+here. Read `contract_version` off it exactly as described below; do not
+expect it to discriminate as one of the five run shapes.
+
 **The run_lifecycle shape** (added in `1.1.0`) is the reply the background-run
 tools return before a run finishes — `run_submit`'s handle, a poll of a
 still-running `run_inspect`, or `run_cancel`'s acknowledgement. A *terminal*

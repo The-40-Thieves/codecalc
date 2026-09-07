@@ -33,6 +33,47 @@ behind it.
 
 ## [Unreleased]
 
+### Changed
+
+- **`verify_optimization` now requires statistical significance, not just a
+  ratio.** With 3 runs per side (the old `repeats`), the smallest one-sided
+  p a single size could ever produce was 1/20 — no size could reach the
+  conventional alpha=0.05 no matter how clean the separation was, so
+  "median ratio cleared `min_speedup`" was an arithmetic fact about noisy
+  timings, not evidence of a real difference. `repeats` is now 5 (floor
+  1/252), `_timed` keeps every run (`all_runs_ms`), not just the min, and a
+  new dependency-free `codecalc/stats.py` runs a one-sided Mann-Whitney U
+  test per size (exact enumeration for n1+n2<=20, normal approximation with
+  tie correction beyond that — ported from mrnh/rigor, MIT). `accepted`
+  now additionally requires a MAJORITY of measured sizes to reject "not
+  faster" at alpha=0.05; the result gains an `inference` field with the
+  per-size U statistic, p-value, and rank-biserial effect size behind the
+  verdict. Also fixes a latent size-misalignment bug the significance test
+  exposed: `_timed(original)` and `_timed(candidate)` each auto-scale their
+  own `sizes` independently, so when only one side needed to rescale (the
+  common case — a slow baseline is visible immediately, a genuinely fast
+  candidate is not) the two `sizes` lists diverged while staying the same
+  length, and `_speedup`/`_infer_speedup` zipped them by position — a
+  per-size ratio or p-value could be labelled with the wrong size entirely.
+  New `_align_sizes` re-measures whichever side scaled less at the other
+  side's final sizes before either function sees the pair. Confirmed the
+  new worst case (~13.4s, 234 executor calls, up from 214 before this fix)
+  stays well inside `verify_optimization`'s 180s deadline. `grades.py`'s
+  `grade_verify_optimization` basis text now names the significance result
+  (sizes significant / alpha) alongside the ratio when `inference` is
+  present — text describing the same evidence, not a change to what
+  evidence maps to what grade, so `GRADE_RULES_VERSION` stays `2`.
+- **CI gap closed: `tests/test_translation_verify.py`'s native-executor-gated
+  checks had never once run against the real executor.** The `tests` job
+  never builds the Rust binary (that split is the `sandbox` job's whole
+  reason to exist), so every `if executor._rust:` block in that file —
+  including the live O(n)->O(1) win and the new identical-code
+  false-accept-rate check — silently self-skipped in CI every time.
+  `ci-python.yml`'s `sandbox` job now runs the same file a second time
+  after confirming the Rust backend, same pattern as
+  `test_platform_contract.py`'s and `test_mcp_all.py`'s existing two-job
+  invocations.
+
 ### Docs
 
 - **Six weakest tool descriptions rewritten to disambiguate from a sibling,

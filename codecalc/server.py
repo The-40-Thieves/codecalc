@@ -1542,21 +1542,26 @@ def verify_optimization(original: str, candidate: str, language: str,
                         test_inputs: list[str] | None = None,
                         sizes: list[int] | None = None,
                         min_speedup: float = 1.15) -> dict:
-    """PROVE an optimisation: same outputs, and measurably faster.
+    """PROVE an optimisation: same outputs, and measurably AND SIGNIFICANTLY faster.
 
     You write the optimised version. This runs both against the same inputs to
-    confirm they still agree, then TIMES both at increasing sizes and compares.
-    Accepted only if equivalent AND at least `min_speedup` faster.
+    confirm they still agree, then TIMES both at increasing sizes (5 runs each)
+    and compares. Accepted only if the median ratio clears `min_speedup` AND a
+    one-sided Mann-Whitney U test rejects "not faster" (alpha=0.05) at a
+    majority of the measured sizes — a ratio alone is not evidence the gap is
+    real rather than noise; see the result's `inference` field for the
+    per-size U statistic, p-value, and effect size behind the verdict.
 
-    A rejection tells you which gate failed and by how much — "correct but only
-    1.09x" is the answer an optimiser that fabricates wins cannot give. A
-    candidate that is faster but wrong fails the first gate, and its speed is
-    never measured, because a faster wrong answer is not an optimisation.
+    A rejection tells you which gate failed and by how much — "correct, 1.3x
+    median, but only 1/4 sizes significant" is the answer an optimiser that
+    fabricates wins cannot give. A candidate that is faster but wrong fails the
+    first gate, and its speed is never measured, because a faster wrong answer
+    is not an optimisation.
 
     An accepted result is graded `cross_checked` (see `grade_basis` for the
-    runtime and the measured speedup). A rejection — wrong OR merely not
-    faster enough — is graded `ungraded`: correctness alone does not earn a
-    grade for the optimisation claim this tool exists to answer.
+    runtime and the measured speedup). A rejection — wrong, not faster enough,
+    or not significantly faster — is graded `ungraded`: correctness alone does
+    not earn a grade for the optimisation claim this tool exists to answer.
     """
     result = optimization.verify_optimization(
         original, candidate, language, test_inputs=test_inputs,

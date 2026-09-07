@@ -83,7 +83,24 @@ TOOL_TIMEOUTS: dict[str, float] = {
     "simplify_expression": 20,
     "matrix": 20,
     # Verification gates: they run BOTH programs, and verify_optimization
-    # additionally times each at four sizes. No network, but real execution.
+    # additionally times each at four sizes, 5 runs per size (REPEATS in
+    # optimization.py), with up to 4 auto-scale re-measurements if the work is
+    # too fast to see. No network, but real execution.
+    #
+    # Confirmed still comfortably inside 180s after REPEATS went 3 -> 5 (added
+    # for optimization._infer_speedup's significance test, which needs more
+    # than 3-vs-3 samples to ever reach alpha=0.05): measured end to end on
+    # this box, the common case (no auto-scale needed — durations already
+    # cross the visibility floor on round 1, which is what every measured run
+    # here did) is ~3.1s. The worst case adds one more bounded round:
+    # optimization._align_sizes re-measures whichever side auto-scaled LESS
+    # at the other side's final sizes when the two diverge (each side scales
+    # independently, so they can land on different sizes — see its
+    # docstring), which is at most one extra `_measure` pass, never a second
+    # full ladder. Every auto-scale round exhausted on BOTH sides PLUS that
+    # alignment pass is a bounded 234 executor calls (was 134 at REPEATS=3,
+    # before either REPEATS=5 or the alignment fix); at the same per-call
+    # cost that is ~13.4s, an ~13x margin under the deadline.
     "verify_translation": 120,
     "verify_optimization": 180,
     # run_submit/run_inspect/run_cancel are RunSupervisor control-
