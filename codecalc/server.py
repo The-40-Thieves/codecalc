@@ -524,30 +524,65 @@ _ALWAYS_LOAD = frozenset({
     "calc_exact", "execute_code", "verify_translation", "verify_optimization", "list_languages",
 })
 
-#: The character equivalent of codecalc's own output cap, not Anthropic's
-#: 500,000-char ceiling — a value BELOW that ceiling still gives a client
-#: something to act on for the one tool family whose output can legitimately
-#: approach it. Derived, not guessed: `executor.MAX_OUTPUT_BYTES` (64 KiB) is
-#: applied independently to stdout AND stderr (executor.py:1027, 1089 —
-#: `truncated = len(out) > cap or len(err) > cap`), so two streams at the cap
-#: is 2 * 65536 = 131072 bytes. The rest is envelope: measured at ~500 bytes
-#: for the python-fallback backend's 21 fields with both streams empty;
-#: rounded up to 8,000 for the rust backend's larger receipt/determinism
-#: blocks and for JSON-escaping the exotic (non-ASCII, control-character)
-#: fraction of a stream. `compare_execution` shares this single value with
-#: the other three rather than a per-snippet multiple — see the
-#: PR description for the caveat that a many-language comparison can still
-#: legitimately exceed it.
-_MAX_RESULT_SIZE_CHARS = 2 * executor.MAX_OUTPUT_BYTES + 8_000  # = 139_072
+#: The hard ceiling `max_output_kb` is clamped to on every tool that takes it
+#: as a caller argument (execute_code, execute_code_stream, run_submit —
+#: whose spec is what a terminal run_inspect eventually reports). Nothing in
+#: executor.py or providers.py bounds this parameter on its own — the default
+#: (executor.MAX_OUTPUT_BYTES, 64 KiB) is just what 0 selects, not a ceiling a
+#: caller cannot exceed — so a caller who raised it used to push a tool's
+#: real output past whatever this file advertised in `_meta` with no ceiling
+#: to stop it. This constant IS that ceiling, chosen from Claude Code's own
+#: published limit for the `_meta` field it bounds: "MCP server developers
+#: can configure custom output limits for individual tools by specifying
+#: _meta['anthropic/maxResultSizeChars'] in the tool's listing, up to a hard
+#: maximum of 500,000 characters" (Claude Code MCP docs, retrieved
+#: 2026-09-07; URL in README's "Tool-definition token cost" section —
+#: tests/test_offline.py bans a literal URL from this package, same as the
+#: comment at the top of this section). That 500,000-char limit is on the
+#: TEXT result — the serialized `content` text block a client renders as the
+#: tool's reply — not on the whole MCP response: every typed tool here
+#: (every one below except `session_run`) ALSO carries `structuredContent`
+#: with the same JSON, which the SDK's `convert_result` populates whenever
+#: `outputSchema` is declared (the spec requires `structuredContent` there
+#: and recommends the serialized text copy too — see
+#: `tests/test_tool_annotations.py`'s outputSchema assertion) — so the
+#: total wire payload for a typed large-result tool approaches TWICE
+#: `_MAX_RESULT_SIZE_CHARS` below, which bounds the text half only.
+#: `_MAX_RESULT_SIZE_CHARS` is the largest value under the 500,000-char text
+#: ceiling this file can compute from a round KiB figure: 240 KiB is applied
+#: independently to stdout AND stderr (executor.py:1027, 1089 —
+#: `truncated = len(out) > cap or len(err) > cap`), so two streams at the
+#: ceiling is 2 * 240 * 1024 = 491_520 bytes; +8_000 bytes of envelope
+#: (measured at ~500 bytes for the python-fallback backend's 21 fields with
+#: both streams empty, rounded up for the rust backend's larger
+#: receipt/determinism blocks and for JSON-escaping the exotic fraction of a
+#: stream) totals 499_520, under 500_000. `min(x, this)` is the same treatment
+#: `execute_code`'s own `timeout = min(timeout, 120)` already gets: a silent
+#: clamp, not a disclosed refusal — lowering `max_output_kb` (including to
+#: the 64 KiB default) is still honoured exactly as asked, and a run that
+#: needs more than 240 KiB of real output belongs in a session instead (see
+#: execute_code's docstring: session-scoped output spills to a
+#: `codecalc://session/{sid}/files/...` resource, readable in full via
+#: session_read_file, with no 240 KiB ceiling of its own).
+_MAX_OUTPUT_KB_CEILING = 240
 
-#: The four tools whose result can approach the output cap above:
+#: The character equivalent of the ceiling above (not codecalc's 64 KiB
+#: DEFAULT) — bounds the serialized TEXT `content` block only, per
+#: `_MAX_OUTPUT_KB_CEILING`'s own comment (which also has the derivation and
+#: the 500,000-char client ceiling this stays under); a typed tool's
+#: `structuredContent` carries the same JSON again, outside this bound.
+_MAX_RESULT_SIZE_CHARS = 2 * _MAX_OUTPUT_KB_CEILING * 1024 + 8_000  # = 499_520
+
+#: The five tools whose result can approach the output cap above:
 #: execute_code/execute_code_stream/session_run each run one program,
-#: compare_execution runs several. run_submit/run_inspect are excluded
-#: deliberately — the SUBMIT reply is a small `run_id` handle, and the
-#: eventual `run_inspect` reply is what carries the full envelope, which is
-#: the same shape execute_code returns and therefore the same cap.
+#: compare_execution runs several, and run_inspect's TERMINAL reply is the
+#: same execution envelope execute_code returns once a managed run finishes
+#: (run_supervisor hands back the same result shape a synchronous run would
+#: have). run_submit is excluded deliberately — its own reply is a small
+#: `run_id` handle; it carries no envelope of its own to cap.
 _LARGE_RESULT_TOOLS = frozenset({
     "execute_code", "execute_code_stream", "session_run", "compare_execution",
+    "run_inspect",
 })
 
 
@@ -815,11 +850,18 @@ def execute_code(
       that workspace outlives the call; a sessionless run has none. See
       `session_run` for the same field plus inline content blocks.
     - `max_memory_mb` / `max_cpu`: per-call resource ceilings.
-    - `max_output_kb`: raise/lower the stdout cap (default 64 KiB). Raising it
-      raises this tool's real output past the `anthropic/maxResultSizeChars`
-      this tool advertises in its `_meta` (derived from the DEFAULT cap on
-      both streams plus envelope) — that field is a client-side truncation
-      hint sized for the default, not a ceiling this tool itself enforces.
+    - `max_output_kb`: raise/lower the stdout+stderr cap (default 64 KiB
+      each). Any value is honoured up to a hard ceiling of 240 KiB per
+      stream; above that it is clamped to 240, because it is what the
+      `anthropic/maxResultSizeChars` this tool advertises in its `_meta`
+      already assumes — the cap leaves no headroom to raise past it without
+      the real result exceeding that hint. A run whose real output needs
+      more than 240 KiB belongs in a session instead: leave `max_output_kb`
+      at its default (0) with `session_id` set (below), and oversized output
+      SPILLS to a full-fidelity file readable via `session_read_file` rather
+      than truncating — see the spill paragraph further down. An EXPLICIT
+      `max_output_kb`, even under the 240 KiB ceiling, is honoured as a
+      literal cap with no spill.
     - `no_net`: block network egress. Linux: enforced in-kernel via a
       seccomp-bpf filter. macOS / no-seccomp kernel: best-effort symbol
       shim, disclosed in `unenforced` when that's the only guarantee that
@@ -855,6 +897,7 @@ def execute_code(
     into and keep the old truncate-and-drop behaviour.
     """
     timeout = min(timeout, 120)
+    max_output_kb = min(max_output_kb, _MAX_OUTPUT_KB_CEILING)
     spec = providers.ComputationSpec(
         language=language,
         code=code,
@@ -971,10 +1014,11 @@ async def execute_code_stream(
     notifications to the client while the program runs, so agents can see
     output before the process finishes. Returns the same result shape and
     applies the SAME ceilings: max_memory_mb, max_output_kb and max_cpu are
-    forwarded to the executor exactly as execute_code forwards them — including
-    the same caveat: raising max_output_kb past its default raises this tool's
-    real output past the `anthropic/maxResultSizeChars` it advertises in its
-    `_meta`, which is sized for the default cap, not enforced by this tool.
+    forwarded to the executor exactly as execute_code forwards them —
+    including the same clamp: `max_output_kb` cannot be raised past a hard
+    ceiling of 240 KiB per stream, since that ceiling is what the
+    `anthropic/maxResultSizeChars` this tool advertises in its `_meta`
+    already assumes.
 
     One difference, deliberate: the wall-clock cap is 300s here against
     execute_code's 120s, because streaming exists for runs long enough to
@@ -994,6 +1038,7 @@ async def execute_code_stream(
     # long enough to want progress) and is called out in the docstring above
     # rather than left for a reader to discover by comparing two min() calls.
     timeout = min(timeout, 300)
+    max_output_kb = min(max_output_kb, _MAX_OUTPUT_KB_CEILING)
     spec = providers.ComputationSpec(
         language=language, code=code, stdin=stdin, timeout=timeout,
         max_memory_mb=max_memory_mb, max_output_kb=max_output_kb,
@@ -1056,15 +1101,15 @@ def run_submit(
     long you wait to collect it.
 
     `max_output_kb` is forwarded to the run exactly as execute_code forwards
-    it (default 64 KiB, raisable). This tool's OWN reply carries no output —
-    it is a small run_id handle, which is why it carries no
+    it, including the same clamp to a hard ceiling of 240 KiB per stream
+    (see execute_code's docstring). This tool's OWN reply carries no
+    output — it is a small run_id handle, which is why it carries no
     `anthropic/maxResultSizeChars` `_meta` itself. The eventual terminal
-    `run_inspect(run_id)` is what returns the full envelope this call's
-    `max_output_kb` produced — same shape execute_code returns, but
-    `run_inspect` advertises no `anthropic/maxResultSizeChars` either
-    (it is not one of the tools that carries it), so there is no advertised
-    cap to exceed there; a caller who needs one should size against
-    execute_code's advertised value instead.
+    `run_inspect(run_id)` is what
+    returns the full envelope this call's `max_output_kb` produced — same
+    shape execute_code returns, and `run_inspect` advertises the SAME
+    `anthropic/maxResultSizeChars` execute_code does, so the clamp applied
+    here is what keeps that advertised value true.
 
     Admission is capped (CODECALC_MAX_ACTIVE_RUNS, default 64): past that
     many runs still running/cancelling at once, this returns a
@@ -1083,6 +1128,7 @@ def run_submit(
             provider_error="run_supervisor_unavailable",
         )
     timeout = min(timeout, 120)
+    max_output_kb = min(max_output_kb, _MAX_OUTPUT_KB_CEILING)
     spec = providers.ComputationSpec(
         language=language, code=code, stdin=stdin, timeout=timeout,
         max_memory_mb=max_memory_mb, max_output_kb=max_output_kb,
@@ -1142,11 +1188,16 @@ def run_inspect(run_id: str) -> dict[str, Any]:
     verdict/unenforced/provider (the interface_version/provider_id/limits
     receipt)/... — merged with a small set of run_* extras (run_id,
     provider_id, started_at, deadline, state, cleaned; see server.py's
-    _RUN_EXTRA_KEYS). Read `ok` and `verdict` on a terminal result to tell a
-    clean finish from a failure; a
-    run stopped by run_cancel is only reflected there for a provider that
-    actually supports cancellation (see run_cancel's own docstring) — check
-    the result the same way you would any other run.
+    _RUN_EXTRA_KEYS). This terminal reply carries the same
+    `anthropic/maxResultSizeChars` `_meta` execute_code advertises (see
+    server.py's `_LARGE_RESULT_TOOLS`) — it is the same envelope, once the
+    run started with run_submit has finished, and run_submit's own
+    `max_output_kb` is clamped the same way execute_code's is so that value
+    stays true here too. Read `ok` and `verdict` on a terminal result to tell
+    a clean finish from a failure; a run stopped by run_cancel is only
+    reflected there for a provider that actually supports cancellation (see
+    run_cancel's own docstring) — check the result the same way you would
+    any other run.
 
     Retention: a finished run's result stays inspectable for the life of
     this server process — call this as many times as you like; nothing is
@@ -1559,6 +1610,14 @@ def session_run(session_id: str, entry_file: str, language: str | None = None,
     blocks (image/text/link), capped at 8 blocks / 4 MiB encoded;
     `truncated_inline: true` past either cap. `dependencies` installs
     packages before running, same rule as execute_code's — see its docstring.
+
+    This tool takes no `max_output_kb` (its inline stdout/stderr stay at the
+    64 KiB default and spill past that, same as execute_code's session
+    branch) but the `anthropic/maxResultSizeChars` `_meta` it advertises
+    covers only that text envelope — the JSON result serialized as the
+    reply's `content` text block. The inlined artifact blocks above
+    (image/text/link, up to 8 of them within the 4 MiB encoded budget) are
+    SEPARATE MCP content blocks, outside the text block this hint bounds.
     """
     result = _session_service.run_file(
         session_id, entry_file, language=language, stdin=stdin, timeout=timeout,

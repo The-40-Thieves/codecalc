@@ -1406,6 +1406,69 @@ def test_run_inspect_terminal_result_has_the_same_keys_as_execute_code() -> None
             server._run_supervisor = old
 
 
+def test_max_output_kb_cannot_push_a_result_past_its_advertised_cap() -> None:
+    """A caller-supplied `max_output_kb` used to reach the executor
+    unclamped: nothing in executor.py or providers.py bounds this parameter
+    on its own, so raising it silently pushed execute_code's real output
+    past the `anthropic/maxResultSizeChars` it advertises in `_meta`
+    (499_520 = 2 * 240 KiB + 8_000) — disclosed as a caveat in the
+    docstring instead of enforced. `server._MAX_OUTPUT_KB_CEILING` (240 KiB
+    per stream, the largest ceiling that keeps the hint under Claude Code's
+    documented 500,000-char maximum) now clamps it at the MCP boundary on
+    every tool that accepts it, including run_submit (whose value is what a
+    terminal run_inspect eventually reports, and run_inspect now carries the
+    same `_meta` execute_code does)."""
+    huge_kb = 10_000  # far past the 240 KiB ceiling the advertised hint assumes
+    big_output_code = "print('x' * (2 * 1024 * 1024))"  # 2 MiB, well over any cap here
+
+    ceiling_bytes = server._MAX_OUTPUT_KB_CEILING * 1024
+
+    exec_result = server.execute_code("python3", big_output_code, provider="local",
+                                      max_output_kb=huge_kb)
+    check(f"execute_code's real stdout ({len(exec_result.get('stdout', ''))} B) stays "
+          f"within the ceiling despite a huge max_output_kb",
+          len(exec_result.get("stdout", "")) <= ceiling_bytes + 64)
+    check(f"execute_code's receipt reports the CLAMPED value "
+          f"({exec_result['provider']['limits']['requested'].get('max_output_kb')}), "
+          f"not the caller's raw one ({huge_kb})",
+          exec_result["provider"]["limits"]["requested"]["max_output_kb"]
+          == server._MAX_OUTPUT_KB_CEILING)
+
+    stream_result = asyncio.run(server.execute_code_stream(
+        "python3", big_output_code, max_output_kb=huge_kb))
+    check(f"execute_code_stream applies the same clamp "
+          f"({len(stream_result.get('stdout', ''))} B)",
+          len(stream_result.get("stdout", "")) <= ceiling_bytes + 64)
+
+    old = server._run_supervisor
+    with tempfile.TemporaryDirectory(prefix="codecalc-run-output-cap-") as root:
+        server._run_supervisor = run_supervisor.RunSupervisor(
+            _real_local_registry(), state_dir=Path(root)
+        )
+        try:
+            submitted = server.run_submit("python3", big_output_code, max_output_kb=huge_kb)
+            run_id = submitted.get("run_id", "")
+            terminal = None
+            for _ in range(200):
+                inspected = server.run_inspect(run_id)
+                if inspected.get("state") in {"finished", "cleaned"}:
+                    terminal = inspected
+                    break
+                time.sleep(0.02)
+            check("run_inspect reaches a terminal state", terminal is not None)
+            if terminal is not None:
+                check(f"run_inspect's real stdout ({len(terminal.get('stdout', ''))} B) "
+                      f"also stays within the ceiling",
+                      len(terminal.get("stdout", "")) <= ceiling_bytes + 64)
+        finally:
+            server._run_supervisor = old
+
+    check("lowering max_output_kb below the ceiling is still honoured exactly",
+          server.execute_code("python3", "print('x'*100)", provider="local",
+                              max_output_kb=1)["provider"]["limits"]["requested"]
+          ["max_output_kb"] == 1)
+
+
 def test_first_terminal_run_inspect_reports_cleaned_state_accurately() -> None:
     """F9 (cross-vendor): run_inspect captured `status` BEFORE calling cleanup()
     and returned that, so the FIRST terminal read reported cleaned=false and the
@@ -1936,6 +1999,7 @@ if __name__ == "__main__":
     test_run_tools_return_an_internal_error_when_no_supervisor_is_wired()
     test_run_cancel_on_the_real_local_provider_does_not_strand_the_result()
     test_run_inspect_terminal_result_has_the_same_keys_as_execute_code()
+    test_max_output_kb_cannot_push_a_result_past_its_advertised_cap()
     test_first_terminal_run_inspect_reports_cleaned_state_accurately()
     test_run_submit_admission_cap_returns_resource_exhausted()
     test_session_output_spills_past_the_default_cap_instead_of_dropping_it()
