@@ -50,6 +50,35 @@ behind it.
   same execution envelope `execute_code` returns and can approach the same
   output cap — it now carries the same value the other four large-result
   tools do.
+- `session_artifacts`/`artifacts_created` no longer hide a user's own file
+  just because it shares a basename (`a.out`, `main.<ext>`, `run.out`, ...)
+  with one of the runner's own scratch files somewhere else in the
+  workspace — e.g. `gcc -o a.out program.c` run in a session subdirectory
+  now reports the binary. The exclusion is now scoped to the exact,
+  root-level paths the runner actually writes to, not the basename anywhere
+  in the tree, and is now derived from the language registry (every
+  `main.<ext>` the registry knows, not a hand-picked subset) rather than a
+  hand-maintained list, so adding a language can no longer reopen this bug
+  for it. `a.exe` (the compiled-output slot on Windows), Kotlin's
+  compile-time `out.jar`, and the session lock file
+  (`.codecalc-session-lock`) are now excluded too — none of them were
+  previously in the excluded set at all. `run.out`/`run.err`/`run.in` and
+  `compile.out`/`compile.err`/`compile.in`, all six of which the Rust
+  execution backend genuinely writes on every call (`run_step()` in
+  executor/src/main.rs, verified against a real Rust-backend run — a first
+  pass at this fix wrongly concluded, from a plain-string grep that cannot
+  see the Rust code's runtime `format!("{tag}.out")`, that none of the six
+  were written anywhere and pruned them), stay excluded.
+- A run whose output spills to `.codecalc-spill/` no longer reports the
+  spill file itself as a new artifact in `artifacts_created` — it was
+  duplicating `stdout_spill`/`stderr_spill`, which already point at it.
+- Documented, not fixed here (a fix is filed separately): `session_run`
+  and `execute_code(session_id=...)` always rewrite the session's
+  root-level `main.<ext>` scratch file with whatever entry file's source is
+  currently executing, regardless of that entry file's actual name — so a
+  session's own, unrelated `main.py` (or the equivalent for another
+  language) at the session root is silently overwritten by running any
+  OTHER entry file.
 
 ### Changed
 

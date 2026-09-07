@@ -1618,6 +1618,12 @@ def session_run(session_id: str, entry_file: str, language: str | None = None,
     reply's `content` text block. The inlined artifact blocks above
     (image/text/link, up to 8 of them within the 4 MiB encoded budget) are
     SEPARATE MCP content blocks, outside the text block this hint bounds.
+
+    Every run rewrites a root-level `main.<ext>` scratch file with
+    `entry_file`'s own source before executing it, regardless of
+    `entry_file`'s name — a session's own `main.py` (or the equivalent for
+    another language) at the session root is therefore overwritten by
+    running any OTHER entry file, not just one actually named `main.<ext>`.
     """
     result = _session_service.run_file(
         session_id, entry_file, language=language, stdin=stdin, timeout=timeout,

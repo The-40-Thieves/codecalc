@@ -658,6 +658,31 @@ jobs:
       # above confirms `rust`, is what actually exercises them.
       - name: translation/optimization verification gate (native executor path)
         run: uv run --no-sync python tests/test_translation_verify.py
+      # SECOND invocation of this file too — same shape, same reason, as the
+      # translation/optimization step just above. The `tests` job (full OS
+      # matrix, no Rust binary) already runs this file, but every path that
+      # actually compiles and runs a program through the Rust binary was
+      # UNVERIFIED there: `_RUNNER_INTERNAL_NAMES`'s exclusion set carried
+      # `run.out`/`run.err`/`run.in`/`compile.out`/`compile.err`/`compile.in`
+      # removed as "dead names" in an earlier revision of this same fix, on
+      # the strength of a plain-string source grep — which cannot see that
+      # executor/src/main.rs's `run_step()` builds those names with a
+      # runtime `format!("{tag}.out")`. The fallback-only `tests` job could
+      # not have caught that: this file's compiled-language artifact
+      # assertions only run for real against the Rust backend, and did not
+      # exist as a check anywhere in CI before this step. First time this
+      # file runs against the Rust backend in CI.
+      #
+      # `runner.os == 'Linux'` only: this leg compiles and runs a real C
+      # program (the "c" language plan is `best_effort` tier precisely
+      # because it has no cross-platform CI evidence — see
+      # tests/test_tier_evidence.py's docstring), and a working `gcc` on
+      # PATH is not something this job's Windows/macOS legs otherwise
+      # guarantee (unlike the `blocknet` shim build above, which is already
+      # skipped on Windows for the same class of reason).
+      - name: session artifacts against the real Rust backend
+        if: runner.os == 'Linux'
+        run: uv run --no-sync python tests/test_execution_service.py
       # Asserts that every ceiling NOT named in `unenforced` actually bites on
       # THIS platform — the half of the promise that cannot be checked by
       # reading the code, because a limit that is set but ignored looks exactly
