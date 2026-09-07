@@ -457,6 +457,16 @@ network-blocking shim. Each has a security-relevant design decision:
    they MUST add authentication first — the tools include code execution and
    runtime updates.
 
+   **CORRECTION 2026-09-07 — a Streamable HTTP mode shipped, with mandatory
+   auth on non-loopback binds.** `codecalc serve-http` exists now
+   (`codecalc/server.py`): it binds loopback by default, and refuses to bind
+   any non-loopback address unless `CODECALC_HTTP_TOKEN` is set, gating every
+   request behind a constant-time bearer check. That closes exactly the gap
+   this item warned about — authentication landed before, not after, the
+   transport became reachable off-box — see the README's "Run the server" and
+   configuration sections, and `SECURITY.md`'s "Known limitations" for the
+   current wording.
+
 ## Re-audit recommendation
 
 Re-run `tests/test_security.py` after any change to `logic.py`, `executor.py`,

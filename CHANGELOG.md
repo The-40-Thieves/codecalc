@@ -9,10 +9,10 @@ This project versions **two** things, and they are not the same number.
 
 | What | Where | Current |
 |---|---|---|
-| The **package** — the tool surface, the CLI, the Python API | `pyproject.toml`, `executor/Cargo.toml`, this file | `0.1.0` |
+| The **package** — the tool surface, the CLI, the Python API | `pyproject.toml`, `executor/Cargo.toml`, this file | see `version` in [`pyproject.toml`](pyproject.toml) — this cell is not re-typed on every release |
 | The **result contract** — the shape every tool result comes back in | `docs/contract/README.md`, `contract_version` on every result | `1.3.0` |
 
-The contract is at `1.3.0` and the package is at `0.1.0` because those claims are
+The contract is at `1.3.0` and the package is at `0.x` because those claims are
 genuinely different. The result contract has a published JSON Schema, a
 documented MAJOR/MINOR/PATCH policy, a twelve-month deprecation window, and a
 gate that fails if the schema drifts from the code — it is stable and says so.

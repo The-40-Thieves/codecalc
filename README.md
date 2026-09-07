@@ -47,7 +47,7 @@ need, one of these is the better tool, and this table says so plainly.
 
 | You want… | Better fit | Why |
 |---|---|---|
-| To just run some Python/JS quickly, zero setup | Your model vendor's built-in interpreter | Already there, already sandboxed, nothing to install |
+| To just run some Python/JS quickly, zero setup | Your model vendor's built-in interpreter | Already there, already sandboxed, nothing to install. Anthropic's code-execution tool has internet access "completely disabled" and cannot install packages at runtime; OpenAI's hosted containers have no outbound network access by default, with an org-level `network_policy` allowlist as an opt-in. Both return output artifacts by reference (Anthropic a `file_id` via the Files API, OpenAI a `container_file_citation`) rather than inline (Anthropic code-execution tool docs, https://platform.claude.com/docs/en/agents-and-tools/tool-use/code-execution-tool; OpenAI shell/container tool guide, https://developers.openai.com/api/docs/guides/tools-shell; both retrieved 2026-09-07) |
 | Heavy or multi-tenant workloads, managed scale | A cloud sandbox (E2B, Modal, Daytona) | Per-tenant Firecracker/gVisor isolation codecalc does not claim by default |
 | Pure arithmetic or symbolic math, nothing else | A small calculator or SymPy MCP | Lower token cost; none of the 31-language runtime machinery |
 | **A model to stop _guessing_ numbers, equivalence, and speedups — locally, privately, with graded evidence** | **codecalc** | Exact rationals, `verify_translation`/`verify_optimization`, and `unenforced`/grade honesty — offline, no account |
@@ -546,9 +546,15 @@ cd /path/to/codecalc && .venv/bin/python -m codecalc.server
 .venv/bin/python -m codecalc.server serve-http --host 127.0.0.1 --port 8000
 ```
 
-Streamable HTTP binds to loopback by default and has no CodeCalc authentication
-layer. Do not bind it to an untrusted network without an authenticating reverse
-proxy and the stronger process/container isolation described in `SECURITY.md`.
+Streamable HTTP binds to loopback by default. Bearer-token auth
+(`CODECALC_HTTP_TOKEN`) is **required** for any non-loopback bind — `serve-http`
+refuses to start on a routable address if the token is unset, and the token
+comparison is constant-time — and **optional** on loopback, where an MCP
+client spawning the process is already inside the trust boundary. Setting a
+token does not change the single-operator threat model: put an authenticating
+reverse proxy and the stronger process/container isolation described in
+`SECURITY.md` in front of it before exposing it beyond one operator's own
+machine.
 
 Point an MCP client at it:
 
@@ -629,6 +635,8 @@ All optional. codecalc runs with none of these set.
 
 | Variable | Default | What it does |
 |---|---|---|
+| `CODECALC_HTTP_TOKEN` | *(unset)* | Bearer token for the Streamable HTTP transport (`serve-http`). Unset, the transport is loopback-only — binding a non-loopback address without this set is refused outright. Set, the token gates every request via a constant-time comparison; stdio ignores this entirely. |
+| `CODECALC_HTTP_URL` | `http://127.0.0.1:8000` | What the HTTP transport's auth metadata advertises as its own URL. Only consulted when `CODECALC_HTTP_TOKEN` is set; the loopback default matches the offline-by-default posture rather than guessing a public one. |
 | `CODECALC_RUNTIME_PATH` | the server's own `PATH`, else `/usr/local/bin:/usr/bin:/bin` | The `PATH` executed code resolves runtimes on. **Set this when an MCP client spawns the server**: clients often launch with a stripped environment, so an inherited `PATH` can miss a toolchain manager's shims entirely and most languages silently become unavailable. `list_languages` reports what actually resolved. |
 | `CODECALC_EXEC_BIN` | `bin/codecalc-exec` (arch-matched) | Override the sandbox binary. Without one, codecalc falls back to a pure-Python executor — `list_languages` and `execute_code` still work, but the Rust path is the production one. |
 | `CODECALC_REQUIRE_NATIVE` | *(unset)* | Fail-closed: refuse to start if no usable `codecalc-exec` binary was found (checked at import, so this is also a server-start check), instead of silently answering every call on the weaker Python fallback. Raises naming `CODECALC_REQUIRE_NATIVE` and the paths that were checked. |
@@ -696,13 +704,32 @@ schemas or the per-tool boundary.
 
 If you are paying too much for codecalc's definitions:
 
-- **Claude Code** enables MCP tool search automatically once a server's tool
-  descriptions exceed roughly 10k tokens. codecalc sits under that threshold, so
-  it is not deferred by default. Set `ENABLE_TOOL_SEARCH=true` to force it on.
+- **Claude Code** defers every MCP tool by default — tool search is on by
+  default, with no token floor codecalc needs to clear. `auto` loads a
+  server's tools upfront only while their definitions total under 10% of the
+  context window and defers all of them once that 10% is reached; `false`
+  loads everything upfront regardless of size (Claude Code MCP docs,
+  https://code.claude.com/docs/en/mcp, retrieved 2026-09-07).
 - **Claude API, via the MCP connector**, takes `defer_loading` once on the
   toolset's `default_config`, or per tool in `configs`. Deferred definitions stay
   out of the system-prompt prefix, prompt caching is preserved, and a matching
   tool is expanded into its full definition when the model searches for it.
+- **OpenAI's Responses API** has the same knob under a different name:
+  `defer_loading: true` on an MCP server tool definition (OpenAI Responses MCP
+  tool guide, https://developers.openai.com/api/docs/guides/tools-connectors-mcp,
+  retrieved 2026-09-07).
+- **VS Code** caps a single chat request at 128 enabled tools and groups
+  excess tools behind "virtual tools" above a configurable threshold (VS Code
+  agent tools docs, dated 2026-09-02,
+  https://code.visualstudio.com/docs/copilot/agents/agent-tools). **Windsurf /
+  Cascade** caps at 100 total tools (Cascade MCP docs,
+  https://docs.devin.ai/desktop/cascade/mcp, retrieved 2026-09-07).
+- **The MCP specification itself has no deferral mechanism** — no tool search,
+  grouping, tags, or toolsets; a server can only publish `ttlMs`/`cacheScope`
+  hints and paginate `tools/list` (MCP spec 2026-07-28,
+  https://modelcontextprotocol.io/specification/2026-07-28/server/tools,
+  retrieved 2026-09-07). A client without one of the mechanisms above pays the
+  full cost regardless of what codecalc does.
 - **Any client** can filter which of the 52 tools it exposes to the model.
   Nothing here requires codecalc to change.
 
@@ -738,6 +765,11 @@ For an operator who would rather not configure every client, codecalc also has
 a first-party knob: `CODECALC_TOOLS` registers only a chosen slice of the
 52-tool surface, so a client that never enables tool search still pays for a
 smaller `tools/list`.
+
+On a client with no deferral mechanism of its own, the client's own allow-list
+does the same job from the other end — OpenAI's `allowed_tools`, Gemini CLI's
+`includeTools`/`excludeTools`, or Codex CLI's `enabled_tools`/`disabled_tools`
+all narrow what a given session sees without touching the server.
 
 **This is not the facade** the section above declines to build. Every tool a
 group activates keeps its own name, its own typed input schema and its own
@@ -1052,7 +1084,13 @@ resolved, unverified by codecalc, may be broken.
   assume — reach for it when this moves behind a container.
 - `no_net` blocks the **network**, not every socket: it refuses `AF_INET` and
   `AF_INET6` and forwards everything else, so `AF_UNIX` local IPC keeps working.
-- No network namespace isolation (single-host tool; containerize for untrusted code)
+- No network namespace isolation (single-host tool; containerize for untrusted code).
+  **Note, 2026-09-07:** this bullet describes the pre-#242 state. Since
+  [#242](https://github.com/The-40-Thieves/codecalc/pull/242) (2026-08-21),
+  Linux additionally enforces `no_net` in-kernel via a seccomp-bpf filter —
+  see the `no_net` row in `SECURITY.md`'s "Known limitations" table for the
+  current per-platform breakdown. A full network *namespace* is still only the
+  strict (gVisor) backend's job; this note does not change that.
 - Every result carries a `backend` field (`"rust"` or `"python"`) so a caller
   never has to infer which sandbox actually ran from an absent key — that was
   possible to confuse with an older build that never reported it at all. The
