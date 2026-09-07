@@ -20,12 +20,19 @@ from __future__ import annotations
 import base64
 import functools
 import inspect
+import json
 import os
 from pathlib import Path
 
 from mcp.server import CacheHint, MCPServer
 from mcp.server.mcpserver import Context
-from mcp.types import ImageContent
+from mcp.types import (
+    EmbeddedResource,
+    ImageContent,
+    ResourceLink,
+    TextContent,
+    TextResourceContents,
+)
 
 from . import (
     __version__,
@@ -469,9 +476,18 @@ _COMPACT_ALWAYS = ("ok", "verdict", "stdout", "exit_code")
 #: except the ones who asked for the small reply — exactly backwards, since a
 #: compact caller is the one least likely to have the full text any other
 #: way.
+#:
+#: `artifacts_created`/`truncated_inline` belong here for the same reason:
+#: `execute_code(session_id=..., compact=True)` runs through `sessions.execute`
+#: the same as the non-compact call, so it can leave new files behind just as
+#: easily — a compact caller is the one LEAST able to discover them any other
+#: way (it has no full-envelope reply to fall back to reading), so dropping
+#: this disclosure specifically in the mode whose whole point is fewer tokens
+#: would be #117 again, wearing a different field.
 _COMPACT_DISCLOSURE = (
     "unenforced", "output_error", "provider",
     "stdout_spill", "stderr_spill", "stdout_spill_capped", "stderr_spill_capped",
+    "artifacts_created", "truncated_inline",
 )
 
 #: The receipt keys compact mode keeps, in the order they are emitted.
@@ -564,6 +580,9 @@ def execute_code(
 
     - `session_id`: run inside a session workspace (see session_start); with a
       stateful session (python3/node) interpreter state persists across calls.
+      Also reports `artifacts_created` (files just created/modified) since
+      that workspace outlives the call; a sessionless run has none. See
+      `session_run` for the same field plus inline content blocks.
     - `max_memory_mb` / `max_cpu`: per-call resource ceilings.
     - `max_output_kb`: raise/lower the stdout cap (default 64 KiB).
     - `no_net`: block network egress. Linux: enforced in-kernel via a
@@ -571,8 +590,8 @@ def execute_code(
       shim, disclosed in `unenforced` when that's the only guarantee that
       held. See SECURITY.md.
     - `compact`: drop the diagnostic fields (timings, workdir, platform). Never
-      drops `unenforced` or `output_error` — if a guarantee you asked for was
-      not applied, a compact result still says so.
+      drops `unenforced`, `output_error`, or `artifacts_created` — if a
+      guarantee you asked for was not applied, a compact result still says so.
 
     With `session_id` set and `max_output_kb` left at its default, output that
     would otherwise be truncated is instead SPILLED: the inline
@@ -1144,9 +1163,93 @@ def session_read_file(session_id: str, path: str, max_bytes: int = 65536,
     return result
 
 
+#: MIME types `session_run` will inline as an `ImageContent` block, up to
+#: `_MAX_INLINE_IMAGE_BYTES` raw (before base64). Anything else — including an
+#: oversize file of one of these types — becomes a `ResourceLink` instead.
+_INLINE_IMAGE_MIMES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
+_MAX_INLINE_IMAGE_BYTES = 1024 * 1024  # 1 MiB raw
+
+#: MIME types `session_run` will inline as an `EmbeddedResource` (text) block,
+#: up to `_MAX_INLINE_TEXT_BYTES`. Same cap execute_code's own stdout capture
+#: uses, so a text artifact and a text stream are held to one ceiling, not two.
+_INLINE_TEXT_MIMES = frozenset({"text/csv", "text/plain", "text/html", "application/json"})
+_MAX_INLINE_TEXT_BYTES = executor.MAX_OUTPUT_BYTES
+
+#: Total content blocks `session_run` attaches beyond the JSON text block —
+#: not per-MIME-type, so 9 small images cap out exactly like 9 mixed files.
+_MAX_INLINE_BLOCKS = 8
+
+#: Aggregate inline-BYTE budget (images + embedded text combined) across one
+#: `session_run` reply. Matches `sessions.RESOURCE_MAX_BYTES` — the same
+#: ceiling a single file already can't exceed to be served as a resource at
+#: all. An artifact that would fit alone but not alongside earlier ones in the
+#: same reply degrades to a `ResourceLink`; only `_MAX_INLINE_BLOCKS` can drop
+#: an artifact from the block list outright. Charged in WIRE bytes: an image
+#: is base64-encoded for `ImageContent` (~4/3 its raw size), so it draws down
+#: this budget by its encoded length, not its raw one — otherwise a reply
+#: could carry ~5.33 MiB of actual base64 while the budget only ever saw
+#: 4 MiB of raw bytes. Text blocks go over the wire as-is (no base64), so
+#: they're still charged raw.
+_INLINE_BUDGET_BYTES = sessions.RESOURCE_MAX_BYTES
+
+
+def _b64_len(raw_size: int) -> int:
+    """Exact base64-encoded length of `raw_size` bytes (with padding),
+    computed without touching the data — lets the budget be checked before
+    a file is read, not after."""
+    return ((raw_size + 2) // 3) * 4
+
+
+def _artifact_block(session_id: str, artifact: dict, budget_left: int):
+    """One content block for `artifact`, plus the bytes it drew from the
+    inline budget (0 for a `ResourceLink`, which never embeds bytes).
+
+    Mime is read from `artifact["mime"]` (extension-based, from
+    `sessions._artifact_mime`) — never sniffed here either. A file that no
+    longer matches what was recorded when it was classified (removed, or
+    grown past its recorded size) reads back as None from `resource_read` and
+    falls through to a `ResourceLink`, same as an ineligible type would.
+    """
+    path, size, mime = artifact["path"], artifact["size"], artifact["mime"]
+    uri = artifact["resource"]
+    if (mime in _INLINE_IMAGE_MIMES and size <= _MAX_INLINE_IMAGE_BYTES
+            and _b64_len(size) <= budget_left):
+        read = sessions.resource_read(session_id, path, max_bytes=size)
+        if read is not None:
+            data, _mime = read
+            b64 = base64.b64encode(data).decode("ascii")
+            return ImageContent(type="image", data=b64, mimeType=mime), len(b64)
+    elif mime in _INLINE_TEXT_MIMES and size <= _MAX_INLINE_TEXT_BYTES and size <= budget_left:
+        read = sessions.resource_read(session_id, path, max_bytes=size)
+        if read is not None:
+            data, _mime = read
+            text = data.decode(errors="replace")
+            return (EmbeddedResource(resource=TextResourceContents(
+                        uri=uri, mimeType=mime, text=text)),
+                    len(text.encode()))
+    return ResourceLink(name=path, uri=uri, mimeType=mime, size=size), 0
+
+
+def _inline_artifact_blocks(session_id: str, artifacts: list[dict]) -> tuple[list, bool]:
+    """Content blocks for `artifacts_created`, plus whether the block cap
+    (`_MAX_INLINE_BLOCKS`) left any artifact out entirely. See `session_run`.
+    """
+    blocks = []
+    budget_left = _INLINE_BUDGET_BYTES
+    truncated = False
+    for artifact in artifacts:
+        if len(blocks) >= _MAX_INLINE_BLOCKS:
+            truncated = True
+            break
+        block, consumed = _artifact_block(session_id, artifact, budget_left)
+        blocks.append(block)
+        budget_left -= consumed
+    return blocks, truncated
+
+
 @mcp.tool(group="sessions")
 def session_run(session_id: str, entry_file: str, language: str | None = None,
-                stdin: str = "", timeout: int = 30) -> dict:
+                stdin: str = "", timeout: int = 30):
     """Run a multi-file program in a session: execute `entry_file`, which may
     import other files already in the session workspace (helper.py, data/...).
 
@@ -1155,10 +1258,26 @@ def session_run(session_id: str, entry_file: str, language: str | None = None,
     plus the entry file's path. Oversized output spills into the session
     workspace the same way execute_code's does — see its docstring for
     `stdout_spill`/`stderr_spill`.
+
+    Reports `artifacts_created` and inlines small ones as extra content
+    blocks (image/text/link), capped at 8 blocks / 4 MiB encoded;
+    `truncated_inline: true` past either cap.
     """
-    return _session_service.run_file(
+    result = _session_service.run_file(
         session_id, entry_file, language=language, stdin=stdin, timeout=timeout
     )
+    created = result.get("artifacts_created")
+    if not created:
+        return result
+    # `_coded` (the @mcp.tool registration wrapper, defined earlier in this
+    # module) stamps a dict result but cannot see inside a list, so the
+    # contract stamp has to happen HERE, before wrapping — see `_coded`'s own
+    # docstring for the general rule this is an instance of.
+    result = contract.stamp(errors.ensure_code(result))
+    blocks, truncated = _inline_artifact_blocks(session_id, created)
+    if truncated:
+        result["truncated_inline"] = True
+    return [TextContent(type="text", text=json.dumps(result)), *blocks]
 
 
 @mcp.tool(group="calculator")

@@ -10,9 +10,9 @@ This project versions **two** things, and they are not the same number.
 | What | Where | Current |
 |---|---|---|
 | The **package** — the tool surface, the CLI, the Python API | `pyproject.toml`, `executor/Cargo.toml`, this file | see `version` in [`pyproject.toml`](pyproject.toml) — this cell is not re-typed on every release |
-| The **result contract** — the shape every tool result comes back in | `docs/contract/README.md`, `contract_version` on every result | `1.3.0` |
+| The **result contract** — the shape every tool result comes back in | `docs/contract/README.md`, `contract_version` on every result | `1.4.0` |
 
-The contract is at `1.3.0` and the package is at `0.x` because those claims are
+The contract is at `1.4.0` and the package is at `0.x` because those claims are
 genuinely different. The result contract has a published JSON Schema, a
 documented MAJOR/MINOR/PATCH policy, a twelve-month deprecation window, and a
 gate that fails if the schema drifts from the code — it is stable and says so.
@@ -53,6 +53,32 @@ behind it.
   name in a description adds discriminating vocabulary to the very prompts
   it exists to disambiguate. `scripts/data/tool_select_baseline.json`
   regenerated from this change.
+
+### Added
+
+- **Inline artifacts from session-scoped runs.** `session_run` and
+  `execute_code(session_id=...)` — both of which run in a session workspace
+  that outlives the call, unlike sessionless `execute_code`'s Rust-owned temp
+  directory — now report `artifacts_created`: the files a run just created
+  or modified, as `{path, size, mime, resource}` (`resource` is the same
+  `codecalc://session/{sid}/files/{path}` URI `session_read_file` already
+  serves). `session_run` additionally inlines eligible artifacts as MCP
+  content blocks alongside its JSON result: a PNG/JPEG/GIF/WebP up to 1 MiB
+  raw as an `ImageContent` block, a CSV/plain-text/HTML/JSON file up to
+  64 KiB as an `EmbeddedResource`, and everything else — including an
+  oversize file of either kind — as a `ResourceLink` (a pointer, not
+  attached bytes). At most 8 such blocks and 4 MiB of inline bytes ON THE
+  WIRE per reply — an image's base64 encoding (~4/3 its raw size), not its
+  raw file size, is what the budget charges, so a reply's actual attached
+  bytes can never exceed the 4 MiB promised regardless of mime mix; beyond
+  either cap the remaining artifacts still appear in `artifacts_created`
+  and the result carries `truncated_inline: true`.
+  `compact_result` never drops `artifacts_created`/`truncated_inline` for
+  the same reason it never drops `unenforced`/`output_error` (#117): a
+  compact caller is the one least able to discover a new file any other
+  way. The content blocks themselves are transport-level and outside the
+  result contract; `contract_version` moves `1.3.0` → **`1.4.0`** (a MINOR
+  add) for the two new JSON fields on the session/envelope/compact shapes.
 
 ## [0.6.0] — 2026-09-06
 

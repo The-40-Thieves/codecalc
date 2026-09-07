@@ -70,6 +70,33 @@ async def main():
         is_img = any(getattr(c, "type", "") == "image" for c in (img_r.content or []))
         check("inline image content type", is_img)
 
+        # 2b. session_run inlines a PNG artifact as an ImageContent block,
+        # alongside the JSON result, and names it in artifacts_created.
+        await client.call_tool("session_write_file", {
+            "session_id": sid, "path": "make_png.py",
+            "content": "import struct, zlib\n"
+                       "def png():\n"
+                       "    sig = b'\\x89PNG\\r\\n\\x1a\\n'\n"
+                       "    w = h = 1\n"
+                       "    ihdr = struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0)\n"
+                       "    raw = b'\\x00' + b'\\xff\\x00\\x00'\n"
+                       "    idat = zlib.compress(raw)\n"
+                       "    def chunk(typ, data):\n"
+                       "        c = struct.pack('>I', len(data)) + typ + data\n"
+                       "        return c + struct.pack('>I', zlib.crc32(typ + data) & 0xffffffff)\n"
+                       "    return sig + chunk(b'IHDR', ihdr) + chunk(b'IDAT', idat) + chunk(b'IEND', b'')\n"
+                       "open('run_plot.png', 'wb').write(png())\n"})
+        run_r = await client.call_tool("session_run", {"session_id": sid, "entry_file": "make_png.py"})
+        run_is_img = any(getattr(c, "type", "") == "image" for c in (run_r.content or []))
+        check("session_run inlines a new PNG as ImageContent", run_is_img,
+              f"-> block types: {[getattr(c, 'type', None) for c in (run_r.content or [])]}")
+        run_d = json.loads(await _txt(run_r))
+        run_created = run_d.get("artifacts_created") or []
+        check("session_run reports artifacts_created with mime image/png",
+              any(a.get("path") == "run_plot.png" and a.get("mime") == "image/png"
+                  for a in run_created),
+              f"-> {run_created}")
+
         # 3. MCP resource read
         res = (await client.read_resource(f"codecalc://session/{sid}/files/helper.py")).contents
         check("MCP resource read", "double" in (res[0].text if res else ""), f"-> {str(res)[:60]}")

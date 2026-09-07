@@ -16,6 +16,7 @@ from __future__ import annotations
 import collections
 import contextlib
 import json
+import mimetypes
 import os
 import re
 import shutil
@@ -279,13 +280,17 @@ def _global_disk_usage() -> int:
     return total
 
 
-def _artifact_entries(d: Path) -> list[tuple[Path, int]]:
-    """`(path, size)` for every file `artifacts()` would list.
+def _artifact_entries(d: Path) -> list[tuple[Path, os.stat_result]]:
+    """`(path, lstat)` for every file `artifacts()` would list.
 
     Factored out of `artifacts()` itself so the disk-quota artifact-count/
     size caps below count exactly what a caller can already SEE via
     `session_artifacts`, rather than a second, independently-drifting
-    definition of "artifact".
+    definition of "artifact". The full `stat_result` (not just `st_size`) is
+    kept rather than unpacked here because `_artifact_snapshot` below needs
+    `st_mtime_ns` too, to tell "unchanged" apart from "rewritten with the same
+    byte count" when `session_run`/`execute_code(session_id=...)` diff a
+    workspace before and after a run.
     """
     out = []
     for p in sorted(d.rglob("*")):
@@ -298,7 +303,53 @@ def _artifact_entries(d: Path) -> list[tuple[Path, int]]:
         if not stat.S_ISREG(st.st_mode):
             continue
         if p.name not in _RUNNER_INTERNAL_NAMES:
-            out.append((p, st.st_size))
+            out.append((p, st))
+    return out
+
+
+def _artifact_snapshot(d: Path) -> dict[str, tuple[int, int]]:
+    """`{relpath: (size, mtime_ns)}` for every current artifact.
+
+    Taken immediately before a session-scoped run (`sessions.execute` and
+    `execution_service.SessionService.run_file`) so `quota_postcheck` can
+    classify what a run created or modified afterwards without a second,
+    independently-drifting walk — same `_artifact_entries` the artifact-count
+    cap and `session_artifacts` already use.
+    """
+    return {p.relative_to(d).as_posix(): (st.st_size, st.st_mtime_ns)
+            for p, st in _artifact_entries(d)}
+
+
+def _artifact_mime(path: Path) -> str:
+    """Best-effort MIME type by EXTENSION only — never opens the file to
+    sniff content, since a session workspace can hold attacker-controlled
+    bytes under any name. `application/octet-stream` when the extension is
+    unknown, same fallback `resource_read` uses for a non-image file.
+    """
+    mime, _ = mimetypes.guess_type(path.name)
+    return mime or "application/octet-stream"
+
+
+def _classify_new_artifacts(session_id: str, d: Path,
+                            before: dict[str, tuple[int, int]]) -> list[dict]:
+    """Files a run just created or modified, relative to `before` (a prior
+    `_artifact_snapshot`): `{path, size, mime, resource}` per file, in the
+    same order `_artifact_entries` (and so `session_artifacts`) lists them.
+
+    "Modified" means size OR mtime changed — a rewrite that lands back at the
+    same byte count still bumps mtime, so this does not miss it.
+    """
+    out = []
+    for p, st in _artifact_entries(d):
+        rel = p.relative_to(d).as_posix()
+        if before.get(rel) == (st.st_size, st.st_mtime_ns):
+            continue
+        out.append({
+            "path": rel,
+            "size": st.st_size,
+            "mime": _artifact_mime(p),
+            "resource": f"codecalc://session/{session_id}/files/{rel}",
+        })
     return out
 
 
@@ -526,10 +577,20 @@ def quota_precheck(session_id: str) -> dict | None:
     return _artifact_count_refusal(session_id)
 
 
-def quota_postcheck(session_id: str, result: dict) -> dict:
+def quota_postcheck(session_id: str, result: dict, *, d: Path | None = None,
+                    before: dict[str, tuple[int, int]] | None = None) -> dict:
     """Disclose in `result` when a run just left `session_id` over its disk
     quota OR its artifact-count cap (point 4; count cap added in fix
-    round 2). Mutates and returns `result`.
+    round 2), and — when `before` is given — what files the run just created
+    or modified. Mutates and returns `result`.
+
+    `before` is a `_artifact_snapshot(d)` taken by the caller right before the
+    run (every session-scoped caller already resolves `d` there to run the
+    code at all, so passing both avoids re-resolving `d` a second time here).
+    Omitted (the default) for callers with no persistent workspace to diff —
+    this stays optional rather than mandatory so it never becomes a second,
+    silently-required precondition for a function every session-scoped path
+    already calls unconditionally.
 
     Never refuses and never touches stdout/exit_code/verdict — the run
     already happened and produced a real result; the only thing added is
@@ -537,6 +598,9 @@ def quota_postcheck(session_id: str, result: dict) -> dict:
     refuse the NEXT call on this session for as long as usage, measured
     fresh, stays over either line.
     """
+    if before is not None:
+        workspace = d if d is not None else _session_dir(session_id)
+        result["artifacts_created"] = _classify_new_artifacts(session_id, workspace, before)
     usage = _session_dir_size(session_id)
     quota = _session_disk_quota_bytes()
     if usage > quota:
@@ -1293,6 +1357,10 @@ def execute(session_id: str, code: str, language: str | None = None,
     quota_refusal = quota_precheck(session_id)
     if quota_refusal is not None:
         return quota_refusal
+    # Taken now, before either branch below runs anything: `quota_postcheck`
+    # diffs against this to report `artifacts_created` regardless of which
+    # branch actually ran the code.
+    before = _artifact_snapshot(d)
     # Lazy check-on-access: reap this session's worker if it has
     # sat idle past the configured TTL, and learn whether it already had
     # been. ONE call, ONE critical section — see `_get_worker_or_expired`'s
@@ -1335,7 +1403,7 @@ def execute(session_id: str, code: str, language: str | None = None,
         # point 4: the worker just ran arbitrary code with the
         # workspace as its cwd — measure what it left behind and disclose an
         # over-quota session rather than let it grow silently forever.
-        return quota_postcheck(session_id, out)
+        return quota_postcheck(session_id, out, d=d, before=before)
     # workspace-only session: fresh process in the session dir, fully sandboxed
     lang = registry.canonical(language) if language else "python3"
     if max_output_kb > 0:
@@ -1343,12 +1411,12 @@ def execute(session_id: str, code: str, language: str | None = None,
         result = executor.execute(lang, code, stdin=stdin, timeout=timeout, workdir=str(d),
                                   max_memory_mb=max_memory_mb, max_output_kb=max_output_kb,
                                   max_cpu=max_cpu, no_net=no_net)
-        return quota_postcheck(session_id, result)
+        return quota_postcheck(session_id, result, d=d, before=before)
     result = executor.execute(lang, code, stdin=stdin, timeout=timeout, workdir=str(d),
                               max_memory_mb=max_memory_mb, max_output_kb=SPILL_CAPTURE_KB,
                               max_cpu=max_cpu, no_net=no_net)
     result = spill_if_truncated(session_id, result, 0)
-    return quota_postcheck(session_id, result)
+    return quota_postcheck(session_id, result, d=d, before=before)
 
 
 def _spill_dir(d: Path) -> Path:
@@ -1584,7 +1652,6 @@ def resource_read(session_id: str, path: str,
     Image files are served as image/png|jpeg|gif|webp so MCP clients render
     them inline; everything else as application/octet-stream.
     """
-    import mimetypes
     d = _session_dir(session_id)
     _reap_then_note(session_id)  # F4: reap an expired worker, never revive it
     target = _jail(d, path)
@@ -1626,8 +1693,8 @@ def artifacts(session_id: str) -> dict:
         # slashes keep the identity identical on ubuntu, macos and windows;
         # pathlib accepts "/" as input on every platform, so the reported path
         # round-trips.
-        {"path": p.relative_to(d).as_posix(), "size": size}
-        for p, size in _artifact_entries(d)
+        {"path": p.relative_to(d).as_posix(), "size": st.st_size}
+        for p, st in _artifact_entries(d)
     ]
     return {"ok": True, "session_id": session_id, "artifacts": files}
 
