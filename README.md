@@ -253,6 +253,13 @@ Rust core" and "Run the server" below.
 
 ### Use it from an MCP client
 
+One-click install: both buttons run `uvx codecalc` and require `uv` to be
+installed.
+
+[![Add to Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](cursor://anysphere.cursor-deeplink/mcp/install?name=codecalc&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyJjb2RlY2FsYyJdfQ==)
+[![Install in VS Code](https://img.shields.io/badge/VS_Code-Install_codecalc-0098FF?logo=visualstudiocode&logoColor=white)](vscode:mcp/install?%7B%22name%22%3A%22codecalc%22%2C%22type%22%3A%22stdio%22%2C%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22codecalc%22%5D%7D)
+[![codecalc MCP server](https://glama.ai/mcp/servers/The-40-Thieves/codecalc/badges/score.svg)](https://glama.ai/mcp/servers/The-40-Thieves/codecalc)
+
 The shortest version of the config above — this registers codecalc as a
 stdio MCP server. The console entry point is `codecalc`, so `uvx codecalc`
 launches it directly:
