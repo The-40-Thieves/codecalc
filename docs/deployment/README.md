@@ -305,6 +305,20 @@ macOS has no local strict primitive. The only strict path is
 `RemoteStrictExecutionProvider` — an authenticated client of a Linux host
 running the §2 service (`codecalc/providers.py`).
 
+This is not a gap this document works around locally, because there is no
+local container option that would actually close it: gVisor itself "requires
+Linux" (https://gvisor.dev/docs/user_guide/faq/, retrieved 2026-09-07), and a
+macOS/Windows container runtime that could host it — Podman included —
+"requires a virtual machine" underneath
+(https://docs.podman.io/en/latest/markdown/podman-machine.1.html, retrieved
+2026-09-07), i.e. it would still be a remote-to-this-process Linux boundary,
+just a locally-hosted one. Even without gVisor layered on top, a bare
+container runtime is a weaker, incomplete boundary on its own — Docker's own
+security docs and Kubernetes' multi-tenancy docs say so of their respective
+defaults (cited in `SECURITY.md`'s "Known limitations"). §1's decision stands
+unchanged: the strict boundary is gVisor+Docker on Linux, reached remotely
+from anywhere else, not a locally-approximated substitute.
+
 ### 4.1 Configuration
 
 ```

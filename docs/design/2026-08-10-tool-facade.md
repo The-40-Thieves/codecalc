@@ -201,3 +201,98 @@ These were surfaced by the review and are worth fixing whether or not a facade i
 - [ ] Per-tool timeouts resolve by the underlying capability name, gated
 - [ ] Catalogue assertions compare name sets, not counts
 - [ ] The token figures are re-measured after any change rather than assumed
+
+## Revisited 2026-09-07
+
+Every premise this design leans on was re-checked against primary sources today. All URLs below
+were retrieved 2026-09-07.
+
+### Verdict
+
+**The decision not to build a facade stands, and it is stronger than it was in August.** The
+largest client now defers every MCP tool by default rather than only above a token threshold, and
+OpenAI's Responses API shipped a `defer_loading` mechanism of its own — the client-side answer this
+document argued for has since broadened rather than narrowed. Nothing found today reopens §1's core
+argument (a facade competes with client-side tool search and loses) or §2's (a facade erases
+per-operation policy metadata).
+
+### Premise table
+
+| Premise as written 2026-08-10 | Status | Source |
+|---|---|---|
+| Selection accuracy "degrades once you exceed 30–50 available tools" | Confirmed verbatim, still live on the page | Tool search tool docs (https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool) |
+| Anthropic recommends tool search "from 10 tools upward" | Confirmed — "You have 10 or more tools available" is still listed as a when-to-use case | Same page |
+| "Claude Code enables tool search automatically only above ~10K tokens of MCP tool descriptions" | **Changed.** Tool search is enabled by default with no token floor: unset or `true` defers every MCP tool regardless of size; `auto` loads tools upfront only while their definitions total under 10% of the context window and defers all of them once that 10% is reached. The current docs describe no fixed token trigger; whether one existed in August 2026 was not checked | Claude Code MCP docs (https://code.claude.com/docs/en/mcp) |
+| "For non-Claude clients there is no standard mechanism at all" | **Changed.** OpenAI's Responses API added `defer_loading` on an MCP server tool definition, alongside `allowed_tools` and per-tool `require_approval`; the function-calling guide suggests staying under 20 functions per turn; Codex CLI has `enabled_tools`/`disabled_tools` and an approval mode (`writes`) that prompts only for non-read-only tools. VS Code caps a chat request at 128 enabled tools and adds virtual-tool grouping above a configurable threshold; Windsurf/Cascade caps at 100 total tools. The MCP specification itself still defines none of this — no search, grouping, tags, or toolsets — so the portability gap the design cites is narrower than stated but not closed | OpenAI Responses MCP tool (https://developers.openai.com/api/docs/guides/tools-connectors-mcp); OpenAI function calling guide (https://developers.openai.com/api/docs/guides/function-calling); Codex CLI docs (https://learn.chatgpt.com/docs/extend/mcp?surface=cli); VS Code agent tools docs, dated 2026-09-02 (https://code.visualstudio.com/docs/copilot/agents/agent-tools); Windsurf/Cascade MCP docs (https://docs.devin.ai/desktop/cascade/mcp); MCP spec 2026-07-28 (https://modelcontextprotocol.io/specification/2026-07-28/server/tools) |
+| SDK facts underpinning §"Dispatch" and §"The triad is registered like any other tool" (`Tool.from_function` raises rather than drops; `ToolManager.add_tool` on a duplicate logs and returns the existing tool, quietly shrinking the count; `call_tool` without a context builds a reduced `Context` with no `request_context`) | Confirmed against python-sdk 2.0.0, pinned here, today | Local verification against the pinned SDK version (no public URL; behavior, not documentation) |
+| The MCP Go SDK's `defer_loading` proposal "was closed as not planned" | Confirmed | modelcontextprotocol/go-sdk issue #762, closed NOT_PLANNED 2026-02-26 (https://github.com/modelcontextprotocol/go-sdk/issues/762) |
+| "what the 2026-07-28 specification added instead — `ttlMs`, `cacheScope`, cursor pagination" | Confirmed. `tools/list` results carry required `ttlMs` and `cacheScope`; servers SHOULD return tools in deterministic order; none of it is a context-window deferral mechanism | MCP spec 2026-07-28, server/tools + changelog (https://modelcontextprotocol.io/specification/2026-07-28/server/tools, /changelog) |
+
+Two adjacent claims outside this document's own premises, checked because #118's accuracy argument
+depends on how they're read:
+
+- **The measured evidence for "30–50" itself is partial, not absent.** Anthropic's own tool-search
+  writeup reports accuracy gains from turning search on (Opus 4: 49%→74%; Opus 4.5: 79.5%→88.1%) but
+  does not disclose the baseline tool count, so it cannot calibrate the threshold directly. GitHub
+  cut Copilot's default toolset from 40 to 13 and measured +2–5 points on SWE-bench
+  Verified/SWE-Lancer — consistent with meaningful degradation somewhere in the 13–40 range, not a
+  precise number. One arXiv paper reports Haiku at 91% (10 tools) falling to 87% (15 tools) and
+  Sonnet holding ≥90% through 20 tools but falling below 30 — single-org telemetry, caveated by its
+  own authors. None of this overturns "30–50"; it partially corroborates it while leaving the exact
+  boundary unmeasured outside one vendor's internal eval. The commonly cited "107 tools" collapse
+  figure is a vendor blog post, not a peer-reviewed or vendor-primary source, and is not relied on
+  here. Sources: Anthropic, "Advanced tool use" (https://www.anthropic.com/engineering/advanced-tool-use, 2025-11-24); GitHub, "How we're making GitHub Copilot smarter with fewer tools" (https://github.blog/ai-and-ml/github-copilot/how-were-making-github-copilot-smarter-with-fewer-tools/, 2025-11-19); arXiv 2606.30317 §VI-C; speakeasy.com/mcp/tool-design/less-is-more (the 107-tool figure, flagged as unverified).
+- **Glama's "3–15 tools" band is not adopted as a premise.** It is an anchor value inside an
+  LLM-judged rubric ("a fast, inexpensive model" grading tool definitions), with no evidence offered
+  for the band itself; the studies it cites concern description quality, not tool count. Not used
+  to support or revise anything in this design. Source: Glama tool-definition quality score
+  methodology (https://github.com/glama-ai/tool-definition-quality-score,
+  https://glama.ai/mcp/methodology).
+
+### Amendments adopted
+
+The flat surface gains server-side policy metadata instead of a facade — this is additive to the
+existing design, not a reversal of it:
+
+- `_meta["anthropic/requiresUserInteraction"]: true` on `install_package` and `update_runtimes`,
+  forcing a permission prompt on every call "even in acceptEdits, auto, and bypassPermissions" mode
+  (Claude Code MCP docs, v2.1.199+, https://code.claude.com/docs/en/mcp).
+- `_meta["anthropic/alwaysLoad"]: true` on the 3–5 most-used core tools, so they stay in context even
+  under a client that defers everything else — mirroring the platform guidance to "keep your 3–5
+  most frequently used tools non-deferred" (tool search tool docs,
+  https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool).
+- `ToolAnnotations` (read-only, idempotent, non-destructive, and closed-world where uniformly true —
+  the calculator group is the clean case) because Codex CLI's `writes` approval mode and the ChatGPT
+  Apps SDK both read annotations to choose confirmation behavior (Codex CLI docs,
+  https://learn.chatgpt.com/docs/extend/mcp?surface=cli; Apps SDK,
+  https://developers.openai.com/apps-sdk/build/mcp-server: "Annotations help ChatGPT and Codex choose
+  appropriate confirmation and safety behavior"). Per the MCP spec, annotations are hints only and
+  "clients MUST consider tool annotations to be untrusted unless they come from trusted servers"
+  (https://modelcontextprotocol.io/specification/2026-07-28/server/tools) — they steer UX, they are
+  not a security boundary, same caveat this design already applies to `_meta`.
+- Explicit return types on tool functions, so `outputSchema` is actually emitted. Verified against
+  python-sdk 2.0.0 today: a bare `-> dict` return annotation yields `output_schema: None` and no
+  `structuredContent`; `-> dict[str, T]` yields both. The spec requires it once declared: "If an
+  output schema is provided: Servers MUST provide structured results that conform to this schema"
+  (https://modelcontextprotocol.io/specification/2026-07-28/server/tools). The SDK docs do not state
+  the bare-dict case, which is why this needed local verification rather than a doc citation
+  (https://py.sdk.modelcontextprotocol.io/v2/).
+
+### Scope amendment on tool count
+
+Independent of the facade-versus-endpoint question, three pairs of existing tools share identical
+inputs and a mergeable result shape: `int_widths`/`bit_analysis`, `calc_stats`/`percentiles`, and
+`base_repr`/`radix_convert`. Consolidate these three pairs additively — the merged tool takes over,
+each retired name survives as a deprecated alias for one MINOR release before removal — rather than
+building a generic `op=` dispatcher over them. §2's argument against collapsing distinct operations
+behind one untyped entry point still applies in full to that shape; a same-signature merge with a
+temporary alias does not raise the same objection, because nothing loses its own name, schema, or
+annotations permanently.
+
+### Preconditions unchanged
+
+[Before this is built](#before-this-is-built) — the frozen v1 result contract, the MCP-independent
+`CapabilityRegistry`, and the benchmarked `execute_code`-plus-API vertical slice — stands exactly as
+written. Nothing found today substitutes for measuring total tokens, latency, correctness, and
+failure attribution on a realistic multi-operation task, which remains the missing evidence for
+either surface decision.

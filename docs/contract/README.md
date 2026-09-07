@@ -35,6 +35,16 @@ That dialect is not arbitrary: MCP `2026-07-28` defaults tool `inputSchema` and
 `outputSchema` to 2020-12 when no `$schema` is present, so this document can be
 handed to a client as an `outputSchema` and validated with no translation step.
 
+**Note, 2026-09-07 — this schema is not yet wired to the MCP `outputSchema`
+field for the calculator tools.** The Python MCP SDK derives a tool's
+`outputSchema` from its return type annotation (SDK 2.0.0, verified: a bare
+`-> dict` yields `output_schema: None` and no `structuredContent`, while
+`-> dict[str, T]` yields both), and the calculator tools are currently
+annotated `-> dict`. Emitting `outputSchema` for them — so a client validates
+structurally instead of by convention — is planned as a MINOR change; until
+then, this document is the contract in prose and JSON Schema, not something a
+client can fetch from `tools/list` today.
+
 ---
 
 ## The five shapes
