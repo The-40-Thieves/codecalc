@@ -1,0 +1,42 @@
+{
+  "manifest_version": "0.4",
+  "name": "codecalc",
+  "display_name": "codecalc",
+  "version": "0.5.0",
+  "description": "Code & logic calculator for AI agents: 31 languages, symbolic math, SMT/logic solving, Big-O.",
+  "author": {
+    "name": "The 40 Thieves",
+    "url": "https://github.com/The-40-Thieves"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/The-40-Thieves/codecalc"
+  },
+  "homepage": "https://github.com/The-40-Thieves/codecalc",
+  "support": "https://github.com/The-40-Thieves/codecalc/issues",
+  "license": "Apache-2.0",
+  "keywords": ["mcp", "sandbox", "executor", "code-execution", "llm", "agent", "symbolic-math"],
+  "server": {
+    "type": "uv",
+    "entry_point": "src/server.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": ["run", "--directory", "${__dirname}", "src/server.py"],
+      "env": {
+        "CODECALC_RUNTIME_PATH": "${user_config.runtime_path}"
+      }
+    }
+  },
+  "compatibility": {
+    "platforms": ["darwin", "linux", "win32"],
+    "runtimes": { "python": ">=3.11" }
+  },
+  "user_config": {
+    "runtime_path": {
+      "type": "string",
+      "title": "Runtime PATH",
+      "description": "PATH executed code resolves language runtimes on (CODECALC_RUNTIME_PATH). Claude Desktop launches the server with a stripped environment, so an inherited PATH can miss a toolchain manager's shims (mise, nvm, rustup, ...) entirely and most languages silently become unavailable. Leave blank to fall back to the server's own PATH.",
+      "required": false
+    }
+  }
+}

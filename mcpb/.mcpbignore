@@ -1,0 +1,7 @@
+# uv's isolated venv, materialized on first launch under this directory by
+# `uv run --directory ${__dirname} src/server.py` (see manifest.json). Never
+# packed: it does not exist at pack time in CI, and even a stray local one
+# from a manual `uv run` in this directory must not end up inside the bundle.
+.venv/
+__pycache__/
+*.pyc

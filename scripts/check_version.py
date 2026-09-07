@@ -29,6 +29,15 @@ WHAT IS COMPARED
   docker/mcp-server.Dockerfile  `ARG CODECALC_VERSION=` (the image
                         pinned 0.3.1 while the manifests had moved to 0.3.2, so
                         it would `pip install codecalc==0.3.1` on a 0.3.2 cut)
+  mcpb/manifest.json    the MCPB bundle's own `"version"` — the number a
+                        Claude Desktop install screen shows a user
+  mcpb/pyproject.toml   its `[project]` version AND its pinned
+                        `"codecalc[full]==X.Y.Z"` dependency — the SECOND one
+                        is the one that actually matters: it is what `uv run`
+                        resolves from PyPI when the bundle launches, so a
+                        stale pin would silently install an old codecalc
+                        forever while manifest.json's own display version
+                        claimed to be current
   the git tag           only when running on a tag (CI sets GITHUB_REF)
 
 The changelog is included because a release whose notes describe a different
@@ -46,6 +55,7 @@ found nothing — the failure mode this repo keeps rediscovering.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -58,6 +68,8 @@ CARGO = REPO / "executor" / "Cargo.toml"
 CHANGELOG = REPO / "CHANGELOG.md"
 README = REPO / "README.md"
 DOCKERFILE = REPO / "docker" / "mcp-server.Dockerfile"
+MCPB_MANIFEST = REPO / "mcpb" / "manifest.json"
+MCPB_PYPROJECT = REPO / "mcpb" / "pyproject.toml"
 
 #: A version has to look like one. This is the floor against an extractor that
 #: silently matches an empty string: `""` would satisfy "they are all equal".
@@ -203,6 +215,59 @@ def dockerfile_version() -> str | None:
     return m.group(1)
 
 
+def mcpb_manifest_version() -> str | None:
+    """The MCPB bundle's own `"version"` field — the number Claude Desktop's
+    install screen shows a user installing the .mcpb from a release."""
+    try:
+        manifest = json.loads(MCPB_MANIFEST.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        fail(f"could not read/parse {MCPB_MANIFEST.relative_to(REPO)}: {exc}")
+        return None
+    version = manifest.get("version")
+    if not version:
+        fail(f"{MCPB_MANIFEST.relative_to(REPO)} declares no top-level \"version\"")
+        return None
+    return str(version)
+
+
+def mcpb_pyproject_version() -> str | None:
+    """The stub bundle project's own `[project]` version in mcpb/pyproject.toml."""
+    try:
+        data = tomllib.loads(MCPB_PYPROJECT.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        fail(f"could not read [project] version from {MCPB_PYPROJECT.relative_to(REPO)}: {exc}")
+        return None
+    version = data.get("project", {}).get("version")
+    if not version:
+        fail(f"{MCPB_PYPROJECT.relative_to(REPO)} declares no [project] version")
+        return None
+    return str(version)
+
+
+def mcpb_dependency_pin_version() -> str | None:
+    """The pinned `"codecalc[full]==X.Y.Z"` dependency in mcpb/pyproject.toml.
+
+    THE ONE THAT ACTUALLY MATTERS: `uv run --directory <bundle> src/server.py`
+    resolves this exact pin from PyPI on every launch (see manifest.json and
+    src/server.py). manifest.json's own "version" is only a label a person
+    reads before installing; a stale pin here would keep launching an old
+    codecalc forever while that label claimed to be current.
+    """
+    try:
+        data = tomllib.loads(MCPB_PYPROJECT.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        fail(f"could not read dependencies from {MCPB_PYPROJECT.relative_to(REPO)}: {exc}")
+        return None
+    deps = data.get("project", {}).get("dependencies", [])
+    m = next((re.match(r"^codecalc\[full\]==([^\s;]+)$", d) for d in deps if
+               re.match(r"^codecalc\[full\]==([^\s;]+)$", d)), None)
+    if not m:
+        fail(f"{MCPB_PYPROJECT.relative_to(REPO)} has no 'codecalc[full]==X.Y.Z' "
+             f"dependency pin — the extractor matched nothing among {deps!r}")
+        return None
+    return m.group(1)
+
+
 readme_pkg_version, readme_exec_version = readme_versions()
 
 sources: dict[str, str | None] = {
@@ -213,6 +278,9 @@ sources: dict[str, str | None] = {
     "README.md (codecalc)": readme_pkg_version,
     "README.md (codecalc-exec)": readme_exec_version,
     "docker/mcp-server.Dockerfile": dockerfile_version(),
+    "mcpb/manifest.json": mcpb_manifest_version(),
+    "mcpb/pyproject.toml": mcpb_pyproject_version(),
+    "mcpb/pyproject.toml (codecalc[full] pin)": mcpb_dependency_pin_version(),
 }
 tag = tag_version()
 if tag is not None:

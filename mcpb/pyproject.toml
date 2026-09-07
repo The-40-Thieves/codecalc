@@ -1,0 +1,21 @@
+[project]
+# NOT the codecalc package itself — this is the tiny stub project the MCPB
+# "uv" runtime resolves via `uv run --directory <bundle> src/server.py`. Its
+# only job is to declare one dependency: the REAL, already-published
+# `codecalc[full]` wheel on PyPI (the same one `pip install 'codecalc[full]'`
+# gets, Rust executor binary included). Nothing here is vendored — `uv run`
+# builds an isolated venv on first launch and caches it, exactly as it would
+# for any other pyproject.toml.
+#
+# Kept version-pinned to the same value as the repo root's pyproject.toml.
+# scripts/check_version.py gates that; scripts/build_mcpb.py regenerates
+# this file's dependency line and the sibling manifest.json's "version" from
+# that single source of truth on every build, so the two cannot drift
+# silently between releases.
+name = "codecalc-mcpb"
+version = "0.5.0"
+description = "MCPB bundle stub that resolves the published codecalc[full] package via uv"
+requires-python = ">=3.11"
+dependencies = [
+    "codecalc[full]==0.5.0",
+]
