@@ -62,6 +62,49 @@ behind it.
   `1.4.0` -> `1.5.0` (MINOR: three new shapes, no existing shape moved).
   `tests/test_contract.py` runs all three tools against fixture code and
   validates the real output against the published schema.
+- **Per-run `dependencies` extended to `execute_code_stream` and
+  `run_submit`; `compare_execution` now discloses rather than silently
+  drops.** Previously only `execute_code`/`session_run` honoured a PEP 723
+  block or an explicit `dependencies` argument; the other three execution
+  tools accepted neither, so a `# /// script` block in code sent to any of
+  them was silently inert prose. `execute_code_stream` now takes the same
+  `dependencies` argument execute_code does, with the same refusal codes
+  (`capability_not_requested` under `no_net`/deny-network/strict), the same
+  120s aggregate install budget, and the same sessionless workdir quota —
+  the install runs BEFORE the first progress notification, so a refusal or
+  a failed install is the stream's first and only event, never interleaved
+  with output. `run_submit` also gained `dependencies`: the install runs on
+  the SAME background worker as the code that follows it (a new
+  `RunSupervisor.start(runner=...)` parameter replaces the normal
+  `provider.execute` dispatch with a caller-supplied callable), so the call
+  still returns a run_id immediately regardless of how long the install
+  takes — only the (cheap, network-free) temp directory creation happens
+  synchronously, before the run_id is minted. A failed install becomes the
+  run's own terminal CODED error (a new `RunSupervisor`/`run_supervisor`
+  exception, `CodedRunFailure`, carries it through `_collect()`'s existing
+  exception path verbatim, with no execution receipt attached — the
+  provider was never reached), inspectable via `run_inspect` exactly like
+  any other outcome. The installed entries and the per-run workdir both
+  ride on the run's OWN record from the moment `start()` returns, not on
+  `run_submit`'s stack frame: `dependencies` appears on every terminal
+  `run_inspect(run_id)` call (retained for the run's whole retention
+  window), and the workdir is released on the run's first collection —
+  whichever of `run_inspect`, `run_submit`'s own opportunistic reap of
+  finished runs (so a fire-and-forget caller that never inspects a run
+  still does not leak its workdir), or a startup sweep of the crash-recovery
+  journal (a new `workdir`/`workdir_identity`/`workdir_cleaned` triple,
+  persisted only for a run that has one) turns out to be. `compare_execution`
+  fans out across several languages with no per-language install plumbing
+  behind it (no capability broker, no per-language workdir), so a real
+  per-language installer was judged out of scope; it instead REJECTS an
+  explicit `dependencies` argument with a `validation` error naming the
+  `dependencies` capability, and DISCLOSES — never silently drops — a
+  python3 snippet's inline PEP 723 block via a new per-row
+  `dependencies: {"status": "unsupported", "reason": ...}` field. No further
+  result-contract bump: `execute_code_stream`/`run_submit`'s `dependencies`
+  field reuses the SAME optional field the execution envelope already
+  declares, and `compare_execution`'s result shape has never been part of
+  the versioned contract.
 
 ### Fixed
 

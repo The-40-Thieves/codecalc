@@ -1063,7 +1063,7 @@ def test_mcp_stream_adapter_compiles_spec_and_delegates_progress() -> None:
 
     class RecordingExecutionService:
         async def execute_stream(self, spec: providers.ComputationSpec, *,
-                                 provider_id=None, on_progress=None) -> dict:
+                                 provider_id=None, dependencies=None, on_progress=None) -> dict:
             calls.append((spec, provider_id))
             if on_progress is not None:
                 await on_progress(3, "three")

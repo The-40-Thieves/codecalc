@@ -301,7 +301,7 @@ difference is worth stating rather than leaving a reader to discover:
 | `install_package` | **Yes, by design.** It runs uv / npm / gem / cargo, which fetch from their registries. Installer hooks also run *outside* the sandbox — see [SECURITY.md](SECURITY.md) |
 | `runtimes_status`, `update_runtimes` | **Yes.** They shell out to mise / rustup / swiftly / npm, which check remote versions |
 | code you execute | **Yes, unless `no_net=True`** — and that guarantee needs the native executor (seccomp-bpf where the Linux kernel supports it, a symbol shim otherwise; see the guarantee table below), so the pure-Python fallback reports it in `unenforced` instead of applying it. Set `CODECALC_REQUIRE_NATIVE=1` to turn "fallback in use" into a startup failure instead of a result you have to notice by reading `unenforced` |
-| `execute_code` / `session_run` with declared `dependencies` | **Yes, before the sandboxed step, through the confined `install_package` path.** A PEP 723 block (python3) or the `dependencies` argument is installed BEFORE the code runs — never inside the sandbox — and refused (`capability_not_requested`, no fetch attempted) when `no_net=True` was requested or the capability policy denies or strictly limits network |
+| `execute_code` / `session_run` / `execute_code_stream` / `run_submit` with declared `dependencies` | **Yes, before the sandboxed step, through the confined `install_package` path.** A PEP 723 block (python3) or the `dependencies` argument is installed BEFORE the code runs — never inside the sandbox — and refused (`capability_not_requested`, no fetch attempted) when `no_net=True` was requested or the capability policy denies or strictly limits network. `run_submit`'s install runs on its own background worker, same as the code that follows it — the call itself still returns a run_id immediately |
 
 These distinctions are stated precisely on purpose: a guarantee described more
 broadly than it is enforced is exactly the failure mode this project works to
@@ -318,10 +318,14 @@ audit trail, alongside `install_denied`) so an operator can tell "source text
 alone triggered this" from an explicit `install_package`/`dependencies=` call.
 To disable it: `no_net=True` on the call, or a `deny-network`/`strict`
 `CODECALC_CAPABILITY_POLICY` — either one refuses before any fetch, block or
-no block. `execute_code_stream`, `run_submit`, and `compare_execution` never
-read this block at all: none of them accept a `dependencies` argument, so a
-`# /// script` block in code passed to any of them is inert text, not a
-trigger.
+no block. `execute_code_stream` and `run_submit` read the block the same way
+`execute_code` does. `compare_execution` is the one holdout: it fans out
+across several languages with no per-language install plumbing behind it, so
+it REJECTS an explicit `dependencies` argument with a `validation` error
+rather than approximating one, and DISCLOSES rather than silently drops an
+inline PEP 723 block it finds in a snippet — that row's result carries
+`dependencies: {"status": "unsupported", "reason": ...}` instead of
+installing from it.
 
 **Two ceilings govern a dependency-bearing run, not one.** The run's own
 `timeout` bounds the sandboxed step; it says nothing about installing

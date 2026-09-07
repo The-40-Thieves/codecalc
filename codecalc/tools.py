@@ -11,11 +11,20 @@ from __future__ import annotations
 import math
 import statistics
 
-from . import executor
+from . import dependencies as dependencies_module
+from . import executor, registry
 
 
 def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 15) -> dict:
-    """Run one code snippet per language; return a side-by-side result table."""
+    """Run one code snippet per language; return a side-by-side result table.
+
+    No per-run dependency installs happen here (see the `compare_execution`
+    MCP tool's own docstring for why) — but a python3 snippet carrying a PEP
+    723 `# /// script` block is still detected and DISCLOSED, never silently
+    dropped: only a REGEX presence check, deliberately not a full parse (a
+    malformed block is exactly as inert here as a valid one, and this path
+    has no reason to raise over it).
+    """
     results = []
     for language, code in snippets.items():
         r = executor.execute(language, code, stdin=stdin, timeout=timeout)
@@ -51,6 +60,15 @@ def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 
         if cold_retry:
             row["cold_retry_recovered"] = cold_retry_recovered
             row["first_attempt_ms"] = first_attempt_ms
+        if (registry.canonical(language) == "python3"
+                and dependencies_module.PEP723_REGEX.search(code)):
+            row["dependencies"] = {
+                "status": "unsupported",
+                "reason": "this snippet carries a PEP 723 '# /// script' "
+                          "block, but compare_execution never installs "
+                          "dependencies (see this tool's own docstring); "
+                          "the block was left unparsed and unhonoured",
+            }
         results.append(row)
     # `fastest` must mean the fastest run that WORKED. It used to be the minimum
     # duration over all results, so a language that failed instantly won: perl
