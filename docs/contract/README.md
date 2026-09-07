@@ -1,7 +1,39 @@
 # The codecalc result contract
 
-**Current version: `1.6.0`** · Schema: [`result-v1.schema.json`](result-v1.schema.json) ·
+**Current version: `1.7.0`** · Schema: [`result-v1.schema.json`](result-v1.schema.json) ·
 Source of truth: [`codecalc/contract.py`](../../codecalc/contract.py)
+
+`1.7.0` is a MINOR bump over `1.6.0`. It ADDS `n_after` to
+`optimization_verification.speedup.per_size[]` and `size_after` to
+`optimization_verification.inference.per_size[]`, both present ONLY when the
+candidate's own n at that position differs from the baseline's — the
+disclosure for a position `_align_sizes` (`codecalc/optimization.py`)
+deliberately leaves unaligned: when the candidate exhausted its ENTIRE
+rescale budget (`_MAX_RESCALE_ROUNDS`, 10^4x the starting size) without ever
+clearing `optimization._VISIBILITY_FLOOR_MS`, re-measuring anyone would be
+either unsafe (the candidate's exhausted n was never validated as safe for
+the baseline) or pointless (the baseline already tried its own smaller
+sizes and failed to help). This bump also makes the visibility-floor
+exclusion rule itself ASYMMETRIC: a position now lands in
+`inference.sizes_below_floor` only when the BASELINE side is unmeasurable
+or never clears the floor, regardless of the candidate. The PRIOR, symmetric
+rule (excluded when EITHER side was below the floor) was a bug, not an extra
+safety margin: a baseline visibly costing real time, paired against a
+candidate too fast to register even after exhausting its own rescale
+budget, is the single most decisive result this tool can produce — the
+symmetric rule discarded exactly that pairing, driving `inference.sizes_total`
+to 0 (and `accepted` to `False` with "no size had enough comparable runs")
+for the canonical genuine-O(1)-win case this whole auto-scale system exists
+to certify. The new rule instead feeds the baseline's sample at its own n
+directly against the candidate's sample at ITS OWN (necessarily larger) n —
+conservative by monotonicity: a candidate still measured faster while doing
+at least as much work is faster, full stop — and `size_after` on that
+`per_size` entry (in both `speedup` and `inference`) discloses the
+mismatched pairing rather than silently presenting it as same-n. No result
+that a `1.6.0` client already understood changes meaning: a position that
+was comparable before stays comparable with the same `size`/`n`, and the
+new fields are additive, absent whenever the two sides ran at the same n
+(still the common case) — hence MINOR, not MAJOR.
 
 `1.6.0` is a MINOR bump over `1.5.0`. It ADDS `sizes_below_floor` to
 `optimization_verification`'s `inference` object: every size excluded from
@@ -48,12 +80,18 @@ eight shapes"). Concretely:
   `accepted`, `reason`, an embedded `verification` (the BARE
   `translation_verification` evidence, without the grade/`contract_version`
   wrapper — `verify_optimization` calls `verify_translation()` directly, not
-  through the graded MCP tool), plus `speedup` (ratio + per-size before/after
-  timings), `inference` (the per-size one-sided Mann-Whitney U test —
+  through the graded MCP tool), plus `speedup` (ratio +
+  `per_size[].{n,before_ms,after_ms,ratio,n_after}` — `n_after`, added in
+  `1.7.0`, present only when the candidate ran at a different n than `n`),
+  `inference` (the per-size one-sided Mann-Whitney U test —
   `test`/`alternative`/`alpha`/`per_size[].{size,n_before,n_after,u,p_value,
-  rank_biserial}`/`sizes_rejecting`/`sizes_total`/
-  `sizes_below_floor[].{size,before_ms,after_ms}` (added in `1.6.0`)/
-  `decision_basis` —
+  rank_biserial,size_after}` (`size_after`, `1.7.0`, present under the same
+  condition as `speedup`'s `n_after` — note `n_before`/`n_after` here are
+  SAMPLE COUNTS, not sizes; `size_after` is the candidate's n)/
+  `sizes_rejecting`/`sizes_total`/
+  `sizes_below_floor[].{size,before_ms,after_ms}` (added in `1.6.0`;
+  ASYMMETRIC as of `1.7.0` — excluded only on the BASELINE's failure, never
+  the candidate's)/`decision_basis` —
   `_accept_decision` requires a MAJORITY of sizes to reject before `accepted`
   can be true), `min_speedup`, `language`, and `grade`/`grade_basis`/
   `grade_rules_version`. A measurement failure (baseline or candidate timing

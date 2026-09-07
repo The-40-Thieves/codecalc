@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/The-40-Thieves/codecalc/main/docs/contract/result-v1.schema.json",
   "title": "codecalc execution result",
-  "description": "The result contract for codecalc's execution tools, version 1.6.0. Generated from codecalc/contract.py by scripts/check_contract.py \u2014 edit the module, not this file.",
+  "description": "The result contract for codecalc's execution tools, version 1.7.0. Generated from codecalc/contract.py by scripts/check_contract.py \u2014 edit the module, not this file.",
   "type": "object",
   "required": [
     "ok",
@@ -896,6 +896,11 @@
                   },
                   "ratio": {
                     "type": "number"
+                  },
+                  "n_after": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Present only when the candidate ran at a different n than the baseline's n above \u2014 an intentionally unaligned, disclosed pairing, not a mislabelled row."
                   }
                 }
               }
@@ -959,6 +964,11 @@
                   },
                   "rank_biserial": {
                     "type": "number"
+                  },
+                  "size_after": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Present only when the candidate's own n at this position differs from the baseline's `size` above \u2014 an intentionally unaligned, disclosed pairing (see optimization._align_sizes), not a mislabelled row. NOT a sample count \u2014 `n_before`/`n_after` above already mean that."
                   }
                 }
               }

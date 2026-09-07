@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import pathlib
 import sys
+import time
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
@@ -327,17 +328,16 @@ _ORIG850 = "original code"
 _CAND850 = "candidate code"
 
 
-def _mock_measure850(language, code, sizes, timeout, repeats):
+def _mock_measure850(language, code, sizes, timeout, repeats, deadline=None):
     # original: visible immediately at the default size, no rescale
     if code == _ORIG850 and tuple(sizes) == (1000,):
         return [{"n": 1000, "ok": True, "duration_ms": 500,
                  "all_runs_ms": [498, 499, 500, 501, 502]}], None
     if code == _ORIG850 and tuple(sizes) == (10000,):
-        # only reached by _align_sizes's re-measurement, once the candidate
-        # forced 10000 into the picture -- a real O(n) baseline at 10x the
-        # size takes roughly 10x as long.
-        return [{"n": 10000, "ok": True, "duration_ms": 5000,
-                 "all_runs_ms": [4980, 4990, 5000, 5010, 5020]}], None
+        # The BASELINE is never grown by alignment (it cleared the floor at
+        # 1000); reaching here means a regression to the version that grew
+        # a real-cost baseline to the candidate's rescaled n.
+        raise AssertionError("alignment re-measured the BASELINE at the candidate's n")
     # candidate: invisible at 1000 (forces one rescale round), visible at 10000
     if code == _CAND850 and tuple(sizes) == (1000,):
         return [{"n": 1000, "ok": True, "duration_ms": 0.5,
@@ -368,22 +368,26 @@ try:
 finally:
     optimization.tools._measure = _orig_measure850
 
-check("_align_sizes makes both sides share the SAME sizes",
-      _before850_aligned["sizes"] == _after850_aligned["sizes"],
+check("_align_sizes leaves the floor-clearing BASELINE at its own n (never grown)",
+      _before850_aligned["sizes"] == [1000] and _after850_aligned["sizes"] == [10000],
       f"-> before={_before850_aligned['sizes']} after={_after850_aligned['sizes']}")
-check("  ...at the LARGER (candidate-forced) size, not the smaller one",
-      _before850_aligned["sizes"] == [10000], f"-> {_before850_aligned['sizes']}")
+check("  ...and re-measured neither side (the mock raises if the baseline is asked for 10000)",
+      _before850_aligned is _before850 and _after850_aligned is _after850,
+      "-> alignment returned the inputs untouched")
 
 _sp850 = optimization._speedup(_before850_aligned, _after850_aligned)
-check("_speedup's per-size entry pairs the RIGHT before/after values for n=10000",
-      _sp850.get("per_size") == [{"n": 10000, "before_ms": 5000, "after_ms": 5, "ratio": 1000.0}],
+check("_speedup pairs baseline@1000 with candidate@10000 and DISCLOSES n_after",
+      _sp850.get("per_size") == [{"n": 1000, "before_ms": 500, "after_ms": 5,
+                                  "ratio": 100.0, "n_after": 10000}],
       f"-> {_sp850.get('per_size')}")
 
 _inf850 = optimization._infer_speedup(_before850_aligned, _after850_aligned)
-check("_infer_speedup's per-size entry is also for n=10000, not the stale n=1000",
-      len(_inf850["per_size"]) == 1 and _inf850["per_size"][0]["size"] == 10000,
+check("_infer_speedup's per-size entry is the mismatched pair, disclosed as size/size_after",
+      len(_inf850["per_size"]) == 1 and _inf850["per_size"][0]["size"] == 1000
+      and _inf850["per_size"][0].get("size_after") == 10000
+      and _inf850["sizes_total"] == 1 and _inf850["sizes_below_floor"] == [],
       f"-> {_inf850.get('per_size')}")
-check("  ...built from the aligned 5-vs-5 samples (n_before/n_after), not a leftover 1-vs-5",
+check("  ...built from the two arms' own 5-vs-5 samples (n_before/n_after), not a leftover 1-vs-5",
       _inf850["per_size"][0]["n_before"] == 5 and _inf850["per_size"][0]["n_after"] == 5,
       f"-> {_inf850.get('per_size')}")
 
@@ -392,7 +396,7 @@ check("  ...built from the aligned 5-vs-5 samples (n_before/n_after), not a left
 _calls850 = []
 
 
-def _counting_measure850(language, code, sizes, timeout, repeats):
+def _counting_measure850(language, code, sizes, timeout, repeats, deadline=None):
     _calls850.append((code, tuple(sizes)))
     return [{"n": n, "ok": True, "duration_ms": 10, "all_runs_ms": [10] * 5} for n in sizes], None
 
@@ -406,6 +410,135 @@ finally:
     optimization.tools._measure = _orig_measure850
 check("aligning two ALREADY-matching sides makes zero extra _measure calls",
       _calls850 == [], f"-> {_calls850}")
+
+
+# ═══ a genuine O(1) candidate that never clears the floor, paired against a ═
+#     floor-clearing baseline, is ACCEPTED — not excluded to sizes_total=0 ══
+# History: an earlier version of this fix reacted to the OLD bug (alignment
+# forcing a real-cost baseline up to a fast arm's UNVALIDATED, exhausted
+# ceiling — see `_align_sizes`'s docstring) by shrinking the exhausted
+# candidate back down and marking the position EXCLUDED. Reviewed and found
+# WRONG: a baseline that clears the floor at its own n, paired against a
+# candidate too fast to register even after exhausting its ENTIRE rescale
+# budget (`_MAX_RESCALE_ROUNDS`, 10**4x the default size), is not a
+# measurement failure — it is the single most decisive result this tool can
+# produce. The exclude-and-shrink version drove `sizes_total` to 0 for
+# EXACTLY the genuine-huge-win case this whole auto-scale system exists to
+# certify: reproduced here with per-size ratios spanning the reviewer's
+# 20x-2400x range, `accepted` must be `True`, not `False` with "no size had
+# enough comparable runs".
+#
+# Built via `_timed` stand-ins (mocking the FUNCTION, not `tools._measure`):
+# the baseline is comfortably visible at the default sizes (no rescale
+# needed, matching a real O(n) or O(n^2) baseline in practice); the
+# candidate has already exhausted `_MAX_RESCALE_ROUNDS` on its own (sizes
+# scaled 10**4x) and is STILL below the floor at every one of them — the
+# `_timed`-level outcome a genuinely O(1) candidate produces. `_align_sizes`
+# must make ZERO `tools._measure` calls here (asserted via the call log): no
+# re-measurement is needed OR safe once the candidate has exhausted its
+# budget without validating anything.
+_ORIG_ASYM = "orig-asym"
+_CAND_ASYM = "cand-asym"
+_ASYM_BEFORE = {"ok": True, "sizes": [2000, 5000, 10000, 20000],
+               "durations_ms": [8.0, 20.0, 50.0, 120.0],
+               "all_runs_ms": [[7.6, 7.8, 8.0, 8.2, 8.4],
+                               [19.0, 19.5, 20.0, 20.5, 21.0],
+                               [48.0, 49.0, 50.0, 51.0, 52.0],
+                               [116.0, 118.0, 120.0, 122.0, 124.0]]}
+_ASYM_AFTER = {"ok": True,
+              "sizes": [n * 10 ** optimization._MAX_RESCALE_ROUNDS
+                        for n in (2000, 5000, 10000, 20000)],
+              "durations_ms": [0.4, 0.2, 0.1, 0.05],
+              "all_runs_ms": [[0.35, 0.38, 0.40, 0.42, 0.45],
+                              [0.18, 0.19, 0.20, 0.21, 0.22],
+                              [0.08, 0.09, 0.10, 0.11, 0.12],
+                              [0.04, 0.045, 0.05, 0.055, 0.06]]}
+check("control: every candidate duration is below the visibility floor "
+      "(a genuinely O(1) workload, exhausted without ever clearing it)",
+      all(d < optimization._VISIBILITY_FLOOR_MS for d in _ASYM_AFTER["durations_ms"]),
+      f"-> {_ASYM_AFTER['durations_ms']}")
+check("control: every baseline duration clears the floor (no rescale needed)",
+      all(d >= optimization._VISIBILITY_FLOOR_MS for d in _ASYM_BEFORE["durations_ms"]),
+      f"-> {_ASYM_BEFORE['durations_ms']}")
+
+_calls_asym = []
+
+
+def _counting_measure_asym(language, code, sizes, timeout, repeats, deadline=None):
+    _calls_asym.append((code, tuple(sizes)))
+    raise AssertionError(
+        f"_align_sizes should not re-measure anything here: code={code!r} sizes={sizes!r}")
+
+
+_orig_measure_asym = optimization.tools._measure
+optimization.tools._measure = _counting_measure_asym
+try:
+    _before_asym_aligned, _after_asym_aligned = optimization._align_sizes(
+        dict(_ASYM_BEFORE), dict(_ASYM_AFTER), _ORIG_ASYM, _CAND_ASYM, "python3", 30)
+finally:
+    optimization.tools._measure = _orig_measure_asym
+
+check("_align_sizes makes ZERO re-measurement calls for an exhausted "
+      "candidate against a floor-clearing baseline",
+      _calls_asym == [], f"-> {_calls_asym}")
+check("  ...and leaves both sides' sizes exactly as measured (intentionally "
+      "mismatched, not forced together)",
+      _before_asym_aligned["sizes"] == _ASYM_BEFORE["sizes"]
+      and _after_asym_aligned["sizes"] == _ASYM_AFTER["sizes"],
+      f"-> before={_before_asym_aligned['sizes']} after={_after_asym_aligned['sizes']}")
+
+_inf_asym = optimization._infer_speedup(_before_asym_aligned, _after_asym_aligned)
+check("all 4 positions are comparable — none excluded to sizes_below_floor",
+      _inf_asym["sizes_total"] == 4 and _inf_asym["sizes_below_floor"] == [],
+      f"-> total={_inf_asym['sizes_total']} below_floor={_inf_asym['sizes_below_floor']}")
+check("  ...and each comparable entry discloses the mismatched pairing via size_after",
+      all(row["size_after"] > row["size"] for row in _inf_asym["per_size"]),
+      f"-> {_inf_asym['per_size']}")
+
+_sp_asym = optimization._speedup(_before_asym_aligned, _after_asym_aligned)
+check("_speedup's per-size ratios span the reviewer's 20x-2400x range",
+      [row["ratio"] for row in _sp_asym["per_size"]] == [20.0, 100.0, 500.0, 2400.0],
+      f"-> {_sp_asym.get('per_size')}")
+check("  ...disclosed via n_after (the candidate's larger, unaligned n)",
+      all(row["n_after"] > row["n"] for row in _sp_asym["per_size"]),
+      f"-> {_sp_asym.get('per_size')}")
+
+_accepted_asym, _reason_asym = optimization._accept_decision(_sp_asym, 1.15, _inf_asym)
+check("reviewer repro: ACCEPTED, not excluded to 'no size had enough "
+      "comparable runs' (the bug this fix closes)",
+      _accepted_asym is True, f"-> accepted={_accepted_asym} {_reason_asym!r}")
+
+# End to end through `verify_optimization` itself, mocking `_timed` (not
+# `tools._measure`) so `_align_sizes`/`_speedup`/`_infer_speedup` all run for
+# real against these exact numbers.
+_orig_vt_asym = optimization.verify_translation
+_orig_timed_asym = optimization._timed
+
+
+def _mock_timed_asym(code, language, sizes, timeout=30, deadline=None):
+    if code == _ORIG_ASYM:
+        return dict(_ASYM_BEFORE)
+    if code == _CAND_ASYM:
+        return dict(_ASYM_AFTER)
+    raise AssertionError(f"unexpected _timed call: code={code!r}")
+
+
+optimization.verify_translation = lambda *a, **k: {"passed": True, "matched": 2, "total": 2}
+optimization._timed = _mock_timed_asym
+try:
+    _e2e_asym = optimization.verify_optimization(_ORIG_ASYM, _CAND_ASYM, "python3")
+finally:
+    optimization.verify_translation = _orig_vt_asym
+    optimization._timed = _orig_timed_asym
+
+check("end to end: verify_optimization accepts the reviewer's exhausted-"
+      "candidate-vs-floor-clearing-baseline repro",
+      _e2e_asym.get("accepted") is True,
+      f"-> accepted={_e2e_asym.get('accepted')} {_e2e_asym.get('reason')!r}")
+check("  ...inference.sizes_total == 4, sizes_below_floor empty",
+      _e2e_asym.get("inference", {}).get("sizes_total") == 4
+      and _e2e_asym.get("inference", {}).get("sizes_below_floor") == [],
+      f"-> {_e2e_asym.get('inference')}")
 
 
 # ═══ the auto-scale floor is PER SIZE, not combined across all sizes ═══════
@@ -445,7 +578,7 @@ _RESCUE_TABLE = {
 _rescue_calls = []
 
 
-def _mock_measure_rescue(language, code, sizes, timeout, repeats):
+def _mock_measure_rescue(language, code, sizes, timeout, repeats, deadline=None):
     _rescue_calls.append((code, tuple(sizes)))
     table = _RESCUE_TABLE[code]
     return [{"n": n, "ok": True, "duration_ms": table[n][0], "all_runs_ms": list(table[n][1])}
@@ -518,7 +651,7 @@ _NEVER_TABLE = {
 }
 
 
-def _mock_measure_never(language, code, sizes, timeout, repeats):
+def _mock_measure_never(language, code, sizes, timeout, repeats, deadline=None):
     table = _NEVER_TABLE[code]
     return [{"n": n, "ok": True, "duration_ms": table[n][0], "all_runs_ms": list(table[n][1])}
             for n in sizes], None
@@ -559,16 +692,19 @@ check("  ...invariant: every size is accounted for in per_size or sizes_below_fl
 #     vanish from BOTH per_size and sizes_below_floor ═══════════════════════
 # Reviewer repro on PR #275: sizes [10, 20, 30] with before [0.5, 10, 12],
 # after [0.3, 4, 5]. Size 10's before_ms (0.5) is at/under the OLDER
-# `bb <= 1.0` guard `_speedup` already applies; size 20's after_ms (4) is
-# under the NEWER `_VISIBILITY_FLOOR_MS` (5); size 30 clears everything.
-# `_infer_speedup` used to check the OLDER guard first with a bare
-# `continue` -- no `sizes_below_floor` entry -- so size 10 disappeared from
-# BOTH `per_size` (correctly excluded) AND `sizes_below_floor` (incorrectly
-# not told about), contradicting this function's own "never silently
-# dropped" guarantee: `sizes_total` read 1 (just size 30) and
-# `sizes_below_floor` named only size 20, with no record of size 10 at all
-# anywhere in the result. Every exclusion reason -- this one included --
-# must fold into ONE disclosure now.
+# `bb <= 1.0` guard `_speedup` already applies (baseline unmeasurable —
+# excluded under the ASYMMETRIC rule too, since it is the baseline that
+# fails here). Size 20's after_ms (4) is under the NEWER
+# `_VISIBILITY_FLOOR_MS` (5), but its BASELINE (before_ms=10) clears the
+# floor fine — under the asymmetric rule (a later fix: a position excludes
+# only on the BASELINE's failure, never the candidate's) this is now
+# COMPARABLE, not excluded: a baseline visibly costing 10ms against a
+# candidate too fast to reach 4ms is decisive evidence, not a measurement
+# gap. Size 30 clears everything regardless. `_infer_speedup` used to check
+# the OLDER guard first with a bare `continue` -- no `sizes_below_floor`
+# entry -- so size 10 disappeared from BOTH `per_size` (correctly excluded)
+# AND `sizes_below_floor` (incorrectly not told about); that invariant is
+# what this test still pins, on the one size (10) that IS excluded.
 _before_1ms = {"sizes": [10, 20, 30], "durations_ms": [0.5, 10, 12],
               "all_runs_ms": [[0.4, 0.45, 0.5, 0.55, 0.6],
                               [9, 9.5, 10, 10.5, 11],
@@ -578,15 +714,14 @@ _after_1ms = {"sizes": [10, 20, 30], "durations_ms": [0.3, 4, 5],
                              [3.8, 3.9, 4, 4.1, 4.2],
                              [4.8, 4.9, 5, 5.1, 5.2]]}
 _inf_1ms = optimization._infer_speedup(_before_1ms, _after_1ms)
-check("a size excluded by the OLDER 1ms-noise-floor guard is named in "
-      "sizes_below_floor too, not dropped from every field",
-      {"size": 10, "before_ms": 0.5, "after_ms": 0.3} in _inf_1ms["sizes_below_floor"],
+check("a size excluded by the OLDER 1ms-noise-floor guard (an unmeasurable "
+      "BASELINE) is named in sizes_below_floor, not dropped from every field",
+      _inf_1ms["sizes_below_floor"] == [{"size": 10, "before_ms": 0.5, "after_ms": 0.3}],
       f"-> {_inf_1ms.get('sizes_below_floor')}")
-check("  ...alongside the size excluded by the NEWER visibility floor",
-      {"size": 20, "before_ms": 10, "after_ms": 4} in _inf_1ms["sizes_below_floor"],
-      f"-> {_inf_1ms.get('sizes_below_floor')}")
-check("  ...and the size that clears everything is still tested normally",
-      _inf_1ms["sizes_total"] == 1 and _inf_1ms["per_size"][0]["size"] == 30,
+check("  ...but size 20 (baseline clears the floor, candidate does not) is "
+      "now COMPARABLE under the asymmetric rule, not excluded",
+      _inf_1ms["sizes_total"] == 2
+      and {r["size"] for r in _inf_1ms["per_size"]} == {20, 30},
       f"-> {_inf_1ms.get('per_size')}")
 check("  ...invariant: every size is accounted for in per_size or sizes_below_floor",
       len(_before_1ms["sizes"]) == _inf_1ms["sizes_total"] + len(_inf_1ms["sizes_below_floor"]),
@@ -717,6 +852,282 @@ if executor._rust:
           "inference" not in o, "-> a faster wrong answer is not an optimisation")
 else:
     print("SKIP live verification gates (no native executor built)")
+
+
+# ═══ a REAL O(n^2) baseline vs a REAL O(1) candidate, at CALIBRATED sizes ══
+# The mocked test above pins the ALIGNMENT INVARIANT down deterministically;
+# this measures the thing that invariant protects — REAL wall time — with a
+# real payload instead of a duration pinned below the floor. The
+# `mcp_middleware.TOOL_TIMEOUTS["verify_optimization"]` comment's "~27s worst
+# case" was measured with every reported duration pinned below the floor (so
+# the rescale ladder ran its full budget purely on subprocess-spawn cost);
+# it does not bound a baseline whose measured time actually GROWS with n —
+# exactly the shape this test uses.
+#
+# `original` is a genuine O(n^2): a `volatile` accumulator defeats the
+# compiler's usual strength-reduction of a trivial counting loop into a
+# closed form (`gcc -O2` — see codecalc/registry.py — will otherwise fold
+# `for i: for j: s+=1` into `s = n*n` and the "baseline" would silently
+# become O(1) too). `candidate` keeps a small FIXED (n-independent) busy-loop
+# pad: the asymmetric visibility rule (this fix) no longer needs padding to
+# avoid a false EXCLUSION, but an unpadded candidate's own duration can still
+# occasionally dip below the floor on ONE size purely from subprocess-spawn
+# jitter (measured directly: happened during this fix's own development),
+# triggering a real rescale that can VALIDATE at a size the real O(n^2)
+# baseline then gets grown up to and cannot afford — the padding keeps the
+# candidate's duration a stable, comfortable margin above the floor so that
+# alignment path is never exercised by accident; the mocked test above pins
+# the exhausted-candidate path deterministically instead.
+#
+# Sizes are CALIBRATED AT TEST TIME, not hardcoded, after this exact test
+# failed on a hosted macOS runner: the previous fixed default sizes
+# ([2000, 5000, 10000, 20000]) measured a real but weak 1.55x with NO sizes
+# excluded, i.e. even the BASELINE's smallest size was too small next to
+# that runner's (higher) subprocess-spawn overhead to produce a decisive
+# signal — a hardware-dependent flake, not a code bug. Fixed here with the
+# simplest calibration that works: probe the baseline at the smallest
+# default size (2000), double it until its duration clears 50ms (10x
+# `_VISIBILITY_FLOOR_MS`), capped at 8 doublings, then scale the other three
+# default-ratio sizes (2.5x/5x/10x) off that same calibrated unit. Printed
+# UNCONDITIONALLY (not just on failure) so a CI failure on a
+# differently-calibrated runner is diagnosable from the log alone.
+if executor._rust:
+    _QUAD_BASE = (
+        "#include <stdio.h>\n"
+        "int main(){\n"
+        "    long long n; if (scanf(\"%lld\", &n) != 1) return 1;\n"
+        "    if (n < 0) n = 0;\n"
+        "    volatile long long s = 0;\n"
+        "    for (long long i = 0; i < n; i++) {\n"
+        "        for (long long j = 0; j < n; j++) {\n"
+        "            s += 1;\n"
+        "        }\n"
+        "    }\n"
+        "    printf(\"%lld\\n\", (long long)s);\n"
+        "    return 0;\n"
+        "}\n")
+    _QUAD_CAND = (
+        "#include <stdio.h>\n"
+        "int main(){\n"
+        "    long long n; if (scanf(\"%lld\", &n) != 1) return 1;\n"
+        "    if (n < 0) n = 0;\n"
+        "    volatile long long pad = 0;\n"
+        "    for (long long k = 0; k < 800000; k++) pad += 1;\n"
+        "    printf(\"%lld\\n\", n*n);\n"
+        "    return 0;\n"
+        "}\n")
+
+    def _quad_probe_ms(code, n, reps=3, timeout=20):
+        vals = []
+        for _ in range(reps):
+            r = executor.execute("c", code, stdin=f"{n}\n", timeout=timeout)
+            d = r.get("duration_ms")
+            if d is not None:
+                vals.append(d)
+        return min(vals) if vals else None
+
+    # Calibrate against BOTH arms: the unit size must make the baseline
+    # cost at least 100ms AND at least 6x what the O(1) candidate costs on
+    # this host (spawn overhead plus its fixed pad). A hosted macOS runner
+    # probed the baseline at 51ms, then measured it at 34ms against a 14ms
+    # candidate at the smallest size: p=0.93 there, so the majority rule
+    # still accepted (3/4) but the smallest size was pure spawn jitter. A
+    # single absolute threshold cannot know the host's spawn cost; the
+    # candidate probe does.
+    _quad_cand_ms = _quad_probe_ms(_QUAD_CAND, 2000) or 10.0
+    _quad_floor_ms = max(100.0, 6.0 * _quad_cand_ms)
+    _quad_unit = 2000
+    _quad_unit_ms = _quad_probe_ms(_QUAD_BASE, _quad_unit)
+    _quad_calib_steps = 0
+    while (_quad_unit_ms is None or _quad_unit_ms < _quad_floor_ms) and _quad_calib_steps < 8:
+        _quad_unit *= 2
+        _quad_unit_ms = _quad_probe_ms(_QUAD_BASE, _quad_unit)
+        _quad_calib_steps += 1
+    # A QUADRATIC payload squares the spread: 10x the unit is 100x the work,
+    # which put the largest size at ~13s per run (x REPEATS) on this box and
+    # spent 93s of the 180s tool deadline on one call. (1, 1.5, 2, 3) keeps
+    # the largest size at 9x the unit's work (~1.2s per run at a 131ms unit)
+    # while the four sizes still span a 9x cost range for the ladder.
+    _QUAD_SIZES = [int(_quad_unit * r) for r in (1, 1.5, 2, 3)]
+    print(f"[calibration] unit={_quad_unit} "
+          f"(after {_quad_calib_steps} doubling step(s), cap 8) "
+          f"baseline@unit={_quad_unit_ms}ms candidate={_quad_cand_ms}ms "
+          f"floor={_quad_floor_ms}ms sizes={_QUAD_SIZES}")
+
+    _quad_t0 = time.perf_counter()
+    _quad_result = optimization.verify_optimization(
+        _QUAD_BASE, _QUAD_CAND, "c", test_inputs=["0", "1", "10", "100"],
+        sizes=_QUAD_SIZES)
+    _quad_wall_s = time.perf_counter() - _quad_t0
+    print(f"[calibration] verify_optimization: ok={_quad_result.get('ok')} "
+          f"accepted={_quad_result.get('accepted')} "
+          f"speedup={_quad_result.get('speedup')} "
+          f"inference_totals=({(_quad_result.get('inference') or {}).get('sizes_rejecting')}/"
+          f"{(_quad_result.get('inference') or {}).get('sizes_total')}) "
+          f"wall={_quad_wall_s:.1f}s")
+
+    check("a real O(n^2)->O(1) win at CALIBRATED sizes is accepted",
+          _quad_result.get("ok") is True and _quad_result.get("accepted") is True,
+          f"-> ok={_quad_result.get('ok')} accepted={_quad_result.get('accepted')} "
+          f"reason={_quad_result.get('reason')!r} error={_quad_result.get('error')!r} "
+          f"code={_quad_result.get('code')!r} sizes={_QUAD_SIZES} wall={_quad_wall_s:.1f}s")
+    # The product's own rule is a MAJORITY of sizes; asserting 4/4 here
+    # made the test stricter than the tool it exercises, and a hosted
+    # runner's spawn jitter at the smallest size is exactly what the
+    # majority rule exists to absorb. Every size must still be COUNTED
+    # (none below the floor) and the two largest must be decisive.
+    _quad_inf = _quad_result.get("inference") or {}
+    _quad_ps = _quad_inf.get("per_size") or []
+    check("  ...every CALIBRATED size counted, a majority decisive, the two largest decisive",
+          _quad_inf.get("sizes_total") == 4
+          and _quad_inf.get("sizes_rejecting", 0) >= 3
+          and _quad_inf.get("sizes_below_floor") == []
+          and len(_quad_ps) == 4
+          and all(row["p_value"] < 0.05 for row in _quad_ps[-2:]),
+          f"-> {_quad_inf}")
+    check("  ...ratio measured, not asserted",
+          isinstance((_quad_result.get("speedup") or {}).get("ratio"), (int, float))
+          and _quad_result["speedup"]["ratio"] > 1,
+          f"-> {_quad_result.get('speedup')}")
+    # mcp_middleware.TOOL_TIMEOUTS["verify_optimization"] = 180 (see that
+    # table's comment, corrected alongside this fix). A generous margin
+    # below it, not a number tuned to just barely pass, catches a real
+    # regression without making the check flaky on a loaded CI runner.
+    check("  ...and the REAL wall time stays well under the 180s tool deadline",
+          _quad_wall_s < 90.0,
+          f"-> wall={_quad_wall_s:.1f}s (180s deadline, "
+          f"margin={180.0 - _quad_wall_s:.0f}s)")
+else:
+    print("SKIP real O(n^2)-vs-O(1) wall-time measurement (no native executor built)")
+
+
+# ═══ _timed's OWN rescale rounds share the SAME measurement deadline as ═══
+#     _align_sizes — the gap fix 2 in the review closes ══════════════════
+# An earlier version of the shared budget covered only `_align_sizes`'s
+# re-measurement calls; `_timed`'s own rescale rounds (on EITHER side, no
+# alignment involved at all) had no equivalent backstop, so a baseline that
+# needed several REAL rescale rounds could still spend `timeout x REPEATS`
+# per round with nothing capping the total.
+#
+# Measured directly on this box (see the calibration probe above): a REAL
+# compiled C payload cannot actually be forced through SEVERAL real rescale
+# rounds here — subprocess-spawn overhead alone (~10ms, measured via an
+# empty program) already exceeds `_VISIBILITY_FLOOR_MS` (5ms) for any n>=~10,
+# so `_timed(_QUAD_BASE, "c", [1])` needed exactly ONE round (n=1 -> n=10,
+# already visible) in practice, never several — an environmental fact, not
+# something this test can override with a different C program. To still
+# exercise and TIME several real rescale rounds deterministically, each
+# mocked `tools._measure` call below actually `time.sleep`s for a duration
+# standing in for genuine O(n^2) per-element cost — REAL wall-clock time is
+# spent, just not by spawning an actual subprocess — while reporting "still
+# below the floor" for the first three sizes tried and clearing it only on
+# the fourth, the exact shape a real, very-cheap-per-element O(n^2) baseline
+# at small n would produce.
+_rescale_round_calls = []
+
+
+def _mock_measure_multi_round(language, code, sizes, timeout, repeats, deadline=None):
+    _rescale_round_calls.append((tuple(sizes), timeout))
+    runs = []
+    for n in sizes:
+        real_ms = {1000: 2.0, 10000: 3.0, 100000: 4.0}.get(n, 60.0)
+        for _ in range(repeats):
+            time.sleep(real_ms / 1000.0)
+        runs.append({"n": n, "ok": True, "duration_ms": real_ms,
+                     "all_runs_ms": [real_ms] * repeats})
+    return runs, None
+
+
+_orig_measure_multi_round = optimization.tools._measure
+optimization.tools._measure = _mock_measure_multi_round
+_multi_t0 = time.perf_counter()
+try:
+    _multi_result = optimization._timed(
+        "multi-round-baseline", "c", [1000],
+        deadline=time.monotonic() + optimization._MEASUREMENT_BUDGET_S)
+finally:
+    optimization.tools._measure = _orig_measure_multi_round
+_multi_wall_s = time.perf_counter() - _multi_t0
+
+check("a baseline needing THREE real rescale rounds clears the floor on the "
+      "fourth call (1000 -> 10000 -> 100000 -> 1000000), not silently "
+      "truncated or capped at fewer rounds",
+      _multi_result.get("ok") is True and _multi_result["sizes"] == [1000000]
+      and _multi_result["durations_ms"][0] == 60.0,
+      f"-> {_multi_result}")
+check("  ...4 tools._measure calls total (initial + 3 rescale rounds) — "
+      "the recomputed worst-case shape for a SINGLE size is unchanged: "
+      "1 + _MAX_RESCALE_ROUNDS calls, still inside the existing 234-call "
+      "ceiling for the whole verify_optimization call",
+      len(_rescale_round_calls) == 4,
+      f"-> {_rescale_round_calls}")
+check("  ...and the REAL wall time (actual time.sleep calls, not a "
+      "zero-cost mock) stays comfortably under the shared "
+      "_MEASUREMENT_BUDGET_S",
+      _multi_wall_s < optimization._MEASUREMENT_BUDGET_S,
+      f"-> wall={_multi_wall_s:.3f}s budget={optimization._MEASUREMENT_BUDGET_S}s")
+
+
+# ═══ the shared measurement-deadline guard bounds a REAL runaway ══════════
+#     re-measurement ═══════════════════════════════════════════════════════
+# The residual risk `_MEASUREMENT_BUDGET_S` exists for: a re-measurement
+# target IS a size the other side validated (it genuinely cleared the floor
+# there), but that size is still expensive for the SPECIFIC program being
+# asked to run at it — a real O(n^2) baseline can be cheap for a fast
+# candidate and ruinous for itself at the same n. Built directly rather than
+# hoping live subprocess-spawn jitter reproduces it (it does, but not
+# reliably — see the comment on this file's `_ORIG850`/`_CAND850` mock for
+# why that path is tested deterministically instead): a REAL baseline
+# measurement, then an alignment call against a HAND-BUILT "after" standing
+# in for a candidate that validated a huge n (2,000,000 — a size the
+# baseline never chose for itself), with the SAME shared deadline
+# `verify_optimization` would construct passed explicitly (this call bypasses
+# `verify_optimization`, so nothing computes one automatically). Before this
+# fix, that could run for `timeout x REPEATS` per position (up to 150s at the
+# default timeout=30) with no defence beyond a per-execution timeout that a
+# slow-but-COMPLETING run never trips. With the fix, `_remeasure_positions`
+# divides what's left of the shared budget (120s) across the executions it
+# is about to run, so a single real O(n^2) baseline asked to run at
+# 2,000,000 (4 * 10**12 operations) fails FAST with a coded, disclosed
+# reason.
+if executor._rust:
+    # The only arm alignment ever grows is the CANDIDATE (the baseline is
+    # never grown -- see _align_sizes). So the runaway this guard bounds is
+    # a real-cost program in the candidate role asked to catch up to a
+    # baseline n that cleared the floor: the quadratic program plays the
+    # candidate, converging at n=2000, against a hand-built baseline that
+    # validated n=2,000,000 (a size the quadratic program never chose).
+    _guard_after = optimization._timed(_QUAD_BASE, "c", [2000])
+    check("control: the (quadratic) candidate converges immediately at n=2000",
+          _guard_after.get("ok") is True and _guard_after["sizes"] == [2000],
+          f"-> {_guard_after}")
+
+    _guard_before = {"ok": True, "sizes": [2_000_000], "durations_ms": [60.0],
+                     "all_runs_ms": [[58.0, 59.0, 60.0, 61.0, 62.0]]}
+    _guard_deadline = time.monotonic() + optimization._MEASUREMENT_BUDGET_S
+
+    _guard_t0 = time.perf_counter()
+    _guard_before_aligned, _guard_after_aligned = optimization._align_sizes(
+        _guard_before, _guard_after, "unused (baseline side is never "
+        "re-measured)", _QUAD_BASE, "c", 30, deadline=_guard_deadline)
+    _guard_wall_s = time.perf_counter() - _guard_t0
+
+    check("a real re-measurement request the candidate cannot afford fails, "
+          "rather than completing (or hanging) at 4*10**12 operations",
+          _guard_after_aligned.get("ok") is False,
+          f"-> {_guard_after_aligned}")
+    check("  ...with a coded, disclosed reason naming the deadline/timeout, "
+          "not a bare crash or silent hang",
+          "timed out" in (_guard_after_aligned.get("error") or "")
+          or "deadline" in (_guard_after_aligned.get("error") or ""),
+          f"-> {_guard_after_aligned.get('error')!r}")
+    check("  ...and it fails FAST: bounded by the shared _MEASUREMENT_BUDGET_S, "
+          "not by timeout(30) x REPEATS(5) = 150s",
+          _guard_wall_s < optimization._MEASUREMENT_BUDGET_S + 5.0,
+          f"-> wall={_guard_wall_s:.1f}s (_MEASUREMENT_BUDGET_S="
+          f"{optimization._MEASUREMENT_BUDGET_S}s)")
+else:
+    print("SKIP alignment deadline guard live check (no native executor built)")
 
 
 # ── the default evidence must include the discriminating inputs ───────────

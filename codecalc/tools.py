@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 import statistics
+import time
 
 from . import dependencies as dependencies_module
 from . import executor, registry
@@ -287,10 +288,30 @@ def _classify_by_ratio(ratios: list[float]) -> str:
     return "O(c^n) (exponential or worse)"
 
 
-def _measure(language: str, code: str, sizes: list[int], timeout: int, repeats: int) -> tuple[list[dict], dict | None]:
-    """Run the program at each size (min-of-repeats). Returns (runs, error)."""
+def _measure(language: str, code: str, sizes: list[int], timeout: int, repeats: int,
+            deadline: float | None = None) -> tuple[list[dict], dict | None]:
+    """Run the program at each size (min-of-repeats). Returns (runs, error).
+
+    `deadline` (an absolute `time.monotonic()` timestamp; optional, backward
+    compatible — every existing caller passes none) is checked BEFORE each
+    size's block of `repeats` executions, not before each individual
+    execution: a per-execution `timeout` already bounds any single run, so
+    the risk this closes is specifically STARTING a whole size's worth of
+    work (`repeats` executions) once there is no longer enough shared budget
+    left to plausibly finish it, not interrupting one already in flight.
+    codecalc/optimization.py's `verify_optimization` threads one shared
+    deadline through every `_measure` call it makes (both `_timed`
+    invocations AND `_align_sizes`'s re-measurement) so the WHOLE
+    measurement phase — not each call in isolation — shares one clock; see
+    `optimization._MEASUREMENT_BUDGET_S`'s docstring for why a per-call-only
+    budget left a gap (a genuinely slow baseline's OWN rescale rounds, with
+    no alignment involved at all, had no equivalent backstop).
+    """
     runs = []
     for n in sizes:
+        if deadline is not None and time.monotonic() >= deadline:
+            return runs, {"ok": False,
+                          "error": f"measurement deadline exceeded before n={n} could run"}
         durations = []
         last = None
         timed_out = False

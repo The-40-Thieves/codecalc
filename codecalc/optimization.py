@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import ast
 import re
+import time
 
 from . import executor, stats, tools
 from .translation import DEFAULT_EDGE_INPUTS, verify_translation
@@ -55,8 +56,73 @@ _VISIBILITY_FLOOR_MS = 5.0
 #: ceiling.
 _MAX_RESCALE_ROUNDS = 4
 
+#: Wall-clock ceiling for the WHOLE measurement phase of ONE
+#: `verify_optimization` call — both `_timed` calls (original AND candidate,
+#: including every auto-scale round each makes) AND `_align_sizes`'s
+#: re-measurement — independent of the per-execution `timeout` argument.
+#:
+#: A single shared budget, not one per phase: `_align_sizes` (below) already
+#: avoids asking either side to run at a size the OTHER side has not itself
+#: validated as a real, floor-clearing measurement — see its docstring — so
+#: this is a backstop against the residual case, not the primary defence: a
+#: re-measurement (or, just as easily, an ordinary `_timed` rescale round on
+#: a program that is simply slow) can target a size that IS legitimate but
+#: is still expensive for the SPECIFIC program running it (a real O(n) or
+#: worse baseline can be cheap for a fast candidate and ruinous for itself at
+#: the same n, and `_timed`'s own auto-scale ladder can walk a genuinely slow
+#: baseline through several such rounds on its own, no alignment involved).
+#: An earlier version of this budget covered only `_align_sizes`'s calls;
+#: `_timed`'s own rescale rounds had no equivalent backstop, so a baseline
+#: that needed several real rescale rounds (see the live test using one)
+#: could still spend `timeout x REPEATS` per round with nothing capping the
+#: total. `_bounded_timeout` (below) is threaded into every `tools._measure`
+#: call this module makes — both `_timed` invocations and `_align_sizes` — so
+#: the whole measurement phase shares one clock: exhausting it fails fast
+#: with a coded, disclosed reason instead of running toward the whole tool's
+#: 180s deadline (mcp_middleware.py's `TOOL_TIMEOUTS["verify_optimization"]`).
+_MEASUREMENT_BUDGET_S = 120.0
 
-def _timed(code: str, language: str, sizes: list[int], timeout: int = 30) -> dict:
+
+def _bounded_timeout(timeout: int, deadline: float | None,
+                     repeats: int) -> tuple[int | None, str | None]:
+    """Cap a per-execution timeout to whatever remains of `deadline`
+    (`time.monotonic()`-based, see `_MEASUREMENT_BUDGET_S`), or refuse
+    outright once it is exhausted. Two layers, not one:
+
+      - THIS function bounds one SIZE's `repeats` executions (all of which
+        have the same expected cost, so dividing the remaining budget by
+        `repeats` — not also by how many DIFFERENT sizes are in the same
+        batch — is a fair split for that dimension: it stops one
+        pathologically slow execution among the `repeats` from starving its
+        own siblings, without artificially shrinking every size's budget by
+        however many OTHER, possibly much cheaper, sizes happen to share
+        the call). A batch with an ascending size list (the common case —
+        `_timed`'s sizes only ever grow) can have wildly different costs
+        per size; dividing by the total execution count across ALL of them
+        starved the largest, legitimately-slower size even when the shared
+        budget had plenty of room (measured: a real O(n^2) baseline's
+        largest calibrated size needed ~6.3s but an even
+        `repeats x len(sizes)` split left it only ~5.7s, timing out a call
+        that was well within the actual remaining budget).
+      - `tools._measure`'s own `deadline` parameter is the SECOND layer: it
+        checks BEFORE STARTING each size's block (not each individual
+        execution) and refuses outright once the shared clock is already
+        exhausted, so a batch never even ATTEMPTS a size it cannot possibly
+        afford, however many sizes came before it.
+
+    `deadline=None` (a caller with no shared budget) returns `timeout`
+    unchanged: this function is a pass-through, not a new requirement.
+    """
+    if deadline is None:
+        return timeout, None
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return None, "measurement deadline exceeded before this batch could run"
+    return max(1, int(min(timeout, remaining / max(1, repeats)))), None
+
+
+def _timed(code: str, language: str, sizes: list[int], timeout: int = 30,
+          deadline: float | None = None) -> dict:
     """Measure min-of-repeats per size, auto-scaling each size INDEPENDENTLY
     until ITS OWN measurement clears the visibility floor.
 
@@ -72,8 +138,20 @@ def _timed(code: str, language: str, sizes: list[int], timeout: int = 30) -> dic
     letting a still-noisy sample drag the significance test down for sizes
     that DID clear the floor (see `_VISIBILITY_FLOOR_MS`'s comment for why the
     old combined check missed exactly this case).
+
+    `deadline` (see `_MEASUREMENT_BUDGET_S`) bounds every `tools._measure`
+    call this makes — the initial batch AND every rescale round — through
+    `_bounded_timeout`. Exhausting it fails the WHOLE call with a coded,
+    disclosed reason rather than silently truncating the rescale ladder: a
+    genuinely slow baseline can spend real, n-dependent time on several
+    rescale rounds with no alignment involved, so this backstop belongs here
+    too, not only in `_align_sizes`.
     """
-    runs, err = tools._measure(language, code, sizes, timeout, repeats=REPEATS)
+    call_timeout, err_msg = _bounded_timeout(timeout, deadline, REPEATS)
+    if err_msg:
+        return {"ok": False, "error": err_msg}
+    runs, err = tools._measure(language, code, sizes, call_timeout, repeats=REPEATS,
+                               deadline=deadline)
     if err:
         return {"ok": False, "error": err["error"]}
     for _ in range(_MAX_RESCALE_ROUNDS):
@@ -82,7 +160,11 @@ def _timed(code: str, language: str, sizes: list[int], timeout: int = 30) -> dic
         if not pending:
             break
         rescaled = [runs[i]["n"] * 10 for i in pending]
-        sub_runs, err = tools._measure(language, code, rescaled, timeout, repeats=REPEATS)
+        call_timeout, err_msg = _bounded_timeout(timeout, deadline, REPEATS)
+        if err_msg:
+            return {"ok": False, "error": err_msg}
+        sub_runs, err = tools._measure(language, code, rescaled, call_timeout, repeats=REPEATS,
+                                       deadline=deadline)
         if err:
             break
         for i, r in zip(pending, sub_runs):
@@ -96,17 +178,25 @@ def _timed(code: str, language: str, sizes: list[int], timeout: int = 30) -> dic
 
 
 def _remeasure_positions(data: dict, code: str, language: str, timeout: int,
-                         fixes: list[tuple[int, int]]) -> dict:
+                         fixes: list[tuple[int, int]],
+                         deadline: float | None = None) -> dict:
     """Re-measure just the given `(index, new_n)` positions of `data`.
 
     One `_measure` call across every position that needs fixing (not one call
     per position), no auto-scale ladder: `_align_sizes` only calls this once
-    it already knows the target n is at least as visible as whatever this
-    side already measured at that position — there is nothing left to
-    discover.
+    it already knows the target n is a size the side being grown TOWARD has
+    already run to completion and found floor-clearing — there is nothing
+    left to discover, only to confirm.
+
+    `deadline` (see `_MEASUREMENT_BUDGET_S`) is the SAME shared budget
+    `_timed` uses, threaded through `_bounded_timeout` exactly the same way.
     """
     new_sizes = [n for _i, n in fixes]
-    runs, err = tools._measure(language, code, new_sizes, timeout, repeats=REPEATS)
+    call_timeout, err_msg = _bounded_timeout(timeout, deadline, REPEATS)
+    if err_msg:
+        return {"ok": False, "error": err_msg}
+    runs, err = tools._measure(language, code, new_sizes, call_timeout, repeats=REPEATS,
+                               deadline=deadline)
     if err:
         return {"ok": False, "error": err["error"]}
     sizes = list(data["sizes"])
@@ -120,94 +210,233 @@ def _remeasure_positions(data: dict, code: str, language: str, timeout: int,
 
 
 def _align_sizes(before: dict, after: dict, original: str, candidate: str,
-                 language: str, timeout: int) -> tuple[dict, dict]:
-    """Make `before["sizes"] == after["sizes"]` at EVERY position, re-measuring
-    whichever side scaled less at each position that still disagrees.
+                 language: str, timeout: int,
+                 deadline: float | None = None) -> tuple[dict, dict]:
+    """Grow the CANDIDATE side up to the baseline's n at each position where
+    the two sides disagree and the baseline cleared the floor there; never
+    grow the baseline. A position where the candidate scaled further than
+    the baseline is left mismatched on purpose (baseline@bn vs candidate@an,
+    disclosed as `size_after`); see below for why forcing
+    alignment there is both unsafe and unnecessary.
 
     `_timed(original, ...)` and `_timed(candidate, ...)` each auto-scale every
     size INDEPENDENTLY (see `_timed`'s docstring) — so the two sides can now
     disagree at SOME positions and agree at others, not just "same length,
     every value different" the way a single combined rescale ladder produced.
-    `_speedup` and `_infer_speedup` both zip `before`/`after` by POSITION, so
-    an undetected mismatch at even one position silently pairs e.g.
-    before@2000 against after@20000 — a per-size ratio and p-value both
-    labelled with the wrong size, the ratio bug from `_speedup`'s own comment
-    history repeated one layer up, now hiding under a significance test
-    instead of a plain number.
 
-    Fix: for each position where the two sides disagree, re-measure whichever
-    side has the SMALLER n at that position, at the OTHER side's n for that
-    position — one `_measure` call per side, batched across every position
-    that needs fixing on that side (not a full re-run of either side's
-    auto-scale ladder: we already know these sizes are at least as visible as
-    whatever the less-scaled side already confirmed, since bigger sizes make
-    invisible work MORE visible, never less). This costs calls only at
-    positions that actually diverged; a position both sides already agree on
-    pays nothing extra, and two sides that agree everywhere (the common case)
-    pay nothing at all.
+    For a position where the two sides disagree, re-measure whichever side
+    has the SMALLER n, at the OTHER side's n — one `_measure` call per side,
+    batched across every position that needs fixing on that side — but ONLY
+    when the LARGER side's own duration at its own n already cleared
+    `_VISIBILITY_FLOOR_MS`: that n is then a real, informative, floor-
+    clearing size, not just an arithmetic ceiling, and it is SAFE to ask the
+    smaller side to run there too (unchanged from this function's original
+    version — the whole other side of this decision is the fix below).
 
-    An empty-intersection approach (skip the mismatched positions entirely)
-    was considered and rejected: the scenario this fix exists for — a
-    dramatic, genuine speedup — is exactly the one most likely to diverge at
-    MORE than one position, so intersecting on already-agreeing positions
-    would most often produce nothing to compare for the very wins this tool
-    exists to certify, silently downgrading `sizes_total` to 0 and `accepted`
-    to False on real optimisations. Re-measuring costs more calls (bounded —
-    see `verify_optimization`'s docstring); the accuracy is worth it.
+    It is NOT safe, and it turns out not to be NECESSARY either, when the
+    larger side never cleared the floor there — i.e. it exhausted
+    `_MAX_RESCALE_ROUNDS` in `_timed` without becoming visible (a genuine
+    O(1) candidate at n up to `10**_MAX_RESCALE_ROUNDS` times the default, or
+    symmetrically an unusually fast baseline). That n was never validated as
+    useful (the side that reached it is still invisible there) or as safe
+    for the other side (only the side that reached it has ever run at that
+    n). An earlier version of this function reacted by forcing the OTHER
+    side up to it anyway (unsafe: a real O(n) or O(n^2) baseline forced to
+    10**4x its converged n) or, once that was fixed, by shrinking the
+    exhausted side back down and marking the position excluded — which
+    turned out to be WRONG whenever the smaller side is the baseline: a
+    baseline that clears the floor at its own n, paired against a candidate
+    too fast to register even after exhausting its entire rescale budget, is
+    not a measurement failure. It is the single most decisive result this
+    tool can produce, and excluding it drove `sizes_total` to 0 for the
+    exact genuine-O(1)-win case this whole auto-scale system exists to
+    certify (reviewer repro: per-size ratios 20x-2400x, `accepted=False`,
+    "no size had enough comparable runs").
+
+    So, per mismatched position:
+
+      - candidate n < baseline n, and the baseline's own duration at its n
+        cleared the floor: grow the candidate up to match it (a real,
+        floor-clearing size the baseline already ran; the candidate is the
+        arm expected to be cheaper there, and the shared budget bounds the
+        case where it is not).
+      - candidate n > baseline n (the candidate rescaled further, typically
+        because it is too fast to register): do NOTHING here. Never grow
+        the baseline to meet it — measured live, a real O(n^2) baseline
+        asked to run at a padded O(1) candidate's rescaled n timed out and
+        turned a genuine win into "baseline re-measurement failed". No
+        re-measurement, no shrinking. `_speedup` and
+        `_infer_speedup` (below) apply an ASYMMETRIC rule downstream: a
+        position is usable whenever the BASELINE side is itself valid and
+        floor-clearing, regardless of whether the candidate is — pairing
+        baseline@bn against candidate@an directly (an >= bn is guaranteed
+        whenever the candidate is the exhausted side, and a comparison at a
+        LARGER candidate n than the baseline's is conservative by
+        monotonicity: if candidate is still faster while doing MORE work,
+        it is faster, full stop) — and BOTH `size` and `size_after` are
+        recorded so the mismatched pairing is disclosed, never silently
+        presented as same-n. A position is excluded (`sizes_below_floor`)
+        only when the BASELINE side is the one that is invalid or never
+        cleared the floor: shrinking it further (it already tried its own
+        SMALLER starting sizes and failed) could not help, so no
+        re-measurement is useful there either.
+
+    Every re-measurement this function still makes goes through
+    `_bounded_timeout`'s SHARED `deadline` (see `_MEASUREMENT_BUDGET_S`) —
+    the residual risk of a re-measurement target that IS validated but is
+    still expensive for the specific program catching up to it (a real
+    O(n) or worse baseline can be cheap for a fast candidate and ruinous for
+    itself at the same n) is bounded there, not here.
     """
     b_sizes, a_sizes = before.get("sizes"), after.get("sizes")
     if not b_sizes or not a_sizes or b_sizes == a_sizes:
         return before, after
-    fix_before: list[tuple[int, int]] = []
+    b_durs = before.get("durations_ms") or []
     fix_after: list[tuple[int, int]] = []
     for i, (bn, an) in enumerate(zip(b_sizes, a_sizes)):
         if bn == an:
             continue
+        bd = b_durs[i] if i < len(b_durs) else None
         if bn < an:
-            fix_before.append((i, an))
+            # `after` scaled more. NEVER grow the baseline to meet it: the
+            # baseline is floor-clearing at bn (or `_timed` would have
+            # rescaled it itself), so baseline@bn vs candidate@an is already
+            # a valid, conservative comparison (`_comparable_positions`
+            # discloses the pairing as `size_after`). Growing the SLOW arm
+            # to the FAST arm's n is exactly the runaway this fix exists to
+            # stop — measured live: a real O(n^2) baseline asked to run at
+            # a padded O(1) candidate's 5x-rescaled n timed out at 21s and
+            # turned a genuine 37x win into "baseline re-measurement
+            # failed". Nothing to do at this position.
+            continue
         else:
-            fix_after.append((i, bn))
-    if fix_before:
-        before = _remeasure_positions(before, original, language, timeout, fix_before)
-        if not before.get("ok"):
-            return before, after
+            # Symmetric: `before` scaled more. Grow `after` up to `bn` only
+            # if `before` actually cleared the floor at its own bn.
+            # Otherwise the BASELINE is the exhausted side — leave both as
+            # they are; the asymmetric downstream rule excludes on a
+            # baseline that never cleared the floor regardless of the
+            # candidate, and shrinking it further cannot change that.
+            if bd is not None and bd >= _VISIBILITY_FLOOR_MS:
+                fix_after.append((i, bn))
     if fix_after:
-        after = _remeasure_positions(after, candidate, language, timeout, fix_after)
+        after = _remeasure_positions(after, candidate, language, timeout, fix_after, deadline)
         if not after.get("ok"):
             return before, after
     return before, after
 
 
-def _speedup(before: dict, after: dict) -> dict:
-    """Ratio after/before per size (median used as the headline)."""
+def _comparable_positions(before: dict, after: dict) -> tuple[list[dict], list[dict]]:
+    """Pair `before`/`after` per position under the ASYMMETRIC visibility
+    rule `_speedup` and `_infer_speedup` both need — computed ONCE so the
+    headline `speedup.ratio` and the significance test can never disagree
+    about which positions counted (an earlier version let `_speedup` apply
+    its own, looser floor than `_infer_speedup`'s, so the ratio could be
+    built from durations the significance test had already excluded).
+
+    A position is COMPARABLE whenever the BASELINE side is measurable and
+    cleared `_VISIBILITY_FLOOR_MS` — regardless of whether the candidate
+    did. A baseline that is genuinely slower tells you something real the
+    moment it is visible; a candidate too fast to register even at a size
+    the baseline needed real rescaling to reach is not a measurement
+    failure, it is the most decisive evidence this tool can produce (see
+    `_align_sizes`'s docstring — the mismatched `size`/`size_after` pair
+    at such a position is intentional, never re-measured away). A position
+    is EXCLUDED only when the baseline itself is unmeasurable, never
+    cleared the floor, has no recorded measurement, or either side lacks
+    the >=2 raw runs a significance test needs — this is the single set of
+    reasons; `_speedup` and `_infer_speedup` differ only in what they DO
+    with a comparable position; `sizes_total (_infer_speedup) + ratio's
+    triple count (_speedup)` are identical.
+
+    Returns `(comparable, excluded)`. Each `comparable` entry carries
+    `size` (the baseline's n), `before_ms`, `after_ms`, `b_sample`,
+    `a_sample`, and `size_after` ONLY when the candidate's n differs from
+    `size` (the common, aligned case stays a single number — see
+    `_align_sizes`). Each `excluded` entry is `sizes_below_floor`-shaped:
+    `size`, `before_ms`, `after_ms` (either `None` when never recorded).
+    `len(sizes) == len(comparable) + len(excluded)` always holds, counting
+    `sizes` as `max(len(before["sizes"]), len(after["sizes"]))` positions.
+    """
+    b_sizes = before.get("sizes") or []
+    a_sizes = after.get("sizes") or []
     b = before.get("durations_ms") or []
     a = after.get("durations_ms") or []
-    if not b or not a or len(b) != len(a):
-        return {"ratio": None, "measurable": False, "reason": "no comparable timings"}
-    # Carry the SIZE through the filter. per_size used to zip before["sizes"]
-    # against the filtered pair list, so dropping any entry shifted every row:
-    # a measurement taken at n=200 was reported as n=100.
-    #
-    # `aa > 0.0`, not `aa is not None`: a 0ms optimized run is reachable
-    # (durations can be 0) and `bb / 0` raised ZeroDivisionError straight out of
-    # the tool as an unhandled exception.
-    sizes = before.get("sizes") or list(range(len(b)))
-    triples = [(n, bb, aa) for n, bb, aa in zip(sizes, b, a)
-               if bb is not None and bb > 1.0 and aa is not None and aa > 0.0]
-    if not triples:
-        return {"ratio": None, "measurable": False,
+    b_runs = before.get("all_runs_ms") or []
+    a_runs = after.get("all_runs_ms") or []
+    total = max(len(b_sizes), len(a_sizes))
+
+    comparable: list[dict] = []
+    excluded: list[dict] = []
+    for i in range(total):
+        if i >= len(b_sizes) or i >= len(b) or i >= len(a):
+            # No recorded baseline measurement at all for this position (a
+            # before/after length mismatch) — still named, never silently
+            # skipped.
+            size = b_sizes[i] if i < len(b_sizes) else (a_sizes[i] if i < len(a_sizes) else i)
+            excluded.append({"size": size, "before_ms": None, "after_ms": None})
+            continue
+        bn = b_sizes[i]
+        an = a_sizes[i] if i < len(a_sizes) else bn
+        bb, aa = b[i], a[i]
+        b_sample = b_runs[i] if i < len(b_runs) else []
+        a_sample = a_runs[i] if i < len(a_runs) else []
+        # The asymmetric rule: only the BASELINE side's floor/measurability
+        # excludes a position. `aa`'s own visibility floor is deliberately
+        # NOT checked here — that was the bug (reviewer repro: a genuine
+        # O(1) candidate drove `sizes_total` to 0 because the OLD, symmetric
+        # rule excluded on EITHER side being below the floor). `aa > 0.0`
+        # only, same as `_speedup` always required: a 0ms optimized run is
+        # reachable and would raise `ZeroDivisionError` on the ratio.
+        if (bb is None or bb <= 1.0 or bb < _VISIBILITY_FLOOR_MS
+                or aa is None or aa <= 0.0):
+            excluded.append({"size": bn, "before_ms": bb, "after_ms": aa})
+            continue
+        # Raw-run sufficiency (>= 2 runs a side for a significance test) is
+        # NOT a comparability reason: the headline ratio needs only the
+        # medians (`_speedup` is called on duration-only dicts by callers
+        # and tests alike). `_infer_speedup` checks the samples itself and
+        # files a comparable-but-untestable position under
+        # `sizes_below_floor`, so its invariant still holds.
+        entry = {"size": bn, "before_ms": bb, "after_ms": aa,
+                 "b_sample": b_sample, "a_sample": a_sample}
+        if an != bn:
+            entry["size_after"] = an
+        comparable.append(entry)
+    return comparable, excluded
+
+
+def _speedup(before: dict, after: dict) -> dict:
+    """Ratio after/before per size (median used as the headline).
+
+    Built from EXACTLY the positions `_comparable_positions` (shared with
+    `_infer_speedup`) calls comparable — the headline ratio can no longer be
+    computed from a duration the significance test excluded (an earlier
+    version applied its own, looser floor independently).
+    """
+    comparable, _excluded = _comparable_positions(before, after)
+    if not comparable:
+        return {"ratio": None, "measurable": False, "per_size": [],
                 "reason": "no size where both runs were measurable "
-                          "(baseline below the 1ms noise floor, or the optimized "
-                          "run measured 0ms)"}
-    ratios = [bb / aa for _n, bb, aa in triples]
+                          "(baseline below the visibility floor, or the "
+                          "optimized run measured 0ms) — see "
+                          "inference.sizes_below_floor"}
+    ratios = [e["before_ms"] / e["after_ms"] for e in comparable]
     import statistics
     median = statistics.median(ratios)
+    per_size = []
+    for e in comparable:
+        row = {"n": e["size"], "before_ms": e["before_ms"], "after_ms": e["after_ms"],
+              "ratio": round(e["before_ms"] / e["after_ms"], 2)}
+        if "size_after" in e:
+            # The candidate's n differs from the baseline's — an
+            # intentionally unaligned, disclosed pairing (see
+            # `_align_sizes`'s docstring), not a mislabelled row.
+            row["n_after"] = e["size_after"]
+        per_size.append(row)
     return {
         "ratio": round(median, 2),
         "measurable": True,
-        "per_size": [{"n": n, "before_ms": bb, "after_ms": aa,
-                      "ratio": round(bb / aa, 2)}
-                     for n, bb, aa in triples],
+        "per_size": per_size,
     }
 
 
@@ -239,69 +468,55 @@ def _infer_speedup(before: dict, after: dict, alpha: float = ALPHA) -> dict:
     triple, can be underpowered on its own) but does require the win to show
     up at more sizes than not, not just in the aggregate median.
 
-    Sizes where `_speedup` itself could not compute a ratio (baseline below
-    the 1ms noise floor, or fewer than 2 runs on either side), a size that
-    never cleared `_timed`'s stronger `_VISIBILITY_FLOOR_MS` within its
-    rescale budget (`_timed`'s per-size auto-scale already tried and failed
-    — see its docstring), and a size with no recorded measurement at all,
-    are ALL excluded from the significance count — but every one of them is
-    named in `sizes_below_floor` (with whatever `before_ms`/`after_ms` it
-    has; `None` where a duration was never available), never silently
-    dropped. `len(sizes) == len(inference["per_size"]) +
+    Comparability is `_comparable_positions`'s ASYMMETRIC rule: a position
+    counts whenever the BASELINE is itself measurable and floor-clearing,
+    regardless of the candidate — see that function's docstring for why the
+    OLD, symmetric "either side below the floor excludes" rule was a bug,
+    not a safety margin (it drove `sizes_total` to 0 for a genuine O(1) win).
+    A comparable position where the candidate's n differs from the
+    baseline's (the candidate exhausted its own rescale budget without
+    clearing the floor — see `_align_sizes`) is tested directly: the
+    baseline's sample at its own n against the candidate's sample at ITS OWN
+    (larger) n, which is CONSERVATIVE by monotonicity — if the candidate is
+    still faster while doing at least as much work, it is faster — and
+    `size_after` in that entry discloses the mismatch rather than silently
+    presenting it as same-n. Every excluded position is named in
+    `sizes_below_floor` (with whatever `before_ms`/`after_ms` it has; `None`
+    where a duration was never available), never silently dropped.
+    `len(sizes) == len(inference["per_size"]) +
     len(inference["sizes_below_floor"])` holds for every result this
     function returns: a size is read as a pass, a fail, or an explicit
-    "excluded, and here is why" — never as nothing at all. The
-    majority-of-sizes rule below counts only sizes that actually cleared
-    every one of those bars, on EITHER side.
+    "excluded, and here is why" — never as nothing at all.
     """
-    b = before.get("durations_ms") or []
-    a = after.get("durations_ms") or []
-    b_runs = before.get("all_runs_ms") or []
-    a_runs = after.get("all_runs_ms") or []
-    sizes = before.get("sizes") or list(range(len(b)))
+    comparable, excluded = _comparable_positions(before, after)
+    # A position can be comparable for the headline ratio (both medians
+    # present, baseline floor-clearing) yet untestable here: a significance
+    # test needs >= 2 raw runs a side. File those under `sizes_below_floor`
+    # too, so the invariant below still counts every position exactly once.
+    testable = []
+    for e in comparable:
+        if len(e["b_sample"]) < 2 or len(e["a_sample"]) < 2:
+            excluded.append({"size": e["size"], "before_ms": e["before_ms"],
+                             "after_ms": e["after_ms"]})
+        else:
+            testable.append(e)
+    comparable = testable
 
     per_size = []
-    sizes_below_floor = []
-    for idx, n in enumerate(sizes):
-        if idx >= len(b) or idx >= len(a):
-            # No recorded measurement at all for this size (a before/after
-            # length mismatch) -- still named, not silently skipped: see the
-            # invariant note below.
-            sizes_below_floor.append({"size": n, "before_ms": None, "after_ms": None})
-            continue
-        bb, aa = b[idx], a[idx]
-        b_sample = b_runs[idx] if idx < len(b_runs) else []
-        a_sample = a_runs[idx] if idx < len(a_runs) else []
-        # Every reason this size cannot feed the significance test --
-        # unmeasurable (same floor `_speedup` already applies: a baseline at
-        # or under the 1ms noise floor, or an optimized run that measured
-        # 0ms), never cleared `_timed`'s stronger `_VISIBILITY_FLOOR_MS`
-        # within its rescale budget, or fewer than 2 comparable runs on
-        # either side -- folds into ONE disclosure, `sizes_below_floor`,
-        # rather than three different silent `continue`s. A size used to
-        # vanish from BOTH `per_size` and `sizes_below_floor` when it failed
-        # the first (oldest) check, contradicting this function's own
-        # "never silently dropped" guarantee (reviewer repro on PR #275:
-        # sizes [10, 20, 30] with before [0.5, 10, 12] after [0.3, 4, 5] --
-        # size 10 disappeared entirely). `len(sizes) == sizes_total +
-        # len(sizes_below_floor)` is now an INVARIANT, not just true in the
-        # common case: every entry in `sizes` lands in exactly one of the
-        # two lists below.
-        if (bb is None or bb <= 1.0 or aa is None or aa <= 0.0
-                or bb < _VISIBILITY_FLOOR_MS or aa < _VISIBILITY_FLOOR_MS
-                or len(b_sample) < 2 or len(a_sample) < 2):
-            sizes_below_floor.append({"size": n, "before_ms": bb, "after_ms": aa})
-            continue
-        mwu = stats.mann_whitney_u(a_sample, b_sample, alternative="less")
+    for e in comparable:
+        mwu = stats.mann_whitney_u(e["a_sample"], e["b_sample"], alternative="less")
         rb = stats.rank_biserial_correlation(mwu["u"], mwu["n1"], mwu["n2"])
-        per_size.append({
-            "size": n,
-            "n_before": len(b_sample),
-            "n_after": len(a_sample),
+        row = {
+            "size": e["size"],
+            "n_before": len(e["b_sample"]),
+            "n_after": len(e["a_sample"]),
             "u": mwu["u"],
             "p_value": mwu["p_value"],
             "rank_biserial": round(rb, 4),
-        })
+        }
+        if "size_after" in e:
+            row["size_after"] = e["size_after"]
+        per_size.append(row)
 
     sizes_total = len(per_size)
     sizes_rejecting = sum(1 for r in per_size if r["p_value"] < alpha)
@@ -311,11 +526,11 @@ def _infer_speedup(before: dict, after: dict, alpha: float = ALPHA) -> dict:
         decision_basis = (f"{sizes_rejecting}/{sizes_total} size(s) reject "
                           f"the null (after not faster) at alpha={alpha}; "
                           f"a majority is required")
-    if sizes_below_floor:
-        decision_basis += (f"; {len(sizes_below_floor)} size(s) excluded — not "
-                           f"comparable (unmeasurable, never cleared the "
+    if excluded:
+        decision_basis += (f"; {len(excluded)} size(s) excluded — the baseline "
+                           f"was unmeasurable, never cleared the "
                            f"{_VISIBILITY_FLOOR_MS}ms visibility floor within "
-                           f"the rescale budget, or too few runs), see "
+                           f"the rescale budget, or had too few runs, see "
                            f"sizes_below_floor")
     return {
         "test": "mann_whitney_u",
@@ -324,7 +539,7 @@ def _infer_speedup(before: dict, after: dict, alpha: float = ALPHA) -> dict:
         "per_size": per_size,
         "sizes_rejecting": sizes_rejecting,
         "sizes_total": sizes_total,
-        "sizes_below_floor": sizes_below_floor,
+        "sizes_below_floor": excluded,
         "decision_basis": decision_basis,
     }
 
@@ -453,19 +668,30 @@ def verify_optimization(original: str, candidate: str, language: str,
                           "output; speed was not measured, because a faster "
                           "wrong answer is not an optimisation"}
 
-    before = _timed(original, language, size_list, timeout=timeout)
+    # One shared wall-clock budget for the ENTIRE measurement phase — both
+    # `_timed` calls (including every auto-scale round each makes) and
+    # `_align_sizes` — not a fresh one per phase. See
+    # `_MEASUREMENT_BUDGET_S`'s docstring for why a per-phase budget left a
+    # gap: `_timed`'s own rescale rounds, on a genuinely slow baseline, can
+    # spend real n-dependent time with no alignment involved at all.
+    deadline = time.monotonic() + _MEASUREMENT_BUDGET_S
+
+    before = _timed(original, language, size_list, timeout=timeout, deadline=deadline)
     if not before.get("ok"):
         return {"ok": False, "error": f"baseline measurement failed: {before.get('error')}"}
-    after = _timed(candidate, language, size_list, timeout=timeout)
+    after = _timed(candidate, language, size_list, timeout=timeout, deadline=deadline)
     if not after.get("ok"):
         return {"ok": False, "error": f"candidate measurement failed: {after.get('error')}"}
 
     # Each side's own auto-scale in `_timed` runs independently, so they can
-    # converge on different sizes (see `_align_sizes`'s docstring). Fix that
-    # BEFORE either `_speedup` or `_infer_speedup` sees these dicts — both
-    # zip before/after by position, so an unaligned pair mislabels every
-    # per-size ratio and p-value with the wrong size.
-    before, after = _align_sizes(before, after, original, candidate, language, timeout)
+    # converge on different sizes (see `_align_sizes`'s docstring). Bring the
+    # two into agreement where it is safe and useful to do so BEFORE either
+    # `_speedup` or `_infer_speedup` sees these dicts — a position left
+    # deliberately mismatched (see `_align_sizes`) is handled explicitly by
+    # both, via `_comparable_positions`'s `size_after` disclosure, never
+    # silently mislabelled.
+    before, after = _align_sizes(before, after, original, candidate, language,
+                                 timeout, deadline=deadline)
     if not before.get("ok"):
         return {"ok": False, "error": f"baseline re-measurement failed: {before.get('error')}"}
     if not after.get("ok"):

@@ -51,7 +51,7 @@ from . import errors, grades
 #: each component is allowed to change — the short form is that MAJOR is the
 #: only one that may break a reader, and it carries a twelve-month deprecation
 #: window before anything is removed.
-CONTRACT_VERSION = "1.6.0"
+CONTRACT_VERSION = "1.7.0"
 
 # THE `$schema` AND `$id` URIs ARE NOT HERE ON PURPOSE.
 #
@@ -325,6 +325,14 @@ def _speedup_properties() -> dict:
     practice (one or the other, never both — see `_speedup`'s two `return`
     statements) but neither is declared `required`, since a schema that
     demanded both would reject every real result.
+
+    `n_after` (added in `1.7.0`): present only when the candidate's own n at
+    this position differs from the baseline's `n` — `_align_sizes` leaves a
+    position deliberately unaligned when the candidate exhausted its rescale
+    budget without ever clearing the visibility floor there, rather than
+    forcing the baseline to re-measure at an unvalidated size (see
+    `optimization._align_sizes`'s docstring). Its absence means the two
+    sides ran at the same n, which is still the common case.
     """
     return {
         "type": "object",
@@ -350,6 +358,16 @@ def _speedup_properties() -> dict:
                         "before_ms": {"type": "number"},
                         "after_ms": {"type": "number"},
                         "ratio": {"type": "number"},
+                        "n_after": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "description": (
+                                "Present only when the candidate ran at a "
+                                "different n than the baseline's n above — "
+                                "an intentionally unaligned, disclosed "
+                                "pairing, not a mislabelled row."
+                            ),
+                        },
                     },
                 },
             },
@@ -375,6 +393,18 @@ def _inference_properties() -> dict:
     len(sizes_below_floor)` always holds. Always present (an empty list when
     every size cleared every bar, which is the common case), same as
     `sizes_rejecting`/`sizes_total` always are.
+
+    The exclusion rule itself is ASYMMETRIC as of `1.7.0`: a position is
+    excluded only when the BASELINE side is unmeasurable or never clears the
+    floor, regardless of the candidate — a floor-clearing baseline paired
+    against a candidate too fast to register even after exhausting its own
+    rescale budget is the most decisive result this tool can produce, not a
+    measurement gap (an earlier, symmetric rule drove `sizes_total` to 0 for
+    exactly that case; see `optimization._comparable_positions`'s
+    docstring). `size_after` (`1.7.0`, per-entry, only in `per_size` — see
+    below) discloses when such a position pairs the baseline's sample
+    against the candidate's own, larger n rather than the same n on both
+    sides.
     """
     return {
         "type": "object",
@@ -398,6 +428,20 @@ def _inference_properties() -> dict:
                         "u": {"type": "number"},
                         "p_value": {"type": "number", "minimum": 0, "maximum": 1},
                         "rank_biserial": {"type": "number"},
+                        "size_after": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "description": (
+                                "Present only when the candidate's own n at "
+                                "this position differs from the baseline's "
+                                "`size` above — an intentionally unaligned, "
+                                "disclosed pairing (see "
+                                "optimization._align_sizes), not a "
+                                "mislabelled row. NOT a sample count — "
+                                "`n_before`/`n_after` above already mean "
+                                "that."
+                            ),
+                        },
                     },
                 },
             },
