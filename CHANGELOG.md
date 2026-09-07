@@ -10,9 +10,9 @@ This project versions **two** things, and they are not the same number.
 | What | Where | Current |
 |---|---|---|
 | The **package** — the tool surface, the CLI, the Python API | `pyproject.toml`, `executor/Cargo.toml`, this file | see `version` in [`pyproject.toml`](pyproject.toml) — this cell is not re-typed on every release |
-| The **result contract** — the shape every tool result comes back in | `docs/contract/README.md`, `contract_version` on every result | `1.4.0` |
+| The **result contract** — the shape every tool result comes back in | `docs/contract/README.md`, `contract_version` on every result | `1.5.0` |
 
-The contract is at `1.4.0` and the package is at `0.x` because those claims are
+The contract is at `1.5.0` and the package is at `0.x` because those claims are
 genuinely different. The result contract has a published JSON Schema, a
 documented MAJOR/MINOR/PATCH policy, a twelve-month deprecation window, and a
 gate that fails if the schema drifts from the code — it is stable and says so.
@@ -32,6 +32,36 @@ behind it.
 ---
 
 ## [Unreleased]
+
+### Added
+
+- **Three new result-contract shapes: `translation_verification`,
+  `optimization_verification`, `edge_case_comparison`.** `verify_translation`
+  and `verify_optimization` were always stamped `contract_version` at the
+  same MCP tool boundary as every other tool, but matched none of the five
+  published execution shapes — `docs/contract/README.md` explicitly scoped
+  them OUT of the schema's "exactly one branch matches" claim rather than
+  close the gap. `translation_verification` covers `verify_translation`'s
+  result (`ok`/`passed`/`matched`/`mismatched`/`inconclusive`/`total`/`cases`
+  plus `grade`/`grade_basis`/`grade_rules_version`). Also fixes a real
+  omission in `translation.aggregate`, caught in review: it never set `ok`
+  at all, when `verify_optimization`'s own `{"ok": True, "accepted": False,
+  ...}` early return already established that `ok` means "the tool
+  completed and produced a real answer", never the verdict — a mismatch is
+  now `ok: true` exactly like a pass, and `aggregate` sets it
+  unconditionally rather than the schema carving out an exception for its
+  absence. `optimization_verification` covers
+  `verify_optimization`'s result, including the full `inference` object
+  (the per-size one-sided Mann-Whitney U test behind `accepted`) and the
+  embedded `verification` field (verify_translation's BARE evidence, no
+  grade/`contract_version` — that wrapper only happens at the MCP tool
+  boundary, which this internal call never crosses). `compare_edge_cases`
+  had the same gap in its success shape; `edge_case_comparison` closes it
+  (its refusal already matched `rejected` and needed no new branch, same as
+  a `verify_optimization` measurement failure). `CONTRACT_VERSION` bumped
+  `1.4.0` -> `1.5.0` (MINOR: three new shapes, no existing shape moved).
+  `tests/test_contract.py` runs all three tools against fixture code and
+  validates the real output against the published schema.
 
 ### Fixed
 

@@ -45,13 +45,13 @@ it hoped was deployed.
 
 from __future__ import annotations
 
-from . import errors
+from . import errors, grades
 
 #: The contract's own version, semver. See docs/contract/README.md for what
 #: each component is allowed to change — the short form is that MAJOR is the
 #: only one that may break a reader, and it carries a twelve-month deprecation
 #: window before anything is removed.
-CONTRACT_VERSION = "1.4.0"
+CONTRACT_VERSION = "1.5.0"
 
 # THE `$schema` AND `$id` URIs ARE NOT HERE ON PURPOSE.
 #
@@ -201,6 +201,200 @@ def _dependencies_property() -> dict:
     }
 
 
+def _translation_side_properties() -> dict:
+    """One side (`source` or `target`) of a `verify_translation` case.
+
+    Read out of `translation.verify_translation`'s per-case dict — see the
+    `cases.append({...})` block in codecalc/translation.py — not out of the
+    full executor result each side derives from. Only four fields survive
+    into the case: `phase` is null whenever nothing ran (an unknown
+    language never reaches a runtime, so it never sets `phase`), which is
+    the same discriminator the five execution shapes already use.
+    """
+    return {
+        "type": "object",
+        "required": ["ok", "phase", "stdout", "stderr"],
+        "properties": {
+            "ok": {"type": "boolean"},
+            "phase": {
+                "type": ["string", "null"],
+                "description": (
+                    "compile/run when this side actually reached a runtime; "
+                    "null when nothing ran."
+                ),
+            },
+            "stdout": {"type": "string"},
+            "stderr": {"type": "string"},
+        },
+    }
+
+
+#: The keys every `verify_translation` result carries, whether it is the
+#: top-level tool result or the BARE dict `verify_optimization` embeds under
+#: `verification` — see `_translation_evidence_properties` below for why the
+#: two are not the same schema.
+TRANSLATION_EVIDENCE_KEYS = (
+    "ok", "passed", "reason", "matched", "mismatched", "inconclusive", "total", "cases",
+)
+
+
+def _translation_evidence_properties() -> dict:
+    """The evidence `translation.aggregate` + `translation.verify_translation`
+    produce: pass/fail plus the full per-case trail. Shared by TWO shapes in
+    this schema:
+
+      * the top-level `verify_translation` TOOL result (`translation_verification`
+        below), which also carries `grade`/`grade_basis`/`grade_rules_version`
+        because the MCP tool boundary always grades it (server.py always calls
+        `grades.grade_verify_translation`);
+      * the `verification` field `verify_optimization` embeds — `optimization.py`
+        calls `translation.verify_translation()` directly, the BARE function,
+        never the graded/stamped tool wrapper, so that nested value carries
+        none of the three grade keys and no `contract_version`. Measured:
+        `server.verify_optimization(...)["verification"]` has exactly these
+        eight keys, never more.
+
+    `ok` here means "the tool completed and produced a real answer", never
+    the verdict — `aggregate` sets it True on a mismatch exactly the same as
+    on a pass, matching `verify_optimization`'s own `{"ok": True, "accepted":
+    False, ...}` early return. This one key is required on BOTH shapes,
+    which is why it lives in this shared dict rather than being added only
+    where the two diverge.
+
+    One shape, two required-key sets — see `translation_verification` and
+    `optimization_verification`'s own `required` lists below for where they
+    diverge.
+    """
+    case = {
+        "type": "object",
+        "required": ["input", "outcome", "reason", "match", "source", "target"],
+        "properties": {
+            "input": {"type": "string"},
+            "outcome": {
+                "type": "string",
+                "enum": ["match", "mismatch", "inconclusive"],
+                "description": (
+                    "See translation.classify_case. 'inconclusive' is NOT a "
+                    "pass — it means neither side gave usable evidence."
+                ),
+            },
+            "reason": {"type": "string"},
+            "match": {
+                "type": "boolean",
+                "description": (
+                    "True only when outcome == 'match'. Kept for callers that "
+                    "predate the three-way outcome."
+                ),
+            },
+            "source": _translation_side_properties(),
+            "target": _translation_side_properties(),
+        },
+    }
+    return {
+        "ok": {
+            "type": "boolean",
+            "description": (
+                "True whenever the tool completed and produced a real "
+                "answer — set unconditionally by `aggregate`, including on "
+                "a mismatch. NOT the verdict: read `passed` for that."
+            ),
+        },
+        "passed": {
+            "type": "boolean",
+            "description": (
+                "True only when there is REAL evidence for equivalence: no "
+                "mismatch, and at least one case where both programs actually "
+                "ran and agreed. An all-inconclusive run is false."
+            ),
+        },
+        "reason": {
+            "type": ["string", "null"],
+            "description": "null only when passed is true; a non-pass always names why.",
+        },
+        "matched": {"type": "integer", "minimum": 0},
+        "mismatched": {"type": "integer", "minimum": 0},
+        "inconclusive": {"type": "integer", "minimum": 0},
+        "total": {"type": "integer", "minimum": 0},
+        "cases": {"type": "array", "items": case},
+    }
+
+
+def _speedup_properties() -> dict:
+    """`optimization._speedup`'s return: a measured ratio, or an honest
+    refusal to report one. `per_size` and `reason` are mutually exclusive in
+    practice (one or the other, never both — see `_speedup`'s two `return`
+    statements) but neither is declared `required`, since a schema that
+    demanded both would reject every real result.
+    """
+    return {
+        "type": "object",
+        "required": ["ratio", "measurable"],
+        "properties": {
+            "ratio": {
+                "type": ["number", "null"],
+                "description": "Median before/after ratio at sizes where both ran. null when not measurable.",
+            },
+            "measurable": {"type": "boolean"},
+            "reason": {
+                "type": "string",
+                "description": "Present only when measurable is false.",
+            },
+            "per_size": {
+                "type": "array",
+                "description": "Present only when measurable is true.",
+                "items": {
+                    "type": "object",
+                    "required": ["n", "before_ms", "after_ms", "ratio"],
+                    "properties": {
+                        "n": {"type": "integer", "minimum": 0},
+                        "before_ms": {"type": "number"},
+                        "after_ms": {"type": "number"},
+                        "ratio": {"type": "number"},
+                    },
+                },
+            },
+        },
+    }
+
+
+def _inference_properties() -> dict:
+    """`optimization._infer_speedup`'s return: the per-size one-sided
+    Mann-Whitney U test that `_accept_decision` requires a MAJORITY of sizes
+    to reject before `accepted` can ever be true. Every key here is read
+    straight off `_infer_speedup`'s own `return` and each `per_size` entry's
+    `dict` literal — `size`/`n_before`/`n_after`/`u`/`p_value`/`rank_biserial`.
+    """
+    return {
+        "type": "object",
+        "required": ["test", "alternative", "alpha", "per_size",
+                     "sizes_rejecting", "sizes_total", "decision_basis"],
+        "properties": {
+            "test": {"type": "string"},
+            "alternative": {"type": "string"},
+            "alpha": {"type": "number"},
+            "per_size": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["size", "n_before", "n_after", "u",
+                                 "p_value", "rank_biserial"],
+                    "properties": {
+                        "size": {"type": "integer", "minimum": 0},
+                        "n_before": {"type": "integer", "minimum": 0},
+                        "n_after": {"type": "integer", "minimum": 0},
+                        "u": {"type": "number"},
+                        "p_value": {"type": "number", "minimum": 0, "maximum": 1},
+                        "rank_biserial": {"type": "number"},
+                    },
+                },
+            },
+            "sizes_rejecting": {"type": "integer", "minimum": 0},
+            "sizes_total": {"type": "integer", "minimum": 0},
+            "decision_basis": {"type": "string"},
+        },
+    }
+
+
 def build_schema(dialect: str | None = None, schema_id: str | None = None) -> dict:
     """The published schema, as a dict. Single source of truth.
 
@@ -252,7 +446,8 @@ def build_schema(dialect: str | None = None, schema_id: str | None = None) -> di
                 ),
             },
         },
-        # FIVE shapes, discriminated so that exactly one branch can match:
+        # FIVE execution shapes, discriminated so that exactly one branch can
+        # match:
         #
         #   envelope       verdict present, backend in (rust, python)
         #   session        backend == "session-worker"
@@ -278,12 +473,53 @@ def build_schema(dialect: str | None = None, schema_id: str | None = None) -> di
         # terminal success carries `verdict`, a terminal failure carries `error`,
         # so neither collides with this branch and `oneOf`'s exactly-one rule
         # holds.
+        #
+        # THREE VERIFICATION shapes, added in 1.5.0:
+        #
+        #   translation_verification   `passed` present
+        #   optimization_verification  `accepted` present
+        #   edge_case_comparison       `divergence_count` present
+        #
+        # Before this version, `verify_translation` and `verify_optimization`
+        # were stamped `contract_version` the same as every other tool (see
+        # `codecalc/server.py`'s `_coded` wrapper, applied to all 52 tools) but
+        # matched NONE of the five execution shapes above — the same defect
+        # `run_lifecycle` closed for the background-run tools, found here by
+        # re-reading docs/contract/README.md's own caveat that these results
+        # were "additive, and undocumented". `translation.aggregate()` also
+        # had a real omission behind that gap, not just a shape to document
+        # around: it never set `ok` at all, which review caught as
+        # inconsistent with `verify_optimization`'s own `{"ok": True,
+        # "accepted": False, ...}` early return — `ok` means "the tool
+        # completed and produced a real answer", never the verdict, so a
+        # mismatch is `ok=True` exactly like a pass. Fixed at the source
+        # (`aggregate` now always sets it), so `translation_verification`
+        # requires `ok` the same as every other branch here.
+        #
+        # `compare_edge_cases` has the same gap and closes it the same way:
+        # its `ok: false` refusal ("provide at least one snippet") already
+        # matches `rejected` (ok + error, no verdict) and needed no new
+        # branch; only its `ok: true` success shape — `divergence_count`,
+        # `divergences`, `results` — was unmodeled, which `edge_case_comparison`
+        # now covers.
+        #
+        # None of the three collides with the five execution shapes or with
+        # each other: none of them ever carries `verdict`, `backend`, or
+        # `run_id`/`state`; `accepted` and `divergence_count` appear on no
+        # other shape in this document. A `verify_optimization` measurement
+        # failure — baseline or candidate — is `{ok: false, error: ...,
+        # code: ...}` with no `accepted` key, so it matches `rejected` rather
+        # than `optimization_verification`, exactly like `compare_edge_cases`'s
+        # own refusal.
         "oneOf": [
             {"$ref": "#/$defs/execution_envelope"},
             {"$ref": "#/$defs/session_result"},
             {"$ref": "#/$defs/compact_result"},
             {"$ref": "#/$defs/rejected"},
             {"$ref": "#/$defs/run_lifecycle"},
+            {"$ref": "#/$defs/translation_verification"},
+            {"$ref": "#/$defs/optimization_verification"},
+            {"$ref": "#/$defs/edge_case_comparison"},
         ],
         "$defs": {
             "execution_envelope": {
@@ -519,6 +755,159 @@ def build_schema(dialect: str | None = None, schema_id: str | None = None) -> di
                 "required": ["ok", "error"],
                 "properties": _error_properties(),
                 "not": {"required": ["verdict"]},
+            },
+            "translation_verification": {
+                "title": "a verify_translation result",
+                "description": (
+                    "The `verify_translation` tool's result: did a source "
+                    "program and a claimed port agree, across every test "
+                    "input, with real evidence either way (see "
+                    "translation.classify_case/aggregate). `grade`/"
+                    "`grade_basis`/`grade_rules_version` are always present — "
+                    "server.py grades every call, pass or not — from "
+                    "codecalc.grades, itself a closed, versioned vocabulary. "
+                    "`ok` is always true here — it means the tool completed "
+                    "and produced a real answer, never the verdict; read "
+                    "`passed` for that."
+                ),
+                "type": "object",
+                "required": [*TRANSLATION_EVIDENCE_KEYS,
+                             "grade", "grade_basis", "grade_rules_version"],
+                "properties": {
+                    **_translation_evidence_properties(),
+                    "grade": {"type": "string", "enum": sorted(grades.GRADES)},
+                    "grade_basis": {"type": "string"},
+                    "grade_rules_version": {"type": "string"},
+                },
+            },
+            "optimization_verification": {
+                "title": "a verify_optimization result",
+                "description": (
+                    "The `verify_optimization` tool's result: is `candidate` a "
+                    "genuine optimisation of `original` — same outputs "
+                    "(`verification`, the embedded correctness check) AND "
+                    "measurably, significantly faster (`speedup`/`inference`). "
+                    "`speedup`/`inference`/`min_speedup`/`language`/`detail` "
+                    "are each present only on SOME of the tool's returns — "
+                    "see optimization.verify_optimization's own `return` "
+                    "statements — so none of them is required here; `ok`, "
+                    "`accepted`, `reason` and the embedded `verification` are "
+                    "the ones every success path carries. A MEASUREMENT "
+                    "failure (baseline or candidate timing failed, e.g. a "
+                    "timeout) is `{ok: false, error: ..., code: ...}` with no "
+                    "`accepted` key at all — that shape already matches "
+                    "`rejected` above and is deliberately NOT modeled here, "
+                    "so the two branches cannot both match the same result."
+                ),
+                "type": "object",
+                "required": ["ok", "accepted", "reason", "verification",
+                             "grade", "grade_basis", "grade_rules_version"],
+                "properties": {
+                    "ok": {"type": "boolean"},
+                    "accepted": {"type": "boolean"},
+                    "reason": {"type": "string"},
+                    "detail": {
+                        "type": "string",
+                        "description": (
+                            "Present only when accepted is false because the "
+                            "correctness gate failed — speed was never "
+                            "measured, because a faster wrong answer is not "
+                            "an optimisation."
+                        ),
+                    },
+                    "verification": {
+                        "type": "object",
+                        "description": (
+                            "The embedded correctness check — verify_translation's "
+                            "BARE return value, called directly rather than "
+                            "through the graded MCP tool. No grade, no "
+                            "contract_version: those are attached only at the "
+                            "MCP tool boundary, which this internal call never "
+                            "crosses."
+                        ),
+                        "required": list(TRANSLATION_EVIDENCE_KEYS),
+                        "properties": _translation_evidence_properties(),
+                    },
+                    "speedup": _speedup_properties(),
+                    "inference": _inference_properties(),
+                    "min_speedup": {"type": "number"},
+                    "language": {"type": "string"},
+                    "grade": {"type": "string", "enum": sorted(grades.GRADES)},
+                    "grade_basis": {"type": "string"},
+                    "grade_rules_version": {"type": "string"},
+                },
+            },
+            "edge_case_comparison": {
+                "title": "a compare_edge_cases result",
+                "description": (
+                    "The `compare_edge_cases` tool's SUCCESS result: the same "
+                    "logic run in N languages on edge-case inputs, with a "
+                    "per-input matrix (`results`) and the subset that "
+                    "diverged (`divergences`). Its own refusal — "
+                    "`{ok: false, error: 'provide at least one ... snippet'}` "
+                    "— already matches `rejected` above (ok + error, no "
+                    "verdict) and is not modeled here; only the ok=true shape "
+                    "needed a branch."
+                ),
+                "type": "object",
+                "required": ["ok", "inputs", "languages", "divergence_count",
+                             "results", "divergences"],
+                "properties": {
+                    "ok": {"type": "boolean"},
+                    "inputs": {"type": "array", "items": {"type": "string"}},
+                    "languages": {"type": "array", "items": {"type": "string"}},
+                    "divergence_count": {"type": "integer", "minimum": 0},
+                    "results": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "required": ["input", "runs"],
+                            "properties": {
+                                "input": {"type": "string"},
+                                "runs": {
+                                    "type": "object",
+                                    "description": "language -> that language's run, keyed by the `snippets` dict's own keys.",
+                                    "additionalProperties": {
+                                        "type": "object",
+                                        "required": ["ok", "stdout", "verdict", "stderr"],
+                                        "properties": {
+                                            "ok": {"type": ["boolean", "null"]},
+                                            "stdout": {"type": "string"},
+                                            "verdict": {
+                                                "type": ["string", "null"],
+                                                "description": "null when nothing ran (e.g. an unknown language).",
+                                            },
+                                            "stderr": {"type": "string"},
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                    "divergences": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "required": ["input", "languages", "kind", "runs"],
+                            "properties": {
+                                "input": {"type": "string"},
+                                "languages": {"type": "array", "items": {"type": "string"}},
+                                "kind": {
+                                    "type": "string", "enum": ["content", "order"],
+                                    "description": (
+                                        "content: the output (or ok-status) "
+                                        "itself differs · order: same lines, "
+                                        "same ok-status, different order."
+                                    ),
+                                },
+                                "runs": {
+                                    "type": "object",
+                                    "description": "same shape as results[].runs, restricted to the diverging languages.",
+                                },
+                            },
+                        },
+                    },
+                },
             },
         },
     }

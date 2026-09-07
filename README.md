@@ -621,7 +621,7 @@ exactly what codecalc's `session_id` already is.
 
 ## The result contract
 
-Every result carries `contract_version`, currently **1.4.0**. The published
+Every result carries `contract_version`, currently **1.5.0**. The published
 schema is [`docs/contract/result-v1.schema.json`](docs/contract/result-v1.schema.json)
 and the policy behind it — what MAJOR/MINOR/PATCH may change, the twelve-month
 deprecation window, worked success/failure/timeout examples, and the migration

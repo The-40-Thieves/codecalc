@@ -110,6 +110,16 @@ def aggregate(outcomes: list[tuple[str, str]]) -> dict:
     that is entirely inconclusive fails with a reason, because "we could not
     check" and "we checked and it was fine" are different answers and the
     caller is entitled to know which one it got.
+
+    `ok` is always True here — it means "the tool completed and produced a
+    real answer", never the verdict. `passed=False` (a mismatch, or nothing
+    conclusive) is still `ok=True`: the tool did its job and reported a real
+    result, the same distinction `verify_optimization`'s own `{"ok": True,
+    "accepted": False, ...}` early return already draws between completion
+    and the claim being verified. This was a real omission, not a
+    documented shape: `aggregate` never set the key at all before, which
+    made `verify_translation`'s result the one shape in the published
+    contract with no `ok` — fixed here instead of carved into the schema.
     """
     matched = sum(1 for o, _ in outcomes if o == "match")
     mismatched = sum(1 for o, _ in outcomes if o == "mismatch")
@@ -127,7 +137,7 @@ def aggregate(outcomes: list[tuple[str, str]]) -> dict:
         reason = None
         passed = True
 
-    return {"passed": passed, "reason": reason, "matched": matched,
+    return {"ok": True, "passed": passed, "reason": reason, "matched": matched,
             "mismatched": mismatched, "inconclusive": inconclusive,
             "total": len(outcomes)}
 
