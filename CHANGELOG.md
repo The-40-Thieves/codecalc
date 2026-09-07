@@ -120,6 +120,82 @@ behind it.
   independently so a future regression of the same shape cannot silently
   disable it a second time.
 
+### Changed
+
+- **The runner's own scratch files (the entry file's source copy, the
+  compiled binary, and — on the Rust backend — the compile/run redirect
+  files) now live inside a private `.codecalc-run/` subdirectory of the
+  workdir, never at the workdir root.** Previously `session_run`/
+  `execute_code(session_id=...)` unconditionally (re)wrote whatever entry
+  file was currently executing to a root-level `main.<ext>`, so a session's
+  own, unrelated `main.py` (or the equivalent for another language) at the
+  session root was silently overwritten by running any OTHER entry file —
+  documented as a known gap in 0.8.0's release notes, fixed here. The
+  running PROGRAM's cwd is unchanged (still the workdir root, on both
+  backends), so a program's own relative file access
+  (`open("data.csv")`, a session's own files) keeps resolving exactly
+  where it always has; only the runner's OWN copies move.
+
+  **CRITICAL, closed before this shipped:** the scratch directory is now
+  WIPED AND RECREATED FRESH on every call, never reused, and the whole run
+  is refused with a coded `permission_denied` if anything already inside
+  it (at any depth) is not a plain file or directory. An earlier version
+  of this fix made `.codecalc-run/` itself symlink-safe to create but left
+  every file WRITTEN inside an already-real one exposed: a session's own
+  executed code, from a PRIOR call, could plant
+  `.codecalc-run/main.<ext> -> <workdir>/important.txt` (the program runs
+  with the workdir as its cwd, so it can reach both names), and the NEXT
+  call's write of its own entry source would follow that symlink and
+  overwrite `important.txt` — including, via a session_list-disclosed
+  absolute workdir path, a file in a DIFFERENT session. Reproduced end to
+  end on both backends before the fix; every write into the scratch
+  directory now opens `O_EXCL`/`CREATE_NEW` (refusing ANY pre-existing
+  entry atomically), and `tests/test_session_jail.py` carries the
+  regressions (symlink, cross-session, and a planted FIFO).
+
+  `python3`'s `sys.path[0]` would otherwise have silently stopped seeing a
+  sibling module written via `session_write_file` (the entry copy's new
+  directory holds nothing a caller ever wrote) — both backends now set
+  `PYTHONPATH` to the workdir root for every step, restoring the same
+  import resolution; a per-run `dependencies` install (which lands at the
+  workdir root, same as before) is covered by the identical mechanism.
+  `node` has the same class of gap for `require("./sibling")` (CommonJS
+  resolves a relative specifier against the REQUIRING FILE's own
+  directory; `NODE_PATH` does not reach it, only bare specifiers) — fixed
+  by writing a small `Module._resolveFilename` shim into the scratch
+  directory on every node run and loading it via
+  `NODE_OPTIONS=--require=<path>`, retrying a failed relative lookup
+  against the workdir root before giving up. `c`/`cpp`/`c++`/`fortran`'s
+  compile commands gained an extra `-I`/include-search entry pointing at
+  the workdir root for the same reason (`#include "helper.h"`/
+  `include 'helper.inc'` resolve relative to the including file's own
+  directory first).
+
+  Three behaviour changes are DOCUMENTED, not fixed: rust's `mod helper;`
+  has no search-path flag equivalent to C's `-I`, so a session's own
+  sibling `.rs` file at the workdir root no longer resolves — single-file
+  rust (the only shape CI's `tested`-tier evidence covers) is unaffected.
+  `bun`'s `require`/`import` and `deno`/`typescript`'s ESM `import` use
+  their own module resolvers (not Node's `Module` class), so the node fix
+  above does not extend to them; a sibling file at the workdir root no
+  longer resolves for those three either. Haskell is NOT in this list:
+  GHC's default import search path is CWD-relative (`-i.`), and haskell's
+  `run` cwd is the workdir root (it has no separate `compile` step): a sibling
+  `Helper.hs` still resolves via `import Helper` exactly as before. What
+  GHC's own build does, unrelated to this change, is write each module's
+  `.hi`/`.o` next to ITS source — so `Helper.hi`/`Helper.o` land at the
+  workdir root beside `Helper.hs`, a pre-existing latent collision risk
+  with a same-named user file, noted here for completeness.
+
+  `session_artifacts`/`artifacts_created` collapse
+  their exclusion rule from a hand-maintained set of root-level basenames
+  (`main.<ext>` per language, `a.out`/`a.exe`, Kotlin's `out.jar`, and the
+  Rust backend's six `{compile,run}.{out,err,in}` files) to the single
+  `.codecalc-run/` directory prefix, since the runner's files no longer
+  share a directory with anything a caller can name at all. Sessionless
+  `execute_code`/`execute_code_stream` share the identical layout inside
+  their own per-run temp workdir.
+
 ## [0.8.0] — 2026-09-07
 
 Three changes since 0.7.0: per-run `dependencies` extended to

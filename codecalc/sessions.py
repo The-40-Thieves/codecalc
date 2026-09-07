@@ -160,142 +160,39 @@ _DEFAULT_MIN_HOST_FREE_MB = 256.0
 #: Written by `_write_lock_file` (below) at the session root the moment a
 #: stateful worker spawns — see that function's docstring for what it
 #: proves. Defined here (rather than at that call site) because
-#: `_RUNNER_INTERNAL_NAMES` needs it below, and a name should be defined
-#: once, at its first use, not duplicated.
+#: `_workspace_scan`'s exclusion logic needs it below, and a name should be
+#: defined once, at its first use, not duplicated.
 _LOCK_FILE_NAME = ".codecalc-session-lock"
 
 
-def _compile_output_names() -> frozenset[str]:
-    """Root-level filenames a compile command HARDCODES into its own argv,
-    as opposed to using the runner's own `{exe}` placeholder (already
-    covered explicitly below by `a.out`/`a.exe`).
-
-    Most compiled languages in `registry.py` compile to `{exe}`, which the
-    runner substitutes with `a.out`/`a.exe` itself — already named above.
-    Kotlin is the one exception: `kotlinc {file} -include-runtime -d
-    {work}/out.jar` names its own output, `out.jar`, directly in the
-    compile command, and the run command (`java -jar {work}/out.jar`) reads
-    it straight back from the session root. Scanning every `compile` argv
-    for a token shaped `{work}/<name>` finds this one case without hand-
-    listing it.
-
-    EXACTLY what this matches, no more: an argv element that IS the
-    string `{work}/<name>` — i.e. `{work}/` and the name were passed as
-    one separate, space-delimited `shlex.split` token, the shape every
-    current `compile` entry actually uses. It does NOT catch a name
-    GLUED to another flag in the same token, e.g. `-o{work}/x` or
-    `--output={work}/x` — `token.startswith(prefix)` would be `False` for
-    either, since the token starts with `-o`/`--output=`, not `{work}/`.
-    A future language's compile command written in one of those glued
-    forms would need its own explicit entry here, the same way the
-    original basename-anywhere-in-tree bug shows what happens when a
-    real write path is assumed covered instead of checked. `run`-only
-    argvs (gleam's `bash -c '... {work} ...'` project scaffold, e.g.) are
-    deliberately NOT scanned either: gleam builds a real project tree
-    under `{work}/proj/`, which is a build output a caller can reasonably
-    want to inspect, not a single scratch filename to hide — and it has
-    no `compile` entry to begin with, so this loop never reaches it.
-    """
-    prefix = "{work}/"
-    names = set()
-    for entry in registry.LANGUAGES.values():
-        for token in entry["compile"] or ():
-            if token.startswith(prefix):
-                names.add(token[len(prefix):])
-    return frozenset(names)
-
-
-#: Names the runner writes AT THE SESSION ROOT (never in a subdirectory),
-#: excluded from what counts as a session's "artifacts" — same set
-#: `artifacts()` already excluded inline; named here so the disk-quota
+#: The runner's own scratch subdirectory, excluded (at any depth under it)
+#: from what counts as a session's "artifacts" — same directory
+#: `_workspace_scan` already excludes inline; named here so the disk-quota
 #: artifact-count cap (below) and `artifacts()` share ONE definition instead
 #: of two that can drift apart.
 #:
-#: `_artifact_entries` below matches these ONLY at `d`'s top level (path
-#: parent == the session root), never by basename anywhere in the tree. The
-#: exclusion used to match a basename wherever `rglob` found it, which made a
-#: user's OWN `a.out`/`a.exe`, `main.py`, or `run.out` invisible to
-#: `session_artifacts`/`artifacts_created` whenever it lived in ANY
-#: directory, not just where the runner actually writes — e.g. `gcc -o a.out
-#: program.c` run inside a session subdirectory produced a binary that this
-#: filter silently ate. `sessions.execute`/`execution_service.run_file` pass
-#: the session root itself as `executor.execute`'s `--workdir` (never a
-#: nested scratch dir), so root-level is exactly, and only, where these
-#: names need excluding. Each name below is tied to the exact code path that
-#: writes it, checked against both backends (`codecalc/executor.py`'s Python
-#: fallback and `executor/src/main.rs`'s Rust binary) rather than assumed —
-#: a first pass at this fix trusted a plain-string grep for these names
-#: across both backends and wrongly concluded six of them were dead; the
-#: Rust binary builds three of them (`{tag}.out`/`.err`/`.in`) with a
-#: runtime `format!`, which no literal-string grep will ever find:
+#: This used to be a hand-maintained set of ROOT-LEVEL BASENAMES
+#: (`_RUNNER_INTERNAL_NAMES`: `main.<ext>` per language, `a.out`/`a.exe`,
+#: Kotlin's `out.jar`, and — on the Rust backend — `run.out`/`run.err`/
+#: `run.in`/`compile.out`/`compile.err`/`compile.in`), matched ONLY at the
+#: session root because that was where the runner actually wrote all of
+#: them. Both backends now write every one of those files into
+#: `registry.RUN_SCRATCH_DIRNAME` instead of the session root (see that
+#: constant's docstring) specifically so a user's own file sharing one of
+#: those names — most consequentially, a `main.<ext>` the user wrote via
+#: `session_write_file` — can no longer collide with the runner's own copy
+#: at all: the two no longer share a directory, let alone a path. One
+#: directory-prefix exclusion accordingly replaces the entire hand-
+#: maintained basename set; a language added to the registry needs nothing
+#: added here to keep its own scratch files out of `session_artifacts`,
+#: because it was never a basename match to begin with.
 #:
-#: - every `main.{ext}` the language table in `registry.py` can produce
-#:   (`{f"main.{ext}" for ext in registry.EXTENSIONS.values()}` below, not
-#:   a hand-picked subset like `main.py`/`main.js` — a language added to
-#:   the registry without its `main.<ext>` added here would reopen exactly
-#:   this bug for that one language): both backends write the entry source
-#:   to `main.{ext}` at the workdir root before running it —
-#:   `_execute_python`'s `src = Path(workdir) / f"main.{ext}"` and
-#:   `main.rs`'s `work.join(format!("main.{ext}", ...))`.
-#: - `a.out` / `a.exe`: the compiled-language output, same two call sites —
-#:   `_execute_python`'s `exe_name = "a.exe" if IS_WINDOWS else "a.out"` and
-#:   `main.rs`'s `work.join(if cfg!(windows) { "a.exe" } else { "a.out" })`.
-#: - `_compile_output_names()` (Kotlin's `out.jar` today — see that
-#:   function's docstring).
-#: - `run.out` / `run.err` / `run.in` and `compile.out` / `compile.err` /
-#:   `compile.in`: the RUST BACKEND's `run_step()` (executor/src/main.rs,
-#:   `fn run_step(argv, work, tag, stdin_data, limits)`) redirects a
-#:   child's stdout/stderr to `work.join(format!("{tag}.out"))` /
-#:   `{tag}.err`, and writes `stdin_data` to `work.join(format!("{tag}.in"))`
-#:   — UNCONDITIONALLY, on every call, before the child even runs. It is
-#:   called once with `tag="compile"` (for every compiled language) and
-#:   once with `tag="run"` (for every language, compiled or not) — so a
-#:   session running on the Rust backend writes `run.out`/`run.err`/`run.in`
-#:   on EVERY call, and `compile.out`/`compile.err`/`compile.in` on every
-#:   call to a compiled language. The Python fallback backend never writes
-#:   these six (it pipes stdout/stderr/stdin in-process instead — see
-#:   `_run_step` in executor.py); `run.out` alone is ALSO written by the
-#:   Rust-independent streaming path (`execute_code_stream` in executor.py),
-#:   which polls `workdir / "run.out"` for partial output while a
-#:   session-scoped run is still in flight. Both backends are excluded here
-#:   unconditionally rather than branching on which one is active: a name
-#:   only one backend writes is simply absent on the other, so excluding it
-#:   unconditionally costs nothing and does not depend on this process
-#:   knowing, at listing time, which backend produced what is on disk now.
-#: - `_LOCK_FILE_NAME` (`.codecalc-session-lock`): written by
-#:   `_write_lock_file` at the session root the moment a stateful worker
-#:   spawns.
-#:
-#: `main.{ext}` at the session root is excluded even when it is ALSO the
-#: exact entry file a caller wrote and named via `session_write_file` (e.g.
-#: `session_write_file(sid, "main.py", ...)` then `session_run(sid,
-#: "main.py")`, exercised by
-#: test_session_service_owns_protocol_neutral_lifecycle_and_artifacts):
-#: `run_file`/`execute()` read the entry file's SOURCE and hand it to
-#: `executor.execute`, which unconditionally (re)writes that exact source to
-#: `main.{ext}` at the session root before running it — so the file at that
-#: path, right after any run, holds exactly what was just executed, not
-#: independent user state distinguishable from the runner's own scratch
-#: copy. Treating it as an artifact would not surface anything a run didn't
-#: already report via `entry_file`/`stdout`. A user file with a DIFFERENT
-#: name, or the same basename in a subdirectory, is a real artifact and is
-#: never touched by this exclusion. NOTE (filed separately, not fixed
-#: here): this same rewrite means `run_file`/`execute()` overwrite
-#: `main.{ext}` at the session root on EVERY run regardless of which entry
-#: file the caller actually asked to run — a user's own, unrelated
-#: `main.py` at the session root is silently clobbered by running any OTHER
-#: entry file. The root-level `main.<ext>` slot is runner scratch space,
-#: not a safe place to keep a file you want to survive another run.
-_RUNNER_INTERNAL_NAMES = frozenset(
-    {
-        "a.out", "a.exe",
-        "run.out", "run.err", "run.in",
-        "compile.out", "compile.err", "compile.in",
-        _LOCK_FILE_NAME,
-    }
-    | {f"main.{ext}" for ext in registry.EXTENSIONS.values()}
-    | _compile_output_names()
-)
+#: `_LOCK_FILE_NAME` (`.codecalc-session-lock`) is excluded separately,
+#: by name, at the session root — `_write_lock_file` writes it there
+#: (not into the scratch subdirectory), since it must survive independently
+#: of any one run's scratch and needs to exist before a worker's first run
+#: ever creates the scratch directory at all.
+_RUNNER_SCRATCH_DIRNAME = registry.RUN_SCRATCH_DIRNAME
 
 #: Guards the "measure usage, then write" critical section in every
 #: disk-quota-checked write path (`write_file`, the spill write in
@@ -455,17 +352,21 @@ def _workspace_scan(d: Path) -> tuple[list[tuple[Path, os.stat_result]], int]:
     guard, anything added later) gets identical behaviour and cost to
     before this existed.
 
-    Two things a session can legitimately create are excluded from
-    `entries` (not `total`), neither by basename alone (see
-    `_RUNNER_INTERNAL_NAMES`'s docstring for why a tree-wide basename match
-    used to hide a user's own files):
+    Two directories a session can legitimately create are excluded from
+    `entries` (not `total`), both by DIRECTORY PREFIX, never by basename
+    anywhere in the tree (see `_RUNNER_SCRATCH_DIRNAME`'s docstring for why
+    a tree-wide basename match used to hide a user's own files):
 
-    - the runner's own scratch files (`_RUNNER_INTERNAL_NAMES`), but ONLY at
-      the session root, where they actually live;
+    - `_RUNNER_SCRATCH_DIRNAME` (any depth under it): the runner's own
+      scratch subdirectory — the entry source copy, the compiled binary,
+      the Rust backend's compile/run redirect files, all of it;
     - the `.codecalc-spill/` directory (any depth under it): a spill file is
       already surfaced via `stdout_spill`/`stderr_spill` and readable through
       `session_read_file`, so also listing it here would double-report the
       same bytes as a fresh "artifact" every time a run's output spills.
+
+    The session lock file (`_LOCK_FILE_NAME`) is excluded too, by exact name
+    at the session root — it lives there, not under the scratch directory.
     """
     entries: list[tuple[Path, os.stat_result]] = []
     total = 0
@@ -480,9 +381,9 @@ def _workspace_scan(d: Path) -> tuple[list[tuple[Path, os.stat_result]], int]:
         if "__pycache__" in p.parts or p.name.endswith(".pyc"):
             continue
         rel_parts = p.relative_to(d).parts
-        if rel_parts and rel_parts[0] == _SPILL_DIRNAME:
+        if rel_parts and rel_parts[0] in (_SPILL_DIRNAME, _RUNNER_SCRATCH_DIRNAME):
             continue
-        if len(rel_parts) == 1 and p.name in _RUNNER_INTERNAL_NAMES:
+        if len(rel_parts) == 1 and p.name == _LOCK_FILE_NAME:
             continue
         entries.append((p, st))
     return entries, total
@@ -1001,10 +902,10 @@ _EXPIRED_MARKER_NAME = ".codecalc-session-expired"
 #: server owns this session's worker and refuses the directory outright,
 #: independent of mtime, age threshold, or even the expiry marker.
 #:
-#: `_LOCK_FILE_NAME` itself is defined up near `_RUNNER_INTERNAL_NAMES`
-#: (which needs it, to exclude this file from `session_artifacts` — it is
-#: written at the session root, same as everything else in that set), not
-#: here where it is used.
+#: `_LOCK_FILE_NAME` itself is defined up near the disk-quota constants
+#: (`_workspace_scan` needs it, to exclude this file from `session_artifacts`
+#: — it is written at the session root, outside the runner's scratch
+#: subdirectory), not here where it is used.
 
 
 def _write_lock_file(d: Path) -> None:
@@ -1952,8 +1853,8 @@ def resource_read(session_id: str, path: str,
 
 def artifacts(session_id: str) -> dict:
     """Files created by executed code (anything beyond the runner's own
-    scratch files at the session root and the `.codecalc-spill/` directory —
-    see `_RUNNER_INTERNAL_NAMES` and `_artifact_entries`)."""
+    `_RUNNER_SCRATCH_DIRNAME` scratch subdirectory and the
+    `.codecalc-spill/` directory — see `_artifact_entries`)."""
     try:
         d = _session_dir(session_id)
     except ValueError as exc:

@@ -651,53 +651,66 @@ def test_session_service_owns_protocol_neutral_lifecycle_and_artifacts() -> None
           stopped["ok"] is True and stopped["deleted"] is True)
 
 
-def test_artifact_filter_excludes_runner_internals_only_at_the_session_root() -> None:
-    """The runner writes its own scratch files (main.<ext>, a.out/a.exe,
-    the Rust backend's run.out/run.err/run.in/compile.out/compile.err/
-    compile.in, Kotlin's out.jar, and the session lock file) directly in
-    the session ROOT — verified against executor.py's `_execute_python`,
-    executor/src/main.rs's `execute()`/`run_step()`, registry.py's Kotlin
-    compile command, and `_write_lock_file`, none of which ever nest these
-    names in a subdirectory (`a.exe` is that same compiled-output slot on
-    Windows — `exe_name = "a.exe" if IS_WINDOWS else "a.out"` / `if
-    cfg!(windows) { "a.exe" } else { "a.out" }`, checked on every OS here
-    since which name a session excludes must not depend on which platform
-    runs the test). Before the fix, `_RUNNER_INTERNAL_NAMES` matched by
-    BASENAME anywhere in the tree, so a user's own `a.out`/`main.py` in a
-    subdirectory (e.g. `gcc -o a.out program.c` run inside `build/`) was
-    silently invisible to `session_artifacts`. This asserts both halves: a
-    user file sharing one of those basenames in a subdirectory is
-    reported, and the runner's own file at its real, root-level location
-    is not — this test simulates the file layout directly (no real
-    execution); `test_a_real_compiled_run_on_the_rust_backend_reports_only_user_artifacts`
-    below covers the same claim against an ACTUAL Rust-backend run,
-    which is what actually caught the run.out/run.err/etc. Rust-only gap
-    a plain-string grep of the source could not see."""
+def test_artifact_filter_excludes_only_the_runner_scratch_subdirectory() -> None:
+    """The runner's own scratch files (main.<ext>, a.out/a.exe, the Rust
+    backend's run.out/run.err/run.in/compile.out/compile.err/compile.in,
+    Kotlin's out.jar) now live INSIDE `registry.RUN_SCRATCH_DIRNAME`
+    (`.codecalc-run/`), never at the session root — verified against
+    executor.py's `_execute_python`, executor/src/main.rs's
+    `execute()`/`run_step()`, and registry.py's Kotlin compile command
+    (`a.exe` is that same compiled-output slot on Windows —
+    `exe_name = "a.exe" if IS_WINDOWS else "a.out"` / `if cfg!(windows) {
+    "a.exe" } else { "a.out" }`, checked on every OS here since which
+    directory a session excludes must not depend on which platform runs
+    the test).
+
+    `session_artifacts` excludes that ONE directory prefix (at any depth
+    under it), never a basename match anywhere in the tree — the shape
+    the earlier `_RUNNER_INTERNAL_NAMES` root-level-basename design (and,
+    before that, a tree-wide basename match) both replaced. So a user's
+    OWN file sharing one of those names, even a `main.py` written via
+    `session_write_file` and sitting directly at the session ROOT, is a
+    real artifact and is reported; only the runner's actual scratch copy,
+    inside `.codecalc-run/`, is hidden — the two no longer share a
+    directory, let alone a path, so they cannot collide at all any more.
+    This test simulates the file layout directly (no real execution);
+    `test_a_real_compiled_run_on_the_rust_backend_reports_only_user_artifacts`
+    below covers the same claim against an ACTUAL Rust-backend run.
+
+    The session lock file (`_LOCK_FILE_NAME`) is the one exception,
+    excluded by exact name AT THE SESSION ROOT — `_write_lock_file` writes
+    it there, not into the scratch subdirectory."""
     old_root = sessions.SESSION_ROOT
     with tempfile.TemporaryDirectory(prefix="codecalc-artifact-scope-") as root:
         sessions.SESSION_ROOT = Path(root)
         try:
             session_id = sessions.start("bash")["session_id"]
             d = sessions._session_dir(session_id)
-            root_only_names = (
+            scratch_names = (
                 "a.out", "a.exe", "main.py", "run.out", "run.err", "run.in",
                 "compile.out", "compile.err", "compile.in", "out.jar",
-                sessions._LOCK_FILE_NAME,
             )
-            (d / "build").mkdir()
-            for name in root_only_names:
-                (d / "build" / name).write_bytes(f"user {name}".encode())
-                (d / name).write_bytes(f"runner {name}".encode())
+            scratch = d / sessions._RUNNER_SCRATCH_DIRNAME
+            scratch.mkdir()
+            for name in scratch_names:
+                # the user's own file, same basename — EVEN at the session root
+                (d / name).write_bytes(f"user {name}".encode())
+                # the runner's own scratch copy, inside .codecalc-run/
+                (scratch / name).write_bytes(f"runner {name}".encode())
+            (d / sessions._LOCK_FILE_NAME).write_bytes(b"12345")
 
             listed = {e["path"] for e in sessions.artifacts(session_id)["artifacts"]}
         finally:
             sessions.SESSION_ROOT = old_root
 
-    for name in root_only_names:
-        check(f"a user file named {name} in a subdirectory IS reported",
-              f"build/{name}" in listed)
-        check(f"the runner's own {name} at the session root is NOT reported",
-              name not in listed)
+    for name in scratch_names:
+        check(f"a user file named {name} at the session root IS reported",
+              name in listed)
+        check(f"the runner's own {name} under {sessions._RUNNER_SCRATCH_DIRNAME}/ "
+              "is NOT reported",
+              f"{sessions._RUNNER_SCRATCH_DIRNAME}/{name}" not in listed)
+    check("the session lock file is not reported",
+          sessions._LOCK_FILE_NAME not in listed)
 
 
 def test_a_real_compiled_run_on_the_rust_backend_reports_only_user_artifacts() -> None:
@@ -705,11 +718,15 @@ def test_a_real_compiled_run_on_the_rust_backend_reports_only_user_artifacts() -
     ACTUAL C program through the REAL Rust executor binary writes
     `main.c`/`a.out` and — on the Rust backend specifically —
     `compile.out`/`compile.err`/`compile.in`/`run.out`/`run.err`/`run.in`
-    at the session root. Verified directly against
+    into `registry.RUN_SCRATCH_DIRNAME` (`.codecalc-run/`) inside the
+    session, never at the session root. Verified directly against
     `executor/src/main.rs`'s `run_step()`, which redirects every
-    compile/run step's stdout/stderr/stdin to `{tag}.{out,err,in}` in the
-    workdir root, unconditionally, on every call — called once with
-    `tag="compile"` and once with `tag="run"`.
+    compile/run step's stdout/stderr/stdin to `{tag}.{out,err,in}` in that
+    scratch directory, unconditionally, on every call — called once with
+    `tag="compile"` and once with `tag="run"`. The user's OWN output
+    (`result.txt`, written by the compiled program to its cwd — the
+    session root, not the scratch directory) is reported; nothing under
+    the scratch subdirectory is.
 
     A prior version of this fix verified the exclusion set by grepping
     both backends' SOURCE for these literal strings and found none in the
@@ -2127,7 +2144,7 @@ if __name__ == "__main__":
     test_receipt_distinguishes_two_sessions_running_the_same_spec()
     test_compact_mode_keeps_the_actionable_half_of_the_receipt()
     test_session_service_owns_protocol_neutral_lifecycle_and_artifacts()
-    test_artifact_filter_excludes_runner_internals_only_at_the_session_root()
+    test_artifact_filter_excludes_only_the_runner_scratch_subdirectory()
     test_a_real_compiled_run_on_the_rust_backend_reports_only_user_artifacts()
     test_session_service_reads_bounded_files_and_runs_workspace_entries()
     test_session_file_pagination_is_shared_and_cursor_based()

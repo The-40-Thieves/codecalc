@@ -592,14 +592,21 @@ check("a POSIX-argv language set is declared",
 check("  ...and bash is in it (the language the failure was measured on)",
       "bash" in registry.POSIX_ARGV_LANGUAGES)
 
-# The actual repair: what these runtimes receive must have NO separator left in
-# it for MSYS to eat. Asserting "no separator" rather than "equals main.sh"
-# keeps the check about the PROPERTY that makes it safe.
+# The actual repair: what these runtimes receive must have NO BACKSLASH left
+# in it for MSYS to eat — not "no separator at all": the rendered path is now
+# scratch-relative (registry.RUN_SCRATCH_DIRNAME + a forward slash), since the
+# run step's cwd is the workdir root, one level above where the runner's own
+# copy of the source actually lives. A `/` is not a `\`, so MSYS's
+# re-tokenization leaves it untouched — that is the property this asserts,
+# not "equals main.sh" or "equals a bare name".
 _WIN_SRC = r"C:\Users\John Smith\AppData\Local\Temp\codecalc-ab12\main.sh"
 for _lang in sorted(registry.POSIX_ARGV_LANGUAGES):
     rendered = registry.source_arg(_lang, _WIN_SRC, windows=True)
-    check(f"{_lang}: the Windows source arg carries no path separator",
-          "\\" not in rendered and "/" not in rendered, f"-> {rendered!r}")
+    check(f"{_lang}: the Windows source arg carries no backslash",
+          "\\" not in rendered, f"-> {rendered!r}")
+    check("  ...and is scratch-relative, naming the same file from the run "
+          "step's cwd (the workdir root, one level above the scratch dir)",
+          rendered == f"{registry.RUN_SCRATCH_DIRNAME}/main.sh", f"-> {rendered!r}")
     check("  ...and no space for the re-parse to split on",
           " " not in rendered, f"-> {rendered!r}")
 

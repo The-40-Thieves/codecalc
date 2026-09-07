@@ -14,7 +14,7 @@
 
 use std::env;
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -273,24 +273,32 @@ const LANGS: &[Lang] = &[
         run: &["swift", "{file}"],
     },
     // compilers
+    // `-I{work}/..` restores a behaviour RUN_SCRATCH_DIRNAME would otherwise
+    // silently take away — see codecalc/registry.py's LANGUAGES table
+    // comment for the full reasoning (mirrored here; scripts/
+    // check_parity.py's test_executor_sweep.py counterpart gates that the
+    // two argv lists agree).
     Lang {
         name: "c",
         ext: "c",
-        compile: Some(&["gcc", "-O2", "-o", "{exe}", "{file}"]),
+        compile: Some(&["gcc", "-O2", "-I{work}/..", "-o", "{exe}", "{file}"]),
         run: &["{exe}"],
     },
     Lang {
         name: "cpp",
         ext: "cpp",
-        compile: Some(&["g++", "-O2", "-o", "{exe}", "{file}"]),
+        compile: Some(&["g++", "-O2", "-I{work}/..", "-o", "{exe}", "{file}"]),
         run: &["{exe}"],
     },
     Lang {
         name: "c++",
         ext: "cpp",
-        compile: Some(&["g++", "-O2", "-o", "{exe}", "{file}"]),
+        compile: Some(&["g++", "-O2", "-I{work}/..", "-o", "{exe}", "{file}"]),
         run: &["{exe}"],
     },
+    // rust's `mod helper;` has no search-path flag equivalent to C's `-I` —
+    // see registry.py's comment on this same entry for the documented,
+    // un-fixable behaviour change this implies for multi-file rust.
     Lang {
         name: "rust",
         ext: "rs",
@@ -306,7 +314,7 @@ const LANGS: &[Lang] = &[
     Lang {
         name: "fortran",
         ext: "f90",
-        compile: Some(&["gfortran", "-O2", "-o", "{exe}", "{file}"]),
+        compile: Some(&["gfortran", "-O2", "-I{work}/..", "-o", "{exe}", "{file}"]),
         run: &["{exe}"],
     },
     Lang {
@@ -554,6 +562,58 @@ fn remove_own_workdir(work: &Path, created: Option<(u64, u64)>) {
     let _ = fs::remove_dir_all(work);
 }
 
+/// The same identity-checked deletion as `remove_own_workdir`, for
+/// `execute()`'s scratch-directory RESET rather than final workdir cleanup
+/// — `run_dir` was not created by THIS call (it may be reused from an
+/// earlier one in the same session, after passing `find_tainted_entry`'s
+/// scan), so the same "is this still the directory I just looked at"
+/// re-check applies before removing it. Returns whether the directory was
+/// actually removed, so the caller can refuse the run rather than silently
+/// proceeding on a directory it could not safely clear.
+fn remove_dir_checked(dir: &Path, created: Option<(u64, u64)>) -> bool {
+    if created.is_some() && dir_identity(dir) != created {
+        eprintln!(
+            "codecalc-exec: refusing to delete {} — it is not the directory just scanned",
+            dir.display()
+        );
+        return false;
+    }
+    fs::remove_dir_all(dir).is_ok()
+}
+
+/// The first entry under `dir` (any depth) that is not a plain file or a
+/// plain directory, or `None` if the whole tree under `dir` is clean.
+///
+/// Used to refuse reusing a session's `.codecalc-run/` scratch directory
+/// across calls when its contents look tampered with — see `execute()`'s
+/// own comment on the CRITICAL symlink-follow this closes. `DirEntry::
+/// file_type()` reports the entry itself (like `lstat`, never `stat`): it
+/// does NOT follow a symlink to ask what it points to, which is the
+/// property this whole check depends on — a symlink is identified as a
+/// symlink, not silently resolved into "a directory" or "a file" first.
+fn find_tainted_entry(dir: &Path) -> std::io::Result<Option<std::path::PathBuf>> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let ft = entry.file_type()?;
+        if ft.is_symlink() {
+            return Ok(Some(entry.path()));
+        } else if ft.is_dir() {
+            if let Some(bad) = find_tainted_entry(&entry.path())? {
+                return Ok(Some(bad));
+            }
+        } else if !ft.is_file() {
+            // A FIFO, device or socket — planting one of these instead of a
+            // symlink is a different mechanism toward the same end (a
+            // program in this session can open() it and block or misbehave
+            // the reader, or an unusual device node can do worse), so it is
+            // refused exactly like a symlink rather than treated as "not a
+            // symlink, therefore fine".
+            return Ok(Some(entry.path()));
+        }
+    }
+    Ok(None)
+}
+
 fn substitute(template: &str, file: &str, exe: &str, work: &str) -> String {
     template
         .replace("{file}", file)
@@ -569,8 +629,18 @@ fn substitute(template: &str, file: &str, exe: &str, work: &str) -> String {
 /// literal unless it precedes a quote; the MSYS2 runtime that
 /// Git-for-Windows' `bash` is built on treats `\` as an ESCAPE, so
 /// `C:\Users\me\...\main.sh` reaches bash as `C:Usersmemain.sh` — every
-/// separator eaten, exit 127, reproducible on a desktop install. This is the
+/// backslash eaten, exit 127, reproducible on a desktop install. This is the
 /// path that box was running, so this copy is the one that closes the bug.
+///
+/// The repair hands these runtimes a path with NO BACKSLASH left in it — not
+/// "no separator": the runner's own copy of the source lives inside
+/// RUN_SCRATCH_DIRNAME, one level under the run step's own cwd (the workdir
+/// root), so a bare basename is no longer enough on its own to name the same
+/// file from that cwd. `source_arg` renders a scratch-relative path with a
+/// forward slash instead (`RUN_SCRATCH_DIRNAME/main.<ext>`) — a `/` is not a
+/// `\`, so MSYS's re-tokenization passes it through untouched, which is the
+/// property this set actually needs; MSYS bash treats `/` as a directory
+/// separator regardless of host OS.
 ///
 /// Mirrored in codecalc/registry.py; scripts/check_parity.py gates that the
 /// two lists stay identical.
@@ -583,6 +653,74 @@ const POSIX_ARGV_LANGUAGES: &[&str] = &["bash", "zsh"];
 /// one level up. Mirrored in codecalc/registry.py; scripts/check_parity.py
 /// gates the two copies.
 const SHELL_WRAPPED: &[&str] = &["gleam", "haskell"];
+
+/// The runner's own scratch subdirectory of a workdir/session root: the
+/// entry source copy (`main.<ext>`), the compiled binary (`a.out`/`a.exe`),
+/// any compile output a language template names via `{work}` (Kotlin's
+/// `out.jar`, gleam's scaffolded `proj/` tree), and this backend's own
+/// compile/run redirect files (`{tag}.out`/`.err`/`.in`) all live HERE,
+/// never at the workdir root.
+///
+/// The workdir root itself stays the RUNNING PROGRAM's cwd (`execute()` sets
+/// this for the run step specifically — the compile step's cwd is this
+/// scratch directory, since compiling is not the user's own program running),
+/// so a user's own relative file access resolves exactly where a caller can
+/// see it, and a session's own files can no longer collide with the
+/// runner's scratch copies at all — the two no longer share a directory.
+///
+/// Mirrored in codecalc/registry.py; scripts/check_parity.py gates that the
+/// two agree.
+const RUN_SCRATCH_DIRNAME: &str = ".codecalc-run";
+
+/// HIGH, reported by adversarial review: node's CommonJS `require("./sibling")`
+/// resolves relative to the REQUIRING FILE's own directory — the same class
+/// of gap `PYTHONPATH` above closes for python3, but `NODE_PATH` does NOT
+/// reach it (it only affects BARE module specifiers, never a relative
+/// `./`/`../` one). A sibling `helper.js` written via `session_write_file`
+/// at the workdir root, importable before the entry file's runner-owned copy
+/// moved into `RUN_SCRATCH_DIRNAME`, now fails with `Cannot find module
+/// './helper'` — measured end to end on both backends before this existed.
+///
+/// Written fresh into the scratch directory alongside the entry source on
+/// EVERY node run (unconditionally, on both backends, mirroring how
+/// `PYTHONPATH` is set unconditionally regardless of language) and loaded
+/// via `NODE_OPTIONS=--require=<absolute path>`: it patches `Module.
+/// _resolveFilename` to retry a failed RELATIVE lookup against
+/// `CODECALC_WORKDIR_ROOT` (the workdir root) before giving up, restoring
+/// the exact resolution a sibling module had before the entry copy's
+/// directory changed. Absolute paths and bare package specifiers are
+/// untouched — this only widens the relative-path fallback.
+///
+/// Mirrored in codecalc/executor.py's `NODE_SIBLING_SHIM_JS` as a
+/// byte-identical string constant rather than a shared asset file crossing
+/// the Python/Rust boundary for no benefit that gives.
+const NODE_SIBLING_SHIM_JS: &str = "\
+// Auto-generated by codecalc on every node run — see main.rs's
+// NODE_SIBLING_SHIM_JS / executor.py's NODE_SIBLING_SHIM_JS for why this exists.
+const Module = require(\"module\");
+const path = require(\"path\");
+const originalResolve = Module._resolveFilename;
+Module._resolveFilename = function (request, parent, isMain, options) {
+  try {
+    return originalResolve.call(this, request, parent, isMain, options);
+  } catch (err) {
+    const root = process.env.CODECALC_WORKDIR_ROOT;
+    if (root && (request.startsWith(\"./\") || request.startsWith(\"../\"))) {
+      try {
+        const alt = path.resolve(root, request);
+        return originalResolve.call(this, alt, parent, isMain, options);
+      } catch (_fallbackErr) {
+        // fall through to the original error below — the fallback failed too
+      }
+    }
+    throw err;
+  }
+};
+";
+
+/// Filename the shim above is written under, inside the scratch directory —
+/// never a name a compiled/interpreted entry itself could collide with.
+const NODE_SIBLING_SHIM_NAME: &str = "_codecalc_node_sibling_shim.js";
 
 /// The tool that does the real work inside each wrapper. Probing THIS is what
 /// makes availability honest: bash being present says nothing about gleam.
@@ -604,27 +742,35 @@ fn plan_supported(lang: &str, windows: bool) -> bool {
 
 /// What `{file}` becomes for `language`.
 ///
-/// The child's cwd is already the workdir (`run_step` sets `current_dir`), so
-/// the bare file name resolves to the same file and leaves nothing for the
-/// escape pass or MSYS path translation to corrupt. `{exe}` is deliberately
-/// NOT given this treatment: it is spawned rather than read, and a bare name
-/// would be resolved against PATH instead of the workdir.
+/// The run step's cwd is the WORKDIR ROOT (`run_step` sets `current_dir` to
+/// it for the run tag — see `execute()`), one level ABOVE
+/// `RUN_SCRATCH_DIRNAME`, where the runner's own copy of the source actually
+/// lives. A bare basename is therefore not enough on its own to name the
+/// same file from that cwd any more; the rendered path is
+/// `RUN_SCRATCH_DIRNAME/<basename>` (forward slash) instead. A `/` still
+/// leaves nothing for MSYS's backslash-escape re-tokenization to corrupt —
+/// see POSIX_ARGV_LANGUAGES's doc comment for why "no backslash", not "no
+/// separator at all", is the property that actually matters here.
+/// `{exe}` is deliberately NOT given this treatment: it is spawned rather
+/// than read, and a bare name would be resolved against PATH instead of the
+/// scratch directory.
 ///
 /// `windows` is a PARAMETER rather than a `cfg!(windows)` read inside the body
 /// for the same reason the Python twin takes one: `cfg!` is a compile-time
 /// constant, so on a Linux build the interesting branch is dead code that no
 /// Linux CI leg can reach. Passing it in makes the Windows rendering testable
 /// on every host, which is where the tests below run.
-fn source_arg<'a>(language: &str, file: &'a str, windows: bool) -> &'a str {
+fn source_arg(language: &str, file: &str, windows: bool) -> String {
     if !windows || !POSIX_ARGV_LANGUAGES.contains(&language) {
-        return file;
+        return file.to_string();
     }
     // Split on BOTH separators: Windows accepts either, and a path that mixed
     // them would keep whichever half this missed.
-    match file.rsplit(['\\', '/']).next() {
+    let base = match file.rsplit(['\\', '/']).next() {
         Some(base) if !base.is_empty() => base,
         _ => file,
-    }
+    };
+    format!("{RUN_SCRATCH_DIRNAME}/{base}")
 }
 
 /// Per-call resource limits (defaults applied by the caller).
@@ -691,29 +837,92 @@ struct StepResult {
     stderr_bytes: Option<u64>,
 }
 
-/// Run one argv step, redirecting stdout/stderr to FILES in `work` rather than
-/// pipes — a pipe fills at 64 KiB and deadlocks any program that writes more
-/// before we read. Limits, the timeout kill and resource accounting are all
-/// delegated to platform::spawn_and_wait; see platform/mod.rs for what each OS
-/// can actually enforce.
+/// The two extra-environment inputs `run_step` layers on top of the
+/// allowlisted, PATH-pinned base environment every step already gets —
+/// bundled into one struct rather than two more bare parameters (see
+/// `run_step`'s own doc comment for what each one is for).
+struct StepEnv<'a> {
+    pythonpath: &'a Path,
+    extra: &'a [(&'a str, String)],
+}
+
+/// Run one argv step, redirecting stdout/stderr to FILES in `io_dir` rather
+/// than pipes — a pipe fills at 64 KiB and deadlocks any program that writes
+/// more before we read. Limits, the timeout kill and resource accounting are
+/// all delegated to platform::spawn_and_wait; see platform/mod.rs for what
+/// each OS can actually enforce.
+///
+/// `io_dir` and `cwd` are DELIBERATELY separate parameters, not one directory
+/// serving both roles: `io_dir` is always `RUN_SCRATCH_DIRNAME` — the
+/// `{tag}.out`/`.err`/`.in` redirect files are the runner's OWN scratch, same
+/// as the source copy and the compiled binary, and never belong at the
+/// workdir root. `cwd` is the scratch directory too for the "compile" tag
+/// (compiling is not the user's own program running) but the WORKDIR ROOT
+/// for the "run" tag — that call is the user's actual program, and its own
+/// relative file access must resolve where a caller can see it. See
+/// `RUN_SCRATCH_DIRNAME`'s doc comment.
+///
+/// `pythonpath` is always the workdir root, regardless of `cwd` — measured
+/// against the pre-scratch-subdirectory behaviour before fixing it: a
+/// python3 entry file used to live directly at the workdir root, so
+/// `sys.path[0]` (the interpreter's OWN directory-of-the-script, unrelated
+/// to `cwd`) put a sibling module written via `session_write_file`
+/// (`helper.py` next to `main.py`, `from helper import ...`) on the import
+/// path for free. Moving the runner's copy of the source into
+/// `RUN_SCRATCH_DIRNAME` makes `sys.path[0]` that scratch directory
+/// instead, which holds nothing a caller ever wrote — silently breaking
+/// every such import. Setting `PYTHONPATH` to the workdir root restores the
+/// same resolution (Python appends `PYTHONPATH` entries to `sys.path`
+/// after `sys.path[0]`) without moving the runner's own copy back to a
+/// caller-visible path. Set unconditionally, on every step and every
+/// language, rather than threading a python3-specific branch through this
+/// generic argv runner: no other language's runtime consults the variable,
+/// so it is inert everywhere it is not python3.
+///
+/// `env.extra` is the same seam for a language-specific need that is not
+/// `pythonpath` — currently `NODE_OPTIONS`/`CODECALC_WORKDIR_ROOT` (see
+/// `NODE_SIBLING_SHIM_JS`) — kept generic here rather than adding a new
+/// named parameter for every future one. Both live on one `StepEnv` rather
+/// than as two more bare arguments to this function, which clippy's
+/// `too_many_arguments` already flagged once at 8.
 fn run_step(
     argv: &[String],
-    work: &Path,
+    io_dir: &Path,
+    cwd: &Path,
     tag: &str,
     stdin_data: &[u8],
     limits: &Limits,
+    env: &StepEnv,
 ) -> StepResult {
-    let out_path = work.join(format!("{tag}.out"));
-    let err_path = work.join(format!("{tag}.err"));
-    let in_path = work.join(format!("{tag}.in"));
-    let _ = fs::write(&in_path, stdin_data);
+    let pythonpath = env.pythonpath;
+    let extra_env = env.extra;
+    let out_path = io_dir.join(format!("{tag}.out"));
+    let err_path = io_dir.join(format!("{tag}.err"));
+    let in_path = io_dir.join(format!("{tag}.in"));
+    // `create_new(true)`, not `fs::write`: these three names are written
+    // into `RUN_SCRATCH_DIRNAME`, freshly wiped and recreated by `execute()`
+    // immediately before this runs (see that reset's own doc comment for
+    // the reproduced symlink-follow this closes) — `O_EXCL`/`CREATE_NEW`
+    // refuses ANY pre-existing entry at the final path component
+    // atomically, same guarantee as the source-file write above.
+    let _ = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&in_path)
+        .and_then(|mut f| f.write_all(stdin_data));
 
     // Previously `.expect(...)` — a panic here produced NO JSON on stdout, so the
     // Python caller saw only "executor produced invalid output" with the real
     // cause (an unwritable workdir) nowhere to be found.
     let (out_f, err_f, in_f) = match (
-        fs::File::create(&out_path),
-        fs::File::create(&err_path),
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&out_path),
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&err_path),
         fs::File::open(&in_path),
     ) {
         (Ok(o), Ok(e), Ok(i)) => (o, e, i),
@@ -722,7 +931,7 @@ fn run_step(
                 exit_code: -2,
                 signal: None,
                 stdout: String::new(),
-                stderr: format!("cannot create I/O files in {}", work.display()),
+                stderr: format!("cannot create I/O files in {}", io_dir.display()),
                 timed_out: false,
                 cpu_ms: 0,
                 peak_memory_kb: 0,
@@ -744,7 +953,7 @@ fn run_step(
 
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..])
-        .current_dir(work)
+        .current_dir(cwd)
         // SECURITY: clear env, then re-add ONLY the allowlist. User code must
         // never see API keys / tokens from the host environment.
         .env_clear();
@@ -771,7 +980,11 @@ fn run_step(
 
     cmd.env("PATH", runtime_path()) // always the sandbox PATH, not the host's
         .env("PYTHONUNBUFFERED", "1")
-        .stdin(Stdio::from(in_f))
+        .env("PYTHONPATH", pythonpath); // see this fn's doc comment
+    for (key, val) in extra_env {
+        cmd.env(key, val);
+    }
+    cmd.stdin(Stdio::from(in_f))
         .stdout(Stdio::from(out_f))
         .stderr(Stdio::from(err_f));
 
@@ -1129,11 +1342,143 @@ fn execute(
         None
     };
 
-    let file = work.join(format!("main.{ext}", ext = lang.ext));
+    // The runner's own scratch subdirectory — see RUN_SCRATCH_DIRNAME's doc
+    // comment for what lives here and why it is never the workdir root
+    // itself. WIPED AND RECREATED FRESH on every call, never reused: a
+    // caller-supplied --workdir is a SESSION directory whose executed code
+    // is adversarial across calls (same threat model as the Rust
+    // `cleanup`/lockfile machinery elsewhere in this codebase).
+    //
+    // CRITICAL, reported by adversarial review and reproduced end to end:
+    // an earlier version of this REUSED an existing real directory here
+    // (created fresh, or accepted as-is if already a plain directory) —
+    // which made the directory ITSELF symlink-safe but left every file
+    // WRITTEN INSIDE it exposed. A prior call's executed code can plant
+    // `.codecalc-run/main.<ext> -> <work>/important.txt` (the program runs
+    // with `work` as its cwd, so it can reach both names), and the next
+    // call's `fs::write(&file, code)` — an ordinary open-write-truncate —
+    // FOLLOWS that symlink and overwrites `important.txt` with whatever
+    // entry file is executing next, including, via a session_list-
+    // disclosed absolute workdir path, a DIFFERENT session's file.
+    //
+    // Recreating from empty every time removes the attack surface at its
+    // root: `fs::remove_dir_all` on a modern Rust toolchain (1.58.1+; this
+    // one pins 1.97.1) walks by directory file descriptor on platforms that
+    // support it and never opens through a nested symlink, only unlinks it
+    // — so wiping cannot be redirected outside `work` either. `.codecalc-
+    // run` existing as a symlink (or any other non-directory) is still
+    // refused outright rather than removed, via `fs::symlink_metadata`
+    // (never `fs::metadata`, which would follow it). A pre-existing REAL
+    // directory is not silently wiped past either: `find_tainted_entry`
+    // below scans everything inside it first, and the WHOLE RUN is refused
+    // if anything there is not a plain file or plain directory — a
+    // symlink, FIFO, device or socket planted between two calls in the
+    // same session is tampering worth surfacing, not debris worth quietly
+    // cleaning up before proceeding.
+    //
+    // The remaining writes into this now-guaranteed-fresh directory (the
+    // source file below, and `run_step`'s three redirect files) open with
+    // `create_new(true)` instead of `fs::write`/`File::create` — `O_EXCL`
+    // (Unix) / `CREATE_NEW` (Windows) refuses ANY pre-existing entry at the
+    // final path component atomically, with no separate check-then-open
+    // window to lose a race in, which is what makes the guarantee real
+    // rather than probably-fine.
+    let run_dir = work.join(RUN_SCRATCH_DIRNAME);
+    match fs::symlink_metadata(&run_dir) {
+        Ok(md) if md.file_type().is_dir() => {
+            match find_tainted_entry(&run_dir) {
+                Ok(Some(bad)) => {
+                    if workdir.is_none() {
+                        remove_own_workdir(&work, created_identity);
+                    }
+                    return json!({
+                        "ok": false,
+                        "error": format!(
+                            "refusing to run: {} inside the runner scratch directory \
+                             is not a plain file or directory (symlink, device, FIFO \
+                             or socket) — this session's own workspace may have been \
+                             tampered with between calls",
+                            bad.display()),
+                    });
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    if workdir.is_none() {
+                        remove_own_workdir(&work, created_identity);
+                    }
+                    return json!({
+                        "ok": false,
+                        "error": format!("cannot inspect runner scratch directory {}: {e}",
+                                         run_dir.display()),
+                    });
+                }
+            }
+            // Identity-checked, not a bare `fs::remove_dir_all` — this
+            // directory was not created by THIS call (it passed the taint
+            // scan above from an earlier one), so the same "is this still
+            // what I just looked at" re-check `remove_own_workdir` applies
+            // to `work` applies here too. scripts/check_parity.py gates
+            // that codecalc/executor.py's Python twin uses the equivalent
+            // `_rmtree_checked` rather than a bare `shutil.rmtree`.
+            let scratch_identity = dir_identity(&run_dir);
+            if !remove_dir_checked(&run_dir, scratch_identity) {
+                if workdir.is_none() {
+                    remove_own_workdir(&work, created_identity);
+                }
+                return json!({
+                    "ok": false,
+                    "error": format!(
+                        "refusing to reset runner scratch directory {}: its identity \
+                         changed between being scanned and being removed",
+                        run_dir.display()),
+                });
+            }
+        }
+        Ok(_) => {
+            if workdir.is_none() {
+                remove_own_workdir(&work, created_identity);
+            }
+            return json!({
+                "ok": false,
+                "error": format!(
+                    "refusing to use {} as the runner scratch directory: it \
+                     already exists and is not a plain directory",
+                    run_dir.display()),
+            });
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            if workdir.is_none() {
+                remove_own_workdir(&work, created_identity);
+            }
+            return json!({
+                "ok": false,
+                "error": format!("cannot inspect runner scratch directory {}: {e}",
+                                 run_dir.display()),
+            });
+        }
+    }
+    if let Err(e) = fs::create_dir(&run_dir) {
+        if workdir.is_none() {
+            remove_own_workdir(&work, created_identity);
+        }
+        return json!({
+            "ok": false,
+            "error": format!("cannot create runner scratch directory {}: {e}",
+                             run_dir.display()),
+        });
+    }
+
+    let file = run_dir.join(format!("main.{ext}", ext = lang.ext));
     // Windows needs the .exe extension for the compiled artifact; CreateProcess
     // will not treat an extensionless PE as executable the way exec() does.
-    let exe = work.join(if cfg!(windows) { "a.exe" } else { "a.out" });
-    if let Err(e) = fs::write(&file, code) {
+    let exe = run_dir.join(if cfg!(windows) { "a.exe" } else { "a.out" });
+    if let Err(e) = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&file)
+        .and_then(|mut f| f.write_all(code.as_bytes()))
+    {
         // Only remove a directory WE created. This used to be unconditional, so
         // a failed source write deleted a caller-supplied --workdir — i.e. the
         // whole session workspace, user data included. And it was reachable
@@ -1150,8 +1495,32 @@ fn execute(
         });
     }
 
+    // Written and set unconditionally, regardless of language — see
+    // NODE_SIBLING_SHIM_JS's own doc comment for why this is inert for
+    // every runtime but node, the same shape as `pythonpath` above.
+    let node_shim = run_dir.join(NODE_SIBLING_SHIM_NAME);
+    if let Err(e) = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&node_shim)
+        .and_then(|mut f| f.write_all(NODE_SIBLING_SHIM_JS.as_bytes()))
+    {
+        if workdir.is_none() {
+            remove_own_workdir(&work, created_identity);
+        }
+        return json!({
+            "ok": false,
+            "error": format!("failed to write {}: {e}", node_shim.display()),
+        });
+    }
+
     let started = Instant::now();
     let work_s = work.to_string_lossy().into_owned();
+    let run_dir_s = run_dir.to_string_lossy().into_owned();
+    let node_extra_env: [(&str, String); 2] = [
+        ("NODE_OPTIONS", format!("--require={}", node_shim.display())),
+        ("CODECALC_WORKDIR_ROOT", work_s.clone()),
+    ];
 
     // Compile and run SHARE the wall-clock budget. Each step used to get the
     // full `limits.timeout`, so a compiled language could take 2x the value the
@@ -1164,13 +1533,27 @@ fn execute(
             .map(|t| {
                 substitute(
                     t,
-                    source_arg(lang.name, &file.to_string_lossy(), cfg!(windows)),
+                    &source_arg(lang.name, &file.to_string_lossy(), cfg!(windows)),
                     &exe.to_string_lossy(),
-                    &work_s,
+                    &run_dir_s,
                 )
             })
             .collect();
-        let sr = run_step(&argv, &work, "compile", b"", limits);
+        // Compile-step cwd is the scratch directory, not `work`: compiling is
+        // not the user's own program running, so any incidental compiler
+        // byproduct belongs in scratch, never at the workdir root.
+        let sr = run_step(
+            &argv,
+            &run_dir,
+            &run_dir,
+            "compile",
+            b"",
+            limits,
+            &StepEnv {
+                pythonpath: &work,
+                extra: &node_extra_env,
+            },
+        );
         compile_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         if sr.timed_out || sr.exit_code != 0 || sr.signal.is_some() {
             let result = json!({
@@ -1222,9 +1605,9 @@ fn execute(
         .map(|t| {
             substitute(
                 t,
-                source_arg(lang.name, &file.to_string_lossy(), cfg!(windows)),
+                &source_arg(lang.name, &file.to_string_lossy(), cfg!(windows)),
                 &exe.to_string_lossy(),
-                &work_s,
+                &run_dir_s,
             )
         })
         .collect();
@@ -1286,7 +1669,23 @@ fn execute(
         }
     }
     let run_started = Instant::now();
-    let sr = run_step(&argv, &work, "run", stdin_data.as_bytes(), &run_limits);
+    // Run-step cwd is `work` itself (the workdir root), NOT the scratch
+    // directory — this is the user's actual program running, and its own
+    // relative file access must resolve where a caller can see it. Only the
+    // I/O redirect files go into the scratch directory (`run_dir` as
+    // `io_dir`).
+    let sr = run_step(
+        &argv,
+        &run_dir,
+        &work,
+        "run",
+        stdin_data.as_bytes(),
+        &run_limits,
+        &StepEnv {
+            pythonpath: &work,
+            extra: &node_extra_env,
+        },
+    );
     // duration_ms is the RUN, not run+compile. It used to be measured from
     // before the compile step, so `benchmark` on C/C++/Rust was timing gcc:
     // a hello-world reported duration_ms=126 with cpu_ms=0.
@@ -1503,15 +1902,22 @@ mod tests {
     // run there would have caught it after shipping, not before.
 
     /// The repair, stated as the property that makes it safe: nothing left for
-    /// the MSYS escape pass to eat. A spaced profile is in the fixture because
-    /// the same re-parse splits on spaces, and `C:\Users\John Smith\` is the
-    /// untested case flags as still open for every other runtime.
+    /// the MSYS escape pass to eat is "no BACKSLASH", not "no separator at
+    /// all" — the rendered path is scratch-relative (RUN_SCRATCH_DIRNAME's
+    /// forward slash), which the escape pass leaves untouched. A spaced
+    /// profile is in the fixture because the same re-parse splits on spaces,
+    /// and `C:\Users\John Smith\` is the untested case flags as still open
+    /// for every other runtime.
     #[test]
-    fn posix_argv_languages_get_a_name_with_no_separator_on_windows() {
+    fn posix_argv_languages_get_a_scratch_relative_path_with_no_backslash_on_windows() {
         let win = r"C:\Users\John Smith\AppData\Local\Temp\codecalc-ab12\main.sh";
         for lang in POSIX_ARGV_LANGUAGES {
             let got = source_arg(lang, win, true);
-            assert_eq!(got, "main.sh", "{lang} kept a path");
+            assert_eq!(
+                got,
+                format!("{RUN_SCRATCH_DIRNAME}/main.sh"),
+                "{lang} kept a path"
+            );
             assert!(!got.contains('\\'), "{lang} kept a backslash");
             assert!(!got.contains(' '), "{lang} kept a space");
         }
@@ -1520,10 +1926,10 @@ mod tests {
     /// Forward slashes are legal separators on Windows, so a mixed path must
     /// not keep whichever half a single-separator split missed.
     #[test]
-    fn a_mixed_separator_path_is_still_reduced_to_the_name() {
+    fn a_mixed_separator_path_is_still_reduced_to_the_scratch_relative_name() {
         assert_eq!(
             source_arg("bash", r"C:/Users/me\tmp/main.sh", true),
-            "main.sh"
+            format!("{RUN_SCRATCH_DIRNAME}/main.sh")
         );
     }
 

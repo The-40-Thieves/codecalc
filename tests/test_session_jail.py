@@ -27,7 +27,7 @@ import time
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from codecalc import sessions
+from codecalc import errors, executor, registry, sessions
 
 FAILS = []
 SKIPS = []
@@ -686,6 +686,166 @@ else:
     except ValueError:
         _wrote_inside = False
     check("an ordinary spill still writes inside the workspace", _wrote_inside)
+
+# ── CRITICAL: a session's scratch subdirectory must be symlink-safe ALL THE
+# WAY THROUGH, not just at the directory level ──────────────────────────────
+# Adversarial review reproduced this end to end on BOTH backends: an earlier
+# fix made `.codecalc-run/` itself symlink-safe to CREATE (refusing to
+# silently reuse a `.codecalc-run` swapped for a symlink) but left every FILE
+# written INSIDE an already-real `.codecalc-run/` exposed. A session's own
+# executed code — from a PRIOR call — can:
+#
+#     rm .codecalc-run/main.sh
+#     ln -s ../important.txt .codecalc-run/main.sh
+#
+# (the program runs with the workdir as its cwd, so both names are reachable)
+# and the NEXT call's ordinary write of its own entry source FOLLOWS that
+# symlink, overwriting `important.txt` with whatever code is executing next
+# — including, via a session_list-disclosed absolute workdir path, a file in
+# a DIFFERENT session entirely. The fix recreates `.codecalc-run/` from empty
+# on every call and refuses the run outright (a coded `permission_denied`,
+# nothing written through it) if anything already inside it is not a plain
+# file or directory — a symlink, FIFO, device or socket.
+#
+# Run against BOTH backends explicitly (same `executor._rust` swap
+# `test_bug_sweep.py` uses), rather than trusting whichever one this
+# process happens to have — a green run against one proves nothing about
+# the other, which is exactly how the earlier, directory-only fix shipped
+# with this file-level gap still open.
+
+
+def _run_scratch_symlink_regressions(backend_label: str) -> None:
+    # Whether the attack was actually STAGED is checked from its OBSERVABLE
+    # outcome (did `.codecalc-run/main.sh` actually become a symlink), not
+    # from a prior capability probe — the same rule test_python_sweep.py's
+    # "rename-swap" regressions already apply, for the same reason: a
+    # generic `_can_symlink()` probe against a plain temp directory can
+    # succeed while the REAL attack, executed through bash inside the
+    # sandboxed child (`ln -s` under whatever token/privilege THAT process
+    # runs with, which can differ from this test process's own), still
+    # fails to stage. Measured on Windows CI: `_can_symlink()` returned
+    # True, and `ln -s` inside the sandboxed bash still could not create a
+    # real symlink — asserting "refused" against an attack that was never
+    # staged would have been checking that a no-op is a no-op, not that the
+    # guard holds.
+    with tempfile.TemporaryDirectory(prefix="codecalc-scratch-jail-") as root:
+        old_root = sessions.SESSION_ROOT
+        sessions.SESSION_ROOT = pathlib.Path(root)
+        try:
+            sid = sessions.start("bash")["session_id"]
+            d = sessions._session_dir(sid)
+            (d / "important.txt").write_text("PRECIOUS DATA\n")
+
+            # Call 1: an ordinary run that, as part of its OWN execution,
+            # deletes and replaces its own runner-owned scratch copy with a
+            # symlink. This is not a race against the runner — by the time
+            # bash's script body runs, the runner has already written
+            # `.codecalc-run/main.sh` and spawned bash against it, so
+            # removing that path and re-creating it as a symlink affects
+            # only what is THERE for the NEXT call to find.
+            plant = ("rm -f .codecalc-run/main.sh\n"
+                     "ln -s ../important.txt .codecalc-run/main.sh\n")
+            r1 = sessions.execute(sid, plant, language="bash")
+            planted = d / registry.RUN_SCRATCH_DIRNAME / "main.sh"
+            planted_is_symlink = planted.is_symlink()
+            if not planted_is_symlink:
+                skip(f"{backend_label}: a symlink planted inside .codecalc-run "
+                     "between calls is refused, nothing written through it",
+                     "the platform refused to stage the symlink, so the attack "
+                     f"never happened: ok={r1.get('ok')} is_symlink=False "
+                     f"stderr={str(r1.get('stderr'))[:70]!r}")
+                sessions.stop(sid)
+                return
+
+            # Call 2: an entirely ordinary run. Pre-fix, this silently wrote
+            # its own source THROUGH the planted symlink and overwrote
+            # `important.txt`.
+            r2 = sessions.execute(sid, "echo ordinary\n", language="bash")
+            important_after = (d / "important.txt").read_text()
+            check(f"{backend_label}: a symlink planted inside .codecalc-run "
+                  "between calls is refused, nothing written through it",
+                  r2.get("ok") is False and important_after == "PRECIOUS DATA\n",
+                  f"-> ok={r2.get('ok')} important={important_after!r}")
+            check(f"{backend_label}: the refusal is a coded permission_denied",
+                  errors.ensure_code(dict(r2)).get("code") == errors.PERMISSION_DENIED,
+                  f"-> {r2.get('error')!r}")
+
+            sessions.stop(sid)
+
+            # Cross-session variant: the planted symlink names a DIFFERENT
+            # session's file, reachable via session_list's own disclosed
+            # absolute workdir path. Staged the same way, checked the same
+            # way — the setup that landed above is not proof this one will
+            # too (a different session, a fresh workdir), so this is
+            # verified independently rather than assumed from the first.
+            victim_sid = sessions.start("bash")["session_id"]
+            victim_d = sessions._session_dir(victim_sid)
+            (victim_d / "secret.txt").write_text("VICTIM SECRET\n")
+
+            attacker_sid = sessions.start("bash")["session_id"]
+            attacker_d = sessions._session_dir(attacker_sid)
+            plant_cross = ("rm -f .codecalc-run/main.sh\n"
+                          f"ln -s {victim_d / 'secret.txt'} .codecalc-run/main.sh\n")
+            r_plant_cross = sessions.execute(attacker_sid, plant_cross, language="bash")
+            planted_cross = attacker_d / registry.RUN_SCRATCH_DIRNAME / "main.sh"
+            if not planted_cross.is_symlink():
+                skip(f"{backend_label}: the cross-session variant is refused too",
+                     "the platform refused to stage the symlink, so the attack "
+                     f"never happened: ok={r_plant_cross.get('ok')} is_symlink=False "
+                     f"stderr={str(r_plant_cross.get('stderr'))[:70]!r}")
+            else:
+                r3 = sessions.execute(attacker_sid, "echo pwned\n", language="bash")
+                secret_after = (victim_d / "secret.txt").read_text()
+                check(f"{backend_label}: the cross-session variant is refused too",
+                      r3.get("ok") is False and secret_after == "VICTIM SECRET\n",  # noqa: S105 -- fixture content, not a real secret
+                      f"-> ok={r3.get('ok')} victim={secret_after!r} "
+                      f"attacker_workdir={attacker_d}")
+
+            sessions.stop(victim_sid)
+            sessions.stop(attacker_sid)
+        finally:
+            sessions.SESSION_ROOT = old_root
+
+
+def _run_scratch_fifo_regression(backend_label: str) -> None:
+    if not hasattr(os, "mkfifo"):
+        skip(f"{backend_label}: a FIFO planted inside .codecalc-run is refused",
+             "os.mkfifo is not available on this platform")
+        return
+    with tempfile.TemporaryDirectory(prefix="codecalc-scratch-fifo-") as root:
+        old_root = sessions.SESSION_ROOT
+        sessions.SESSION_ROOT = pathlib.Path(root)
+        try:
+            sid = sessions.start("bash")["session_id"]
+            d = sessions._session_dir(sid)
+            scratch = d / registry.RUN_SCRATCH_DIRNAME
+            scratch.mkdir()
+            os.mkfifo(str(scratch / "main.sh"))
+            r = sessions.execute(sid, "echo hi\n", language="bash", timeout=5)
+            check(f"{backend_label}: a FIFO planted inside .codecalc-run is refused",
+                  r.get("ok") is False,
+                  f"-> ok={r.get('ok')} error={r.get('error')!r}")
+            sessions.stop(sid)
+        finally:
+            sessions.SESSION_ROOT = old_root
+
+
+_saved_rust_scratch = executor._rust
+executor._rust = None
+try:
+    _run_scratch_symlink_regressions("fallback")
+    _run_scratch_fifo_regression("fallback")
+finally:
+    executor._rust = _saved_rust_scratch
+
+if executor._rust and os.name != "nt":
+    _run_scratch_symlink_regressions("rust")
+    _run_scratch_fifo_regression("rust")
+else:
+    skip("rust: scratch-directory symlink/FIFO regressions",
+         "no codecalc-exec binary resolved; build executor/ with "
+         "`cargo build --release --manifest-path executor/Cargo.toml` or set "
+         "CODECALC_EXEC_BIN before this module is imported")
 
 print(f"\n=== {len(FAILS)} FAILURES, {len(SKIPS)} skipped ===" if FAILS else
       f"\n=== ALL SESSION-JAIL TESTS PASS ({len(SKIPS)} skipped) ===")
