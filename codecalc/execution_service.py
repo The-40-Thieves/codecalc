@@ -555,13 +555,21 @@ class SessionService:
             workdir = sessions._session_dir(session_id)
             if not workdir.is_dir():
                 return {"ok": False, "error": f"unknown session '{session_id}'"}
+            # ONE walk of `workdir` feeds quota_precheck's own two checks —
+            # see `_workspace_scan`'s docstring. This is deliberately NOT
+            # also shared with the `before` snapshot further down: a
+            # dependency install can run between this point and that one
+            # (see its own comment), so the two are not the same instant and
+            # must not share one walk's result.
+            #
             # refused before the entry file even runs. `entry_file`
             # is about to run as a fresh process that can write anything into
             # the workspace, same as sessions.execute()'s workspace branch —
             # see `quota_precheck`'s docstring for why re-measuring here
             # (rather than a sticky flag) is what makes "refused until freed"
             # self-healing.
-            quota_refusal = sessions.quota_precheck(session_id)
+            scan_pre_install = sessions._workspace_scan(workdir)
+            quota_refusal = sessions.quota_precheck(session_id, scan=scan_pre_install)
             if quota_refusal is not None:
                 return quota_refusal
             resource = sessions.resource_read(session_id, entry_file)
@@ -620,7 +628,17 @@ class SessionService:
         # gets the same guarantee sessions.execute() promises: "before the
         # entry file runs" — the entry file has not run yet at this point
         # either way.
-        before = sessions._artifact_snapshot(workdir)
+        #
+        # `dep_specs` EMPTY (no dependencies asked for — the common call) is
+        # the one case where nothing wrote to `workdir` between
+        # `scan_pre_install` above and here: that scan's `entries` is
+        # therefore still exactly what a fresh walk would find, so it is
+        # reused instead of re-globbing a directory that provably has not
+        # changed. `dep_specs` non-empty always retakes the walk (`entries`
+        # left `None`, `_artifact_snapshot`'s own default), because THAT
+        # case is exactly the one the paragraph above exists for.
+        before = sessions._artifact_snapshot(
+            workdir, entries=None if dep_specs else scan_pre_install[0])
         # captured at the larger spill ceiling and re-truncated to
         # the executor's own default cap, same as sessions.execute()'s
         # workspace branch — session_run has no caller-facing max_output_kb
@@ -640,5 +658,9 @@ class SessionService:
             result["dependencies"] = dep_entries
         # point 4: the entry file just ran arbitrary code with the
         # workspace as its cwd — measure what it left behind and disclose an
-        # over-quota session rather than let it grow silently forever.
-        return sessions.quota_postcheck(session_id, result, d=workdir, before=before)
+        # over-quota session rather than let it grow silently forever. ONE
+        # fresh post-run scan feeds quota_postcheck's size/classify/count
+        # checks — see `_workspace_scan`'s docstring.
+        return sessions.quota_postcheck(
+            session_id, result, d=workdir, before=before,
+            scan=sessions._workspace_scan(workdir))
