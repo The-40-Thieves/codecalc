@@ -10,9 +10,9 @@ This project versions **two** things, and they are not the same number.
 | What | Where | Current |
 |---|---|---|
 | The **package** — the tool surface, the CLI, the Python API | `pyproject.toml`, `executor/Cargo.toml`, this file | see `version` in [`pyproject.toml`](pyproject.toml) — this cell is not re-typed on every release |
-| The **result contract** — the shape every tool result comes back in | `docs/contract/README.md`, `contract_version` on every result | `1.5.0` |
+| The **result contract** — the shape every tool result comes back in | `docs/contract/README.md`, `contract_version` on every result | `1.6.0` |
 
-The contract is at `1.5.0` and the package is at `0.x` because those claims are
+The contract is at `1.6.0` and the package is at `0.x` because those claims are
 genuinely different. The result contract has a published JSON Schema, a
 documented MAJOR/MINOR/PATCH policy, a twelve-month deprecation window, and a
 gate that fails if the schema drifts from the code — it is stable and says so.
@@ -32,6 +32,70 @@ behind it.
 ---
 
 ## [Unreleased]
+
+### Fixed
+
+- **`verify_optimization`'s auto-scale visibility floor was applied ACROSS
+  ALL sizes combined, not per size** — `optimization._timed` broke out of
+  its rescale loop as soon as `max(measured) >= 20ms or min(measured) >=
+  5ms` over every tested size together, so once the LARGEST size cleared
+  the floor, the loop stopped rescaling even though the SMALLEST sizes
+  could still be sitting in timer noise. Real evidence from hosted macOS CI
+  (main at `541528bb`'s `ci-python` sandbox job, and PR #270's): a genuine
+  1.9-2.4x O(n)->O(1) speedup measured `n=200000` at p=0.65 and `n=400000`
+  at p=0.058 (indistinguishable from noise) while the two largest sizes
+  were always decisive (p<0.03) — the majority-of-sizes significance test
+  (`_accept_decision`, #264) correctly called that "could be noise" and
+  rejected a real win. #272 worked around this in the TEST's candidate pair
+  only (giving it ~10x more work per element so even the smallest size
+  cleared the old combined floor); this fixes the product. `_timed` now
+  rescales each size INDEPENDENTLY until ITS OWN measurement clears the
+  floor, keeping both arms on one ladder via `_align_sizes` (generalized
+  to re-measure whichever side scaled less at each POSITION that still
+  disagrees, not just when the two sides' whole size lists differ). A size
+  excluded from the significance test for ANY reason — never clears the
+  floor within the rescale budget (a genuinely O(1)-fast workload, for
+  instance), is unmeasurable, or has too few comparable runs — is excluded
+  from the majority vote and named in a new `inference.sizes_below_floor`
+  field (`before_ms`/`after_ms` are `null` when no duration was ever
+  recorded), so `len(sizes) == len(per_size) + len(sizes_below_floor)`
+  always holds — never silently dropped from every field at once, which an
+  earlier draft of this same fix did for a size an OLDER, narrower guard
+  excluded first (caught in review, before merge: a size at or under the
+  1ms noise floor `_speedup` already applies used to `continue` past the
+  new disclosure entirely). `grade_verify_optimization`'s basis text
+  discloses the exclusion when it happens.
+  Verified live on the box, in one uninterrupted run (4 dedicated busy-loop
+  processes matching `nproc`, started before and killed only after all 20
+  calls completed — an EARLIER attempt at this same measurement is NOT the
+  source of this number: it was invalidated when its CPU load died partway
+  through, and this is the clean re-run): the ORIGINAL (pre-#272) `s+=i`-
+  per-element candidate pair, run 20 times under `nice -n 19` plus that
+  load, went from 2/20 accepted (documented in #272) to 13/20 accepted with
+  this fix. The failures were NOT spread evenly: all 6 of the first 6 runs
+  failed (0-2/4 sizes significant) while the 1-minute load average was
+  still climbing from the fresh start, then 9 of the next 10 passed, then
+  1 more failed (run 16, 2/4) before the final 4 passed — a real
+  Mann-Whitney result on genuinely swamped timings under a harsher-than-
+  realistic synthetic load (PR #272's own characterization of this same
+  4-busy-loop harness), not a gap the auto-scale floor is meant to close;
+  `sizes_below_floor` was empty on every failing run, confirming these were
+  noise verdicts, not visibility-floor misses. This candidate pair is
+  deliberately NOT added as a hard live CI assertion for the same reason —
+  see `tests/test_translation_verify.py`'s comment at that spot. Re-measured
+  the worst-case executor-call bound (unchanged at 234 — a size that already clears the floor is no
+  longer re-measured for free, so the common case costs FEWER calls, but
+  the worst case — every size stays below the floor every round on both
+  sides — costs the same as the old whole-batch loop) and the worst-case
+  wall time (forced live on this box's Rust backend: ~23.5s at 200 calls,
+  ~16.4s at 160 calls including an alignment remeasurement, both
+  ~0.11-0.12s/call; scaled to the full 234-call ceiling, ~27s — an ~6.7x
+  margin under `verify_optimization`'s 180s MCP deadline). `CONTRACT_VERSION`
+  bumped `1.5.0` -> `1.6.0` (MINOR: `sizes_below_floor` added to
+  `inference`, always present, no existing field moved).
+  `GRADE_RULES_VERSION` unchanged — the evidence-to-grade mapping did not
+  move, only `grade_basis`'s text gained an optional clause when sizes were
+  excluded.
 
 ## [0.8.0] — 2026-09-07
 

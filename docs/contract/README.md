@@ -1,7 +1,28 @@
 # The codecalc result contract
 
-**Current version: `1.5.0`** · Schema: [`result-v1.schema.json`](result-v1.schema.json) ·
+**Current version: `1.6.0`** · Schema: [`result-v1.schema.json`](result-v1.schema.json) ·
 Source of truth: [`codecalc/contract.py`](../../codecalc/contract.py)
+
+`1.6.0` is a MINOR bump over `1.5.0`. It ADDS `sizes_below_floor` to
+`optimization_verification`'s `inference` object: every size excluded from
+`per_size`/`sizes_total`/`sizes_rejecting` (the majority-of-sizes vote) for
+ANY reason — never cleared `optimization._VISIBILITY_FLOOR_MS` within
+`_timed`'s per-size auto-scale budget, an unmeasurable baseline/candidate,
+or too few comparable runs — rather than tested on a still-noisy sample or
+silently dropped; `before_ms`/`after_ms` are `null` when no duration was
+ever recorded. See `codecalc/optimization.py`'s `_VISIBILITY_FLOOR_MS`
+docstring for the bug this closes (a real, macOS-CI-observed false rejection
+of a genuine 1.9-2.4x speedup, because the OLD floor was applied across all
+sizes combined instead of per size). `sizes_below_floor` is `required`
+(always present on `inference`, an empty list when every size cleared every
+bar, the common case), same as `sizes_rejecting`/`sizes_total` always are —
+the same choice `tier` made at `1.3.0`, and with the same consequence: a
+strict validator applying the `1.6.0` schema to a result STORED before this
+bump (shaped like `1.5.0`, with no `sizes_below_floor` key at all) rejects
+it as missing a required field, exactly as it would a pre-`1.3.0` doctor
+document missing `tier`. No existing key moves or changes meaning on either
+result a `1.5.0` client already understood, so that client is unaffected —
+additions only, hence MINOR.
 
 `1.5.0` is a MINOR bump over `1.4.0`. It ADDS three new `oneOf` branches —
 `translation_verification`, `optimization_verification`, `edge_case_comparison`
@@ -30,7 +51,9 @@ eight shapes"). Concretely:
   through the graded MCP tool), plus `speedup` (ratio + per-size before/after
   timings), `inference` (the per-size one-sided Mann-Whitney U test —
   `test`/`alternative`/`alpha`/`per_size[].{size,n_before,n_after,u,p_value,
-  rank_biserial}`/`sizes_rejecting`/`sizes_total`/`decision_basis` —
+  rank_biserial}`/`sizes_rejecting`/`sizes_total`/
+  `sizes_below_floor[].{size,before_ms,after_ms}` (added in `1.6.0`)/
+  `decision_basis` —
   `_accept_decision` requires a MAJORITY of sizes to reject before `accepted`
   can be true), `min_speedup`, `language`, and `grade`/`grade_basis`/
   `grade_rules_version`. A measurement failure (baseline or candidate timing

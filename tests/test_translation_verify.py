@@ -408,6 +408,192 @@ check("aligning two ALREADY-matching sides makes zero extra _measure calls",
       _calls850 == [], f"-> {_calls850}")
 
 
+# ═══ the auto-scale floor is PER SIZE, not combined across all sizes ═══════
+# The bug: `_timed`'s old rescale loop broke out as soon as
+# `max(measured) >= 20.0 or min(measured) >= 5.0` ACROSS ALL FOUR sizes
+# together, so once the two LARGEST sizes here cleared the floor on their
+# own, the loop stopped rescaling even though the two SMALLEST sizes were
+# still sitting well under 5ms — real evidence from hosted macOS CI showed
+# exactly this shape (see `_VISIBILITY_FLOOR_MS`'s docstring in
+# `codecalc/optimization.py`). Reproduced here with a mocked
+# `tools._measure`: sizes 100/200 start under the floor, 300/400 start
+# comfortably over it. The fix rescales ONLY the lagging positions (asserted
+# via the call log below, not just the outcome) and the result is that all
+# four sizes clear the floor and all four are decisive, not just the two
+# that happened to start big.
+_ORIG_RESCUE = "print(1)  # orig-rescue"
+_CAND_RESCUE = "print(1)  # cand-rescue"
+
+_RESCUE_TABLE = {
+    _ORIG_RESCUE: {
+        100: (2.0, [1.8, 1.9, 2.0, 2.1, 2.2]),
+        200: (3.0, [2.8, 2.9, 3.0, 3.1, 3.2]),
+        300: (100.0, [98, 99, 100, 101, 102]),
+        400: (120.0, [118, 119, 120, 121, 122]),
+        1000: (20.0, [18, 19, 20, 21, 22]),
+        2000: (25.0, [23, 24, 25, 26, 27]),
+    },
+    _CAND_RESCUE: {
+        100: (1.0, [0.8, 0.9, 1.0, 1.1, 1.2]),
+        200: (1.5, [1.3, 1.4, 1.5, 1.6, 1.7]),
+        300: (10.0, [9, 9.5, 10, 10.5, 11]),
+        400: (12.0, [11, 11.5, 12, 12.5, 13]),
+        1000: (6.0, [5.6, 5.8, 6.0, 6.2, 6.4]),
+        2000: (7.5, [7.0, 7.2, 7.5, 7.8, 8.0]),
+    },
+}
+_rescue_calls = []
+
+
+def _mock_measure_rescue(language, code, sizes, timeout, repeats):
+    _rescue_calls.append((code, tuple(sizes)))
+    table = _RESCUE_TABLE[code]
+    return [{"n": n, "ok": True, "duration_ms": table[n][0], "all_runs_ms": list(table[n][1])}
+            for n in sizes], None
+
+
+_orig_measure_rescue = optimization.tools._measure
+optimization.tools._measure = _mock_measure_rescue
+try:
+    _before_rescue = optimization._timed(_ORIG_RESCUE, "python3", [100, 200, 300, 400])
+    _rescue_calls.clear()
+    _after_rescue = optimization._timed(_CAND_RESCUE, "python3", [100, 200, 300, 400])
+finally:
+    optimization.tools._measure = _orig_measure_rescue
+
+check("control: the two smallest sizes needed one rescale round, the two largest did not",
+      _before_rescue["sizes"] == [1000, 2000, 300, 400],
+      f"-> {_before_rescue['sizes']}")
+check("  ...and only the LAGGING positions were re-measured, never all four",
+      _rescue_calls == [(_CAND_RESCUE, (100, 200, 300, 400)),
+                        (_CAND_RESCUE, (1000, 2000))],
+      f"-> {_rescue_calls}")
+check("  ...every size now clears the visibility floor",
+      all(d >= optimization._VISIBILITY_FLOOR_MS for d in _before_rescue["durations_ms"])
+      and all(d >= optimization._VISIBILITY_FLOOR_MS for d in _after_rescue["durations_ms"]),
+      f"-> before={_before_rescue['durations_ms']} after={_after_rescue['durations_ms']}")
+
+_inf_rescue = optimization._infer_speedup(_before_rescue, _after_rescue)
+check("the fix makes ALL FOUR sizes decisive, including the two the OLD "
+      "combined floor would have left untested",
+      _inf_rescue["sizes_total"] == 4 and _inf_rescue["sizes_rejecting"] == 4
+      and not _inf_rescue["sizes_below_floor"],
+      f"-> {_inf_rescue}")
+check("  ...invariant: every size is accounted for in per_size or sizes_below_floor",
+      len(_before_rescue["sizes"]) == _inf_rescue["sizes_total"] + len(_inf_rescue["sizes_below_floor"]),
+      f"-> len(sizes)={len(_before_rescue['sizes'])} sizes_total={_inf_rescue['sizes_total']} "
+      f"sizes_below_floor={len(_inf_rescue['sizes_below_floor'])}")
+
+
+# ═══ a size that can NEVER clear the floor is disclosed, not silently
+#     dropped or folded into the majority vote ═══════════════════════════════
+# The disclosure layer: if a size still cannot clear `_VISIBILITY_FLOOR_MS`
+# after `_timed` exhausts its rescale budget (e.g. a genuinely O(1)-fast
+# workload at every achievable size), it must not be silently excluded —
+# `inference.sizes_below_floor` names it, and the majority-of-sizes vote is
+# computed over the REMAINING sizes only, never padded or shrunk silently.
+_ORIG_NEVER = "print(1)  # orig-never"
+_CAND_NEVER = "print(1)  # cand-never"
+_NEVER_TABLE = {
+    _ORIG_NEVER: {
+        10: (8.0, [7.0, 7.5, 8.0, 8.5, 9.0]),
+        20: (9.0, [8.0, 8.5, 9.0, 9.5, 10.0]),
+        30: (10.0, [9.0, 9.5, 10.0, 10.5, 11.0]),
+        # Between the OLD 1ms noise floor `_speedup` already applies and the
+        # NEW 5ms visibility floor: clears the former (so it is not dropped
+        # by the pre-existing `bb <= 1.0` guard below) but never the latter,
+        # by construction (a fixed cost regardless of n, as a genuinely
+        # O(1)-fast workload would measure) -- this is what must land in
+        # `sizes_below_floor`, not fall through the OLDER, coarser filter.
+        **{n: (2.0, [1.8, 1.9, 2.0, 2.1, 2.2])
+           for n in (50, 500, 5000, 50000, 500000)},
+    },
+    _CAND_NEVER: {
+        10: (5.5, [5.3, 5.4, 5.5, 5.6, 5.7]),
+        20: (6.5, [6.3, 6.4, 6.5, 6.6, 6.7]),
+        30: (7.5, [7.3, 7.4, 7.5, 7.6, 7.7]),
+        **{n: (1.5, [1.3, 1.4, 1.5, 1.6, 1.7])
+           for n in (50, 500, 5000, 50000, 500000)},
+    },
+}
+
+
+def _mock_measure_never(language, code, sizes, timeout, repeats):
+    table = _NEVER_TABLE[code]
+    return [{"n": n, "ok": True, "duration_ms": table[n][0], "all_runs_ms": list(table[n][1])}
+            for n in sizes], None
+
+
+_orig_measure_never = optimization.tools._measure
+optimization.tools._measure = _mock_measure_never
+try:
+    _before_never = optimization._timed(_ORIG_NEVER, "python3", [10, 20, 30, 50])
+    _after_never = optimization._timed(_CAND_NEVER, "python3", [10, 20, 30, 50])
+finally:
+    optimization.tools._measure = _orig_measure_never
+
+check("control: the never-visible size exhausted the rescale budget "
+      "(4 rounds, 10^4x) on both sides, so no alignment is needed",
+      _before_never["sizes"] == [10, 20, 30, 500000]
+      and _after_never["sizes"] == [10, 20, 30, 500000],
+      f"-> before={_before_never['sizes']} after={_after_never['sizes']}")
+
+_inf_never = optimization._infer_speedup(_before_never, _after_never)
+check("a size that can never clear the floor is named in sizes_below_floor, not tested",
+      _inf_never["sizes_below_floor"] == [{"size": 500000, "before_ms": 2.0, "after_ms": 1.5}],
+      f"-> {_inf_never.get('sizes_below_floor')}")
+check("  ...and the majority rule is computed over the remaining 3 sizes, not padded to 4",
+      _inf_never["sizes_total"] == 3 and _inf_never["sizes_rejecting"] == 3,
+      f"-> total={_inf_never['sizes_total']} rejecting={_inf_never['sizes_rejecting']}")
+check("  ...and decision_basis discloses the exclusion, never silently",
+      "excluded" in _inf_never["decision_basis"] and "sizes_below_floor" in _inf_never["decision_basis"],
+      f"-> {_inf_never['decision_basis']!r}")
+check("  ...invariant: every size is accounted for in per_size or sizes_below_floor",
+      len(_before_never["sizes"]) == _inf_never["sizes_total"] + len(_inf_never["sizes_below_floor"]),
+      f"-> len(sizes)={len(_before_never['sizes'])} sizes_total={_inf_never['sizes_total']} "
+      f"sizes_below_floor={len(_inf_never['sizes_below_floor'])}")
+
+
+# ═══ a size excluded for an OLDER reason (the pre-existing 1ms noise floor
+#     `_speedup` already applies) must ALSO land in sizes_below_floor, not
+#     vanish from BOTH per_size and sizes_below_floor ═══════════════════════
+# Reviewer repro on PR #275: sizes [10, 20, 30] with before [0.5, 10, 12],
+# after [0.3, 4, 5]. Size 10's before_ms (0.5) is at/under the OLDER
+# `bb <= 1.0` guard `_speedup` already applies; size 20's after_ms (4) is
+# under the NEWER `_VISIBILITY_FLOOR_MS` (5); size 30 clears everything.
+# `_infer_speedup` used to check the OLDER guard first with a bare
+# `continue` -- no `sizes_below_floor` entry -- so size 10 disappeared from
+# BOTH `per_size` (correctly excluded) AND `sizes_below_floor` (incorrectly
+# not told about), contradicting this function's own "never silently
+# dropped" guarantee: `sizes_total` read 1 (just size 30) and
+# `sizes_below_floor` named only size 20, with no record of size 10 at all
+# anywhere in the result. Every exclusion reason -- this one included --
+# must fold into ONE disclosure now.
+_before_1ms = {"sizes": [10, 20, 30], "durations_ms": [0.5, 10, 12],
+              "all_runs_ms": [[0.4, 0.45, 0.5, 0.55, 0.6],
+                              [9, 9.5, 10, 10.5, 11],
+                              [11, 11.5, 12, 12.5, 13]]}
+_after_1ms = {"sizes": [10, 20, 30], "durations_ms": [0.3, 4, 5],
+             "all_runs_ms": [[0.25, 0.28, 0.3, 0.32, 0.35],
+                             [3.8, 3.9, 4, 4.1, 4.2],
+                             [4.8, 4.9, 5, 5.1, 5.2]]}
+_inf_1ms = optimization._infer_speedup(_before_1ms, _after_1ms)
+check("a size excluded by the OLDER 1ms-noise-floor guard is named in "
+      "sizes_below_floor too, not dropped from every field",
+      {"size": 10, "before_ms": 0.5, "after_ms": 0.3} in _inf_1ms["sizes_below_floor"],
+      f"-> {_inf_1ms.get('sizes_below_floor')}")
+check("  ...alongside the size excluded by the NEWER visibility floor",
+      {"size": 20, "before_ms": 10, "after_ms": 4} in _inf_1ms["sizes_below_floor"],
+      f"-> {_inf_1ms.get('sizes_below_floor')}")
+check("  ...and the size that clears everything is still tested normally",
+      _inf_1ms["sizes_total"] == 1 and _inf_1ms["per_size"][0]["size"] == 30,
+      f"-> {_inf_1ms.get('per_size')}")
+check("  ...invariant: every size is accounted for in per_size or sizes_below_floor",
+      len(_before_1ms["sizes"]) == _inf_1ms["sizes_total"] + len(_inf_1ms["sizes_below_floor"]),
+      f"-> len(sizes)=3 sizes_total={_inf_1ms['sizes_total']} "
+      f"sizes_below_floor={len(_inf_1ms['sizes_below_floor'])}")
+
+
 # ═══ identical before/after code is never accepted (the false-accept rate) ══
 # The strongest form of the guarantee above: original and candidate are the
 # SAME program, run through the REAL executor with REAL timing noise, not an
@@ -486,6 +672,31 @@ if executor._rust:
           (o.get("inference") or {}).get("sizes_total", 0) > 0
           and o["inference"]["sizes_rejecting"] * 2 > o["inference"]["sizes_total"],
           f"-> {o.get('inference')}")
+
+    # The ORIGINAL, weaker O(n)->O(1) pair (before #272 gave it ~10x more
+    # work per element to work around this exact bug in the TEST rather than
+    # the product) -- `git show e2067cb2^:tests/test_translation_verify.py`.
+    # This is the candidate pair that flaked on hosted macOS CI: `s+=i` once
+    # per element left the two SMALLEST of four sizes close enough to
+    # process-startup/scheduling noise that the OLD combined auto-scale floor
+    # never rescaled them (the largest size alone cleared it), so the
+    # significance test saw only 2/4 decisive sizes and correctly called a
+    # real 1.9-2.4x speedup "could be noise". The per-size floor fix rescales
+    # EVERY size until IT is visible, independent of how big the others are —
+    # measured on this box, 20 runs under `nice -n 19` plus a saturating CPU
+    # load on every core: 13/20 accepted, up from 2/20 on the unfixed
+    # product (see CHANGELOG.md). NOT asserted here as a hard live check,
+    # deliberately: this candidate pair sits close enough to the noise floor
+    # by construction (that is WHY #272 replaced it for the CI-gated test
+    # above) that even the fix does not make EVERY run decisive on a shared,
+    # variably-loaded runner — an unconditional `accepted is True` here would
+    # reintroduce exactly the flaky live-CI assertion #272 existed to remove,
+    # now on a different candidate pair. The heavier SLOW/FAST pair above
+    # (which the fix does not need to rescue — it was already comfortably
+    # over the old COMBINED floor at every size) stays the CI-gated live
+    # evidence that a real win is accepted; the deterministic mocked tests
+    # elsewhere in this file are what actually pin the per-size floor
+    # mechanism down.
 
     # The unchanged-candidate rejection is asserted DETERMINISTICALLY above
     # (the "false-accept rate" section), and again LIVE further above with

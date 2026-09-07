@@ -99,8 +99,29 @@ TOOL_TIMEOUTS: dict[str, float] = {
     # docstring), which is at most one extra `_measure` pass, never a second
     # full ladder. Every auto-scale round exhausted on BOTH sides PLUS that
     # alignment pass is a bounded 234 executor calls (was 134 at REPEATS=3,
-    # before either REPEATS=5 or the alignment fix); at the same per-call
-    # cost that is ~13.4s, an ~13x margin under the deadline.
+    # before either REPEATS=5 or the alignment fix).
+    #
+    # Rechecked after making the auto-scale floor PER-SIZE instead of
+    # combined across sizes (optimization._VISIBILITY_FLOOR_MS — fixes a real
+    # false rejection of a genuine speedup on hosted macOS CI, see that
+    # constant's docstring): the bound is UNCHANGED at 234. A size that
+    # already cleared the floor is no longer re-measured for free each round
+    # (typically FEWER calls now), but the worst case — every size stays
+    # below the floor every round on both sides, so every round re-measures
+    # all of them — costs exactly what the old whole-batch loop cost, and
+    # `_align_sizes`'s per-position generalization still re-measures each
+    # mismatched position on exactly one side, so the total re-measured
+    # (size, repeat) pairs across both sides is still capped at
+    # `len(sizes) * REPEATS` (20), same as the old whole-list version.
+    # Measured directly on this box (native Rust backend, a program forced
+    # through real subprocess execution but with every reported duration
+    # pinned below the floor, so the rescale loop runs its full budget with
+    # REAL per-call cost): 200 `_measure`-level calls (both sides exhausting
+    # all 4 rescale rounds, symmetric so no alignment needed) took ~23.5s; a
+    # second run that also forced an alignment remeasurement (160 calls,
+    # asymmetric rescaling) took ~16.4s — both ~0.11-0.12s/call. Scaling that
+    # per-call cost up to the full 234-call ceiling gives ~27s worst case,
+    # still an ~6.7x margin under the 180s deadline.
     "verify_translation": 120,
     "verify_optimization": 180,
     # run_submit/run_inspect/run_cancel are RunSupervisor control-

@@ -169,6 +169,21 @@ check("a result with no `inference` field still grades cross_checked",
 check("  ...with a basis that says nothing about significance it was never given",
       "Mann-Whitney" not in g_no_inference["grade_basis"], f"-> {g_no_inference['grade_basis']}")
 
+# A result whose `inference` names sizes that never cleared the per-size
+# visibility floor (`optimization._VISIBILITY_FLOOR_MS`) must say so in
+# grade_basis too -- a shrunk sizes_total with no explanation would read as
+# a weaker significance result than what was actually excluded and why.
+_opt_below_floor = optimization_accepted(ratio=2.3, n_sizes=3)
+_opt_below_floor["inference"]["sizes_below_floor"] = [
+    {"size": 999, "before_ms": 2.0, "after_ms": 1.5}]
+g_below_floor = grades.grade_verify_optimization(_opt_below_floor, "python3")
+check("a result with sizes_below_floor names the exclusion in grade_basis",
+      "1 size(s) excluded" in g_below_floor["grade_basis"]
+      and "sizes_below_floor" in g_below_floor["grade_basis"],
+      f"-> {g_below_floor['grade_basis']!r}")
+check("  ...still grades cross_checked -- exclusion is disclosure, not a demotion",
+      g_below_floor["grade"] == grades.CROSS_CHECKED, f"-> {g_below_floor['grade']}")
+
 g = grades.grade_verify_optimization(optimization_not_equivalent(), "python3")
 check("optimization rejected for correctness -> ungraded, never cross_checked",
       g["grade"] == grades.UNGRADED, f"-> {g['grade']}")

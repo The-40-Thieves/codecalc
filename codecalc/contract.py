@@ -51,7 +51,7 @@ from . import errors, grades
 #: each component is allowed to change — the short form is that MAJOR is the
 #: only one that may break a reader, and it carries a twelve-month deprecation
 #: window before anything is removed.
-CONTRACT_VERSION = "1.5.0"
+CONTRACT_VERSION = "1.6.0"
 
 # THE `$schema` AND `$id` URIs ARE NOT HERE ON PURPOSE.
 #
@@ -363,11 +363,24 @@ def _inference_properties() -> dict:
     to reject before `accepted` can ever be true. Every key here is read
     straight off `_infer_speedup`'s own `return` and each `per_size` entry's
     `dict` literal — `size`/`n_before`/`n_after`/`u`/`p_value`/`rank_biserial`.
+
+    `sizes_below_floor` (added in `1.6.0`): every size excluded from
+    `per_size`/`sizes_total`/`sizes_rejecting` for ANY reason — never
+    cleared `optimization._VISIBILITY_FLOOR_MS` within `_timed`'s per-size
+    rescale budget, an unmeasurable baseline/candidate (the same floor
+    `_speedup` already applies), too few comparable runs, or no recorded
+    measurement at all — rather than tested on a still-noisy sample or
+    silently dropped. `before_ms`/`after_ms` are `null` when no duration was
+    ever available for that size. `len(sizes) == len(per_size) +
+    len(sizes_below_floor)` always holds. Always present (an empty list when
+    every size cleared every bar, which is the common case), same as
+    `sizes_rejecting`/`sizes_total` always are.
     """
     return {
         "type": "object",
         "required": ["test", "alternative", "alpha", "per_size",
-                     "sizes_rejecting", "sizes_total", "decision_basis"],
+                     "sizes_rejecting", "sizes_total", "sizes_below_floor",
+                     "decision_basis"],
         "properties": {
             "test": {"type": "string"},
             "alternative": {"type": "string"},
@@ -390,6 +403,22 @@ def _inference_properties() -> dict:
             },
             "sizes_rejecting": {"type": "integer", "minimum": 0},
             "sizes_total": {"type": "integer", "minimum": 0},
+            "sizes_below_floor": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["size", "before_ms", "after_ms"],
+                    "properties": {
+                        "size": {"type": "integer", "minimum": 0},
+                        # `null` when no duration was ever recorded for this
+                        # size (a before/after length mismatch) — every
+                        # exclusion reason lands here, not just a visibility
+                        # miss with real numbers on both sides.
+                        "before_ms": {"type": ["number", "null"]},
+                        "after_ms": {"type": ["number", "null"]},
+                    },
+                },
+            },
             "decision_basis": {"type": "string"},
         },
     }
