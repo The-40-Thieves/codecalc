@@ -18,10 +18,12 @@ connection for exactly that reason.
 from __future__ import annotations
 
 import base64
+import dataclasses
 import functools
 import inspect
 import json
 import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -62,6 +64,9 @@ from . import (
 )
 from . import (
     audit as audit_module,
+)
+from . import (
+    dependencies as dependencies_module,
 )
 from .mcp_middleware import redact_validation_errors_middleware, timeout_middleware
 
@@ -180,6 +185,7 @@ _run_supervisor = run_supervisor.RunSupervisor(
     _provider_registry, state_dir=_run_state_dir, max_active_runs=_max_active_runs
 )
 _run_supervisor.recover_orphans()
+
 # one append-only audit sink for broker decisions and security-relevant
 # side effects (denied capability, refused install, cleanup). Defaults to
 # ~/.codecalc/audit/audit.log; CODECALC_AUDIT_LOG relocates it, or disables it
@@ -1006,6 +1012,7 @@ async def execute_code_stream(
     max_cpu: int = 0,
     no_net: bool = False,
     provider: str | None = None,
+    dependencies: list[str] | None = None,
     ctx: Context = None,
 ) -> dict[str, Any]:
     """Execute code and STREAM progress + partial output as it runs.
@@ -1024,9 +1031,9 @@ async def execute_code_stream(
     execute_code's 120s, because streaming exists for runs long enough to
     want progress.
 
-    Unlike execute_code, this tool has no `dependencies` argument and never
-    reads a PEP 723 block out of `code`: a `# /// script` block here is inert
-    text, not a trigger — nothing here calls into codecalc/dependencies.py.
+    `dependencies`: same as execute_code's (PEP 723 merge, `no_net`/policy
+    refusal, 120s budget, workdir quota) — installed before streaming
+    starts; a refusal/failed install is the stream's only event.
     """
     # `max_memory_mb`/`max_output_kb`/`max_cpu` used to be silently dropped on
     # this path: the docstring claimed only "the same result shape" as
@@ -1056,7 +1063,8 @@ async def execute_code_stream(
             pass
 
     return await _execution_service.execute_stream(
-        spec, provider_id=provider, on_progress=report_progress
+        spec, provider_id=provider, dependencies=dependencies,
+        on_progress=report_progress
     )
 
 
@@ -1087,6 +1095,7 @@ def run_submit(
     max_cpu: int = 0,
     no_net: bool = False,
     provider: str | None = None,
+    dependencies: list[str] | None = None,
 ) -> dict[str, Any]:
     """Submit code for BACKGROUND execution; returns a run_id immediately.
 
@@ -1118,9 +1127,15 @@ def run_submit(
 
     Retention: see run_inspect.
 
-    Unlike execute_code, this tool has no `dependencies` argument and never
-    reads a PEP 723 block out of `code` — inert text here, same as
-    execute_code_stream.
+    `dependencies`: same semantics as execute_code's own `dependencies` (PEP
+    723 merge, `no_net`/policy refusal, 120s budget, workdir quota). A
+    refusal is returned directly with no run created. Otherwise this call
+    still returns immediately: the install itself runs on the background
+    worker, ahead of the code, and a failed install becomes the run's own
+    terminal error — readable via run_inspect(run_id) like any other
+    outcome, same `dependencies` field execute_code returns. Its temp
+    workdir is freed on first collection (inspect, the next submission's own
+    reap of finished runs, or a startup sweep after a restart).
     """
     if _run_supervisor is None:
         return errors.error_result(
@@ -1153,15 +1168,92 @@ def run_submit(
             errors.VALIDATION, str(exc), provider_error=exc.code,
             requested_provider=exc.provider_id, available_providers=list(exc.available),
         )
+
+    # Same parse/merge as execute_code's sessionless path, before brokering —
+    # a malformed PEP 723 block is a validation refusal regardless of policy.
+    dep_specs, dep_parse_error, dep_implicit = dependencies_module.resolve(
+        spec.language, spec.code, dependencies)
+    if dep_parse_error is not None:
+        return dep_parse_error
+    if dep_specs and dep_implicit:
+        _audit_log.emit(
+            audit_module.DEPENDENCY_INSTALL_IMPLICIT,
+            decision="detected", language=spec.language,
+            dependency_count=len(dep_specs),
+        )
+
     run_spec, decision, rejection = execution_service.broker_run(
         spec, provider_obj, policy=capabilities.policy_from_env(), audit=_audit_log)
     if rejection is not None:
         return rejection
+
+    dep_workdir: str | None = None
+    dep_workdir_identity = None
+    runner = None
+    if dep_specs:
+        # Same restriction as execute_code/session_run: the install path only
+        # confines a direct subprocess against the LOCAL provider's own
+        # workdir contract (see codecalc/dependencies.py's module docstring).
+        if provider_obj.provider_id != "local":
+            return errors.error_result(
+                errors.VALIDATION,
+                f"provider {provider_obj.provider_id!r} does not support "
+                "per-run dependencies",
+                provider_error="unsupported_capability",
+                requested_provider=provider_obj.provider_id,
+                capability="dependencies",
+            )
+        policy = capabilities.policy_from_env()
+        if dependencies_module.network_refused(no_net=spec.no_net, policy=policy):
+            return dependencies_module.refusal_result(spec.no_net, policy)
+        # Only an empty directory is created here, synchronously — cheap,
+        # no network — so run_submit's "returns immediately" promise stays
+        # true. The actual fetch happens inside `_install_then_execute`,
+        # BELOW, submitted to the supervisor's OWN worker thread: doing the
+        # install here instead (as an earlier version of this change did)
+        # meant a slow install blocked this call, and left the workdir owned
+        # by nothing once a run_id existed but no `_Run` had it yet, with no
+        # way for a fire-and-forget caller or a server restart to ever
+        # release it. Owning it on the run record from the moment `start()`
+        # returns is what fixes both.
+        dep_workdir = tempfile.mkdtemp(prefix="codecalc-deps-")
+        dep_workdir_identity = executor._dir_identity(dep_workdir)
+        run_spec = dataclasses.replace(run_spec, workdir=dep_workdir)
+
+        def _install_then_execute(_run_spec: providers.ComputationSpec = run_spec) -> dict:
+            """Runs on the supervisor's worker thread, not this call's own
+            stack — see run_supervisor.RunSupervisor.start's `runner`
+            parameter. `_run_spec` is bound as a default at DEFINITION time
+            (this closure is built fresh per call, submitted once, never
+            reused in a loop) purely so a reader does not have to check for
+            a late-binding hazard that cannot actually occur here; every
+            other name it closes over (`spec`, `dep_specs`, `dep_workdir`,
+            `provider_obj`, `_audit_log`) is likewise never reassigned after
+            this point in `run_submit`."""
+            entries, failure = dependencies_module.install_dependencies(
+                spec.language, dep_specs, session_id=None,
+                workdir=dep_workdir, audit=_audit_log)
+            if failure is not None:
+                # Never reached the provider — raised, not returned, so
+                # `_collect()`'s exception path reports it via
+                # `CodedRunFailure` (the ALREADY-coded failure, verbatim) and
+                # never calls attach_receipt: a receipt claims "this ran",
+                # which this did not.
+                raise run_supervisor.CodedRunFailure({**failure, "dependencies": entries})
+            result = dict(provider_obj.execute(_run_spec))
+            result["dependencies"] = entries
+            return result
+
+        runner = _install_then_execute
+
     try:
         handle = _run_supervisor.start(
             run_spec, provider_id=provider_obj.provider_id,
-            capability_decision=decision, receipt_spec=spec)
+            capability_decision=decision, receipt_spec=spec,
+            runner=runner, workdir=dep_workdir, workdir_identity=dep_workdir_identity)
     except run_supervisor.TooManyActiveRuns as exc:
+        if dep_workdir is not None:
+            executor._rmtree_checked(dep_workdir, dep_workdir_identity)
         return errors.error_result(
             errors.RESOURCE_EXHAUSTED,
             f"{exc.active} runs are already active against a limit of "
@@ -1169,6 +1261,15 @@ def run_submit(
             "wait for one to finish, then retry",
             active_runs=exc.active, limit=exc.limit,
         )
+    except Exception:
+        # ANY OTHER failure between creating the workdir and a run record
+        # actually owning it (LOW, cross-vendor review) leaves nothing else
+        # to release it — `start()` raising here means no `_Run` was ever
+        # inserted, so neither `_collect()` nor `recover_orphans()` will
+        # ever see this directory.
+        if dep_workdir is not None:
+            executor._rmtree_checked(dep_workdir, dep_workdir_identity)
+        raise
     return {
         "ok": True, "run_id": handle.run_id, "provider_id": handle.provider_id,
         "started_at": handle.started_at, "deadline": handle.deadline,
@@ -1247,6 +1348,13 @@ def run_inspect(run_id: str) -> dict[str, Any]:
         # over a resource-release problem that has nothing to do with the
         # result being reported.
         result = {**result, "cleanup_error": str(exc)}
+    # A run submitted with dependencies carries them on `result` already —
+    # `run_supervisor._collect()` attached them the same way it attaches
+    # everything else the run's own callable returned (or, on a failed
+    # install, `CodedRunFailure` carried them into the terminal error) —
+    # nothing left for this tool to merge in itself. The workdir that
+    # install used is released by `_collect()` too, on this run's first
+    # collection, whichever caller that turns out to be.
     # F9 (cross-vendor): re-read the status AFTER cleanup(). `status` above was
     # captured pre-cleanup, so returning it made the FIRST terminal read report
     # cleaned=false (state "finished") and the NEXT read cleaned=true (state
@@ -1383,17 +1491,33 @@ def benchmark(code: str, language: str = "python3", sizes: str = "100,1000,10000
 
 
 @mcp.tool(group="execution")
-def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 15) -> dict[str, Any]:
+def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 15,
+                      dependencies: dict[str, list[str]] | None = None) -> dict[str, Any]:
     """Run the same code in multiple languages side by side.
 
     `snippets` maps language name -> code (each snippet must be valid in its own
     language). Returns per-language stdout/stderr/exit/duration plus which was fastest.
     Example: {"python3": "print(6*7)", "node": "console.log(6*7)"}
 
-    No `dependencies` argument and no PEP 723 block reading here — a
-    `# /// script` block in a snippet is inert text, same as
-    execute_code_stream/run_submit.
+    `dependencies` is NOT supported here (a truthy value is a `validation`
+    error) — this tool fans out across every language with no per-language
+    install plumbing behind it; use `install_package`/
+    `execute_code(dependencies=...)` beforehand instead. A `# /// script`
+    block in a snippet is likewise never installed, but is DISCLOSED, not
+    dropped: a python3 row that carries one gets
+    `dependencies: {"status": "unsupported", "reason": ...}`.
     """
+    if dependencies:
+        return errors.error_result(
+            errors.VALIDATION,
+            "compare_execution does not install per-run dependencies (no "
+            "per-language installer here — see this tool's own docstring); "
+            "install packages first via install_package or "
+            "execute_code(dependencies=...), then compare code that needs "
+            "nothing further installed",
+            provider_error="unsupported_capability",
+            capability="dependencies",
+        )
     return tools.compare_execution(snippets, stdin=stdin, timeout=timeout)
 
 

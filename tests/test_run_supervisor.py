@@ -548,6 +548,382 @@ def test_recover_orphans_skips_an_unregistered_provider_without_crashing() -> No
           ghost_after is not None and ghost_after.get("state") == "running")
 
 
+def test_start_journals_the_workdir_before_the_runner_can_possibly_run() -> None:
+    """cross-vendor review: `start()` used to `self._pool.submit()` BEFORE
+    inserting/journalling the `_Run` record — a hard kill in that window
+    left a workdir the worker had already started installing into (or was
+    about to) with NO on-disk record naming it, so `recover_orphans()`'s
+    startup sweep would have nothing to find. The fix journals FIRST, inside
+    the SAME lock, before the worker thread is given any chance to run at
+    all — proven here with a runner that blocks on an Event: `start()`
+    returns (having already written the journal) while the runner is still
+    provably blocked on its very first statement, and the journal is read
+    in that window, not after the runner finishes."""
+    from codecalc import executor
+
+    registry = providers.ProviderRegistry(default_provider_id="local")
+    registry.register(providers.LocalExecutionProvider())
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocking_runner() -> dict:
+        entered.set()
+        release.wait(5)
+        return {"ok": True, "verdict": "OK", "stdout": "done", "stderr": "",
+                "exit_code": 0, "unenforced": []}
+
+    workdir = tempfile.mkdtemp(prefix="codecalc-deps-journal-order-")
+    identity = executor._dir_identity(workdir)
+    handle = None
+    journal_exists_immediately = False
+    record = None
+    runner_entered = False
+    with tempfile.TemporaryDirectory(prefix="codecalc-runs-journal-order-") as root:
+        supervisor = run_supervisor.RunSupervisor(registry, state_dir=Path(root))
+        try:
+            handle = supervisor.start(
+                providers.ComputationSpec("python3", "unused"),
+                runner=blocking_runner, workdir=workdir, workdir_identity=identity,
+            )
+            # The journal is checked IMMEDIATELY after start() returns, before
+            # the runner is ever released — under the fix this is not a race:
+            # the journal write happens before self._pool.submit() is even
+            # called, so it is unconditionally on disk by the time start()
+            # returns, regardless of how the worker thread gets scheduled.
+            journal_path = supervisor._path(handle.run_id)
+            journal_exists_immediately = journal_path.exists()
+            record = (json.loads(journal_path.read_text(encoding="utf-8"))
+                      if journal_exists_immediately else None)
+            # Extra assurance the runner really is concurrent, not merely
+            # not-yet-scheduled: confirm it actually entered and is blocked
+            # on its first statement — the journal above was already read
+            # before this point, so this does not loosen the assertion.
+            runner_entered = entered.wait(2)
+        finally:
+            release.set()
+            if handle is not None:
+                supervisor.wait(handle.run_id, timeout=2)
+    import shutil as _shutil
+    _shutil.rmtree(workdir, ignore_errors=True)
+
+    check("the runner genuinely started running (blocked on the Event)",
+          runner_entered)
+    check("the journal file exists the instant start() returns",
+          journal_exists_immediately)
+    check("the journal already names the workdir, unreleased",
+          record is not None and record.get("workdir") == workdir
+          and record.get("workdir_cleaned") is False,
+          )
+
+
+def test_start_pops_the_run_and_releases_its_workdir_when_pool_submit_raises() -> None:
+    """cross-vendor review: `self._pool.submit()` CAN raise —
+    ThreadPoolExecutor spawns worker threads lazily, and "cannot start new
+    thread" under OS thread exhaustion is a real, reproduced failure. By the
+    time it is called, the run is ALREADY in `self._runs` and journalled
+    (journal-before-submit, the previous round's own fix). Left there with
+    `future=None` forever, the run would never terminate, and EVERY later
+    `start()`/`inspect()` call would crash dereferencing None in
+    `_reap_completed_locked()`'s/`inspect()`'s own `run.future.done()` — a
+    process-wide denial of service until restart. `start()` must instead
+    pop the half-created run, release the workdir it owned, journal it
+    TERMINAL, and re-raise — leaving the supervisor exactly as usable as
+    before the failed call."""
+    from codecalc import executor
+
+    registry = providers.ProviderRegistry(default_provider_id="local")
+    registry.register(providers.LocalExecutionProvider())
+    workdir = tempfile.mkdtemp(prefix="codecalc-deps-submit-fails-")
+    identity = executor._dir_identity(workdir)
+
+    def runner() -> dict:
+        return {"ok": True, "verdict": "OK", "stdout": "unreachable",
+                "stderr": "", "exit_code": 0, "unenforced": []}
+
+    second_workdir = None
+    with tempfile.TemporaryDirectory(prefix="codecalc-runs-submit-fails-") as root:
+        supervisor = run_supervisor.RunSupervisor(registry, state_dir=Path(root))
+        real_submit = supervisor._pool.submit
+        calls = {"n": 0}
+
+        def failing_submit(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("cannot start new thread")
+            return real_submit(*args, **kwargs)
+
+        supervisor._pool.submit = failing_submit
+
+        raised = None
+        try:
+            supervisor.start(
+                providers.ComputationSpec("python3", "unused"),
+                runner=runner, workdir=workdir, workdir_identity=identity,
+            )
+        except Exception as exc:
+            raised = exc
+
+        run_absent = len(supervisor._runs) == 0
+        workdir_released = not Path(workdir).exists()
+
+        # A SECOND start() (submit now succeeds) must work normally — the
+        # supervisor is not left stuck by the first failure.
+        second_workdir = tempfile.mkdtemp(prefix="codecalc-deps-submit-fails-2-")
+        second_identity = executor._dir_identity(second_workdir)
+        handle = supervisor.start(
+            providers.ComputationSpec("python3", "unused"),
+            runner=runner, workdir=second_workdir, workdir_identity=second_identity,
+        )
+        second_result = supervisor.wait(handle.run_id, timeout=2)
+
+    check("start() re-raises the pool's own submit failure",
+          isinstance(raised, RuntimeError) and "cannot start new thread" in str(raised),
+          )
+    check("the half-created run is NOT left in the supervisor", run_absent)
+    check("the workdir it owned was released", workdir_released)
+    check("a second start() succeeds after the first's submit failure",
+          second_result.get("stdout") == "unreachable" and second_result.get("ok") is True,
+          )
+
+    if second_workdir is not None:
+        import shutil as _shutil
+        _shutil.rmtree(second_workdir, ignore_errors=True)
+
+
+def test_reap_and_inspect_skip_a_record_with_no_future_yet() -> None:
+    """defence in depth (cross-vendor review): `start()` itself never
+    leaves a None-future record in `self._runs` any more — a failed
+    `self._pool.submit()` pops it immediately, under the same lock (see
+    `test_start_pops_the_run_and_releases_its_workdir_when_pool_submit_raises`).
+    `_reap_completed_locked()`/`inspect()` must still not crash
+    dereferencing `.done()` on one anyway, in case that invariant is ever
+    violated by a future change — constructed directly here, bypassing
+    `start()` entirely, to exercise the GUARD itself rather than the
+    invariant it defends against."""
+    from codecalc import run_supervisor as rs
+
+    provider = providers.LocalExecutionProvider()
+    registry = providers.ProviderRegistry(default_provider_id="local")
+    registry.register(provider)
+    with tempfile.TemporaryDirectory(prefix="codecalc-runs-none-future-") as root:
+        supervisor = run_supervisor.RunSupervisor(registry, state_dir=Path(root))
+        handle = run_supervisor.RunHandle(
+            run_id="none-future-run", provider_id=provider.provider_id,
+            started_at=time.time(), deadline=time.time() + 30)
+        bare_run = rs._Run(handle=handle, provider=provider,
+                           spec=providers.ComputationSpec("python3", "unused"),
+                           future=None)
+        supervisor._runs["none-future-run"] = bare_run
+
+        reap_raised = None
+        try:
+            with supervisor._lock:
+                supervisor._reap_completed_locked()
+        except Exception as exc:
+            reap_raised = exc
+
+        inspect_raised = None
+        inspected = None
+        try:
+            inspected = supervisor.inspect("none-future-run")
+        except Exception as exc:
+            inspect_raised = exc
+
+    check("_reap_completed_locked() does not crash on a None-future record",
+          reap_raised is None, )
+    check("inspect() does not crash on a None-future record either",
+          inspect_raised is None)
+    check("inspect() still reports something sane (still running, not collected)",
+          inspected is not None and inspected.get("state") == "running")
+
+
+def test_start_runner_replaces_provider_dispatch_and_owns_a_workdir() -> None:
+    """`start(runner=..., workdir=..., workdir_identity=...)` is what
+    run_submit's dependency-install path uses: `runner` runs on the SAME
+    worker thread instead of `provider.execute`, and the workdir it names is
+    released by `_collect()` exactly once, whichever caller (inspect/wait/
+    the next submission's own reap) happens to be the one that collects it
+    first — never twice, and never by anyone else."""
+    from codecalc import executor
+
+    registry = providers.ProviderRegistry(default_provider_id="local")
+    registry.register(providers.LocalExecutionProvider())
+    calls: list[str] = []
+
+    def runner() -> dict:
+        calls.append("ran")
+        return {"ok": True, "verdict": "OK", "stdout": "from-runner",
+                "stderr": "", "exit_code": 0, "unenforced": []}
+
+    with tempfile.TemporaryDirectory(prefix="codecalc-runs-workdir-") as root:
+        workdir = tempfile.mkdtemp(prefix="codecalc-deps-owned-")
+        identity = executor._dir_identity(workdir)
+        supervisor = run_supervisor.RunSupervisor(registry, state_dir=Path(root))
+        handle = supervisor.start(
+            providers.ComputationSpec("python3", "unused"),
+            runner=runner, workdir=workdir, workdir_identity=identity,
+        )
+        result = supervisor.wait(handle.run_id, timeout=2)
+        workdir_gone_after_first_collect = not Path(workdir).exists()
+        # A second collection (inspect, here) must not error and must not
+        # try to remove the (already-gone) directory a second time — the
+        # `workdir_cleaned` guard in `_collect()` is what this asserts.
+        again = supervisor.inspect(handle.run_id)
+
+    check("runner() replaced provider.execute entirely", calls == ["ran"])
+    check("the run's OWN result is exactly what runner() returned",
+          result.get("stdout") == "from-runner" and result.get("ok") is True)
+    check("the runner still gets the SAME receipt attachment provider.execute would",
+          isinstance(result.get("provider"), dict))
+    check("the owned workdir is released on the run's first collection",
+          workdir_gone_after_first_collect)
+    check("a second collection does not raise or re-attempt the removal",
+          again.get("state") in {"finished", "cleaned"})
+
+
+def test_coded_run_failure_becomes_the_verbatim_terminal_result() -> None:
+    """A `runner` that raises `CodedRunFailure` — run_submit's dependency
+    install path, when the install itself fails — must come back as EXACTLY
+    that coded result, not the generic `errors.INTERNAL` wrapping every
+    OTHER raised exception gets, and with NO execution receipt: the
+    provider was never reached, and a receipt claims otherwise."""
+    from codecalc import executor
+
+    registry = providers.ProviderRegistry(default_provider_id="local")
+    registry.register(providers.LocalExecutionProvider())
+    coded = {
+        "ok": False, "code": "resource_exhausted",
+        "error": "the run's dependency workdir reached the quota",
+        "remedy": "raise the relevant ceiling or reduce the work",
+        "provider_error": "dependency_workdir_quota_exceeded",
+        "dependencies": [{"spec": "big-pkg", "language": "python3", "ok": True,
+                          "installer": "uv", "elapsed_ms": 1}],
+    }
+
+    def failing_runner() -> dict:
+        raise run_supervisor.CodedRunFailure(dict(coded))
+
+    with tempfile.TemporaryDirectory(prefix="codecalc-runs-codedfail-") as root:
+        workdir = tempfile.mkdtemp(prefix="codecalc-deps-codedfail-")
+        identity = executor._dir_identity(workdir)
+        supervisor = run_supervisor.RunSupervisor(registry, state_dir=Path(root))
+        handle = supervisor.start(
+            providers.ComputationSpec("python3", "unused"),
+            runner=failing_runner, workdir=workdir, workdir_identity=identity,
+        )
+        result = supervisor.wait(handle.run_id, timeout=2)
+        workdir_released = not Path(workdir).exists()
+
+    check("the terminal result matches the raised CodedRunFailure verbatim",
+          all(result.get(k) == v for k, v in coded.items()))
+    check("no execution receipt was attached — the provider was never reached",
+          "provider" not in result)
+    check("the result still carries a contract_version (stamped)",
+          bool(result.get("contract_version")))
+    check("the owned workdir was still released despite the failure",
+          workdir_released)
+
+
+def test_recover_orphans_sweeps_an_uncleaned_workdir_for_a_terminal_run() -> None:
+    """A run that finished and was journalled `workdir_cleaned: false` an
+    instant before the process crashed has no provider-side work left (it
+    is already `finished`, not `running`/`cancelling`), but its per-run
+    dependency workdir is exactly as orphaned as an active run's provider
+    state — nothing else will ever release it once the in-memory `_Run`
+    that owned it is gone. `recover_orphans()` at the next startup is that
+    release."""
+    from codecalc import executor
+
+    provider = BlockingProvider()
+    registry = providers.ProviderRegistry(default_provider_id=provider.provider_id)
+    registry.register(provider)
+    with tempfile.TemporaryDirectory(prefix="codecalc-runs-workdir-sweep-") as root:
+        state_dir = Path(root)
+        workdir = tempfile.mkdtemp(prefix="codecalc-deps-orphaned-")
+        identity = executor._dir_identity(workdir)
+        journal = state_dir / "orphan-terminal.json"
+        journal.write_text(json.dumps({
+            "run_id": "orphan-terminal", "provider_id": provider.provider_id,
+            "state": "finished", "workdir": workdir,
+            "workdir_identity": list(identity), "workdir_cleaned": False,
+        }), encoding="utf-8")
+        supervisor = run_supervisor.RunSupervisor(registry, state_dir=state_dir)
+        supervisor.recover_orphans()
+        workdir_gone = not Path(workdir).exists()
+        record_after = json.loads(journal.read_text(encoding="utf-8"))
+
+    check("a terminal orphan's workdir is removed by the startup sweep", workdir_gone)
+    check("the journal now records workdir_cleaned: true",
+          record_after.get("workdir_cleaned") is True)
+    check("a terminal run's STATE is untouched by the sweep (no provider work was due)",
+          record_after.get("state") == "finished")
+
+
+def test_recover_orphans_sweeps_a_workdir_alongside_active_provider_recovery() -> None:
+    """An ACTIVE orphan (running/cancelling when the process died) gets BOTH
+    sweeps: the existing provider-side cancel/cleanup, AND the workdir
+    release — independently, per recover_orphans()'s own docstring."""
+    from codecalc import executor
+
+    provider = BlockingProvider()
+    registry = providers.ProviderRegistry(default_provider_id=provider.provider_id)
+    registry.register(provider)
+    with tempfile.TemporaryDirectory(prefix="codecalc-runs-workdir-active-") as root:
+        state_dir = Path(root)
+        workdir = tempfile.mkdtemp(prefix="codecalc-deps-active-orphan-")
+        identity = executor._dir_identity(workdir)
+        journal = state_dir / "orphan-active.json"
+        journal.write_text(json.dumps({
+            "run_id": "orphan-active", "provider_id": provider.provider_id,
+            "state": "running", "workdir": workdir,
+            "workdir_identity": list(identity), "workdir_cleaned": False,
+        }), encoding="utf-8")
+        supervisor = run_supervisor.RunSupervisor(registry, state_dir=state_dir)
+        recovered = supervisor.recover_orphans()
+        workdir_gone = not Path(workdir).exists()
+        record_after = json.loads(journal.read_text(encoding="utf-8"))
+
+    check("the active orphan's provider side still recovers",
+          recovered == ["orphan-active"] and provider.cancelled == ["orphan-active"])
+    check("the SAME orphan's workdir is ALSO released", workdir_gone)
+    check("the journal records both outcomes",
+          record_after.get("state") == "recovered"
+          and record_after.get("workdir_cleaned") is True)
+
+
+def test_recover_orphans_refuses_a_workdir_with_mismatched_identity() -> None:
+    """A journalled identity that no longer matches the directory on disk
+    (the path was recreated, or never matched at all — a corrupted/hand-
+    edited journal) is REFUSED, not deleted — `executor._rmtree_checked`'s
+    own fail-closed rule, re-derived here rather than bypassed. It IS still
+    marked `workdir_cleaned` afterward: a permanently untrustworthy identity
+    is a decision, not a transient failure to retry every future restart."""
+    provider = BlockingProvider()
+    registry = providers.ProviderRegistry(default_provider_id=provider.provider_id)
+    registry.register(provider)
+    with tempfile.TemporaryDirectory(prefix="codecalc-runs-workdir-mismatch-") as root:
+        state_dir = Path(root)
+        workdir = tempfile.mkdtemp(prefix="codecalc-deps-mismatch-")
+        journal = state_dir / "orphan-mismatch.json"
+        journal.write_text(json.dumps({
+            "run_id": "orphan-mismatch", "provider_id": provider.provider_id,
+            "state": "finished", "workdir": workdir,
+            "workdir_identity": [999999, 999999], "workdir_cleaned": False,
+        }), encoding="utf-8")
+        supervisor = run_supervisor.RunSupervisor(registry, state_dir=state_dir)
+        try:
+            supervisor.recover_orphans()
+            workdir_survived = Path(workdir).exists()
+            record_after = json.loads(journal.read_text(encoding="utf-8"))
+        finally:
+            import shutil as _shutil
+            _shutil.rmtree(workdir, ignore_errors=True)
+
+    check("a mismatched identity is REFUSED — the directory survives", workdir_survived)
+    check("the journal still records workdir_cleaned: true — no retry every restart",
+          record_after.get("workdir_cleaned") is True)
+
+
 if __name__ == "__main__":
     test_lifecycle_is_provider_bound_and_cleanup_is_idempotent()
     test_journal_is_bounded_and_orphans_are_reconciled()
@@ -560,4 +936,12 @@ if __name__ == "__main__":
     test_a_provider_that_raises_becomes_a_terminal_failed_result_not_a_strand()
     test_a_completed_but_uninspected_run_frees_its_admission_slot()
     test_recover_orphans_skips_an_unregistered_provider_without_crashing()
+    test_start_journals_the_workdir_before_the_runner_can_possibly_run()
+    test_start_pops_the_run_and_releases_its_workdir_when_pool_submit_raises()
+    test_reap_and_inspect_skip_a_record_with_no_future_yet()
+    test_start_runner_replaces_provider_dispatch_and_owns_a_workdir()
+    test_coded_run_failure_becomes_the_verbatim_terminal_result()
+    test_recover_orphans_sweeps_an_uncleaned_workdir_for_a_terminal_run()
+    test_recover_orphans_sweeps_a_workdir_alongside_active_provider_recovery()
+    test_recover_orphans_refuses_a_workdir_with_mismatched_identity()
     sys.exit(1 if FAILS else 0)

@@ -347,8 +347,17 @@ class ExecutionService:
                                              capability_decision=decision))
 
     async def execute_stream(self, spec: ComputationSpec, *, provider_id: str | None = None,
+                             dependencies: list[str] | None = None,
                              on_progress=None) -> dict:
-        """Stream through the selected provider using protocol-neutral progress."""
+        """Stream through the selected provider using protocol-neutral progress.
+
+        `dependencies` mirrors `execute()`'s sessionless path exactly: parsed/
+        merged with a PEP 723 block (python3) before brokering, refused under
+        `no_net`/a deny-network or strict policy, installed into a per-run
+        workdir BEFORE the provider is ever asked to stream. A refusal or
+        install failure is returned directly, with `on_progress` never called
+        — the tool's single reply is the stream's first and only event.
+        """
         try:
             provider = self.registry.select(provider_id, spec=spec)
         except UnknownProvider as exc:
@@ -359,19 +368,67 @@ class ExecutionService:
                 requested_provider=exc.provider_id,
                 available_providers=list(exc.available),
             ))
+
+        # Same parse/merge as execute()'s sessionless path, before brokering.
+        dep_specs, dep_parse_error, dep_implicit = dependencies_module.resolve(
+            spec.language, spec.code, dependencies)
+        if dep_parse_error is not None:
+            return contract.stamp(dep_parse_error)
+        if dep_specs and dep_implicit:
+            self.audit.emit(
+                audit_module.DEPENDENCY_INSTALL_IMPLICIT,
+                decision="detected", language=spec.language,
+                dependency_count=len(dep_specs),
+            )
+
         run_spec, decision, rejection = self._broker(spec, provider)
         if rejection is not None:
             return rejection
+
+        dep_entries = None
+        dep_workdir: str | None = None
+        dep_workdir_identity = None
+        if dep_specs:
+            if provider.provider_id != "local":
+                return contract.stamp(errors.error_result(
+                    errors.VALIDATION,
+                    f"provider {provider.provider_id!r} does not support "
+                    "per-run dependencies",
+                    provider_error="unsupported_capability",
+                    requested_provider=provider.provider_id,
+                    capability="dependencies",
+                ))
+            policy = self._policy()
+            if dependencies_module.network_refused(no_net=spec.no_net, policy=policy):
+                return contract.stamp(dependencies_module.refusal_result(spec.no_net, policy))
+            dep_workdir = tempfile.mkdtemp(prefix="codecalc-deps-")
+            dep_workdir_identity = executor._dir_identity(dep_workdir)
+            dep_entries, failure = dependencies_module.install_dependencies(
+                spec.language, dep_specs, session_id=None,
+                workdir=dep_workdir, audit=self.audit)
+            if failure is not None:
+                executor._rmtree_checked(dep_workdir, dep_workdir_identity)
+                result = dict(failure)
+                result["dependencies"] = dep_entries
+                return contract.stamp(result)
+            run_spec = dataclasses.replace(run_spec, workdir=dep_workdir)
+
         try:
-            result = dict(await provider.execute_stream(run_spec, on_progress=on_progress))
-        except UnsupportedCapability as exc:
-            return contract.stamp(errors.error_result(
-                errors.VALIDATION,
-                str(exc),
-                provider_error=exc.code,
-                requested_provider=exc.provider_id,
-                capability=exc.capability,
-            ))
+            try:
+                result = dict(await provider.execute_stream(run_spec, on_progress=on_progress))
+            except UnsupportedCapability as exc:
+                return contract.stamp(errors.error_result(
+                    errors.VALIDATION,
+                    str(exc),
+                    provider_error=exc.code,
+                    requested_provider=exc.provider_id,
+                    capability=exc.capability,
+                ))
+        finally:
+            if dep_workdir is not None:
+                executor._rmtree_checked(dep_workdir, dep_workdir_identity)
+        if dep_entries is not None:
+            result["dependencies"] = dep_entries
         return contract.stamp(attach_receipt(spec, provider, result,
                                              capability_decision=decision))
 

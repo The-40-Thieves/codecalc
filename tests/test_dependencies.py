@@ -561,6 +561,351 @@ check("compact_result omits `dependencies` when the run declared none",
           {"ok": True, "verdict": "OK", "stdout": "", "exit_code": 0}))
 
 
+# ═══ 11. execute_code_stream: dependencies, refusal-first-event ═══════════
+# A refusal or a failed install must be the stream's FIRST AND ONLY event:
+# on_progress is never called, and the coroutine's own return value carries
+# the stamped error — exercised through ExecutionService.execute_stream()
+# directly (async), the same layer sections 3-5 exercise for execute().
+
+import asyncio as _asyncio
+
+
+class _StreamingLocal(providers.LocalExecutionProvider):
+    """Same provider_id as real local (activates the dependency path), never
+    reaches the real executor — captures the spec and counts/records every
+    progress notification it was asked to send."""
+
+    def __init__(self) -> None:
+        self.provider_id = "local"
+        self.captured_spec = None
+        self.calls = 0
+        self.progress: list[tuple[int, str]] = []
+
+    async def execute_stream(self, spec: providers.ComputationSpec, on_progress=None) -> dict:
+        self.calls += 1
+        self.captured_spec = spec
+        if on_progress is not None:
+            await on_progress(1, "started")
+        return {"ok": True, "verdict": "OK", "stdout": "", "stderr": "",
+                "exit_code": 0, "unenforced": [], "workdir": spec.workdir or ""}
+
+
+def _stream_service(policy=None):
+    provider = _StreamingLocal()
+    registry = providers.ProviderRegistry(default_provider_id="local")
+    registry.register(provider)
+    return execution_service.ExecutionService(registry, policy=policy), provider
+
+
+async def _record_progress11(value: int, message: str) -> None:
+    _progress11.append((value, message))
+
+
+_progress11: list[tuple[int, str]] = []
+
+stream_service, stream_provider = _stream_service()
+with _StubInstall() as stream_stub:
+    stream_result = _asyncio.run(stream_service.execute_stream(
+        providers.ComputationSpec(language="python3", code="print(1)", no_net=True),
+        dependencies=["requests"], on_progress=_record_progress11,
+    ))
+check("execute_code_stream: no_net + dependencies refused",
+      stream_result.get("ok") is False
+      and stream_result.get("code") == "permission_denied"
+      and stream_result.get("provider_error") == capabilities.CAPABILITY_NOT_REQUESTED,
+      f"-> {stream_result}")
+check("execute_code_stream: refused before streaming — packages.install never called",
+      stream_stub.calls == [], f"-> {stream_stub.calls}")
+check("execute_code_stream: refused before streaming — the provider never streamed",
+      stream_provider.calls == 0)
+check("execute_code_stream: refusal is the ONLY event — no progress notification fired",
+      _progress11 == [], f"-> {_progress11}")
+
+_progress11b: list[tuple[int, str]] = []
+
+
+async def _record_progress11b(value: int, message: str) -> None:
+    _progress11b.append((value, message))
+
+
+stream_service2, stream_provider2 = _stream_service()
+with _StubInstall() as stream_stub2:
+    stream_result2 = _asyncio.run(stream_service2.execute_stream(
+        providers.ComputationSpec(language="python3", code="print(1)"),
+        dependencies=["requests"], on_progress=_record_progress11b,
+    ))
+check("execute_code_stream happy path: ok", stream_result2.get("ok") is True, f"-> {stream_result2}")
+check("execute_code_stream happy path: packages.install called once with the run's workdir",
+      len(stream_stub2.calls) == 1 and stream_stub2.calls[0]["session_id"] is None
+      and bool(stream_stub2.calls[0]["workdir"]), f"-> {stream_stub2.calls}")
+check("execute_code_stream happy path: installed into the SAME workdir the provider streamed with",
+      stream_provider2.captured_spec is not None
+      and stream_provider2.captured_spec.workdir == stream_stub2.calls[0]["workdir"],
+      f"-> spec.workdir={getattr(stream_provider2.captured_spec, 'workdir', None)} "
+      f"install.workdir={stream_stub2.calls[0]['workdir']}")
+check("execute_code_stream happy path: install happened BEFORE the provider streamed",
+      stream_provider2.calls == 1)
+check("execute_code_stream happy path: streaming still ran (progress fired) after the install",
+      _progress11b == [(1, "started")], f"-> {_progress11b}")
+check("execute_code_stream happy path: result carries the dependencies field",
+      _strip_timing(stream_result2.get("dependencies") or []) == [
+          {"spec": "requests", "language": "python3", "ok": True, "installer": "uv"}],
+      f"-> {stream_result2.get('dependencies')}")
+check("execute_code_stream happy path: the workdir is removed after the run",
+      not pathlib.Path(stream_stub2.calls[0]["workdir"]).exists(),
+      f"-> {stream_stub2.calls[0]['workdir']}")
+
+# 11b. deny-network / strict POLICIES refuse execute_code_stream too, not
+# only an explicit no_net=True — same coverage section 3 already gives
+# execute()'s sessionless path, threaded through the stream path.
+
+stream_service3, stream_provider3 = _stream_service(policy=_deny)
+with _StubInstall() as stream_stub3:
+    stream_result3 = _asyncio.run(stream_service3.execute_stream(
+        providers.ComputationSpec(language="python3", code="print(1)", no_net=False),
+        dependencies=["requests"],
+    ))
+check("execute_code_stream: deny-network POLICY refuses (not just no_net=True)",
+      stream_result3.get("ok") is False
+      and stream_result3.get("provider_error") == capabilities.CAPABILITY_NOT_REQUESTED,
+      f"-> {stream_result3}")
+check("execute_code_stream: deny-network policy — packages.install never called",
+      stream_stub3.calls == [], f"-> {stream_stub3.calls}")
+check("execute_code_stream: deny-network policy — the provider never streamed",
+      stream_provider3.calls == 0)
+
+stream_service4, stream_provider4 = _stream_service(policy=_strict_only)
+with _StubInstall() as stream_stub4:
+    stream_result4 = _asyncio.run(stream_service4.execute_stream(
+        providers.ComputationSpec(language="python3", code="print(1)", no_net=False),
+        dependencies=["requests"],
+    ))
+check("execute_code_stream: strict policy (no deny-network) refuses too",
+      stream_result4.get("ok") is False
+      and stream_result4.get("provider_error") == capabilities.CAPABILITY_NOT_REQUESTED,
+      f"-> {stream_result4}")
+check("execute_code_stream: strict policy — packages.install never called",
+      stream_stub4.calls == [], f"-> {stream_stub4.calls}")
+
+
+# ═══ 12. run_submit: dependencies install on the SUPERVISOR'S OWN WORKER
+# ═══     thread (never blocking run_submit's own return), with the run
+# ═══     record — not run_submit's stack frame — owning the workdir ═══════
+#
+# This section swaps in a supervisor pointed at a throwaway journal
+# directory, against the REAL LocalExecutionProvider (needed for
+# provider_id == "local" to activate the dependency path, and for a real,
+# fast `print(...)` to actually execute once install "succeeds").
+
+import tempfile as _tempfile12
+from pathlib import Path as _Path12
+
+from codecalc import providers as _providers12
+from codecalc import run_supervisor as _run_supervisor_mod12
+
+_old_run_supervisor12 = _srv976._run_supervisor
+_real_local_registry12 = _providers12.ProviderRegistry(default_provider_id="local")
+_real_local_registry12.register(_providers12.LocalExecutionProvider())
+_run_state_dir12 = _tempfile12.TemporaryDirectory(prefix="codecalc-run-deps-")
+
+
+def _wait_run_future(run_id: str, timeout: float = 5.0) -> None:
+    """Block until `run_id`'s background future is DONE, WITHOUT calling
+    run_inspect/wait — used only to make a fire-and-forget test
+    deterministic; the whole point of that test is that nothing ever calls
+    run_inspect on this run_id."""
+    run = _srv976._run_supervisor._runs[run_id]
+    run.future.result(timeout=timeout)
+
+
+try:
+    _srv976._run_supervisor = _run_supervisor_mod12.RunSupervisor(
+        _real_local_registry12, state_dir=_Path12(_run_state_dir12.name))
+    try:
+        # refusal: no run is ever created, same as execute_code's refusal —
+        # both an explicit no_net=True AND a deny-network/strict POLICY.
+        with _StubInstall() as stub_submit_refused:
+            submitted_refused = _srv976.run_submit(
+                "python3", "print(1)", no_net=True, dependencies=["requests"])
+        check("run_submit: no_net + dependencies refused, no run created",
+              submitted_refused.get("ok") is False
+              and "run_id" not in submitted_refused
+              and submitted_refused.get("provider_error") == capabilities.CAPABILITY_NOT_REQUESTED,
+              f"-> {submitted_refused}")
+        check("run_submit: refused before any run — packages.install never called",
+              stub_submit_refused.calls == [], f"-> {stub_submit_refused.calls}")
+
+        os.environ[capabilities.POLICY_ENV] = "deny-network"
+        try:
+            with _StubInstall() as stub_submit_deny:
+                submitted_deny = _srv976.run_submit(
+                    "python3", "print(1)", dependencies=["requests"])
+        finally:
+            os.environ.pop(capabilities.POLICY_ENV, None)
+        check("run_submit: deny-network POLICY refuses too (not just no_net=True)",
+              submitted_deny.get("ok") is False and "run_id" not in submitted_deny
+              and submitted_deny.get("provider_error") == capabilities.CAPABILITY_NOT_REQUESTED,
+              f"-> {submitted_deny}")
+        check("run_submit: deny-network policy — packages.install never called",
+              stub_submit_deny.calls == [], f"-> {stub_submit_deny.calls}")
+
+        os.environ[capabilities.POLICY_ENV] = "strict"
+        try:
+            with _StubInstall() as stub_submit_strict:
+                submitted_strict = _srv976.run_submit(
+                    "python3", "print(1)", dependencies=["requests"])
+        finally:
+            os.environ.pop(capabilities.POLICY_ENV, None)
+        check("run_submit: strict policy (no deny-network) refuses too",
+              submitted_strict.get("ok") is False
+              and submitted_strict.get("provider_error") == capabilities.CAPABILITY_NOT_REQUESTED,
+              f"-> {submitted_strict}")
+        check("run_submit: strict policy — packages.install never called",
+              stub_submit_strict.calls == [], f"-> {stub_submit_strict.calls}")
+
+        # happy path: run_submit returns a run_id; the install + the run
+        # itself both happen on the background worker. Polled to terminal
+        # via run_inspect rather than asserted immediately — the whole
+        # point of this round's fix is that nothing about the install is
+        # synchronous with run_submit's own return any more.
+        #
+        # The stub MUST stay installed for the whole polling loop, not just
+        # the `run_submit()` call: the install itself now runs on a
+        # background worker thread AFTER run_submit returns, so exiting the
+        # `with` block right after submit (as an earlier version of this
+        # test did) would un-stub `packages.install` before the worker ever
+        # calls it — a real race that let the worker fall through to the
+        # REAL installer, observed as a flake on this very suite.
+        with _StubInstall() as stub_submit:
+            submitted = _srv976.run_submit(
+                "python3", "print(1)", dependencies=["requests"])
+            check("run_submit: succeeds and returns a run_id immediately",
+                  submitted.get("ok") is True and bool(submitted.get("run_id")),
+                  f"-> {submitted}")
+            run_id12 = submitted.get("run_id", "")
+
+            terminal12 = None
+            for _ in range(200):
+                inspected12 = _srv976.run_inspect(run_id12)
+                if inspected12.get("state") in {"finished", "cleaned"}:
+                    terminal12 = inspected12
+                    break
+                time.sleep(0.02)
+        check("run_submit + run_inspect: reaches a terminal state", terminal12 is not None)
+        check("run_submit: the dependency installed with the run's own workdir",
+              len(stub_submit.calls) == 1 and stub_submit.calls[0]["session_id"] is None
+              and bool(stub_submit.calls[0]["workdir"]), f"-> {stub_submit.calls}")
+        dep_workdir12 = stub_submit.calls[0]["workdir"] if stub_submit.calls else None
+        if terminal12 is not None:
+            check("run_inspect terminal result carries the dependencies field",
+                  _strip_timing(terminal12.get("dependencies") or []) == [
+                      {"spec": "requests", "language": "python3", "ok": True, "installer": "uv"}],
+                  f"-> {terminal12.get('dependencies')}")
+            check("run_inspect terminal result: the run itself still succeeded",
+                  terminal12.get("ok") is True, f"-> {terminal12}")
+            check("run_inspect: the install workdir is released after the terminal poll",
+                  dep_workdir12 is not None and not _Path12(dep_workdir12).exists(),
+                  f"-> {dep_workdir12}")
+            again12 = _srv976.run_inspect(run_id12)
+            check("run_inspect: a second read still carries dependencies (retention)",
+                  _strip_timing(again12.get("dependencies") or []) == [
+                      {"spec": "requests", "language": "python3", "ok": True, "installer": "uv"}],
+                  f"-> {again12.get('dependencies')}")
+
+        # fire-and-forget: submit a dependency-bearing run and NEVER call
+        # run_inspect on it. The NEXT run_submit's own opportunistic reap
+        # (`_reap_completed_locked()`, called at the top of every `start()`)
+        # must still collect it and release its workdir — nothing else
+        # ever will, once nobody polls it. `_wait_run_future` (not
+        # run_inspect) is used only to make the test deterministic, and
+        # runs INSIDE the stub's `with` block for the same reason as above:
+        # the worker thread's install call has to land while the stub is
+        # still the thing installed.
+        with _StubInstall() as stub_forgotten:
+            forgotten = _srv976.run_submit(
+                "python3", "print('forgotten')", dependencies=["requests"])
+            check("fire-and-forget: run_submit still succeeds",
+                  forgotten.get("ok") is True and bool(forgotten.get("run_id")), f"-> {forgotten}")
+            forgotten_run_id = forgotten.get("run_id", "")
+            _wait_run_future(forgotten_run_id)  # not run_inspect — see helper docstring
+            forgotten_workdir = (stub_forgotten.calls[0]["workdir"]
+                                if stub_forgotten.calls else None)
+        check("fire-and-forget: the workdir still exists — nothing has collected it yet",
+              forgotten_workdir is not None and _Path12(forgotten_workdir).exists(),
+              f"-> {forgotten_workdir}")
+
+        with _StubInstall():
+            _srv976.run_submit("python3", "print('next')")
+        check("fire-and-forget: the NEXT run_submit's own reap released the "
+              "forgotten run's workdir — run_inspect was never called on it",
+              not _Path12(forgotten_workdir).exists(), f"-> {forgotten_workdir}")
+
+        # install FAILURE surfaces as the run's own terminal CODED error via
+        # run_inspect — not a generic INTERNAL wrapping, and with NO
+        # execution receipt attached (the provider was never reached).
+        with _StubInstall(ok=False) as stub_fail:
+            submitted_fail = _srv976.run_submit(
+                "python3", "print(1)", dependencies=["broken-pkg"])
+            check("install failure: run_submit still returns a run_id (the "
+                  "failure is the run's OWN terminal outcome, not a submit-time refusal)",
+                  submitted_fail.get("ok") is True and bool(submitted_fail.get("run_id")),
+                  f"-> {submitted_fail}")
+            fail_run_id = submitted_fail.get("run_id", "")
+            terminal_fail = None
+            for _ in range(200):
+                inspected_fail = _srv976.run_inspect(fail_run_id)
+                if inspected_fail.get("state") in {"finished", "cleaned"}:
+                    terminal_fail = inspected_fail
+                    break
+                time.sleep(0.02)
+        check("install failure: run_inspect reaches a terminal state", terminal_fail is not None)
+        if terminal_fail is not None:
+            check("install failure: the SAME coded failure packages.install itself raised",
+                  terminal_fail.get("ok") is False and terminal_fail.get("code") == "internal"
+                  and terminal_fail.get("error") == "stubbed failure",
+                  f"-> {terminal_fail}")
+            check("install failure: the attempted (failing) entry is disclosed",
+                  _strip_timing(terminal_fail.get("dependencies") or []) == [
+                      {"spec": "broken-pkg", "language": "python3", "ok": False, "installer": "uv"}],
+                  f"-> {terminal_fail.get('dependencies')}")
+            check("install failure: NO execution receipt — the provider was never reached",
+                  "provider" not in terminal_fail, f"-> {terminal_fail}")
+            check("install failure: the provider itself never ran",
+                  len(stub_fail.calls) == 1)
+    finally:
+        _srv976._run_supervisor = _old_run_supervisor12
+finally:
+    _run_state_dir12.cleanup()
+
+
+# ═══ 13. compare_execution: dependencies REJECTED explicitly; an inline PEP
+# ═══     723 block is DISCLOSED as unsupported rather than silently dropped
+
+rejected13 = _srv976.compare_execution(
+    {"python3": "print(1)"}, dependencies={"python3": ["requests"]})
+check("compare_execution: an explicit `dependencies` argument is REJECTED",
+      rejected13.get("ok") is False and rejected13.get("code") == "validation"
+      and rejected13.get("provider_error") == "unsupported_capability"
+      and rejected13.get("capability") == "dependencies",
+      f"-> {rejected13}")
+
+from codecalc import tools as _tools13
+
+compared13 = _tools13.compare_execution({
+    "python3": VALID_BLOCK,
+    "node": "console.log(1)",
+})
+rows13 = {r["language"]: r for r in compared13["results"]}
+check("compare_execution: a python3 snippet's inline PEP 723 block is DISCLOSED",
+      rows13["python3"].get("dependencies", {}).get("status") == "unsupported",
+      f"-> {rows13['python3']}")
+check("compare_execution: the disclosure names WHY (PEP 723 mentioned in the reason)",
+      "PEP 723" in rows13["python3"].get("dependencies", {}).get("reason", ""),
+      f"-> {rows13['python3'].get('dependencies')}")
+check("compare_execution: a snippet with NO block carries no dependencies disclosure",
+      "dependencies" not in rows13["node"], f"-> {rows13['node']}")
+
+
 # ═══ 6. this module imports nothing network-related ═══════════════════════
 
 import re as _re

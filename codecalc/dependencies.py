@@ -62,10 +62,17 @@ starts — the run's own timeout says nothing about the step that precedes it.
 ceiling across every dependency of one run, independent of `timeout`; exceeding
 it stops before the next install and is reported as `errors.TIMEOUT` naming
 the budget (`DEPENDENCY_INSTALL_BUDGET_EXCEEDED`), not folded into a generic
-install failure. `execute_code_stream`, `run_submit`, and `compare_execution`
-never call into this module at all — a PEP 723 block in code passed to any of
-them is inert prose, not a trigger, because none of them accept a
-`dependencies` argument or route through `resolve()`.
+install failure. `execute_code_stream` and `run_submit` both route through
+`resolve()`/`install_dependencies()` the same way `execute_code` does — the
+former installs before the first progress notification is ever sent (a
+refusal or failure IS the stream's one and only event), the latter installs
+SYNCHRONOUSLY inside the submit call itself, before a run_id is even minted,
+since the install has to land before the code is handed to the background
+worker. `compare_execution` is the one holdout: it fans out across several
+languages with no per-language install plumbing behind it, so it REJECTS an
+explicit `dependencies` argument outright (a validation error, not a silent
+ignore) and only DISCLOSES an inline PEP 723 block it finds rather than
+installing from it — see its own docstring.
 
 THE SESSIONLESS WORKDIR HAS NO SESSION TO QUOTA AGAINST, SO THIS REUSES ONE.
 `packages.install`'s own docstring says it runs no quota check on a bare
