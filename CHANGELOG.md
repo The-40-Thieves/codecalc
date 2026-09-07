@@ -33,6 +33,40 @@ behind it.
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-09-06
+
+### Added
+
+- **MCPB bundle (Claude Desktop extension), built and attached to every
+  release** (#258). `mcpb/` at the repo root (manifest, `pyproject.toml`,
+  `.mcpbignore`, `src/server.py`) packs a one-click Claude Desktop install.
+  Uses the manifest's **`uv`** server type rather than the legacy `python`
+  type: Claude Desktop's own managed `uv` resolves `codecalc[full]` from
+  PyPI into an isolated venv on first launch, so nothing codecalc-specific
+  is vendored into the bundle (3,845 bytes, 3 files). A PEP 508 environment
+  marker (`sys_platform != 'win32' or platform_machine != 'ARM64'`) on the
+  `codecalc[full]==<version>` dependency excludes Windows-on-ARM64, because
+  `cryptography` (pulled in via `mcp -> pyjwt[crypto]`) ships no
+  `win_arm64` wheel on PyPI; `mcpb/src/server.py` checks for that platform
+  before importing `codecalc` at all and exits with a one-line cause and
+  workaround instead of a bare `ModuleNotFoundError`. `manifest.json`'s
+  `long_description` discloses the resulting undisclosed-until-now
+  behaviour up front: first launch resolves ~120 MB from PyPI over the
+  network and fails without one, with nothing cached yet. New
+  `tests/test_mcpb_manifest.py` (58th test file) asserts the manifest
+  shape, the version/pin match `codecalc.__version__`, the marker text, and
+  — behaviourally, via a subprocess with `sys.platform`/`platform.machine()`
+  monkeypatched — that the ARM64 guard actually fires clean and
+  traceback-free. `scripts/check_version.py` now gates `mcpb/manifest.json`
+  and `mcpb/pyproject.toml`'s pin alongside the other version sites. A new
+  `build-mcpb` CI job builds the bundle and feeds it through the release
+  job's existing SHA256SUMS/attestation/upload steps; publish-pypi/
+  publish-testpypi/publish-crates do not depend on it.
+- **`glama.json`** at the repo root, naming the maintainer for Glama author
+  verification on the server's Glama listing (#255).
+- **`MAINTAINERS.md`** now names the confirmed maintainer handle instead of
+  a placeholder, agreeing with `glama.json` (#256).
+
 ### Changed
 
 - **`rust` and `go` promoted to the `tested` reliability tier** (from
@@ -54,6 +88,19 @@ behind it.
   breakage is the tier system's founding counterexample, and promoting it is
   a separate decision.
 
+### Fixed
+
+- **`scripts/build_mcpb.py`'s retry now covers only the npx network fetch**
+  (#259). The retry wrapper added in #258 retried *any*
+  `subprocess.CalledProcessError` three times with linear backoff, which
+  also retried `mcpb validate`/`mcpb pack` semantic failures — a genuinely
+  broken manifest took three attempts and ~6s to report instead of failing
+  on its first non-zero exit. Split into `retry_run()` (3 attempts, linear
+  backoff, wraps only `npx -y <cli>@<version> --version`, the network step)
+  and `run()` (executes `validate`/`pack` exactly once each, now that both
+  are local/deterministic once the CLI is cached), so a broken manifest
+  surfaces the CLI's own stderr immediately.
+
 ### Docs
 
 - **Novice on-ramp: README reordered, new QUICKSTART.md added.** The README's
@@ -70,6 +117,11 @@ behind it.
   an MCP client (both `setup --write` and copy-paste JSON), `codecalc
   doctor`, a prominent untrusted-code safety note linking SECURITY.md, and
   where to go next.
+- **One-click Cursor and VS Code MCP install badges, plus a Glama score
+  badge, in the README** (#257). Both badges register the recommended
+  `uvx 'codecalc[full]'` Full edition, matching the README's own per-client
+  config blocks, rather than the Core edition (whose symbolic/parsing tools
+  return `dependency_missing`).
 
 ## [0.5.0] — 2026-08-22
 
@@ -1431,7 +1483,8 @@ it, so there was no upgrade path to describe — only what the thing is.
   `ok: false` through the sandbox. Tracked, with a dated reproduction, at
   [#42](https://github.com/The-40-Thieves/codecalc/issues/42).
 
-[Unreleased]: https://github.com/The-40-Thieves/codecalc/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/The-40-Thieves/codecalc/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.6.0
 [0.5.0]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.5.0
 [0.4.0]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.4.0
 [0.3.1]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.3.1
