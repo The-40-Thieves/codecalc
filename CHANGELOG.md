@@ -33,6 +33,14 @@ behind it.
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-09-07
+
+Four changes since 0.6.0: inline artifacts from session-scoped runs,
+`verify_optimization`'s accept decision backed by a significance test,
+per-tool `ToolAnnotations`/`outputSchema`/server-side policy `_meta`, and
+per-run dependencies for `execute_code`/`session_run`. The result contract
+moves `1.3.0` → `1.4.0` (additive) for the fields the last three add.
+
 ### Changed
 
 - **`verify_optimization` now requires statistical significance, not just a
@@ -1666,7 +1674,8 @@ it, so there was no upgrade path to describe — only what the thing is.
   `ok: false` through the sandbox. Tracked, with a dated reproduction, at
   [#42](https://github.com/The-40-Thieves/codecalc/issues/42).
 
-[Unreleased]: https://github.com/The-40-Thieves/codecalc/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/The-40-Thieves/codecalc/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.7.0
 [0.6.0]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.6.0
 [0.5.0]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.5.0
 [0.4.0]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.4.0
