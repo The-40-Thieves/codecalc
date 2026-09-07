@@ -267,6 +267,15 @@ jobs:
       - name: grade vocabulary derivation rules
         shell: bash
         run: uv run --no-sync python tests/test_grades.py
+      # The Mann-Whitney U primitive verify_optimization's significance test is
+      # built on (codecalc/stats.py). Pure stdlib math — no sandbox, no z3 — so it
+      # runs everywhere: exact-enumeration counts cross-checked against a
+      # brute-force count from the DEFINITION of U (not just the recurrence's own
+      # arithmetic), the textbook n=m=3 case (U=0 -> exact p=1/20), the tie
+      # fallback, and the effect-size sign convention.
+      - name: Mann-Whitney U statistic (verify_optimization's significance test)
+        shell: bash
+        run: uv run --no-sync python tests/test_stats.py
       # Session workspace confinement. Also sandbox-free: _jail() is path logic over a tempdir, so
       # the boundary can be checked on any runner rather than only where a session can be started.
       # The protocol gate. Asserts the NEGOTIATED version from a real connection,
@@ -639,6 +648,16 @@ jobs:
       # were gated on one developer's machine.
       - name: executor regressions
         run: uv run --no-sync python tests/test_executor_sweep.py
+      # SECOND invocation of the same file the `tests` job above already runs — deliberately, same
+      # shape as `test_platform_contract.py`'s two runs (fallback-tells-the-truth there,
+      # unenforced-tells-the-truth here) and `test_mcp_all.py`'s. The `tests` job never builds this
+      # binary (that split is this job's whole reason to exist — see the job-level comment above),
+      # so every `if executor._rust:` block in this file — the live O(n)->O(1) win, and the live
+      # identical-code false-accept-rate check — self-skips there every single time and has never
+      # once run against the real executor in CI. Running it again here, after the backend assertion
+      # above confirms `rust`, is what actually exercises them.
+      - name: translation/optimization verification gate (native executor path)
+        run: uv run --no-sync python tests/test_translation_verify.py
       # Asserts that every ceiling NOT named in `unenforced` actually bites on
       # THIS platform — the half of the promise that cannot be checked by
       # reading the code, because a limit that is set but ignored looks exactly

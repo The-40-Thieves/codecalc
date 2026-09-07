@@ -26,7 +26,7 @@ import sys
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from codecalc import executor, grades, optimization, translation
+from codecalc import executor, grades, optimization, stats, translation
 from codecalc import server as _server
 from codecalc.translation import aggregate, classify_case, compare_edge_cases
 
@@ -193,18 +193,32 @@ _orig_vt843 = optimization.verify_translation
 _orig_timed843 = optimization._timed
 
 
+def _timed_stub(min_ms, n=5, sizes=(1000,)):
+    """Build a `_timed`-shaped dict with `n` distinct, evenly-spaced runs per
+    size, minimum exactly `min_ms` — separated widely enough from whatever
+    the OTHER side's stub uses that the two samples do not overlap, so the
+    Mann-Whitney test on them is unambiguous (see `_run843`'s docstring for
+    when overlap is wanted instead)."""
+    runs = [min_ms + i for i in range(n)]
+    return {"ok": True, "sizes": list(sizes), "durations_ms": [runs[0]],
+            "all_runs_ms": [runs]}
+
+
 def _run843(ratio, min_speedup):
     """Call verify_optimization with a MEASURED before/after that yields `ratio`.
 
     _speedup's ratio is before/after and keeps only before>1.0, after>0.0; pick
-    (100*ratio, 100) so the single measured pair's median ratio is exactly
-    `ratio`.
+    mins (100*ratio, 100) so the measured pair's median-of-mins ratio is
+    exactly `ratio`. Each side gets REPEATS-shaped `all_runs_ms` too (5
+    distinct, widely-separated values), so `_infer_speedup` has enough data to
+    run — for every `ratio` used below except the "genuine win" case, the
+    accept/reject verdict is already decided by the ratio checks before the
+    significance test is even consulted, so its exact shape does not matter
+    there; for the win case the wide separation this builds makes the test
+    unambiguously significant, matching what a REAL 2x win would look like.
     """
     optimization.verify_translation = lambda *a, **k: {"passed": True, "matched": 2, "total": 2}
-    _seq = iter([
-        {"ok": True, "sizes": [1000], "durations_ms": [100.0 * ratio]},
-        {"ok": True, "sizes": [1000], "durations_ms": [100.0]},
-    ])
+    _seq = iter([_timed_stub(100.0 * ratio), _timed_stub(100.0)])
     optimization._timed = lambda *a, **k: next(_seq)
     try:
         return optimization.verify_optimization("orig", "cand", "python3",
@@ -229,33 +243,194 @@ check("min_speedup<=1 can never accept, even a genuine 2x ratio",
       _nothr843.get("accepted") is False, f"-> {_nothr843.get('reason')!r}")
 _win843 = _run843(2.0, 1.15)
 check("a genuine 2x win clearing a real min_speedup>1 IS accepted",
-      _win843.get("accepted") is True and _win843.get("reason") == "verified faster",
+      _win843.get("accepted") is True and _win843.get("reason", "").startswith("verified faster"),
       f"-> accepted={_win843.get('accepted')} {_win843.get('reason')!r}")
+check("  ...and the inference object names a majority of significant sizes",
+      _win843.get("inference", {}).get("sizes_rejecting", 0) > 0
+      and _win843["inference"]["sizes_rejecting"] == _win843["inference"]["sizes_total"],
+      f"-> {_win843.get('inference')}")
 # The pure decision, checked directly for the unmeasurable case.
+_empty_inference = {"sizes_total": 0, "sizes_rejecting": 0, "decision_basis": "n/a"}
 check("an unmeasurable speedup is never accepted",
-      optimization._accept_decision({"ratio": None, "measurable": False}, 1.15)[0] is False)
+      optimization._accept_decision({"ratio": None, "measurable": False}, 1.15,
+                                    _empty_inference)[0] is False)
 
 
-# ═══ identical code plus timing noise is never certified ════════════════════
-# The unchanged-candidate guarantee used to be checked through a LIVE timing
-# measurement of FAST vs. FAST (identical O(1) code). That program does almost
-# no work, so its runtime is dominated by fixed process-startup jitter and its
-# measured before/after median ratio swings wildly: reproduced here across 30
-# runs it ranged 0.71x to 1.53x, and 2/30 exceeded the default min_speedup=1.15 and
-# were CERTIFIED "verified faster" — a flaky false accept, not a bug in the
-# accept logic (those runs genuinely MEASURED >1.15; an epsilon over min_speedup
-# would not have caught 1.53x and would only harm genuine small wins). The fix
-# is to assert the DECISION against an INJECTED within-noise ratio (
-# pattern), so the guarantee never depends on runner jitter. A realistic default
-# threshold (1.15) already rejects a within-noise ratio: the accept logic is
-# sound — what was flaky was measuring noise and feeding it back in.
-_noise845 = _run843(1.03, 1.15)
-check("a within-noise ratio (1.03) under a realistic threshold is NOT accepted",
+# ═══ a ratio that clears the threshold on NOISE alone is still rejected ═════
+# This is the fix #843 above did not have: `ratio >= min_speedup` used to be
+# the WHOLE decision, so a measured ratio inflated by noise — the
+# min-of-repeats happened to land favourably even though the two full
+# distributions overlap heavily and nothing about the candidate is actually
+# faster — was certified "verified faster" as long as the arithmetic cleared
+# the bar. Measured on this repo: reproduced across 30 LIVE runs of identical
+# O(1) code, the median-of-mins ratio ranged 0.71x-1.53x and 2/30 runs
+# exceeded the default min_speedup=1.15 and were certified. That is exactly
+# the false-accept rate a significance test exists to bound. Built here
+# DETERMINISTICALLY (an injected, overlapping full sample) rather than by
+# waiting for a live run to get unlucky: the two samples below give a
+# median-of-mins ratio that clears min_speedup=1.15, but their FULL
+# distributions interleave enough that the one-sided Mann-Whitney test cannot
+# reject "after is not faster" at alpha=0.05 — real noise, not a fabricated
+# input the accept logic special-cases.
+_before_noise = [95, 100, 130, 135, 140]  # min 95
+_after_noise = [80, 105, 110, 115, 120]  # min 80 -> ratio 95/80 = 1.1875
+_noise_ratio = min(_before_noise) / min(_after_noise)
+check("control: the injected ratio clears min_speedup=1.15 on the raw numbers",
+      _noise_ratio >= 1.15, f"-> ratio={_noise_ratio}")
+_noise_mwu = stats.mann_whitney_u(_after_noise, _before_noise, alternative="less")
+check("control: the full samples are NOT significant at alpha=0.05",
+      _noise_mwu["p_value"] >= 0.05, f"-> p={_noise_mwu['p_value']}")
+
+
+def _run_noise():
+    optimization.verify_translation = lambda *a, **k: {"passed": True, "matched": 2, "total": 2}
+    _seq = iter([
+        {"ok": True, "sizes": [1000], "durations_ms": [min(_before_noise)],
+         "all_runs_ms": [_before_noise]},
+        {"ok": True, "sizes": [1000], "durations_ms": [min(_after_noise)],
+         "all_runs_ms": [_after_noise]},
+    ])
+    optimization._timed = lambda *a, **k: next(_seq)
+    try:
+        return optimization.verify_optimization("orig", "cand", "python3", min_speedup=1.15)
+    finally:
+        optimization.verify_translation = _orig_vt843
+        optimization._timed = _orig_timed843
+
+
+_noise845 = _run_noise()
+check("a ratio that clears min_speedup on noise alone is NOT accepted",
       _noise845.get("accepted") is False, f"-> {_noise845.get('reason')!r}")
+check("  ...even though the median ratio itself did clear the threshold",
+      _noise845.get("speedup", {}).get("ratio", 0) >= 1.15,
+      f"-> ratio={_noise845.get('speedup', {}).get('ratio')}")
 check("an unchanged/noisy candidate is never certified 'verified faster'",
-      _noise845.get("reason") != "verified faster")
+      not (_noise845.get("reason") or "").startswith("verified faster"))
 check("and it is never graded cross_checked",
       grades.grade_verify_optimization(_noise845, "python3").get("grade") != grades.CROSS_CHECKED)
+
+
+# ═══ before/after must be paired by MEASURED SIZE, not by list position ════
+# `_timed(original)` and `_timed(candidate)` each auto-scale their own copy
+# of `sizes` independently (see `optimization._align_sizes`'s docstring).
+# The common case is exactly the one that matters: a slow baseline is
+# visible at the default sizes (no rescale), a genuinely fast candidate is
+# not (one or more rescales) -- so the two `sizes` lists converge to the
+# SAME LENGTH but DIFFERENT VALUES, and `_speedup`/`_infer_speedup` zip
+# before/after BY POSITION. Reproduced here with a mocked `tools._measure`:
+# the candidate needs one rescale round (1000 -> 10000) that the original
+# never does, so an unfixed pairing would compare original@1000 against
+# candidate@10000 and label the row "n: 1000" (or "n: 10000", depending on
+# which side's list is trusted) -- either way, the WRONG pair of numbers
+# under one size.
+_ORIG850 = "original code"
+_CAND850 = "candidate code"
+
+
+def _mock_measure850(language, code, sizes, timeout, repeats):
+    # original: visible immediately at the default size, no rescale
+    if code == _ORIG850 and tuple(sizes) == (1000,):
+        return [{"n": 1000, "ok": True, "duration_ms": 500,
+                 "all_runs_ms": [498, 499, 500, 501, 502]}], None
+    if code == _ORIG850 and tuple(sizes) == (10000,):
+        # only reached by _align_sizes's re-measurement, once the candidate
+        # forced 10000 into the picture -- a real O(n) baseline at 10x the
+        # size takes roughly 10x as long.
+        return [{"n": 10000, "ok": True, "duration_ms": 5000,
+                 "all_runs_ms": [4980, 4990, 5000, 5010, 5020]}], None
+    # candidate: invisible at 1000 (forces one rescale round), visible at 10000
+    if code == _CAND850 and tuple(sizes) == (1000,):
+        return [{"n": 1000, "ok": True, "duration_ms": 0.5,
+                 "all_runs_ms": [0.4, 0.5, 0.5, 0.6, 0.5]}], None
+    if code == _CAND850 and tuple(sizes) == (10000,):
+        return [{"n": 10000, "ok": True, "duration_ms": 5,
+                 "all_runs_ms": [4, 5, 5, 6, 5]}], None
+    raise AssertionError(f"unexpected _measure call: code={code!r} sizes={sizes!r}")
+
+
+_orig_measure850 = optimization.tools._measure
+optimization.tools._measure = _mock_measure850
+try:
+    _before850 = optimization._timed(_ORIG850, "python3", [1000])
+    _after850 = optimization._timed(_CAND850, "python3", [1000])
+finally:
+    optimization.tools._measure = _orig_measure850
+
+check("control: the two sides auto-scaled to DIFFERENT sizes",
+      _before850["sizes"] != _after850["sizes"]
+      and len(_before850["sizes"]) == len(_after850["sizes"]),
+      f"-> before={_before850['sizes']} after={_after850['sizes']}")
+
+optimization.tools._measure = _mock_measure850
+try:
+    _before850_aligned, _after850_aligned = optimization._align_sizes(
+        _before850, _after850, _ORIG850, _CAND850, "python3", 30)
+finally:
+    optimization.tools._measure = _orig_measure850
+
+check("_align_sizes makes both sides share the SAME sizes",
+      _before850_aligned["sizes"] == _after850_aligned["sizes"],
+      f"-> before={_before850_aligned['sizes']} after={_after850_aligned['sizes']}")
+check("  ...at the LARGER (candidate-forced) size, not the smaller one",
+      _before850_aligned["sizes"] == [10000], f"-> {_before850_aligned['sizes']}")
+
+_sp850 = optimization._speedup(_before850_aligned, _after850_aligned)
+check("_speedup's per-size entry pairs the RIGHT before/after values for n=10000",
+      _sp850.get("per_size") == [{"n": 10000, "before_ms": 5000, "after_ms": 5, "ratio": 1000.0}],
+      f"-> {_sp850.get('per_size')}")
+
+_inf850 = optimization._infer_speedup(_before850_aligned, _after850_aligned)
+check("_infer_speedup's per-size entry is also for n=10000, not the stale n=1000",
+      len(_inf850["per_size"]) == 1 and _inf850["per_size"][0]["size"] == 10000,
+      f"-> {_inf850.get('per_size')}")
+check("  ...built from the aligned 5-vs-5 samples (n_before/n_after), not a leftover 1-vs-5",
+      _inf850["per_size"][0]["n_before"] == 5 and _inf850["per_size"][0]["n_after"] == 5,
+      f"-> {_inf850.get('per_size')}")
+
+# Already-aligned input (the common case, e.g. every measured run in this
+# suite's own live sections) must cost no extra `_measure` call.
+_calls850 = []
+
+
+def _counting_measure850(language, code, sizes, timeout, repeats):
+    _calls850.append((code, tuple(sizes)))
+    return [{"n": n, "ok": True, "duration_ms": 10, "all_runs_ms": [10] * 5} for n in sizes], None
+
+
+optimization.tools._measure = _counting_measure850
+try:
+    _same850 = optimization._timed("x", "python3", [1000])
+    _calls850.clear()
+    optimization._align_sizes(_same850, dict(_same850), "x", "x", "python3", 30)
+finally:
+    optimization.tools._measure = _orig_measure850
+check("aligning two ALREADY-matching sides makes zero extra _measure calls",
+      _calls850 == [], f"-> {_calls850}")
+
+
+# ═══ identical before/after code is never accepted (the false-accept rate) ══
+# The strongest form of the guarantee above: original and candidate are the
+# SAME program, run through the REAL executor with REAL timing noise, not an
+# injected sample. There is no true speedup to find, so `accepted` must be
+# False regardless of what a single min-of-repeats measurement happens to
+# read. Before the significance test, this was exactly the flaky case
+# documented above (2/30 live runs certified). With the majority-of-sizes
+# Mann-Whitney gate, a false accept now requires a MAJORITY of independent
+# per-size tests to each false-positive at alpha=0.05 simultaneously — for 4
+# sizes that is under 0.05% by chance, not 1-in-15 (2/30).
+if executor._rust:
+    _IDENTICAL = ("import sys\nn=int(sys.stdin.readline())\ns=0\n"
+                  "for i in range(n): s+=i\nprint(s)")
+    _ident = optimization.verify_optimization(_IDENTICAL, _IDENTICAL, "python3",
+                                              test_inputs=["10", "100"],
+                                              sizes=[50000, 100000, 150000])
+    check("identical before/after code is never accepted",
+          _ident.get("accepted") is False,
+          f"-> accepted={_ident.get('accepted')} "
+          f"ratio={(_ident.get('speedup') or {}).get('ratio')} "
+          f"inference={_ident.get('inference')}")
+else:
+    print("SKIP identical-code false-accept-rate check (no native executor built)")
 
 
 # ═══ the gates are callable on their own, with no model anywhere ═══════════
@@ -282,13 +457,19 @@ if executor._rust:
           f"-> ratio={(o.get('speedup') or {}).get('ratio')} {o.get('reason')!r}")
     check("  ...and equivalence was checked first",
           (o.get("verification") or {}).get("passed") is True)
+    check("  ...and a majority of sizes were significant at alpha=0.05",
+          (o.get("inference") or {}).get("sizes_total", 0) > 0
+          and o["inference"]["sizes_rejecting"] * 2 > o["inference"]["sizes_total"],
+          f"-> {o.get('inference')}")
 
-    # The unchanged-candidate rejection is asserted DETERMINISTICALLY in the
-    # block above, not here: a live FAST-vs-FAST timing measures noise
-    # (identical O(1) code, runtime dominated by process-startup jitter) and its
-    # median ratio occasionally exceeds min_speedup, flaking this assertion. The
-    # rejections below carry what an optimiser that fabricates wins cannot: WHICH
-    # gate failed.
+    # The unchanged-candidate rejection is asserted DETERMINISTICALLY above
+    # (the "false-accept rate" section), and again LIVE further above with
+    # identical code — not here: a live FAST-vs-FAST timing measures noise
+    # (identical O(1) code, runtime dominated by process-startup jitter) and
+    # its median ratio occasionally exceeds min_speedup on its own, which is
+    # exactly the case the significance test (already exercised in the other
+    # two spots) is for. The rejections below carry what an optimiser that
+    # fabricates wins cannot: WHICH gate failed.
     o = optimization.verify_optimization(SLOW, "print(999)", "python3",
                                          test_inputs=["10", "100"])
     check("a faster-but-wrong candidate is rejected on correctness",
@@ -296,6 +477,8 @@ if executor._rust:
           f"-> {o.get('reason')!r}")
     check("  ...and its speed was never measured", "speedup" not in o,
           "-> a faster wrong answer is not an optimisation")
+    check("  ...and inference was never run either",
+          "inference" not in o, "-> a faster wrong answer is not an optimisation")
 else:
     print("SKIP live verification gates (no native executor built)")
 

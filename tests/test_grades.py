@@ -71,10 +71,21 @@ def translation_all_inconclusive():
 
 
 def optimization_accepted(language="python3", ratio=1.8, n_sizes=4, matched=4, total=4):
-    return {"ok": True, "accepted": True, "reason": "verified faster",
+    return {"ok": True, "accepted": True,
+            "reason": f"verified faster: {ratio}x median, {n_sizes}/{n_sizes} "
+                      f"size(s) significant at alpha=0.05",
             "speedup": {"ratio": ratio, "measurable": True,
                         "per_size": [{"n": n, "before_ms": 10, "after_ms": 5, "ratio": ratio}
                                      for n in range(n_sizes)]},
+            # grade_verify_optimization only reads `accepted`/`speedup`/
+            # `verification` — `inference` is here because it is what a REAL
+            # verify_optimization result now carries (see
+            # optimization._infer_speedup), and this module's own docstring
+            # says fixtures are shaped like the real thing, not a subset of
+            # it. Its presence must not change the grade below.
+            "inference": {"test": "mann_whitney_u", "alternative": "after_faster",
+                          "alpha": 0.05, "sizes_rejecting": n_sizes, "sizes_total": n_sizes,
+                          "decision_basis": f"{n_sizes}/{n_sizes} size(s) reject the null"},
             "min_speedup": 1.15,
             "verification": {"passed": True, "matched": matched, "total": total},
             "language": language}
@@ -145,6 +156,18 @@ g = grades.grade_verify_optimization(optimization_accepted(language="rust", rati
 check("optimization accepted -> cross_checked", g["grade"] == grades.CROSS_CHECKED, f"-> {g['grade']}")
 check("optimization grade_basis names the runtime AND the measured speedup",
       "rust" in g["grade_basis"] and "2.3" in g["grade_basis"], f"-> {g['grade_basis']}")
+check("  ...AND the significance result (sizes significant / alpha), not just the ratio",
+      "4/4" in g["grade_basis"] and "alpha=0.05" in g["grade_basis"]
+      and "Mann-Whitney" in g["grade_basis"], f"-> {g['grade_basis']}")
+
+# A result shaped like an OLDER verify_optimization (no `inference` field at
+# all) must still grade -- the basis clause above is additive, never required.
+g_no_inference = grades.grade_verify_optimization(
+    {k: v for k, v in optimization_accepted().items() if k != "inference"}, "python3")
+check("a result with no `inference` field still grades cross_checked",
+      g_no_inference["grade"] == grades.CROSS_CHECKED, f"-> {g_no_inference['grade']}")
+check("  ...with a basis that says nothing about significance it was never given",
+      "Mann-Whitney" not in g_no_inference["grade_basis"], f"-> {g_no_inference['grade_basis']}")
 
 g = grades.grade_verify_optimization(optimization_not_equivalent(), "python3")
 check("optimization rejected for correctness -> ungraded, never cross_checked",

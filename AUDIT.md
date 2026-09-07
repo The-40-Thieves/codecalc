@@ -316,7 +316,9 @@ network-blocking shim. Each has a security-relevant design decision:
 10. **compare_edge_cases**: offline-capable; snippets are provided per language
     and run through the standard sandbox. No LLM in the loop.
 11. **verify_optimization**: the speedup gate is MEASURED (same sizes, min-of-repeats,
-    baseline-subtracted), never the LLM's claim. Already-optimal code is
+    baseline-subtracted) AND statistically tested (a one-sided Mann-Whitney U
+    test per size, majority must reject at alpha=0.05 — codecalc/stats.py),
+    never the LLM's claim. Already-optimal code is
     honestly rejected ("no accepted optimization after retry" with the
     measured ratio) rather than fabricating a pass. Sub-noise-floor baselines
     are accepted on correctness with an explicit warning — which is why the

@@ -159,14 +159,21 @@ def grade_verify_optimization(result: dict, language: str) -> dict:
 
     `accepted` is True only after the embedded correctness verification
     passed (itself `cross_checked`-shaped evidence: original vs. candidate,
-    independently agreed) AND the speedup was actually measured and cleared
-    `min_speedup`. Both halves are folded into one `cross_checked` grade
-    because the top-level claim being graded — "candidate IS a genuine
-    optimisation" — depends on both; `grade_basis` names both facts so
-    neither is hidden. A candidate that is equivalent but not measurably
-    faster (`accepted=False`) is a non-success for THIS claim even though its
-    own correctness check passed, so it stays ungraded — the grade is about
-    the tool's verdict, not about how far the candidate got.
+    independently agreed), the speedup was actually measured and cleared
+    `min_speedup`, AND (as of the significance-test change to
+    `optimization._accept_decision`) a majority of measured sizes rejected
+    "not faster" in a one-sided Mann-Whitney U test at alpha=0.05. All of
+    that is folded into one `cross_checked` grade because the top-level
+    claim being graded — "candidate IS a genuine optimisation" — depends on
+    all of it; `grade_basis` names the significance result alongside the
+    ratio, when the result carries an `inference` field, so neither is
+    hidden. This is a change to what the basis TEXT describes, not to what
+    evidence maps to what grade — `accepted` already encodes the stronger
+    bar upstream in `optimization.py`, so `GRADE_RULES_VERSION` does not
+    move for it. A candidate that is equivalent but not measurably (or not
+    significantly) faster (`accepted=False`) is a non-success for THIS claim
+    even though its own correctness check passed, so it stays ungraded — the
+    grade is about the tool's verdict, not about how far the candidate got.
     """
     if not result.get("accepted"):
         reason = result.get("reason") or result.get("error") or "not accepted"
@@ -195,6 +202,17 @@ def grade_verify_optimization(result: dict, language: str) -> dict:
     basis = (f"cross-checked: original and candidate independently agreed on "
              f"{matched}/{total} test input(s) under {language} execution; "
              f"speed measured at {ratio}x (median) across {sizes_measured} size(s)")
+    # `inference` is present on every result produced by the current
+    # optimization.py (it is what `accepted=True` now actually rests on —
+    # see this function's docstring), but this reads it defensively rather
+    # than assuming: a fixture or a future caller shaped like an older
+    # result (ratio-only, no `inference`) still grades, just without the
+    # extra clause, same as `matched`/`total` above already tolerate absence.
+    inference = result.get("inference")
+    if inference and inference.get("sizes_total"):
+        basis += (f"; {inference['sizes_rejecting']}/{inference['sizes_total']} "
+                  f"size(s) significant at alpha={inference.get('alpha')} "
+                  f"(one-sided Mann-Whitney U)")
     return _graded(result, CROSS_CHECKED, basis)
 
 
