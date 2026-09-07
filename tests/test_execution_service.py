@@ -651,6 +651,120 @@ def test_session_service_owns_protocol_neutral_lifecycle_and_artifacts() -> None
           stopped["ok"] is True and stopped["deleted"] is True)
 
 
+def test_artifact_filter_excludes_runner_internals_only_at_the_session_root() -> None:
+    """The runner writes its own scratch files (main.<ext>, a.out/a.exe,
+    the Rust backend's run.out/run.err/run.in/compile.out/compile.err/
+    compile.in, Kotlin's out.jar, and the session lock file) directly in
+    the session ROOT — verified against executor.py's `_execute_python`,
+    executor/src/main.rs's `execute()`/`run_step()`, registry.py's Kotlin
+    compile command, and `_write_lock_file`, none of which ever nest these
+    names in a subdirectory (`a.exe` is that same compiled-output slot on
+    Windows — `exe_name = "a.exe" if IS_WINDOWS else "a.out"` / `if
+    cfg!(windows) { "a.exe" } else { "a.out" }`, checked on every OS here
+    since which name a session excludes must not depend on which platform
+    runs the test). Before the fix, `_RUNNER_INTERNAL_NAMES` matched by
+    BASENAME anywhere in the tree, so a user's own `a.out`/`main.py` in a
+    subdirectory (e.g. `gcc -o a.out program.c` run inside `build/`) was
+    silently invisible to `session_artifacts`. This asserts both halves: a
+    user file sharing one of those basenames in a subdirectory is
+    reported, and the runner's own file at its real, root-level location
+    is not — this test simulates the file layout directly (no real
+    execution); `test_a_real_compiled_run_on_the_rust_backend_reports_only_user_artifacts`
+    below covers the same claim against an ACTUAL Rust-backend run,
+    which is what actually caught the run.out/run.err/etc. Rust-only gap
+    a plain-string grep of the source could not see."""
+    old_root = sessions.SESSION_ROOT
+    with tempfile.TemporaryDirectory(prefix="codecalc-artifact-scope-") as root:
+        sessions.SESSION_ROOT = Path(root)
+        try:
+            session_id = sessions.start("bash")["session_id"]
+            d = sessions._session_dir(session_id)
+            root_only_names = (
+                "a.out", "a.exe", "main.py", "run.out", "run.err", "run.in",
+                "compile.out", "compile.err", "compile.in", "out.jar",
+                sessions._LOCK_FILE_NAME,
+            )
+            (d / "build").mkdir()
+            for name in root_only_names:
+                (d / "build" / name).write_bytes(f"user {name}".encode())
+                (d / name).write_bytes(f"runner {name}".encode())
+
+            listed = {e["path"] for e in sessions.artifacts(session_id)["artifacts"]}
+        finally:
+            sessions.SESSION_ROOT = old_root
+
+    for name in root_only_names:
+        check(f"a user file named {name} in a subdirectory IS reported",
+              f"build/{name}" in listed)
+        check(f"the runner's own {name} at the session root is NOT reported",
+              name not in listed)
+
+
+def test_a_real_compiled_run_on_the_rust_backend_reports_only_user_artifacts() -> None:
+    """Live proof, not a simulated file layout: compiling and running an
+    ACTUAL C program through the REAL Rust executor binary writes
+    `main.c`/`a.out` and — on the Rust backend specifically —
+    `compile.out`/`compile.err`/`compile.in`/`run.out`/`run.err`/`run.in`
+    at the session root. Verified directly against
+    `executor/src/main.rs`'s `run_step()`, which redirects every
+    compile/run step's stdout/stderr/stdin to `{tag}.{out,err,in}` in the
+    workdir root, unconditionally, on every call — called once with
+    `tag="compile"` and once with `tag="run"`.
+
+    A prior version of this fix verified the exclusion set by grepping
+    both backends' SOURCE for these literal strings and found none in the
+    Rust binary — wrongly: the Rust code builds them with a runtime
+    `format!("{tag}.out")`, invisible to a literal-string grep. This test
+    instead runs the real binary and inspects what `artifacts_created`
+    actually reports, which is the only way this class of bug is caught.
+
+    Skips LOUDLY (a printed SKIP line, not a silent pass) when no Rust
+    binary is resolved in this environment — see executor.py's
+    `_rust_binary()`/`CODECALC_EXEC_BIN` — rather than passing vacuously
+    because the Python fallback backend (which never writes these six
+    files at all) was exercised instead.
+    """
+    if executor._rust is None:
+        print("SKIP test_a_real_compiled_run_on_the_rust_backend_reports_only_user_artifacts "
+              "(no codecalc-exec binary resolved; build executor/ with "
+              "`cargo build --release --manifest-path executor/Cargo.toml` or set "
+              "CODECALC_EXEC_BIN before this module is imported)")
+        return
+
+    old_root = sessions.SESSION_ROOT
+    with tempfile.TemporaryDirectory(prefix="codecalc-artifact-real-c-") as root:
+        sessions.SESSION_ROOT = Path(root)
+        try:
+            session_id = sessions.start("bash")["session_id"]
+            code = (
+                '#include <stdio.h>\n'
+                'int main(void) {\n'
+                '    FILE *f = fopen("result.txt", "w");\n'
+                '    fprintf(f, "hello-from-c\\n");\n'
+                '    fclose(f);\n'
+                '    printf("compiled and ran\\n");\n'
+                '    return 0;\n'
+                '}\n'
+            )
+            result = sessions.execute(session_id, code, language="c")
+            created = {a["path"] for a in (result.get("artifacts_created") or [])}
+            listed = {e["path"] for e in sessions.artifacts(session_id)["artifacts"]}
+        finally:
+            sessions.SESSION_ROOT = old_root
+
+    check("the real C program actually compiled and ran on the Rust backend",
+          result.get("ok") is True and result.get("backend") != "python"
+          and "compiled and ran" in result.get("stdout", ""))
+    check("the real user output file IS in artifacts_created",
+          "result.txt" in created)
+    check("artifacts_created names ONLY the user's own output, nothing runner-internal "
+          f"(got {sorted(created)})",
+          created == {"result.txt"})
+    check("session_artifacts agrees — no runner-internal file listed either "
+          f"(got {sorted(listed)})",
+          listed == {"result.txt"})
+
+
 def test_session_service_reads_bounded_files_and_runs_workspace_entries() -> None:
     service_type = getattr(execution_service, "SessionService", None)
     check("session service supports workspace reads and runs", service_type is not None)
@@ -1776,6 +1890,40 @@ def test_spill_files_are_retained_up_to_a_bounded_count() -> None:
             sessions._SPILL_RETENTION = old_retention
 
 
+def test_session_artifacts_excludes_the_spill_directory() -> None:
+    """A run whose output spills wrote its own `.codecalc-spill/*.bin` file
+    into the workspace — before the fix, `_artifact_entries` did not exclude
+    it, so it showed up as a brand-new "artifact" in `artifacts_created`
+    (always degraded to a ResourceLink, since a spill can be arbitrarily
+    large), duplicating what `stdout_spill` already reports. The spill stays
+    fetchable through `session_read_file`/`resource_read` either way — only
+    the artifact LISTING/classification is what must not double-count it."""
+    old_root = sessions.SESSION_ROOT
+    with tempfile.TemporaryDirectory(prefix="codecalc-artifact-spill-") as root:
+        sessions.SESSION_ROOT = Path(root)
+        try:
+            session_id = sessions.start("bash")["session_id"]
+            code = 'import sys; sys.stdout.write("A" * 100000)'
+            result = sessions.execute(session_id, code, language="python3")
+            spill_uri = result.get("stdout_spill")
+            created = result.get("artifacts_created") or []
+            listed = {e["path"] for e in sessions.artifacts(session_id)["artifacts"]}
+            fetched = (
+                sessions.resource_read(session_id, spill_uri.split("/files/", 1)[1])
+                if isinstance(spill_uri, str) else None
+            )
+        finally:
+            sessions.SESSION_ROOT = old_root
+
+    check("the run actually spilled", isinstance(spill_uri, str))
+    check("stdout_spill still points at a real, readable file",
+          fetched is not None)
+    check("artifacts_created does not name anything under .codecalc-spill/",
+          not any(a["path"].startswith(sessions._SPILL_DIRNAME + "/") for a in created))
+    check("session_artifacts does not list anything under .codecalc-spill/ either",
+          not any(p.startswith(sessions._SPILL_DIRNAME + "/") for p in listed))
+
+
 # ── session_run / execute_code(session_id=...) inline artifacts ───────────
 
 def test_session_run_inlines_oversized_artifact_as_a_link_not_an_image() -> None:
@@ -1979,6 +2127,8 @@ if __name__ == "__main__":
     test_receipt_distinguishes_two_sessions_running_the_same_spec()
     test_compact_mode_keeps_the_actionable_half_of_the_receipt()
     test_session_service_owns_protocol_neutral_lifecycle_and_artifacts()
+    test_artifact_filter_excludes_runner_internals_only_at_the_session_root()
+    test_a_real_compiled_run_on_the_rust_backend_reports_only_user_artifacts()
     test_session_service_reads_bounded_files_and_runs_workspace_entries()
     test_session_file_pagination_is_shared_and_cursor_based()
     test_mcp_session_adapters_delegate_to_the_shared_service()
@@ -2007,6 +2157,7 @@ if __name__ == "__main__":
     test_session_run_also_spills_oversized_output()
     test_a_spill_the_server_writes_is_always_readable_back()
     test_spill_files_are_retained_up_to_a_bounded_count()
+    test_session_artifacts_excludes_the_spill_directory()
     test_session_run_inlines_oversized_artifact_as_a_link_not_an_image()
     test_session_run_charges_the_inline_budget_in_encoded_wire_bytes()
     test_session_run_inlines_a_small_csv_as_an_embedded_resource()
