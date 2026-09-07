@@ -2,10 +2,26 @@
 
 Each entry maps a language name to file extension and optional compile/run
 argv templates. Placeholders:
-  {file}  absolute path to the user's source file
-  {exe}   absolute path to the compiled binary (compile step output)
-  {work}  absolute path to the per-run temp workdir
+  {file}  absolute path to the runner's OWN COPY of the source, inside the
+          scratch subdirectory (RUN_SCRATCH_DIRNAME below) — never the
+          workdir root itself.
+  {exe}   absolute path to the compiled binary (compile step output), also
+          inside the scratch subdirectory.
+  {work}  absolute path to the scratch subdirectory itself (NOT the workdir
+          root — see RUN_SCRATCH_DIRNAME). Kotlin's compile command and the
+          gleam/haskell wrapper scripts use this to place their own build
+          output alongside {exe} rather than at the workdir root.
   {proj}  generated project dir name (dotnet / gleam wrappers)
+
+The workdir ROOT is a separate thing from all four placeholders above: it is
+the RUNNING PROGRAM's cwd (both `codecalc/executor.py` and
+`executor/src/main.rs` set it for the run step specifically — the compile
+step's cwd is the scratch subdirectory, since nothing about compiling is the
+user's own I/O), so a program's own relative file access
+(`open("data.csv")`, a session's own files written via `session_write_file`)
+resolves there, exactly where a caller placed them — never inside the
+runner's scratch subdirectory, which the caller never sees as a workspace
+path at all.
 """
 
 from __future__ import annotations
@@ -132,23 +148,51 @@ RUNTIME_STATES = ("supported", "installed", "unhealthy", "available")
 #:     C:\Users\me\AppData\Local\Temp\codecalc-ab12\main.sh
 #:
 #: arrives at bash as `C:UsersmeAppDataLocalTempcodecalc-ab12main.sh` — every
-#: separator eaten, exit 127, 100% reproducible on a desktop Git-for-Windows
+#: backslash eaten, exit 127, 100% reproducible on a desktop Git-for-Windows
 #: install. Nothing on the Python side is wrong; `shlex.split` produces a
 #: correct argv and Windows flattens it before the callee re-splits it.
 #:
-#: The repair is to hand these runtimes a name with NO separator left in it.
-#: The child's cwd IS the workdir already (`_run_step(..., cwd=workdir)` here
-#: and `current_dir` in main.rs), so the bare file name names the same file and
-#: leaves nothing for either the escape pass or MSYS path translation to
-#: corrupt. It also immunises the spaced-profile case (`C:\Users\John Smith\`),
-#: which the same re-parse would split on — untested by CI and by the box that
-#: found this one, so it is a property of the fix rather than a verified claim.
+#: The repair is to hand these runtimes a path with NO BACKSLASH left in it —
+#: not "no separator": since the runner's own copy of the source lives inside
+#: RUN_SCRATCH_DIRNAME (below), one level under the run step's own cwd (the
+#: workdir root — see that constant's docstring for why the two differ), a
+#: bare basename is no longer enough on its own to name the same file from
+#: that cwd. `source_arg` instead renders a scratch-relative path with a
+#: forward slash (`RUN_SCRATCH_DIRNAME/main.<ext>`) — a `/` is not a `\`, so
+#: MSYS's re-tokenization passes it through untouched, which is the whole
+#: property this set exists to guarantee; MSYS bash treats `/` as a directory
+#: separator regardless of host OS. It also immunises the spaced-profile case
+#: (`C:\Users\John Smith\`), which the same re-parse would split on — untested
+#: by CI and by the box that found this one, so it is a property of the fix
+#: rather than a verified claim.
 #:
 #: SCOPED TO THE SHELLS BECAUSE THAT IS WHERE IT WAS MEASURED. A MinGW `gcc` is
 #: the same kind of program and plausibly shares the mechanism, but nobody has
 #: run it; this set exists to stop exactly that guess. Mirrored in main.rs and
 #: gated by scripts/check_parity.py.
 POSIX_ARGV_LANGUAGES = frozenset({"bash", "zsh"})
+
+#: The runner's own scratch subdirectory of a workdir/session root: the
+#: entry source copy (`main.<ext>`), the compiled binary (`a.out`/`a.exe`),
+#: any compile output a language template names via `{work}` (Kotlin's
+#: `out.jar`, gleam's scaffolded `proj/` tree), and — on the Rust backend
+#: only — the compile/run redirect files all live HERE, never at the workdir
+#: root.
+#:
+#: The workdir root itself stays the RUNNING PROGRAM's cwd (both backends set
+#: this for the run step specifically), so a user's own relative file access
+#: (`open("data.csv")`, a session's own `main.py` written via
+#: `session_write_file`) keeps resolving exactly where it always has, and a
+#: session's own files are never silently overwritten by the runner's next
+#: run of some OTHER entry file — the bug this subdirectory exists to close.
+#: `sessions.py`'s artifact listing excludes this one directory prefix
+#: (plus the session lock and the spill directory) rather than a
+#: hand-maintained set of root-level basenames, so a language added to the
+#: registry can never reopen that bug for itself.
+#:
+#: Mirrored in `executor/src/main.rs`; `scripts/check_parity.py` gates that
+#: the two agree.
+RUN_SCRATCH_DIRNAME = ".codecalc-run"
 
 #: Languages whose CANONICAL PLAN still needs a POSIX shell to prepare its
 #: workspace — the `bash -c` wrappers. csharp left this set when
@@ -200,9 +244,17 @@ def source_arg(language: str, path: str, *, windows: bool) -> str:
     treat `\` as a separator and hands back the whole path unchanged. The Linux
     CI leg caught that on the first run; with `os.path` it would have passed
     three green legs and shipped the bug it was written to prevent.
+
+    The rendered path is `RUN_SCRATCH_DIRNAME/<basename>` (forward slash),
+    not the bare basename alone: the run step's cwd is the workdir ROOT, one
+    level above where the runner's own copy of the source actually lives
+    (see RUN_SCRATCH_DIRNAME), so a bare name would no longer resolve. A `/`
+    survives MSYS's backslash-escape re-tokenization untouched — see
+    POSIX_ARGV_LANGUAGES's docstring for why that is the property that
+    matters, not "no separator at all".
     """
     if windows and language in POSIX_ARGV_LANGUAGES:
-        return ntpath.basename(path)
+        return f"{RUN_SCRATCH_DIRNAME}/{ntpath.basename(path)}"
     return path
 
 
@@ -241,12 +293,39 @@ LANGUAGES: dict[str, dict] = {
     # toolchain, because contract_check.py's COMPILED_BROKEN case only proves
     # a bad program is REJECTED correctly, and a review's smoke test once
     # found the rust HOST toolchain failing while `rustc` resolved cleanly.
-    "c":       _c("gcc -O2 -o {exe} {file}", "{exe}", "best_effort"),
-    "cpp":     _c("g++ -O2 -o {exe} {file}", "{exe}", "best_effort"),
-    "c++":     _c("g++ -O2 -o {exe} {file}", "{exe}", "best_effort"),
+    # `-I{work}/..` restores a behaviour the scratch subdirectory would
+    # otherwise silently take away: `#include "helper.h"` (C/C++) and
+    # `include 'helper.inc'` (Fortran) resolve QUOTED/relative includes
+    # against the INCLUDING FILE's own directory first — which used to be
+    # the workdir root itself (where a sibling written via
+    # `session_write_file` actually lives), and is now RUN_SCRATCH_DIRNAME
+    # instead. `{work}` is that scratch directory (see its docstring), so
+    # `{work}/..` is the workdir root, purely lexically — no extra
+    # placeholder needed, and the OS resolves the `..` component when gcc
+    # opens the file, the same way it always resolves `..` in any path. `-I`
+    # ADDS a search directory rather than replacing the implicit
+    # same-directory check, so this is additive: a header already found next
+    # to the scratch copy (there is never one) is unaffected, and one at the
+    # workdir root is now found same as before this subdirectory existed.
+    # Measured against the un-fixed behaviour: `#include "x.h"` for a
+    # session's own `x.h` written via `session_write_file` failed with
+    # "No such file or directory" before this flag was added.
+    "c":       _c("gcc -O2 -I{work}/.. -o {exe} {file}", "{exe}", "best_effort"),
+    "cpp":     _c("g++ -O2 -I{work}/.. -o {exe} {file}", "{exe}", "best_effort"),
+    "c++":     _c("g++ -O2 -I{work}/.. -o {exe} {file}", "{exe}", "best_effort"),
+    # rust's `mod helper;` has NO equivalent search-path flag — module
+    # resolution is strictly relative to the declaring file's own directory,
+    # with no rustc option to add a fallback search directory the way C's
+    # `-I`/Fortran's `-I` do. A session's own `helper.rs` at the workdir
+    # root, previously resolvable via `mod helper;` in `main.rs` (both used
+    # to live in the same directory), is a DOCUMENTED, un-fixable behaviour
+    # change from the scratch subdirectory: `mod helper;` now looks in
+    # RUN_SCRATCH_DIRNAME, where no such file exists. A single-file rust
+    # program (the only shape tests/test_tier_evidence.py's `tested` claim
+    # covers) is entirely unaffected.
     "rust":    _c("rustc -O -o {exe} {file}", "{exe}", "tested"),
     "go":      _c(None, "go run {file}", "tested"),
-    "fortran": _c("gfortran -O2 -o {exe} {file}", "{exe}", "best_effort"),
+    "fortran": _c("gfortran -O2 -I{work}/.. -o {exe} {file}", "{exe}", "best_effort"),
     "zig":     _c(None, "zig run {file}", "best_effort"),
     # Java 11+ single-file source launch (JEP 330) — works with JDK 26.
     "java":    _c(None, "java {file}", "best_effort"),
@@ -272,6 +351,21 @@ LANGUAGES: dict[str, dict] = {
         'bash -c \'gleam new "$2/proj" --name prog --skip-git && cp "$1" "$2/proj/src/prog.gleam" && cd "$2/proj" && gleam run\' codecalc {file} {work}',
         "best_effort",
     ),
+    # Unlike rust's `mod` (declaring-file-relative), GHC's default import
+    # search path is CWD-relative (`-i.`), and this plan's `run` cwd is the
+    # workdir root — never RUN_SCRATCH_DIRNAME, since haskell has no separate
+    # `compile` entry (this whole bash script is the one "run" step). So a
+    # session's own sibling `Helper.hs` at the workdir root DOES still
+    # resolve via `import Helper` — verified end to end, correcting an
+    # earlier, wrong claim here that grouped haskell with rust as broken by
+    # RUN_SCRATCH_DIRNAME. What actually changed nothing: GHC's own build
+    # writes each module's `.hi`/`.o` NEXT TO ITS SOURCE, so `Helper.hi`/
+    # `Helper.o` land at the workdir root beside `Helper.hs` — outside
+    # RUN_SCRATCH_DIRNAME, a latent collision risk with a same-named user
+    # file, but a PRE-EXISTING GHC characteristic this fix neither
+    # introduced nor changed (main.hs's own copy already lived at the
+    # workdir root before RUN_SCRATCH_DIRNAME existed, with the identical
+    # cwd, so `Helper.hi`/`.o` landed exactly there then too).
     "haskell": _c(
         None,
         'bash -c \'f=$(printf %q "$1"); e=$(printf %q "$3"); nix-shell -p ghc --run "ghc -O2 -o $e $f && $e"\' codecalc {file} {work} {exe}',

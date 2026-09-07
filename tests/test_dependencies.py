@@ -906,6 +906,78 @@ check("compare_execution: a snippet with NO block carries no dependencies disclo
       "dependencies" not in rows13["node"], f"-> {rows13['node']}")
 
 
+# ═══ 14. dependency importability survives RUN_SCRATCH_DIRNAME ════════════
+# packages.py's own docstring: a `--target <workdir root>` install used to be
+# importable "for free" because CPython puts the entry file's own directory
+# on sys.path[0], and the entry file's runner-owned copy used to live
+# directly at that same workdir root. It no longer does
+# (registry.RUN_SCRATCH_DIRNAME) — `PYTHONPATH=<workdir root>`, set
+# unconditionally on every python3 step, is now the ONLY thing making a
+# `--target`-installed package importable. This proves that end to end, on
+# BOTH backends, via a STUBBED install (this repo's test suite deliberately
+# avoids a real network install in a test that would, if it regressed, do
+# the very damage it is checking for — see test_package_isolation.py's own
+# docstring) that writes real, IMPORTABLE Python source at the workdir
+# root, then actually RUNS an entry file that imports it through the real
+# executor — not a mock of either half.
+
+from codecalc import executor as _executor14
+
+
+class _StubInstallModule(_StubInstall):
+    """Like `_StubInstall`, but writes an IMPORTABLE `.py` module rather
+    than an opaque `.bin` blob — the shape a real `--target` install
+    actually produces, and the only shape that can prove "importable", not
+    merely "present on disk"."""
+
+    def __call__(self, language, package, session_id=None, version=None,
+                audit=None, workdir=None, timeout=600):
+        result = super().__call__(language, package, session_id=session_id,
+                                  version=version, audit=audit,
+                                  workdir=workdir, timeout=timeout)
+        if result.get("ok"):
+            target_dir = (pathlib.Path(workdir) if workdir
+                         else sessions._session_dir(session_id))
+            (target_dir / f"{package}.py").write_text("VALUE = 42\n")
+        return result
+
+
+def _dependency_importability_regression(backend_label: str) -> None:
+    sid14 = sessions.start("python3")["session_id"]
+    try:
+        _session_service.write_file(
+            sid14, "main.py",
+            "import fakepkg14\nprint(fakepkg14.VALUE)\n")
+        with _StubInstallModule() as stub14:
+            r14 = _session_service.run_file(
+                sid14, "main.py", dependencies=["fakepkg14"])
+        check(f"{backend_label}: dependency install stub ran once",
+              len(stub14.calls) == 1, f"-> {stub14.calls}")
+        check(f"{backend_label}: the entry file imports the installed "
+              "package and runs (PYTHONPATH covers the workdir root)",
+              r14.get("ok") is True and r14.get("stdout", "").strip() == "42",
+              f"-> ok={r14.get('ok')} stdout={r14.get('stdout')!r} "
+              f"stderr={r14.get('stderr')!r}")
+    finally:
+        sessions.stop(sid14)
+
+
+_saved_rust14 = _executor14._rust
+_executor14._rust = None
+try:
+    _dependency_importability_regression("fallback")
+finally:
+    _executor14._rust = _saved_rust14
+
+if _executor14._rust:
+    _dependency_importability_regression("rust")
+else:
+    print("SKIP rust: dependency importability survives RUN_SCRATCH_DIRNAME "
+          "(no codecalc-exec binary resolved; build executor/ with "
+          "`cargo build --release --manifest-path executor/Cargo.toml` or set "
+          "CODECALC_EXEC_BIN before this module is imported)")
+
+
 # ═══ 6. this module imports nothing network-related ═══════════════════════
 
 import re as _re

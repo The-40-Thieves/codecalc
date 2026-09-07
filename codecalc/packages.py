@@ -16,10 +16,24 @@ sandbox runs untrusted code on. One tool call therefore installed third-party
 code into every future sandboxed run, for every session, permanently, and
 survived session_stop. The docstring claimed workspace scoping the whole time.
 
-`--target <dir>` fixes it and needs no environment plumbing: CPython puts the
-script's own directory on sys.path[0], and executed code runs from the session
-workdir, so a package installed there is importable. Verified both halves — a
-package installed with --target is importable from that directory and is NOT
+`--target <dir>` fixes it, but the WHY has since moved: `uv pip install
+--target <workdir root>` puts the package files directly at the session
+workdir root, and that USED TO be importable "for free" because CPython
+puts the script's own directory on sys.path[0], and the entry file's own
+runner-owned copy used to live directly at that same workdir root. It no
+longer does — the entry copy now lives inside a private scratch
+subdirectory (`registry.RUN_SCRATCH_DIRNAME`), so `sys.path[0]` is THAT
+directory, not the workdir root a `--target` install actually lands in.
+The only thing making a `--target`-installed package importable now is
+`executor.py`'s/`main.rs`'s own `PYTHONPATH=<workdir root>`, set
+unconditionally on every python3 step for a DIFFERENT stated reason (a
+sibling module written via `session_write_file`) that happens to cover
+this one too, since both are "something at the workdir root that
+`sys.path[0]` no longer reaches on its own". Removing `PYTHONPATH` on the
+theory that it is redundant with this `--target` scheme would silently
+break every dependency install this function makes. Verified both
+halves — a package installed with --target is importable from that
+directory (via `PYTHONPATH`, end to end, on both backends) and is NOT
 visible to the host interpreter.
 
 `ruby` and `r` had the same shape (`gem install` -> the interpreter's global

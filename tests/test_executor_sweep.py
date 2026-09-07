@@ -67,17 +67,30 @@ def run_exec(code: str, lang: str = "python3", timeout: int = 30, **flags) -> di
         return {"_unparsable": p.stdout[:400], "_stderr": p.stderr[:400]}
 
 
-# ═══ 1. a failed source write must not delete the caller's workdir ══════════
-# `--workdir` is a SESSION directory holding the user's files. When the source
-# write failed the cleanup path removed it wholesale, so a sandboxed program
-# could destroy the whole session workspace with `rm -f main.sh && mkdir main.sh`
-# — the write then fails against a directory and the workspace goes with it.
+# ═══ 1. a scratch-directory setup failure must not delete the caller's
+# ═══    workdir ══════════════════════════════════════════════════════════
+# `--workdir` is a SESSION directory holding the user's files. When the
+# source write failed the cleanup path removed it wholesale, so a sandboxed
+# program could destroy the whole session workspace with
+# `rm -rf main.sh && mkdir main.sh` — the write then failed against a
+# directory and the workspace went with it. The runner's own copy of the
+# source now lives at `.codecalc-run/main.<ext>` (registry.
+# RUN_SCRATCH_DIRNAME), which is WIPED AND RECREATED FRESH on every call
+# (see that constant's docstring) — so a directory occupying that exact
+# scratch-file name no longer survives to force the write itself to fail
+# the way it used to; the reset silently clears it before the write ever
+# runs. What DOES still force an early, structural failure, cross-platform
+# (a plain file blocks directory use identically on POSIX and Windows,
+# unlike a chmod-based sabotage, which Windows does not enforce the same
+# way for directories): `.codecalc-run` itself pre-existing as a plain
+# FILE rather than a directory, refused outright before anything is wiped
+# or written.
 if EXE.exists():
     work = pathlib.Path(tempfile.mkdtemp(prefix="codecalc-sweep-"))
     (work / "precious.txt").write_text("user data")
-    (work / "main.py").mkdir()          # forces the source write to fail
+    (work / registry.RUN_SCRATCH_DIRNAME).write_text("not a directory")
     r = run_exec("print(1)", workdir=str(work))
-    check("failed source write leaves the caller's workdir intact",
+    check("a scratch-directory setup failure leaves the caller's workdir intact",
           (work / "precious.txt").is_file(), f"-> ok={r.get('ok')} err={str(r.get('error'))[:60]}")
     check("  ...and it still reports the failure", r.get("ok") is False)
     shutil.rmtree(work, ignore_errors=True)

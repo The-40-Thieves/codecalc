@@ -163,13 +163,50 @@ _ENV_ALLOWLIST = {
 _ENV_ALLOWLIST_NT = {k.upper() for k in _ENV_ALLOWLIST}
 
 
-def _env() -> dict:
+def _env(pythonpath: str | None = None, extra: dict[str, str] | None = None) -> dict:
+    """The environment a sandboxed step runs with.
+
+    `pythonpath`, when given, is always the workdir root, regardless of
+    which directory the step's cwd actually is (mirrors main.rs's
+    `run_step`'s own `pythonpath` parameter — see its doc comment for the
+    full reasoning). In short: a python3 entry file used to live directly
+    at the workdir root, so `sys.path[0]` (set by the interpreter to the
+    directory containing the SCRIPT, independent of cwd) put a sibling
+    module written via `session_write_file` on the import path for free.
+    The entry file's runner-owned copy now lives inside
+    `registry.RUN_SCRATCH_DIRNAME` instead, which holds nothing a caller
+    ever wrote — silently breaking every such import. Setting `PYTHONPATH`
+    to the workdir root restores the same resolution (Python appends
+    `PYTHONPATH` entries to `sys.path` after `sys.path[0]`) without moving
+    the runner's own copy back to a caller-visible path. `_execute_python`
+    passes it on every step (compile and run, every language) rather than
+    threading a python3-specific branch through the generic `_run_step`:
+    no other language's runtime consults the variable, so it is inert
+    everywhere it is not python3.
+
+    Optional (default None, meaning "unset") because `_env()` has other
+    callers with no such workdir to offer — `packages.py`'s installer
+    subprocess, `doctor.py`'s runtime probe, `sessions._worker_env`'s
+    persistent-worker spawn (which never runs a script FILE at all, so the
+    `sys.path[0]` gap this parameter closes does not apply to it) — and
+    none of them should gain a new environment variable they never asked
+    for.
+
+    `extra`, when given, is layered on top of everything else — the seam
+    `_execute_python` uses for `NODE_OPTIONS`/`CODECALC_WORKDIR_ROOT` (see
+    `NODE_SIBLING_SHIM_JS`), kept generic here rather than adding a second
+    named parameter for every future language-specific env need.
+    """
     if IS_WINDOWS:
         env = {k: v for k, v in os.environ.items() if k.upper() in _ENV_ALLOWLIST_NT}
     else:
         env = {k: v for k, v in os.environ.items() if k in _ENV_ALLOWLIST}
     env["PATH"] = registry.runtime_path()
     env["PYTHONUNBUFFERED"] = "1"
+    if pythonpath is not None:
+        env["PYTHONPATH"] = pythonpath
+    if extra:
+        env.update(extra)
     return env
 
 
@@ -621,7 +658,9 @@ class _BoundedDrain:
 
 def _run_step(argv: list[str], cwd: str, timeout: int, stdin: str,
               max_memory_mb: int = 0, max_cpu: int = 0,
-              max_output_bytes: int = MAX_OUTPUT_BYTES) -> tuple[int, bytes, bytes, bool, int]:
+              max_output_bytes: int = MAX_OUTPUT_BYTES,
+              pythonpath: str | None = None,
+              extra_env: dict[str, str] | None = None) -> tuple[int, bytes, bytes, bool, int]:
     # NOTE: preexec_fn is unsafe under threads (PLW1509) — this is the PYTHON
     # FALLBACK path only, used when the Rust binary is absent. It serializes
     # spawns with a lock to avoid concurrent fork+preexec races; the production
@@ -642,7 +681,7 @@ def _run_step(argv: list[str], cwd: str, timeout: int, stdin: str,
         # actually made the root of its own process tree there at all.
         popen_kwargs: dict = {
             "cwd": cwd,
-            "env": _env(),
+            "env": _env(pythonpath, extra_env),
             "stdin": subprocess.PIPE,
             "stdout": subprocess.PIPE,
             "stderr": subprocess.PIPE,
@@ -990,6 +1029,174 @@ def _children_cpu_ms_since(before: float) -> int:
     return max(0, int((_children_cpu_seconds() - before) * 1000))
 
 
+#: Symlink-refusing open flags shared by every write this module makes
+#: directly into a session's `.codecalc-run/` scratch subdirectory. Mirrors
+#: `sessions._O_NOFOLLOW`/`_write_nofollow`'s own flag set (`O_WRONLY |
+#: O_CREAT | O_EXCL | O_NOFOLLOW`, sessions.py's `_write_spill`) rather than
+#: redefining a different one — one convention, not two that can drift.
+#: `O_NOFOLLOW` is redundant with `O_EXCL` here (`O_EXCL` alone already
+#: refuses ANY existing entry at the final path component, symlink or not,
+#: atomically — there is no separate check-then-open window for it to lose
+#: a race in) but costs nothing and matches this codebase's established
+#: belt-and-suspenders style for exactly this class of write.
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_SCRATCH_WRITE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW
+
+
+def _write_scratch_nofollow(target: Path, content: str) -> None:
+    """Write `target` — a file THIS module is about to create fresh inside a
+    just-reset `.codecalc-run/` (see `_reset_run_scratch_dir`) — refusing to
+    write through a pre-existing entry of ANY kind at that exact path.
+
+    CRITICAL, reported by adversarial review and reproduced end to end on
+    both backends: `_execute_python` used to write the entry source via a
+    plain `Path.write_text()`, which FOLLOWS a symlink at the final
+    component. `_reset_run_scratch_dir` (below) makes the DIRECTORY itself
+    symlink-safe, but that alone does not protect a file written INSIDE
+    it — a session's own executed code, from a PRIOR call, can plant
+    `.codecalc-run/main.py -> <workdir>/important.txt` (the program runs
+    with the workdir as its cwd, so it can reach both names) and the NEXT
+    call's plain write would follow that link and overwrite
+    `important.txt` with whatever entry file is executing next — including,
+    via a session_list-disclosed absolute workdir path, a DIFFERENT
+    session's file. `O_EXCL` closes this: the directory was just wiped and
+    recreated by `_reset_run_scratch_dir` moments before this call, so
+    nothing legitimate is ever already there, and an `OSError` here (rather
+    than a silent write-through) is exactly the right outcome if something
+    is.
+    """
+    fd = os.open(target, _SCRATCH_WRITE_FLAGS, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(content)
+
+
+#: HIGH, reported by adversarial review: node's CommonJS `require("./sibling")`
+#: resolves relative to the REQUIRING FILE's own directory — the same class of
+#: gap `PYTHONPATH` above closes for python3, but `NODE_PATH` does NOT reach it
+#: (it only affects BARE module specifiers, never a relative `./`/`../` one).
+#: A sibling `helper.js` written via `session_write_file` at the workdir root,
+#: importable before the entry file's runner-owned copy moved into
+#: `registry.RUN_SCRATCH_DIRNAME`, now fails with `Cannot find module
+#: './helper'` — measured end to end on both backends before this existed.
+#:
+#: Written fresh into the scratch directory alongside the entry source on
+#: EVERY node run (unconditionally, on both backends, mirroring how
+#: `PYTHONPATH` is set unconditionally regardless of language) and loaded via
+#: `NODE_OPTIONS=--require=<absolute path>`: it patches `Module._resolveFilename`
+#: to retry a failed RELATIVE lookup against `CODECALC_WORKDIR_ROOT` (the
+#: workdir root) before giving up, restoring the exact resolution a sibling
+#: module had before the entry copy's directory changed. Absolute paths and
+#: bare package specifiers are untouched — this only widens the relative-path
+#: fallback, it does not change what `require("lodash")` or `require("/abs")`
+#: already resolved to.
+#:
+#: Mirrored in executor/src/main.rs (`NODE_SIBLING_SHIM_JS`) rather than
+#: shared as one file: the Rust binary embeds its own copy at compile time
+#: (`include_str!` would need a build-time path relative to that crate, and a
+#: shared asset file crossed the Python/Rust boundary for no benefit a
+#: byte-identical string constant does not already give).
+NODE_SIBLING_SHIM_JS = """\
+// Auto-generated by codecalc on every node run — see executor.py's
+// NODE_SIBLING_SHIM_JS / main.rs's NODE_SIBLING_SHIM_JS for why this exists.
+const Module = require("module");
+const path = require("path");
+const originalResolve = Module._resolveFilename;
+Module._resolveFilename = function (request, parent, isMain, options) {
+  try {
+    return originalResolve.call(this, request, parent, isMain, options);
+  } catch (err) {
+    const root = process.env.CODECALC_WORKDIR_ROOT;
+    if (root && (request.startsWith("./") || request.startsWith("../"))) {
+      try {
+        const alt = path.resolve(root, request);
+        return originalResolve.call(this, alt, parent, isMain, options);
+      } catch (_fallbackErr) {
+        // fall through to the original error below — the fallback failed too
+      }
+    }
+    throw err;
+  }
+};
+"""
+
+#: Filename the shim above is written under, inside the scratch directory —
+#: never a name a compiled/interpreted entry itself could collide with (no
+#: registry extension is `.js` for a name starting with `_`, and it is never
+#: read back by anything but node's own `--require`).
+_NODE_SIBLING_SHIM_NAME = "_codecalc_node_sibling_shim.js"
+
+
+def _reset_run_scratch_dir(workdir: str) -> Path:
+    """`workdir`/`registry.RUN_SCRATCH_DIRNAME`, WIPED AND RECREATED FRESH on
+    every call — never reused across executions. Mirrors main.rs's own reset
+    of the same directory; see `registry.RUN_SCRATCH_DIRNAME`'s docstring
+    for what lives in it and why.
+
+    A session workspace persists across calls and the code it runs is
+    adversarial. An earlier version of this function REUSED an existing
+    `.codecalc-run/`, refusing only when the directory ITSELF was not a
+    plain directory (a `mkdir()`-then-`lstat()`-on-`FileExistsError`
+    pattern) — which left every file WRITTEN INSIDE it exposed: see
+    `_write_scratch_nofollow`'s docstring for the exact reproduced attack.
+    Recreating the directory from empty every time removes the attack
+    surface at its root instead of trying to out-race it file by file:
+    there is no "already there" left for a symlink to have been planted as,
+    by the time this run's own writes happen — which is also what makes
+    `_write_scratch_nofollow`'s `O_EXCL` a guarantee rather than a
+    best-effort probably-fine.
+
+    `.codecalc-run` existing as a symlink (or any other non-directory) is
+    refused outright, the same as before. A pre-existing REAL directory is
+    not silently wiped past, either: everything inside it (at any depth) is
+    scanned first, and the WHOLE RUN is refused with a coded error if
+    anything there is not a plain file or a plain directory — a symlink,
+    FIFO, device or socket planted between two calls in the same session is
+    treated as tampering worth surfacing, not debris worth quietly cleaning
+    up before proceeding. Only once that scan comes back clean is the
+    directory recursively removed via the same IDENTITY-CHECKED
+    `_rmtree_checked` every other workdir deletion in this module already
+    goes through (scripts/check_parity.py gates against an UNCHECKED direct
+    call here, for exactly this reason) — (device, inode) recorded right
+    after the taint scan above, re-verified
+    immediately before the actual delete, so a directory renamed into
+    `.codecalc-run`'s place in the gap between the scan and the delete is
+    refused rather than removed. `_rmtree_checked`'s own internal walk is
+    additionally safe against a symlink PLANTED INSIDE the directory it
+    does delete: on POSIX it walks by directory file descriptor where the
+    platform supports it (Linux does) and never opens through a nested
+    symlink, only `unlink`s it; where that is unavailable it falls back to
+    a path-based walk that still checks `os.path.islink()` per entry and
+    unlinks rather than recurses, carrying the same accepted
+    parent-component TOCTOU `sessions._write_nofollow`'s own docstring
+    already documents for this codebase, pending `openat2`.
+    """
+    d = Path(workdir) / registry.RUN_SCRATCH_DIRNAME
+    try:
+        st = d.lstat()
+    except FileNotFoundError:
+        d.mkdir()
+        return d
+    if not stat.S_ISDIR(st.st_mode):
+        raise OSError(
+            f"refusing to use {d} as the runner scratch directory: it "
+            "already exists and is not a plain directory")
+    for entry in d.rglob("*"):
+        est = entry.lstat()
+        if not (stat.S_ISREG(est.st_mode) or stat.S_ISDIR(est.st_mode)):
+            raise OSError(
+                f"refusing to run: {entry} inside the runner scratch "
+                "directory is not a plain file or directory (symlink, "
+                "device, FIFO or socket) — this session's own workspace "
+                "may have been tampered with between calls")
+    identity = _dir_identity(d)
+    if not _rmtree_checked(d, identity):
+        raise OSError(
+            f"refusing to reset the runner scratch directory {d}: its "
+            "identity changed between being scanned and being removed")
+    d.mkdir()
+    return d
+
+
 def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10,
                     workdir: str | None = None, max_memory_mb: int = 0,
                     max_output_kb: int = 0, max_cpu: int = 0,
@@ -1027,23 +1234,55 @@ def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10
     cap = max_output_kb * 1024 if max_output_kb > 0 else MAX_OUTPUT_BYTES
     started = time.monotonic()
     try:
-        src = Path(workdir) / f"main.{ext}"
-        src.write_text(code)
+        try:
+            run_dir = _reset_run_scratch_dir(workdir)
+        except OSError as exc:
+            # Not a runtime-unavailable shape (no argv was ever built to
+            # report) — a plain refusal, same as the Rust backend's own
+            # "failed to write source to ..." return below for the sibling
+            # failure mode.
+            return {"ok": False, "error": str(exc)}
+        run_dir_s = str(run_dir)
+        src = run_dir / f"main.{ext}"
+        try:
+            _write_scratch_nofollow(src, code)
+        except OSError as exc:
+            return {"ok": False, "error": f"failed to write source to {src}: {exc}"}
+        # Written and set unconditionally, regardless of language — see
+        # NODE_SIBLING_SHIM_JS's own docstring for why this is inert for
+        # every runtime but node, the same shape as `pythonpath` above.
+        node_shim = run_dir / _NODE_SIBLING_SHIM_NAME
+        try:
+            _write_scratch_nofollow(node_shim, NODE_SIBLING_SHIM_JS)
+        except OSError as exc:
+            return {"ok": False, "error": f"failed to write {node_shim}: {exc}"}
+        node_extra_env = {
+            "NODE_OPTIONS": f"--require={node_shim}",
+            "CODECALC_WORKDIR_ROOT": workdir,
+        }
         # Windows needs the .exe extension on the compiled artifact.
         exe_name = "a.exe" if IS_WINDOWS else "a.out"
         # `{file}` is rendered per-language: a runtime that re-parses the raw
-        # Windows command line gets a name with no separator in it.
+        # Windows command line gets a scratch-relative path with no
+        # backslash in it (registry.source_arg).
         # `{exe}` stays absolute — it is spawned, not read, and a bare name
-        # would be looked up on PATH rather than in the workdir.
+        # would be looked up on PATH rather than in the scratch directory.
+        # `{work}` is the scratch directory itself, not `workdir` — see
+        # registry.RUN_SCRATCH_DIRNAME's docstring.
         fmt = {"file": registry.source_arg(name, str(src), windows=IS_WINDOWS),
-               "exe": str(Path(workdir) / exe_name), "work": workdir}
+               "exe": str(run_dir / exe_name), "work": run_dir_s}
 
         compile_ms = 0
         if entry["compile"]:
             argv = [a.format(**fmt) for a in entry["compile"]]
             try:
+                # Compile-step cwd is the scratch directory, not `workdir`:
+                # compiling is not the user's own program running, so any
+                # incidental compiler byproduct belongs in scratch, never at
+                # the workdir root.
                 rc, out, err, to, _, compile_drain_error, compile_seen = _run_step(
-                    argv, workdir, timeout, "", max_memory_mb, max_cpu, cap)
+                    argv, run_dir_s, timeout, "", max_memory_mb, max_cpu, cap,
+                    pythonpath=workdir, extra_env=node_extra_env)
             except OSError as exc:
                 # The compiler binary itself is missing or not executable.
                 # Unhandled, this escaped as a raised exception instead of the
@@ -1074,8 +1313,13 @@ def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10
         argv = [a.format(**fmt) for a in entry["run"]]
         run_started = time.monotonic()
         try:
+            # Run-step cwd is `workdir` itself (the session/workdir root),
+            # NOT the scratch directory — this is the actual program running,
+            # and a program's own relative file access must resolve where a
+            # caller can see it (registry.RUN_SCRATCH_DIRNAME's docstring).
             rc, out, err, to, cpu_ms, drain_error, run_seen = _run_step(
-                argv, workdir, timeout, stdin, max_memory_mb, max_cpu, cap)
+                argv, workdir, timeout, stdin, max_memory_mb, max_cpu, cap,
+                pythonpath=workdir, extra_env=node_extra_env)
         except OSError as exc:
             # The interpreter/runtime binary itself is missing or not
             # executable — same shape gap as the compile phase above.
@@ -1496,7 +1740,10 @@ async def execute_stream(spec, on_progress=None) -> dict:
         await proc.stdin.drain()
         proc.stdin.close()
 
-        out_path = workdir / "run.out"
+        # The Rust backend now writes `run.out` inside its own scratch
+        # subdirectory, not directly under `workdir` — see
+        # registry.RUN_SCRATCH_DIRNAME's docstring.
+        out_path = workdir / registry.RUN_SCRATCH_DIRNAME / "run.out"
         last_len = 0
         partial = ""
         while proc.returncode is None:

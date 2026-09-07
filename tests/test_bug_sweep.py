@@ -668,11 +668,18 @@ if _ex._rust and os.name != "nt":
     import tempfile as _tf
     import threading as _th
 
+    from codecalc import registry as _reg_bs
+
     _w = _tf.mkdtemp()
     try:
         def _lock_output():
             time.sleep(1.0)
-            for _f in pathlib.Path(_w).glob("*.out"):
+            # The Rust backend's run/compile redirect files now live inside
+            # its scratch subdirectory (registry.RUN_SCRATCH_DIRNAME), not at
+            # the workdir root — glob there, not at `_w` itself, or this
+            # sabotage silently finds nothing and the run completes cleanly,
+            # readable, defeating the whole point of this test.
+            for _f in pathlib.Path(_w, _reg_bs.RUN_SCRATCH_DIRNAME).glob("*.out"):
                 try:
                     _f.chmod(0o000)
                 except OSError:
@@ -696,7 +703,7 @@ if _ex._rust and os.name != "nt":
               and "os error" in (_out.get("output_error") or ""),
               f"-> {_out.get('output_error')!r}")
     finally:
-        for _f in pathlib.Path(_w).glob("*"):
+        for _f in pathlib.Path(_w).glob("**/*"):
             try:
                 _f.chmod(0o644)
             except OSError:
