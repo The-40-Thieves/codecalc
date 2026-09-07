@@ -33,6 +33,15 @@ behind it.
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-09-07
+
+Three changes since 0.7.0: per-run `dependencies` extended to
+`execute_code_stream`/`run_submit`, a hard `max_output_kb` ceiling with
+matching result-size hints on all five large-result tools, and three new
+result-contract shapes for verification/comparison tools plus the artifact
+filter and session-walk fixes that came with them. The result contract
+moves `1.4.0` → `1.5.0` (additive) for the three new shapes.
+
 ### Added
 
 - **Three new result-contract shapes: `translation_verification`,
@@ -1850,7 +1859,8 @@ it, so there was no upgrade path to describe — only what the thing is.
   `ok: false` through the sandbox. Tracked, with a dated reproduction, at
   [#42](https://github.com/The-40-Thieves/codecalc/issues/42).
 
-[Unreleased]: https://github.com/The-40-Thieves/codecalc/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/The-40-Thieves/codecalc/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.8.0
 [0.7.0]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.7.0
 [0.6.0]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.6.0
 [0.5.0]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.5.0
