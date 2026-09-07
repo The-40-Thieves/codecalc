@@ -215,7 +215,9 @@ ran it. Treat the shape as the claim and run the suite for the numbers;
 ```
 tests/test_security.py    → ALL SECURITY TESTS PASS
 tests/test_smoke.py       → 31 passed, 0 failed (all languages via Rust executor)
-tests/test_features.py    → ALL NEW-FEATURE TESTS PASS (sessions/files/artifacts/packages/verdicts/streaming/compact)
+tests/test_features.py    → ALL NEW-FEATURE TESTS PASS (62 checks, 19 async:
+                             sessions/files/artifacts/packages/verdicts/streaming/compact —
+                             the async half used to be dead code, see the file's own docstring)
 tests/test_gap4.py        → ITEMS 1-4 ALL PASS (resources, inline images, multi-file, units)
 tests/test_calc_port.py   → ALL 19 PORTED FEATURES PASS (calc skill parity: exact, bitop, float, radix, ...)
 tests/test_mcp_all.py     → 52/52 tools round-trip over stdio + session file resources
