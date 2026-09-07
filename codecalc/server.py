@@ -965,7 +965,12 @@ def run_cancel(run_id: str) -> dict:
 
 @mcp.tool(group="calculator")
 def evaluate_expression(expression: str) -> dict:
-    """Symbolically evaluate or simplify a math expression, e.g. 'integrate(x**2, x)' or 'sqrt(144) + 2**10'."""
+    """Symbolically evaluate an expression to a value or closed form via
+    sympify: 'integrate(x**2, x)', 'sqrt(144) + 2**10'. Not simplification —
+    for simplified/factored/expanded forms, use simplify_expression. Not
+    exact numeric arithmetic on plain arithmetic — use calc_exact for that.
+    Returns `value` (if the result is a number) or the evaluated expression,
+    plus `type`."""
     return logic.evaluate_expression(expression)
 
 
@@ -1215,10 +1220,12 @@ def percentage(part: str, total: str) -> dict:
 
 @mcp.tool(group="calculator")
 def calc_stats(nums: list[float]) -> dict:
-    """mean, median, sample stdev, and coefficient of variation (CV).
-
-    CV > 0.2 means run-to-run noise swamps the effect being measured — the
-    numbers cannot be compared across runs.
+    """Mean, median, sample stdev, and coefficient of variation (CV) for a
+    sample of numbers. Pairs with percentiles for distribution shape
+    (p50/p90/p95/p99) on the same sample, and with benchmark or
+    verify_optimization, which are common sources of the timing samples this
+    tool summarizes. CV > 0.2 flags run-to-run noise that swamps the effect.
+    Returns n/mean/median/stdev/cv plus a cv_note.
     """
     return exact.stats(nums)
 
@@ -1244,16 +1251,22 @@ def collision_probability(items: int, bits: int) -> dict:
 
 @mcp.tool(group="calculator")
 def data_sizes(n: int) -> dict:
-    """Byte sizes both ways: binary (KiB/MiB/GiB) AND decimal (KB/MB/GB).
-
-    The 1024/1000 gap is where '291 MB' and '277 MiB' silently disagree by 5%.
+    """Byte counts for a plain integer, both binary (KiB/MiB/GiB/TiB, /1024)
+    and decimal (KB/MB/GB/TB, /1000) — the gap between them is where '291 MB'
+    and '277 MiB' silently disagree by 5%. For units other than bytes, use
+    convert_units. For a duration, not a byte count, use human_duration.
+    Returns `bytes` plus `binary` and `decimal` dicts of unit -> value.
     """
     return exact.data_sizes(n)
 
 
 @mcp.tool(group="calculator")
 def human_duration(seconds: float) -> dict:
-    """Humanised duration plus per-day and per-30d rates."""
+    """Humanised duration (e.g. '2d 3h 4m 5s') plus per-day and per-30d rates
+    for a number of seconds. For converting an epoch timestamp to a calendar
+    date, use epoch_time — this tool is for elapsed time, not a point in
+    time. For byte counts, not seconds, use data_sizes. Returns `human`,
+    `per_day`, `per_30d`, and the echoed `seconds`."""
     return exact.human_duration(seconds)
 
 
@@ -1324,7 +1337,12 @@ def algebraic_equiv(a: str, b: str) -> dict:
 
 @mcp.tool(group="calculator")
 def solve_expression(expr: str, var: str = "x") -> dict:
-    """Solve for a root or crossover: 'x**2 - 4 = 0', '2*x + 1 = 7'."""
+    """Solve a single equation in one variable for its roots or crossover
+    point: 'x**2 - 4 = 0', '2*x + 1 = 7'. For a system of several equations,
+    use solve_linear. For general constraint satisfiability (inequalities,
+    boolean constraints, multiple solvers), use z3_check. Returns
+    `solutions` as a list of strings alongside the parsed `equation` and
+    `variable`."""
     return exact.solve_expression(expr, var)
 
 
@@ -1338,7 +1356,11 @@ def limit_expression(expr: str, var: str = "x", point: str = "oo") -> dict:
 
 @mcp.tool(group="calculator")
 def simplify_expression(expr: str) -> dict:
-    """Simplified, factored and expanded forms of an expression."""
+    """Simplified, factored, and expanded forms of an expression —
+    algebraic rewriting, not solving and not a numeric value. For roots of
+    an equation, use solve_expression. For an exact numeric result, use
+    calc_exact. Returns `simplified`, `factored`, and `expanded` as strings
+    alongside the parsed `original`."""
     return exact.simplify_expression(expr)
 
 
