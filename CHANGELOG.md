@@ -33,6 +33,19 @@ behind it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`tests/test_translation_verify.py`'s live "a real O(n)->O(1) win is
+  accepted" check flaked on hosted sandbox runners** (observed twice on
+  macOS in `ci-python`, 0/2 on ubuntu/windows). The candidate pair's two
+  smallest sizes sat close enough to process-startup/scheduling noise that
+  the one-sided significance test correctly refused to certify them,
+  dropping the run below a majority of sizes. The gate's math was not the
+  bug — the test's candidate pair was too close to the noise floor at the
+  smallest sizes. Fixed by giving the same O(n)->O(1) pair ~10x more work
+  per element so every tested size clears the floor with margin, not by
+  weakening `codecalc/optimization.py`'s acceptance rule.
+
 ## [0.7.0] — 2026-09-07
 
 Four changes since 0.6.0: inline artifacts from session-scoped runs,

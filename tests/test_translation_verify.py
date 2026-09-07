@@ -447,7 +447,32 @@ if executor._rust:
     r = translation.verify_translation("python3", SRC, "node", "console.log(1)", ["3", "7"])
     check("a wrong port fails", r.get("passed") is False)
 
-    SLOW = "import sys\nn=int(sys.stdin.readline())\ns=0\nfor i in range(n): s+=i\nprint(s)"
+    # `s+=i` once per element left the two SMALLEST sizes here close enough to
+    # the process-startup/scheduling floor that a contended sandbox runner
+    # could not tell before from after: observed on a hosted macOS runner
+    # (twice — main at 541528b and a later PR, both in ci-python's sandbox
+    # job), n=200000 measured p~0.38-0.65 (indistinguishable from noise) and
+    # n=400000 measured p~0.058-0.11 (short of alpha=0.05), while the two
+    # LARGEST sizes were decisive every time (p<0.03). The measured median
+    # ratio (1.9-2.4x) still cleared min_speedup on all of these — this was
+    # exactly the "ratio clears the threshold but the significance test
+    # correctly refuses to certify it as real" case the majority-of-sizes
+    # gate exists to catch, not a bug in the gate (see `_accept_decision`).
+    #
+    # Fix: give the SAME O(n)->O(1) win ~10x more work per element (an inner
+    # loop, unrolled, accumulating the same sum ten times over and dividing
+    # the total back down) so even the SMALLEST tested size's baseline
+    # duration comfortably clears the noise floor rather than sitting on it —
+    # a large effect at EVERY size, not a bigger `min_speedup` or a weaker
+    # acceptance rule. Measured locally (nice -n 19, a saturating CPU load on
+    # every core): the unmodified pair accepted 2/20 runs; this pair accepted
+    # 20/20, every one of them with a majority of sizes significant and most
+    # with all four.
+    SLOW = ("import sys\nn=int(sys.stdin.readline())\ns=0\n"
+            "for i in range(n):\n"
+            "    for _ in range(10):\n"
+            "        s+=i\n"
+            "print(s//10)")
     FAST = "import sys\nn=int(sys.stdin.readline())\nprint(n*(n-1)//2)"
     SIZES = [200000, 400000, 800000, 1600000]
 
