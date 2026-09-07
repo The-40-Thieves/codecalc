@@ -167,10 +167,15 @@ def grade_verify_optimization(result: dict, language: str) -> dict:
     claim being graded — "candidate IS a genuine optimisation" — depends on
     all of it; `grade_basis` names the significance result alongside the
     ratio, when the result carries an `inference` field, so neither is
-    hidden. This is a change to what the basis TEXT describes, not to what
-    evidence maps to what grade — `accepted` already encodes the stronger
-    bar upstream in `optimization.py`, so `GRADE_RULES_VERSION` does not
-    move for it. A candidate that is equivalent but not measurably (or not
+    hidden — including, when `inference.sizes_below_floor` is non-empty, how
+    many sizes were excluded from that majority vote (never cleared the
+    per-size auto-scale floor, unmeasurable, or too few runs — see
+    `optimization._infer_speedup`'s docstring), rather than a reader seeing
+    a shrunk `sizes_total` with no explanation. This is
+    a change to what the basis TEXT describes, not to what evidence maps to
+    what grade — `accepted` already encodes the stronger bar upstream in
+    `optimization.py`, so `GRADE_RULES_VERSION` does not move for it. A
+    candidate that is equivalent but not measurably (or not
     significantly) faster (`accepted=False`) is a non-success for THIS claim
     even though its own correctness check passed, so it stays ungraded — the
     grade is about the tool's verdict, not about how far the candidate got.
@@ -213,6 +218,15 @@ def grade_verify_optimization(result: dict, language: str) -> dict:
         basis += (f"; {inference['sizes_rejecting']}/{inference['sizes_total']} "
                   f"size(s) significant at alpha={inference.get('alpha')} "
                   f"(one-sided Mann-Whitney U)")
+        # Additive detail, not a new evidence-to-grade mapping: `accepted`
+        # already excludes these sizes from the majority vote upstream in
+        # `optimization._infer_speedup` (see `sizes_below_floor`'s docstring
+        # there) — this just says so in the text a reader of `grade_basis`
+        # sees, rather than leaving a shrunk `sizes_total` unexplained.
+        below_floor = inference.get("sizes_below_floor") or []
+        if below_floor:
+            basis += (f" ({len(below_floor)} size(s) excluded — not "
+                      f"comparable, see inference.sizes_below_floor)")
     return _graded(result, CROSS_CHECKED, basis)
 
 
