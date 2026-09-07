@@ -9,6 +9,19 @@ primitive.
 
 Security: session dirs live under a dedicated root owned by this process;
 file tools (list/read/write) are strictly confined to that root.
+
+Performance, measured (not re-derive this from memory — re-run the
+`hyperfine` comparison in CHANGELOG.md's [Unreleased] "walked its own
+workspace directory up to 6 times" entry if it matters again): a
+session-scoped call (`execute()`/`execution_service.SessionService.run_file`)
+walks its own workspace directory via `_workspace_scan` at most twice per
+call (once before the run, once after) rather than up to 6 separate globs of
+the same directory, because `quota_precheck`/`quota_postcheck`/
+`_artifact_snapshot`/`_classify_new_artifacts`/`_artifact_count_refusal`/
+`_disk_quota_refusal` all accept a pre-computed scan and share one instead of
+each taking their own. See `_workspace_scan`'s own docstring for the walk
+count this collapses and why computing the unfiltered disk-usage total costs
+nothing extra once the filtered artifact listing is already being built.
 """
 
 from __future__ import annotations
@@ -411,6 +424,70 @@ def _global_disk_usage() -> int:
     return total
 
 
+def _workspace_scan(d: Path) -> tuple[list[tuple[Path, os.stat_result]], int]:
+    """One `rglob` pass over `d`: `(entries, total_bytes)` — the filtered
+    `(path, lstat)` artifact listing `_artifact_entries` returns, paired
+    with the UNFILTERED total byte count `_iter_regular_files`/
+    `_session_dir_size` measure (every regular file on disk, artifact or
+    not — a disk-quota check cares about bytes actually occupied, not just
+    what `session_artifacts` would show a caller). `total` accumulates
+    every regular file's size BEFORE any artifact filter below runs, so it
+    stays the exact same number `_session_dir_size` would compute
+    independently — the two are the same walk, not two agreeing
+    definitions.
+
+    A single session-scoped call (`sessions.execute`/
+    `execution_service.SessionService.run_file`) used to walk the same
+    directory this many times: `quota_precheck`'s own disk-usage AND
+    artifact-count checks (2 separate globs), the pre-run
+    `_artifact_snapshot`, and `quota_postcheck`'s classify AND disk-usage
+    AND artifact-count checks (3 more) — up to 6 re-globs of one directory
+    per call, none of which could see the others already did the same
+    work. Measured end-to-end (`docs`/CHANGELOG's [Unreleased] entry has
+    the full table) on a 5000-file workspace (10x the 500-file default
+    `CODECALC_MAX_ARTIFACT_COUNT` cap) that doubling cost several hundred
+    ms of `session_run` latency — material even at the cap itself (500
+    files), not just at 10x it. `quota_precheck`/`quota_postcheck`/
+    `_artifact_snapshot` each accept an optional pre-computed scan (or
+    `entries`/`total_bytes` piece of one) for exactly this reuse; every one
+    of them still computes its own when called bare, so a caller that never
+    heard of this function (every existing test, `write_file`'s per-write
+    guard, anything added later) gets identical behaviour and cost to
+    before this existed.
+
+    Two things a session can legitimately create are excluded from
+    `entries` (not `total`), neither by basename alone (see
+    `_RUNNER_INTERNAL_NAMES`'s docstring for why a tree-wide basename match
+    used to hide a user's own files):
+
+    - the runner's own scratch files (`_RUNNER_INTERNAL_NAMES`), but ONLY at
+      the session root, where they actually live;
+    - the `.codecalc-spill/` directory (any depth under it): a spill file is
+      already surfaced via `stdout_spill`/`stderr_spill` and readable through
+      `session_read_file`, so also listing it here would double-report the
+      same bytes as a fresh "artifact" every time a run's output spills.
+    """
+    entries: list[tuple[Path, os.stat_result]] = []
+    total = 0
+    for p in sorted(d.rglob("*")):
+        try:
+            st = p.lstat()
+        except OSError:
+            continue  # raced away between the listing and the lstat
+        if not stat.S_ISREG(st.st_mode):
+            continue
+        total += st.st_size
+        if "__pycache__" in p.parts or p.name.endswith(".pyc"):
+            continue
+        rel_parts = p.relative_to(d).parts
+        if rel_parts and rel_parts[0] == _SPILL_DIRNAME:
+            continue
+        if len(rel_parts) == 1 and p.name in _RUNNER_INTERNAL_NAMES:
+            continue
+        entries.append((p, st))
+    return entries, total
+
+
 def _artifact_entries(d: Path) -> list[tuple[Path, os.stat_result]]:
     """`(path, lstat)` for every file `artifacts()` would list.
 
@@ -423,37 +500,19 @@ def _artifact_entries(d: Path) -> list[tuple[Path, os.stat_result]]:
     byte count" when `session_run`/`execute_code(session_id=...)` diff a
     workspace before and after a run.
 
-    Two things a session can legitimately create are excluded, neither by
-    basename alone (see `_RUNNER_INTERNAL_NAMES`'s docstring for why a
-    tree-wide basename match used to hide a user's own files):
-
-    - the runner's own scratch files (`_RUNNER_INTERNAL_NAMES`), but ONLY at
-      the session root, where they actually live;
-    - the `.codecalc-spill/` directory (any depth under it): a spill file is
-      already surfaced via `stdout_spill`/`stderr_spill` and readable through
-      `session_read_file`, so also listing it here would double-report the
-      same bytes as a fresh "artifact" every time a run's output spills.
+    A thin wrapper over `_workspace_scan` (see its docstring for the
+    exclusion rules this applies and why the two byte totals it computes
+    alongside `entries` are a single walk, not two): every caller here
+    wants only the filtered listing, not the unfiltered disk-usage total
+    `_workspace_scan` also computes in the same pass, so this simply
+    discards that second element rather than duplicating the walk.
     """
-    out = []
-    for p in sorted(d.rglob("*")):
-        if "__pycache__" in p.parts or p.name.endswith(".pyc"):
-            continue
-        try:
-            st = p.lstat()
-        except OSError:
-            continue
-        if not stat.S_ISREG(st.st_mode):
-            continue
-        rel_parts = p.relative_to(d).parts
-        if rel_parts and rel_parts[0] == _SPILL_DIRNAME:
-            continue
-        if len(rel_parts) == 1 and p.name in _RUNNER_INTERNAL_NAMES:
-            continue
-        out.append((p, st))
-    return out
+    return _workspace_scan(d)[0]
 
 
-def _artifact_snapshot(d: Path) -> dict[str, tuple[int, int]]:
+def _artifact_snapshot(d: Path, *,
+                       entries: list[tuple[Path, os.stat_result]] | None = None,
+                       ) -> dict[str, tuple[int, int]]:
     """`{relpath: (size, mtime_ns)}` for every current artifact.
 
     Taken immediately before a session-scoped run (`sessions.execute` and
@@ -461,9 +520,23 @@ def _artifact_snapshot(d: Path) -> dict[str, tuple[int, int]]:
     classify what a run created or modified afterwards without a second,
     independently-drifting walk — same `_artifact_entries` the artifact-count
     cap and `session_artifacts` already use.
+
+    `entries` lets a caller that already ran `_workspace_scan(d)` a moment
+    ago (`sessions.execute` does, right before this) hand over that same
+    listing instead of making this take its own, redundant walk of the
+    identical, unchanged-in-between directory — see `_workspace_scan`'s
+    docstring for the walk count this is one piece of collapsing. Omitted
+    (the default) walks `d` itself via `_artifact_entries`, unchanged from
+    before this parameter existed — `execution_service.run_file` relies on
+    exactly this default: it takes its own snapshot AFTER a dependency
+    install that can happen between its own `quota_precheck` and this call,
+    so the two are deliberately NOT the same instant and must not share one
+    walk's result.
     """
+    if entries is None:
+        entries = _artifact_entries(d)
     return {p.relative_to(d).as_posix(): (st.st_size, st.st_mtime_ns)
-            for p, st in _artifact_entries(d)}
+            for p, st in entries}
 
 
 def _artifact_mime(path: Path) -> str:
@@ -477,16 +550,25 @@ def _artifact_mime(path: Path) -> str:
 
 
 def _classify_new_artifacts(session_id: str, d: Path,
-                            before: dict[str, tuple[int, int]]) -> list[dict]:
+                            before: dict[str, tuple[int, int]], *,
+                            entries: list[tuple[Path, os.stat_result]] | None = None,
+                            ) -> list[dict]:
     """Files a run just created or modified, relative to `before` (a prior
     `_artifact_snapshot`): `{path, size, mime, resource}` per file, in the
     same order `_artifact_entries` (and so `session_artifacts`) lists them.
 
     "Modified" means size OR mtime changed — a rewrite that lands back at the
     same byte count still bumps mtime, so this does not miss it.
+
+    `entries` is the same reuse seam as `_artifact_snapshot`'s: a caller
+    that already has a post-run `_workspace_scan(d)` (`quota_postcheck`
+    does, when given one) hands its `entries` half over instead of this
+    taking its own walk of the same, already-settled post-run directory.
+    Omitted (the default) walks `d` itself via `_artifact_entries`,
+    unchanged from before this parameter existed.
     """
     out = []
-    for p, st in _artifact_entries(d):
+    for p, st in (entries if entries is not None else _artifact_entries(d)):
         rel = p.relative_to(d).as_posix()
         if before.get(rel) == (st.st_size, st.st_mtime_ns):
             continue
@@ -554,7 +636,8 @@ _QUOTA_RECOVERY_HINT = (
 )
 
 
-def _disk_quota_refusal(session_id: str, incoming_bytes: int) -> dict | None:
+def _disk_quota_refusal(session_id: str, incoming_bytes: int, *,
+                        total_bytes: int | None = None) -> dict | None:
     """None if `incoming_bytes` more may be written into `session_id`'s
     workspace right now under every disk ceiling except the per-artifact
     ones (`_artifact_cap_refusal` is separate — see its own docstring);
@@ -573,13 +656,20 @@ def _disk_quota_refusal(session_id: str, incoming_bytes: int) -> dict | None:
     true. A net-non-positive write is NOT routed through this function at
     all — see `_write_guard`'s fix-round-4 recovery-path comment.
 
+    `total_bytes` lets `quota_precheck` hand over a `_workspace_scan(d)` it
+    already ran instead of this taking its own `_session_dir_size` walk —
+    see `_workspace_scan`'s docstring. Omitted (the default, and always the
+    case for `_write_guard`'s callers, which have no such scan to offer)
+    measures `_session_dir_size` itself, unchanged from before this
+    parameter existed.
+
     Checked smallest blast radius first: a session over its OWN quota should
     say so, not blame the shared global total it may not even be close to.
     The host-free-space floor runs last and unconditionally — it protects
     the host even when both quotas above are generous, because a shared host
     can be driven low by something that is not a codecalc session at all.
     """
-    session_usage = _session_dir_size(session_id)
+    session_usage = _session_dir_size(session_id) if total_bytes is None else total_bytes
     session_quota = _session_disk_quota_bytes()
     if session_usage + incoming_bytes > session_quota:
         return errors.error_result(
@@ -623,7 +713,9 @@ def _disk_quota_refusal(session_id: str, incoming_bytes: int) -> dict | None:
     return None
 
 
-def _artifact_count_refusal(session_id: str) -> dict | None:
+def _artifact_count_refusal(session_id: str, *,
+                            entries: list[tuple[Path, os.stat_result]] | None = None,
+                            ) -> dict | None:
     """None unless `session_id` already has MORE artifact files than
     `CODECALC_MAX_ARTIFACT_COUNT` allows right now; otherwise the refusal.
 
@@ -639,15 +731,26 @@ def _artifact_count_refusal(session_id: str) -> dict | None:
     the count cap's own precheck/postcheck counterpart to
     `_disk_quota_refusal`, consulted by `quota_precheck`/`quota_postcheck`
     the same way and for the same reason.
+
+    `entries` is the same `_workspace_scan(d)` reuse seam as
+    `_disk_quota_refusal`'s `total_bytes` — `quota_precheck`/
+    `quota_postcheck` each hand over one when they have it (see
+    `_workspace_scan`'s docstring). Omitted (the default) resolves `d` and
+    walks it via `_artifact_entries`, unchanged from before this parameter
+    existed — note that path ALSO covers "unknown/vanished session" (a
+    missing `d` is simply "no refusal", same as always), which a caller
+    supplying `entries` has already necessarily resolved past.
     """
-    try:
-        d = _session_dir(session_id)
-    except ValueError:
-        return None
-    if not d.is_dir():
-        return None
+    if entries is None:
+        try:
+            d = _session_dir(session_id)
+        except ValueError:
+            return None
+        if not d.is_dir():
+            return None
+        entries = _artifact_entries(d)
     max_count = _max_artifact_count()
-    count = len(_artifact_entries(d))
+    count = len(entries)
     if count > max_count:
         return errors.error_result(
             errors.RESOURCE_EXHAUSTED,
@@ -695,7 +798,9 @@ def _write_guard(session_id: str, d: Path, incoming_bytes: int, net_bytes: int, 
     return _disk_quota_refusal(session_id, net_bytes)
 
 
-def quota_precheck(session_id: str) -> dict | None:
+def quota_precheck(session_id: str, *,
+                   scan: tuple[list[tuple[Path, os.stat_result]], int] | None = None,
+                   ) -> dict | None:
     """None if `session_id` may execute code / write right now; otherwise the
     refusal to return verbatim, before anything runs.
 
@@ -716,15 +821,27 @@ def quota_precheck(session_id: str) -> dict | None:
     for the count cap (fix round 2) — checked second, after the byte
     quotas, for the same "smallest blast radius first" reason
     `_disk_quota_refusal` orders its own two checks.
+
+    `scan` is a `_workspace_scan(d)` the caller already ran, letting BOTH
+    checks below share it instead of each re-globbing `d` on its own — see
+    `_workspace_scan`'s docstring for why that matters (a session-scoped
+    call used to walk the same directory up to 6 times; this is 2 of those
+    6). Omitted (the default, and what every direct/test caller of this
+    function gets) leaves each check to take its own walk exactly as
+    before this parameter existed.
     """
-    refusal = _disk_quota_refusal(session_id, 0)
+    total_bytes = scan[1] if scan is not None else None
+    refusal = _disk_quota_refusal(session_id, 0, total_bytes=total_bytes)
     if refusal is not None:
         return refusal
-    return _artifact_count_refusal(session_id)
+    entries = scan[0] if scan is not None else None
+    return _artifact_count_refusal(session_id, entries=entries)
 
 
 def quota_postcheck(session_id: str, result: dict, *, d: Path | None = None,
-                    before: dict[str, tuple[int, int]] | None = None) -> dict:
+                    before: dict[str, tuple[int, int]] | None = None,
+                    scan: tuple[list[tuple[Path, os.stat_result]], int] | None = None,
+                    ) -> dict:
     """Disclose in `result` when a run just left `session_id` over its disk
     quota OR its artifact-count cap (point 4; count cap added in fix
     round 2), and — when `before` is given — what files the run just created
@@ -738,16 +855,27 @@ def quota_postcheck(session_id: str, result: dict, *, d: Path | None = None,
     silently-required precondition for a function every session-scoped path
     already calls unconditionally.
 
+    `scan` is a POST-run `_workspace_scan(d)` the caller already ran — it
+    feeds the classify step below AND the artifact-count check AND (via its
+    byte total) the disk-usage check, so this function's own three globs of
+    the same, already-settled post-run directory collapse into the one walk
+    the caller made instead. Omitted (the default) has each of those three
+    take its own walk, unchanged from before this parameter existed —
+    passing `scan` without `before` is a caller error avoided in practice
+    because every current caller that has one has the other too.
+
     Never refuses and never touches stdout/exit_code/verdict — the run
     already happened and produced a real result; the only thing added is
     visibility, plus the fact (silent otherwise) that `quota_precheck` will
     refuse the NEXT call on this session for as long as usage, measured
     fresh, stays over either line.
     """
+    entries = scan[0] if scan is not None else None
     if before is not None:
         workspace = d if d is not None else _session_dir(session_id)
-        result["artifacts_created"] = _classify_new_artifacts(session_id, workspace, before)
-    usage = _session_dir_size(session_id)
+        result["artifacts_created"] = _classify_new_artifacts(
+            session_id, workspace, before, entries=entries)
+    usage = scan[1] if scan is not None else _session_dir_size(session_id)
     quota = _session_disk_quota_bytes()
     if usage > quota:
         result["disk_quota_exceeded"] = True
@@ -759,7 +887,7 @@ def quota_postcheck(session_id: str, result: dict, *, d: Path | None = None,
         result["global_disk_quota_exceeded"] = True
         result["global_disk_usage_bytes"] = global_usage
         result["global_disk_quota_bytes"] = global_quota
-    count_refusal = _artifact_count_refusal(session_id)
+    count_refusal = _artifact_count_refusal(session_id, entries=entries)
     if count_refusal is not None:
         result["artifact_count_exceeded"] = True
         result["artifact_count"] = count_refusal["artifact_count"]
@@ -1498,19 +1626,24 @@ def execute(session_id: str, code: str, language: str | None = None,
         return _guard_error(exc)
     if not d.is_dir():
         return {"ok": False, "error": f"unknown session '{session_id}'"}
+    # ONE walk of `d` feeds quota_precheck's own two checks below AND the
+    # pre-run snapshot right after it — nothing else touches this directory
+    # in between, so there is no reason for either to re-glob it on its own.
+    # See `_workspace_scan`'s docstring for the walk count this collapses.
+    scan_before = _workspace_scan(d)
     # refused BEFORE anything runs, not just before this module's
     # own writes — executed code can write straight into the workspace
     # (open("x", "w") in a worker, or a fresh process's own output files),
     # which no per-write check below can bound. See `quota_precheck`'s
     # docstring for why re-measuring here (rather than a sticky flag) is what
     # makes "refused until freed" self-healing.
-    quota_refusal = quota_precheck(session_id)
+    quota_refusal = quota_precheck(session_id, scan=scan_before)
     if quota_refusal is not None:
         return quota_refusal
     # Taken now, before either branch below runs anything: `quota_postcheck`
     # diffs against this to report `artifacts_created` regardless of which
     # branch actually ran the code.
-    before = _artifact_snapshot(d)
+    before = _artifact_snapshot(d, entries=scan_before[0])
     # Lazy check-on-access: reap this session's worker if it has
     # sat idle past the configured TTL, and learn whether it already had
     # been. ONE call, ONE critical section — see `_get_worker_or_expired`'s
@@ -1552,8 +1685,11 @@ def execute(session_id: str, code: str, language: str | None = None,
         out["confined"] = w.confined
         # point 4: the worker just ran arbitrary code with the
         # workspace as its cwd — measure what it left behind and disclose an
-        # over-quota session rather than let it grow silently forever.
-        return quota_postcheck(session_id, out, d=d, before=before)
+        # over-quota session rather than let it grow silently forever. ONE
+        # fresh post-run scan feeds quota_postcheck's size/classify/count
+        # checks below — same collapse as `scan_before` above, just taken
+        # now instead of before the run, since the run just changed `d`.
+        return quota_postcheck(session_id, out, d=d, before=before, scan=_workspace_scan(d))
     # workspace-only session: fresh process in the session dir, fully sandboxed
     lang = registry.canonical(language) if language else "python3"
     if max_output_kb > 0:
@@ -1561,12 +1697,12 @@ def execute(session_id: str, code: str, language: str | None = None,
         result = executor.execute(lang, code, stdin=stdin, timeout=timeout, workdir=str(d),
                                   max_memory_mb=max_memory_mb, max_output_kb=max_output_kb,
                                   max_cpu=max_cpu, no_net=no_net)
-        return quota_postcheck(session_id, result, d=d, before=before)
+        return quota_postcheck(session_id, result, d=d, before=before, scan=_workspace_scan(d))
     result = executor.execute(lang, code, stdin=stdin, timeout=timeout, workdir=str(d),
                               max_memory_mb=max_memory_mb, max_output_kb=SPILL_CAPTURE_KB,
                               max_cpu=max_cpu, no_net=no_net)
     result = spill_if_truncated(session_id, result, 0)
-    return quota_postcheck(session_id, result, d=d, before=before)
+    return quota_postcheck(session_id, result, d=d, before=before, scan=_workspace_scan(d))
 
 
 def _spill_dir(d: Path) -> Path:

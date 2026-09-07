@@ -155,6 +155,42 @@ behind it.
 
 ### Changed
 
+- **A session-scoped run (`session_run`, `execute_code(session_id=...)`) walked
+  its own workspace directory up to 6 times per call** — `quota_precheck`'s
+  disk-usage AND artifact-count checks (2 separate `rglob`s), the pre-run
+  artifact snapshot #263 added, and `quota_postcheck`'s classify AND
+  disk-usage AND artifact-count checks (3 more), none aware any of the
+  others had already walked the same, unchanged-in-between directory.
+  Measured with `hyperfine` (20 runs, Rust backend, min of run) on
+  workspaces of 0 / 500 (the default `CODECALC_MAX_ARTIFACT_COUNT` cap) /
+  5000 (10x the cap) small nested files: at the cap, #263 added 64ms
+  (303.5ms at the pre-#263 commit -> 367.5ms on main, +17.4%); at 10x the
+  cap, 599ms (572.2ms -> 1171.2ms, +51.1%) — material by both of this
+  ticket's bars (>50ms absolute, >10% of trivial-run latency at the cap).
+  This fix cuts that back to 329.3ms at the cap (-38.2ms/-10.4% from
+  main) and 747.0ms at 10x (-424.2ms/-36.2%): a `_workspace_scan(d)`
+  helper builds the filtered artifact listing AND the unfiltered
+  disk-usage total in ONE `rglob` pass — a microbenchmark showed doing
+  both costs no more than the filtered listing alone already did (163ms
+  vs 165ms median at 5000 files) — and `quota_precheck`/`quota_postcheck`/
+  `_artifact_snapshot`/`_classify_new_artifacts`/`_artifact_count_refusal`/
+  `_disk_quota_refusal` now each accept an optional pre-computed scan (or
+  its `entries`/`total_bytes` half) that `sessions.execute()`/
+  `execution_service.SessionService.run_file()` share across their own
+  before/after pair — 2 walks per call instead of 6 (`run_file()` still
+  forces a fresh post-install scan when dependencies were actually
+  installed, reusing the pre-install one otherwise — see
+  `_artifact_snapshot`'s docstring). Every function still takes its own
+  independent walk when called bare (bare is what every existing test
+  does), so nothing outside that shared before/after pair changes shape or
+  cost. A residual gap remains versus the pre-#263 numbers (329.3ms/747.0ms
+  vs 303.5ms/572.2ms) — not walk COUNT (2 here vs pre-#263's 4) but
+  per-file COST: #268's more precise runner-internal-file exclusion (a
+  relative-path-parts check per file, not a top-level basename compare)
+  made every filtered walk ~48% pricier standalone regardless of this fix
+  (measured: 180.0ms vs 121.8ms median per call at 5000 files) — a
+  separately-justified correctness fix, not something this change should
+  undo.
 - A caller-supplied `max_output_kb` used to reach the executor unclamped and
   push a tool's real output past the `anthropic/maxResultSizeChars` value it
   advertises (`execute_code`/`execute_code_stream`/`run_submit`, noted as a
