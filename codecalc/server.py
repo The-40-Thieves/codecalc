@@ -23,6 +23,7 @@ import inspect
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 from mcp.server import CacheHint, MCPServer
 from mcp.server.mcpserver import Context
@@ -32,6 +33,7 @@ from mcp.types import (
     ResourceLink,
     TextContent,
     TextResourceContents,
+    ToolAnnotations,
 )
 
 from . import (
@@ -349,6 +351,218 @@ TOOLS_ENV = "CODECALC_TOOLS"
 TOOL_GROUPS: dict[str, str] = {}
 
 
+# ── Per-tool ToolAnnotations (readOnlyHint/destructiveHint/idempotentHint/ ─
+# openWorldHint), so a client can approve or auto-run by the
+# tool's actual behaviour instead of by name. Evidence for how the SDK wires
+# this: `mcp.server.mcpserver.tools.base.Tool.from_function` takes
+# `annotations: ToolAnnotations | None` and stores it on the `Tool`; the
+# server's `list_tools()` copies it straight onto the wire `MCPTool.annotations`
+# (mcp/server/mcpserver/server.py:490-493, `mcp` 2.0.0, verified against the
+# installed venv, not assumed from docs).
+#
+# GROUP_ANNOTATIONS is the default for every tool in a group; a tool whose
+# actual behaviour differs from its group's default gets an entry in
+# TOOL_ANNOTATION_OVERRIDES instead of a bespoke `annotations=` at its own
+# `@mcp.tool()` line, so a reviewer sees every value in two tables rather than
+# scattered across 52 call sites. `_tool()` below resolves
+# `TOOL_ANNOTATION_OVERRIDES.get(name, GROUP_ANNOTATIONS[group])`.
+#
+# `calculator` is 25/25 pure — exact/symbolic arithmetic, unit conversion,
+# bit twiddling — none of it touches a filesystem, a subprocess or a socket,
+# so the whole group takes the same annotation with zero overrides.
+# `admin` is 2/2 the opposite: both tools change the host (package installs,
+# runtime upgrades) and both fetch from a registry, so the group default IS
+# the honest value for both members too.
+#
+# The other four groups are mixed, and the override table says why for each
+# entry rather than asserting it. Two entries below deliberately depart from
+# codecalc's ticket text after reading the code it was written against:
+#   * `compare_edge_cases` was proposed alongside `z3_check`/`algebraic_equiv`
+#     as read-only, but translation.py:225-260 shows it calls the same `_run`
+#     -> `executor.execute` path `verify_translation` does — it EXECUTES every
+#     snippet it is given, so it gets verify_translation's annotation, not
+#     z3_check's.
+#   * `verify_translation`/`verify_optimization` were proposed with
+#     `open_world_hint=False` on the claim that "network is refused by
+#     default". Measured: neither passes `no_net` to `executor.execute` at
+#     all (translation.py:29, optimization.py:315), and `executor.execute`'s
+#     own default is `no_net=False` (executor.py:1434-1436) — the same default
+#     `execute_code` has. Nothing in this codebase refuses network by default;
+#     `open_world_hint=True` is the value that matches what the code does, not
+#     what a client might assume from the name "verify".
+GROUP_ANNOTATIONS: dict[str, ToolAnnotations] = {
+    "calculator": ToolAnnotations(
+        read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False),
+    "verification": ToolAnnotations(
+        read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False),
+    "execution": ToolAnnotations(
+        read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False),
+    "sessions": ToolAnnotations(
+        read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False),
+    "analysis": ToolAnnotations(
+        read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False),
+    "admin": ToolAnnotations(
+        read_only_hint=False, destructive_hint=True, idempotent_hint=False, open_world_hint=True),
+}
+
+#: tool name -> its annotation, for every tool whose behaviour differs from
+#: its group's GROUP_ANNOTATIONS default. `_open_world` tools below default
+#: `no_net=False` (network reachable) or accept no `no_net` parameter at
+#: all — see the module docstring above for the two corrections this made
+#: against the ticket text, and the `no_net` reasoning it is built on.
+TOOL_ANNOTATION_OVERRIDES: dict[str, ToolAnnotations] = {
+    # verification: these three execute caller-supplied code across one or two
+    # languages, unlike z3_check/algebraic_equiv's pure symbolic evaluation.
+    "verify_translation": ToolAnnotations(
+        read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True),
+    "verify_optimization": ToolAnnotations(
+        read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True),
+    "compare_edge_cases": ToolAnnotations(
+        read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True),
+    # execution: these three run the caller's code with the network reachable
+    # by default (no_net=False); runtimes_status stays read-only (it changes
+    # nothing on this machine) but genuinely contacts each package manager's
+    # remote index, so open_world_hint is True where the group default is False.
+    "execute_code": ToolAnnotations(
+        read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True),
+    "execute_code_stream": ToolAnnotations(
+        read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True),
+    "compare_execution": ToolAnnotations(
+        read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True),
+    "runtimes_status": ToolAnnotations(
+        read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=True),
+    # sessions: session_start/run/run_submit mutate (new session, new run)
+    # but do not destroy anything; session_write_file/session_stop/run_cancel
+    # DO destroy something irrecoverably — write_file has no existence check
+    # (sessions.py's `write_file` overwrites whatever was already at `path`
+    # unconditionally, so a second call can permanently discard the first
+    # call's content) and session_stop/run_cancel tear down a live resource —
+    # the same "irrecoverable loss" reasoning applies to all three.
+    # session_stop/run_cancel are also idempotent by construction
+    # (sessions.py:1132's `.pop(id, None)`; run_cancel's idempotency on an
+    # already-finished run is asserted directly by tests/test_mcp_all.py);
+    # session_write_file is idempotent too — the same (session_id, path,
+    # content) call twice leaves the file in the same state, no additional
+    # effect. session_run and run_submit reach the network the same way
+    # execute_code does — session_run takes no `no_net` parameter at all,
+    # and run_submit's defaults to False.
+    "session_start": ToolAnnotations(
+        read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=False),
+    "session_write_file": ToolAnnotations(
+        read_only_hint=False, destructive_hint=True, idempotent_hint=True, open_world_hint=False),
+    "session_run": ToolAnnotations(
+        read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True),
+    "run_submit": ToolAnnotations(
+        read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True),
+    "session_stop": ToolAnnotations(
+        read_only_hint=False, destructive_hint=True, idempotent_hint=True, open_world_hint=False),
+    "run_cancel": ToolAnnotations(
+        read_only_hint=False, destructive_hint=True, idempotent_hint=True, open_world_hint=False),
+    # analysis: both execute code (benchmark runs the snippet at each size;
+    # extract_function runs the extracted program), unlike analyze_complexity's
+    # static structural pass.
+    "benchmark": ToolAnnotations(
+        read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True),
+    "extract_function": ToolAnnotations(
+        read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True),
+}
+
+# `run_inspect`, `session_files` and `session_artifacts` are NOT in the table
+# above — they take the `sessions` group's read-only default, and stay there
+# on purpose despite a real side effect each of them can trigger:
+#   * `run_inspect`, on a run whose future has already completed, collects
+#     the result and PRUNES the on-disk run journal
+#     (run_supervisor.py's `_collect`/`_prune`, called from `inspect()`).
+#   * `session_files`/`session_artifacts` both call `sessions.py`'s
+#     `_reap_then_note`, which tears down an ALREADY idle-expired worker
+#     ("F4: reap an expired worker, never revive it") before listing.
+# Neither creates, destroys or changes anything a caller asked for or would
+# notice as new state — both are finalizing a run/session that was already
+# over (a completed future, an idle-expired worker past its own TTL) as a
+# side effect of reading its current state, not a mutation the read caused.
+# That is why `read_only_hint` stays True: the judgement is recorded here so
+# a future change to either function re-reads this reasoning instead of
+# re-deriving it, or worse, assuming no side effect exists at all.
+
+
+def _default_title(name: str) -> str:
+    """A human-readable `title` derived from the tool name.
+
+    `mcp.tool(title=...)` is a first-class SDK kwarg (`Tool.from_function`,
+    `mcp/server/mcpserver/tools/base.py`) that reaches the wire as `MCPTool.title`
+    — a display string separate from `name` (still the identifier a client
+    calls) and from `description` (still the full docstring). Derived rather
+    than hand-typed at each of 52 call sites, so it cannot drift from the name
+    the way a hand-typed string could.
+    """
+    return name.replace("_", " ").title()
+
+
+# ── Server-side policy metadata, `_meta` on the wire. ───────────────────────
+# Claude Code's MCP docs (retrieved 2026-09-07; URL in README's "Tool-definition
+# token cost" section — tests/test_offline.py bans a literal URL from this
+# package, the same ban that keeps codecalc from phoning home):
+#   * `anthropic/requiresUserInteraction: true` forces a permission prompt on
+#     every call, even under acceptEdits/auto/bypassPermissions (v2.1.199+).
+#   * `anthropic/alwaysLoad: true` keeps a tool loaded when a client defers
+#     the rest of the surface (tool search / progressive disclosure) — meant
+#     for "your 3-5 most frequently used tools".
+#   * `anthropic/maxResultSizeChars` caps how much of a result the client
+#     keeps before truncating.
+# `meta=` is a first-class `mcp.tool()` kwarg in the pinned SDK, wired the
+# same way `annotations=` is (`Tool.from_function(meta=...)` ->
+# `Tool.meta` -> `list_tools()`'s `_meta=info.meta`,
+# mcp/server/mcpserver/server.py:493) — no monkeypatching needed.
+_REQUIRES_USER_INTERACTION = frozenset({"install_package", "update_runtimes"})
+
+#: Five tools, matching Anthropic's own guidance ("your 3-5 most frequently
+#: used tools") — one calculator entry point (`calc_exact`), one execution
+#: entry point (`execute_code`), the two equivalence/optimisation-proof tools
+#: verification exists for, and language discovery (`list_languages`), which
+#: a client typically needs before it can call any of the others correctly.
+_ALWAYS_LOAD = frozenset({
+    "calc_exact", "execute_code", "verify_translation", "verify_optimization", "list_languages",
+})
+
+#: The character equivalent of codecalc's own output cap, not Anthropic's
+#: 500,000-char ceiling — a value BELOW that ceiling still gives a client
+#: something to act on for the one tool family whose output can legitimately
+#: approach it. Derived, not guessed: `executor.MAX_OUTPUT_BYTES` (64 KiB) is
+#: applied independently to stdout AND stderr (executor.py:1027, 1089 —
+#: `truncated = len(out) > cap or len(err) > cap`), so two streams at the cap
+#: is 2 * 65536 = 131072 bytes. The rest is envelope: measured at ~500 bytes
+#: for the python-fallback backend's 21 fields with both streams empty;
+#: rounded up to 8,000 for the rust backend's larger receipt/determinism
+#: blocks and for JSON-escaping the exotic (non-ASCII, control-character)
+#: fraction of a stream. `compare_execution` shares this single value with
+#: the other three rather than a per-snippet multiple — see the
+#: PR description for the caveat that a many-language comparison can still
+#: legitimately exceed it.
+_MAX_RESULT_SIZE_CHARS = 2 * executor.MAX_OUTPUT_BYTES + 8_000  # = 139_072
+
+#: The four tools whose result can approach the output cap above:
+#: execute_code/execute_code_stream/session_run each run one program,
+#: compare_execution runs several. run_submit/run_inspect are excluded
+#: deliberately — the SUBMIT reply is a small `run_id` handle, and the
+#: eventual `run_inspect` reply is what carries the full envelope, which is
+#: the same shape execute_code returns and therefore the same cap.
+_LARGE_RESULT_TOOLS = frozenset({
+    "execute_code", "execute_code_stream", "session_run", "compare_execution",
+})
+
+
+def _tool_meta(name: str) -> dict[str, Any] | None:
+    """Server-side `_meta` for one tool, or None for a tool that carries none."""
+    meta: dict[str, Any] = {}
+    if name in _REQUIRES_USER_INTERACTION:
+        meta["anthropic/requiresUserInteraction"] = True
+    if name in _ALWAYS_LOAD:
+        meta["anthropic/alwaysLoad"] = True
+    if name in _LARGE_RESULT_TOOLS:
+        meta["anthropic/maxResultSizeChars"] = _MAX_RESULT_SIZE_CHARS
+    return meta or None
+
+
 def _active_groups() -> frozenset[str]:
     """The groups this process registers tools for.
 
@@ -415,6 +629,15 @@ def _tool(*d_args, **d_kwargs):
             # the whole of the enforcement. No entry in `_tool_manager`
             # means absent from `tools/list` AND rejected by `tools/call`.
             return _coded(fn)
+        # A per-tool `@mcp.tool(annotations=..., meta=...)`
+        # at the call site still wins (`setdefault`) — these are defaults
+        # derived from the group/name tables above, not an override of an
+        # explicit value a future tool might need.
+        d_kwargs.setdefault("annotations", TOOL_ANNOTATION_OVERRIDES.get(name, GROUP_ANNOTATIONS[group]))
+        d_kwargs.setdefault("title", _default_title(name))
+        tool_meta = _tool_meta(name)
+        if tool_meta is not None:
+            d_kwargs.setdefault("meta", tool_meta)
         return _mcp_tool(*d_args, **d_kwargs)(_coded(fn))
     return deco
 
@@ -572,7 +795,7 @@ def execute_code(
     no_net: bool = False,
     compact: bool = False,
     provider: str | None = None,
-) -> dict:
+) -> dict[str, Any]:
     """Execute `code` in `language` in a sandbox.
 
     Returns stdout, stderr, exit_code, duration_ms, cpu_ms, peak_memory_kb,
@@ -584,7 +807,11 @@ def execute_code(
       that workspace outlives the call; a sessionless run has none. See
       `session_run` for the same field plus inline content blocks.
     - `max_memory_mb` / `max_cpu`: per-call resource ceilings.
-    - `max_output_kb`: raise/lower the stdout cap (default 64 KiB).
+    - `max_output_kb`: raise/lower the stdout cap (default 64 KiB). Raising it
+      raises this tool's real output past the `anthropic/maxResultSizeChars`
+      this tool advertises in its `_meta` (derived from the DEFAULT cap on
+      both streams plus envelope) — that field is a client-side truncation
+      hint sized for the default, not a ceiling this tool itself enforces.
     - `no_net`: block network egress. Linux: enforced in-kernel via a
       seccomp-bpf filter. macOS / no-seccomp kernel: best-effort symbol
       shim, disclosed in `unenforced` when that's the only guarantee that
@@ -631,7 +858,7 @@ def execute_code(
 
 
 @mcp.tool(group="sessions")
-def session_start(language: str = "python3") -> dict:
+def session_start(language: str = "python3") -> dict[str, Any]:
     """Start a persistent session. python3/node get a stateful REPL worker
     (variables/imports persist across execute_code calls); other languages get
     a persistent workspace directory. Returns session_id."""
@@ -639,20 +866,20 @@ def session_start(language: str = "python3") -> dict:
 
 
 @mcp.tool(group="sessions")
-def session_stop(session_id: str) -> dict:
+def session_stop(session_id: str) -> dict[str, Any]:
     """Stop a session: kill its REPL worker (if any) and delete its workspace."""
     return _session_service.stop(session_id)
 
 
 @mcp.tool(group="sessions")
-def session_list() -> dict:
+def session_list() -> dict[str, Any]:
     """List active sessions and their languages/state."""
     return _session_service.list_sessions()
 
 
 @mcp.tool(group="sessions")
 def session_files(session_id: str, path: str = "", page_size: int | None = None,
-                  cursor: str | None = None) -> dict:
+                  cursor: str | None = None) -> dict[str, Any]:
     """List workspace files, optionally using a bounded cursor page."""
     return _session_service.list_files(
         session_id, path, page_size=page_size, cursor=cursor
@@ -660,14 +887,14 @@ def session_files(session_id: str, path: str = "", page_size: int | None = None,
 
 
 @mcp.tool(group="sessions")
-def session_write_file(session_id: str, path: str, content: str) -> dict:
+def session_write_file(session_id: str, path: str, content: str) -> dict[str, Any]:
     """Write a file into a session workspace (relative path, no escapes).
     Use this to seed input data for executed code."""
     return _session_service.write_file(session_id, path, content)
 
 
 @mcp.tool(group="sessions")
-def session_artifacts(session_id: str) -> dict:
+def session_artifacts(session_id: str) -> dict[str, Any]:
     """List files created by executed code in a session (excluding runner
     internals like main.py/run.out)."""
     return _session_service.artifacts(session_id)
@@ -679,7 +906,7 @@ def session_artifacts(session_id: str) -> dict:
 # backends, Cargo build scripts) that the docstring's warning below exists
 # to carry forward to every caller.
 def install_package(language: str, package: str, session_id: str | None = None,
-                    version: str | None = None) -> dict:
+                    version: str | None = None) -> dict[str, Any]:
     """Install a package for a language (uv pip / npm / gem / go get / cargo add...).
 
     With session_id, installs into that session's workspace so executed code
@@ -712,14 +939,17 @@ async def execute_code_stream(
     no_net: bool = False,
     provider: str | None = None,
     ctx: Context = None,
-) -> dict:
+) -> dict[str, Any]:
     """Execute code and STREAM progress + partial output as it runs.
 
     Unlike execute_code (which returns only at exit), this reports progress
     notifications to the client while the program runs, so agents can see
     output before the process finishes. Returns the same result shape and
     applies the SAME ceilings: max_memory_mb, max_output_kb and max_cpu are
-    forwarded to the executor exactly as execute_code forwards them.
+    forwarded to the executor exactly as execute_code forwards them — including
+    the same caveat: raising max_output_kb past its default raises this tool's
+    real output past the `anthropic/maxResultSizeChars` it advertises in its
+    `_meta`, which is sized for the default cap, not enforced by this tool.
 
     One difference, deliberate: the wall-clock cap is 300s here against
     execute_code's 120s, because streaming exists for runs long enough to
@@ -783,7 +1013,7 @@ def run_submit(
     max_cpu: int = 0,
     no_net: bool = False,
     provider: str | None = None,
-) -> dict:
+) -> dict[str, Any]:
     """Submit code for BACKGROUND execution; returns a run_id immediately.
 
     Same request shape as execute_code (minus session_id: a run is a
@@ -795,6 +1025,17 @@ def run_submit(
     call open for the whole computation. `timeout` is still the WORK's own
     deadline (same 120s ceiling as execute_code) — it bounds the run, not how
     long you wait to collect it.
+
+    `max_output_kb` is forwarded to the run exactly as execute_code forwards
+    it (default 64 KiB, raisable). This tool's OWN reply carries no output —
+    it is a small run_id handle, which is why it carries no
+    `anthropic/maxResultSizeChars` `_meta` itself. The eventual terminal
+    `run_inspect(run_id)` is what returns the full envelope this call's
+    `max_output_kb` produced — same shape execute_code returns, but
+    `run_inspect` advertises no `anthropic/maxResultSizeChars` either
+    (it is not one of the tools that carries it), so there is no advertised
+    cap to exceed there; a caller who needs one should size against
+    execute_code's advertised value instead.
 
     Admission is capped (CODECALC_MAX_ACTIVE_RUNS, default 64): past that
     many runs still running/cancelling at once, this returns a
@@ -857,7 +1098,7 @@ def run_submit(
 
 
 @mcp.tool(group="sessions")
-def run_inspect(run_id: str) -> dict:
+def run_inspect(run_id: str) -> dict[str, Any]:
     """Poll a background run started with run_submit.
 
     While running: {"ok": True, "state": "running"|"cancelling", "run_id",
@@ -934,7 +1175,7 @@ def run_inspect(run_id: str) -> dict:
 
 
 @mcp.tool(group="sessions")
-def run_cancel(run_id: str) -> dict:
+def run_cancel(run_id: str) -> dict[str, Any]:
     """Cancel a background run started with run_submit.
 
     Idempotent: calling this on a run that is already finished/cleaned
@@ -983,7 +1224,7 @@ def run_cancel(run_id: str) -> dict:
 
 
 @mcp.tool(group="calculator")
-def evaluate_expression(expression: str) -> dict:
+def evaluate_expression(expression: str) -> dict[str, Any]:
     """Symbolically evaluate an expression to a value or closed form via
     sympify: 'integrate(x**2, x)', 'sqrt(144) + 2**10'. Not simplification —
     for simplified/factored/expanded forms, use simplify_expression. Not
@@ -994,13 +1235,13 @@ def evaluate_expression(expression: str) -> dict:
 
 
 @mcp.tool(group="calculator")
-def truth_table(expression: str) -> dict:
+def truth_table(expression: str) -> dict[str, Any]:
     """Build the truth table for a boolean expression: 'a and b or not c', 'p xor q', 'a implies b'."""
     return logic.truth_table(expression)
 
 
 @mcp.tool(group="verification")
-def z3_check(smt2: str) -> dict:
+def z3_check(smt2: str) -> dict[str, Any]:
     """Check an SMT-LIB2 formula with Z3: sat/unsat/unknown plus a model. Example:
     '(declare-const x Int)(assert (> x 5))(check-sat)'.
 
@@ -1015,14 +1256,14 @@ def z3_check(smt2: str) -> dict:
 
 
 @mcp.tool(group="calculator")
-def solve_linear(system: str, variables: str) -> dict:
+def solve_linear(system: str, variables: str) -> dict[str, Any]:
     """Solve a system of equations; `system` is ';'-separated equations, `variables` comma-separated. Example: system='x + y = 10; x - y = 2', variables='x, y'."""
     vars_ = [v.strip() for v in variables.split(",") if v.strip()]
     return logic.solve_linear(system, vars_)
 
 
 @mcp.tool(group="calculator")
-def matrix(rows: list[list[int | float | str]], op: str) -> dict:
+def matrix(rows: list[list[int | float | str]], op: str) -> dict[str, Any]:
     """Structured matrix operations: det, inverse, eigenvalues, transpose, rank, trace.
 
     `evaluate_expression` refuses `Matrix([[1,2],[3,4]])` on purpose — `[`/`]`
@@ -1039,14 +1280,14 @@ def matrix(rows: list[list[int | float | str]], op: str) -> dict:
 
 
 @mcp.tool(group="analysis")
-def analyze_complexity(code: str, language: str = "python3") -> dict:
+def analyze_complexity(code: str, language: str = "python3") -> dict[str, Any]:
     """Estimate the asymptotic (Big-O) time complexity of a code snippet via structural analysis."""
     return complexity.analyze(code, language)
 
 
 @mcp.tool(group="analysis")
 def benchmark(code: str, language: str = "python3", sizes: str = "100,1000,10000,100000",
-              timeout: int = 30) -> dict:
+              timeout: int = 30) -> dict[str, Any]:
     """Empirically measure time complexity by running code at increasing input sizes.
 
     Contract: the code must read an integer N from stdin (first line) and do work
@@ -1058,7 +1299,7 @@ def benchmark(code: str, language: str = "python3", sizes: str = "100,1000,10000
 
 
 @mcp.tool(group="execution")
-def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 15) -> dict:
+def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 15) -> dict[str, Any]:
     """Run the same code in multiple languages side by side.
 
     `snippets` maps language name -> code (each snippet must be valid in its own
@@ -1069,7 +1310,7 @@ def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 
 
 
 @mcp.tool(group="execution")
-def runtimes_status(languages: str = "") -> dict:
+def runtimes_status(languages: str = "") -> dict[str, Any]:
     """Check every language runtime for available updates (NON-MUTATING).
 
     Reports current vs latest version per language, which package manager owns
@@ -1089,7 +1330,7 @@ def runtimes_status(languages: str = "") -> dict:
 
 
 @mcp.tool(group="admin")
-def update_runtimes(languages: str = "", apply: bool = False, timeout: int = 600) -> dict:
+def update_runtimes(languages: str = "", apply: bool = False, timeout: int = 600) -> dict[str, Any]:
     """Update language runtimes. SAFE BY DEFAULT: with apply=False this is a
     dry run — it returns the update commands that WOULD run without changing
     anything. Pass apply=True to actually execute them (mise up, rustup update,
@@ -1132,6 +1373,14 @@ def session_file_resource(session_id: str, path: str):
         return data
 
 
+# Deliberately left untyped (no `-> dict` or `-> dict[str, Any]`): the body
+# below returns EITHER a dict OR a raw `ImageContent` (as_image=True, or an
+# image file read without it). Measured against the pinned SDK: annotating
+# the union as `dict[str, Any] | ImageContent` builds a schema, but a Union
+# return always gets wrapped in `{"result": ...}`, which is a wire-shape
+# change to a path that already works, and a shape the published contract
+# does not document. session_run has the same untyped treatment, for the
+# same reason with a list instead of ImageContent — see its own comment.
 @mcp.tool(group="sessions")
 def session_read_file(session_id: str, path: str, max_bytes: int = 65536,
                       as_image: bool = False):
@@ -1247,6 +1496,15 @@ def _inline_artifact_blocks(session_id: str, artifacts: list[dict]) -> tuple[lis
     return blocks, truncated
 
 
+# Deliberately left `-> dict` (not `dict[str, Any]`), same treatment as
+# session_read_file: this can return a LIST of content blocks
+# (`[TextContent, *artifact blocks]`, see `_inline_artifact_blocks` above)
+# when the run created artifacts, not only a dict. Typing the union wraps
+# every reply in `{"result": ...}` (measured against the pinned SDK — see
+# session_read_file's own comment), and a caller reading the list branch
+# would hit the SDK's own output validation instead: "validation error for
+# DictModel ... Input should be a valid dictionary". Left untyped, both
+# branches pass through unvalidated exactly as before.
 @mcp.tool(group="sessions")
 def session_run(session_id: str, entry_file: str, language: str | None = None,
                 stdin: str = "", timeout: int = 30):
@@ -1281,7 +1539,7 @@ def session_run(session_id: str, entry_file: str, language: str | None = None,
 
 
 @mcp.tool(group="calculator")
-def convert_units(value: float, from_unit: str, to_unit: str) -> dict:
+def convert_units(value: float, from_unit: str, to_unit: str) -> dict[str, Any]:
     """Convert a value between units (dimensional analysis via sympy).
 
     Supports metric/imperial length, mass, time, speed, energy, power, force,
@@ -1293,14 +1551,14 @@ def convert_units(value: float, from_unit: str, to_unit: str) -> dict:
 
 
 @mcp.tool(group="calculator")
-def physical_constants(name: str | None = None) -> dict:
+def physical_constants(name: str | None = None) -> dict[str, Any]:
     """Look up a physical constant (speed_of_light, planck, avogadro,
     gravity, electron_mass, gas_constant, ...) or list all 22 with values."""
     return units.constants(name)
 
 
 @mcp.tool(group="calculator")
-def list_units() -> dict:
+def list_units() -> dict[str, Any]:
     """List every supported unit alias for convert_units."""
     return units.list_units()
 
@@ -1308,7 +1566,7 @@ def list_units() -> dict:
 # ── exact arithmetic & programmer-mode (ported from the Claude calc skill) ──
 
 @mcp.tool(group="calculator")
-def calc_exact(expr: str) -> dict:
+def calc_exact(expr: str) -> dict[str, Any]:
     """EXACT arithmetic: 0.1 + 0.2 == 0.3 is True here (False in plain Python).
 
     Everything is an exact rational, integers are arbitrary precision. Supports
@@ -1321,7 +1579,7 @@ def calc_exact(expr: str) -> dict:
 
 
 @mcp.tool(group="calculator")
-def compare_threshold(a: str, op: str, b: str) -> dict:
+def compare_threshold(a: str, op: str, b: str) -> dict[str, Any]:
     """Exact threshold check with a verdict and the shortfall when it fails.
 
     `a OP b` with op in ==, !=, >, >=, <, <= (= accepted for ==). Both sides
@@ -1332,13 +1590,13 @@ def compare_threshold(a: str, op: str, b: str) -> dict:
 
 
 @mcp.tool(group="calculator")
-def percentage(part: str, total: str) -> dict:
+def percentage(part: str, total: str) -> dict[str, Any]:
     """Exact share and percentage of PART / TOTAL (rationals accepted)."""
     return exact.percentage(part, total)
 
 
 @mcp.tool(group="calculator")
-def calc_stats(nums: list[float]) -> dict:
+def calc_stats(nums: list[float]) -> dict[str, Any]:
     """Mean, median, sample stdev, and coefficient of variation (CV) for a
     sample of numbers. Pairs with percentiles for distribution shape
     (p50/p90/p95/p99) on the same sample, and with benchmark or
@@ -1350,7 +1608,7 @@ def calc_stats(nums: list[float]) -> dict:
 
 
 @mcp.tool(group="calculator")
-def percentiles(nums: list[float]) -> dict:
+def percentiles(nums: list[float]) -> dict[str, Any]:
     """p50/p90/p95/p99 by nearest-rank AND linear interpolation.
 
     Warns when n < 100 that p99 is just the maximum wearing a label.
@@ -1359,7 +1617,7 @@ def percentiles(nums: list[float]) -> dict:
 
 
 @mcp.tool(group="calculator")
-def collision_probability(items: int, bits: int) -> dict:
+def collision_probability(items: int, bits: int) -> dict[str, Any]:
     """Birthday-bound hash collision probability: 1 - exp(-n^2 / (2*2^b)).
 
     Sizes hashes: 1e6 items into 64 bits is ~2.7e-8; 1e5 into 32 bits is ~0.69
@@ -1369,7 +1627,7 @@ def collision_probability(items: int, bits: int) -> dict:
 
 
 @mcp.tool(group="calculator")
-def data_sizes(n: int) -> dict:
+def data_sizes(n: int) -> dict[str, Any]:
     """Byte counts for a plain integer, both binary (KiB/MiB/GiB/TiB, /1024)
     and decimal (KB/MB/GB/TB, /1000) — the gap between them is where '291 MB'
     and '277 MiB' silently disagree by 5%. For units other than bytes, use
@@ -1380,7 +1638,7 @@ def data_sizes(n: int) -> dict:
 
 
 @mcp.tool(group="calculator")
-def human_duration(seconds: float) -> dict:
+def human_duration(seconds: float) -> dict[str, Any]:
     """Humanised duration (e.g. '2d 3h 4m 5s') plus per-day and per-30d rates
     for a number of seconds. For converting an epoch timestamp to a calendar
     date, use epoch_time — this tool is for elapsed time, not a point in
@@ -1390,21 +1648,21 @@ def human_duration(seconds: float) -> dict:
 
 
 @mcp.tool(group="calculator")
-def epoch_time(n: str) -> dict:
+def epoch_time(n: str) -> dict[str, Any]:
     """Epoch seconds/millis/micros/nanos to ISO 8601 UTC (implausible readings
     suppressed)."""
     return exact.epoch_time(n)
 
 
 @mcp.tool(group="calculator")
-def base_repr(n: int, width: int | None = None) -> dict:
+def base_repr(n: int, width: int | None = None) -> dict[str, Any]:
     """hex/oct/bin of N; with WIDTH, two's complement and signed-overflow
     detection. `base_repr(3000000000, 32)` says plainly it does not fit i32."""
     return exact.base_repr(n, width)
 
 
 @mcp.tool(group="calculator")
-def radix_convert(value: str, from_base: int = 10, to_base: int = 10) -> dict:
+def radix_convert(value: str, from_base: int = 10, to_base: int = 10) -> dict[str, Any]:
     """Convert a value between ANY bases 2..36, fractions included; bases that
     cannot represent the fraction (e.g. 0.1 in base 2) are flagged
     non-terminating. `radix_convert('zz', 36, 7)` is one call."""
@@ -1412,7 +1670,7 @@ def radix_convert(value: str, from_base: int = 10, to_base: int = 10) -> dict:
 
 
 @mcp.tool(group="calculator")
-def float_repr(x: float) -> dict:
+def float_repr(x: float) -> dict[str, Any]:
     """What binary64 actually stores for X: exact value, raw bits, ULP, both
     neighbours, and whether the literal is representable. `float_repr(0.1)`
     shows 0.1000000000000000055511151231257827...; `float_repr(0.25)` says
@@ -1421,7 +1679,7 @@ def float_repr(x: float) -> dict:
 
 
 @mcp.tool(group="calculator")
-def int_widths(n: int) -> dict:
+def int_widths(n: int) -> dict[str, Any]:
     """Which widths (i8..i64/u8..u64) hold N, and the wrapped value where they
     do not. Flags anything past 2^53 as unable to round-trip through a JS
     number or JSON float. `int_widths(3000000000)` shows the i32 wrap."""
@@ -1429,14 +1687,14 @@ def int_widths(n: int) -> dict:
 
 
 @mcp.tool(group="calculator")
-def bit_analysis(n: int, align: int | None = None) -> dict:
+def bit_analysis(n: int, align: int | None = None) -> dict[str, Any]:
     """popcount, bit length, trailing zeros, power-of-two check, next power of
     two, and (with align) padding needed to reach an alignment boundary."""
     return exact.bit_analysis(n, align)
 
 
 @mcp.tool(group="calculator")
-def bitop(a: int, op: str, b: int | None = None, width: int = 64) -> dict:
+def bitop(a: int, op: str, b: int | None = None, width: int = 64) -> dict[str, Any]:
     """Programmer-mode bit ops: and or xor nand nor xnor not shl shr sar rol ror
     at width 8/16/32/64. Every result shows unsigned, signed (two's complement),
     hex, octal and binary. shr is logical (zero-fill); sar is arithmetic
@@ -1447,7 +1705,7 @@ def bitop(a: int, op: str, b: int | None = None, width: int = 64) -> dict:
 
 
 @mcp.tool(group="verification")
-def algebraic_equiv(a: str, b: str) -> dict:
+def algebraic_equiv(a: str, b: str) -> dict[str, Any]:
     """Are two expressions algebraically identical? Refs: 'is (a*b)/c the same
     as a*(b/c)?' answered exactly. Caveat: symbolic identity says nothing
     about float rounding, integer truncation or modular overflow."""
@@ -1455,7 +1713,7 @@ def algebraic_equiv(a: str, b: str) -> dict:
 
 
 @mcp.tool(group="calculator")
-def solve_expression(expr: str, var: str = "x") -> dict:
+def solve_expression(expr: str, var: str = "x") -> dict[str, Any]:
     """Solve a single equation in one variable for its roots or crossover
     point: 'x**2 - 4 = 0', '2*x + 1 = 7'. For a system of several equations,
     use solve_linear. For general constraint satisfiability (inequalities,
@@ -1466,7 +1724,7 @@ def solve_expression(expr: str, var: str = "x") -> dict:
 
 
 @mcp.tool(group="calculator")
-def limit_expression(expr: str, var: str = "x", point: str = "oo") -> dict:
+def limit_expression(expr: str, var: str = "x", point: str = "oo") -> dict[str, Any]:
     """Asymptotic behaviour: limit of EXPR as var -> point (default oo).
     'limit_expression(\"n*log(n)/n**2\", \"n\")' returns 0 — settles complexity
     arguments faster than arguing."""
@@ -1474,7 +1732,7 @@ def limit_expression(expr: str, var: str = "x", point: str = "oo") -> dict:
 
 
 @mcp.tool(group="calculator")
-def simplify_expression(expr: str) -> dict:
+def simplify_expression(expr: str) -> dict[str, Any]:
     """Simplified, factored, and expanded forms of an expression —
     algebraic rewriting, not solving and not a numeric value. For roots of
     an equation, use solve_expression. For an exact numeric result, use
@@ -1486,7 +1744,7 @@ def simplify_expression(expr: str) -> dict:
 @mcp.tool(group="verification")
 def verify_translation(source_code: str, source_language: str,
                        target_code: str, target_language: str,
-                       test_inputs: list[str] | None = None) -> dict:
+                       test_inputs: list[str] | None = None) -> dict[str, Any]:
     """PROVE that a port is equivalent: run both programs, compare their output.
 
     You write the translation — you are the language model. This runs your
@@ -1525,7 +1783,7 @@ def verify_translation(source_code: str, source_language: str,
 
 @mcp.tool(group="verification")
 def compare_edge_cases(snippets: dict[str, str],
-                       inputs: list[str] | None = None) -> dict:
+                       inputs: list[str] | None = None) -> dict[str, Any]:
     """Run the same logic in N languages on edge-case inputs and flag divergence.
 
     `snippets` maps language -> code (provide a correct snippet per language;
@@ -1541,7 +1799,7 @@ def compare_edge_cases(snippets: dict[str, str],
 def verify_optimization(original: str, candidate: str, language: str,
                         test_inputs: list[str] | None = None,
                         sizes: list[int] | None = None,
-                        min_speedup: float = 1.15) -> dict:
+                        min_speedup: float = 1.15) -> dict[str, Any]:
     """PROVE an optimisation: same outputs, and measurably AND SIGNIFICANTLY faster.
 
     You write the optimised version. This runs both against the same inputs to
@@ -1572,7 +1830,7 @@ def verify_optimization(original: str, candidate: str, language: str,
 @mcp.tool(group="analysis")
 def extract_function(code: str, language: str, function_name: str,
                      call: str | None = None,
-                     test_inputs: list[str] | None = None) -> dict:
+                     test_inputs: list[str] | None = None) -> dict[str, Any]:
     """Extract a named function (with its imports + referenced helpers) into a
     standalone program and run it in the sandbox.
 

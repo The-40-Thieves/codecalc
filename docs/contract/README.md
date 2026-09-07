@@ -3,23 +3,30 @@
 **Current version: `1.4.0`** · Schema: [`result-v1.schema.json`](result-v1.schema.json) ·
 Source of truth: [`codecalc/contract.py`](../../codecalc/contract.py)
 
-`1.4.0` is a MINOR bump over `1.3.0`: it ADDS `artifacts_created` to a
-session-scoped result — `session_run` and `execute_code(session_id=...)` —
-naming the files that run just created or modified in the session workspace,
-as `{path, size, mime, resource}` per file (`resource` is a
-`codecalc://session/{sid}/files/{path}` URI, also readable via
-`session_read_file`). `session_run` additionally adds `truncated_inline`,
-set `true` when more artifacts exist than the reply's inline-content budget
-(8 blocks / 4 MiB) could attach — the full list still appears in
-`artifacts_created` either way. Both fields are additions to the existing
-**session** shape (present on the envelope shape too, for a workspace-only
-session run) and to **compact**, which never drops them for the same reason
-it never drops `unenforced`. Neither field changes what an existing field
-means, so a `1.3.0` client is unaffected. The MCP content blocks
-`session_run` attaches alongside its JSON result (`ImageContent` for a small
-image, `EmbeddedResource` for a small text file, `ResourceLink` otherwise)
-are a TRANSPORT-level addition, not a result-v1 field — this document and
-the schema describe the JSON result only.
+`1.4.0` is a MINOR bump over `1.3.0`, and carries two additive changes landed
+against the same `1.3.0` base — one bump, not two:
+
+- It ADDS `artifacts_created` to a session-scoped result — `session_run` and
+  `execute_code(session_id=...)` — naming the files that run just created or
+  modified in the session workspace, as `{path, size, mime, resource}` per
+  file (`resource` is a `codecalc://session/{sid}/files/{path}` URI, also
+  readable via `session_read_file`). `session_run` additionally adds
+  `truncated_inline`, set `true` when more artifacts exist than the reply's
+  inline-content budget (8 blocks / 4 MiB) could attach — the full list
+  still appears in `artifacts_created` either way. Both fields are additions
+  to the existing **session** shape (present on the envelope shape too, for
+  a workspace-only session run) and to **compact**, which never drops them
+  for the same reason it never drops `unenforced`. The MCP content blocks
+  `session_run` attaches alongside its JSON result (`ImageContent` for a
+  small image, `EmbeddedResource` for a small text file, `ResourceLink`
+  otherwise) are a TRANSPORT-level addition, not a result-v1 field — this
+  document and the schema describe the JSON result only.
+- It is the wire gaining `outputSchema` and `structuredContent`, described
+  in the note below — a client that only read the `content` text block is
+  unaffected.
+
+Neither change moves or removes what an existing field means, so a `1.3.0`
+client is unaffected by either — additions only, hence MINOR.
 
 `1.3.0` is a MINOR bump over `1.2.0`: it ADDS a `tier` field to every entry in
 the `doctor` diagnostic document's `runtimes` array, plus a `tier_summary`
@@ -53,15 +60,62 @@ That dialect is not arbitrary: MCP `2026-07-28` defaults tool `inputSchema` and
 `outputSchema` to 2020-12 when no `$schema` is present, so this document can be
 handed to a client as an `outputSchema` and validated with no translation step.
 
-**Note, 2026-09-07 — this schema is not yet wired to the MCP `outputSchema`
-field for the calculator tools.** The Python MCP SDK derives a tool's
-`outputSchema` from its return type annotation (SDK 2.0.0, verified: a bare
-`-> dict` yields `output_schema: None` and no `structuredContent`, while
-`-> dict[str, T]` yields both), and the calculator tools are currently
-annotated `-> dict`. Emitting `outputSchema` for them — so a client validates
-structurally instead of by convention — is planned as a MINOR change; until
-then, this document is the contract in prose and JSON Schema, not something a
-client can fetch from `tools/list` today.
+**Updated, 2026-09-07 — `outputSchema` is now emitted for most tools, and it
+is a looser document than this one.** Most tools are now annotated
+`-> dict[str, Any]` (previously a bare `-> dict`, which the SDK cannot
+schematise at all — verified, SDK 2.0.0: a bare `-> dict` return yields
+`output_schema: None` and no `structuredContent`, while `-> dict[str, T]`
+yields both). That flips a typed tool onto the SDK's structured-output path,
+so its `tools/list` entry carries an `outputSchema` and every `tools/call`
+result carries `structuredContent` alongside the unchanged text block.
+
+Three tools are deliberately left untyped, because their return value is not
+always a dict:
+
+- `session_read_file` can return a raw `ImageContent` block instead of a
+  dict (`as_image=True`, or any image file read without it).
+- `session_run` can return a list of content blocks
+  (`[TextContent, *artifact blocks]`) when the run created artifacts.
+- `list_languages`/`list_execution_providers` return `list[dict]`, which
+  the SDK schematises fine on its own (measured: identical output schema
+  either way) — not an exception in practice, just not the `dict[str, Any]`
+  form the other 49 tools took.
+
+Annotating either of the first two as a `dict[str, Any] | ImageContent`/
+`dict[str, Any] | list[...]` union builds a schema, but the SDK wraps EVERY
+Union return in `{"result": ...}` (measured), which is a wire-shape change
+to a path that already works — and for `session_run` specifically, a caller
+whose run produced artifacts would then fail the SDK's own output
+validation ("validation error for DictModel ... Input should be a valid
+dictionary") instead of getting a result. So `session_read_file` and
+`session_run` keep their pre-existing untyped return, `outputSchema` stays
+`None` for those two, and `structuredContent` stays unpopulated for them —
+nothing else about their behavior changed.
+
+What actually gets published is **not** this file. The SDK derives
+`outputSchema` mechanically from the Python return-type annotation, and
+`dict[str, Any]` produces the generic, permissive shape Python's typing gives
+it license to produce — measured on `execute_code`:
+
+```json
+{"type": "object", "additionalProperties": true, "title": "execute_codeDictOutput"}
+```
+
+— an object with no fields, no `required`, no enums. This document's schema
+(the five shapes, the 21 envelope fields, the verdict/code enumerations) is
+still the one worth validating against; it is just not the one a client reads
+back from `tools/list`. Getting the SDK to emit *this* schema verbatim would
+need a `TypedDict` (or `BaseModel`) per shape, one of which — `run_lifecycle` vs
+`envelope` vs `rejected` — a tool can return conditionally at runtime, and that
+is future work, not done here. Until then: `outputSchema` on the wire tells a
+client "this is a JSON object", which is strictly true and worth having, and
+this document tells it what the object actually contains.
+
+One caveat for a client UI: in some MCP clients `structuredContent` displaces
+the `content` text block's default display. Nothing is actually lost — the SDK
+still emits the text block on every call, `tests/_mcp_client.py`'s `data()`
+helper still reads it as a fallback, and a client that only speaks `content`
+still works exactly as before.
 
 ---
 

@@ -709,7 +709,14 @@ If you are paying too much for codecalc's definitions:
   server's tools upfront only while their definitions total under 10% of the
   context window and defers all of them once that 10% is reached; `false`
   loads everything upfront regardless of size (Claude Code MCP docs,
-  https://code.claude.com/docs/en/mcp, retrieved 2026-09-07).
+  https://code.claude.com/docs/en/mcp, retrieved 2026-09-07). `calc_exact`,
+  `execute_code`, `verify_translation`, `verify_optimization`, and
+  `list_languages` carry `_meta["anthropic/alwaysLoad"]` (per that same doc,
+  "your 3-5 most frequently used tools") so they stay loaded even when a
+  client defers everything else; `install_package` and `update_runtimes`
+  carry `_meta["anthropic/requiresUserInteraction"]`, which forces a
+  permission prompt on every call regardless of the session's permission
+  mode — both change the host and both fetch from a registry.
 - **Claude API, via the MCP connector**, takes `defer_loading` once on the
   toolset's `default_config`, or per tool in `configs`. Deferred definitions stay
   out of the system-prompt prefix, prompt caching is preserved, and a matching
@@ -770,6 +777,20 @@ On a client with no deferral mechanism of its own, the client's own allow-list
 does the same job from the other end — OpenAI's `allowed_tools`, Gemini CLI's
 `includeTools`/`excludeTools`, or Codex CLI's `enabled_tools`/`disabled_tools`
 all narrow what a given session sees without touching the server.
+
+Every tool also now carries a `ToolAnnotations` hint (`readOnlyHint`,
+`destructiveHint`, `idempotentHint`, `openWorldHint` — see
+`codecalc/server.py`'s `GROUP_ANNOTATIONS`/`TOOL_ANNOTATION_OVERRIDES` tables
+for the value on each of the 52). Codex CLI's `writes` approval mode
+(v0.144.0+) reads `readOnlyHint` directly: a tool marked `readOnlyHint: true`
+skips the approval prompt, everything else still asks. That covers the whole
+`calculator` group (25/25 pure) plus the read-only members of the mixed
+groups — `list_languages`/`list_execution_providers`/`runtimes_status` in
+`execution`, `z3_check`/`algebraic_equiv` in `verification`,
+`session_list`/`session_files`/`session_read_file`/`session_artifacts`/
+`run_inspect` in `sessions`, and `analyze_complexity` in `analysis` — without
+codecalc doing anything client-specific; the annotation is the same hint
+every MCP client reads, `writes` just happens to be the mode that consumes it.
 
 **This is not the facade** the section above declines to build. Every tool a
 group activates keeps its own name, its own typed input schema and its own
@@ -842,7 +863,7 @@ PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py         # every tool over MC
 PYTHONPATH=. .venv/bin/python tests/test_executor_sweep.py  # sandbox regressions
 ```
 
-59 test files and 16 CI-invoked scripts, **2184 assertions**. "CI-invoked"
+61 test files and 16 CI-invoked scripts, **2184 assertions**. "CI-invoked"
 means referenced by path (`scripts/<name>.py`) from a job in
 `.github/workflows/*.yml` — `scripts/check_claims.py` derives the count that
 way and gates it, so a script wired into a workflow without this sentence

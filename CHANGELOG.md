@@ -74,29 +74,55 @@ behind it.
   `test_platform_contract.py`'s and `test_mcp_all.py`'s existing two-job
   invocations.
 
-### Docs
-
-- **Six weakest tool descriptions rewritten to disambiguate from a sibling,
-  per Glama's coherence review.** `evaluate_expression`, `simplify_expression`,
-  `solve_expression`, `calc_stats`, `data_sizes`, and `human_duration` were
-  the shortest tool docstrings in `codecalc/server.py` and none named a
-  sibling tool to distinguish itself from — `evaluate_expression`'s own text
-  said "evaluate or simplify", directly claiming `simplify_expression`'s job.
-  Each now follows a four-part shape (what it returns, the sibling it is the
-  alternative to and the condition that decides between them, a natural
-  follow-up tool, and the return shape) modelled on `matrix`'s docstring,
-  which Glama scored 5/5 on disambiguation. The MCP tool description IS the
-  docstring the SDK exposes in `tools/list` — this is a documentation-only
-  change, no behavior moved. `scripts/tool_select_eval.py --baseline` (the
-  lexical tool-selection regression gate) improved on all three `--tools`
-  presets (full 118→123, dev 96→101, core 63→68 top-1 hits out of a prior
-  measured run; net +4/+5/+5 against the checked-in baseline) — a sibling's
-  name in a description adds discriminating vocabulary to the very prompts
-  it exists to disambiguate. `scripts/data/tool_select_baseline.json`
-  regenerated from this change.
-
 ### Added
 
+- **Per-tool `ToolAnnotations` (readOnlyHint/destructiveHint/idempotentHint/
+  openWorldHint) on all 52 tools, and typed return schemas on 49 of them.**
+  Every tool now declares a group-derived (with named per-tool overrides)
+  `ToolAnnotations` and a human-readable `title`. Every bare `-> dict`
+  return became `-> dict[str, Any]` EXCEPT `session_read_file` and
+  `session_run` (both can return something other than a dict — a raw
+  `ImageContent`, or a list of content blocks when a run produced
+  artifacts — and typing that union wraps every reply in `{"result": ...}`,
+  which for `session_run` fails the SDK's own output validation on the list
+  branch; both keep their pre-existing untyped return, exactly as before);
+  `list_languages`/`list_execution_providers` were already `-> list[dict]`,
+  which the SDK schematises fine without a change. `dict[str, Any]` is what
+  actually flips a tool onto the SDK's structured-output path (verified: a
+  bare `-> dict` cannot be schematised at all). `tools/list` now carries an
+  `outputSchema` for every typed tool and every `tools/call` reply from one
+  carries `structuredContent` alongside its unchanged text block — see
+  `docs/contract/README.md`'s updated 2026-09-07 note for what that schema
+  actually contains (a permissive `{"type": "object"}`, not this repo's
+  detailed result contract), which two tools stay untyped and why, and the
+  caveat that some MCP clients let `structuredContent` displace the text
+  block's default display without dropping anything. `contract_version` and
+  `code` are asserted present in `structuredContent` now that a caller can
+  read it structurally. A caller-supplied `max_output_kb` above the default
+  64 KiB can push `execute_code`/`execute_code_stream`/`run_submit`'s real
+  output past their advertised `anthropic/maxResultSizeChars` below — noted
+  in each tool's docstring.
+  `CONTRACT_VERSION` bumped `1.3.0` -> `1.4.0` (MINOR: the wire gained a
+  capability, no result shape moved). New `tests/test_tool_annotations.py`
+  asserts every one of the 52 registered tools carries a complete
+  annotation, that no `calculator`-group tool is marked non-read-only, and
+  that `outputSchema` is `None` on exactly the two tools left untyped.
+- **Server-side policy `_meta` on select tools, read by Claude Code
+  (`code.claude.com/docs/en/mcp`, retrieved 2026-09-07).**
+  `_meta["anthropic/requiresUserInteraction"] = true` on `install_package`
+  and `update_runtimes` (both mutate the host and fetch from a registry) —
+  forces a permission prompt on every call even under
+  acceptEdits/auto/bypassPermissions. `_meta["anthropic/alwaysLoad"] = true`
+  on `calc_exact`, `execute_code`, `verify_translation`,
+  `verify_optimization`, `list_languages` — five entry-point tools that stay
+  loaded when a client defers the rest of the surface via tool search.
+  `_meta["anthropic/maxResultSizeChars"]` on `execute_code`,
+  `execute_code_stream`, `session_run`, `compare_execution` — set to
+  `2 * executor.MAX_OUTPUT_BYTES + 8_000` (139,072), derived from the two
+  independently-capped output streams plus envelope overhead, not
+  Anthropic's 500,000-char ceiling. New `tests/test_tool_meta.py` asserts
+  `tools/list` carries exactly these `_meta` keys on exactly these tools and
+  no others.
 - **Inline artifacts from session-scoped runs.** `session_run` and
   `execute_code(session_id=...)` — both of which run in a session workspace
   that outlives the call, unlike sessionless `execute_code`'s Rust-owned temp
@@ -118,8 +144,35 @@ behind it.
   the same reason it never drops `unenforced`/`output_error` (#117): a
   compact caller is the one least able to discover a new file any other
   way. The content blocks themselves are transport-level and outside the
-  result contract; `contract_version` moves `1.3.0` → **`1.4.0`** (a MINOR
-  add) for the two new JSON fields on the session/envelope/compact shapes.
+  result contract. This is also why `session_run` stays off the typed-return
+  list above: it can return `[TextContent, *artifact blocks]` rather than a
+  dict, and typing that union fails the SDK's own output validation on the
+  list branch — see `codecalc/server.py`'s comment above the tool.
+  `CONTRACT_VERSION` moves `1.3.0` → **`1.4.0`** (a MINOR add) for the two
+  new JSON fields on the session/envelope/compact shapes — the same MINOR
+  bump the annotations/`outputSchema`/`_meta` change above shares; both
+  landed against the same `1.3.0` base, so there is one bump, not two.
+
+### Docs
+
+- **Six weakest tool descriptions rewritten to disambiguate from a sibling,
+  per Glama's coherence review.** `evaluate_expression`, `simplify_expression`,
+  `solve_expression`, `calc_stats`, `data_sizes`, and `human_duration` were
+  the shortest tool docstrings in `codecalc/server.py` and none named a
+  sibling tool to distinguish itself from — `evaluate_expression`'s own text
+  said "evaluate or simplify", directly claiming `simplify_expression`'s job.
+  Each now follows a four-part shape (what it returns, the sibling it is the
+  alternative to and the condition that decides between them, a natural
+  follow-up tool, and the return shape) modelled on `matrix`'s docstring,
+  which Glama scored 5/5 on disambiguation. The MCP tool description IS the
+  docstring the SDK exposes in `tools/list` — this is a documentation-only
+  change, no behavior moved. `scripts/tool_select_eval.py --baseline` (the
+  lexical tool-selection regression gate) improved on all three `--tools`
+  presets (full 118→123, dev 96→101, core 63→68 top-1 hits out of a prior
+  measured run; net +4/+5/+5 against the checked-in baseline) — a sibling's
+  name in a description adds discriminating vocabulary to the very prompts
+  it exists to disambiguate. `scripts/data/tool_select_baseline.json`
+  regenerated from this change.
 
 ## [0.6.0] — 2026-09-06
 
