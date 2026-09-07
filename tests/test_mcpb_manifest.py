@@ -20,12 +20,14 @@ import pathlib
 import re
 import subprocess
 import sys
+import time
 import tomllib
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from codecalc import __version__
+from scripts import build_mcpb
 
 MCPB_DIR = REPO_ROOT / "mcpb"
 MANIFEST_PATH = MCPB_DIR / "manifest.json"
@@ -180,6 +182,79 @@ long_description = manifest.get("long_description", "")
 check("manifest.long_description discloses the first-launch network dependency",
       "network" in long_description.lower() or "pypi" in long_description.lower(),
       f"-> {long_description!r}")
+
+
+# ── scripts/build_mcpb.py: retry is scoped to the network step only ────────
+# The bug: build_mcpb.run() used to retry ANY subprocess.CalledProcessError
+# three times with linear backoff. That was added so a transient `npx` fetch
+# of the pinned mcpb CLI would not fail a release, but it also retried
+# `mcpb validate`/`mcpb pack` SEMANTIC failures, so a genuinely broken
+# manifest took three attempts and ~6s to report instead of failing on the
+# first non-zero exit. The fix splits the helper in two: retry_run() (used
+# only to warm npx's cache of the pinned CLI, the one network step) retries;
+# run() (used for validate/pack, both local once the CLI is cached) does not.
+#
+# subprocess.run is monkeypatched with a fake so both call counts are
+# directly assertable without touching the real network or shelling out to
+# npx; time.sleep is monkeypatched to a no-op so the backoff (2s + 4s) does
+# not actually pause this suite.
+_real_subprocess_run = subprocess.run
+_real_sleep = time.sleep
+build_mcpb.time.sleep = lambda _seconds: None
+
+
+def _fake_subprocess_run(always_fail: bool, fail_count: int = 0):
+    """Fails the first `fail_count` calls (or every call, if always_fail),
+    then succeeds. Returns (fake, calls) where calls['n'] is the count."""
+    calls = {"n": 0}
+
+    def fake(args, check=True):
+        calls["n"] += 1
+        if always_fail or calls["n"] <= fail_count:
+            raise subprocess.CalledProcessError(1, args)
+        return subprocess.CompletedProcess(args, 0)
+
+    return fake, calls
+
+
+# 1. run() (the validate/pack path): a semantic failure is attempted exactly
+#    once — no retry — and its CalledProcessError propagates immediately.
+fake, calls = _fake_subprocess_run(always_fail=True)
+build_mcpb.subprocess.run = fake
+try:
+    build_mcpb.run(["npx", "-y", "@anthropic-ai/mcpb@2.1.2", "validate", "mcpb"])
+    check("run() raises on a validate-style failure", False, "-> no exception raised")
+except subprocess.CalledProcessError:
+    check("run() raises on a validate-style failure", True)
+check("run() attempts a semantic failure exactly once (no retry)", calls["n"] == 1,
+      f"-> attempts={calls['n']}")
+
+# 2. retry_run() (the npx cache-warm path): a failure that never clears is
+#    retried up to ATTEMPTS times, then raised.
+fake, calls = _fake_subprocess_run(always_fail=True)
+build_mcpb.subprocess.run = fake
+try:
+    build_mcpb.retry_run(["npx", "-y", "@anthropic-ai/mcpb@2.1.2", "--version"])
+    check("retry_run() raises once retries are exhausted", False, "-> no exception raised")
+except subprocess.CalledProcessError:
+    check("retry_run() raises once retries are exhausted", True)
+check(f"retry_run() attempts exactly ATTEMPTS ({build_mcpb.ATTEMPTS}) times",
+      calls["n"] == build_mcpb.ATTEMPTS, f"-> attempts={calls['n']}")
+
+# 3. retry_run() sanity check: a transient failure that clears before
+#    ATTEMPTS is exhausted recovers instead of raising.
+fake, calls = _fake_subprocess_run(always_fail=False, fail_count=build_mcpb.ATTEMPTS - 1)
+build_mcpb.subprocess.run = fake
+try:
+    build_mcpb.retry_run(["npx", "-y", "@anthropic-ai/mcpb@2.1.2", "--version"])
+    check("retry_run() recovers once the transient failure clears", True)
+except subprocess.CalledProcessError as exc:
+    check("retry_run() recovers once the transient failure clears", False, f"-> {exc}")
+check("...after retrying exactly ATTEMPTS times", calls["n"] == build_mcpb.ATTEMPTS,
+      f"-> attempts={calls['n']}")
+
+build_mcpb.subprocess.run = _real_subprocess_run
+build_mcpb.time.sleep = _real_sleep
 
 
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else "\n=== MCPB MANIFEST OK ===")
