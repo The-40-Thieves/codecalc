@@ -33,6 +33,27 @@ behind it.
 
 ## [Unreleased]
 
+### Docs
+
+- **Six weakest tool descriptions rewritten to disambiguate from a sibling,
+  per Glama's coherence review.** `evaluate_expression`, `simplify_expression`,
+  `solve_expression`, `calc_stats`, `data_sizes`, and `human_duration` were
+  the shortest tool docstrings in `codecalc/server.py` and none named a
+  sibling tool to distinguish itself from — `evaluate_expression`'s own text
+  said "evaluate or simplify", directly claiming `simplify_expression`'s job.
+  Each now follows a four-part shape (what it returns, the sibling it is the
+  alternative to and the condition that decides between them, a natural
+  follow-up tool, and the return shape) modelled on `matrix`'s docstring,
+  which Glama scored 5/5 on disambiguation. The MCP tool description IS the
+  docstring the SDK exposes in `tools/list` — this is a documentation-only
+  change, no behavior moved. `scripts/tool_select_eval.py --baseline` (the
+  lexical tool-selection regression gate) improved on all three `--tools`
+  presets (full 118→123, dev 96→101, core 63→68 top-1 hits out of a prior
+  measured run; net +4/+5/+5 against the checked-in baseline) — a sibling's
+  name in a description adds discriminating vocabulary to the very prompts
+  it exists to disambiguate. `scripts/data/tool_select_baseline.json`
+  regenerated from this change.
+
 ## [0.6.0] — 2026-09-06
 
 ### Added
