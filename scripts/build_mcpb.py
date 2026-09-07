@@ -29,15 +29,23 @@ The `@anthropic-ai/mcpb` CLI is pinned to an EXACT version below and run via
 change what a release-tagged commit produces with no diff anywhere in this
 repo to review.
 
-Both `npx` invocations retry on failure — 3 attempts, linear backoff — the
-same shape as codecalc/prefetch.py's grammar-download retry (see that
-module's own comment for the reasoning: one attempt is a coin flip on the
-network, not a measurement of it). This matters more here than it looks:
-release.yml's release-assets job (checksums, build-provenance attestation,
-`gh release upload`) depends on this script succeeding, so a transient `npx`
-fetch failure of the packaging CLI from the npm registry would otherwise
+Only the step that touches the network retries — 3 attempts, linear
+backoff, the same shape as codecalc/prefetch.py's grammar-download retry
+(see that module's own comment for the reasoning: one attempt is a coin
+flip on the network, not a measurement of it). That step is a cheap
+`npx -y <cli>@<version> --version`: `npx` resolves and caches the pinned
+CLI from the npm registry on first invocation, so this warms the same
+cache `validate`/`pack` will read from. release.yml's release-assets job
+(checksums, build-provenance attestation, `gh release upload`) depends on
+this script succeeding, so a transient npm fetch failure would otherwise
 skip drafting the entire GitHub release even though every platform wheel
 built and verified cleanly.
+
+`validate` and `pack` run exactly once each, with no retry: once the CLI is
+cached, both are local, deterministic operations, so a non-zero exit is
+mcpb's own schema check or packer rejecting the bundle — a genuinely broken
+manifest — and retrying it three times would only burn ~6s reproducing the
+same failure before finally surfacing it.
 
 Usage: python scripts/build_mcpb.py
 """
@@ -80,6 +88,17 @@ def codecalc_version() -> str:
 
 
 def run(args: list[str]) -> None:
+    """Run args once. No retry: a non-zero exit here is a semantic failure
+    (mcpb rejecting the manifest, a bad bundle directory, ...) and should
+    surface immediately with the CLI's own stderr, not be retried."""
+    print(f"$ {' '.join(args)}")
+    subprocess.run(args, check=True)
+
+
+def retry_run(args: list[str]) -> None:
+    """Run args with retry — for the one step that touches the network
+    (resolving/caching the pinned mcpb CLI via npx). 3 attempts, linear
+    backoff; see this module's docstring for why only this step retries."""
     print(f"$ {' '.join(args)}")
     last_exc: subprocess.CalledProcessError | None = None
     for attempt in range(1, ATTEMPTS + 1):
@@ -121,6 +140,14 @@ def main() -> int:
     output = DIST_DIR / f"codecalc-{version}.mcpb"
     cli = f"@anthropic-ai/mcpb@{MCPB_CLI_VERSION}"
 
+    # The only network step: resolves and caches the pinned CLI from the npm
+    # registry. `--version` is the cheapest no-op the CLI offers (see this
+    # module's docstring); this is the retried call, so a transient npm
+    # hiccup here doesn't fail the whole build.
+    retry_run(["npx", "-y", cli, "--version"])
+
+    # Now local and deterministic — run once each, no retry, so a genuine
+    # validate/pack failure surfaces immediately.
     run(["npx", "-y", cli, "validate", str(MCPB_DIR)])
     run(["npx", "-y", cli, "pack", str(MCPB_DIR), str(output)])
 
