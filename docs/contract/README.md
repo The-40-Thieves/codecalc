@@ -3,8 +3,8 @@
 **Current version: `1.4.0`** · Schema: [`result-v1.schema.json`](result-v1.schema.json) ·
 Source of truth: [`codecalc/contract.py`](../../codecalc/contract.py)
 
-`1.4.0` is a MINOR bump over `1.3.0`, and carries two additive changes landed
-against the same `1.3.0` base — one bump, not two:
+`1.4.0` is a MINOR bump over `1.3.0`, and carries THREE additive changes
+landed against the same `1.3.0` base — one bump, not three:
 
 - It ADDS `artifacts_created` to a session-scoped result — `session_run` and
   `execute_code(session_id=...)` — naming the files that run just created or
@@ -13,10 +13,7 @@ against the same `1.3.0` base — one bump, not two:
   readable via `session_read_file`). `session_run` additionally adds
   `truncated_inline`, set `true` when more artifacts exist than the reply's
   inline-content budget (8 blocks / 4 MiB) could attach — the full list
-  still appears in `artifacts_created` either way. Both fields are additions
-  to the existing **session** shape (present on the envelope shape too, for
-  a workspace-only session run) and to **compact**, which never drops them
-  for the same reason it never drops `unenforced`. The MCP content blocks
+  still appears in `artifacts_created` either way. The MCP content blocks
   `session_run` attaches alongside its JSON result (`ImageContent` for a
   small image, `EmbeddedResource` for a small text file, `ResourceLink`
   otherwise) are a TRANSPORT-level addition, not a result-v1 field — this
@@ -24,9 +21,19 @@ against the same `1.3.0` base — one bump, not two:
 - It is the wire gaining `outputSchema` and `structuredContent`, described
   in the note below — a client that only read the `content` text block is
   unaffected.
+- It ADDS an optional `dependencies` field to the execution envelope and to
+  the session result shape (per-run dependencies for
+  `execute_code`/`session_run`) —
+  `[{spec, language, ok, installer, elapsed_ms, unenforced?}]`, present only
+  when a run declared dependencies via a PEP 723 block or the `dependencies`
+  tool argument.
 
-Neither change moves or removes what an existing field means, so a `1.3.0`
-client is unaffected by either — additions only, hence MINOR.
+All three are additions to the existing **session** shape (present on the
+envelope shape too, for a workspace-only session run) and to **compact**,
+which never drops any of them for the same reason it never drops
+`unenforced`. None moves or removes what an existing field means, and none
+is present on a result that never triggers it, so a `1.3.0` client is
+unaffected by any of the three — additions only, hence MINOR.
 
 `1.3.0` is a MINOR bump over `1.2.0`: it ADDS a `tier` field to every entry in
 the `doctor` diagnostic document's `runtimes` array, plus a `tier_summary`

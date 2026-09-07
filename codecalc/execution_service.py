@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import dataclasses
+import tempfile
+
 from . import (
     audit as audit_module,
 )
@@ -13,6 +16,9 @@ from . import (
     providers,
     registry,
     sessions,
+)
+from . import (
+    dependencies as dependencies_module,
 )
 from .providers import (
     ComputationSpec,
@@ -123,7 +129,8 @@ class ExecutionService:
         return broker_run(spec, provider, policy=self._policy(),
                           audit=self.audit, session_id=session_id)
 
-    def execute(self, spec: ComputationSpec, *, provider_id: str | None = None) -> dict:
+    def execute(self, spec: ComputationSpec, *, provider_id: str | None = None,
+               dependencies: list[str] | None = None) -> dict:
         try:
             provider = self.registry.select(provider_id, spec=spec)
         except UnknownProvider as exc:
@@ -134,6 +141,28 @@ class ExecutionService:
                 requested_provider=exc.provider_id,
                 available_providers=list(exc.available),
             ))
+
+        # Parse/merge a PEP 723 block (python3) with the explicit
+        # `dependencies` argument BEFORE brokering — a malformed block is a
+        # `validation` refusal regardless of capability policy, and costs
+        # nothing to check first.
+        dep_specs, dep_parse_error, dep_implicit = dependencies_module.resolve(
+            spec.language, spec.code, dependencies)
+        if dep_parse_error is not None:
+            return contract.stamp(dep_parse_error)
+        if dep_specs and dep_implicit:
+            # Source text ALONE (a PEP 723 block, no `dependencies` argument)
+            # is about to start a confined install — logged distinctly from an
+            # explicit `install_package`/`dependencies=` call so a reader of
+            # the trail can tell which one happened. Logged here, at the
+            # point of detection, regardless of whether the refusal check
+            # below then blocks it — a refused attempt is still worth knowing
+            # source tried to trigger.
+            self.audit.emit(
+                audit_module.DEPENDENCY_INSTALL_IMPLICIT,
+                decision="detected", language=spec.language,
+                dependency_count=len(dep_specs),
+            )
 
         # broker capabilities BEFORE any side effect. `run_spec` is the
         # possibly-narrowed spec that actually runs (network denied -> no_net
@@ -146,59 +175,112 @@ class ExecutionService:
         if rejection is not None:
             return rejection
 
+        dep_entries = None
+        dep_workdir: str | None = None
+        dep_workdir_identity = None
+        if dep_specs:
+            # Dependencies install through packages.py's own confined path,
+            # which only this provider uses — see the module's docstring for
+            # why other providers (Piston, a remote strict backend) are not
+            # wired to it rather than guessed at.
+            if provider.provider_id != "local":
+                return contract.stamp(errors.error_result(
+                    errors.VALIDATION,
+                    f"provider {provider.provider_id!r} does not support "
+                    "per-run dependencies",
+                    provider_error="unsupported_capability",
+                    requested_provider=provider.provider_id,
+                    capability="dependencies",
+                ))
+            # THE SECURITY PROPERTY: never fetch when the run has no network —
+            # checked against the run AS ASKED (spec.no_net), not run_spec,
+            # which the broker may have already narrowed for the SANDBOXED
+            # step; that narrowing is irrelevant here because the install
+            # never enters the sandbox at all. See dependencies.network_refused.
+            policy = self._policy()
+            if dependencies_module.network_refused(no_net=spec.no_net, policy=policy):
+                return contract.stamp(dependencies_module.refusal_result(spec.no_net, policy))
+            # Sessionless: the Rust executor normally owns and deletes its own
+            # temp workdir. With dependencies to install first, THIS layer
+            # pre-creates the workdir, installs into it, and passes it as
+            # `--workdir` — which the executor then treats as caller-supplied
+            # and never deletes (see executor.py's `_rmtree_checked` docstring)
+            # — so cleanup below is this service's own responsibility.
+            dep_workdir = tempfile.mkdtemp(prefix="codecalc-deps-")
+            dep_workdir_identity = executor._dir_identity(dep_workdir)
+            dep_entries, failure = dependencies_module.install_dependencies(
+                spec.language, dep_specs, session_id=None,
+                workdir=dep_workdir, audit=self.audit)
+            if failure is not None:
+                # Never reached the executor — no receipt, same as every other
+                # pre-execution refusal above (broker rejection, unsupported
+                # capability): a receipt claims "this ran", which this did not.
+                executor._rmtree_checked(dep_workdir, dep_workdir_identity)
+                result = dict(failure)
+                result["dependencies"] = dep_entries
+                return contract.stamp(result)
+            run_spec = dataclasses.replace(run_spec, workdir=dep_workdir)
+
         try:
-            if provider.describe()["capabilities"].get("managed_runs"):
-                if self.supervisor is None:
-                    return contract.stamp(errors.error_result(
-                        errors.INTERNAL,
-                        "managed execution provider requires a run supervisor",
-                        provider_error="run_supervisor_unavailable",
-                        requested_provider=provider.provider_id,
-                    ))
-                handle = self.supervisor.start(run_spec, provider_id=provider.provider_id,
-                                               capability_decision=decision,
-                                               receipt_spec=spec)
-                cleanup_failure = None
-                try:
-                    result = dict(self.supervisor.wait(
-                        handle.run_id, timeout=run_spec.timeout + 10
-                    ))
-                finally:
+            try:
+                if provider.describe()["capabilities"].get("managed_runs"):
+                    if self.supervisor is None:
+                        return contract.stamp(errors.error_result(
+                            errors.INTERNAL,
+                            "managed execution provider requires a run supervisor",
+                            provider_error="run_supervisor_unavailable",
+                            requested_provider=provider.provider_id,
+                        ))
+                    handle = self.supervisor.start(run_spec, provider_id=provider.provider_id,
+                                                   capability_decision=decision,
+                                                   receipt_spec=spec)
+                    cleanup_failure = None
                     try:
-                        self.supervisor.cleanup(handle.run_id)
-                        self.audit.emit(
-                            audit_module.CLEANUP, run_id=handle.run_id,
-                            decision="cleaned", provider_id=provider.provider_id)
-                    except ProviderOperationFailure as exc:
-                        cleanup_failure = exc
-                        self.audit.emit(
-                            audit_module.CLEANUP, run_id=handle.run_id,
-                            decision="cleanup_failed", reason=str(exc),
-                            provider_id=provider.provider_id)
-                if cleanup_failure is not None:
-                    # F3 (cross-vendor): cleanup is best-effort and must NOT
-                    # discard the collected result. Replacing a good result
-                    # (stdout/verdict/receipt) with an internal error over a
-                    # provider-side resource-release problem loses exactly what
-                    # the caller asked for. Mirror run_inspect (server.py): keep
-                    # the result and append `cleanup_error`.
-                    result["cleanup_error"] = str(cleanup_failure)
-            else:
-                result = dict(provider.execute(run_spec))
-        except UnsupportedCapability as exc:
-            return contract.stamp(errors.error_result(
-                errors.VALIDATION,
-                str(exc),
-                provider_error=exc.code,
-                requested_provider=exc.provider_id,
-                capability=exc.capability,
-            ))
+                        result = dict(self.supervisor.wait(
+                            handle.run_id, timeout=run_spec.timeout + 10
+                        ))
+                    finally:
+                        try:
+                            self.supervisor.cleanup(handle.run_id)
+                            self.audit.emit(
+                                audit_module.CLEANUP, run_id=handle.run_id,
+                                decision="cleaned", provider_id=provider.provider_id)
+                        except ProviderOperationFailure as exc:
+                            cleanup_failure = exc
+                            self.audit.emit(
+                                audit_module.CLEANUP, run_id=handle.run_id,
+                                decision="cleanup_failed", reason=str(exc),
+                                provider_id=provider.provider_id)
+                    if cleanup_failure is not None:
+                        # F3 (cross-vendor): cleanup is best-effort and must NOT
+                        # discard the collected result. Replacing a good result
+                        # (stdout/verdict/receipt) with an internal error over a
+                        # provider-side resource-release problem loses exactly what
+                        # the caller asked for. Mirror run_inspect (server.py): keep
+                        # the result and append `cleanup_error`.
+                        result["cleanup_error"] = str(cleanup_failure)
+                else:
+                    result = dict(provider.execute(run_spec))
+            except UnsupportedCapability as exc:
+                return contract.stamp(errors.error_result(
+                    errors.VALIDATION,
+                    str(exc),
+                    provider_error=exc.code,
+                    requested_provider=exc.provider_id,
+                    capability=exc.capability,
+                ))
+        finally:
+            if dep_workdir is not None:
+                executor._rmtree_checked(dep_workdir, dep_workdir_identity)
+        if dep_entries is not None:
+            result["dependencies"] = dep_entries
         return contract.stamp(attach_receipt(spec, provider, result,
                                              capability_decision=decision))
 
     def execute_session(self, session_service: SessionService, session_id: str,
                         spec: ComputationSpec, *,
-                        provider_id: str | None = None) -> dict:
+                        provider_id: str | None = None,
+                        dependencies: list[str] | None = None) -> dict:
         """Execute a CodeCalc workspace session without changing providers."""
         try:
             provider = self.registry.select(provider_id, spec=spec)
@@ -219,6 +301,17 @@ class ExecutionService:
                 requested_provider=exc.provider_id,
                 capability=exc.capability,
             ))
+        # Same parse/merge as the sessionless path, before brokering.
+        dep_specs, dep_parse_error, dep_implicit = dependencies_module.resolve(
+            spec.language, spec.code, dependencies)
+        if dep_parse_error is not None:
+            return contract.stamp(dep_parse_error)
+        if dep_specs and dep_implicit:
+            self.audit.emit(
+                audit_module.DEPENDENCY_INSTALL_IMPLICIT,
+                session_id=session_id, decision="detected",
+                language=spec.language, dependency_count=len(dep_specs),
+            )
         # broker before the worker runs; a denied network forces no_net
         # on the spec the session worker receives where the provider can enforce
         # it (the local provider on the rust backend does).
@@ -226,7 +319,26 @@ class ExecutionService:
                                                      session_id=session_id)
         if rejection is not None:
             return rejection
+        dep_entries = None
+        if dep_specs:
+            policy = self._policy()
+            if dependencies_module.network_refused(no_net=spec.no_net, policy=policy):
+                return contract.stamp(dependencies_module.refusal_result(spec.no_net, policy))
+            # A session's workspace is already the run's workdir — install
+            # into it directly, the same target the worker/workspace process
+            # already imports from (packages.install's session_id branch).
+            dep_entries, failure = dependencies_module.install_dependencies(
+                spec.language, dep_specs, session_id=session_id,
+                workdir=None, audit=self.audit)
+            if failure is not None:
+                # Never reached the worker/workspace — no receipt, same
+                # reasoning as the sessionless path above.
+                result = dict(failure)
+                result["dependencies"] = dep_entries
+                return contract.stamp(result)
         result = dict(session_service.execute(session_id, run_spec))
+        if dep_entries is not None:
+            result["dependencies"] = dep_entries
         # F6 (cross-vendor): name the session in the receipt. The spec is
         # identical across sessions, so without this two sessions running the
         # same code produced byte-identical receipts despite different state.
@@ -286,6 +398,16 @@ class ExecutionService:
 
 class SessionService:
     """Protocol-neutral session lifecycle, workspace, and artifact service."""
+
+    def __init__(self, *, audit: audit_module.AuditLog | None = None) -> None:
+        # Same default-to-no-op shape as `ExecutionService.__init__`: an
+        # explicit `audit` wins (server.py passes the real one so
+        # `session_run`'s dependency installs are audited exactly like
+        # `execute_code`'s); a no-op sink otherwise, so every OTHER method on
+        # this class — none of which needed an audit log before — stays
+        # unaffected by callers that construct `SessionService()` bare (tests
+        # included).
+        self.audit = audit if audit is not None else audit_module.AuditLog(None)
 
     def start(self, language: str = "python3") -> dict:
         return sessions.start(language)
@@ -369,7 +491,8 @@ class SessionService:
 
     def run_file(self, session_id: str, entry_file: str,
                  language: str | None = None, stdin: str = "",
-                 timeout: int = 30) -> dict:
+                 timeout: int = 30,
+                 dependencies: list[str] | None = None) -> dict:
         """Run a workspace entry file as a fresh process in its session."""
         try:
             workdir = sessions._session_dir(session_id)
@@ -384,28 +507,70 @@ class SessionService:
             quota_refusal = sessions.quota_precheck(session_id)
             if quota_refusal is not None:
                 return quota_refusal
-            # Taken before the entry file runs, so quota_postcheck below can
-            # report which files it created or modified — see
-            # sessions.execute()'s own `before` for the same snapshot on the
-            # session-worker/workspace-execute path.
-            before = sessions._artifact_snapshot(workdir)
             resource = sessions.resource_read(session_id, entry_file)
         except ValueError as exc:
             return sessions._guard_error(exc)  # #212, see read_file's comment above
         if resource is None:
             return {"ok": False, "error": f"no such file or file too large: {entry_file}"}
         data, _mime_type = resource
+        source = data.decode(errors="replace")
         if language is None:
             extension = entry_file.rsplit(".", 1)[-1] if "." in entry_file else ""
             by_extension = {value: key for key, value in registry.EXTENSIONS.items()}
             language = by_extension.get(extension, "python3")
+        # Parse/merge before running. session_run has no per-call
+        # `no_net` of its own (the sandboxed step here has always run with
+        # network open — see the module docstring), so the refusal check is
+        # policy-only: `no_net=False` unconditionally, `network_refused` still
+        # catches a deny-network/strict CODECALC_CAPABILITY_POLICY.
+        dep_specs, dep_parse_error, dep_implicit = dependencies_module.resolve(
+            language, source, dependencies)
+        if dep_parse_error is not None:
+            return dep_parse_error
+        if dep_specs and dep_implicit:
+            self.audit.emit(
+                audit_module.DEPENDENCY_INSTALL_IMPLICIT,
+                session_id=session_id, decision="detected",
+                language=language, dependency_count=len(dep_specs),
+            )
+        dep_entries = None
+        if dep_specs:
+            policy = capabilities.policy_from_env()
+            if dependencies_module.network_refused(no_net=False, policy=policy):
+                return dependencies_module.refusal_result(False, policy)
+            dep_entries, failure = dependencies_module.install_dependencies(
+                language, dep_specs, session_id=session_id, workdir=None,
+                audit=self.audit)
+            if failure is not None:
+                result = dict(failure)
+                result["dependencies"] = dep_entries
+                return result
+        # Taken AFTER any dependency install, immediately before the entry
+        # file runs — deliberately NOT at its original position (right after
+        # quota_precheck, before resource_read/dependency resolution). A
+        # dependency install into this session's own workspace (uv's
+        # --target dir, npm's node_modules, both managers' .cache/ trees) IS
+        # a filesystem write to `workdir`, and `_classify_new_artifacts`
+        # reports anything ABSENT from `before` as something the run
+        # "created or modified" — so a snapshot taken before the install
+        # would misreport uv/npm's own byproducts as artifacts THE PROGRAM
+        # produced. Snapshotting here instead treats the just-installed tree
+        # as part of the baseline, so only what the entry file itself
+        # writes below is ever reported — see tests/test_dependencies.py's
+        # "artifact-snapshot ordering" section, which asserts this directly
+        # (an installed file does NOT appear in `artifacts_created`; a file
+        # the entry file itself writes does). `quota_postcheck` below still
+        # gets the same guarantee sessions.execute() promises: "before the
+        # entry file runs" — the entry file has not run yet at this point
+        # either way.
+        before = sessions._artifact_snapshot(workdir)
         # captured at the larger spill ceiling and re-truncated to
         # the executor's own default cap, same as sessions.execute()'s
         # workspace branch — session_run has no caller-facing max_output_kb
         # of its own to honour instead (see sessions.SPILL_CAPTURE_KB).
         result = executor.execute(
             language,
-            data.decode(errors="replace"),
+            source,
             stdin=stdin,
             timeout=timeout,
             workdir=str(workdir),
@@ -414,6 +579,8 @@ class SessionService:
         result = sessions.spill_if_truncated(session_id, result, 0)
         result["entry_file"] = entry_file
         result["language"] = language
+        if dep_entries is not None:
+            result["dependencies"] = dep_entries
         # point 4: the entry file just ran arbitrary code with the
         # workspace as its cwd — measure what it left behind and disclose an
         # over-quota session rather than let it grow silently forever.

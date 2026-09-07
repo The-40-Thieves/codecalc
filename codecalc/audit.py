@@ -65,6 +65,12 @@ CAPABILITY_REJECTED = "capability_rejected"
 INSTALL_DENIED = "install_denied"
 STRICT_PROVIDER_REJECTED = "strict_provider_rejected"
 CLEANUP = "cleanup"
+#: A PEP 723 block in `code` alone — no `dependencies` tool argument — started
+#: a dependency install. Named distinctly from INSTALL_DENIED/an explicit
+#: `install_package` call so a reader of the trail can tell "an operator asked
+#: for this" from "the source text alone triggered it" (codecalc/dependencies.py
+#: `Resolution.implicit`).
+DEPENDENCY_INSTALL_IMPLICIT = "dependency_install_implicit"
 
 #: the live-file size ceiling that triggers a rotation.
 AUDIT_MAX_MB_ENV = "CODECALC_AUDIT_MAX_MB"

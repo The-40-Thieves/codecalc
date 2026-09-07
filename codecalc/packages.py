@@ -494,13 +494,35 @@ def _macos_confinement(bin_: str, workspace: str, env: dict, language: str) -> t
 
 
 def install(language: str, package: str, session_id: str | None = None,
-            version: str | None = None, audit: object | None = None) -> dict:
+            version: str | None = None, audit: object | None = None,
+            workdir: str | None = None, timeout: int = 600) -> dict:
     """Install a package for a language. Returns where it was installed.
 
     `audit`, when given, is an `audit.AuditLog`: a deny-by-default
     allowlist refusal emits an `install_denied` event carrying the ecosystem and
     the bare package name — never a credential or the install output. Default
     None keeps every existing caller unchanged.
+
+    `workdir`, when given and `session_id` is not, targets that directory
+    directly instead of the shared ad-hoc cache — the per-run dependency
+    installer uses this to install into a sessionless run's own
+    workdir, which is what makes the result importable (see the module
+    docstring: cwd is what puts a package on sys.path[0]/node_modules
+    resolution). `session_id` still wins when both are given — a session's own
+    workspace and quota checks are unaffected by this parameter. This
+    function itself still runs no disk-quota check on a bare `workdir` — a
+    sessionless run has no session for THIS module to measure against — but a
+    caller MAY check one afterward; `dependencies.install_dependencies` does,
+    against the session-workspace quota constant, for exactly this `workdir`
+    path (see that module for why the same cap is reused rather than a second
+    one invented).
+
+    `timeout`: the wall-clock ceiling passed to the underlying subprocess,
+    default 600s (this module's long-standing ad-hoc/`install_package` value,
+    unchanged for every existing caller). `dependencies.install_dependencies`
+    passes a SMALLER, remaining-budget value here for each dependency of a
+    run, so one slow install cannot silently consume the whole aggregate
+    budget it is measured against.
     """
     name = registry.canonical(language) or language
     if name in _UNSUPPORTED:
@@ -609,6 +631,13 @@ def install(language: str, package: str, session_id: str | None = None,
         if quota_refusal is not None:
             return quota_refusal
         cwd = d
+    elif workdir:
+        # A caller-supplied directory (a sessionless run's own workdir), not a
+        # session and not the shared cache. No quota check: this directory
+        # belongs to the run, not to a session this module can measure.
+        cwd = Path(workdir)
+        if not cwd.is_dir():
+            return {"ok": False, "error": f"no such workdir: {workdir}"}
     else:
         cwd = CACHE_ROOT
         cwd.mkdir(parents=True, exist_ok=True)
@@ -653,9 +682,9 @@ def install(language: str, package: str, session_id: str | None = None,
 
     try:
         p = subprocess.run(cmd, cwd=str(cwd), env=env, capture_output=True,
-                           text=True, timeout=600, preexec_fn=confine)
+                           text=True, timeout=timeout, preexec_fn=confine)
     except subprocess.TimeoutExpired:
-        return _out({"ok": False, "error": "package install timed out (600s)"})
+        return _out({"ok": False, "error": f"package install timed out ({timeout}s)"})
     except Exception as exc:
         return _out({"ok": False, "error": f"install failed: {exc}"})
 
@@ -683,7 +712,7 @@ def install(language: str, package: str, session_id: str | None = None,
     # program runs from — sys.path[0] for python, node_modules lookup for node.
     # An ad-hoc install goes to the shared cache, which is NOT that directory, so
     # say so instead of reporting a success the caller cannot use.
-    importable = session_id is not None
+    importable = session_id is not None or workdir is not None
     return _out({"ok": True, "language": name, "package": spec,
             "target": str(cwd), "importable": importable,
             "note": None if importable else

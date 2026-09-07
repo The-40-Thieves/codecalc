@@ -783,8 +783,10 @@ def test_mcp_session_adapters_delegate_to_the_shared_service() -> None:
 
         def run_file(self, session_id: str, entry_file: str,
                      language: str | None = None, stdin: str = "",
-                     timeout: int = 30) -> dict:
-            calls.append(("run", session_id, entry_file, language, stdin, timeout))
+                     timeout: int = 30,
+                     dependencies: list[str] | None = None) -> dict:
+            calls.append(("run", session_id, entry_file, language, stdin, timeout,
+                          dependencies))
             return {"operation": "run"}
 
     old_service = getattr(server, "_session_service", None)
@@ -821,7 +823,7 @@ def test_mcp_session_adapters_delegate_to_the_shared_service() -> None:
         ("artifacts", "sid"),
         ("read", "sid", "data/x", 7, False),
         ("read", "sid", "data/x", 4 * 1024 * 1024, False),
-        ("run", "sid", "main.py", "python3", "input", 9),
+        ("run", "sid", "main.py", "python3", "input", 9, None),
     ])
 
 
