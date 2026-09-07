@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/The-40-Thieves/codecalc/main/docs/contract/result-v1.schema.json",
   "title": "codecalc execution result",
-  "description": "The result contract for codecalc's execution tools, version 1.4.0. Generated from codecalc/contract.py by scripts/check_contract.py \u2014 edit the module, not this file.",
+  "description": "The result contract for codecalc's execution tools, version 1.5.0. Generated from codecalc/contract.py by scripts/check_contract.py \u2014 edit the module, not this file.",
   "type": "object",
   "required": [
     "ok",
@@ -34,6 +34,15 @@
     },
     {
       "$ref": "#/$defs/run_lifecycle"
+    },
+    {
+      "$ref": "#/$defs/translation_verification"
+    },
+    {
+      "$ref": "#/$defs/optimization_verification"
+    },
+    {
+      "$ref": "#/$defs/edge_case_comparison"
     }
   ],
   "$defs": {
@@ -522,6 +531,589 @@
         "required": [
           "verdict"
         ]
+      }
+    },
+    "translation_verification": {
+      "title": "a verify_translation result",
+      "description": "The `verify_translation` tool's result: did a source program and a claimed port agree, across every test input, with real evidence either way (see translation.classify_case/aggregate). `grade`/`grade_basis`/`grade_rules_version` are always present \u2014 server.py grades every call, pass or not \u2014 from codecalc.grades, itself a closed, versioned vocabulary. `ok` is always true here \u2014 it means the tool completed and produced a real answer, never the verdict; read `passed` for that.",
+      "type": "object",
+      "required": [
+        "ok",
+        "passed",
+        "reason",
+        "matched",
+        "mismatched",
+        "inconclusive",
+        "total",
+        "cases",
+        "grade",
+        "grade_basis",
+        "grade_rules_version"
+      ],
+      "properties": {
+        "ok": {
+          "type": "boolean",
+          "description": "True whenever the tool completed and produced a real answer \u2014 set unconditionally by `aggregate`, including on a mismatch. NOT the verdict: read `passed` for that."
+        },
+        "passed": {
+          "type": "boolean",
+          "description": "True only when there is REAL evidence for equivalence: no mismatch, and at least one case where both programs actually ran and agreed. An all-inconclusive run is false."
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "null only when passed is true; a non-pass always names why."
+        },
+        "matched": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "mismatched": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "inconclusive": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cases": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "input",
+              "outcome",
+              "reason",
+              "match",
+              "source",
+              "target"
+            ],
+            "properties": {
+              "input": {
+                "type": "string"
+              },
+              "outcome": {
+                "type": "string",
+                "enum": [
+                  "match",
+                  "mismatch",
+                  "inconclusive"
+                ],
+                "description": "See translation.classify_case. 'inconclusive' is NOT a pass \u2014 it means neither side gave usable evidence."
+              },
+              "reason": {
+                "type": "string"
+              },
+              "match": {
+                "type": "boolean",
+                "description": "True only when outcome == 'match'. Kept for callers that predate the three-way outcome."
+              },
+              "source": {
+                "type": "object",
+                "required": [
+                  "ok",
+                  "phase",
+                  "stdout",
+                  "stderr"
+                ],
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  },
+                  "phase": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "compile/run when this side actually reached a runtime; null when nothing ran."
+                  },
+                  "stdout": {
+                    "type": "string"
+                  },
+                  "stderr": {
+                    "type": "string"
+                  }
+                }
+              },
+              "target": {
+                "type": "object",
+                "required": [
+                  "ok",
+                  "phase",
+                  "stdout",
+                  "stderr"
+                ],
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  },
+                  "phase": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "compile/run when this side actually reached a runtime; null when nothing ran."
+                  },
+                  "stdout": {
+                    "type": "string"
+                  },
+                  "stderr": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "grade": {
+          "type": "string",
+          "enum": [
+            "cross_checked",
+            "executed",
+            "solver_proven",
+            "ungraded"
+          ]
+        },
+        "grade_basis": {
+          "type": "string"
+        },
+        "grade_rules_version": {
+          "type": "string"
+        }
+      }
+    },
+    "optimization_verification": {
+      "title": "a verify_optimization result",
+      "description": "The `verify_optimization` tool's result: is `candidate` a genuine optimisation of `original` \u2014 same outputs (`verification`, the embedded correctness check) AND measurably, significantly faster (`speedup`/`inference`). `speedup`/`inference`/`min_speedup`/`language`/`detail` are each present only on SOME of the tool's returns \u2014 see optimization.verify_optimization's own `return` statements \u2014 so none of them is required here; `ok`, `accepted`, `reason` and the embedded `verification` are the ones every success path carries. A MEASUREMENT failure (baseline or candidate timing failed, e.g. a timeout) is `{ok: false, error: ..., code: ...}` with no `accepted` key at all \u2014 that shape already matches `rejected` above and is deliberately NOT modeled here, so the two branches cannot both match the same result.",
+      "type": "object",
+      "required": [
+        "ok",
+        "accepted",
+        "reason",
+        "verification",
+        "grade",
+        "grade_basis",
+        "grade_rules_version"
+      ],
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "accepted": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "detail": {
+          "type": "string",
+          "description": "Present only when accepted is false because the correctness gate failed \u2014 speed was never measured, because a faster wrong answer is not an optimisation."
+        },
+        "verification": {
+          "type": "object",
+          "description": "The embedded correctness check \u2014 verify_translation's BARE return value, called directly rather than through the graded MCP tool. No grade, no contract_version: those are attached only at the MCP tool boundary, which this internal call never crosses.",
+          "required": [
+            "ok",
+            "passed",
+            "reason",
+            "matched",
+            "mismatched",
+            "inconclusive",
+            "total",
+            "cases"
+          ],
+          "properties": {
+            "ok": {
+              "type": "boolean",
+              "description": "True whenever the tool completed and produced a real answer \u2014 set unconditionally by `aggregate`, including on a mismatch. NOT the verdict: read `passed` for that."
+            },
+            "passed": {
+              "type": "boolean",
+              "description": "True only when there is REAL evidence for equivalence: no mismatch, and at least one case where both programs actually ran and agreed. An all-inconclusive run is false."
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "null only when passed is true; a non-pass always names why."
+            },
+            "matched": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "mismatched": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "inconclusive": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "total": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "cases": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "input",
+                  "outcome",
+                  "reason",
+                  "match",
+                  "source",
+                  "target"
+                ],
+                "properties": {
+                  "input": {
+                    "type": "string"
+                  },
+                  "outcome": {
+                    "type": "string",
+                    "enum": [
+                      "match",
+                      "mismatch",
+                      "inconclusive"
+                    ],
+                    "description": "See translation.classify_case. 'inconclusive' is NOT a pass \u2014 it means neither side gave usable evidence."
+                  },
+                  "reason": {
+                    "type": "string"
+                  },
+                  "match": {
+                    "type": "boolean",
+                    "description": "True only when outcome == 'match'. Kept for callers that predate the three-way outcome."
+                  },
+                  "source": {
+                    "type": "object",
+                    "required": [
+                      "ok",
+                      "phase",
+                      "stdout",
+                      "stderr"
+                    ],
+                    "properties": {
+                      "ok": {
+                        "type": "boolean"
+                      },
+                      "phase": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "description": "compile/run when this side actually reached a runtime; null when nothing ran."
+                      },
+                      "stdout": {
+                        "type": "string"
+                      },
+                      "stderr": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "target": {
+                    "type": "object",
+                    "required": [
+                      "ok",
+                      "phase",
+                      "stdout",
+                      "stderr"
+                    ],
+                    "properties": {
+                      "ok": {
+                        "type": "boolean"
+                      },
+                      "phase": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "description": "compile/run when this side actually reached a runtime; null when nothing ran."
+                      },
+                      "stdout": {
+                        "type": "string"
+                      },
+                      "stderr": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "speedup": {
+          "type": "object",
+          "required": [
+            "ratio",
+            "measurable"
+          ],
+          "properties": {
+            "ratio": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "description": "Median before/after ratio at sizes where both ran. null when not measurable."
+            },
+            "measurable": {
+              "type": "boolean"
+            },
+            "reason": {
+              "type": "string",
+              "description": "Present only when measurable is false."
+            },
+            "per_size": {
+              "type": "array",
+              "description": "Present only when measurable is true.",
+              "items": {
+                "type": "object",
+                "required": [
+                  "n",
+                  "before_ms",
+                  "after_ms",
+                  "ratio"
+                ],
+                "properties": {
+                  "n": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "before_ms": {
+                    "type": "number"
+                  },
+                  "after_ms": {
+                    "type": "number"
+                  },
+                  "ratio": {
+                    "type": "number"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "inference": {
+          "type": "object",
+          "required": [
+            "test",
+            "alternative",
+            "alpha",
+            "per_size",
+            "sizes_rejecting",
+            "sizes_total",
+            "decision_basis"
+          ],
+          "properties": {
+            "test": {
+              "type": "string"
+            },
+            "alternative": {
+              "type": "string"
+            },
+            "alpha": {
+              "type": "number"
+            },
+            "per_size": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "size",
+                  "n_before",
+                  "n_after",
+                  "u",
+                  "p_value",
+                  "rank_biserial"
+                ],
+                "properties": {
+                  "size": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "n_before": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "n_after": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "u": {
+                    "type": "number"
+                  },
+                  "p_value": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "rank_biserial": {
+                    "type": "number"
+                  }
+                }
+              }
+            },
+            "sizes_rejecting": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "sizes_total": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "decision_basis": {
+              "type": "string"
+            }
+          }
+        },
+        "min_speedup": {
+          "type": "number"
+        },
+        "language": {
+          "type": "string"
+        },
+        "grade": {
+          "type": "string",
+          "enum": [
+            "cross_checked",
+            "executed",
+            "solver_proven",
+            "ungraded"
+          ]
+        },
+        "grade_basis": {
+          "type": "string"
+        },
+        "grade_rules_version": {
+          "type": "string"
+        }
+      }
+    },
+    "edge_case_comparison": {
+      "title": "a compare_edge_cases result",
+      "description": "The `compare_edge_cases` tool's SUCCESS result: the same logic run in N languages on edge-case inputs, with a per-input matrix (`results`) and the subset that diverged (`divergences`). Its own refusal \u2014 `{ok: false, error: 'provide at least one ... snippet'}` \u2014 already matches `rejected` above (ok + error, no verdict) and is not modeled here; only the ok=true shape needed a branch.",
+      "type": "object",
+      "required": [
+        "ok",
+        "inputs",
+        "languages",
+        "divergence_count",
+        "results",
+        "divergences"
+      ],
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "inputs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "languages": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "divergence_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "results": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "input",
+              "runs"
+            ],
+            "properties": {
+              "input": {
+                "type": "string"
+              },
+              "runs": {
+                "type": "object",
+                "description": "language -> that language's run, keyed by the `snippets` dict's own keys.",
+                "additionalProperties": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "stdout",
+                    "verdict",
+                    "stderr"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": [
+                        "boolean",
+                        "null"
+                      ]
+                    },
+                    "stdout": {
+                      "type": "string"
+                    },
+                    "verdict": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "null when nothing ran (e.g. an unknown language)."
+                    },
+                    "stderr": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "divergences": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "input",
+              "languages",
+              "kind",
+              "runs"
+            ],
+            "properties": {
+              "input": {
+                "type": "string"
+              },
+              "languages": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "content",
+                  "order"
+                ],
+                "description": "content: the output (or ok-status) itself differs \u00b7 order: same lines, same ok-status, different order."
+              },
+              "runs": {
+                "type": "object",
+                "description": "same shape as results[].runs, restricted to the diverging languages."
+              }
+            }
+          }
+        }
       }
     }
   }

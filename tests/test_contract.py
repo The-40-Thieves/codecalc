@@ -90,6 +90,25 @@ def errors_for(result: dict) -> list[str]:
     return [f"{list(e.path)}: {e.message}" for e in validator.iter_errors(result)]
 
 
+def check_stamped(label: str, result: dict) -> None:
+    """Both halves of the stamp invariant — every tool result is supposed to
+    carry BOTH `ok` and `contract_version`, but this file used to gate only
+    the second: five call sites checked `carries contract_version` and none
+    checked `ok`, which is exactly the gap `translation.aggregate()` had
+    (see `codecalc/translation.py`) — a result missing `ok` entirely could
+    still pass every one of those checks. Schema validation (`errors_for`)
+    now catches this too, since `ok` is back in the top-level `required`
+    list, but this is a DIRECT assertion independent of the schema: it
+    catches a result missing `ok` even if the schema itself were wrong.
+    """
+    check(f"{label} carries ok", isinstance(result, dict) and "ok" in result,
+          f"-> {result.get('ok') if isinstance(result, dict) else type(result).__name__}")
+    check(f"{label} carries contract_version",
+          isinstance(result, dict)
+          and result.get("contract_version") == contract.CONTRACT_VERSION,
+          f"-> {result.get('contract_version') if isinstance(result, dict) else type(result).__name__}")
+
+
 # ── THE CONTROL. Everything below is vacuous if this fails ─────────────────
 # A result with a verdict outside the enum and a missing required field. If the
 # validator accepts this, it accepts anything, and every PASS after it means
@@ -141,9 +160,7 @@ for _label, _call, _want_verdict in STATUS_CASES:
           f"-> {_errs[:2]}")
     check(f"{_label} is classified {_want_verdict}",
           _r.get("verdict") == _want_verdict, f"-> {_r.get('verdict')}")
-    check(f"{_label} carries contract_version",
-          _r.get("contract_version") == contract.CONTRACT_VERSION,
-          f"-> {_r.get('contract_version')}")
+    check_stamped(_label, _r)
 
 # the rejected shape: no verdict, because nothing ran
 _rejected = executor.execute("nosuchlang", "x")
@@ -151,8 +168,7 @@ check("a rejected request validates against the published schema",
       not errors_for(_rejected), f"-> {errors_for(_rejected)[:2]}")
 check("a rejected request carries NO verdict",
       "verdict" not in _rejected, f"-> {_rejected.get('verdict')}")
-check("a rejected request still carries contract_version",
-      _rejected.get("contract_version") == contract.CONTRACT_VERSION)
+check_stamped("a rejected request", _rejected)
 
 # BOTH backends, because the contract's whole claim is that they agree. The
 # fallback is forced the same way scripts/check_parity.py forces it.
@@ -420,9 +436,7 @@ try:
         _r3 = _call3()
         _e3 = errors_for(_r3)
         check(f"{_label3} validates", not _e3, f"-> {_e3[:1]}")
-        check(f"{_label3} carries contract_version",
-              _r3.get("contract_version") == contract.CONTRACT_VERSION,
-              f"-> {_r3.get('contract_version')}")
+        check_stamped(_label3, _r3)
 
     # The fallback's compile path, forced. Its own branch, because forcing the
     # fallback and compiling are two independent conditions and the bug lived
@@ -479,9 +493,7 @@ async def main() -> None:
             _errs = errors_for(payload)
             check("the SERIALISED success response validates", not _errs,
                   f"-> {_errs[:2]}")
-            check("the serialised response carries contract_version",
-                  payload.get("contract_version") == contract.CONTRACT_VERSION,
-                  f"-> {payload.get('contract_version')}")
+            check_stamped("the serialised response", payload)
 
         # A failure over the wire, because serialisation is where a null or a
         # missing key would show up differently from the in-process dict.
@@ -536,9 +548,7 @@ with _tempfile.TemporaryDirectory(prefix="codecalc-contract-run-") as _run_root:
         _submitted = server.run_submit("python3", "print('bg')", timeout=10)
         check("a run_submit response validates against the published schema",
               not errors_for(_submitted), f"-> {errors_for(_submitted)[:2]}")
-        check("the run_submit response carries contract_version",
-              _submitted.get("contract_version") == contract.CONTRACT_VERSION,
-              f"-> {_submitted.get('contract_version')}")
+        check_stamped("the run_submit response", _submitted)
         _rid = _submitted.get("run_id", "")
         _terminal = None
         for _ in range(200):
@@ -558,6 +568,102 @@ with _tempfile.TemporaryDirectory(prefix="codecalc-contract-run-") as _run_root:
               not errors_for(_cancelled), f"-> {errors_for(_cancelled)[:2]}")
     finally:
         server._run_supervisor = _old_sup
+
+
+# ── verification-tool shapes validate too (contract 1.5.0) ─────────────────
+# `verify_translation`, `verify_optimization` and `compare_edge_cases` were
+# always stamped `contract_version` at the same MCP tool boundary as every
+# other tool, but matched NONE of the five execution shapes above — the same
+# defect `run_lifecycle` closed for the background-run tools, except
+# docs/contract/README.md scoped it OUT of the "exactly one branch matches"
+# claim instead of closing it. These run the REAL tools against fixture
+# code — not synthetic dicts — and validate the actual output.
+#
+# Neither tool has a `compact` mode (only `execute_code` does), so there is
+# no compact variant to cover here.
+
+# translation_verification: a pass and a mismatch carry the SAME key set —
+# only `grade`/`passed`/`reason` differ in value — so both are asserted.
+# `ok` is true on BOTH: translation.aggregate() sets it unconditionally
+# (fixed in review — it used to set no `ok` at all), because `ok` means "the
+# tool completed and produced a real answer", never the verdict, the same
+# distinction verify_optimization's own {"ok": True, "accepted": False}
+# early return already draws.
+_t_pass = server.verify_translation("print(1)", "python3", "print(1)", "python3",
+                                    test_inputs=[""])
+check("a passing verify_translation validates against the published schema",
+      not errors_for(_t_pass), f"-> {errors_for(_t_pass)[:2]}")
+check("...and carries ok=true", _t_pass.get("ok") is True, f"-> {_t_pass.get('ok')}")
+check_stamped("a passing verify_translation", _t_pass)
+check("...and is graded cross_checked", _t_pass.get("grade") == "cross_checked",
+      f"-> {_t_pass.get('grade')}")
+
+_t_mismatch = server.verify_translation("print(1)", "python3", "print(2)", "python3",
+                                        test_inputs=[""])
+check("a mismatching verify_translation validates against the published schema",
+      not errors_for(_t_mismatch), f"-> {errors_for(_t_mismatch)[:2]}")
+check("...and STILL carries ok=true — ok is not the verdict",
+      _t_mismatch.get("ok") is True and _t_mismatch.get("passed") is False,
+      f"-> ok={_t_mismatch.get('ok')} passed={_t_mismatch.get('passed')}")
+check_stamped("a mismatching verify_translation", _t_mismatch)
+check("...and is graded ungraded, not a softened pass",
+      _t_mismatch.get("grade") == "ungraded" and _t_mismatch.get("passed") is False,
+      f"-> grade={_t_mismatch.get('grade')} passed={_t_mismatch.get('passed')}")
+
+# edge_case_comparison: the success shape gets the new branch; the refusal
+# (no snippets given) already matched `rejected` and must keep doing so.
+_edge_ok = server.compare_edge_cases({"python3": "print(input())"})
+check("a compare_edge_cases success validates against the published schema",
+      not errors_for(_edge_ok), f"-> {errors_for(_edge_ok)[:2]}")
+check_stamped("a compare_edge_cases success", _edge_ok)
+_edge_err = server.compare_edge_cases({})
+check("a compare_edge_cases refusal still validates as `rejected`",
+      not errors_for(_edge_err) and "divergence_count" not in _edge_err,
+      f"-> {errors_for(_edge_err)[:2]} keys={sorted(_edge_err)}")
+check_stamped("a compare_edge_cases refusal", _edge_err)
+
+# optimization_verification: the correctness-failure early return never
+# measures speed, so `speedup`/`inference` are correctly absent.
+_o_not_equiv = server.verify_optimization("print(1)", "print(2)", "python3")
+check("a not-equivalent verify_optimization validates against the published schema",
+      not errors_for(_o_not_equiv), f"-> {errors_for(_o_not_equiv)[:2]}")
+check("...and never measures speed",
+      "speedup" not in _o_not_equiv and "inference" not in _o_not_equiv,
+      "-> a faster wrong answer is not an optimisation")
+check_stamped("a not-equivalent verify_optimization", _o_not_equiv)
+
+# A measurement failure (`{ok: false, error, code}`, no `accepted` key) must
+# fall through to `rejected` rather than double-matching a new branch.
+# Triggered fast (no timeout wait): correct on the small correctness-check
+# inputs, asserts on the larger timing size.
+_GUARDED = 'n = int(input() or 0)\nassert n < 1000, "boom"\nprint(n)'
+_o_measure_fail = server.verify_optimization(_GUARDED, _GUARDED, "python3", sizes=[2000])
+check("a verify_optimization measurement failure validates as `rejected`",
+      not errors_for(_o_measure_fail)
+      and _o_measure_fail.get("ok") is False
+      and "accepted" not in _o_measure_fail,
+      f"-> {errors_for(_o_measure_fail)[:2]} keys={sorted(_o_measure_fail)}")
+check_stamped("a verify_optimization measurement failure", _o_measure_fail)
+
+# The full accepted path needs a REAL, measurable speedup — gated behind a
+# built native executor for the same reason
+# tests/test_translation_verify.py gates its own live timing assertions: the
+# pure-Python fallback's spawn overhead can swamp a modest algorithmic win.
+# This exists to prove the SHAPE validates, not to re-litigate the
+# significance test itself (already covered live there).
+if executor._rust:
+    _SLOW = ("n = int(input() or 0)\ntotal = 0\n"
+             "for i in range(n):\n    total += i\nprint(total)")
+    _FAST = "n = int(input() or 0)\nprint(n*(n-1)//2 if n > 0 else 0)"
+    _o_accepted = server.verify_optimization(_SLOW, _FAST, "python3", sizes=[2000000])
+    check("an accepted verify_optimization validates against the published schema",
+          not errors_for(_o_accepted), f"-> {errors_for(_o_accepted)[:2]}")
+    check("...and is graded cross_checked",
+          _o_accepted.get("accepted") is True and _o_accepted.get("grade") == "cross_checked",
+          f"-> accepted={_o_accepted.get('accepted')} grade={_o_accepted.get('grade')}")
+    check_stamped("an accepted verify_optimization", _o_accepted)
+else:
+    print("SKIP accepted verify_optimization shape check (no native executor built)")
 
 
 # ── the REQUEST contract, on every OS this runs on ──────────────

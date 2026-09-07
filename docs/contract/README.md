@@ -1,7 +1,55 @@
 # The codecalc result contract
 
-**Current version: `1.4.0`** · Schema: [`result-v1.schema.json`](result-v1.schema.json) ·
+**Current version: `1.5.0`** · Schema: [`result-v1.schema.json`](result-v1.schema.json) ·
 Source of truth: [`codecalc/contract.py`](../../codecalc/contract.py)
+
+`1.5.0` is a MINOR bump over `1.4.0`. It ADDS three new `oneOf` branches —
+`translation_verification`, `optimization_verification`, `edge_case_comparison`
+— covering `verify_translation`, `verify_optimization` and
+`compare_edge_cases`, which were previously stamped `contract_version` like
+every other tool but matched none of the five execution shapes and were
+explicitly scoped OUT of the "exactly one branch matches" claim by this same
+document (see the removed caveat under "The five shapes" below, now "The
+eight shapes"). Concretely:
+
+- **`translation_verification`** is `verify_translation`'s result: `ok`,
+  `passed`, `reason`, `matched`, `mismatched`, `inconclusive`, `total`,
+  `cases[]` (`translation.aggregate`'s evidence), plus `grade`/`grade_basis`/
+  `grade_rules_version` (every call is graded — see `codecalc/grades.py`).
+  `translation.aggregate()` had never set `ok` at all before this bump — a
+  real omission caught in review, not a shape to document around:
+  `verify_optimization`'s own `{"ok": True, "accepted": False, ...}` early
+  return already established that `ok` means "the tool completed and
+  produced a real answer", never the verdict, so a mismatch is `ok: true`
+  exactly like a pass. `aggregate` now sets it unconditionally, and this
+  branch requires `ok` the same as every other shape in this document.
+- **`optimization_verification`** is `verify_optimization`'s result: `ok`,
+  `accepted`, `reason`, an embedded `verification` (the BARE
+  `translation_verification` evidence, without the grade/`contract_version`
+  wrapper — `verify_optimization` calls `verify_translation()` directly, not
+  through the graded MCP tool), plus `speedup` (ratio + per-size before/after
+  timings), `inference` (the per-size one-sided Mann-Whitney U test —
+  `test`/`alternative`/`alpha`/`per_size[].{size,n_before,n_after,u,p_value,
+  rank_biserial}`/`sizes_rejecting`/`sizes_total`/`decision_basis` —
+  `_accept_decision` requires a MAJORITY of sizes to reject before `accepted`
+  can be true), `min_speedup`, `language`, and `grade`/`grade_basis`/
+  `grade_rules_version`. A measurement failure (baseline or candidate timing
+  failed — e.g. a timeout) is `{ok: false, error, code}` with no `accepted`
+  key and already matched **`rejected`** before this bump; it is deliberately
+  NOT re-modeled here, so the two branches cannot both match one result.
+- **`edge_case_comparison`** is `compare_edge_cases`'s **success** result:
+  `ok`, `inputs`, `languages`, `divergence_count`, `results[]` (a per-input
+  matrix, `{input, runs: {language: {ok, stdout, verdict, stderr}}}`), and
+  `divergences[]` (`{input, languages, kind: content|order, runs}`). Its own
+  refusal (`{ok: false, error: "provide at least one ... snippet"}`) already
+  matched `rejected` and needed no new branch.
+
+None of the three collides with the five execution shapes or with each
+other — `accepted` and `divergence_count` appear on no other shape, and
+`ok` and `contract_version` are required on all eight. A `1.4.0` client is
+unaffected: nothing about the five execution shapes, the error taxonomy, or
+the verdict enum moved — this bump only widens what the schema accepts, by
+naming three shapes it was always silently serving.
 
 `1.4.0` is a MINOR bump over `1.3.0`, and carries THREE additive changes
 landed against the same `1.3.0` base — one bump, not three:
@@ -109,7 +157,7 @@ it license to produce — measured on `execute_code`:
 ```
 
 — an object with no fields, no `required`, no enums. This document's schema
-(the five shapes, the 21 envelope fields, the verdict/code enumerations) is
+(the eight shapes, the 21 envelope fields, the verdict/code enumerations) is
 still the one worth validating against; it is just not the one a client reads
 back from `tools/list`. Getting the SDK to emit *this* schema verbatim would
 need a `TypedDict` (or `BaseModel`) per shape, one of which — `run_lifecycle` vs
@@ -126,29 +174,42 @@ still works exactly as before.
 
 ---
 
-## The five shapes
+## The eight shapes
 
-Every result carries `ok` and `contract_version`. Beyond that there are five
-shapes, and a client discriminates them in this order:
+Every result carries `ok` and `contract_version`, and a client discriminates
+the eight shapes in this order:
 
 | Shape | Discriminator | What it is |
 |---|---|---|
-| **rejected** | no `verdict`, carries `error` | Nothing ran — unknown language, malformed request, an executor that would not start. Carries `error` and a `code`. |
+| **rejected** | no `verdict`, carries `error` | Nothing ran — unknown language, malformed request, an executor that would not start. Carries `error` and a `code`. Also covers a `verify_optimization` measurement failure and a `compare_edge_cases` refusal (see below) — both are `{ok: false, error, code}` with no shape-specific key, so neither needed its own branch. |
 | **run_lifecycle** | a `run_id` and `state`, no `verdict`/`error`/`backend` | A background-run response from `run_submit`, `run_inspect` *while the run is still active*, or `run_cancel`. Names the run; nothing has run through it yet. |
 | **session** | `backend == "session-worker"` | Ran in a warm session worker. |
 | **compact** | `verdict` present, no `backend` | `execute_code(compact=True)`. |
 | **envelope** | `verdict` present, `backend` in `rust`/`python` | A fresh sandboxed run. All 21 fields. |
+| **translation_verification** | `passed` present | `verify_translation`'s result: did a source program and a claimed port agree, with real evidence either way. `ok` is true whenever the tool completed — including a mismatch; it is not the verdict. |
+| **optimization_verification** | `accepted` present | `verify_optimization`'s result: is `candidate` a genuine, measurably-faster optimisation of `original`. |
+| **edge_case_comparison** | `divergence_count` present | `compare_edge_cases`'s success result: the same logic run in N languages, and where it diverged. |
 
-These five are **execution** shapes — the discriminator column above only
-ever fires for something that ran code (or explicitly refused to). A
-verify-family result (`verify_translation`, `verify_optimization`, …) is
-stamped with the same `contract_version` by the same `stamp()` at the MCP
-tool boundary — every tool gets that, not just these five — but its own
-shape (`accepted`/`reason`/`speedup`/`inference`/`verification`/…, or
-`passed`/`matched`/`cases`/…) matches none of the five above and is not
-itself in `result-v1.schema.json`'s `oneOf`: it is additive, and undocumented
-here. Read `contract_version` off it exactly as described below; do not
-expect it to discriminate as one of the five run shapes.
+The first five are **execution** shapes — their discriminators only ever
+fire for something that ran code (or explicitly refused to). The last three,
+added in `1.5.0`, are **verification** shapes: `verify_translation`,
+`verify_optimization` and `compare_edge_cases` were always stamped
+`contract_version` by the same `stamp()` at the MCP tool boundary — every
+tool gets that — but before `1.5.0` their own shapes matched none of the
+five execution branches and were explicitly scoped OUT of this document's
+"exactly one branch matches" claim. That claim now covers all eight: none of
+the three verification shapes collides with the five execution shapes or
+with each other (`accepted` and `divergence_count` appear on no other
+shape), and a `verify_optimization`/`compare_edge_cases` FAILURE that
+carries no shape-specific key falls through to `rejected` rather than
+double-matching. `translation.aggregate()` also had a real omission behind
+this gap: it never set `ok` at all, which would have made
+`translation_verification` the one shape in this document without it.
+Fixed at the source instead of carved into the schema — `ok` means "the
+tool completed and produced a real answer", never the verdict, so a
+mismatch is `ok: true` exactly like a pass (see `verify_optimization`'s own
+`{"ok": True, "accepted": False, ...}` early return for the same
+distinction already in the contract) — so all eight shapes require it.
 
 **The run_lifecycle shape** (added in `1.1.0`) is the reply the background-run
 tools return before a run finishes — `run_submit`'s handle, a poll of a
@@ -217,7 +278,7 @@ allowed to change:
 | Component | May change | Examples |
 |---|---|---|
 | **MAJOR** | Anything a reader can break on | Removing a field. Changing a field's type. Changing what a value means. **Adding or removing a member of the `code` or `verdict` enum.** Changing which shape a situation returns. |
-| **MINOR** | Additions only | A new field. A new result shape. A newly populated field that was always allowed to be null. |
+| **MINOR** | Additions only | A new field. A new result shape. A newly populated field that was always allowed to be null. Narrowing a TOP-LEVEL `required` list down to what every individual `oneOf` branch already required on its own — no branch that validated before stops validating; it only admits a branch that could not previously satisfy the global requirement. |
 | **PATCH** | Nothing on the wire | Description text, documentation, examples. |
 
 > **Why enum *expansion* is MAJOR and not MINOR.**
