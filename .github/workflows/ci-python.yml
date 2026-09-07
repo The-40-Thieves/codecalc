@@ -713,6 +713,16 @@ jobs:
           # against the silent path that actually exists, a duplicate name that add_tool discards
           # with a warning nothing reads, rather than a schema failure, which RAISES.
           uv run --no-sync python scripts/check_tool_names.py /tmp/mcp.out
+      # Every registered tool carries a complete ToolAnnotations, no
+      # calculator-group tool is non-read-only, and the typed `-> dict[str, Any]`
+      # returns actually populate structuredContent (with the contract stamp
+      # inside it) rather than only the text block.
+      - name: tool annotations + structured output
+        run: uv run --no-sync python tests/test_tool_annotations.py
+      # Server-side policy `_meta` lands on exactly the tools it is
+      # supposed to, and nowhere else.
+      - name: tool policy metadata
+        run: uv run --no-sync python tests/test_tool_meta.py
       # every declared tool names a real CODECALC_TOOLS group, and the default
       # (unset) configuration still registers all of them — the tool-surface-reduction
       # analogue of the check just above. Needs `mcp` installed to import codecalc.server,

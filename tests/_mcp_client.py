@@ -84,15 +84,19 @@ def data(result):
     """Parse a tool result's JSON payload.
 
     fastmcp's client exposed `result.data` — a parsed dict. The official SDK
-    does not: codecalc's tools return `dict`, which the SDK serialises into a
-    text content block, leaving `structured_content` None unless a tool opts in
-    with `structured_output=True`.
+    does not: it derives `structured_content` from the tool's return type
+    annotation, populating it only when that annotation is schematisable.
 
-    Deliberately NOT opting in during this port. Doing so would add an
-    `outputSchema` and a `structuredContent` field to every tool's wire format,
-    which is a change to the public surface and belongs in its own change, not
-    smuggled into a protocol migration. The text block is unchanged, so existing
-    consumers see exactly what they saw before.
+    A later change moved which side of that line codecalc sits on. Most
+    tools' return annotation went from a bare `-> dict` (not schematisable —
+    the SDK cannot build a model from `dict` with no type args) to
+    `-> dict[str, Any]` (schematisable), so `structured_content` is now
+    populated for every tool except `session_read_file` and `session_run`
+    (both left untyped on purpose — see codecalc/server.py). This helper
+    already handled both cases before that change landed, for the
+    in-process-vs-stdio asymmetry noted below; nothing here needed to
+    change, only this comment, which used to describe the pre-change state
+    as current.
     """
     import json
 
