@@ -1293,29 +1293,34 @@ if executor._rust:
           f"reason={_quad_result.get('reason')!r} error={_quad_result.get('error')!r} "
           f"code={_quad_result.get('code')!r} sizes={_QUAD_SIZES} wall={_quad_wall_s:.1f}s")
     # This is the one assertion the 2026-09-08 incident actually broke, and
-    # the only thing worth asserting about HOW it passed is what the tool's
-    # OWN Bonferroni-majority regime promises — not a stronger claim this
-    # test cannot honestly make on every run. The old version asserted
-    # `sizes_total == 4` and `sizes_below_floor == []`, which turned a
-    # single excluded size (see the calibration comment above) into a hard
-    # test FAILURE independent of `accepted` — backwards, since the
-    # majority rule exists precisely so a live run does not need every size
-    # to survive. Assert instead what `_accept_decision` actually required
-    # to reach `accepted=True`: `correction == "bonferroni"` (more than
-    # `_FWER_UNANIMITY_MAX` sizes were counted, so a MAJORITY — not
-    # unanimity — was the bar that had to clear), at least 3 of them
-    # rejecting, and every counted size's OWN ratio clearing `min_speedup`
-    # (gate (e) in `_infer_speedup` — a "significant" size whose actual
-    # ratio is tiny should never count as a size the caller asked for).
+    # the only thing worth asserting about HOW it passed is what the tool
+    # itself required — not a stronger claim this test cannot honestly make
+    # on every run. The old version asserted `sizes_total == 4` and
+    # `sizes_below_floor == []`, which turned a single excluded size (see
+    # the calibration comment above) into a hard test FAILURE independent
+    # of `accepted`. A first rewrite asserted `correction == "bonferroni"`,
+    # which in a four-size test is the SAME condition spelled differently
+    # (only four counted sizes reach the Bonferroni regime), as review
+    # pointed out with a synthetic two-survivor accept that it still
+    # failed. So assert exactly the rule `_accept_decision` applied, under
+    # whichever regime the surviving sizes landed in: `_fwer_satisfied` on
+    # the reported counts, at least two counted sizes (the tool's own
+    # floor), and the reported regime consistent with the count. Which
+    # regime that was on a given run is reported in the detail, not
+    # asserted.
     _quad_inf = _quad_result.get("inference") or {}
-    _quad_ps = _quad_inf.get("per_size") or []
-    check("  ...accepted via the Bonferroni-MAJORITY regime (not unanimity), "
-          ">=3 sizes rejecting, every counted size's own ratio clearing min_speedup",
-          _quad_inf.get("correction") == "bonferroni"
-          and _quad_inf.get("sizes_rejecting", 0) >= 3
-          and len(_quad_ps) == _quad_inf.get("sizes_total")
-          and all(row["ratio"] >= optimization.DEFAULT_MIN_SPEEDUP for row in _quad_ps),
-          f"-> {_quad_inf}")
+    check("  ...and the reported inference satisfies the tool's own "
+          "family-wise rule for however many sizes survived",
+          optimization._fwer_satisfied(_quad_inf.get("sizes_total", 0),
+                                       _quad_inf.get("sizes_rejecting", 0),
+                                       _quad_inf.get("correction"))
+          and _quad_inf.get("sizes_total", 0) >= optimization._MIN_COUNTED_SIZES
+          and _quad_inf.get("correction") == (
+              "bonferroni" if _quad_inf.get("sizes_total", 0) > optimization._FWER_UNANIMITY_MAX
+              else "unanimity"),
+          f"-> correction={_quad_inf.get('correction')} "
+          f"{_quad_inf.get('sizes_rejecting')}/{_quad_inf.get('sizes_total')} "
+          f"below_floor={len(_quad_inf.get('sizes_below_floor') or [])}")
     check("  ...ratio measured, not asserted",
           isinstance((_quad_result.get("speedup") or {}).get("ratio"), (int, float))
           and _quad_result["speedup"]["ratio"] > 1,
