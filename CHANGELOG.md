@@ -90,6 +90,30 @@ behind it.
   recognises an OLDER binary's stderr-only shape via a `"runtime
   unavailable"` prefix match, so a caller gets the same classification
   regardless of which binary answered (#280).
+- **`tests/test_executor_sweep.py` and `tests/test_appcontainer.py` decided
+  whether a native executor was present by checking `.exists()` on a
+  hardcoded `bin/codecalc-exec` path, ignoring `CODECALC_EXEC_BIN`
+  entirely.** A local run that pointed only `CODECALC_EXEC_BIN` at a binary
+  built elsewhere (say `executor/target/release/codecalc-exec`, with `bin/`
+  empty) silently skipped every "rust:" assertion with no SKIP line printed
+  — the `if EXE.exists():` guard had no `else` branch — and setting
+  `CODECALC_REQUIRE_NATIVE=1` alongside it did nothing to catch the
+  mistake, since that variable was never consulted by the test's own
+  hardcoded check. That is how a stale Rust-backend `exit_code` assertion
+  passed locally and only failed in CI's sandbox job, which always builds
+  straight into `bin/`. Both files now resolve the binary through a new
+  shared helper, `tests/_helpers.resolve_native_executor`, which calls
+  `codecalc/executor.py`'s own `_rust_binary()` (`CODECALC_EXEC_BIN` first,
+  then the arch-aware `bin/` candidates) instead of duplicating that
+  ordering — the two can no longer drift apart. It prints one loud `SKIP
+  native executor: <reason>` line when nothing resolves, and raises instead
+  of returning `None` when `CODECALC_REQUIRE_NATIVE=1` is set and nothing
+  resolves, so a run that means to test the native backend cannot quietly
+  fall through to skipping it. `.github/workflows/ci-python.yml`'s sandbox
+  job now greps an existence floor for both files independently — `PASS
+  rust:` for the first, the helper's own `native executor: <path>` line for
+  the second, whose checks are not "rust:"-named — the same
+  assert-from-outside-the-file pattern `test_features.py` uses (#277).
 
 ## [0.9.0] — 2026-09-07
 

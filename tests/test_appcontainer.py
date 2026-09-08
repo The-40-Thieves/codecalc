@@ -31,11 +31,15 @@ import sys
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
+from _helpers import resolve_native_executor
+
 FAILS: list[str] = []
 SKIPS: list[str] = []
 
 IS_WINDOWS = sys.platform.startswith("win")
-EXE = REPO_ROOT / "bin" / ("codecalc-exec.exe" if os.name == "nt" else "codecalc-exec")
+#: Resolved the SAME way codecalc/executor.py resolves it at import time
+#: (CODECALC_EXEC_BIN first, then bin/) — see _helpers.resolve_native_executor.
+EXE = resolve_native_executor()
 WINDOWS_RS = (REPO_ROOT / "executor" / "src" / "platform" / "windows.rs").read_text(
     encoding="utf-8"
 )
@@ -136,7 +140,7 @@ if not IS_WINDOWS:
         "non-Windows: the AppContainer path is Windows-only; isolation is a "
         "Win11-box acceptance item and is left unchecked here",
     )
-elif not EXE.exists():
+elif not EXE:
     skip("AppContainer runtime smoke", "bin/codecalc-exec not built")
 else:
     env = dict(os.environ)
