@@ -10,9 +10,9 @@ This project versions **two** things, and they are not the same number.
 | What | Where | Current |
 |---|---|---|
 | The **package** — the tool surface, the CLI, the Python API | `pyproject.toml`, `executor/Cargo.toml`, this file | see `version` in [`pyproject.toml`](pyproject.toml) — this cell is not re-typed on every release |
-| The **result contract** — the shape every tool result comes back in | `docs/contract/README.md`, `contract_version` on every result | `1.6.0` |
+| The **result contract** — the shape every tool result comes back in | `docs/contract/README.md`, `contract_version` on every result | `1.7.0` |
 
-The contract is at `1.6.0` and the package is at `0.x` because those claims are
+The contract is at `1.7.0` and the package is at `0.x` because those claims are
 genuinely different. The result contract has a published JSON Schema, a
 documented MAJOR/MINOR/PATCH policy, a twelve-month deprecation window, and a
 gate that fails if the schema drifts from the code — it is stable and says so.
@@ -32,6 +32,17 @@ behind it.
 ---
 
 ## [Unreleased]
+
+## [0.9.0] — 2026-09-07
+
+Headline changes since 0.8.0: the runner's own scratch files moved into a
+private `.codecalc-run/` subdirectory on both backends, with symlink-safe
+writes closing a cross-session overwrite before it shipped;
+`verify_optimization` gained a per-size visibility floor, an asymmetric
+comparability rule between the baseline and candidate, and one shared
+measurement budget across every call it makes; the result contract moves
+`1.5.0` → `1.7.0`; and `tests/test_features.py`'s async MCP section — most
+of the file's coverage — is now actually executed.
 
 ### Fixed
 
@@ -2077,7 +2088,8 @@ it, so there was no upgrade path to describe — only what the thing is.
   `ok: false` through the sandbox. Tracked, with a dated reproduction, at
   [#42](https://github.com/The-40-Thieves/codecalc/issues/42).
 
-[Unreleased]: https://github.com/The-40-Thieves/codecalc/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/The-40-Thieves/codecalc/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.9.0
 [0.8.0]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.8.0
 [0.7.0]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.7.0
 [0.6.0]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.6.0
