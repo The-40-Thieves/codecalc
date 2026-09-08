@@ -426,11 +426,22 @@ _shutil_fixtures.rmtree(_gzl_dir, ignore_errors=True)
 # regress silently.
 #
 # `_PROBE_TIMEOUT_S`/`_DEFAULT_PROBE_TIMEOUT_S` are monkeypatched down to
-# keep these fixtures fast — the fake binaries below sleep past a
-# 1-second deadline rather than a real 10-25s one. That changes how LONG
-# the fixture takes, never WHAT it proves: `_probe_version` reads both
-# constants fresh on every call, so a short deadline exercises the exact
-# same retry-then-report code path as the real ones.
+# keep these fixtures fast — a 1-second deadline rather than a real
+# 10-25s one. That changes how LONG the fixture takes, never WHAT it
+# proves: `_probe_version` reads both constants fresh on every call, so a
+# short deadline exercises the exact same retry-then-report code path as
+# the real ones.
+#
+# The fake binaries below block with an UNCONDITIONAL `while true; do :;
+# done` rather than `sleep N` for a fixed N: a fixed sleep only reproduces
+# a timeout if it reliably outlasts whatever deadline this run patched in,
+# and a macOS CI run of an earlier version of this fixture (`sleep 5`
+# against a 1s deadline) answered WITHIN the deadline anyway — the process
+# scheduling/signal-delivery margin on that runner was enough to swallow a
+# fixed multiple that this file's own Linux/mise runs could not reproduce.
+# A busy-loop cannot ever finish on its own before the timeout regardless
+# of platform: the ONLY way it stops is `subprocess.run`'s own SIGKILL on
+# the deadline it enforces, which is what actually needs proving here.
 if os.name == "nt":
     print("SKIP version-probe-timeout fixtures (needs a POSIX shell script)")
 else:
@@ -442,8 +453,7 @@ else:
     _slow_dir = _tf.mkdtemp(prefix="codecalc-doctor-test-")
     _fake_slow_rustc = pathlib.Path(_slow_dir) / "rustc"
     _fake_slow_rustc.write_text(
-        "#!/bin/sh\n/usr/bin/sleep 5\necho 'rustc 1.99.0 (fake, never answers in time)'\n",
-        encoding="utf-8")
+        "#!/bin/sh\nwhile true; do :; done\n", encoding="utf-8")
     _fake_slow_rustc.chmod(0o755)
     registry.runtime_path = lambda: _slow_dir
     try:
@@ -471,10 +481,11 @@ else:
     _shutil_fixtures.rmtree(_slow_dir, ignore_errors=True)
 
     # The retry path, proven to actually RECOVER a version rather than merely
-    # tolerating its absence: the FIRST call blocks past the deadline, the
-    # SECOND is warm (a marker file left by the first call short-circuits the
-    # sleep) — the exact shape a cold rustup proxy takes, slow once per
-    # process and fast forever after.
+    # tolerating its absence: the FIRST call blocks past the deadline (an
+    # unconditional busy-loop — see the note above this section for why not
+    # `sleep N`), the SECOND is warm (a marker file left by the first call
+    # short-circuits the loop) — the exact shape a cold rustup proxy takes,
+    # slow once per process and fast forever after.
     _warm_dir = _tf.mkdtemp(prefix="codecalc-doctor-test-")
     _marker = pathlib.Path(_warm_dir) / ".called"
     _fake_warm_rustc = pathlib.Path(_warm_dir) / "rustc"
@@ -482,7 +493,7 @@ else:
         f'#!/bin/sh\n'
         f'if [ ! -f "{_marker}" ]; then\n'
         f'  /usr/bin/touch "{_marker}"\n'
-        f'  /usr/bin/sleep 5\n'
+        f'  while true; do :; done\n'
         f'fi\n'
         f'echo "rustc 1.99.0 (fake, warm on retry)"\n', encoding="utf-8")
     _fake_warm_rustc.chmod(0o755)
@@ -521,8 +532,7 @@ else:
     _slow_go_dir = _tf.mkdtemp(prefix="codecalc-doctor-test-")
     _fake_slow_go = pathlib.Path(_slow_go_dir) / "go"
     _fake_slow_go.write_text(
-        "#!/bin/sh\n/usr/bin/sleep 5\necho 'go version go1.99.0 linux/arm64'\n",
-        encoding="utf-8")
+        "#!/bin/sh\nwhile true; do :; done\n", encoding="utf-8")
     _fake_slow_go.chmod(0o755)
     registry.runtime_path = lambda: _slow_go_dir
     try:
@@ -558,7 +568,7 @@ else:
     _fake_dead_bash = pathlib.Path(_dead_dir) / "bash"
     _fake_dead_bash.write_text(
         '#!/bin/sh\n'
-        'if [ "$1" = "--version" ]; then /usr/bin/sleep 5; exit 0; fi\n'
+        'if [ "$1" = "--version" ]; then while true; do :; done; fi\n'
         'exit 1\n', encoding="utf-8")
     _fake_dead_bash.chmod(0o755)
     doctor._PROBE_TIMEOUT_S = {**_saved_probe_timeout, "bash": 1.0}
