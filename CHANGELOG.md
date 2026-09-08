@@ -53,11 +53,21 @@ behind it.
   full ~960 KiB the program had printed — the kind of hang two earlier
   reports described as "a stray codecalc-exec `--timeout 30` outlived its
   own timeout by >500s", because the executor's `--timeout` bounds only
-  the sandboxed program, never this write-the-result phase. Measured
-  locally: the exact 983,040-byte shape hung the unpatched code on roughly
-  1 run in 3 (asyncio's backpressure pause is itself timing-dependent — a
-  synthetic 5 MB result hung it reliably) and a raw `subprocess.Popen` with
-  nothing reading its stdout hung on every run, 20/20. `execute_stream` now
+  the sandboxed program, never this write-the-result phase. The exact
+  983,040-byte shape's hang rate on the unpatched code is host/timing-
+  dependent, not a fixed number: asyncio's backpressure pause only engages
+  once the buffered amount crosses its 64 KiB limit, and how much of the
+  JSON the Rust binary manages to write before the loop's first
+  `proc.wait()` call decides whether that ever happens — a function of
+  scheduling, not of the code path taken. Two independent 10-run batches
+  on this host each hung 2 of 10 (4 of 20 total); an adversarial review
+  pass, on this same host at a different time, reported 10 of 10 for the
+  identical shape — both figures are real, and the gap between them is
+  itself evidence of how narrow and timing-sensitive the race is. A larger
+  5 MB result, well past the same 64 KiB thresholds either way, closed
+  that gap: two independent 5-run batches both hung 5 of 5 (10 of 10
+  total) on this host, and a raw `subprocess.Popen` with nothing reading
+  its stdout at all hung on every run, 20 of 20. `execute_stream` now
   starts `proc.communicate()` as a background task BEFORE the progress loop
   begins polling `run.out`, so the pipe is drained continuously from the
   moment the child is spawned regardless of how large the eventual result
@@ -81,7 +91,17 @@ behind it.
   elsewhere (a materially different bug) would still find this phase
   unbounded, and a watchdog thread precise enough to bound it without ever
   firing on a merely-slow drain is not a small enough change to land
-  alongside this fix.
+  alongside this fix. Adversarial review also caught the same cleanup
+  missing on a second, more realistic path: `except Exception` never
+  catches `asyncio.CancelledError` (a `BaseException` since Python 3.8), so
+  an MCP client cancelling `execute_code_stream` mid-run skipped the
+  kill/cancel cleanup entirely — reproduced live as a `time.sleep(15)` run,
+  cancelled after 1s, whose codecalc-exec was still alive 2.5s later with
+  its workdir already deleted out from under it. That cleanup now lives in
+  `finally` itself, guarded and ordered BEFORE the workdir is removed, so
+  it runs on every exit from the stream — cancelled, failed, or
+  successful — and the cancellation still propagates to the caller rather
+  than coming back as a `stream failed:` result.
 
 ## [0.10.0] — 2026-09-08
 

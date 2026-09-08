@@ -1966,19 +1966,38 @@ async def execute_stream(spec, on_progress=None) -> dict:
         result.pop("spawn_error", None)
         return contract.stamp(result)
     except Exception as exc:
+        return contract.stamp({"ok": False, "error": f"stream failed: {exc}"})
+    finally:
+        # Runs on EVERY exit from the try block above, including
+        # `asyncio.CancelledError` — a `BaseException` since Python 3.8, so
+        # the `except Exception` above never sees it and this cleanup used
+        # to live there ONLY, meaning cancellation skipped it entirely. The
+        # realistic trigger is an MCP client cancelling `execute_code_stream`
+        # mid-stream, not a raised exception: reproduced live with a
+        # `time.sleep(15)` program, cancelled ~1s in — codecalc-exec was
+        # still alive 2.5s later, and its workdir was already gone, because
+        # `_rmtree_checked` below ran with nothing having killed the process
+        # first and nothing having cancelled the drain task either. Placed
+        # BEFORE `_rmtree_checked`, not after, for exactly that reason: a
+        # still-running executor must lose its process before it loses its
+        # workdir, never the other way round. Guarded on "not already done/
+        # exited" so the normal-return and ordinary-exception paths (which
+        # already drove both to completion) do nothing extra here. The
+        # CancelledError itself is never caught anywhere above, so it keeps
+        # propagating to the caller once this block finishes — cancellation
+        # must never come back as a `stream failed:` result.
         if communicate_task is not None and not communicate_task.done():
-            # Otherwise a failure elsewhere in this block (e.g. `on_progress`
-            # raising) leaves the drain task running unobserved: nothing
-            # awaits it, its own exceptions are logged as "never retrieved"
-            # noise, and the rust process it was draining outlives this
-            # function with only `_rmtree_checked` in `finally` cleaning up
-            # its now-orphaned workdir, never the process itself.
             communicate_task.cancel()
         if proc is not None and proc.returncode is None:
             with contextlib.suppress(ProcessLookupError):
                 proc.kill()
-        return contract.stamp({"ok": False, "error": f"stream failed: {exc}"})
-    finally:
+            # Confirms the kill actually took effect before the workdir it
+            # was writing into is removed, rather than trusting that a sent
+            # SIGKILL and an about-to-run rmtree can never race. Bounded and
+            # best-effort: a process that somehow survives this long is not
+            # worth blocking cleanup on any further.
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(proc.wait(), timeout=5)
         if stdin_path:
             Path(stdin_path).unlink(missing_ok=True)
         _rmtree_checked(workdir, created_identity)

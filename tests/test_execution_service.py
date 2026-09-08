@@ -914,6 +914,61 @@ def test_execute_code_stream_drains_output_larger_than_the_pipe_buffer() -> None
                   after - before == set())
 
 
+def test_execute_code_stream_kills_the_process_on_caller_cancellation() -> None:
+    """Cancelling the CALLER's own task mid-stream — an MCP client cancelling
+    `execute_code_stream`, the realistic trigger, not a raised exception —
+    used to skip the kill/cancel cleanup in `execute_stream` entirely.
+    `asyncio.CancelledError` is a `BaseException` (since Python 3.8), so the
+    `except Exception` block that cleanup used to live in never saw it; only
+    `finally` ran, which deleted the workdir with nothing having killed the
+    still-running codecalc-exec and nothing having cancelled the drain task
+    either. That cleanup now lives in `finally` itself, guarded and placed
+    BEFORE `_rmtree_checked`, so it runs on this path too.
+    """
+    if executor._rust is None:
+        print("SKIP test_execute_code_stream_kills_the_process_on_caller_cancellation "
+              "(no codecalc-exec binary resolved; build executor/ with "
+              "`cargo build --release --manifest-path executor/Cargo.toml` or set "
+              "CODECALC_EXEC_BIN before this module is imported)")
+        return
+
+    async def scenario() -> tuple[bool, set[int] | None]:
+        spec = providers.ComputationSpec(
+            language="python3", code="import time\ntime.sleep(10)\n", timeout=30,
+        )
+        before = _codecalc_exec_pids()
+        task = asyncio.create_task(executor.execute_stream(spec))
+        await asyncio.sleep(1)  # let codecalc-exec actually spawn and start sleeping
+        task.cancel()
+        cancelled = False
+        try:
+            await task
+        except asyncio.CancelledError:
+            cancelled = True
+        # Polled, not a single snapshot: the kill is sent synchronously inside
+        # `finally`, but the kernel actually finishing the process is not.
+        # ~3s total, matching the live repro this regression test is against
+        # (codecalc-exec was still observed alive 2.5s after cancellation on
+        # the pre-fix code).
+        survived: set[int] | None = None
+        for _ in range(30):
+            pids = _codecalc_exec_pids()
+            if before is not None and pids is not None:
+                survived = pids - before
+                if not survived:
+                    break
+            await asyncio.sleep(0.1)
+        return cancelled, survived
+
+    cancelled, survived = asyncio.run(scenario())
+    check("rust: cancelling execute_code_stream mid-run raises CancelledError "
+          "back to the caller, not a dict result", cancelled)
+    if survived is not None:
+        check(f"rust: cancelling execute_code_stream mid-run leaves no "
+              f"codecalc-exec process behind (still running: {sorted(survived)})",
+              survived == set())
+
+
 def test_session_service_reads_bounded_files_and_runs_workspace_entries() -> None:
     service_type = getattr(execution_service, "SessionService", None)
     check("session service supports workspace reads and runs", service_type is not None)
@@ -2295,6 +2350,7 @@ if __name__ == "__main__":
     test_artifact_filter_excludes_only_the_runner_scratch_subdirectory()
     test_a_real_compiled_run_on_the_rust_backend_reports_only_user_artifacts()
     test_execute_code_stream_drains_output_larger_than_the_pipe_buffer()
+    test_execute_code_stream_kills_the_process_on_caller_cancellation()
     test_session_service_reads_bounded_files_and_runs_workspace_entries()
     test_session_file_pagination_is_shared_and_cursor_based()
     test_mcp_session_adapters_delegate_to_the_shared_service()
