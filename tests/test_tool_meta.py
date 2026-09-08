@@ -45,6 +45,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from _helpers import expected_tool_count  # noqa: E402
+
 from _mcp_client import in_process
 
 from codecalc import server as codecalc_server
@@ -87,7 +89,7 @@ EXPECTED_MAX_RESULT_SIZE_CHARS = 2 * MAX_OUTPUT_KB_CEILING * 1024 + 8_000  # = 4
 async def main() -> None:
     async with in_process() as client:
         listed = {t.name: t for t in (await client.list_tools()).tools}
-        check("tools/list served 52 tools", len(listed) == 52, f"-> {len(listed)}")
+        check(f"tools/list served {expected_tool_count()} tools", len(listed) == expected_tool_count(), f"-> {len(listed)}")
 
         def meta_of(name: str) -> dict:
             return getattr(listed[name], "meta", None) or {}

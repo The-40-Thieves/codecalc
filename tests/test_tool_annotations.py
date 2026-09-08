@@ -30,6 +30,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from _helpers import expected_tool_count  # noqa: E402
+
 from _mcp_client import in_process
 
 from codecalc import server
@@ -45,7 +47,7 @@ def check(name: str, cond: bool, detail: str = "") -> None:
 
 # ── every registered tool resolves to a complete ToolAnnotations ───────────
 tools = server.mcp._tool_manager._tools
-check("52 tools are registered (default CODECALC_TOOLS)", len(tools) == 52, f"-> {len(tools)}")
+check(f"{expected_tool_count()} tools are registered (default CODECALC_TOOLS)", len(tools) == expected_tool_count(), f"-> {len(tools)}")
 
 missing = [name for name, t in tools.items() if t.annotations is None]
 check("every registered tool has a non-None annotations object", not missing, f"-> {missing}")

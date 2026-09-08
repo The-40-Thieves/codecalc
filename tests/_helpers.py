@@ -66,3 +66,24 @@ def resolve_native_executor() -> pathlib.Path | None:
         raise RuntimeError(f"{executor.REQUIRE_NATIVE_ENV} is set, but {reason}")
     print(f"SKIP native executor: {reason}")
     return None
+
+
+def expected_tool_count() -> int:
+    """The tool count README.md claims ("as **N MCP tools**"), the one number
+    `scripts/check_claims.py` already gates against the live registry.
+
+    Tests that assert how many tools tools/list serves used to hard-code the
+    number; every tool added then had to touch three test files, and a branch
+    rebased across another branch's tool addition failed on the stale literal
+    (the count changed on main without the literal changing here). Reading
+    the README's gated claim keeps ONE source of truth: check_claims proves
+    README == registry, and these tests prove served == README.
+    """
+    import re
+    from pathlib import Path
+    readme = (Path(__file__).resolve().parent.parent / "README.md").read_text(encoding="utf-8")
+    m = re.search(r"as \*\*(\d+) MCP tools\*\*", readme)
+    if m is None:
+        raise RuntimeError("README.md no longer states 'as **N MCP tools**'; update expected_tool_count()")
+    return int(m.group(1))
+
