@@ -1035,6 +1035,112 @@ else:
     print("SKIP identical-code false-accept-rate check (no native executor built)")
 
 
+# ═══ shared budget-aware calibration for the two live O(k)->O(1) tests ═════
+# Both the O(n)->O(1) (python, below) and the O(n^2)->O(1) (c, further down)
+# live tests pick their sizes from a unit calibrated AT TEST TIME against
+# this host's own spawn overhead — a fixed default was measured, twice, to
+# blow the tool's own `_MEASUREMENT_BUDGET_S` on a slow hosted runner (see
+# the `_QUAD_SIZES` comment further down for the incident this closes; the
+# python test hit the SAME failure mode on a hosted Windows sandbox runner
+# on 2026-09-08, PR #301: one of its four FIXED sizes fell below the
+# visibility/tie floor there, leaving 3 counted sizes, the unanimity regime,
+# and a genuine 12.85x win refused).
+#
+# The old calibration DOUBLED the unit until it cleared a floor with no idea
+# what that would cost: a slow-spawning runner's floor-clearing unit, grown
+# 2x at a time, could overshoot by up to 2x (linear payload) or 4x
+# (quadratic — cost is the SQUARE of the size ratio), and the four sizes
+# built off that oversized unit could then exceed the whole measurement
+# budget outright ("baseline measurement failed: measurement deadline
+# exceeded"). Fixed by PROJECTING the whole call's cost from each candidate
+# unit before growing to it, in narrower 1.5x steps, and refusing to grow
+# past a unit whose projection would exceed half the budget — the other
+# half stays margin for the sizes actually measuring slower than the
+# straight-line projection, real jitter, and the correctness check.
+#
+# `exponent` is 1 for a linear baseline (cost ~ size/unit) and 2 for a
+# quadratic one (cost ~ (size/unit)**2); everything else is shared.
+_CALIB_MULTIPLIERS = (1, 1.4, 1.7, 2)
+_CALIB_GROWTH = 1.5
+_CALIB_MAX_STEPS = 14
+_CALIB_PROJECTION_BOUND_S = optimization._MEASUREMENT_BUDGET_S * 0.5
+
+
+def _calib_project_total_s(unit_ms: float, cand_ms: float, exponent: int) -> float:
+    """Project verify_optimization's whole wall time from one calibrated
+    unit, before spending it: the baseline's cost at `unit * m` scales as
+    `unit_ms * m**exponent`, so the baseline arm across all four
+    `_CALIB_MULTIPLIERS` costs `REPEATS * unit_ms * sum(m**exponent)`; the
+    O(1) candidate arm costs `REPEATS * 4 * cand_ms` regardless of size
+    (constant per run); one extra baseline-sized allowance covers a single
+    `_align_sizes`/`_timed` rescale round (the mocked test further below
+    shows a real baseline CAN need one).
+    """
+    sum_mult_pow = sum(m ** exponent for m in _CALIB_MULTIPLIERS)
+    baseline_s = optimization.REPEATS * unit_ms * sum_mult_pow / 1000.0
+    candidate_s = optimization.REPEATS * len(_CALIB_MULTIPLIERS) * cand_ms / 1000.0
+    rescale_allowance_s = baseline_s / len(_CALIB_MULTIPLIERS)
+    return baseline_s + candidate_s + rescale_allowance_s
+
+
+def _calibrate_unit(probe_fn, cand_ms: float, unit0: int, exponent: int) -> dict:
+    """Grow `unit0` in `_CALIB_GROWTH`x steps until `probe_fn(unit)` clears
+    `max(150ms, 10x candidate)`, projecting the cost of the NEXT step before
+    taking it and refusing to grow past `_CALIB_PROJECTION_BOUND_S` (50% of
+    `_MEASUREMENT_BUDGET_S`). Returns a dict rather than a tuple so the
+    calibration log line and the SKIP diagnostic can both read it by name.
+    """
+    floor_ms = max(150.0, 10.0 * cand_ms)
+    unit = unit0
+    unit_ms = probe_fn(unit)
+    steps = 0
+    while (unit_ms is None or unit_ms < floor_ms) and steps < _CALIB_MAX_STEPS:
+        # Extrapolate the NEXT unit's cost from the current measurement
+        # rather than probing it first: growing size by `_CALIB_GROWTH`
+        # scales a linear cost by the same factor and a quadratic one by
+        # its square — `_CALIB_GROWTH ** exponent` covers both — so a step
+        # that would already blow the budget is skipped without spending
+        # the wall time to confirm it.
+        projected_next_unit_ms = (unit_ms or 1.0) * (_CALIB_GROWTH ** exponent)
+        if _calib_project_total_s(projected_next_unit_ms, cand_ms, exponent) \
+                > _CALIB_PROJECTION_BOUND_S:
+            break
+        unit = int(unit * _CALIB_GROWTH)
+        unit_ms = probe_fn(unit)
+        steps += 1
+    projection_s = _calib_project_total_s(unit_ms or 0.0, cand_ms, exponent)
+    floor_met = unit_ms is not None and unit_ms >= floor_ms
+    return {"unit": unit, "unit_ms": unit_ms, "steps": steps, "floor_ms": floor_ms,
+           "cand_ms": cand_ms, "projection_s": projection_s, "floor_met": floor_met,
+           "sizes": [int(unit * m) for m in _CALIB_MULTIPLIERS]}
+
+
+def _print_calib_skip(label: str, calib: dict) -> None:
+    print(f"[calibration:{label}] SKIP: could not reach the {calib['floor_ms']:.0f}ms floor "
+         f"within {_CALIB_PROJECTION_BOUND_S:.0f}s (50% of the "
+         f"{optimization._MEASUREMENT_BUDGET_S:.0f}s measurement budget) -- "
+         f"candidate={calib['cand_ms']:.1f}ms best achievable baseline_unit="
+         f"{calib['unit_ms']}ms at unit={calib['unit']} (after {calib['steps']} "
+         f"growth step(s)) projected_total={calib['projection_s']:.1f}s. This runner's "
+         f"spawn overhead is too large to run a decisive measurement inside budget; a "
+         f"doomed measurement is not attempted.")
+
+
+def _print_calib_per_size(label: str, calib: dict, exponent: int, result: dict) -> None:
+    """Per-size PROJECTED (from the calibration unit) vs ACTUAL (from the
+    call's own reported timings) durations, printed unconditionally so a
+    future runner-speed incident is diagnosable from the CI log alone
+    without needing to reproduce it."""
+    actual_by_n = {row["n"]: row for row in (result.get("speedup") or {}).get("per_size", [])}
+    for n, m in zip(calib["sizes"], _CALIB_MULTIPLIERS):
+        projected_before_ms = calib["unit_ms"] * (m ** exponent)
+        row = actual_by_n.get(n)
+        actual = (f"before={row['before_ms']}ms after={row['after_ms']}ms ratio={row['ratio']}"
+                 if row else "excluded (see inference.sizes_below_floor)")
+        print(f"[calibration:{label}] n={n} projected_before={projected_before_ms:.1f}ms "
+             f"projected_after={calib['cand_ms']:.1f}ms actual: {actual}")
+
+
 # ═══ the gates are callable on their own, with no model anywhere ═══════════
 # They used to run only as the second half of a tool that first asked a
 # separately configured model to write the candidate. The caller of this server
@@ -1076,18 +1182,84 @@ if executor._rust:
             "        s+=i\n"
             "print(s//10)")
     FAST = "import sys\nn=int(sys.stdin.readline())\nprint(n*(n-1)//2)"
-    SIZES = [200000, 400000, 800000, 1600000]
 
-    o = optimization.verify_optimization(SLOW, FAST, "python3",
-                                         test_inputs=["10", "100", "1000"], sizes=SIZES)
-    check("a real O(n)->O(1) win is accepted", o.get("accepted") is True,
-          f"-> ratio={(o.get('speedup') or {}).get('ratio')} {o.get('reason')!r}")
-    check("  ...and equivalence was checked first",
-          (o.get("verification") or {}).get("passed") is True)
-    check("  ...and a majority of sizes were significant at alpha=0.05",
-          (o.get("inference") or {}).get("sizes_total", 0) > 0
-          and o["inference"]["sizes_rejecting"] * 2 > o["inference"]["sizes_total"],
-          f"-> {o.get('inference')}")
+    # SIZES used to be the four FIXED numbers above (200000, 400000, 800000,
+    # 1600000). A hosted Windows sandbox runner (PR #301, 2026-09-08, docs-only
+    # change — nothing product-side moved) still refused this genuine win:
+    # "ratio=12.85 ... 2/3 size(s) reject the null" — one of the four fixed
+    # sizes fell below the visibility/tie floor on that runner (heavier
+    # spawn/scheduling jitter than this box), leaving 3 counted sizes, the
+    # unanimity regime, and a real 12.85x speedup sunk by the one size that
+    # stayed noisy. Same root cause as `_QUAD_SIZES` below (a hardware-
+    # dependent floor, not a code bug) so it gets the same fix: calibrate
+    # the unit against this host's own spawn overhead via `_calibrate_unit`
+    # (see the shared comment above) instead of hardcoding it.
+    def _lin_probe_ms(code, n, reps=3, timeout=60):
+        vals = []
+        for _ in range(reps):
+            r = executor.execute("python3", code, stdin=f"{n}\n", timeout=timeout)
+            d = r.get("duration_ms")
+            if d is not None:
+                vals.append(d)
+        return min(vals) if vals else None
+
+    _lin_cand_ms = _lin_probe_ms(FAST, 2000) or 10.0
+    _lin_calib = _calibrate_unit(lambda n: _lin_probe_ms(SLOW, n), _lin_cand_ms,
+                                 200000, exponent=1)
+    print(f"[calibration:lin] unit={_lin_calib['unit']} "
+          f"(after {_lin_calib['steps']} 1.5x growth step(s), cap {_CALIB_MAX_STEPS}) "
+          f"baseline@unit={_lin_calib['unit_ms']}ms candidate={_lin_cand_ms}ms "
+          f"floor={_lin_calib['floor_ms']}ms "
+          f"projected_total={_lin_calib['projection_s']:.1f}s "
+          f"bound={_CALIB_PROJECTION_BOUND_S:.1f}s sizes={_lin_calib['sizes']}")
+
+    if not _lin_calib["floor_met"]:
+        _print_calib_skip("lin", _lin_calib)
+        print("SKIP real O(n)-vs-O(1) wall-time measurement (calibration could not meet "
+              "the budget-aware floor on this runner)")
+    else:
+        SIZES = _lin_calib["sizes"]
+        _lin_t0 = time.perf_counter()
+        o = optimization.verify_optimization(SLOW, FAST, "python3",
+                                             test_inputs=["10", "100", "1000"], sizes=SIZES)
+        _lin_wall_s = time.perf_counter() - _lin_t0
+        _print_calib_per_size("lin", _lin_calib, 1, o)
+        check("a real O(n)->O(1) win is accepted", o.get("accepted") is True,
+              f"-> ratio={(o.get('speedup') or {}).get('ratio')} {o.get('reason')!r}")
+        check("  ...and equivalence was checked first",
+              (o.get("verification") or {}).get("passed") is True)
+        # `_fwer_satisfied` on the reported counts, not a hand-rolled "majority
+        # of sizes" check — mirrors `_QUAD_SIZES`' assertion further down and
+        # for the same reason: assert exactly the rule `_accept_decision`
+        # applied, whichever regime (unanimity at <=3 counted, Bonferroni-
+        # corrected majority above that) the surviving sizes landed in.
+        _lin_inf = o.get("inference") or {}
+        check("  ...and the reported inference satisfies the tool's own "
+              "family-wise rule for however many sizes survived",
+              optimization._fwer_satisfied(_lin_inf.get("sizes_total", 0),
+                                           _lin_inf.get("sizes_rejecting", 0),
+                                           _lin_inf.get("correction"))
+              and _lin_inf.get("sizes_total", 0) >= optimization._MIN_COUNTED_SIZES
+              and _lin_inf.get("correction") == (
+                  "bonferroni" if _lin_inf.get("sizes_total", 0) > optimization._FWER_UNANIMITY_MAX
+                  else "unanimity"),
+              f"-> correction={_lin_inf.get('correction')} "
+              f"{_lin_inf.get('sizes_rejecting')}/{_lin_inf.get('sizes_total')} "
+              f"below_floor={len(_lin_inf.get('sizes_below_floor') or [])}")
+        # Wall bound derived from the PROJECTION when it stayed comfortably
+        # under budget (see item 4 of the `_QUAD_SIZES` fix below), not a
+        # flat budget+overhead bound in every case: a linear payload's
+        # projection is far below 50% of budget almost always, so a bound
+        # that scales with what was actually projected catches a real
+        # regression (the tool running far longer than its own calibration
+        # predicted) that a fixed `_MEASUREMENT_BUDGET_S + 30` bound is too
+        # loose to ever notice.
+        _lin_wall_bound_s = _lin_calib["projection_s"] * 2.0 + 20.0
+        check("  ...and the REAL wall time stays within 2x its own projection "
+              "plus a fixed overhead allowance",
+              _lin_wall_s < _lin_wall_bound_s,
+              f"-> wall={_lin_wall_s:.1f}s bound={_lin_wall_bound_s:.1f}s "
+              f"projected={_lin_calib['projection_s']:.1f}s")
 
     # The ORIGINAL, weaker O(n)->O(1) pair (before #272 gave it ~10x more
     # work per element to work around this exact bug in the TEST rather than
@@ -1250,96 +1422,112 @@ if executor._rust:
     # tie/overlap exclusion (gate (b) in `_infer_speedup`) trigger under
     # heavier runner jitter, which is what actually shrank the counted set
     # from four to three that day, not the arithmetic ratio (a genuine 26x).
+    #
+    # The DOUBLING loop that used to grow the unit here had no notion of the
+    # measurement budget: it only looked at the floor. A hosted Windows
+    # sandbox runner (PR #299) then doubled the unit six times (2000 ->
+    # 128000, because its slow candidate probe raised the floor) and the
+    # four resulting sizes ([128000, 179200, 217600, 256000]) blew straight
+    # through `_MEASUREMENT_BUDGET_S` ("baseline measurement failed:
+    # measurement deadline exceeded before n=256000 could run", wall=160s);
+    # a hosted macOS runner hit the same failure mode doubling to 64000
+    # earlier still. `_calibrate_unit` (shared with the O(n)->O(1) test
+    # above) fixes both defects at once: 1.5x steps instead of 2x (a
+    # QUADRATIC payload squares the spread, so a doubling could overshoot
+    # the floor by up to 4x — a 1.5x step overshoots by at most 2.25x), and
+    # a cost PROJECTION checked before every growth step, refusing to grow
+    # past whatever unit would blow half of `_MEASUREMENT_BUDGET_S`.
     _quad_cand_ms = _quad_probe_ms(_QUAD_CAND, 2000) or 10.0
-    _quad_floor_ms = max(150.0, 10.0 * _quad_cand_ms)
-    _quad_unit = 2000
-    _quad_unit_ms = _quad_probe_ms(_QUAD_BASE, _quad_unit)
-    _quad_calib_steps = 0
-    while (_quad_unit_ms is None or _quad_unit_ms < _quad_floor_ms) and _quad_calib_steps < 8:
-        _quad_unit *= 2
-        _quad_unit_ms = _quad_probe_ms(_QUAD_BASE, _quad_unit)
-        _quad_calib_steps += 1
-    # A QUADRATIC payload squares the spread: 10x the unit is 100x the work,
-    # which put the largest size at ~13s per run (x REPEATS) on this box and
-    # spent 93s of the 180s tool deadline on one call. (1, 1.4, 1.7, 2) keeps
-    # the largest size at 4x the unit's work (measured: ~29-33s wall for the
-    # whole calibrated call on this box, comfortably under the 120s
-    # `_MEASUREMENT_BUDGET_S`) — narrower than the (1, 1.5, 2, 3) this test
-    # used before 2026-09-08 (9x the unit's work at the largest size), which
-    # left the smallest size's margin over the visibility/tie floor thin
-    # enough to erode under a noisy runner (see the calibration comment
-    # above).
-    _QUAD_SIZES = [int(_quad_unit * r) for r in (1, 1.4, 1.7, 2)]
-    print(f"[calibration] unit={_quad_unit} "
-          f"(after {_quad_calib_steps} doubling step(s), cap 8) "
-          f"baseline@unit={_quad_unit_ms}ms candidate={_quad_cand_ms}ms "
-          f"floor={_quad_floor_ms}ms sizes={_QUAD_SIZES}")
+    _quad_calib = _calibrate_unit(lambda n: _quad_probe_ms(_QUAD_BASE, n), _quad_cand_ms,
+                                  2000, exponent=2)
+    # (1, 1.4, 1.7, 2) keeps the largest size at 4x the unit's work —
+    # narrower than the (1, 1.5, 2, 3) this test used before 2026-09-08 (9x
+    # the unit's work at the largest size), which left the smallest size's
+    # margin over the visibility/tie floor thin enough to erode under a
+    # noisy runner (see the calibration comment above).
+    _QUAD_SIZES = _quad_calib["sizes"]
+    print(f"[calibration:quad] unit={_quad_calib['unit']} "
+          f"(after {_quad_calib['steps']} 1.5x growth step(s), cap {_CALIB_MAX_STEPS}) "
+          f"baseline@unit={_quad_calib['unit_ms']}ms candidate={_quad_cand_ms}ms "
+          f"floor={_quad_calib['floor_ms']}ms "
+          f"projected_total={_quad_calib['projection_s']:.1f}s "
+          f"bound={_CALIB_PROJECTION_BOUND_S:.1f}s sizes={_QUAD_SIZES}")
 
-    _quad_t0 = time.perf_counter()
-    _quad_result = optimization.verify_optimization(
-        _QUAD_BASE, _QUAD_CAND, "c", test_inputs=["0", "1", "10", "100"],
-        sizes=_QUAD_SIZES)
-    _quad_wall_s = time.perf_counter() - _quad_t0
-    print(f"[calibration] verify_optimization: ok={_quad_result.get('ok')} "
-          f"accepted={_quad_result.get('accepted')} "
-          f"speedup={_quad_result.get('speedup')} "
-          f"inference_totals=({(_quad_result.get('inference') or {}).get('sizes_rejecting')}/"
-          f"{(_quad_result.get('inference') or {}).get('sizes_total')}) "
-          f"wall={_quad_wall_s:.1f}s")
+    if not _quad_calib["floor_met"]:
+        _print_calib_skip("quad", _quad_calib)
+        print("SKIP real O(n^2)-vs-O(1) wall-time measurement (calibration could not meet "
+              "the budget-aware floor on this runner)")
+    else:
+        _quad_t0 = time.perf_counter()
+        _quad_result = optimization.verify_optimization(
+            _QUAD_BASE, _QUAD_CAND, "c", test_inputs=["0", "1", "10", "100"],
+            sizes=_QUAD_SIZES)
+        _quad_wall_s = time.perf_counter() - _quad_t0
+        print(f"[calibration:quad] verify_optimization: ok={_quad_result.get('ok')} "
+              f"accepted={_quad_result.get('accepted')} "
+              f"speedup={_quad_result.get('speedup')} "
+              f"inference_totals=({(_quad_result.get('inference') or {}).get('sizes_rejecting')}/"
+              f"{(_quad_result.get('inference') or {}).get('sizes_total')}) "
+              f"wall={_quad_wall_s:.1f}s")
+        _print_calib_per_size("quad", _quad_calib, 2, _quad_result)
 
-    check("a real O(n^2)->O(1) win at CALIBRATED sizes is accepted",
-          _quad_result.get("ok") is True and _quad_result.get("accepted") is True,
-          f"-> ok={_quad_result.get('ok')} accepted={_quad_result.get('accepted')} "
-          f"reason={_quad_result.get('reason')!r} error={_quad_result.get('error')!r} "
-          f"code={_quad_result.get('code')!r} sizes={_QUAD_SIZES} wall={_quad_wall_s:.1f}s")
-    # This is the one assertion the 2026-09-08 incident actually broke, and
-    # the only thing worth asserting about HOW it passed is what the tool
-    # itself required — not a stronger claim this test cannot honestly make
-    # on every run. The old version asserted `sizes_total == 4` and
-    # `sizes_below_floor == []`, which turned a single excluded size (see
-    # the calibration comment above) into a hard test FAILURE independent
-    # of `accepted`. A first rewrite asserted `correction == "bonferroni"`,
-    # which in a four-size test is the SAME condition spelled differently
-    # (only four counted sizes reach the Bonferroni regime), as review
-    # pointed out with a synthetic two-survivor accept that it still
-    # failed. So assert exactly the rule `_accept_decision` applied, under
-    # whichever regime the surviving sizes landed in: `_fwer_satisfied` on
-    # the reported counts, at least two counted sizes (the tool's own
-    # floor), and the reported regime consistent with the count. Which
-    # regime that was on a given run is reported in the detail, not
-    # asserted.
-    _quad_inf = _quad_result.get("inference") or {}
-    check("  ...and the reported inference satisfies the tool's own "
-          "family-wise rule for however many sizes survived",
-          optimization._fwer_satisfied(_quad_inf.get("sizes_total", 0),
-                                       _quad_inf.get("sizes_rejecting", 0),
-                                       _quad_inf.get("correction"))
-          and _quad_inf.get("sizes_total", 0) >= optimization._MIN_COUNTED_SIZES
-          and _quad_inf.get("correction") == (
-              "bonferroni" if _quad_inf.get("sizes_total", 0) > optimization._FWER_UNANIMITY_MAX
-              else "unanimity"),
-          f"-> correction={_quad_inf.get('correction')} "
-          f"{_quad_inf.get('sizes_rejecting')}/{_quad_inf.get('sizes_total')} "
-          f"below_floor={len(_quad_inf.get('sizes_below_floor') or [])}")
-    check("  ...ratio measured, not asserted",
-          isinstance((_quad_result.get("speedup") or {}).get("ratio"), (int, float))
-          and _quad_result["speedup"]["ratio"] > 1,
-          f"-> {_quad_result.get('speedup')}")
-    # mcp_middleware.TOOL_TIMEOUTS["verify_optimization"] = 180 (see that
-    # table's comment, corrected alongside this fix). The bound is derived
-    # from the tool's OWN measurement budget plus a fixed overhead for the
-    # correctness check and process spawns, not a hand-picked number: a
-    # fixed 90 s bar failed deterministically on the hosted Windows sandbox
-    # runner (wall=118.2 s, 2026-09-08) while the call itself accepted —
-    # the runner is simply slower, and the measurement budget already caps
-    # what the tool will spend there. Anything past budget + overhead means
-    # the budget is not being honoured, which IS the regression this guards.
-    _quad_wall_bound_s = optimization._MEASUREMENT_BUDGET_S + 30.0
-    check("  ...and the REAL wall time stays under the measurement budget plus "
-          "overhead (and so under the 180s tool deadline)",
-          _quad_wall_s < _quad_wall_bound_s,
-          f"-> wall={_quad_wall_s:.1f}s bound={_quad_wall_bound_s:.0f}s "
-          f"(180s deadline, margin={180.0 - _quad_wall_s:.0f}s)")
+        check("a real O(n^2)->O(1) win at CALIBRATED sizes is accepted",
+              _quad_result.get("ok") is True and _quad_result.get("accepted") is True,
+              f"-> ok={_quad_result.get('ok')} accepted={_quad_result.get('accepted')} "
+              f"reason={_quad_result.get('reason')!r} error={_quad_result.get('error')!r} "
+              f"code={_quad_result.get('code')!r} sizes={_QUAD_SIZES} wall={_quad_wall_s:.1f}s")
+        # This is the one assertion the 2026-09-08 incident actually broke, and
+        # the only thing worth asserting about HOW it passed is what the tool
+        # itself required — not a stronger claim this test cannot honestly make
+        # on every run. The old version asserted `sizes_total == 4` and
+        # `sizes_below_floor == []`, which turned a single excluded size (see
+        # the calibration comment above) into a hard test FAILURE independent
+        # of `accepted`. A first rewrite asserted `correction == "bonferroni"`,
+        # which in a four-size test is the SAME condition spelled differently
+        # (only four counted sizes reach the Bonferroni regime), as review
+        # pointed out with a synthetic two-survivor accept that it still
+        # failed. So assert exactly the rule `_accept_decision` applied, under
+        # whichever regime the surviving sizes landed in: `_fwer_satisfied` on
+        # the reported counts, at least two counted sizes (the tool's own
+        # floor), and the reported regime consistent with the count. Which
+        # regime that was on a given run is reported in the detail, not
+        # asserted.
+        _quad_inf = _quad_result.get("inference") or {}
+        check("  ...and the reported inference satisfies the tool's own "
+              "family-wise rule for however many sizes survived",
+              optimization._fwer_satisfied(_quad_inf.get("sizes_total", 0),
+                                           _quad_inf.get("sizes_rejecting", 0),
+                                           _quad_inf.get("correction"))
+              and _quad_inf.get("sizes_total", 0) >= optimization._MIN_COUNTED_SIZES
+              and _quad_inf.get("correction") == (
+                  "bonferroni" if _quad_inf.get("sizes_total", 0) > optimization._FWER_UNANIMITY_MAX
+                  else "unanimity"),
+              f"-> correction={_quad_inf.get('correction')} "
+              f"{_quad_inf.get('sizes_rejecting')}/{_quad_inf.get('sizes_total')} "
+              f"below_floor={len(_quad_inf.get('sizes_below_floor') or [])}")
+        check("  ...ratio measured, not asserted",
+              isinstance((_quad_result.get("speedup") or {}).get("ratio"), (int, float))
+              and _quad_result["speedup"]["ratio"] > 1,
+              f"-> {_quad_result.get('speedup')}")
+        # mcp_middleware.TOOL_TIMEOUTS["verify_optimization"] = 180 (see that
+        # table's comment, corrected alongside this fix). The bound used to be
+        # a flat `_MEASUREMENT_BUDGET_S + 30` regardless of how cheap the
+        # calibration itself projected the call to be — honest as a ceiling
+        # (it is still what a caller with no calibration would need to
+        # tolerate) but too loose to catch a REGRESSION on a normal-speed
+        # runner, where the projection sits far under the budget and the call
+        # ought to land close to it. Since calibration only reaches this
+        # branch when its projection is <= 50% of budget (`floor_met`), a
+        # bound derived from that projection (2x it, plus a fixed 20s
+        # overhead for the correctness check and process spawns) is a
+        # tighter, still-honest bound in the common case.
+        _quad_wall_bound_s = _quad_calib["projection_s"] * 2.0 + 20.0
+        check("  ...and the REAL wall time stays within 2x its own projection "
+              "plus a fixed overhead allowance (and so under the 180s tool deadline)",
+              _quad_wall_s < _quad_wall_bound_s,
+              f"-> wall={_quad_wall_s:.1f}s bound={_quad_wall_bound_s:.1f}s "
+              f"projected={_quad_calib['projection_s']:.1f}s "
+              f"(180s deadline, margin={180.0 - _quad_wall_s:.0f}s)")
 else:
     print("SKIP real O(n^2)-vs-O(1) wall-time measurement (no native executor built)")
 
