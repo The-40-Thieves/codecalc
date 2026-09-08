@@ -488,6 +488,29 @@ fn first_cmd(template: &[&'static str]) -> &'static str {
         .unwrap_or("")
 }
 
+/// A SECOND executable `lang`'s plan needs, beyond the compile tool that
+/// decides whether it resolves at all — or None when there isn't one.
+/// Mirrors `codecalc/registry.py`'s `secondary_command` (see its docstring
+/// for the bug this closes: kotlin's `run` step launches `java -jar ...`
+/// directly, a binary `kotlinc` resolving says nothing about, which is what
+/// let `--probe` — and `doctor`, before its own matching fix — report kotlin
+/// available from a JRE alone with no Kotlin toolchain on the host).
+///
+/// Computed mechanically from `compile`/`run`, the same as the Python side,
+/// rather than a hardcoded per-language table: any FUTURE compile-then-run
+/// language whose `run` step names a literal command different from its
+/// compile tool is caught by the same rule instead of quietly repeating this
+/// bug.
+fn secondary_cmd(lang: &Lang) -> Option<&'static str> {
+    let compile = lang.compile?;
+    let run_cmd = *lang.run.first()?;
+    let compile_cmd = *compile.first()?;
+    if run_cmd.starts_with('{') || run_cmd == compile_cmd {
+        return None;
+    }
+    Some(run_cmd)
+}
+
 /// Probe every language's runtime against PATH; JSON: {"language": bool, ...}
 fn probe() -> serde_json::Value {
     let mut out = serde_json::Map::new();
@@ -505,11 +528,14 @@ fn probe() -> serde_json::Value {
                 "" => first_cmd(lang.compile.unwrap_or(&[])),
                 c => c,
             };
-            if cmd.is_empty() || cmd == "bash" || cmd == "sh" {
+            let primary_available = if cmd.is_empty() || cmd == "bash" || cmd == "sh" {
                 on_path(if cmd.is_empty() { "bash" } else { cmd })
             } else {
                 on_path(cmd)
-            }
+            };
+            // Available only when a SECOND tool the run step needs (kotlin's
+            // `java`) resolves too — see `secondary_cmd`'s doc comment.
+            primary_available && secondary_cmd(lang).is_none_or(on_path)
         };
         out.insert(lang.name.to_string(), json!(available));
     }
@@ -1005,7 +1031,18 @@ fn run_step(
                 exit_code: -2,
                 signal: None,
                 stdout: String::new(),
-                stderr: format!("spawn failed: {e}"),
+                // Names the phase AND the binary this call tried to launch —
+                // a bare "spawn failed: No such file or directory (os error
+                // 2)" is exactly what a kotlin compile step with no
+                // `kotlinc` on PATH reported: true (nothing ran, no output
+                // to lose), but silent about WHICH of the plan's tools was
+                // missing, which is the one fact a caller needs to act on.
+                // Mirrors the Python fallback's `_runtime_unavailable_result`
+                // phrasing (`executor.py`), which already names both.
+                stderr: format!(
+                    "runtime unavailable for the {tag} phase: {:?} not found ({e})",
+                    argv.first().map_or("", String::as_str)
+                ),
                 timed_out: false,
                 cpu_ms: 0,
                 peak_memory_kb: 0,
@@ -1988,5 +2025,51 @@ mod tests {
             assert!(wrapped_tool(lang).is_some(), "{lang} has no wrapped_tool");
         }
         assert!(wrapped_tool("python3").is_none());
+    }
+
+    // ── secondary_cmd: kotlin's run step needs java, and nothing else does ──
+    // A regression test for the exact reported defect: kotlin's `run` step
+    // launches `java -jar ...` directly, a binary `kotlinc` resolving says
+    // nothing about, and `probe()` used to advertise kotlin available from
+    // java alone. Reproduced as a unit test on the mechanical derivation
+    // itself, separately from the subprocess-level fixture in
+    // tests/test_executor_sweep.py that exercises the whole `--probe` CLI.
+
+    #[test]
+    fn kotlin_needs_java_beyond_its_compile_tool() {
+        let kotlin = canonical("kotlin").expect("kotlin is registered");
+        assert_eq!(
+            secondary_cmd(kotlin),
+            Some("java"),
+            "kotlin's run step launches java directly; kotlinc resolving says nothing about it"
+        );
+    }
+
+    #[test]
+    fn a_compiled_language_whose_run_step_is_just_its_own_binary_needs_no_second_tool() {
+        // c/cpp/rust/fortran all run `{exe}` — the binary compiling just
+        // produced — so the compile tool resolving is already the whole
+        // story. Asserted over every LANG with a compile step rather than
+        // one hand-picked name, so a future compiled language is covered by
+        // construction instead of needing its own line added here.
+        for lang in LANGS {
+            if lang.compile.is_none() {
+                continue;
+            }
+            if lang.run.first().is_some_and(|c| c.starts_with('{')) {
+                assert_eq!(
+                    secondary_cmd(lang),
+                    None,
+                    "{}: an {{exe}}-style run step needs no second tool",
+                    lang.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_interpreted_language_with_no_compile_step_has_no_secondary_command() {
+        let python3 = canonical("python3").expect("python3 is registered");
+        assert_eq!(secondary_cmd(python3), None);
     }
 }

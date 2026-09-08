@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/The-40-Thieves/codecalc/main/docs/contract/doctor-v1.schema.json",
   "title": "codecalc doctor report",
-  "description": "`codecalc doctor --json`, version 1.7.0 \u2014 the same contract version and policy as the execution result. Generated from codecalc/contract.py by scripts/check_contract.py.",
+  "description": "`codecalc doctor --json`, version 1.8.0 \u2014 the same contract version and policy as the execution result. Generated from codecalc/contract.py by scripts/check_contract.py.",
   "type": "object",
   "required": [
     "contract_version",
@@ -32,7 +32,7 @@
     },
     "healthy": {
       "type": "boolean",
-      "description": "Deliberately NARROW, and the process exit code follows it: true when a workspace is writable and a backend resolved. A missing optional extra or an uninstalled runtime is a fact about the host, not a fault, and must not fail an install check."
+      "description": "Deliberately NARROW, and the process exit code follows it: true when a workspace is writable, a backend resolved, and no `tested`-tier runtime is `unhealthy`. A missing optional extra or an uninstalled runtime \u2014 of ANY tier \u2014 is a fact about the host, not a fault, and must not fail an install check; a `tested`-tier runtime that RESOLVED and then proved broken (a non-executable file, or a failed --deep probe) is codecalc's own advertised guarantee failing, and does."
     },
     "python": {
       "type": "object",
@@ -362,7 +362,7 @@
               "unhealthy",
               "available"
             ],
-            "description": "supported = codecalc knows it, nothing resolves here \u00b7 installed = resolves and is executable, NOT run \u00b7 unhealthy = resolves but cannot run, or was run and failed \u00b7 available = actually executed here and answered (--deep only)"
+            "description": "supported = codecalc knows it, nothing resolves here \u00b7 installed = resolves and is executable, NOT run \u00b7 unhealthy = resolves but cannot run, was run (hello-world) and failed, or (under --deep) its version probe never got an answer (spawn failure/timeout) or exited non-zero on a flag this code has confirmed correct for that command \u2014 a nonzero exit on an UNCONFIRMED flag guess is reported as merely unmeasured, never unhealthy \u00b7 available = actually executed here and answered (--deep only)"
           },
           "path": {
             "type": [
@@ -375,7 +375,7 @@
               "string",
               "null"
             ],
-            "description": "the runtime's own version string, read by running it with --version. null means NOT MEASURED \u2014 no --deep, no version flag, or an unreadable answer \u2014 never 'no version'."
+            "description": "the runtime's own version string, read by running it with --version. null means NOT MEASURED \u2014 no --deep, no version flag, or an unreadable answer \u2014 never 'no version', and NEVER a failed probe's error text; see `probe_error` for that."
           },
           "tier": {
             "type": "string",
@@ -388,6 +388,10 @@
           },
           "detail": {
             "type": "string"
+          },
+          "probe_error": {
+            "type": "string",
+            "description": "present whenever a --deep version probe ran and failed (a nonzero exit, a timeout, or a spawn error), whether or not that failure was trusted enough to move `status` \u2014 e.g. the text Apple's java stub prints when no JDK is installed. Its PRESENCE does not by itself mean `unhealthy`: a nonzero exit on a version flag this code has not confirmed is correct for that command is recorded here but leaves `status` at `installed`, since the failure may be a wrong flag guess rather than the runtime. Distinct from `version`, which never carries this text; `detail` carries a one-line human summary when the failure WAS trusted enough to demote the row."
           }
         }
       }

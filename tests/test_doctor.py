@@ -185,6 +185,255 @@ else:
           any("not runnable" in r for r in broken["remedies"]),
           f"-> {broken['remedies'][:2]}")
     check("...and the report validates", not errors_for(broken))
+    # python3 is `tested` tier — codecalc's own CI genuinely executes and
+    # checks it on every PR — so a RESOLVED-but-broken python3 is not an
+    # ordinary "toolchain not installed" host fact, it is codecalc's own
+    # advertised guarantee failing, and `healthy` says so.
+    check("...and a broken `tested`-tier runtime makes the install unhealthy",
+          broken["healthy"] is False,
+          "-> python3 is `tested`; an uninstalled BEST_EFFORT runtime must "
+          "not do this, only a resolved-and-broken TESTED one")
+
+
+import shutil as _shutil_fixtures
+
+# ── A FAILED VERSION PROBE MUST NOT BE STORED AS A VERSION (#279) ──────────
+#
+# Reproduced against `/usr/bin/java` on a macOS host with no JDK: Apple ships
+# a stub there that resolves on PATH and exits non-zero printing "The
+# operation couldn't be completed. Unable to locate a Java Runtime." on
+# stderr. The OLD `_runtime_version` read that as a perfectly good first
+# non-empty line and RETURNED IT — `status` stayed `installed`, `unhealthy`
+# never counted it, and `healthy` never noticed. This fixture reproduces the
+# exact shape (a fake `java` that exits 1 printing that text) without needing
+# a Mac: any command that resolves and answers `--deep`'s version probe with
+# a nonzero exit is the same defect.
+_apple_stub_msg = "The operation couldn't be completed. Unable to locate a Java Runtime."
+_java_broken_dir = _tf.mkdtemp(prefix="codecalc-doctor-test-")
+_fake_java = pathlib.Path(_java_broken_dir) / "java"
+_fake_java.write_text(f'#!/bin/sh\necho "{_apple_stub_msg}" >&2\nexit 1\n', encoding="utf-8")
+_fake_java.chmod(0o755)
+registry.runtime_path = lambda: _java_broken_dir
+try:
+    java_broken = doctor.report(deep=True)
+finally:
+    registry.runtime_path = _saved_path
+_java_row = next((r for r in java_broken["runtimes"] if r["name"] == "java"), {})
+if os.name == "nt":
+    print("SKIP failed-version-probe (needs a POSIX shell script fixture)")
+else:
+    check("a runtime whose --deep version probe exits non-zero is `unhealthy`",
+          _java_row.get("status") == "unhealthy", f"-> {_java_row.get('status')}")
+    check("...never `installed` (the pre-fix status for this exact host)",
+          _java_row.get("status") != "installed")
+    check("...and `version` is None, NEVER the probe's error text",
+          _java_row.get("version") is None, f"-> {_java_row.get('version')!r}")
+    check("...and the failure lands in `probe_error`, not manufactured elsewhere",
+          _java_row.get("probe_error") is not None
+          and _apple_stub_msg in _java_row["probe_error"],
+          f"-> {_java_row.get('probe_error')!r}")
+    check("...and it counts in runtime_summary.unhealthy",
+          java_broken["runtime_summary"]["unhealthy"] >= 1,
+          f"-> {java_broken['runtime_summary']}")
+    # java is `best_effort` — nothing CI-checked ever promised it works —
+    # so this must NOT be the thing that fails an install check. Only a
+    # `tested`-tier runtime resolving-then-breaking does that (see above).
+    check("...but java is `best_effort`, so `healthy` is UNCHANGED by it",
+          java_broken["healthy"] is True,
+          "-> a best_effort runtime's own probe failing is not codecalc's "
+          "advertised guarantee breaking")
+    check("...and the remedy names java specifically, not just \"unhealthy\"",
+          any("java" in r and "install a working" in r for r in java_broken["remedies"]),
+          f"-> {java_broken['remedies']}")
+    check("...and the report still validates", not errors_for(java_broken))
+
+
+# ── KOTLIN: RESOLUTION MUST NEED BOTH kotlinc AND java (#280) ──────────────
+#
+# kotlin used to be registered with its resolving `command` set to `java`
+# (the binary its `run` step invokes), so it read `installed` on any host
+# with a JRE and no Kotlin toolchain at all — `execute_code(language=
+# "kotlin")` then failed at spawn. Two fixtures: java-without-kotlinc (the
+# exact reported repro) and kotlinc-without-java (the new secondary-tool
+# check this fix adds, otherwise unexercised).
+_kotlin_dir = _tf.mkdtemp(prefix="codecalc-doctor-test-")
+_fake_java2 = pathlib.Path(_kotlin_dir) / "java"
+_fake_java2.write_text("#!/bin/sh\necho ok\nexit 0\n", encoding="utf-8")
+_fake_java2.chmod(0o755)
+registry.runtime_path = lambda: _kotlin_dir
+try:
+    kotlin_no_kotlinc = doctor.report()
+finally:
+    registry.runtime_path = _saved_path
+_kt = next((r for r in kotlin_no_kotlinc["runtimes"] if r["name"] == "kotlin"), {})
+if os.name == "nt":
+    print("SKIP kotlin two-tool resolution (needs a POSIX shell script fixture)")
+else:
+    check("kotlin's deciding command is kotlinc, never java",
+          _kt.get("command") == "kotlinc", f"-> {_kt.get('command')!r}")
+    check("java alone (no kotlinc) does NOT report kotlin installed",
+          _kt.get("status") != "installed", f"-> {_kt.get('status')!r}")
+
+    _kotlin_dir2 = _tf.mkdtemp(prefix="codecalc-doctor-test-")
+    _fake_kotlinc = pathlib.Path(_kotlin_dir2) / "kotlinc"
+    _fake_kotlinc.write_text("#!/bin/sh\necho ok\nexit 0\n", encoding="utf-8")
+    _fake_kotlinc.chmod(0o755)
+    registry.runtime_path = lambda: _kotlin_dir2
+    try:
+        kotlin_no_java = doctor.report()
+    finally:
+        registry.runtime_path = _saved_path
+    _kt2 = next((r for r in kotlin_no_java["runtimes"] if r["name"] == "kotlin"), {})
+    check("kotlinc alone (no java) ALSO does not report kotlin installed",
+          _kt2.get("status") != "installed", f"-> {_kt2.get('status')!r}")
+    check("...and the missing half is named by its actual binary",
+          "java" in (_kt2.get("detail") or ""), f"-> {_kt2.get('detail')!r}")
+    check("...and the remedy names kotlin's missing half too",
+          any("kotlin" in r and "java" in r for r in kotlin_no_java["remedies"]),
+          f"-> {kotlin_no_java['remedies']}")
+    _shutil_fixtures.rmtree(_kotlin_dir2, ignore_errors=True)
+
+_shutil_fixtures.rmtree(_java_broken_dir, ignore_errors=True)
+_shutil_fixtures.rmtree(_kotlin_dir, ignore_errors=True)
+
+
+# ── A NONZERO EXIT ON AN UNTESTED FLAG IS "UNKNOWN", NEVER "BROKEN" ────────
+#
+# A shipped version of the #279 fix trusted ANY nonzero exit from `<command>
+# --version` as evidence of brokenness. `--version` is a GNU convention, not
+# a universal one: `go --version` exits 2 ("flag provided but not defined" —
+# `go version` is correct), `lua --version` exits 1 (`-v` is correct), `zig
+# --version` exits 1 (`zig version` is correct). Since go is `tested` tier,
+# that shipped version reported a perfectly WORKING go install `unhealthy`
+# and flipped `healthy: false` on any host with these three toolchains —
+# a regression worse than the bug it fixed, caught by adversarial review, not
+# by a test, because no test ran `_probe_version` against a command using an
+# UNCONFIRMED flag. `_probe_version` returns `(version, probe_error,
+# hard_failure)`; a nonzero exit is `hard_failure=False` always, and the
+# caller (report(), tested below) trusts a `False` only when `_VERSION_FLAG`
+# has an explicit entry for that command.
+_v, _e, _h = doctor._probe_version("no-such-fake-command-xyz", None)
+check("no path at all is not measured, not a failure",
+      _v is None and _e is None and _h is False, f"-> {(_v, _e, _h)}")
+_v, _e, _h = doctor._probe_version("python3", "/nonexistent/python3")
+check("a resolved-but-unspawnable path is a HARD failure",
+      _v is None and _e is not None and _h is True, f"-> {(_v, _e, _h)}")
+
+_untrusted_dir = _tf.mkdtemp(prefix="codecalc-doctor-test-")
+_fake_untrusted = pathlib.Path(_untrusted_dir) / "fakelang"
+_fake_untrusted.write_text(
+    "#!/bin/sh\necho \"usage: fakelang [command]\" >&2\nexit 1\n", encoding="utf-8")
+_fake_untrusted.chmod(0o755)
+if os.name != "nt":
+    assert "fakelang" not in doctor._VERSION_FLAG, "fixture invalid: pick a name not audited"
+    _v, _e, _h = doctor._probe_version("fakelang", str(_fake_untrusted))
+    check("a command on the untested `--version` default: nonzero exit is a "
+          "SOFT failure, never hard",
+          _v is None and _e is not None and _h is False, f"-> {(_v, _e, _h)}")
+
+# ── go / lua / zig: the exact three the regression broke ───────────────────
+_gzl_dir = pathlib.Path(_tf.mkdtemp(prefix="codecalc-doctor-test-"))
+
+
+def _write_fixture(name: str, script: str) -> None:
+    p = _gzl_dir / name
+    p.write_text(script, encoding="utf-8")
+    p.chmod(0o755)
+
+
+if os.name == "nt":
+    print("SKIP go/lua/zig non-GNU version-flag fixtures (needs a POSIX shell script)")
+else:
+    # go: `version` is a SUBCOMMAND (no dashes); `--version` is an unknown flag.
+    _write_fixture("go", (
+        "#!/bin/sh\n"
+        'if [ "$1" = "version" ]; then echo "go version go1.99.0 linux/arm64"; exit 0; fi\n'
+        'echo "flag provided but not defined: -version" >&2\nexit 2\n'))
+    # zig: same subcommand shape as go.
+    _write_fixture("zig", (
+        "#!/bin/sh\n"
+        'if [ "$1" = "version" ]; then echo "0.99.0"; exit 0; fi\n'
+        'echo "info: Usage: zig [command] [options]" >&2\nexit 1\n'))
+    # lua: `-v` is correct; also doubles as the hello-world RUN step (lua is
+    # in `_HELLO`), so anything but `-v`/`--version` prints "codecalc" and
+    # exits 0 — a fake interpreter, not just a fake version responder.
+    _write_fixture("lua", (
+        "#!/bin/sh\n"
+        'if [ "$1" = "-v" ]; then echo "Lua 5.4.6  Copyright (C) 1994-2023 Lua.org, PUC-Rio"; exit 0; fi\n'
+        'if [ "$1" = "--version" ]; then echo "lua: unrecognized option --version" >&2; exit 1; fi\n'
+        'echo codecalc\nexit 0\n'))
+
+    # The ENV VAR, not the `registry.runtime_path` monkeypatch used
+    # elsewhere in this file: lua is in `_HELLO`, so its check spawns a real
+    # `execute_code` run, which on the Rust backend shells out to the
+    # `codecalc-exec` binary as a SEPARATE process — one that reads
+    # `CODECALC_RUNTIME_PATH` from ITS OWN inherited environment, never from
+    # this Python process's `registry.runtime_path` attribute. Only the env
+    # var reaches both the in-process version probe AND that child, on
+    # either backend.
+    _saved_runtime_path_env = os.environ.get("CODECALC_RUNTIME_PATH")
+    os.environ["CODECALC_RUNTIME_PATH"] = str(_gzl_dir)
+    try:
+        gzl = doctor.report(deep=True)
+    finally:
+        if _saved_runtime_path_env is None:
+            os.environ.pop("CODECALC_RUNTIME_PATH", None)
+        else:
+            os.environ["CODECALC_RUNTIME_PATH"] = _saved_runtime_path_env
+    _rows = {r["name"]: r for r in gzl["runtimes"]}
+
+    check("go (non-GNU --version, correct flag confirmed) is NOT unhealthy",
+          _rows["go"]["status"] not in ("unhealthy", "supported"),
+          f"-> {_rows['go']['status']}")
+    check("  ...and its real version WAS read via the corrected flag",
+          _rows["go"].get("version") == "go version go1.99.0 linux/arm64",
+          f"-> {_rows['go'].get('version')!r}")
+    check("zig (non-GNU --version, correct flag confirmed) is NOT unhealthy",
+          _rows["zig"]["status"] not in ("unhealthy", "supported"),
+          f"-> {_rows['zig']['status']}")
+    check("  ...and its real version WAS read via the corrected flag",
+          _rows["zig"].get("version") == "0.99.0", f"-> {_rows['zig'].get('version')!r}")
+    check("lua: the hello-world run is the arbiter, not the version flag",
+          _rows["lua"]["status"] == "available", f"-> {_rows['lua']['status']}")
+    check("  ...and lua's own version WAS read via the corrected `-v` flag",
+          _rows["lua"].get("version", "").startswith("Lua 5.4.6"),
+          f"-> {_rows['lua'].get('version')!r}")
+    check("go/lua/zig being merely resolved-but-fake does not cost `healthy` "
+          "(they are best_effort; only a broken TESTED runtime would)",
+          gzl["healthy"] is True, f"-> {gzl['healthy']}")
+    check("...and the report validates", not errors_for(gzl))
+
+_shutil_fixtures.rmtree(_untrusted_dir, ignore_errors=True)
+_shutil_fixtures.rmtree(_gzl_dir, ignore_errors=True)
+
+
+# ── THE REAL HOST, --deep: TESTED-TIER MUST NEVER FALSE-POSITIVE ───────────
+#
+# The regression above escaped because no test ran `doctor.report(deep=True)`
+# against what a REAL runner's toolchains actually do — every other fixture
+# in this file fakes a broken binary. This runs it against whatever is
+# actually installed here (CI images ship python3/node always, and often
+# go/rust) and asserts the four `tested`-tier languages never read
+# `unhealthy` when they resolve at all, and that `healthy` stays true.
+_real_deep = doctor.report(deep=True)
+check("--deep against the REAL host's own toolchains validates",
+      not errors_for(_real_deep), f"-> {errors_for(_real_deep)[:3]}")
+_real_tested = [r for r in _real_deep["runtimes"] if r["tier"] == "tested"]
+check("all four `tested`-tier languages are present to check",
+      sorted(r["name"] for r in _real_tested) == ["go", "node", "python3", "rust"],
+      f"-> {sorted(r['name'] for r in _real_tested)}")
+for _r in _real_tested:
+    if _r["status"] == "supported":
+        print(f"SKIP {_r['name']}: not installed on this host — nothing to assert")
+        continue
+    check(f"--deep: {_r['name']} (tested, resolved here) is installed/available, "
+          f"never unhealthy",
+          _r["status"] in ("installed", "available"),
+          f"-> status={_r['status']} version={_r.get('version')!r} "
+          f"probe_error={_r.get('probe_error')!r}")
+check("--deep against the real host's own tested-tier toolchains stays healthy",
+      _real_deep["healthy"] is True,
+      f"-> {[(r['name'], r['status'], r.get('probe_error')) for r in _real_tested]}")
 
 
 # ── UNWRITABLE WORKSPACE — the one failure that IS unhealthy ───────────────

@@ -10,9 +10,9 @@ This project versions **two** things, and they are not the same number.
 | What | Where | Current |
 |---|---|---|
 | The **package** — the tool surface, the CLI, the Python API | `pyproject.toml`, `executor/Cargo.toml`, this file | see `version` in [`pyproject.toml`](pyproject.toml) — this cell is not re-typed on every release |
-| The **result contract** — the shape every tool result comes back in | `docs/contract/README.md`, `contract_version` on every result | `1.7.0` |
+| The **result contract** — the shape every tool result comes back in | `docs/contract/README.md`, `contract_version` on every result | `1.8.0` |
 
-The contract is at `1.7.0` and the package is at `0.x` because those claims are
+The contract is at `1.8.0` and the package is at `0.x` because those claims are
 genuinely different. The result contract has a published JSON Schema, a
 documented MAJOR/MINOR/PATCH policy, a twelve-month deprecation window, and a
 gate that fails if the schema drifts from the code — it is stable and says so.
@@ -32,6 +32,53 @@ behind it.
 ---
 
 ## [Unreleased]
+
+### Fixed
+
+- `doctor --deep`'s version probe stored a failed probe's own stderr as the
+  runtime's `version` and left `status` at `installed` — reproduced against
+  Apple's `/usr/bin/java` stub on a macOS host with no JDK, which resolves on
+  PATH and exits non-zero printing "The operation couldn't be completed.
+  Unable to locate a Java Runtime." A version probe that never gets an
+  answer at all (a spawn failure or a timeout) now demotes the row to
+  `unhealthy`, counts in `runtime_summary.unhealthy`, and reports the
+  failure under the new `probe_error` field — never under `version`. A
+  NONZERO EXIT alone is trusted as evidence of brokenness only when the flag
+  used is one this code has confirmed correct for that command (an explicit
+  `_VERSION_FLAG` entry, as java's `-version` already was): `--version` is a
+  GNU convention, not a universal one, and an earlier version of this fix
+  trusted ANY nonzero exit, which reported go (`go --version` exits 2; `go
+  version` is correct), lua (`lua --version` exits 1; `-v` is correct) and
+  zig (`zig --version` exits 1; `zig version` is correct) `unhealthy` on a
+  perfectly working host — go being `tested` tier, that also flipped
+  `healthy: false`. All three now have confirmed `_VERSION_FLAG` entries;
+  a command on the untested default that exits non-zero is reported as
+  merely unmeasured (`probe_error` recorded, `status` untouched), and a
+  language with a hello-world check (`_HELLO`) always has that run BEFORE
+  the version probe gets a say, not after. `healthy` also goes `false` when
+  a `tested`-tier runtime (python3/node/rust/go — the tier a CI job
+  genuinely executes and checks on every PR) resolved and then proved
+  broken via a TRUSTED probe failure; an uninstalled or broken
+  `best_effort`/`plan_only` runtime, java and kotlin included, still leaves
+  it untouched (#279).
+- `kotlin` was registered with its resolution `command` set to `java` (the
+  binary its `run` step invokes), so `doctor`/`list_languages` reported it
+  `installed` from a JRE alone on any host with no Kotlin toolchain at all —
+  `execute_code(language="kotlin")` then failed at spawn with a bare
+  `exit_code -2`. `doctor`'s deciding command for a compile-then-run language
+  is now always its compile tool (`kotlinc` for kotlin), and a plan whose
+  `run` step needs a SECOND, different tool that the compile tool's
+  resolution says nothing about is reported `installed` only when BOTH
+  resolve — kotlin is the one instance of this in the registry today, and the
+  check is derived mechanically from `compile`/`run` rather than
+  hand-maintained, so a future language in the same shape is caught by
+  construction. The Rust executor's spawn-failure message also now names the
+  phase and the missing binary instead of a bare OS error — though that
+  message still lands only in `stderr`, not in an `error` key, so
+  `errors.ensure_code` still classifies a Rust-backend spawn failure as
+  `internal` rather than `runtime_unavailable` (the Python fallback, whose
+  envelope carries `error`, classifies it correctly); pre-existing, not
+  fixed here, tracked separately (#280).
 
 ## [0.9.0] — 2026-09-07
 
