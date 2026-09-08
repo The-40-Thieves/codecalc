@@ -1,5 +1,9 @@
 """Server-side policy `_meta` reaches `tools/list`, on exactly the named tools
-and no others.
+and no others. Also covers two properties of the tool-DESCRIPTION surface
+that `scripts/tool_select_eval.py` cannot: that surface only ever scores
+`"<name> <description>"` per tool (see its own `_doc_text`/`load_tool_schemas`),
+never `mcp.instructions`, so nothing else asserts on the instructions string
+or on whether a description actually names its confusable siblings.
 
 Evidence for how `_meta` is wired, so this test is not the only thing that
 would catch a regression: `mcp.server.mcpserver.tools.base.Tool.from_function`
@@ -24,6 +28,8 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _mcp_client import in_process
+
+from codecalc import server as codecalc_server
 
 FAILS: list[str] = []
 
@@ -90,6 +96,31 @@ async def main() -> None:
         check("no tool outside the three named sets carries any anthropic/* _meta",
               actual_meta_bearers == expected_meta_bearers,
               f"-> extra={sorted(actual_meta_bearers - expected_meta_bearers)}")
+
+        # ── instructions is a routing map naming every tool group ───────────
+        # scripts/tool_select_eval.py never scores `mcp.instructions` (it
+        # reads `"<name> <description>"` per tool from the live registry
+        # only — see `_doc_text`/`load_tool_schemas`), so nothing else in
+        # this repo would notice `instructions` silently dropping a group.
+        instructions = codecalc_server.mcp.instructions or ""
+        missing_groups = sorted(g for g in codecalc_server.KNOWN_GROUPS if g not in instructions)
+        check(f"instructions names every tool group ({sorted(codecalc_server.KNOWN_GROUPS)})",
+              not missing_groups, f"-> missing: {missing_groups}")
+        check(f"instructions stays under ~1,800 characters (measured: {len(instructions)})",
+              len(instructions) <= 1800, f"-> {len(instructions)}")
+
+        # ── each description-cluster tool names at least one of its own ─────
+        # siblings — derived from `codecalc_server.DESCRIPTION_CLUSTERS`, not
+        # hand-copied here, so this cannot silently drift from the list
+        # server.py actually declares.
+        for cluster in codecalc_server.DESCRIPTION_CLUSTERS:
+            for name in sorted(cluster):
+                desc = listed[name].description or ""
+                siblings = cluster - {name}
+                named = {s for s in siblings if s in desc}
+                check(f"{name}'s description names at least one sibling from its "
+                      f"cluster {sorted(cluster)}",
+                      bool(named), f"-> named={sorted(named)}")
 
 
 asyncio.run(main())

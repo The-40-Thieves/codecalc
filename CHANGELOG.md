@@ -245,6 +245,34 @@ behind it.
   cancelled, malformed, or skipped) is recorded in the audit log.
   `update_runtimes(apply=False)` — the default, dry-run form — is never
   gated, since nothing runs.
+- **Tool descriptions now name the sibling a caller would otherwise confuse
+  them with, and the MCP `instructions` string is a routing map instead of
+  a 9-tool digest.** Glama's public review scored `human_duration` and
+  `simplify_expression` lowest (2.4/5) and flagged two clusters a model
+  cannot tell apart from description text alone: {`evaluate_expression`,
+  `calc_exact`, `solve_expression`, `solve_linear`, `z3_check`} and
+  {`bit_analysis`, `bitop`, `int_widths`, `base_repr`}. Every tool in both
+  clusters now leads with "use X, not Y, when Z" naming the sibling and the
+  discriminating condition (e.g. `calc_exact` for literal arithmetic with
+  no symbols vs `evaluate_expression` for a symbolic expression;
+  `bit_analysis` for facts about one value's bits vs `bitop` for combining
+  two operands); `human_duration` and `simplify_expression` lead with the
+  vocabulary an agent would actually search on instead of a noun-phrase
+  summary. `scripts/tool_select_eval.py`'s checked-in baseline (the lexical
+  proxy for whether a description still carries its discriminating
+  vocabulary) does not regress on any of `full`/`dev`/`core` — two of the
+  three measured BETTER after the rewrite. Separately, `instructions`
+  previously named only 9 of the (then) 52 tools; it now maps every tool
+  group (calculator, verification, execution, sessions, analysis, admin)
+  to its member tools by intent, under ~1,800 characters, so a client that
+  defers tool loading (tool search / progressive disclosure) has a
+  starting point for the other 43. `instructions` is not part of the
+  tool-select eval's corpus — that eval scores only `"<name>
+  <description>"` per tool from the live registry — so this is gated
+  separately, by asserting every tool group is named in `instructions` and
+  every cluster tool names a sibling, both checked against the constants
+  `codecalc/server.py` declares rather than hand-copied lists that could
+  drift from them.
 
 ## [0.10.0] — 2026-09-08
 
