@@ -162,6 +162,13 @@
 {"prompt": "Show me only what the code I RAN produced, not the input files I planted myself", "expected": ["session_artifacts"]}
 {"prompt": "filter out the runner internals and any input data I seeded — I only want what my execution actually PRODUCED", "expected": ["session_artifacts"]}
 {"prompt": "Of everything sitting in my workspace, which parts did my LAST run actually produce, versus what I put there myself?", "expected": ["session_artifacts"]}
+{"prompt": "Back up everything in my persistent workspace right now so I can come back to this exact state later", "expected": ["session_snapshot"]}
+{"prompt": "Archive the current contents of my session before I start refactoring, in case I need to go back to it", "expected": ["session_snapshot"]}
+{"prompt": "I want a restore point for this workspace I can return to if the next few changes go badly", "expected": ["session_snapshot"]}
+{"prompt": "Bring back the exact files from that workspace backup I made earlier, into a brand new workspace", "expected": ["session_snapshot"]}
+{"prompt": "Wipe my current workspace and put back exactly what was in that earlier backup, same workspace id", "expected": ["session_snapshot"]}
+{"prompt": "What backups have I saved for this workspace, and when was each one made?", "expected": ["session_snapshot"]}
+{"prompt": "Get rid of one of those old workspace backups, I don't need it anymore", "expected": ["session_snapshot"]}
 {"prompt": "Pull the contents of that output file back out of my workspace so I can look at it", "expected": ["session_read_file"]}
 {"prompt": "Fetch a file from the persistent workspace, and if it's a picture, hand it back as something I can actually view", "expected": ["session_read_file"]}
 {"prompt": "I know exactly which single file I want the CONTENTS of — I don't need a whole listing", "expected": ["session_read_file"]}

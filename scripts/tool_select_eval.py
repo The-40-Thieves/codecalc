@@ -3,7 +3,7 @@
 tool for a plain-language ask, scored against the CURRENT tool schemas
 (names + descriptions) exactly as an MCP client sees them?
 
-WHY THIS EXISTS. `codecalc/server.py` carries 52 hand-written tool
+WHY THIS EXISTS. `codecalc/server.py` carries 53 hand-written tool
 descriptions, and a future PR will trim them to cut `tools/list` token cost
 (README: "Tool-definition token cost"). Nothing today would notice a trim
 that also deletes the vocabulary a model actually leans on to pick between
@@ -88,7 +88,7 @@ description as a live confusor — and the eval reruns on just that tool's
 own prompts. No sampling: a fixed-size random sample is exactly what let
 three real ablations (`limit_expression`, `analyze_complexity`,
 `extract_function`) go completely unexercised by this gate in v1 — a fixed
-seed=0 draw of 10 tools out of 52 never once selected any of the three.
+seed=0 draw of 10 tools out of 53 never once selected any of the three.
 Reported as POOLED INTEGER hit counts, not a float percentage: a per-tool
 percentage threshold is meaningless for a tool with only 3 prompts, and a
 tool BM25 already gets wrong with its REAL description has zero headroom to
@@ -157,7 +157,7 @@ DEFAULT_EPSILON_HITS = 1
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 #: Small, deliberately generic — removing these helps BM25's IDF do its job
-#: over a 52-document corpus without needing a bigger stopword list than
+#: over a 53-document corpus without needing a bigger stopword list than
 #: that corpus can justify. Not a claim of completeness.
 _STOPWORDS = frozenset({
     "a", "an", "the", "of", "to", "in", "is", "are", "for", "on", "and",

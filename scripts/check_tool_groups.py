@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Every `@mcp.tool()` declares a real group, and the default set registers all of them.
 
-`CODECALC_TOOLS` lets an operator register a SLICE of the 52-tool surface instead of paying the
+`CODECALC_TOOLS` lets an operator register a SLICE of the 53-tool surface instead of paying the
 full ~9.2k-token `tools/list` cost for every client. That only works if two things hold, neither of
 which the Python type checker or a normal test run would catch on its own:
 
