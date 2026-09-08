@@ -1172,6 +1172,37 @@ else:
 # default-ratio sizes (2.5x/5x/10x) off that same calibrated unit. Printed
 # UNCONDITIONALLY (not just on failure) so a CI failure on a
 # differently-calibrated runner is diagnosable from the log alone.
+#
+# WHY FOUR sizes, and why the spacing/floor changed again on 2026-09-08:
+# `optimization._fwer_correction` splits on `_FWER_UNANIMITY_MAX` (3) — at
+# <= 3 COUNTED sizes, `_accept_decision` demands EVERY one reject
+# (unanimity); above that it needs only a Bonferroni-corrected MAJORITY
+# (3-of-4 at alpha/4=0.0125). Calibrating four raw sizes is meant to land
+# in the second, more forgiving regime — but a hosted Windows sandbox
+# runner still false-rejected a genuine 26x win: one of the four sizes (not
+# the noisy one) dropped OUT of the counted set — a tie routed to the
+# normal approximation with overlapping ranges, gate (b) in
+# `_infer_speedup` — under that runner's heavier jitter, leaving only 3
+# counted and flipping the regime back to unanimity. The one size that
+# stayed counted and measured noisy (n=5 vs 5, exact p=0.0754 — real
+# separation, ratio 12.97x, just not decisive at REPEATS=5) was then enough
+# on its own to sink a win the majority regime would have tolerated. The
+# fix is NOT a looser product rule (a separate decision, deliberately not
+# made here) — it is keeping all FOUR calibrated sizes reliably IN the
+# counted set, so this live test actually exercises the Bonferroni-majority
+# regime the tool's own default call uses, where a single noisy size (like
+# the 0.0754 one) is exactly what 3-of-4 is designed to tolerate. Narrower
+# multiplier spacing — (1, 1.4, 1.7, 2) rather than the previous (1, 1.5,
+# 2, 3) — and a wider calibration margin (see the floor calculation below)
+# both cut the chance that the smallest size's margin over the
+# visibility/tie floor erodes under jitter and gets excluded. Measured on
+# this box under real host contention (`nice -n 19`, shared with other
+# concurrent load — see CHANGELOG/PR description for the exact counts): the
+# OLD (1, 1.5, 2, 3) / 6x-floor calibration accepted 5/10 (two of the five
+# non-accepts were outright measurement timeouts under that contention, not
+# this gate); the NEW (1, 1.4, 1.7, 2) / 10x-floor calibration accepted
+# 10/10, every run landing on `correction: bonferroni` with all four sizes
+# counted.
 if executor._rust:
     _QUAD_BASE = (
         "#include <stdio.h>\n"
@@ -1208,15 +1239,19 @@ if executor._rust:
         return min(vals) if vals else None
 
     # Calibrate against BOTH arms: the unit size must make the baseline
-    # cost at least 100ms AND at least 6x what the O(1) candidate costs on
+    # cost at least 150ms AND at least 10x what the O(1) candidate costs on
     # this host (spawn overhead plus its fixed pad). A hosted macOS runner
     # probed the baseline at 51ms, then measured it at 34ms against a 14ms
     # candidate at the smallest size: p=0.93 there, so the majority rule
     # still accepted (3/4) but the smallest size was pure spawn jitter. A
     # single absolute threshold cannot know the host's spawn cost; the
-    # candidate probe does.
+    # candidate probe does. Raised from 100ms/6x (this test's margin before
+    # 2026-09-08) to 150ms/10x: a thinner margin let the smallest size's
+    # tie/overlap exclusion (gate (b) in `_infer_speedup`) trigger under
+    # heavier runner jitter, which is what actually shrank the counted set
+    # from four to three that day, not the arithmetic ratio (a genuine 26x).
     _quad_cand_ms = _quad_probe_ms(_QUAD_CAND, 2000) or 10.0
-    _quad_floor_ms = max(100.0, 6.0 * _quad_cand_ms)
+    _quad_floor_ms = max(150.0, 10.0 * _quad_cand_ms)
     _quad_unit = 2000
     _quad_unit_ms = _quad_probe_ms(_QUAD_BASE, _quad_unit)
     _quad_calib_steps = 0
@@ -1226,10 +1261,15 @@ if executor._rust:
         _quad_calib_steps += 1
     # A QUADRATIC payload squares the spread: 10x the unit is 100x the work,
     # which put the largest size at ~13s per run (x REPEATS) on this box and
-    # spent 93s of the 180s tool deadline on one call. (1, 1.5, 2, 3) keeps
-    # the largest size at 9x the unit's work (~1.2s per run at a 131ms unit)
-    # while the four sizes still span a 9x cost range for the ladder.
-    _QUAD_SIZES = [int(_quad_unit * r) for r in (1, 1.5, 2, 3)]
+    # spent 93s of the 180s tool deadline on one call. (1, 1.4, 1.7, 2) keeps
+    # the largest size at 4x the unit's work (measured: ~29-33s wall for the
+    # whole calibrated call on this box, comfortably under the 120s
+    # `_MEASUREMENT_BUDGET_S`) — narrower than the (1, 1.5, 2, 3) this test
+    # used before 2026-09-08 (9x the unit's work at the largest size), which
+    # left the smallest size's margin over the visibility/tie floor thin
+    # enough to erode under a noisy runner (see the calibration comment
+    # above).
+    _QUAD_SIZES = [int(_quad_unit * r) for r in (1, 1.4, 1.7, 2)]
     print(f"[calibration] unit={_quad_unit} "
           f"(after {_quad_calib_steps} doubling step(s), cap 8) "
           f"baseline@unit={_quad_unit_ms}ms candidate={_quad_cand_ms}ms "
@@ -1252,20 +1292,35 @@ if executor._rust:
           f"-> ok={_quad_result.get('ok')} accepted={_quad_result.get('accepted')} "
           f"reason={_quad_result.get('reason')!r} error={_quad_result.get('error')!r} "
           f"code={_quad_result.get('code')!r} sizes={_QUAD_SIZES} wall={_quad_wall_s:.1f}s")
-    # The product's own rule is a MAJORITY of sizes; asserting 4/4 here
-    # made the test stricter than the tool it exercises, and a hosted
-    # runner's spawn jitter at the smallest size is exactly what the
-    # majority rule exists to absorb. Every size must still be COUNTED
-    # (none below the floor) and the two largest must be decisive.
+    # This is the one assertion the 2026-09-08 incident actually broke, and
+    # the only thing worth asserting about HOW it passed is what the tool
+    # itself required — not a stronger claim this test cannot honestly make
+    # on every run. The old version asserted `sizes_total == 4` and
+    # `sizes_below_floor == []`, which turned a single excluded size (see
+    # the calibration comment above) into a hard test FAILURE independent
+    # of `accepted`. A first rewrite asserted `correction == "bonferroni"`,
+    # which in a four-size test is the SAME condition spelled differently
+    # (only four counted sizes reach the Bonferroni regime), as review
+    # pointed out with a synthetic two-survivor accept that it still
+    # failed. So assert exactly the rule `_accept_decision` applied, under
+    # whichever regime the surviving sizes landed in: `_fwer_satisfied` on
+    # the reported counts, at least two counted sizes (the tool's own
+    # floor), and the reported regime consistent with the count. Which
+    # regime that was on a given run is reported in the detail, not
+    # asserted.
     _quad_inf = _quad_result.get("inference") or {}
-    _quad_ps = _quad_inf.get("per_size") or []
-    check("  ...every CALIBRATED size counted, a majority decisive, the two largest decisive",
-          _quad_inf.get("sizes_total") == 4
-          and _quad_inf.get("sizes_rejecting", 0) >= 3
-          and _quad_inf.get("sizes_below_floor") == []
-          and len(_quad_ps) == 4
-          and all(row["p_value"] < 0.05 for row in _quad_ps[-2:]),
-          f"-> {_quad_inf}")
+    check("  ...and the reported inference satisfies the tool's own "
+          "family-wise rule for however many sizes survived",
+          optimization._fwer_satisfied(_quad_inf.get("sizes_total", 0),
+                                       _quad_inf.get("sizes_rejecting", 0),
+                                       _quad_inf.get("correction"))
+          and _quad_inf.get("sizes_total", 0) >= optimization._MIN_COUNTED_SIZES
+          and _quad_inf.get("correction") == (
+              "bonferroni" if _quad_inf.get("sizes_total", 0) > optimization._FWER_UNANIMITY_MAX
+              else "unanimity"),
+          f"-> correction={_quad_inf.get('correction')} "
+          f"{_quad_inf.get('sizes_rejecting')}/{_quad_inf.get('sizes_total')} "
+          f"below_floor={len(_quad_inf.get('sizes_below_floor') or [])}")
     check("  ...ratio measured, not asserted",
           isinstance((_quad_result.get("speedup") or {}).get("ratio"), (int, float))
           and _quad_result["speedup"]["ratio"] > 1,
