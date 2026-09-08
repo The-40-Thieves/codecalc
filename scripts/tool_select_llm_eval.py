@@ -396,11 +396,25 @@ def call_list_mode(base_url: str, api_key: str, model: str, catalog_text: str,
 
 # ── resumable cache ──────────────────────────────────────────────────────────
 
-def cache_key(model: str, group: str, prompt: str) -> str:
-    """sha256 over `(model, group, prompt)`, unit-separator joined so no
-    concatenation of the three fields could collide with a different split.
+def tools_payload_hash(tools_payload: list[dict]) -> str:
+    """sha256 over the EXACT `tools=[...]` payload sent for a group — names,
+    descriptions, and `inputSchema`, in the sorted order `build_tools_payload`
+    already produces. Folded into `cache_key` below so an edited description
+    (the whole point of this eval, per the README's "Tool-definition token
+    cost" section) invalidates every cached call for that group instead of
+    silently replaying a stale response scored against a description that no
+    longer exists.
     """
-    return hashlib.sha256(f"{model}\x1f{group}\x1f{prompt}".encode()).hexdigest()
+    return hashlib.sha256(json.dumps(tools_payload, sort_keys=True).encode()).hexdigest()
+
+
+def cache_key(model: str, group: str, prompt: str, tools_hash: str) -> str:
+    """sha256 over `(model, group, tools_hash, prompt)`, unit-separator
+    joined so no concatenation of the fields could collide with a different
+    split. `tools_hash` (see `tools_payload_hash`) is what makes this cache
+    description-sensitive, not just model/group/prompt-sensitive.
+    """
+    return hashlib.sha256(f"{model}\x1f{group}\x1f{tools_hash}\x1f{prompt}".encode()).hexdigest()
 
 
 def cache_load(cache_dir: Path, key: str) -> dict | None:
@@ -424,16 +438,20 @@ def cache_save(cache_dir: Path, key: str, record: dict) -> None:
 # ── per-prompt evaluation ────────────────────────────────────────────────────
 
 def evaluate_prompt(base_url: str, api_key: str, model: str, group: str, prompt: str,
-                     tools_payload: list[dict], catalog_text: str, schemas: dict[str, dict],
-                     timeout: float, max_retries: int, cache_dir: Path, use_cache: bool) -> dict:
+                     tools_payload: list[dict], tools_hash: str, catalog_text: str,
+                     schemas: dict[str, dict], timeout: float, max_retries: int,
+                     cache_dir: Path, use_cache: bool) -> tuple[dict, bool]:
     """One `(model, group, prompt)` unit: both calls (unless cached), scrubbed
-    of the API key, written back to the cache.
+    of the API key, written back to the cache. Returns `(record, from_cache)`
+    — the bool is never itself cached (it describes THIS run's cache
+    behavior, not the record's), only used by `main()` to warn when a group
+    got zero cache hits despite an existing baseline (see `tools_payload_hash`).
     """
-    key = cache_key(model, group, prompt)
+    key = cache_key(model, group, prompt, tools_hash)
     if use_cache:
         cached = cache_load(cache_dir, key)
         if cached is not None:
-            return cached
+            return cached, True
 
     tool_result = call_tool_mode(base_url, api_key, model, tools_payload, prompt, timeout, max_retries)
     list_result = call_list_mode(base_url, api_key, model, catalog_text, schemas, prompt, timeout, max_retries)
@@ -449,7 +467,7 @@ def evaluate_prompt(base_url: str, api_key: str, model: str, group: str, prompt:
     }
     if use_cache:
         cache_save(cache_dir, key, record)
-    return record
+    return record, False
 
 
 # ── aggregation ──────────────────────────────────────────────────────────────
@@ -468,6 +486,16 @@ def aggregate(schemas: dict[str, dict], prompt_records: list[tuple[dict, dict]],
     """`prompt_records`: `[(prompt_entry, evaluate_prompt() record), ...]` for
     one (model, group). Returns top-1/top-3 next to the BM25 numbers for the
     same schemas/prompts, the confusion list, and the BM25-disagreement list.
+
+    `top3` is STRICT: hit iff `expected` intersects `list_top3` — the LIST
+    call's OWN ranked answer, nothing else. A prior cut of this function
+    unioned in `effective_top1` (which is usually `tool_top1`, from a
+    DIFFERENT call/mode) before checking the intersection, which counted a
+    correct TOOLS-mode call as a "top-3" even on the 147/898 records (first
+    live run) where `tool_top1` was not one of LIST mode's own three picks —
+    inflating full/haiku from a real 134/196 to a reported 179/196. That
+    union is still reported, under its own honest name
+    (`top1_or_list_top3`), never folded into `top3` again.
     """
     docs = {name: f"{name} {info['description']}" for name, info in schemas.items()}
     bm25 = tse.BM25(docs)
@@ -475,6 +503,7 @@ def aggregate(schemas: dict[str, dict], prompt_records: list[tuple[dict, dict]],
     n = len(prompt_records)
     top1_hits = 0
     top3_hits = 0
+    top1_or_list_top3_hits = 0
     top1_source: Counter[str] = Counter()
     confusion = []
     disagreements = []
@@ -495,16 +524,19 @@ def aggregate(schemas: dict[str, dict], prompt_records: list[tuple[dict, dict]],
             effective_top1 = None
             top1_source["none"] += 1
 
-        candidate_top3 = set(list_top3)
-        if effective_top1 is not None:
-            candidate_top3.add(effective_top1)
-
         hit1 = effective_top1 in expected
-        hit3 = bool(candidate_top3 & expected)
+        hit3_strict = bool(set(list_top3) & expected)
+        union_candidates = set(list_top3)
+        if effective_top1 is not None:
+            union_candidates.add(effective_top1)
+        hit3_union = bool(union_candidates & expected)
+
         if hit1:
             top1_hits += 1
-        if hit3:
+        if hit3_strict:
             top3_hits += 1
+        if hit3_union:
+            top1_or_list_top3_hits += 1
         if not hit1:
             confusion.append({
                 "prompt": entry["prompt"], "expected": sorted(expected),
@@ -525,6 +557,8 @@ def aggregate(schemas: dict[str, dict], prompt_records: list[tuple[dict, dict]],
         "n": n,
         "top1_hits": top1_hits, "top1": round(top1_hits / n, 4) if n else None,
         "top3_hits": top3_hits, "top3": round(top3_hits / n, 4) if n else None,
+        "top1_or_list_top3_hits": top1_or_list_top3_hits,
+        "top1_or_list_top3": round(top1_or_list_top3_hits / n, 4) if n else None,
         "top1_source": dict(top1_source),
         "confusion": confusion,
         "disagreements_with_bm25": disagreements,
@@ -597,7 +631,9 @@ def _print_summary(report: dict) -> None:
             bm25 = result["bm25"]
             print(f"  --tools {group}: n={result['n']}  "
                   f"model top1={result['top1']} ({result['top1_hits']}/{result['n']})  "
-                  f"top3={result['top3']} ({result['top3_hits']}/{result['n']})   |   "
+                  f"top3={result['top3']} ({result['top3_hits']}/{result['n']})  "
+                  f"[top1_or_list_top3={result['top1_or_list_top3']} "
+                  f"({result['top1_or_list_top3_hits']}/{result['n']})]   |   "
                   f"BM25 top1={bm25['top1']} ({bm25['top1_hits']}/{bm25['n']})  "
                   f"top3={bm25['top3']} ({bm25['top3_hits']}/{bm25['n']})")
             print(f"    top1_source={result['top1_source']}  "
@@ -668,6 +704,10 @@ def main(argv: list[str] | None = None) -> int:
         group: tse.evaluate(schemas_by_group[group], prompts) for group in groups
     }
 
+    tools_hash_by_group = {
+        group: tools_payload_hash(build_tools_payload(schemas_by_group[group])) for group in groups
+    }
+
     futures: dict[cf.Future, tuple[str, str, dict]] = {}
     with cf.ThreadPoolExecutor(max_workers=args.concurrency) as executor:
         for model in models:
@@ -678,19 +718,52 @@ def main(argv: list[str] | None = None) -> int:
                 for entry in applicable_by_group[group]:
                     fut = executor.submit(
                         evaluate_prompt, base_url, api_key, model, group, entry["prompt"],
-                        tools_payload, catalog_text, schemas, args.timeout, args.max_retries,
-                        args.cache_dir, not args.no_cache,
+                        tools_payload, tools_hash_by_group[group], catalog_text, schemas,
+                        args.timeout, args.max_retries, args.cache_dir, not args.no_cache,
                     )
                     futures[fut] = (model, group, entry)
 
         collected: dict[tuple[str, str], list[tuple[dict, dict]]] = {}
+        cache_hits: Counter[tuple[str, str]] = Counter()
         total = len(futures)
         for done, fut in enumerate(cf.as_completed(futures), 1):
             model, group, entry = futures[fut]
-            record = fut.result()
+            record, from_cache = fut.result()
             collected.setdefault((model, group), []).append((entry, record))
+            if from_cache:
+                cache_hits[(model, group)] += 1
             if done % 25 == 0 or done == total:
                 print(f"  ... {done}/{total} calls complete", file=sys.stderr)
+
+    # A group/model that got ZERO cache hits despite an existing baseline
+    # entry for it is a strong signal the tool catalog changed since that
+    # baseline was measured (tools_payload_hash folds the description +
+    # inputSchema into the cache key precisely so this is detectable rather
+    # than silently replaying — or, here, silently NOT replaying — a stale
+    # response). A cleared cache directory produces the identical signal;
+    # both are worth a human noticing, so this does not try to tell them
+    # apart.
+    baseline_for_warning = None
+    if args.baseline.is_file():
+        try:
+            baseline_for_warning = json.loads(args.baseline.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            baseline_for_warning = None
+    if baseline_for_warning is not None:
+        for model in models:
+            for group in groups:
+                n_applicable = len(applicable_by_group[group])
+                if n_applicable == 0 or cache_hits[(model, group)] > 0:
+                    continue
+                if baseline_for_warning.get("models", {}).get(model, {}).get(group):
+                    print(
+                        f"::warning::zero cache hits for {model!r}/{group!r} "
+                        f"(0/{n_applicable}) even though a baseline entry exists for it — "
+                        f"every prompt required a fresh call. Likely cause: the tool "
+                        f"descriptions/inputSchema changed since that baseline was measured "
+                        f"(cache_key folds in a hash of the exact tools payload), or the "
+                        f"cache directory was cleared."
+                    )
 
     results: dict[str, dict[str, dict]] = {}
     for model in models:

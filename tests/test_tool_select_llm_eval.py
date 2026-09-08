@@ -73,6 +73,13 @@ FAKE_API_KEY = "unit-test-fake-bearer-9f3c7a1e-do-not-leak"
 NO_TOOLS_MODEL = "fake/no-tools-model"
 TOOLS_MODEL = "fake/test-model"
 
+#: A model name where TOOLS-mode and LIST-mode deliberately DISAGREE: TOOLS
+#: mode calls the alphabetically-LAST tool in the catalog, LIST mode still
+#: ranks the first three — so `tool_top1` is guaranteed absent from
+#: `list_top3` (25 real 'core' tools, last vs. first three cannot overlap).
+#: Exercises the strict-vs-union top-3 split aggregate() computes.
+DISAGREE_MODEL = "fake/disagree-model"
+
 
 # ── the fake OpenAI-compatible server ───────────────────────────────────────
 
@@ -119,7 +126,10 @@ class _FakeHandler(http.server.BaseHTTPRequestHandler):
             if body.get("model") == NO_TOOLS_MODEL:
                 self._send(400, {"error": {"message": "this model does not support tools"}})
                 return
-            first_tool = body["tools"][0]["function"]["name"]
+            if body.get("model") == DISAGREE_MODEL:
+                chosen_tool = body["tools"][-1]["function"]["name"]  # LAST, not first
+            else:
+                chosen_tool = body["tools"][0]["function"]["name"]
             self._send(200, {
                 "choices": [{
                     "finish_reason": "tool_calls",
@@ -127,7 +137,7 @@ class _FakeHandler(http.server.BaseHTTPRequestHandler):
                         "role": "assistant", "content": None,
                         "tool_calls": [{
                             "id": "call_0", "type": "function",
-                            "function": {"name": first_tool, "arguments": "{}"},
+                            "function": {"name": chosen_tool, "arguments": "{}"},
                         }],
                     },
                 }],
@@ -196,6 +206,13 @@ core_schemas = tsle.load_tool_schemas("core")
 _sorted_core = sorted(core_schemas)
 FIRST_TOOL = _sorted_core[0]          # what the fake server always "calls"
 SECOND_TOOL = _sorted_core[1]         # deliberately mislabeled prompt below
+LAST_TOOL = _sorted_core[-1]          # DISAGREE_MODEL's TOOLS-mode pick
+
+DISAGREE_PROMPTS = [
+    {"prompt": "Please work out a result for scenario Zeta, final case.", "expected": [LAST_TOOL]},
+]
+check("DISAGREE_PROMPTS pass the name-leak validator",
+      tse.validate_prompts(DISAGREE_PROMPTS) == [])
 
 FIXTURE_PROMPTS = [
     {"prompt": "Please work out a result for scenario Alpha, first case.", "expected": [FIRST_TOOL]},
@@ -274,6 +291,63 @@ with tempfile.TemporaryDirectory(prefix="tool_select_llm_eval_test_") as _tmp:
               "both fixture tools",
               result3["top3_hits"] == 2, f"-> {result3}")
 
+        # ── C2: STRICT vs UNION top-3, on a prompt where tool_top1 disagrees
+        # with every list_top3 entry. This is the exact shape a cross-vendor
+        # review found measured live (haiku/full: 179/196 reported vs
+        # 134/196 strict) — aggregate() used to union `effective_top1` into
+        # the top-3 candidate set before checking hits, so a correct
+        # TOOLS-mode call could count as "top-3" even when LIST mode's own
+        # three picks never named it at all.
+        disagree_data = TMP / "disagree_prompts.jsonl"
+        disagree_data.write_text(
+            "\n".join(json.dumps(e) for e in DISAGREE_PROMPTS) + "\n", encoding="utf-8"
+        )
+        proc_disagree = run_cli(server, disagree_data, cache_dir, json_out, "--models", DISAGREE_MODEL)
+        check("run C2: the real CLI exits 0",
+              proc_disagree.returncode == 0, f"-> rc={proc_disagree.returncode}")
+        report_disagree = json.loads(json_out.read_text(encoding="utf-8"))
+        result_disagree = report_disagree["results"][DISAGREE_MODEL]["core"]
+        check("run C2: tool_top1 (LAST_TOOL) disagrees with every list_top3 entry "
+              "(first three, alphabetically) — the scenario this test exists to force",
+              LAST_TOOL not in _sorted_core[:3], f"-> LAST_TOOL={LAST_TOOL!r} first3={_sorted_core[:3]}")
+        check("run C2: top1_hits == 1 (TOOLS mode called the correct LAST_TOOL directly)",
+              result_disagree["top1_hits"] == 1, f"-> {result_disagree}")
+        check("run C2: STRICT top3_hits == 0 (LAST_TOOL is not among LIST mode's own "
+              "three picks) — this is the assertion the old union bug would have failed, "
+              "reporting 1 instead",
+              result_disagree["top3_hits"] == 0, f"-> {result_disagree}")
+        check("run C2: the UNION metric (top1_or_list_top3) still hits — reported under "
+              "its own honest name, never folded back into top3",
+              result_disagree["top1_or_list_top3_hits"] == 1, f"-> {result_disagree}")
+
+        # ── C3: zero-cache-hits-despite-a-baseline warning ───────────────────
+        # A baseline naming DISAGREE_MODEL/core exists, but --no-cache forces
+        # every prompt to be a fresh call regardless of what is on disk — the
+        # same OBSERVABLE shape a silently-stale cache_key (pre-fix) would
+        # have produced by NEVER matching after a description edit. The
+        # warning does not try to distinguish "forced" from "actually stale";
+        # it fires on the same evidence either way (see tools_payload_hash).
+        stale_baseline = TMP / "stale_baseline.json"
+        stale_baseline.write_text(json.dumps({
+            "prompt_set_sha256": tse.prompts_content_hash(DISAGREE_PROMPTS),
+            "models": {DISAGREE_MODEL: {"core": {"n": 1, "top1_hits": 1}}},
+        }), encoding="utf-8")
+        cmd_c3 = [
+            sys.executable, str(REPO_ROOT / "scripts" / "tool_select_llm_eval.py"),
+            "--data", str(disagree_data), "--groups", "core", "--cache-dir", str(cache_dir),
+            "--json", str(json_out), "--models", DISAGREE_MODEL, "--no-cache",
+            "--baseline", str(stale_baseline),
+        ]
+        env_c3 = {"PATH": os.environ.get("PATH", ""), tsle.ENV_BASE_URL: base_url_for(server),
+                  tsle.ENV_API_KEY: FAKE_API_KEY}
+        proc_c3 = subprocess.run(cmd_c3, cwd=REPO_ROOT, env=env_c3, capture_output=True, text=True, timeout=120)
+        check("run C3: exits 0 (the warning is informational, never a failure by itself)",
+              proc_c3.returncode == 0, f"-> rc={proc_c3.returncode} stdout={proc_c3.stdout[-500:]!r}")
+        check("run C3: prints the zero-cache-hits warning naming the model/group, since a "
+              "baseline entry exists for it but --no-cache guaranteed zero hits",
+              "::warning::zero cache hits" in proc_c3.stdout and DISAGREE_MODEL in proc_c3.stdout,
+              f"-> stdout={proc_c3.stdout[-800:]!r}")
+
         # ── D: advisory vs strict exit codes ─────────────────────────────────
         doctored_baseline = TMP / "doctored_baseline.json"
         doctored_baseline.write_text(json.dumps({
@@ -311,7 +385,8 @@ with tempfile.TemporaryDirectory(prefix="tool_select_llm_eval_test_") as _tmp:
         # ── E: the secret never appears, across every run above ─────────────
         all_stdout_stderr = "".join([
             proc1.stdout, proc1.stderr, proc2.stdout, proc2.stderr,
-            proc3.stdout, proc3.stderr, proc4.stdout, proc4.stderr,
+            proc3.stdout, proc3.stderr, proc_disagree.stdout, proc_disagree.stderr,
+            proc_c3.stdout, proc_c3.stderr, proc4.stdout, proc4.stderr,
             proc5.stdout, proc5.stderr,
         ])
         check("the fake bearer token never appears in any run's stdout/stderr",
@@ -332,12 +407,22 @@ check("_scrub() is a no-op when there is nothing to redact",
 check("_scrub() is a no-op for an empty/None secret (never raises)",
       tsle._scrub("text", None) == "text" and tsle._scrub("text", "") == "text")
 
-check("cache_key() is a function of ALL THREE of (model, group, prompt) — changing "
-      "any one changes the key",
+check("cache_key() is a function of ALL FOUR of (model, group, prompt, tools_hash) — "
+      "changing any one changes the key, including tools_hash alone (a description edit "
+      "with model/group/prompt held fixed)",
       len({
-          tsle.cache_key("m1", "full", "p"), tsle.cache_key("m2", "full", "p"),
-          tsle.cache_key("m1", "dev", "p"), tsle.cache_key("m1", "full", "q"),
-      }) == 4)
+          tsle.cache_key("m1", "full", "p", "h1"), tsle.cache_key("m2", "full", "p", "h1"),
+          tsle.cache_key("m1", "dev", "p", "h1"), tsle.cache_key("m1", "full", "q", "h1"),
+          tsle.cache_key("m1", "full", "p", "h2"),
+      }) == 5)
+
+check("tools_payload_hash() changes when a description changes, tool ORDER held fixed "
+      "(the whole point: an edited description must not silently replay a stale cached "
+      "response)",
+      tsle.tools_payload_hash([{"type": "function", "function": {"name": "a", "description": "d1"}}])
+      != tsle.tools_payload_hash([{"type": "function", "function": {"name": "a", "description": "d2"}}]))
+check("tools_payload_hash() is identical for the identical payload",
+      tsle.tools_payload_hash([{"a": 1}]) == tsle.tools_payload_hash([{"a": 1}]))
 
 check("_parse_ranked_names() extracts a JSON array embedded in prose/fences",
       tsle._parse_ranked_names(

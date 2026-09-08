@@ -179,11 +179,18 @@ behind it.
   env only — never a CLI argument, never logged), offering the exact tool
   catalog (name + description + `inputSchema`) an MCP client would see via
   `tools/list`, per `full`/`dev`/`core` group. Two calls per prompt (a real
-  `tools=[...]` call for top-1, a ranked-list call for top-3, with the
-  second serving as the top-1 fallback when a model has no function-calling
-  support), a resumable on-disk cache keyed by `(model, group, prompt)`, and
-  an advisory (non-blocking by default; `--strict` to fail) regression
-  compare against a checked-in baseline. See `docs/tool-selection-eval.md`
+  `tools=[...]` call for top-1, a ranked-list call for a STRICT top-3 — a
+  hit iff LIST mode's own three names intersect `expected`, never unioned
+  with the separate TOOLS-mode pick, which is reported on its own honest
+  `top1_or_list_top3` column instead — with LIST mode's own #1 serving as
+  the top-1 fallback when a model has no function-calling support), a
+  resumable on-disk cache keyed by `(model, group, prompt, tools_hash)` —
+  `tools_hash` is a hash of the exact `tools=[...]` payload, so an edited
+  description or `inputSchema` invalidates the cache instead of silently
+  replaying a stale response — and an advisory (non-blocking by default;
+  `--strict` to fail) regression compare against a checked-in baseline that
+  also warns when a group gets zero cache hits despite an existing baseline
+  entry (a likely description change). See `docs/tool-selection-eval.md`
   for the measured numbers next to the BM25 baseline. A new
   `tool-select-llm-eval` CI job (`workflow_dispatch` only, gated on the
   `CODECALC_EVAL_API_KEY` secret) runs it live and uploads the JSON report.
