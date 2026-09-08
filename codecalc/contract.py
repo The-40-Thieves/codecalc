@@ -51,7 +51,7 @@ from . import errors, grades
 #: each component is allowed to change — the short form is that MAJOR is the
 #: only one that may break a reader, and it carries a twelve-month deprecation
 #: window before anything is removed.
-CONTRACT_VERSION = "1.10.0"
+CONTRACT_VERSION = "1.11.0"
 
 # THE `$schema` AND `$id` URIs ARE NOT HERE ON PURPOSE.
 #
@@ -461,22 +461,27 @@ def _speedup_properties() -> dict:
 
 def _inference_properties() -> dict:
     """`optimization._infer_speedup`'s return: the per-size one-sided
-    Mann-Whitney U test that `_accept_decision` requires a MAJORITY of sizes
-    to reject before `accepted` can ever be true. Every key here is read
-    straight off `_infer_speedup`'s own `return` and each `per_size` entry's
-    `dict` literal — `size`/`n_before`/`n_after`/`u`/`p_value`/`rank_biserial`.
+    Mann-Whitney U test `_accept_decision` requires EVERY counted size (<= 3
+    of them) or a MAJORITY at a Bonferroni-corrected alpha (> 3) to reject
+    before `accepted` can ever be true — see `optimization._fwer_correction`.
+    Every key here is read straight off `_infer_speedup`'s own `return` and
+    each `per_size` entry's `dict` literal —
+    `size`/`n_before`/`n_after`/`u`/`p_value`/`rank_biserial`/`method`/`ratio`.
 
     `sizes_below_floor` (added in `1.6.0`): every size excluded from
     `per_size`/`sizes_total`/`sizes_rejecting` for ANY reason — never
     cleared `optimization._VISIBILITY_FLOOR_MS` within `_timed`'s per-size
     rescale budget, an unmeasurable baseline/candidate (the same floor
-    `_speedup` already applies), too few comparable runs, or no recorded
-    measurement at all — rather than tested on a still-noisy sample or
-    silently dropped. `before_ms`/`after_ms` are `null` when no duration was
-    ever available for that size. `len(sizes) == len(per_size) +
-    len(sizes_below_floor)` always holds. Always present (an empty list when
-    every size cleared every bar, which is the common case), same as
-    `sizes_rejecting`/`sizes_total` always are.
+    `_speedup` already applies), too few comparable runs, or (as of the
+    version documented alongside this comment) fewer runs a side than
+    `stats.min_testable_n(alpha)` can ever reject with or a
+    `normal_approximation`-method test on fewer than
+    `optimization._NORMAL_APPROX_MIN_N` runs a side — rather than tested on a
+    still-noisy sample or silently dropped. `before_ms`/`after_ms` are `null`
+    when no duration was ever available for that size. `len(sizes) ==
+    len(per_size) + len(sizes_below_floor)` always holds. Always present (an
+    empty list when every size cleared every bar, which is the common case),
+    same as `sizes_rejecting`/`sizes_total` always are.
 
     The exclusion rule itself is ASYMMETRIC as of `1.7.0`: a position is
     excluded only when the BASELINE side is unmeasurable or never clears the
@@ -489,22 +494,67 @@ def _inference_properties() -> dict:
     below) discloses when such a position pairs the baseline's sample
     against the candidate's own, larger n rather than the same n on both
     sides.
+
+    Closing a false accept CI reproduced live (identical before/after code
+    measured `accepted=True`) added four things, all documented on
+    `optimization.py`'s own constants/functions rather than repeated here:
+
+      - `method` on every `per_size` row — `stats.mann_whitney_u`'s own
+        `"exact"` / `"normal_approximation"`, previously computed and
+        discarded.
+      - `ratio` on every `per_size` row — that size's OWN before/after
+        ratio; `sizes_rejecting` now also requires it to clear the caller's
+        `min_speedup`, not just the p-value.
+      - `effective_alpha` and `correction` (`"unanimity"` / `"bonferroni"` /
+        `"n/a"` when `sizes_total` is 0) — the family-wise-error-controlled
+        bar `sizes_rejecting` is actually compared against; `alpha` above
+        stays the nominal, uncorrected level throughout.
+      - a `reason` string on a `sizes_below_floor` entry excluded for one of
+        the two NEW reasons above (too few runs to ever reject at `alpha`;
+        a `normal_approximation` result below the reliable-observation
+        floor) — absent on an entry excluded for an OLDER reason (the
+        visibility floor, an unmeasurable side), so a `1.10.0` client
+        comparing `sizes_below_floor` entries by their existing three keys
+        still matches exactly the entries it always did.
     """
     return {
         "type": "object",
-        "required": ["test", "alternative", "alpha", "per_size",
-                     "sizes_rejecting", "sizes_total", "sizes_below_floor",
-                     "decision_basis"],
+        "required": ["test", "alternative", "alpha", "effective_alpha",
+                     "correction", "per_size", "sizes_rejecting",
+                     "sizes_total", "sizes_below_floor", "decision_basis"],
         "properties": {
             "test": {"type": "string"},
             "alternative": {"type": "string"},
             "alpha": {"type": "number"},
+            "effective_alpha": {
+                "type": "number",
+                "description": (
+                    "The family-wise-error-controlled alpha a size's own "
+                    "p_value is actually compared against for "
+                    "sizes_rejecting — equal to `alpha` when `correction` "
+                    "is 'unanimity' or 'n/a', and `alpha / sizes_total` "
+                    "when it is 'bonferroni'. See "
+                    "optimization._fwer_correction."
+                ),
+            },
+            "correction": {
+                "type": "string",
+                "enum": ["unanimity", "bonferroni", "n/a"],
+                "description": (
+                    "Which family-wise-error rule sizes_rejecting was "
+                    "computed under: 'unanimity' (sizes_total <= 3 — every "
+                    "counted size must reject), 'bonferroni' (> 3 — a "
+                    "majority must reject at effective_alpha = alpha / "
+                    "sizes_total), or 'n/a' (sizes_total == 0, "
+                    "accepted can never be true regardless)."
+                ),
+            },
             "per_size": {
                 "type": "array",
                 "items": {
                     "type": "object",
                     "required": ["size", "n_before", "n_after", "u",
-                                 "p_value", "rank_biserial"],
+                                 "p_value", "rank_biserial", "method", "ratio"],
                     "properties": {
                         "size": {"type": "integer", "minimum": 0},
                         "n_before": {"type": "integer", "minimum": 0},
@@ -512,6 +562,39 @@ def _inference_properties() -> dict:
                         "u": {"type": "number"},
                         "p_value": {"type": "number", "minimum": 0, "maximum": 1},
                         "rank_biserial": {"type": "number"},
+                        "method": {
+                            "type": "string",
+                            "enum": ["exact", "normal_approximation"],
+                            "description": (
+                                "stats.mann_whitney_u's own method for this "
+                                "size's test — previously computed and "
+                                "discarded. 'normal_approximation' means a "
+                                "tie was present somewhere in the combined "
+                                "sample (see stats.py's module docstring); a "
+                                "row with this method and fewer than "
+                                "optimization._NORMAL_APPROX_MIN_N runs a "
+                                "side is still here (not sizes_below_floor) "
+                                "when the two samples' raw-run ranges do "
+                                "NOT overlap — see "
+                                "optimization._ranges_overlap — a decisive, "
+                                "unambiguous comparison the tie does not "
+                                "actually make untrustworthy."
+                            ),
+                        },
+                        "ratio": {
+                            "type": "number",
+                            "description": (
+                                "This size's OWN before_ms/after_ms ratio — "
+                                "the same computation _speedup's per_size "
+                                "uses. sizes_rejecting requires this to "
+                                "clear the caller's min_speedup as well as "
+                                "p_value < effective_alpha; a size can be "
+                                "statistically significant on a trivial "
+                                "difference, and that alone is not "
+                                "'this size is the speedup the caller "
+                                "asked for'."
+                            ),
+                        },
                         "size_after": {
                             "type": "integer",
                             "minimum": 0,
@@ -538,6 +621,21 @@ def _inference_properties() -> dict:
                     "required": ["size", "before_ms", "after_ms"],
                     "properties": {
                         "size": {"type": "integer", "minimum": 0},
+                        "reason": {
+                            "type": "string",
+                            "description": (
+                                "Why this size was excluded — present only "
+                                "for the two NEWEST exclusion reasons (too "
+                                "few runs a side to ever reject at alpha; a "
+                                "normal_approximation result below the "
+                                "reliable-observation floor). Absent on an "
+                                "entry excluded for an older reason (the "
+                                "visibility floor, an unmeasurable side) — "
+                                "additive, never required, so an entry a "
+                                "prior client already matched by its three "
+                                "original keys still matches."
+                            ),
+                        },
                         # `null` when no duration was ever recorded for this
                         # size (a before/after length mismatch) — every
                         # exclusion reason lands here, not just a visibility

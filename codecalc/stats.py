@@ -73,6 +73,29 @@ _NORMAL = NormalDist(0, 1)
 EXACT_MAX_N = 20
 
 
+def min_testable_n(alpha: float) -> int:
+    """Smallest per-side sample size `n` (n1 == n2 == n, no ties) whose exact
+    one-sided p-value can be `< alpha` AT ALL. The floor on that p-value is
+    `1/C(2n, n)` (the single most extreme arrangement — see `_exact_p`), so a
+    smaller `n` cannot reject the null no matter how clean the separation;
+    it is structurally incapable of it, not merely underpowered.
+
+    Exists to let a caller (`optimization._infer_speedup`) distinguish "this
+    size was tested and failed to reject" from "this size could never have
+    rejected regardless of the data" — a size in the second category still
+    counted against a majority vote it could not possibly contribute a
+    rejection to, which is exactly backwards (codecalc issue #284: measuring
+    ONE FEWER size, dropping such a position, flipped a genuine 10x win from
+    rejected to accepted). Derived here rather than hard-coded so it tracks
+    `alpha` if that ever moves: at `alpha=0.05` this returns 4
+    (`1/C(6,3)=0.05` is not `< 0.05`; `1/C(8,4)=0.0142...` is).
+    """
+    n = 2
+    while 1.0 / math.comb(2 * n, n) >= alpha:
+        n += 1
+    return n
+
+
 def normal_cdf(x: float) -> float:
     """Standard normal CDF. Ported from rigor/distributions.py verbatim."""
     return _NORMAL.cdf(x)

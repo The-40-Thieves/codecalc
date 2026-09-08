@@ -1,7 +1,60 @@
 # The codecalc result contract
 
-**Current version: `1.10.0`** · Schema: [`result-v1.schema.json`](result-v1.schema.json) ·
+**Current version: `1.11.0`** · Schema: [`result-v1.schema.json`](result-v1.schema.json) ·
 Source of truth: [`codecalc/contract.py`](../../codecalc/contract.py)
+
+`1.11.0` is a MINOR bump over `1.10.0`. It adds four fields to
+`optimization_verification.inference`, closing a false accept reproduced live
+in CI: `verify_optimization` certified IDENTICAL before/after code as a
+verified speedup (macOS sandbox job, native executor, main; measured ratio
+1.21x, `sizes_rejecting` 2/3, a bare majority satisfied). All four are
+additive — nothing a `1.10.0` client already reads changes shape or meaning:
+
+* **`method`, on every `inference.per_size[]` row.** `stats.mann_whitney_u`
+  already computes `"exact"` or `"normal_approximation"` per test; `_infer_
+  speedup` computed it and threw it away, so a caller could not tell an exact
+  p-value from an asymptotic one produced at n=5 — a sample size `stats.py`'s
+  own module docstring says is "not a number worth calling alpha=0.05
+  against". Both of the CI incident's "rejecting" sizes were `normal_
+  approximation`, and this is why a caller can now see that for themselves.
+* **`ratio`, on every `inference.per_size[]` row.** That size's OWN
+  before/after ratio, the same computation `speedup.per_size` already
+  reports per position. `sizes_rejecting` now requires it to clear the
+  caller's `min_speedup` as well as `p_value < effective_alpha` — a size can
+  be statistically significant on a difference too small to be the speedup
+  the caller asked for, and `p_value` alone could not previously show that.
+* **`effective_alpha` and `correction`, on `inference` itself.** The
+  family-wise-error-controlled bar `sizes_rejecting` is actually compared
+  against: `"unanimity"` (every counted size must reject; `sizes_total <= 3`)
+  or `"bonferroni"` (`alpha / sizes_total` per size, a majority of those
+  required; `sizes_total > 3`), or `"n/a"` when `sizes_total` is 0. `alpha`
+  itself is unchanged in meaning — it stays the nominal, uncorrected level a
+  caller already reads. A bare majority at the nominal `alpha`, always, is
+  what let the CI incident's two false-positive sizes (out of three) carry
+  the vote; unanimity at `sizes_total <= 3` alone would already have refused
+  it (2 of 3 is not 3 of 3). Unanimity over a SINGLE counted size is no
+  correction at all (one uncorrected test at the nominal `alpha`), so
+  `accepted` is never `true` with `sizes_total` below 2; `decision_basis`
+  says so in words when that is the reason.
+* **`reason`, on a `sizes_below_floor[]` entry**, present only when that
+  entry was excluded for one of two NEW reasons: fewer than
+  `stats.min_testable_n(alpha)` runs a side (structurally unable to ever
+  reject at `alpha` — replaces a flat "fewer than 2 runs" guard), or a
+  `normal_approximation`-method result on fewer than 8 runs a side whose two
+  samples' raw-run ranges overlap (the literal "the timer cannot always say
+  which side a given pair of runs favoured" case — see
+  `optimization._ranges_overlap`; gating on the tie alone, without the
+  overlap qualifier, was measured live as nearly blinding the tool to
+  genuine wins, so it is deliberately narrower than "any tie"). An entry
+  excluded for an OLDER reason (the visibility floor, an unmeasurable side)
+  carries no `reason` — a `1.10.0` client that already matches `sizes_below_
+  floor` entries by their original three keys (`size`/`before_ms`/`after_ms`)
+  still matches exactly the entries it always did.
+
+See `codecalc/optimization.py`'s `_infer_speedup`/`_accept_decision`/
+`_fwer_correction`/`_ranges_overlap` for the full mechanism, and
+`CHANGELOG.md`'s `[Unreleased]` entry for the measured before/after
+false-accept counts.
 
 `1.10.0` is a MINOR bump over `1.9.0`, and adds a new result shape plus two new
 optional fields on an existing one:

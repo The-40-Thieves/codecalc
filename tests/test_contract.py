@@ -670,12 +670,16 @@ check_stamped("a verify_optimization measurement failure", _o_measure_fail)
 # tests/test_translation_verify.py gates its own live timing assertions: the
 # pure-Python fallback's spawn overhead can swamp a modest algorithmic win.
 # This exists to prove the SHAPE validates, not to re-litigate the
-# significance test itself (already covered live there).
+# significance test itself (already covered live there). Two sizes, not
+# one: a single counted size is one uncorrected test and can never be
+# `accepted` (optimization._MIN_COUNTED_SIZES), so a one-size request is
+# the rejected shape, not the accepted one this block is here to validate.
 if executor._rust:
     _SLOW = ("n = int(input() or 0)\ntotal = 0\n"
              "for i in range(n):\n    total += i\nprint(total)")
     _FAST = "n = int(input() or 0)\nprint(n*(n-1)//2 if n > 0 else 0)"
-    _o_accepted = server.verify_optimization(_SLOW, _FAST, "python3", sizes=[2000000])
+    _o_accepted = server.verify_optimization(_SLOW, _FAST, "python3",
+                                             sizes=[1000000, 2000000])
     check("an accepted verify_optimization validates against the published schema",
           not errors_for(_o_accepted), f"-> {errors_for(_o_accepted)[:2]}")
     check("...and is graded cross_checked",
