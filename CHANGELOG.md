@@ -65,7 +65,13 @@ behind it.
   `WWW-Authenticate: Bearer resource_metadata="..."` on an unauthenticated or
   invalid request, per the MCP authorization spec. The static-token path is
   unchanged when no issuer is configured; if both end up set, the issuer wins
-  and the static token is rejected, with a startup warning naming both.
+  and the static token is rejected, with a startup warning naming both. The
+  issuer and JWKS URLs must be `https://` unless the host is loopback, and
+  the OAuth verifier is built ONLY inside `serve-http`'s own startup path —
+  never at module import — so `CODECALC_OAUTH_ISSUER` set in the environment
+  costs `doctor`, `--help`, `serve-strict`, and the bare stdio server no
+  network call; `serve-http` itself fails closed with a clear stderr message
+  if the configured issuer cannot be reached or is not HTTPS off loopback.
 - `llms.txt` at the repo root (the [llmstxt.org](https://llmstxt.org/)
   convention) indexing README, QUICKSTART, the result contract docs and
   schemas, SECURITY.md, AUDIT.md, CONTRIBUTING.md, and the packaged skill, so

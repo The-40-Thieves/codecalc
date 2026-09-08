@@ -21,6 +21,7 @@ plain enough to not need a library either.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
@@ -42,6 +43,42 @@ ALLOWED_ALGORITHMS = ("RS256", "ES256")
 DISCOVERY_PATH = "/.well-known/openid-configuration"
 
 
+def _is_loopback_host(host: str) -> bool:
+    """Same loopback test `codecalc/server.py`'s `--host` handling uses for
+    its own DNS-rebinding decision — `ipaddress`, not a spelling list, so
+    127.0.0.2 is exactly as loopback as 127.0.0.1. `urlsplit(...).hostname`
+    is already lowercased and stripped of IPv6 brackets, so it feeds
+    `ip_address` directly."""
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return host in ("localhost", "ip6-localhost")
+
+
+def require_https_or_loopback(url: str, *, what: str) -> None:
+    """Refuse a plain-`http://` issuer or JWKS URL unless it names a loopback
+    host. A bearer token is exactly as valuable as a password over the wire
+    it travels — RFC 8414 §3.1 already requires HTTPS for an authorization
+    server's own metadata for this reason, and this project's threat model
+    (SECURITY.md) is "one operator, put a real TLS boundary in front of
+    anything hosted" — but `http://127.0.0.1:PORT` is also this whole test
+    suite's fake issuer, and codecalc's own README examples default to
+    loopback everywhere else. `discover_jwks_uri` and `JWTTokenVerifier`
+    both call this — once for the issuer, once for whichever JWKS URL is
+    actually used (explicit `--oauth-jwks-url` or the discovered one) — so
+    neither can be configured with a plaintext non-loopback endpoint.
+    """
+    parsed = urlsplit(url)
+    if parsed.scheme == "https":
+        return
+    if parsed.scheme == "http" and _is_loopback_host(parsed.hostname or ""):
+        return
+    raise ValueError(
+        f"{what} must be https:// (plain http:// is only accepted for a "
+        f"loopback host, for local testing): {url!r}"
+    )
+
+
 def discover_jwks_uri(issuer: str, *, timeout: float = 5.0) -> str:
     """Fetch `issuer`'s OpenID Connect discovery document and return `jwks_uri`.
 
@@ -50,12 +87,19 @@ def discover_jwks_uri(issuer: str, *, timeout: float = 5.0) -> str:
     given. A network or shape failure here is a startup error, not a 401: an
     operator who configured `--oauth-issuer` wrong should see that on the
     command line, not learn it from every request being unauthenticated.
+
+    ONLY at `serve-http` startup: this is called exclusively from
+    `codecalc/server.py`'s `_http_auth()`, which is itself called exclusively
+    from `serve-http`'s own branch of `main()` — never at module import, so
+    `doctor`, `--help`, `serve-strict`, and the bare stdio server never pay
+    this network call even when `CODECALC_OAUTH_ISSUER` happens to be set in
+    the environment they inherit. (It used to run at import for every
+    subcommand; tests/test_serve_http_oauth.py's "no network call outside
+    serve-http" section is the regression test for that.)
     """
+    require_https_or_loopback(issuer, what="the OAuth issuer")
     discovery_url = issuer.rstrip("/") + DISCOVERY_PATH
-    parsed = urlsplit(discovery_url)
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        raise ValueError(f"OAuth issuer must be an absolute http(s) URL, got {issuer!r}")
-    request = Request(  # noqa: S310 -- scheme is checked immediately above
+    request = Request(  # noqa: S310 -- scheme is checked by require_https_or_loopback above
         discovery_url, headers={"Accept": "application/json"},
     )
     with urlopen(request, timeout=timeout) as response:  # noqa: S310 -- see above
@@ -92,6 +136,11 @@ class JWTTokenVerifier(TokenVerifier):
     """
 
     def __init__(self, *, issuer: str, audience: str, jwks_url: str) -> None:
+        # Validated here too, not only for the issuer at discovery time: an
+        # explicit `--oauth-jwks-url` never goes through `discover_jwks_uri`
+        # at all, and a discovered `jwks_uri` could in principle name a
+        # different host than the issuer it came from.
+        require_https_or_loopback(jwks_url, what="the JWKS URL")
         self._issuer = issuer
         self._audience = audience
         # cache_jwk_set=True (5 minute TTL) is PyJWKClient's own default; kept

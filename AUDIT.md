@@ -474,6 +474,19 @@ network-blocking shim. Each has a security-relevant design decision:
    configuration sections, and `SECURITY.md`'s "Known limitations" for the
    current wording.
 
+   **UPDATE — `--oauth-issuer` also satisfies this gate.** The same
+   non-loopback-bind refusal now also accepts `CODECALC_OAUTH_ISSUER` (or
+   `--oauth-issuer`) as an alternative to `CODECALC_HTTP_TOKEN`: bearer
+   tokens are then verified as JWTs against the issuer's own JWKS instead of
+   a static value. It is off by default, requires `https://` for the issuer
+   and JWKS URLs except a loopback host, and is built ONLY inside
+   `serve-http`'s own code path — never at module import — so a
+   `CODECALC_OAUTH_ISSUER` set in the environment costs `doctor`, `--help`,
+   `serve-strict`, and the bare stdio server nothing; only `serve-http`
+   itself pays the one JWKS-discovery network call, and fails closed with a
+   clear error if that issuer cannot be reached, rather than starting a
+   server no token could ever pass.
+
 ## Re-audit recommendation
 
 Re-run `tests/test_security.py` after any change to `logic.py`, `executor.py`,

@@ -632,9 +632,16 @@ operator's own machine.
 
 For hosted use only, `serve-http` also accepts `--oauth-issuer URL` (or
 `CODECALC_OAUTH_ISSUER`) as an alternative to the static token — **off by
-default**; the static-token path above is unchanged when it is unset. Given an
-issuer, `serve-http` validates each bearer token as a JWT against that
-issuer's own JWKS (RS256/ES256; the JWKS URL is discovered once from
+default**; the static-token path above is unchanged when it is unset, and
+setting the variable costs nothing outside `serve-http` itself: `doctor`,
+`--help`, `serve-strict`, and the bare stdio server never touch the network
+over it, only `serve-http`'s own startup does. The issuer and JWKS URLs must
+be `https://` unless the host is loopback (for local testing); an issuer that
+is plain `http://` on a real host, or cannot be reached at all, fails
+`serve-http`'s startup outright with a message on stderr rather than starting
+a server no token could ever pass. Given a reachable issuer, `serve-http`
+validates each bearer token as a JWT against that issuer's own JWKS
+(RS256/ES256; the JWKS URL is discovered once from
 `<issuer>/.well-known/openid-configuration`, or pinned with
 `--oauth-jwks-url`) and checks its issuer, audience, expiry, and
 not-before. It also serves RFC 9728 Protected Resource Metadata at

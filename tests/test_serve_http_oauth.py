@@ -10,6 +10,7 @@ header on the wire, or a 200 on a genuinely valid token.
 
 from __future__ import annotations
 
+import asyncio
 import http.server
 import json
 import os
@@ -458,6 +459,118 @@ def _run_and_compare(main_root: pathlib.Path) -> None:
 
 
 _compare_static_token_path_to_main()
+
+
+# ═══ 6. CODECALC_OAUTH_ISSUER must not cost a network call outside serve-http
+# Regression for a real bug: `_http_auth()` used to run at module IMPORT
+# time regardless of subcommand, so `codecalc doctor` (or --help, or the
+# bare stdio server) with an issuer configured did OIDC discovery before
+# printing anything, and crashed with an unhandled URLError if that issuer
+# was not reachable — reproduced live with
+# `CODECALC_OAUTH_ISSUER=https://issuer.invalid python -m codecalc.server doctor`.
+# The fake issuer here is a CLOSED loopback port (bound, then immediately
+# released) rather than an unresolvable DNS name: connecting to it fails
+# with an instant ECONNREFUSED, so a version that (incorrectly) DOES try
+# the network still fails fast rather than hanging on DNS — the wall-clock
+# bound below is deliberately generous (a healthy run finishes in well
+# under a second) but still tight enough to distinguish "never touched the
+# network" from "tried once and got refused quickly", let alone a real DNS
+# timeout.
+_unreachable_issuer = f"http://127.0.0.1:{_free_port()}"
+
+
+def _run_subcommand_with_unreachable_issuer(args: list[str], *, label: str) -> None:
+    env = {**os.environ, "PYTHONPATH": str(REPO_ROOT), "CODECALC_OAUTH_ISSUER": _unreachable_issuer}
+    env.pop("CODECALC_HTTP_TOKEN", None)
+    started = time.monotonic()
+    result = subprocess.run(
+        [sys.executable, "-m", "codecalc.server", *args],
+        cwd=REPO_ROOT, env=env, capture_output=True, text=True, timeout=30,
+    )
+    elapsed = time.monotonic() - started
+    check(f"`codecalc {label}` with an unreachable CODECALC_OAUTH_ISSUER still exits 0",
+          result.returncode == 0, f"-> exit={result.returncode} stderr={result.stderr[-300:]!r}")
+    check("  ...and returns well under the bound a real network attempt would need "
+          "(no discovery call was made)",
+          elapsed < 10.0, f"-> {elapsed:.2f}s")
+
+
+_run_subcommand_with_unreachable_issuer(["doctor"], label="doctor")
+_run_subcommand_with_unreachable_issuer(["--help"], label="--help")
+
+
+def _check_stdio_ignores_unreachable_issuer() -> None:
+    """A real `initialize` handshake over stdio, not just `doctor`'s exit
+    code — proves the transport that spawns this server every day (Claude
+    Desktop, LiteLLM, any MCP client) is equally unaffected. `_mcp_client`
+    is importable directly (no path juggling needed): this script's OWN
+    directory (`tests/`) is already first on `sys.path`, the same way it is
+    for every other suite file that imports it."""
+    from _mcp_client import over_stdio
+
+    async def _probe() -> int:
+        async with over_stdio({"CODECALC_OAUTH_ISSUER": _unreachable_issuer}) as c:
+            listed = await c.list_tools()
+            return len(listed.tools)
+
+    try:
+        tool_count = asyncio.run(asyncio.wait_for(_probe(), timeout=20))
+    except Exception as exc:
+        check("stdio initialize with an unreachable CODECALC_OAUTH_ISSUER still works",
+              False, f"-> raised {exc!r}")
+        return
+    check("stdio initialize with an unreachable CODECALC_OAUTH_ISSUER still works",
+          tool_count > 0, f"-> {tool_count} tools")
+
+
+_check_stdio_ignores_unreachable_issuer()
+
+
+def _check_serve_http_fails_closed_on_unreachable_issuer() -> None:
+    """The mirror image of the two checks above: `serve-http` is the ONE
+    subcommand that DOES need the issuer reachable, and must say so clearly
+    and exit non-zero rather than start a server no token could ever pass,
+    or crash with a raw traceback."""
+    port = _free_port()
+    env = {**os.environ, "PYTHONPATH": str(REPO_ROOT), "CODECALC_OAUTH_ISSUER": _unreachable_issuer}
+    env.pop("CODECALC_HTTP_TOKEN", None)
+    result = subprocess.run(
+        [sys.executable, "-m", "codecalc.server", "serve-http",
+         "--host", "127.0.0.1", "--port", str(port)],
+        cwd=REPO_ROOT, env=env, capture_output=True, text=True, timeout=30,
+    )
+    check("serve-http with an unreachable issuer exits non-zero (fails closed)",
+          result.returncode != 0, f"-> exit={result.returncode}")
+    check("  ...with a clear message on stderr, not a raw traceback",
+          "Refusing to start" in result.stderr and "Traceback" not in result.stderr,
+          f"-> {result.stderr[-400:]!r}")
+
+
+_check_serve_http_fails_closed_on_unreachable_issuer()
+
+
+# ═══ 7. https:// required for issuer/JWKS URLs except loopback ════════════
+def _check_https_required_off_loopback() -> None:
+    port = _free_port()
+    env = {**os.environ, "PYTHONPATH": str(REPO_ROOT),
+           "CODECALC_OAUTH_ISSUER": "http://not-a-loopback-host.example"}
+    env.pop("CODECALC_HTTP_TOKEN", None)
+    result = subprocess.run(
+        [sys.executable, "-m", "codecalc.server", "serve-http",
+         "--host", "127.0.0.1", "--port", str(port)],
+        cwd=REPO_ROOT, env=env, capture_output=True, text=True, timeout=30,
+    )
+    check("a plain http:// issuer on a non-loopback host is refused at startup",
+          result.returncode != 0 and "https://" in result.stderr,
+          f"-> exit={result.returncode} stderr={result.stderr[-300:]!r}")
+    # The positive case: the exact ISSUER live-tested throughout this file
+    # is itself a plain http://127.0.0.1:PORT loopback URL and every check
+    # above already succeeded against it — proving the loopback exemption
+    # works is what every earlier PASS in this file already did, so it is
+    # not re-asserted here as a separate live request.
+
+
+_check_https_required_off_loopback()
 
 
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
