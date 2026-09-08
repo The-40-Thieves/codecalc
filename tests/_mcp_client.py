@@ -56,11 +56,14 @@ class StdioTransport:
         return await self._cm.__aexit__(*exc)
 
 
-def _server_params() -> StdioServerParameters:
+def _server_params(env: dict[str, str] | None = None) -> StdioServerParameters:
+    base = {"PYTHONPATH": str(REPO_ROOT), "PATH": __import__("os").environ.get("PATH", "")}
+    if env:
+        base.update(env)
     return StdioServerParameters(
         command=sys.executable,
         args=["-m", "codecalc.server"],
-        env={"PYTHONPATH": str(REPO_ROOT), "PATH": __import__("os").environ.get("PATH", "")},
+        env=base,
     )
 
 
@@ -74,9 +77,15 @@ async def in_process():
 
 
 @asynccontextmanager
-async def over_stdio():
-    """Client bound to a real `python -m codecalc.server` subprocess."""
-    async with Client(StdioTransport(_server_params()), mode="auto") as c:
+async def over_stdio(env: dict[str, str] | None = None):
+    """Client bound to a real `python -m codecalc.server` subprocess.
+
+    `env` is merged OVER the base PYTHONPATH/PATH, not a replacement for
+    them — a test that needs, say, `CODECALC_RUNTIME_PATH` pointed at a
+    scratch directory should not also have to re-derive PYTHONPATH/PATH
+    itself just to add one variable.
+    """
+    async with Client(StdioTransport(_server_params(env)), mode="auto") as c:
         yield c
 
 

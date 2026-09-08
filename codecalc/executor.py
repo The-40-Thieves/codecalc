@@ -986,6 +986,13 @@ def _runtime_unavailable_result(name: str, phase: str, argv: list[str], exc: OSE
         "total_ms": elapsed_ms,
         "timed_out": False,
         "output_truncated": False,
+        # None, not "no problem": no stream was ever opened, so there is
+        # nothing to report a read failure ABOUT — the same reasoning as
+        # `stdout_bytes`/`stderr_bytes` below, and a gap this function had
+        # even before this fix (ENVELOPE_KEYS has required this since #120;
+        # nothing had run both this path and the parity check together to
+        # notice it was missing).
+        "output_error": None,
         "verdict": "RTE",
         "cpu_ms": 0,
         "peak_memory_kb": None,
@@ -1197,6 +1204,41 @@ def _reset_run_scratch_dir(workdir: str) -> Path:
     return d
 
 
+def _resolve_argv0(cmd: str) -> str | None:
+    """Resolve `cmd` against the SANDBOX's own PATH convention
+    (`registry.runtime_path()`) rather than leaving it to the OS loader.
+
+    `subprocess.Popen` raising `FileNotFoundError` when `cmd` is not on
+    `env["PATH"]` gives the same answer for free on POSIX — but not on
+    Windows. Python's own `subprocess` docs say so directly: "On Windows
+    with shell=False, cwd does not override the current working directory
+    and env cannot override the PATH environment variable. Using a full
+    path avoids all of these variations." (docs.python.org/3/library/
+    subprocess.html, Popen constructor; verified against the current
+    documentation before writing this, not from memory.) `env["PATH"]` —
+    set from `registry.runtime_path()` in `_env()` below — is therefore
+    INERT for RESOLUTION purposes on Windows, even though it correctly
+    becomes the child's own PATH once the process has actually started.
+
+    Reproduced: `CODECALC_RUNTIME_PATH` pointed at an empty scratch
+    directory does not hide an ALREADY-INSTALLED compiler on Windows — a
+    runner that happens to ship one (several bundle a MinGW `gcc`) went on
+    to actually spawn it, which then failed for an unrelated reason (its
+    OWN linker/assembler sub-processes could not resolve on the now-emptied
+    PATH) rather than reporting the missing-runtime shape this whole path
+    exists to produce: a genuine compile failure with no `error` key,
+    misclassified `internal` instead of `runtime_unavailable`.
+
+    Resolving here, ourselves, against the SAME path string `_env()` will
+    hand the child, makes this decision independent of which PATH the
+    host OS's own loader happens to consult: `shutil.which` splits on
+    `os.pathsep` for the CURRENT platform, so it agrees with `_env()`'s
+    `PATH` value on every OS this backend runs on, rather than only on
+    the ones whose native search rules happen to consult that same value.
+    """
+    return shutil.which(cmd, path=registry.runtime_path())
+
+
 def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10,
                     workdir: str | None = None, max_memory_mb: int = 0,
                     max_output_kb: int = 0, max_cpu: int = 0,
@@ -1275,6 +1317,16 @@ def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10
         compile_ms = 0
         if entry["compile"]:
             argv = [a.format(**fmt) for a in entry["compile"]]
+            if _resolve_argv0(argv[0]) is None:
+                # See `_resolve_argv0`'s doc comment: resolved OURSELVES,
+                # against the sandbox's own PATH, rather than left to the
+                # OS loader — Windows' CreateProcess searching the CALLING
+                # process's own PATH (never the child's) would otherwise
+                # let an already-installed compiler slip past this check.
+                exc = FileNotFoundError(
+                    f"[Errno 2] No such file or directory: {argv[0]!r}")
+                return _runtime_unavailable_result(name, "compile", argv, exc,
+                                                   workdir, started, no_net)
             try:
                 # Compile-step cwd is the scratch directory, not `workdir`:
                 # compiling is not the user's own program running, so any
@@ -1312,6 +1364,13 @@ def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10
 
         argv = [a.format(**fmt) for a in entry["run"]]
         run_started = time.monotonic()
+        if _resolve_argv0(argv[0]) is None:
+            # Same reasoning as the compile step above — a single-command
+            # (interpreted) language's `run` step IS its only spawn.
+            exc = FileNotFoundError(
+                f"[Errno 2] No such file or directory: {argv[0]!r}")
+            return _runtime_unavailable_result(name, "run", argv, exc,
+                                               workdir, started, no_net)
         try:
             # Run-step cwd is `workdir` itself (the session/workdir root),
             # NOT the scratch directory — this is the actual program running,
@@ -1643,6 +1702,67 @@ def _execute_uncontracted(language: str, code: str, stdin: str = "", timeout: in
                 # older build that never reported the field at all — a caller
                 # could not tell "rust, unreported" from "rust, not present".
                 result["backend"] = "rust"
+                # A spawn failure (a missing/uninstalled runtime or compiler)
+                # populated `stderr` on this backend and never an `error`
+                # key, so `errors.ensure_code` — which classifies a failing
+                # result by matching TEXT IN `error`, never `stderr` — had
+                # nothing to match and the result came back `internal`
+                # instead of `runtime_unavailable`. The pure-Python fallback
+                # never had this gap: `_runtime_unavailable_result` always
+                # set `error` for the identical failure.
+                #
+                # A binary built after this fix sets `error` itself (see
+                # `spawn_error` on `executor/src/main.rs`'s `StepResult`), so
+                # this is a FALLBACK for one built before it — reached only
+                # when the binary answered but left `error` unset.
+                #
+                # GATED ON `exit_code == -2`, NOT on stderr text — that is
+                # the load-bearing part of this branch, found by adversarial
+                # review: a first draft matched any `stderr` starting with
+                # "runtime unavailable", and a program that RAN, printed
+                # "Runtime unavailable: my custom database is down" to its
+                # OWN stderr and exited 7 came back classified
+                # `runtime_unavailable` with the install remedy — the
+                # program's own message overwriting `error` and a genuine
+                # exit status silently reclassified as a Rust internal
+                # detail. `exit_code == -2` is safe where text is not: it is
+                # the OLD Rust binary's literal "nothing spawned" sentinel,
+                # and no process that actually ran and exited can produce it
+                # (a real exit status is 0-255 on POSIX; this codebase never
+                # maps a Windows exit code to -2 either) — so this branch can
+                # only fire for a genuine spawn failure, never for a program
+                # whose stderr happens to start with the right words.
+                # `error`/`phase` unset is the same "answered but pre-fix"
+                # shape check as before, now secondary to the exit_code gate
+                # rather than load-bearing on their own.
+                if (result.get("ok") is False and not result.get("error")
+                        and "phase" in result
+                        and result.get("exit_code") == -2):
+                    # `exit_code == -2` ALONE already proved this is a spawn
+                    # failure — see the block comment above — so `error` is
+                    # set from `stderr` unconditionally whenever it has
+                    # content (the binary's own worded explanation; every
+                    # binary since #280 has one) and a synthesized fallback
+                    # only for a binary old enough to have neither (pre-#280,
+                    # a bare, wordless spawn failure). The `"runtime
+                    # unavailable"`/`"spawn failed"` wording this docstring
+                    # used to GATE on is a fact about which binary answered,
+                    # not a condition this branch still needs: it holds for
+                    # every binary built after main.rs first reported a
+                    # spawn failure at all, and stopped being load-bearing
+                    # the moment `exit_code == -2` became the real gate.
+                    stderr_text = str(result.get("stderr") or "")
+                    result["error"] = stderr_text or (
+                        f"runtime unavailable for the {result['phase']} phase")
+                    # The Rust-internal spawn sentinel carries no meaning to
+                    # a caller, who has no way to know it is not a real exit
+                    # status. This backend's own payload no longer uses it
+                    # (see `spawn_error`'s comment), but a binary built
+                    # before that fix still does; normalize it here too, so
+                    # the documented convention (`null` — see
+                    # docs/contract/README.md) holds regardless of which
+                    # binary answered.
+                    result["exit_code"] = None
                 # `no_net` disclosure keys off the Rust binary's own verdict.
                 # The binary emits `no_net_best_effort_shim` when only
                 # the bypassable LD_PRELOAD/dyld symbol shim held (macOS, or a

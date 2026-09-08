@@ -861,6 +861,29 @@ struct StepResult {
     /// field exists to prevent.
     stdout_bytes: Option<u64>,
     stderr_bytes: Option<u64>,
+    /// Set ONLY when the OS could not launch this step's process at all —
+    /// `Command::spawn()` itself failing (ENOENT for a missing binary,
+    /// EACCES for one that is not executable, and similar). `None` in every
+    /// other outcome, INCLUDING the other early return in this function that
+    /// also carries `exit_code == -2` for an unrelated reason (this runner's
+    /// own compile/run I/O redirect files could not be created) — conflating
+    /// the two would misclassify an internal codecalc defect as "install a
+    /// runtime", which is the wrong remedy for a caller to receive.
+    ///
+    /// `execute()` copies this text into the envelope's `error` field and
+    /// reports `exit_code: null` (see docs/contract/README.md's "`null`
+    /// means not measured" — the same convention it already documents for a
+    /// process that never spawned) whenever it is `Some`. The text is
+    /// written to contain "runtime unavailable" specifically because
+    /// `codecalc/errors.py::ensure_code` maps any failing result whose
+    /// message contains that phrase to the `runtime_unavailable` code — the
+    /// SAME code the pure-Python fallback's `_runtime_unavailable_result`
+    /// already produces for the identical failure (a missing/uninstalled
+    /// runtime), which is what let a caller branch on `code` identically
+    /// regardless of which backend answered. Before this field existed, a
+    /// spawn failure here populated only `stderr`, `ensure_code` had no
+    /// message to match, and the result came back classified `internal`.
+    spawn_error: Option<String>,
 }
 
 /// The two extra-environment inputs `run_step` layers on top of the
@@ -973,6 +996,10 @@ fn run_step(
                 // measurement of something that never happened.
                 stdout_bytes: None,
                 stderr_bytes: None,
+                // NOT a missing runtime — this runner's OWN scratch files
+                // could not be created. See this field's doc comment on
+                // `StepResult` for why the two must stay distinguishable.
+                spawn_error: None,
             };
         }
     };
@@ -1027,22 +1054,26 @@ fn run_step(
     let waited = match platform::spawn_and_wait(cmd, &resolved, raw_stdio) {
         Ok(w) => w,
         Err(e) => {
+            // The one case (of the two early returns in this function) that
+            // means "install a runtime" rather than "codecalc has a bug" —
+            // see `spawn_error`'s doc comment on `StepResult` for why the
+            // SAME text below is also carried there, not just in `stderr`.
+            let missing = argv.first().map_or("", String::as_str);
+            // Names the phase AND the binary this call tried to launch — a
+            // bare "spawn failed: No such file or directory (os error 2)" is
+            // exactly what a kotlin compile step with no `kotlinc` on PATH
+            // reported: true (nothing ran, no output to lose), but silent
+            // about WHICH of the plan's tools was missing, which is the one
+            // fact a caller needs to act on. Mirrors the Python fallback's
+            // `_runtime_unavailable_result` phrasing (`executor.py`), which
+            // already names both.
+            let detail =
+                format!("runtime unavailable for the {tag} phase: {missing:?} not found ({e})");
             return StepResult {
                 exit_code: -2,
                 signal: None,
                 stdout: String::new(),
-                // Names the phase AND the binary this call tried to launch —
-                // a bare "spawn failed: No such file or directory (os error
-                // 2)" is exactly what a kotlin compile step with no
-                // `kotlinc` on PATH reported: true (nothing ran, no output
-                // to lose), but silent about WHICH of the plan's tools was
-                // missing, which is the one fact a caller needs to act on.
-                // Mirrors the Python fallback's `_runtime_unavailable_result`
-                // phrasing (`executor.py`), which already names both.
-                stderr: format!(
-                    "runtime unavailable for the {tag} phase: {:?} not found ({e})",
-                    argv.first().map_or("", String::as_str)
-                ),
+                stderr: detail.clone(),
                 timed_out: false,
                 cpu_ms: 0,
                 peak_memory_kb: 0,
@@ -1053,6 +1084,7 @@ fn run_step(
                 // As above: nothing ran, so nothing produced output.
                 stdout_bytes: None,
                 stderr_bytes: None,
+                spawn_error: Some(detail),
             };
         }
     };
@@ -1105,6 +1137,9 @@ fn run_step(
         unenforced,
         stdout_bytes: out_bytes,
         stderr_bytes: err_bytes,
+        // The process spawned (we got this far), so this is not a missing
+        // runtime by definition.
+        spawn_error: None,
     }
 }
 
@@ -1593,10 +1628,19 @@ fn execute(
         );
         compile_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         if sr.timed_out || sr.exit_code != 0 || sr.signal.is_some() {
-            let result = json!({
+            let mut result = json!({
                 "ok": false, "language": lang.name, "phase": "compile",
                 "stdout": sr.stdout, "stderr": sr.stderr,
-                "exit_code": if sr.signal.is_some() { serde_json::Value::Null } else { serde_json::Value::from(sr.exit_code) },
+                // null when the process never spawned at all (a missing
+                // compiler), same as when it was killed by a signal — in
+                // both cases `exit_code` describes a process that never
+                // produced a real exit status. See `spawn_error`'s doc
+                // comment on `StepResult`.
+                "exit_code": if sr.signal.is_some() || sr.spawn_error.is_some() {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::Value::from(sr.exit_code)
+                },
                 "duration_ms": compile_ms, "compile_ms": compile_ms,
                 "cpu_ms": sr.cpu_ms, "peak_memory_kb": sr.peak_memory_kb,
                 "timed_out": sr.timed_out, "verdict": verdict(&sr, limits),
@@ -1629,6 +1673,13 @@ fn execute(
                 "platform": std::env::consts::OS,
                 "workdir": work_s,
             });
+            // Present ONLY for a missing/uninstalled compiler — absent on an
+            // ordinary compile error (bad source, nonzero `gcc` exit), which
+            // is a request that reached a real toolchain and failed on its
+            // own terms. See `spawn_error`'s doc comment on `StepResult`.
+            if let Some(err) = &sr.spawn_error {
+                result["error"] = json!(err);
+            }
             if workdir.is_none() {
                 remove_own_workdir(&work, created_identity);
             }
@@ -1729,7 +1780,7 @@ fn execute(
     let duration_ms = u64::try_from(run_started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let total_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
-    let result = json!({
+    let mut result = json!({
         // An output we could not read is not a successful run. This used to
         // be exit-status-only, so a failed read returned ok=true with an empty
         // stdout — a wrong answer wearing a success. `output_error` below says
@@ -1740,7 +1791,14 @@ fn execute(
         "phase": "run",
         "stdout": sr.stdout,
         "stderr": sr.stderr,
-        "exit_code": if sr.signal.is_some() { serde_json::Value::Null } else { serde_json::Value::from(sr.exit_code) },
+        // null when the process never spawned at all (a missing runtime) —
+        // same convention as a signal kill. See `spawn_error`'s doc comment
+        // on `StepResult`.
+        "exit_code": if sr.signal.is_some() || sr.spawn_error.is_some() {
+            serde_json::Value::Null
+        } else {
+            serde_json::Value::from(sr.exit_code)
+        },
         "duration_ms": duration_ms,
         "compile_ms": compile_ms,
         "total_ms": total_ms,
@@ -1768,6 +1826,13 @@ fn execute(
         "platform": std::env::consts::OS,
         "workdir": work_s,
     });
+    // Present ONLY for a missing/uninstalled runtime — absent on an
+    // ordinary program failure (nonzero exit, a caught signal, a timeout),
+    // which is a request that reached a real interpreter and failed on its
+    // own terms. See `spawn_error`'s doc comment on `StepResult`.
+    if let Some(err) = &sr.spawn_error {
+        result["error"] = json!(err);
+    }
     if workdir.is_none() {
         remove_own_workdir(&work, created_identity);
     }

@@ -46,18 +46,19 @@ def _missing_runtime(r: dict) -> bool:
 
     Detects three spawn-failure shapes: the pure-Python fallback's
     `_runtime_unavailable_result` (exit_code None, stderr says "runtime
-    unavailable"), the Rust executor's spawn failure (exit_code -2, stderr
-    now also says "runtime unavailable" — naming the phase and the missing
-    binary, where it used to say only "spawn failed"; both strings are
-    checked so a binary built before that wording changed still matches),
-    and both backends' structural refusal for a
-    SHELL_WRAPPED language (gleam, haskell) on Windows — `plan_supported()`
-    returns False there regardless of what is installed, and that refusal
-    carries no `exit_code`/`stderr` at all, only an `error` saying
-    "unsupported on this platform". Missing that shape is exactly what let a
-    platform-unsupported language read as a smoke-suite FAIL. A genuine
-    wrong-output failure always carries a real exit_code from the
-    interpreter/compiler that DID run, never one of these sentinels.
+    unavailable"), the Rust executor's spawn failure (ALSO exit_code None
+    now — it used to report its own internal `-2` sentinel here, and before
+    that said only "spawn failed" with neither the phase nor the missing
+    binary named; `-2` and "spawn failed" are both still checked so a
+    binary built before either fix landed still matches), and both
+    backends' structural refusal for a SHELL_WRAPPED language (gleam,
+    haskell) on Windows — `plan_supported()` returns False there regardless
+    of what is installed, and that refusal carries no `exit_code`/`stderr`
+    at all, only an `error` saying "unsupported on this platform". Missing
+    that shape is exactly what let a platform-unsupported language read as
+    a smoke-suite FAIL. A genuine wrong-output failure always carries a
+    real exit_code from the interpreter/compiler that DID run, never one of
+    these sentinels.
     """
     if r.get("ok") or r.get("timed_out"):
         return False

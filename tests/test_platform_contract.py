@@ -24,6 +24,7 @@ with each other and disagreed with Windows.
 
 from __future__ import annotations
 
+import asyncio
 import pathlib
 import re
 import sys
@@ -719,6 +720,194 @@ check("no shim on Windows is the platform, not a gap",
       missing_release_artifacts(True, None, False) == [])
 check("Windows still requires the executor",
       missing_release_artifacts(False, None, False) == ["codecalc-exec"])
+
+# ── a spawn failure (missing runtime/compiler) is `runtime_unavailable`, ────
+# not `internal`, on BOTH backends ──────────────────────────────────────────
+# A Rust spawn failure populated `stderr` and never an `error` key, so
+# `errors.ensure_code` — which classifies a failing result by matching TEXT
+# IN `error`, never `stderr` — had nothing to match and the result came back
+# `internal` instead of `runtime_unavailable`. The pure-Python fallback never
+# had this gap: `_runtime_unavailable_result` always set `error` for the
+# identical failure. Fixed in executor/src/main.rs (a new `spawn_error` field
+# on `StepResult`, surfaced as the envelope's `error`) and
+# codecalc/executor.py's Rust-result mapping (a `stderr`-prefix fallback for
+# an older binary that answers without the new field).
+#
+# CODECALC_RUNTIME_PATH — not the real PATH — is what BOTH backends resolve a
+# runtime from (see registry.runtime_path()'s docstring), so pointing it at
+# an empty scratch directory makes a language's own runtime/compiler
+# unresolvable, on THIS process's own PATH, without touching the real PATH
+# the test process (or the stdio subprocess below) needs to run at all.
+#
+# "on this process's own PATH" is the important qualifier, not a redundant
+# one: on Windows, CreateProcess resolves a bare argv[0] against the
+# CALLING process's OWN ambient PATH, not the env block handed to the
+# child — the override below changes what the CHILD sees once spawned, but
+# not whether it is found in the first place. So a fixture language whose
+# runtime/compiler is genuinely absent everywhere (lua, kotlin) is
+# unaffected by that distinction, but "hide an ALREADY-INSTALLED tool via
+# this override" is not a safe assumption cross-platform — see the kotlin
+# fixture comment below for where that bit a `c`+gcc version of this test.
+import os
+import shutil
+import tempfile
+
+from codecalc import errors, server
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _mcp_client import data, over_stdio
+
+_NO_RUNTIME_DIR = pathlib.Path(tempfile.mkdtemp(prefix="codecalc-noruntime-"))
+_SAVED_RUNTIME_PATH = os.environ.get("CODECALC_RUNTIME_PATH")
+
+# A fake, WORKING `java` planted in the same scratch directory — mirrors
+# tests/test_executor_sweep.py's own kotlin fixture exactly (same
+# fake-binary content and naming), not `c`+gcc's "hide the real compiler
+# behind an empty PATH" approach: on Windows, CreateProcess resolves the
+# executable named in argv[0] against the CALLING process's OWN ambient
+# PATH, not the env block handed to the child (the classic Windows
+# subprocess trap this repo's own notes on npm/tar already record) — so a
+# REAL, already-installed compiler is not reliably hidden by overriding
+# `CODECALC_RUNTIME_PATH` alone, and a Windows CI runner that happens to
+# ship gcc (several do, via a bundled MinGW) went on to actually spawn it,
+# which then failed for an unrelated reason (its OWN linker/assembler
+# sub-processes could not resolve on the now-emptied PATH) — a genuine
+# compile failure with no `error` key, not the spawn-failure shape this
+# test means to exercise. `kotlinc` sidesteps the whole question: it is
+# not bundled by ANY of the three runners this suite targets, so there is
+# nothing ambient to accidentally find — its absence is a fact about the
+# host, not something this fixture has to engineer via PATH tricks.
+_fixture_java = _NO_RUNTIME_DIR / ("java.bat" if os.name == "nt" else "java")
+if os.name == "nt":
+    _fixture_java.write_text("@echo off\r\necho ok\r\nexit /b 0\r\n", encoding="utf-8")
+else:
+    _fixture_java.write_text("#!/bin/sh\necho ok\nexit 0\n", encoding="utf-8")
+    _fixture_java.chmod(0o755)
+
+
+def _spawn_failure(lang: str, code: str = "x") -> dict:
+    os.environ["CODECALC_RUNTIME_PATH"] = str(_NO_RUNTIME_DIR)
+    try:
+        return server.execute_code(lang, code)
+    finally:
+        if _SAVED_RUNTIME_PATH is None:
+            os.environ.pop("CODECALC_RUNTIME_PATH", None)
+        else:
+            os.environ["CODECALC_RUNTIME_PATH"] = _SAVED_RUNTIME_PATH
+
+
+try:
+    # lua: a single-command (interpreted) language — its `run` step IS the
+    # spawn, so this exercises the "run" phase.
+    _lua = _spawn_failure("lua")
+    check("a missing single-command runtime is runtime_unavailable, not internal",
+          _lua.get("code") == errors.RUNTIME_UNAVAILABLE,
+          f"-> code={_lua.get('code')} error={str(_lua.get('error'))[:90]!r}")
+    check("...and names the phase it failed in", _lua.get("phase") == "run",
+          f"-> {_lua.get('phase')}")
+    check("...with exit_code null (nothing spawned) per docs/contract/README.md",
+          _lua.get("exit_code") is None, f"-> {_lua.get('exit_code')!r}")
+
+    # kotlin: compile-then-run, with `kotlinc` genuinely absent (see the
+    # fixture comment above for why this beats hiding a REAL compiler like
+    # gcc behind a PATH override). No SHELL_WRAPPED entanglement either —
+    # kotlin's plan is argv-only — so it is supported on every platform this
+    # suite runs on; no skip branch is needed.
+    if registry.plan_supported("kotlin", windows=(os.name == "nt")):
+        _kt = _spawn_failure("kotlin", "fun main() { println(42) }")
+        check("a missing compiler is runtime_unavailable, not internal",
+              _kt.get("code") == errors.RUNTIME_UNAVAILABLE,
+              f"-> code={_kt.get('code')} error={str(_kt.get('error'))[:90]!r}")
+        check("...and names the compile phase", _kt.get("phase") == "compile",
+              f"-> {_kt.get('phase')}")
+        check("...with exit_code null too", _kt.get("exit_code") is None,
+              f"-> {_kt.get('exit_code')!r}")
+    else:
+        skip("a missing compiler is runtime_unavailable",
+             "kotlin is unsupported on this platform")
+
+    # ── adversarial: a program's OWN stderr must never impersonate a spawn
+    # failure ────────────────────────────────────────────────────────────
+    # Found by adversarial review of the fallback's `stderr`-prefix shim
+    # above: a python3 program that RUNS, prints text starting with
+    # "Runtime unavailable" to its OWN stderr, and exits nonzero used to
+    # come back classified `runtime_unavailable` with the install remedy —
+    # the program's message overwrote `error`, and a real exit status (7,
+    # not the -2 sentinel) was silently reclassified as "codecalc has no
+    # runtime". This is a REAL execution, not a spawn failure, on the RUST
+    # backend specifically — the backend whose result never carried an
+    # `error` key at all before this fix, so its gate is the one this
+    # regresses if it drifts back to matching text instead of `exit_code`.
+    if executor._rust is not None:
+        _adversarial = server.execute_code(
+            "python3",
+            'import sys; sys.stderr.write('
+            '"Runtime unavailable: my custom database is down\\n"); sys.exit(7)')
+        check("a program's own stderr cannot impersonate a spawn failure",
+              _adversarial.get("code") != errors.RUNTIME_UNAVAILABLE,
+              f"-> code={_adversarial.get('code')} "
+              f"error={_adversarial.get('error')!r}")
+        check("...it keeps its REAL exit code", _adversarial.get("exit_code") == 7,
+              f"-> {_adversarial.get('exit_code')!r}")
+        check("...and its verdict is an ordinary nonzero exit (RTE)",
+              _adversarial.get("verdict") == "RTE", f"-> {_adversarial.get('verdict')!r}")
+    else:
+        skip("a program's own stderr cannot impersonate a spawn failure",
+             "no native executor built, nothing to compare")
+
+    # Parity: both backends agree, key-for-key, on the SAME spawn failure —
+    # scripts/check_parity.py cannot reach this (it only runs the success
+    # path), and test_contract.py's own compile-failure parity check exercises
+    # a genuine compile ERROR (bad source), never a missing compiler.
+    if executor._rust is None:
+        skip("spawn-failure key parity across backends",
+             "no native executor built, nothing to compare")
+    else:
+        _rust_spawn = _lua
+        _saved_rust = executor._rust
+        executor._rust = None
+        try:
+            _fb_spawn = _spawn_failure("lua")
+        finally:
+            executor._rust = _saved_rust
+        check("the fallback also reports runtime_unavailable for the same failure",
+              _fb_spawn.get("code") == errors.RUNTIME_UNAVAILABLE,
+              f"-> {_fb_spawn.get('code')} {str(_fb_spawn.get('error'))[:80]!r}")
+        check("both backends return the SAME keys for a spawn failure",
+              set(_rust_spawn) == set(_fb_spawn),
+              f"-> rust-only={sorted(set(_rust_spawn) - set(_fb_spawn))} "
+              f"python-only={sorted(set(_fb_spawn) - set(_rust_spawn))}")
+finally:
+    shutil.rmtree(_NO_RUNTIME_DIR, ignore_errors=True)
+
+
+# ── the same failure, serialised over a REAL stdio MCP round-trip ──────────
+# The in-process checks above prove the dict this process builds; this proves
+# the JSON a caller actually receives still carries the same phase/code/
+# exit_code after going through `python -m codecalc.server`'s real framing —
+# `tests/test_contract.py` makes the identical distinction for its own
+# MCP round-trip checks, for the same reason (serialisation is where a null
+# or a missing key shows up differently from the in-process dict).
+async def _stdio_spawn_failure() -> None:
+    scratch = pathlib.Path(tempfile.mkdtemp(prefix="codecalc-noruntime-stdio-"))
+    try:
+        async with over_stdio(env={"CODECALC_RUNTIME_PATH": str(scratch)}) as c:
+            r = await c.call_tool("execute_code", {"language": "lua", "code": "print(1)"})
+            payload = data(r)
+            check("stdio: a missing runtime round-trips as runtime_unavailable",
+                  isinstance(payload, dict)
+                  and payload.get("code") == errors.RUNTIME_UNAVAILABLE,
+                  f"-> {payload.get('code') if isinstance(payload, dict) else payload!r}")
+            if isinstance(payload, dict):
+                check("stdio: phase survives serialisation", payload.get("phase") == "run",
+                      f"-> {payload.get('phase')}")
+                check("stdio: exit_code is null over the wire",
+                      payload.get("exit_code") is None, f"-> {payload.get('exit_code')!r}")
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+asyncio.run(_stdio_spawn_failure())
 
 print(f"\n=== {len(FAILS)} FAILURE(S), {len(SKIPS)} skipped ===" if FAILS else
       f"\n=== PLATFORM CONTRACT HOLDS ({len(SKIPS)} skipped) ===")
