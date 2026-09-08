@@ -45,7 +45,7 @@ def check(name: str, cond: bool, detail: str = "") -> None:
 
 # ── every registered tool resolves to a complete ToolAnnotations ───────────
 tools = server.mcp._tool_manager._tools
-check("52 tools are registered (default CODECALC_TOOLS)", len(tools) == 52, f"-> {len(tools)}")
+check("54 tools are registered (default CODECALC_TOOLS)", len(tools) == 54, f"-> {len(tools)}")
 
 missing = [name for name, t in tools.items() if t.annotations is None]
 check("every registered tool has a non-None annotations object", not missing, f"-> {missing}")
@@ -65,8 +65,8 @@ check("every registered tool has a non-empty title", not missing_title, f"-> {mi
 
 # ── the invariant a reviewer checks by hand: calculator is pure ────────────
 calculator_tools = [name for name, g in server.TOOL_GROUPS.items() if g == "calculator"]
-check("the calculator group has 25 tools (matches the README table)",
-      len(calculator_tools) == 25, f"-> {len(calculator_tools)}")
+check("the calculator group has 27 tools (matches the README table)",
+      len(calculator_tools) == 27, f"-> {len(calculator_tools)}")
 non_read_only_calc = [
     name for name in calculator_tools
     if not (tools[name].annotations and tools[name].annotations.read_only_hint is True)

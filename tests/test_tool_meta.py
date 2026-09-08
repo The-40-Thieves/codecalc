@@ -87,7 +87,7 @@ EXPECTED_MAX_RESULT_SIZE_CHARS = 2 * MAX_OUTPUT_KB_CEILING * 1024 + 8_000  # = 4
 async def main() -> None:
     async with in_process() as client:
         listed = {t.name: t for t in (await client.list_tools()).tools}
-        check("tools/list served 52 tools", len(listed) == 52, f"-> {len(listed)}")
+        check("tools/list served 54 tools", len(listed) == 54, f"-> {len(listed)}")
 
         def meta_of(name: str) -> dict:
             return getattr(listed[name], "meta", None) or {}
