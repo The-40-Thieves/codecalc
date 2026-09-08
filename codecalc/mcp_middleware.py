@@ -120,8 +120,36 @@ TOOL_TIMEOUTS: dict[str, float] = {
     # all 4 rescale rounds, symmetric so no alignment needed) took ~23.5s; a
     # second run that also forced an alignment remeasurement (160 calls,
     # asymmetric rescaling) took ~16.4s — both ~0.11-0.12s/call. Scaling that
-    # per-call cost up to the full 234-call ceiling gives ~27s worst case,
-    # still an ~6.7x margin under the 180s deadline.
+    # per-call cost up to the full 234-call ceiling gave ~27s worst case,
+    # ~6.7x margin under the 180s deadline.
+    #
+    # That ~27s figure does NOT bound every shape: every duration in that
+    # measurement was pinned below the floor, so the rescale ladder's real
+    # cost was pure subprocess-spawn overhead, never work that scales with n.
+    # Two later fixes close what it missed. (a) `optimization._align_sizes`
+    # could re-measure a real-cost baseline (a genuine O(n) or O(n^2)
+    # program) AT a fast arm's exhausted, 10^4x-scaled n — a size the fast
+    # arm ran but the slow one never did. Now a position where the BASELINE
+    # cleared the floor and the candidate never did is not re-measured at
+    # all: it is the most decisive outcome the tool can produce (every
+    # candidate run beat every baseline run), so the already-collected
+    # samples feed the significance test directly and the pairing is
+    # disclosed as `size`/`size_after` (contract 1.7.0). Alignment only
+    # ever grows the CANDIDATE side, up to a baseline n that cleared the
+    # floor; the baseline is never grown. (b) `optimization._MEASUREMENT_BUDGET_S` (120s) is one
+    # shared, monotonic-clock budget threaded into EVERY `tools._measure`
+    # call this tool makes — both `_timed` ladders AND alignment — so no
+    # phase can run toward this 180s deadline on its own; exhaustion fails
+    # fast with a coded, disclosed reason. The executor-call bound is at
+    # most the 234 above (candidate-below-floor positions are no longer
+    # re-measured, so alignment can only cost less). Re-measured with a
+    # REAL payload — a genuine O(n^2) baseline (`volatile`-guarded so
+    # `gcc -O2` cannot fold the loop) against a genuine O(1) candidate at
+    # the default sizes `[2000, 5000, 10000, 20000]`: the full call completed
+    # in ~9.5s (~19x margin under 180s), and a re-measurement the baseline
+    # could not afford failed via the budget in ~11s rather than the
+    # up-to-150s a per-execution-only timeout allowed. See
+    # `tests/test_translation_verify.py`'s O(n^2)-vs-O(1) live sections.
     "verify_translation": 120,
     "verify_optimization": 180,
     # run_submit/run_inspect/run_cancel are RunSupervisor control-

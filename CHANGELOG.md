@@ -120,6 +120,61 @@ behind it.
   independently so a future regression of the same shape cannot silently
   disable it a second time.
 
+- **`verify_optimization` could reject a genuine O(1) win as noise, and
+  its alignment step could re-measure a real-cost baseline at a fast arm's
+  UNVALIDATED, exhausted rescale ceiling.** Each side's auto-scale in
+  `_timed` can exhaust `_MAX_RESCALE_ROUNDS` (10^4x the starting size)
+  without ever clearing `_VISIBILITY_FLOOR_MS` — exactly what a genuine O(1)
+  candidate does. The old `_align_sizes` saw that as "the other side scaled
+  less" and re-measured the SLOWER side (often the baseline, with real
+  per-n cost) AT that exhausted n — a legitimate huge win became "baseline
+  re-measurement failed" or a re-measurement bounded only by
+  `timeout x REPEATS` per position (up to 150s each at the default
+  `timeout=30`). An intermediate version of this fix shrank the exhausted
+  candidate back to the baseline's n and then EXCLUDED the position because
+  the candidate was still below the floor there — driving `sizes_total` to
+  0 and `accepted` to `False` for per-size ratios of 20x-2400x (caught in
+  review before merge). The rule is now ASYMMETRIC (`_comparable_positions`,
+  shared by `_speedup` and `_infer_speedup` so the headline ratio and the
+  significance verdict can never disagree about which positions counted): a
+  position counts whenever the BASELINE is measurable and cleared the floor,
+  regardless of the candidate; a candidate too fast to register at a size
+  the baseline needed real work to reach is the most decisive evidence the
+  tool can produce (every candidate run beat every baseline run), so the
+  already-collected samples feed the Mann-Whitney test directly, with the
+  pairing disclosed as `size`/`size_after` (`per_size[].size_after` and
+  `speedup.per_size[].n_after`, present only when the two n differ). A
+  position is excluded and named in `inference.sizes_below_floor` only when
+  the BASELINE itself is unmeasurable, never cleared the floor, or lacks
+  the >=2 runs a test needs. Alignment only ever grows the CANDIDATE side, up to a baseline n that
+  already cleared the floor; the baseline is never grown (an earlier
+  version grew it to a padded O(1) candidate's rescaled n and timed out). Second, one shared
+  wall-clock budget — `_MEASUREMENT_BUDGET_S` (120s, `time.monotonic()`) —
+  is threaded through EVERY `tools._measure` call the tool makes, both
+  `_timed` ladders and alignment (an earlier version bounded alignment
+  only, leaving `_timed`'s own rescale rounds free to run toward the 180s
+  tool deadline on a real-cost baseline); exhaustion fails fast with a
+  coded, disclosed reason. Per-size executions divide the remaining budget
+  by `repeats`, not by `repeats x len(sizes)`, so a legitimately slower
+  largest size is not starved by cheaper siblings (measured: an even split
+  left a real O(n^2) baseline's largest calibrated size 5.7s when it needed
+  6.3s). The executor-call bound is at most the previous 234
+  (candidate-below-floor positions are no longer re-measured). Measured on
+  this box's Rust backend with a REAL payload — a `volatile`-guarded O(n^2)
+  baseline against a genuine O(1) candidate at the default sizes
+  `[2000, 5000, 10000, 20000]`: the full call completed in ~9.5s (~19x
+  margin under 180s); a re-measurement the baseline could not afford
+  failed via the budget in ~11s rather than up to 150s. The live
+  O(n^2)->O(1) test now calibrates its sizes at test time from probes of
+  BOTH arms (the baseline must cost >= 100 ms and >= 6x the O(1)
+  candidate's spawn-plus-pad cost on that host) instead of fixed constants
+  (the fixed-constant version measured a quadratic-vs-constant win at only
+  1.55x on a hosted macOS runner and rejected it), and asserts the
+  product's own majority rule rather than 4/4 sizes. `CONTRACT_VERSION` bumped `1.6.0` -> `1.7.0`
+  (MINOR: `size_after`/`n_after` added, present only when the two arms
+  ran at different n; `sizes_below_floor` semantics narrowed to the
+  baseline side; no field removed or moved).
+
 ### Changed
 
 - **The runner's own scratch files (the entry file's source copy, the
