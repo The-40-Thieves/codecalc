@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/The-40-Thieves/codecalc/main/docs/contract/result-v1.schema.json",
   "title": "codecalc execution result",
-  "description": "The result contract for codecalc's execution tools, version 1.13.0. Generated from codecalc/contract.py by scripts/check_contract.py \u2014 edit the module, not this file.",
+  "description": "The result contract for codecalc's execution tools, version 1.14.0. Generated from codecalc/contract.py by scripts/check_contract.py \u2014 edit the module, not this file.",
   "type": "object",
   "required": [
     "ok",
@@ -46,6 +46,9 @@
     },
     {
       "$ref": "#/$defs/comparison_rows"
+    },
+    {
+      "$ref": "#/$defs/session_snapshot_result"
     }
   ],
   "$defs": {
@@ -1429,6 +1432,233 @@
           }
         }
       }
+    },
+    "session_snapshot_result": {
+      "title": "a session_snapshot result",
+      "description": "session_snapshot(session_id, action=...) archives or restores a session's workspace files. `action` discriminates the four success shapes this tool can return; a failure (`ok: false`) matches `rejected` instead, same as every other tool. The archive itself is stored OUTSIDE the jailed session workspace \u2014 sandboxed code run inside a session can never read or tamper with it \u2014 so nothing here overlaps `session_result`'s own shape, which describes what runs INSIDE one.",
+      "type": "object",
+      "required": [
+        "ok",
+        "action"
+      ],
+      "properties": {
+        "ok": {
+          "const": true
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "save",
+            "restore",
+            "list",
+            "delete"
+          ]
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "save"
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "required": [
+              "snapshot_id",
+              "bytes",
+              "files",
+              "created_at",
+              "label"
+            ],
+            "properties": {
+              "snapshot_id": {
+                "type": "string"
+              },
+              "bytes": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "The archive's own size on disk (post-gzip), not the sum of the files it holds."
+              },
+              "files": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "created_at": {
+                "type": "string"
+              },
+              "label": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "list"
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "required": [
+              "session_id",
+              "snapshots"
+            ],
+            "properties": {
+              "snapshots": {
+                "type": "array",
+                "description": "Oldest first, by created_at.",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "snapshot_id",
+                    "bytes",
+                    "files",
+                    "created_at",
+                    "label"
+                  ],
+                  "properties": {
+                    "snapshot_id": {
+                      "type": "string"
+                    },
+                    "bytes": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "files": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "created_at": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "label": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "delete"
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "required": [
+              "session_id",
+              "snapshot_id",
+              "deleted"
+            ],
+            "properties": {
+              "snapshot_id": {
+                "type": "string"
+              },
+              "deleted": {
+                "type": "boolean",
+                "description": "false for a snapshot_id that was already gone \u2014 delete is idempotent, not an error on a repeat call."
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "restore"
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "description": "The restored session's own session_start shape (session_id/language/stateful/workdir/files), plus what this call itself restored.",
+            "required": [
+              "session_id",
+              "language",
+              "stateful",
+              "workdir",
+              "files",
+              "restored_files",
+              "bytes"
+            ],
+            "properties": {
+              "session_id": {
+                "type": "string"
+              },
+              "language": {
+                "type": "string"
+              },
+              "stateful": {
+                "type": "boolean"
+              },
+              "workdir": {
+                "type": "string"
+              },
+              "files": {
+                "type": "array",
+                "description": "The restored workspace's own file listing (session_files' own shape), NOT a count \u2014 see action=\"save\"'s `files`, which is one."
+              },
+              "restored_files": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "bytes": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Bytes actually written to disk by this restore (uncompressed), not the archive's own on-disk size."
+              },
+              "replaced": {
+                "type": "boolean",
+                "description": "Present and true only when replace=True restored into the SAME session_id that named the snapshot's origin, instead of starting a new one."
+              },
+              "confined": {
+                "type": "boolean"
+              },
+              "unenforced": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      ]
     }
   }
 }

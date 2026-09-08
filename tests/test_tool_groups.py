@@ -1,8 +1,8 @@
-"""CODECALC_TOOLS: registering a SLICE of the 52-tool surface.
+"""CODECALC_TOOLS: registering a SLICE of the 53-tool surface.
 
 The tool-definition token cost (README: "Tool-definition token cost") is real,
 and the fix that stayed unbuilt on purpose is a facade
-(docs/design/2026-08-10-tool-facade.md) — collapsing 52 typed tools behind one
+(docs/design/2026-08-10-tool-facade.md) — collapsing 53 typed tools behind one
 dispatcher erases per-tool schemas and per-tool approval boundaries. What this
 adds instead is server-side REGISTRATION filtering: a tool outside the active
 group set is never handed to `_mcp_tool(...)` at all, so it is absent from
@@ -110,8 +110,8 @@ check("unset CODECALC_TOOLS: exactly the declared tools register (none missing, 
       f"-> {len(default_data.get('registered', []))} registered vs {len(DECLARED)} declared; "
       f"missing={sorted(set(DECLARED) - set(default_data.get('registered', [])))}, "
       f"extra={sorted(set(default_data.get('registered', [])) - set(DECLARED))}")
-check("unset CODECALC_TOOLS: registers all 52",
-      default.returncode == 0 and len(default_data.get("registered", [])) == 52,
+check("unset CODECALC_TOOLS: registers all 53",
+      default.returncode == 0 and len(default_data.get("registered", [])) == 53,
       f"-> {len(default_data.get('registered', []))}")
 check("unset CODECALC_TOOLS: every known group is active",
       default.returncode == 0

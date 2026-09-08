@@ -10,9 +10,9 @@ This project versions **two** things, and they are not the same number.
 | What | Where | Current |
 |---|---|---|
 | The **package** — the tool surface, the CLI, the Python API | `pyproject.toml`, `executor/Cargo.toml`, this file | see `version` in [`pyproject.toml`](pyproject.toml) — this cell is not re-typed on every release |
-| The **result contract** — the shape every tool result comes back in | `docs/contract/README.md`, `contract_version` on every result | `1.10.0` |
+| The **result contract** — the shape every tool result comes back in | `docs/contract/README.md`, `contract_version` on every result | `1.14.0` |
 
-The contract is at `1.10.0` and the package is at `0.x` because those claims are
+The contract is at `1.14.0` and the package is at `0.x` because those claims are
 genuinely different. The result contract has a published JSON Schema, a
 documented MAJOR/MINOR/PATCH policy, a twelve-month deprecation window, and a
 gate that fails if the schema drifts from the code — it is stable and says so.
@@ -182,6 +182,15 @@ behind it.
   it runs on every exit from the stream — cancelled, failed, or
   successful — and the cancellation still propagates to the caller rather
   than coming back as a `stream failed:` result.
+
+### Added
+
+- **`session_snapshot(session_id, action="save"|"restore"|"list"|"delete", snapshot_id=None, label=None, replace=False)`** — archive a session's workspace files to a `tar.gz` and restore one later, into a new session or back into the same one. One tool with an `action` parameter rather than four separate tools, to keep the 53-tool surface from growing by three at once for one feature; `action`'s four shapes are close enough in signature (`session_id` plus an optional `snapshot_id`/`label`/`replace`) that splitting them would mostly duplicate the same three parameters four times over.
+  - `action="save"` applies the EXACT artifact rules `session_artifacts` already uses (`.codecalc-run/`, `.codecalc-spill/`, and the session lock file excluded) plus one more: a hardlinked file is excluded too, because — unlike a symlink, which `_workspace_scan` already drops before this ever runs — a hardlink is `S_ISREG` and would otherwise be archived, silently smuggling the bytes of whatever it aliases outside the workspace into a snapshot a caller can later restore anywhere. The archive is written OUTSIDE the jailed session workspace, in its own subtree of the sessions root (`.codecalc-snapshots/<session_id>/`), specifically so a session's own sandboxed program can never read, tamper with, or delete an archive of its own past state through the ordinary workspace path. Identity-checked before anything is read (`_dir_identity`, the same check `session_stop` already applies before deleting a workspace) — a session whose directory was swapped out from under it (the same rename-swap attack `tests/test_python_sweep.py`/`tests/test_execution_service.py` already regression-test for `stop()`) is refused rather than archived.
+  - `action="restore"` extracts through a safe extractor that refuses, before a single byte of ANY member is written: an absolute path, a `..` component, a symlink or hardlink member, a device/FIFO/socket member, a member over the existing per-artifact byte cap (`CODECALC_MAX_ARTIFACT_BYTES`), and an archive over the existing per-session artifact-count cap (`CODECALC_MAX_ARTIFACT_COUNT`) — reusing both existing caps rather than inventing new ones for the restore path specifically. Every member is written with `O_EXCL | O_NOFOLLOW`, so a hostile archive can never overwrite or follow an existing file. Without `replace=True`, restores into a brand-new session (same language the snapshot was saved from) and returns that session's own `session_start` shape plus `restored_files`/`bytes`; with `replace=True`, wipes and recreates the SAME session's workspace first (identity-checked the same way `save` is) and, for a stateful python3/node session, kills and respawns its REPL worker — restoring FILES only, never REPL variables/imports, which nothing in this module keeps around once a worker process exits.
+  - Two new caps, env-configurable like the existing session disk quotas: `CODECALC_MAX_SNAPSHOT_BYTES` (default 256 MiB) bounds one archive's raw content size, and `CODECALC_MAX_SNAPSHOTS_PER_SESSION` (default 10) bounds how many a session accumulates — both because a snapshot lives OUTSIDE any session's own disk quota, so nothing existing would otherwise bound it.
+  - Lifecycle: `session_stop` now also deletes every snapshot the session ever saved, unless called with the new `keep_snapshots=True` — the simplest lifecycle with no separate "orphaned snapshot" state to reason about, since a snapshot only ever existed because its origin session did. `session_stop`'s result carries a new `snapshots_deleted` count when it did so.
+  - `CONTRACT_VERSION` bumped `1.13.0` -> `1.14.0` (MINOR): adds the `session_snapshot_result` shape (discriminated by the new `action` field, which collides with no existing shape) — purely additive, no existing tool's result changed shape or meaning.
 
 ## [0.10.0] — 2026-09-08
 

@@ -45,7 +45,7 @@ def check(name: str, cond: bool, detail: str = "") -> None:
 
 # ── every registered tool resolves to a complete ToolAnnotations ───────────
 tools = server.mcp._tool_manager._tools
-check("52 tools are registered (default CODECALC_TOOLS)", len(tools) == 52, f"-> {len(tools)}")
+check("53 tools are registered (default CODECALC_TOOLS)", len(tools) == 53, f"-> {len(tools)}")
 
 missing = [name for name, t in tools.items() if t.annotations is None]
 check("every registered tool has a non-None annotations object", not missing, f"-> {missing}")

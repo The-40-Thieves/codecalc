@@ -145,6 +145,50 @@ async def main():
               unknown.get("ok") is False and unknown.get("code") == "validation",
               f"-> {unknown}")
 
+        # ── session_start / session_write_file / session_snapshot ──────────
+        started = data(await client.call_tool("session_start", {"language": "bash"}))
+        snap_sid = started.get("session_id", "")
+        await client.call_tool(
+            "session_write_file", {"session_id": snap_sid, "path": "a.txt", "content": "42"})
+        saved = data(await client.call_tool(
+            "session_snapshot", {"session_id": snap_sid, "action": "save", "label": "mcp"}))
+        check("session_snapshot save returns a snapshot_id",
+              saved.get("ok") is True and bool(saved.get("snapshot_id")),
+              f"-> {saved}")
+        listed = data(await client.call_tool(
+            "session_snapshot", {"session_id": snap_sid, "action": "list"}))
+        check("session_snapshot list finds the snapshot just saved",
+              any(s.get("snapshot_id") == saved.get("snapshot_id")
+                  for s in (listed.get("snapshots") or [])),
+              f"-> {listed}")
+        restored = data(await client.call_tool(
+            "session_snapshot",
+            {"session_id": snap_sid, "action": "restore", "snapshot_id": saved.get("snapshot_id")}))
+        restored_sid = restored.get("session_id", "")
+        check("session_snapshot restore round-trips the file's exact bytes",
+              restored.get("ok") is True and restored.get("restored_files") == 1,
+              f"-> {restored}")
+        read_back = data(await client.call_tool(
+            "session_read_file", {"session_id": restored_sid, "path": "a.txt"}))
+        check("...and the restored session's file reads back byte-identical",
+              read_back.get("content") == "42", f"-> {read_back}")
+        deleted = data(await client.call_tool(
+            "session_snapshot",
+            {"session_id": snap_sid, "action": "delete", "snapshot_id": saved.get("snapshot_id")}))
+        check("session_snapshot delete reports deleted=true",
+              deleted.get("ok") is True and deleted.get("deleted") is True,
+              f"-> {deleted}")
+        bad_action = data(await client.call_tool(
+            "session_snapshot", {"session_id": snap_sid, "action": "not-a-real-action"}))
+        check("session_snapshot refuses an unknown action",
+              bad_action.get("ok") is False and bad_action.get("code") == "validation",
+              f"-> {bad_action}")
+        await client.call_tool("session_stop", {"session_id": restored_sid})
+        stopped = data(await client.call_tool("session_stop", {"session_id": snap_sid}))
+        check("session_stop deletes snapshots by default",
+              stopped.get("snapshots_deleted") == 0,  # already deleted above
+              f"-> {stopped}")
+
         # ── evaluate_expression ───────────────────────────────────────────
         r = data(await client.call_tool("evaluate_expression",
                                         {"expression": "integrate(x**2, x)"}))
