@@ -10,12 +10,22 @@ in the same order, so it does not have to fetch each URL itself.
 That means llms-full.txt is *derived*, not authored — it says nothing that
 llms.txt and the files under it do not already say. A hand-maintained copy
 would drift the moment any linked file changed, which is exactly the class of
-staleness CONTRIBUTING.md's "rule that matters most" exists to catch. This
-script is how it is built, and `scripts/check_llms_txt.py` is how the
-committed file is proven to still match what this script produces —
-regenerate with:
+staleness CONTRIBUTING.md's "rule that matters most" exists to catch.
+
+It is NOT committed to the repository. A generated file whose content is a
+function of every doc it links would need regenerating (and re-verifying
+byte-for-byte) on every unrelated doc PR, which is a worse trade than the
+convenience of having it in the tree — the same reasoning
+CONTRIBUTING.md's SECURITY.md/AUDIT.md counts already trades the other way,
+except there the source of truth is small and stable and here it is the
+whole doc set. Instead it is built fresh in CI and attached to each GitHub
+release (`.github/workflows/release.yml`, `release-assets` job, next to the
+SBOM); `scripts/check_llms_txt.py` proves this script still runs cleanly and
+that everything llms.txt links still exists, without needing a committed
+copy to diff against. Regenerate a local copy with:
 
     uv run python scripts/build_llms_full.py
+    uv run python scripts/build_llms_full.py --output /tmp/llms-full.txt
 
 FLOOR: refuses to write an empty or suspiciously small file. A parser that
 silently matched zero links would otherwise happily "build" a one-line file
@@ -24,12 +34,16 @@ and exit 0.
 
 from __future__ import annotations
 
+import argparse
 import re
 import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 LLMS_TXT = REPO / "llms.txt"
+#: Default target for a local, manual regen. NOT committed — see module
+#: docstring — so this path only ever exists as a gitignored scratch file or
+#: inside a CI runner's ephemeral workspace.
 OUTPUT = REPO / "llms-full.txt"
 
 #: `[title](url)` markdown links, one per file list entry. `re.M` is not
@@ -98,12 +112,19 @@ def build() -> str:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--output", type=Path, default=OUTPUT,
+                        help=f"where to write the generated file (default: {OUTPUT})")
+    args = parser.parse_args()
+
     text = build()
     if len(text) < 1000:
         raise SystemExit(f"build_llms_full: produced only {len(text)} bytes — "
                           "too small to be the real doc set, refusing to write it")
-    OUTPUT.write_text(text, encoding="utf-8")
-    print(f"wrote {OUTPUT.relative_to(REPO)} ({len(text)} bytes from {len(extract_entries(LLMS_TXT.read_text(encoding='utf-8')))} files)")
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(text, encoding="utf-8")
+    n_files = len(extract_entries(LLMS_TXT.read_text(encoding="utf-8")))
+    print(f"wrote {args.output} ({len(text)} bytes from {n_files} files)")
     return 0
 
 

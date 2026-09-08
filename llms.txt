@@ -38,3 +38,4 @@ tool result) — see CONTRIBUTING.md before treating one number as the other.
 ## Optional
 
 - [codecalc/SKILL.md](https://raw.githubusercontent.com/The-40-Thieves/codecalc/main/codecalc/SKILL.md): the packaged skill that tells a model which tools to call and which result fields it may relay.
+- [llms-full.txt](https://github.com/The-40-Thieves/codecalc/releases/latest/download/llms-full.txt): the full text of every file linked above, concatenated, for a client with room for more than this index. Built fresh and attached to each GitHub Release (`release-assets` job) rather than committed, so it never goes stale against an unrelated doc PR; GitHub's `/releases/latest/download/<name>` redirect keeps this one URL pointed at the newest release's copy. Resolves starting with the first release published after this entry was added — earlier releases carry no such asset.

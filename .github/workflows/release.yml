@@ -709,6 +709,24 @@ jobs:
           path: dl
           merge-multiple: true
 
+      # ── llms-full.txt, before the checksums so it is covered BY them ────
+      #
+      # scripts/build_llms_full.py concatenates the full text of every file
+      # llms.txt links (stdlib only — no `uv sync` needed). It is deliberately
+      # NOT committed to the repo (see that script's module docstring): a
+      # generated copy of the whole doc set would need regenerating, and
+      # re-verifying byte-for-byte, on every unrelated doc PR. Built here
+      # instead and shipped as a release asset next to the SBOM below, so
+      # llms.txt's own "Optional" entry for it
+      # (github.com/.../releases/latest/download/llms-full.txt) always
+      # resolves to the newest release's copy.
+      - name: build llms-full.txt (from llms.txt)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          python3 scripts/build_llms_full.py --output dist/llms-full.txt
+
       # ── SBOM, before the checksums so it is covered BY them ──────────────
       #
       # Scoped to the SOURCE TREE, not to the wheel, and that is a measured
