@@ -2200,6 +2200,20 @@ def _doctor(as_json: bool = False, deep: bool = False) -> int:
                      "supported": "missing"}[state]
             print(f"    {label:14} {', '.join(names)}")
 
+    # `installed` rows that carry a `probe_error` are the deliberately
+    # unresolved case (#282's conservative rule): the version probe exited
+    # nonzero on an UNCONFIRMED flag, so `status` never moved and nothing
+    # above (available/unhealthy/supported) shows them. Named under its own
+    # heading rather than folded into "BROKEN" — this is not "broken",
+    # it is "the version guess didn't work", and reporting it as broken
+    # would be a stronger claim than was measured.
+    probe_failed = sorted((r["name"], r["probe_error"]) for r in rep["runtimes"]
+                          if r["status"] == "installed" and r.get("probe_error"))
+    if probe_failed:
+        print("    installed, version probe failed:")
+        for name, probe_error in probe_failed:
+            print(f"      {name:14} {probe_error}")
+
     # RELIABILITY, a different axis from the resolution block just
     # printed above. `installed`/`available` there says what THIS host
     # resolved or ran; `tier` here says how much codecalc's own CI has
