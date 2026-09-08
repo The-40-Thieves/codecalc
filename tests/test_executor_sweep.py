@@ -37,9 +37,15 @@ import time
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
+from _helpers import resolve_native_executor
+
 from codecalc import errors, executor, registry
 
-EXE = REPO_ROOT / "bin" / ("codecalc-exec.exe" if os.name == "nt" else "codecalc-exec")
+#: Resolved the SAME way codecalc/executor.py resolves it at import time
+#: (CODECALC_EXEC_BIN first, then bin/) — see _helpers.resolve_native_executor.
+#: `None` when no usable binary was found; every "rust:" branch below is
+#: gated on `EXE` being truthy, never on a hardcoded path's `.exists()`.
+EXE = resolve_native_executor()
 
 FAILS: list[str] = []
 SKIPS: list[str] = []
@@ -85,7 +91,7 @@ def run_exec(code: str, lang: str = "python3", timeout: int = 30, **flags) -> di
 # way for directories): `.codecalc-run` itself pre-existing as a plain
 # FILE rather than a directory, refused outright before anything is wiped
 # or written.
-if EXE.exists():
+if EXE:
     work = pathlib.Path(tempfile.mkdtemp(prefix="codecalc-sweep-"))
     (work / "precious.txt").write_text("user data")
     (work / registry.RUN_SCRATCH_DIRNAME).write_text("not a directory")
@@ -139,7 +145,7 @@ check("the python /proc walk decodes leniently",
 # side's count is recoverable from the ceiling it applies: the child's
 # RLIMIT_NPROC is ambient + headroom, so subtracting the headroom recovers what
 # it measured, and that is what can be compared against the Python walk.
-if EXE.exists() and pathlib.Path("/proc/self/status").is_file():
+if EXE and pathlib.Path("/proc/self/status").is_file():
     r = run_exec("import resource; print(resource.getrlimit(resource.RLIMIT_NPROC)[0])")
     applied = int((r.get("stdout") or "0").strip() or 0)
     rust_ambient = applied - executor.DEFAULT_PROCESS_HEADROOM
@@ -157,7 +163,7 @@ check("tempdir retry is bounded", "MAX_TEMPDIR_ATTEMPTS" in src)
 check("tempdir retry only retries a name collision",
       "AlreadyExists" in src, "-> must not retry permission errors")
 
-if EXE.exists() and os.name != "nt":
+if EXE and os.name != "nt":
     bad = pathlib.Path(tempfile.mkdtemp(prefix="codecalc-rotmp-"))
     bad.chmod(0o500)                      # readable, NOT writable
     env = {**os.environ, "TMPDIR": str(bad)}
@@ -192,7 +198,7 @@ if unix.exists():
     check("executor kills the child's process GROUP on termination", "killpg" in u)
     check("  ...and PDEATHSIG remains as the SIGKILL backstop", "PR_SET_PDEATHSIG" in u)
 
-if EXE.exists() and os.name != "nt":
+if EXE and os.name != "nt":
     marker = pathlib.Path(tempfile.gettempdir()) / f"codecalc-orphan-{os.getpid()}"
     marker.unlink(missing_ok=True)
     # The grandchild writes the marker only if it OUTLIVES the kill. Checking a
@@ -231,7 +237,7 @@ if unix.exists():
 
 # The block must not reach the sandboxed program: the signal mask survives
 # execve, so a child inheriting it would ignore the very signal used to stop it.
-if EXE.exists() and os.name != "nt":
+if EXE and os.name != "nt":
     r = run_exec("import signal\n"
                  "blocked = signal.pthread_sigmask(signal.SIG_BLOCK, [])\n"
                  "names = sorted(s.name for s in blocked)\n"
@@ -248,7 +254,7 @@ if EXE.exists() and os.name != "nt":
 #     os.rename("/tmp/victim", work)             # put someone else's there
 # Cleanup then deleted a directory the executor never made. It now compares
 # (device, inode) recorded at creation and refuses when they differ.
-if EXE.exists() and os.name != "nt":
+if EXE and os.name != "nt":
     victim = pathlib.Path(tempfile.mkdtemp(prefix="codecalc-victim-"))
     (victim / "important.txt").write_text("caller data")
     r = run_exec("import os\n"
@@ -271,7 +277,7 @@ check("run timeout is the remainder of the budget",
       "saturating_sub" in src and "spent_secs" in src)
 check("compile time is reported separately", '"compile_ms"' in src and '"total_ms"' in src)
 
-if EXE.exists() and shutil.which("gcc"):
+if EXE and shutil.which("gcc"):
     r = run_exec('#include <stdio.h>\nint main(){printf("hi\\n");return 0;}', lang="c")
     for k in ("compile_ms", "duration_ms", "total_ms"):
         check(f"c run reports {k}", isinstance(r.get(k), int), f"-> {r.get(k)}")
@@ -297,7 +303,7 @@ if blocknet.exists():
     check("blocknet forwards the calls it allows",
           "RTLD_NEXT" in b, "-> otherwise an allowed socket() still fails")
 
-if EXE.exists() and sys.platform.startswith("linux") and blocknet.exists():
+if EXE and sys.platform.startswith("linux") and blocknet.exists():
     # The AF_INET half is wrapped whole: no_net enforcement (seccomp on this
     # host if the kernel supports it, the shim otherwise) refuses at
     # socket(), not at connect(), so a test that only guarded connect() dies
@@ -336,8 +342,9 @@ if EXE.exists() and sys.platform.startswith("linux") and blocknet.exists():
 check("the shim is built by the build system, not by hand",
       (REPO_ROOT / "executor" / "build.rs").is_file())
 
-shim = EXE.parent / ("blocknet.dylib" if sys.platform == "darwin" else "blocknet.so")
-if shim.exists() and blocknet.exists():
+shim = (EXE.parent / ("blocknet.dylib" if sys.platform == "darwin" else "blocknet.so")
+        if EXE else None)
+if shim and shim.exists() and blocknet.exists():
     check("the shim beside the executable is not older than its source",
           shim.stat().st_mtime >= blocknet.stat().st_mtime,
           f"-> shim {time.strftime('%H:%M:%S', time.localtime(shim.stat().st_mtime))} "
@@ -501,7 +508,7 @@ SNIPPET = {
 WARMUP = {"csharp": ["dotnet", "--version"], "gleam": ["gleam", "--version"]}
 
 for lang, tool in TOOLCHAIN.items():
-    if not (EXE.exists() and shutil.which(tool) and os.name != "nt"):
+    if not (EXE and shutil.which(tool) and os.name != "nt"):
         skip(f"{lang} space/injection regression", f"{tool} not installed")
         continue
     warm = WARMUP.get(lang)
@@ -578,7 +585,7 @@ else:
     _fixture_java.chmod(0o755)
 KOTLIN_SNIPPET = 'fun main() { println(42) }'
 
-if EXE.exists():
+if EXE:
     env = {**os.environ, "CODECALC_RUNTIME_PATH": str(_kotlin_fixture_dir)}
     p = subprocess.run(
         [str(EXE), "--lang", "kotlin", "--timeout", "30"],

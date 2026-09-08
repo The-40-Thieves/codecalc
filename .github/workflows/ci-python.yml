@@ -647,7 +647,23 @@ jobs:
       # sandbox's own regression suite and its cross-platform contract, and they
       # were gated on one developer's machine.
       - name: executor regressions
-        run: uv run --no-sync python tests/test_executor_sweep.py
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --no-sync python tests/test_executor_sweep.py | tee /tmp/executor-sweep.out
+
+          # FLOOR: this file resolves the binary via tests/_helpers.resolve_native_executor
+          # — the SAME resolution codecalc/executor.py uses (CODECALC_EXEC_BIN first, then
+          # bin/) — rather than the hardcoded `bin/codecalc-exec` + `.exists()` check it used
+          # to gate on, which ignored CODECALC_EXEC_BIN and silently skipped every "rust:"
+          # assertion with no SKIP line whenever that was the only thing pointing at a binary.
+          # Grepping for at least one `PASS rust:` line from OUTSIDE the file means a
+          # resolution that quietly stops finding the binary this job just built fails this
+          # step, rather than passing on an empty "rust:" section the way it used to.
+          if ! grep -q '^PASS rust:' /tmp/executor-sweep.out; then
+            echo "::error::tests/test_executor_sweep.py printed no 'PASS rust:' line — the native executor branches did not run"
+            exit 1
+          fi
       # SECOND invocation of the same file the `tests` job above already runs — deliberately, same
       # shape as `test_platform_contract.py`'s two runs (fallback-tells-the-truth there,
       # unenforced-tells-the-truth here) and `test_mcp_all.py`'s. The `tests` job never builds this
@@ -697,7 +713,19 @@ jobs:
       # box. The built executor from the step above is what makes the runtime
       # leg meaningful rather than a source-scan alone.
       - name: AppContainer strict backend (compiles, runs, discloses unverified)
-        run: uv run --no-sync python tests/test_appcontainer.py
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --no-sync python tests/test_appcontainer.py | tee /tmp/appcontainer.out
+
+          # FLOOR, same resolution and same reason as the "executor regressions" step above —
+          # this file also switched from a hardcoded `bin/codecalc-exec` + `.exists()` check to
+          # tests/_helpers.resolve_native_executor. Its own checks are not named "rust:" though,
+          # so the floor is the helper's own success line instead.
+          if ! grep -q '^native executor: ' /tmp/appcontainer.out; then
+            echo "::error::tests/test_appcontainer.py printed no 'native executor: <path>' line — it did not resolve the binary this job just built"
+            exit 1
+          fi
       - name: runtime self-update tools
         run: uv run --no-sync python tests/test_runtimes_mcp.py
       # MCP-stdio round-trips that EXECUTE code (python3) and drive sessions,
