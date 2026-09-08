@@ -622,6 +622,26 @@ check("a compare_edge_cases refusal still validates as `rejected`",
       f"-> {errors_for(_edge_err)[:2]} keys={sorted(_edge_err)}")
 check_stamped("a compare_edge_cases refusal", _edge_err)
 
+# comparison_rows (contract 1.10.0): compare_execution's result matched none
+# of the branches above — the identical gap edge_case_comparison closed for
+# its sibling tool. `_c_rows`'s python3 row is a plain success; `errors.
+# stamp_row`'s error/code/remedy classification for a failing row is
+# exercised live, on both backends, in tests/test_platform_contract.py —
+# this only has to prove the SHAPE (including an empty-snippets call, which
+# has no refusal of its own here and still returns comparison_rows).
+_c_rows = server.compare_execution({"python3": "print(1)"})
+check("a compare_execution result validates against the published schema",
+      not errors_for(_c_rows), f"-> {errors_for(_c_rows)[:2]}")
+check_stamped("a compare_execution result", _c_rows)
+check("...and carries no `code`/`error` on a row that ran fine",
+      not ({"code", "error"} & _c_rows["results"][0].keys()),
+      f"-> {_c_rows['results'][0]}")
+_c_empty = server.compare_execution({})
+check("compare_execution with no snippets is STILL comparison_rows (count=0), not `rejected`",
+      not errors_for(_c_empty) and _c_empty.get("count") == 0,
+      f"-> {errors_for(_c_empty)[:2]} keys={sorted(_c_empty)}")
+check_stamped("an empty compare_execution", _c_empty)
+
 # optimization_verification: the correctness-failure early return never
 # measures speed, so `speedup`/`inference` are correctly absent.
 _o_not_equiv = server.verify_optimization("print(1)", "print(2)", "python3")

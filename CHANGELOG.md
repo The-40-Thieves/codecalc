@@ -10,9 +10,9 @@ This project versions **two** things, and they are not the same number.
 | What | Where | Current |
 |---|---|---|
 | The **package** — the tool surface, the CLI, the Python API | `pyproject.toml`, `executor/Cargo.toml`, this file | see `version` in [`pyproject.toml`](pyproject.toml) — this cell is not re-typed on every release |
-| The **result contract** — the shape every tool result comes back in | `docs/contract/README.md`, `contract_version` on every result | `1.8.0` |
+| The **result contract** — the shape every tool result comes back in | `docs/contract/README.md`, `contract_version` on every result | `1.10.0` |
 
-The contract is at `1.8.0` and the package is at `0.x` because those claims are
+The contract is at `1.10.0` and the package is at `0.x` because those claims are
 genuinely different. The result contract has a published JSON Schema, a
 documented MAJOR/MINOR/PATCH policy, a twelve-month deprecation window, and a
 gate that fails if the schema drifts from the code — it is stable and says so.
@@ -148,6 +148,28 @@ behind it.
   cross-platform-consistent CLI with `--version` documented in its own
   reference and is left without a hello-world backstop (per-command
   portability note in the PR body).
+- `compare_execution` rebuilt each per-language row from a fixed field list
+  (`language`, `ok`, `stdout`, `stderr`, `exit_code`, `duration_ms`,
+  `timed_out`, `cold_retry`) and never carried `error`/`code`/`remedy` from
+  the underlying `executor.execute()` result — a row for a language with no
+  runtime installed on this host read `stderr: "runtime unavailable ..."`
+  with nothing a caller could branch on, and the tool's OWN `ok` is `True`
+  whenever the comparison ran (never "every language succeeded"), so
+  `server.py`'s `_coded` wrapper (`errors.ensure_code`) never reached the
+  rows either. A row that failed for a REQUEST-level reason — no runtime for
+  that language, or a timeout that survived the one warm retry — now carries
+  `error`/`code`/`remedy` via the new `errors.stamp_row`; an ordinary
+  program failure (a real `RTE`/`OLE` `exit_code`) still carries none of the
+  three, matching the INTENDED convention that `code` marks a failed
+  request, not a failed program — a convention the top-level `execute_code`
+  envelope does not yet honour itself for a plain RTE/timeout (those come
+  back `code: "internal"` there today; pre-existing, tracked separately).
+  `compare_edge_cases`'s per-language `runs[lang]` entries had the identical
+  gap and are fixed the same way. `compare_execution`'s own result also
+  never matched any branch
+  in the published result contract — the same gap `edge_case_comparison`
+  closed for `compare_edge_cases` in `1.5.0` — so contract `1.10.0` adds a
+  `comparison_rows` branch for it; see `docs/contract/README.md`.
 
 ## [0.9.0] — 2026-09-07
 

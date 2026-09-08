@@ -266,3 +266,60 @@ def ensure_code(result: dict) -> dict:
     result["remedy"] = REMEDIES[code]
     result["code_inferred"] = True
     return result
+
+
+def stamp_row(row: dict, *, timed_out: bool = False, timeout_message: str | None = None) -> dict:
+    """`ensure_code`, applied to a SUB-result embedded inside an `ok: true`
+    tool response — `compare_execution`'s per-language rows, `compare_edge_
+    cases`'s per-language runs, and anything else in their shape. Mutates and
+    returns `row`.
+
+    Those tools' own top-level `ok` means "the comparison ran", not "every
+    language succeeded" (the same distinction `ok` already draws for a whole
+    result — see contract.py's description of it), so `server.py`'s `_coded`
+    wrapper never reaches these rows: it only classifies a result whose OWN
+    `ok` is false, and the row is nested three keys deep inside one that says
+    `true`. Without this, a row for a language with no runtime installed
+    carried `stderr` prose and nothing a caller could branch on.
+
+    `row["ok"]` not being exactly `False` (a language never even attempted,
+    or a row shape with no `ok` at all) is left untouched — same rule
+    `ensure_code` itself follows.
+
+    A row already carrying its own `error` (the executor set one — a spawn
+    failure, e.g. "runtime unavailable for the ... phase: ...") is classified
+    from THAT text.
+
+    A row with no `error` of its own but `timed_out=True` has nothing to
+    classify from — the raw envelope never sets `error` for an ordinary
+    program timeout, only `stderr`, and a killed process is free to have left
+    real PROGRAM output there before the signal landed (executor/src/main.rs
+    substitutes a safe placeholder only when `stderr` was empty). Feeding
+    that to a message-matching classifier risks a code derived from the
+    CALLER's program text rather than from codecalc's own diagnosis, so
+    `timeout_message` — built by the CALLER, never copied from `stdout`/
+    `stderr` — is what gets classified instead, when given.
+
+    Any other `ok: False` row — an ordinary RTE/OLE that ran to completion
+    and failed on its own terms, with no `error` and no timeout — is left
+    with no `code` at all. That is the INTENDED reading of `verdict`/
+    `exit_code` vs `code` (see docs/contract/README.md's "The program ran
+    and failed" vs "Rejected before execution" shapes): a failed PROGRAM is
+    told apart from a failed REQUEST by `verdict`'s presence, and `code`
+    is meant to mark only the latter. It is NOT yet what the top-level
+    execution envelope itself does: `execute_code` on a plain RTE
+    (`sys.exit(3)`) or a plain wall-clock timeout comes back `code:
+    "internal"` (`code_inferred: true`) today, because `executor.execute`
+    never sets `error` for either and `ensure_code`'s message matcher falls
+    through to `internal` on an empty message — pre-existing on `main`,
+    unrelated to this function, and tracked separately. This function
+    applies the rule as it is MEANT to work, not as the envelope currently
+    does; do not infer from this docstring that the two already agree.
+    """
+    if row.get("ok") is not False:
+        return row
+    if not row.get("error") and timed_out and timeout_message:
+        row["error"] = timeout_message
+    if row.get("error"):
+        ensure_code(row)
+    return row

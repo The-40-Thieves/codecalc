@@ -13,11 +13,27 @@ import statistics
 import time
 
 from . import dependencies as dependencies_module
-from . import executor, registry
+from . import errors, executor, registry
 
 
 def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 15) -> dict:
     """Run one code snippet per language; return a side-by-side result table.
+
+    The OUTER `ok` is always `True` once the comparison itself ran to
+    completion — it means "this tool produced a real table", not "every
+    language succeeded", the same distinction the envelope's own `ok` draws
+    for a single run (a program that exits non-zero is `ok: false` there too,
+    but the REQUEST still succeeded). A language that failed is visible in
+    its OWN row: `results[i]["ok"]` is that row's own success, and a row that
+    failed for a REQUEST-level reason (no runtime installed, a timeout) also
+    carries `error`/`code`/`remedy` — the same taxonomy `errors.py` uses
+    everywhere else — via `errors.stamp_row`. An ordinary program failure
+    (a real RTE/OLE `exit_code`) carries no `code`, matching the INTENDED
+    convention that `code` means a failed request, not a failed program —
+    a convention the top-level `execute_code` envelope does not yet honour
+    itself for a plain RTE/TLE (those come back `code: "internal"` there
+    today; see `errors.stamp_row`'s docstring), so do not read this row's
+    behavior as proof the two already agree.
 
     No per-run dependency installs happen here (see the `compare_execution`
     MCP tool's own docstring for why) — but a python3 snippet carrying a PEP
@@ -58,6 +74,18 @@ def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 
             "timed_out": r.get("timed_out", False),
             "cold_retry": cold_retry,
         }
+        # The executor's own `error` (a spawn failure — no runtime/compiler
+        # installed) is carried through verbatim so a caller reading this
+        # table does not have to re-run the language alone just to learn
+        # WHY it failed. See `errors.stamp_row`'s docstring for the full
+        # rule, including why a still-timed-out row is classified from a
+        # message THIS function builds rather than from `stderr`.
+        if r.get("error"):
+            row["error"] = r["error"]
+        errors.stamp_row(
+            row, timed_out=row["timed_out"],
+            timeout_message=f"{language} timed out after {timeout}s (wall-clock)",
+        )
         if cold_retry:
             row["cold_retry_recovered"] = cold_retry_recovered
             row["first_attempt_ms"] = first_attempt_ms
@@ -337,7 +365,21 @@ def _measure(language: str, code: str, sizes: list[int], timeout: int, repeats: 
                                    "no growth estimate is possible from a timeout",
                           "detail": last}
         if last is not None and not last.get("ok"):
-            return runs, {"ok": False, "error": f"program failed at n={n}", "detail": last}
+            # The underlying executor result's OWN `error` (e.g. a spawn
+            # failure: "runtime unavailable for the ... phase: ...") is
+            # appended rather than dropped — server.py's `_coded` wrapper
+            # classifies THIS function's return value via `errors.
+            # ensure_code`, which matches on message text, so a generic
+            # "program failed at n=100" with nothing else used to classify
+            # every such failure `internal` regardless of the real cause.
+            # `detail` (the raw `last` result) already carried the real
+            # reason for a caller willing to dig for it; this puts the same
+            # substring where the automatic classifier actually looks.
+            detail_error = last.get("error")
+            message = f"program failed at n={n}"
+            if detail_error:
+                message = f"{message}: {detail_error}"
+            return runs, {"ok": False, "error": message, "detail": last}
         runs.append({
             "n": n,
             "ok": bool(durations),

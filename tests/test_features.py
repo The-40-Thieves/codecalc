@@ -331,6 +331,40 @@ check("a failed benchmark claims no method at all",
       _failed.get("ok") is False and "method" not in _failed,
       f"-> ok={_failed.get('ok')} method={_failed.get('method')!r}")
 
+# `_measure`'s "program failed at n=N" message used to be the ONLY text the
+# top-level `benchmark` tool's automatic `errors.ensure_code` (server.py's
+# `_coded` wrapper) had to classify from — generic enough that a language
+# with no runtime installed at all was misclassified `internal` rather than
+# `runtime_unavailable`, the wrong remedy for "install the language". The
+# underlying executor result's OWN `error` (e.g. a spawn failure) is now
+# appended to that message, so the SAME automatic classification correctly
+# reads it. `CODECALC_RUNTIME_PATH` (not the real PATH) is what both
+# backends resolve a runtime from, so pointing it at an empty scratch
+# directory makes `lua` unresolvable regardless of what is actually
+# installed here.
+import os as _os_bench
+import shutil as _shutil_bench
+import tempfile as _tempfile_bench
+
+from codecalc import errors as _errors_bench
+from codecalc import server as _server_bench
+
+_no_runtime_dir = _tempfile_bench.mkdtemp(prefix="codecalc-bench-noruntime-")
+_saved_runtime_path = _os_bench.environ.get("CODECALC_RUNTIME_PATH")
+_os_bench.environ["CODECALC_RUNTIME_PATH"] = _no_runtime_dir
+try:
+    _no_runtime = _server_bench.benchmark(
+        "n=int(input())\nprint(n)", language="lua", sizes="100,200,300")
+finally:
+    if _saved_runtime_path is None:
+        _os_bench.environ.pop("CODECALC_RUNTIME_PATH", None)
+    else:
+        _os_bench.environ["CODECALC_RUNTIME_PATH"] = _saved_runtime_path
+    _shutil_bench.rmtree(_no_runtime_dir, ignore_errors=True)
+check("a benchmark against a missing runtime is classified runtime_unavailable, not internal",
+      _no_runtime.get("code") == _errors_bench.RUNTIME_UNAVAILABLE,
+      f"-> code={_no_runtime.get('code')} error={str(_no_runtime.get('error'))[:120]!r}")
+
 # ── the shipped skill (#88) ───────────────────────────────────────────────
 # The tools exist to stop a model asserting numbers it did not compute. Nothing
 # made a model REACH for them: no skill, no prompting guide, nothing in the

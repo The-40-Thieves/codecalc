@@ -27,7 +27,7 @@ import time
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from codecalc import executor, grades, optimization, stats, translation
+from codecalc import errors, executor, grades, optimization, stats, translation
 from codecalc import server as _server
 from codecalc.translation import aggregate, classify_case, compare_edge_cases
 
@@ -177,6 +177,55 @@ try:
     r = compare_edge_cases({"a": "x\ny\n", "b": "x\ny\n"}, inputs=["i"])
     check("identical output in identical order -> no divergence",
           r["divergence_count"] == 0, f"-> {r['divergence_count']}")
+finally:
+    translation._run = _orig_run
+
+
+# ── compare_edge_cases: per-run error/code/remedy classification ───────────
+# Same rule compare_execution's rows follow (errors.stamp_row) — a run that
+# failed for a REQUEST-level reason (no runtime, a timeout) carries
+# error/code/remedy on its OWN entry in results[i]["runs"][lang]; an
+# ordinary program failure carries none of the three; the OUTER `ok` stays
+# `True`. Deterministic fakes, keyed by language, same pattern as above.
+_orig_run = translation._run
+try:
+    def _fake_run(lang, code, stdin, timeout=15):
+        if lang == "lua":
+            detail = "runtime unavailable for the run phase: 'lua' not found (No such file or directory)"
+            return {"ok": False, "stdout": "", "stderr": detail, "error": detail,
+                    "exit_code": None, "verdict": "RTE", "timed_out": False}
+        if lang == "node":
+            return {"ok": False, "stdout": "", "stderr": "<killed: exceeded wall-clock timeout>",
+                    "exit_code": None, "verdict": "TLE", "timed_out": True}
+        if lang == "perl":
+            return {"ok": False, "stdout": "", "stderr": "syntax error at -e line 1.",
+                    "exit_code": 1, "verdict": "RTE", "timed_out": False}
+        return {"ok": True, "stdout": code, "verdict": "OK", "stderr": "", "timed_out": False}
+
+    translation._run = _fake_run
+
+    r = compare_edge_cases({"lua": "x", "python3": "x"}, inputs=["i"])
+    check("compare_edge_cases outer ok is True even though a language could not run",
+          r["ok"] is True, f"-> {r['ok']}")
+    _runs = r["results"][0]["runs"]
+    check("a missing-runtime run is classified runtime_unavailable",
+          _runs["lua"].get("code") == errors.RUNTIME_UNAVAILABLE, f"-> {_runs['lua'].get('code')}")
+    check("...and carries error text and a remedy",
+          bool(_runs["lua"].get("error")) and _runs["lua"].get("remedy") is not None,
+          f"-> {_runs['lua']}")
+    check("a working run carries no code/error/remedy",
+          not ({"code", "error", "remedy"} & _runs["python3"].keys()),
+          f"-> {_runs['python3']}")
+
+    r = compare_edge_cases({"node": "x", "python3": "x"}, inputs=["i"])
+    check("a timed-out run is classified timeout",
+          r["results"][0]["runs"]["node"].get("code") == errors.TIMEOUT,
+          f"-> {r['results'][0]['runs']['node'].get('code')}")
+
+    r = compare_edge_cases({"perl": "x", "python3": "x"}, inputs=["i"])
+    check("an ordinary program failure carries no code",
+          "code" not in r["results"][0]["runs"]["perl"],
+          f"-> {r['results'][0]['runs']['perl']}")
 finally:
     translation._run = _orig_run
 
