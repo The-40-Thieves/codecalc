@@ -1511,6 +1511,163 @@ check("vanished-output detector names the empty side",
       and translation.vanished_output_side(_empty_r, _full_r) == "source")
 
 
+# ═══ codecalc issue #286: _normalize folded SEVEN distinct separator ═══════
+#     characters into \n via str.splitlines(), certifying byte-different ═══
+#     outputs as equivalent — and the evidence shown was the NORMALIZED ════
+#     string, so a reader had nothing to notice the difference with ════════
+# `str.splitlines()` (the old implementation) treats VT (0x0B), FF (0x0C),
+# FS/GS/RS (0x1C-0x1E), NEL (0x85), U+2028 LINE SEPARATOR and U+2029
+# PARAGRAPH SEPARATOR as line boundaries, same as a real `\n` — so a source
+# printing one of them and a port printing `\n` compared equal. Each is
+# checked individually: a single shared assertion across all seven would not
+# show WHICH one a future regression broke.
+_EXOTIC_SEPARATORS = [
+    ("VT 0x0B", "\x0b"),
+    ("FF 0x0C", "\x0c"),
+    ("FS 0x1C", "\x1c"),
+    ("GS 0x1D", "\x1d"),
+    ("RS 0x1E", "\x1e"),
+    ("NEL U+0085", "\x85"),
+    ("LINE SEPARATOR U+2028", " "),
+    ("PARAGRAPH SEPARATOR U+2029", " "),
+]
+for _sep_label, _sep in _EXOTIC_SEPARATORS:
+    check(f"#286 {_sep_label}: _normalize leaves it untouched, not folded to \\n",
+          translation._normalize(f"A{_sep}B") == f"A{_sep}B",
+          f"-> {translation._normalize(f'A{_sep}B')!r}")
+    _outcome, _reason = classify_case(ok(f"A{_sep}B"), ok("A\nB"))
+    check(f"#286 {_sep_label}: a program printing it does NOT match one printing a real \\n",
+          _outcome == "mismatch", f"-> {_outcome} {_reason!r}")
+
+# The tolerated cases must still match — fixing #286 must not regress the
+# actual cross-platform differences _normalize exists to absorb.
+for _tol_label, _tol_a, _tol_b in [
+    ("CRLF vs LF", "A\r\nB", "A\nB"),
+    ("bare CR vs LF", "A\rB", "A\nB"),
+    ("trailing spaces/tabs per line", "A \nB\t", "A\nB"),
+    ("trailing blank lines", "A\nB\n\n\n", "A\nB"),
+]:
+    _tol_outcome, _ = classify_case(ok(_tol_a), ok(_tol_b))
+    check(f"#286 control: {_tol_label} is STILL tolerated (still a match)",
+          _tol_outcome == "match", f"-> {_tol_outcome} ({_tol_a!r} vs {_tol_b!r})")
+
+# End to end, the issue's own repro shape, on BOTH execution backends: a
+# source printing U+2028 and a port printing a real `\n` must be a MISMATCH,
+# never `cross_checked`, and the case's RAW stdout must show what the
+# normalized stdout alone would have erased. Node is present on this host;
+# skip cleanly rather than failing the whole suite on an unrelated
+# environment gap if it is ever absent.
+#
+# The source writes the U+2028 through `sys.stdout.buffer` (raw bytes, the
+# reporter's own `b"A\xe2\x80\xa8B\n"`), NOT `sys.stdout.write("A\u2028B\n")`
+# (text mode): a text-mode write encodes through the child's stdout codec,
+# which on Windows is the console code page, not UTF-8 — neither backend
+# sets PYTHONUTF8/PYTHONIOENCODING — so `sys.stdout.write` raised
+# UnicodeEncodeError there and the source side produced nothing at all
+# (observed on windows-latest CI, py3.11 and py3.14: source stdout/stdout_raw
+# both `''`). Writing the bytes directly bypasses that codec on every
+# platform, matching the byte stream the issue itself reports.
+if executor.probe().get("node"):
+    _SRC_286 = 'import sys\nsys.stdout.buffer.write(b"A\\xe2\\x80\\xa8B\\n")'
+    _TGT_286 = 'process.stdout.write("A\\nB\\n")'
+    for _backend_name, _force_fallback in (("rust", False), ("python fallback", True)):
+        if _force_fallback and not executor._rust:
+            continue  # nothing to force away from on a build with no rust binary
+        _saved_rust286 = executor._rust
+        if _force_fallback:
+            executor._rust = None
+        try:
+            _r286 = translation.verify_translation(
+                "python3", _SRC_286, "node", _TGT_286, [""])
+        finally:
+            executor._rust = _saved_rust286
+        check(f"#286 {_backend_name}: source U+2028 vs target real \\n is a "
+              "MISMATCH, not certified equivalent",
+              _r286.get("passed") is False and _r286.get("mismatched") == 1,
+              f"-> passed={_r286.get('passed')} mismatched={_r286.get('mismatched')}")
+        _case286 = _r286["cases"][0]
+        check(f"  ...{_backend_name}: the normalized stdout ALSO differs "
+              "now (the fix itself — U+2028 is no longer folded to \\n)",
+              _case286["source"]["stdout"] == "A B"
+              and _case286["target"]["stdout"] == "A\nB",
+              f"-> source={_case286['source']['stdout']!r} "
+              f"target={_case286['target']['stdout']!r}")
+        check(f"  ...{_backend_name}: and stdout_raw is exactly what each "
+              "side wrote, trailing newline included",
+              _case286["source"]["stdout_raw"] == "A B\n"
+              and _case286["target"]["stdout_raw"] == "A\nB\n",
+              f"-> source={_case286['source']['stdout_raw']!r} "
+              f"target={_case286['target']['stdout_raw']!r}")
+
+    # The MCP tool layer (server.verify_translation), the entry point the
+    # issue's own repro used against the shipped 0.7.0 server.
+    _srv286 = _server.verify_translation(_SRC_286, "python3", _TGT_286, "node",
+                                         test_inputs=[""])
+    check("#286 the MCP tool result is likewise a mismatch, never cross_checked",
+          _srv286.get("passed") is False
+          and _srv286.get("grade") != grades.CROSS_CHECKED,
+          f"-> passed={_srv286.get('passed')} grade={_srv286.get('grade')!r}")
+else:
+    print("SKIP #286 end-to-end repro (node runtime not available)")
+
+
+# ═══ #286's own suggestion: when normalization DOES fold a real difference ═
+#     (a tolerated one), stdout_raw is where a reader sees it, since the ════
+#     normalized stdout and the match verdict cannot show it by design ═════
+# CRLF-vs-LF is exactly the kind of difference NORMALIZE_TOLERANCE exists to
+# absorb — outcome is correctly "match", but the two programs did not write
+# the same bytes, and stdout_raw is the only place that is still visible.
+_a_crlf, _b_lf = ok("line one\r\nline two\r\n"), ok("line one\nline two\n")
+_crlf_outcome, _ = classify_case(_a_crlf, _b_lf)
+check("control: CRLF vs LF is classified a match (the tolerance working as intended)",
+      _crlf_outcome == "match", f"-> {_crlf_outcome}")
+# The tolerance is exercised through classify_case directly above (no
+# runtime needed for that assertion); this second half drives the real
+# per-case dict shape through a stubbed _run, since `stdout_raw` is built in
+# `verify_translation`, not in `classify_case`.
+_orig_run = translation._run
+try:
+    translation._run = lambda lang, code, stdin, timeout=15: (
+        ok("line one\r\nline two\r\n") if lang == "python3" else ok("line one\nline two\n"))
+    _crlf_r = translation.verify_translation("python3", "src", "node", "tgt", [""])
+finally:
+    translation._run = _orig_run
+_crlf_case = _crlf_r["cases"][0]
+check("the tolerated fold: outcome is match and normalized stdout is IDENTICAL",
+      _crlf_case["outcome"] == "match"
+      and _crlf_case["source"]["stdout"] == _crlf_case["target"]["stdout"],
+      f"-> outcome={_crlf_case['outcome']} "
+      f"source={_crlf_case['source']['stdout']!r} target={_crlf_case['target']['stdout']!r}")
+check("  ...but stdout_raw still shows the source used CRLF and the target used LF",
+      _crlf_case["source"]["stdout_raw"] == "line one\r\nline two\r\n"
+      and _crlf_case["target"]["stdout_raw"] == "line one\nline two\n"
+      and _crlf_case["source"]["stdout_raw"] != _crlf_case["target"]["stdout_raw"],
+      f"-> source={_crlf_case['source']['stdout_raw']!r} "
+      f"target={_crlf_case['target']['stdout_raw']!r}")
+
+
+# ═══ #286's audit: compare_edge_cases shares _normalize AND its own ════════
+#     splitlines()-based order/content comparison — both must not re-fold ══
+# `compare_edge_cases` builds its exact/sorted divergence keys from
+# `r["stdout"].split("\n")` (fixed alongside `_normalize` itself — it used to
+# be `.splitlines()`, which would have re-folded an exotic separator into a
+# line break at exactly this second call site even after `_normalize` was
+# fixed). Two "languages" that differ ONLY by U+2028-vs-`\n` must diverge.
+_orig_run = translation._run
+try:
+    translation._run = lambda lang, code, stdin, timeout=15: {
+        "ok": True, "stdout": code, "verdict": "OK", "stderr": ""}
+    r = compare_edge_cases({"a": "A B", "b": "A\nB"}, inputs=["i"])
+    check("#286 compare_edge_cases: U+2028 vs a real \\n IS a divergence",
+          r["divergence_count"] == 1, f"-> {r['divergence_count']}")
+    check("  ...and both stdout_raw values are present and show the difference",
+          r["results"][0]["runs"]["a"]["stdout_raw"] == "A B"
+          and r["results"][0]["runs"]["b"]["stdout_raw"] == "A\nB",
+          f"-> {r['results'][0]['runs']}")
+finally:
+    translation._run = _orig_run
+
+
 # The tools must not re-introduce the slice. Checked through the SERVER layer,
 # because that is the one a model calls and the one that carried the slice —
 # the module function never did.

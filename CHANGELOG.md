@@ -35,6 +35,44 @@ behind it.
 
 ### Fixed
 
+- `verify_translation` and `compare_edge_cases` certified byte-different
+  program output as equivalent. `translation._normalize` decided whether two
+  programs agreed with `"\n".join(line.rstrip() for line in
+  s.splitlines()).strip()` — and `str.splitlines()` treats far more than
+  `\n` as a line boundary: VT (0x0B), FF (0x0C), FS/GS/RS (0x1C-0x1E), NEL
+  (0x85), U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR all counted,
+  and the `"\n".join(...)` rewrote every one of them to a real `\n`. Almost
+  no language treats those seven as line terminators on output, so a source
+  printing one and a port printing an actual newline compared equal. Reported
+  end to end (#286): a python3 program writing `A<U+2028>B` and a node port
+  writing `A\nB` — two different byte streams — verified as `matched: 1,
+  mismatched: 0`, graded `cross_checked`, the tool's strongest grade, whose
+  own definition is "run and agreeing". They did not agree. The `stdout`
+  shown in the result was also the NORMALIZED string on both sides, so a
+  reader auditing the match had nothing to see — the difference had already
+  been removed from the evidence along with the verdict. `compare_edge_cases`
+  shares the same `_normalize`, so its divergence comparison and its own
+  displayed `stdout` had the identical defect, one call downstream: its
+  order/content divergence keys were ALSO built with `.splitlines()`, so an
+  exotic separator would have re-folded into a line break at that second
+  site even after `_normalize` alone was fixed — both are fixed together
+  here. `_normalize` now tolerates exactly three things and nothing else:
+  `\r\n`/`\r` folded to `\n` (the real cross-platform line-ending
+  difference), trailing spaces/tabs per line (`rstrip(" \t")`, not a bare
+  `rstrip()`, which strips the same exotic whitespace off the end of a
+  line), and trailing blank lines at the end of the whole output — spelled
+  out once as `translation.NORMALIZE_TOLERANCE` so there is a single place
+  that says what "the same output" means here. Every per-case result (both
+  tools) now also carries `stdout_raw`, the exact bytes a side wrote, next
+  to the normalized `stdout` — so a match that folds a real, tolerated
+  difference (CRLF vs LF, say) still leaves the raw bytes visible to a
+  reader, which the normalized string and the verdict alone cannot do by
+  design. `verify_optimization`'s correctness gate calls
+  `translation.verify_translation()` directly and is fixed by the same
+  change; `compare_execution` (`tools.py`) never normalized or compared
+  stdout across languages at all (only truthiness, for its "vanished
+  output" discrepancy check) and does not share the defect.
+
 - `execute_code_stream` on the Rust backend could hang forever, with the
   sandboxed program already finished and its full output already sitting on
   disk. `executor.execute_stream`'s progress loop polled `proc.wait()` in a

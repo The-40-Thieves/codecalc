@@ -1,7 +1,28 @@
 # The codecalc result contract
 
-**Current version: `1.11.0`** · Schema: [`result-v1.schema.json`](result-v1.schema.json) ·
+**Current version: `1.12.0`** · Schema: [`result-v1.schema.json`](result-v1.schema.json) ·
 Source of truth: [`codecalc/contract.py`](../../codecalc/contract.py)
+
+`1.12.0` is a MINOR bump over `1.11.0`. It adds `stdout_raw` to every
+`translation_verification` case's `source`/`target` (`_translation_side_
+properties`) and to every `compare_edge_cases` per-language run
+(`_edge_case_run_properties`), closing part of codecalc #286: `_normalize`
+(`translation.py`) used `str.splitlines()` to compare two programs' stdout,
+which treats VT (0x0B), FF (0x0C), FS/GS/RS (0x1C-0x1E), NEL (0x85), U+2028
+LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR as line breaks and folds all
+seven into `\n` — so a source printing a real `\n` and a port printing U+2028
+compared equal, and the `stdout` shown in the result was the NORMALIZED
+string, so a reader had no way to see the difference even after being told
+where to look. `_normalize` itself is fixed (see `translation.
+NORMALIZE_TOLERANCE`: only `\r\n`/`\r` -> `\n`, trailing per-line spaces/tabs,
+and trailing blank lines are tolerated now — nothing else Python calls a line
+or whitespace boundary is touched), which is a behavior change with no shape
+to model in a schema. `stdout_raw` is the shape change: exactly what a side
+wrote, before normalization, sitting next to the normalized `stdout` so a
+reader can see the two are the same string, or are not, without re-running
+anything. Both fields are always present, not only when they differ — a
+`1.11.0` client that already reads `stdout` sees no change; `stdout_raw` is
+purely additive, hence MINOR.
 
 `1.11.0` is a MINOR bump over `1.10.0`. It adds four fields to
 `optimization_verification.inference`, closing a false accept reproduced live

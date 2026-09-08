@@ -51,7 +51,7 @@ from . import errors, grades
 #: each component is allowed to change — the short form is that MAJOR is the
 #: only one that may break a reader, and it carries a twelve-month deprecation
 #: window before anything is removed.
-CONTRACT_VERSION = "1.11.0"
+CONTRACT_VERSION = "1.12.0"
 
 # THE `$schema` AND `$id` URIs ARE NOT HERE ON PURPOSE.
 #
@@ -268,13 +268,18 @@ def _edge_case_run_properties() -> dict:
     `_error_properties()`, same reasoning as `_comparison_row_properties`)
     are new in 1.10.0 and present only on a run that failed for a
     REQUEST-level reason — see `errors.stamp_row`.
+
+    `stdout_raw` (new in 1.12.0) is exactly what the program wrote, before
+    `translation.NORMALIZE_TOLERANCE` is applied to build `stdout` — see
+    `_translation_side_properties`'s docstring for why (codecalc #286).
     """
     return {
         "type": "object",
-        "required": ["ok", "stdout", "verdict", "stderr"],
+        "required": ["ok", "stdout", "stdout_raw", "verdict", "stderr"],
         "properties": {
             "ok": {"type": ["boolean", "null"]},
             "stdout": {"type": "string"},
+            "stdout_raw": {"type": "string"},
             "verdict": {
                 "type": ["string", "null"],
                 "description": "null when nothing ran (e.g. an unknown language).",
@@ -290,14 +295,25 @@ def _translation_side_properties() -> dict:
 
     Read out of `translation.verify_translation`'s per-case dict — see the
     `cases.append({...})` block in codecalc/translation.py — not out of the
-    full executor result each side derives from. Only four fields survive
-    into the case: `phase` is null whenever nothing ran (an unknown
-    language never reaches a runtime, so it never sets `phase`), which is
-    the same discriminator the five execution shapes already use.
+    full executor result each side derives from. `phase` is null whenever
+    nothing ran (an unknown language never reaches a runtime, so it never
+    sets `phase`), which is the same discriminator the five execution
+    shapes already use.
+
+    `stdout_raw` (new in 1.12.0) is exactly what this side wrote, before
+    `translation.NORMALIZE_TOLERANCE` (`\\r\\n`/`\\r` folded to `\\n`,
+    trailing per-line spaces/tabs, trailing blank lines) is applied to build
+    `stdout`. Before this, `stdout` — the normalized string — was the ONLY
+    evidence a caller could read: a match built on a normalization that
+    erased a genuine difference (codecalc #286 — `str.splitlines()`, the old
+    implementation, treated seven distinct separator characters as `\\n`)
+    had nothing in the result a reader could use to notice. Both fields are
+    always present, not only when they differ, so nobody has to guess
+    whether normalization changed anything.
     """
     return {
         "type": "object",
-        "required": ["ok", "phase", "stdout", "stderr"],
+        "required": ["ok", "phase", "stdout", "stdout_raw", "stderr"],
         "properties": {
             "ok": {"type": "boolean"},
             "phase": {
@@ -308,6 +324,7 @@ def _translation_side_properties() -> dict:
                 ),
             },
             "stdout": {"type": "string"},
+            "stdout_raw": {"type": "string"},
             "stderr": {"type": "string"},
         },
     }

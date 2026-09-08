@@ -2024,6 +2024,9 @@ def verify_translation(source_code: str, source_language: str,
     function against the original. Pair with compare_edge_cases to find the
     inputs worth testing.
 
+    Matching tolerates only line-ending/trailing-whitespace noise;
+    stdout_raw carries what actually ran.
+
     A pass is graded `cross_checked` (two independent implementations, run
     and agreeing — see `grade_basis` for which runtimes). A non-pass is
     graded `ungraded`: never a softer positive grade.
