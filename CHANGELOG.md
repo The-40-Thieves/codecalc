@@ -33,6 +33,56 @@ behind it.
 
 ## [Unreleased]
 
+### Fixed
+
+- `execute_code_stream` on the Rust backend could hang forever, with the
+  sandboxed program already finished and its full output already sitting on
+  disk. `executor.execute_stream`'s progress loop polled `proc.wait()` in a
+  0.25s cycle and only drained stdout/stderr afterward, via
+  `proc.communicate()` — but `wait()` never reads a byte, and the Rust
+  binary's one write to that pipe is its entire final JSON result, output
+  and all. Once #269's ceiling raise (64 KiB to 240 KiB) let a result
+  exceed the OS pipe buffer (64 KiB, `F_GETPIPE_SZ`'s Linux default) or
+  asyncio's own `StreamReader` backpressure limit (also 64 KiB), the child
+  blocked inside `write()` with room in the pipe left unfilled — and
+  nothing was ever going to unblock it, because the loop's own exit
+  condition (`proc.returncode` becoming set) was exactly the write it was
+  blocked on. Reproduced live on this host: a `--timeout 30
+  --max-output-kb 240` run sat 18 minutes with no child process, state S,
+  `wchan anon_pipe_write`, and a workdir whose `run.out` already held the
+  full ~960 KiB the program had printed — the kind of hang two earlier
+  reports described as "a stray codecalc-exec `--timeout 30` outlived its
+  own timeout by >500s", because the executor's `--timeout` bounds only
+  the sandboxed program, never this write-the-result phase. Measured
+  locally: the exact 983,040-byte shape hung the unpatched code on roughly
+  1 run in 3 (asyncio's backpressure pause is itself timing-dependent — a
+  synthetic 5 MB result hung it reliably) and a raw `subprocess.Popen` with
+  nothing reading its stdout hung on every run, 20/20. `execute_stream` now
+  starts `proc.communicate()` as a background task BEFORE the progress loop
+  begins polling `run.out`, so the pipe is drained continuously from the
+  moment the child is spawned regardless of how large the eventual result
+  is; the loop's own exit condition is now the drain task finishing, not a
+  bare `wait()`. Every other `subprocess`/`create_subprocess_exec` call
+  site in `codecalc/*.py` was audited for the same "wait before drain"
+  shape and found to already drain concurrently: the non-streaming Rust
+  path (`_execute_uncontracted`) uses `proc.communicate()` directly (drains
+  internally via threads), the pure-Python fallback (`_run_step`) spawns
+  dedicated drain threads before its poll loop starts, and the session
+  REPL workers (`sessions.Worker`) read their response pipe with a blocking
+  `readline()` that pulls bytes continuously rather than waiting on process
+  exit — none of those needed a change. A Rust-side bound on the write
+  phase itself (so an executor whose parent has wedged, rather than died,
+  cannot sit in `anon_pipe_write` forever either) was considered and left
+  as a follow-up rather than added here: a dead parent's read end closes on
+  process exit, and neither `executor/src/platform/unix.rs` nor any other
+  Rust source in this repo installs a custom `SIGPIPE` handler, so the
+  existing "parent already gone" case already fails fast (`EPIPE`/default
+  `SIGPIPE`) rather than hanging — only a parent that is alive but stuck
+  elsewhere (a materially different bug) would still find this phase
+  unbounded, and a watchdog thread precise enough to bound it without ever
+  firing on a merely-slow drain is not a small enough change to land
+  alongside this fix.
+
 ## [0.10.0] — 2026-09-08
 
 ### Fixed
@@ -335,54 +385,6 @@ behind it.
   `correction`/`effective_alpha` to `optimization_verification.inference`,
   and an optional `reason` to `inference.sizes_below_floor` entries excluded
   for one of the two new reasons above; see `docs/contract/README.md`.
-- `execute_code_stream` on the Rust backend could hang forever, with the
-  sandboxed program already finished and its full output already sitting on
-  disk. `executor.execute_stream`'s progress loop polled `proc.wait()` in a
-  0.25s cycle and only drained stdout/stderr afterward, via
-  `proc.communicate()` — but `wait()` never reads a byte, and the Rust
-  binary's one write to that pipe is its entire final JSON result, output
-  and all. Once #269's ceiling raise (64 KiB to 240 KiB) let a result
-  exceed the OS pipe buffer (64 KiB, `F_GETPIPE_SZ`'s Linux default) or
-  asyncio's own `StreamReader` backpressure limit (also 64 KiB), the child
-  blocked inside `write()` with room in the pipe left unfilled — and
-  nothing was ever going to unblock it, because the loop's own exit
-  condition (`proc.returncode` becoming set) was exactly the write it was
-  blocked on. Reproduced live on this host: a `--timeout 30
-  --max-output-kb 240` run sat 18 minutes with no child process, state S,
-  `wchan anon_pipe_write`, and a workdir whose `run.out` already held the
-  full ~960 KiB the program had printed — the kind of hang two earlier
-  reports described as "a stray codecalc-exec `--timeout 30` outlived its
-  own timeout by >500s", because the executor's `--timeout` bounds only
-  the sandboxed program, never this write-the-result phase. Measured
-  locally: the exact 983,040-byte shape hung the unpatched code on roughly
-  1 run in 3 (asyncio's backpressure pause is itself timing-dependent — a
-  synthetic 5 MB result hung it reliably) and a raw `subprocess.Popen` with
-  nothing reading its stdout hung on every run, 20/20. `execute_stream` now
-  starts `proc.communicate()` as a background task BEFORE the progress loop
-  begins polling `run.out`, so the pipe is drained continuously from the
-  moment the child is spawned regardless of how large the eventual result
-  is; the loop's own exit condition is now the drain task finishing, not a
-  bare `wait()`. Every other `subprocess`/`create_subprocess_exec` call
-  site in `codecalc/*.py` was audited for the same "wait before drain"
-  shape and found to already drain concurrently: the non-streaming Rust
-  path (`_execute_uncontracted`) uses `proc.communicate()` directly (drains
-  internally via threads), the pure-Python fallback (`_run_step`) spawns
-  dedicated drain threads before its poll loop starts, and the session
-  REPL workers (`sessions.Worker`) read their response pipe with a blocking
-  `readline()` that pulls bytes continuously rather than waiting on process
-  exit — none of those needed a change. A Rust-side bound on the write
-  phase itself (so an executor whose parent has wedged, rather than died,
-  cannot sit in `anon_pipe_write` forever either) was considered and left
-  as a follow-up rather than added here: a dead parent's read end closes on
-  process exit, and neither `executor/src/platform/unix.rs` nor any other
-  Rust source in this repo installs a custom `SIGPIPE` handler, so the
-  existing "parent already gone" case already fails fast (`EPIPE`/default
-  `SIGPIPE`) rather than hanging — only a parent that is alive but stuck
-  elsewhere (a materially different bug) would still find this phase
-  unbounded, and a watchdog thread precise enough to bound it without ever
-  firing on a merely-slow drain is not a small enough change to land
-  alongside this fix.
-
 ## [0.9.0] — 2026-09-07
 
 Headline changes since 0.8.0: the runner's own scratch files moved into a
