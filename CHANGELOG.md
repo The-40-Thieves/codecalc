@@ -171,6 +171,22 @@ behind it.
   place that bridges it to the async `ctx.report_progress` via
   `anyio.from_thread.run(...)`, the same pattern the resource-change
   notifications above use.
+- `scripts/tool_select_llm_eval.py` — the MODEL-driven half of the
+  tool-selection eval `scripts/tool_select_eval.py`'s own docstring says its
+  BM25 selector "cannot tell you whether an actual LLM tool-selector would
+  pick correctly." This calls a real chat model over an OpenAI-compatible
+  `/chat/completions` endpoint (`CODECALC_EVAL_BASE_URL`/`CODECALC_EVAL_API_KEY`,
+  env only — never a CLI argument, never logged), offering the exact tool
+  catalog (name + description + `inputSchema`) an MCP client would see via
+  `tools/list`, per `full`/`dev`/`core` group. Two calls per prompt (a real
+  `tools=[...]` call for top-1, a ranked-list call for top-3, with the
+  second serving as the top-1 fallback when a model has no function-calling
+  support), a resumable on-disk cache keyed by `(model, group, prompt)`, and
+  an advisory (non-blocking by default; `--strict` to fail) regression
+  compare against a checked-in baseline. See `docs/tool-selection-eval.md`
+  for the measured numbers next to the BM25 baseline. A new
+  `tool-select-llm-eval` CI job (`workflow_dispatch` only, gated on the
+  `CODECALC_EVAL_API_KEY` secret) runs it live and uploads the JSON report.
 
 ### Fixed
 

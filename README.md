@@ -885,6 +885,12 @@ three of `full`/`dev`/`core`, wired into CI via
 `tests/test_tool_select_eval.py` so the gate is proven live, on every
 surface, on every run — not just at the PR that added it.
 
+BM25 is a lexical proxy, not a model — `scripts/tool_select_llm_eval.py` is
+the model-driven half, calling a real chat model over a live gateway with
+the identical tool catalog and labeled corpus; it is opt-in (`workflow_dispatch`,
+advisory rather than a hard gate) rather than wired into every PR, and its
+measured numbers live in `docs/tool-selection-eval.md` next to BM25's own.
+
 ## Reducing the tool surface
 
 For an operator who would rather not configure every client, codecalc also has
