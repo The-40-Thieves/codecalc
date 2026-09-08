@@ -37,7 +37,7 @@ import time
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from codecalc import executor, registry
+from codecalc import errors, executor, registry
 
 EXE = REPO_ROOT / "bin" / ("codecalc-exec.exe" if os.name == "nt" else "codecalc-exec")
 
@@ -558,12 +558,17 @@ for lang, tool in TOOLCHAIN.items():
 # codecalc/doctor.py — see tests/test_doctor.py) and `execute_code` failed at
 # the COMPILE step's spawn with a bare `exit_code -2, stderr "spawn failed:
 # No such file or directory (os error 2)"` — naming neither the phase nor
-# which binary was missing. Reproduced here with a fake, WORKING `java` and
-# no `kotlinc` anywhere on the sandbox PATH, on both backends: the compile
+# which binary was missing, AND `-2` was a Rust-internal sentinel with no
+# meaning to a caller. Reproduced here with a fake, WORKING `java` and no
+# `kotlinc` anywhere on the sandbox PATH, on both backends: the compile
 # spawn failure must come back as the SAME coded, non-crashing "runtime
 # unavailable" shape a language with no compile step at all gets when its
-# sole command is missing — never a raised exception, and never phase="run"
-# (the failure is in compiling, not in running a binary that was never built).
+# sole command is missing — never a raised exception, never phase="run" (the
+# failure is in compiling, not in running a binary that was never built),
+# and — as of the fix that also gives this failure an `error` key
+# `errors.ensure_code` classifies `runtime_unavailable` — `exit_code: null`
+# on BOTH backends, the SAME convention as any other "nothing spawned"
+# result (see docs/contract/README.md).
 _kotlin_fixture_dir = pathlib.Path(tempfile.mkdtemp(prefix="codecalc-kotlin-fixture-"))
 _fixture_java = _kotlin_fixture_dir / ("java.bat" if os.name == "nt" else "java")
 if os.name == "nt":
@@ -595,12 +600,20 @@ if EXE.exists():
               f"-> {r.get('stderr')!r}")
         check("rust: ...and names the actual missing binary (kotlinc)",
               "kotlinc" in (r.get("stderr") or ""), f"-> {r.get('stderr')!r}")
-        # exit_code -2 is main.rs's existing "nothing spawned" sentinel — the
-        # SAME one a language with no compile step gets when ITS sole
-        # command is missing (run_step() is one function for both phases).
-        check("rust: ...exit_code is the same sentinel a missing single "
-              "command gets, not something bespoke to compile failures",
-              r.get("exit_code") == -2, f"-> {r.get('exit_code')!r}")
+        # null, not the OLD Rust-internal `-2` sentinel: "nothing spawned"
+        # now reads the same way on a compile failure as it does on a
+        # missing single-command runtime, and as the Python fallback's own
+        # `_runtime_unavailable_result` always has (see
+        # docs/contract/README.md's "null means not measured" convention).
+        check("rust: ...exit_code is null (nothing spawned), same convention "
+              "as a missing single-command runtime, not Rust's old -2 sentinel",
+              r.get("exit_code") is None, f"-> {r.get('exit_code')!r}")
+        # `error` (not just `stderr`) is what `errors.ensure_code` reads —
+        # this is the fact the whole fix exists to establish: a caller sees
+        # the SAME code regardless of which backend answered.
+        check("rust: ...classifies runtime_unavailable via ensure_code",
+              errors.ensure_code(dict(r)).get("code") == errors.RUNTIME_UNAVAILABLE,
+              f"-> {errors.ensure_code(dict(r)).get('code')!r} error={r.get('error')!r}")
 else:
     skip("rust: kotlin missing-compiler fixture", "codecalc-exec not built")
 
@@ -625,14 +638,16 @@ check("python fallback: ...names both the phase and the missing binary",
       "runtime unavailable" in (fb.get("stderr") or "")
       and "kotlinc" in (fb.get("stderr") or ""),
       f"-> {fb.get('stderr')!r}")
-# The Python fallback's coded sentinel for "nothing spawned" is exit_code
-# None (see executor._runtime_unavailable_result), not Rust's -2 — a
-# DIFFERENT but equally coded shape, same as a single-command language's
-# missing runtime gets on this backend. Never -2: that is Rust's sentinel,
-# and the two backends must not be confused for one another here.
+# The Python fallback's sentinel for "nothing spawned" has always been
+# exit_code None (see executor._runtime_unavailable_result) — the SAME
+# convention the Rust backend now also uses for this failure (it used to
+# report its own internal `-2` here instead; see the "rust:" checks above).
 check("python fallback: ...exit_code is None, its OWN not-installed "
       "sentinel — same as a missing single-command runtime gets here",
       fb.get("exit_code") is None, f"-> {fb.get('exit_code')!r}")
+check("python fallback: ...classifies runtime_unavailable via ensure_code",
+      errors.ensure_code(dict(fb)).get("code") == errors.RUNTIME_UNAVAILABLE,
+      f"-> {errors.ensure_code(dict(fb)).get('code')!r} error={fb.get('error')!r}")
 
 shutil.rmtree(_kotlin_fixture_dir, ignore_errors=True)
 

@@ -1,7 +1,27 @@
 # The codecalc result contract
 
-**Current version: `1.8.0`** · Schema: [`result-v1.schema.json`](result-v1.schema.json) ·
+**Current version: `1.9.0`** · Schema: [`result-v1.schema.json`](result-v1.schema.json) ·
 Source of truth: [`codecalc/contract.py`](../../codecalc/contract.py)
+
+`1.9.0` is a MINOR bump over `1.8.0`. A spawn failure — the requested
+language's runtime or compiler could not be launched at all, typically
+because it is not installed — used to reach a caller two different ways
+depending on backend: the pure-Python fallback set `error` (and
+`code_inferred` classified it `runtime_unavailable`), while the native Rust
+executor put the identical fact only in `stderr` and left `error` unset,
+which classified it `internal` — the wrong remedy for "install the
+language". Both backends now set `error` for this failure (worded to start
+"runtime unavailable for the ... phase: ..."), and both now report
+`exit_code: null` rather than the Rust backend's previous internal sentinel
+`-2` — the SAME convention the contract already documented for "nothing ran"
+elsewhere (see "Truncation, and how much was cut" below). The `error`
+property itself is not new — it already appeared in the schema's execution
+envelope shape (shared with the dead-session-worker shape) — so nothing
+about the SCHEMA changed at this bump, only what a real spawn-failure result
+now populates: a `1.8.0` client already tolerant of an absent `error` on the
+envelope shape sees no shape it cannot parse, and one that reads `error`
+when present now gets it on a failure it previously had to infer from
+`stderr` prose — hence MINOR, not MAJOR.
 
 `1.8.0` is a MINOR bump over `1.7.0`. It ADDS a `probe_error` field to the
 `doctor` diagnostic document's `runtimes[]` entries, present whenever a
@@ -659,6 +679,54 @@ request has a `code` and no `verdict`.
   "workdir": "/tmp/codecalc-1788693-320c67bb"
 }
 ```
+
+### Spawn failure (a missing runtime)
+
+Still an execution envelope — `verdict` is present, because the code ran as
+far as it could — but `exit_code` is `null` for the SAME reason as the
+timeout above: the process never produced a real exit status. `error` names
+the phase and the binary that could not be launched; a caller at the MCP
+tool boundary (where `errors.ensure_code` runs) sees this classified `code:
+"runtime_unavailable"` from that text.
+
+```json
+{
+  "ok": false,
+  "contract_version": "1.9.0",
+  "language": "lua",
+  "phase": "run",
+  "backend": "rust",
+  "platform": "linux",
+  "stdout": "",
+  "stderr": "runtime unavailable for the run phase: \"lua\" not found (No such file or directory (os error 2))",
+  "exit_code": null,
+  "timed_out": false,
+  "verdict": "RTE",
+  "output_truncated": false,
+  "output_error": null,
+  "stdout_bytes": null,
+  "stderr_bytes": null,
+  "duration_ms": 19,
+  "compile_ms": 0,
+  "total_ms": 19,
+  "cpu_ms": 0,
+  "peak_memory_kb": 0,
+  "unenforced": [],
+  "workdir": "/tmp/codecalc-1965350-399f7fd9",
+  "error": "runtime unavailable for the run phase: \"lua\" not found (No such file or directory (os error 2))"
+}
+```
+
+`stderr` and `error` carry the identical text here — the Rust binary's own
+spawn-failure message already says "runtime unavailable"; `error` exists
+so a caller can read it as a stable machine-facing field rather than
+parsing `stderr` prose, not because the two texts need to differ.
+
+A compile-then-run language missing its COMPILER reports the identical
+shape with `"phase": "compile"` instead. `stdout_bytes`/`stderr_bytes` are
+`null` rather than `0` on EITHER phase — nothing spawned, so there is no
+program output to have counted (see "Truncation, and how much was cut"
+above).
 
 ### Rejected before execution
 

@@ -51,7 +51,7 @@ from . import errors, grades
 #: each component is allowed to change — the short form is that MAJOR is the
 #: only one that may break a reader, and it carries a twelve-month deprecation
 #: window before anything is removed.
-CONTRACT_VERSION = "1.8.0"
+CONTRACT_VERSION = "1.9.0"
 
 # THE `$schema` AND `$id` URIs ARE NOT HERE ON PURPOSE.
 #
@@ -705,6 +705,19 @@ def build_schema(dialect: str | None = None, schema_id: str | None = None) -> di
                     },
                     "workdir": {"type": "string"},
                     "dependencies": _dependencies_property(),
+                    # `code`/`error`/`remedy`/`code_inferred` on an envelope
+                    # that DID reach a runtime, not just on the short
+                    # `rejected` shape below: a spawn failure (a missing
+                    # runtime/compiler) still carries `verdict` — the code
+                    # ran as far as it could — but a caller needs the same
+                    # `code`/`error` pair every OTHER failure gets. 1.9.0
+                    # is the first version either backend actually SETS
+                    # `error` here (see docs/contract/README.md); this
+                    # `properties` entry already declared it beforehand
+                    # because `_error_properties()` is shared with the
+                    # dead-worker session shape, so no schema property
+                    # changed shape at this bump — only what a real result
+                    # populates.
                     **{k: v for k, v in _error_properties().items() if k != "ok"},
                 },
             },

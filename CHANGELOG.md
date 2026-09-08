@@ -79,6 +79,17 @@ behind it.
   `internal` rather than `runtime_unavailable` (the Python fallback, whose
   envelope carries `error`, classifies it correctly); pre-existing, not
   fixed here, tracked separately (#280).
+- Closing that gap: a Rust-backend spawn failure now sets an `error` key
+  too (previously only `stderr`), worded to start "runtime unavailable for
+  the ... phase: ..." so `errors.ensure_code` classifies it
+  `runtime_unavailable` instead of `internal`, matching the pure-Python
+  fallback's existing classification of the identical failure. `exit_code`
+  is now `null` on both backends for this case (the fallback's existing
+  convention — the prior Rust-only sentinel `-2` carried no meaning to a
+  caller), and the Python fallback's mapping of a raw Rust result now also
+  recognises an OLDER binary's stderr-only shape via a `"runtime
+  unavailable"` prefix match, so a caller gets the same classification
+  regardless of which binary answered (#280).
 
 ## [0.9.0] — 2026-09-07
 
