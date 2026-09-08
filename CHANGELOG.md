@@ -10,9 +10,9 @@ This project versions **two** things, and they are not the same number.
 | What | Where | Current |
 |---|---|---|
 | The **package** — the tool surface, the CLI, the Python API | `pyproject.toml`, `executor/Cargo.toml`, this file | see `version` in [`pyproject.toml`](pyproject.toml) — this cell is not re-typed on every release |
-| The **result contract** — the shape every tool result comes back in | `docs/contract/README.md`, `contract_version` on every result | `1.10.0` |
+| The **result contract** — the shape every tool result comes back in | `docs/contract/README.md`, `contract_version` on every result | `1.13.0` |
 
-The contract is at `1.10.0` and the package is at `0.x` because those claims are
+The contract is at `1.13.0` and the package is at `0.x` because those claims are
 genuinely different. The result contract has a published JSON Schema, a
 documented MAJOR/MINOR/PATCH policy, a twelve-month deprecation window, and a
 gate that fails if the schema drifts from the code — it is stable and says so.
@@ -51,6 +51,13 @@ behind it.
   (PyPI, crates.io, GitHub Releases, the MCP registry, Smithery, Glama,
   MCPB) and `docs/distribution.md` records the submission steps for the two
   directories that do not list codecalc yet (PulseMCP, mcp.so).
+<<<<<<< HEAD
+||||||| parent of 9db901b (docs: update tool/test counts for trace_execution, add CHANGELOG entry)
+||||||| parent of c491b51 (docs(docker): prepare a Docker MCP Catalog submission, unopened)
+=======
+<<<<<<< HEAD
+||||||| parent of c491b51 (docs(docker): prepare a Docker MCP Catalog submission, unopened)
+>>>>>>> 9db901b (docs: update tool/test counts for trace_execution, add CHANGELOG entry)
 - `docker/mcp-catalog/server.yaml` (+ `tools.json`, `readme.md`): a prepared
   submission for the [Docker MCP Catalog](https://hub.docker.com/mcp),
   targeting `docker/mcp-server.Dockerfile` (already shipped) as a
@@ -64,6 +71,7 @@ behind it.
   spinning up the container. Validated against the registry's own
   `task validate`/`task build --tools` tooling — see `docs/distribution.md`
   for the exact submission steps; this commit does not open that PR.
+<<<<<<< HEAD
 - **Argument completion (`completion/complete`) for `language`, `unit`,
   `provider`, `session_id` and `run_id`.** The 2026-07-28 wire only lets a
   completion request name a prompt or a resource template
@@ -154,6 +162,62 @@ behind it.
   place that bridges it to the async `ctx.report_progress` via
   `anyio.from_thread.run(...)`, the same pattern the resource-change
   notifications above use.
+||||||| parent of 9db901b (docs: update tool/test counts for trace_execution, add CHANGELOG entry)
+=======
+||||||| parent of c930ab8 (docs: update tool/test counts for trace_execution, add CHANGELOG entry)
+=======
+- **`trace_execution`** (53rd MCP tool, `execution` group): line-level execution
+  tracing for python3 — answers "which lines ran, in what order, and why did
+  this input produce that output", where `execute_code` only answers "what did
+  it print". Runs the submitted code through the SAME sandboxed executor
+  `execute_code` uses (Rust with the pure-Python fallback, both backends,
+  identical `stdout`/`stderr`/`exit_code`/`verdict`/timing) via a generated
+  harness that installs `sys.settrace`, execs the user's source from a
+  sibling file written at the run's workdir root, and streams JSON-lines
+  trace events into `.codecalc-run/` — the same scratch-directory-write/read-
+  after/caller-deletes pattern `execute_code_stream` already uses for
+  `run.out` (see `codecalc/tracing.py`'s module docstring). Returns the
+  standard envelope PLUS `events` (ordered `{step, line, event, func,
+  locals}` for user-code frames only, `event` one of line/call/return/
+  exception, `locals` holding only the names that CHANGED since the frame's
+  previous event, each repr capped at ~200 chars; `return` events also carry
+  `return_value`, `exception` events carry `exception_type`/
+  `exception_message`), `branches` (hit count per `if`/`elif`/`while`/`for`/
+  `try` line from a static AST parse), `lines_executed`/
+  `lines_never_executed`, and `truncated`/`truncated_reason` (`max_events` or
+  an internal trace-byte ceiling — RECORDING stops, the program always runs
+  to completion, so `stdout`/`exit_code`/`verdict` are always the real,
+  complete ones even when `events` is partial). A CPython trace-protocol
+  quirk — a spurious `return` event with `arg=None` fired for every frame an
+  exception is UNWINDING through, indistinguishable read naively from a
+  function that genuinely returned `None` — is tracked and suppressed, so a
+  `return` in `events` always means the function actually returned.
+  Python3-only in v1 (`sys.settrace` has no cross-language equivalent this
+  package can drive uniformly); any other `language` is refused
+  (`code: validation`, naming `execute_code` as the remedy) before anything
+  is spawned. A non-`local` `provider` is refused the same way: the harness's
+  own workdir-staging/reading contract only the local Rust/Python-fallback
+  executor can satisfy. New result contract shape `execution_trace`
+  (`docs/contract/README.md`, `CONTRACT_VERSION` `1.12.0` -> `1.13.0`, MINOR —
+  additive), discriminated from the plain `execution_envelope` shape by a
+  new `not: {required: [events]}` exclusion on that def (mirrors how
+  `compact`/`rejected` already exclude `backend`/`verdict`), so `oneOf`'s
+  "exactly one shape matches" claim still holds. `tests/test_trace_execution.py`
+  covers both backends: event order/changed-locals/branch counts/
+  `lines_never_executed` on an if/else+loop+function-call program, the
+  exception-unwind suppression above, the `max_events` cap (program
+  completes, trace is cut, `truncated_reason: "max_events"`), stdin
+  passthrough, byte-for-byte `stdout`/`exit_code`/`verdict` parity against
+  `execute_code` on three programs, `SyntaxError` parity (no `Traceback`
+  header, matching CPython's own uncaught-syntax-error convention), a
+  non-python refusal that spawns nothing (asserted via a tripwire on
+  `executor.execute`, not by absence-of-observation), a wall-clock timeout
+  (`verdict: TLE`, partial events, `truncated: false` — a sandbox kill is
+  disclosed via `verdict`/`timed_out`, not this tool's own two recording
+  caps), and no leaked `codecalc-exec` process after either a normal run or
+  a timeout kill.
+>>>>>>> c930ab8 (docs: update tool/test counts for trace_execution, add CHANGELOG entry)
+>>>>>>> 9db901b (docs: update tool/test counts for trace_execution, add CHANGELOG entry)
 
 ### Fixed
 
