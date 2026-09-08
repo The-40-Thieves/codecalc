@@ -503,14 +503,25 @@ if "bash" in registry.LANGUAGES:
     out = sessions.execute(sid, script, language="bash")
     stopped = sessions.stop(sid)
     d = pathlib.Path(started["workdir"])
+    held = pathlib.Path(str(d) + ".held")
     # Same distinction as the fallback case above: if the shell could not
     # perform the rename, the attack was never staged and stop() deleting its
     # own workdir is correct. Only assert the refusal where the swap actually
-    # happened.
-    if victim.exists():
+    # happened — which means BOTH renames, not just the second. Unlike the
+    # fallback case, a failed `mv` does not abort this script: on Windows the
+    # first `mv` (the shell's own cwd) is refused, the second then moves the
+    # victim INSIDE the still-present workdir, and "the victim is gone from
+    # its original path" alone read that as a staged swap. stop() deleting
+    # its own, identity-unchanged workdir (victim inside it) was correct,
+    # and the assertion that followed was measuring the wrong thing.
+    # Reproduced on windows-latest the first time a real `bash` resolved
+    # there (the fallback now spawns the sandbox-PATH-resolved binary, so
+    # Git's bash runs where the WSL stub used to fail).
+    if not held.exists() or victim.exists():
         skip("session workdir rename-swap",
-             "the platform refused the rename, so the victim is still at its "
-             f"original path and the attack was never staged: ok={out.get('ok')}")
+             "the platform refused the rename, so the attack was never "
+             f"staged: ok={out.get('ok')} held={held.exists()} "
+             f"victim_at_origin={victim.exists()}")
     else:
         check("session stop() does not delete a directory swapped in by rename",
               (d / "important.txt").is_file(),
@@ -518,7 +529,7 @@ if "bash" in registry.LANGUAGES:
         check("  ...and stop() reports deleted=False rather than lying",
               stopped.get("deleted") is False, f"-> {stopped}")
     shutil.rmtree(d, ignore_errors=True)
-    shutil.rmtree(pathlib.Path(str(d) + ".held"), ignore_errors=True)
+    shutil.rmtree(held, ignore_errors=True)
     shutil.rmtree(victim, ignore_errors=True)
 else:
     skip("session workdir rename-swap regression", "bash not registered")
