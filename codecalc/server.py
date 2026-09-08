@@ -57,6 +57,7 @@ from . import (
     optimization,
     packages,
     providers,
+    registry,
     run_supervisor,
     runtimes,
     sessions,
@@ -251,23 +252,22 @@ mcp = MCPServer(
     # visibility on. list_languages() was the other candidate and was
     # rejected: it returns a `list[dict]`, one entry per language, with no
     # natural top-level slot for a server-wide field, and a caller only sees
-    # it if they think to call that specific tool. This f-string is evaluated
-    # once, at import time, after `executor` above has already resolved
-    # `_rust` (and, with CODECALC_REQUIRE_NATIVE=1, already refused to import
-    # at all if it came up empty) — so what it reports is what this process
-    # actually has, not a static claim that can drift from it.
-    instructions=(
-        "Universal coding & logic calculator. Tools: list_languages (available "
-        "runtimes), execute_code (run code in 31 languages, returns stdout/"
-        "stderr/exit/time), evaluate_expression (symbolic math via SymPy), "
-        "truth_table (boolean logic), z3_check (SMT-LIB2 satisfiability), "
-        "solve_linear (systems of equations), analyze_complexity (static Big-O), "
-        "benchmark (empirical Big-O by running at increasing sizes), "
-        "compare_execution (same code across many languages). "
-        f"Execution backend: {executor.backend()} (rust = full sandbox "
-        "including no_net; python = fallback, no_net and peak_memory_kb "
-        "unenforced — see CODECALC_REQUIRE_NATIVE)."
-    ),
+    # it if they think to call that specific tool.
+    #
+    # Left `None` HERE on purpose: at this point in the module, `_tool()`
+    # has not been installed yet and not one `@mcp.tool()` line below has
+    # run, so neither `_ACTIVE_GROUPS` nor `TOOL_GROUPS` exist yet either. A
+    # PR #299 review caught the first version of this hardcoding "52 tools
+    # in 6 groups" and every tool name into a literal built HERE, at import
+    # time — correct only for the unconfigured default. A
+    # `CODECALC_TOOLS=core` (calculator only) or `dev` process still
+    # registers a SUBSET of tools/groups, decided later by `_active_groups()`
+    # below, but that static string kept advertising z3_check/execute_code/
+    # sessions tools/groups the process never registers. `_install_instructions()`,
+    # called at the bottom of this module after the last `@mcp.tool()` line
+    # has executed, replaces this with a routing map built from what
+    # actually got registered — see it and `_GROUP_ROUTING_TEXT` there.
+    instructions=None,
 )
 
 
@@ -357,6 +357,18 @@ TOOLS_ENV = "CODECALC_TOOLS"
 #: is active, so `doctor` can describe the groups a caller is NOT seeing —
 #: complete only once this module has finished importing.
 TOOL_GROUPS: dict[str, str] = {}
+
+#: Tool clusters Glama's public v0.5.0 review named as lexically
+#: indistinguishable from a description alone — a model reading `tools/list`
+#: could not tell `calc_exact` from `evaluate_expression`, or `bit_analysis`
+#: from `bitop`, without opening the docstrings. Kept as data here, not just
+#: prose in each docstring, so tests/test_tool_meta.py can assert every
+#: member's description names at least one of its own siblings without
+#: hand-copying (and silently drifting from) this exact list.
+DESCRIPTION_CLUSTERS: tuple[frozenset[str], ...] = (
+    frozenset({"evaluate_expression", "calc_exact", "solve_expression", "solve_linear", "z3_check"}),
+    frozenset({"bit_analysis", "bitop", "int_widths", "base_repr"}),
+)
 
 
 # ── Per-tool ToolAnnotations (readOnlyHint/destructiveHint/idempotentHint/ ─
@@ -528,6 +540,12 @@ _REQUIRES_USER_INTERACTION = frozenset({"install_package", "update_runtimes"})
 #: entry point (`execute_code`), the two equivalence/optimisation-proof tools
 #: verification exists for, and language discovery (`list_languages`), which
 #: a client typically needs before it can call any of the others correctly.
+#
+# COORDINATOR NOTE: `trace_execution` and `branch_reachability` were named as
+# candidates for this set, but neither exists as a tool on this branch —
+# adding either here (or anywhere) would be a new `@mcp.tool()` with nothing
+# to register, which is worse than leaving this comment. Add them to
+# `_ALWAYS_LOAD` once they land, not before.
 _ALWAYS_LOAD = frozenset({
     "calc_exact", "execute_code", "verify_translation", "verify_optimization", "list_languages",
 })
@@ -1479,12 +1497,12 @@ def run_cancel(run_id: str) -> dict[str, Any]:
 
 @mcp.tool(group="calculator")
 def evaluate_expression(expression: str) -> dict[str, Any]:
-    """Symbolically evaluate an expression to a value or closed form via
-    sympify: 'integrate(x**2, x)', 'sqrt(144) + 2**10'. Not simplification —
-    for simplified/factored/expanded forms, use simplify_expression. Not
-    exact numeric arithmetic on plain arithmetic — use calc_exact for that.
-    Returns `value` (if the result is a number) or the evaluated expression,
-    plus `type`."""
+    """Use evaluate_expression, not calc_exact, for something other than
+    plain arithmetic on literal values. Symbolically evaluate to a value or
+    closed form via sympify: 'integrate(x**2, x)', 'sqrt(144) + 2**10'. Not
+    simplification — for simplified/factored/expanded forms, use
+    simplify_expression. Returns `value` (if the result is a number) or the
+    evaluated expression, plus `type`."""
     return logic.evaluate_expression(expression)
 
 
@@ -1496,7 +1514,9 @@ def truth_table(expression: str) -> dict[str, Any]:
 
 @mcp.tool(group="verification")
 def z3_check(smt2: str) -> dict[str, Any]:
-    """Check an SMT-LIB2 formula with Z3: sat/unsat/unknown plus a model. Example:
+    """Use z3_check, not solve_expression, for satisfiability over
+    inequalities, boolean combinations, or several variables at once: sat/
+    unsat/unknown plus a model. Example:
     '(declare-const x Int)(assert (> x 5))(check-sat)'.
 
     `unsat` is graded `solver_proven` — see `grade_basis` for the engine
@@ -1511,7 +1531,9 @@ def z3_check(smt2: str) -> dict[str, Any]:
 
 @mcp.tool(group="calculator")
 def solve_linear(system: str, variables: str) -> dict[str, Any]:
-    """Solve a system of equations; `system` is ';'-separated equations, `variables` comma-separated. Example: system='x + y = 10; x - y = 2', variables='x, y'."""
+    """Use solve_linear, not solve_expression, for a system of equations
+    sharing variables. `system` is ';'-separated equations, `variables`
+    comma-separated. Example: system='x + y = 10; x - y = 2', variables='x, y'."""
     vars_ = [v.strip() for v in variables.split(",") if v.strip()]
     return logic.solve_linear(system, vars_)
 
@@ -1867,7 +1889,7 @@ def physical_constants(name: str | None = None) -> dict[str, Any]:
 
 @mcp.tool(group="calculator")
 def list_units() -> dict[str, Any]:
-    """List every supported unit alias for convert_units."""
+    """List every supported unit alias — all aliases and spellings — for convert_units."""
     return units.list_units()
 
 
@@ -1875,7 +1897,9 @@ def list_units() -> dict[str, Any]:
 
 @mcp.tool(group="calculator")
 def calc_exact(expr: str) -> dict[str, Any]:
-    """EXACT arithmetic: 0.1 + 0.2 == 0.3 is True here (False in plain Python).
+    """Use calc_exact, not evaluate_expression, for a literal arithmetic
+    expression with no symbols in it. EXACT arithmetic: 0.1 + 0.2 == 0.3 is
+    True here (False in plain Python).
 
     Everything is an exact rational, integers are arbitrary precision. Supports
     + - * / // % ** comparisons, bitwise ops (& | ^ << >> ~) on integers, and
@@ -1947,11 +1971,11 @@ def data_sizes(n: int) -> dict[str, Any]:
 
 @mcp.tool(group="calculator")
 def human_duration(seconds: float) -> dict[str, Any]:
-    """Humanised duration (e.g. '2d 3h 4m 5s') plus per-day and per-30d rates
-    for a number of seconds. For converting an epoch timestamp to a calendar
-    date, use epoch_time — this tool is for elapsed time, not a point in
-    time. For byte counts, not seconds, use data_sizes. Returns `human`,
-    `per_day`, `per_30d`, and the echoed `seconds`."""
+    """Convert a SPAN of elapsed seconds (not a point-in-time timestamp) into
+    a humanised duration (e.g. '2d 3h 4m 5s') plus per-day and per-30d rates.
+    For an epoch timestamp to a calendar date, use epoch_time instead. For
+    byte counts, not seconds, use data_sizes. Returns `human`, `per_day`,
+    `per_30d`, and the echoed `seconds`."""
     return exact.human_duration(seconds)
 
 
@@ -1964,7 +1988,8 @@ def epoch_time(n: str) -> dict[str, Any]:
 
 @mcp.tool(group="calculator")
 def base_repr(n: int, width: int | None = None) -> dict[str, Any]:
-    """hex/oct/bin of N; with WIDTH, two's complement and signed-overflow
+    """Use base_repr, not int_widths, for a single specified width. hex/
+    oct/bin of N; with WIDTH, two's complement and signed-overflow
     detection. `base_repr(3000000000, 32)` says plainly it does not fit i32."""
     return exact.base_repr(n, width)
 
@@ -1988,7 +2013,8 @@ def float_repr(x: float) -> dict[str, Any]:
 
 @mcp.tool(group="calculator")
 def int_widths(n: int) -> dict[str, Any]:
-    """Which widths (i8..i64/u8..u64) hold N, and the wrapped value where they
+    """Use int_widths, not base_repr, to scan across widths, not just one.
+    Which widths (i8..i64/u8..u64) hold N, and the wrapped value where they
     do not. Flags anything past 2^53 as unable to round-trip through a JS
     number or JSON float. `int_widths(3000000000)` shows the i32 wrap."""
     return exact.int_widths(n)
@@ -1996,15 +2022,18 @@ def int_widths(n: int) -> dict[str, Any]:
 
 @mcp.tool(group="calculator")
 def bit_analysis(n: int, align: int | None = None) -> dict[str, Any]:
-    """popcount, bit length, trailing zeros, power-of-two check, next power of
-    two, and (with align) padding needed to reach an alignment boundary."""
+    """Use bit_analysis, not bitop, for facts about a single N: popcount,
+    bit length, trailing zeros, power-of-two check, next power of two, and
+    (with align) padding needed to reach an alignment boundary."""
     return exact.bit_analysis(n, align)
 
 
 @mcp.tool(group="calculator")
 def bitop(a: int, op: str, b: int | None = None, width: int = 64) -> dict[str, Any]:
-    """Programmer-mode bit ops: and or xor nand nor xnor not shl shr sar rol ror
-    at width 8/16/32/64. Every result shows unsigned, signed (two's complement),
+    """Use bitop, not bit_analysis, to apply an operation (and/or/xor/not/
+    shifts/rotates) rather than describe a value. Programmer-mode bit ops:
+    and or xor nand nor xnor not shl shr sar rol ror at width 8/16/32/64.
+    Every result shows unsigned, signed (two's complement),
     hex, octal and binary. shr is logical (zero-fill); sar is arithmetic
     (sign-propagating) — 0x80 shr 1 = 0x40 (+64) but 0x80 sar 1 = 0xC0 (-64).
     A left shift that drops bits says OVERFLOW and shows the unbounded answer.
@@ -2022,9 +2051,9 @@ def algebraic_equiv(a: str, b: str) -> dict[str, Any]:
 
 @mcp.tool(group="calculator")
 def solve_expression(expr: str, var: str = "x") -> dict[str, Any]:
-    """Solve a single equation in one variable for its roots or crossover
-    point: 'x**2 - 4 = 0', '2*x + 1 = 7'. For a system of several equations,
-    use solve_linear. For general constraint satisfiability (inequalities,
+    """Use solve_expression, not z3_check, for the roots of one equation:
+    'x**2 - 4 = 0', '2*x + 1 = 7'. For a system of several equations, use
+    solve_linear. For general constraint satisfiability (inequalities,
     boolean constraints, multiple solvers), use z3_check. Returns
     `solutions` as a list of strings alongside the parsed `equation` and
     `variable`."""
@@ -2041,11 +2070,10 @@ def limit_expression(expr: str, var: str = "x", point: str = "oo") -> dict[str, 
 
 @mcp.tool(group="calculator")
 def simplify_expression(expr: str) -> dict[str, Any]:
-    """Simplified, factored, and expanded forms of an expression —
-    algebraic rewriting, not solving and not a numeric value. For roots of
-    an equation, use solve_expression. For an exact numeric result, use
-    calc_exact. Returns `simplified`, `factored`, and `expanded` as strings
-    alongside the parsed `original`."""
+    """Simplify, factor, and expand an expression — algebraic forms, not
+    solving (use solve_expression) and not a numeric value (use
+    calc_exact). Returns `simplified`, `factored`, and `expanded` as
+    strings alongside the parsed `original`."""
     return exact.simplify_expression(expr)
 
 
@@ -2154,11 +2182,115 @@ def extract_function(code: str, language: str, function_name: str,
                                          call=call, test_inputs=test_inputs)
 
 
+# ── instructions: a routing map for what THIS process actually registers ───
+# Every `@mcp.tool()` line above has now run, so `_ACTIVE_GROUPS` and
+# `TOOL_GROUPS` are complete — see the long comment on `instructions=None`
+# in the `MCPServer(...)` construction above for why this could not be a
+# literal there.
+
 #: Registry entries that are a second spelling of a language already counted,
 #: not a language of their own. Mirrors ALIAS_ENTRIES in scripts/check_claims.py
-#: — the count this command prints has to agree with the one the README states
-#: and the gate enforces, or it is just a fourth opinion.
+#: — the count this command prints (and the one `_GROUP_ROUTING_TEXT`'s
+#: "execution" entry states below) has to agree with the one the README
+#: states and the gate enforces, or it is just a fourth opinion. Defined
+#: here, ahead of `_tool_groups_report()` below where a caller might expect
+#: it, because `_GROUP_ROUTING_TEXT` (immediately below) is a dict literal
+#: whose values evaluate immediately and already needs it.
 _ALIAS_ENTRIES = {"c++"}
+
+#: One intent-routing sentence per KNOWN_GROUPS member, hand-written (not
+#: derived from each tool's own docstring) so this text stays independent
+#: of whatever wording the tool-select eval's BM25 scoring is sensitive to
+#: on that OTHER surface — `_build_instructions()` below picks only the
+#: entries whose key is in `_ACTIVE_GROUPS`, so a `CODECALC_TOOLS=core`
+#: process's instructions never names a tool or group it did not register.
+_GROUP_ROUTING_TEXT: dict[str, str] = {
+    "calculator": (
+        "math/logic/units/numbers: evaluate_expression (symbolic, has "
+        "variables/calculus) vs calc_exact (exact arithmetic on literal "
+        "numbers); simplify_expression (rewrite forms) vs solve_expression "
+        "(one-variable roots) vs solve_linear (systems); truth_table "
+        "(boolean logic); matrix, calc_stats, percentiles, percentage, "
+        "compare_threshold, limit_expression, collision_probability; "
+        "bit_analysis (one value's bit layout) vs bitop (apply an "
+        "operation) vs int_widths (which widths hold N) vs base_repr "
+        "(hex/oct/bin at a width) vs radix_convert (base-to-base); "
+        "float_repr, data_sizes, human_duration (elapsed seconds), "
+        "epoch_time (timestamp to date); convert_units, list_units, "
+        "physical_constants."
+    ),
+    "verification": (
+        "z3_check (SMT satisfiability) vs solve_expression (one equation's "
+        "roots); algebraic_equiv (symbolic identity); "
+        "verify_translation/verify_optimization (prove two programs match "
+        "by running both); compare_edge_cases (find divergent inputs)."
+    ),
+    "execution": (
+        f"run code ({len(set(registry.LANGUAGES) - _ALIAS_ENTRIES)} "
+        "languages): execute_code (one-shot) / execute_code_stream (live "
+        "output) / compare_execution (many languages); list_languages, "
+        "list_execution_providers, runtimes_status."
+    ),
+    "sessions": (
+        "persistent workspace + background runs: "
+        "session_start/session_run/session_stop; "
+        "session_files/session_read_file/session_write_file/"
+        "session_artifacts (workspace I/O); "
+        "run_submit/run_inspect/run_cancel (async execution)."
+    ),
+    "analysis": (
+        "analyze_complexity (static Big-O) / benchmark (measured Big-O) / "
+        "extract_function."
+    ),
+    "admin": "mutates the host: install_package, update_runtimes.",
+}
+
+def _build_instructions() -> str:
+    """Routing map for exactly what `_ACTIVE_GROUPS` registered.
+
+    Called once, after every `@mcp.tool()` line has executed (see the call
+    site below), so `TOOL_GROUPS`/`_ACTIVE_GROUPS` are both complete and the
+    "N tools in K groups" lead sentence is counted from the live registry,
+    never a hand-typed number that could drift from it — the same class of
+    bug `check_claims.py` exists to catch on the README, now avoided here
+    by construction instead. Kept under ~1,800 characters for the default
+    (every-group) case; a narrower `CODECALC_TOOLS` only shrinks it further.
+    NOT part of the tool-select eval's corpus: scripts/tool_select_eval.py
+    scores `"<name> <description>"` per tool from the live registry only
+    (`_doc_text`), never `mcp.instructions`.
+    """
+    active_order = [g for g in ("calculator", "verification", "execution",
+                                "sessions", "analysis", "admin") if g in _ACTIVE_GROUPS]
+    n_tools = sum(1 for g in TOOL_GROUPS.values() if g in _ACTIVE_GROUPS)
+    lead = (
+        f"Universal coding & logic calculator, {n_tools} tool"
+        f"{'s' if n_tools != 1 else ''} in {len(active_order)} group"
+        f"{'s' if len(active_order) != 1 else ''} — pick by intent."
+    )
+    group_sentences = [f"{g} ({_GROUP_ROUTING_TEXT[g]})" for g in active_order]
+    backend_note = (
+        f"Execution backend: {executor.backend()} (rust = full sandbox "
+        "including no_net; python = fallback, no_net and peak_memory_kb "
+        "unenforced — see CODECALC_REQUIRE_NATIVE)."
+    )
+    return " ".join([lead, *group_sentences, backend_note])
+
+
+def _install_instructions() -> None:
+    """Set `mcp.instructions` from `_build_instructions()`.
+
+    `MCPServer.instructions` is a read-only property backed by
+    `self._lowlevel_server.instructions`, which the SDK itself sets with a
+    plain `self.instructions = instructions` assignment
+    (`mcp/server/lowlevel/server.py`, `mcp` 2.0.0, verified against the
+    installed venv) — a plain attribute, not a validated setter, so
+    reassigning it post-construction is the SDK's own pattern, not a
+    monkeypatch of private state.
+    """
+    mcp._lowlevel_server.instructions = _build_instructions()
+
+
+_install_instructions()
 
 
 def _tool_groups_report() -> dict:
