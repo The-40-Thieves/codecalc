@@ -51,6 +51,20 @@ behind it.
   (PyPI, crates.io, GitHub Releases, the MCP registry, Smithery, Glama,
   MCPB) and `docs/distribution.md` records the submission steps for the two
   directories that do not list codecalc yet (PulseMCP, mcp.so).
+||||||| parent of c491b51 (docs(docker): prepare a Docker MCP Catalog submission, unopened)
+- `docker/mcp-catalog/server.yaml` (+ `tools.json`, `readme.md`): a prepared
+  submission for the [Docker MCP Catalog](https://hub.docker.com/mcp),
+  targeting `docker/mcp-server.Dockerfile` (already shipped) as a
+  Docker-built image (`mcp/codecalc`) so it gets Docker's own signatures,
+  SBOM, provenance and Docker Desktop listing rather than a self-hosted
+  image. `tools.json` is the live `tools/list` response from that exact
+  image (52 tools — `CODECALC_TOOLS` is unset in the image, which registers
+  every group; the symbolic-extra tools among them already report "extra
+  not installed" rather than erroring, per the image's existing documented
+  tradeoff), so the registry's own `build --tools` reads it instead of
+  spinning up the container. Validated against the registry's own
+  `task validate`/`task build --tools` tooling — see `docs/distribution.md`
+  for the exact submission steps; this commit does not open that PR.
 
 ### Fixed
 
