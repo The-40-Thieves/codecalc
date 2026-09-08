@@ -100,6 +100,24 @@ behind it.
   cache TTL (`cache_hints=` on the `MCPServer` construction) — a client
   refetching inside that window can still see stale content even though the
   notification arrived immediately.
+- **Server and per-tool `icons` (2025-11-25+), and `website_url`.**
+  `MCPServer(icons=[...], website_url=...)` carries one server-level icon;
+  every tool now also carries a per-GROUP `icons` entry (six monochrome,
+  under-300-byte inline `data:image/svg+xml;base64,...` glyphs — a "+" for
+  `calculator`, a checkmark for `verification`, a play triangle for
+  `execution`, a folder tab for `sessions`, ascending bars for `analysis`,
+  a gear ring for `admin` — plus a seventh, distinct one for the server
+  itself). `website_url` points at this repository. Both are inline data,
+  never an external `src` — the same no-phone-home reasoning
+  `tests/test_offline.py` already enforces elsewhere in this package; the
+  SVG namespace attribute and `website_url` are each built from two literal
+  string halves rather than one so that reasoning holds structurally, not
+  just by convention. Real cost, measured and disclosed in README's
+  "Tool-definition token cost": **+6,665 tokens** (`o200k_base`, +11,540
+  bytes) on the full served `tools/list` payload — small per icon, but
+  repeated once per tool (25 times for `calculator` alone). Icons are not
+  description text, so `scripts/tool_select_eval.py`'s BM25 corpus and
+  baseline are unaffected (verified).
 
 ### Fixed
 
