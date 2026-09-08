@@ -51,7 +51,6 @@ behind it.
   (PyPI, crates.io, GitHub Releases, the MCP registry, Smithery, Glama,
   MCPB) and `docs/distribution.md` records the submission steps for the two
   directories that do not list codecalc yet (PulseMCP, mcp.so).
-||||||| parent of c491b51 (docs(docker): prepare a Docker MCP Catalog submission, unopened)
 - `docker/mcp-catalog/server.yaml` (+ `tools.json`, `readme.md`): a prepared
   submission for the [Docker MCP Catalog](https://hub.docker.com/mcp),
   targeting `docker/mcp-server.Dockerfile` (already shipped) as a
@@ -487,7 +486,6 @@ behind it.
   `code`/`error`/`remedy`/`code_inferred` are treated as non-droppable
   disclosure (same bucket as `unenforced`/`output_error`) so they survive
   the compaction that follows.
-||||||| parent of dca51c2 (fix: stop verify_optimization certifying identical code as a speedup)
 - **`verify_optimization` certified IDENTICAL before/after code as a verified
   speedup.** Reproduced live in CI (macOS sandbox job, native executor, main):
   `accepted=True` at a measured ratio of 1.21x, `sizes_rejecting` 2/3 —
