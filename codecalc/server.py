@@ -246,14 +246,15 @@ _session_service = execution_service.SessionService(audit=_audit_log)
 # rather than fighting it) in a 16x16 viewBox, evenodd cutout for the hole —
 # well under 300 bytes, base64 included.
 #
-# The SVG namespace attribute's value is built from two literal halves
-# rather than one, for the same reason `_WEBSITE_URL` below is: a bare
-# `"https?://..."` substring anywhere in this package's source is exactly
-# what tests/test_offline.py's outbound-URL scan is looking for, and this
-# one is a namespace declaration, not a fetch, but the scan cannot tell the
-# difference from source text alone.
+# The SVG namespace attribute below is a literal, plain string — NOT split
+# to dodge tests/test_offline.py's outbound-URL scan. That scan bans a
+# hardcoded phone-home endpoint; this is an XML namespace declaration every
+# valid standalone SVG document carries and nothing in this codebase (or any
+# SVG renderer) ever fetches. It is named explicitly in that test's own
+# `_URL_EXEMPTIONS` allowlist, the same mechanism already used for
+# example.com/localhost/127.0.0.1 — see the comment there for why.
 def _svg_icon(path_d: str, *, attrs: str = 'fill="currentColor"', rule: str | None = None) -> Icon:
-    ns = "http" + "://www.w3.org/2000/svg"
+    ns = "http://www.w3.org/2000/svg"
     fill_rule = f' fill-rule="{rule}"' if rule else ""
     svg = f'<svg xmlns="{ns}" viewBox="0 0 16 16"><path{fill_rule} {attrs} d="{path_d}"/></svg>'
     data = base64.b64encode(svg.encode("ascii")).decode("ascii")
@@ -273,9 +274,13 @@ _SERVER_ICON = _svg_icon(
     rule="evenodd",
 )
 
-#: `website_url` (MCPServer construction below) built from two literal
-#: halves for the same reason `_svg_icon`'s xmlns is — see that comment.
-_WEBSITE_URL = "http" + "s://github.com/The-40-Thieves/codecalc"
+#: `website_url` (MCPServer construction below) — a plain literal, NOT split
+#: to dodge tests/test_offline.py's outbound-URL scan. It is this
+#: repository's own homepage, published as metadata for a client to show a
+#: human; codecalc's own runtime never issues a request to it. Named
+#: explicitly in that test's `_URL_EXEMPTIONS` allowlist, same mechanism as
+#: `_svg_icon`'s xmlns above.
+_WEBSITE_URL = "https://github.com/The-40-Thieves/codecalc"
 
 mcp = MCPServer(
     name="codecalc",
@@ -408,7 +413,16 @@ async def _complete_argument(ref, argument, context):
     if getter is None:
         return None
     prefix = argument.value or ""
-    matches = [v for v in getter() if v.startswith(prefix)]
+    try:
+        candidates = getter()
+    except Exception:
+        # A getter reads live server state (sessions, run supervisor,
+        # provider registry) — a raise there is this handler's problem to
+        # absorb, not a reason to surface a raw internal error to a client
+        # that only asked for completions. Same empty shape the SDK itself
+        # returns when a completion handler answers `None`.
+        return Completion(values=[], total=None, has_more=None)
+    matches = [v for v in candidates if v.startswith(prefix)]
     values = matches[:_COMPLETION_LIMIT]
     return Completion(values=values, total=len(matches), has_more=len(matches) > len(values))
 
@@ -1134,11 +1148,16 @@ def execute_code(
     `max_output_kb` is honoured as a literal ceiling with no spill, same as
     before. Session-LESS runs (no `session_id`) have no workspace to spill
     into and keep the old truncate-and-drop behaviour.
-
-    With `session_id` set, a successful call fires one `resources/list`
-    change notification (best effort — see `_notify_resources_changed`) once
-    the run has actually written into that session's workspace.
     """
+    # Resource-change notification not documented in the docstring above:
+    # the docstring is this tool's served `description`, and
+    # scripts/tool_select_eval.py scores tool SELECTION against it — an
+    # equivalent paragraph here measurably hurt selection (same reasoning as
+    # benchmark's/compare_execution's/verify_optimization's own comments on
+    # progress, just above their bodies). With `session_id` set, a
+    # successful call fires one `resources/list` change notification (best
+    # effort — see `_notify_resources_changed`) once the run has actually
+    # written into that session's workspace. See CHANGELOG.md.
     timeout = min(timeout, 120)
     max_output_kb = min(max_output_kb, _MAX_OUTPUT_KB_CEILING)
     spec = providers.ComputationSpec(
@@ -1190,13 +1209,13 @@ def session_start(language: str = "python3") -> dict[str, Any]:
 
 @mcp.tool(group="sessions")
 def session_stop(session_id: str, ctx: Context = None) -> dict[str, Any]:
-    """Stop a session: kill its REPL worker (if any) and delete its workspace.
-
-    Fires one `resources/list` change notification (best effort) when the
-    workspace was actually removed (`deleted: true`) — a second `session_stop`
-    on an already-gone session is idempotent and changes nothing, so it stays
-    silent.
-    """
+    """Stop a session: kill its REPL worker (if any) and delete its workspace."""
+    # Resource-change notification not documented in the docstring above —
+    # same tool_select_eval reasoning as execute_code's own comment. Fires
+    # one `resources/list` change notification (best effort) when the
+    # workspace was actually removed (`deleted: true`) — a second
+    # `session_stop` on an already-gone session is idempotent and changes
+    # nothing, so it stays silent. See CHANGELOG.md.
     result = _session_service.stop(session_id)
     if result.get("ok") and result.get("deleted"):
         _notify_resources_changed(ctx)
@@ -1221,15 +1240,15 @@ def session_files(session_id: str, path: str = "", page_size: int | None = None,
 @mcp.tool(group="sessions")
 def session_write_file(session_id: str, path: str, content: str, ctx: Context = None) -> dict[str, Any]:
     """Write a file into a session workspace (relative path, no escapes).
-    Use this to seed input data for executed code.
-
-    On success, fires one `resources/list` change notification AND one
-    resource-updated notification for this exact file's
-    `codecalc://session/{session_id}/files/{path}` URI (both best effort) —
-    the second is the one place this server names the specific resource that
-    changed, since every other mutating tool here can touch an unbounded set
-    of files a single URI cannot name.
-    """
+    Use this to seed input data for executed code."""
+    # Resource-change notifications not documented in the docstring above —
+    # same tool_select_eval reasoning as execute_code's own comment. On
+    # success, fires one `resources/list` change notification AND one
+    # resource-updated notification for this exact file's
+    # `codecalc://session/{session_id}/files/{path}` URI (both best effort)
+    # — the second is the one place this server names the specific resource
+    # that changed, since every other mutating tool here can touch an
+    # unbounded set of files a single URI cannot name. See CHANGELOG.md.
     result = _session_service.write_file(session_id, path, content)
     if result.get("ok"):
         _notify_resources_changed(ctx)
@@ -1272,12 +1291,6 @@ async def install_package(language: str, package: str, session_id: str | None = 
     is still restricted to the allowlist, so secrets do not leak, but the
     filesystem is not confined. Do not point this at untrusted input. See
     SECURITY.md.
-
-    With session_id, a successful install fires one `resources/list` change
-    notification (best effort) — the installed package's files land in that
-    session's workspace, reachable through the session-file resource
-    template. The shared-cache path (no session_id) touches nothing a
-    session-scoped resource can name, so it stays silent.
     """
     echo = {"language": language, "package": package}
     if version:
@@ -1294,6 +1307,14 @@ async def install_package(language: str, package: str, session_id: str | None = 
     )
     if gate is not None:
         return gate
+    # Resource-change notification not documented in the docstring above —
+    # same tool_select_eval reasoning as execute_code's own comment. With
+    # session_id, a successful install fires one `resources/list` change
+    # notification (best effort) — the installed package's files land in
+    # that session's workspace, reachable through the session-file resource
+    # template. The shared-cache path (no session_id) touches nothing a
+    # session-scoped resource can name, so it stays silent. See
+    # CHANGELOG.md.
     result = packages.install(language, package, session_id=session_id,
                               version=version, audit=_audit_log)
     # `install_package` is now a native `async def` (#302's confirmation
@@ -2094,11 +2115,12 @@ def session_run(session_id: str, entry_file: str, language: str | None = None,
     `main.<ext>` file a session's own files could collide with. A session's
     own `main.py` (or the equivalent for another language) at the session
     root is never touched by running a different entry file.
-
-    Every successful run fires one `resources/list` change notification
-    (best effort) — the entry file's own scratch copy changes on every call,
-    even when `artifacts_created` is empty.
     """
+    # Resource-change notification not documented in the docstring above —
+    # same tool_select_eval reasoning as execute_code's own comment. Every
+    # successful run fires one `resources/list` change notification (best
+    # effort) — the entry file's own scratch copy changes on every call,
+    # even when `artifacts_created` is empty. See CHANGELOG.md.
     result = _session_service.run_file(
         session_id, entry_file, language=language, stdin=stdin, timeout=timeout,
         dependencies=dependencies,

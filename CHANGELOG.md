@@ -80,7 +80,11 @@ behind it.
   reaching into `RunSupervisor`'s private `_runs` table directly). Matching
   is prefix-only and case-sensitive, capped at the SDK's own 100-item
   ceiling on `Completion.values`, with `total`/`has_more` reporting the full
-  match count and whether the cap actually dropped anything.
+  match count and whether the cap actually dropped anything. A getter that
+  raises (each reads live server state — sessions, the run supervisor, the
+  provider registry) is caught and answered with an empty completion rather
+  than surfacing a raw internal error to a client that only asked for
+  completions.
 - **`resources/list`-changed and resource-updated notifications on every
   tool that mutates a session's workspace.** `session_run`,
   `execute_code(session_id=...)`, `session_write_file`, `session_stop`
@@ -99,16 +103,26 @@ behind it.
   these tools async. `resources/list` itself still carries the existing 10s
   cache TTL (`cache_hints=` on the `MCPServer` construction) — a client
   refetching inside that window can still see stale content even though the
-  notification arrived immediately.
+  notification arrived immediately. Documented in a code comment on each of
+  the five tools above, not their docstrings: the docstring is each tool's
+  served `description`, and `scripts/tool_select_eval.py` scores tool
+  selection against it — measured, an earlier draft of this same paragraph
+  in the docstrings cost 1-2 top-1 hits against the checked-in `full`/`dev`
+  baselines (one flip: a CSV-save prompt started picking `session_read_file`
+  over `session_write_file`) before it was moved out, the same fix already
+  applied to the progress-notification comments below.
 - **A server `icons` entry (2025-11-25+) and `website_url`.**
   `MCPServer(icons=[...], website_url=...)` carries one server-level icon (a
   monochrome, under-300-byte inline `data:image/svg+xml;base64,...` glyph)
   and a `website_url` pointing at this repository. Both are inline/self-
   contained data, never an external `src` — the same no-phone-home reasoning
-  `tests/test_offline.py` already enforces elsewhere in this package; the
-  SVG namespace attribute and `website_url` are each built from two literal
-  string halves rather than one so that reasoning holds structurally, not
-  just by convention. Both ride on `initialize`, once per **connection** —
+  `tests/test_offline.py` already enforces elsewhere in this package. Both
+  literals are written plainly (not string-split to dodge that test's
+  outbound-URL scan); `tests/test_offline.py` instead gained an explicit,
+  commented `_URL_EXEMPTIONS` entry for each — the SVG namespace declaration
+  every standalone SVG carries, and this repository's own homepage — the
+  same mechanism already used for example.com/localhost/127.0.0.1. Both
+  ride on `initialize`, once per **connection** —
   measured before/after, `tools/list`'s served payload is byte-identical
   (59,902 bytes / 15,952 tokens, `o200k_base`, either way): **+0** tokens on
   the number README's "Tool-definition token cost" section exists to track.
