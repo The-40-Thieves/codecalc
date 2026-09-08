@@ -782,6 +782,193 @@ def test_a_real_compiled_run_on_the_rust_backend_reports_only_user_artifacts() -
           listed == {"result.txt"})
 
 
+def _codecalc_exec_pids() -> set[int] | None:
+    """PIDs currently running the resolved `codecalc-exec` binary.
+
+    `None` on a platform with no `/proc` (Windows, macOS) — a fixed `set()`
+    fallback there would read as "confirmed clean" when it is really
+    "unmeasured", the same gap `executor.current_uid_tasks()`'s docstring
+    calls out for the same reason. Matched by `/proc/<pid>/exe`'s resolved
+    target rather than `cmdline` text: a `pgrep`-style substring match on the
+    argv has already produced a false alarm in this suite once (see
+    test_executor_sweep.py's orphan-reaping test, which matched its own shell
+    invocation) and readlink is exact where a substring is not.
+    """
+    proc_root = Path("/proc")
+    if not proc_root.is_dir() or not executor._rust:
+        return None
+    target = Path(executor._rust).resolve()
+    pids: set[int] = set()
+    for entry in proc_root.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            exe = (entry / "exe").readlink()
+        except OSError:
+            continue  # exited between listing and reading, or not ours to read
+        if exe == target:
+            pids.add(int(entry.name))
+    return pids
+
+
+def _run_stream_with_watchdog(coro, timeout: float) -> tuple[dict | None, bool]:
+    """Drive `coro` (an `executor.execute_stream(...)` awaitable) to completion
+    on its own event loop, in a background thread, without ever letting a hang
+    inside it wedge this test file.
+
+    Before the fix this regression test exists to catch, `execute_stream`'s
+    progress loop called `proc.wait()` and never read a byte of stdout/stderr
+    until after the child exited — so a result whose JSON exceeded the pipe
+    buffer left the child blocked in `write()` forever, and the loop's own
+    exit condition (`proc.returncode` becoming set) could never fire. A
+    `pytest.mark.timeout`-style wrapper around `asyncio.run()` would have hung
+    right along with it: the coroutine itself never returns control to
+    `asyncio.run()`, so nothing back on the calling thread would even get a
+    chance to raise. Running it on a `daemon=True` thread and joining with a
+    wall-clock bound is what makes a regression here a reported FAILURE
+    instead of a wedged test suite — the thread (and, pre-fix, the orphaned
+    codecalc-exec it left blocked) is simply abandoned when the join times out.
+    """
+    box: dict = {}
+
+    def runner() -> None:
+        try:
+            box["result"] = asyncio.run(coro)
+        except BaseException as exc:  # re-raised by the caller, not swallowed
+            box["error"] = exc
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+    thread.join(timeout=timeout)
+    if thread.is_alive():
+        return None, True
+    if "error" in box:
+        raise box["error"]
+    return box.get("result"), False
+
+
+def test_execute_code_stream_drains_output_larger_than_the_pipe_buffer() -> None:
+    """`execute_stream`'s progress loop used to poll `proc.wait()` and only
+    drain stdout/stderr afterward, via
+    `proc.communicate()`. A result whose JSON exceeds the OS pipe buffer
+    (64 KiB, `F_GETPIPE_SZ`'s default) or asyncio's own `StreamReader`
+    backpressure limit (also 64 KiB) left the child blocked inside `write()`
+    with the loop's own exit condition — the write it was blocked on —
+    unreachable. Reproduced live: a `--max-output-kb 240` stream sat for
+    >500s in `wchan anon_pipe_write` with an already-finished child and a
+    workdir whose `run.out` already held the full 960 KiB the program had
+    printed. `execute_stream` now starts `proc.communicate()` as a background
+    task BEFORE the progress loop begins polling, so the pipe is never left
+    unread regardless of the result's size.
+
+    Two shapes, both over the 64 KiB buffer and reported separately so a
+    truncation-logic regression cannot hide behind a hang-logic one:
+      - 200 KiB: under the 240 KiB stream ceiling, so NOT truncated.
+      - 983_040 bytes (960 KiB): the exact live-incident shape, well over the
+        ceiling, so truncated.
+    A watchdog bounds the whole call — see `_run_stream_with_watchdog` — so a
+    reintroduced deadlock FAILS this test rather than hanging the suite.
+    """
+    if executor._rust is None:
+        print("SKIP test_execute_code_stream_drains_output_larger_than_the_pipe_buffer "
+              "(no codecalc-exec binary resolved; build executor/ with "
+              "`cargo build --release --manifest-path executor/Cargo.toml` or set "
+              "CODECALC_EXEC_BIN before this module is imported)")
+        return
+
+    ceiling_bytes = 240 * 1024
+    cases = (
+        ("200 KiB (under the ceiling)", 200 * 1024, False),
+        ("983,040 bytes (the exact live-incident shape)", 983_040, True),
+    )
+    for label, byte_count, expect_truncated in cases:
+        code = f"import sys\nsys.stdout.write('A' * {byte_count})\n"
+        spec = providers.ComputationSpec(
+            language="python3", code=code, timeout=30, max_output_kb=240,
+        )
+        before = _codecalc_exec_pids()
+        result, timed_out = _run_stream_with_watchdog(
+            executor.execute_stream(spec), timeout=45,
+        )
+        check(f"rust: streaming {label} completes inside the watchdog "
+              f"instead of hanging on the result pipe", not timed_out)
+        if timed_out:
+            # The rest of these assertions all read `result`, which is None
+            # on a timeout — reporting them as failures too would bury the
+            # one that actually explains what went wrong.
+            continue
+        assert result is not None
+        check(f"rust: streaming {label} succeeds", result.get("ok") is True)
+        stdout_len = len(result.get("stdout") or "")
+        # `+ 64` slop for a truncation marker appended past the raw byte cap —
+        # the same allowance `test_max_output_kb_cannot_push_a_result_past_its_advertised_cap`
+        # uses for the identical reason.
+        check(f"rust: streaming {label} stdout stays within the 240 KiB ceiling "
+              f"({stdout_len} B)", stdout_len <= ceiling_bytes + 64)
+        check(f"rust: streaming {label} output_truncated is {expect_truncated}",
+              bool(result.get("output_truncated")) == expect_truncated)
+        after = _codecalc_exec_pids()
+        if before is not None and after is not None:
+            check(f"rust: streaming {label} leaves no codecalc-exec process behind "
+                  f"(new pids: {sorted(after - before)})",
+                  after - before == set())
+
+
+def test_execute_code_stream_kills_the_process_on_caller_cancellation() -> None:
+    """Cancelling the CALLER's own task mid-stream — an MCP client cancelling
+    `execute_code_stream`, the realistic trigger, not a raised exception —
+    used to skip the kill/cancel cleanup in `execute_stream` entirely.
+    `asyncio.CancelledError` is a `BaseException` (since Python 3.8), so the
+    `except Exception` block that cleanup used to live in never saw it; only
+    `finally` ran, which deleted the workdir with nothing having killed the
+    still-running codecalc-exec and nothing having cancelled the drain task
+    either. That cleanup now lives in `finally` itself, guarded and placed
+    BEFORE `_rmtree_checked`, so it runs on this path too.
+    """
+    if executor._rust is None:
+        print("SKIP test_execute_code_stream_kills_the_process_on_caller_cancellation "
+              "(no codecalc-exec binary resolved; build executor/ with "
+              "`cargo build --release --manifest-path executor/Cargo.toml` or set "
+              "CODECALC_EXEC_BIN before this module is imported)")
+        return
+
+    async def scenario() -> tuple[bool, set[int] | None]:
+        spec = providers.ComputationSpec(
+            language="python3", code="import time\ntime.sleep(10)\n", timeout=30,
+        )
+        before = _codecalc_exec_pids()
+        task = asyncio.create_task(executor.execute_stream(spec))
+        await asyncio.sleep(1)  # let codecalc-exec actually spawn and start sleeping
+        task.cancel()
+        cancelled = False
+        try:
+            await task
+        except asyncio.CancelledError:
+            cancelled = True
+        # Polled, not a single snapshot: the kill is sent synchronously inside
+        # `finally`, but the kernel actually finishing the process is not.
+        # ~3s total, matching the live repro this regression test is against
+        # (codecalc-exec was still observed alive 2.5s after cancellation on
+        # the pre-fix code).
+        survived: set[int] | None = None
+        for _ in range(30):
+            pids = _codecalc_exec_pids()
+            if before is not None and pids is not None:
+                survived = pids - before
+                if not survived:
+                    break
+            await asyncio.sleep(0.1)
+        return cancelled, survived
+
+    cancelled, survived = asyncio.run(scenario())
+    check("rust: cancelling execute_code_stream mid-run raises CancelledError "
+          "back to the caller, not a dict result", cancelled)
+    if survived is not None:
+        check(f"rust: cancelling execute_code_stream mid-run leaves no "
+              f"codecalc-exec process behind (still running: {sorted(survived)})",
+              survived == set())
+
+
 def test_session_service_reads_bounded_files_and_runs_workspace_entries() -> None:
     service_type = getattr(execution_service, "SessionService", None)
     check("session service supports workspace reads and runs", service_type is not None)
@@ -2162,6 +2349,8 @@ if __name__ == "__main__":
     test_session_service_owns_protocol_neutral_lifecycle_and_artifacts()
     test_artifact_filter_excludes_only_the_runner_scratch_subdirectory()
     test_a_real_compiled_run_on_the_rust_backend_reports_only_user_artifacts()
+    test_execute_code_stream_drains_output_larger_than_the_pipe_buffer()
+    test_execute_code_stream_kills_the_process_on_caller_cancellation()
     test_session_service_reads_bounded_files_and_runs_workspace_entries()
     test_session_file_pagination_is_shared_and_cursor_based()
     test_mcp_session_adapters_delegate_to_the_shared_service()
