@@ -918,6 +918,12 @@ three of `full`/`dev`/`core`, wired into CI via
 `tests/test_tool_select_eval.py` so the gate is proven live, on every
 surface, on every run — not just at the PR that added it.
 
+BM25 is a lexical proxy, not a model — `scripts/tool_select_llm_eval.py` is
+the model-driven half, calling a real chat model over a live gateway with
+the identical tool catalog and labeled corpus; it is opt-in (`workflow_dispatch`,
+advisory rather than a hard gate) rather than wired into every PR, and its
+measured numbers live in `docs/tool-selection-eval.md` next to BM25's own.
+
 ## Reducing the tool surface
 
 For an operator who would rather not configure every client, codecalc also has
@@ -1015,7 +1021,7 @@ PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py         # every tool over MC
 PYTHONPATH=. .venv/bin/python tests/test_executor_sweep.py  # sandbox regressions
 ```
 
-65 test files and 18 CI-invoked scripts, **2184 assertions**. "CI-invoked"
+66 test files and 19 CI-invoked scripts, **2184 assertions**. "CI-invoked"
 means referenced by path (`scripts/<name>.py`) from a job in
 `.github/workflows/*.yml` — `scripts/check_claims.py` derives the count that
 way and gates it, so a script wired into a workflow without this sentence
