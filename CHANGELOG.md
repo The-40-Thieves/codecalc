@@ -35,6 +35,19 @@ behind it.
 
 ### Added
 
+- MCP Apps (`io.modelcontextprotocol/ui`) graphical views for
+  `verify_translation` and `verify_optimization`: each tool now carries
+  `_meta.ui.resourceUri` pointing at a self-contained `ui://` HTML resource
+  (inline CSS/JS, no external assets, no network) that a supporting host
+  (Claude, ChatGPT, VS Code, and others per the ext-apps spec's own host
+  list) renders alongside the tool's answer — a per-case diff table with
+  first-differing-line highlighting for the translation proof, and a
+  per-size before/after timing chart plus the significance table for the
+  optimization proof. `tools/call` is byte-for-byte unchanged for hosts
+  without Apps support — the `_meta` key is additive and ignorable, verified
+  against a live run of `main`'s server. See
+  `docs/design/2026-09-08-mcp-apps-verification-views.md` for the spec
+  research this was built from.
 - `llms.txt` at the repo root (the [llmstxt.org](https://llmstxt.org/)
   convention) indexing README, QUICKSTART, the result contract docs and
   schemas, SECURITY.md, AUDIT.md, CONTRIBUTING.md, and the packaged skill, so
@@ -51,19 +64,19 @@ behind it.
   (PyPI, crates.io, GitHub Releases, the MCP registry, Smithery, Glama,
   MCPB) and `docs/distribution.md` records the submission steps for the two
   directories that do not list codecalc yet (PulseMCP, mcp.so).
-- MCP Apps (`io.modelcontextprotocol/ui`) graphical views for
-  `verify_translation` and `verify_optimization`: each tool now carries
-  `_meta.ui.resourceUri` pointing at a self-contained `ui://` HTML resource
-  (inline CSS/JS, no external assets, no network) that a supporting host
-  (Claude, ChatGPT, VS Code, and others per the ext-apps spec's own host
-  list) renders alongside the tool's answer — a per-case diff table with
-  first-differing-line highlighting for the translation proof, and a
-  per-size before/after timing chart plus the significance table for the
-  optimization proof. `tools/call` is byte-for-byte unchanged for hosts
-  without Apps support — the `_meta` key is additive and ignorable, verified
-  against a live run of `main`'s server. See
-  `docs/design/2026-09-08-mcp-apps-verification-views.md` for the spec
-  research this was built from.
+- `docker/mcp-catalog/server.yaml` (+ `tools.json`, `readme.md`): a prepared
+  submission for the [Docker MCP Catalog](https://hub.docker.com/mcp),
+  targeting `docker/mcp-server.Dockerfile` (already shipped) as a
+  Docker-built image (`mcp/codecalc`) so it gets Docker's own signatures,
+  SBOM, provenance and Docker Desktop listing rather than a self-hosted
+  image. `tools.json` is the live `tools/list` response from that exact
+  image (52 tools — `CODECALC_TOOLS` is unset in the image, which registers
+  every group; the symbolic-extra tools among them already report "extra
+  not installed" rather than erroring, per the image's existing documented
+  tradeoff), so the registry's own `build --tools` reads it instead of
+  spinning up the container. Validated against the registry's own
+  `task validate`/`task build --tools` tooling — see `docs/distribution.md`
+  for the exact submission steps; this commit does not open that PR.
 
 ### Fixed
 
@@ -486,7 +499,6 @@ behind it.
   `code`/`error`/`remedy`/`code_inferred` are treated as non-droppable
   disclosure (same bucket as `unenforced`/`output_error`) so they survive
   the compaction that follows.
-||||||| parent of dca51c2 (fix: stop verify_optimization certifying identical code as a speedup)
 - **`verify_optimization` certified IDENTICAL before/after code as a verified
   speedup.** Reproduced live in CI (macOS sandbox job, native executor, main):
   `accepted=True` at a measured ratio of 1.21x, `sizes_rejecting` 2/3 —
