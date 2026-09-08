@@ -1299,6 +1299,34 @@ fn verdict(sr: &StepResult, limits: &Limits) -> &'static str {
     "OK"
 }
 
+/// The `exit_code` JSON value for a step result.
+///
+/// `null` means "this process never produced a real exit status" — it was
+/// never spawned at all (`spawn_error`), the SAME reason a missing runtime
+/// reports `null` (see `spawn_error`'s own doc comment on `StepResult`).
+///
+/// A process that spawned and was then killed BY A SIGNAL (SIGSEGV, the OOM
+/// killer's SIGKILL, ...) is a DIFFERENT case: it did stop, just not via
+/// `exit()`. POSIX's own `waitpid` convention — and Python's
+/// `subprocess.Popen.returncode`, which the pure-Python fallback already
+/// returns unmodified — reports that as `-signal`: negative, and never a
+/// value a real `exit()` call can produce (0-255 on POSIX). A caller can
+/// therefore tell the three outcomes apart from the SIGN alone: `null` is
+/// "nothing ran to a stop", negative is "a signal", non-negative is "a real
+/// exit() call". This backend used to report `null` for a signal death too —
+/// indistinguishable from a process that never spawned, and disagreeing
+/// with the fallback, which already used `-N`. `-N` is the direction this
+/// aligns to: it names WHICH signal; `null` names nothing.
+fn exit_code_json(sr: &StepResult) -> serde_json::Value {
+    if sr.spawn_error.is_some() {
+        serde_json::Value::Null
+    } else if let Some(signal) = sr.signal {
+        serde_json::Value::from(-i64::from(signal))
+    } else {
+        serde_json::Value::from(sr.exit_code)
+    }
+}
+
 /// How many whole seconds remain in the wall-clock budget for the run step,
 /// given how long compiling already took. `elapsed_ms` is `started.elapsed()`
 /// captured right after the compile step returns, at millisecond precision —
@@ -1632,15 +1660,10 @@ fn execute(
                 "ok": false, "language": lang.name, "phase": "compile",
                 "stdout": sr.stdout, "stderr": sr.stderr,
                 // null when the process never spawned at all (a missing
-                // compiler), same as when it was killed by a signal — in
-                // both cases `exit_code` describes a process that never
-                // produced a real exit status. See `spawn_error`'s doc
-                // comment on `StepResult`.
-                "exit_code": if sr.signal.is_some() || sr.spawn_error.is_some() {
-                    serde_json::Value::Null
-                } else {
-                    serde_json::Value::from(sr.exit_code)
-                },
+                // compiler); negative (the signal number) when it spawned
+                // and was then killed by one — see `exit_code_json`'s own
+                // doc comment for why those are different claims.
+                "exit_code": exit_code_json(&sr),
                 "duration_ms": compile_ms, "compile_ms": compile_ms,
                 "cpu_ms": sr.cpu_ms, "peak_memory_kb": sr.peak_memory_kb,
                 "timed_out": sr.timed_out, "verdict": verdict(&sr, limits),
@@ -1672,6 +1695,19 @@ fn execute(
                 "total_ms": u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
                 "platform": std::env::consts::OS,
                 "workdir": work_s,
+                // ALWAYS present (null far more often than not) — an
+                // internal marker for codecalc/executor.py, never part of
+                // the published envelope (that layer pops it before a
+                // caller ever sees the result). Its role: `exit_code_json`
+                // makes a real signal death report a negative `exit_code`,
+                // which can legitimately equal the OLD wire format's
+                // "nothing spawned" sentinel (-2, for SIGINT) — this key's
+                // very PRESENCE (not its value) is what tells that Python
+                // layer it is talking to a binary built after this fix, so
+                // it never has to guess from `exit_code` alone again. See
+                // `spawn_error`'s doc comment on `StepResult` for the field
+                // this mirrors.
+                "spawn_error": sr.spawn_error.as_deref(),
             });
             // Present ONLY for a missing/uninstalled compiler — absent on an
             // ordinary compile error (bad source, nonzero `gcc` exit), which
@@ -1791,14 +1827,11 @@ fn execute(
         "phase": "run",
         "stdout": sr.stdout,
         "stderr": sr.stderr,
-        // null when the process never spawned at all (a missing runtime) —
-        // same convention as a signal kill. See `spawn_error`'s doc comment
-        // on `StepResult`.
-        "exit_code": if sr.signal.is_some() || sr.spawn_error.is_some() {
-            serde_json::Value::Null
-        } else {
-            serde_json::Value::from(sr.exit_code)
-        },
+        // null when the process never spawned at all (a missing runtime);
+        // negative (the signal number) when it spawned and was then killed
+        // by one — see `exit_code_json`'s own doc comment for why those are
+        // different claims.
+        "exit_code": exit_code_json(&sr),
         "duration_ms": duration_ms,
         "compile_ms": compile_ms,
         "total_ms": total_ms,
@@ -1825,6 +1858,9 @@ fn execute(
         "stderr_bytes": sr.stderr_bytes,
         "platform": std::env::consts::OS,
         "workdir": work_s,
+        // See the compile return's identical field for why this exists —
+        // ALWAYS present, internal to this JSON handshake only.
+        "spawn_error": sr.spawn_error.as_deref(),
     });
     // Present ONLY for a missing/uninstalled runtime — absent on an
     // ordinary program failure (nonzero exit, a caught signal, a timeout),

@@ -161,15 +161,99 @@ behind it.
   `error`/`code`/`remedy` via the new `errors.stamp_row`; an ordinary
   program failure (a real `RTE`/`OLE` `exit_code`) still carries none of the
   three, matching the INTENDED convention that `code` marks a failed
-  request, not a failed program — a convention the top-level `execute_code`
-  envelope does not yet honour itself for a plain RTE/timeout (those come
-  back `code: "internal"` there today; pre-existing, tracked separately).
+  request, not a failed program — the same convention `errors.ensure_code`
+  now applies to the top-level `execute_code` envelope itself (see the
+  Fixed entry below).
   `compare_edge_cases`'s per-language `runs[lang]` entries had the identical
   gap and are fixed the same way. `compare_execution`'s own result also
   never matched any branch
   in the published result contract — the same gap `edge_case_comparison`
   closed for `compare_edge_cases` in `1.5.0` — so contract `1.10.0` adds a
   `comparison_rows` branch for it; see `docs/contract/README.md`.
+- `execute_code`/`execute_code_stream`/`run_inspect`/`session_run` (anything
+  routed through `errors.ensure_code`, at `server.py`'s `_coded` wrapper)
+  classified an ordinary program failure as `internal` — remedy "a defect
+  in codecalc; the message is worth reporting verbatim" — whenever
+  `executor.execute` set no `error` of its own: a plain `sys.exit(3)` (RTE)
+  or a plain wall-clock timeout (TLE), on either backend, never set `error`
+  at all (only `verdict`/`exit_code`/`timed_out`), so `ensure_code`'s
+  message matcher had an empty string to classify and fell through to its
+  fallback every time. A model reading that filed a bug for a program that
+  did exactly what it was written to do. `docs/contract/README.md`'s own
+  "The program ran and failed" example already documented the intended
+  reading — a result with `verdict` present and no `error` is a failed
+  PROGRAM, not a failed REQUEST, and gets no `code` at all — the same rule
+  `errors.stamp_row` (above) already applied one level down, for
+  `compare_execution`/`compare_edge_cases` rows. `ensure_code` now applies
+  it at the envelope level too: a real `RTE`/`OLE`/`MLE` verdict with no
+  `error` is left with no `code`, and a timeout (`verdict: "TLE"` or
+  `timed_out: true`) is classified `timeout` instead — actionable (raise
+  `timeout`) rather than a false defect report. A genuine unknown (`ok:
+  false`, no `verdict`, no `error`) still falls to `internal`,
+  `code_inferred: true`, unchanged. No schema or `CONTRACT_VERSION` change:
+  `code`/`error`/`remedy`/`code_inferred` were already optional on the
+  execution envelope, and the corrected behavior is what the published
+  contract already documented — this fixes the code to match the docs, not
+  the other way round. A COMPILE failure (`phase: "compile"`, e.g. a `c`/
+  `rust` syntax error) follows the identical rule and is now a documented
+  DECISION rather than an accident of the verdict-based gate also catching
+  it: retrying the same request cannot succeed either way, so it stays
+  codeless too — see `errors.ensure_code`'s docstring and
+  `docs/contract/README.md`'s new compile-failure example. Neither backend
+  emits a verdict distinct from an ordinary run's `RTE` for a compile
+  failure; adding one to the closed 8-code enum (or a ninth `VERDICTS`
+  entry) is a bigger, separate decision this fix does not make.
+- On POSIX (Linux, macOS), the native (Rust) backend reported
+  `exit_code: null` for a process killed BY A SIGNAL (a segfault, the OOM
+  killer's `SIGKILL`, ...) — indistinguishable from one that never spawned
+  at all, and disagreeing with the pure-Python fallback, which already used
+  `subprocess.Popen`'s own convention: negative, the signal number (`-11`
+  for `SIGSEGV` on Linux glibc; `-5` for `SIGTRAP` on macOS/Apple silicon
+  for the identical null-deref — the exact number is platform-specific, the
+  SIGN is not). `executor/src/main.rs`'s new `exit_code_json` aligns the
+  native backend to the SAME convention the fallback already used on each
+  OS — including Windows, which has no signals at all and was already
+  correct on both backends: an access violation there is a real, POSITIVE
+  exit code (the NTSTATUS itself, e.g. `3221225477` /
+  `0xC0000005` for `STATUS_ACCESS_VIOLATION`), unaffected by this fix. A
+  caller now tells "never ran" from "ran and was killed abnormally" from
+  whether `exit_code` is `null` at all, on either backend, on any OS.
+  `contract.py`'s `exit_code` description documents the convention per
+  platform. No new field, no `code_inferred` involved: `exit_code`'s type
+  (`integer | null`) does not change, only which integers a POSIX signal
+  death can now produce on the native backend.
+- The `exit_code: -N` fix directly above reopened `codecalc/executor.py`'s
+  compat shim for pre-#283 binaries (which gates on the OLD wire format's
+  literal `exit_code == -2` "nothing spawned" sentinel): SIGINT is signal
+  2, so a program killed by SIGINT (`raise(SIGINT)` in C,
+  `os.kill(os.getpid(), signal.SIGINT)` under python's default handler)
+  now legitimately reports `exit_code: -2` too, and the shim could no
+  longer tell the two apart from `exit_code` alone — a real, killed
+  program came back `code: "runtime_unavailable"`, `error: "runtime
+  unavailable for the run phase"`, `exit_code: null`, remedy "install the
+  runtime". Found by cross-vendor review. Fixed with a THIRD, ALWAYS-
+  present JSON key from the binary, `spawn_error` (`null` when nothing
+  went wrong at spawn, the message otherwise — distinct from the existing
+  `error`, which stays conditional and caller-facing): the shim now gates
+  on `exit_code == -2` **AND** `"spawn_error" not in result` — a binary
+  built after this fix carries the key on every result, so the shim can
+  never fire against one regardless of what `exit_code` says; its absence
+  is what proves the answering binary predates this fix. `spawn_error`
+  itself is popped before a caller ever sees the result — internal to this
+  one JSON handshake, never part of the published envelope, so no schema
+  or `CONTRACT_VERSION` change.
+- `execute_code(..., compact=True)` classified a "rejected before execution"
+  failure (an unknown language, a validation refusal — anything with no
+  `verdict`/`stdout`/`exit_code` to fall back on) as `internal` regardless
+  of the real cause, while the identical call with `compact=False` correctly
+  classified it: `compact_result` builds a FRESH dict naming only a fixed
+  field list, which dropped `error` before `server.py`'s `_coded` wrapper
+  ever got to run `errors.ensure_code` on it — by the time the classifier
+  saw the result, the text it needed to classify FROM was already gone.
+  `execute_code` now runs `ensure_code` BEFORE `compact_result`, and
+  `code`/`error`/`remedy`/`code_inferred` are treated as non-droppable
+  disclosure (same bucket as `unenforced`/`output_error`) so they survive
+  the compaction that follows.
 
 ## [0.9.0] — 2026-09-07
 

@@ -722,7 +722,30 @@ def build_schema(dialect: str | None = None, schema_id: str | None = None) -> di
                     "stderr": {"type": "string"},
                     "exit_code": {
                         "type": ["integer", "null"],
-                        "description": "null when the process was killed rather than exiting.",
+                        "description": (
+                            "null when the process never produced a real exit "
+                            "status at all — a timeout kill, or a runtime/"
+                            "compiler that never spawned. A real, non-null "
+                            "value when it spawned and was then killed "
+                            "ABNORMALLY, in whatever convention the OS "
+                            "itself uses — never this contract's own "
+                            "invention: on POSIX (Linux, macOS), NEGATIVE, "
+                            "the signal number (e.g. -11 for SIGSEGV on "
+                            "Linux glibc, but -5 for SIGTRAP on macOS/Apple "
+                            "silicon for the identical null-deref — the "
+                            "number is platform-specific, the SIGN is not), "
+                            "the same convention Python's own "
+                            "subprocess.Popen.returncode uses and the "
+                            "pure-Python fallback already returned; on "
+                            "Windows, POSITIVE, the raw NTSTATUS itself "
+                            "(e.g. 3221225477 / 0xC0000005 for "
+                            "STATUS_ACCESS_VIOLATION) — Windows has no "
+                            "signals, so an abnormal exit is just a large "
+                            "exit code. The native backend used to report "
+                            "null for a POSIX signal death, indistinguishable "
+                            "from a process that never ran at all; it now "
+                            "matches the fallback's own convention on each OS."
+                        ),
                     },
                     "timed_out": {"type": "boolean"},
                     "verdict": {
@@ -868,11 +891,26 @@ def build_schema(dialect: str | None = None, schema_id: str | None = None) -> di
                 "description": (
                     "What `execute_code(compact=True)` returns. Diagnostics a "
                     "caller can live without are dropped to save tokens; "
-                    "`unenforced` and `output_error` are NOT droppable and "
-                    "appear whenever they say anything, which is the whole "
-                    "difference between this and the version of compact mode "
-                    "that was a defect (#117). No `backend` key, which is what "
-                    "distinguishes this branch from the full envelope."
+                    "`unenforced`, `output_error` and (new — see below) "
+                    "`code`/`error`/`remedy`/`code_inferred` are NOT "
+                    "droppable and appear whenever they say anything, which "
+                    "is the whole difference between this and the version of "
+                    "compact mode that was a defect (#117). No `backend` "
+                    "key, which is what distinguishes this branch from the "
+                    "full envelope.\n\n"
+                    "`code`/`error`/`remedy`/`code_inferred` are the ENTIRE "
+                    "content of a \"rejected before execution\" failure "
+                    "(validation, permission_denied, ...) — that shape has "
+                    "no `verdict`/`stdout`/`exit_code` to fall back on, so "
+                    "compact mode dropping all four used to leave such a "
+                    "failure with nothing to say at all: `execute_code"
+                    "(\"nosuchlang\", ..., compact=True)` came back `code: "
+                    "\"internal\"` where `compact=False` on the identical "
+                    "call correctly gave `validation`, because `errors."
+                    "ensure_code` ran AFTER compaction had already dropped "
+                    "the `error` text it needed to classify from. `errors."
+                    "ensure_code` now runs BEFORE compaction instead (see "
+                    "`server.compact_result`'s own docstring)."
                 ),
                 "type": "object",
                 "required": ["ok", "verdict", "stdout", "exit_code"],
@@ -884,6 +922,7 @@ def build_schema(dialect: str | None = None, schema_id: str | None = None) -> di
                     "exit_code": {"type": ["integer", "null"]},
                     "unenforced": {"type": "array", "items": {"type": "string"}},
                     "output_error": {"type": ["string", "null"]},
+                    **{k: v for k, v in _error_properties().items() if k != "ok"},
                 },
             },
             "run_lifecycle": {
@@ -1104,11 +1143,9 @@ def build_schema(dialect: str | None = None, schema_id: str | None = None) -> di
                     "or timed out, failed. An ordinary program failure (a "
                     "real RTE/OLE `exit_code`) carries none of the three, "
                     "matching the INTENDED reading that `code` means a "
-                    "failed REQUEST, not a failed program — a reading the "
-                    "top-level execute_code envelope does not yet honour "
-                    "itself for a plain RTE/timeout (those come back "
-                    "`code: \"internal\"` there today; pre-existing, "
-                    "tracked separately, not something this shape changes)."
+                    "failed REQUEST, not a failed program — the same reading "
+                    "`errors.ensure_code` applies to the top-level "
+                    "execute_code envelope itself."
                 ),
                 "type": "object",
                 "required": ["ok", "count", "succeeded", "results", "fastest",

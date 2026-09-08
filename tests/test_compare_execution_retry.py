@@ -312,9 +312,9 @@ check("a recovered row carries no code", "code" not in node_row, f"-> {node_row}
 # 10. an ordinary deterministic failure (e.g. a compile error, a real exit
 # code) is NOT a request-level failure and carries no code — `verdict`/
 # `exit_code` already tell that story, per the INTENDED convention
-# errors.stamp_row implements (a failed PROGRAM, not a failed REQUEST) — a
-# convention the top-level execute_code envelope does not yet honour itself
-# for a plain RTE/timeout (see errors.stamp_row's own docstring).
+# errors.stamp_row implements (a failed PROGRAM, not a failed REQUEST) — the
+# same convention errors.ensure_code applies to the top-level execute_code
+# envelope itself (see both functions' own docstrings).
 fake, calls = make_fake({
     "perl": [fail_result("syntax error at -e line 1.")],
     "python3": [ok_result("42", 33)],
