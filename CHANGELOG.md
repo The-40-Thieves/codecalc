@@ -114,6 +114,40 @@ behind it.
   rust:` for the first, the helper's own `native executor: <path>` line for
   the second, whose checks are not "rust:"-named — the same
   assert-from-outside-the-file pattern `test_features.py` uses (#277).
+- A runtime with no confirmed `_VERSION_FLAG` entry that failed its version
+  probe on the untested `--version` guess was disclosed in the JSON row only
+  (`status: installed`, `probe_error` set) — the text renderer showed it
+  under none of available/BROKEN/missing, and `_remedies()` said nothing
+  about it either, so an operator reading `doctor` (rather than piping
+  `--json`) never learned the probe had failed at all. `_VERSION_FLAG` now
+  carries an explicit, audited entry for every registered runtime's command
+  (`escript`/`tclsh` excluded — no non-interactive version flag exists to
+  call), not just the five flag overrides, all confirmed live on this box
+  with exit 0 on the default `--version` (audit table in the PR body) —
+  leaving "unmeasured" the rare case of a genuinely new, not-yet-audited
+  command rather than the common one. The trust rule itself is unchanged: a
+  nonzero exit is still evidence of brokenness only for a command this code
+  has confirmed the flag for. The text renderer now lists an
+  installed-but-probe-failed row under its own "installed, version probe
+  failed" heading, and `_remedies()` names it with the probe output,
+  phrased as "the runtime may still work" so it is not overclaimed as
+  broken. JSON shape unchanged — `remedies` was already `array of string`,
+  and `probe_error` already existed on the row.
+
+  Review caught that `awk`'s new confirmed-default entry was audited only
+  against THIS box's GNU awk: `awk` is the one command name on the audited
+  list that resolves to genuinely different, non-interoperable programs
+  across hosts — BSD/macOS one-true-awk and busybox awk reject GNU long
+  options like `--version` outright, which is exactly the shape #282 was
+  written to fix, just for a command #282 never audited. `awk` is now also
+  in `_HELLO` (`BEGIN{print "codecalc"}`, portable POSIX syntax) so a
+  hello-world arbitrates its status BEFORE the version probe gets a say,
+  regardless of which awk flavor answers; `sqlite3`/`jq`/`zsh` gained the
+  same belt-and-suspenders treatment even though neither has a known
+  divergent fork. Every other confirmed-default entry is a single-vendor,
+  cross-platform-consistent CLI with `--version` documented in its own
+  reference and is left without a hello-world backstop (per-command
+  portability note in the PR body).
 
 ## [0.9.0] — 2026-09-07
 

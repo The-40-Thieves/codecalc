@@ -66,7 +66,10 @@ nothing, never a failure message. `runtime_summary.unhealthy` counts every
 TRUSTED cause together; `probe_error`/`detail` says which one applies to a
 given row, and a row can carry `probe_error` while still reading `installed`
 — that combination means "the version guess didn't work; nothing here says
-the runtime itself is broken".
+the runtime itself is broken". That combination is surfaced in the text
+renderer under its own "installed, version probe failed" heading and named
+one line per runtime in `_remedies()`, phrased as "may still work" — not
+just left in the JSON row for a caller to notice on their own.
 """
 
 from __future__ import annotations
@@ -616,6 +619,35 @@ def report(deep: bool = False) -> dict:
 #: A one-line program per language would be 31 more things to keep correct, and
 #: `--deep` only needs to prove the runtime answers at all. Languages absent
 #: here are still resolved and reported; they are simply not promoted.
+#:
+#: `awk` is here for the exact reason lua/go/zig needed `_VERSION_FLAG`
+#: overrides: `--version` is not a universal convention, and unlike those
+#: three, it is not even a universal convention FOR A SINGLE COMMAND NAME —
+#: `awk` resolves to genuinely different, non-interoperable programs across
+#: hosts (GNU awk accepts `--version`; BSD/macOS one-true-awk and busybox awk
+#: reject GNU long options outright and exit non-zero). This box's own `awk`
+#: is GNU awk, so `_VERSION_FLAG["awk"] = "--version"` is correct HERE and
+#: kept — but trusting that confirmed-here flag on every host would repeat
+#: #282's own regression for a command #282 never audited: a working BSD awk
+#: demoted to `unhealthy` because its GNU-flavored flag failed. A
+#: `BEGIN{print ...}` hello-world is portable POSIX awk syntax across every
+#: implementation and arbitrates BEFORE the version probe gets a say
+#: regardless — see the ordering note in `report()` below — so a real BSD
+#: awk now reads `available` (hello ran) with `probe_error` still recorded
+#: and `status` never demoted, rather than depending on which awk flavor
+#: happened to be on the audit box.
+#:
+#: `sqlite3`/`jq`/`zsh` are added alongside it even though none of the three
+#: has a known divergent fork (each is a single upstream project with a
+#: documented `--version`, unlike awk) — a trivial constant-printing program
+#: was cheap for all three, and a hello-world is strictly stronger evidence
+#: than a flag guess regardless of how confident that guess is. The other
+#: 20+ audited-default entries in `_VERSION_FLAG` are NOT given one here:
+#: each is a single-vendor, cross-platform-consistent CLI with `--version`
+#: in its own published reference (dotnet, node, rustc, python3's siblings,
+#: ...) — see the PR body's per-command portability note — and adding a
+#: hello-world to every best_effort language "just in case" would be a
+#: second thing to keep correct for no evidence of the same risk.
 _HELLO = {
     "python3": 'print("codecalc")',
     "node": 'console.log("codecalc")',
@@ -624,6 +656,10 @@ _HELLO = {
     "php": '<?php echo "codecalc\\n";',
     "lua": 'print("codecalc")',
     "bash": 'echo codecalc',
+    "awk": 'BEGIN{print "codecalc"}',
+    "sqlite": "SELECT 'codecalc';",
+    "jq": '"codecalc"',
+    "zsh": 'echo codecalc',
 }
 
 
@@ -631,34 +667,83 @@ _HELLO = {
 #: because `primary_command` collapses several languages onto one binary and
 #: asking `bash` its version four times would be three wasted spawns.
 #:
-#: `--version` is the default and the map holds only the exceptions, so a
-#: runtime added later works without an entry. An exception is not a special
-#: case for its own sake: `java -version` predates the GNU convention and
-#: prints to STDERR, which is why both streams are read below.
+#: Membership — NOT the flag value — is what matters to `report()`: this map
+#: doubles as "this code has been TOLD the correct flag for this command",
+#: and a NONZERO exit is trusted as real evidence of brokenness only for a
+#: command listed here (see `report()`'s `probe_hard_failure or cmd in
+#: _VERSION_FLAG` check). A command with no entry that exits nonzero is
+#: reported as merely unmeasured, not broken — `status` stays `installed`,
+#: `probe_error` is still recorded, and both the text renderer's "installed,
+#: version probe failed" block and `_remedies()` name it, phrased as "may
+#: still work" rather than overclaimed as broken.
 #:
-#: AUDITED against every registered language's actual toolchain (mise-managed
-#: on the box this was measured on) after `go`/`lua`/`zig` shipped a false
-#: `unhealthy` from the untested `--version` default — see the PR body for
-#: the full per-language table. `go --version` exits 2 ("flag provided but
-#: not defined: -version"; go takes `version` as a SUBCOMMAND, no dashes).
-#: `lua --version` exits 1 ("unrecognized option"; `-v` is correct). `zig
-#: --version` exits 1 (prints a usage banner; `zig version`, no dashes, is
-#: correct — the same subcommand shape as go). Every other audited language
-#: (awk, bash, bun, gcc/g++/gfortran, dotnet, deno, elixir, gleam, nix-shell
-#: for haskell, mojo, node, perl, php, python3, Rscript, ruby, rustc, sqlite3,
-#: swift, zsh) answered plain `--version` with exit 0 and is deliberately
-#: left off this map. `_VERSION_FLAG` membership doubles as "this code has
-#: been TOLD the correct flag for this command" — `_probe_version`'s caller
-#: (`report()`) trusts a NONZERO exit as real evidence of brokenness only for
-#: commands listed here; a command still on the untested default that exits
-#: nonzero is reported as merely unmeasured, not broken, because the failure
-#: might be this guess rather than the runtime.
+#: Originally held only the three GNU exceptions (`go`/`lua`/`zig`) plus
+#: java/kotlinc's non-GNU `-version`, on the theory that "the map holds only
+#: the exceptions, so a runtime added later works without an entry" — but
+#: that meant every language still answering the DEFAULT `--version`
+#: correctly (the common case) was "unmeasured" the moment its real-world
+#: exit code ever went nonzero on some other host, for no better reason than
+#: nobody had confirmed the default there either. So it now lists EVERY
+#: registered runtime's command (`escript`/`tclsh` excluded — see
+#: `_NO_VERSION`, they are never probed at all), confirmed flag or default
+#: alike, and "unmeasured" is the rare exception (a newly added, not-yet-
+#: audited runtime) rather than the common case.
+#:
+#: AUDITED LIVE on this box (mise-managed toolchains, ARM64 Ubuntu 24.04) —
+#: every command below was actually run with the flag shown and confirmed to
+#: exit 0 (or, for the five overrides, confirmed that the override is the
+#: one that does): see the PR body for the full per-command
+#: command/flag/exit-code/first-line table. `go --version` exits 2 ("flag
+#: provided but not defined: -version"; go takes `version` as a SUBCOMMAND,
+#: no dashes). `lua --version` exits 1 ("unrecognized option"; `-v` is
+#: correct). `zig --version` exits 1 (prints a usage banner; `zig version`,
+#: no dashes, is correct — the same subcommand shape as go). `java`/`kotlinc`
+#: predate the GNU convention and use `-version` (also why both stdout and
+#: stderr are read below — java's stub prints to stderr). Every other
+#: audited command answered plain `--version` with exit 0 and is listed with
+#: that value explicitly, rather than left to the implicit default, so its
+#: membership here — not just its flag — is on record.
+#:
+#: NOT the same guarantee for every entry, though: `awk` (and, belt-and-
+#: suspenders, `sqlite3`/`jq`/`zsh`) are ALSO in `_HELLO`, which arbitrates
+#: status ahead of whatever this map says — `awk`'s `--version` is confirmed
+#: correct only for the GNU awk THIS box happens to run, and a BSD/macOS/
+#: busybox awk that rejects it is proven fine by the hello-world instead of
+#: being demoted on a flag guess this map cannot vouch for everywhere. Every
+#: other entry here has no hello-world backstop because it is a single-
+#: vendor, cross-platform-consistent CLI with `--version` in its own
+#: published reference (see the PR body's per-command portability note) —
+#: `awk` is the one command name on this list that resolves to genuinely
+#: different, non-interoperable programs depending on the host.
 _VERSION_FLAG: dict[str, str] = {
     "java": "-version",
     "kotlinc": "-version",
     "go": "version",
     "lua": "-v",
     "zig": "version",
+    "awk": "--version",
+    "bash": "--version",
+    "bun": "--version",
+    "gcc": "--version",
+    "g++": "--version",
+    "gfortran": "--version",
+    "dotnet": "--version",
+    "deno": "--version",
+    "elixir": "--version",
+    "gleam": "--version",
+    "nix-shell": "--version",
+    "jq": "--version",
+    "mojo": "--version",
+    "node": "--version",
+    "perl": "--version",
+    "php": "--version",
+    "python3": "--version",
+    "Rscript": "--version",
+    "ruby": "--version",
+    "rustc": "--version",
+    "sqlite3": "--version",
+    "swift": "--version",
+    "zsh": "--version",
 }
 
 #: Commands with no version flag worth calling. `escript` and `tclsh` have no
@@ -784,6 +869,18 @@ def _remedies(backend: str, extras: list, runtimes: list, workspace: dict) -> li
         out.append(f"{r['name']}: resolved on PATH ({r['command']}) but its "
                    f"own probe failed ({r['probe_error'][:100]}) — install a "
                    f"working {r['name']} runtime")
+    # A row that stayed `installed` despite a `probe_error` was DELIBERATELY
+    # not trusted as broken — no confirmed `_VERSION_FLAG` entry (or
+    # `_HELLO` run) backs the nonzero exit, so it may just be a wrong flag
+    # guess rather than a broken runtime (see report()'s conservative rule).
+    # That combination used to be disclosed in the JSON row only — nothing
+    # here or in the text renderer named it — so an operator reading the
+    # prose had no way to learn the probe even ran. Named separately from
+    # `probed_broken` above and phrased so it is never read as "broken".
+    for r in runtimes:
+        if r["status"] == "installed" and r.get("probe_error"):
+            out.append(f"{r['name']}: version probe failed; the runtime may "
+                       f"still work ({r['probe_error'][:100]})")
     unhealthy = [r["name"] for r in runtimes
                  if r["status"] == "unhealthy" and r["name"] not in probed_broken_names]
     if unhealthy:

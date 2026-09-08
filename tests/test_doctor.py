@@ -407,6 +407,189 @@ _shutil_fixtures.rmtree(_untrusted_dir, ignore_errors=True)
 _shutil_fixtures.rmtree(_gzl_dir, ignore_errors=True)
 
 
+# ── AN AUDITED DEFAULT FLAG IS TRUSTED THE SAME AS AN OVERRIDE ─────────────
+#
+# The residual gap after #279/#280: a command with NO `_VERSION_FLAG` entry
+# that exits nonzero on the untested `--version` guess is reported as merely
+# unmeasured (correct — the guess might be wrong), but that same
+# unmeasured-forever treatment was ALSO applied to commands whose plain
+# `--version` had already been confirmed correct by this box's own audit
+# (dotnet, node, sqlite3, ...) purely because nobody had bothered to say so
+# in `_VERSION_FLAG` itself. `dotnet` — not `awk` — is the fixture here:
+# `dotnet` is a single-vendor CLI with no `_HELLO` backstop, so a fake
+# `dotnet` failing its confirmed flag proves the `_VERSION_FLAG` widening
+# ALONE does something. `awk` would prove nothing here — it is ALSO in
+# `_HELLO` (see below), which would arbitrate a fully-broken fake awk to
+# `unhealthy` regardless of whether its flag were trusted at all.
+assert "dotnet" in doctor._VERSION_FLAG and doctor._VERSION_FLAG["dotnet"] == "--version", (
+    "fixture invalid: dotnet must be a CONFIRMED-default entry for this test to mean anything")
+assert "dotnet" not in doctor._HELLO, (
+    "fixture invalid: pick a confirmed-default command with no hello-world "
+    "backstop, or this test cannot isolate what _VERSION_FLAG alone does")
+if os.name == "nt":
+    print("SKIP audited-default-flag trust (needs a POSIX shell script fixture)")
+else:
+    _dotnet_dir = _tf.mkdtemp(prefix="codecalc-doctor-test-")
+    _fake_dotnet = pathlib.Path(_dotnet_dir) / "dotnet"
+    _fake_dotnet.write_text(
+        '#!/bin/sh\necho "dotnet: fatal: fixture failure" >&2\nexit 1\n', encoding="utf-8")
+    _fake_dotnet.chmod(0o755)
+    registry.runtime_path = lambda: _dotnet_dir
+    try:
+        dotnet_broken = doctor.report(deep=True)
+    finally:
+        registry.runtime_path = _saved_path
+    _dotnet_row = next((r for r in dotnet_broken["runtimes"] if r["name"] == "csharp"), {})
+    check("a CONFIRMED default flag's nonzero exit IS trusted as `unhealthy` "
+          "(the audit widening actually does something)",
+          _dotnet_row.get("status") == "unhealthy", f"-> {_dotnet_row.get('status')!r}")
+    check("...and the failure is named in probe_error, not manufactured",
+          _dotnet_row.get("probe_error") is not None
+          and "fixture failure" in _dotnet_row["probe_error"],
+          f"-> {_dotnet_row.get('probe_error')!r}")
+    check("...and csharp is best_effort, so `healthy` is unaffected",
+          dotnet_broken["healthy"] is True)
+    _shutil_fixtures.rmtree(_dotnet_dir, ignore_errors=True)
+
+
+# ── A REJECTED CONFIRMED FLAG IS ARBITRATED BY HELLO-WORLD, NOT TRUSTED ────
+#
+# `awk` is different from `dotnet` above precisely because its confirmed
+# `--version` is only confirmed for the GNU awk THIS box happens to run —
+# BSD/macOS one-true-awk and busybox awk reject GNU long options outright.
+# Trusting that confirmed-here flag on every host would repeat #282's own
+# regression for a command #282 never audited. `awk` is in `_HELLO` for
+# exactly this reason: a `BEGIN{...}` hello-world is portable POSIX syntax
+# across every real implementation and arbitrates BEFORE `probe_error` gets
+# a say (see the ordering note in `report()`), regardless of which awk
+# flavor is on PATH. This fixture simulates the BSD-awk shape directly: it
+# rejects `--version`/`-version` but runs an ordinary awk program correctly.
+#
+# `_HELLO` spawns through `executor.execute()`, which on the Rust backend
+# shells out to `codecalc-exec` as a SEPARATE process that inherits this
+# process's OS environment wholesale (no `env=` override, unlike `_env()`'s
+# callers) — the same reason the go/lua/zig fixture above sets the ENV VAR,
+# not the `registry.runtime_path` attribute, and this fixture does too.
+if os.name == "nt":
+    print("SKIP BSD-awk hello-world arbitration (needs a POSIX shell script fixture)")
+else:
+    _bsdawk_dir = _tf.mkdtemp(prefix="codecalc-doctor-test-")
+    _fake_bsdawk = pathlib.Path(_bsdawk_dir) / "awk"
+    _fake_bsdawk.write_text(
+        '#!/bin/sh\n'
+        'if [ "$1" = "--version" ] || [ "$1" = "-version" ]; then\n'
+        '  echo "awk: unknown option -- version" >&2\n'
+        '  exit 2\n'
+        'fi\n'
+        'echo codecalc\n'
+        'exit 0\n', encoding="utf-8")
+    _fake_bsdawk.chmod(0o755)
+    _saved_bsdawk_env = os.environ.get(registry.RUNTIME_PATH_ENV)
+    os.environ[registry.RUNTIME_PATH_ENV] = str(_bsdawk_dir)
+    try:
+        bsdawk = doctor.report(deep=True)
+    finally:
+        if _saved_bsdawk_env is None:
+            os.environ.pop(registry.RUNTIME_PATH_ENV, None)
+        else:
+            os.environ[registry.RUNTIME_PATH_ENV] = _saved_bsdawk_env
+    _bsdawk_row = next((r for r in bsdawk["runtimes"] if r["name"] == "awk"), {})
+    check("a BSD-flavored awk that rejects the confirmed --version flag is "
+          "NOT demoted to unhealthy",
+          _bsdawk_row.get("status") == "available", f"-> {_bsdawk_row.get('status')!r}")
+    check("...and the rejected flag is still recorded, not silently dropped",
+          _bsdawk_row.get("probe_error") is not None,
+          f"-> {_bsdawk_row.get('probe_error')!r}")
+    check("...and version stays unmeasured (the flag never answered), never invented",
+          _bsdawk_row.get("version") is None, f"-> {_bsdawk_row.get('version')!r}")
+    _shutil_fixtures.rmtree(_bsdawk_dir, ignore_errors=True)
+
+# The positive half: on THIS real box, awk's confirmed default flag yields
+# an actual version string, proving the audit entry didn't change *which*
+# flag is sent, only whether a nonzero exit from it is trusted. Made
+# TOLERANT of a real BSD/macOS/busybox awk that rejects `--version` outright
+# (the exact risk flagged in review — this box's own awk was audited as GNU
+# awk only): a `None` read here is not a failure, it means the flag was
+# rejected — the fixture above already proves that case is handled safely —
+# so this SKIPS loudly, naming the awk flavor if it can be identified,
+# rather than failing on a host whose awk simply is not GNU awk.
+_awk_path = _shutil_fixtures.which("awk", path=registry.runtime_path())
+if _awk_path is None:
+    print("SKIP newly-audited-flag real version (awk not on this host's PATH)")
+else:
+    _awk_version = doctor._runtime_version("awk", _awk_path)
+    if _awk_version is None:
+        _flavor = None
+        for _probe_args in (["-W", "version"], ["-version"]):
+            try:
+                _p = subprocess.run([_awk_path, *_probe_args],
+                                    capture_output=True, timeout=5, text=True)
+            except (OSError, subprocess.SubprocessError):
+                continue
+            _lines = (_p.stdout or _p.stderr or "").strip().splitlines()
+            if _lines:
+                _flavor = _lines[0]
+                break
+        print(f"SKIP awk version read — this host's awk rejects --version "
+              f"(not GNU awk); flavor: "
+              f"{_flavor or 'unidentified, likely BSD/busybox awk'}")
+    else:
+        check("a newly-audited command (awk, confirmed default `--version`) "
+              "reads a real version on this host",
+              isinstance(_awk_version, str) and "wk" in _awk_version.lower(),
+              f"-> {_awk_version!r}")
+
+
+# ── AN UNRESOLVED `probe_error` IS VISIBLE, NOT JUST IN THE JSON ROW ───────
+#
+# Residual from #282's review: a runtime whose version probe exits nonzero
+# on an UNCONFIRMED flag stays `installed` with `probe_error` set (the
+# conservative, correct call) — but the text renderer showed such a row
+# under NEITHER available/BROKEN/missing, and `_remedies()` said nothing
+# about it either. The JSON disclosed it; a human reading `doctor` never saw
+# it. Both halves fixed here: `_remedies()` names the runtime and the probe
+# output, and the text renderer lists it under its own heading. Neither
+# needs a real broken binary — a synthetic row exercises both in isolation
+# from the (now much smaller) set of genuinely unaudited commands.
+_fake_row = {"name": "fakelang", "command": "fakelang", "status": "installed",
+             "path": "/usr/bin/fakelang", "tier": "best_effort", "version": None,
+             "probe_error": "fakelang --version: exited 1: usage: fakelang [opts]"}
+assert "fakelang" not in doctor._VERSION_FLAG, "fixture invalid: pick a name not audited"
+
+_remedy_lines = doctor._remedies(
+    backend="rust", extras=[], runtimes=[_fake_row],
+    workspace={"writable": True, "path": doctor.tempfile.gettempdir(), "error": None})
+check("an installed-but-probe-failed runtime gets its own remedy line",
+      any("fakelang" in line and "version probe failed" in line
+          and "may still work" in line for line in _remedy_lines),
+      f"-> {_remedy_lines}")
+check("...and it is NOT phrased as broken (that would overclaim the evidence)",
+      not any("fakelang" in line and "BROKEN" in line for line in _remedy_lines))
+
+import contextlib
+import io
+
+from codecalc import server as _server
+
+_visibility_rep = doctor.report()
+_visibility_rep = {**_visibility_rep,
+                   "runtimes": [*_visibility_rep["runtimes"], _fake_row]}
+_saved_report = doctor.report
+doctor.report = lambda deep=False: _visibility_rep
+_out = io.StringIO()
+try:
+    with contextlib.redirect_stdout(_out):
+        _server._doctor(as_json=False, deep=False)
+finally:
+    doctor.report = _saved_report
+_rendered = _out.getvalue()
+check("the text renderer shows a heading for installed-but-probe-failed runtimes",
+      "installed, version probe failed:" in _rendered, f"-> {_rendered[-400:]}")
+check("...naming the runtime and its probe_error, not just a count",
+      "fakelang" in _rendered and _fake_row["probe_error"] in _rendered,
+      f"-> {_rendered[-400:]}")
+
+
 # ── THE REAL HOST, --deep: TESTED-TIER MUST NEVER FALSE-POSITIVE ───────────
 #
 # The regression above escaped because no test ran `doctor.report(deep=True)`
