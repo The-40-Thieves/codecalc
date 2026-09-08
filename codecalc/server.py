@@ -1459,6 +1459,15 @@ def trace_execution(
     size ceiling stopped RECORDING early (the underlying stdout/exit code
     are unaffected either way).
 
+    TRUST: the trace is produced BY the traced program at its OWN privilege
+    — a debugging aid, not an attestation of behaviour, exactly as
+    trustworthy as that program's own stdout. `discarded_events` /
+    `events_consistent` are a best-effort tamper/corruption signal (never a
+    guarantee) computed independently of the file's own content.
+    `unenforced` may additionally note "only the main thread is traced"
+    (sys.settrace is per-thread) or, fallback backend only, an OLE
+    `exit_code` race.
+
     PYTHON3 ONLY for now; any other `language` is refused up front. For a
     structural Big-O guess with nothing executed, use analyze_complexity.
     `provider`: only 'local' (default) is supported here.

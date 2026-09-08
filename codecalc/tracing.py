@@ -104,12 +104,91 @@ killed run reports `truncated: false` — the standard `verdict`/`timed_out`/
 `truncated_reason` with a third, cap-unrelated meaning would blur two
 different questions ("did codecalc's own recording limit cut this short" vs
 "did the sandbox kill the process") into one field.
+
+TRUST BOUNDARY — READ BEFORE TRUSTING `events`. The trace is produced BY the
+traced process, using the SAME privilege the traced code itself runs with.
+It is exactly as trustworthy as that program's own stdout: a debugging aid,
+never an attestation of behaviour. A sandboxed program can compute the trace
+sink's own path from `__file__` (it is a sibling of the workdir the harness
+already discloses) and append arbitrary bytes to it — a cross-vendor review
+reproduced this with a forged trailing `return` event, keeping it last via
+`os._exit(0)` to skip the harness's own cleanup entirely. This module cannot
+stop that (in-process code sharing the traced program's own uid is not a
+security boundary this package can construct from Python alone — see
+`_refuse_unsupported_provider`'s docstring for the same "cannot exclude same-
+privilege code" limitation, one layer up), so instead of pretending
+otherwise it bounds the DAMAGE and SURFACES the tampering:
+
+  * The parser (`_parse_trace_file`) never reads more than `_MAX_TRACE_BYTES
+    + 4 KiB` off disk (`os.open`/`os.read` in a bounded loop, never
+    `Path.read_text()` of the whole file) — a sandboxed program appending
+    megabytes of junk cannot force this (unsandboxed, parent-process)
+    parser into unbounded work. If the file on disk is bigger than that
+    window, `truncated: true, truncated_reason: "trace_file_exceeded"` says
+    so and only the bounded prefix is read.
+  * Every candidate line is schema-validated (`_validate_event`): exactly
+    the keys its `event` value permits, correct types, `line` within the
+    program's own line range, and `step` continuing the exact monotonic
+    sequence the harness's OWN counter would have produced. Anything else —
+    malformed JSON, an unknown key, a skipped or repeated `step` — is
+    DISCARDED, counted in `discarded_events`, and never raises.
+  * The harness writes a final `{"event": "end", "step": N, "emitted": N}`
+    line, whether or not either cap fired, in every path `_run_source`
+    returns through normally. `events_consistent` is `false` whenever that
+    line is missing, its `emitted` count disagrees with how many events this
+    parser actually accepted, or anything appears after it — the ONE thing
+    `os._exit(0)` (or any other bypass of the harness's own return path)
+    cannot fake, because it never runs the code that writes it. A forged
+    event placed BEFORE a genuine `end` line still inflates the accepted
+    count past what `emitted` claims, so `events_consistent` catches that
+    case too, not just an outright-missing terminator.
+
+None of this turns `events` into a signed record — a sufficiently determined
+attacker with same-process code execution can still corrupt it in ways this
+parser accepts (see `_validate_event`'s own docstring for the one class of
+forgery — an exact step-and-shape match — this design cannot detect at the
+per-line level, only via the aggregate `events_consistent` check). What it
+guarantees is that a CARELESS or MODERATE corruption is either rejected
+outright or visibly flagged, and that no amount of appended data can force
+this process to do more than a fixed, small amount of extra work.
+
+THREADS. `sys.settrace` is a per-THREAD hook; installing it in the main
+thread traces only frames running there. A program that starts its own
+thread runs code this tracer never sees `call`/`line`/`return`/`exception`
+events for — that code still executes normally (this only affects what
+`events` can show, never `stdout`/`exit_code`), but a reader must not read
+`events` as a complete account of everything the program did. The harness
+checks `threading.active_count()` cheaply on every `call` event and once
+more as it exits; the first time it observes more than one thread, it flags
+that in the trace file, and `execute_trace` copies `"threads: only the main
+thread is traced"` into the result's own `unenforced` array — the same
+disclosure list `execute_code` already uses for a guarantee it could not
+apply.
+
+FALLBACK-BACKEND OLE RACE. The pure-Python fallback's own output-cap
+enforcement (`executor._run_step`) polls `overflow.is_set()` on a 20ms
+timer, racing the child's own natural exit — confirmed PRE-EXISTING and
+already nondeterministic for plain `execute_code` on this backend (the same
+program's `exit_code` flips between 0 and a negative signal across repeated
+runs at sizes near the cap). This module's extra per-event file I/O shifts
+that race's timing enough to change which side usually wins for a given
+program, so `trace_execution`'s `exit_code` on an OLE verdict, fallback
+backend only, is not reliably comparable to what `execute_code` reports for
+the identical program — `verdict` and `output_truncated` are unaffected and
+always agree. Not fixed here: the race lives in shared executor code every
+tool depends on, and this module works around its OWN sensitivity to it
+rather than changing that polling loop. `execute_trace` adds `"exit_code:
+fallback backend may differ on output-limit kills"` to `unenforced`
+whenever `backend == "python"` and `verdict == "OLE"`. The Rust backend's
+own cap enforcement is not timing-sensitive this way — confirmed
+deterministic across dozens of trials — so this note is fallback-only.
 """
 
 from __future__ import annotations
 
 import ast
 import json
+import os
 import tempfile
 import textwrap
 from collections import Counter
@@ -159,6 +238,50 @@ _MAX_TRACE_BYTES = 512 * 1024
 #: "CAPS" section for why this is the source of truth over inferring
 #: truncation from the raw event count.
 _TRUNCATION_MARKER_KEY = "__trace_truncated__"
+
+#: The JSON key marking the harness's own "more than one thread was alive"
+#: disclosure — see the module docstring's "THREADS" section.
+_THREAD_MARKER_KEY = "__trace_multithreaded__"
+
+#: Slack ABOVE `_MAX_TRACE_BYTES` the parser will read before concluding the
+#: file is bigger than the harness could legitimately have written — enough
+#: for the truncation marker, the final `end` line, and JSON overhead on the
+#: last real event, none of which count against the wrapper's own in-process
+#: `_MAX_TRACE_BYTES` check (see `_stop_tracing`). See the module docstring's
+#: "TRUST BOUNDARY" section for why this bound exists at all: it is what
+#: keeps a sandboxed program appending megabytes to the trace file from
+#: forcing this UNSANDBOXED parser to do unbounded work.
+_TRACE_READ_SLACK_BYTES = 4096
+_MAX_TRACE_READ_BYTES = _MAX_TRACE_BYTES + _TRACE_READ_SLACK_BYTES
+
+#: The event types a trace line may legitimately declare, and the EXTRA keys
+#: (beyond `_BASE_EVENT_KEYS`) each one requires — no more, no fewer.
+#: `_validate_event` requires an exact key-set match, so an event carrying
+#: an extra or missing key is discarded rather than partially trusted.
+_BASE_EVENT_KEYS = frozenset({"step", "line", "event", "func", "locals"})
+_EVENT_EXTRA_KEYS: dict[str, frozenset[str]] = {
+    "line": frozenset(),
+    "call": frozenset(),
+    "return": frozenset({"return_value"}),
+    "exception": frozenset({"exception_type", "exception_message"}),
+}
+
+#: Defensive ceilings on a single event's string/dict fields, independent of
+#: the whole-file byte bound above — a forged event that passes every other
+#: check still cannot make one line disproportionately large. The wrapper's
+#: own `_LOCALS_REPR_LIMIT` (200) already caps a legitimate repr well under
+#: `_MAX_STR_FIELD_LEN`; the gap is headroom, not a promise either value is
+#: exact.
+_MAX_FUNC_LEN = 200
+_MAX_STR_FIELD_LEN = 4096
+_MAX_LOCALS_ENTRIES = 200
+
+#: Copied into the result's own `unenforced` array — see the module
+#: docstring's "THREADS" / "FALLBACK-BACKEND OLE RACE" sections.
+THREADS_UNENFORCED_NOTE = "threads: only the main thread is traced"
+FALLBACK_OLE_EXIT_CODE_UNENFORCED_NOTE = (
+    "exit_code: fallback backend may differ on output-limit kills"
+)
 
 #: AST node types that are branch POINTS for the `branches` report — every
 #: line where control can diverge. `ast.Try`'s `lineno` is its `try:` line;
@@ -250,11 +373,22 @@ def _build_wrapper_source(user_source_path: str, trace_path: str,
     correctly through backslashes/quotes on every platform this package
     targets — the same reasoning `registry.source_arg` documents for why a
     raw f-string path is not safe to splice into generated source.
+
+    Writes a final `{{"event": "end", "step": N, "emitted": N}}` line on every
+    path `_run_source` returns through — see the module docstring's "TRUST
+    BOUNDARY" section for what that buys the parser. Installs a FRESH
+    `__main__` module (`sys.modules["__main__"]`) with the user's own
+    `__file__` before `exec()`-ing their code, restored afterward, so
+    `sys.modules['__main__']` matches what `execute_code` would show instead
+    of leaking this harness's own module object and internals (cross-vendor
+    review, "sys.modules leaks the wrapper").
     """
     return textwrap.dedent(f"""\
         import json
         import sys
+        import threading
         import traceback
+        import types
 
         _USER_SOURCE = {user_source_path!r}
         _TRACE_PATH = {trace_path!r}
@@ -278,6 +412,12 @@ def _build_wrapper_source(user_source_path: str, trace_path: str,
         # so the frame is no longer unwinding and a later real return must
         # not be suppressed.
         _unwinding = set()
+        # See the module docstring's "THREADS" section: sys.settrace is
+        # per-thread, so a second thread's frames are invisible here
+        # regardless of filename. Checked cheaply (once per 'call' event,
+        # never per 'line') rather than not at all.
+        _multithreaded = False
+        _thread_marker_written = False
 
 
         def _safe_repr(value):
@@ -307,6 +447,20 @@ def _build_wrapper_source(user_source_path: str, trace_path: str,
             _trace_file.flush()
 
 
+        def _note_threads():
+            global _multithreaded, _thread_marker_written
+            if not _multithreaded and threading.active_count() > 1:
+                _multithreaded = True
+            if _multithreaded and not _thread_marker_written:
+                _thread_marker_written = True
+                try:
+                    _trace_file.write(
+                        json.dumps({{{_THREAD_MARKER_KEY!r}: True}}) + "\\n")
+                    _trace_file.flush()
+                except Exception:
+                    pass
+
+
         def _stop_tracing(reason):
             sys.settrace(None)
             _emit({{{_TRUNCATION_MARKER_KEY!r}: True, "reason": reason}})
@@ -314,6 +468,8 @@ def _build_wrapper_source(user_source_path: str, trace_path: str,
 
         def _tracer(frame, event, arg):
             global _step
+            if event == "call":
+                _note_threads()
             if frame.f_code.co_filename != _USER_SOURCE:
                 return None
             if _event_count >= _MAX_EVENTS:
@@ -374,10 +530,18 @@ def _build_wrapper_source(user_source_path: str, trace_path: str,
                 traceback.print_exception(type(exc), exc, None, file=sys.stderr)
                 return 1
             sys.settrace(_tracer)
-            module_globals = {{"__name__": "__main__", "__file__": _USER_SOURCE,
-                              "__builtins__": __builtins__}}
+            # A FRESH module object, not a bare dict, so introspection from
+            # inside the traced program (sys.modules['__main__'], its
+            # __file__, __dict__) matches what execute_code would show —
+            # not this harness's OWN module/globals/temp-file identity.
+            # Restored in the finally below regardless of outcome.
+            user_module = types.ModuleType("__main__")
+            user_module.__file__ = _USER_SOURCE
+            user_module.__builtins__ = __builtins__
+            _saved_main = sys.modules.get("__main__")
+            sys.modules["__main__"] = user_module
             try:
-                exec(code_obj, module_globals)
+                exec(code_obj, user_module.__dict__)
             except SystemExit as exc:
                 sys.settrace(None)
                 code = exc.code
@@ -398,44 +562,216 @@ def _build_wrapper_source(user_source_path: str, trace_path: str,
                 return 0
             finally:
                 sys.settrace(None)
+                if _saved_main is not None:
+                    sys.modules["__main__"] = _saved_main
+                else:
+                    sys.modules.pop("__main__", None)
 
 
         sys.argv = [_USER_SOURCE]
         _exit_code = _run_source()
+        _note_threads()
+        try:
+            _trace_file.write(
+                json.dumps({{"event": "end", "step": _step,
+                            "emitted": _event_count}}) + "\\n")
+            _trace_file.flush()
+        except Exception:
+            pass
         _trace_file.close()
         sys.exit(_exit_code)
         """)
 
 
-def _parse_trace_file(path: Path) -> tuple[list[dict], bool, str | None]:
-    """`(events, truncated, truncated_reason)` from a trace file that may not
-    exist (a hard kill before the wrapper opened it) or may end mid-line (a
-    hard kill mid-write, despite the per-line flush — the OS can still cut a
-    write short). Both are read as "no more trace to show", never as an
-    error: the envelope's own `verdict`/`timed_out` already say the run was
-    killed.
+def _bounded_read(path: Path, limit: int) -> tuple[bytes, bool]:
+    """`(data, exceeded)` — at most `limit` bytes off `path`, via `os.open`/
+    `os.read` in a loop, NEVER `Path.read_text()` of the whole file. `exceeded`
+    is true when the file on disk is bigger than `limit`, regardless of
+    whether the bytes actually read turn out to be well-formed.
+
+    This is the one function standing between a sandboxed program appending
+    an unbounded amount of data to the trace sink and this UNSANDBOXED parent
+    process doing unbounded work reading it back — see the module docstring's
+    "TRUST BOUNDARY" section. `os.fstat` on the SAME fd being read, not a
+    separate `path.stat()`, so the size and the bytes come from one open of
+    the file rather than two lookups that could race a concurrent writer.
     """
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        size = os.fstat(fd).st_size
+        to_read = min(size, limit)
+        chunks: list[bytes] = []
+        remaining = to_read
+        while remaining > 0:
+            chunk = os.read(fd, min(remaining, 1024 * 1024))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks), size > limit
+    finally:
+        os.close(fd)
+
+
+def _validate_event(obj: object, expected_step: int, max_line: int) -> dict | None:
+    """A clean, schema-conformant copy of `obj` if it is a legitimate trace
+    event for step `expected_step`, else `None`.
+
+    Exact key-set match (`_BASE_EVENT_KEYS` plus exactly the extras
+    `_EVENT_EXTRA_KEYS[event]` names — no more, no fewer), correct types, and
+    `step == expected_step`: the running counter this parser expects next,
+    which only ever matches the harness's OWN monotonic `_step` sequence
+    unless a forger happens to guess the exact next value. That ONE class of
+    forgery — an event that also matches the expected step — is the kind
+    this function cannot catch on its own; `execute_trace`'s aggregate
+    `events_consistent` check (against the harness's own `end` line) is what
+    catches it instead, because such an event still inflates the accepted
+    count past what the harness's real, in-memory counter reported. See the
+    module docstring's "TRUST BOUNDARY" section.
+
+    Returns a FRESH dict built field-by-field, never `obj` itself passed
+    through: an attacker-controlled dict reaching the result verbatim would
+    make this validator a filter on ADMISSION only, not on CONTENT, the
+    moment a future field is added to `obj` without a matching check here.
+    """
+    if not isinstance(obj, dict):
+        return None
+    event = obj.get("event")
+    extra = _EVENT_EXTRA_KEYS.get(event) if isinstance(event, str) else None
+    if extra is None:
+        return None
+    if set(obj) != _BASE_EVENT_KEYS | extra:
+        return None
+    step = obj.get("step")
+    if not isinstance(step, int) or isinstance(step, bool) or step != expected_step:
+        return None
+    line = obj.get("line")
+    if not isinstance(line, int) or isinstance(line, bool) or not (0 <= line <= max_line):
+        return None
+    func = obj.get("func")
+    if not isinstance(func, str) or len(func) > _MAX_FUNC_LEN:
+        return None
+    locals_ = obj.get("locals")
+    if (not isinstance(locals_, dict) or len(locals_) > _MAX_LOCALS_ENTRIES
+            or not all(isinstance(k, str) and len(k) <= _MAX_FUNC_LEN
+                       and isinstance(v, str) and len(v) <= _MAX_STR_FIELD_LEN
+                       for k, v in locals_.items())):
+        return None
+    clean = {"step": step, "line": line, "event": event, "func": func,
+             "locals": dict(locals_)}
+    for key in extra:
+        value = obj.get(key)
+        if not isinstance(value, str) or len(value) > _MAX_STR_FIELD_LEN:
+            return None
+        clean[key] = value
+    return clean
+
+
+def _parse_trace_file(path: Path, code: str, max_events: int) -> dict[str, Any]:
+    """The trusted-as-far-as-possible reading of a trace file the SANDBOXED
+    program had write access to. See the module docstring's "TRUST BOUNDARY"
+    section for the threat this defends against and what it does not.
+
+    Returns `{"events", "truncated", "truncated_reason", "discarded_events",
+    "events_consistent", "multithreaded"}`. A trace file that does not exist
+    (a hard kill before the wrapper opened it) or ends mid-line (a hard kill
+    mid-write, despite the per-line flush) is read as "no more trace to
+    show", never as an error — the envelope's own `verdict`/`timed_out`
+    already say the run was killed, and `events_consistent` is correctly
+    `false` in that case too (the harness's own `end` line was never
+    reached).
+    """
+    empty = {"events": [], "truncated": False, "truncated_reason": None,
+              "discarded_events": 0, "events_consistent": False,
+              "multithreaded": False}
     if not path.is_file():
-        return [], False, None
+        return empty
+
+    data, exceeded = _bounded_read(path, _MAX_TRACE_READ_BYTES)
+    truncated = exceeded
+    truncated_reason = "trace_file_exceeded" if exceeded else None
+
+    max_line = max(1, len(code.splitlines()))
     events: list[dict] = []
-    truncated = False
-    truncated_reason: str | None = None
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = line.strip()
+    discarded_events = 0
+    multithreaded = False
+    end_seen = False
+    events_after_end = 0
+    end_emitted: int | None = None
+    end_step: int | None = None
+    expected_step = 1
+
+    text = data.decode("utf-8", errors="replace")
+    # The LAST line may be a partial write (a hard kill mid-flush, or simply
+    # where this bounded read happened to stop) — `splitlines()` on
+    # `errors="replace"`-decoded bytes cannot tell "clean EOF" from "cut
+    # short" either way, so a trailing line with no `\n` in the raw bytes is
+    # always dropped rather than risk decoding a truncated JSON object into
+    # something that HAPPENS to parse.
+    lines = text.split("\n")
+    if not data.endswith(b"\n"):
+        lines = lines[:-1]
+
+    for raw_line in lines:
+        line = raw_line.strip()
         if not line:
+            continue
+        if end_seen:
+            events_after_end += 1
             continue
         try:
             obj = json.loads(line)
         except json.JSONDecodeError:
-            # A partial final line from a hard kill mid-write — dropped, not
-            # raised; see the docstring above.
+            discarded_events += 1
             continue
-        if isinstance(obj, dict) and obj.get(_TRUNCATION_MARKER_KEY):
-            truncated = True
-            truncated_reason = obj.get("reason")
+        if not isinstance(obj, dict):
+            discarded_events += 1
             continue
-        events.append(obj)
-    return events, truncated, truncated_reason
+        if obj.get(_TRUNCATION_MARKER_KEY):
+            if not truncated:
+                reason = obj.get("reason")
+                if reason in ("max_events", "max_trace_bytes"):
+                    truncated = True
+                    truncated_reason = reason
+            continue
+        if obj.get(_THREAD_MARKER_KEY):
+            multithreaded = True
+            continue
+        if obj.get("event") == "end":
+            if (set(obj) == {"event", "step", "emitted"}
+                    and isinstance(obj.get("step"), int)
+                    and not isinstance(obj.get("step"), bool)
+                    and isinstance(obj.get("emitted"), int)
+                    and not isinstance(obj.get("emitted"), bool)):
+                end_seen = True
+                end_step = obj["step"]
+                end_emitted = obj["emitted"]
+            else:
+                discarded_events += 1
+            continue
+        clean = _validate_event(obj, expected_step, max_line)
+        if clean is None:
+            discarded_events += 1
+            continue
+        events.append(clean)
+        expected_step += 1
+        if len(events) >= max_events:
+            if not truncated:
+                truncated = True
+                truncated_reason = "max_events"
+            break
+
+    events_consistent = (
+        end_seen and events_after_end == 0
+        and end_emitted == len(events) and end_step == len(events)
+    )
+    return {
+        "events": events, "truncated": truncated,
+        "truncated_reason": truncated_reason,
+        "discarded_events": discarded_events,
+        "events_consistent": events_consistent,
+        "multithreaded": multithreaded,
+    }
 
 
 def _branch_report(source: str, events: list[dict]) -> dict[str, Any]:
@@ -502,7 +838,8 @@ def execute_trace(language: str, code: str, stdin: str = "", timeout: int = 30,
             max_output_kb=max_output_kb, max_cpu=max_cpu, no_net=no_net,
         )
 
-        events, truncated, truncated_reason = _parse_trace_file(trace_path)
+        parsed = _parse_trace_file(trace_path, code, max_events)
+        events = parsed["events"]
         result["events"] = events
         result["event_count"] = len(events)
         # Always equal to `event_count` by construction: every event that
@@ -511,10 +848,30 @@ def execute_trace(language: str, code: str, stdin: str = "", timeout: int = 30,
         # because the tool's documented shape names it separately from the
         # total — see server.py's `trace_execution` docstring.
         result["steps_before_truncation"] = len(events)
-        result["truncated"] = truncated
-        if truncated_reason is not None:
-            result["truncated_reason"] = truncated_reason
+        result["truncated"] = parsed["truncated"]
+        if parsed["truncated_reason"] is not None:
+            result["truncated_reason"] = parsed["truncated_reason"]
+        # See the module docstring's "TRUST BOUNDARY" section: neither of
+        # these can be forged away by a sandboxed program the way the
+        # events themselves partially can, because both are computed BY
+        # this (unsandboxed) parser rather than trusted from the file.
+        result["discarded_events"] = parsed["discarded_events"]
+        result["events_consistent"] = parsed["events_consistent"]
         result.update(_branch_report(code, events))
+
+        unenforced = result.get("unenforced")
+        if not isinstance(unenforced, list):
+            unenforced = []
+            result["unenforced"] = unenforced
+        if parsed["multithreaded"] and THREADS_UNENFORCED_NOTE not in unenforced:
+            unenforced.append(THREADS_UNENFORCED_NOTE)
+        # See the module docstring's "FALLBACK-BACKEND OLE RACE" section —
+        # fallback-only and OLE-only, because that is exactly where the
+        # race is confirmed to live; the Rust backend's own cap enforcement
+        # is not timing-sensitive this way.
+        if (result.get("backend") == "python" and result.get("verdict") == "OLE"
+                and FALLBACK_OLE_EXIT_CODE_UNENFORCED_NOTE not in unenforced):
+            unenforced.append(FALLBACK_OLE_EXIT_CODE_UNENFORCED_NOTE)
         return result
     finally:
         executor._rmtree_checked(workdir, created_identity)

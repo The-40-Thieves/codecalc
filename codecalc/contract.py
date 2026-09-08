@@ -876,8 +876,39 @@ def _execution_trace_only_properties() -> dict:
         },
         "truncated_reason": {
             "type": "string",
-            "enum": ["max_events", "max_trace_bytes"],
-            "description": "Present only when `truncated` is true.",
+            "enum": ["max_events", "max_trace_bytes", "trace_file_exceeded"],
+            "description": (
+                "Present only when `truncated` is true. `trace_file_exceeded` "
+                "means the trace file on disk was bigger than the harness "
+                "could legitimately have written — a possible sign the "
+                "SANDBOXED program itself appended to it; see this shape's "
+                "own trust-boundary note on `events_consistent`."
+            ),
+        },
+        "discarded_events": {
+            "type": "integer", "minimum": 0,
+            "description": (
+                "Lines in the trace file this (unsandboxed) parser read but "
+                "rejected — malformed JSON, an unrecognised or malformed "
+                "shape, or a `step` that did not continue the expected "
+                "monotonic sequence. Always 0 for a trace nothing has "
+                "tampered with; nonzero does not by itself mean tampering — "
+                "see `events_consistent`."
+            ),
+        },
+        "events_consistent": {
+            "type": "boolean",
+            "description": (
+                "True only when the harness's own trailing `end` marker was "
+                "found, its `emitted` count matches the number of `events` "
+                "this parser accepted, and nothing followed it in the file. "
+                "The trace is produced BY the traced process, at the SAME "
+                "privilege it runs with — this is a best-effort tamper/"
+                "corruption signal, never a cryptographic guarantee; a run "
+                "killed by TLE/OLE/MLE before the harness could write its "
+                "own `end` line also reports this false, honestly, since "
+                "nothing vouches for a partial trace's completeness either."
+            ),
         },
         "branches": {
             "type": "object",
@@ -1096,6 +1127,7 @@ def build_schema(dialect: str | None = None, schema_id: str | None = None) -> di
                 "type": "object",
                 "required": [*ENVELOPE_KEYS, "events", "event_count",
                              "steps_before_truncation", "truncated",
+                             "discarded_events", "events_consistent",
                              "branches", "lines_executed", "lines_never_executed"],
                 "properties": {
                     **_execution_envelope_properties(),

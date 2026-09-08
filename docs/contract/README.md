@@ -27,15 +27,39 @@ report computed from an AST parse of the submitted source —
   is recorded once tracing stops) and exists because a caller reasoning
   about a truncated trace wants the count of what stopped tracing without a
   second lookup.
-* **`truncated`** / **`truncated_reason`** (`max_events` or an internal
-  trace-byte ceiling, present only when `truncated` is true) — either cap
-  stops RECORDING, never the program: the underlying `exec()` keeps running
-  to completion at full speed regardless, so `stdout`/`exit_code`/`verdict`
-  are always the real, complete ones even when `events` is partial. A hard
-  kill (TLE/OLE/MLE) before either cap trips reports `truncated: false` —
-  that story is already told by `verdict`/`timed_out`/`output_truncated`,
-  and this field is deliberately scoped to this tool's own two recording
-  caps rather than overloaded with a third, unrelated meaning.
+* **`truncated`** / **`truncated_reason`** (`max_events`, an internal
+  trace-byte ceiling, or `trace_file_exceeded` — present only when
+  `truncated` is true) — the first two caps stop RECORDING, never the
+  program: the underlying `exec()` keeps running to completion at full
+  speed regardless, so `stdout`/`exit_code`/`verdict` are always the real,
+  complete ones even when `events` is partial. A hard kill (TLE/OLE/MLE)
+  before either cap trips reports `truncated: false` — that story is
+  already told by `verdict`/`timed_out`/`output_truncated`, and this field
+  is deliberately scoped to this tool's own recording caps rather than
+  overloaded with an unrelated meaning. `trace_file_exceeded` is different
+  in kind from the other two — see `discarded_events`/`events_consistent`
+  immediately below.
+* **`discarded_events`** / **`events_consistent`** — the trace is produced
+  BY the traced process, at the SAME privilege it runs with, so a
+  sandboxed program can derive the trace file's own path from `__file__`
+  and write to it directly (a cross-vendor review reproduced a forged
+  trailing `return` event this way, using `os._exit(0)` to skip the
+  harness's own cleanup). This tool cannot make the trace an attestation of
+  behaviour — it remains exactly as trustworthy as that program's own
+  stdout — but it bounds and surfaces tampering rather than trusting the
+  file blindly: the (unsandboxed) parser never reads more than
+  `_MAX_TRACE_BYTES + 4 KiB` off disk regardless of how much a program
+  appends (`trace_file_exceeded` fires when the file is bigger than that),
+  every candidate line is schema-validated (unknown keys, wrong types, or a
+  `step` that skips or repeats the harness's own monotonic sequence are
+  DISCARDED and counted in `discarded_events`, never raised), and the
+  harness writes a final `{"event": "end", "step": N, "emitted": N}` line
+  on every path it returns through normally — `events_consistent` is
+  `false` whenever that line is missing, its count disagrees with what this
+  parser actually accepted, or anything follows it, which is the one thing
+  a same-process forger cannot fake by definition (it never runs the code
+  that writes it). See `codecalc/tracing.py`'s module docstring, "TRUST
+  BOUNDARY" section, for exactly what this does and does not guarantee.
 * **`branches`** — source line number (string key) -> execution count, for
   every `if`/`elif`/`while`/`for`/`try` line, from a static `ast` parse of
   the submitted code (never from the trace alone, so a branch that never
@@ -43,6 +67,27 @@ report computed from an AST parse of the submitted source —
 * **`lines_executed`** / **`lines_never_executed`** — the cheap "which
   branch actually ran" view: every statically-detected executable line,
   split by whether a `line` event ever fired on it.
+
+Two more differences from `execute_code` are disclosed through the
+EXISTING `unenforced` array rather than a new field, because both describe
+a guarantee this tool could not fully apply rather than new information
+about the traced program:
+
+* **`"threads: only the main thread is traced"`** — `sys.settrace` is a
+  per-THREAD hook; a program that starts its own thread runs code this
+  tracer never sees events for (that code still executes normally — only
+  `events`' completeness is affected, never `stdout`/`exit_code`). Added
+  whenever the harness observes more than one thread alive at any point.
+* **`"exit_code: fallback backend may differ on output-limit kills"`** —
+  the pure-Python fallback's own OLE enforcement polls a flag on a 20ms
+  timer, racing the child's natural exit; that race is PRE-EXISTING and
+  already nondeterministic for plain `execute_code` on this backend, and
+  this tool's extra per-event file I/O shifts its timing enough to make
+  `trace_execution`'s `exit_code` on an OLE verdict, fallback backend only,
+  unreliable to compare against `execute_code`'s for the same program —
+  `verdict`/`output_truncated` are unaffected. Added only when
+  `backend == "python"` and `verdict == "OLE"`; the Rust backend's own cap
+  enforcement is not timing-sensitive this way.
 
 All of it is additive: a `1.12.0` client reading `execute_code`'s own
 `execution_envelope` shape sees no change, because `trace_execution` is a
