@@ -160,16 +160,20 @@ def grade_verify_optimization(result: dict, language: str) -> dict:
     `accepted` is True only after the embedded correctness verification
     passed (itself `cross_checked`-shaped evidence: original vs. candidate,
     independently agreed), the speedup was actually measured and cleared
-    `min_speedup`, AND (as of the significance-test change to
-    `optimization._accept_decision`) a majority of measured sizes rejected
-    "not faster" in a one-sided Mann-Whitney U test at alpha=0.05. All of
+    `min_speedup`, AND (per `optimization._accept_decision`/`_fwer_correction`)
+    EVERY counted size rejected "not faster" in a one-sided Mann-Whitney U
+    test (3 or fewer counted sizes) or a MAJORITY did at a Bonferroni-
+    corrected alpha (more than 3) — a bare majority at the nominal alpha,
+    always, let a false-accept CI incident's two false-positive sizes (of
+    three) carry the vote; see that module for the full mechanism. All of
     that is folded into one `cross_checked` grade because the top-level
     claim being graded — "candidate IS a genuine optimisation" — depends on
     all of it; `grade_basis` names the significance result alongside the
     ratio, when the result carries an `inference` field, so neither is
     hidden — including, when `inference.sizes_below_floor` is non-empty, how
-    many sizes were excluded from that majority vote (never cleared the
-    per-size auto-scale floor, unmeasurable, or too few runs — see
+    many sizes were excluded from that vote (never cleared the per-size
+    auto-scale floor, unmeasurable, too few runs to ever reject, or a tied
+    normal-approximation result below the reliable-observation floor — see
     `optimization._infer_speedup`'s docstring), rather than a reader seeing
     a shrunk `sizes_total` with no explanation. This is
     a change to what the basis TEXT describes, not to what evidence maps to
@@ -215,11 +219,16 @@ def grade_verify_optimization(result: dict, language: str) -> dict:
     # extra clause, same as `matched`/`total` above already tolerate absence.
     inference = result.get("inference")
     if inference and inference.get("sizes_total"):
+        # `effective_alpha` (falling back to the nominal `alpha` for an
+        # older/hand-built result that predates it) is the bar actually
+        # compared against here — `alpha` alone would understate it under a
+        # Bonferroni correction (more than 3 counted sizes).
         basis += (f"; {inference['sizes_rejecting']}/{inference['sizes_total']} "
-                  f"size(s) significant at alpha={inference.get('alpha')} "
+                  f"size(s) significant at alpha="
+                  f"{inference.get('effective_alpha', inference.get('alpha'))} "
                   f"(one-sided Mann-Whitney U)")
         # Additive detail, not a new evidence-to-grade mapping: `accepted`
-        # already excludes these sizes from the majority vote upstream in
+        # already excludes these sizes from the vote upstream in
         # `optimization._infer_speedup` (see `sizes_below_floor`'s docstring
         # there) — this just says so in the text a reader of `grade_basis`
         # sees, rather than leaving a shrunk `sizes_total` unexplained.

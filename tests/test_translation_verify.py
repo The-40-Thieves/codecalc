@@ -392,8 +392,15 @@ def _mock_measure850(language, code, sizes, timeout, repeats, deadline=None):
         return [{"n": 1000, "ok": True, "duration_ms": 0.5,
                  "all_runs_ms": [0.4, 0.5, 0.5, 0.6, 0.5]}], None
     if code == _CAND850 and tuple(sizes) == (10000,):
+        # Distinct values (no ties): a tie anywhere in the COMBINED sample
+        # routes stats.mann_whitney_u to the normal approximation (see
+        # stats.py), which optimization._infer_speedup now excludes below
+        # `_NORMAL_APPROX_MIN_N` observations a side (#285) -- a tie here
+        # would make this position untestable and is not what this section
+        # is pinning down (the size/size_after disclosure on a mismatched
+        # pairing), so the mock stays exact-method by construction.
         return [{"n": 10000, "ok": True, "duration_ms": 5,
-                 "all_runs_ms": [4, 5, 5, 6, 5]}], None
+                 "all_runs_ms": [4, 4.5, 5.5, 6, 5.2]}], None
     raise AssertionError(f"unexpected _measure call: code={code!r} sizes={sizes!r}")
 
 
@@ -776,6 +783,188 @@ check("  ...invariant: every size is accounted for in per_size or sizes_below_fl
       len(_before_1ms["sizes"]) == _inf_1ms["sizes_total"] + len(_inf_1ms["sizes_below_floor"]),
       f"-> len(sizes)=3 sizes_total={_inf_1ms['sizes_total']} "
       f"sizes_below_floor={len(_inf_1ms['sizes_below_floor'])}")
+
+
+# ═══ THE PRIMARY REGRESSION: a deterministic reproduction of the CI ═════════
+#     false accept — identical code certified as a verified speedup ═════════
+# Reported live (macOS sandbox job, native executor, main): `verify_optimization`
+# on IDENTICAL before/after code returned `accepted=True` at a measured ratio
+# of 1.21x, sizes [50000, 100000, 150000], `sizes_rejecting` 2/3 — the bare
+# "a majority of sizes reject" rule let two false-positive per-size votes
+# carry a three-size verdict. Both "rejecting" sizes were a tie routed to the
+# normal approximation at REPEATS=5 a side (p=0.023, p=0.047 — a sample size
+# stats.py's own module docstring says is "not a number worth calling
+# alpha=0.05 against"); the third (p=0.898) plainly did not reject.
+#
+# The incident's raw timings were never preserved, only its summary
+# statistics (u, p, method, sizes_rejecting/sizes_total) — so this rebuilds a
+# sample pair that MEASURABLY reproduces the same shape (checked below as
+# "control" facts, not assumed) rather than the identical bytes: two sizes
+# with a tie-routed normal-approximation p just under 0.05 (u=2.5/p=0.020 and
+# u=4.0/p=0.044, both close to the reported 0.023/0.047), and a third with a
+# p far from significant (u=18.0/p=0.889, matching the reported 0.898 almost
+# exactly) — deliberately built with OVERLAPPING before/after ranges (see
+# `optimization._ranges_overlap`), the same "the timer cannot always order
+# these" shape a run of literally identical code produces.
+_ci843_a1, _ci843_b1 = [20, 20, 20, 20, 44], [40, 42, 44, 46, 48]
+_ci843_a2, _ci843_b2 = [21, 21, 21, 44, 46], [42, 44, 46, 48, 50]
+_ci843_a3, _ci843_b3 = [40, 44, 47, 48, 49], [41, 42, 43, 45, 46]
+
+_ci843_r1 = stats.mann_whitney_u(_ci843_a1, _ci843_b1, alternative="less")
+_ci843_r2 = stats.mann_whitney_u(_ci843_a2, _ci843_b2, alternative="less")
+_ci843_r3 = stats.mann_whitney_u(_ci843_a3, _ci843_b3, alternative="less")
+check("control: size 1 reproduces the reported shape (tied, normal_approximation, p just under 0.05)",
+      _ci843_r1["method"] == "normal_approximation" and _ci843_r1["u"] == 2.5
+      and _ci843_r1["p_value"] < 0.05, f"-> {_ci843_r1}")
+check("control: size 2 reproduces the reported shape (tied, normal_approximation, p just under 0.05)",
+      _ci843_r2["method"] == "normal_approximation" and _ci843_r2["u"] == 4.0
+      and _ci843_r2["p_value"] < 0.05, f"-> {_ci843_r2}")
+check("control: size 3 reproduces the reported shape (clearly not significant)",
+      _ci843_r3["p_value"] > 0.8, f"-> {_ci843_r3}")
+check("control: sizes 1 and 2's raw samples OVERLAP (the ambiguous, "
+      "below-timer-resolution case) — not just tied within one side",
+      optimization._ranges_overlap(_ci843_a1, _ci843_b1)
+      and optimization._ranges_overlap(_ci843_a2, _ci843_b2))
+_ci843_p = [_ci843_r1["p_value"], _ci843_r2["p_value"], _ci843_r3["p_value"]]
+check("control: under the OLD bare-majority rule (no method/overlap exclusion, "
+      "no per-size ratio gate, no unanimity/Bonferroni) this reproduction "
+      "would have been ACCEPTED — 2 of 3 sizes reject at alpha=0.05, a "
+      "majority, exactly the reported incident's shape",
+      sum(1 for p in _ci843_p if p < 0.05) * 2 > len(_ci843_p),
+      f"-> p_values={_ci843_p}")
+
+_ci843_before = {"sizes": [50000, 100000, 150000],
+                 "durations_ms": [min(_ci843_b1), min(_ci843_b2), min(_ci843_b3)],
+                 "all_runs_ms": [_ci843_b1, _ci843_b2, _ci843_b3]}
+_ci843_after = {"sizes": [50000, 100000, 150000],
+                "durations_ms": [min(_ci843_a1), min(_ci843_a2), min(_ci843_a3)],
+                "all_runs_ms": [_ci843_a1, _ci843_a2, _ci843_a3]}
+_ci843_inf = optimization._infer_speedup(_ci843_before, _ci843_after)
+_ci843_sp = optimization._speedup(_ci843_before, _ci843_after)
+check("control: the reproduction's overall median ratio clears min_speedup, "
+      "same as the reported incident's 1.21x",
+      _ci843_sp.get("ratio", 0) >= 1.15, f"-> {_ci843_sp.get('ratio')}")
+check("the two tied, overlapping-range sizes are excluded to sizes_below_floor "
+      "with a reason, never silently counted",
+      {e["size"] for e in _ci843_inf["sizes_below_floor"]} == {50000, 100000}
+      and all("normal approximation" in e.get("reason", "")
+              for e in _ci843_inf["sizes_below_floor"]),
+      f"-> {_ci843_inf['sizes_below_floor']}")
+_ci843_accepted, _ci843_reason = optimization._accept_decision(_ci843_sp, 1.15, _ci843_inf)
+check("THE FIX: the same shape that was reported accepted=True live is now "
+      "correctly rejected",
+      _ci843_accepted is False, f"-> accepted={_ci843_accepted} {_ci843_reason!r}")
+
+
+# ═══ a SECOND, independent CI false accept, same guard, different sizes ════
+# A second live occurrence (macOS sandbox job, a later PR, main content):
+# identical code again `accepted=True`, ratio 1.2x, size 50000 u=4.0/p=0.045
+# (tied, normal_approximation — reproduced below almost exactly: u=4.0,
+# p=0.0443), size 100000 u=15.5/p=0.77 (NOT rejecting — reproduced exactly:
+# u=15.5, p=0.7690), and a third size reported only as "presumably
+# significant" (no u/p given) — 2 of 3 reject, the same majority-satisfied
+# shape as the first incident, on DIFFERENT raw numbers. Two independent
+# live false accepts on the same guard is why this is the PRIMARY
+# regression, not a one-off: the realised false-accept rate on that runner
+# is well above the nominal 5%. The third size here reuses the first
+# incident's own u=2.5/p=0.020 construction (a stand-in for "presumably
+# significant" — the live report gave no numbers for it).
+_ci290_a1, _ci290_b1 = [21, 21, 21, 44, 46], [42, 44, 46, 48, 50]
+_ci290_a2, _ci290_b2 = [43, 43, 44, 46, 48], [40, 42, 44, 45, 47]
+_ci290_a3, _ci290_b3 = _ci843_a1, _ci843_b1
+
+_ci290_r1 = stats.mann_whitney_u(_ci290_a1, _ci290_b1, alternative="less")
+_ci290_r2 = stats.mann_whitney_u(_ci290_a2, _ci290_b2, alternative="less")
+check("control: size 1 reproduces the second incident's reported shape "
+      "(tied, normal_approximation, u=4.0, p~0.045)",
+      _ci290_r1["method"] == "normal_approximation" and _ci290_r1["u"] == 4.0
+      and abs(_ci290_r1["p_value"] - 0.045) < 0.001, f"-> {_ci290_r1}")
+check("control: size 2 reproduces the second incident's NON-rejecting size "
+      "(u=15.5, p=0.77, exactly)",
+      _ci290_r2["method"] == "normal_approximation" and _ci290_r2["u"] == 15.5
+      and abs(_ci290_r2["p_value"] - 0.77) < 0.001, f"-> {_ci290_r2}")
+
+_ci290_before = {"sizes": [50000, 100000, 150000],
+                 "durations_ms": [min(_ci290_b1), min(_ci290_b2), min(_ci290_b3)],
+                 "all_runs_ms": [_ci290_b1, _ci290_b2, _ci290_b3]}
+_ci290_after = {"sizes": [50000, 100000, 150000],
+                "durations_ms": [min(_ci290_a1), min(_ci290_a2), min(_ci290_a3)],
+                "all_runs_ms": [_ci290_a1, _ci290_a2, _ci290_a3]}
+_ci290_inf = optimization._infer_speedup(_ci290_before, _ci290_after)
+_ci290_sp = optimization._speedup(_ci290_before, _ci290_after)
+_ci290_p = [_ci290_r1["p_value"], _ci290_r2["p_value"], _ci843_r1["p_value"]]
+check("control: under the OLD bare-majority rule this SECOND reproduction "
+      "would ALSO have been accepted — 2 of 3 sizes reject at alpha=0.05",
+      sum(1 for p in _ci290_p if p < 0.05) * 2 > len(_ci290_p),
+      f"-> p_values={_ci290_p}")
+_ci290_accepted, _ci290_reason = optimization._accept_decision(_ci290_sp, 1.15, _ci290_inf)
+check("THE FIX: the SECOND live false-accept shape is also correctly rejected",
+      _ci290_accepted is False, f"-> accepted={_ci290_accepted} {_ci290_reason!r}")
+
+
+# ═══ codecalc issue #284: a size below the exact test's own resolution ══════
+#     floor counted against the majority it could never contribute a ════════
+#     rejection to — measuring ONE FEWER size flipped reject to accept ══════
+# The issue's own repro, verbatim: size 4000 kept only 3 of 5 repeats a side
+# (two runs lost) — 1/C(6,3) = 1/20 = 0.05 is the best ONE-SIDED p a 3-vs-3
+# comparison can ever produce, and 0.05 is not `< 0.05`, so that size could
+# NEVER reject no matter how clean the separation, yet the OLD `< 2` guard
+# admitted it into `sizes_total` anyway — a guaranteed vote against, not an
+# abstention. Size 2000 (5 of 5 repeats, u=0, perfect separation) rejects on
+# its own; before this fix, `sizes_rejecting=1, sizes_total=2` was NOT a
+# majority (`1*2 <= 2`) and the reported 10x win was rejected as "could be
+# noise". `stats.min_testable_n(0.05) == 4`: size 4000's 3 runs a side is
+# below it and is now excluded to `sizes_below_floor` instead of counted.
+_284_before = {"sizes": [2000, 4000], "durations_ms": [100.0, 200.0],
+              "all_runs_ms": [[100., 101., 102., 103., 104.], [200., 201., 202.]]}
+_284_after = {"sizes": [2000, 4000], "durations_ms": [10.0, 20.0],
+             "all_runs_ms": [[10., 11., 12., 13., 14.], [20., 21., 22.]]}
+_284_inf = optimization._infer_speedup(_284_before, _284_after)
+check("control: stats.min_testable_n(0.05) == 4, matching the issue's own derivation",
+      stats.min_testable_n(0.05) == 4, f"-> {stats.min_testable_n(0.05)}")
+check("size 4000 (3 runs a side, structurally unable to reject at alpha=0.05) "
+      "is excluded to sizes_below_floor, not counted against the vote",
+      _284_inf["sizes_total"] == 1
+      and _284_inf["sizes_below_floor"] == [
+          {"size": 4000, "before_ms": 200.0, "after_ms": 20.0,
+           "reason": _284_inf["sizes_below_floor"][0]["reason"]}]
+      and "fewer than 4 runs" in _284_inf["sizes_below_floor"][0]["reason"],
+      f"-> {_284_inf}")
+check("size 2000's perfect separation is the ONLY counted size and rejects "
+      "on its own (unanimity at sizes_total=1 is trivially satisfied)",
+      _284_inf["sizes_total"] == 1 and _284_inf["sizes_rejecting"] == 1,
+      f"-> {_284_inf.get('per_size')}")
+_284_accepted, _284_reason = optimization._accept_decision(
+    {"measurable": True, "ratio": 10.0}, 1.15, _284_inf)
+check("THE FIX: the reported 10x win is accepted, not rejected as "
+      "'no size had enough comparable runs'",
+      _284_accepted is True, f"-> accepted={_284_accepted} {_284_reason!r}")
+
+
+# ═══ codecalc issue #285: _infer_speedup dropped mann_whitney_u's `method`, ═
+#     hiding that a tied sample used the normal approximation at n=5 ════════
+# A genuine, decisively-separated win (non-overlapping ranges — the OPPOSITE
+# of the false-accept shape above) whose raw samples still tie internally
+# (integer-ms timings, the issue's own third example): before this fix, a
+# caller reading `inference.per_size` could not tell this p-value came from
+# the asymptotic approximation rather than the exact distribution. It now
+# does, AND — because the ranges do not overlap — this size still correctly
+# counts as rejecting: (b)'s exclusion is narrower than "any tie".
+_285_after, _285_before = [2, 2, 2, 3, 2], [5, 5, 6, 5, 5]
+_285_raw = stats.mann_whitney_u(_285_after, _285_before, alternative="less")
+check("control: the issue's own example ties and falls back to the normal approximation",
+      _285_raw["method"] == "normal_approximation", f"-> {_285_raw}")
+_285_inf = optimization._infer_speedup(
+    {"sizes": [1000], "durations_ms": [min(_285_before)], "all_runs_ms": [_285_before]},
+    {"sizes": [1000], "durations_ms": [min(_285_after)], "all_runs_ms": [_285_after]})
+check("THE FIX: `method` is carried onto the per_size row, previously discarded",
+      len(_285_inf["per_size"]) == 1 and _285_inf["per_size"][0]["method"] == "normal_approximation",
+      f"-> {_285_inf.get('per_size')}")
+check("  ...and a decisive, non-overlapping win still counts as rejecting "
+      "despite the tie (not swept into sizes_below_floor with the noise case)",
+      _285_inf["sizes_total"] == 1 and _285_inf["sizes_rejecting"] == 1
+      and _285_inf["sizes_below_floor"] == [],
+      f"-> {_285_inf}")
 
 
 # ═══ identical before/after code is never accepted (the false-accept rate) ══

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/The-40-Thieves/codecalc/main/docs/contract/result-v1.schema.json",
   "title": "codecalc execution result",
-  "description": "The result contract for codecalc's execution tools, version 1.10.0. Generated from codecalc/contract.py by scripts/check_contract.py \u2014 edit the module, not this file.",
+  "description": "The result contract for codecalc's execution tools, version 1.11.0. Generated from codecalc/contract.py by scripts/check_contract.py \u2014 edit the module, not this file.",
   "type": "object",
   "required": [
     "ok",
@@ -942,6 +942,8 @@
             "test",
             "alternative",
             "alpha",
+            "effective_alpha",
+            "correction",
             "per_size",
             "sizes_rejecting",
             "sizes_total",
@@ -958,6 +960,19 @@
             "alpha": {
               "type": "number"
             },
+            "effective_alpha": {
+              "type": "number",
+              "description": "The family-wise-error-controlled alpha a size's own p_value is actually compared against for sizes_rejecting \u2014 equal to `alpha` when `correction` is 'unanimity' or 'n/a', and `alpha / sizes_total` when it is 'bonferroni'. See optimization._fwer_correction."
+            },
+            "correction": {
+              "type": "string",
+              "enum": [
+                "unanimity",
+                "bonferroni",
+                "n/a"
+              ],
+              "description": "Which family-wise-error rule sizes_rejecting was computed under: 'unanimity' (sizes_total <= 3 \u2014 every counted size must reject), 'bonferroni' (> 3 \u2014 a majority must reject at effective_alpha = alpha / sizes_total), or 'n/a' (sizes_total == 0, accepted can never be true regardless)."
+            },
             "per_size": {
               "type": "array",
               "items": {
@@ -968,7 +983,9 @@
                   "n_after",
                   "u",
                   "p_value",
-                  "rank_biserial"
+                  "rank_biserial",
+                  "method",
+                  "ratio"
                 ],
                 "properties": {
                   "size": {
@@ -993,6 +1010,18 @@
                   },
                   "rank_biserial": {
                     "type": "number"
+                  },
+                  "method": {
+                    "type": "string",
+                    "enum": [
+                      "exact",
+                      "normal_approximation"
+                    ],
+                    "description": "stats.mann_whitney_u's own method for this size's test \u2014 previously computed and discarded. 'normal_approximation' means a tie was present somewhere in the combined sample (see stats.py's module docstring); a row with this method and fewer than optimization._NORMAL_APPROX_MIN_N runs a side is still here (not sizes_below_floor) when the two samples' raw-run ranges do NOT overlap \u2014 see optimization._ranges_overlap \u2014 a decisive, unambiguous comparison the tie does not actually make untrustworthy."
+                  },
+                  "ratio": {
+                    "type": "number",
+                    "description": "This size's OWN before_ms/after_ms ratio \u2014 the same computation _speedup's per_size uses. sizes_rejecting requires this to clear the caller's min_speedup as well as p_value < effective_alpha; a size can be statistically significant on a trivial difference, and that alone is not 'this size is the speedup the caller asked for'."
                   },
                   "size_after": {
                     "type": "integer",
@@ -1023,6 +1052,10 @@
                   "size": {
                     "type": "integer",
                     "minimum": 0
+                  },
+                  "reason": {
+                    "type": "string",
+                    "description": "Why this size was excluded \u2014 present only for the two NEWEST exclusion reasons (too few runs a side to ever reject at alpha; a normal_approximation result below the reliable-observation floor). Absent on an entry excluded for an older reason (the visibility floor, an unmeasurable side) \u2014 additive, never required, so an entry a prior client already matched by its three original keys still matches."
                   },
                   "before_ms": {
                     "type": [

@@ -446,8 +446,144 @@ def _speedup(before: dict, after: dict) -> dict:
 #: sidedness, and callers reading `inference.alpha` expect the familiar number.
 ALPHA = 0.05
 
+#: `verify_optimization`'s own default, promoted to a module constant so
+#: `_infer_speedup` can share it (see (e) below) rather than the two
+#: functions carrying independently-chosen literals that could silently
+#: drift apart.
+DEFAULT_MIN_SPEEDUP = 1.15
 
-def _infer_speedup(before: dict, after: dict, alpha: float = ALPHA) -> dict:
+#: Below this many observations A SIDE, a `normal_approximation`-method
+#: p-value (see `stats.mann_whitney_u`) is not treated as informative enough
+#: to count toward a rejection WHEN the two samples' ranges overlap (see
+#: `_ranges_overlap`) — even when it clears alpha. `REPEATS` (5) is BELOW
+#: this floor on purpose: the approximation is asymptotic, and `stats.py`'s
+#: own module docstring says so explicitly — "at n=m=5 (10 observations) it
+#: is a rough guide, not a number worth calling alpha=0.05 against" — yet
+#: ties (coarse wall-clock resolution, or two genuinely-equal runs) route
+#: straight to it regardless of n, and wall-clock timings tie constantly at
+#: REPEATS=5. This is what closed a REAL false accept: CI measured
+#: IDENTICAL before/after code as accepted=True at ratio 1.21, sizes_rejecting
+#: 2/3, both "rejecting" sizes tied and normal_approximation at n=5 a side
+#: (p=0.023, p=0.047) — an approximation the module that computed it does not
+#: trust at that sample size, deciding the vote. The overlap qualifier
+#: (`_ranges_overlap`) matters in practice, not just in theory: gating on the
+#: method+n alone (no overlap check) measured LIVE as nearly BLINDING the
+#: tool — a real ~16x algorithmic win accepted only 1/10 runs, because this
+#: tool's own integer-millisecond timings tie constantly even for a
+#: genuinely, unambiguously fast candidate (every one of its runs can land on
+#: the same rounded ms with zero overlap against the baseline). A size
+#: excluded here is disclosed in `sizes_below_floor` with a `reason`, not
+#: silently dropped (see codecalc issue #285, which is about the missing
+#: `method` field this constant now acts on, not just surfaces).
+_NORMAL_APPROX_MIN_N = 8
+
+#: At or below this many COUNTED sizes, `_accept_decision` requires EVERY one
+#: to reject rather than a bare majority. With few, independent per-size
+#: tests, "a majority" (e.g. 2 of 3) still lets ONE false-positive size carry
+#: the accept vote — exactly the CI incident this whole layered fix closes
+#: (2/3 sizes "rejecting" on IDENTICAL code, majority satisfied, accepted).
+#: Requiring unanimity at small k needs no per-test alpha correction to
+#: control the family-wise error: three independent tests that must ALL
+#: reject at alpha=0.05 have a chance false-accept probability far below
+#: 0.05 on their own (assuming independence, ~0.05^3). See `_fwer_correction`.
+_FWER_UNANIMITY_MAX = 3
+
+
+def _fwer_correction(k: int, alpha: float) -> tuple[float, str]:
+    """Family-wise error control for the "how many of `k` counted sizes must
+    reject" decision `_accept_decision` makes — (d) in the false-accept fix.
+
+    Two regimes, chosen by `k` (the number of sizes that survived every
+    other exclusion in `_infer_speedup` — visibility floor, testability,
+    normal-approximation reliability):
+
+      k <= `_FWER_UNANIMITY_MAX`   No per-test correction; every counted
+                                   size must reject (unanimity). Cheap
+                                   sizes make unanimity itself the control —
+                                   see `_FWER_UNANIMITY_MAX`'s docstring.
+
+      k >  `_FWER_UNANIMITY_MAX`   `alpha / k` per size (Bonferroni), and
+                                   still only a MAJORITY of those harder-to-
+                                   clear tests is required. Unanimity across
+                                   many sizes would be brittle against
+                                   ordinary per-size timing noise (a single
+                                   size out of, say, 8 landing on a bad
+                                   sample would veto an otherwise-decisive
+                                   win); Bonferroni-correcting each test's
+                                   own alpha keeps the chance of ANY single
+                                   size falsely rejecting at ~`alpha` total
+                                   across all `k` of them, so requiring only
+                                   a majority of those corrected tests still
+                                   keeps a chance false accept much rarer
+                                   than the uncorrected majority rule this
+                                   whole fix replaces.
+
+    Returns `(effective_alpha, correction_name)`. `k <= 0` returns
+    `(alpha, "n/a")` — `_fwer_satisfied` always returns False for
+    `sizes_total == 0` regardless of what this returns, so the value here is
+    never actually consulted, but IS documented.
+    """
+    if k <= 0:
+        return alpha, "n/a"
+    if k <= _FWER_UNANIMITY_MAX:
+        return alpha, "unanimity"
+    return alpha / k, "bonferroni"
+
+
+def _ranges_overlap(a_sample: list[float], b_sample: list[float]) -> bool:
+    """Do two raw-run samples' VALUE RANGES overlap at all — used to decide
+    whether (b)'s normal-approximation reliability gate actually applies.
+
+    A tie ANYWHERE in the combined sample routes `stats.mann_whitney_u` to
+    the normal approximation (see `stats.py`), and this tool's own wall-clock
+    timings (integer milliseconds) tie constantly — measured directly: a
+    genuine ~6x O(1) win's candidate arm alone produced `[42, 42, 45, 53,
+    42]`, three ties, from ordinary process-spawn jitter clustering on the
+    same rounded millisecond, with NO overlap at all against the baseline's
+    `[243..266]` range. Excluding EVERY tied result below
+    `_NORMAL_APPROX_MIN_N` (the first version of this fix) is not just
+    conservative, it is nearly BLIND: measured live on this box, that
+    version accepted a real 16x algorithmic win only 1 time in 10 runs,
+    because REPEATS=5 at integer-ms resolution ties on almost every size
+    regardless of whether the two arms are genuinely different.
+
+    What actually makes the normal approximation's tie correction untrustworthy
+    at n=5 is not "a tie happened somewhere" — it is a comparison the timer
+    could not have ordered even in principle: two runs, one from EACH side,
+    landing on the same rounded millisecond (or the two sides' ranges
+    crossing at all). That is the literal, operational meaning of "below the
+    timer's resolution" — a tie confined to duplicate readings WITHIN one
+    side (the fast-candidate case above) does not create that ambiguity: the
+    two arms are still cleanly, unambiguously ordered.
+
+    Returns True when the two samples' `[min, max]` ranges intersect
+    (inclusive — landing on the SAME boundary value counts as ambiguous,
+    not narrowly avoided).
+    """
+    return not (max(a_sample) < min(b_sample) or max(b_sample) < min(a_sample))
+
+
+def _fwer_satisfied(sizes_total: int, sizes_rejecting: int, correction: str | None) -> bool:
+    """Does `sizes_rejecting` clear the bar `correction` (see
+    `_fwer_correction`) demands out of `sizes_total`? Shared by
+    `_infer_speedup` (to state the rule in `decision_basis`) and
+    `_accept_decision` (to actually gate `accepted`) so the two can never
+    disagree about what "enough" means.
+
+    `correction=None` (an older or hand-built `inference` dict that predates
+    this fix — see tests/test_grades.py's fixtures) falls back to the
+    ORIGINAL bare-majority rule rather than raising: a caller that never
+    knew about unanimity/Bonferroni gets the same answer it always did.
+    """
+    if sizes_total == 0:
+        return False
+    if correction == "unanimity":
+        return sizes_rejecting == sizes_total
+    return sizes_rejecting * 2 > sizes_total
+
+
+def _infer_speedup(before: dict, after: dict, alpha: float = ALPHA,
+                   min_speedup: float = DEFAULT_MIN_SPEEDUP) -> dict:
     """Test, per size, whether `after` is stochastically faster than `before`.
 
     `_speedup`'s median ratio says HOW MUCH faster the measured runs were; it
@@ -487,17 +623,59 @@ def _infer_speedup(before: dict, after: dict, alpha: float = ALPHA) -> dict:
     len(inference["sizes_below_floor"])` holds for every result this
     function returns: a size is read as a pass, a fail, or an explicit
     "excluded, and here is why" — never as nothing at all.
+
+    Three further gates, all part of the same false-accept fix (a live CI
+    run certified IDENTICAL before/after code as `accepted=True`):
+
+      (b) a size whose test used `stats.mann_whitney_u`'s `normal_approximation`
+          method (routed there by a tie — see `stats.py`'s module docstring)
+          with fewer than `_NORMAL_APPROX_MIN_N` observations a side does not
+          count toward `sizes_rejecting`, however small its p-value: the
+          approximation itself is not trustworthy there, per `stats.py`'s own
+          reasoning. Excluded to `sizes_below_floor` with a `reason` (#285).
+      (c) a size below `stats.min_testable_n(alpha)` observations a side is
+          STRUCTURALLY unable to reject at `alpha`, so it cannot be allowed to
+          count against a majority/unanimity vote it could never contribute a
+          rejection to (replaces the old flat `< 2` guard). Also excluded to
+          `sizes_below_floor` with a `reason` (#284).
+      (e) a size counts as "rejecting" only when ITS OWN ratio (`before_ms /
+          after_ms`, the same computation `_speedup` uses for the headline)
+          also clears `min_speedup` — a size can be "significant" (the
+          samples don't overlap much) while the actual difference is tiny;
+          `p_value < alpha` alone is not "this size is a speedup of the size
+          the caller asked for".
+
+    `method` and `ratio` are carried on every surviving `per_size` row
+    (method: (a), #285 — a caller can now tell an exact p from an
+    asymptotic one; ratio: needed to disclose (e)'s own gate, and a strict
+    superset of what `_speedup`'s `per_size` already reports per position).
+
+    (d), the family-wise correction on how many surviving sizes must
+    reject, is `_fwer_correction`/`_fwer_satisfied` — see those docstrings.
+    `correction` and `effective_alpha` are always present here alongside the
+    original `alpha` (which stays the NOMINAL, uncorrected level throughout
+    — `effective_alpha` is what a size's OWN p-value is actually compared to
+    for `sizes_rejecting`).
     """
     comparable, excluded = _comparable_positions(before, after)
-    # A position can be comparable for the headline ratio (both medians
-    # present, baseline floor-clearing) yet untestable here: a significance
-    # test needs >= 2 raw runs a side. File those under `sizes_below_floor`
-    # too, so the invariant below still counts every position exactly once.
+    # (c): a size below the smallest n whose exact p COULD be < alpha is not
+    # merely untested, it is structurally incapable of rejecting — counting
+    # it against the vote it can never contribute a rejection to is exactly
+    # backwards (codecalc #284: dropping one such size flipped a genuine 10x
+    # win from rejected to accepted). Replaces the old flat `< 2` guard,
+    # computed from `alpha` rather than hard-coded so the two never drift.
+    min_n = stats.min_testable_n(alpha)
     testable = []
     for e in comparable:
-        if len(e["b_sample"]) < 2 or len(e["a_sample"]) < 2:
-            excluded.append({"size": e["size"], "before_ms": e["before_ms"],
-                             "after_ms": e["after_ms"]})
+        if len(e["b_sample"]) < min_n or len(e["a_sample"]) < min_n:
+            excluded.append({
+                "size": e["size"], "before_ms": e["before_ms"], "after_ms": e["after_ms"],
+                "reason": (f"fewer than {min_n} runs per side ({len(e['b_sample'])} "
+                          f"before / {len(e['a_sample'])} after) — the smallest n "
+                          f"whose exact one-sided p can be < alpha={alpha} at all "
+                          f"is {min_n} (1/C(2n,n)); a smaller sample cannot reject "
+                          f"the null no matter how clean the separation"),
+            })
         else:
             testable.append(e)
     comparable = testable
@@ -505,37 +683,84 @@ def _infer_speedup(before: dict, after: dict, alpha: float = ALPHA) -> dict:
     per_size = []
     for e in comparable:
         mwu = stats.mann_whitney_u(e["a_sample"], e["b_sample"], alternative="less")
+        n_before, n_after = len(e["b_sample"]), len(e["a_sample"])
+        # (b): a tie routed this size to the normal approximation, and that
+        # approximation is asymptotic — `stats.py`'s own docstring: not "a
+        # number worth calling alpha against" at n=5. Below
+        # `_NORMAL_APPROX_MIN_N` a side, distrust it — but ONLY when the two
+        # samples' ranges actually overlap (`_ranges_overlap`): a tie
+        # confined to duplicate readings WITHIN one side (this tool's own
+        # measurements do this constantly at integer-ms resolution — see
+        # that function's docstring) does not make the comparison ambiguous,
+        # and excluding it anyway measured as nearly BLINDING the tool to
+        # genuine wins, not just conservative.
+        if (mwu["method"] == "normal_approximation"
+                and (n_before < _NORMAL_APPROX_MIN_N or n_after < _NORMAL_APPROX_MIN_N)
+                and _ranges_overlap(e["a_sample"], e["b_sample"])):
+            excluded.append({
+                "size": e["size"], "before_ms": e["before_ms"], "after_ms": e["after_ms"],
+                "reason": (f"a tie routed this size to the normal approximation "
+                          f"(stats.mann_whitney_u's method) AND the two samples' "
+                          f"ranges overlap — below {_NORMAL_APPROX_MIN_N} runs per "
+                          f"side ({n_before} before / {n_after} after here) that is "
+                          f"below the timer's resolution: the timer cannot always "
+                          f"say which side a given pair of runs favoured — see "
+                          f"stats.py's own module docstring on why n=5 is 'not a "
+                          f"number worth calling alpha against'"),
+            })
+            continue
         rb = stats.rank_biserial_correlation(mwu["u"], mwu["n1"], mwu["n2"])
         row = {
             "size": e["size"],
-            "n_before": len(e["b_sample"]),
-            "n_after": len(e["a_sample"]),
+            "n_before": n_before,
+            "n_after": n_after,
             "u": mwu["u"],
             "p_value": mwu["p_value"],
             "rank_biserial": round(rb, 4),
+            "method": mwu["method"],
+            "ratio": round(e["before_ms"] / e["after_ms"], 2),
         }
         if "size_after" in e:
             row["size_after"] = e["size_after"]
         per_size.append(row)
 
     sizes_total = len(per_size)
-    sizes_rejecting = sum(1 for r in per_size if r["p_value"] < alpha)
+    effective_alpha, correction = _fwer_correction(sizes_total, alpha)
+    # (e): a size only counts as rejecting when its OWN ratio also clears
+    # min_speedup — "the samples barely overlap" is not "this size sped up
+    # by the amount the caller asked for".
+    sizes_rejecting = sum(1 for r in per_size
+                          if r["p_value"] < effective_alpha and r["ratio"] >= min_speedup)
     if sizes_total == 0:
         decision_basis = "no size had enough comparable runs for a significance test"
+    elif correction == "unanimity":
+        decision_basis = (f"{sizes_rejecting}/{sizes_total} size(s) reject the null "
+                          f"(after not faster, at its own ratio >= {min_speedup}x) at "
+                          f"alpha={alpha}; {sizes_total} counted size(s) (<= "
+                          f"{_FWER_UNANIMITY_MAX}) requires EVERY one to reject, not "
+                          f"a bare majority — with this few independent tests a "
+                          f"majority still lets one false-positive size carry the "
+                          f"vote")
     else:
-        decision_basis = (f"{sizes_rejecting}/{sizes_total} size(s) reject "
-                          f"the null (after not faster) at alpha={alpha}; "
-                          f"a majority is required")
+        decision_basis = (f"{sizes_rejecting}/{sizes_total} size(s) reject the null "
+                          f"(after not faster, at its own ratio >= {min_speedup}x) at "
+                          f"the Bonferroni-corrected alpha={effective_alpha:.4g} "
+                          f"(alpha={alpha} / {sizes_total} sizes); a majority of "
+                          f"those corrected tests is required")
     if excluded:
         decision_basis += (f"; {len(excluded)} size(s) excluded — the baseline "
                            f"was unmeasurable, never cleared the "
                            f"{_VISIBILITY_FLOOR_MS}ms visibility floor within "
-                           f"the rescale budget, or had too few runs, see "
+                           f"the rescale budget, had fewer than {min_n} runs per "
+                           f"side, or used the normal approximation on fewer than "
+                           f"{_NORMAL_APPROX_MIN_N} runs per side — see "
                            f"sizes_below_floor")
     return {
         "test": "mann_whitney_u",
         "alternative": "after_faster",
         "alpha": alpha,
+        "effective_alpha": effective_alpha,
+        "correction": correction,
         "per_size": per_size,
         "sizes_rejecting": sizes_rejecting,
         "sizes_total": sizes_total,
@@ -554,21 +779,32 @@ def _accept_decision(sp: dict, min_speedup: float, inference: dict) -> tuple[boo
       - the threshold itself demands a speedup: min_speedup > 1
       - the measured ratio is an actual speedup AND clears it: ratio > 1
         and ratio >= min_speedup
-      - a MAJORITY of sizes reject the null (after not faster) in
-        `_infer_speedup`'s per-size Mann-Whitney test at `inference["alpha"]`
+      - `_fwer_satisfied` on `_infer_speedup`'s per-size Mann-Whitney test:
+        EVERY counted size rejects "after not faster" (<= 3 counted sizes),
+        or a MAJORITY do at the Bonferroni-corrected alpha (> 3) — see
+        `_fwer_correction`'s docstring for why the cutover and why each
+        regime is enough on its own.
 
-    The last bullet is the fix this function exists for. `ratio >= min_speedup`
-    used to be the whole decision, but with REPEATS runs per size the smallest
-    one-sided p a single size can ever produce is 1/C(2*REPEATS, REPEATS) — no
-    size could clear alpha=0.05 by construction at REPEATS=3, so "the median
-    ratio cleared 1.15x" was an arithmetic fact about noisy timings, not
-    evidence the difference was real. A ratio can still clear min_speedup on
-    pure noise (see tests/test_translation_verify.py's false-accept-rate
-    assertion on IDENTICAL before/after code); requiring the test to also
-    reject closes exactly that gap.
+    The last bullet is the fix this function exists for, TWICE now.
+    `ratio >= min_speedup` used to be the whole decision, but with REPEATS
+    runs per size the smallest one-sided p a single size can ever produce is
+    1/C(2*REPEATS, REPEATS) — no size could clear alpha=0.05 by construction
+    at REPEATS=3, so "the median ratio cleared 1.15x" was an arithmetic fact
+    about noisy timings, not evidence the difference was real (see
+    tests/test_translation_verify.py's false-accept-rate assertion on
+    IDENTICAL before/after code). A bare MAJORITY of sizes rejecting was the
+    first fix, and it was not enough on its own: a live CI run on a hosted
+    macOS sandbox measured IDENTICAL before/after code as accepted=True at
+    ratio 1.21 with 2 of 3 sizes "rejecting" — both of them a tie routed to
+    the normal approximation at REPEATS=5, a sample size `stats.py`'s own
+    docstring says is not trustworthy there. `_infer_speedup` now excludes
+    that kind of vote entirely (see its docstring, gates (b)/(c)/(e)); this
+    function's OWN fix is (d) — replacing "a bare majority, always" with the
+    unanimity-or-Bonferroni split `_fwer_satisfied` applies, so a small
+    battery of sizes cannot be swung by one noisy vote the way 2-of-3 was.
 
-    A ratio <= 1, a min_speedup <= 1, or a non-majority-rejecting test result
-    can NEVER yield accepted=True; the grade side
+    A ratio <= 1, a min_speedup <= 1, or an FWER-unsatisfied test result can
+    NEVER yield accepted=True; the grade side
     (grades.grade_verify_optimization) already refuses to certify a ratio <=
     1, and this makes the tool agree at the source. `bool` is an `int`, but a
     measured ratio is never a bool.
@@ -586,19 +822,19 @@ def _accept_decision(sp: dict, min_speedup: float, inference: dict) -> tuple[boo
         return False, f"measured {ratio}x is below the required {min_speedup}x"
     sizes_total = inference.get("sizes_total", 0)
     sizes_rejecting = inference.get("sizes_rejecting", 0)
-    if sizes_total == 0 or sizes_rejecting * 2 <= sizes_total:
+    if not _fwer_satisfied(sizes_total, sizes_rejecting, inference.get("correction")):
         return False, (f"measured {ratio}x clears {min_speedup}x, but the "
                        f"one-sided significance test does not: "
                        f"{inference.get('decision_basis')} — could be noise")
     return True, (f"verified faster: {ratio}x median, {sizes_rejecting}/"
                   f"{sizes_total} size(s) significant at "
-                  f"alpha={inference.get('alpha')}")
+                  f"alpha={inference.get('effective_alpha', inference.get('alpha'))}")
 
 
 def verify_optimization(original: str, candidate: str, language: str,
                         test_inputs: list[str] | None = None,
                         sizes: list[int] | None = None,
-                        min_speedup: float = 1.15,
+                        min_speedup: float = DEFAULT_MIN_SPEEDUP,
                         timeout: int = 30) -> dict:
     """Decide whether `candidate` is a genuine optimisation of `original`.
 
@@ -606,10 +842,13 @@ def verify_optimization(original: str, candidate: str, language: str,
 
       correctness  both programs run on the same inputs and must agree
       speed        both are timed at the same sizes (`REPEATS` runs each);
-                   the median ratio must clear `min_speedup` AND a
-                   one-sided Mann-Whitney U test must reject "candidate is
-                   not faster" (alpha=0.05) at a MAJORITY of the measured
-                   sizes — see `_infer_speedup` and `_accept_decision`.
+                   the median ratio must clear `min_speedup`, EACH counted
+                   size's OWN ratio must also clear it, AND a one-sided
+                   Mann-Whitney U test must reject "candidate is not
+                   faster" at every counted size (<= 3 of them) or a
+                   majority at a Bonferroni-corrected alpha (> 3) — see
+                   `_infer_speedup`, `_fwer_correction` and
+                   `_accept_decision`.
 
     The significance test exists because the ratio check alone has no
     statistical footing at the sample sizes this tool can afford: with
@@ -698,7 +937,7 @@ def verify_optimization(original: str, candidate: str, language: str,
         return {"ok": False, "error": f"candidate re-measurement failed: {after.get('error')}"}
 
     sp = _speedup(before, after)
-    inference = _infer_speedup(before, after)
+    inference = _infer_speedup(before, after, min_speedup=min_speedup)
     accepted, reason = _accept_decision(sp, min_speedup, inference)
     return {
         "ok": True,

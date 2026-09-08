@@ -272,6 +272,58 @@ behind it.
   `code`/`error`/`remedy`/`code_inferred` are treated as non-droppable
   disclosure (same bucket as `unenforced`/`output_error`) so they survive
   the compaction that follows.
+||||||| parent of dca51c2 (fix: stop verify_optimization certifying identical code as a speedup)
+- **`verify_optimization` certified IDENTICAL before/after code as a verified
+  speedup.** Reproduced live in CI (macOS sandbox job, native executor, main):
+  `accepted=True` at a measured ratio of 1.21x, `sizes_rejecting` 2/3 —
+  `_accept_decision`'s bare "a majority of sizes reject" rule let two
+  false-positive per-size votes carry a three-size verdict outright. Both
+  "rejecting" sizes were a tie routed to `stats.mann_whitney_u`'s normal
+  approximation at `REPEATS=5` a side (p=0.023, p=0.047) — a sample size
+  `stats.py`'s own module docstring says is "not a number worth calling
+  alpha=0.05 against" — while the third size (p=0.898) plainly did not
+  reject. Closed with five layered fixes in `optimization._infer_speedup`/
+  `_accept_decision`, all measured, not just argued:
+  - `_infer_speedup`'s per-size rows now carry `stats.mann_whitney_u`'s own
+    `method` (`"exact"` / `"normal_approximation"`), previously computed and
+    discarded, so a caller can tell which produced a given `p_value` (#285).
+  - A size below `stats.min_testable_n(alpha)` observations a side (4 at the
+    default alpha=0.05: the smallest n whose exact one-sided p can be < alpha
+    at all, `1/C(2n,n)`) is structurally incapable of ever rejecting and no
+    longer counts toward the vote it could never contribute a rejection to
+    — excluded to `inference.sizes_below_floor` with a `reason` instead
+    (replaces a flat `< 2` guard; #284).
+  - A `normal_approximation`-method result on fewer than 8 runs a side is
+    excluded the same way, but ONLY when the two samples' raw-run ranges
+    overlap (`_ranges_overlap`) — the literal "the timer cannot always say
+    which side a given pair of runs favoured" case, not merely "a tie
+    happened somewhere." Gating on the tie alone (no overlap check) was
+    measured LIVE as nearly blinding the tool: this tool's own integer-
+    millisecond timings tie constantly even for an unambiguously fast,
+    non-overlapping candidate (a real ~16x win's candidate arm produced
+    `[42, 42, 45, 53, 42]` from ordinary process-spawn jitter), and excluding
+    every tied result outright accepted a genuine win only 1 run in 10.
+  - `_accept_decision` now requires EVERY counted size to reject when there
+    are <= 3 of them (unanimity — the regime the CI incident's 3-size,
+    2-rejecting case falls in, and enough on its own to have refused it),
+    or a majority at a Bonferroni-corrected `alpha / k` when there are more
+    than 3 (`_fwer_correction`) — a bare majority, always, is what let one
+    false-positive size carry a three-size vote.
+  - A size counts as rejecting only when its OWN before/after ratio also
+    clears `min_speedup`, not only its p-value — a size can be statistically
+    significant on a difference too small to be the speedup the caller
+    asked for.
+
+  Measured before/after on this repo (identical code, 60 runs on the Rust
+  backend under a 4-process CPU hog, the default and 3-size CI variant): see
+  the PR body for the exact counts. The two live real-win regression tests
+  in `tests/test_translation_verify.py` (a real O(n)->O(1) win and a
+  calibrated O(n^2)->O(1) win, `nice -n 19` plus a saturating CPU load)
+  still accept. Contract `1.11.0` adds `method`/`ratio` to
+  `optimization_verification.inference.per_size`,
+  `correction`/`effective_alpha` to `optimization_verification.inference`,
+  and an optional `reason` to `inference.sizes_below_floor` entries excluded
+  for one of the two new reasons above; see `docs/contract/README.md`.
 
 ## [0.9.0] — 2026-09-07
 
