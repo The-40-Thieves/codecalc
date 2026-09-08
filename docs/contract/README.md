@@ -1,7 +1,41 @@
 # The codecalc result contract
 
-**Current version: `1.12.0`** · Schema: [`result-v1.schema.json`](result-v1.schema.json) ·
+**Current version: `1.13.0`** · Schema: [`result-v1.schema.json`](result-v1.schema.json) ·
 Source of truth: [`codecalc/contract.py`](../../codecalc/contract.py)
+
+`1.13.0` is a MINOR bump over `1.12.0`, on the **doctor** schema
+(`doctor-v1.schema.json`) rather than the execution result — the two share
+this one version and policy, see "Two version numbers, on purpose" below.
+It adds `probe_ms` to every `runtimes[]` row a `--deep` version probe was
+attempted for, and narrows what a version-probe **timeout** is allowed to
+mean, closing three separate 2026-09-08 hosted-runner failures (main among
+them): a cold `windows-latest` runner's FIRST `rustc --version` goes through
+the rustup proxy — an arg-forwarding shim that has to locate and re-exec the
+real toolchain component before it can answer anything — and exceeded the
+probe's 10-second deadline. `_probe_version` reported that exactly like a
+spawn failure (`hard_failure=True` either way), and `report()` trusted rust's
+confirmed `_VERSION_FLAG` entry the same way it trusts a genuine nonzero
+exit, so a `tested`-tier runtime that was never actually broken read
+`unhealthy`, `healthy` flipped `false`, and `tests/test_doctor.py`'s
+real-host `--deep` assertions (added for the earlier go/lua/zig regression,
+#282 — they assert every resolved `tested`-tier language stays
+installed/available) failed alongside it. A timeout means
+"the probe did not answer within the deadline"; it is not evidence the
+runtime is broken, and this version stops treating the two as the same
+claim: `_probe_version` now returns `hard_failure=False` for a timeout, and
+`report()` never promotes a bare timeout to `unhealthy` regardless of
+whether the command has a confirmed `_VERSION_FLAG` entry — only a
+`_HELLO` runtime whose own hello-world run independently fails still gets
+demoted, exactly as it did before. Two mitigations reduce how often the
+timeout fires at all: one retry (a slow-start proxy is warm on its second
+call) and a raised per-command deadline for the toolchains audited as
+routing through this shape on a cold host (`rustc`/rustup, `dotnet`, `java`,
+`kotlinc`, `swift`). `probe_ms` is the new field: the total wall time a
+`--deep` version probe took across every attempt, present whenever one was
+attempted at all — a `1.12.0` client that already reads `runtimes[].status`
+sees no change in what a nonzero exit or a spawn failure demotes; only the
+timeout case narrows, and only in the direction of trusting less, so no
+existing `unhealthy` classification is undone by this.
 
 `1.12.0` is a MINOR bump over `1.11.0`. It adds `stdout_raw` to every
 `translation_verification` case's `source`/`target` (`_translation_side_

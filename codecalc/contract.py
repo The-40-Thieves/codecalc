@@ -51,7 +51,7 @@ from . import errors, grades
 #: each component is allowed to change — the short form is that MAJOR is the
 #: only one that may break a reader, and it carries a twelve-month deprecation
 #: window before anything is removed.
-CONTRACT_VERSION = "1.12.0"
+CONTRACT_VERSION = "1.13.0"
 
 # THE `$schema` AND `$id` URIs ARE NOT HERE ON PURPOSE.
 #
@@ -1523,15 +1523,19 @@ def build_doctor_schema(dialect: str | None = None, schema_id: str | None = None
                             "description": (
                                 "supported = codecalc knows it, nothing resolves "
                                 "here · installed = resolves and is executable, "
-                                "NOT run · unhealthy = resolves but cannot run, "
-                                "was run (hello-world) and failed, or (under "
-                                "--deep) its version probe never got an answer "
-                                "(spawn failure/timeout) or exited non-zero on a "
-                                "flag this code has confirmed correct for that "
-                                "command — a nonzero exit on an UNCONFIRMED "
-                                "flag guess is reported as merely unmeasured, "
-                                "never unhealthy · available = actually "
-                                "executed here and answered (--deep only)"
+                                "NOT run · unhealthy = resolves but cannot run: "
+                                "was run (hello-world) and failed, its version "
+                                "probe never even SPAWNED, or its version probe "
+                                "exited non-zero on a flag this code has "
+                                "confirmed correct for that command — a nonzero "
+                                "exit on an UNCONFIRMED flag guess, OR a version "
+                                "probe that merely TIMED OUT (confirmed flag or "
+                                "not), is reported as merely unmeasured, never "
+                                "unhealthy on its own; a timeout only demotes a "
+                                "row that ALSO has a hello-world and that "
+                                "hello-world independently failed · available = "
+                                "actually executed here and answered (--deep "
+                                "only)"
                             ),
                         },
                         "path": {"type": ["string", "null"]},
@@ -1574,13 +1578,30 @@ def build_doctor_schema(dialect: str | None = None, schema_id: str | None = None
                                 "installed. Its PRESENCE does not by itself "
                                 "mean `unhealthy`: a nonzero exit on a version "
                                 "flag this code has not confirmed is correct "
-                                "for that command is recorded here but leaves "
-                                "`status` at `installed`, since the failure "
-                                "may be a wrong flag guess rather than the "
-                                "runtime. Distinct from `version`, which never "
-                                "carries this text; `detail` carries a "
-                                "one-line human summary when the failure WAS "
-                                "trusted enough to demote the row."
+                                "for that command, OR a timeout (confirmed "
+                                "flag or not — a timeout measures the runner, "
+                                "not the runtime), is recorded here but leaves "
+                                "`status` at `installed`/`available`. Distinct "
+                                "from `version`, which never carries this "
+                                "text; `detail` carries a one-line human "
+                                "summary when the failure WAS trusted enough "
+                                "to demote the row."
+                            ),
+                        },
+                        "probe_ms": {
+                            "type": "number",
+                            "minimum": 0,
+                            "description": (
+                                "present whenever a --deep version probe was "
+                                "attempted at all — the TOTAL wall-clock time "
+                                "across every attempt, including a timed-out "
+                                "one that got retried once. Lets a runner-"
+                                "speed flake be diagnosed from the report "
+                                "alone: two rows with identical `status` and "
+                                "`probe_error` can be \"answered in 40ms\" and "
+                                "\"answered after two 25s timeouts\", and only "
+                                "the report, not the status, can tell them "
+                                "apart."
                             ),
                         },
                     },

@@ -35,6 +35,48 @@ behind it.
 
 ### Fixed
 
+- `codecalc doctor --deep` demoted a `tested`-tier toolchain to `unhealthy`
+  (flipping `healthy` false) whenever its version probe merely TIMED OUT,
+  treating "the runner did not answer in time" the same as "the runner
+  answered and is broken". Reproduced live four times on 2026-09-08 alone,
+  on cold `windows-latest` hosted runners, main among them: three were
+  `rustc --version` exceeding the 10-second probe deadline because a fresh
+  runner's FIRST `rustc` invocation goes through the rustup proxy — a tiny
+  arg-forwarding shim that has to locate and re-exec the real toolchain
+  component before it can answer anything, a cost a warm process never
+  pays again — and a fourth, on a later commit, was plain `go version`
+  doing the same with no proxy involved at all. `_probe_version` used to
+  return `hard_failure=True` for a timeout, identical to a genuine spawn
+  failure, and `report()` trusted that the same way it trusts a nonzero
+  exit on a command with a confirmed `_VERSION_FLAG` entry (both `rustc`
+  and `go` are audited, GNU-style `--version`/`version` commands) — so a
+  perfectly working toolchain read `unhealthy`, and the two real-host
+  `--deep` assertions added in #282 for the go/lua/zig regression failed
+  alongside it. A timeout now stays `hard_failure=False` and is never
+  trusted as evidence on its own, for any command, confirmed flag or not:
+  the row stays at `installed`/`available`, `probe_error` still records
+  what happened, and it is disclosed under doctor's existing "installed,
+  version probe failed" heading. The one thing that still demotes a row
+  after a timeout is a `_HELLO` runtime whose own hello-world execution
+  independently fails — arbitrated exactly as before, completely
+  independent of how the version probe went. Two mitigations reduce how
+  often the timeout fires at all, on top of the classification fix: one
+  retry (a slow-start proxy is warm on its second call, so `rustc`/`go`
+  alike usually answer well inside the deadline on the retry), and a
+  raised per-attempt timeout (10s to 25s) for the specific toolchains
+  audited as routing through this shape on a cold host — `rustc` (rustup),
+  `dotnet` and `swift` (their own first-call driver discovery), `java` and
+  `kotlinc` (cold JVM class loading and JIT warmup) — which is deliberately
+  NOT the safety net: the retry and the non-demotion rule apply to every
+  command whether or not it is in that table, which is what let `go`'s
+  failure (no table entry, no proxy) get fixed by the same two changes. The
+  report also now carries `probe_ms` on every row a `--deep` version probe
+  was attempted for — the total wall time across every attempt, including a
+  retried timeout — so a runner-speed flake is diagnosable from the report
+  itself instead of only from a stack of identical `probe_error` strings
+  with no way to tell "answered in 40ms" from "answered after 24s and a
+  retry". `probe_ms` is a MINOR (additive) bump of the doctor schema.
+
 - `verify_translation` and `compare_edge_cases` certified byte-different
   program output as equivalent. `translation._normalize` decided whether two
   programs agreed with `"\n".join(line.rstrip() for line in

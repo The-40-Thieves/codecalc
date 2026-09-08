@@ -309,15 +309,17 @@ _shutil_fixtures.rmtree(_kotlin_dir, ignore_errors=True)
 # a regression worse than the bug it fixed, caught by adversarial review, not
 # by a test, because no test ran `_probe_version` against a command using an
 # UNCONFIRMED flag. `_probe_version` returns `(version, probe_error,
-# hard_failure)`; a nonzero exit is `hard_failure=False` always, and the
-# caller (report(), tested below) trusts a `False` only when `_VERSION_FLAG`
-# has an explicit entry for that command.
-_v, _e, _h = doctor._probe_version("no-such-fake-command-xyz", None)
+# hard_failure, timed_out, probe_ms)`; a nonzero exit is `hard_failure=False`
+# always, and the caller (report(), tested below) trusts a `False` only when
+# `_VERSION_FLAG` has an explicit entry for that command.
+_v, _e, _h, _t, _ms = doctor._probe_version("no-such-fake-command-xyz", None)
 check("no path at all is not measured, not a failure",
-      _v is None and _e is None and _h is False, f"-> {(_v, _e, _h)}")
-_v, _e, _h = doctor._probe_version("python3", "/nonexistent/python3")
-check("a resolved-but-unspawnable path is a HARD failure",
-      _v is None and _e is not None and _h is True, f"-> {(_v, _e, _h)}")
+      _v is None and _e is None and _h is False and _t is False and _ms is None,
+      f"-> {(_v, _e, _h, _t, _ms)}")
+_v, _e, _h, _t, _ms = doctor._probe_version("python3", "/nonexistent/python3")
+check("a resolved-but-unspawnable path is a HARD failure, not a timeout",
+      _v is None and _e is not None and _h is True and _t is False,
+      f"-> {(_v, _e, _h, _t)}")
 
 _untrusted_dir = _tf.mkdtemp(prefix="codecalc-doctor-test-")
 _fake_untrusted = pathlib.Path(_untrusted_dir) / "fakelang"
@@ -326,10 +328,11 @@ _fake_untrusted.write_text(
 _fake_untrusted.chmod(0o755)
 if os.name != "nt":
     assert "fakelang" not in doctor._VERSION_FLAG, "fixture invalid: pick a name not audited"
-    _v, _e, _h = doctor._probe_version("fakelang", str(_fake_untrusted))
+    _v, _e, _h, _t, _ms = doctor._probe_version("fakelang", str(_fake_untrusted))
     check("a command on the untested `--version` default: nonzero exit is a "
-          "SOFT failure, never hard",
-          _v is None and _e is not None and _h is False, f"-> {(_v, _e, _h)}")
+          "SOFT failure, never hard, never a timeout",
+          _v is None and _e is not None and _h is False and _t is False,
+          f"-> {(_v, _e, _h, _t)}")
 
 # ── go / lua / zig: the exact three the regression broke ───────────────────
 _gzl_dir = pathlib.Path(_tf.mkdtemp(prefix="codecalc-doctor-test-"))
@@ -405,6 +408,181 @@ else:
 
 _shutil_fixtures.rmtree(_untrusted_dir, ignore_errors=True)
 _shutil_fixtures.rmtree(_gzl_dir, ignore_errors=True)
+
+
+# ── A VERSION-PROBE TIMEOUT MUST NOT DEMOTE A WORKING RUNTIME ──────────────
+#
+# Reproduced live, three times, on 2026-09-08: a cold `windows-latest`
+# runner's FIRST `rustc --version` goes through the rustup proxy — a tiny
+# arg-forwarding shim that has to locate and re-exec the real toolchain
+# component before it can answer anything — and exceeded the (then
+# unconditional) probe deadline. The shipped code treated that exactly like
+# a spawn failure: `hard_failure=True` regardless of WHY the probe never
+# answered, which demoted a perfectly working `tested`-tier rust to
+# `unhealthy` and flipped `healthy` false on every hit, main included.
+# Confirmed failing this way against this exact fixture before the fix
+# (`status: unhealthy`, `healthy: False`) — see the PR body for the
+# transcript; the two checks below are what makes it impossible to
+# regress silently.
+#
+# `_PROBE_TIMEOUT_S`/`_DEFAULT_PROBE_TIMEOUT_S` are monkeypatched down to
+# keep these fixtures fast — the fake binaries below sleep past a
+# 1-second deadline rather than a real 10-25s one. That changes how LONG
+# the fixture takes, never WHAT it proves: `_probe_version` reads both
+# constants fresh on every call, so a short deadline exercises the exact
+# same retry-then-report code path as the real ones.
+if os.name == "nt":
+    print("SKIP version-probe-timeout fixtures (needs a POSIX shell script)")
+else:
+    _saved_probe_timeout = dict(doctor._PROBE_TIMEOUT_S)
+    _saved_default_timeout = doctor._DEFAULT_PROBE_TIMEOUT_S
+    doctor._PROBE_TIMEOUT_S = {**_saved_probe_timeout, "rustc": 1.0}
+    doctor._DEFAULT_PROBE_TIMEOUT_S = 1.0
+
+    _slow_dir = _tf.mkdtemp(prefix="codecalc-doctor-test-")
+    _fake_slow_rustc = pathlib.Path(_slow_dir) / "rustc"
+    _fake_slow_rustc.write_text(
+        "#!/bin/sh\n/usr/bin/sleep 5\necho 'rustc 1.99.0 (fake, never answers in time)'\n",
+        encoding="utf-8")
+    _fake_slow_rustc.chmod(0o755)
+    registry.runtime_path = lambda: _slow_dir
+    try:
+        slow_rustc = doctor.report(deep=True)
+    finally:
+        registry.runtime_path = _saved_path
+    _rust_row = next(r for r in slow_rustc["runtimes"] if r["name"] == "rust")
+    check("a version probe that NEVER answers in time (both attempts) stays "
+          "`installed`, never `unhealthy`",
+          _rust_row.get("status") == "installed", f"-> {_rust_row.get('status')!r}")
+    check("...and probe_error names the timeout, not manufactured elsewhere",
+          _rust_row.get("probe_error") is not None
+          and "timed out" in _rust_row["probe_error"],
+          f"-> {_rust_row.get('probe_error')!r}")
+    check("...and probe_ms records real wall time across both attempts",
+          isinstance(_rust_row.get("probe_ms"), (int, float)) and _rust_row["probe_ms"] > 0,
+          f"-> {_rust_row.get('probe_ms')!r}")
+    check("...and version stays unmeasured, never invented from the timeout",
+          _rust_row.get("version") is None, f"-> {_rust_row.get('version')!r}")
+    check("...and rust being `tested`-tier does NOT cost `healthy` — a "
+          "timeout is the RUNNER being slow, not codecalc's own guarantee "
+          "failing",
+          slow_rustc["healthy"] is True, f"-> {slow_rustc['healthy']}")
+    check("...and the report still validates", not errors_for(slow_rustc))
+    _shutil_fixtures.rmtree(_slow_dir, ignore_errors=True)
+
+    # The retry path, proven to actually RECOVER a version rather than merely
+    # tolerating its absence: the FIRST call blocks past the deadline, the
+    # SECOND is warm (a marker file left by the first call short-circuits the
+    # sleep) — the exact shape a cold rustup proxy takes, slow once per
+    # process and fast forever after.
+    _warm_dir = _tf.mkdtemp(prefix="codecalc-doctor-test-")
+    _marker = pathlib.Path(_warm_dir) / ".called"
+    _fake_warm_rustc = pathlib.Path(_warm_dir) / "rustc"
+    _fake_warm_rustc.write_text(
+        f'#!/bin/sh\n'
+        f'if [ ! -f "{_marker}" ]; then\n'
+        f'  /usr/bin/touch "{_marker}"\n'
+        f'  /usr/bin/sleep 5\n'
+        f'fi\n'
+        f'echo "rustc 1.99.0 (fake, warm on retry)"\n', encoding="utf-8")
+    _fake_warm_rustc.chmod(0o755)
+    registry.runtime_path = lambda: _warm_dir
+    try:
+        warm_rustc = doctor.report(deep=True)
+    finally:
+        registry.runtime_path = _saved_path
+    _warm_row = next(r for r in warm_rustc["runtimes"] if r["name"] == "rust")
+    check("a proxy that is slow only ONCE is recovered by the retry: a "
+          "real version IS read",
+          _warm_row.get("version") == "rustc 1.99.0 (fake, warm on retry)",
+          f"-> {_warm_row.get('version')!r}")
+    check("...and status is never touched by the first attempt's timeout",
+          _warm_row.get("status") == "installed", f"-> {_warm_row.get('status')!r}")
+    check("...and no probe_error is recorded — the retry answered, so "
+          "nothing here failed",
+          _warm_row.get("probe_error") is None, f"-> {_warm_row.get('probe_error')!r}")
+    _shutil_fixtures.rmtree(_warm_dir, ignore_errors=True)
+
+    # GENERALITY: the classification fix is not a rustc-only special case.
+    # `report()`'s trust rule (`not probe_timed_out and cmd in
+    # _VERSION_FLAG`) and the retry loop in `_probe_version` both apply to
+    # every command uniformly — `_PROBE_TIMEOUT_S` only raises the ceiling
+    # for the handful of commands audited as slow-start proxies, it does not
+    # gate whether the classification or the retry apply at all. `go`
+    # reproduces the identical failure on its OWN evidence (a later
+    # 2026-09-08 windows-latest run than the rustc hits: `go version timed
+    # out after 10s` -> unhealthy -> healthy false) while staying on the
+    # plain DEFAULT timeout — deliberately NOT added to `_PROBE_TIMEOUT_S` —
+    # so this fixture is the one that would fail if the fix had quietly been
+    # a per-command special case instead of a change to `report()`'s rule.
+    assert "go" not in doctor._PROBE_TIMEOUT_S, (
+        "fixture invalid: go must stay on the DEFAULT timeout, unlisted in "
+        "_PROBE_TIMEOUT_S, to prove the fix is not a rustc-only table")
+    _slow_go_dir = _tf.mkdtemp(prefix="codecalc-doctor-test-")
+    _fake_slow_go = pathlib.Path(_slow_go_dir) / "go"
+    _fake_slow_go.write_text(
+        "#!/bin/sh\n/usr/bin/sleep 5\necho 'go version go1.99.0 linux/arm64'\n",
+        encoding="utf-8")
+    _fake_slow_go.chmod(0o755)
+    registry.runtime_path = lambda: _slow_go_dir
+    try:
+        slow_go = doctor.report(deep=True)
+    finally:
+        registry.runtime_path = _saved_path
+    _go_row = next(r for r in slow_go["runtimes"] if r["name"] == "go")
+    check("go, on the plain DEFAULT timeout with no per-command entry, is "
+          "ALSO never demoted by a bare timeout",
+          _go_row.get("status") == "installed", f"-> {_go_row.get('status')!r}")
+    check("...and probe_error still names the timeout",
+          _go_row.get("probe_error") is not None
+          and "timed out" in _go_row["probe_error"],
+          f"-> {_go_row.get('probe_error')!r}")
+    check("...and healthy stays true — go is `tested`-tier, exactly the "
+          "combination that flipped it false on main",
+          slow_go["healthy"] is True, f"-> {slow_go['healthy']}")
+    _shutil_fixtures.rmtree(_slow_go_dir, ignore_errors=True)
+
+    doctor._PROBE_TIMEOUT_S = _saved_probe_timeout
+    doctor._DEFAULT_PROBE_TIMEOUT_S = _saved_default_timeout
+
+    # The other half: a timeout is not FREE cover. `bash` is in `_HELLO`, so
+    # its hello-world run is the arbiter regardless of what the version
+    # probe did — if that run ALSO fails, the row is genuinely unhealthy,
+    # and a version-probe timeout must not be read as protecting it. The
+    # environment variable, not the `registry.runtime_path` monkeypatch used
+    # above: `_HELLO`'s check spawns `codecalc-exec` as a SEPARATE process
+    # (see the go/lua/zig fixture earlier in this file for the same reason),
+    # which only ever sees `CODECALC_RUNTIME_PATH` from its own inherited
+    # environment.
+    _dead_dir = _tf.mkdtemp(prefix="codecalc-doctor-test-")
+    _fake_dead_bash = pathlib.Path(_dead_dir) / "bash"
+    _fake_dead_bash.write_text(
+        '#!/bin/sh\n'
+        'if [ "$1" = "--version" ]; then /usr/bin/sleep 5; exit 0; fi\n'
+        'exit 1\n', encoding="utf-8")
+    _fake_dead_bash.chmod(0o755)
+    doctor._PROBE_TIMEOUT_S = {**_saved_probe_timeout, "bash": 1.0}
+    _saved_runtime_path_env2 = os.environ.get(registry.RUNTIME_PATH_ENV)
+    os.environ[registry.RUNTIME_PATH_ENV] = str(_dead_dir)
+    try:
+        dead_bash = doctor.report(deep=True)
+    finally:
+        doctor._PROBE_TIMEOUT_S = _saved_probe_timeout
+        if _saved_runtime_path_env2 is None:
+            os.environ.pop(registry.RUNTIME_PATH_ENV, None)
+        else:
+            os.environ[registry.RUNTIME_PATH_ENV] = _saved_runtime_path_env2
+    _dead_bash_row = next(r for r in dead_bash["runtimes"] if r["name"] == "bash")
+    check("a timed-out version probe does NOT shield a runtime whose "
+          "hello-world ALSO fails — it is genuinely `unhealthy`",
+          _dead_bash_row.get("status") == "unhealthy",
+          f"-> {_dead_bash_row.get('status')!r}")
+    check("...and the timeout is still on record (a human reading this row "
+          "sees why the version is missing too)",
+          _dead_bash_row.get("probe_error") is not None
+          and "timed out" in _dead_bash_row["probe_error"],
+          f"-> {_dead_bash_row.get('probe_error')!r}")
+    _shutil_fixtures.rmtree(_dead_dir, ignore_errors=True)
 
 
 # ── AN AUDITED DEFAULT FLAG IS TRUSTED THE SAME AS AN OVERRIDE ─────────────
@@ -614,6 +792,18 @@ for _r in _real_tested:
           _r["status"] in ("installed", "available"),
           f"-> status={_r['status']} version={_r.get('version')!r} "
           f"probe_error={_r.get('probe_error')!r}")
+    # Printed rather than asserted into a number: a CI log otherwise has no
+    # way to tell "this runtime answered promptly" from "this runtime just
+    # barely made the deadline" — the exact distinction a runner-speed flake
+    # needs, and the reason this field exists at all. `rust` on a cold
+    # `windows-latest` image is the case this is FOR: a slow proxy that
+    # still answers should show up here as a large-but-successful number,
+    # not vanish into a bare PASS line.
+    print(f"     probe_ms[{_r['name']}] = {_r.get('probe_ms')!r}")
+    check(f"  ...and {_r['name']}'s probe_ms is a real, non-negative "
+          f"duration",
+          isinstance(_r.get("probe_ms"), (int, float)) and _r["probe_ms"] >= 0,
+          f"-> {_r.get('probe_ms')!r}")
 check("--deep against the real host's own tested-tier toolchains stays healthy",
       _real_deep["healthy"] is True,
       f"-> {[(r['name'], r['status'], r.get('probe_error')) for r in _real_tested]}")
