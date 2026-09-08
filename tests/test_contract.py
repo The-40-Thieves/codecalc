@@ -670,16 +670,28 @@ check_stamped("a verify_optimization measurement failure", _o_measure_fail)
 # tests/test_translation_verify.py gates its own live timing assertions: the
 # pure-Python fallback's spawn overhead can swamp a modest algorithmic win.
 # This exists to prove the SHAPE validates, not to re-litigate the
-# significance test itself (already covered live there). Two sizes, not
-# one: a single counted size is one uncorrected test and can never be
-# `accepted` (optimization._MIN_COUNTED_SIZES), so a one-size request is
-# the rejected shape, not the accepted one this block is here to validate.
+# significance test itself (already covered live there).
+#
+# Four sizes, not two: two counted sizes is still <= `_FWER_UNANIMITY_MAX`,
+# so `_accept_decision` demands BOTH reject (unanimity) — one size's ratio
+# happening to land only borderline-significant under jitter (an
+# `optimization.stats.mann_whitney_u` sample that overlaps by chance at
+# REPEATS=5) fails the whole call, exactly the false-reject shape THE-1007
+# fixed in tests/test_translation_verify.py's calibrated live test (see its
+# comment for the full incident). Four sizes lands this call in the
+# Bonferroni-corrected MAJORITY regime instead (3-of-4 at alpha/4), the
+# same regime the tool's own default `sizes=None` call uses — measured
+# directly (10 runs, `nice -n 19`, real host contention): the two-size
+# version accepted 10/10 in this run but stays structurally exposed;
+# the four-size version also accepted 10/10 (9/10 landing on
+# `correction: bonferroni`, one run dropping to 3 counted sizes and still
+# unanimous) while adding under 3s of wall time.
 if executor._rust:
     _SLOW = ("n = int(input() or 0)\ntotal = 0\n"
              "for i in range(n):\n    total += i\nprint(total)")
     _FAST = "n = int(input() or 0)\nprint(n*(n-1)//2 if n > 0 else 0)"
     _o_accepted = server.verify_optimization(_SLOW, _FAST, "python3",
-                                             sizes=[1000000, 2000000])
+                                             sizes=[500000, 1000000, 1500000, 2000000])
     check("an accepted verify_optimization validates against the published schema",
           not errors_for(_o_accepted), f"-> {errors_for(_o_accepted)[:2]}")
     check("...and is graded cross_checked",
