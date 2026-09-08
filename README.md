@@ -759,17 +759,21 @@ codecalc's `tools/list` returns 52 definitions. Measured with `o200k_base` as a
 proxy, that is roughly 9,200 tokens of descriptions and input schemas, and every
 client pays it before the first user message.
 
-Each tool also carries a per-group `icons` field (2025-11-25+; a tiny inline
-`data:image/svg+xml;base64,...` monochrome glyph, under 300 bytes even for the
-largest of the six) — small per icon, but repeated once per tool (25 times for
-the `calculator` group alone), and base64 tokenizes far worse than prose under
-a BPE encoder. Measured the same way, on the SAME two connections before and
-after adding icons (the FULL served `tools/list` payload this time, not just
-descriptions and schemas, so this number is not directly comparable to the
-9,200 above): +11,540 bytes, **+6,665 tokens** (`o200k_base`) — a real,
-non-trivial addition, disclosed rather than rounded away. Icons are not
-description TEXT, so they do not affect `scripts/tool_select_eval.py`'s BM25
-corpus (verified: the eval's own baseline is unchanged by this addition).
+A per-tool `icons` field (2025-11-25+) was tried and measured, not assumed:
+one tiny inline `data:image/svg+xml;base64,...` glyph per tool GROUP, under
+300 bytes even for the largest of six — small per icon, but `Tool.icons` is a
+per-TOOL field, so each of the 52 tools repeats its group's full base64
+payload on the wire, and base64 tokenizes far worse than prose under a BPE
+encoder. Measured on the full served `tools/list` payload: **+11,540 bytes,
++6,665 tokens** (`o200k_base`) — real and non-trivial on a server whose whole
+pitch (see "Reducing the tool surface" below and `docs/design/
+2026-08-10-tool-facade.md`) is that tool SELECTION accuracy matters more than
+saving a few tokens elsewhere. Removed. codecalc's `MCPServer` still carries
+one SERVER-level icon plus a `website_url` — both ride on `initialize`, once
+per **connection**, not once per **tool**, so they do not touch `tools/list`
+at all: measured before/after, the served `tools/list` payload is
+byte-identical (59,902 bytes / 15,952 tokens either way) — **+0** on the
+number this section exists to track.
 
 codecalc does not hide its tools behind a discovery facade, and that is
 deliberate: the tool surface is where per-operation approval prompts, audit

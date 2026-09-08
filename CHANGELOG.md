@@ -100,24 +100,28 @@ behind it.
   cache TTL (`cache_hints=` on the `MCPServer` construction) — a client
   refetching inside that window can still see stale content even though the
   notification arrived immediately.
-- **Server and per-tool `icons` (2025-11-25+), and `website_url`.**
-  `MCPServer(icons=[...], website_url=...)` carries one server-level icon;
-  every tool now also carries a per-GROUP `icons` entry (six monochrome,
-  under-300-byte inline `data:image/svg+xml;base64,...` glyphs — a "+" for
-  `calculator`, a checkmark for `verification`, a play triangle for
-  `execution`, a folder tab for `sessions`, ascending bars for `analysis`,
-  a gear ring for `admin` — plus a seventh, distinct one for the server
-  itself). `website_url` points at this repository. Both are inline data,
-  never an external `src` — the same no-phone-home reasoning
+- **A server `icons` entry (2025-11-25+) and `website_url`.**
+  `MCPServer(icons=[...], website_url=...)` carries one server-level icon (a
+  monochrome, under-300-byte inline `data:image/svg+xml;base64,...` glyph)
+  and a `website_url` pointing at this repository. Both are inline/self-
+  contained data, never an external `src` — the same no-phone-home reasoning
   `tests/test_offline.py` already enforces elsewhere in this package; the
   SVG namespace attribute and `website_url` are each built from two literal
   string halves rather than one so that reasoning holds structurally, not
-  just by convention. Real cost, measured and disclosed in README's
-  "Tool-definition token cost": **+6,665 tokens** (`o200k_base`, +11,540
-  bytes) on the full served `tools/list` payload — small per icon, but
-  repeated once per tool (25 times for `calculator` alone). Icons are not
-  description text, so `scripts/tool_select_eval.py`'s BM25 corpus and
-  baseline are unaffected (verified).
+  just by convention. Both ride on `initialize`, once per **connection** —
+  measured before/after, `tools/list`'s served payload is byte-identical
+  (59,902 bytes / 15,952 tokens, `o200k_base`, either way): **+0** tokens on
+  the number README's "Tool-definition token cost" section exists to track.
+
+  A per-GROUP `Tool.icons` entry on every tool was tried first, and pulled
+  after measuring its real cost: `Tool.icons` is a per-TOOL field, so each
+  of the 52 tools repeated its group's full base64 payload on the wire, and
+  base64 tokenizes far worse than prose under a BPE encoder — **+6,665
+  tokens** (`o200k_base`, +11,540 bytes) on the full served `tools/list`
+  payload, on a server whose whole pitch (see README's "Reducing the tool
+  surface" and `docs/design/2026-08-10-tool-facade.md`) is that tool
+  SELECTION accuracy matters more than a marginal token saving elsewhere.
+  Not an acceptable trade; removed before release.
 - **Progress notifications on `benchmark`, `verify_optimization` and
   `compare_execution`**, the same `ctx.report_progress` mechanism
   `execute_code_stream` already used. `benchmark` reports once per

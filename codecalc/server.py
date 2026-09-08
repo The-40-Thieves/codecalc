@@ -223,16 +223,28 @@ _execution_service = execution_service.ExecutionService(
 _session_service = execution_service.SessionService(audit=_audit_log)
 
 
-# ── Icons (2025-11-25+): one per tool GROUP, plus one for the server itself ──
+# ── The server's own icon (2025-11-25+) ──────────────────────────────────────
+#
+# SERVER-LEVEL ONLY. This used to also apply a per-GROUP icon to every tool
+# (`Tool.icons`, via `_tool()`'s `d_kwargs.setdefault("icons", ...)`) — pulled
+# after measuring the real cost: only 6 DISTINCT icons exist, but `Tool.icons`
+# is a per-TOOL field, so each tool's own copy repeats the full base64
+# payload on the wire, and base64 tokenizes far worse than prose under a BPE
+# encoder. Measured: +6,665 tokens (o200k_base) on the full served
+# `tools/list` payload for a server whose whole pitch is that tool SELECTION
+# accuracy matters (see README's "Tool-definition token cost" table, and
+# #118/`docs/design/2026-08-10-tool-facade.md`'s reasoning against paying
+# that kind of cost for anything less than a real fix). The server-level
+# icon below survives: it rides on `initialize`, once per CONNECTION, not
+# once per tool — a fundamentally different, negligible cost shape.
 #
 # Inline `data:image/svg+xml;base64,...` — no external URL (a remote `src`
 # means every client that renders an icon fetches from wherever this string
 # points, which is exactly the phone-home shape tests/test_offline.py exists
-# to ban; a self-contained data URI has no such fetch). Each glyph is a
-# single monochrome `<path>` (`fill="currentColor"`, so it inherits the
-# client's own theme rather than fighting it) in a 16x16 viewBox — small
-# enough that even the biggest of the seven here is under 300 bytes,
-# base64 included.
+# to ban; a self-contained data URI has no such fetch). A single monochrome
+# `<path>` (`fill="currentColor"`, so it inherits the client's own theme
+# rather than fighting it) in a 16x16 viewBox, evenodd cutout for the hole —
+# well under 300 bytes, base64 included.
 #
 # The SVG namespace attribute's value is built from two literal halves
 # rather than one, for the same reason `_WEBSITE_URL` below is: a bare
@@ -250,45 +262,12 @@ def _svg_icon(path_d: str, *, attrs: str = 'fill="currentColor"', rule: str | No
     # "override if the source MIME type is MISSING or generic" — it is
     # neither here), and an absent `sizes` already means "any size" per
     # `Icon.sizes`'s own docstring. Both fields would only re-state what
-    # `src` already carries, at real cost: this repeats 52 times (once per
-    # tool, via GROUP_ICONS) plus once for the server, so two redundant
-    # fields is ~1,500 bytes of `tools/list` that says nothing new.
+    # `src` already carries.
     return Icon(src=f"data:image/svg+xml;base64,{data}")
 
 
-#: group -> its icon. One entry per KNOWN_GROUPS member (defined further
-#: down, once every group's tools have been catalogued — this dict only
-#: needs the group NAMES, which are stable strings, not the frozenset
-#: itself); `_tool()` applies it as every tool's default `icons=[...]` (a
-#: per-tool `@mcp.tool(icons=...)` at the call site would still win — same
-#: `setdefault` pattern GROUP_ANNOTATIONS/`_tool_meta` already use).
-#: Every path below is FILLED (`fill="currentColor"`, `_svg_icon`'s default
-#: `attrs=`) rather than stroked — a stroke needs `stroke`/`stroke-width`/
-#: often `stroke-linecap`/`stroke-linejoin` attributes on top of the path
-#: data itself, and this dict's icon is repeated once per tool in the
-#: group (25x for `calculator` alone) — every avoidable attribute byte here
-#: is really ~25-52 bytes of `tools/list`, base64-inflated on top of that.
-GROUP_ICONS: dict[str, Icon] = {
-    # a "+" glyph — exact/symbolic arithmetic and unit conversion.
-    "calculator": _svg_icon("M7 2h2v5h5v2h-5v5h-2v-5h-5v-2h5z"),
-    # a filled checkmark ribbon — equivalence/optimisation proofs.
-    "verification": _svg_icon("M2 8 3.5 6.5 6 9 12 2 13.5 3.5 6 11z"),
-    # a play triangle — running code.
-    "execution": _svg_icon("M4 2l10 6-10 6z"),
-    # a filled folder tab — persistent sessions/workspaces.
-    "sessions": _svg_icon("M1 3h5l1 2h8v8H1z"),
-    # ascending bars — complexity/benchmarking.
-    "analysis": _svg_icon("M2 14V9h3v5zm5 0V5h3v9zm5 0V2h3v12z"),
-    # a gear ring (evenodd cutout for the hole) — package installs/updates.
-    "admin": _svg_icon(
-        "M8 1a7 7 0 100 14A7 7 0 008 1zm0 4a3 3 0 100 6 3 3 0 000-6z", rule="evenodd"
-    ),
-}
-
 #: The server's own icon (`MCPServer(icons=[...])`) — a circle with a
-#: plus-shaped cutout (evenodd), distinct from every per-tool group glyph
-#: above so a client's server list and its tool list are never showing the
-#: same mark for two different things.
+#: plus-shaped cutout (evenodd).
 _SERVER_ICON = _svg_icon(
     "M8 0a8 8 0 100 16A8 8 0 008 0zm-1.5 4h3v2.5H13v3H9.5V13h-3V9.5H3v-3h3.5z",
     rule="evenodd",
@@ -900,7 +879,6 @@ def _tool(*d_args, **d_kwargs):
         # explicit value a future tool might need.
         d_kwargs.setdefault("annotations", TOOL_ANNOTATION_OVERRIDES.get(name, GROUP_ANNOTATIONS[group]))
         d_kwargs.setdefault("title", _default_title(name))
-        d_kwargs.setdefault("icons", [GROUP_ICONS[group]])
         tool_meta = _tool_meta(name)
         if tool_meta is not None:
             d_kwargs.setdefault("meta", tool_meta)
