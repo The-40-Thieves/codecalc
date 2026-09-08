@@ -139,29 +139,46 @@ fields changes. A host that never negotiated
 call `resources/read` on a `ui://` URI, and per the two client rules already
 documented in `docs/contract/README.md`'s spirit (ignore fields you don't
 recognise), an MCP-conformant client ignores an unrecognised key under
-`_meta` — there is nothing to opt out of. `tests/test_mcp_apps_views.py`
-proves this directly: `tools/call` on both tools is byte-identical to a
-`main`-branch checkout's server, run over the same stdio transport.
+`_meta` — there is nothing to opt out of. Confirmed once during development
+by spawning an actual `main`-branch checkout's server over the same stdio
+transport and byte-comparing its `tools/call` JSON for `verify_translation`
+(deterministic) and its full result-schema keys for `verify_optimization`
+(whose timings never reproduce bit-for-bit). `tests/test_mcp_apps_views.py`
+does not repeat that live spawn on every run — it would need a second venv
+and a second built Rust executor — and instead guards the same claim two
+cheaper ways: a live in-process call against THIS server compared to a
+known-good expectation, and a structural `git diff` of every module that
+can influence either tool's return value against `origin/main`'s
+merge-base. That diff is **best-effort**: the CI job it runs in checks out
+with the default `fetch-depth` (1), so `origin/main` is not always locally
+resolvable there, and the test degrades to a skip (not a failure) rather
+than claiming a comparison it could not make.
 
 ## Files
 
 - `codecalc/apps_views.py` — the two static HTML documents, as module-level
-  string constants, plus size/URI constants.
+  string constants, plus size/URI constants; `debug_html_with_sample_hook()`
+  builds a separate, screenshot-only copy wired to
+  `window.__CODECALC_SAMPLE__` — the served documents never carry that hook.
 - `codecalc/server.py` — `_UI_RESOURCES` (tool name -> `ui://` URI), folded
   into the existing `_tool_meta()` merge point; two `@mcp.resource(...)`
   declarations next to `session_file_resource`.
 - `tests/test_mcp_apps_views.py` — resource listing/reading, MIME type, HTML
-  structural checks (no external `src`/`href`, parses under `html.parser`),
-  `_meta` shape, size caps, and the `tools/call` byte-identity check against
-  a scratch `main` checkout.
+  structural checks (no external `src`/`href`/`xlink:href` or CSS
+  `url()`/`@import`, parses under `html.parser`), `_meta` shape, size caps,
+  the sample hook's absence from the served documents, the message
+  listener's origin check, and the `tools/call` unchanged-behaviour checks
+  described above (live + best-effort structural, not a repeated live spawn
+  of `main`).
 - `docs/contract/README.md` — a note that `_meta` (tool or resource) is not
   part of the versioned JSON result contract.
 
 ## Manual verification
 
 No live Claude Desktop/Claude.ai/ChatGPT session is drivable from this
-environment. Verification instead renders each HTML document, with a bundled
-sample result assigned to `window.__CODECALC_SAMPLE__`, in a headless browser
-via Playwright, and saves a screenshot of the resulting DOM. See
-`docs/design/verify_translation-sample.png` and
+environment. Verification instead renders `apps_views.debug_html_with_sample_hook(...)`
+— a copy of each document with a bundled sample result wired to
+`window.__CODECALC_SAMPLE__`, never the served resource itself — in a
+headless browser via Playwright, and saves a screenshot of the resulting
+DOM. See `docs/design/verify_translation-sample.png` and
 `docs/design/verify_optimization-sample.png`.

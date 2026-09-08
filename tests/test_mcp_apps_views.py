@@ -8,8 +8,14 @@ Five things, in order:
      spec-mandated MIME type (`text/html;profile=mcp-app`, imported from
      the SDK's own `mcp.server.apps.APP_MIME_TYPE`, not retyped here)
   2. each document is well-formed HTML (walked with `html.parser`, stdlib,
-     not a lenient regex) and embeds no external `src`/`href` — self-
-     contained per the ticket's own constraint, checked structurally
+     not a lenient regex) and embeds no external reference of any of the
+     four shapes HTML/CSS/SVG can carry one in — a `src`/`href`/`xlink:href`
+     attribute, or a `url(...)`/`@import` inside a `<style>` block or a
+     `style="..."` attribute — self-contained per the ticket's own
+     constraint, checked structurally. Also asserts neither served document
+     contains the screenshot-only `__CODECALC_SAMPLE__` hook at all (see
+     `codecalc/apps_views.debug_html_with_sample_hook`) and that the
+     postMessage listener checks `event.source` before trusting a message.
   3. both documents stay under the self-imposed size ceiling
      (`apps_views.MAX_VIEW_BYTES`)
   4. `tools/list`'s `_meta.ui.resourceUri` on the two bound tools matches
@@ -38,6 +44,7 @@ Standalone runner (check()/FAILS/sys.exit), no pytest — the repo convention.
 from __future__ import annotations
 
 import asyncio
+import re
 import subprocess
 import sys
 from html.parser import HTMLParser
@@ -63,24 +70,55 @@ def check(name: str, cond: bool, detail: str = "") -> None:
 
 # ═══ 1-3: structural checks on the two HTML documents themselves ═══════════
 
+#: `url(...)` / `@import ...` inside a `<style>` block or a `style="..."`
+#: attribute — the two CSS shapes an external reference can take that a
+#: plain `src`/`href` attribute scan never sees.
+_CSS_URL_RE = re.compile(r"""url\(\s*['"]?([^'")]+)""")
+_CSS_IMPORT_RE = re.compile(r"""@import\s+(?:url\()?['"]?([^'");]+)""")
+
+
 class _ExternalRefFinder(HTMLParser):
-    """Collects every `src`/`href` attribute value the parser sees.
+    """Collects every external-reference-shaped value the parser sees:
+    `src`/`href`/`xlink:href` attributes, and `url(...)`/`@import` inside
+    `<style>` text or a `style="..."` attribute (SVG and CSS both allow an
+    external reference nothing in a plain attribute scan would catch).
 
     A regex over raw HTML would miss attributes split across lines or using
     single quotes; `html.parser` (stdlib, the same module the ticket names)
-    tokenizes properly regardless of quoting/formatting.
+    tokenizes properly regardless of quoting/formatting. html.parser already
+    lower-cases tag/attribute names, so `xlink:href` (SVG, always lowercase
+    in valid markup) needs no case-folding here.
     """
+
+    _REF_ATTRS = frozenset({"src", "href", "xlink:href"})
 
     def __init__(self) -> None:
         super().__init__()
         self.refs: list[str] = []
         self.tags_seen: list[str] = []
+        self._in_style = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         self.tags_seen.append(tag)
+        if tag == "style":
+            self._in_style = True
         for name, value in attrs:
-            if name in ("src", "href") and value:
+            if not value:
+                continue
+            if name in self._REF_ATTRS:
                 self.refs.append(value)
+            elif name == "style":
+                self.refs.extend(_CSS_URL_RE.findall(value))
+                self.refs.extend(_CSS_IMPORT_RE.findall(value))
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "style":
+            self._in_style = False
+
+    def handle_data(self, text: str) -> None:
+        if self._in_style:
+            self.refs.extend(_CSS_URL_RE.findall(text))
+            self.refs.extend(_CSS_IMPORT_RE.findall(text))
 
 
 def _is_external(ref: str) -> bool:
@@ -103,8 +141,27 @@ for tool_name, uri in sorted(apps_views.UI_RESOURCE_URIS.items()):
     if parse_ok:
         check(f"{tool_name}: view parses as HTML", True)
         external = [r for r in parser.refs if _is_external(r)]
-        check(f"{tool_name}: view has no external src/href", not external, f"-> {external}")
+        check(f"{tool_name}: view has no external src/href/xlink:href or "
+              "style url()/@import", not external, f"-> {external}")
         check(f"{tool_name}: view has a <script> tag", "script" in parser.tags_seen)
+
+    # The screenshot-only sample hook must never reach the served resource —
+    # it is built by a SEPARATE function (apps_views.debug_html_with_sample_hook)
+    # that this module never calls when constructing VIEWS_BY_URI.
+    check(f"{tool_name}: served view carries no __CODECALC_SAMPLE__ hook",
+          "__CODECALC_SAMPLE__" not in html)
+
+    # The postMessage listener must check `event.source` before trusting a
+    # message — a static source check, since simulating a real cross-frame
+    # postMessage attack needs a browser, not html.parser. Kept string-based
+    # (not a full JS parse) deliberately: the exact guard shape is asserted,
+    # not merely "the substring appears somewhere in a docstring".
+    has_source_guard = "event.source !== window.parent" in html
+    check(f"{tool_name}: message listener checks event.source against window.parent",
+          has_source_guard, "" if has_source_guard else "-> guard string not found")
+    has_embedded_guard = "window.parent !== window" in html
+    check(f"{tool_name}: message listener is gated on being embedded at all",
+          has_embedded_guard, "" if has_embedded_guard else "-> guard string not found")
 
 
 # ═══ live checks: resources/list, resources/read, tools/list _meta ════════

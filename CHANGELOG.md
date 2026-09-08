@@ -43,9 +43,13 @@ behind it.
   list) renders alongside the tool's answer — a per-case diff table with
   first-differing-line highlighting for the translation proof, and a
   per-size before/after timing chart plus the significance table for the
-  optimization proof. `tools/call` is byte-for-byte unchanged for hosts
-  without Apps support — the `_meta` key is additive and ignorable, verified
-  against a live run of `main`'s server. See
+  optimization proof. `tools/call` is unchanged for hosts without Apps
+  support — the `_meta` key is additive and ignorable — confirmed once
+  during development by byte-comparing a live run of `main`'s server, and
+  guarded going forward by a live in-process equivalence check plus a
+  structural diff against `origin/main`'s merge-base (best-effort: only
+  where `origin/main` is fetchable, which the CI job that runs it is not
+  currently guaranteed to be). See
   `docs/design/2026-09-08-mcp-apps-verification-views.md` for the spec
   research this was built from.
 - `llms.txt` at the repo root (the [llmstxt.org](https://llmstxt.org/)

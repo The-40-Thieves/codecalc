@@ -13,9 +13,17 @@ Each document hand-rolls the small read-only slice of the MCP Apps wire
 protocol it needs (a JSON-RPC 2.0 `ui/initialize` handshake over
 `window.postMessage`, then a `tool-result` notification carrying
 `structuredContent`) rather than loading the reference `app-sdk` package,
-because this document cannot fetch anything at all. A
-`window.__CODECALC_SAMPLE__` hook lets the same document be rendered offline
-(headless browser, no live host) for the screenshots under docs/design/.
+because this document cannot fetch anything at all. The listener only acts
+on messages whose `event.source` is this document's own `window.parent`
+(and only when actually embedded at all), so a sibling frame the host also
+happens to embed cannot spoof a tool result.
+
+`debug_html_with_sample_hook()` builds a SEPARATE, screenshot-only copy of a
+view wired to `window.__CODECALC_SAMPLE__` — the served documents
+(`VERIFY_TRANSLATION_HTML`/`VERIFY_OPTIMIZATION_HTML`, what `server.py`
+actually registers) carry no such hook at all, so nothing running in a
+real host's iframe can short-circuit the real `tool-result` flow with
+fabricated data.
 
 Kept as plain string constants, not a template engine: the server never
 substitutes anything into these documents at request time — the tool's
@@ -73,12 +81,24 @@ pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-family: ui-
 #: `structuredContent`/`structured_content`. Never calls a tool, never asks
 #: for a display-mode change, never sends tool input — a read-only view has
 #: no use for any of the protocol's other messages.
+#:
+#: Origin-checked both ways: `__sendToHost` only posts when this document is
+#: actually embedded (`window.parent !== window` — a top-level load has no
+#: host to talk to), and the listener drops anything not sourced from that
+#: SAME `window.parent` — a sibling frame the host also embeds (an ad, a
+#: second tool's own `ui://` view, anything else sharing the same parent)
+#: can otherwise post an indistinguishable `tool-result` notification and
+#: spoof this view's rendered content. `event.source` is compared to the
+#: object, not a string origin, because a `srcdoc`/`about:srcdoc` iframe
+#: (how a host typically embeds inline HTML like this) has no meaningful
+#: `event.origin` to check.
 _BRIDGE_JS = """
 var __pending = {};
 var __nextId = 1;
+var __embedded = window.parent !== window;
 
 function __sendToHost(message) {
-  if (window.parent) { window.parent.postMessage(message, "*"); }
+  if (__embedded) { window.parent.postMessage(message, "*"); }
 }
 
 function __callHost(method, params) {
@@ -90,6 +110,7 @@ function __callHost(method, params) {
 }
 
 window.addEventListener("message", function (event) {
+  if (!__embedded || event.source !== window.parent) { return; }
   var msg = event.data;
   if (!msg || msg.jsonrpc !== "2.0") { return; }
   if (msg.id !== undefined && __pending[msg.id]) {
@@ -104,13 +125,24 @@ window.addEventListener("message", function (event) {
   }
 });
 
-if (window.__CODECALC_SAMPLE__) {
-  render(window.__CODECALC_SAMPLE__);
-} else {
-  __callHost("ui/initialize", {}).then(function () {
-    __sendToHost({ jsonrpc: "2.0", method: "ui/notifications/initialized", params: {} });
-  });
-}
+__callHost("ui/initialize", {}).then(function () {
+  __sendToHost({ jsonrpc: "2.0", method: "ui/notifications/initialized", params: {} });
+});
+"""
+
+#: NOT part of `_BRIDGE_JS`, and NEVER included in `VERIFY_TRANSLATION_HTML`/
+#: `VERIFY_OPTIMIZATION_HTML` (what `server.py` actually serves). A served
+#: `ui://` document that unconditionally honoured a `window.__CODECALC_SAMPLE__`
+#: global would let anything able to set a global in that window (a
+#: misbehaving extension, a future same-origin script) short-circuit the real
+#: `tool-result` flow with fabricated data — so the production documents
+#: carry no such check at all. `debug_html_with_sample_hook` below builds a
+#: SEPARATE copy, for local screenshot generation only, that appends this
+#: hook inside the same closure `render()` is defined in (it is not
+#: reachable from outside the IIFE). See "Manual verification" in the design
+#: doc.
+_SAMPLE_HOOK_JS = """
+if (window.__CODECALC_SAMPLE__) { render(window.__CODECALC_SAMPLE__); }
 """
 
 _ESC_JS = """
@@ -122,14 +154,20 @@ function esc(s) {
 """
 
 
-def _document(title: str, body: str, script: str) -> str:
+def _document(title: str, body: str, script: str, *, debug_hook: str = "") -> str:
+    """`debug_hook` defaults to empty — every production call below leaves it
+    unset, so `VERIFY_TRANSLATION_HTML`/`VERIFY_OPTIMIZATION_HTML` (what
+    `server.py` serves) never contain it. Only `debug_html_with_sample_hook`
+    passes `_SAMPLE_HOOK_JS`, for a screenshot-only copy that is never wired
+    into `VIEWS_BY_URI` or any `@mcp.resource`.
+    """
     return (
         "<!doctype html>\n"
         "<html>\n<head>\n<meta charset=\"utf-8\">\n"
         f"<title>{title}</title>\n"
         f"<style>{_STYLE}</style>\n</head>\n<body>\n"
         f"{body}\n"
-        f"<script>\n(function () {{\n\"use strict\";\n{_ESC_JS}\n{script}\n{_BRIDGE_JS}\n}})();\n</script>\n"
+        f"<script>\n(function () {{\n\"use strict\";\n{_ESC_JS}\n{script}\n{debug_hook}\n{_BRIDGE_JS}\n}})();\n</script>\n"
         "</body>\n</html>\n"
     )
 
@@ -324,8 +362,31 @@ VERIFY_OPTIMIZATION_HTML = _document(
 #: `resources/read` handler name -> HTML, matching `UI_RESOURCE_URIS` above by
 #: construction (asserted in tests/test_mcp_apps_views.py rather than derived
 #: automatically, so a mismatch is a loud test failure rather than a KeyError
-#: at request time).
+#: at request time). Every value here is one of the two production calls to
+#: `_document()` above, with `debug_hook` unset — this dict is what
+#: `server.py` actually serves, so it never carries `_SAMPLE_HOOK_JS`.
 VIEWS_BY_URI: dict[str, str] = {
     UI_RESOURCE_URIS["verify_translation"]: VERIFY_TRANSLATION_HTML,
     UI_RESOURCE_URIS["verify_optimization"]: VERIFY_OPTIMIZATION_HTML,
 }
+
+#: tool name -> (title, body, script), the same three arguments the two
+#: production `_document()` calls above already pass — kept here (rather
+#: than re-deriving them from `VIEWS_BY_URI`, which holds the ALREADY-BUILT
+#: production HTML with no hook) so `debug_html_with_sample_hook` can build
+#: an independent copy with `debug_hook=_SAMPLE_HOOK_JS` instead.
+_DOCUMENT_PARTS_BY_TOOL: dict[str, tuple[str, str, str]] = {
+    "verify_translation": ("verify_translation", _TRANSLATION_BODY, _TRANSLATION_SCRIPT),
+    "verify_optimization": ("verify_optimization", _OPTIMIZATION_BODY, _OPTIMIZATION_SCRIPT),
+}
+
+
+def debug_html_with_sample_hook(tool_name: str) -> str:
+    """A screenshot-only variant of a view's HTML, wired to render whatever is
+    assigned to `window.__CODECALC_SAMPLE__` before the real handshake would
+    otherwise run. NOT served by `server.py`, NOT in `VIEWS_BY_URI` — for
+    local, offline rendering (see docs/design/2026-09-08-mcp-apps-
+    verification-views.md's "Manual verification") only.
+    """
+    title, body, script = _DOCUMENT_PARTS_BY_TOOL[tool_name]
+    return _document(title, body, script, debug_hook=_SAMPLE_HOOK_JS)
