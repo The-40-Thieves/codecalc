@@ -33,6 +33,25 @@ behind it.
 
 ## [Unreleased]
 
+### Added
+
+- `llms.txt` at the repo root (the [llmstxt.org](https://llmstxt.org/)
+  convention) indexing README, QUICKSTART, the result contract docs and
+  schemas, SECURITY.md, AUDIT.md, CONTRIBUTING.md, and the packaged skill, so
+  an LLM client can find codecalc's own docs without crawling the repo.
+  `scripts/build_llms_full.py` builds `llms-full.txt` (the full text of
+  everything `llms.txt` links) from that index; it is not committed —
+  instead `.github/workflows/release.yml`'s `release-assets` job builds it
+  fresh and attaches it to each GitHub Release next to the SBOM, and
+  `llms.txt`'s own entry for it points at the stable
+  `releases/latest/download/llms-full.txt` URL. `scripts/check_llms_txt.py`
+  gates the index offline: every linked path must exist, every section must
+  carry at least one verifiable link, and the generator must still run
+  cleanly end to end. README.md gained a "Where to find codecalc" table
+  (PyPI, crates.io, GitHub Releases, the MCP registry, Smithery, Glama,
+  MCPB) and `docs/distribution.md` records the submission steps for the two
+  directories that do not list codecalc yet (PulseMCP, mcp.so).
+
 ### Fixed
 
 - `codecalc doctor --deep` demoted a `tested`-tier toolchain to `unhealthy`
