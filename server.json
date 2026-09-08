@@ -4,8 +4,8 @@
   "title": "codecalc",
   "description": "Code & logic calculator for AI agents: 31 languages, symbolic math, SMT/logic solving, Big-O.",
   "repository": { "url": "https://github.com/The-40-Thieves/codecalc", "source": "github" },
-  "version": "0.9.0",
+  "version": "0.10.0",
   "packages": [
-    { "registryType": "pypi", "registryBaseUrl": "https://pypi.org", "identifier": "codecalc", "version": "0.9.0", "runtimeHint": "uvx", "transport": { "type": "stdio" } }
+    { "registryType": "pypi", "registryBaseUrl": "https://pypi.org", "identifier": "codecalc", "version": "0.10.0", "runtimeHint": "uvx", "transport": { "type": "stdio" } }
   ]
 }
