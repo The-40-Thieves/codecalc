@@ -32,7 +32,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from _helpers import expected_tool_count  # noqa: E402
+from _helpers import expected_tool_count
 
 FAILS: list[str] = []
 
