@@ -52,6 +52,20 @@ behind it.
   currently guaranteed to be). See
   `docs/design/2026-09-08-mcp-apps-verification-views.md` for the spec
   research this was built from.
+- `serve-http --oauth-issuer` (or `CODECALC_OAUTH_ISSUER`): optional, off by
+  default, JWT bearer-token validation as an alternative to the static
+  `CODECALC_HTTP_TOKEN`. Given an issuer, tokens are verified as JWTs
+  (RS256/ES256) against that issuer's JWKS — discovered once from
+  `<issuer>/.well-known/openid-configuration`, or pinned with
+  `--oauth-jwks-url` — checking issuer, audience (`--oauth-audience`,
+  defaulting to this server's own resource URL), expiry, not-before, and
+  optionally required scopes (`--oauth-scopes`). The server also publishes
+  RFC 9728 Protected Resource Metadata at
+  `/.well-known/oauth-protected-resource/mcp` and returns
+  `WWW-Authenticate: Bearer resource_metadata="..."` on an unauthenticated or
+  invalid request, per the MCP authorization spec. The static-token path is
+  unchanged when no issuer is configured; if both end up set, the issuer wins
+  and the static token is rejected, with a startup warning naming both.
 - `llms.txt` at the repo root (the [llmstxt.org](https://llmstxt.org/)
   convention) indexing README, QUICKSTART, the result contract docs and
   schemas, SECURITY.md, AUDIT.md, CONTRIBUTING.md, and the packaged skill, so

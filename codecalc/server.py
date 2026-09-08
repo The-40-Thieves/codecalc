@@ -92,41 +92,128 @@ HTTP_TOKEN_ENV = "CODECALC_HTTP_TOKEN"  # noqa: S105 -- the env var's NAME, not 
 #: binding a real interface knows the real URL.
 HTTP_URL_ENV = "CODECALC_HTTP_URL"
 
+#: Off by default. Set, `serve-http` validates bearer tokens as JWTs against
+#: this OAuth/OIDC issuer instead of the static `CODECALC_HTTP_TOKEN` above —
+#: see `_http_auth`'s precedence rule when BOTH are set. This is the resource
+#: server (RS) role only: codecalc never runs its own `/authorize`/`/token`
+#: endpoints, so there is no dynamic client registration surface to secure.
+OAUTH_ISSUER_ENV = "CODECALC_OAUTH_ISSUER"
 
-def _http_auth() -> dict:
+#: Expected `aud` claim, and the RFC 8707 "resource" this server advertises at
+#: its own `/.well-known/oauth-protected-resource`. Defaults to this server's
+#: own resource URL (`CODECALC_HTTP_URL` + `/mcp`) — the common case where the
+#: token was minted specifically for this server, not shared with others.
+OAUTH_AUDIENCE_ENV = "CODECALC_OAUTH_AUDIENCE"
+
+#: Override the JWKS endpoint. Unset, it is discovered once at startup from
+#: the issuer's `/.well-known/openid-configuration` (`codecalc/auth/`).
+OAUTH_JWKS_URL_ENV = "CODECALC_OAUTH_JWKS_URL"
+
+#: Space-separated scopes a token must carry. Unset, any successfully
+#: verified token is accepted regardless of scope.
+OAUTH_SCOPES_ENV = "CODECALC_OAUTH_SCOPES"
+
+
+def _http_auth(*, oauth_issuer: str | None = None, oauth_audience: str | None = None,
+                oauth_jwks_url: str | None = None, oauth_scopes: str | None = None) -> dict:
     """Constructor kwargs wiring bearer auth into the server, or {}.
 
-    Computed at import because `token_verifier`/`auth` are constructor-only in
-    the SDK (both must be supplied together), and the module-level server below
-    is the one every transport serves. The token comparison is constant-time:
-    a timing oracle on an auth check is the classic way a static token leaks.
+    Every `oauth_*` keyword left `None` falls back to its environment
+    variable. That default is what lets the module-level `mcp = MCPServer(...,
+    **_http_auth())` call below work at all: `token_verifier`/`auth` are
+    constructor-only in the SDK, so they must be known by IMPORT time — before
+    `main()` has parsed a single argv flag. `serve-http`'s CLI flags are the
+    one caller that passes these explicitly, computed AFTER argv parsing, to
+    recompute this and reassign `mcp.settings.auth` / `mcp._token_verifier`
+    before serving (see `main()` below) — `Settings` is a plain pydantic
+    model, mutable like any other, and the SDK only reads these two fields
+    lazily, inside `streamable_http_app()`, which does not run until `mcp.run`
+    is called.
 
-    The SDK's `BearerAuthBackend` does the header parsing and 401s; this
-    verifier is the part that is OURS — it decides what counts as valid.
+    Precedence when BOTH `CODECALC_HTTP_TOKEN` and an issuer are configured:
+    **the issuer wins**. Only a JWT that verifies against it is accepted; the
+    static token is not treated as a second valid credential — presenting it
+    fails JWT decoding like any other garbage bearer value — and a warning is
+    printed to stderr so a leftover token in the environment does not read as
+    "also still active". Rationale: an operator who added `--oauth-issuer`
+    almost certainly means to move OFF the static token, and silently
+    accepting either would leave the weaker credential live with no signal
+    that it still works.
+
+    The token comparison on the static path is constant-time: a timing oracle
+    on an auth check is the classic way a static token leaks. The SDK's
+    `BearerAuthBackend` does the header parsing and 401s either way; the
+    verifier built here is the part that is OURS — it decides what counts as
+    valid.
     """
     import hmac
+    import sys
 
-    token = os.environ.get(HTTP_TOKEN_ENV, "")
-    if not token:
-        return {}
-
-    from mcp.server.auth.provider import AccessToken, TokenVerifier
     from mcp.server.auth.settings import AuthSettings
     from pydantic import AnyHttpUrl
 
+    static_token = os.environ.get(HTTP_TOKEN_ENV, "")
+    base = os.environ.get(HTTP_URL_ENV, "").strip() or "http://127.0.0.1:8000"
+    resource_url = base.rstrip("/") + "/mcp"
+
+    if oauth_issuer is None:
+        oauth_issuer = os.environ.get(OAUTH_ISSUER_ENV, "").strip()
+
+    if oauth_issuer:
+        oauth_issuer = oauth_issuer.rstrip("/")
+        if oauth_audience is None:
+            oauth_audience = os.environ.get(OAUTH_AUDIENCE_ENV, "").strip()
+        oauth_audience = oauth_audience or resource_url
+        if oauth_jwks_url is None:
+            oauth_jwks_url = os.environ.get(OAUTH_JWKS_URL_ENV, "").strip()
+        if oauth_scopes is None:
+            oauth_scopes = os.environ.get(OAUTH_SCOPES_ENV, "").strip()
+        required_scopes = oauth_scopes.split() if oauth_scopes else None
+
+        if static_token:
+            print(
+                f"codecalc serve-http: both {OAUTH_ISSUER_ENV} and {HTTP_TOKEN_ENV} "
+                "are set. The issuer wins — only a JWT that verifies against it is "
+                f"accepted, and the static {HTTP_TOKEN_ENV} value is REJECTED like "
+                "any other invalid bearer token. Unset one to silence this warning.",
+                file=sys.stderr,
+            )
+
+        # Lazy, and from codecalc/auth/ rather than a top-level import: this
+        # is the ONE outbound HTTP call in the whole CLI-facing path (JWKS
+        # discovery), gated behind explicit `--oauth-issuer` configuration —
+        # see codecalc/auth/__init__.py for why it cannot live at top level.
+        from .auth.oauth_verifier import JWTTokenVerifier, discover_jwks_uri
+
+        jwks_url = oauth_jwks_url or discover_jwks_uri(oauth_issuer)
+        return {
+            "token_verifier": JWTTokenVerifier(
+                issuer=oauth_issuer, audience=oauth_audience, jwks_url=jwks_url,
+            ),
+            "auth": AuthSettings(
+                issuer_url=AnyHttpUrl(oauth_issuer),
+                resource_server_url=AnyHttpUrl(oauth_audience),
+                required_scopes=required_scopes,
+            ),
+        }
+
+    if not static_token:
+        return {}
+
+    from mcp.server.auth.provider import AccessToken, TokenVerifier
+
     class _StaticTokenVerifier(TokenVerifier):
         async def verify_token(self, presented: str) -> AccessToken | None:
-            if not hmac.compare_digest(presented.encode(), token.encode()):
+            if not hmac.compare_digest(presented.encode(), static_token.encode()):
                 return None
             return AccessToken(token=presented, client_id="codecalc-operator",
                                scopes=["codecalc"])
 
-    base = os.environ.get(HTTP_URL_ENV, "").strip() or "http://127.0.0.1:8000"
     return {
         "token_verifier": _StaticTokenVerifier(),
         "auth": AuthSettings(
             issuer_url=AnyHttpUrl(base),
-            resource_server_url=AnyHttpUrl(base.rstrip("/") + "/mcp"),
+            resource_server_url=AnyHttpUrl(resource_url),
             required_scopes=["codecalc"],
         ),
     }
@@ -3013,7 +3100,12 @@ def main() -> None:
             "  cleanup [--dry-run|--write] [--include-unmarked]\n"
             "                                      reclaim disk from abandoned session workspaces\n"
             "  serve-strict [ARGS]                authenticated HTTP execution service\n"
-            "  serve-http [--host H] [--port P]   MCP over streamable HTTP\n"
+            "  serve-http [--host H] [--port P] [--oauth-issuer URL]\n"
+            "             [--oauth-audience URL] [--oauth-jwks-url URL]\n"
+            "             [--oauth-scopes \"S1 S2\"]\n"
+            "                                      MCP over streamable HTTP; --oauth-issuer\n"
+            "                                      validates bearer tokens as JWTs instead of\n"
+            "                                      the static CODECALC_HTTP_TOKEN\n"
             "  -h, --help                         show this message and exit\n"
             "  -V, --version                      show the codecalc version and exit\n"
             "\n"
@@ -3072,6 +3164,26 @@ def main() -> None:
         port_text = (rest[rest.index("--port") + 1]
                      if "--port" in rest and rest.index("--port") + 1 < len(rest)
                      else "8000")
+        # `--oauth-*` flags, same "argv is inspected rather than parsed" style
+        # as --host/--port above. None means "the flag was not given" — the
+        # signal `_http_auth()` needs to fall back to its own env var — not
+        # "the flag was given as an empty string", which --host/--port do not
+        # have to distinguish because they always have a hardcoded default.
+        def _flag(name: str) -> str | None:
+            return rest[rest.index(name) + 1] if name in rest and rest.index(name) + 1 < len(rest) else None
+
+        oauth_issuer_flag = _flag("--oauth-issuer")
+        oauth_audience_flag = _flag("--oauth-audience")
+        oauth_jwks_url_flag = _flag("--oauth-jwks-url")
+        oauth_scopes_flag = _flag("--oauth-scopes")
+        # What `_http_auth()` will actually see for the issuer, flag-or-env —
+        # needed below by the loopback/auth refusal check, which must treat
+        # "--oauth-issuer given on the command line, no env vars at all" as
+        # authenticated too, not just the two env vars it used to know about.
+        oauth_issuer_effective = (
+            oauth_issuer_flag if oauth_issuer_flag is not None
+            else os.environ.get(OAUTH_ISSUER_ENV, "").strip()
+        )
         # FAIL CLOSED on a routable bind with no auth. The whole
         # 127/8 block and ::1 are loopback — `ipaddress` decides, not a string
         # compare, because 127.0.0.2 is exactly as loopback as 127.0.0.1 and a
@@ -3086,13 +3198,14 @@ def main() -> None:
         except ValueError:
             loopback = host in ("localhost", "ip6-localhost")
             is_ipv6 = False
-        if not loopback and not os.environ.get(HTTP_TOKEN_ENV):
+        if not loopback and not os.environ.get(HTTP_TOKEN_ENV) and not oauth_issuer_effective:
             print(
                 f"codecalc serve-http: refusing to bind {host}: it is not a "
-                f"loopback address and {HTTP_TOKEN_ENV} is not set. An "
-                "unauthenticated bind on a routable interface would expose "
-                "every execution tool to that network. Set the variable to a "
-                "strong secret and restart, or bind 127.0.0.1.",
+                f"loopback address and neither {HTTP_TOKEN_ENV} nor "
+                f"{OAUTH_ISSUER_ENV}/--oauth-issuer is set. An unauthenticated "
+                "bind on a routable interface would expose every execution "
+                "tool to that network. Configure one and restart, or bind "
+                "127.0.0.1.",
                 file=sys.stderr,
             )
             raise SystemExit(2)
@@ -3119,6 +3232,24 @@ def main() -> None:
             allowed_hosts=[f"{host_for_header}:*"],
             allowed_origins=[f"http://{host_for_header}:*"],
         )
+        # Only recompute auth when a --oauth-* flag was actually given. The
+        # module-level `mcp = MCPServer(..., **_http_auth())` above already
+        # built the env-only answer at import time (before this function even
+        # started parsing argv) — recomputing unconditionally would re-run
+        # OIDC discovery's network call a second time and double-print the
+        # both-configured warning whenever oauth is configured by env alone,
+        # for a result identical to what import time already computed.
+        # `Settings` is a plain pydantic model — mutable — and the SDK does
+        # not read `.settings.auth`/`._token_verifier` until `streamable_http_app()`
+        # builds routes, which `mcp.run` below has not called yet.
+        if any(f is not None for f in
+               (oauth_issuer_flag, oauth_audience_flag, oauth_jwks_url_flag, oauth_scopes_flag)):
+            auth_kwargs = _http_auth(
+                oauth_issuer=oauth_issuer_flag, oauth_audience=oauth_audience_flag,
+                oauth_jwks_url=oauth_jwks_url_flag, oauth_scopes=oauth_scopes_flag,
+            )
+            mcp.settings.auth = auth_kwargs.get("auth")
+            mcp._token_verifier = auth_kwargs.get("token_verifier")
         mcp.run(
             transport="streamable-http",
             host=host,
