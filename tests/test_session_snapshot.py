@@ -17,7 +17,7 @@ reimplements:
     True)` apply the SAME check `stop()` already does, and this file
     exercises it directly rather than re-deriving a new mechanism.
   - `tests/test_session_jail.py`'s symlink/TOCTOU coverage of `_jail`,
-    `_write_nofollow`, `_read_nofollow`: `_safe_extract_tar` writes every
+    `_write_nofollow`, `_read_nofollow`: `_extract_planned_tar` writes every
     extracted member with the identical `O_EXCL | O_NOFOLLOW` flags those
     already use.
 
@@ -34,7 +34,7 @@ does.
 Windows: paths are handled via `pathlib`/`os.path`, never a hardcoded `/` or
 POSIX assumption in the assertions here (tar member names inside the archive
 are always forward-slash, by the tar format itself — see
-`_safe_extract_tar`'s own rejection of a literal backslash in a member
+`_plan_tar_extraction`'s own rejection of a literal backslash in a member
 name). Only the genuine-hardlink exclusion case is skipped on a platform
 where creating one fails.
 """
@@ -42,10 +42,12 @@ where creating one fails.
 from __future__ import annotations
 
 import io
+import json
 import os
 import pathlib
 import sys
 import tarfile
+import time
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
@@ -492,6 +494,278 @@ def _test_replace_same_session():
 
 
 _test_replace_same_session()
+
+
+# ── 11. the sidecar is ADVISORY: a lying raw_bytes cannot buy past quota ────
+def _test_sidecar_raw_bytes_is_not_trusted():
+    """Adversarial-review finding (CRITICAL): `snapshot_restore` used to take
+    `raw_bytes` from the `.json` sidecar on faith for the quota decision — a
+    caller (or anything with the same filesystem access executed code has)
+    could place a real, large archive beside a sidecar lying about its size
+    and sail through a tight quota. The real total must come from the
+    archive's own structure (`_plan_tar_extraction`), never the sidecar.
+    """
+    sid = _new_session("bash")
+    try:
+        sessions.write_file(sid, "small.txt", "hi")
+        save = _with_env({}, lambda: sessions.snapshot_save(sid))
+        tar_path, meta_path = sessions._snapshot_paths(sid, save["snapshot_id"])
+        _write_hostile_archive(
+            tar_path, lambda tf: _add_member(tf, "big.bin", data=b"0" * (2 * 1024 * 1024)))
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        meta["raw_bytes"] = 1  # the lie: the real archive content is ~2 MiB
+        meta_path.write_text(json.dumps(meta), encoding="utf-8")
+        # The math that makes this a real proof, not just a refusal: the
+        # session's own pre-existing usage is a couple of bytes ("hi"), and
+        # the configured quota is ~1 MiB (1,048,576 bytes). Checked against
+        # the sidecar's LIE (`raw_bytes: 1`), `2 + 1 = 3` is nowhere near
+        # the quota and nothing would be refused. A refusal firing at all
+        # is therefore only possible because the REAL ~2 MiB archive
+        # content — re-derived from the archive's own structure, never the
+        # sidecar — is what actually got checked.
+        r = _with_env({sessions.SESSION_DISK_QUOTA_MB_ENV: "1"},  # ~1 MiB — under the real 2 MiB
+                      lambda: sessions.snapshot_restore(sid, save["snapshot_id"]))
+        check("a lying sidecar cannot buy a restore past the REAL quota "
+              "(1-byte lie would never trip a ~1 MiB quota; the real ~2 MiB content does)",
+              r.get("ok") is False and r.get("code") == errors.RESOURCE_EXHAUSTED,
+              f"-> {r}")
+        check("...and the refusal's own quota_bytes names the ~1 MiB ceiling actually configured",
+              r.get("quota_bytes") == 1024 * 1024, f"-> quota_bytes={r.get('quota_bytes')}")
+    finally:
+        sessions.stop(sid)
+
+
+_test_sidecar_raw_bytes_is_not_trusted()
+
+
+# ── 12. snapshot_save is refused by the SAME quota checks write_file gets ───
+def _test_save_routes_through_disk_quota_and_host_floor():
+    """Adversarial-review finding (HIGH): `snapshot_save` never called
+    `_disk_quota_refusal` at all — the per-snapshot byte cap
+    (`CODECALC_MAX_SNAPSHOT_BYTES`) was the only ceiling, so a save could
+    still run the host's free space to zero, or blow straight past the
+    per-session/global disk quotas every other write in this module
+    respects.
+    """
+    sid = _new_session("bash")
+    try:
+        sessions.write_file(sid, "big.bin", "x" * 5000)
+        r = _with_env({sessions.SESSION_DISK_QUOTA_MB_ENV: "0.001"},  # ~1048 bytes
+                      lambda: sessions.snapshot_save(sid))
+        check("save is refused by the per-session disk quota, same as write_file",
+              r.get("ok") is False and r.get("code") == errors.RESOURCE_EXHAUSTED
+              and "quota" in (r.get("error") or ""),
+              f"-> {r}")
+        r2 = _with_env({sessions.MIN_HOST_FREE_MB_ENV: "999999999"},
+                       lambda: sessions.snapshot_save(sid))
+        check("save is refused by the host-free-space floor",
+              r2.get("ok") is False and r2.get("code") == errors.RESOURCE_EXHAUSTED
+              and "free disk space" in (r2.get("error") or ""),
+              f"-> {r2}")
+        # positive control: comfortably under both, still succeeds
+        r3 = _with_env({}, lambda: sessions.snapshot_save(sid))
+        check("...while a save comfortably under both still succeeds (control)",
+              r3.get("ok") is True, f"-> {r3}")
+    finally:
+        sessions.stop(sid)
+
+
+_test_save_routes_through_disk_quota_and_host_floor()
+
+
+# ── 13. collision shapes leave the workspace/no orphan behind, both paths ──
+def _test_collisions_leave_nothing_behind():
+    """Adversarial-review finding (HIGH): cross-member collisions (a file
+    `a` followed by `a/b`; a dir `a` followed by a file `a`) were not
+    caught in a planning pass — extraction failed mid-way, and on
+    `replace=True` the original workspace had ALREADY been wiped first,
+    leaving a half-populated workspace and no worker. Both collision
+    shapes must now be refused before a single byte is written, for BOTH
+    `replace=True` (workspace intact) and a new session (no orphan
+    directory left under the sessions root).
+    """
+    cases = [
+        ("file then dir", lambda tf: (_add_member(tf, "a", b"x"),
+                                      _add_member(tf, "a/b", b"y"))),
+        ("dir then file", lambda tf: (_add_member(tf, "a", type=tarfile.DIRTYPE),
+                                      _add_member(tf, "a", b"y"))),
+    ]
+    for label, builder in cases:
+        # replace=True: the ORIGINAL workspace must survive, untouched.
+        sid = _new_session("bash")
+        try:
+            sessions.write_file(sid, "original.txt", "must survive")
+            save = _with_env({}, lambda sid=sid: sessions.snapshot_save(sid))
+            tar_path, _m = sessions._snapshot_paths(sid, save["snapshot_id"])
+            _write_hostile_archive(tar_path, builder)
+            r = _with_env({}, lambda sid=sid, save=save: sessions.snapshot_restore(
+                sid, save["snapshot_id"], replace=True))
+            check(f"collision ({label}, replace=True) is refused",
+                  r.get("ok") is False and r.get("code") == errors.PERMISSION_DENIED,
+                  f"-> {r}")
+            original = sessions._session_dir(sid) / "original.txt"
+            check(f"...and the ORIGINAL workspace survives untouched ({label})",
+                  original.is_file() and original.read_text() == "must survive",
+                  f"-> exists={original.exists()}")
+            check(f"...still has a live worker entry, nothing torn down ({label})",
+                  sessions.list_sessions().get("ok") is True)
+        finally:
+            sessions.stop(sid)
+
+        # new session: no orphan directory left under the sessions root.
+        sid2 = _new_session("bash")
+        try:
+            sessions.write_file(sid2, "a.txt", "hi")
+            save2 = _with_env({}, lambda sid2=sid2: sessions.snapshot_save(sid2))
+            tar_path2, _m2 = sessions._snapshot_paths(sid2, save2["snapshot_id"])
+            _write_hostile_archive(tar_path2, builder)
+            before = _sessions_on_disk()
+            r2 = _with_env({}, lambda sid2=sid2, save2=save2: sessions.snapshot_restore(
+                sid2, save2["snapshot_id"]))
+            check(f"collision ({label}, new session) is refused",
+                  r2.get("ok") is False and r2.get("code") == errors.PERMISSION_DENIED,
+                  f"-> {r2}")
+            after = _sessions_on_disk()
+            check(f"...and no orphan session/temp directory was left behind ({label})",
+                  after == before, f"-> before={before} after={after}")
+        finally:
+            sessions.stop(sid2)
+
+
+_test_collisions_leave_nothing_behind()
+
+
+# ── 14. a gzip bomb is refused fast — bounded decompression, not just a
+#        post-hoc size check ────────────────────────────────────────────────
+class _ZeroStream:
+    """A readable that emits `n` zero bytes without ever materializing them
+    all in memory at once — the fixture for a member that HONESTLY declares
+    a multi-GiB size but compresses (being all zeros) to a few KiB, the
+    exact shape adversarial review reproduced costing several seconds of
+    CPU under `tf.getmembers()`."""
+
+    def __init__(self, n: int) -> None:
+        self.n = n
+
+    def read(self, size: int = -1) -> bytes:
+        if self.n <= 0:
+            return b""
+        take = self.n if size < 0 else min(size, self.n)
+        self.n -= take
+        return bytes(take)
+
+
+def _test_gzip_bomb_refused_quickly():
+    sid = _new_session("bash")
+    try:
+        sessions.write_file(sid, "small.txt", "hi")
+        save = _with_env({}, lambda: sessions.snapshot_save(sid))
+        tar_path, _m = sessions._snapshot_paths(sid, save["snapshot_id"])
+        bomb_size = 2 * 1024 * 1024 * 1024  # 2 GiB declared, ~compresses to nothing
+        tmp = tar_path.with_name("bomb.tmp")
+        with tarfile.open(tmp, "w:gz") as tf:
+            info = tarfile.TarInfo(name="bomb.bin")
+            info.size = bomb_size
+            tf.addfile(info, _ZeroStream(bomb_size))
+        tmp.replace(tar_path)
+        compressed_size = tar_path.stat().st_size
+        started = time.monotonic()
+        r = _with_env({}, lambda: sessions.snapshot_restore(sid, save["snapshot_id"]))
+        elapsed = time.monotonic() - started
+        check("a 2 GiB (declared) / tiny (compressed) bomb is refused, not extracted",
+              r.get("ok") is False and r.get("code") == errors.RESOURCE_EXHAUSTED,
+              f"-> {r} (archive was {compressed_size} bytes on disk)")
+        # Generous bound: real decompression of 2 GiB would cost seconds
+        # (adversarial review measured ~5s under the OLD getmembers()-based
+        # code); refusing off the declared header size costs a fraction of
+        # a second regardless of host load. 10s leaves ample headroom for
+        # a slow CI runner while still failing hard if this regresses to
+        # "decompress first, check later".
+        check("...refused in well under the time real decompression would cost",
+              elapsed < 10.0, f"-> elapsed={elapsed:.3f}s")
+    finally:
+        sessions.stop(sid)
+
+
+_test_gzip_bomb_refused_quickly()
+
+
+def _test_cumulative_budget_catches_many_small_members():
+    """The per-member cap (`CODECALC_MAX_ARTIFACT_BYTES`) catches ONE
+    oversized member; the running-total check against
+    `_extraction_byte_budget()` is what catches many members that are each
+    individually fine but sum to a bomb. Exercised separately so a
+    regression that removed only the running-total check (while leaving
+    the per-member one intact) would still be caught."""
+    sid = _new_session("bash")
+    try:
+        sessions.write_file(sid, "small.txt", "hi")
+        save = _with_env({}, lambda: sessions.snapshot_save(sid))
+        tar_path, _m = sessions._snapshot_paths(sid, save["snapshot_id"])
+        per_member = 4 * 1024 * 1024  # 4 MiB each — comfortably under a per-member cap of 5 MiB
+        tmp = tar_path.with_name("many.tmp")
+        with tarfile.open(tmp, "w:gz") as tf:
+            for i in range(5):  # 5 * 4 MiB = 20 MiB, over a 10 MiB budget
+                info = tarfile.TarInfo(name=f"f{i}.bin")
+                info.size = per_member
+                tf.addfile(info, _ZeroStream(per_member))
+        tmp.replace(tar_path)
+        started = time.monotonic()
+        r = _with_env(
+            {sessions.MAX_ARTIFACT_BYTES_ENV: str(5 * 1024 * 1024),
+             sessions.MAX_SNAPSHOT_BYTES_ENV: str(5 * 1024 * 1024)},  # budget ~= 10 MiB
+            lambda: sessions.snapshot_restore(sid, save["snapshot_id"]))
+        elapsed = time.monotonic() - started
+        check("many individually-small members whose SUM is a bomb are refused",
+              r.get("ok") is False and r.get("code") == errors.RESOURCE_EXHAUSTED,
+              f"-> {r}")
+        check("...by the CUMULATIVE budget, not a single member's own size",
+              "budget" in (r.get("error") or ""), f"-> {r.get('error')}")
+        check("...and still refused quickly (aborted partway, not after all 5)",
+              elapsed < 10.0, f"-> elapsed={elapsed:.3f}s")
+    finally:
+        sessions.stop(sid)
+
+
+_test_cumulative_budget_catches_many_small_members()
+
+
+# ── 15. an exact duplicate member path is refused, not silently overwritten ─
+def _test_duplicate_member_path_refused():
+    sid = _new_session("bash")
+    try:
+        sessions.write_file(sid, "a.txt", "hi")
+        save = _with_env({}, lambda: sessions.snapshot_save(sid))
+        tar_path, _m = sessions._snapshot_paths(sid, save["snapshot_id"])
+        _write_hostile_archive(tar_path, lambda tf: (
+            _add_member(tf, "dup.txt", b"first"),
+            _add_member(tf, "dup.txt", b"second"),
+        ))
+        before = _sessions_on_disk()
+        r = _with_env({}, lambda: sessions.snapshot_restore(sid, save["snapshot_id"]))
+        check("a duplicate member path is refused",
+              r.get("ok") is False and r.get("code") == errors.PERMISSION_DENIED,
+              f"-> {r}")
+        check("...and no orphan session directory was left behind",
+              _sessions_on_disk() == before, f"-> {_sessions_on_disk() - before}")
+
+        # positive control: a duplicated DIRECTORY entry is harmless and allowed.
+        tar_path2, _m2 = sessions._snapshot_paths(sid, save["snapshot_id"])
+        _write_hostile_archive(tar_path2, lambda tf: (
+            _add_member(tf, "d", type=tarfile.DIRTYPE),
+            _add_member(tf, "d", type=tarfile.DIRTYPE),
+            _add_member(tf, "d/f.txt", b"ok"),
+        ))
+        r2 = _with_env({}, lambda: sessions.snapshot_restore(sid, save["snapshot_id"]))
+        check("CONTROL: a duplicated DIRECTORY entry is allowed",
+              r2.get("ok") is True and r2.get("restored_files") == 1, f"-> {r2}")
+        if r2.get("ok"):
+            sessions.stop(r2["session_id"])
+    finally:
+        sessions.stop(sid)
+
+
+_test_duplicate_member_path_refused()
 
 
 print(f"\n=== {len(FAILS)} FAILURE(S), {len(SKIPS)} skipped ===" if FAILS else
