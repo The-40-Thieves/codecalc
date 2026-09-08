@@ -64,6 +64,34 @@ behind it.
   spinning up the container. Validated against the registry's own
   `task validate`/`task build --tools` tooling — see `docs/distribution.md`
   for the exact submission steps; this commit does not open that PR.
+- **`bits(mode=...)` and `symbolic(op=...)`**, replacing the two lexically-
+  overlapping clusters `docs/design/2026-08-10-tool-facade.md`'s "Scope
+  amendment on tool count" flagged for a same-signature-union merge:
+  `bits` folds `bit_analysis`/`bitop`/`int_widths`/`base_repr` behind
+  `mode="analysis"/"op"/"widths"/"repr"`, and `symbolic` folds
+  `solve_expression`/`solve_linear`/`simplify_expression`/`limit_expression`
+  behind `op="solve"/"solve_linear"/"simplify"/"limit"`. Each mode/op takes
+  the union of its four predecessors' parameters (documented per mode as
+  "used by mode X"), returns EXACTLY that predecessor's own result shape
+  plus one additive key (`mode` on `bits`, `op` on `symbolic`), and rejects
+  a mismatched parameter combination with a closed-enum `validation` error
+  naming the missing or extra field — not the generic
+  `call_capability(name, args)` facade that design document's §2 rejected:
+  nothing here erases a per-operation schema, annotation, or approval
+  boundary. See [Deprecated](#deprecated) below for the eight retired
+  names, still registered as thin aliases for this release.
+
+### Deprecated
+
+- **`bit_analysis`, `bitop`, `int_widths`, `base_repr`, `solve_expression`,
+  `solve_linear`, `simplify_expression`, `limit_expression`** — replaced by
+  `bits(mode=...)`/`symbolic(op=...)` above. Each alias is now a one-line
+  delegation to its replacement with the mode/op preset; its own
+  description is prefixed "Deprecated alias for `bits(mode=...)`/
+  `symbolic(op=...)`; removed in the next minor release." Every alias keeps
+  its own registered name, schema and annotations through this release —
+  calling it by the old name is byte-identical to calling the replacement
+  directly, tool timeouts included. Removed in **0.12.0**.
 
 ### Fixed
 
