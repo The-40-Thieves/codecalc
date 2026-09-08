@@ -219,6 +219,60 @@ behind it.
 >>>>>>> c930ab8 (docs: update tool/test counts for trace_execution, add CHANGELOG entry)
 >>>>>>> 9db901b (docs: update tool/test counts for trace_execution, add CHANGELOG entry)
 
+  **Hardened after cross-vendor review flagged the first cut DO NOT MERGE**,
+  before this tool ever shipped:
+  * **Trace-sink forgery / server-side amplification.** The traced program
+    can derive its own trace file's path from `__file__` and write to it
+    directly — the review reproduced a forged trailing `return` event kept
+    last via `os._exit(0)` to skip the harness's own cleanup. Mitigated,
+    not eliminated (in-process code sharing the traced program's own uid is
+    not a boundary this package can construct — see `codecalc/tracing.py`'s
+    "TRUST BOUNDARY" section): the parser now reads AT MOST
+    `_MAX_TRACE_BYTES + 4 KiB` off disk (`os.open`/`os.read` in a bounded
+    loop, never `Path.read_text()` of the whole file — a program appending
+    megabytes cannot force this UNSANDBOXED parser into unbounded work;
+    `truncated_reason: "trace_file_exceeded"` when the file on disk is
+    bigger than that), every event is schema-validated (exact key set,
+    correct types, `step` continuing the harness's own monotonic sequence —
+    anything else is discarded into a new `discarded_events` count, never
+    raised), and the harness now writes a final `{"event": "end", "step":
+    N, "emitted": N}` line on every path it returns through normally — a
+    new `events_consistent` result field is `false` whenever that line is
+    missing, its count disagrees with what was actually accepted, or
+    anything follows it, which an `os._exit` bypass cannot fake by
+    definition.
+  * **Threads.** `sys.settrace` is a per-thread hook; a second thread's
+    frames were silently absent from `events` with no disclosure. The
+    harness now checks `threading.active_count()` cheaply per `call` event
+    and once more at exit, adding `"threads: only the main thread is
+    traced"` to the result's own `unenforced` array the first time it
+    observes more than one thread.
+  * **`sys.modules['__main__']` leaked the harness's own module and temp
+    file**, not the user's — `sys.modules['__main__'].__file__` showed this
+    harness's internal path instead of matching `execute_code`. Fixed by
+    installing a FRESH `__main__` module (the user's own `__file__`) before
+    `exec()`-ing their code, restored afterward.
+  * **Fallback-backend OLE `exit_code` race.** The pure-Python fallback's
+    own output-cap enforcement (`executor._run_step`) polls a flag on a
+    20ms timer, racing the traced child's natural exit — confirmed
+    PRE-EXISTING and already nondeterministic for plain `execute_code` on
+    this backend (the identical program's `exit_code` flips between `0`
+    and a negative signal across repeated runs at sizes near the cap).
+    `trace_execution`'s extra per-event file I/O shifts that race's timing
+    enough to make its own `exit_code` on an OLE verdict, fallback backend
+    only, unreliable to compare against `execute_code`'s — `verdict`/
+    `output_truncated` are unaffected and always agree. Not fixed at the
+    root (the race lives in shared executor code every tool depends on);
+    disclosed instead via a new `"exit_code: fallback backend may differ
+    on output-limit kills"` entry in `unenforced`, added only when
+    `backend == "python"` and `verdict == "OLE"` — confirmed the Rust
+    backend has no such race across dozens of trials.
+
+  New result fields (`discarded_events`, `events_consistent`) and the third
+  `truncated_reason` enum member (`trace_file_exceeded`) are declared in the
+  `execution_trace` contract shape alongside the rest of it — still additive,
+  landing before this tool's own first release.
+
 ### Fixed
 
 - `codecalc doctor --deep` demoted a `tested`-tier toolchain to `unhealthy`
