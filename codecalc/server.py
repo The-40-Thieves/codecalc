@@ -30,6 +30,7 @@ from typing import Any
 from mcp.server import CacheHint, MCPServer
 from mcp.server.mcpserver import Context
 from mcp.types import (
+    Completion,
     EmbeddedResource,
     ImageContent,
     InputRequiredResult,
@@ -57,6 +58,7 @@ from . import (
     optimization,
     packages,
     providers,
+    registry,
     run_supervisor,
     runtimes,
     sessions,
@@ -270,6 +272,86 @@ mcp = MCPServer(
     ),
 )
 
+
+# ── Argument completion (completion/complete) ───────────────────────────────
+#
+# The 2026-07-28 wire only lets a completion request name a PROMPT or a
+# RESOURCE TEMPLATE (`mcp_types.CompleteRequestParams.ref:
+# ResourceTemplateReference | PromptReference` — no `ref/tool` variant
+# exists in the spec), and this server has one resource template
+# (`codecalc://session/{session_id}/files/{+path}`) and no prompts. A tool
+# argument therefore has no `ref` of its own to hang a completion off — so
+# this dispatches on `argument.name` alone, the one thing every caller of
+# `mcp.complete()` supplies regardless of which tool or template it is
+# completing for, and ignores `ref`/`context` entirely. tests/
+# test_mcp_protocol.py drives this the same way a real client would: a raw
+# `complete()` call naming the session-file template as `ref` and one of
+# the five argument names below.
+def _completion_languages() -> list[str]:
+    """Every registry key plus every alias, e.g. "py" alongside "python3"."""
+    values = set(registry.LANGUAGES)
+    for aliases in registry.ALIASES.values():
+        values.update(aliases)
+    return sorted(values)
+
+
+def _completion_units() -> list[str]:
+    return units.list_units()["units"]
+
+
+def _completion_providers() -> list[str]:
+    return [d["provider_id"] for d in _provider_registry.descriptors()]  # already sorted
+
+
+def _completion_session_ids() -> list[str]:
+    return sorted(s["session_id"] for s in _session_service.list_sessions()["sessions"])
+
+
+def _completion_run_ids() -> list[str]:
+    if _run_supervisor is None:
+        return []
+    return sorted(_run_supervisor.known_run_ids())
+
+
+#: argument name -> zero-arg callable returning every candidate value
+#: (unsorted callers already sort; unfiltered — the handler below applies
+#: the caller's prefix). One entry per tool-argument NAME this server
+#: completes, not per tool: several tools share an argument name
+#: (`language` alone appears on execute_code, benchmark, session_start...)
+#: and this serves all of them from the same list.
+_COMPLETERS = {
+    "language": _completion_languages,
+    "unit": _completion_units,
+    "provider": _completion_providers,
+    "session_id": _completion_session_ids,
+    "run_id": _completion_run_ids,
+}
+
+#: `mcp_types.Completion.values`'s own documented ceiling: "Must not exceed
+#: 100 items." Enforced here rather than trusted to the SDK, so `total`/
+#: `has_more` stay accurate even if a future list of languages or live
+#: sessions grows past it.
+_COMPLETION_LIMIT = 100
+
+
+@mcp.completion()
+async def _complete_argument(ref, argument, context):
+    """Prefix-complete `language`/`unit`/`provider`/`session_id`/`run_id`.
+
+    Case-sensitive, prefix-only (no fuzzy/substring matching — the SDK's own
+    `Completion.values` contract is a ranked list of exact continuations, not
+    a search result). `total` is the FULL match count before the 100-item
+    cap; `has_more` is only true when the cap actually dropped something, so
+    a caller can tell "100 shown, 100 total" (has_more=False) from "100
+    shown, 140 total" (has_more=True).
+    """
+    getter = _COMPLETERS.get(argument.name)
+    if getter is None:
+        return None
+    prefix = argument.value or ""
+    matches = [v for v in getter() if v.startswith(prefix)]
+    values = matches[:_COMPLETION_LIMIT]
+    return Completion(values=values, total=len(matches), has_more=len(matches) > len(values))
 
 
 def _coded(fn):

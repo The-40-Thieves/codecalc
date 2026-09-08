@@ -64,6 +64,23 @@ behind it.
   spinning up the container. Validated against the registry's own
   `task validate`/`task build --tools` tooling — see `docs/distribution.md`
   for the exact submission steps; this commit does not open that PR.
+- **Argument completion (`completion/complete`) for `language`, `unit`,
+  `provider`, `session_id` and `run_id`.** The 2026-07-28 wire only lets a
+  completion request name a prompt or a resource template
+  (`mcp_types.CompleteRequestParams.ref` has no `ref/tool` variant), and
+  this server has one resource template and no prompts — so the new
+  `@mcp.completion()` handler (`server.py`'s `_complete_argument`) dispatches
+  on `argument.name` alone rather than on `ref`, and serves any of the five
+  names regardless of which tool or template the request nominally targets.
+  `language` completes registry keys plus every alias (`registry.py`);
+  `unit` completes `units.list_units()`; `provider` completes
+  `_provider_registry.descriptors()`'s ids; `session_id` completes live and
+  on-disk sessions (`SessionService.list_sessions()`); `run_id` completes
+  `RunSupervisor.known_run_ids()` (new — the alternative was server.py
+  reaching into `RunSupervisor`'s private `_runs` table directly). Matching
+  is prefix-only and case-sensitive, capped at the SDK's own 100-item
+  ceiling on `Completion.values`, with `total`/`has_more` reporting the full
+  match count and whether the cap actually dropped anything.
 
 ### Fixed
 

@@ -31,6 +31,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from mcp import Client
 from mcp.server.context import ServerRequestContext
+from mcp.types import ResourceTemplateReference
 
 from codecalc import mcp_middleware, server
 from codecalc.mcp_middleware import DEFAULT_TIMEOUT_SECONDS, TOOL_TIMEOUTS, timeout_middleware
@@ -129,6 +130,58 @@ async def main() -> None:
         # breaks nested reads while a flat read keeps working.
         check("template uses reserved expansion {+path}",
               any("{+path}" in u for u in uris), f"-> {uris}")
+
+        # ── completion/complete: no `ref/tool` in the spec, so this server
+        # dispatches on the argument NAME alone (see server.py's own
+        # comment on `_complete_argument`) — any resource-template ref will
+        # do, since the handler never inspects `ref`.
+        tpl_ref = ResourceTemplateReference(uri=uris[0])
+
+        async def complete(name: str, value: str):
+            return await c.complete(tpl_ref, {"name": name, "value": value})
+
+        comp = await complete("language", "py")
+        check("language completion is prefix-filtered",
+              set(comp.completion.values) == {"py", "python", "python3", "python3.12", "python3.14"},
+              f"-> {comp.completion.values}")
+        check("language completion reports total/has_more accurately",
+              comp.completion.total == 5 and comp.completion.has_more is False,
+              f"-> total={comp.completion.total} has_more={comp.completion.has_more}")
+
+        comp = await complete("language", "zzz-no-such-language")
+        check("an unmatched prefix completes to nothing", comp.completion.values == [],
+              f"-> {comp.completion.values}")
+
+        comp = await complete("unit", "kg")
+        check("unit completion finds a known unit", "kg" in comp.completion.values,
+              f"-> {comp.completion.values}")
+
+        comp = await complete("provider", "")
+        check("provider completion includes the local provider",
+              "local" in comp.completion.values, f"-> {comp.completion.values}")
+
+        started = await c.call_tool("session_start", {"language": "python3"})
+        sid = started.structured_content["session_id"]
+        comp = await complete("session_id", sid[:4])
+        check("session_id completion includes a just-started session",
+              sid in comp.completion.values, f"-> {comp.completion.values}")
+        await c.call_tool("session_stop", {"session_id": sid})
+
+        comp = await complete("run_id", "")
+        check("run_id completion returns a list (possibly empty) with no error",
+              isinstance(comp.completion.values, list), f"-> {comp.completion.values}")
+
+        comp = await complete("not_a_completed_argument", "")
+        check("an argument name this server does not complete gets an empty completion",
+              comp.completion.values == [] and comp.completion.total is None,
+              f"-> {comp.completion}")
+
+        # `total` capped display, `has_more` set — asserted directly against
+        # the handler's own limit rather than trying to grow >100 live
+        # sessions/languages through the protocol.
+        from codecalc.server import _COMPLETION_LIMIT
+        check("the completion cap matches the SDK's documented ceiling",
+              _COMPLETION_LIMIT == 100, f"-> {_COMPLETION_LIMIT}")
 
         # ── a real round-trip through a tool ────────────────────────────────
         r = await c.call_tool("calc_exact", {"expr": "0.1+0.2 == 0.3"})
