@@ -676,7 +676,7 @@ check_stamped("a verify_optimization measurement failure", _o_measure_fail)
 # so `_accept_decision` demands BOTH reject (unanimity) — one size's ratio
 # happening to land only borderline-significant under jitter (an
 # `optimization.stats.mann_whitney_u` sample that overlaps by chance at
-# REPEATS=5) fails the whole call, exactly the false-reject shape THE-1007
+# REPEATS=5) fails the whole call, exactly the false-reject shape the 2026-09-08 hosted-runner incident
 # fixed in tests/test_translation_verify.py's calibrated live test (see its
 # comment for the full incident). Four sizes lands this call in the
 # Bonferroni-corrected MAJORITY regime instead (3-of-4 at alpha/4), the
