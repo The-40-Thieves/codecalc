@@ -78,7 +78,7 @@ prompts = tse.load_prompts()
 # 196-prompt set (still >= 3/tool) pass while RAISING measured accuracy.
 # Growing the corpus is fine (a floor, not an exact match); shrinking it
 # without a deliberate re-baseline (which also updates this number) is not.
-CHECKED_IN_PROMPT_COUNT_FLOOR = 196
+CHECKED_IN_PROMPT_COUNT_FLOOR = 205
 check(f"tool_select_prompts.jsonl has >= {CHECKED_IN_PROMPT_COUNT_FLOOR} prompts "
       f"(pinned floor, not just a per-tool minimum)",
       len(prompts) >= CHECKED_IN_PROMPT_COUNT_FLOOR, f"-> {len(prompts)}")

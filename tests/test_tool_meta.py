@@ -45,6 +45,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from _helpers import expected_tool_count
 from _mcp_client import in_process
 
 from codecalc import server as codecalc_server
@@ -75,7 +76,9 @@ REQUIRES_USER_INTERACTION = {"install_package", "update_runtimes"}
 ALWAYS_LOAD = {"calc_exact", "execute_code", "verify_translation", "verify_optimization",
                "list_languages"}
 MAX_RESULT_SIZE_CHARS_TOOLS = {"execute_code", "execute_code_stream", "session_run",
-                               "compare_execution", "run_inspect"}
+                               "compare_execution", "run_inspect",
+    "trace_execution",  # events + stdout: same result-size shape as execute_code
+}
 # 240 KiB per stream: the largest static hint under Claude Code's documented
 # hard maximum of 500,000 characters for `anthropic/maxResultSizeChars`
 # (code.claude.com/docs/en/mcp) that this file can compute from a round KiB
@@ -87,7 +90,7 @@ EXPECTED_MAX_RESULT_SIZE_CHARS = 2 * MAX_OUTPUT_KB_CEILING * 1024 + 8_000  # = 4
 async def main() -> None:
     async with in_process() as client:
         listed = {t.name: t for t in (await client.list_tools()).tools}
-        check("tools/list served 52 tools", len(listed) == 52, f"-> {len(listed)}")
+        check(f"tools/list served {expected_tool_count()} tools", len(listed) == expected_tool_count(), f"-> {len(listed)}")
 
         def meta_of(name: str) -> dict:
             return getattr(listed[name], "meta", None) or {}
@@ -108,7 +111,7 @@ async def main() -> None:
         has_cap = {n: meta_of(n).get("anthropic/maxResultSizeChars")
                   for n, t in listed.items()
                   if meta_of(n).get("anthropic/maxResultSizeChars") is not None}
-        check("anthropic/maxResultSizeChars is set on exactly the 5 named tools",
+        check(f"anthropic/maxResultSizeChars is set on exactly the {len(MAX_RESULT_SIZE_CHARS_TOOLS)} named tools",
               set(has_cap) == MAX_RESULT_SIZE_CHARS_TOOLS, f"-> {sorted(has_cap)}")
         wrong_values = {n: v for n, v in has_cap.items() if v != EXPECTED_MAX_RESULT_SIZE_CHARS}
         check(f"every maxResultSizeChars equals {EXPECTED_MAX_RESULT_SIZE_CHARS} "
