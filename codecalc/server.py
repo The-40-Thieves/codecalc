@@ -65,6 +65,7 @@ from . import (
     runtimes,
     sessions,
     tools,
+    tracing,
     translation,
     units,
 )
@@ -78,7 +79,7 @@ from .mcp_middleware import redact_validation_errors_middleware, timeout_middlew
 
 #: Bearer token for the Streamable HTTP transport. Unset means the
 #: transport is loopback-only: `serve-http` REFUSES a non-loopback bind
-#: without it, because a token-less bind on a routable interface exposes 52
+#: without it, because a token-less bind on a routable interface exposes 53
 #: unauthenticated code-execution tools to whatever the interface reaches.
 #: stdio ignores this entirely — auth is HTTP middleware, and an MCP client
 #: spawning the server over stdio is already inside the trust boundary.
@@ -661,6 +662,11 @@ TOOL_ANNOTATION_OVERRIDES: dict[str, ToolAnnotations] = {
         read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True),
     "execute_code_stream": ToolAnnotations(
         read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True),
+    # trace_execution runs the caller's code through the identical executor
+    # path execute_code does (see codecalc/tracing.py) — same reasoning,
+    # same override.
+    "trace_execution": ToolAnnotations(
+        read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True),
     "compare_execution": ToolAnnotations(
         read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True),
     "runtimes_status": ToolAnnotations(
@@ -813,16 +819,19 @@ _MAX_OUTPUT_KB_CEILING = 240
 #: `structuredContent` carries the same JSON again, outside this bound.
 _MAX_RESULT_SIZE_CHARS = 2 * _MAX_OUTPUT_KB_CEILING * 1024 + 8_000  # = 499_520
 
-#: The five tools whose result can approach the output cap above:
+#: The six tools whose result can approach the output cap above:
 #: execute_code/execute_code_stream/session_run each run one program,
 #: compare_execution runs several, and run_inspect's TERMINAL reply is the
 #: same execution envelope execute_code returns once a managed run finishes
 #: (run_supervisor hands back the same result shape a synchronous run would
 #: have). run_submit is excluded deliberately — its own reply is a small
-#: `run_id` handle; it carries no envelope of its own to cap.
+#: `run_id` handle; it carries no envelope of its own to cap. trace_execution
+#: carries the SAME envelope plus a per-line event trace, which is why it
+#: also caps `max_events` at a size `codecalc/tracing.py`'s own internal
+#: trace-byte ceiling keeps well under this tool's char budget.
 _LARGE_RESULT_TOOLS = frozenset({
     "execute_code", "execute_code_stream", "session_run", "compare_execution",
-    "run_inspect",
+    "run_inspect", "trace_execution",
 })
 
 
@@ -1416,6 +1425,50 @@ async def execute_code_stream(
     return await _execution_service.execute_stream(
         spec, provider_id=provider, dependencies=dependencies,
         on_progress=report_progress
+    )
+
+
+@mcp.tool(group="execution")
+def trace_execution(
+    language: str,
+    code: str,
+    stdin: str = "",
+    timeout: int = 30,
+    max_events: int = 2000,
+    max_memory_mb: int = 0,
+    max_output_kb: int = 0,
+    max_cpu: int = 0,
+    no_net: bool = False,
+    provider: str | None = None,
+) -> dict[str, Any]:
+    """Debug WHY, line by line: which statements fired, in what order, with
+    what variable values at each step, and which if/elif/while/for/try
+    branch was taken versus never taken. Want just the printed output
+    instead? Use execute_code.
+
+    Returns `events`: ordered `{step, line, event, func, locals}`, one entry
+    per traced line/call/return/exception in YOUR code only (library
+    internals excluded). `locals` on each entry is only the names that
+    changed since the previous step in that same call — not a full dump
+    every line. A `return` entry also carries `return_value`; an
+    `exception` entry carries `exception_type`/`exception_message`.
+
+    Also returns `branches` (hit count per if/elif/while/for/try line),
+    `lines_executed` / `lines_never_executed` (coverage from a static parse),
+    and `truncated`/`truncated_reason` when `max_events` or an internal
+    size ceiling stopped RECORDING early (the underlying stdout/exit code
+    are unaffected either way).
+
+    PYTHON3 ONLY for now; any other `language` is refused up front. For a
+    structural Big-O guess with nothing executed, use analyze_complexity.
+    `provider`: only 'local' (default) is supported here.
+    """
+    timeout = min(timeout, 120)
+    max_output_kb = min(max_output_kb, _MAX_OUTPUT_KB_CEILING)
+    return tracing.execute_trace(
+        language, code, stdin=stdin, timeout=timeout, max_events=max_events,
+        max_memory_mb=max_memory_mb, max_output_kb=max_output_kb,
+        max_cpu=max_cpu, no_net=no_net, provider=provider,
     )
 
 
