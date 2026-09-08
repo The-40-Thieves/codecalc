@@ -2088,9 +2088,20 @@ def test_session_run_stamps_the_wrapped_json_block_even_though_coded_cannot_see_
     """`_coded` (server.py's tool-registration wrapper) stamps a DICT result;
     session_run's inline-artifact reply is a LIST, so the stamp has to happen
     inside the tool before wrapping. Checked both directions: a successful
-    run (contract_version) and a run that fails AFTER writing a file (code),
-    so the manually-stamped path is exercised for both, not just the
-    untouched plain-dict path a refusal or a no-artifact run still takes."""
+    run (contract_version) and a run that fails AFTER writing a file
+    (contract_version again, plus `errors.ensure_code` actually ran), so the
+    manually-stamped path is exercised for both, not just the untouched
+    plain-dict path a refusal or a no-artifact run still takes.
+
+    The failure is a plain `sys.exit(1)` — an ordinary program failure with a
+    real `verdict`/`exit_code` and no `error` of its own. `errors.ensure_code`
+    deliberately leaves that uncoded (see its own docstring): `code` marks a
+    failed REQUEST, not a failed PROGRAM, and a `sys.exit(1)` is the program
+    behaving exactly as written. That the manual call ran is what `ok`/
+    `verdict` being present without a fabricated `code`/`code_inferred`
+    PROVES — before that fix, this exact call site was reachable evidence of
+    the bug: `ensure_code` filled every codeless failure with `internal`
+    regardless of whether it reached a runtime at all."""
     old_root = sessions.SESSION_ROOT
     with tempfile.TemporaryDirectory(prefix="codecalc-artifact-stamp-") as root:
         sessions.SESSION_ROOT = Path(root)
@@ -2115,8 +2126,13 @@ def test_session_run_stamps_the_wrapped_json_block_even_though_coded_cannot_see_
                         if isinstance(fail_result, list) and fail_result else {})
             check("its JSON text block still carries contract_version",
                   fail_data.get("contract_version") == contract.CONTRACT_VERSION)
-            check("and a code, same as the untouched dict path would give it",
-                  fail_data.get("ok") is False and bool(fail_data.get("code")))
+            check(f"ok is false, verdict names the ordinary failure "
+                  f"-> ok={fail_data.get('ok')} verdict={fail_data.get('verdict')!r}",
+                  fail_data.get("ok") is False and fail_data.get("verdict") == "RTE")
+            check("...and NO fabricated code — a real verdict with no `error` "
+                  f"is a failed PROGRAM, not a failed REQUEST "
+                  f"-> code={fail_data.get('code')!r} code_inferred={fail_data.get('code_inferred')!r}",
+                  "code" not in fail_data and "code_inferred" not in fail_data)
         finally:
             server.session_stop(session_id)
             sessions.SESSION_ROOT = old_root

@@ -755,10 +755,27 @@ _COMPACT_ALWAYS = ("ok", "verdict", "stdout", "exit_code")
 #: dependency-install path before the identical executor call — dropping it
 #: here would silently hide a failed OR unenforced install from the one
 #: caller with no full-envelope reply to fall back to reading.
+#:
+#: `code`/`error`/`remedy`/`code_inferred` belong here for the same reason
+#: `unenforced` does, not as an afterthought: they are the ENTIRE content of
+#: a "rejected before execution" result (validation, permission_denied, ...)
+#: — that shape has no `verdict`/`stdout`/`exit_code` to fall back on, so
+#: dropping all four left compact mode with nothing to say about a failure
+#: at all. `execute_code` now calls `errors.ensure_code` on its result
+#: BEFORE handing it to `compact_result` (see that call site) specifically
+#: so these are populated before this list is consulted: before that fix, a
+#: codeless failure reached this function first, `compact_result` built a
+#: fresh dict that dropped `error` along with everything else not named
+#: here, and `_coded`'s own `ensure_code` call — the one every other tool
+#: relies on — ran LAST, against the already-compacted dict, with nothing
+#: left in it to classify from. `execute_code("nosuchlang", ...,
+#: compact=True)` came back `code: "internal"` where `compact=False` on the
+#: identical call correctly gave `validation`.
 _COMPACT_DISCLOSURE = (
     "unenforced", "output_error", "provider",
     "stdout_spill", "stderr_spill", "stdout_spill_capped", "stderr_spill_capped",
     "artifacts_created", "truncated_inline", "dependencies",
+    "code", "error", "remedy", "code_inferred",
 )
 
 #: The receipt keys compact mode keeps, in the order they are emitted.
@@ -790,6 +807,18 @@ def compact_result(result: dict) -> dict:
     surface (#118), a future response_format — has to reuse this rather than
     re-derive which fields are droppable. Re-deriving it is how the first
     version lost `unenforced`.
+
+    Callers MUST run `errors.ensure_code` on `result` before passing it here
+    — `execute_code` does, immediately before its own `compact_result` call.
+    This function builds a FRESH dict naming only `_COMPACT_ALWAYS`/
+    `_COMPACT_DISCLOSURE`, so a `code`/`error`/`remedy` chosen after this
+    runs would classify from a dict that already lost the `error` text
+    needed to classify FROM — that ordering bug is exactly what made
+    `execute_code("nosuchlang", ..., compact=True)` come back `code:
+    "internal"` where `compact=False` on the identical call correctly gave
+    `validation`: `server.py`'s `_coded` wrapper calls `ensure_code` on
+    every tool's result, but only AFTER `execute_code` had already compacted
+    it, by which point `error` was gone.
     """
     out = {k: result.get(k) for k in _COMPACT_ALWAYS}
     out["stdout"] = result.get("stdout", "")
@@ -927,7 +956,17 @@ def execute_code(
         result = _execution_service.execute(spec, provider_id=provider,
                                             dependencies=dependencies)
     if compact:
-        return compact_result(result)
+        # `ensure_code` BEFORE `compact_result`, not after: `compact_result`
+        # builds a fresh dict naming only `_COMPACT_ALWAYS`/
+        # `_COMPACT_DISCLOSURE`, so a `code`/`error`/`remedy` chosen after
+        # compaction would classify from a dict that already lost the
+        # `error` text it needed to classify FROM. `_coded`'s own
+        # `ensure_code` call (server.py's tool-registration wrapper) still
+        # runs afterward, on the compacted dict — harmless: a result that
+        # already carries `code` is left untouched (see `ensure_code`'s own
+        # docstring), so calling it twice is not calling it twice in any
+        # way that matters.
+        return compact_result(errors.ensure_code(result))
     return result
 
 

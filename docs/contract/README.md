@@ -630,6 +630,13 @@ contract exposes exactly where rather than papering over it:
   reported as `RTE` rather than guessed as `MLE`. `scripts/check_contract.py`
   re-derives both backends' verdict vocabularies from source and fails if this
   asymmetry stops being true.
+- **A process killed abnormally never reports `exit_code: null` on EITHER
+  backend, on any OS** — but the VALUE's convention is the platform's own,
+  not this contract's invention: negative (the POSIX signal number) on
+  Linux/macOS, positive (the raw NTSTATUS) on Windows, which has no
+  signals. Both backends agree with EACH OTHER on the same OS; neither
+  backend invents a cross-platform encoding the OS itself does not use. See
+  "A program killed by a signal" below.
 
 ---
 
@@ -672,7 +679,9 @@ Real transcripts, captured by running the product. `workdir`, timings and
 Note `ok: false`. It reports "ran and exited 0", not "codecalc worked" — a
 program that behaves exactly as intended and exits 3 lands here. Read `verdict`
 and `exit_code` to tell a failed *program* from a failed *request*; a failed
-request has a `code` and no `verdict`.
+request has a `code` and no `verdict`. `errors.ensure_code` enforces this: a
+real `RTE`/`OLE`/`MLE` verdict with no `error` of its own gets no `code` at
+all, never a message-matched `internal`.
 
 ```json
 {
@@ -701,15 +710,132 @@ request has a `code` and no `verdict`.
 }
 ```
 
-### Timeout
-
-`exit_code` is `null` because the process was killed rather than exiting, and
-`stderr` says which clock did it. No partial result is returned.
+A COMPILE failure is the identical shape, `phase: "compile"` instead of
+`"run"` — a compile-then-run language (`c`, `rust`, ...) whose source does
+not compile. `code` is absent here too, deliberately: retrying the same
+request cannot succeed either way, and the fix — a syntax error in this
+case — is in the program, not something codecalc got wrong. `stderr` carries
+the compiler's own diagnostic in full; nothing summarizes or drops it.
+Neither backend emits a verdict distinct from an ordinary run's `RTE` for
+this — a caller tells "failed to compile" from "compiled and then failed"
+by reading `phase`, never by a `code` or a different `verdict`.
 
 ```json
 {
   "ok": false,
-  "contract_version": "1.1.0",
+  "contract_version": "1.10.0",
+  "language": "c",
+  "phase": "compile",
+  "backend": "rust",
+  "platform": "linux",
+  "stdout": "",
+  "stderr": "main.c:1:11: error: expected declaration specifiers or '...' before '{' token\n    1 | int main( { return 0 }\n      |           ^\n",
+  "exit_code": 1,
+  "timed_out": false,
+  "verdict": "RTE",
+  "output_truncated": false,
+  "output_error": null,
+  "stdout_bytes": 0,
+  "stderr_bytes": 181,
+  "duration_ms": 64,
+  "compile_ms": 64,
+  "total_ms": 64,
+  "cpu_ms": 12,
+  "peak_memory_kb": 13156,
+  "unenforced": [],
+  "workdir": "/tmp/codecalc-2722576-ea0d6fe"
+}
+```
+
+### A program killed by a signal
+
+`exit_code` is a real, non-`null` value here — never `null` — because the
+process DID stop, just not via `exit()`. The SIGN, and which convention
+applies, is PER-PLATFORM, not one portable constant:
+
+- **POSIX (Linux, macOS): negative — the signal number that killed it.**
+  This is the SAME convention Python's own `subprocess.Popen.returncode`
+  uses, and both backends now agree on it: the pure-Python fallback always
+  returned `-N` for a signal death (it is `subprocess`'s own `returncode`,
+  unmodified); the native backend now matches it (`exit_code_json` in
+  `executor/src/main.rs`) rather than reporting `null` — which used to be
+  indistinguishable from a runtime that never spawned at all. The exact
+  NUMBER is not portable even across two POSIX hosts: the identical
+  null-pointer dereference traps as `SIGSEGV` (11, so `exit_code: -11`) on
+  Linux glibc, but as `SIGTRAP` (5, so `exit_code: -5`) on macOS/Apple
+  silicon — measured, not assumed, after a first version of this contract's
+  own test suite hardcoded `-11` and failed identically on both backends on
+  macOS. A caller checking for "was this killed by a signal" should test
+  `exit_code < 0`, never a specific value.
+- **Windows: positive — the NTSTATUS itself.** Windows has no signals at
+  all (`platform/mod.rs`'s own doc comment on `StepResult::signal`: always
+  `None` there); an abnormal termination like an access violation is just a
+  large positive exit code — `0xC0000005` / `3221225477` for
+  `STATUS_ACCESS_VIOLATION`. `exit_code_json` already passes this through
+  unchanged on Windows (the `-N` branch only fires when `signal` is
+  `Some`), so nothing needed to change there.
+
+`null` is reserved for the other case entirely: nothing ran to a stop at
+all (a timeout kill, or a runtime that never spawned — see below), on
+either OS.
+
+```json
+{
+  "ok": false,
+  "contract_version": "1.10.0",
+  "language": "c",
+  "phase": "run",
+  "backend": "rust",
+  "platform": "linux",
+  "stdout": "",
+  "stderr": "",
+  "exit_code": -11,
+  "timed_out": false,
+  "verdict": "RTE",
+  "output_truncated": false,
+  "output_error": null,
+  "stdout_bytes": 0,
+  "stderr_bytes": 0,
+  "duration_ms": 204,
+  "compile_ms": 237,
+  "total_ms": 441,
+  "cpu_ms": 0,
+  "peak_memory_kb": 752,
+  "unenforced": [],
+  "workdir": "/tmp/codecalc-2786582-f7d1faa"
+}
+```
+
+A real transcript from Linux (`SIGSEGV`, hence `-11`); the identical
+null-deref on macOS carries `"platform": "darwin"` and `"exit_code": -5`
+instead, and on Windows `"platform": "win32"` and a positive
+`"exit_code": 3221225477`, with everything else about the shape unchanged.
+
+`stderr` is empty here because a segfault does not itself write anything —
+a program that DID print diagnostics before crashing would still have them
+in `stdout`/`stderr`, same as any other run. `verdict` is `RTE` — the same
+verdict an ordinary nonzero exit gets — because neither backend infers a
+verdict distinct from a signal-caused crash except `MLE` (a signal near the
+memory ceiling; see "Backends are not identical" above). `code` is absent
+for the same reason it is absent from an ordinary RTE above: the process
+ran and failed on its own terms, which `errors.ensure_code` does not
+classify as a REQUEST-level failure.
+
+### Timeout
+
+`exit_code` is `null` because the process was killed rather than exiting, and
+`stderr` says which clock did it. No partial result is returned. Unlike an
+ordinary program failure above, a timeout DOES carry `code` — `"timeout"`,
+`code_inferred: true` — because it is something the caller can act on (raise
+`timeout`), the same actionable shape every other coded failure has;
+`executor.execute` never sets `error` for this either, so `errors.
+ensure_code` classifies it from `verdict`/`timed_out` directly rather than
+falling through to `internal` the way it once did.
+
+```json
+{
+  "ok": false,
+  "contract_version": "1.10.0",
   "language": "python3",
   "phase": "run",
   "backend": "rust",
@@ -729,7 +855,10 @@ request has a `code` and no `verdict`.
   "cpu_ms": 28,
   "peak_memory_kb": 15252,
   "unenforced": [],
-  "workdir": "/tmp/codecalc-1788693-320c67bb"
+  "workdir": "/tmp/codecalc-1788693-320c67bb",
+  "code": "timeout",
+  "remedy": "raise `timeout`, or reduce the work; a partial result is not returned",
+  "code_inferred": true
 }
 ```
 

@@ -1235,6 +1235,14 @@ def _resolve_argv0(cmd: str) -> str | None:
     `os.pathsep` for the CURRENT platform, so it agrees with `_env()`'s
     `PATH` value on every OS this backend runs on, rather than only on
     the ones whose native search rules happen to consult that same value.
+
+    The RESOLVED path is what both call sites then spawn, not the bare
+    name. Checking existence and still passing `cmd` through to `Popen`
+    was measured insufficient on the same platform: a fake `gcc` placed
+    FIRST on `CODECALC_RUNTIME_PATH` passed this check, and CreateProcess
+    then ran the runner's own MinGW `gcc` from the calling process's PATH
+    anyway (a fast compile failure where a timeout was expected). With
+    the absolute path in `argv[0]`, the loader has nothing left to search.
     """
     return shutil.which(cmd, path=registry.runtime_path())
 
@@ -1317,7 +1325,8 @@ def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10
         compile_ms = 0
         if entry["compile"]:
             argv = [a.format(**fmt) for a in entry["compile"]]
-            if _resolve_argv0(argv[0]) is None:
+            resolved = _resolve_argv0(argv[0])
+            if resolved is None:
                 # See `_resolve_argv0`'s doc comment: resolved OURSELVES,
                 # against the sandbox's own PATH, rather than left to the
                 # OS loader — Windows' CreateProcess searching the CALLING
@@ -1327,6 +1336,10 @@ def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10
                     f"[Errno 2] No such file or directory: {argv[0]!r}")
                 return _runtime_unavailable_result(name, "compile", argv, exc,
                                                    workdir, started, no_net)
+            # ...and SPAWN what was resolved, not the bare name: the
+            # existence check alone still let CreateProcess pick the
+            # caller's-PATH compiler (see the docstring's second paragraph).
+            argv[0] = resolved
             try:
                 # Compile-step cwd is the scratch directory, not `workdir`:
                 # compiling is not the user's own program running, so any
@@ -1364,13 +1377,15 @@ def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10
 
         argv = [a.format(**fmt) for a in entry["run"]]
         run_started = time.monotonic()
-        if _resolve_argv0(argv[0]) is None:
+        resolved = _resolve_argv0(argv[0])
+        if resolved is None:
             # Same reasoning as the compile step above — a single-command
             # (interpreted) language's `run` step IS its only spawn.
             exc = FileNotFoundError(
                 f"[Errno 2] No such file or directory: {argv[0]!r}")
             return _runtime_unavailable_result(name, "run", argv, exc,
                                                workdir, started, no_net)
+        argv[0] = resolved
         try:
             # Run-step cwd is `workdir` itself (the session/workdir root),
             # NOT the scratch directory — this is the actual program running,
@@ -1716,28 +1731,56 @@ def _execute_uncontracted(language: str, code: str, stdin: str = "", timeout: in
                 # this is a FALLBACK for one built before it — reached only
                 # when the binary answered but left `error` unset.
                 #
-                # GATED ON `exit_code == -2`, NOT on stderr text — that is
-                # the load-bearing part of this branch, found by adversarial
-                # review: a first draft matched any `stderr` starting with
-                # "runtime unavailable", and a program that RAN, printed
-                # "Runtime unavailable: my custom database is down" to its
-                # OWN stderr and exited 7 came back classified
+                # GATED ON `exit_code == -2` AND `"spawn_error" not in
+                # result` — NOT on stderr text, and, since `exit_code_json`
+                # in main.rs started emitting `-N` (the POSIX signal number)
+                # for a process killed by a signal, NOT on `exit_code == -2`
+                # alone either: SIGINT is signal 2, so a program killed by
+                # SIGINT (`raise(SIGINT)` in C, `os.kill(os.getpid(),
+                # signal.SIGINT)` under the default handler in python) now
+                # legitimately reports `exit_code: -2` too — reproduced by
+                # cross-vendor review, which is exactly the "no process that
+                # actually ran and exited can produce it" invariant this
+                # comment used to state, now false. `-2` is no longer a safe
+                # sentinel on its own.
+                #
+                # `spawn_error` (a THIRD, always-present JSON key on every
+                # binary built after this fix — `null` when nothing spawned
+                # wrong, the message otherwise; see `exit_code_json`'s
+                # sibling in main.rs) is what restores an unambiguous
+                # signal: its ABSENCE is what proves the answering binary
+                # predates this fix and never emits it at all, which is the
+                # only case `exit_code == -2` was ever a safe sentinel for.
+                # A binary built after this fix carries the key on EVERY
+                # result (`null` far more often than not), so this branch
+                # can never fire against one, regardless of what `exit_code`
+                # says — a SIGINT-killed run on a new binary has `exit_code:
+                # -2` AND `spawn_error: null` (verified by test), so the key
+                # being PRESENT at all is what disqualifies it here, not its
+                # value.
+                #
+                # A first draft (before this) matched any `stderr` starting
+                # with "runtime unavailable", and a program that RAN,
+                # printed "Runtime unavailable: my custom database is down"
+                # to its OWN stderr and exited 7 came back classified
                 # `runtime_unavailable` with the install remedy — the
                 # program's own message overwriting `error` and a genuine
                 # exit status silently reclassified as a Rust internal
-                # detail. `exit_code == -2` is safe where text is not: it is
-                # the OLD Rust binary's literal "nothing spawned" sentinel,
-                # and no process that actually ran and exited can produce it
-                # (a real exit status is 0-255 on POSIX; this codebase never
-                # maps a Windows exit code to -2 either) — so this branch can
-                # only fire for a genuine spawn failure, never for a program
-                # whose stderr happens to start with the right words.
-                # `error`/`phase` unset is the same "answered but pre-fix"
-                # shape check as before, now secondary to the exit_code gate
-                # rather than load-bearing on their own.
+                # detail. `error`/`phase` unset is the same "answered but
+                # pre-fix" shape check as before, now secondary to the two
+                # gates above rather than load-bearing on their own.
+                #
+                # `spawn_error` is popped below regardless of which branch
+                # fires: it is a wire-level marker between this function and
+                # the Rust binary, never part of the published envelope —
+                # the fallback backend has no such key, so leaving it in
+                # would break `scripts/check_parity.py`'s "both backends
+                # return the same keys" gate and would need a schema entry
+                # it does not deserve.
                 if (result.get("ok") is False and not result.get("error")
                         and "phase" in result
-                        and result.get("exit_code") == -2):
+                        and result.get("exit_code") == -2
+                        and "spawn_error" not in result):
                     # `exit_code == -2` ALONE already proved this is a spawn
                     # failure — see the block comment above — so `error` is
                     # set from `stderr` unconditionally whenever it has
@@ -1782,6 +1825,12 @@ def _execute_uncontracted(language: str, code: str, stdin: str = "", timeout: in
                         unenforced[:] = [u for u in unenforced
                                          if u != "no_net_best_effort_shim"]
                         unenforced.append(_NO_NET_BEST_EFFORT)
+                # Wire-level marker between this function and the Rust
+                # binary only — see the block comment above the `-2` gate
+                # for why it exists. Never part of the published envelope:
+                # popped unconditionally (a no-op on an old binary, which
+                # never set it), whether or not the compat branch fired.
+                result.pop("spawn_error", None)
                 return result
             return {"ok": False, "error": f"executor produced invalid output: {err[:200]!r}"}
         except Exception as exc:
@@ -1888,6 +1937,11 @@ async def execute_stream(spec, on_progress=None) -> dict:
         result["streamed_partial"] = partial
         result["streamed"] = True
         result["backend"] = "rust"
+        # Same wire-level marker `_execute_uncontracted` pops: this path
+        # reads the binary's JSON directly rather than through it, and
+        # was the one tool surface (`execute_code_stream`) still handing
+        # the key to a caller. Never part of the published envelope.
+        result.pop("spawn_error", None)
         return contract.stamp(result)
     except Exception as exc:
         return contract.stamp({"ok": False, "error": f"stream failed: {exc}"})

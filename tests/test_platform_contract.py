@@ -748,8 +748,10 @@ check("Windows still requires the executor",
 # unaffected by that distinction, but "hide an ALREADY-INSTALLED tool via
 # this override" is not a safe assumption cross-platform — see the kotlin
 # fixture comment below for where that bit a `c`+gcc version of this test.
+import json
 import os
 import shutil
+import subprocess
 import tempfile
 
 from codecalc import errors, server, tools, translation
@@ -1053,6 +1055,508 @@ async def _stdio_row_spawn_failure() -> None:
 
 
 asyncio.run(_stdio_row_spawn_failure())
+
+
+# ── execute_code: the envelope-level version of the SAME rule ──────────────
+# errors.stamp_row (above) classifies compare_execution/compare_edge_cases'
+# per-row failures; errors.ensure_code applies the identical rule to the
+# top-level envelope every OTHER tool result passes through (execute_code,
+# execute_code_stream, run_inspect, session_run — server.py's `_coded`
+# wrapper). Real execution on BOTH backends: a plain `sys.exit(3)` RTE must
+# carry no `code` at all (docs/contract/README.md's own "The program ran and
+# failed" example), and a real wall-clock timeout must carry `code:
+# "timeout"` — neither `executor.execute` result sets `error` for either
+# outcome, which is exactly what used to fall through to `internal`.
+for _backend_name, _force_fallback in (("rust", False), ("python fallback", True)):
+    _saved_rust = executor._rust
+    if _force_fallback:
+        executor._rust = None
+    try:
+        _rte = server.execute_code("python3", "import sys; sys.exit(3)")
+    finally:
+        executor._rust = _saved_rust
+    check(f"{_backend_name}: a real sys.exit(3) is verdict RTE, exit_code 3",
+          _rte.get("verdict") == "RTE" and _rte.get("exit_code") == 3,
+          f"-> verdict={_rte.get('verdict')!r} exit_code={_rte.get('exit_code')!r}")
+    check(f"{_backend_name}: ...and carries NO code/remedy/code_inferred",
+          not ({"code", "remedy", "code_inferred"} & _rte.keys()),
+          f"-> {_rte}")
+
+    _saved_rust = executor._rust
+    if _force_fallback:
+        executor._rust = None
+    try:
+        _tle = server.execute_code(
+            "python3", "import time; time.sleep(3)", timeout=1)
+    finally:
+        executor._rust = _saved_rust
+    check(f"{_backend_name}: a real wall-clock timeout is verdict TLE",
+          _tle.get("verdict") == "TLE" and _tle.get("timed_out") is True,
+          f"-> verdict={_tle.get('verdict')!r} timed_out={_tle.get('timed_out')!r}")
+    check(f"{_backend_name}: ...and is classified timeout, not internal",
+          _tle.get("code") == errors.TIMEOUT,
+          f"-> code={_tle.get('code')} error={_tle.get('error')!r}")
+    check(f"{_backend_name}: ...marked code_inferred, with the timeout remedy",
+          _tle.get("code_inferred") is True
+          and _tle.get("remedy") == errors.REMEDIES[errors.TIMEOUT],
+          f"-> {_tle.get('code_inferred')!r} / {_tle.get('remedy')!r}")
+
+
+# The same RTE, over a REAL stdio MCP round-trip — proves the JSON a caller
+# actually receives has no `code` key at all (a `null` would still be a key
+# present, which is not the same claim as absent).
+async def _stdio_execute_code_rte() -> None:
+    async with over_stdio() as c:
+        r = await c.call_tool(
+            "execute_code",
+            {"language": "python3", "code": "import sys; sys.exit(3)"})
+        payload = data(r)
+        check("stdio: execute_code's real RTE survives serialisation",
+              isinstance(payload, dict) and payload.get("verdict") == "RTE"
+              and payload.get("exit_code") == 3,
+              f"-> {payload!r}")
+        if isinstance(payload, dict):
+            check("stdio: ...with no code/remedy/code_inferred key at all",
+                  not ({"code", "remedy", "code_inferred"} & payload.keys()),
+                  f"-> {sorted(payload)}")
+
+
+asyncio.run(_stdio_execute_code_rte())
+
+
+# ── a COMPILE failure follows the identical RTE rule, on purpose ───────────
+# `errors.ensure_code` treats `phase: "compile"` no differently from
+# `phase: "run"` — a compile failure is a failed PROGRAM (its source has a
+# syntax error), not a failed REQUEST: retrying the identical request cannot
+# succeed either way. This is a DECISION, documented in `ensure_code`'s own
+# docstring and in docs/contract/README.md's "The program ran and failed"
+# section, not an accident of the verdict-based gate happening to also catch
+# this shape.
+#
+# `c` (gcc, already relied on by the segfault fixture below, and present on
+# all three CI runners) is the PRIMARY fixture — it exercises the
+# fallback's own compile branch (`_fallback_compile_failure`) and the Rust
+# binary's. `_COMPILE_TIMEOUT` (60s, against the 10s default) is deliberate
+# headroom, not decoration: CI caught this fixture reporting `verdict: TLE`
+# instead of `RTE` on a cold Windows runner's rustc (see below) because the
+# 10s default was the compile budget too, on a runner slow enough that the
+# ordinary case — a syntax error the compiler rejects almost immediately —
+# still lost the race.
+_COMPILE_TIMEOUT = 60
+for _backend_name, _force_fallback in (("rust", False), ("python fallback", True)):
+    _saved_rust = executor._rust
+    if _force_fallback:
+        executor._rust = None
+    try:
+        _ce = server.execute_code("c", "int main( { return 0 }", timeout=_COMPILE_TIMEOUT)
+    finally:
+        executor._rust = _saved_rust
+    check(f"{_backend_name}: a C compile error is phase compile, verdict RTE",
+          _ce.get("phase") == "compile" and _ce.get("verdict") == "RTE",
+          f"-> phase={_ce.get('phase')!r} verdict={_ce.get('verdict')!r}")
+    check(f"{_backend_name}: ...with the compiler's diagnostic in stderr",
+          bool(_ce.get("stderr")), f"-> {_ce.get('stderr')!r}")
+    check(f"{_backend_name}: ...and NO code/remedy/code_inferred",
+          not ({"code", "remedy", "code_inferred"} & _ce.keys()),
+          f"-> {_ce}")
+
+# `rust` is the SECOND compiled language, per the review that asked for one
+# beyond C — but only where `rustc` itself responds promptly: the CI
+# failure above was rustc, specifically, timing out on a cold Windows
+# runner (rustup's proxy binary, first invocation ever on that runner) —
+# not a defect in this fixture's LOGIC, but a fixture measuring compiler
+# startup latency it never meant to measure. Probing `rustc --version`
+# first, with its own generous budget, and skipping loudly rather than
+# guessing at a "safe enough" timeout, is what keeps this from being the
+# same flake with a bigger number.
+_rustc_responsive = False
+if shutil.which("rustc"):
+    try:
+        _rustc_probe = subprocess.run(
+            ["rustc", "--version"], capture_output=True, timeout=60, check=False)
+        _rustc_responsive = _rustc_probe.returncode == 0
+    except (subprocess.TimeoutExpired, OSError) as _rustc_exc:
+        skip("Rust compile-failure classification",
+             f"rustc --version did not respond within 60s: {_rustc_exc!r}")
+else:
+    skip("Rust compile-failure classification", "no rustc on this PATH")
+
+if _rustc_responsive:
+    for _backend_name, _force_fallback in (("rust", False), ("python fallback", True)):
+        _saved_rust = executor._rust
+        if _force_fallback:
+            executor._rust = None
+        try:
+            _ce = server.execute_code(
+                "rust", "fn main() { let x = ; }", timeout=_COMPILE_TIMEOUT)
+        finally:
+            executor._rust = _saved_rust
+        check(f"{_backend_name}: a Rust compile error is phase compile, verdict RTE",
+              _ce.get("phase") == "compile" and _ce.get("verdict") == "RTE",
+              f"-> phase={_ce.get('phase')!r} verdict={_ce.get('verdict')!r}")
+        check(f"{_backend_name}: ...with the compiler's diagnostic in stderr",
+              bool(_ce.get("stderr")), f"-> {_ce.get('stderr')!r}")
+        check(f"{_backend_name}: ...and NO code/remedy/code_inferred",
+              not ({"code", "remedy", "code_inferred"} & _ce.keys()),
+              f"-> {_ce}")
+elif shutil.which("rustc"):
+    skip("Rust compile-failure classification", "rustc --version failed or was slow")
+
+
+# ── the OTHER side of a compile-phase failure: a genuine TIMEOUT ───────────
+# Observed for real in the CI run above: a compile that runs OUT OF TIME
+# (rather than finishing and reporting a syntax error) is verdict TLE, code
+# `timeout` — correct behaviour, and a DIFFERENT case from the "compile
+# failure -> no code" rule two sections up, which only applies once the
+# compiler actually finished and reported failure on its own terms. Pinned
+# deterministically here with a fake `gcc` that busy-loops forever, rather
+# than depending on how slow any REAL compiler happens to be on a given
+# runner (which is exactly what made the CI failure this guards flaky in
+# the first place). A pure shell/batch busy-loop, not `sleep`/`ping`: the
+# sandboxed child's PATH is `CODECALC_RUNTIME_PATH` alone here (see
+# registry.RUNTIME_PATH_ENV's precedence), so an external binary this fake
+# compiler tried to exec would itself be unresolvable — measured: a first
+# version calling `sleep` came back a fast RTE ("sleep: not found"), not
+# the timeout this fixture means to exercise.
+_slow_gcc_dir = pathlib.Path(tempfile.mkdtemp(prefix="codecalc-slow-gcc-"))
+try:
+    if os.name == "nt":
+        _slow_gcc = _slow_gcc_dir / "gcc.bat"
+        _slow_gcc.write_text("@echo off\r\n:loop\r\ngoto loop\r\n", encoding="utf-8")
+    else:
+        _slow_gcc = _slow_gcc_dir / "gcc"
+        _slow_gcc.write_text("#!/bin/sh\nwhile true; do :; done\n", encoding="utf-8")
+        _slow_gcc.chmod(0o755)
+    for _backend_name, _force_fallback in (("rust", False), ("python fallback", True)):
+        os.environ["CODECALC_RUNTIME_PATH"] = str(_slow_gcc_dir)
+        _saved_rust = executor._rust
+        if _force_fallback:
+            executor._rust = None
+        try:
+            _ct = server.execute_code("c", "int main(){return 0;}", timeout=2)
+        finally:
+            executor._rust = _saved_rust
+            if _SAVED_RUNTIME_PATH is None:
+                os.environ.pop("CODECALC_RUNTIME_PATH", None)
+            else:
+                os.environ["CODECALC_RUNTIME_PATH"] = _SAVED_RUNTIME_PATH
+        check(f"{_backend_name}: a compile-phase TIMEOUT is verdict TLE, not RTE",
+              _ct.get("phase") == "compile" and _ct.get("verdict") == "TLE"
+              and _ct.get("timed_out") is True,
+              f"-> phase={_ct.get('phase')!r} verdict={_ct.get('verdict')!r} "
+              f"timed_out={_ct.get('timed_out')!r}")
+        check(f"{_backend_name}: ...classified code timeout, not left uncoded",
+              _ct.get("code") == errors.TIMEOUT, f"-> {_ct.get('code')}")
+finally:
+    shutil.rmtree(_slow_gcc_dir, ignore_errors=True)
+
+
+# ── a signal-killed run: both backends must agree on exit_code, on EACH OS ──
+# Before this fix, the Rust backend reported `exit_code: null` for a process
+# killed BY A SIGNAL (indistinguishable from one that never spawned at all),
+# while the pure-Python fallback already used POSIX/subprocess's own `-N`
+# convention (`subprocess.Popen.returncode` is negative-signal on a signal
+# death). `exit_code_json` in executor/src/main.rs now aligns the Rust
+# backend to the SAME convention `subprocess.Popen` already uses on THIS
+# platform — see its own doc comment.
+#
+# The exact VALUE is platform-specific, not a portable constant: a null-deref
+# traps as SIGSEGV (11) on Linux glibc, but as SIGTRAP (5, i.e. -5) on macOS/
+# Apple silicon — measured, not assumed, after CI caught a first version of
+# this test hardcoding `-11` and failing identically on both backends on
+# macOS. Windows has no signals at all (see platform/mod.rs's own doc
+# comment on `signal`): an access violation is a real, POSITIVE `exit_code`
+# — the NTSTATUS itself, `0xC0000005` / `3221225477` for
+# STATUS_ACCESS_VIOLATION — which `exit_code_json` already passes through
+# unchanged (`sr.signal` is always `None` there, so the `-N` branch never
+# fires). What this test can portably assert: `exit_code` is never null (the
+# process DID stop, just not via `exit()`), and — the parity that actually
+# matters — both backends report the IDENTICAL value for the identical
+# crash on the identical OS.
+if shutil.which("gcc") or shutil.which("cc"):
+    _segv_c = "int main() { int *p = 0; *p = 1; return 0; }"
+    _segv_by_backend: dict[str, int | None] = {}
+    for _backend_name, _force_fallback in (("rust", False), ("python fallback", True)):
+        _saved_rust = executor._rust
+        if _force_fallback:
+            executor._rust = None
+        try:
+            _segv = server.execute_code("c", _segv_c)
+        finally:
+            executor._rust = _saved_rust
+        check(f"{_backend_name}: a segfaulting program is verdict RTE",
+              _segv.get("verdict") == "RTE", f"-> {_segv.get('verdict')!r}")
+        check(f"{_backend_name}: ...with a real exit_code, not null "
+              f"(the process stopped, just not via exit())",
+              _segv.get("exit_code") is not None, f"-> {_segv.get('exit_code')!r}")
+        if IS_WINDOWS:
+            check(f"{_backend_name}: ...positive (the NTSTATUS access-"
+                  f"violation code Windows reports; no signals to be "
+                  f"negative FROM)",
+                  isinstance(_segv.get("exit_code"), int) and _segv["exit_code"] > 0,
+                  f"-> {_segv.get('exit_code')!r}")
+        else:
+            check(f"{_backend_name}: ...negative (the POSIX signal number "
+                  f"that killed it — -11 SIGSEGV on Linux glibc, -5 SIGTRAP "
+                  f"on macOS/Apple silicon for the identical null-deref; "
+                  f"either is a real signal death, never null)",
+                  isinstance(_segv.get("exit_code"), int) and _segv["exit_code"] < 0,
+                  f"-> {_segv.get('exit_code')!r}")
+        check(f"{_backend_name}: ...and NO code/remedy/code_inferred",
+              not ({"code", "remedy", "code_inferred"} & _segv.keys()),
+              f"-> {_segv}")
+        _segv_by_backend[_backend_name] = _segv.get("exit_code")
+    check("both backends report the IDENTICAL exit_code for the identical "
+          "crash on this OS — the parity that matters, not a hardcoded "
+          "cross-platform constant",
+          len(set(_segv_by_backend.values())) == 1, f"-> {_segv_by_backend}")
+else:
+    skip("signal-death exit_code parity", "no gcc/cc on this PATH")
+
+
+# ── SIGINT is signal 2 — the EXACT value the OLD Rust wire format used as
+# its "nothing spawned" sentinel (`exit_code: -2`) ─────────────────────────
+# `exit_code_json`'s new `-N` convention (above) means a program killed BY
+# SIGINT now legitimately reports `exit_code: -2` — the same NUMBER
+# `codecalc/executor.py`'s compat shim (from #283) used to treat as proof
+# that nothing spawned at all. Reproduced by cross-vendor review: a
+# SIGINT-killed C or python3 program came back `code: "runtime_unavailable"`,
+# `error: "runtime unavailable for the run phase"`, `exit_code: null`,
+# remedy "install the runtime" — a request that ran a real program and was
+# genuinely killed, told it needed a runtime installed. Fixed with a THIRD,
+# ALWAYS-present JSON key from the binary, `spawn_error` (null when nothing
+# went wrong at spawn, the message otherwise — distinct from `error`, which
+# stays conditional and caller-facing): the shim now gates on `exit_code ==
+# -2` AND `"spawn_error" not in result` — a binary built after this fix
+# carries the key on EVERY result, so the shim can never fire against one,
+# regardless of what `exit_code` says. See `codecalc/executor.py`'s updated
+# comment on the gate, and `spawn_error`'s doc comment on
+# `executor/src/main.rs`'s `StepResult`.
+if shutil.which("gcc") or shutil.which("cc"):
+    _sigint_c = "#include <signal.h>\nint main() { raise(SIGINT); return 0; }\n"
+    _r = server.execute_code("c", _sigint_c)
+    check("rust: a SIGINT-killed C program is verdict RTE",
+          _r.get("verdict") == "RTE", f"-> {_r.get('verdict')!r}")
+    check("rust: ...with a real exit_code, not null",
+          _r.get("exit_code") is not None, f"-> {_r.get('exit_code')!r}")
+    if not IS_WINDOWS:
+        check("rust: ...specifically -2 on POSIX (SIGINT is signal 2)",
+              _r.get("exit_code") == -2, f"-> {_r.get('exit_code')!r}")
+    check("rust: ...and NO code/error/remedy/code_inferred — a real "
+          "signal death, not a spawn failure",
+          not ({"code", "error", "remedy", "code_inferred"} & _r.keys()),
+          f"-> {_r}")
+else:
+    skip("SIGINT-killed C program classification", "no gcc/cc on this PATH")
+
+_sigint_py = ("import os, signal\n"
+              "os.kill(os.getpid(), signal.SIGINT)\n")
+_r = server.execute_code("python3", _sigint_py)
+check("rust: a SIGINT-killed python3 program is verdict RTE",
+      _r.get("verdict") == "RTE", f"-> {_r.get('verdict')!r}")
+check("rust: ...with a real exit_code, not null",
+      _r.get("exit_code") is not None, f"-> {_r.get('exit_code')!r}")
+if not IS_WINDOWS:
+    check("rust: ...specifically -2 on POSIX (SIGINT is signal 2)",
+          _r.get("exit_code") == -2, f"-> {_r.get('exit_code')!r}")
+check("rust: ...and NO code/error/remedy/code_inferred — a real "
+      "signal death, not a spawn failure",
+      not ({"code", "error", "remedy", "code_inferred"} & _r.keys()),
+      f"-> {_r}")
+
+
+# ── the shim itself, pinned against SYNTHETIC binary JSON ───────────────────
+# The two real-execution checks above prove the end-to-end behaviour on
+# whatever binary this run happens to have; this pins the SHIM'S OWN
+# decision rule directly, independent of any real compiler/runtime, so a
+# future change to the gate's boolean logic fails here even if no signal
+# happens to fire on the CI host that runs it.
+class _FakeRustProc:
+    """Stands in for `_popen_group`'s return value: `execute()` only ever
+    calls `.communicate()` on it."""
+
+    def __init__(self, stdout_json: dict) -> None:
+        self._out = json.dumps(stdout_json).encode()
+
+    def communicate(self, input=None, timeout=None):
+        return self._out, b""
+
+
+def _shim_result_for(payload: dict) -> dict:
+    """Via `server.execute_code`, not `executor.execute` directly: `code`
+    comes from `errors.ensure_code`, which only runs at `server.py`'s
+    `_coded` wrapper — `executor.execute` itself never calls it (only
+    `contract.stamp`), so asserting on `code` against the lower-level
+    entry point would test nothing about the shim's actual effect on what
+    a caller receives.
+
+    `server.execute_code` also probes `--capabilities` (a SEPARATE
+    `_popen_group` call, `no_net_kernel_enforcement_available` via
+    `providers.describe`) before it ever gets to the run itself — the fake
+    below only answers the RUN invocation (`--lang` in argv) and delegates
+    anything else to the REAL `_popen_group`, or this fixture would break
+    the capability probe rather than exercising the shim at all.
+    """
+    saved_rust = executor._rust
+    real_popen_group = executor._popen_group
+
+    def _fake_popen_group(argv):
+        if "--lang" in argv:
+            return _FakeRustProc(payload)
+        return real_popen_group(argv)
+
+    executor._rust = "/fake/codecalc-exec"
+    executor._popen_group = _fake_popen_group
+    try:
+        return server.execute_code("python3", "print(1)")
+    finally:
+        executor._rust = saved_rust
+        executor._popen_group = real_popen_group
+
+
+_old_binary_spawn_failure = {
+    "ok": False, "language": "python3", "phase": "run",
+    # The wording a binary built after #280 (worded stderr) but before
+    # #283 (the JSON `error` KEY) produces — the shim's own comment says
+    # `stderr_text` is used AS-IS whenever it has content, "every binary
+    # since #280 has one" (a bare, wordless spawn failure predates #280
+    # entirely and is the fallback branch below this dict, not this one).
+    # A message with NEITHER "runtime unavailable" NOR any `_MESSAGE_HINTS`
+    # entry ahead of it in the list would test the wrong thing here: this
+    # fixture's whole point is that `error` already says the right thing
+    # in plain text, and the shim's job is only to SURFACE it as `error`.
+    "stdout": "", "stderr": "runtime unavailable for the run phase: 'python3' not found (os error 2)",
+    "exit_code": -2, "duration_ms": 3, "compile_ms": 0, "total_ms": 3,
+    "cpu_ms": 0, "peak_memory_kb": 0, "timed_out": False,
+    "output_truncated": False, "verdict": "RTE", "output_error": None,
+    "stdout_bytes": None, "stderr_bytes": None,
+    "platform": "linux", "workdir": "<synthetic-workdir>",
+    # NO "spawn_error" key at all — the exact shape a binary built before
+    # this fix emits. This is the ONLY thing that should make the shim fire.
+}
+_old = _shim_result_for(_old_binary_spawn_failure)
+check("shim: an OLD binary's -2/no-spawn_error-key shape still classifies "
+      "runtime_unavailable",
+      _old.get("code") == errors.RUNTIME_UNAVAILABLE, f"-> {_old.get('code')}")
+check("shim: ...exit_code normalised to null (the documented 'nothing "
+      "spawned' convention)",
+      _old.get("exit_code") is None, f"-> {_old.get('exit_code')!r}")
+
+_new_binary_sigint = dict(_old_binary_spawn_failure)
+_new_binary_sigint["stderr"] = ""
+_new_binary_sigint["spawn_error"] = None  # present, null — a NEW binary, SIGINT (-2), no spawn failure
+_new = _shim_result_for(_new_binary_sigint)
+check("shim: a NEW binary's identical -2 with spawn_error PRESENT (null) "
+      "does NOT fire the compat branch",
+      _new.get("code") != errors.RUNTIME_UNAVAILABLE, f"-> {_new.get('code')}")
+check("shim: ...exit_code is left as the real signal value, -2, not "
+      "normalised to null",
+      _new.get("exit_code") == -2, f"-> {_new.get('exit_code')!r}")
+check("shim: ...and spawn_error itself never reaches the returned result "
+      "(internal to this JSON handshake only)",
+      "spawn_error" not in _new, f"-> {sorted(_new)}")
+
+# `execute_code_stream` does NOT go through `_execute_uncontracted`: it has
+# its own read-the-binary's-JSON path in `executor.execute_stream`, which is
+# exactly where the review of this fix found the key still leaking (present,
+# null) while every other surface — execute_code, run_inspect, session_run,
+# compare_execution rows — had it popped. A real run on the Rust backend,
+# since the Python fallback never sets the key and would pass vacuously.
+if executor._rust is not None:
+    _streamed = asyncio.run(server.execute_code_stream(
+        "python3", "print('hi')", timeout=20))
+    check("execute_code_stream: spawn_error never reaches the streamed "
+          "result either (its own JSON path pops it too)",
+          _streamed.get("ok") is True and "spawn_error" not in _streamed,
+          f"-> ok={_streamed.get('ok')!r} keys={sorted(_streamed)}")
+else:
+    skip("execute_code_stream spawn_error pop", "no Rust binary resolved")
+
+
+# ── compact mode must classify IDENTICALLY to the full envelope ────────────
+# `execute_code(..., compact=True)` used to call `errors.ensure_code` (via
+# `_coded`, server.py's tool-registration wrapper) AFTER `compact_result`
+# had already built a fresh dict that dropped `error` — so a `compact=True`
+# call to a "rejected before execution" shape (no `verdict`/`stdout`/
+# `exit_code` to fall back on) had NOTHING left to classify from and came
+# back `code: "internal"` regardless of the real cause. `execute_code` now
+# runs `ensure_code` BEFORE `compact_result` (see both docstrings), and
+# `code`/`error`/`remedy`/`code_inferred` are in `_COMPACT_DISCLOSURE` so
+# they survive the compaction that follows.
+for _backend_name, _force_fallback in (("rust", False), ("python fallback", True)):
+    _saved_rust = executor._rust
+    if _force_fallback:
+        executor._rust = None
+    try:
+        _full = server.execute_code("nosuchlang", "x")
+        _compact = server.execute_code("nosuchlang", "x", compact=True)
+    finally:
+        executor._rust = _saved_rust
+    check(f"{_backend_name}: an unknown-language compact result matches "
+          f"the full one's code",
+          _compact.get("code") == _full.get("code") == errors.VALIDATION,
+          f"-> full={_full.get('code')} compact={_compact.get('code')}")
+    check(f"{_backend_name}: ...and still carries error/remedy",
+          bool(_compact.get("error")) and bool(_compact.get("remedy")),
+          f"-> error={_compact.get('error')!r} remedy={_compact.get('remedy')!r}")
+
+_COMPACT_NORUNTIME_DIR = pathlib.Path(tempfile.mkdtemp(prefix="codecalc-compact-noruntime-"))
+if _real_python3 is None:
+    skip("compact mode: missing-runtime classification", "no python3 on this PATH")
+else:
+    _compact_py_link = _COMPACT_NORUNTIME_DIR / pathlib.Path(_real_python3).name
+    if os.name == "nt":
+        shutil.copy2(_real_python3, _compact_py_link)
+    else:
+        _compact_py_link.symlink_to(_real_python3)
+    try:
+        for _backend_name, _force_fallback in (("rust", False), ("python fallback", True)):
+            os.environ["CODECALC_RUNTIME_PATH"] = str(_COMPACT_NORUNTIME_DIR)
+            _saved_rust = executor._rust
+            if _force_fallback:
+                executor._rust = None
+            try:
+                _full = server.execute_code("lua", "print(1)")
+                _compact = server.execute_code("lua", "print(1)", compact=True)
+            finally:
+                executor._rust = _saved_rust
+                if _SAVED_RUNTIME_PATH is None:
+                    os.environ.pop("CODECALC_RUNTIME_PATH", None)
+                else:
+                    os.environ["CODECALC_RUNTIME_PATH"] = _SAVED_RUNTIME_PATH
+            check(f"{_backend_name}: a missing-runtime compact result matches "
+                  f"the full one's code",
+                  _compact.get("code") == _full.get("code") == errors.RUNTIME_UNAVAILABLE,
+                  f"-> full={_full.get('code')} compact={_compact.get('code')}")
+    finally:
+        shutil.rmtree(_COMPACT_NORUNTIME_DIR, ignore_errors=True)
+
+for _backend_name, _force_fallback in (("rust", False), ("python fallback", True)):
+    _saved_rust = executor._rust
+    if _force_fallback:
+        executor._rust = None
+    try:
+        _compact_tle = server.execute_code(
+            "python3", "import time; time.sleep(3)", timeout=1, compact=True)
+    finally:
+        executor._rust = _saved_rust
+    check(f"{_backend_name}: a compact timeout is classified timeout too",
+          _compact_tle.get("code") == errors.TIMEOUT and _compact_tle.get("verdict") == "TLE",
+          f"-> code={_compact_tle.get('code')} verdict={_compact_tle.get('verdict')!r}")
+
+for _backend_name, _force_fallback in (("rust", False), ("python fallback", True)):
+    _saved_rust = executor._rust
+    if _force_fallback:
+        executor._rust = None
+    try:
+        _compact_rte = server.execute_code(
+            "python3", "import sys; sys.exit(3)", compact=True)
+    finally:
+        executor._rust = _saved_rust
+    check(f"{_backend_name}: a compact plain RTE still carries no code",
+          "code" not in _compact_rte and _compact_rte.get("verdict") == "RTE"
+          and _compact_rte.get("exit_code") == 3,
+          f"-> {_compact_rte}")
 
 print(f"\n=== {len(FAILS)} FAILURE(S), {len(SKIPS)} skipped ===" if FAILS else
       f"\n=== PLATFORM CONTRACT HOLDS ({len(SKIPS)} skipped) ===")

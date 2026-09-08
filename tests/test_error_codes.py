@@ -246,6 +246,106 @@ _r = server.install_package(language="ruby", package="nokogiri")
 check("install_package(ruby) -> permission_denied, not internal",
       _r.get("code") == errors.PERMISSION_DENIED, f"-> {_r.get('code')}")
 
+# ── ensure_code(): a real per-run verdict must not be message-matched ──────
+# `executor.execute` never sets `error` for an ordinary program failure (a
+# plain `sys.exit(3)` RTE) or a plain wall-clock timeout (TLE) — only
+# `verdict`/`exit_code`/`timed_out` say so (see executor.py's run-phase
+# result and `_fallback_verdict`). Before this fix, `ensure_code` had an
+# empty string to message-match and fell through to `internal` regardless —
+# a model whose program correctly reported its own failure was told to go
+# file a bug about codecalc. Synthetic envelope-shaped dicts here (no real
+# execution needed to prove `ensure_code`'s own decision); a REAL exit-3 run
+# and a real timeout, on both backends plus a stdio round-trip, live in
+# tests/test_platform_contract.py instead.
+_rte = errors.ensure_code({"ok": False, "verdict": "RTE", "exit_code": 3,
+                           "timed_out": False, "stderr": "boom"})
+check("a real RTE verdict with no error carries no code at all",
+      "code" not in _rte, f"-> {_rte.get('code')!r}")
+check("...and no remedy/code_inferred either",
+      "remedy" not in _rte and "code_inferred" not in _rte, f"-> {_rte}")
+
+# `phase` plays no part in the decision — a COMPILE failure is the identical
+# rule as a RUN failure (a failed PROGRAM, not a failed REQUEST): retrying
+# the same request cannot succeed either way. Real compiler invocations on
+# both backends live in tests/test_platform_contract.py.
+_ce = errors.ensure_code({"ok": False, "verdict": "RTE", "exit_code": 1,
+                          "phase": "compile", "stderr": "syntax error"})
+check("a compile-phase RTE with no error carries no code either",
+      "code" not in _ce, f"-> {_ce.get('code')!r}")
+
+for _label, _shape in [
+    ("verdict == TLE alone", {"ok": False, "verdict": "TLE", "exit_code": None}),
+    ("verdict == TLE with timed_out (compact mode drops timed_out, not verdict)",
+     {"ok": False, "verdict": "TLE", "timed_out": True, "exit_code": None}),
+]:
+    _tle = errors.ensure_code(dict(_shape))
+    check(f"a timeout ({_label}) is classified timeout, not internal",
+          _tle.get("code") == errors.TIMEOUT, f"-> {_tle.get('code')}")
+    check("...and marked code_inferred (nothing chose it at a raise site)",
+          _tle.get("code_inferred") is True, f"-> {_tle.get('code_inferred')}")
+    check("...with the timeout remedy",
+          _tle.get("remedy") == errors.REMEDIES[errors.TIMEOUT], f"-> {_tle.get('remedy')!r}")
+
+# OLE/MLE follow the identical RTE rule: a real verdict, no error, no code.
+for _verdict in ("OLE", "MLE"):
+    _r = errors.ensure_code({"ok": False, "verdict": _verdict, "exit_code": None})
+    check(f"a real {_verdict} verdict with no error carries no code either",
+          "code" not in _r, f"-> {_r.get('code')!r}")
+
+# A spawn failure (executor DOES set `error`, and still carries `verdict` —
+# "the code ran as far as it could") is unaffected: classified from the
+# message exactly as before this fix.
+_spawn = errors.ensure_code({
+    "ok": False, "verdict": "RTE", "exit_code": None,
+    "error": "runtime unavailable for the run phase: 'lua' not found",
+})
+check("a spawn failure (verdict present, error already set) is unaffected",
+      _spawn.get("code") == errors.RUNTIME_UNAVAILABLE, f"-> {_spawn.get('code')}")
+
+# A genuine unknown — ok: False, no verdict, no error, no exit_code — still
+# falls to internal/code_inferred, exactly as before this fix.
+_unknown = errors.ensure_code({"ok": False})
+check("a genuine unknown (no verdict, no error) is still internal",
+      _unknown.get("code") == errors.INTERNAL, f"-> {_unknown.get('code')}")
+check("...and marked code_inferred",
+      _unknown.get("code_inferred") is True, f"-> {_unknown.get('code_inferred')}")
+
+# A code chosen at the raise site is never overwritten, verdict or not —
+# same regression guard as the earlier "not overwritten" check, extended to
+# a result that also carries a verdict.
+_pre_coded = errors.ensure_code({"ok": False, "verdict": "RTE", "code": errors.WORKER_FAILURE})
+check("a pre-coded verdict-bearing result is left alone",
+      _pre_coded.get("code") == errors.WORKER_FAILURE
+      and "code_inferred" not in _pre_coded, f"-> {_pre_coded}")
+
+# End-to-end: a real python3 process that calls sys.exit(3) must round-trip
+# through execute_code -> server._coded -> errors.ensure_code with no
+# fabricated code — the exact model-facing symptom this fix closes.
+_real_rte = server.execute_code("python3", "import sys; sys.exit(3)")
+check("execute_code: a real sys.exit(3) carries no code",
+      _real_rte.get("ok") is False and _real_rte.get("verdict") == "RTE"
+      and _real_rte.get("exit_code") == 3 and "code" not in _real_rte,
+      f"-> ok={_real_rte.get('ok')} verdict={_real_rte.get('verdict')!r} "
+      f"exit_code={_real_rte.get('exit_code')!r} code={_real_rte.get('code')!r}")
+check("...and no remedy/code_inferred either",
+      "remedy" not in _real_rte and "code_inferred" not in _real_rte,
+      f"-> {_real_rte}")
+
+# `compact=True` must classify IDENTICALLY to `compact=False` — a "rejected
+# before execution" shape (no verdict/stdout/exit_code) has NOTHING else to
+# classify from, so `compact_result` dropping `error` before `ensure_code`
+# ran left it `internal` regardless of the real cause. Real execution on
+# both backends (missing runtime, timeout, plain RTE too) lives in
+# tests/test_platform_contract.py; this pins the exact symptom reported.
+_full_reject = server.execute_code("nosuchlang", "x")
+_compact_reject = server.execute_code("nosuchlang", "x", compact=True)
+check("execute_code(compact=True) on an unknown language matches compact=False",
+      _compact_reject.get("code") == _full_reject.get("code") == errors.VALIDATION,
+      f"-> full={_full_reject.get('code')} compact={_compact_reject.get('code')}")
+check("...and still carries error/remedy (the ENTIRE content of this shape)",
+      bool(_compact_reject.get("error")) and bool(_compact_reject.get("remedy")),
+      f"-> {_compact_reject}")
+
 print(f"\n=== {len(FAILS)} FAILURES ===" if FAILS else
       "\n=== ALL ERROR-CODE TESTS PASS ===")
 sys.exit(1 if FAILS else 0)

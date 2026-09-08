@@ -30,10 +30,8 @@ def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 
     everywhere else — via `errors.stamp_row`. An ordinary program failure
     (a real RTE/OLE `exit_code`) carries no `code`, matching the INTENDED
     convention that `code` means a failed request, not a failed program —
-    a convention the top-level `execute_code` envelope does not yet honour
-    itself for a plain RTE/TLE (those come back `code: "internal"` there
-    today; see `errors.stamp_row`'s docstring), so do not read this row's
-    behavior as proof the two already agree.
+    the same convention `errors.ensure_code` applies to the top-level
+    `execute_code` envelope itself (see its own docstring).
 
     No per-run dependency installs happen here (see the `compare_execution`
     MCP tool's own docstring for why) — but a python3 snippet carrying a PEP

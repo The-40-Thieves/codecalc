@@ -256,10 +256,57 @@ def ensure_code(result: dict) -> dict:
     Only touches results that are failing and codeless. A successful result
     gets nothing — a `code` on an `ok: True` payload would read as a warning
     and there is no such thing here.
+
+    A result that reached a runtime — `verdict` is present exactly when the
+    code ran (contract.py's module docstring) — and carries no `error` of its
+    own is an ORDINARY per-run outcome, not a request codecalc itself refused:
+    `verdict`/`exit_code` already tell that story. `docs/contract/README.md`'s
+    "The program ran and failed" vs "Rejected before execution" draws this
+    exact line, and its own worked RTE example (`sys.exit(3)`) shows no `code`
+    at all — `code` marks a failed REQUEST, not a failed PROGRAM. Before this,
+    an empty `error` fell through `_from_message` to `internal` regardless: a
+    program that behaved exactly as written (a real `RTE`/`OLE`/`MLE`) or a
+    plain wall-clock timeout came back "a defect in codecalc; the message is
+    worth reporting verbatim" — the wrong direction for a model that just
+    wrote a program which failed on its own terms. `errors.stamp_row` already
+    draws the identical line one level down, for `compare_execution`/
+    `compare_edge_cases`'s per-row results; this is the same rule applied
+    where every OTHER tool result passes through `ensure_code` — `execute_
+    code`, `execute_code_stream`, `run_inspect`, `session_run` among them.
+
+    TLE is the one deliberate exception: a wall-clock or CPU deadline is
+    something the caller CAN act on (raise `timeout`), the same actionable
+    shape every other coded failure has, so it is classified `timeout` (still
+    `code_inferred: true` — nothing chose it at a raise site) even though it
+    also carries no `error`. An ordinary RTE/OLE/MLE gets no code at all: none
+    of the eight taxonomy entries means "a program you ran exited badly on its
+    own terms" — `internal` is a defect in codecalc, not a verdict about a
+    caller's program — so leaving `code` unset is the honest answer here, not
+    a gap a ninth enum member would need to fill.
+
+    A COMPILE failure (`phase: "compile"`, a nonzero `exit_code`/`verdict:
+    "RTE"` from `rustc`/`gcc`/whatever the language's plan compiles with, no
+    `error`) is deliberately the SAME as an ordinary run failure, not a
+    fourth case: retrying the identical request cannot succeed either way —
+    the fix is in the PROGRAM (its source has a syntax error), same as a
+    program that ran and exited 3 on its own terms. Neither backend emits a
+    distinct verdict for a compile failure (`contract.VERDICTS` is
+    `OK`/`TLE`/`OLE`/`MLE`/`RTE`, the same five either way) — introducing one
+    is a closed-enum, MAJOR-adjacent decision this function does not make on
+    its own; `phase` already tells a caller compiling and running are
+    different steps, and `stderr` already carries the compiler's own
+    diagnostic. See docs/contract/README.md's "The program ran and failed"
+    section for a worked compile-failure example.
     """
     if not isinstance(result, dict) or result.get("ok") is not False:
         return result
     if result.get("code"):
+        return result
+    if not result.get("error") and result.get("verdict") is not None:
+        if result.get("timed_out") or result.get("verdict") == "TLE":
+            result["code"] = TIMEOUT
+            result["remedy"] = REMEDIES[TIMEOUT]
+            result["code_inferred"] = True
         return result
     code = _from_message(str(result.get("error") or ""))
     result["code"] = code
@@ -306,15 +353,12 @@ def stamp_row(row: dict, *, timed_out: bool = False, timeout_message: str | None
     `exit_code` vs `code` (see docs/contract/README.md's "The program ran
     and failed" vs "Rejected before execution" shapes): a failed PROGRAM is
     told apart from a failed REQUEST by `verdict`'s presence, and `code`
-    is meant to mark only the latter. It is NOT yet what the top-level
-    execution envelope itself does: `execute_code` on a plain RTE
-    (`sys.exit(3)`) or a plain wall-clock timeout comes back `code:
-    "internal"` (`code_inferred: true`) today, because `executor.execute`
-    never sets `error` for either and `ensure_code`'s message matcher falls
-    through to `internal` on an empty message — pre-existing on `main`,
-    unrelated to this function, and tracked separately. This function
-    applies the rule as it is MEANT to work, not as the envelope currently
-    does; do not infer from this docstring that the two already agree.
+    is meant to mark only the latter. `ensure_code` itself now applies the
+    identical rule directly to a `verdict`-bearing, error-less result — see
+    its own docstring — so this row-level function and the top-level
+    execution envelope agree; that was not always true (a plain RTE/TLE
+    through `execute_code` used to come back `code: "internal"`, fixed
+    alongside this docstring).
     """
     if row.get("ok") is not False:
         return row
