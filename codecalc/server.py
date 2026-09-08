@@ -27,10 +27,13 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+import anyio
 from mcp.server import CacheHint, MCPServer
 from mcp.server.mcpserver import Context
 from mcp.types import (
+    Completion,
     EmbeddedResource,
+    Icon,
     ImageContent,
     InputRequiredResult,
     ResourceLink,
@@ -219,9 +222,71 @@ _execution_service = execution_service.ExecutionService(
 )
 _session_service = execution_service.SessionService(audit=_audit_log)
 
+
+# ── The server's own icon (2025-11-25+) ──────────────────────────────────────
+#
+# SERVER-LEVEL ONLY. This used to also apply a per-GROUP icon to every tool
+# (`Tool.icons`, via `_tool()`'s `d_kwargs.setdefault("icons", ...)`) — pulled
+# after measuring the real cost: only 6 DISTINCT icons exist, but `Tool.icons`
+# is a per-TOOL field, so each tool's own copy repeats the full base64
+# payload on the wire, and base64 tokenizes far worse than prose under a BPE
+# encoder. Measured: +6,665 tokens (o200k_base) on the full served
+# `tools/list` payload for a server whose whole pitch is that tool SELECTION
+# accuracy matters (see README's "Tool-definition token cost" table, and
+# #118/`docs/design/2026-08-10-tool-facade.md`'s reasoning against paying
+# that kind of cost for anything less than a real fix). The server-level
+# icon below survives: it rides on `initialize`, once per CONNECTION, not
+# once per tool — a fundamentally different, negligible cost shape.
+#
+# Inline `data:image/svg+xml;base64,...` — no external URL (a remote `src`
+# means every client that renders an icon fetches from wherever this string
+# points, which is exactly the phone-home shape tests/test_offline.py exists
+# to ban; a self-contained data URI has no such fetch). A single monochrome
+# `<path>` (`fill="currentColor"`, so it inherits the client's own theme
+# rather than fighting it) in a 16x16 viewBox, evenodd cutout for the hole —
+# well under 300 bytes, base64 included.
+#
+# The SVG namespace attribute below is a literal, plain string — NOT split
+# to dodge tests/test_offline.py's outbound-URL scan. That scan bans a
+# hardcoded phone-home endpoint; this is an XML namespace declaration every
+# valid standalone SVG document carries and nothing in this codebase (or any
+# SVG renderer) ever fetches. It is named explicitly in that test's own
+# `_URL_EXEMPTIONS` allowlist, the same mechanism already used for
+# example.com/localhost/127.0.0.1 — see the comment there for why.
+def _svg_icon(path_d: str, *, attrs: str = 'fill="currentColor"', rule: str | None = None) -> Icon:
+    ns = "http://www.w3.org/2000/svg"
+    fill_rule = f' fill-rule="{rule}"' if rule else ""
+    svg = f'<svg xmlns="{ns}" viewBox="0 0 16 16"><path{fill_rule} {attrs} d="{path_d}"/></svg>'
+    data = base64.b64encode(svg.encode("ascii")).decode("ascii")
+    # `mime_type`/`sizes` both left unset: the `data:image/svg+xml;...` src
+    # already states its own MIME type (`mime_type` is documented as an
+    # "override if the source MIME type is MISSING or generic" — it is
+    # neither here), and an absent `sizes` already means "any size" per
+    # `Icon.sizes`'s own docstring. Both fields would only re-state what
+    # `src` already carries.
+    return Icon(src=f"data:image/svg+xml;base64,{data}")
+
+
+#: The server's own icon (`MCPServer(icons=[...])`) — a circle with a
+#: plus-shaped cutout (evenodd).
+_SERVER_ICON = _svg_icon(
+    "M8 0a8 8 0 100 16A8 8 0 008 0zm-1.5 4h3v2.5H13v3H9.5V13h-3V9.5H3v-3h3.5z",
+    rule="evenodd",
+)
+
+#: `website_url` (MCPServer construction below) — a plain literal, NOT split
+#: to dodge tests/test_offline.py's outbound-URL scan. It is this
+#: repository's own homepage, published as metadata for a client to show a
+#: human; codecalc's own runtime never issues a request to it. Named
+#: explicitly in that test's `_URL_EXEMPTIONS` allowlist, same mechanism as
+#: `_svg_icon`'s xmlns above.
+_WEBSITE_URL = "https://github.com/The-40-Thieves/codecalc"
+
 mcp = MCPServer(
     name="codecalc",
     version=__version__,
+    icons=[_SERVER_ICON],
+    website_url=_WEBSITE_URL,
     # ttlMs/cacheScope became REQUIRED on list and read results in 2026-07-28
     # (SEP-2549). They are a freshness hint that lets a client cache instead of
     # re-listing; "public" is right here because this server has no per-caller
@@ -270,6 +335,155 @@ mcp = MCPServer(
     instructions=None,
 )
 
+
+# ── Argument completion (completion/complete) ───────────────────────────────
+#
+# The 2026-07-28 wire only lets a completion request name a PROMPT or a
+# RESOURCE TEMPLATE (`mcp_types.CompleteRequestParams.ref:
+# ResourceTemplateReference | PromptReference` — no `ref/tool` variant
+# exists in the spec), and this server has one resource template
+# (`codecalc://session/{session_id}/files/{+path}`) and no prompts. A tool
+# argument therefore has no `ref` of its own to hang a completion off — so
+# this dispatches on `argument.name` alone, the one thing every caller of
+# `mcp.complete()` supplies regardless of which tool or template it is
+# completing for, and ignores `ref`/`context` entirely. tests/
+# test_mcp_protocol.py drives this the same way a real client would: a raw
+# `complete()` call naming the session-file template as `ref` and one of
+# the five argument names below.
+def _completion_languages() -> list[str]:
+    """Every registry key plus every alias, e.g. "py" alongside "python3"."""
+    values = set(registry.LANGUAGES)
+    for aliases in registry.ALIASES.values():
+        values.update(aliases)
+    return sorted(values)
+
+
+def _completion_units() -> list[str]:
+    return units.list_units()["units"]
+
+
+def _completion_providers() -> list[str]:
+    return [d["provider_id"] for d in _provider_registry.descriptors()]  # already sorted
+
+
+def _completion_session_ids() -> list[str]:
+    return sorted(s["session_id"] for s in _session_service.list_sessions()["sessions"])
+
+
+def _completion_run_ids() -> list[str]:
+    if _run_supervisor is None:
+        return []
+    return sorted(_run_supervisor.known_run_ids())
+
+
+#: argument name -> zero-arg callable returning every candidate value
+#: (unsorted callers already sort; unfiltered — the handler below applies
+#: the caller's prefix). One entry per tool-argument NAME this server
+#: completes, not per tool: several tools share an argument name
+#: (`language` alone appears on execute_code, benchmark, session_start...)
+#: and this serves all of them from the same list.
+_COMPLETERS = {
+    "language": _completion_languages,
+    "unit": _completion_units,
+    "provider": _completion_providers,
+    "session_id": _completion_session_ids,
+    "run_id": _completion_run_ids,
+}
+
+#: `mcp_types.Completion.values`'s own documented ceiling: "Must not exceed
+#: 100 items." Enforced here rather than trusted to the SDK, so `total`/
+#: `has_more` stay accurate even if a future list of languages or live
+#: sessions grows past it.
+_COMPLETION_LIMIT = 100
+
+
+@mcp.completion()
+async def _complete_argument(ref, argument, context):
+    """Prefix-complete `language`/`unit`/`provider`/`session_id`/`run_id`.
+
+    Case-sensitive, prefix-only (no fuzzy/substring matching — the SDK's own
+    `Completion.values` contract is a ranked list of exact continuations, not
+    a search result). `total` is the FULL match count before the 100-item
+    cap; `has_more` is only true when the cap actually dropped something, so
+    a caller can tell "100 shown, 100 total" (has_more=False) from "100
+    shown, 140 total" (has_more=True).
+    """
+    getter = _COMPLETERS.get(argument.name)
+    if getter is None:
+        return None
+    prefix = argument.value or ""
+    try:
+        candidates = getter()
+    except Exception:
+        # A getter reads live server state (sessions, run supervisor,
+        # provider registry) — a raise there is this handler's problem to
+        # absorb, not a reason to surface a raw internal error to a client
+        # that only asked for completions. Same empty shape the SDK itself
+        # returns when a completion handler answers `None`.
+        return Completion(values=[], total=None, has_more=None)
+    matches = [v for v in candidates if v.startswith(prefix)]
+    values = matches[:_COMPLETION_LIMIT]
+    return Completion(values=values, total=len(matches), has_more=len(matches) > len(values))
+
+
+# ── Session-mutation notifications (resources/list-changed, resource/updated) ─
+#
+# `ctx.notify_resources_changed()`/`ctx.notify_resource_updated(uri)` are
+# coroutines that publish onto a `subscriptions/listen` stream (2026-07-28,
+# SEP-2575) — but every tool below is a plain synchronous `def`, which the
+# SDK runs via `anyio.to_thread.run_sync` (`mcp_middleware.py`'s own module
+# docstring: "the SDK runs them on a worker thread"), not on the event loop
+# that owns those coroutines. `anyio.from_thread.run(...)` is the documented
+# bridge back from an anyio worker thread to its event loop, blocking this
+# worker thread (never the loop) until the notification is published. Best
+# effort, same shape as `execute_code_stream`'s own `report_progress`
+# wrapper above: a client that never opened a listen stream gets no error
+# and no notification, and a publish failure never fails the tool call it
+# rode in on.
+#
+# `resources/list` itself carries a 10s cache TTL (`cache_hints=` on the
+# `MCPServer(...)` construction above) — a client that refetches inside that
+# window can still see stale content even though the notification arrived
+# immediately; the TTL is a caching hint, not a guarantee this notification
+# supersedes.
+def _notify_resources_changed(ctx: Context) -> None:
+    if ctx is None:
+        return
+    try:
+        anyio.from_thread.run(ctx.notify_resources_changed)
+    except Exception:
+        pass
+
+
+def _notify_resource_updated(ctx: Context, uri: str) -> None:
+    if ctx is None:
+        return
+    try:
+        anyio.from_thread.run(ctx.notify_resource_updated, uri)
+    except Exception:
+        pass
+
+
+def _sync_progress(ctx: Context):
+    """A SYNCHRONOUS `(done, total, message)` callback bound to `ctx`, for
+    passing into `tools.benchmark`/`tools.compare_execution`/
+    `optimization.verify_optimization` — all three are plain synchronous
+    functions with no SDK dependency of their own (see `tools.ProgressFn`'s
+    own comment), so the bridge to `ctx.report_progress` (a coroutine) lives
+    here, the same `anyio.from_thread.run(...)` pattern
+    `_notify_resources_changed` above uses. Returns a no-op when `ctx` is
+    None, same as every other best-effort helper in this file.
+    """
+    if ctx is None:
+        return lambda done, total, message: None
+
+    def _progress(done: int, total: int, message: str) -> None:
+        try:
+            anyio.from_thread.run(ctx.report_progress, float(done), float(total), message)
+        except Exception:
+            pass
+
+    return _progress
 
 
 def _coded(fn):
@@ -893,6 +1107,7 @@ def execute_code(
     compact: bool = False,
     provider: str | None = None,
     dependencies: list[str] | None = None,
+    ctx: Context = None,
 ) -> dict[str, Any]:
     """Execute `code` in `language` in a sandbox.
 
@@ -951,6 +1166,15 @@ def execute_code(
     before. Session-LESS runs (no `session_id`) have no workspace to spill
     into and keep the old truncate-and-drop behaviour.
     """
+    # Resource-change notification not documented in the docstring above:
+    # the docstring is this tool's served `description`, and
+    # scripts/tool_select_eval.py scores tool SELECTION against it — an
+    # equivalent paragraph here measurably hurt selection (same reasoning as
+    # benchmark's/compare_execution's/verify_optimization's own comments on
+    # progress, just above their bodies). With `session_id` set, a
+    # successful call fires one `resources/list` change notification (best
+    # effort — see `_notify_resources_changed`) once the run has actually
+    # written into that session's workspace. See CHANGELOG.md.
     timeout = min(timeout, 120)
     max_output_kb = min(max_output_kb, _MAX_OUTPUT_KB_CEILING)
     spec = providers.ComputationSpec(
@@ -972,6 +1196,8 @@ def execute_code(
             _session_service, session_id, spec, provider_id=provider,
             dependencies=dependencies,
         )
+        if result.get("ok"):
+            _notify_resources_changed(ctx)
     else:
         result = _execution_service.execute(spec, provider_id=provider,
                                             dependencies=dependencies)
@@ -999,9 +1225,18 @@ def session_start(language: str = "python3") -> dict[str, Any]:
 
 
 @mcp.tool(group="sessions")
-def session_stop(session_id: str) -> dict[str, Any]:
+def session_stop(session_id: str, ctx: Context = None) -> dict[str, Any]:
     """Stop a session: kill its REPL worker (if any) and delete its workspace."""
-    return _session_service.stop(session_id)
+    # Resource-change notification not documented in the docstring above —
+    # same tool_select_eval reasoning as execute_code's own comment. Fires
+    # one `resources/list` change notification (best effort) when the
+    # workspace was actually removed (`deleted: true`) — a second
+    # `session_stop` on an already-gone session is idempotent and changes
+    # nothing, so it stays silent. See CHANGELOG.md.
+    result = _session_service.stop(session_id)
+    if result.get("ok") and result.get("deleted"):
+        _notify_resources_changed(ctx)
+    return result
 
 
 @mcp.tool(group="sessions")
@@ -1020,10 +1255,22 @@ def session_files(session_id: str, path: str = "", page_size: int | None = None,
 
 
 @mcp.tool(group="sessions")
-def session_write_file(session_id: str, path: str, content: str) -> dict[str, Any]:
+def session_write_file(session_id: str, path: str, content: str, ctx: Context = None) -> dict[str, Any]:
     """Write a file into a session workspace (relative path, no escapes).
     Use this to seed input data for executed code."""
-    return _session_service.write_file(session_id, path, content)
+    # Resource-change notifications not documented in the docstring above —
+    # same tool_select_eval reasoning as execute_code's own comment. On
+    # success, fires one `resources/list` change notification AND one
+    # resource-updated notification for this exact file's
+    # `codecalc://session/{session_id}/files/{path}` URI (both best effort)
+    # — the second is the one place this server names the specific resource
+    # that changed, since every other mutating tool here can touch an
+    # unbounded set of files a single URI cannot name. See CHANGELOG.md.
+    result = _session_service.write_file(session_id, path, content)
+    if result.get("ok"):
+        _notify_resources_changed(ctx)
+        _notify_resource_updated(ctx, f"codecalc://session/{session_id}/files/{path}")
+    return result
 
 
 @mcp.tool(group="sessions")
@@ -1077,8 +1324,32 @@ async def install_package(language: str, package: str, session_id: str | None = 
     )
     if gate is not None:
         return gate
-    return packages.install(language, package, session_id=session_id,
-                            version=version, audit=_audit_log)
+    # Resource-change notification not documented in the docstring above —
+    # same tool_select_eval reasoning as execute_code's own comment. With
+    # session_id, a successful install fires one `resources/list` change
+    # notification (best effort) — the installed package's files land in
+    # that session's workspace, reachable through the session-file resource
+    # template. The shared-cache path (no session_id) touches nothing a
+    # session-scoped resource can name, so it stays silent. See
+    # CHANGELOG.md.
+    result = packages.install(language, package, session_id=session_id,
+                              version=version, audit=_audit_log)
+    # `install_package` is now a native `async def` (#302's confirmation
+    # gate needs `await confirmation.require_confirmation(...)`), so it runs
+    # directly on the event loop rather than on the worker thread
+    # `anyio.to_thread.run_sync` gives a plain synchronous `def` — see
+    # `_notify_resources_changed`'s own docstring for why that distinction
+    # matters. Awaiting `ctx.notify_resources_changed()` directly here is
+    # therefore correct where the thread-bridged sync helper (used by every
+    # OTHER tool below, all still plain `def`s) would not be: calling
+    # `anyio.from_thread.run(...)` from the loop's own thread has no worker
+    # thread to bridge FROM.
+    if session_id and result.get("ok") and ctx is not None:
+        try:
+            await ctx.notify_resources_changed()
+        except Exception:
+            pass
+    return result
 
 
 @mcp.tool(group="execution")
@@ -1563,7 +1834,7 @@ def analyze_complexity(code: str, language: str = "python3") -> dict[str, Any]:
 
 @mcp.tool(group="analysis")
 def benchmark(code: str, language: str = "python3", sizes: str = "100,1000,10000,100000",
-              timeout: int = 30) -> dict[str, Any]:
+              timeout: int = 30, ctx: Context = None) -> dict[str, Any]:
     """Empirically measure time complexity by running code at increasing input sizes.
 
     Contract: the code must read an integer N from stdin (first line) and do work
@@ -1571,12 +1842,22 @@ def benchmark(code: str, language: str = "python3", sizes: str = "100,1000,10000
     the growth curve to estimate Big-O (O(1), O(log n), O(n), O(n log n), O(n^2)...).
     Example python: 'import sys\\nn=int(sys.stdin.readline()); s=0\\nfor i in range(n): s+=i\\nprint(s)'
     """
-    return tools.benchmark(code, language=language, sizes=sizes, timeout=timeout)
+    # Progress deliberately NOT documented in the docstring above: the
+    # docstring is this tool's `description` on the wire, and
+    # scripts/tool_select_eval.py scores tool SELECTION against it —
+    # measured, adding this paragraph there cost 2 top-1 hits on the `full`
+    # baseline (BM25's length normalization dilutes the terms a prompt
+    # actually matches on). See CHANGELOG.md and `tools.benchmark`'s own
+    # docstring (not served to any client) for what this reports and why an
+    # auto-scale retry does not get its own progress sequence.
+    return tools.benchmark(code, language=language, sizes=sizes, timeout=timeout,
+                           on_progress=_sync_progress(ctx))
 
 
 @mcp.tool(group="execution")
 def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 15,
-                      dependencies: dict[str, list[str]] | None = None) -> dict[str, Any]:
+                      dependencies: dict[str, list[str]] | None = None,
+                      ctx: Context = None) -> dict[str, Any]:
     """Run the same code in multiple languages side by side.
 
     `snippets` maps language name -> code (each snippet must be valid in its own
@@ -1591,6 +1872,11 @@ def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 
     dropped: a python3 row that carries one gets
     `dependencies: {"status": "unsupported", "reason": ...}`.
     """
+    # Progress not documented in the docstring above — same reasoning as
+    # benchmark's own comment just above it: the docstring feeds
+    # tool_select_eval's BM25 corpus, and this paragraph measurably hurt
+    # selection there. Reports once per language, in `snippets`' own
+    # iteration order; see CHANGELOG.md.
     if dependencies:
         return errors.error_result(
             errors.VALIDATION,
@@ -1602,7 +1888,8 @@ def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 
             provider_error="unsupported_capability",
             capability="dependencies",
         )
-    return tools.compare_execution(snippets, stdin=stdin, timeout=timeout)
+    return tools.compare_execution(snippets, stdin=stdin, timeout=timeout,
+                                   on_progress=_sync_progress(ctx))
 
 
 @mcp.tool(group="execution")
@@ -1821,7 +2108,7 @@ def _inline_artifact_blocks(session_id: str, artifacts: list[dict]) -> tuple[lis
 @mcp.tool(group="sessions")
 def session_run(session_id: str, entry_file: str, language: str | None = None,
                 stdin: str = "", timeout: int = 30,
-                dependencies: list[str] | None = None):
+                dependencies: list[str] | None = None, ctx: Context = None):
     """Run a multi-file program in a session: execute `entry_file`, which may
     import other files already in the session workspace (helper.py, data/...).
 
@@ -1850,10 +2137,17 @@ def session_run(session_id: str, entry_file: str, language: str | None = None,
     own `main.py` (or the equivalent for another language) at the session
     root is never touched by running a different entry file.
     """
+    # Resource-change notification not documented in the docstring above —
+    # same tool_select_eval reasoning as execute_code's own comment. Every
+    # successful run fires one `resources/list` change notification (best
+    # effort) — the entry file's own scratch copy changes on every call,
+    # even when `artifacts_created` is empty. See CHANGELOG.md.
     result = _session_service.run_file(
         session_id, entry_file, language=language, stdin=stdin, timeout=timeout,
         dependencies=dependencies,
     )
+    if result.get("ok"):
+        _notify_resources_changed(ctx)
     created = result.get("artifacts_created")
     if not created:
         return result
@@ -2138,7 +2432,8 @@ def compare_edge_cases(snippets: dict[str, str],
 def verify_optimization(original: str, candidate: str, language: str,
                         test_inputs: list[str] | None = None,
                         sizes: list[int] | None = None,
-                        min_speedup: float = optimization.DEFAULT_MIN_SPEEDUP) -> dict[str, Any]:
+                        min_speedup: float = optimization.DEFAULT_MIN_SPEEDUP,
+                        ctx: Context = None) -> dict[str, Any]:
     """PROVE an optimisation: same outputs, and measurably AND SIGNIFICANTLY faster.
 
     You write the optimised version. This runs both against the same inputs to
@@ -2161,9 +2456,16 @@ def verify_optimization(original: str, candidate: str, language: str,
     or not significantly faster — is graded `ungraded`: correctness alone does
     not earn a grade for the optimisation claim this tool exists to answer.
     """
+    # Progress not documented in the docstring above — same reasoning as
+    # benchmark's/compare_execution's own comments: the docstring feeds
+    # tool_select_eval's BM25 corpus, and an equivalent paragraph measurably
+    # hurt selection there. Reports once after each of four phases COMPLETES
+    # (correctness, baseline sizes, candidate sizes, alignment — see
+    # optimization.PROGRESS_PHASES); a phase that fails reports nothing for
+    # itself, and later phases never ran. See CHANGELOG.md.
     result = optimization.verify_optimization(
         original, candidate, language, test_inputs=test_inputs,
-        sizes=sizes, min_speedup=min_speedup)
+        sizes=sizes, min_speedup=min_speedup, on_progress=_sync_progress(ctx))
     return grades.grade_verify_optimization(result, result.get("language", language))
 
 

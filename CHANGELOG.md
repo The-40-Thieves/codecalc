@@ -64,6 +64,96 @@ behind it.
   spinning up the container. Validated against the registry's own
   `task validate`/`task build --tools` tooling — see `docs/distribution.md`
   for the exact submission steps; this commit does not open that PR.
+- **Argument completion (`completion/complete`) for `language`, `unit`,
+  `provider`, `session_id` and `run_id`.** The 2026-07-28 wire only lets a
+  completion request name a prompt or a resource template
+  (`mcp_types.CompleteRequestParams.ref` has no `ref/tool` variant), and
+  this server has one resource template and no prompts — so the new
+  `@mcp.completion()` handler (`server.py`'s `_complete_argument`) dispatches
+  on `argument.name` alone rather than on `ref`, and serves any of the five
+  names regardless of which tool or template the request nominally targets.
+  `language` completes registry keys plus every alias (`registry.py`);
+  `unit` completes `units.list_units()`; `provider` completes
+  `_provider_registry.descriptors()`'s ids; `session_id` completes live and
+  on-disk sessions (`SessionService.list_sessions()`); `run_id` completes
+  `RunSupervisor.known_run_ids()` (new — the alternative was server.py
+  reaching into `RunSupervisor`'s private `_runs` table directly). Matching
+  is prefix-only and case-sensitive, capped at the SDK's own 100-item
+  ceiling on `Completion.values`, with `total`/`has_more` reporting the full
+  match count and whether the cap actually dropped anything. A getter that
+  raises (each reads live server state — sessions, the run supervisor, the
+  provider registry) is caught and answered with an empty completion rather
+  than surfacing a raw internal error to a client that only asked for
+  completions.
+- **`resources/list`-changed and resource-updated notifications on every
+  tool that mutates a session's workspace.** `session_run`,
+  `execute_code(session_id=...)`, `session_write_file`, `session_stop`
+  (only when it actually removed a workspace — a second stop on an
+  already-gone session is idempotent and stays silent), and
+  `install_package(session_id=...)` each now fire one
+  `ctx.notify_resources_changed()` (best effort) on success;
+  `session_write_file` additionally fires `ctx.notify_resource_updated()`
+  for the exact `codecalc://session/{session_id}/files/{path}` URI it just
+  rewrote, since it is the one mutating tool here that names a single file
+  rather than an unbounded set. Both are coroutines published onto a
+  `subscriptions/listen` stream (2026-07-28, SEP-2575); every tool above is
+  a plain synchronous `def` that the SDK runs on a worker thread, so the new
+  `_notify_resources_changed`/`_notify_resource_updated` helpers bridge back
+  to the event loop via `anyio.from_thread.run(...)` rather than making
+  these tools async. `resources/list` itself still carries the existing 10s
+  cache TTL (`cache_hints=` on the `MCPServer` construction) — a client
+  refetching inside that window can still see stale content even though the
+  notification arrived immediately. Documented in a code comment on each of
+  the five tools above, not their docstrings: the docstring is each tool's
+  served `description`, and `scripts/tool_select_eval.py` scores tool
+  selection against it — measured, an earlier draft of this same paragraph
+  in the docstrings cost 1-2 top-1 hits against the checked-in `full`/`dev`
+  baselines (one flip: a CSV-save prompt started picking `session_read_file`
+  over `session_write_file`) before it was moved out, the same fix already
+  applied to the progress-notification comments below.
+- **A server `icons` entry (2025-11-25+) and `website_url`.**
+  `MCPServer(icons=[...], website_url=...)` carries one server-level icon (a
+  monochrome, under-300-byte inline `data:image/svg+xml;base64,...` glyph)
+  and a `website_url` pointing at this repository. Both are inline/self-
+  contained data, never an external `src` — the same no-phone-home reasoning
+  `tests/test_offline.py` already enforces elsewhere in this package. Both
+  literals are written plainly (not string-split to dodge that test's
+  outbound-URL scan); `tests/test_offline.py` instead gained an explicit,
+  commented `_URL_EXEMPTIONS` entry for each — the SVG namespace declaration
+  every standalone SVG carries, and this repository's own homepage — the
+  same mechanism already used for example.com/localhost/127.0.0.1. Both
+  ride on `initialize`, once per **connection** —
+  measured before/after, `tools/list`'s served payload is byte-identical
+  (59,902 bytes / 15,952 tokens, `o200k_base`, either way): **+0** tokens on
+  the number README's "Tool-definition token cost" section exists to track.
+
+  A per-GROUP `Tool.icons` entry on every tool was tried first, and pulled
+  after measuring its real cost: `Tool.icons` is a per-TOOL field, so each
+  of the 52 tools repeated its group's full base64 payload on the wire, and
+  base64 tokenizes far worse than prose under a BPE encoder — **+6,665
+  tokens** (`o200k_base`, +11,540 bytes) on the full served `tools/list`
+  payload, on a server whose whole pitch (see README's "Reducing the tool
+  surface" and `docs/design/2026-08-10-tool-facade.md`) is that tool
+  SELECTION accuracy matters more than a marginal token saving elsewhere.
+  Not an acceptable trade; removed before release.
+- **Progress notifications on `benchmark`, `verify_optimization` and
+  `compare_execution`**, the same `ctx.report_progress` mechanism
+  `execute_code_stream` already used. `benchmark` reports once per
+  requested size, during the first (non-rescaled) measurement pass only —
+  an auto-scale retry is a distinct, unpredictable-length phase, and giving
+  it its own 1..total sequence would stop the WHOLE call being monotone.
+  `compare_execution` reports once per language, in `snippets`' own
+  iteration order. `verify_optimization` reports once after each of four
+  phases COMPLETES — correctness, baseline sizes, candidate sizes,
+  alignment (`optimization.PROGRESS_PHASES`) — so a phase that fails
+  reports nothing for itself, and the phases after it never ran. All three
+  tools are plain synchronous `def`s that the SDK runs on a worker thread,
+  so `tools.py`/`optimization.py` gained a synchronous `on_progress(done,
+  total, message)` callback parameter (`tools.ProgressFn`) with no SDK
+  dependency of its own; server.py's new `_sync_progress(ctx)` is the one
+  place that bridges it to the async `ctx.report_progress` via
+  `anyio.from_thread.run(...)`, the same pattern the resource-change
+  notifications above use.
 
 ### Fixed
 

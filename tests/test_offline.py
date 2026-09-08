@@ -132,9 +132,30 @@ for var in ("CODECALC_LLM_GATEWAY", "CODECALC_LLM_API_KEY", "CODECALC_LLM_MODEL"
 # placeholder still unresolved. No genuine hardcoded phone-home URL can
 # contain an unresolved `{...}`, so this narrows the ban to what it is meant
 # to catch without exempting anything a literal endpoint could hide behind.
+#: Two more exemptions, same shape as example.com/localhost/127.0.0.1 above —
+#: named explicitly rather than pattern-matched, so adding a THIRD exemption
+#: later requires a THIRD name here, never a widened pattern that could
+#: swallow a genuine phone-home URL by accident.
+#:
+#:   "http://www.w3.org/2000/svg"  — the SVG root element's XML namespace
+#:     attribute (server.py's `_svg_icon`). A namespace declaration is not a
+#:     fetch: no HTTP client in this codebase, nor any SVG renderer, ever
+#:     resolves it as an address — it is a literal string every valid
+#:     standalone SVG document carries, checked at
+#:     https://www.w3.org/TR/SVG11/struct.html#SVGElement.
+#:   "https://github.com/The-40-Thieves/codecalc"  — `_WEBSITE_URL`, this
+#:     repository's own homepage, published verbatim as `MCPServer`'s
+#:     `website_url=` metadata field (2025-11-25+). A client MAY show it to
+#:     a human as a link; codecalc's own runtime never issues a request to
+#:     it — the same "never fetched by this package" property example.com
+#:     is exempted for.
+_URL_EXEMPTIONS = (
+    "example.com", "localhost", "127.0.0.1",
+    "http://www.w3.org/2000/svg",
+    "https://github.com/The-40-Thieves/codecalc",
+)
 urls = sorted({u for u in re.findall(r"https?://[^\s\"'`)]+", ALL_SRC)
-               if "example.com" not in u and "localhost" not in u
-               and "127.0.0.1" not in u and "{" not in u})
+               if not any(exempt in u for exempt in _URL_EXEMPTIONS) and "{" not in u})
 check("no outbound URL is embedded in the package", not urls, f"-> {urls[:3]}")
 
 # ═══ the tools that replaced them need no network ══════════════════════════
