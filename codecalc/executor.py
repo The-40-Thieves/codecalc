@@ -1864,6 +1864,7 @@ def execute(language: str, code: str, stdin: str = "", timeout: int = 10,
 async def execute_stream(spec, on_progress=None) -> dict:
     """Execute a canonical request and report protocol-neutral progress."""
     import asyncio
+    import contextlib
 
     if _rust is None:
         result = execute(
@@ -1880,6 +1881,8 @@ async def execute_stream(spec, on_progress=None) -> dict:
     workdir = Path(tempfile.mkdtemp(prefix="codecalc-stream-"))
     created_identity = _dir_identity(workdir)
     stdin_path = None
+    proc = None
+    communicate_task = None
     try:
         args = [_rust, "--lang", spec.language, "--timeout", str(spec.timeout),
                 "--workdir", str(workdir)]
@@ -1909,17 +1912,36 @@ async def execute_stream(spec, on_progress=None) -> dict:
         await proc.stdin.drain()
         proc.stdin.close()
 
+        # `proc.communicate()` is started HERE, as a background task, not
+        # after the progress loop below finishes. The old code called
+        # `proc.wait()` in the loop and only drained stdout/stderr once that
+        # returned — but `wait()` never reads a byte, and the Rust binary's
+        # final JSON (the sandboxed program's captured stdout, up to
+        # `max_output_kb`) goes out over the same pipe `wait()` was watching.
+        # Once that JSON exceeds the OS pipe buffer (64 KiB, `F_GETPIPE_SZ`'s
+        # default) or asyncio's own `StreamReader` backpressure limit (also
+        # 64 KiB), the child blocks inside `write()` with room left to fill —
+        # and nothing was ever going to drain it, because the loop's own exit
+        # condition (`proc.returncode` becoming set) is the thing that write()
+        # blocks forever. Confirmed live: a 240 KiB-capped stream sat for
+        # >500s in `wchan anon_pipe_write` with an already-finished child and
+        # a workdir that had already written the full output to `run.out`.
+        # Starting the drain concurrently, before the loop even begins
+        # polling, means the pipe is never left unread regardless of how
+        # large the result is.
+        communicate_task = asyncio.create_task(proc.communicate())
+
         # The Rust backend now writes `run.out` inside its own scratch
         # subdirectory, not directly under `workdir` — see
         # registry.RUN_SCRATCH_DIRNAME's docstring.
         out_path = workdir / registry.RUN_SCRATCH_DIRNAME / "run.out"
         last_len = 0
         partial = ""
-        while proc.returncode is None:
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=0.25)
-            except TimeoutError:
-                pass
+        while not communicate_task.done():
+            # `asyncio.wait`, not `wait_for` — `wait_for` cancels the awaited
+            # future on its own timeout, which would tear down the very
+            # drain this loop depends on after the first 0.25s tick.
+            await asyncio.wait({communicate_task}, timeout=0.25)
             if out_path.exists():
                 data = out_path.read_bytes()
                 if len(data) > last_len:
@@ -1929,7 +1951,7 @@ async def execute_stream(spec, on_progress=None) -> dict:
                     if on_progress is not None:
                         await on_progress(last_len, f"stdout so far: {last_len} bytes")
 
-        stdout_bytes, stderr_bytes = await proc.communicate()
+        stdout_bytes, stderr_bytes = communicate_task.result()
         result = json.loads(stdout_bytes.decode(errors="replace"))
         if not isinstance(result, dict) or "ok" not in result:
             return {"ok": False,
@@ -1944,6 +1966,17 @@ async def execute_stream(spec, on_progress=None) -> dict:
         result.pop("spawn_error", None)
         return contract.stamp(result)
     except Exception as exc:
+        if communicate_task is not None and not communicate_task.done():
+            # Otherwise a failure elsewhere in this block (e.g. `on_progress`
+            # raising) leaves the drain task running unobserved: nothing
+            # awaits it, its own exceptions are logged as "never retrieved"
+            # noise, and the rust process it was draining outlives this
+            # function with only `_rmtree_checked` in `finally` cleaning up
+            # its now-orphaned workdir, never the process itself.
+            communicate_task.cancel()
+        if proc is not None and proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
         return contract.stamp({"ok": False, "error": f"stream failed: {exc}"})
     finally:
         if stdin_path:
