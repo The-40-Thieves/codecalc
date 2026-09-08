@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _mcp_client import over_stdio
+from _mcp_client import auto_confirm, over_stdio
 
 FAILS = []
 #: Every check() call, pass or fail — the raw material for the "N checks, M
@@ -45,7 +45,12 @@ async def _txt(r) -> str:
 
 
 async def main():
-    async with over_stdio() as client:
+    # install_package (step 7 below) is now gated behind a confirmation —
+    # codecalc/confirmation.py — so this client needs an elicitation_callback
+    # to get past it. `auto_confirm` always answers `confirm: true`; the
+    # decline/cancel/malformed paths have their own coverage in
+    # tests/test_confirmation_gate.py.
+    async with over_stdio(elicitation_callback=auto_confirm) as client:
         tools = (await client.list_tools()).tools
         names = sorted(t.name for t in tools)
         print("tools:", len(names), names)

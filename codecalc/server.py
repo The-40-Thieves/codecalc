@@ -32,6 +32,7 @@ from mcp.server.mcpserver import Context
 from mcp.types import (
     EmbeddedResource,
     ImageContent,
+    InputRequiredResult,
     ResourceLink,
     TextContent,
     TextResourceContents,
@@ -42,6 +43,7 @@ from . import (
     __version__,
     capabilities,
     complexity,
+    confirmation,
     contract,
     doctor,
     errors,
@@ -1018,9 +1020,15 @@ def session_artifacts(session_id: str) -> dict[str, Any]:
 # original report of install-time hook risk (npm postinstall, Python build
 # backends, Cargo build scripts) that the docstring's warning below exists
 # to carry forward to every caller.
-def install_package(language: str, package: str, session_id: str | None = None,
-                    version: str | None = None) -> dict[str, Any]:
+async def install_package(language: str, package: str, session_id: str | None = None,
+                          version: str | None = None,
+                          ctx: Context = None) -> dict[str, Any] | InputRequiredResult:
     """Install a package for a language (uv pip / npm / gem / go get / cargo add...).
+
+    Asks the caller to confirm before installing (a protocol-level gate, not
+    just the `anthropic/requiresUserInteraction` `_meta` hint — see
+    codecalc/confirmation.py); a declined or malformed confirmation refuses
+    with no install attempted.
 
     With session_id, installs into that session's workspace so executed code
     can import it. Without, installs into a shared cache.
@@ -1036,6 +1044,21 @@ def install_package(language: str, package: str, session_id: str | None = None,
     filesystem is not confined. Do not point this at untrusted input. See
     SECURITY.md.
     """
+    echo = {"language": language, "package": package}
+    if version:
+        echo["version"] = version
+    message = (
+        f"Install {package}" + (f"=={version}" if version else "") + f" for {language}"
+        + (f" into session {session_id}" if session_id else " into the shared cache")
+        + "? This runs an unsandboxed installer subprocess that can execute "
+          "arbitrary install-time hooks (see SECURITY.md)."
+    )
+    gate = await confirmation.require_confirmation(
+        ctx, tool="install_package", message=message, echo=echo,
+        audit_log=_audit_log, session_id=session_id,
+    )
+    if gate is not None:
+        return gate
     return packages.install(language, package, session_id=session_id,
                             version=version, audit=_audit_log)
 
@@ -1581,12 +1604,17 @@ def runtimes_status(languages: str = "") -> dict[str, Any]:
 
 
 @mcp.tool(group="admin")
-def update_runtimes(languages: str = "", apply: bool = False, timeout: int = 600) -> dict[str, Any]:
+async def update_runtimes(languages: str = "", apply: bool = False, timeout: int = 600,
+                          ctx: Context = None) -> dict[str, Any] | InputRequiredResult:
     """Update language runtimes. SAFE BY DEFAULT: with apply=False this is a
     dry run — it returns the update commands that WOULD run without changing
     anything. Pass apply=True to actually execute them (mise up, rustup update,
     swiftly update, apt-get upgrade of language packages, npm -g update, uv tool
     upgrade). `languages` = comma-separated subset; empty = all.
+
+    apply=True asks the caller to confirm first (a protocol-level gate, not
+    just the `anthropic/requiresUserInteraction` `_meta` hint — see
+    codecalc/confirmation.py); apply=False is never gated, since nothing runs.
 
     PRIVILEGE: the apt manager updates system packages and its command begins
     with `sudo`. Those commands do NOT run unless the HOST has set
@@ -1600,6 +1628,18 @@ def update_runtimes(languages: str = "", apply: bool = False, timeout: int = 600
     downloads and installs. "Dry run" bounds what changes on disk, not what is
     sent.
     """
+    if apply:
+        gate = await confirmation.require_confirmation(
+            ctx, tool="update_runtimes",
+            message=(
+                f"Apply runtime updates for {languages or 'all configured languages'}? "
+                "This runs package-manager commands (mise/rustup/npm/uv, and apt "
+                "with sudo when CODECALC_ALLOW_RUNTIME_APPLY=1) that change installed toolchains."
+            ),
+            echo={"languages": languages or "all"}, audit_log=_audit_log,
+        )
+        if gate is not None:
+            return gate
     return runtimes.update(languages or None, apply=apply, timeout=timeout)
 
 
