@@ -472,6 +472,28 @@ def _notify_resource_updated(ctx: Context, uri: str) -> None:
         pass
 
 
+def _sync_progress(ctx: Context):
+    """A SYNCHRONOUS `(done, total, message)` callback bound to `ctx`, for
+    passing into `tools.benchmark`/`tools.compare_execution`/
+    `optimization.verify_optimization` — all three are plain synchronous
+    functions with no SDK dependency of their own (see `tools.ProgressFn`'s
+    own comment), so the bridge to `ctx.report_progress` (a coroutine) lives
+    here, the same `anyio.from_thread.run(...)` pattern
+    `_notify_resources_changed` above uses. Returns a no-op when `ctx` is
+    None, same as every other best-effort helper in this file.
+    """
+    if ctx is None:
+        return lambda done, total, message: None
+
+    def _progress(done: int, total: int, message: str) -> None:
+        try:
+            anyio.from_thread.run(ctx.report_progress, float(done), float(total), message)
+        except Exception:
+            pass
+
+    return _progress
+
+
 def _coded(fn):
     """Attach an error code to any failing dict a tool returns.
 
@@ -1792,7 +1814,7 @@ def analyze_complexity(code: str, language: str = "python3") -> dict[str, Any]:
 
 @mcp.tool(group="analysis")
 def benchmark(code: str, language: str = "python3", sizes: str = "100,1000,10000,100000",
-              timeout: int = 30) -> dict[str, Any]:
+              timeout: int = 30, ctx: Context = None) -> dict[str, Any]:
     """Empirically measure time complexity by running code at increasing input sizes.
 
     Contract: the code must read an integer N from stdin (first line) and do work
@@ -1800,12 +1822,22 @@ def benchmark(code: str, language: str = "python3", sizes: str = "100,1000,10000
     the growth curve to estimate Big-O (O(1), O(log n), O(n), O(n log n), O(n^2)...).
     Example python: 'import sys\\nn=int(sys.stdin.readline()); s=0\\nfor i in range(n): s+=i\\nprint(s)'
     """
-    return tools.benchmark(code, language=language, sizes=sizes, timeout=timeout)
+    # Progress deliberately NOT documented in the docstring above: the
+    # docstring is this tool's `description` on the wire, and
+    # scripts/tool_select_eval.py scores tool SELECTION against it —
+    # measured, adding this paragraph there cost 2 top-1 hits on the `full`
+    # baseline (BM25's length normalization dilutes the terms a prompt
+    # actually matches on). See CHANGELOG.md and `tools.benchmark`'s own
+    # docstring (not served to any client) for what this reports and why an
+    # auto-scale retry does not get its own progress sequence.
+    return tools.benchmark(code, language=language, sizes=sizes, timeout=timeout,
+                           on_progress=_sync_progress(ctx))
 
 
 @mcp.tool(group="execution")
 def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 15,
-                      dependencies: dict[str, list[str]] | None = None) -> dict[str, Any]:
+                      dependencies: dict[str, list[str]] | None = None,
+                      ctx: Context = None) -> dict[str, Any]:
     """Run the same code in multiple languages side by side.
 
     `snippets` maps language name -> code (each snippet must be valid in its own
@@ -1820,6 +1852,11 @@ def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 
     dropped: a python3 row that carries one gets
     `dependencies: {"status": "unsupported", "reason": ...}`.
     """
+    # Progress not documented in the docstring above — same reasoning as
+    # benchmark's own comment just above it: the docstring feeds
+    # tool_select_eval's BM25 corpus, and this paragraph measurably hurt
+    # selection there. Reports once per language, in `snippets`' own
+    # iteration order; see CHANGELOG.md.
     if dependencies:
         return errors.error_result(
             errors.VALIDATION,
@@ -1831,7 +1868,8 @@ def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 
             provider_error="unsupported_capability",
             capability="dependencies",
         )
-    return tools.compare_execution(snippets, stdin=stdin, timeout=timeout)
+    return tools.compare_execution(snippets, stdin=stdin, timeout=timeout,
+                                   on_progress=_sync_progress(ctx))
 
 
 @mcp.tool(group="execution")
@@ -2367,7 +2405,8 @@ def compare_edge_cases(snippets: dict[str, str],
 def verify_optimization(original: str, candidate: str, language: str,
                         test_inputs: list[str] | None = None,
                         sizes: list[int] | None = None,
-                        min_speedup: float = optimization.DEFAULT_MIN_SPEEDUP) -> dict[str, Any]:
+                        min_speedup: float = optimization.DEFAULT_MIN_SPEEDUP,
+                        ctx: Context = None) -> dict[str, Any]:
     """PROVE an optimisation: same outputs, and measurably AND SIGNIFICANTLY faster.
 
     You write the optimised version. This runs both against the same inputs to
@@ -2390,9 +2429,16 @@ def verify_optimization(original: str, candidate: str, language: str,
     or not significantly faster — is graded `ungraded`: correctness alone does
     not earn a grade for the optimisation claim this tool exists to answer.
     """
+    # Progress not documented in the docstring above — same reasoning as
+    # benchmark's/compare_execution's own comments: the docstring feeds
+    # tool_select_eval's BM25 corpus, and an equivalent paragraph measurably
+    # hurt selection there. Reports once after each of four phases COMPLETES
+    # (correctness, baseline sizes, candidate sizes, alignment — see
+    # optimization.PROGRESS_PHASES); a phase that fails reports nothing for
+    # itself, and later phases never ran. See CHANGELOG.md.
     result = optimization.verify_optimization(
         original, candidate, language, test_inputs=test_inputs,
-        sizes=sizes, min_speedup=min_speedup)
+        sizes=sizes, min_speedup=min_speedup, on_progress=_sync_progress(ctx))
     return grades.grade_verify_optimization(result, result.get("language", language))
 
 

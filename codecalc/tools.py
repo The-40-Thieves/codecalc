@@ -11,12 +11,23 @@ from __future__ import annotations
 import math
 import statistics
 import time
+from collections.abc import Callable
 
 from . import dependencies as dependencies_module
 from . import errors, executor, registry
 
+#: Shape every `on_progress` callback in this module takes: (done, total,
+#: message), SYNCHRONOUS — these functions run inside `@mcp.tool`'s plain
+#: `def`s, which the SDK already runs on a worker thread (see
+#: server.py's own `_notify_resources_changed` comment for the same fact);
+#: server.py's callback bridges to `ctx.report_progress` via
+#: `anyio.from_thread.run(...)`, so nothing below this module needs to be
+#: async or know the SDK exists at all.
+ProgressFn = Callable[[int, int, str], None]
 
-def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 15) -> dict:
+
+def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 15,
+                      on_progress: ProgressFn | None = None) -> dict:
     """Run one code snippet per language; return a side-by-side result table.
 
     The OUTER `ok` is always `True` once the comparison itself ran to
@@ -39,9 +50,15 @@ def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 
     dropped: only a REGEX presence check, deliberately not a full parse (a
     malformed block is exactly as inert here as a valid one, and this path
     has no reason to raise over it).
+
+    `on_progress(done, total, message)`, if given, is called once PER
+    LANGUAGE after that language's row is complete (`total` =
+    `len(snippets)`, fixed up front) — monotone, 1..total, in the same
+    order `snippets` iterates.
     """
     results = []
-    for language, code in snippets.items():
+    total = len(snippets)
+    for i, (language, code) in enumerate(snippets.items(), start=1):
         r = executor.execute(language, code, stdin=stdin, timeout=timeout)
         # a language can lose the wall-clock race to a globally slow
         # runner rather than to a defect in its own snippet — one repro had
@@ -97,6 +114,8 @@ def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 
                           "the block was left unparsed and unhonoured",
             }
         results.append(row)
+        if on_progress is not None:
+            on_progress(i, total, f"ran {language} ({i}/{total})")
     # `fastest` must mean the fastest run that WORKED. It used to be the minimum
     # duration over all results, so a language that failed instantly won: perl
     # dying in 25ms beat a working python3 at 344ms, and the tool's headline
@@ -315,7 +334,8 @@ def _classify_by_ratio(ratios: list[float]) -> str:
 
 
 def _measure(language: str, code: str, sizes: list[int], timeout: int, repeats: int,
-            deadline: float | None = None) -> tuple[list[dict], dict | None]:
+            deadline: float | None = None,
+            on_progress: ProgressFn | None = None) -> tuple[list[dict], dict | None]:
     """Run the program at each size (min-of-repeats). Returns (runs, error).
 
     `deadline` (an absolute `time.monotonic()` timestamp; optional, backward
@@ -332,9 +352,16 @@ def _measure(language: str, code: str, sizes: list[int], timeout: int, repeats: 
     `optimization._MEASUREMENT_BUDGET_S`'s docstring for why a per-call-only
     budget left a gap (a genuinely slow baseline's OWN rescale rounds, with
     no alignment involved at all, had no equivalent backstop).
+
+    `on_progress`, if given, fires once PER SIZE this call actually finishes
+    measuring (`total` = `len(sizes)` for THIS call) — `benchmark()` below is
+    the only caller that passes one, and only for its first (non-rescaled)
+    pass; `optimization.py`'s callers never pass one, so this stays a no-op
+    for every other caller by default.
     """
     runs = []
-    for n in sizes:
+    total = len(sizes)
+    for i, n in enumerate(sizes, start=1):
         if deadline is not None and time.monotonic() >= deadline:
             return runs, {"ok": False,
                           "error": f"measurement deadline exceeded before n={n} could run"}
@@ -386,11 +413,14 @@ def _measure(language: str, code: str, sizes: list[int], timeout: int, repeats: 
             "stdout": (last or {}).get("stdout", "")[:200],
             "stderr": ((last or {}).get("stderr") or "")[:200],
         })
+        if on_progress is not None:
+            on_progress(i, total, f"measured n={n} ({i}/{total})")
     return runs, None
 
 
 def benchmark(code: str, language: str = "python3", sizes: str = "100,1000,10000,100000",
-              timeout: int = 30, repeats: int = 3) -> dict:
+              timeout: int = 30, repeats: int = 3,
+              on_progress: ProgressFn | None = None) -> dict:
     """Empirically measure complexity.
 
     Contract: `code` must read an integer N from stdin (first line) and perform
@@ -400,6 +430,13 @@ def benchmark(code: str, language: str = "python3", sizes: str = "100,1000,10000
     Sizes auto-scale: if the measured work is below ~20ms at the largest size,
     sizes are multiplied by 10 and re-measured (up to 4x) so the fit sees real
     compute, not subprocess spawn noise.
+
+    `on_progress(done, total, message)`, if given, fires once PER SIZE
+    (`total` = the requested size count, fixed) during the FIRST measurement
+    pass only — an auto-scale re-measurement is a distinct, unpredictable-
+    length retry phase (0 to 4 extra passes over the SAME `total` sizes), and
+    firing a fresh 1..total sequence for each one would no longer be
+    monotone across the whole call.
     """
     try:
         size_list = [int(s.strip()) for s in sizes.split(",") if s.strip()]
@@ -409,7 +446,7 @@ def benchmark(code: str, language: str = "python3", sizes: str = "100,1000,10000
         return {"ok": False, "error": "need at least 3 sizes for a meaningful fit"}
     repeats = max(1, min(repeats, 5))
 
-    runs, error = _measure(language, code, size_list, timeout, repeats)
+    runs, error = _measure(language, code, size_list, timeout, repeats, on_progress=on_progress)
     if error:
         error["runs"] = runs
         return error

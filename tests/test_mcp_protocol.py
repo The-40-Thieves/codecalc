@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import itertools
 import pathlib
 import sys
 
@@ -301,6 +302,69 @@ async def main() -> None:
               not wrong_group_icon, f"-> {wrong_group_icon}")
         check("every icon's data URI is under 600 bytes", not oversize, f"-> {oversize}")
         check("every icon decodes to well-formed SVG XML", not bad_svg, f"-> {bad_svg}")
+
+        # ── progress notifications (feature 4) ───────────────────────────────
+        progress_events: list[tuple[float, float | None, str | None]] = []
+
+        async def on_progress(progress: float, total: float | None, message: str | None) -> None:
+            progress_events.append((progress, total, message))
+
+        progress_events.clear()
+        await c.call_tool(
+            "compare_execution",
+            {"snippets": {"python3": "print(1)", "node": "console.log(1)"}},
+            progress_callback=on_progress,
+        )
+        check("compare_execution reports one progress event per language, in order",
+              [p for p, t, m in progress_events] == [1.0, 2.0], f"-> {progress_events}")
+        check("compare_execution's progress total is fixed at the language count",
+              all(t == 2.0 for p, t, m in progress_events), f"-> {progress_events}")
+
+        progress_events.clear()
+        bench_code = ("import sys\nn=int(sys.stdin.readline())\ns=0\n"
+                      "for i in range(n): s+=i\nprint(s)")
+        await c.call_tool(
+            "benchmark",
+            {"code": bench_code, "sizes": "2000,4000,8000,16000"},
+            progress_callback=on_progress,
+        )
+        check("benchmark reports one progress event per requested size, in order",
+              [p for p, t, m in progress_events][:4] == [1.0, 2.0, 3.0, 4.0],
+              f"-> {progress_events}")
+        check("benchmark's progress sequence is monotone non-decreasing",
+              all(a[0] <= b[0] for a, b in itertools.pairwise(progress_events)),
+              f"-> {progress_events}")
+
+        progress_events.clear()
+        opt_code = ("import sys\nn=int(sys.stdin.readline())\ns=0\n"
+                    "for i in range(n): s+=i\nprint(s)")
+        await c.call_tool(
+            "verify_optimization",
+            {"original": opt_code, "candidate": opt_code, "language": "python3",
+             "sizes": [2000, 5000, 10000]},
+            progress_callback=on_progress,
+        )
+        check("verify_optimization reports exactly one progress event per phase "
+              "(correctness, baseline sizes, candidate sizes, alignment)",
+              len(progress_events) == 4, f"-> {progress_events}")
+        check("verify_optimization's progress sequence is 1..4, monotone, total 4",
+              [p for p, t, m in progress_events] == [1.0, 2.0, 3.0, 4.0]
+              and all(t == 4.0 for p, t, m in progress_events),
+              f"-> {progress_events}")
+
+        # a rejected candidate (wrong output) fails IN phase 1 — a progress
+        # event marks a phase COMPLETING, so the phase that failed reports
+        # nothing, and neither do the three phases after it that never ran.
+        progress_events.clear()
+        wrong_candidate = "import sys\nsys.stdin.readline()\nprint('nope')"
+        await c.call_tool(
+            "verify_optimization",
+            {"original": opt_code, "candidate": wrong_candidate, "language": "python3",
+             "sizes": [2000, 5000, 10000]},
+            progress_callback=on_progress,
+        )
+        check("a candidate that fails correctness reports no progress at all",
+              progress_events == [], f"-> {progress_events}")
 
         # ── the timeout backstop still covers what it used to ───────────────
         # AUDIT.md HIGH-05. MCPServer.tool() has no timeout= parameter, so these

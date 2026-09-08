@@ -118,6 +118,24 @@ behind it.
   repeated once per tool (25 times for `calculator` alone). Icons are not
   description text, so `scripts/tool_select_eval.py`'s BM25 corpus and
   baseline are unaffected (verified).
+- **Progress notifications on `benchmark`, `verify_optimization` and
+  `compare_execution`**, the same `ctx.report_progress` mechanism
+  `execute_code_stream` already used. `benchmark` reports once per
+  requested size, during the first (non-rescaled) measurement pass only —
+  an auto-scale retry is a distinct, unpredictable-length phase, and giving
+  it its own 1..total sequence would stop the WHOLE call being monotone.
+  `compare_execution` reports once per language, in `snippets`' own
+  iteration order. `verify_optimization` reports once after each of four
+  phases COMPLETES — correctness, baseline sizes, candidate sizes,
+  alignment (`optimization.PROGRESS_PHASES`) — so a phase that fails
+  reports nothing for itself, and the phases after it never ran. All three
+  tools are plain synchronous `def`s that the SDK runs on a worker thread,
+  so `tools.py`/`optimization.py` gained a synchronous `on_progress(done,
+  total, message)` callback parameter (`tools.ProgressFn`) with no SDK
+  dependency of its own; server.py's new `_sync_progress(ctx)` is the one
+  place that bridges it to the async `ctx.report_progress` via
+  `anyio.from_thread.run(...)`, the same pattern the resource-change
+  notifications above use.
 
 ### Fixed
 
