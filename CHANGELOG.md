@@ -10,9 +10,9 @@ This project versions **two** things, and they are not the same number.
 | What | Where | Current |
 |---|---|---|
 | The **package** — the tool surface, the CLI, the Python API | `pyproject.toml`, `executor/Cargo.toml`, this file | see `version` in [`pyproject.toml`](pyproject.toml) — this cell is not re-typed on every release |
-| The **result contract** — the shape every tool result comes back in | `docs/contract/README.md`, `contract_version` on every result | `1.13.0` |
+| The **result contract** — the shape every tool result comes back in | `docs/contract/README.md`, `contract_version` on every result | `1.10.0` |
 
-The contract is at `1.14.0` and the package is at `0.x` because those claims are
+The contract is at `1.10.0` and the package is at `0.x` because those claims are
 genuinely different. The result contract has a published JSON Schema, a
 documented MAJOR/MINOR/PATCH policy, a twelve-month deprecation window, and a
 gate that fails if the schema drifts from the code — it is stable and says so.
@@ -35,6 +35,7 @@ behind it.
 
 ### Added
 
+<<<<<<< HEAD
 - `llms.txt` at the repo root (the [llmstxt.org](https://llmstxt.org/)
   convention) indexing README, QUICKSTART, the result contract docs and
   schemas, SECURITY.md, AUDIT.md, CONTRIBUTING.md, and the packaged skill, so
@@ -166,6 +167,42 @@ behind it.
 =======
 ||||||| parent of c930ab8 (docs: update tool/test counts for trace_execution, add CHANGELOG entry)
 =======
+||||||| parent of 7046790 (docs: rebuild the changelog after a conflicted rebase; test-file count 64)
+- `llms.txt` at the repo root (the [llmstxt.org](https://llmstxt.org/)
+  convention) indexing README, QUICKSTART, the result contract docs and
+  schemas, SECURITY.md, AUDIT.md, CONTRIBUTING.md, and the packaged skill, so
+  an LLM client can find codecalc's own docs without crawling the repo.
+  `scripts/build_llms_full.py` builds `llms-full.txt` (the full text of
+  everything `llms.txt` links) from that index; it is not committed —
+  instead `.github/workflows/release.yml`'s `release-assets` job builds it
+  fresh and attaches it to each GitHub Release next to the SBOM, and
+  `llms.txt`'s own entry for it points at the stable
+  `releases/latest/download/llms-full.txt` URL. `scripts/check_llms_txt.py`
+  gates the index offline: every linked path must exist, every section must
+  carry at least one verifiable link, and the generator must still run
+  cleanly end to end. README.md gained a "Where to find codecalc" table
+  (PyPI, crates.io, GitHub Releases, the MCP registry, Smithery, Glama,
+  MCPB) and `docs/distribution.md` records the submission steps for the two
+  directories that do not list codecalc yet (PulseMCP, mcp.so).
+<<<<<<< HEAD
+||||||| parent of c491b51 (docs(docker): prepare a Docker MCP Catalog submission, unopened)
+- `docker/mcp-catalog/server.yaml` (+ `tools.json`, `readme.md`): a prepared
+  submission for the [Docker MCP Catalog](https://hub.docker.com/mcp),
+  targeting `docker/mcp-server.Dockerfile` (already shipped) as a
+  Docker-built image (`mcp/codecalc`) so it gets Docker's own signatures,
+  SBOM, provenance and Docker Desktop listing rather than a self-hosted
+  image. `tools.json` is the live `tools/list` response from that exact
+  image (52 tools — `CODECALC_TOOLS` is unset in the image, which registers
+  every group; the symbolic-extra tools among them already report "extra
+  not installed" rather than erroring, per the image's existing documented
+  tradeoff), so the registry's own `build --tools` reads it instead of
+  spinning up the container. Validated against the registry's own
+  `task validate`/`task build --tools` tooling — see `docs/distribution.md`
+  for the exact submission steps; this commit does not open that PR.
+||||||| parent of c930ab8 (docs: update tool/test counts for trace_execution, add CHANGELOG entry)
+=======
+=======
+>>>>>>> 7046790 (docs: rebuild the changelog after a conflicted rebase; test-file count 64)
 - **`trace_execution`** (53rd MCP tool, `execution` group): line-level execution
   tracing for python3 — answers "which lines ran, in what order, and why did
   this input produce that output", where `execute_code` only answers "what did
@@ -216,8 +253,13 @@ behind it.
   disclosed via `verdict`/`timed_out`, not this tool's own two recording
   caps), and no leaked `codecalc-exec` process after either a normal run or
   a timeout kill.
+<<<<<<< HEAD
 >>>>>>> c930ab8 (docs: update tool/test counts for trace_execution, add CHANGELOG entry)
 >>>>>>> 9db901b (docs: update tool/test counts for trace_execution, add CHANGELOG entry)
+||||||| parent of 7046790 (docs: rebuild the changelog after a conflicted rebase; test-file count 64)
+>>>>>>> c930ab8 (docs: update tool/test counts for trace_execution, add CHANGELOG entry)
+=======
+>>>>>>> 7046790 (docs: rebuild the changelog after a conflicted rebase; test-file count 64)
 
   **Hardened after cross-vendor review flagged the first cut DO NOT MERGE**,
   before this tool ever shipped:
@@ -272,6 +314,35 @@ behind it.
   `truncated_reason` enum member (`trace_file_exceeded`) are declared in the
   `execution_trace` contract shape alongside the rest of it — still additive,
   landing before this tool's own first release.
+- `llms.txt` at the repo root (the [llmstxt.org](https://llmstxt.org/)
+  convention) indexing README, QUICKSTART, the result contract docs and
+  schemas, SECURITY.md, AUDIT.md, CONTRIBUTING.md, and the packaged skill, so
+  an LLM client can find codecalc's own docs without crawling the repo.
+  `scripts/build_llms_full.py` builds `llms-full.txt` (the full text of
+  everything `llms.txt` links) from that index; it is not committed —
+  instead `.github/workflows/release.yml`'s `release-assets` job builds it
+  fresh and attaches it to each GitHub Release next to the SBOM, and
+  `llms.txt`'s own entry for it points at the stable
+  `releases/latest/download/llms-full.txt` URL. `scripts/check_llms_txt.py`
+  gates the index offline: every linked path must exist, every section must
+  carry at least one verifiable link, and the generator must still run
+  cleanly end to end. README.md gained a "Where to find codecalc" table
+  (PyPI, crates.io, GitHub Releases, the MCP registry, Smithery, Glama,
+  MCPB) and `docs/distribution.md` records the submission steps for the two
+  directories that do not list codecalc yet (PulseMCP, mcp.so).
+- `docker/mcp-catalog/server.yaml` (+ `tools.json`, `readme.md`): a prepared
+  submission for the [Docker MCP Catalog](https://hub.docker.com/mcp),
+  targeting `docker/mcp-server.Dockerfile` (already shipped) as a
+  Docker-built image (`mcp/codecalc`) so it gets Docker's own signatures,
+  SBOM, provenance and Docker Desktop listing rather than a self-hosted
+  image. `tools.json` is the live `tools/list` response from that exact
+  image (52 tools — `CODECALC_TOOLS` is unset in the image, which registers
+  every group; the symbolic-extra tools among them already report "extra
+  not installed" rather than erroring, per the image's existing documented
+  tradeoff), so the registry's own `build --tools` reads it instead of
+  spinning up the container. Validated against the registry's own
+  `task validate`/`task build --tools` tooling — see `docs/distribution.md`
+  for the exact submission steps; this commit does not open that PR.
 
 ### Fixed
 
