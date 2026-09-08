@@ -14,6 +14,12 @@ most distinctive tools were the only two that did not work on a fresh install.
 The caller proposes. This module decides. See classify_case/aggregate for the
 rules, which are deliberately separable from the sandbox so they can be tested
 without two runtimes and a built binary.
+
+Both tools compare stdout through the SAME `_normalize` — see
+NORMALIZE_TOLERANCE for exactly what it does and does not treat as equivalent.
+A per-case result also carries each side's RAW (un-normalized) stdout
+alongside the normalized one, so a caller can see what a program actually
+wrote even when the normalized comparison calls it a match (codecalc #286).
 """
 
 from __future__ import annotations
@@ -29,8 +35,34 @@ def _run(language: str, code: str, stdin: str, timeout: int = 15) -> dict:
     return executor.execute(language, code, stdin=stdin, timeout=timeout)
 
 
+#: The ONLY cross-platform differences `_normalize` tolerates. Kept as one
+#: named constant rather than left implicit in the function body, so there is
+#: a single place that says what "the same output" means here.
+#:
+#: `str.splitlines()` used to be the implementation, and it splits on far more
+#: than `\n`: VT (0x0B), FF (0x0C), FS/GS/RS (0x1C-0x1E), NEL (0x85), U+2028
+#: LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR are ALL line boundaries to
+#: Python, and the old `"\n".join(...)` rewrote every one of them to `\n` —
+#: seven distinct characters silently canonicalised into one, so a source
+#: printing a real `\n` and a port printing U+2028 compared equal (codecalc
+#: issue #286). Almost no language treats those seven as line terminators on
+#: output; they are DATA a program chose to emit, and a difference in them is
+#: a difference this tool exists to catch, not a formatting quirk to smooth
+#: over. `str.rstrip()`/`str.strip()` have the same problem one level down:
+#: bare `.rstrip()` trims the same VT/FF/NEL/U+2028-class whitespace off the
+#: end of a line as SPACE ALSO. `split("\n")` and `rstrip(" \t")` below name
+#: exactly what is tolerated instead of reaching for "whitespace" in general.
+NORMALIZE_TOLERANCE = (
+    "\\r\\n and \\r are folded to \\n (line-ending convention); trailing "
+    "spaces/tabs are trimmed per line; trailing blank lines at the end of "
+    "the whole output are trimmed. Nothing else — no other character "
+    "Python calls a line or whitespace boundary is touched."
+)
+
+
 def _normalize(s: str) -> str:
-    return "\n".join(line.rstrip() for line in s.splitlines()).strip()
+    s = s.replace("\r\n", "\n").replace("\r", "\n")
+    return "\n".join(line.rstrip(" \t") for line in s.split("\n")).strip(" \t\n")
 
 
 def classify_case(a: dict, b: dict) -> tuple[str, str]:
@@ -222,11 +254,21 @@ def verify_translation(source: str, source_code: str, target: str,
             # Retained for callers that predate the three-way outcome. Only a
             # real "match" is true here; inconclusive is NOT a match.
             "match": outcome == "match",
+            # "stdout" is the NORMALIZED string the match/mismatch decision was
+            # made on; "stdout_raw" is exactly what the program wrote, before
+            # NORMALIZE_TOLERANCE is applied. #286: the normalized string was
+            # the ONLY evidence shown, so a match that folded a genuine
+            # separator difference into agreement had nothing in the result
+            # a reader could use to notice — both fields are now always
+            # present, not only when they differ, so a reader never has to
+            # guess whether normalization changed anything.
             "source": {"ok": bool(a.get("ok")), "phase": a.get("phase"),
                        "stdout": _normalize(a.get("stdout", ""))[:400],
+                       "stdout_raw": (a.get("stdout") or "")[:400],
                        "stderr": (a.get("stderr") or "")[:200]},
             "target": {"ok": bool(b.get("ok")), "phase": b.get("phase"),
                        "stdout": _normalize(b.get("stdout", ""))[:400],
+                       "stdout_raw": (b.get("stdout") or "")[:400],
                        "stderr": (b.get("stderr") or "")[:200]},
         })
     return {**aggregate(outcomes), "cases": cases}
@@ -271,8 +313,14 @@ def compare_edge_cases(snippets: dict[str, str],
         row = {"input": stdin[:60], "runs": {}}
         for lang, code in snippets.items():
             r = _run(lang, code, stdin, timeout)
+            # "stdout" is normalized (NORMALIZE_TOLERANCE); "stdout_raw" is
+            # exactly what the program wrote. Same reasoning as
+            # verify_translation's per-case result (#286): the normalized
+            # string alone erases whatever a separator-folding bug would have
+            # hidden.
             run_entry = {
                 "ok": r.get("ok"), "stdout": _normalize(r.get("stdout", ""))[:300],
+                "stdout_raw": (r.get("stdout") or "")[:300],
                 "verdict": r.get("verdict"), "stderr": (r.get("stderr") or "")[:150],
             }
             if r.get("error"):
@@ -286,11 +334,19 @@ def compare_edge_cases(snippets: dict[str, str],
         # built per run: the exact (order-sensitive) one and the sorted
         # (order-insensitive) one, so an order-only difference can be told
         # apart from a real content difference rather than collapsed into it.
+        #
+        # `.split("\n")`, NOT `.splitlines()`: `r["stdout"]` here is already
+        # NORMALIZE_TOLERANCE-normalized, but normalizing only folds \r\n/\r
+        # to \n — it does not remove or rewrite VT/FF/FS/GS/RS/NEL/U+2028/
+        # U+2029, so a normalized string can still contain one verbatim.
+        # `.splitlines()` would silently re-fold it into a line break at
+        # EXACTLY this comparison, reintroducing #286 one call downstream of
+        # the fix in `_normalize` itself.
         if len(row["runs"]) > 1:
             exact_behaviors = set()
             sorted_behaviors = set()
             for r in row["runs"].values():
-                lines = tuple(r["stdout"].splitlines())
+                lines = tuple(r["stdout"].split("\n"))
                 exact_behaviors.add((r["ok"], lines))
                 sorted_behaviors.add((r["ok"], tuple(sorted(lines))))
             content_diverges = len(sorted_behaviors) > 1
