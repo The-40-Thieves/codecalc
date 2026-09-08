@@ -498,9 +498,9 @@ _FWER_UNANIMITY_MAX = 3
 #: 0.357% false-accept rate, 97.6% of it through a lone surviving size. A
 #: single testable size is a data-poverty condition, and the honest verdict
 #: for it is "not enough was measurable to certify", stated as such in
-#: `decision_basis`, not "verified faster". A caller who hits it can raise
-#: repeats or sizes; the `sizes_below_floor` reasons say which sizes fell out
-#: and why.
+#: `decision_basis`, not "verified faster". A caller who hits it can add
+#: sizes (`REPEATS` is a module constant, not a tool parameter); the
+#: `sizes_below_floor` reasons say which sizes fell out and why.
 _MIN_COUNTED_SIZES = 2
 
 
@@ -759,7 +759,7 @@ def _infer_speedup(before: dict, after: dict, alpha: float = ALPHA,
                           f"the null at alpha={alpha}), and a single counted size "
                           f"is one uncorrected test, not a verified speedup: at "
                           f"least {_MIN_COUNTED_SIZES} counted sizes are required "
-                          f"— raise repeats or add sizes so more of them clear "
+                          f"— add sizes so more of them clear "
                           f"the floor")
     elif correction == "unanimity":
         decision_basis = (f"{sizes_rejecting}/{sizes_total} size(s) reject the null "
