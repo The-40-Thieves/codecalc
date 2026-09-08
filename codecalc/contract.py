@@ -51,7 +51,7 @@ from . import errors, grades
 #: each component is allowed to change — the short form is that MAJOR is the
 #: only one that may break a reader, and it carries a twelve-month deprecation
 #: window before anything is removed.
-CONTRACT_VERSION = "1.13.0"
+CONTRACT_VERSION = "1.14.0"
 
 # THE `$schema` AND `$id` URIs ARE NOT HERE ON PURPOSE.
 #
@@ -668,7 +668,7 @@ def _inference_properties() -> dict:
 
 
 def _execution_envelope_properties() -> dict:
-    """The property set `execution_envelope` and `execution_trace` (1.13.0)
+    """The property set `execution_envelope` and `execution_trace` (1.14.0)
     both carry — trace_execution stamps the SAME envelope `execute_code`
     does, plus its own trace fields, so the two defs share this rather than
     each hand-copying it and drifting the way `check_contract.py`'s own
@@ -815,7 +815,7 @@ def _execution_envelope_properties() -> dict:
 
 
 def _execution_trace_only_properties() -> dict:
-    """The properties `execution_trace` (1.13.0) adds ON TOP of the shared
+    """The properties `execution_trace` (1.14.0) adds ON TOP of the shared
     envelope set above — see `trace_execution`'s docstring (codecalc/
     server.py) for what each one means to a caller.
     """
@@ -997,7 +997,7 @@ def build_schema(dialect: str | None = None, schema_id: str | None = None) -> di
         #   rejected       no verdict at all, carries `error`
         #   run_lifecycle  a run_id, a state, and NO verdict/error/backend
         #
-        # `execution_trace` (1.13.0) is `trace_execution`'s own shape: the
+        # `execution_trace` (1.14.0) is `trace_execution`'s own shape: the
         # identical envelope `execute_code` returns, plus a per-line event
         # trace and a static branch/line-coverage report. It would otherwise
         # double-match `envelope` (this schema's own `additionalProperties`
@@ -1100,7 +1100,7 @@ def build_schema(dialect: str | None = None, schema_id: str | None = None) -> di
                 ),
                 "type": "object",
                 "required": list(ENVELOPE_KEYS),
-                # `trace_execution` (1.13.0) stamps this SAME envelope plus an
+                # `trace_execution` (1.14.0) stamps this SAME envelope plus an
                 # `events` array — additive, but additive is exactly what
                 # would otherwise make BOTH this branch and `execution_trace`
                 # validate at once (this def's `additionalProperties` is left
@@ -1117,7 +1117,7 @@ def build_schema(dialect: str | None = None, schema_id: str | None = None) -> di
             "execution_trace": {
                 "title": "a trace_execution result",
                 "description": (
-                    "trace_execution's own shape (1.13.0): the identical "
+                    "trace_execution's own shape (1.14.0): the identical "
                     "execution_envelope execute_code returns for the SAME "
                     "python3 program, plus a per-line event trace and a "
                     "static branch/line-coverage report. Discriminated from "

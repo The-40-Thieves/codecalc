@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/The-40-Thieves/codecalc/main/docs/contract/result-v1.schema.json",
   "title": "codecalc execution result",
-  "description": "The result contract for codecalc's execution tools, version 1.13.0. Generated from codecalc/contract.py by scripts/check_contract.py \u2014 edit the module, not this file.",
+  "description": "The result contract for codecalc's execution tools, version 1.14.0. Generated from codecalc/contract.py by scripts/check_contract.py \u2014 edit the module, not this file.",
   "type": "object",
   "required": [
     "ok",
@@ -269,7 +269,7 @@
     },
     "execution_trace": {
       "title": "a trace_execution result",
-      "description": "trace_execution's own shape (1.13.0): the identical execution_envelope execute_code returns for the SAME python3 program, plus a per-line event trace and a static branch/line-coverage report. Discriminated from `execution_envelope` by `events` \u2014 required here, excluded there (see that def's own `not` clause).",
+      "description": "trace_execution's own shape (1.14.0): the identical execution_envelope execute_code returns for the SAME python3 program, plus a per-line event trace and a static branch/line-coverage report. Discriminated from `execution_envelope` by `events` \u2014 required here, excluded there (see that def's own `not` clause).",
       "type": "object",
       "required": [
         "ok",

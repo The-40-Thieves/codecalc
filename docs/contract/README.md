@@ -502,7 +502,7 @@ always a dict:
 - `list_languages`/`list_execution_providers` return `list[dict]`, which
   the SDK schematises fine on its own (measured: identical output schema
   either way) — not an exception in practice, just not the `dict[str, Any]`
-  form the other 50 tools (including `trace_execution`, added `1.13.0`) took.
+  form the other 50 tools (including `trace_execution`, added `1.14.0`) took.
 
 Annotating either of the first two as a `dict[str, Any] | ImageContent`/
 `dict[str, Any] | list[...]` union builds a schema, but the SDK wraps EVERY
@@ -554,7 +554,7 @@ the ten shapes in this order:
 | **session** | `backend == "session-worker"` | Ran in a warm session worker. |
 | **compact** | `verdict` present, no `backend` | `execute_code(compact=True)`. |
 | **envelope** | `verdict` present, `backend` in `rust`/`python`, no `events` | A fresh sandboxed run. All 21 fields. |
-| **execution_trace** | `verdict` present, `backend` in `rust`/`python`, `events` present | `trace_execution`'s result (added `1.13.0`): the same envelope, plus `events`/`branches`/`lines_executed`/`lines_never_executed`/`truncated`. |
+| **execution_trace** | `verdict` present, `backend` in `rust`/`python`, `events` present | `trace_execution`'s result (added `1.14.0`): the same envelope, plus `events`/`branches`/`lines_executed`/`lines_never_executed`/`truncated`. |
 | **translation_verification** | `passed` present | `verify_translation`'s result: did a source program and a claimed port agree, with real evidence either way. `ok` is true whenever the tool completed — including a mismatch; it is not the verdict. |
 | **optimization_verification** | `accepted` present | `verify_optimization`'s result: is `candidate` a genuine, measurably-faster optimisation of `original`. |
 | **edge_case_comparison** | `divergence_count` present | `compare_edge_cases`'s success result: the same logic run in N languages, and where it diverged. |
@@ -582,7 +582,7 @@ mismatch is `ok: true` exactly like a pass (see `verify_optimization`'s own
 distinction already in the contract) — so all nine of those shapes require
 it.
 
-**`execution_trace`**, added in `1.13.0`, is `trace_execution`'s own shape —
+**`execution_trace`**, added in `1.14.0`, is `trace_execution`'s own shape —
 see the version-history entry above for its fields. It is the one shape here
 that would otherwise double-match another (`envelope`): both carry
 `verdict`/`backend`, and this schema's `additionalProperties` is

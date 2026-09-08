@@ -12,7 +12,7 @@ This project versions **two** things, and they are not the same number.
 | The **package** — the tool surface, the CLI, the Python API | `pyproject.toml`, `executor/Cargo.toml`, this file | see `version` in [`pyproject.toml`](pyproject.toml) — this cell is not re-typed on every release |
 | The **result contract** — the shape every tool result comes back in | `docs/contract/README.md`, `contract_version` on every result | `1.13.0` |
 
-The contract is at `1.13.0` and the package is at `0.x` because those claims are
+The contract is at `1.14.0` and the package is at `0.x` because those claims are
 genuinely different. The result contract has a published JSON Schema, a
 documented MAJOR/MINOR/PATCH policy, a twelve-month deprecation window, and a
 gate that fails if the schema drifts from the code — it is stable and says so.
@@ -198,7 +198,7 @@ behind it.
   is spawned. A non-`local` `provider` is refused the same way: the harness's
   own workdir-staging/reading contract only the local Rust/Python-fallback
   executor can satisfy. New result contract shape `execution_trace`
-  (`docs/contract/README.md`, `CONTRACT_VERSION` `1.12.0` -> `1.13.0`, MINOR —
+  (`docs/contract/README.md`, `CONTRACT_VERSION` `1.13.0` -> `1.14.0`, MINOR —
   additive), discriminated from the plain `execution_envelope` shape by a
   new `not: {required: [events]}` exclusion on that def (mirrors how
   `compact`/`rejected` already exclude `backend`/`verdict`), so `oneOf`'s
