@@ -228,13 +228,28 @@ async def _live_checks() -> None:
             "target_code": "print(1 + 1)", "target_language": "python3",
             "test_inputs": [""],
         }))
+        # `stdout_raw` is exactly what the child process wrote, before
+        # NORMALIZE_TOLERANCE folds line-ending noise — and on windows-latest
+        # a python3 child's text-mode `print()` writes CRLF, so `stdout_raw`
+        # is legitimately '2\r\n' there against '2\n' everywhere else (both
+        # are the SAME tolerated fold `_normalize` already treats as a
+        # match: `stdout` — the normalized field — is '2' on every platform,
+        # which is what actually decided `outcome: match` here). Comparing
+        # `stdout_raw` after undoing that one specific, already-documented
+        # fold keeps this assertion an EXACT match (not a laxer "close
+        # enough") while not being a false CI failure on Windows.
+        actual_cases = [
+            {**c, "source": {**c["source"], "stdout_raw": c["source"]["stdout_raw"].replace("\r\n", "\n")},
+                  "target": {**c["target"], "stdout_raw": c["target"]["stdout_raw"].replace("\r\n", "\n")}}
+            for c in (translation_result.get("cases") or [])
+        ]
         expected_case = {
             "input": "", "outcome": "match", "reason": "", "match": True,
             "source": {"ok": True, "phase": "run", "stdout": "2", "stdout_raw": "2\n", "stderr": ""},
             "target": {"ok": True, "phase": "run", "stdout": "2", "stdout_raw": "2\n", "stderr": ""},
         }
         check("verify_translation: tools/call result unchanged (deterministic case)",
-              translation_result.get("cases") == [expected_case]
+              actual_cases == [expected_case]
               and translation_result.get("passed") is True
               and translation_result.get("grade") == "cross_checked",
               f"-> {translation_result}")
