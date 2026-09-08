@@ -248,6 +248,17 @@ reported `available`, because nothing was executed, and claiming otherwise for a
 binary that was merely found on `PATH` would be a stronger measurement than was
 taken.
 
+Under `--deep`, a runtime whose version probe never gets an answer (a spawn
+failure or a timeout) is `unhealthy` too; a nonzero exit alone only counts
+when the flag used is one confirmed correct for that command (`go version`,
+`lua -v`, `zig version` — none of them speak GNU `--version`, so a bare
+nonzero exit there is reported as merely unmeasured, not broken). A captured
+failure lands in `probe_error`, never in `version`, which holds a version
+string or nothing. A compile-then-run language whose `run` step needs a
+SECOND, different tool (kotlin: `kotlinc` compiles, but `run` launches
+`java` directly) reports `installed` only when BOTH resolve; `detail` names
+whichever half is missing.
+
 Building the Rust core yourself, or running from a checkout? See "Build the
 Rust core" and "Run the server" below.
 

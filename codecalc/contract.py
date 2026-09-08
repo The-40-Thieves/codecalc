@@ -51,7 +51,7 @@ from . import errors, grades
 #: each component is allowed to change — the short form is that MAJOR is the
 #: only one that may break a reader, and it carries a twelve-month deprecation
 #: window before anything is removed.
-CONTRACT_VERSION = "1.7.0"
+CONTRACT_VERSION = "1.8.0"
 
 # THE `$schema` AND `$id` URIs ARE NOT HERE ON PURPOSE.
 #
@@ -1035,10 +1035,14 @@ def build_doctor_schema(dialect: str | None = None, schema_id: str | None = None
                 "type": "boolean",
                 "description": (
                     "Deliberately NARROW, and the process exit code follows it: "
-                    "true when a workspace is writable and a backend resolved. A "
-                    "missing optional extra or an uninstalled runtime is a fact "
+                    "true when a workspace is writable, a backend resolved, and "
+                    "no `tested`-tier runtime is `unhealthy`. A missing optional "
+                    "extra or an uninstalled runtime — of ANY tier — is a fact "
                     "about the host, not a fault, and must not fail an install "
-                    "check."
+                    "check; a `tested`-tier runtime that RESOLVED and then "
+                    "proved broken (a non-executable file, or a failed --deep "
+                    "probe) is codecalc's own advertised guarantee failing, and "
+                    "does."
                 ),
             },
             "python": {
@@ -1187,7 +1191,13 @@ def build_doctor_schema(dialect: str | None = None, schema_id: str | None = None
                                 "supported = codecalc knows it, nothing resolves "
                                 "here · installed = resolves and is executable, "
                                 "NOT run · unhealthy = resolves but cannot run, "
-                                "or was run and failed · available = actually "
+                                "was run (hello-world) and failed, or (under "
+                                "--deep) its version probe never got an answer "
+                                "(spawn failure/timeout) or exited non-zero on a "
+                                "flag this code has confirmed correct for that "
+                                "command — a nonzero exit on an UNCONFIRMED "
+                                "flag guess is reported as merely unmeasured, "
+                                "never unhealthy · available = actually "
                                 "executed here and answered (--deep only)"
                             ),
                         },
@@ -1198,7 +1208,9 @@ def build_doctor_schema(dialect: str | None = None, schema_id: str | None = None
                                 "the runtime's own version string, read by "
                                 "running it with --version. null means NOT "
                                 "MEASURED — no --deep, no version flag, or an "
-                                "unreadable answer — never 'no version'."
+                                "unreadable answer — never 'no version', and "
+                                "NEVER a failed probe's error text; see "
+                                "`probe_error` for that."
                             ),
                         },
                         "tier": {
@@ -1218,6 +1230,26 @@ def build_doctor_schema(dialect: str | None = None, schema_id: str | None = None
                             ),
                         },
                         "detail": {"type": "string"},
+                        "probe_error": {
+                            "type": "string",
+                            "description": (
+                                "present whenever a --deep version probe ran "
+                                "and failed (a nonzero exit, a timeout, or a "
+                                "spawn error), whether or not that failure was "
+                                "trusted enough to move `status` — e.g. the "
+                                "text Apple's java stub prints when no JDK is "
+                                "installed. Its PRESENCE does not by itself "
+                                "mean `unhealthy`: a nonzero exit on a version "
+                                "flag this code has not confirmed is correct "
+                                "for that command is recorded here but leaves "
+                                "`status` at `installed`, since the failure "
+                                "may be a wrong flag guess rather than the "
+                                "runtime. Distinct from `version`, which never "
+                                "carries this text; `detail` carries a "
+                                "one-line human summary when the failure WAS "
+                                "trusted enough to demote the row."
+                            ),
+                        },
                     },
                 },
             },

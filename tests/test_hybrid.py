@@ -19,10 +19,13 @@ def _missing_runtime(r: dict) -> bool:
     could not be spawned on this machine at all — not that the sandboxed
     program ran and misbehaved. That is a fact about the machine, and must
     read as SKIP, never as a false FAIL. Same detection as test_smoke.py:
-    the pure-Python fallback's `_runtime_unavailable_result` (exit_code
-    None, stderr says "runtime unavailable") and the Rust executor's spawn
-    failure (exit_code -2, stderr says "spawn failed"); a genuine
-    wrong-output failure always carries a real exit_code instead.
+    the pure-Python fallback's `_runtime_unavailable_result` and the Rust
+    executor's spawn failure both say "runtime unavailable" (exit_code None
+    on the fallback, -2 on Rust) — the Rust side used to say "spawn failed"
+    instead, naming neither the phase nor which binary it tried to launch,
+    which is why "spawn failed" is still checked too, for a binary built
+    before that wording changed. A genuine wrong-output failure always
+    carries a real exit_code from the interpreter/compiler that DID run.
     """
     if r.get("ok") or r.get("timed_out"):
         return False

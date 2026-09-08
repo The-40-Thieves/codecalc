@@ -1851,5 +1851,15 @@ def probe() -> dict:
             cmd = (entry["compile"] or ["bash"])[0] if entry["compile"] else "bash"
         if cmd.startswith(("bash", "sh")):
             cmd = "bash"
-        out[name] = shutil.which(cmd) is not None
+        resolved = shutil.which(cmd) is not None
+        # A plan whose `run` step needs a SECOND, different tool (kotlin:
+        # `kotlinc` resolving says nothing about whether `java` is present)
+        # is not available until THAT resolves too — see
+        # registry.secondary_command's docstring. Mirrors doctor.report()'s
+        # identical check; the two agreeing on what resolves is what
+        # tests/test_platform_contract.py gates.
+        secondary = registry.secondary_command(entry)
+        if resolved and secondary is not None:
+            resolved = shutil.which(secondary) is not None
+        out[name] = resolved
     return out

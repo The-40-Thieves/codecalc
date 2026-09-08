@@ -550,6 +550,93 @@ for lang, tool in TOOLCHAIN.items():
           f"-> {pwned.read_text(encoding='utf-8')[:60] if pwned.exists() else 'inert'}")
     shutil.rmtree(hostile.parent, ignore_errors=True)
 
+# ── kotlin: a missing compile tool must fail CODED, not with a bare OS
+# ═══    error, on EITHER backend (#280) ═════════════════════════════════════
+#
+# kotlin's `run` step launches `java -jar ...` directly, so on a host with a
+# JRE and no `kotlinc` at all, doctor used to report it `installed` (fixed in
+# codecalc/doctor.py — see tests/test_doctor.py) and `execute_code` failed at
+# the COMPILE step's spawn with a bare `exit_code -2, stderr "spawn failed:
+# No such file or directory (os error 2)"` — naming neither the phase nor
+# which binary was missing. Reproduced here with a fake, WORKING `java` and
+# no `kotlinc` anywhere on the sandbox PATH, on both backends: the compile
+# spawn failure must come back as the SAME coded, non-crashing "runtime
+# unavailable" shape a language with no compile step at all gets when its
+# sole command is missing — never a raised exception, and never phase="run"
+# (the failure is in compiling, not in running a binary that was never built).
+_kotlin_fixture_dir = pathlib.Path(tempfile.mkdtemp(prefix="codecalc-kotlin-fixture-"))
+_fixture_java = _kotlin_fixture_dir / ("java.bat" if os.name == "nt" else "java")
+if os.name == "nt":
+    _fixture_java.write_text("@echo off\r\necho ok\r\nexit /b 0\r\n", encoding="utf-8")
+else:
+    _fixture_java.write_text("#!/bin/sh\necho ok\nexit 0\n", encoding="utf-8")
+    _fixture_java.chmod(0o755)
+KOTLIN_SNIPPET = 'fun main() { println(42) }'
+
+if EXE.exists():
+    env = {**os.environ, "CODECALC_RUNTIME_PATH": str(_kotlin_fixture_dir)}
+    p = subprocess.run(
+        [str(EXE), "--lang", "kotlin", "--timeout", "30"],
+        input=KOTLIN_SNIPPET, capture_output=True, text=True,
+        encoding="utf-8", errors="replace", env=env, timeout=60)
+    try:
+        r = json.loads(p.stdout)
+        _parsed = True
+    except json.JSONDecodeError:
+        r, _parsed = {}, False
+    check("rust: a missing kotlinc parses as JSON, not a crash",
+          _parsed, f"-> stdout={p.stdout[:200]!r} stderr={p.stderr[:200]!r}")
+    if _parsed:
+        check("rust: ...ok is false", r.get("ok") is False, f"-> {r}")
+        check("rust: ...fails at the COMPILE phase, not run",
+              r.get("phase") == "compile", f"-> {r.get('phase')!r}")
+        check("rust: ...NOT a bare, unexplained os-error spawn failure",
+              "runtime unavailable" in (r.get("stderr") or ""),
+              f"-> {r.get('stderr')!r}")
+        check("rust: ...and names the actual missing binary (kotlinc)",
+              "kotlinc" in (r.get("stderr") or ""), f"-> {r.get('stderr')!r}")
+        # exit_code -2 is main.rs's existing "nothing spawned" sentinel — the
+        # SAME one a language with no compile step gets when ITS sole
+        # command is missing (run_step() is one function for both phases).
+        check("rust: ...exit_code is the same sentinel a missing single "
+              "command gets, not something bespoke to compile failures",
+              r.get("exit_code") == -2, f"-> {r.get('exit_code')!r}")
+else:
+    skip("rust: kotlin missing-compiler fixture", "codecalc-exec not built")
+
+_saved_rust_bin = executor._rust
+_saved_runtime_path_env = os.environ.get("CODECALC_RUNTIME_PATH")
+executor._rust = None  # force the Python fallback for this call
+os.environ["CODECALC_RUNTIME_PATH"] = str(_kotlin_fixture_dir)
+try:
+    fb = executor.execute("kotlin", KOTLIN_SNIPPET, timeout=30)
+finally:
+    executor._rust = _saved_rust_bin
+    if _saved_runtime_path_env is None:
+        os.environ.pop("CODECALC_RUNTIME_PATH", None)
+    else:
+        os.environ["CODECALC_RUNTIME_PATH"] = _saved_runtime_path_env
+check("python fallback: a missing kotlinc does not raise, returns a result",
+      isinstance(fb, dict), f"-> {type(fb)}")
+check("python fallback: ...ok is false", fb.get("ok") is False, f"-> {fb}")
+check("python fallback: ...fails at the COMPILE phase, not run",
+      fb.get("phase") == "compile", f"-> {fb.get('phase')!r}")
+check("python fallback: ...names both the phase and the missing binary",
+      "runtime unavailable" in (fb.get("stderr") or "")
+      and "kotlinc" in (fb.get("stderr") or ""),
+      f"-> {fb.get('stderr')!r}")
+# The Python fallback's coded sentinel for "nothing spawned" is exit_code
+# None (see executor._runtime_unavailable_result), not Rust's -2 — a
+# DIFFERENT but equally coded shape, same as a single-command language's
+# missing runtime gets on this backend. Never -2: that is Rust's sentinel,
+# and the two backends must not be confused for one another here.
+check("python fallback: ...exit_code is None, its OWN not-installed "
+      "sentinel — same as a missing single-command runtime gets here",
+      fb.get("exit_code") is None, f"-> {fb.get('exit_code')!r}")
+
+shutil.rmtree(_kotlin_fixture_dir, ignore_errors=True)
+
+
 print(f"\n=== {len(FAILS)} FAILURE(S), {len(SKIPS)} skipped ===" if FAILS else
       f"\n=== EXECUTOR SWEEP REGRESSIONS FIXED ({len(SKIPS)} skipped) ===")
 sys.exit(1 if FAILS else 0)

@@ -47,7 +47,10 @@ def _missing_runtime(r: dict) -> bool:
     Detects three spawn-failure shapes: the pure-Python fallback's
     `_runtime_unavailable_result` (exit_code None, stderr says "runtime
     unavailable"), the Rust executor's spawn failure (exit_code -2, stderr
-    says "spawn failed"), and both backends' structural refusal for a
+    now also says "runtime unavailable" — naming the phase and the missing
+    binary, where it used to say only "spawn failed"; both strings are
+    checked so a binary built before that wording changed still matches),
+    and both backends' structural refusal for a
     SHELL_WRAPPED language (gleam, haskell) on Windows — `plan_supported()`
     returns False there regardless of what is installed, and that refusal
     carries no `exit_code`/`stderr` at all, only an `error` saying

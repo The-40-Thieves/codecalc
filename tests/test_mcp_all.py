@@ -263,8 +263,9 @@ async def main():
         # (language, stdout) and (language, ok), which cannot separate "node
         # never started" from "node started and printed nothing" from "node was
         # killed by the deadline". Those are different bugs with different
-        # fixes, and the executor ALREADY distinguishes them — `spawn failed:
-        # {e}`, `cannot create I/O files in {dir}`, and a synthesised message
+        # fixes, and the executor ALREADY distinguishes them — "runtime
+        # unavailable for the {phase} phase: ... not found ({e})",
+        # `cannot create I/O files in {dir}`, and a synthesised message
         # when a timeout leaves stderr empty, plus exit_code and timed_out on
         # every row. compare_execution returns all of it. The detail string
         # threw it away, so each occurrence cost a rerun and told us nothing.

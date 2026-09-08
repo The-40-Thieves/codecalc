@@ -214,6 +214,37 @@ SHELL_WRAPPED = frozenset({"gleam", "haskell"})
 WRAPPED_TOOL = {"gleam": "gleam", "haskell": "nix-shell"}
 
 
+def secondary_command(entry: dict) -> str | None:
+    """A SECOND executable `entry`'s plan needs, beyond the one that decides
+    whether it resolves at all — or None when there isn't one.
+
+    Most compile-then-run plans (c/cpp/rust/fortran) `run` is literally
+    `{exe}`, the binary the compile step itself just produced, so resolving
+    the compile tool is already proof the whole plan can run: nothing more to
+    check. Kotlin's `run` step instead launches `java -jar ...` directly — a
+    toolchain `kotlinc` resolving says NOTHING about whether a JRE is present
+    — and that gap is exactly what let kotlin report `installed` from `java`
+    alone (`command: "java"`) on a host with no Kotlin toolchain at all: the
+    resolving-decider and the thing `run` actually invokes were silently two
+    different binaries.
+
+    Computed mechanically from the registry entry rather than a hand-kept
+    per-language table, so a future compile-then-run language that ALSO needs
+    a distinct run-time tool is caught by the same rule instead of quietly
+    inheriting this bug: any entry with a compile step whose `run`'s first
+    token is a literal command (not a `{exe}`/`{file}`/`{work}` placeholder)
+    different from that compile tool needs both probed.
+    """
+    compile_ = entry.get("compile")
+    run = entry.get("run") or []
+    if not compile_ or not run:
+        return None
+    run_cmd = run[0]
+    if run_cmd.startswith("{") or run_cmd == compile_[0]:
+        return None
+    return run_cmd
+
+
 def plan_supported(name: str, *, windows: bool) -> bool:
     """Whether `name`'s canonical plan can execute on this platform AT ALL.
 

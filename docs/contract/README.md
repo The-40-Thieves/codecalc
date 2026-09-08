@@ -1,7 +1,46 @@
 # The codecalc result contract
 
-**Current version: `1.7.0`** · Schema: [`result-v1.schema.json`](result-v1.schema.json) ·
+**Current version: `1.8.0`** · Schema: [`result-v1.schema.json`](result-v1.schema.json) ·
 Source of truth: [`codecalc/contract.py`](../../codecalc/contract.py)
+
+`1.8.0` is a MINOR bump over `1.7.0`. It ADDS a `probe_error` field to the
+`doctor` diagnostic document's `runtimes[]` entries, present whenever a
+`--deep` version probe ran and failed — a nonzero exit, a timeout, or a
+spawn error — whether or not that failure was trusted enough to move
+`status`. This closes a report reproduced on macOS with no JDK:
+`/usr/bin/java` (Apple's stub, always present on PATH there) exits non-zero
+printing "The operation couldn't be completed. Unable to locate a Java
+Runtime.", and the version probe used to read that text as a perfectly good
+version string and leave `status` at `installed` — the failure was observed
+and then discarded. `version` never carries a failed probe's text;
+`probe_error` does.
+
+A probe failure moves `status` to `unhealthy` only when it is TRUSTED: a
+spawn failure or timeout (the probe never got an answer at all, regardless
+of which flag was used) always is; a mere nonzero exit is trusted only when
+the flag used is one this code has confirmed correct for that command (an
+explicit override, the same list java's `-version` was already on). This
+distinction exists because `--version` is a GNU convention, not a universal
+one — `go --version` exits 2 (`go version` is the real form), `lua
+--version` exits 1 (`-v` is correct), `zig --version` exits 1 (`zig
+version` is correct) — and a nonzero exit on an UNCONFIRMED flag is reported
+as merely unmeasured (`probe_error` still recorded, `status` untouched),
+never as evidence the runtime itself is broken. A language with a
+hello-world check (`_HELLO`) is stronger evidence than either reading and is
+always consulted first.
+
+`healthy` also gained a narrow new condition alongside the existing
+"workspace writable and a backend resolved" rule: it now goes `false` when a
+`tested`-tier runtime (the tier a CI job genuinely executes and checks on
+every PR — see `tier_summary`) resolved and then proved broken by a TRUSTED
+failure, whether a non-executable file or a failed `--deep` probe. An
+`unhealthy` `best_effort`/`plan_only` runtime — java and kotlin included —
+still leaves `healthy` untouched, same as before: nothing ever promised
+those work. No result a `1.7.0` client already understood changes meaning —
+`probe_error` is additive and absent on every row it does not apply to, and
+`healthy`'s new condition only ever turns a currently-`true` value `false`
+in a situation this document already called "the install cannot execute
+what it advertises" — hence MINOR, not MAJOR.
 
 `1.7.0` is a MINOR bump over `1.6.0`. It ADDS `n_after` to
 `optimization_verification.speedup.per_size[]` and `size_after` to

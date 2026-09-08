@@ -32,6 +32,41 @@ binary this process only found on PATH would be the exact defect this project
 keeps correcting: a field that claims a stronger measurement than was taken.
 `status_basis` says which of the two ran, per report, so a reader never has to
 infer it.
+
+`unhealthy` HAS TWO CAUSES, DELIBERATELY MERGED
+
+"resolves and is NOT executable" (a file present with the wrong mode) and "was
+run and failed" (a --deep hello-world execution, or a version probe that
+NEVER GOT AN ANSWER — a spawn failure or a timeout) are the same CLAIM from a
+caller's point of view — this row resolved and cannot be trusted to run —
+even though they are measured differently.
+
+A version probe that merely EXITED NON-ZERO is deliberately NOT treated the
+same as one of those, unless this code has been explicitly told the flag it
+used is the runtime's real one. `--version` is a GNU convention, not a
+universal one: `go --version` exits 2 ("flag provided but not defined" — `go
+version` is the real form), `lua --version` exits 1 (`-v` is correct), `zig
+--version` exits 1 (`zig version` is correct) — a shipped version of this
+file trusted their nonzero exits as brokenness and reported all three
+`unhealthy` (go being `tested` tier, this also flipped `healthy` false) on
+any host with a perfectly working toolchain. `_VERSION_FLAG` doubles as the
+"this flag is confirmed correct for this command" set: a nonzero exit from a
+command NOT in it is reported as merely unmeasured (`version` stays None,
+`probe_error` is still recorded for a human to read), never `unhealthy`. A
+command WITH an entry — java's Apple stub is the canonical case: `-version`
+IS its documented flag, and it still exits non-zero printing "Unable to
+locate a Java Runtime." on stderr — trusts the nonzero exit, because this
+code was TOLD that flag is right and the runtime still failed it. A language
+with a hello-world program (`_HELLO`) is stronger evidence still and
+overrides either reading: lua is in `_HELLO`, so its wrong-flagged version
+probe never gets the final word regardless.
+
+`probe_error` never lands in `version`, which holds a version string or
+nothing, never a failure message. `runtime_summary.unhealthy` counts every
+TRUSTED cause together; `probe_error`/`detail` says which one applies to a
+given row, and a row can carry `probe_error` while still reading `installed`
+— that combination means "the version guess didn't work; nothing here says
+the runtime itself is broken".
 """
 
 from __future__ import annotations
@@ -88,12 +123,20 @@ def primary_command(entry: dict, name: str | None = None) -> str:
     installed, and probing it advertised wrapper languages on machines that
     had never seen them. `name` is optional only for callers that predate the
     wrapper distinction; passing it is what makes the answer honest.
+
+    A compiled language's deciding command is ALWAYS its compile tool, never
+    `run` — including when `run` is not the `{exe}` template but a literal
+    command of its own (kotlin's `run` launches `java -jar ...`). Kotlin used
+    to fall through to `run`'s own first token here, so `command` read
+    `"java"`: a language reported `installed` from a JRE alone, with no
+    Kotlin toolchain anywhere on the host. `registry.secondary_command`
+    is what catches `run` needing a SECOND, different tool on top of this one.
     """
     if name is not None and name in registry.SHELL_WRAPPED:
         return registry.WRAPPED_TOOL[name]
+    if entry["compile"]:
+        return entry["compile"][0]
     cmd = entry["run"][0] if entry["run"] else ""
-    if cmd.startswith("{"):
-        cmd = (entry["compile"] or ["bash"])[0] if entry["compile"] else "bash"
     if cmd.startswith(("bash", "sh")):
         cmd = "bash"
     return cmd
@@ -367,6 +410,19 @@ def report(deep: bool = False) -> dict:
         if (name in registry.SHELL_WRAPPED and status == "installed"
                 and shutil.which("bash", path=registry.runtime_path()) is None):
             status, path = "supported", None
+        # A plan whose `run` step needs a SECOND, different tool is not truly
+        # installed until THAT resolves too — kotlin's `run` launches
+        # `java -jar ...`, and `kotlinc` resolving says nothing about whether
+        # a JRE is present. Reporting `installed` from the compile tool alone
+        # is exactly the bug: `command` read `"java"` before this file's fix,
+        # so kotlin advertised installed from a JRE with no Kotlin toolchain
+        # anywhere on the host. See registry.secondary_command's docstring.
+        missing_secondary = None
+        secondary = registry.secondary_command(registry.LANGUAGES[name])
+        if (status == "installed" and secondary is not None
+                and shutil.which(secondary, path=registry.runtime_path()) is None):
+            missing_secondary = secondary
+            status, path = "supported", None
         # `version` is present on every row so a caller never has to branch on
         # the key's existence, and is None unless it was actually read. Under
         # --deep only, for the same reason `available` is: asking 31 runtimes
@@ -378,22 +434,71 @@ def report(deep: bool = False) -> dict:
         # `status: available` (this host ran it fine under --deep) while
         # `tier: best_effort` (no CI job checks it) — that combination is
         # exactly "works here, but nothing stops it silently breaking".
+        version, probe_error, probe_hard_failure = (
+            _probe_version(cmd, path) if deep and status == "installed" else (None, None, False))
         row = {"name": name, "command": cmd, "status": status, "path": path,
-               "tier": tier,
-               "version": _runtime_version(cmd, path) if deep else None}
-        # Only languages with a hello program are promoted. Running the others
-        # with an EMPTY source would execute a no-op, find no "codecalc" in its
-        # stdout, and demote a perfectly good runtime to `unhealthy` — a --deep
-        # run reporting failures it manufactured itself. They stay `installed`,
-        # which is what was actually measured about them.
-        if deep and status == "installed" and name in _HELLO:
-            probe = executor.execute(name, _HELLO[name], timeout=20)
-            ran = probe.get("ok") is True and "codecalc" in (probe.get("stdout") or "")
-            row["status"] = "available" if ran else "unhealthy"
-            if not ran:
-                row["detail"] = (probe.get("error")
-                                 or (probe.get("stderr") or "")[:200]
-                                 or f"verdict={probe.get('verdict')}")
+               "tier": tier, "version": version}
+        if missing_secondary:
+            row["detail"] = (f"{cmd!r} resolves, but {name}'s run step also "
+                             f"needs {missing_secondary!r}, which was not "
+                             f"found on PATH — install it to run {name}")
+        if deep and status == "installed":
+            if probe_error:
+                row["probe_error"] = probe_error
+            # Only languages with a hello program are promoted, and — CRITICAL
+            # — checked FIRST, ahead of `probe_error` below: a nonzero exit
+            # from the VERSION probe is not evidence the runtime cannot run
+            # code, and a real hello-world execution is strictly stronger
+            # evidence than a --version flag guess. Reversing this order
+            # (checking `probe_error` first) was a shipped regression: `go
+            # --version` exits 2 ("flag provided but not defined"; the real
+            # form is `go version`), `lua --version` exits 1 (`lua -v` is
+            # correct), `zig --version` exits 1 (`zig version`, no dashes) —
+            # none of them are GNU-style, and go is `tested` tier, so
+            # `doctor --deep` reported a perfectly working install as
+            # `unhealthy`/`healthy: false` on any host with those toolchains.
+            # lua IS in `_HELLO`; skipping its hello run because a WRONG
+            # version flag "failed" first (the ordering bug) hid the one
+            # measurement that would have proven it fine.
+            if name in _HELLO:
+                probe = executor.execute(name, _HELLO[name], timeout=20)
+                ran = probe.get("ok") is True and "codecalc" in (probe.get("stdout") or "")
+                row["status"] = "available" if ran else "unhealthy"
+                if not ran:
+                    row["detail"] = (probe.get("error")
+                                     or (probe.get("stderr") or "")[:200]
+                                     or f"verdict={probe.get('verdict')}")
+            elif probe_error:
+                # No hello program to arbitrate, so this is the only signal
+                # there is — and it is trusted ONLY when it is real evidence
+                # of brokenness, not a guessed flag this runtime never spoke:
+                #
+                #   HARD failure (never even spawned, or timed out) — always
+                #   trusted. A command `_runtime_status` just found on PATH
+                #   that then refuses to run AT ALL is broken regardless of
+                #   which flag was used.
+                #
+                #   SOFT failure (ran, exited non-zero) — trusted ONLY when
+                #   `cmd` has an explicit `_VERSION_FLAG` entry, i.e. this
+                #   code has been TOLD that flag is the correct one for this
+                #   runtime and it still failed. Apple's java stub is exactly
+                #   this case: `-version` IS java's documented flag (the
+                #   `_VERSION_FLAG` override below), it exits non-zero
+                #   printing "Unable to locate a Java Runtime.", and java is
+                #   not in `_HELLO`, so this is the only measurement of it
+                #   `doctor` ever takes. A command still on the untested
+                #   DEFAULT `--version` guess getting a nonzero exit proves
+                #   nothing except that the guess was probably wrong — go,
+                #   lua and zig before their `_VERSION_FLAG` entries existed
+                #   were exactly this, and demoting them was reporting a
+                #   failure this code's own wrong guess manufactured.
+                if probe_hard_failure or cmd in _VERSION_FLAG:
+                    row["status"] = "unhealthy"
+                    row["detail"] = f"version probe failed: {probe_error}"
+                # else: leave `status` at `installed`. `version` already
+                # stayed None (see _probe_version) — "not measured", not "no
+                # version" — and `probe_error` is still recorded above for a
+                # human to see WHY, without it driving `status` on a guess.
         runtimes.append(row)
 
     summary = {state: sum(1 for r in runtimes if r["status"] == state)
@@ -425,7 +530,22 @@ def report(deep: bool = False) -> dict:
     # exiting non-zero for them would make `doctor` useless as the install
     # check it is meant to be. What makes an install unhealthy is
     # that it cannot execute anything: no workspace to run in, or no backend.
-    healthy = bool(workspace["writable"]) and backend in ("rust", "python")
+    #
+    # One more thing is narrow enough to belong here: a `tested`-tier
+    # runtime that is `unhealthy` — resolved but genuinely broken, whether
+    # that came from a non-executable file or a failed --deep probe. `tested`
+    # is the tier a CI job actually executes and asserts on every PR (see
+    # RELIABILITY_TIERS); an UNINSTALLED language of any tier stays
+    # `supported`, an ordinary fact about the host, and does not flip this —
+    # only ONE that resolved and then proved broken does, because that is
+    # codecalc's own advertised guarantee failing, not a host missing an
+    # optional toolchain. `best_effort`/`plan_only` runtimes (java, kotlin,
+    # ...) never reach here regardless of how broken their probe is — the
+    # whole reason those tiers exist is that nothing promised they work.
+    tested_broken = sorted({r["name"] for r in runtimes
+                            if r["tier"] == "tested" and r["status"] == "unhealthy"})
+    healthy = (bool(workspace["writable"]) and backend in ("rust", "python")
+               and not tested_broken)
 
     return {
         # Under the result contract's version and policy rather than a third
@@ -515,9 +635,30 @@ _HELLO = {
 #: runtime added later works without an entry. An exception is not a special
 #: case for its own sake: `java -version` predates the GNU convention and
 #: prints to STDERR, which is why both streams are read below.
+#:
+#: AUDITED against every registered language's actual toolchain (mise-managed
+#: on the box this was measured on) after `go`/`lua`/`zig` shipped a false
+#: `unhealthy` from the untested `--version` default — see the PR body for
+#: the full per-language table. `go --version` exits 2 ("flag provided but
+#: not defined: -version"; go takes `version` as a SUBCOMMAND, no dashes).
+#: `lua --version` exits 1 ("unrecognized option"; `-v` is correct). `zig
+#: --version` exits 1 (prints a usage banner; `zig version`, no dashes, is
+#: correct — the same subcommand shape as go). Every other audited language
+#: (awk, bash, bun, gcc/g++/gfortran, dotnet, deno, elixir, gleam, nix-shell
+#: for haskell, mojo, node, perl, php, python3, Rscript, ruby, rustc, sqlite3,
+#: swift, zsh) answered plain `--version` with exit 0 and is deliberately
+#: left off this map. `_VERSION_FLAG` membership doubles as "this code has
+#: been TOLD the correct flag for this command" — `_probe_version`'s caller
+#: (`report()`) trusts a NONZERO exit as real evidence of brokenness only for
+#: commands listed here; a command still on the untested default that exits
+#: nonzero is reported as merely unmeasured, not broken, because the failure
+#: might be this guess rather than the runtime.
 _VERSION_FLAG: dict[str, str] = {
     "java": "-version",
     "kotlinc": "-version",
+    "go": "version",
+    "lua": "-v",
+    "zig": "version",
 }
 
 #: Commands with no version flag worth calling. `escript` and `tclsh` have no
@@ -527,43 +668,91 @@ _VERSION_FLAG: dict[str, str] = {
 _NO_VERSION = frozenset({"escript", "tclsh"})
 
 
-def _runtime_version(command: str, path: str | None) -> str | None:
-    """The runtime's own version string, or None when it could not be read.
+def _probe_version(command: str, path: str | None) -> tuple[str | None, str | None, bool]:
+    """`(version, probe_error, hard_failure)`.
 
-    NONE MEANS NOT MEASURED, NEVER "no version". Doctor is asked to report
-    versions; it is not asked to invent them. A runtime that has no version
-    flag, times out, crashes, or answers with something unparsable all produce
-    `None` here and leave `status` untouched — a version that could not be read
-    says nothing about whether the runtime works, and demoting it would report a
-    failure this function manufactured.
+    `version`/`probe_error` are never both non-None. NONE MEANS NOT MEASURED,
+    NEVER "no version". Doctor is asked to report versions; it is not asked
+    to invent them. A runtime that has no version flag, or that answers on
+    exit 0 with nothing parseable, is simply not measured — `version` is
+    None and `probe_error` stays None too, because NEITHER case is evidence
+    the runtime is broken.
+
+    `hard_failure` is the caller's (`report()`'s) signal for how much to
+    TRUST a non-None `probe_error` as evidence of brokenness, and is False
+    whenever `probe_error` is None:
+
+      True   the probe never got an answer at all — a spawn error (the
+             resolved path exists but refuses to execute) or a timeout. That
+             is real evidence regardless of which flag was used: a command
+             `_runtime_status` just found on PATH that will not run AT ALL
+             is broken.
+      False  the probe RAN and exited non-zero. That is real evidence ONLY
+             when the flag used is one this code has been explicitly TOLD is
+             correct for `command` (`_VERSION_FLAG` has an entry) — this is
+             the exact case Apple's java stub reproduces: `-version` IS
+             java's documented flag, and it still exits non-zero printing
+             "Unable to locate a Java Runtime." A command still on the
+             untested `--version` DEFAULT that exits non-zero proves nothing
+             except that the guess was probably wrong: `go --version` exits
+             2 (`go version` is correct), `lua --version` exits 1 (`-v` is
+             correct), `zig --version` exits 1 (`zig version` is correct) —
+             none of them speak GNU `--version`, and reporting any of them
+             `unhealthy` from this alone is a failure this function's own
+             wrong guess manufactured, not one the runtime produced. The
+             caller decides what "trust" means for its `False` case
+             (`cmd in _VERSION_FLAG`); this function only reports what kind
+             of failure it was.
 
     Runs under the executor's 23-entry env allowlist rather than the doctor
     process's own environment. This is a diagnostic, but it is still spawning
     host binaries, and there is no reason for `gcc --version` to see an API key.
     """
     if not path or command in _NO_VERSION:
-        return None
+        return None, None, False
     flag = _VERSION_FLAG.get(command, "--version")
     try:
         proc = subprocess.run(
             [path, flag],
             capture_output=True, timeout=10, env=executor._env(), check=False,
         )
-    except (OSError, subprocess.SubprocessError):
-        return None
+    except subprocess.TimeoutExpired:
+        return None, f"{command} {flag} timed out after 10s", True
+    except (OSError, subprocess.SubprocessError) as exc:
+        # A resolved path that fails to even SPAWN (permission revoked, file
+        # removed, between `_runtime_status` and here) is the same kind of
+        # broken-not-missing signal as a nonzero exit — not "not measured".
+        return None, f"{command} {flag}: {exc}", True
     # stdout OR stderr: `java -version` uses stderr, and a runtime that answers
     # on the stream we did not read is indistinguishable from one that did not
     # answer at all.
+    text = ""
     for stream in (proc.stdout, proc.stderr):
-        text = (stream or b"").decode("utf-8", "replace").strip()
-        for line in text.splitlines():
+        decoded = (stream or b"").decode("utf-8", "replace").strip()
+        for line in decoded.splitlines():
             line = line.strip()
             if line:
-                # First non-empty line, capped. Some runtimes print a paragraph
-                # (gcc prints its licence), and the report is a diagnostic, not
-                # a transcript.
-                return line[:120]
-    return None
+                text = line[:200]
+                break
+        if text:
+            break
+    if proc.returncode != 0:
+        # Whatever it printed — the Apple-stub message, a usage banner, or
+        # nothing at all — is a FAILURE report, not a version. `version` in
+        # the returned pair stays None on this branch unconditionally. This
+        # is a SOFT failure (it ran); `hard_failure=False` regardless of
+        # `command` — the caller is the one that knows whether this
+        # `command`'s flag is trusted, not this function.
+        return None, text or f"{command} {flag} exited {proc.returncode}", False
+    # First non-empty line, capped. Some runtimes print a paragraph (gcc
+    # prints its licence), and the report is a diagnostic, not a transcript.
+    return (text[:120] or None), None, False
+
+
+def _runtime_version(command: str, path: str | None) -> str | None:
+    """The runtime's own version string, or None when it could not be read —
+    the half of `_probe_version` most callers (and tests) only need."""
+    return _probe_version(command, path)[0]
 
 
 def _skill_path() -> str | None:
@@ -585,8 +774,28 @@ def _remedies(backend: str, extras: list, runtimes: list, workspace: dict) -> li
     for e in extras:
         if e["remedy"]:
             out.append(e["remedy"])
-    unhealthy = [r["name"] for r in runtimes if r["status"] == "unhealthy"]
+    # `probe_error` rows failed a REAL measurement (nonzero exit / timeout) —
+    # named separately from a plain permission-mode `unhealthy` because the
+    # fix is different: install a working runtime, not `chmod +x`.
+    probed_broken = [r for r in runtimes
+                     if r["status"] == "unhealthy" and r.get("probe_error")]
+    probed_broken_names = {r["name"] for r in probed_broken}
+    for r in probed_broken:
+        out.append(f"{r['name']}: resolved on PATH ({r['command']}) but its "
+                   f"own probe failed ({r['probe_error'][:100]}) — install a "
+                   f"working {r['name']} runtime")
+    unhealthy = [r["name"] for r in runtimes
+                 if r["status"] == "unhealthy" and r["name"] not in probed_broken_names]
     if unhealthy:
         out.append(f"resolved but not runnable: {', '.join(unhealthy)} — "
                    f"check the file mode and the runtime PATH")
+    # A language whose compile tool resolved but whose run step needs a
+    # SECOND tool that did not (kotlin: kotlinc without java) reports
+    # `supported`, not `unhealthy` — nothing about it is broken, it is simply
+    # half-installed. Named here rather than folded into the generic
+    # `supported` case because `detail` already has the exact missing binary.
+    half_installed = [r for r in runtimes
+                      if r["status"] == "supported" and "run step also needs" in (r.get("detail") or "")]
+    for r in half_installed:
+        out.append(f"{r['name']}: {r['detail']}")
     return out
