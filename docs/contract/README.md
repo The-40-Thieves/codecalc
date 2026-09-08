@@ -56,9 +56,13 @@ report computed from an AST parse of the submitted source —
   harness writes a final `{"event": "end", "step": N, "emitted": N}` line
   on every path it returns through normally — `events_consistent` is
   `false` whenever that line is missing, its count disagrees with what this
-  parser actually accepted, or anything follows it, which is the one thing
-  a same-process forger cannot fake by definition (it never runs the code
-  that writes it). See `codecalc/tracing.py`'s module docstring, "TRUST
+  parser actually accepted, or anything follows it. That catches crude
+  tampering, not a deliberate forger: the program can read its own trace
+  file, append a step-continuous forged event plus a matching `end` line,
+  and exit before the harness writes the real one, and the parser accepts
+  that as consistent. `events_consistent: true` is therefore not proof of
+  an untampered trace; the trace is exactly as trustworthy as the program's
+  own stdout. See `codecalc/tracing.py`'s module docstring, "TRUST
   BOUNDARY" section, for exactly what this does and does not guarantee.
 * **`branches`** — source line number (string key) -> execution count, for
   every `if`/`elif`/`while`/`for`/`try` line, from a static `ast` parse of

@@ -143,9 +143,13 @@ otherwise it bounds the DAMAGE and SURFACES the tampering:
     count past what `emitted` claims, so `events_consistent` catches that
     case too, not just an outright-missing terminator.
 
-None of this turns `events` into a signed record — a sufficiently determined
-attacker with same-process code execution can still corrupt it in ways this
-parser accepts (see `_validate_event`'s own docstring for the one class of
+None of this turns `events` into a signed record — a program that reads its
+own trace file back (it can: the file lives in its cwd) can append a
+step-continuous forged event and its own matching `end` line, then exit
+before the harness writes the real one, and this parser accepts that as
+consistent. `events_consistent: true` is therefore NOT proof of an untampered
+trace; it only says nothing crude happened. Same-process code execution can
+corrupt the record in ways this parser accepts (see `_validate_event`'s own docstring for the one class of
 forgery — an exact step-and-shape match — this design cannot detect at the
 per-line level, only via the aggregate `events_consistent` check). What it
 guarantees is that a CARELESS or MODERATE corruption is either rejected
