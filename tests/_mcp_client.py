@@ -68,25 +68,47 @@ def _server_params(env: dict[str, str] | None = None) -> StdioServerParameters:
 
 
 @asynccontextmanager
-async def in_process():
-    """Client bound to the server object; fastest, exercises handlers directly."""
+async def in_process(*, elicitation_callback=None):
+    """Client bound to the server object; fastest, exercises handlers directly.
+
+    `elicitation_callback`, when given, both answers elicitation requests and
+    declares the client's elicitation capability (`mcp.client.session.Client`
+    advertises it only when a non-default callback is set) — needed by any
+    test that drives a gated admin tool (install_package, update_runtimes)
+    past its confirmation gate. See `auto_confirm` below for the common case.
+    """
     from codecalc import server
 
-    async with Client(server.mcp, mode="auto") as c:
+    async with Client(server.mcp, mode="auto", elicitation_callback=elicitation_callback) as c:
         yield c
 
 
 @asynccontextmanager
-async def over_stdio(env: dict[str, str] | None = None):
+async def over_stdio(env: dict[str, str] | None = None, *, elicitation_callback=None):
     """Client bound to a real `python -m codecalc.server` subprocess.
 
     `env` is merged OVER the base PYTHONPATH/PATH, not a replacement for
     them — a test that needs, say, `CODECALC_RUNTIME_PATH` pointed at a
     scratch directory should not also have to re-derive PYTHONPATH/PATH
     itself just to add one variable.
+
+    `elicitation_callback`: see `in_process`'s docstring.
     """
-    async with Client(StdioTransport(_server_params(env)), mode="auto") as c:
+    async with Client(StdioTransport(_server_params(env)), mode="auto",
+                      elicitation_callback=elicitation_callback) as c:
         yield c
+
+
+async def auto_confirm(context, params):
+    """An `elicitation_callback` that always accepts with `confirm: true`.
+
+    The common case for a test that needs a gated admin tool to actually run:
+    it does not exercise the decline/cancel/malformed paths (see
+    tests/test_confirmation_gate.py for those), just gets past the gate.
+    """
+    from mcp.types import ElicitResult
+
+    return ElicitResult(action="accept", content={"confirm": True})
 
 
 def data(result):

@@ -656,6 +656,14 @@ for each one.
 `remedy` travels with the code in the result, so the fix does not live only in
 this table.
 
+`install_package` and `update_runtimes(apply=True)` gate on a caller
+confirmation before doing anything (see `codecalc/confirmation.py`); a
+declined or cancelled confirmation is `permission_denied` — the same
+"elevation gate" this table already describes — and a missing or malformed
+confirmation response is `validation`. Neither is a new code: both reuse the
+existing eight-entry taxonomy, in the same `{"ok": false, "code", "error",
+"remedy"}` shape as every other rejection in this document.
+
 ### `code_inferred`
 
 A failing result may carry `code_inferred: true`. That means the code was

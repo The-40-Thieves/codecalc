@@ -224,6 +224,27 @@ behind it.
   prioritized audit scope, and a submission checklist with the OSTIF intake
   channel. `SECURITY.md` now says the application is submission-ready and
   pending submission.
+- **`install_package` and `update_runtimes(apply=True)` now gate on a
+  protocol-level confirmation instead of only the `anthropic/
+  requiresUserInteraction` `_meta` hint.** That hint is read by exactly one
+  client (Claude Code) and forces a permission prompt there; every other
+  client, or that one with the hint stripped, previously called straight
+  through with nothing asking whether the install/apply should happen. On a
+  2026-07-28 connection the tool now returns the SDK's multi-round-trip
+  `input_required` result on the first call, asking the caller to confirm
+  (echoing back the package/language, or the languages being updated); the
+  client's retry carries the answer, and the tool proceeds on `confirm: true`
+  or refuses — `permission_denied` for a decline/cancel, `validation` for a
+  missing or malformed answer — with no install or update attempted either
+  way. On an older connection whose client declared the elicitation
+  capability, the same question goes out as a standalone `elicitation/create`
+  request instead. A client on an older connection that never declared
+  elicitation is unaffected: the gate is skipped and behaviour is unchanged,
+  `_meta` hint included — which is also why that hint stays on both tools
+  rather than being replaced outright. Every outcome (confirmed, declined,
+  cancelled, malformed, or skipped) is recorded in the audit log.
+  `update_runtimes(apply=False)` — the default, dry-run form — is never
+  gated, since nothing runs.
 
 ## [0.10.0] — 2026-09-08
 
