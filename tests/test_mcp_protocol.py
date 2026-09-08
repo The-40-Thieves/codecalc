@@ -30,6 +30,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from mcp import Client
+from mcp.client.subscriptions import ResourcesListChanged, ResourceUpdated
 from mcp.server.context import ServerRequestContext
 from mcp.types import ResourceTemplateReference
 
@@ -187,6 +188,72 @@ async def main() -> None:
         r = await c.call_tool("calc_exact", {"expr": "0.1+0.2 == 0.3"})
         text = "".join(getattr(b, "text", "") for b in r.content)
         check("calc_exact round-trips", "true" in text.lower(), f"-> {text[:60]}")
+
+        # ── session-mutation notifications (resources/list-changed) ─────────
+        # `subscriptions/listen` is 2026-07-28-only — the connection above
+        # already negotiated it (see the headline check at the top of this
+        # file). One notification per mutating call, none on a read-only one.
+        async def next_event(sub, timeout=1.0):
+            try:
+                return await asyncio.wait_for(sub.__anext__(), timeout=timeout)
+            except TimeoutError:
+                return None
+
+        async with c.listen(resources_list_changed=True) as sub:
+            await c.call_tool("session_list", {})
+            check("session_list (read-only) fires no resources-changed event",
+                  await next_event(sub, 0.3) is None)
+
+            started = await c.call_tool("session_start", {"language": "python3"})
+            sid = started.structured_content["session_id"]
+
+            await c.call_tool("session_write_file",
+                              {"session_id": sid, "path": "a.txt", "content": "hi"})
+            check("session_write_file fires a resources-changed event",
+                  isinstance(await next_event(sub), ResourcesListChanged))
+            check("...and only one", await next_event(sub, 0.3) is None)
+
+            await c.call_tool("session_read_file", {"session_id": sid, "path": "a.txt"})
+            check("session_read_file (read-only) fires no event",
+                  await next_event(sub, 0.3) is None)
+
+            await c.call_tool(
+                "execute_code",
+                {"language": "python3", "code": "1+1", "session_id": sid},
+            )
+            check("execute_code(session_id=...) fires a resources-changed event",
+                  isinstance(await next_event(sub), ResourcesListChanged))
+            check("...and only one", await next_event(sub, 0.3) is None)
+
+            await c.call_tool("session_stop", {"session_id": sid})
+            check("session_stop fires a resources-changed event",
+                  isinstance(await next_event(sub), ResourcesListChanged))
+            check("...and only one", await next_event(sub, 0.3) is None)
+
+            # idempotent: an already-gone session changes nothing on a
+            # second stop.
+            await c.call_tool("session_stop", {"session_id": sid})
+            check("a second session_stop on an already-gone session fires no event",
+                  await next_event(sub, 0.3) is None)
+
+        # ── resource-updated for the ONE named file that changed ────────────
+        started = await c.call_tool("session_start", {"language": "python3"})
+        sid = started.structured_content["session_id"]
+        uri = f"codecalc://session/{sid}/files/b.txt"
+        async with c.listen(resource_subscriptions=[uri]) as sub:
+            await c.call_tool("session_write_file",
+                              {"session_id": sid, "path": "b.txt", "content": "hi"})
+            event = await next_event(sub)
+            check("session_write_file fires resource-updated for its own URI",
+                  isinstance(event, ResourceUpdated) and event.uri == uri, f"-> {event}")
+            check("...and only one", await next_event(sub, 0.3) is None)
+
+            # a DIFFERENT file's write does not match this subscription's URI.
+            await c.call_tool("session_write_file",
+                              {"session_id": sid, "path": "c.txt", "content": "hi"})
+            check("a write to a different file fires no event on this subscription",
+                  await next_event(sub, 0.3) is None)
+        await c.call_tool("session_stop", {"session_id": sid})
 
         # ── the timeout backstop still covers what it used to ───────────────
         # AUDIT.md HIGH-05. MCPServer.tool() has no timeout= parameter, so these

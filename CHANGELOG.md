@@ -81,6 +81,25 @@ behind it.
   is prefix-only and case-sensitive, capped at the SDK's own 100-item
   ceiling on `Completion.values`, with `total`/`has_more` reporting the full
   match count and whether the cap actually dropped anything.
+- **`resources/list`-changed and resource-updated notifications on every
+  tool that mutates a session's workspace.** `session_run`,
+  `execute_code(session_id=...)`, `session_write_file`, `session_stop`
+  (only when it actually removed a workspace — a second stop on an
+  already-gone session is idempotent and stays silent), and
+  `install_package(session_id=...)` each now fire one
+  `ctx.notify_resources_changed()` (best effort) on success;
+  `session_write_file` additionally fires `ctx.notify_resource_updated()`
+  for the exact `codecalc://session/{session_id}/files/{path}` URI it just
+  rewrote, since it is the one mutating tool here that names a single file
+  rather than an unbounded set. Both are coroutines published onto a
+  `subscriptions/listen` stream (2026-07-28, SEP-2575); every tool above is
+  a plain synchronous `def` that the SDK runs on a worker thread, so the new
+  `_notify_resources_changed`/`_notify_resource_updated` helpers bridge back
+  to the event loop via `anyio.from_thread.run(...)` rather than making
+  these tools async. `resources/list` itself still carries the existing 10s
+  cache TTL (`cache_hints=` on the `MCPServer` construction) — a client
+  refetching inside that window can still see stale content even though the
+  notification arrived immediately.
 
 ### Fixed
 

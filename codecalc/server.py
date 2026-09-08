@@ -27,6 +27,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+import anyio
 from mcp.server import CacheHint, MCPServer
 from mcp.server.mcpserver import Context
 from mcp.types import (
@@ -352,6 +353,44 @@ async def _complete_argument(ref, argument, context):
     matches = [v for v in getter() if v.startswith(prefix)]
     values = matches[:_COMPLETION_LIMIT]
     return Completion(values=values, total=len(matches), has_more=len(matches) > len(values))
+
+
+# ── Session-mutation notifications (resources/list-changed, resource/updated) ─
+#
+# `ctx.notify_resources_changed()`/`ctx.notify_resource_updated(uri)` are
+# coroutines that publish onto a `subscriptions/listen` stream (2026-07-28,
+# SEP-2575) — but every tool below is a plain synchronous `def`, which the
+# SDK runs via `anyio.to_thread.run_sync` (`mcp_middleware.py`'s own module
+# docstring: "the SDK runs them on a worker thread"), not on the event loop
+# that owns those coroutines. `anyio.from_thread.run(...)` is the documented
+# bridge back from an anyio worker thread to its event loop, blocking this
+# worker thread (never the loop) until the notification is published. Best
+# effort, same shape as `execute_code_stream`'s own `report_progress`
+# wrapper above: a client that never opened a listen stream gets no error
+# and no notification, and a publish failure never fails the tool call it
+# rode in on.
+#
+# `resources/list` itself carries a 10s cache TTL (`cache_hints=` on the
+# `MCPServer(...)` construction above) — a client that refetches inside that
+# window can still see stale content even though the notification arrived
+# immediately; the TTL is a caching hint, not a guarantee this notification
+# supersedes.
+def _notify_resources_changed(ctx: Context) -> None:
+    if ctx is None:
+        return
+    try:
+        anyio.from_thread.run(ctx.notify_resources_changed)
+    except Exception:
+        pass
+
+
+def _notify_resource_updated(ctx: Context, uri: str) -> None:
+    if ctx is None:
+        return
+    try:
+        anyio.from_thread.run(ctx.notify_resource_updated, uri)
+    except Exception:
+        pass
 
 
 def _coded(fn):
@@ -957,6 +996,7 @@ def execute_code(
     compact: bool = False,
     provider: str | None = None,
     dependencies: list[str] | None = None,
+    ctx: Context = None,
 ) -> dict[str, Any]:
     """Execute `code` in `language` in a sandbox.
 
@@ -1014,6 +1054,10 @@ def execute_code(
     `max_output_kb` is honoured as a literal ceiling with no spill, same as
     before. Session-LESS runs (no `session_id`) have no workspace to spill
     into and keep the old truncate-and-drop behaviour.
+
+    With `session_id` set, a successful call fires one `resources/list`
+    change notification (best effort — see `_notify_resources_changed`) once
+    the run has actually written into that session's workspace.
     """
     timeout = min(timeout, 120)
     max_output_kb = min(max_output_kb, _MAX_OUTPUT_KB_CEILING)
@@ -1036,6 +1080,8 @@ def execute_code(
             _session_service, session_id, spec, provider_id=provider,
             dependencies=dependencies,
         )
+        if result.get("ok"):
+            _notify_resources_changed(ctx)
     else:
         result = _execution_service.execute(spec, provider_id=provider,
                                             dependencies=dependencies)
@@ -1063,9 +1109,18 @@ def session_start(language: str = "python3") -> dict[str, Any]:
 
 
 @mcp.tool(group="sessions")
-def session_stop(session_id: str) -> dict[str, Any]:
-    """Stop a session: kill its REPL worker (if any) and delete its workspace."""
-    return _session_service.stop(session_id)
+def session_stop(session_id: str, ctx: Context = None) -> dict[str, Any]:
+    """Stop a session: kill its REPL worker (if any) and delete its workspace.
+
+    Fires one `resources/list` change notification (best effort) when the
+    workspace was actually removed (`deleted: true`) — a second `session_stop`
+    on an already-gone session is idempotent and changes nothing, so it stays
+    silent.
+    """
+    result = _session_service.stop(session_id)
+    if result.get("ok") and result.get("deleted"):
+        _notify_resources_changed(ctx)
+    return result
 
 
 @mcp.tool(group="sessions")
@@ -1084,10 +1139,22 @@ def session_files(session_id: str, path: str = "", page_size: int | None = None,
 
 
 @mcp.tool(group="sessions")
-def session_write_file(session_id: str, path: str, content: str) -> dict[str, Any]:
+def session_write_file(session_id: str, path: str, content: str, ctx: Context = None) -> dict[str, Any]:
     """Write a file into a session workspace (relative path, no escapes).
-    Use this to seed input data for executed code."""
-    return _session_service.write_file(session_id, path, content)
+    Use this to seed input data for executed code.
+
+    On success, fires one `resources/list` change notification AND one
+    resource-updated notification for this exact file's
+    `codecalc://session/{session_id}/files/{path}` URI (both best effort) —
+    the second is the one place this server names the specific resource that
+    changed, since every other mutating tool here can touch an unbounded set
+    of files a single URI cannot name.
+    """
+    result = _session_service.write_file(session_id, path, content)
+    if result.get("ok"):
+        _notify_resources_changed(ctx)
+        _notify_resource_updated(ctx, f"codecalc://session/{session_id}/files/{path}")
+    return result
 
 
 @mcp.tool(group="sessions")
@@ -1125,6 +1192,12 @@ async def install_package(language: str, package: str, session_id: str | None = 
     is still restricted to the allowlist, so secrets do not leak, but the
     filesystem is not confined. Do not point this at untrusted input. See
     SECURITY.md.
+
+    With session_id, a successful install fires one `resources/list` change
+    notification (best effort) — the installed package's files land in that
+    session's workspace, reachable through the session-file resource
+    template. The shared-cache path (no session_id) touches nothing a
+    session-scoped resource can name, so it stays silent.
     """
     echo = {"language": language, "package": package}
     if version:
@@ -1141,8 +1214,24 @@ async def install_package(language: str, package: str, session_id: str | None = 
     )
     if gate is not None:
         return gate
-    return packages.install(language, package, session_id=session_id,
-                            version=version, audit=_audit_log)
+    result = packages.install(language, package, session_id=session_id,
+                              version=version, audit=_audit_log)
+    # `install_package` is now a native `async def` (#302's confirmation
+    # gate needs `await confirmation.require_confirmation(...)`), so it runs
+    # directly on the event loop rather than on the worker thread
+    # `anyio.to_thread.run_sync` gives a plain synchronous `def` — see
+    # `_notify_resources_changed`'s own docstring for why that distinction
+    # matters. Awaiting `ctx.notify_resources_changed()` directly here is
+    # therefore correct where the thread-bridged sync helper (used by every
+    # OTHER tool below, all still plain `def`s) would not be: calling
+    # `anyio.from_thread.run(...)` from the loop's own thread has no worker
+    # thread to bridge FROM.
+    if session_id and result.get("ok") and ctx is not None:
+        try:
+            await ctx.notify_resources_changed()
+        except Exception:
+            pass
+    return result
 
 
 @mcp.tool(group="execution")
@@ -1881,7 +1970,7 @@ def _inline_artifact_blocks(session_id: str, artifacts: list[dict]) -> tuple[lis
 @mcp.tool(group="sessions")
 def session_run(session_id: str, entry_file: str, language: str | None = None,
                 stdin: str = "", timeout: int = 30,
-                dependencies: list[str] | None = None):
+                dependencies: list[str] | None = None, ctx: Context = None):
     """Run a multi-file program in a session: execute `entry_file`, which may
     import other files already in the session workspace (helper.py, data/...).
 
@@ -1909,11 +1998,17 @@ def session_run(session_id: str, entry_file: str, language: str | None = None,
     `main.<ext>` file a session's own files could collide with. A session's
     own `main.py` (or the equivalent for another language) at the session
     root is never touched by running a different entry file.
+
+    Every successful run fires one `resources/list` change notification
+    (best effort) — the entry file's own scratch copy changes on every call,
+    even when `artifacts_created` is empty.
     """
     result = _session_service.run_file(
         session_id, entry_file, language=language, stdin=stdin, timeout=timeout,
         dependencies=dependencies,
     )
+    if result.get("ok"):
+        _notify_resources_changed(ctx)
     created = result.get("artifacts_created")
     if not created:
         return result
