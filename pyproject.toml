@@ -46,6 +46,16 @@ dependencies = [
     # Bounded on both ends: `fastmcp>=2.0` with no ceiling had already carried
     # this project from 2.x to 3.4.6, a major bump nobody chose.
     "mcp>=2.0,<3",
+    # `mcp` already pulls this in (its own OAuth client code needs it), so
+    # declaring it costs nothing extra on disk — every install already has
+    # it. The point of listing it explicitly is narrower: `codecalc/auth/`
+    # does `import jwt` for `serve-http --oauth-issuer`'s JWT verification,
+    # and a name only reachable because a DEPENDENCY happens to need it is
+    # one `mcp` could drop in a future release without codecalc's own
+    # manifest saying otherwise. No `codecalc[oauth]` extra was added: an
+    # extra exists to make an ABSENT library optional, and this one is never
+    # absent — `mcp>=2.0,<3` forces it in unconditionally.
+    "pyjwt[crypto]>=2.10,<3",
 ]
 
 # The heavy half, measured: sympy 40.4 MB + z3-solver 43.1 MB +

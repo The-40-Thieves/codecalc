@@ -623,13 +623,42 @@ cd /path/to/codecalc && .venv/bin/python -m codecalc.server
 
 Streamable HTTP binds to loopback by default. Bearer-token auth
 (`CODECALC_HTTP_TOKEN`) is **required** for any non-loopback bind — `serve-http`
-refuses to start on a routable address if the token is unset, and the token
-comparison is constant-time — and **optional** on loopback, where an MCP
-client spawning the process is already inside the trust boundary. Setting a
-token does not change the single-operator threat model: put an authenticating
-reverse proxy and the stronger process/container isolation described in
-`SECURITY.md` in front of it before exposing it beyond one operator's own
-machine.
+refuses to start on a routable address if neither it nor `--oauth-issuer` (below)
+is set, and the static-token comparison is constant-time — and **optional** on
+loopback, where an MCP client spawning the process is already inside the trust
+boundary. Setting a token does not change the single-operator threat model: put
+an authenticating reverse proxy and the stronger process/container isolation
+described in `SECURITY.md` in front of it before exposing it beyond one
+operator's own machine.
+
+For hosted use only, `serve-http` also accepts `--oauth-issuer URL` (or
+`CODECALC_OAUTH_ISSUER`) as an alternative to the static token — **off by
+default**; the static-token path above is unchanged when it is unset, and
+setting the variable costs nothing outside `serve-http` itself: `doctor`,
+`--help`, `serve-strict`, and the bare stdio server never touch the network
+over it, only `serve-http`'s own startup does. The issuer and JWKS URLs must
+be `https://` unless the host is loopback (for local testing); an issuer that
+is plain `http://` on a real host, or cannot be reached at all, fails
+`serve-http`'s startup outright with a message on stderr rather than starting
+a server no token could ever pass. Given a reachable issuer, `serve-http`
+validates each bearer token as a JWT against that issuer's own JWKS
+(RS256/ES256; the JWKS URL is discovered once from
+`<issuer>/.well-known/openid-configuration`, or pinned with
+`--oauth-jwks-url`) and checks its issuer, audience, expiry, and
+not-before. It also serves RFC 9728 Protected Resource Metadata at
+`/.well-known/oauth-protected-resource/mcp`, and a request with a missing or
+invalid token gets `WWW-Authenticate: Bearer resource_metadata="..."` pointing
+at it, per the MCP authorization spec (2025-06-18 and later). `--oauth-audience`
+defaults to this server's own resource URL; `--oauth-scopes "s1 s2"` requires
+every named scope on the token, checked by the SDK's own auth middleware. If
+both a static token and an issuer end up configured at once, **the issuer
+wins** — a request bearing the static token's exact value is rejected like any
+other invalid bearer value, and a warning naming both settings is printed to
+stderr at startup. codecalc runs no `/authorize` or `/token` endpoint of its
+own (it is a resource server only, never an authorization server), so there is
+no dynamic client registration surface here either; a 2026-07-28-era client
+that needs one uses a Client ID Metadata Document against its OWN
+authorization server, not against codecalc.
 
 Point an MCP client at it:
 
@@ -712,6 +741,10 @@ All optional. codecalc runs with none of these set.
 |---|---|---|
 | `CODECALC_HTTP_TOKEN` | *(unset)* | Bearer token for the Streamable HTTP transport (`serve-http`). Unset, the transport is loopback-only — binding a non-loopback address without this set is refused outright. Set, the token gates every request via a constant-time comparison; stdio ignores this entirely. |
 | `CODECALC_HTTP_URL` | `http://127.0.0.1:8000` | What the HTTP transport's auth metadata advertises as its own URL. Only consulted when `CODECALC_HTTP_TOKEN` is set; the loopback default matches the offline-by-default posture rather than guessing a public one. |
+| `CODECALC_OAUTH_ISSUER` | *(unset)* | Same as `--oauth-issuer`: validate `serve-http` bearer tokens as JWTs against this issuer instead of the static `CODECALC_HTTP_TOKEN`. Off by default. If both end up set, the issuer wins and the static token is rejected — see "Run the server" above. |
+| `CODECALC_OAUTH_AUDIENCE` | this server's own resource URL (`CODECALC_HTTP_URL` + `/mcp`) | Same as `--oauth-audience`: the expected JWT `aud` claim, and the RFC 8707 resource this server advertises at its own `/.well-known/oauth-protected-resource`. Only consulted when `CODECALC_OAUTH_ISSUER` is set. |
+| `CODECALC_OAUTH_JWKS_URL` | *(unset)* — discovered from `<issuer>/.well-known/openid-configuration` | Same as `--oauth-jwks-url`: pin the JWKS endpoint instead of discovering it. Only consulted when `CODECALC_OAUTH_ISSUER` is set. |
+| `CODECALC_OAUTH_SCOPES` | *(unset)* | Same as `--oauth-scopes`: space-separated scopes a token must carry. Unset, any token that otherwise verifies is accepted regardless of scope. Only consulted when `CODECALC_OAUTH_ISSUER` is set. |
 | `CODECALC_RUNTIME_PATH` | the server's own `PATH`, else `/usr/local/bin:/usr/bin:/bin` | The `PATH` executed code resolves runtimes on. **Set this when an MCP client spawns the server**: clients often launch with a stripped environment, so an inherited `PATH` can miss a toolchain manager's shims entirely and most languages silently become unavailable. `list_languages` reports what actually resolved. |
 | `CODECALC_EXEC_BIN` | `bin/codecalc-exec` (arch-matched) | Override the sandbox binary. Without one, codecalc falls back to a pure-Python executor — `list_languages` and `execute_code` still work, but the Rust path is the production one. |
 | `CODECALC_REQUIRE_NATIVE` | *(unset)* | Fail-closed: refuse to start if no usable `codecalc-exec` binary was found (checked at import, so this is also a server-start check), instead of silently answering every call on the weaker Python fallback. Raises naming `CODECALC_REQUIRE_NATIVE` and the paths that were checked. |
@@ -989,7 +1022,7 @@ PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py         # every tool over MC
 PYTHONPATH=. .venv/bin/python tests/test_executor_sweep.py  # sandbox regressions
 ```
 
-66 test files and 19 CI-invoked scripts, **2184 assertions**. "CI-invoked"
+67 test files and 19 CI-invoked scripts, **2184 assertions**. "CI-invoked"
 means referenced by path (`scripts/<name>.py`) from a job in
 `.github/workflows/*.yml` — `scripts/check_claims.py` derives the count that
 way and gates it, so a script wired into a workflow without this sentence
