@@ -57,6 +57,7 @@ from . import (
     optimization,
     packages,
     providers,
+    registry,
     run_supervisor,
     runtimes,
     sessions,
@@ -251,58 +252,22 @@ mcp = MCPServer(
     # visibility on. list_languages() was the other candidate and was
     # rejected: it returns a `list[dict]`, one entry per language, with no
     # natural top-level slot for a server-wide field, and a caller only sees
-    # it if they think to call that specific tool. This f-string is evaluated
-    # once, at import time, after `executor` above has already resolved
-    # `_rust` (and, with CODECALC_REQUIRE_NATIVE=1, already refused to import
-    # at all if it came up empty) — so what it reports is what this process
-    # actually has, not a static claim that can drift from it.
-    # Routing map, not a tool digest: a client that defers tool loading
-    # (tool search / progressive disclosure — see the README's "Tool-
-    # definition token cost") sees THIS before it has called anything, so it
-    # has to be enough to pick the right one of 52 by intent alone. The
-    # earlier version named only 9 tools and left 43 undiscoverable from
-    # `instructions` alone; this one names every one of the 6 groups
-    # `KNOWN_GROUPS` declares (and every tool in it, derived by hand from
-    # that same registry so it cannot silently drop a group) so a deferred
-    # search still has a starting point for run code / sessions /
-    # background runs / verify / math / logic / numbers / units / admin.
-    # Kept under ~1,800 characters — measured with `len()` in the PR, not
-    # eyeballed. NOT part of the tool-select eval's corpus:
-    # scripts/tool_select_eval.py scores `"<name> <description>"` per tool
-    # from the live registry only (`_doc_text`), never `mcp.instructions`.
-    instructions=(
-        "Universal coding & logic calculator, 52 tools in 6 groups — pick by "
-        "intent. calculator (math/logic/units/numbers, 25 tools): "
-        "evaluate_expression (symbolic, has variables/calculus) vs calc_exact "
-        "(exact arithmetic on literal numbers); simplify_expression (rewrite "
-        "forms) vs solve_expression (one-variable roots) vs solve_linear "
-        "(systems); truth_table (boolean logic); matrix, calc_stats, "
-        "percentiles, percentage, compare_threshold, limit_expression, "
-        "collision_probability; bit_analysis (one value's bit layout) vs "
-        "bitop (result of one op) vs int_widths (which widths hold N) vs "
-        "base_repr (hex/oct/bin at a width) vs radix_convert (base-to-base); "
-        "float_repr, data_sizes, human_duration (elapsed seconds), "
-        "epoch_time (timestamp to date); convert_units, list_units, "
-        "physical_constants. verification (5): z3_check (SMT satisfiability) "
-        "vs solve_expression (closed-form); algebraic_equiv (symbolic "
-        "identity); verify_translation/verify_optimization (prove two "
-        "programs match by running both); compare_edge_cases (find "
-        "divergent inputs). execution — run code (6, 31 languages): "
-        "execute_code (one-shot) / execute_code_stream (live output) / "
-        "compare_execution (many languages); list_languages, "
-        "list_execution_providers, runtimes_status. sessions — persistent "
-        "workspace + background runs (11): "
-        "session_start/session_run/session_stop; "
-        "session_files/session_read_file/session_write_file/"
-        "session_artifacts (workspace I/O); "
-        "run_submit/run_inspect/run_cancel (async execution). analysis (3): "
-        "analyze_complexity (static Big-O) / benchmark (measured Big-O) / "
-        "extract_function. admin (2, mutates the host): install_package, "
-        "update_runtimes. "
-        f"Execution backend: {executor.backend()} (rust = full sandbox "
-        "including no_net; python = fallback, no_net and peak_memory_kb "
-        "unenforced — see CODECALC_REQUIRE_NATIVE)."
-    ),
+    # it if they think to call that specific tool.
+    #
+    # Left `None` HERE on purpose: at this point in the module, `_tool()`
+    # has not been installed yet and not one `@mcp.tool()` line below has
+    # run, so neither `_ACTIVE_GROUPS` nor `TOOL_GROUPS` exist yet either. A
+    # PR #299 review caught the first version of this hardcoding "52 tools
+    # in 6 groups" and every tool name into a literal built HERE, at import
+    # time — correct only for the unconfigured default. A
+    # `CODECALC_TOOLS=core` (calculator only) or `dev` process still
+    # registers a SUBSET of tools/groups, decided later by `_active_groups()`
+    # below, but that static string kept advertising z3_check/execute_code/
+    # sessions tools/groups the process never registers. `_install_instructions()`,
+    # called at the bottom of this module after the last `@mcp.tool()` line
+    # has executed, replaces this with a routing map built from what
+    # actually got registered — see it and `_GROUP_ROUTING_TEXT` there.
+    instructions=None,
 )
 
 
@@ -1924,7 +1889,7 @@ def physical_constants(name: str | None = None) -> dict[str, Any]:
 
 @mcp.tool(group="calculator")
 def list_units() -> dict[str, Any]:
-    """List every supported unit alias for convert_units."""
+    """List every supported unit alias — all aliases and spellings — for convert_units."""
     return units.list_units()
 
 
@@ -2065,9 +2030,10 @@ def bit_analysis(n: int, align: int | None = None) -> dict[str, Any]:
 
 @mcp.tool(group="calculator")
 def bitop(a: int, op: str, b: int | None = None, width: int = 64) -> dict[str, Any]:
-    """Use bitop, not bit_analysis, to combine two operands. Programmer-mode
-    bit ops: and or xor nand nor xnor not shl shr sar rol ror at width
-    8/16/32/64. Every result shows unsigned, signed (two's complement),
+    """Use bitop, not bit_analysis, to apply an operation (and/or/xor/not/
+    shifts/rotates) rather than describe a value. Programmer-mode bit ops:
+    and or xor nand nor xnor not shl shr sar rol ror at width 8/16/32/64.
+    Every result shows unsigned, signed (two's complement),
     hex, octal and binary. shr is logical (zero-fill); sar is arithmetic
     (sign-propagating) — 0x80 shr 1 = 0x40 (+64) but 0x80 sar 1 = 0xC0 (-64).
     A left shift that drops bits says OVERFLOW and shows the unbounded answer.
@@ -2085,12 +2051,12 @@ def algebraic_equiv(a: str, b: str) -> dict[str, Any]:
 
 @mcp.tool(group="calculator")
 def solve_expression(expr: str, var: str = "x") -> dict[str, Any]:
-    """Use solve_expression, not z3_check, for one equation in one variable,
-    solved for its roots or crossover point: 'x**2 - 4 = 0', '2*x + 1 = 7'.
-    For a system of several equations, use solve_linear. For general
-    constraint satisfiability (inequalities, boolean constraints, multiple
-    solvers), use z3_check. Returns `solutions` as a list of strings
-    alongside the parsed `equation` and `variable`."""
+    """Use solve_expression, not z3_check, for the roots of one equation:
+    'x**2 - 4 = 0', '2*x + 1 = 7'. For a system of several equations, use
+    solve_linear. For general constraint satisfiability (inequalities,
+    boolean constraints, multiple solvers), use z3_check. Returns
+    `solutions` as a list of strings alongside the parsed `equation` and
+    `variable`."""
     return exact.solve_expression(expr, var)
 
 
@@ -2216,11 +2182,115 @@ def extract_function(code: str, language: str, function_name: str,
                                          call=call, test_inputs=test_inputs)
 
 
+# ── instructions: a routing map for what THIS process actually registers ───
+# Every `@mcp.tool()` line above has now run, so `_ACTIVE_GROUPS` and
+# `TOOL_GROUPS` are complete — see the long comment on `instructions=None`
+# in the `MCPServer(...)` construction above for why this could not be a
+# literal there.
+
 #: Registry entries that are a second spelling of a language already counted,
 #: not a language of their own. Mirrors ALIAS_ENTRIES in scripts/check_claims.py
-#: — the count this command prints has to agree with the one the README states
-#: and the gate enforces, or it is just a fourth opinion.
+#: — the count this command prints (and the one `_GROUP_ROUTING_TEXT`'s
+#: "execution" entry states below) has to agree with the one the README
+#: states and the gate enforces, or it is just a fourth opinion. Defined
+#: here, ahead of `_tool_groups_report()` below where a caller might expect
+#: it, because `_GROUP_ROUTING_TEXT` (immediately below) is a dict literal
+#: whose values evaluate immediately and already needs it.
 _ALIAS_ENTRIES = {"c++"}
+
+#: One intent-routing sentence per KNOWN_GROUPS member, hand-written (not
+#: derived from each tool's own docstring) so this text stays independent
+#: of whatever wording the tool-select eval's BM25 scoring is sensitive to
+#: on that OTHER surface — `_build_instructions()` below picks only the
+#: entries whose key is in `_ACTIVE_GROUPS`, so a `CODECALC_TOOLS=core`
+#: process's instructions never names a tool or group it did not register.
+_GROUP_ROUTING_TEXT: dict[str, str] = {
+    "calculator": (
+        "math/logic/units/numbers: evaluate_expression (symbolic, has "
+        "variables/calculus) vs calc_exact (exact arithmetic on literal "
+        "numbers); simplify_expression (rewrite forms) vs solve_expression "
+        "(one-variable roots) vs solve_linear (systems); truth_table "
+        "(boolean logic); matrix, calc_stats, percentiles, percentage, "
+        "compare_threshold, limit_expression, collision_probability; "
+        "bit_analysis (one value's bit layout) vs bitop (apply an "
+        "operation) vs int_widths (which widths hold N) vs base_repr "
+        "(hex/oct/bin at a width) vs radix_convert (base-to-base); "
+        "float_repr, data_sizes, human_duration (elapsed seconds), "
+        "epoch_time (timestamp to date); convert_units, list_units, "
+        "physical_constants."
+    ),
+    "verification": (
+        "z3_check (SMT satisfiability) vs solve_expression (one equation's "
+        "roots); algebraic_equiv (symbolic identity); "
+        "verify_translation/verify_optimization (prove two programs match "
+        "by running both); compare_edge_cases (find divergent inputs)."
+    ),
+    "execution": (
+        f"run code ({len(set(registry.LANGUAGES) - _ALIAS_ENTRIES)} "
+        "languages): execute_code (one-shot) / execute_code_stream (live "
+        "output) / compare_execution (many languages); list_languages, "
+        "list_execution_providers, runtimes_status."
+    ),
+    "sessions": (
+        "persistent workspace + background runs: "
+        "session_start/session_run/session_stop; "
+        "session_files/session_read_file/session_write_file/"
+        "session_artifacts (workspace I/O); "
+        "run_submit/run_inspect/run_cancel (async execution)."
+    ),
+    "analysis": (
+        "analyze_complexity (static Big-O) / benchmark (measured Big-O) / "
+        "extract_function."
+    ),
+    "admin": "mutates the host: install_package, update_runtimes.",
+}
+
+def _build_instructions() -> str:
+    """Routing map for exactly what `_ACTIVE_GROUPS` registered.
+
+    Called once, after every `@mcp.tool()` line has executed (see the call
+    site below), so `TOOL_GROUPS`/`_ACTIVE_GROUPS` are both complete and the
+    "N tools in K groups" lead sentence is counted from the live registry,
+    never a hand-typed number that could drift from it — the same class of
+    bug `check_claims.py` exists to catch on the README, now avoided here
+    by construction instead. Kept under ~1,800 characters for the default
+    (every-group) case; a narrower `CODECALC_TOOLS` only shrinks it further.
+    NOT part of the tool-select eval's corpus: scripts/tool_select_eval.py
+    scores `"<name> <description>"` per tool from the live registry only
+    (`_doc_text`), never `mcp.instructions`.
+    """
+    active_order = [g for g in ("calculator", "verification", "execution",
+                                "sessions", "analysis", "admin") if g in _ACTIVE_GROUPS]
+    n_tools = sum(1 for g in TOOL_GROUPS.values() if g in _ACTIVE_GROUPS)
+    lead = (
+        f"Universal coding & logic calculator, {n_tools} tool"
+        f"{'s' if n_tools != 1 else ''} in {len(active_order)} group"
+        f"{'s' if len(active_order) != 1 else ''} — pick by intent."
+    )
+    group_sentences = [f"{g} ({_GROUP_ROUTING_TEXT[g]})" for g in active_order]
+    backend_note = (
+        f"Execution backend: {executor.backend()} (rust = full sandbox "
+        "including no_net; python = fallback, no_net and peak_memory_kb "
+        "unenforced — see CODECALC_REQUIRE_NATIVE)."
+    )
+    return " ".join([lead, *group_sentences, backend_note])
+
+
+def _install_instructions() -> None:
+    """Set `mcp.instructions` from `_build_instructions()`.
+
+    `MCPServer.instructions` is a read-only property backed by
+    `self._lowlevel_server.instructions`, which the SDK itself sets with a
+    plain `self.instructions = instructions` assignment
+    (`mcp/server/lowlevel/server.py`, `mcp` 2.0.0, verified against the
+    installed venv) — a plain attribute, not a validated setter, so
+    reassigning it post-construction is the SDK's own pattern, not a
+    monkeypatch of private state.
+    """
+    mcp._lowlevel_server.instructions = _build_instructions()
+
+
+_install_instructions()
 
 
 def _tool_groups_report() -> dict:

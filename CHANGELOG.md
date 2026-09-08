@@ -255,24 +255,34 @@ behind it.
   clusters now leads with "use X, not Y, when Z" naming the sibling and the
   discriminating condition (e.g. `calc_exact` for literal arithmetic with
   no symbols vs `evaluate_expression` for a symbolic expression;
-  `bit_analysis` for facts about one value's bits vs `bitop` for combining
-  two operands); `human_duration` and `simplify_expression` lead with the
-  vocabulary an agent would actually search on instead of a noun-phrase
-  summary. `scripts/tool_select_eval.py`'s checked-in baseline (the lexical
-  proxy for whether a description still carries its discriminating
-  vocabulary) does not regress on any of `full`/`dev`/`core` — two of the
-  three measured BETTER after the rewrite. Separately, `instructions`
-  previously named only 9 of the (then) 52 tools; it now maps every tool
-  group (calculator, verification, execution, sessions, analysis, admin)
-  to its member tools by intent, under ~1,800 characters, so a client that
-  defers tool loading (tool search / progressive disclosure) has a
-  starting point for the other 43. `instructions` is not part of the
-  tool-select eval's corpus — that eval scores only `"<name>
-  <description>"` per tool from the live registry — so this is gated
-  separately, by asserting every tool group is named in `instructions` and
-  every cluster tool names a sibling, both checked against the constants
-  `codecalc/server.py` declares rather than hand-copied lists that could
-  drift from them.
+  `bit_analysis` for facts about one value's bits vs `bitop` to apply an
+  operation — not "combine two operands", the first cut's wording, which a
+  cross-vendor review caught as false for `bitop`'s own unary `not`);
+  `human_duration` and `simplify_expression` lead with the vocabulary an
+  agent would actually search on instead of a noun-phrase summary.
+  `scripts/tool_select_eval.py`'s checked-in baseline (the lexical proxy
+  for whether a description still carries its discriminating vocabulary,
+  regenerated with this change) does not regress on any of
+  `full`/`dev`/`core` — all three measured better after the rewrite.
+  Separately, `instructions` previously named only 9 of the (then) 52
+  tools; it now maps every ACTIVE tool group (calculator, verification,
+  execution, sessions, analysis, admin) to its member tools by intent,
+  under ~1,800 characters, so a client that defers tool loading (tool
+  search / progressive disclosure) has a starting point for the rest.
+  "Active" is load-bearing: the first cut built this string once, at
+  import, before `CODECALC_TOOLS` had decided which groups actually get
+  registered, so a `core`/`dev` server advertised tools (`z3_check`,
+  `execute_code`, whole session/admin groups) it never registers — caught
+  by the same review. `instructions` is now built AFTER every tool has
+  registered, filtered to `_ACTIVE_GROUPS`, with its "N tools in K groups"
+  lead counted from the live registration, not a hand-typed number.
+  `instructions` is not part of the tool-select eval's corpus — that eval
+  scores only `"<name> <description>"` per tool from the live registry —
+  so this is gated separately: every active group is named in
+  `instructions` and no absent group or tool leaks in under
+  `CODECALC_TOOLS=core`/`dev`, plus every cluster tool names a sibling,
+  all three checked against constants `codecalc/server.py` declares rather
+  than hand-copied lists that could drift from them.
 
 ## [0.10.0] — 2026-09-08
 

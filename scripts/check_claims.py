@@ -119,7 +119,22 @@ else:
 # the one that rots. `\+?` makes the same regex match "30+" too, so a FUTURE
 # reversion to the vaguer phrasing fails loudly instead of silently un-gating
 # itself again.
-_srv_langs = [int(n) for n in re.findall(r"(\d+)\+?\s+languages", SERVER)]
+#
+# `instructions` stopped being a source-text LITERAL this regex could grep
+# once a PR #299 review found the earlier hardcoded string kept advertising
+# tools/groups a `CODECALC_TOOLS=core`/`dev` process never registers:
+# `_build_instructions()` now COMPUTES it (language count included, via
+# `len(set(registry.LANGUAGES) - _ALIAS_ENTRIES)`) from whatever
+# `_ACTIVE_GROUPS` this process resolves, at import time. Grepping the raw
+# SOURCE TEXT for "N languages" now matches nothing — the digit is not IN
+# the source, only the `len(...)` expression is — so this imports the live
+# module and reads the COMPUTED string instead. `codecalc/server.py`
+# imports cleanly on a bare checkout (sympy/z3/tree-sitter are lazy,
+# per-call imports — see codecalc/logic.py's own module docstring), so this
+# stays a bare-checkout check like the rest of this file.
+from codecalc import server as server_mod  # noqa: E402
+
+_srv_langs = [int(n) for n in re.findall(r"(\d+)\+?\s+languages", server_mod.mcp.instructions or "")]
 if not _srv_langs:
     fail("server.py's instructions= no longer states 'N languages' — the "
          "extractor matched nothing, so this gate proves nothing rather than passing")
