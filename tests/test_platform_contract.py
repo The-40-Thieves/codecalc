@@ -1456,6 +1456,22 @@ check("shim: ...and spawn_error itself never reaches the returned result "
       "(internal to this JSON handshake only)",
       "spawn_error" not in _new, f"-> {sorted(_new)}")
 
+# `execute_code_stream` does NOT go through `_execute_uncontracted`: it has
+# its own read-the-binary's-JSON path in `executor.execute_stream`, which is
+# exactly where the review of this fix found the key still leaking (present,
+# null) while every other surface — execute_code, run_inspect, session_run,
+# compare_execution rows — had it popped. A real run on the Rust backend,
+# since the Python fallback never sets the key and would pass vacuously.
+if executor._rust is not None:
+    _streamed = asyncio.run(server.execute_code_stream(
+        "python3", "print('hi')", timeout=20))
+    check("execute_code_stream: spawn_error never reaches the streamed "
+          "result either (its own JSON path pops it too)",
+          _streamed.get("ok") is True and "spawn_error" not in _streamed,
+          f"-> ok={_streamed.get('ok')!r} keys={sorted(_streamed)}")
+else:
+    skip("execute_code_stream spawn_error pop", "no Rust binary resolved")
+
 
 # ── compact mode must classify IDENTICALLY to the full envelope ────────────
 # `execute_code(..., compact=True)` used to call `errors.ensure_code` (via

@@ -241,7 +241,20 @@ behind it.
   is what proves the answering binary predates this fix. `spawn_error`
   itself is popped before a caller ever sees the result — internal to this
   one JSON handshake, never part of the published envelope, so no schema
-  or `CONTRACT_VERSION` change.
+  or `CONTRACT_VERSION` change. Popped on BOTH read paths: `execute_stream`
+  (the `execute_code_stream` tool) reads the binary's JSON itself rather
+  than through `_execute_uncontracted`, and the first cut of this fix left
+  the key in that one surface's result (found by the adversarial review).
+- The pure-Python fallback resolved a compile/run command against the
+  sandbox's own PATH (`CODECALC_RUNTIME_PATH`) to decide whether it EXISTS,
+  then still handed the bare name to `subprocess.Popen` — which on Windows
+  lets `CreateProcess` search the CALLING process's PATH instead (Python's
+  own docs: "env cannot override the PATH environment variable"). Measured
+  on a hosted Windows runner: a fake `gcc` placed first on
+  `CODECALC_RUNTIME_PATH` passed the existence check and the runner's own
+  MinGW `gcc` ran anyway. The resolved absolute path is now what gets
+  spawned, so the sandbox PATH decides which binary runs on every OS, not
+  only the ones whose loader consults the child's environment.
 - `execute_code(..., compact=True)` classified a "rejected before execution"
   failure (an unknown language, a validation refusal — anything with no
   `verdict`/`stdout`/`exit_code` to fall back on) as `internal` regardless

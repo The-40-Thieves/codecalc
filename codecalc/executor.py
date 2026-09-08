@@ -1235,6 +1235,14 @@ def _resolve_argv0(cmd: str) -> str | None:
     `os.pathsep` for the CURRENT platform, so it agrees with `_env()`'s
     `PATH` value on every OS this backend runs on, rather than only on
     the ones whose native search rules happen to consult that same value.
+
+    The RESOLVED path is what both call sites then spawn, not the bare
+    name. Checking existence and still passing `cmd` through to `Popen`
+    was measured insufficient on the same platform: a fake `gcc` placed
+    FIRST on `CODECALC_RUNTIME_PATH` passed this check, and CreateProcess
+    then ran the runner's own MinGW `gcc` from the calling process's PATH
+    anyway (a fast compile failure where a timeout was expected). With
+    the absolute path in `argv[0]`, the loader has nothing left to search.
     """
     return shutil.which(cmd, path=registry.runtime_path())
 
@@ -1317,7 +1325,8 @@ def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10
         compile_ms = 0
         if entry["compile"]:
             argv = [a.format(**fmt) for a in entry["compile"]]
-            if _resolve_argv0(argv[0]) is None:
+            resolved = _resolve_argv0(argv[0])
+            if resolved is None:
                 # See `_resolve_argv0`'s doc comment: resolved OURSELVES,
                 # against the sandbox's own PATH, rather than left to the
                 # OS loader — Windows' CreateProcess searching the CALLING
@@ -1327,6 +1336,10 @@ def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10
                     f"[Errno 2] No such file or directory: {argv[0]!r}")
                 return _runtime_unavailable_result(name, "compile", argv, exc,
                                                    workdir, started, no_net)
+            # ...and SPAWN what was resolved, not the bare name: the
+            # existence check alone still let CreateProcess pick the
+            # caller's-PATH compiler (see the docstring's second paragraph).
+            argv[0] = resolved
             try:
                 # Compile-step cwd is the scratch directory, not `workdir`:
                 # compiling is not the user's own program running, so any
@@ -1364,13 +1377,15 @@ def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10
 
         argv = [a.format(**fmt) for a in entry["run"]]
         run_started = time.monotonic()
-        if _resolve_argv0(argv[0]) is None:
+        resolved = _resolve_argv0(argv[0])
+        if resolved is None:
             # Same reasoning as the compile step above — a single-command
             # (interpreted) language's `run` step IS its only spawn.
             exc = FileNotFoundError(
                 f"[Errno 2] No such file or directory: {argv[0]!r}")
             return _runtime_unavailable_result(name, "run", argv, exc,
                                                workdir, started, no_net)
+        argv[0] = resolved
         try:
             # Run-step cwd is `workdir` itself (the session/workdir root),
             # NOT the scratch directory — this is the actual program running,
@@ -1922,6 +1937,11 @@ async def execute_stream(spec, on_progress=None) -> dict:
         result["streamed_partial"] = partial
         result["streamed"] = True
         result["backend"] = "rust"
+        # Same wire-level marker `_execute_uncontracted` pops: this path
+        # reads the binary's JSON directly rather than through it, and
+        # was the one tool surface (`execute_code_stream`) still handing
+        # the key to a caller. Never part of the published envelope.
+        result.pop("spawn_error", None)
         return contract.stamp(result)
     except Exception as exc:
         return contract.stamp({"ok": False, "error": f"stream failed: {exc}"})
