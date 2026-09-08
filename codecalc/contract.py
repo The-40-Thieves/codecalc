@@ -51,7 +51,7 @@ from . import errors, grades
 #: each component is allowed to change — the short form is that MAJOR is the
 #: only one that may break a reader, and it carries a twelve-month deprecation
 #: window before anything is removed.
-CONTRACT_VERSION = "1.9.0"
+CONTRACT_VERSION = "1.10.0"
 
 # THE `$schema` AND `$id` URIs ARE NOT HERE ON PURPOSE.
 #
@@ -198,6 +198,90 @@ def _dependencies_property() -> dict:
             "BEFORE the sandboxed step, through the confined install_package "
             "path — never inside the sandbox."
         ),
+    }
+
+
+def _comparison_row_properties() -> dict:
+    """A `compare_execution` result's per-language `results[]` row.
+
+    Read out of `tools.compare_execution`'s own row-construction, not out of
+    the full executor result each row derives from — most envelope fields
+    (`platform`, `backend`, `verdict`, `unenforced`, the byte/timing
+    breakdown) never survive into the row; only what a caller comparing
+    languages side by side needs to. `error`/`code`/`remedy`/`code_inferred`
+    (from `_error_properties()`, `ok` excluded — a row's `ok` is not fixed to
+    `False` the way a dedicated error shape's is) are new in 1.10.0 and only
+    present on a row that failed for a REQUEST-level reason — see
+    `errors.stamp_row`'s docstring for the exact rule, including why an
+    ordinary program failure (a real RTE/OLE `exit_code`) carries none of
+    them.
+    """
+    return {
+        "language": {"type": "string"},
+        "ok": {"type": ["boolean", "null"]},
+        "stdout": {"type": "string"},
+        "stderr": {"type": "string"},
+        "exit_code": {"type": ["integer", "null"]},
+        "duration_ms": {"type": ["number", "null"]},
+        "timed_out": {"type": "boolean"},
+        "cold_retry": {
+            "type": "boolean",
+            "description": (
+                "True when this language timed out once and was retried "
+                "exactly one warm time — a cold-start casualty (a globally "
+                "slow runner, not a defect in this language's snippet) gets "
+                "one chance to prove it before being reported as a failure."
+            ),
+        },
+        "cold_retry_recovered": {
+            "type": "boolean",
+            "description": "Present only when cold_retry is true: did the warm retry succeed.",
+        },
+        "first_attempt_ms": {
+            "type": ["number", "null"],
+            "description": "Present only when cold_retry is true: the FIRST (timed-out) attempt's duration.",
+        },
+        "dependencies": {
+            "type": "object",
+            "description": (
+                "Present only on a python3 row whose snippet carries an "
+                "unparsed PEP 723 '# /// script' block — compare_execution "
+                "never installs dependencies, so this discloses the block "
+                "rather than silently ignoring it."
+            ),
+            "required": ["status", "reason"],
+            "properties": {
+                "status": {"const": "unsupported"},
+                "reason": {"type": "string"},
+            },
+        },
+        **{k: v for k, v in _error_properties().items() if k != "ok"},
+    }
+
+
+def _edge_case_run_properties() -> dict:
+    """One language's run inside a `compare_edge_cases` result's per-input
+    `runs` map (`results[i].runs[lang]`, and the restricted copy under a
+    `divergences[i].runs`).
+
+    `error`/`code`/`remedy`/`code_inferred` (`ok` excluded from
+    `_error_properties()`, same reasoning as `_comparison_row_properties`)
+    are new in 1.10.0 and present only on a run that failed for a
+    REQUEST-level reason — see `errors.stamp_row`.
+    """
+    return {
+        "type": "object",
+        "required": ["ok", "stdout", "verdict", "stderr"],
+        "properties": {
+            "ok": {"type": ["boolean", "null"]},
+            "stdout": {"type": "string"},
+            "verdict": {
+                "type": ["string", "null"],
+                "description": "null when nothing ran (e.g. an unknown language).",
+            },
+            "stderr": {"type": "string"},
+            **{k: v for k, v in _error_properties().items() if k != "ok"},
+        },
     }
 
 
@@ -576,9 +660,24 @@ def build_schema(dialect: str | None = None, schema_id: str | None = None) -> di
         # `divergences`, `results` — was unmodeled, which `edge_case_comparison`
         # now covers.
         #
-        # None of the three collides with the five execution shapes or with
+        # ONE MORE, added in 1.10.0: `comparison_rows` for `compare_execution`.
+        # It had the identical gap `edge_case_comparison` closed above — an
+        # `ok: true` success shape (`count`, `succeeded`, `results`,
+        # `fastest`, `fastest_note`, `discrepancies`) that matched no branch
+        # here, found the same way: `compare_execution`'s per-language ROWS
+        # never carried `error`/`code`/`remedy` at all (see
+        # `errors.stamp_row`), so fixing that meant giving the shape those
+        # rows live in a schema to be checked against, rather than adding a
+        # field to a document that never covered the result in the first
+        # place. Its own refusal shape does not exist — `compare_execution`
+        # has none; an empty `snippets` dict just returns an empty table
+        # (`count: 0`), still `comparison_rows`, not `rejected`.
+        #
+        # None of the four collides with the five execution shapes or with
         # each other: none of them ever carries `verdict`, `backend`, or
-        # `run_id`/`state`; `accepted` and `divergence_count` appear on no
+        # `run_id`/`state`; `accepted`, `divergence_count`, and `count`
+        # together with `results` (a compare_execution row array, never a
+        # dependency array — see `_comparison_row_properties`) appear on no
         # other shape in this document. A `verify_optimization` measurement
         # failure — baseline or candidate — is `{ok: false, error: ...,
         # code: ...}` with no `accepted` key, so it matches `rejected` rather
@@ -593,6 +692,7 @@ def build_schema(dialect: str | None = None, schema_id: str | None = None) -> di
             {"$ref": "#/$defs/translation_verification"},
             {"$ref": "#/$defs/optimization_verification"},
             {"$ref": "#/$defs/edge_case_comparison"},
+            {"$ref": "#/$defs/comparison_rows"},
         ],
         "$defs": {
             "execution_envelope": {
@@ -953,19 +1053,7 @@ def build_schema(dialect: str | None = None, schema_id: str | None = None) -> di
                                 "runs": {
                                     "type": "object",
                                     "description": "language -> that language's run, keyed by the `snippets` dict's own keys.",
-                                    "additionalProperties": {
-                                        "type": "object",
-                                        "required": ["ok", "stdout", "verdict", "stderr"],
-                                        "properties": {
-                                            "ok": {"type": ["boolean", "null"]},
-                                            "stdout": {"type": "string"},
-                                            "verdict": {
-                                                "type": ["string", "null"],
-                                                "description": "null when nothing ran (e.g. an unknown language).",
-                                            },
-                                            "stderr": {"type": "string"},
-                                        },
-                                    },
+                                    "additionalProperties": _edge_case_run_properties(),
                                 },
                             },
                         },
@@ -990,6 +1078,86 @@ def build_schema(dialect: str | None = None, schema_id: str | None = None) -> di
                                     "type": "object",
                                     "description": "same shape as results[].runs, restricted to the diverging languages.",
                                 },
+                            },
+                        },
+                    },
+                },
+            },
+            "comparison_rows": {
+                "title": "a compare_execution result",
+                "description": (
+                    "The `compare_execution` tool's result: the same code run "
+                    "in N languages side by side (`results`), the fastest "
+                    "language that actually succeeded (`fastest`), and any "
+                    "cross-language discrepancies noticed along the way "
+                    "(`discrepancies` — e.g. one language produced output "
+                    "while a sibling silently produced none). `compare_"
+                    "execution` has no refusal shape of its own the way "
+                    "`compare_edge_cases` does: an empty `snippets` dict "
+                    "still returns this shape, with `count: 0`.\n\n"
+                    "`ok` is always `true` once the comparison ran — it means "
+                    "\"this tool produced a real table\", never \"every "
+                    "language succeeded\"; read each row's OWN `ok` for that, "
+                    "and a row's `code`/`error`/`remedy` (new in 1.10.0 — see "
+                    "`_comparison_row_properties`/`errors.stamp_row`) for "
+                    "WHY a row that needed a runtime this host does not have, "
+                    "or timed out, failed. An ordinary program failure (a "
+                    "real RTE/OLE `exit_code`) carries none of the three, "
+                    "matching the INTENDED reading that `code` means a "
+                    "failed REQUEST, not a failed program — a reading the "
+                    "top-level execute_code envelope does not yet honour "
+                    "itself for a plain RTE/timeout (those come back "
+                    "`code: \"internal\"` there today; pre-existing, "
+                    "tracked separately, not something this shape changes)."
+                ),
+                "type": "object",
+                "required": ["ok", "count", "succeeded", "results", "fastest",
+                             "fastest_note", "discrepancies"],
+                "properties": {
+                    "ok": {"const": True},
+                    "count": {"type": "integer", "minimum": 0},
+                    "succeeded": {
+                        "type": "integer", "minimum": 0,
+                        "description": "How many rows both ran AND reported a duration — see `fastest`'s own docstring for why duration is part of this count.",
+                    },
+                    "results": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "required": ["language", "ok", "stdout", "stderr",
+                                         "exit_code", "duration_ms", "timed_out",
+                                         "cold_retry"],
+                            "properties": _comparison_row_properties(),
+                        },
+                    },
+                    "fastest": {
+                        "type": ["string", "null"],
+                        "description": "The language with the lowest duration_ms among rows that both succeeded and reported one; null when none did.",
+                    },
+                    "fastest_note": {
+                        "type": ["string", "null"],
+                        "description": "Non-null exactly when `fastest` is null, naming why.",
+                    },
+                    "discrepancies": {
+                        "type": "array",
+                        "description": (
+                            "Always present, empty when there is nothing to "
+                            "disclose. Two shapes share this array — a "
+                            "still-timed-out-after-retry row (`timed_out: "
+                            "true`, `sibling_durations_ms`, `variance_note`) "
+                            "and a silent-output row (`issue` names 'no "
+                            "stdout while another language produced some') "
+                            "— deliberately left as loosely-typed objects "
+                            "rather than a second internal oneOf: this is a "
+                            "diagnostic aid, not a value a caller is expected "
+                            "to branch structurally on."
+                        ),
+                        "items": {
+                            "type": "object",
+                            "required": ["language", "issue"],
+                            "properties": {
+                                "language": {"type": "string"},
+                                "issue": {"type": "string"},
                             },
                         },
                     },

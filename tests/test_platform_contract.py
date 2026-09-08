@@ -752,7 +752,7 @@ import os
 import shutil
 import tempfile
 
-from codecalc import errors, server
+from codecalc import errors, server, tools, translation
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from _mcp_client import data, over_stdio
@@ -908,6 +908,151 @@ async def _stdio_spawn_failure() -> None:
 
 
 asyncio.run(_stdio_spawn_failure())
+
+
+# ── compare_execution / compare_edge_cases: the SAME spawn-failure ─────────
+# classification, one level down, on a per-language ROW rather than the
+# top-level envelope — errors.stamp_row (codecalc/errors.py), not
+# errors.ensure_code directly, since these tools' own `ok` stays `True`
+# once the comparison ran and server.py's `_coded` wrapper never reaches a
+# nested row. Real execution on BOTH backends, plus a stdio round-trip —
+# the in-process spawn-failure checks above cannot stand in for this: they
+# never call compare_execution/compare_edge_cases at all.
+#
+# Needs one sibling that still resolves alongside the hidden one, unlike
+# the single-language `_spawn_failure` helper above — a scratch PATH
+# holding a symlink to the REAL python3 (found on this process's own PATH
+# before CODECALC_RUNTIME_PATH replaces it) makes `lua` the only language
+# this dir cannot resolve, regardless of what else is actually installed.
+_ROW_SCRATCH = pathlib.Path(tempfile.mkdtemp(prefix="codecalc-row-noruntime-"))
+_real_python3 = shutil.which("python3") or shutil.which("python")
+if _real_python3 is None:
+    skip("compare_execution/compare_edge_cases row classification",
+         "no python3 on this PATH to use as the working sibling")
+else:
+    _py_link = _ROW_SCRATCH / (pathlib.Path(_real_python3).name)
+    if os.name == "nt":
+        shutil.copy2(_real_python3, _py_link)
+    else:
+        _py_link.symlink_to(_real_python3)
+
+    def _row_for(language: str, dir_: pathlib.Path = _ROW_SCRATCH) -> dict:
+        os.environ["CODECALC_RUNTIME_PATH"] = str(dir_)
+        try:
+            r = tools.compare_execution({"python3": "print(42)", "lua": "print(42)"})
+        finally:
+            if _SAVED_RUNTIME_PATH is None:
+                os.environ.pop("CODECALC_RUNTIME_PATH", None)
+            else:
+                os.environ["CODECALC_RUNTIME_PATH"] = _SAVED_RUNTIME_PATH
+        return next(row for row in r["results"] if row["language"] == language), r
+
+    try:
+        for _backend_name, _force_fallback in (("rust", False), ("python fallback", True)):
+            _saved_rust = executor._rust
+            if _force_fallback:
+                executor._rust = None
+            try:
+                _lua_row, _full = _row_for("lua")
+                _py_row = next(row for row in _full["results"] if row["language"] == "python3")
+            finally:
+                executor._rust = _saved_rust
+            check(f"{_backend_name}: compare_execution's outer ok stays True",
+                  _full["ok"] is True, f"-> {_full['ok']}")
+            check(f"{_backend_name}: a missing-runtime row is runtime_unavailable",
+                  _lua_row.get("code") == errors.RUNTIME_UNAVAILABLE,
+                  f"-> code={_lua_row.get('code')} error={str(_lua_row.get('error'))[:90]!r}")
+            check(f"{_backend_name}: ...and carries error text and a remedy",
+                  bool(_lua_row.get("error")) and _lua_row.get("remedy") is not None,
+                  f"-> {_lua_row.get('error')!r} / {_lua_row.get('remedy')!r}")
+            check(f"{_backend_name}: a working sibling row carries no code/error/remedy",
+                  not ({"code", "error", "remedy"} & _py_row.keys()),
+                  f"-> {_py_row}")
+
+        # Parity: the SAME row-level keys on both backends for the SAME
+        # failure (scripts/check_parity.py never reaches compare_execution
+        # at all — it only runs execute_code's own success path).
+        if executor._rust is None:
+            skip("compare_execution row-key parity across backends",
+                 "no native executor built, nothing to compare")
+        else:
+            _rust_row, _ = _row_for("lua")
+            _saved_rust = executor._rust
+            executor._rust = None
+            try:
+                _fb_row, _ = _row_for("lua")
+            finally:
+                executor._rust = _saved_rust
+            check("compare_execution: both backends return the SAME row keys for a spawn failure",
+                  set(_rust_row) == set(_fb_row),
+                  f"-> rust-only={sorted(set(_rust_row) - set(_fb_row))} "
+                  f"python-only={sorted(set(_fb_row) - set(_rust_row))}")
+
+        # A timeout row is classified `timeout`, from a message compare_
+        # execution builds itself — never from the killed process's own
+        # `stderr`, which is free to carry real (untrusted) program output.
+        _timeout_row = next(
+            row for row in tools.compare_execution(
+                {"python3": "import time; time.sleep(3)"}, timeout=1)["results"]
+            if row["language"] == "python3")
+        check("compare_execution: a still-timed-out row is classified timeout",
+              _timeout_row.get("code") == errors.TIMEOUT,
+              f"-> {_timeout_row.get('code')} error={_timeout_row.get('error')!r}")
+
+        # compare_edge_cases has the identical per-run classification, via
+        # the same errors.stamp_row call.
+        os.environ["CODECALC_RUNTIME_PATH"] = str(_ROW_SCRATCH)
+        try:
+            _edge = translation.compare_edge_cases(
+                {"python3": "print(input())", "lua": "print(io.read())"}, inputs=["1"])
+        finally:
+            if _SAVED_RUNTIME_PATH is None:
+                os.environ.pop("CODECALC_RUNTIME_PATH", None)
+            else:
+                os.environ["CODECALC_RUNTIME_PATH"] = _SAVED_RUNTIME_PATH
+        _edge_runs = _edge["results"][0]["runs"]
+        check("compare_edge_cases: outer ok stays True", _edge["ok"] is True, f"-> {_edge['ok']}")
+        check("compare_edge_cases: a missing-runtime run is runtime_unavailable",
+              _edge_runs["lua"].get("code") == errors.RUNTIME_UNAVAILABLE,
+              f"-> {_edge_runs['lua'].get('code')}")
+        check("compare_edge_cases: a working run carries no code/error/remedy",
+              not ({"code", "error", "remedy"} & _edge_runs["python3"].keys()),
+              f"-> {_edge_runs['python3']}")
+    finally:
+        shutil.rmtree(_ROW_SCRATCH, ignore_errors=True)
+
+
+# ── the same row-level classification, over a REAL stdio MCP round-trip ────
+async def _stdio_row_spawn_failure() -> None:
+    if _real_python3 is None:
+        skip("stdio: compare_execution row classification", "no python3 on this PATH")
+        return
+    scratch = pathlib.Path(tempfile.mkdtemp(prefix="codecalc-row-noruntime-stdio-"))
+    try:
+        link = scratch / pathlib.Path(_real_python3).name
+        if os.name == "nt":
+            shutil.copy2(_real_python3, link)
+        else:
+            link.symlink_to(_real_python3)
+        async with over_stdio(env={"CODECALC_RUNTIME_PATH": str(scratch)}) as c:
+            r = await c.call_tool(
+                "compare_execution",
+                {"snippets": {"python3": "print(42)", "lua": "print(42)"}})
+            payload = data(r)
+            check("stdio: compare_execution's outer ok survives serialisation",
+                  isinstance(payload, dict) and payload.get("ok") is True,
+                  f"-> {payload.get('ok') if isinstance(payload, dict) else payload!r}")
+            if isinstance(payload, dict):
+                _lua = next((row for row in payload.get("results", [])
+                             if row.get("language") == "lua"), None)
+                check("stdio: a missing-runtime row round-trips as runtime_unavailable",
+                      _lua is not None and _lua.get("code") == errors.RUNTIME_UNAVAILABLE,
+                      f"-> {_lua.get('code') if _lua else None}")
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+asyncio.run(_stdio_row_spawn_failure())
 
 print(f"\n=== {len(FAILS)} FAILURE(S), {len(SKIPS)} skipped ===" if FAILS else
       f"\n=== PLATFORM CONTRACT HOLDS ({len(SKIPS)} skipped) ===")

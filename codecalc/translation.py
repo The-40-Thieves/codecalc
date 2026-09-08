@@ -18,7 +18,7 @@ without two runtimes and a built binary.
 
 from __future__ import annotations
 
-from . import executor
+from . import errors, executor
 
 #: default edge-case inputs (each is stdin for the program)
 DEFAULT_EDGE_INPUTS = ["", "0", "1", "-1", "10", "100", "0.1\n0.2"]
@@ -251,6 +251,16 @@ def compare_edge_cases(snippets: dict[str, str],
     are then reported).
 
     Offline-capable: no LLM needed, snippets must be provided per language.
+
+    Like `compare_execution`, the OUTER `ok` is always `True` once the sweep
+    ran (its only `ok: false` is the empty-snippets refusal above) — it means
+    "this tool produced a real matrix", not "every language succeeded". A
+    per-language run that failed for a REQUEST-level reason (no runtime
+    installed, a timeout) carries `error`/`code`/`remedy` on its OWN entry in
+    `results[i]["runs"][lang]`, via `errors.stamp_row` — the same rule
+    `compare_execution`'s rows follow, including leaving an ordinary program
+    failure (a real RTE/OLE `exit_code`, no request-level cause) with no
+    `code` at all.
     """
     if not snippets:
         return {"ok": False, "error": "provide at least one {language: code} snippet"}
@@ -261,10 +271,17 @@ def compare_edge_cases(snippets: dict[str, str],
         row = {"input": stdin[:60], "runs": {}}
         for lang, code in snippets.items():
             r = _run(lang, code, stdin, timeout)
-            row["runs"][lang] = {
+            run_entry = {
                 "ok": r.get("ok"), "stdout": _normalize(r.get("stdout", ""))[:300],
                 "verdict": r.get("verdict"), "stderr": (r.get("stderr") or "")[:150],
             }
+            if r.get("error"):
+                run_entry["error"] = r["error"]
+            errors.stamp_row(
+                run_entry, timed_out=bool(r.get("timed_out")),
+                timeout_message=f"{lang} timed out after {timeout}s (wall-clock)",
+            )
+            row["runs"][lang] = run_entry
         # divergence = outputs differ, or error-status differs. Two keys are
         # built per run: the exact (order-sensitive) one and the sorted
         # (order-insensitive) one, so an order-only difference can be told

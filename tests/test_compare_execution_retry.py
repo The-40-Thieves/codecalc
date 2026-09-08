@@ -1,4 +1,5 @@
-"""compare_execution's cold-start retry + timeout classification.
+"""compare_execution's cold-start retry + timeout classification, and its
+per-row `error`/`code`/`remedy` classification.
 
 Standalone, like the other suites: a check() accumulator, sys.exit(1) on any
 failure. The bug this guards: `node` intermittently loses the wall-clock race
@@ -10,7 +11,12 @@ it STILL times out, flags it with a sibling-timing comparison that
 discriminates "this language is broken" from "the runner was slow".
 
 executor.execute is monkeypatched with a fake so timeouts are deterministic
-and the retry count is directly assertable — no real timing involved.
+and the retry count is directly assertable — no real timing involved. The
+section near the bottom of this file, guarded "ROW CLASSIFICATION", uses the
+same fakes to prove `errors.stamp_row`'s three outcomes deterministically —
+a real hidden-runtime/real-timeout version of the same three cases, on both
+execution backends, lives in tests/test_platform_contract.py instead, where
+the native executor is actually built.
 """
 
 from __future__ import annotations
@@ -21,7 +27,7 @@ import sys
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from codecalc import tools
+from codecalc import errors, tools
 
 FAILS: list[str] = []
 
@@ -61,6 +67,24 @@ def fail_result(stderr: str, duration_ms: float = 25) -> dict:
         "stdout": "",
         "stderr": stderr,
         "exit_code": 1,
+        "duration_ms": duration_ms,
+        "timed_out": False,
+    }
+
+
+def spawn_failure_result(language: str, duration_ms: float = 5) -> dict:
+    """A missing-runtime spawn failure, shaped the way executor.execute
+    reports one (see codecalc/executor.py's `_runtime_unavailable_result` and
+    the Rust-result mapping it shares the wording with) — `error` carries the
+    same text as `stderr`, and `exit_code` is `None`, never Rust's internal
+    `-2` sentinel."""
+    detail = f'runtime unavailable for the run phase: {language!r} not found (No such file or directory)'
+    return {
+        "ok": False,
+        "stdout": "",
+        "stderr": detail,
+        "error": detail,
+        "exit_code": None,
         "duration_ms": duration_ms,
         "timed_out": False,
     }
@@ -230,6 +254,79 @@ r = tools.compare_execution({"node": "console.log(42)", "python3": "print(42)"})
 node_entries = [d for d in r["discrepancies"] if d["language"] == "node"]
 check("a language appears at most once in discrepancies",
       len(node_entries) == 1, f"-> {node_entries}")
+
+
+# ── ROW CLASSIFICATION: errors.stamp_row's three outcomes ──────────────────
+# 7. a missing-runtime row carries error/code/remedy; the working sibling
+#    carries none of the three; the OUTER ok stays True.
+fake, calls = make_fake({
+    "lua": [spawn_failure_result("lua")],
+    "python3": [ok_result("42", 33)],
+})
+tools.executor.execute = fake
+r = tools.compare_execution({"lua": "print(42)", "python3": "print(42)"})
+check("outer ok is True even though one language could not run",
+      r["ok"] is True, f"-> {r['ok']}")
+lua_row = row(r["results"], "lua")
+check("a missing-runtime row is classified runtime_unavailable",
+      lua_row.get("code") == errors.RUNTIME_UNAVAILABLE, f"-> {lua_row.get('code')}")
+check("...and carries error text", bool(lua_row.get("error")), f"-> {lua_row.get('error')!r}")
+check("...and a remedy", lua_row.get("remedy") == errors.REMEDIES[errors.RUNTIME_UNAVAILABLE],
+      f"-> {lua_row.get('remedy')!r}")
+check("...and is marked code_inferred (message-matched, not raised)",
+      lua_row.get("code_inferred") is True, f"-> {lua_row.get('code_inferred')}")
+python_row = row(r["results"], "python3")
+check("a working row carries no code at all", "code" not in python_row, f"-> {python_row}")
+check("...and no error/remedy either", "error" not in python_row and "remedy" not in python_row,
+      f"-> {python_row}")
+
+# 8. a row still timed_out after the warm retry is classified `timeout` —
+# from a message THIS function builds, never from the row's own `stderr`
+# (which the killed process is free to have left non-empty with its OWN
+# output — see errors.stamp_row's docstring for why that is not safe to
+# feed to a message-matching classifier).
+fake, calls = make_fake({
+    "node": [timeout_result(15000), timeout_result(15000)],
+    "python3": [ok_result("42", 30)],
+})
+tools.executor.execute = fake
+r = tools.compare_execution({"node": "console.log(42)", "python3": "print(42)"}, timeout=15)
+node_row = row(r["results"], "node")
+check("a still-timed-out row is classified timeout",
+      node_row.get("code") == errors.TIMEOUT, f"-> {node_row.get('code')}")
+check("...and its error text is built by compare_execution, not copied from stderr",
+      node_row.get("error") == "node timed out after 15s (wall-clock)",
+      f"-> {node_row.get('error')!r}")
+
+# 9. a language that timed out once but RECOVERED on the warm retry is a
+# success row (case 1's own row) and must carry no code.
+fake, calls = make_fake({
+    "node": [timeout_result(15000), ok_result("42", 40)],
+    "python3": [ok_result("42", 33)],
+})
+tools.executor.execute = fake
+r = tools.compare_execution({"node": "console.log(42)", "python3": "print(42)"})
+node_row = row(r["results"], "node")
+check("a recovered row carries no code", "code" not in node_row, f"-> {node_row}")
+
+# 10. an ordinary deterministic failure (e.g. a compile error, a real exit
+# code) is NOT a request-level failure and carries no code — `verdict`/
+# `exit_code` already tell that story, per the INTENDED convention
+# errors.stamp_row implements (a failed PROGRAM, not a failed REQUEST) — a
+# convention the top-level execute_code envelope does not yet honour itself
+# for a plain RTE/timeout (see errors.stamp_row's own docstring).
+fake, calls = make_fake({
+    "perl": [fail_result("syntax error at -e line 1.")],
+    "python3": [ok_result("42", 33)],
+})
+tools.executor.execute = fake
+r = tools.compare_execution({"perl": "bad(", "python3": "print(42)"})
+perl_row = row(r["results"], "perl")
+check("an ordinary program failure carries no code",
+      "code" not in perl_row, f"-> {perl_row}")
+check("...and no error/remedy of its own (compare_execution's error/code/"
+      "remedy are reserved for request-level failures)",
+      "error" not in perl_row and "remedy" not in perl_row, f"-> {perl_row}")
 
 
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else "\n=== COLD-START RETRY / CLASSIFICATION OK ===")

@@ -1,7 +1,47 @@
 # The codecalc result contract
 
-**Current version: `1.9.0`** · Schema: [`result-v1.schema.json`](result-v1.schema.json) ·
+**Current version: `1.10.0`** · Schema: [`result-v1.schema.json`](result-v1.schema.json) ·
 Source of truth: [`codecalc/contract.py`](../../codecalc/contract.py)
+
+`1.10.0` is a MINOR bump over `1.9.0`, and adds a new result shape plus two new
+optional fields on an existing one:
+
+* **A `comparison_rows` branch, for `compare_execution`.** Its result — the
+  same code run in N languages side by side — never matched any of this
+  document's `oneOf` branches; it sat outside the published contract
+  entirely, the same gap `edge_case_comparison` closed for `compare_
+  edge_cases` in `1.5.0`. Closing it is what makes the second change below
+  possible to *describe*, not just to ship: a field added to an unmodeled
+  shape is not a documented contract change.
+* **`error`/`code`/`remedy`/`code_inferred` on `compare_execution`'s
+  per-language `results[]` rows, and on `compare_edge_cases`'s per-language
+  `runs[lang]` entries.** Before this version, a row or run that failed for
+  a REQUEST-level reason — no runtime installed for that language, or a
+  timeout — carried only `stdout`/`stderr`/`exit_code` (or `verdict`), same
+  as an ordinary program failure. A caller could not tell "this language's
+  own snippet is broken" from "this host does not have this language
+  installed" without re-running that one language alone through `execute_
+  code` and reading `code` there. Both tools' OUTER `ok` was, and remains,
+  `True` once the comparison itself ran — it means "this tool produced a
+  real table", never "every language succeeded" — so `server.py`'s `_coded`
+  wrapper (which classifies a result via `errors.ensure_code`) never reached
+  these nested rows either; `errors.stamp_row` is the same classification
+  applied at the row level instead. An ordinary program failure (a real
+  `RTE`/`OLE` `exit_code`, the code ran and failed on its own terms) still
+  carries none of the four fields, matching the INTENDED reading of "The
+  program ran and failed" vs "Rejected before execution" below: `code`
+  is meant to mark a failed REQUEST, never a failed program. That is NOT yet
+  what the top-level execution envelope itself does for every case: a plain
+  RTE (`sys.exit(3)`) or a plain wall-clock timeout through `execute_code`
+  comes back `code: "internal"` today (`executor.execute` never sets `error`
+  for either, so `errors.ensure_code`'s message matcher falls through to
+  `internal`) — pre-existing on the envelope, not something this version
+  touches, and tracked separately; `errors.stamp_row` applies the rule as it
+  is meant to work at the row level, not as the envelope currently does. This
+  closes the SAME gap `1.9.0` closed one backend at a time (below): a
+  Rust-backend spawn failure now sets `error` on the envelope itself, but
+  `compare_execution`/`compare_edge_cases` never forwarded that field — on
+  EITHER backend — into their own rows at all.
 
 `1.9.0` is a MINOR bump over `1.8.0`. A spawn failure — the requested
 language's runtime or compiler could not be launched at all, typically
@@ -294,10 +334,10 @@ still works exactly as before.
 
 ---
 
-## The eight shapes
+## The nine shapes
 
 Every result carries `ok` and `contract_version`, and a client discriminates
-the eight shapes in this order:
+the nine shapes in this order:
 
 | Shape | Discriminator | What it is |
 |---|---|---|
@@ -309,9 +349,10 @@ the eight shapes in this order:
 | **translation_verification** | `passed` present | `verify_translation`'s result: did a source program and a claimed port agree, with real evidence either way. `ok` is true whenever the tool completed — including a mismatch; it is not the verdict. |
 | **optimization_verification** | `accepted` present | `verify_optimization`'s result: is `candidate` a genuine, measurably-faster optimisation of `original`. |
 | **edge_case_comparison** | `divergence_count` present | `compare_edge_cases`'s success result: the same logic run in N languages, and where it diverged. |
+| **comparison_rows** | `count`/`succeeded`/`fastest` present | `compare_execution`'s result: the same code run in N languages side by side, which was fastest, and any cross-language discrepancies noticed. |
 
 The first five are **execution** shapes — their discriminators only ever
-fire for something that ran code (or explicitly refused to). The last three,
+fire for something that ran code (or explicitly refused to). The next three,
 added in `1.5.0`, are **verification** shapes: `verify_translation`,
 `verify_optimization` and `compare_edge_cases` were always stamped
 `contract_version` by the same `stamp()` at the MCP tool boundary — every
@@ -329,7 +370,19 @@ Fixed at the source instead of carved into the schema — `ok` means "the
 tool completed and produced a real answer", never the verdict, so a
 mismatch is `ok: true` exactly like a pass (see `verify_optimization`'s own
 `{"ok": True, "accepted": False, ...}` early return for the same
-distinction already in the contract) — so all eight shapes require it.
+distinction already in the contract) — so all eight of those shapes require
+it.
+
+**`comparison_rows`**, added in `1.10.0`, is `compare_execution`'s own result
+— the identical gap `edge_case_comparison` closed for its sibling tool in
+`1.5.0`, found the same way: `compare_execution` matched none of the other
+eight branches either, and had no branch of its own to fall back on
+(`compare_execution` has no refusal shape — an empty `snippets` dict still
+returns this shape, with `count: 0`). Unlike the three verification shapes,
+it collides with none of them structurally (`count`/`succeeded`/`fastest`
+appear on no other shape) and needed no failure-shape reasoning of its own,
+because it has no failure shape: `ok` is unconditionally `true` once the
+comparison ran, the same as `edge_case_comparison`.
 
 **The run_lifecycle shape** (added in `1.1.0`) is the reply the background-run
 tools return before a run finishes — `run_submit`'s handle, a poll of a
@@ -756,6 +809,44 @@ but they carry the same error half, so a caller branches on `code` identically.
   "code_inferred": true,
   "error": "Sympify of expression 'could not parse 'x +++ ***'' failed ...",
   "remedy": "fix the arguments and retry; the message names the field"
+}
+```
+
+### A `compare_execution` row that needed a runtime this host does not have
+
+The tool's OUTER `ok` is `true` — the comparison itself ran — but the `lua`
+row failed for a REQUEST-level reason, so it carries `code`/`error`/`remedy`
+the same as a top-level coded failure. The `python3` row ran and succeeded
+and carries none of the three; a row that ran and failed on its OWN terms
+(a real `RTE`/`OLE` `exit_code`) would carry none of them either, only
+`exit_code` and `timed_out` saying so — see `errors.stamp_row` in
+`codecalc/errors.py` for the full rule. `compare_edge_cases`'s per-language
+`runs[lang]` entries follow the identical rule.
+
+```json
+{
+  "ok": true,
+  "contract_version": "1.10.0",
+  "count": 2,
+  "succeeded": 1,
+  "results": [
+    {
+      "language": "python3", "ok": true, "stdout": "42\n", "stderr": "",
+      "exit_code": 0, "duration_ms": 33, "timed_out": false, "cold_retry": false
+    },
+    {
+      "language": "lua", "ok": false, "stdout": "", "exit_code": null,
+      "duration_ms": 4, "timed_out": false, "cold_retry": false,
+      "stderr": "runtime unavailable for the run phase: \"lua\" not found (No such file or directory (os error 2))",
+      "error": "runtime unavailable for the run phase: \"lua\" not found (No such file or directory (os error 2))",
+      "code": "runtime_unavailable",
+      "code_inferred": true,
+      "remedy": "install the runtime, or call list_languages to see what this host has"
+    }
+  ],
+  "fastest": "python3",
+  "fastest_note": null,
+  "discrepancies": []
 }
 ```
 
