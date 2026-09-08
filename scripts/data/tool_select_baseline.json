@@ -1,30 +1,30 @@
 {
     "codecalc_version": "0.10.0",
     "core": {
-        "n": 100,
+        "n": 116,
         "skipped": 96,
-        "top1": 0.69,
-        "top1_hits": 69,
-        "top3": 0.84,
-        "top3_hits": 84
+        "top1": 0.6379,
+        "top1_hits": 74,
+        "top3": 0.8362,
+        "top3_hits": 97
     },
     "dev": {
-        "n": 153,
+        "n": 169,
         "skipped": 43,
-        "top1": 0.6863,
-        "top1_hits": 105,
-        "top3": 0.8105,
-        "top3_hits": 124
+        "top1": 0.6331,
+        "top1_hits": 107,
+        "top3": 0.8166,
+        "top3_hits": 138
     },
     "full": {
-        "n": 196,
+        "n": 212,
         "skipped": 0,
-        "top1": 0.6429,
-        "top1_hits": 126,
-        "top3": 0.7908,
-        "top3_hits": 155
+        "top1": 0.6038,
+        "top1_hits": 128,
+        "top3": 0.8019,
+        "top3_hits": 170
     },
-    "generated_at": "2026-09-08T22:04:41Z",
-    "prompt_count": 196,
-    "prompt_set_sha256": "b7a425b364531476cf89ab95132f049080d293b4f10b167121d3ba1ca4137ef2"
+    "generated_at": "2026-09-08T23:22:28Z",
+    "prompt_count": 212,
+    "prompt_set_sha256": "5c770ea268c8e5a0752e644e0e696ef9822de9d7d82cea05cf5eadad091b29a5"
 }
