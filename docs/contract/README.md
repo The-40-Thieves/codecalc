@@ -8,18 +8,21 @@ Source of truth: [`codecalc/contract.py`](../../codecalc/contract.py)
 this one version and policy, see "Two version numbers, on purpose" below.
 It adds `probe_ms` to every `runtimes[]` row a `--deep` version probe was
 attempted for, and narrows what a version-probe **timeout** is allowed to
-mean, closing three separate 2026-09-08 hosted-runner failures (main among
-them): a cold `windows-latest` runner's FIRST `rustc --version` goes through
-the rustup proxy — an arg-forwarding shim that has to locate and re-exec the
-real toolchain component before it can answer anything — and exceeded the
-probe's 10-second deadline. `_probe_version` reported that exactly like a
-spawn failure (`hard_failure=True` either way), and `report()` trusted rust's
-confirmed `_VERSION_FLAG` entry the same way it trusts a genuine nonzero
-exit, so a `tested`-tier runtime that was never actually broken read
-`unhealthy`, `healthy` flipped `false`, and `tests/test_doctor.py`'s
-real-host `--deep` assertions (added for the earlier go/lua/zig regression,
-#282 — they assert every resolved `tested`-tier language stays
-installed/available) failed alongside it. A timeout means
+mean, closing four separate 2026-09-08 hosted-runner failures (main among
+them): three were a cold `windows-latest` runner's FIRST `rustc --version`
+going through the rustup proxy — an arg-forwarding shim that has to locate
+and re-exec the real toolchain component before it can answer anything — and
+exceeding the probe's 10-second deadline; a fourth, on a later commit, was
+plain `go version` doing the same with no proxy involved and no per-command
+override for `go` at all. `_probe_version` reported that exactly like a
+spawn failure (`hard_failure=True` either way), and `report()` trusted the
+confirmed `_VERSION_FLAG` entry (both `rustc` and `go` are audited, GNU-style
+commands) the same way it trusts a genuine nonzero exit, so a `tested`-tier
+runtime that was never actually broken read `unhealthy`, `healthy` flipped
+`false`, and `tests/test_doctor.py`'s real-host `--deep` assertions (added
+for the earlier go/lua/zig regression, #282 — they assert every resolved
+`tested`-tier language stays installed/available) failed alongside it. A
+timeout means
 "the probe did not answer within the deadline"; it is not evidence the
 runtime is broken, and this version stops treating the two as the same
 claim: `_probe_version` now returns `hard_failure=False` for a timeout, and
