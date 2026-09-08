@@ -254,7 +254,12 @@ behind it.
   `CODECALC_RUNTIME_PATH` passed the existence check and the runner's own
   MinGW `gcc` ran anyway. The resolved absolute path is now what gets
   spawned, so the sandbox PATH decides which binary runs on every OS, not
-  only the ones whose loader consults the child's environment.
+  only the ones whose loader consults the child's environment. One
+  observable side effect, fallback backend only: a runtime that exposes
+  its raw `argv[0]` to the program (`process.argv0` under node/bun/deno;
+  python/ruby/perl/bash discard it in favour of the script path) now sees
+  the resolved absolute interpreter path rather than the bare name — the
+  native backend already behaved this way.
 - `execute_code(..., compact=True)` classified a "rejected before execution"
   failure (an unknown language, a validation refusal — anything with no
   `verdict`/`stdout`/`exit_code` to fall back on) as `internal` regardless
