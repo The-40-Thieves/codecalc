@@ -1,0 +1,40 @@
+{
+  "prompt_set_sha256": "b7a425b364531476cf89ab95132f049080d293b4f10b167121d3ba1ca4137ef2",
+  "generated_at": "2026-09-08T22:56:07Z",
+  "models": {
+    "anthropic/claude-haiku-4-5-20251001": {
+      "full": {
+        "n": 196,
+        "top1_hits": 164,
+        "top3_hits": 134
+      },
+      "dev": {
+        "n": 153,
+        "top1_hits": 147,
+        "top3_hits": 106
+      },
+      "core": {
+        "n": 100,
+        "top1_hits": 98,
+        "top3_hits": 78
+      }
+    },
+    "openai/gpt-4o-mini": {
+      "full": {
+        "n": 196,
+        "top1_hits": 179,
+        "top3_hits": 193
+      },
+      "dev": {
+        "n": 153,
+        "top1_hits": 147,
+        "top3_hits": 151
+      },
+      "core": {
+        "n": 100,
+        "top1_hits": 98,
+        "top3_hits": 100
+      }
+    }
+  }
+}

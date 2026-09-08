@@ -56,3 +56,6 @@ opengrep.json
 # file it links — see that script's module docstring for why it is built in CI
 # and attached to each GitHub release instead of being committed here.
 /llms-full.txt
+# scripts/tool_select_llm_eval.py's resumable per-(model, group, prompt) cache —
+# machine-local, and a rerun regenerates it from nothing.
+scripts/data/.llm_eval_cache/

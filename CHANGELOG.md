@@ -139,6 +139,23 @@ behind it.
   `truncated_reason` enum member (`trace_file_exceeded`) are declared in the
   `execution_trace` contract shape alongside the rest of it — still additive,
   landing before this tool's own first release.
+- MCP Apps (`io.modelcontextprotocol/ui`) graphical views for
+  `verify_translation` and `verify_optimization`: each tool now carries
+  `_meta.ui.resourceUri` pointing at a self-contained `ui://` HTML resource
+  (inline CSS/JS, no external assets, no network) that a supporting host
+  (Claude, ChatGPT, VS Code, and others per the ext-apps spec's own host
+  list) renders alongside the tool's answer — a per-case diff table with
+  first-differing-line highlighting for the translation proof, and a
+  per-size before/after timing chart plus the significance table for the
+  optimization proof. `tools/call` is unchanged for hosts without Apps
+  support — the `_meta` key is additive and ignorable — confirmed once
+  during development by byte-comparing a live run of `main`'s server, and
+  guarded going forward by a live in-process equivalence check plus a
+  structural diff against `origin/main`'s merge-base (best-effort: only
+  where `origin/main` is fetchable, which the CI job that runs it is not
+  currently guaranteed to be). See
+  `docs/design/2026-09-08-mcp-apps-verification-views.md` for the spec
+  research this was built from.
 - `llms.txt` at the repo root (the [llmstxt.org](https://llmstxt.org/)
   convention) indexing README, QUICKSTART, the result contract docs and
   schemas, SECURITY.md, AUDIT.md, CONTRIBUTING.md, and the packaged skill, so
@@ -258,6 +275,29 @@ behind it.
   place that bridges it to the async `ctx.report_progress` via
   `anyio.from_thread.run(...)`, the same pattern the resource-change
   notifications above use.
+- `scripts/tool_select_llm_eval.py` — the MODEL-driven half of the
+  tool-selection eval `scripts/tool_select_eval.py`'s own docstring says its
+  BM25 selector "cannot tell you whether an actual LLM tool-selector would
+  pick correctly." This calls a real chat model over an OpenAI-compatible
+  `/chat/completions` endpoint (`CODECALC_EVAL_BASE_URL`/`CODECALC_EVAL_API_KEY`,
+  env only — never a CLI argument, never logged), offering the exact tool
+  catalog (name + description + `inputSchema`) an MCP client would see via
+  `tools/list`, per `full`/`dev`/`core` group. Two calls per prompt (a real
+  `tools=[...]` call for top-1, a ranked-list call for a STRICT top-3 — a
+  hit iff LIST mode's own three names intersect `expected`, never unioned
+  with the separate TOOLS-mode pick, which is reported on its own honest
+  `top1_or_list_top3` column instead — with LIST mode's own #1 serving as
+  the top-1 fallback when a model has no function-calling support), a
+  resumable on-disk cache keyed by `(model, group, prompt, tools_hash)` —
+  `tools_hash` is a hash of the exact `tools=[...]` payload, so an edited
+  description or `inputSchema` invalidates the cache instead of silently
+  replaying a stale response — and an advisory (non-blocking by default;
+  `--strict` to fail) regression compare against a checked-in baseline that
+  also warns when a group gets zero cache hits despite an existing baseline
+  entry (a likely description change). See `docs/tool-selection-eval.md`
+  for the measured numbers next to the BM25 baseline. A new
+  `tool-select-llm-eval` CI job (`workflow_dispatch` only, gated on the
+  `CODECALC_EVAL_API_KEY` secret) runs it live and uploads the JSON report.
 
 ### Fixed
 

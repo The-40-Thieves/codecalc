@@ -29,6 +29,7 @@ from typing import Any
 
 import anyio
 from mcp.server import CacheHint, MCPServer
+from mcp.server.apps import APP_MIME_TYPE
 from mcp.server.mcpserver import Context
 from mcp.types import (
     Completion,
@@ -44,6 +45,7 @@ from mcp.types import (
 
 from . import (
     __version__,
+    apps_views,
     capabilities,
     complexity,
     confirmation,
@@ -844,6 +846,13 @@ def _tool_meta(name: str) -> dict[str, Any] | None:
         meta["anthropic/alwaysLoad"] = True
     if name in _LARGE_RESULT_TOOLS:
         meta["anthropic/maxResultSizeChars"] = _MAX_RESULT_SIZE_CHARS
+    if name in apps_views.UI_RESOURCE_URIS:
+        # MCP Apps (io.modelcontextprotocol/ui): points a supporting host at
+        # the ui:// resource below. `visibility` is left unset (spec default
+        # ["model", "app"]) — the tool's own text/structured result is
+        # unchanged for the model either way; see
+        # docs/design/2026-09-08-mcp-apps-verification-views.md.
+        meta["ui"] = {"resourceUri": apps_views.UI_RESOURCE_URIS[name]}
     return meta or None
 
 
@@ -2033,6 +2042,34 @@ def session_file_resource(session_id: str, path: str):
         return data.decode("utf-8")  # str -> TextResourceContents
     except UnicodeDecodeError:
         return data
+
+
+# ── MCP Apps (io.modelcontextprotocol/ui) resources ─────────────────────────
+# Two static, self-contained HTML documents (codecalc/apps_views.py) bound to
+# verify_translation/verify_optimization via the `_meta.ui.resourceUri` set in
+# `_tool_meta` above. `mime_type=APP_MIME_TYPE` is the SDK's own constant, not
+# a literal, so a host that requires the exact spec string never sees a typo.
+# `resources/list`'s cache hint (10s, public) already covers these the same
+# as every other resource — nothing here is per-caller or ever changes at
+# runtime, so no override is needed. See
+# docs/design/2026-09-08-mcp-apps-verification-views.md for the research this
+# is built from.
+@mcp.resource(apps_views.UI_RESOURCE_URIS["verify_translation"],
+              name="verify_translation view",
+              description="Interactive per-case comparison table for a verify_translation result, "
+                          "with first-differing-line highlighting. Ignored by hosts without MCP Apps support.",
+              mime_type=APP_MIME_TYPE)
+def verify_translation_view() -> str:
+    return apps_views.VERIFY_TRANSLATION_HTML
+
+
+@mcp.resource(apps_views.UI_RESOURCE_URIS["verify_optimization"],
+              name="verify_optimization view",
+              description="Interactive per-size timing chart and significance table for a "
+                          "verify_optimization result. Ignored by hosts without MCP Apps support.",
+              mime_type=APP_MIME_TYPE)
+def verify_optimization_view() -> str:
+    return apps_views.VERIFY_OPTIMIZATION_HTML
 
 
 # Deliberately left untyped (no `-> dict` or `-> dict[str, Any]`): the body
