@@ -67,7 +67,6 @@ repo change, so it does not belong in a gated CI check. `scripts/check_llms_txt.
 and `scripts/check_claims.py` gate everything in this repo that a script can
 verify offline; a third party's submission queue is deliberately not one of
 those things.
-||||||| parent of c491b51 (docs(docker): prepare a Docker MCP Catalog submission, unopened)
 
 Where codecalc is published, and — for a listing that needs a human to act —
 the exact steps to submit it.
