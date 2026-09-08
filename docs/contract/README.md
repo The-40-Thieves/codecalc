@@ -599,6 +599,20 @@ allowed to change:
 A client that follows both can be written against `1.0.0` and keep working
 across every `1.x` without changes.
 
+### `_meta` is not part of this contract
+
+`contract_version` and this document describe the shape of a tool's
+**result** — the dict a tool returns, stamped and validated. Server-side
+`_meta` on `tools/list` (the `anthropic/*` policy keys, and MCP Apps'
+`ui.resourceUri`) and on a `ui://` resource's own `resources/read` response
+lives entirely outside it: it is wire metadata about the *tool or resource
+declaration*, not about any result this contract versions, and an MCP client
+is already required to ignore an unrecognised `_meta` key regardless of what
+it names. Adding, removing, or changing a `_meta` key is therefore never a
+`contract_version` bump on its own — see
+`docs/design/2026-09-08-mcp-apps-verification-views.md` for where the two
+verification tools' `ui` key comes from.
+
 ### Deprecation, and the compatibility window
 
 Nothing in a MAJOR is removed without notice. A field or enum member being

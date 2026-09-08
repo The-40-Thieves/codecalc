@@ -480,6 +480,15 @@ Every session file is also exposed as an MCP resource:
 `codecalc://session/<session_id>/files/<path>` — images render inline for the
 model, text returns as text, other files download.
 
+**Graphical results in MCP Apps hosts**: `verify_translation` and
+`verify_optimization` also carry an [MCP Apps](https://modelcontextprotocol.io)
+`ui://` view (`ui://verify-translation/view.html`,
+`ui://verify-optimization/view.html`) — a per-case diff table and a per-size
+timing chart, respectively, rendered inline by a host that supports the
+extension. Both are self-contained (inline CSS/JS, no network, no external
+assets); a host without MCP Apps support sees exactly today's text/structured
+result, unchanged.
+
 **Exact arithmetic & programmer-mode**: exact rationals, threshold checks, bit
 analysis, binary64 introspection.
 
@@ -973,7 +982,7 @@ PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py         # every tool over MC
 PYTHONPATH=. .venv/bin/python tests/test_executor_sweep.py  # sandbox regressions
 ```
 
-63 test files and 18 CI-invoked scripts, **2184 assertions**. "CI-invoked"
+64 test files and 18 CI-invoked scripts, **2184 assertions**. "CI-invoked"
 means referenced by path (`scripts/<name>.py`) from a job in
 `.github/workflows/*.yml` — `scripts/check_claims.py` derives the count that
 way and gates it, so a script wired into a workflow without this sentence

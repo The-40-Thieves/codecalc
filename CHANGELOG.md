@@ -35,6 +35,23 @@ behind it.
 
 ### Added
 
+- MCP Apps (`io.modelcontextprotocol/ui`) graphical views for
+  `verify_translation` and `verify_optimization`: each tool now carries
+  `_meta.ui.resourceUri` pointing at a self-contained `ui://` HTML resource
+  (inline CSS/JS, no external assets, no network) that a supporting host
+  (Claude, ChatGPT, VS Code, and others per the ext-apps spec's own host
+  list) renders alongside the tool's answer — a per-case diff table with
+  first-differing-line highlighting for the translation proof, and a
+  per-size before/after timing chart plus the significance table for the
+  optimization proof. `tools/call` is unchanged for hosts without Apps
+  support — the `_meta` key is additive and ignorable — confirmed once
+  during development by byte-comparing a live run of `main`'s server, and
+  guarded going forward by a live in-process equivalence check plus a
+  structural diff against `origin/main`'s merge-base (best-effort: only
+  where `origin/main` is fetchable, which the CI job that runs it is not
+  currently guaranteed to be). See
+  `docs/design/2026-09-08-mcp-apps-verification-views.md` for the spec
+  research this was built from.
 - `llms.txt` at the repo root (the [llmstxt.org](https://llmstxt.org/)
   convention) indexing README, QUICKSTART, the result contract docs and
   schemas, SECURITY.md, AUDIT.md, CONTRIBUTING.md, and the packaged skill, so
