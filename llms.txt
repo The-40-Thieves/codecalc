@@ -1,0 +1,40 @@
+# codecalc
+
+> codecalc is an offline, self-hosted MCP server that gives an AI agent a
+> calculator, a code runner, and a logic checker — so it gets a *correct*
+> answer instead of a guessed one.
+
+codecalc runs untrusted code in 31 languages, does exact symbolic math,
+solves SMT/logic problems, and measures complexity, exposed as 52 MCP tools
+over stdio or Streamable HTTP. Its core opens no sockets, ships no model, no
+API key, and no telemetry; network access is opt-in and scoped to the one
+tool that needs it. `verify_translation`, `verify_optimization`, and
+`z3_check` prove a claim (a port behaves identically, an optimization
+preserved behavior, a formula is satisfiable) instead of asserting it. Two
+things are versioned separately here — the package (`pyproject.toml`) and
+the result contract (`docs/contract/README.md`, `contract_version` on every
+tool result) — see CONTRIBUTING.md before treating one number as the other.
+
+## Docs
+
+- [README](https://raw.githubusercontent.com/The-40-Thieves/codecalc/main/README.md): install paths (uvx/pip/from-source), the tool and language inventory, the network-boundary table, and how codecalc compares to hosted interpreters and cloud sandboxes.
+- [QUICKSTART](https://raw.githubusercontent.com/The-40-Thieves/codecalc/main/QUICKSTART.md): the fastest path to a working MCP connection and a first call.
+- [CHANGELOG](https://raw.githubusercontent.com/The-40-Thieves/codecalc/main/CHANGELOG.md): every caller-observable change, in Keep a Changelog format, with the package and contract version histories kept separate.
+- [CONTRIBUTING](https://raw.githubusercontent.com/The-40-Thieves/codecalc/main/CONTRIBUTING.md): commit sign-off (DCO), the local gates in `scripts/`, the counts `check_claims.py` enforces, and the changelog policy.
+
+## Contract
+
+- [Result contract README](https://raw.githubusercontent.com/The-40-Thieves/codecalc/main/docs/contract/README.md): the versioned result-shape contract, its MAJOR/MINOR/PATCH policy, and the twelve-month deprecation window.
+- [Result schema v1](https://raw.githubusercontent.com/The-40-Thieves/codecalc/main/docs/contract/result-v1.schema.json): JSON Schema every tool result validates against.
+- [Computation-spec schema v1](https://raw.githubusercontent.com/The-40-Thieves/codecalc/main/docs/contract/computation-spec-v1.schema.json): JSON Schema for the computation-spec input shape.
+- [Doctor schema v1](https://raw.githubusercontent.com/The-40-Thieves/codecalc/main/docs/contract/doctor-v1.schema.json): JSON Schema for `codecalc doctor`'s report shape.
+- [Provider contract v1](https://raw.githubusercontent.com/The-40-Thieves/codecalc/main/docs/contract/provider-v1.md): the contract an external execution provider must implement.
+
+## Security
+
+- [SECURITY.md](https://raw.githubusercontent.com/The-40-Thieves/codecalc/main/SECURITY.md): threat model, in-scope and out-of-scope findings, private vulnerability reporting, and the safe-harbor terms for security research.
+- [AUDIT.md](https://raw.githubusercontent.com/The-40-Thieves/codecalc/main/AUDIT.md): the pre-publication security audit, its findings, and the environment-variable allowlist it documents.
+
+## Optional
+
+- [codecalc/SKILL.md](https://raw.githubusercontent.com/The-40-Thieves/codecalc/main/codecalc/SKILL.md): the packaged skill that tells a model which tools to call and which result fields it may relay.

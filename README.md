@@ -89,6 +89,27 @@ server stays exactly as it was) and backs up the original to
 > one with `gh attestation verify <file> --repo The-40-Thieves/codecalc`; PyPI
 > wheels additionally carry PEP 740 attestations.
 
+### Where to find codecalc
+
+| Where | What you get | Link |
+|---|---|---|
+| PyPI | `pip install codecalc` / `uvx codecalc` | [pypi.org/project/codecalc](https://pypi.org/project/codecalc/) |
+| crates.io | the `codecalc-exec` Rust executor crate | [crates.io/crates/codecalc-exec](https://crates.io/crates/codecalc-exec) |
+| GitHub Releases | wheels for every platform, the executor binaries, the `.mcpb` bundle, an SBOM, and `SHA256SUMS` | [github.com/The-40-Thieves/codecalc/releases](https://github.com/The-40-Thieves/codecalc/releases) |
+| MCP registry (official) | the `io.github.The-40-Thieves/codecalc` server entry `server.json` publishes to | [registry.modelcontextprotocol.io](https://registry.modelcontextprotocol.io/v0/servers?search=codecalc) |
+| Smithery | hosted listing and one-click client config | [smithery.ai/servers/@The-40-Thieves/codecalc](https://smithery.ai/servers/@The-40-Thieves/codecalc) |
+| Glama | hosted listing and the score badge above | [glama.ai/mcp/servers/The-40-Thieves/codecalc](https://glama.ai/mcp/servers/The-40-Thieves/codecalc) |
+| MCPB (Claude Desktop) | the drag-and-drop bundle, attached to every GitHub Release | see GitHub Releases, above |
+
+**Not yet listed:** PulseMCP and mcp.so do not carry a codecalc entry yet.
+PulseMCP's own submission page (checked 2026-09-08) says it is not accepting
+new submissions and that publishing to the official MCP registry — already
+done, row above — is what it indexes from once submissions reopen, so there
+is nothing to submit there today. mcp.so takes a submission through its own
+form. See [docs/distribution.md](docs/distribution.md) for the exact steps,
+kept there rather than here because submitting is an action for whoever runs
+it, not a fact about the current release.
+
 **The published install** (simplest — no build step, and what most people want):
 
 ```bash
@@ -936,7 +957,7 @@ PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py         # every tool over MC
 PYTHONPATH=. .venv/bin/python tests/test_executor_sweep.py  # sandbox regressions
 ```
 
-62 test files and 16 CI-invoked scripts, **2184 assertions**. "CI-invoked"
+62 test files and 17 CI-invoked scripts, **2184 assertions**. "CI-invoked"
 means referenced by path (`scripts/<name>.py`) from a job in
 `.github/workflows/*.yml` — `scripts/check_claims.py` derives the count that
 way and gates it, so a script wired into a workflow without this sentence
