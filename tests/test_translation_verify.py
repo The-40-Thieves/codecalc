@@ -1557,8 +1557,18 @@ for _tol_label, _tol_a, _tol_b in [
 # normalized stdout alone would have erased. Node is present on this host;
 # skip cleanly rather than failing the whole suite on an unrelated
 # environment gap if it is ever absent.
+#
+# The source writes the U+2028 through `sys.stdout.buffer` (raw bytes, the
+# reporter's own `b"A\xe2\x80\xa8B\n"`), NOT `sys.stdout.write("A\u2028B\n")`
+# (text mode): a text-mode write encodes through the child's stdout codec,
+# which on Windows is the console code page, not UTF-8 — neither backend
+# sets PYTHONUTF8/PYTHONIOENCODING — so `sys.stdout.write` raised
+# UnicodeEncodeError there and the source side produced nothing at all
+# (observed on windows-latest CI, py3.11 and py3.14: source stdout/stdout_raw
+# both `''`). Writing the bytes directly bypasses that codec on every
+# platform, matching the byte stream the issue itself reports.
 if executor.probe().get("node"):
-    _SRC_286 = 'import sys\nsys.stdout.write("A\\u2028B\\n")'
+    _SRC_286 = 'import sys\nsys.stdout.buffer.write(b"A\\xe2\\x80\\xa8B\\n")'
     _TGT_286 = 'process.stdout.write("A\\nB\\n")'
     for _backend_name, _force_fallback in (("rust", False), ("python fallback", True)):
         if _force_fallback and not executor._rust:
