@@ -202,6 +202,15 @@ behind it.
   successful — and the cancellation still propagates to the caller rather
   than coming back as a `stream failed:` result.
 
+### Changed
+
+- **Docs:** `docs/security/ostif-application.md` brought current with 0.10.0
+  (version, size, sandbox tiers, the seccomp-bpf/sigstore/SBOM/ClusterFuzzLite
+  work landed since the draft), a named-incident-class threat model, a
+  prioritized audit scope, and a submission checklist with the OSTIF intake
+  channel. `SECURITY.md` now says the application is submission-ready and
+  pending submission.
+
 ## [0.10.0] — 2026-09-08
 
 ### Fixed
