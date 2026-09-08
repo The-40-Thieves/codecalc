@@ -37,9 +37,35 @@ infer it.
 
 "resolves and is NOT executable" (a file present with the wrong mode) and "was
 run and failed" (a --deep hello-world execution, or a version probe that
-NEVER GOT AN ANSWER — a spawn failure or a timeout) are the same CLAIM from a
-caller's point of view — this row resolved and cannot be trusted to run —
-even though they are measured differently.
+NEVER EVEN SPAWNED) are the same CLAIM from a caller's point of view — this
+row resolved and cannot be trusted to run — even though they are measured
+differently.
+
+A version probe that merely TIMED OUT is deliberately NOT folded into that
+same claim, and this is true of EVERY command, not a rustc-specific carve-
+out: `report()`'s trust rule stopped treating a timeout as evidence for any
+`_VERSION_FLAG` entry, and `_probe_version`'s retry runs for every command it
+probes. Four separate hosted-runner failures on 2026-09-08 (cold
+`windows-latest` images, main among them) prove exactly that breadth: three
+were `rustc --version` exceeding the probe's own deadline because the FIRST
+invocation on such a host goes through the rustup proxy — an arg-forwarding
+shim that has to locate and re-exec the real `rustc.exe` before it can answer
+anything, a cost a fresh VM has not amortized — and a fourth, on a LATER
+commit than those three, was plain `go version timed out after 10s` with no
+proxy involved and no `_PROBE_TIMEOUT_S` entry for `go` at all. Both flipped
+a perfectly working `tested`-tier toolchain to `unhealthy`/`healthy: false`
+for the identical reason: "the runner did not answer IN TIME" was being read
+as "the runner answered and is broken" — a strictly weaker claim than a spawn
+failure, and this file no longer treats it as interchangeable with one.
+`_probe_version` reports a timeout with `hard_failure=False`, `report()`
+never promotes it to `unhealthy` on its own regardless of whether `command`
+has a confirmed `_VERSION_FLAG` entry (`_PROBE_TIMEOUT_S` only raises the
+per-attempt deadline for a few commands audited as slow-start proxies; it
+does not gate whether this rule or the retry apply — see both docstrings),
+and the row stays at `installed`/`available` with `probe_error` recording
+what happened. The one thing that still overrides this is `_HELLO`: a
+language with a hello-world program is arbitrated by whether THAT run
+succeeds, completely independent of how the version probe went.
 
 A version probe that merely EXITED NON-ZERO is deliberately NOT treated the
 same as one of those, unless this code has been explicitly told the flag it
@@ -79,6 +105,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 from . import (
@@ -437,8 +464,9 @@ def report(deep: bool = False) -> dict:
         # `status: available` (this host ran it fine under --deep) while
         # `tier: best_effort` (no CI job checks it) — that combination is
         # exactly "works here, but nothing stops it silently breaking".
-        version, probe_error, probe_hard_failure = (
-            _probe_version(cmd, path) if deep and status == "installed" else (None, None, False))
+        version, probe_error, probe_hard_failure, probe_timed_out, probe_ms = (
+            _probe_version(cmd, path) if deep and status == "installed"
+            else (None, None, False, False, None))
         row = {"name": name, "command": cmd, "status": status, "path": path,
                "tier": tier, "version": version}
         if missing_secondary:
@@ -446,6 +474,14 @@ def report(deep: bool = False) -> dict:
                              f"needs {missing_secondary!r}, which was not "
                              f"found on PATH — install it to run {name}")
         if deep and status == "installed":
+            # How long the version probe took, total across every attempt
+            # (including a timed-out one that got retried) — a runner-speed
+            # flake is otherwise invisible: two reports with identical
+            # `status`/`probe_error` could be "answered in 40ms" and
+            # "answered after 24s and a retry", and only one of those is a
+            # CI image worth investigating.
+            if probe_ms is not None:
+                row["probe_ms"] = probe_ms
             if probe_error:
                 row["probe_error"] = probe_error
             # Only languages with a hello program are promoted, and — CRITICAL
@@ -462,7 +498,10 @@ def report(deep: bool = False) -> dict:
             # `unhealthy`/`healthy: false` on any host with those toolchains.
             # lua IS in `_HELLO`; skipping its hello run because a WRONG
             # version flag "failed" first (the ordering bug) hid the one
-            # measurement that would have proven it fine.
+            # measurement that would have proven it fine. The same ordering
+            # is what makes a TIMED-OUT version probe safe below: a hello
+            # language's status never even reads `probe_timed_out` — its own
+            # run is the only thing that can demote it.
             if name in _HELLO:
                 probe = executor.execute(name, _HELLO[name], timeout=20)
                 ran = probe.get("ok") is True and "codecalc" in (probe.get("stdout") or "")
@@ -474,31 +513,51 @@ def report(deep: bool = False) -> dict:
             elif probe_error:
                 # No hello program to arbitrate, so this is the only signal
                 # there is — and it is trusted ONLY when it is real evidence
-                # of brokenness, not a guessed flag this runtime never spoke:
+                # of brokenness, not a guessed flag this runtime never spoke,
+                # and not a runner that was merely slow to answer:
                 #
-                #   HARD failure (never even spawned, or timed out) — always
-                #   trusted. A command `_runtime_status` just found on PATH
-                #   that then refuses to run AT ALL is broken regardless of
-                #   which flag was used.
+                #   HARD failure (never even SPAWNED — a resolved path that
+                #   refuses to execute at all) — always trusted. A command
+                #   `_runtime_status` just found on PATH that will not run AT
+                #   ALL is broken regardless of which flag was used.
                 #
-                #   SOFT failure (ran, exited non-zero) — trusted ONLY when
-                #   `cmd` has an explicit `_VERSION_FLAG` entry, i.e. this
-                #   code has been TOLD that flag is the correct one for this
-                #   runtime and it still failed. Apple's java stub is exactly
-                #   this case: `-version` IS java's documented flag (the
-                #   `_VERSION_FLAG` override below), it exits non-zero
-                #   printing "Unable to locate a Java Runtime.", and java is
-                #   not in `_HELLO`, so this is the only measurement of it
-                #   `doctor` ever takes. A command still on the untested
-                #   DEFAULT `--version` guess getting a nonzero exit proves
-                #   nothing except that the guess was probably wrong — go,
-                #   lua and zig before their `_VERSION_FLAG` entries existed
-                #   were exactly this, and demoting them was reporting a
-                #   failure this code's own wrong guess manufactured.
-                if probe_hard_failure or cmd in _VERSION_FLAG:
+                #   TIMEOUT (spawned, never answered in time) — NEVER trusted
+                #   alone, confirmed flag or not, and this is a rule about
+                #   the CLAIM a timeout makes, not about which command made
+                #   it. Four 2026-09-08 hosted-runner failures were exactly
+                #   this: three were a cold `windows-latest` image's first
+                #   `rustc --version` going through the rustup proxy and
+                #   exceeding the probe deadline; a fourth, on a later
+                #   commit, was plain `go version` doing the same with no
+                #   proxy and no per-command timeout override at all — both
+                #   flipped a perfectly working `tested`-tier toolchain to
+                #   `unhealthy`/`healthy: false`. "did not answer in time" is
+                #   not "answered and is broken" — see `_probe_version`'s
+                #   docstring for the retry and the
+                #   per-command timeout table this also gained.
+                #
+                #   SOFT failure (ran to completion, exited non-zero) —
+                #   trusted ONLY when `cmd` has an explicit `_VERSION_FLAG`
+                #   entry, i.e. this code has been TOLD that flag is the
+                #   correct one for this runtime and it still failed. Apple's
+                #   java stub is exactly this case: `-version` IS java's
+                #   documented flag (the `_VERSION_FLAG` override below), it
+                #   exits non-zero printing "Unable to locate a Java
+                #   Runtime.", and java is not in `_HELLO`, so this is the
+                #   only measurement of it `doctor` ever takes. A command
+                #   still on the untested DEFAULT `--version` guess getting a
+                #   nonzero exit proves nothing except that the guess was
+                #   probably wrong — go, lua and zig before their
+                #   `_VERSION_FLAG` entries existed were exactly this, and
+                #   demoting them was reporting a failure this code's own
+                #   wrong guess manufactured.
+                if probe_hard_failure or (not probe_timed_out and cmd in _VERSION_FLAG):
                     row["status"] = "unhealthy"
                     row["detail"] = f"version probe failed: {probe_error}"
-                # else: leave `status` at `installed`. `version` already
+                # else: leave `status` at `installed`. Two shapes land here
+                # now: a nonzero exit on an UNCONFIRMED flag (unchanged,
+                # #282), and ANY timeout (new — confirmed flag or not, a
+                # timeout is never trusted on its own). `version` already
                 # stayed None (see _probe_version) — "not measured", not "no
                 # version" — and `probe_error` is still recorded above for a
                 # human to see WHY, without it driving `status` on a guess.
@@ -752,9 +811,57 @@ _VERSION_FLAG: dict[str, str] = {
 #: for 10 seconds" is a bad way to learn this.
 _NO_VERSION = frozenset({"escript", "tclsh"})
 
+#: The ordinary per-attempt deadline for a version probe. Generous already —
+#: `report()`'s own docstring calls --deep "a build, not a diagnostic" for
+#: asking 31 runtimes anything at all — but not generous enough for the
+#: commands in `_PROBE_TIMEOUT_S` below on a cold host.
+_DEFAULT_PROBE_TIMEOUT_S = 10.0
 
-def _probe_version(command: str, path: str | None) -> tuple[str | None, str | None, bool]:
-    """`(version, probe_error, hard_failure)`.
+#: Per-command override of `_DEFAULT_PROBE_TIMEOUT_S`, for commands whose
+#: FIRST invocation on a cold host routes through a slow-start proxy rather
+#: than the real binary — the 10s default is a real deadline for a warm
+#: process and a coin flip for one of these:
+#:
+#:   rustc    rustup's installed `rustc` is a tiny arg-forwarding shim that
+#:            has to locate and re-exec the real toolchain component on its
+#:            first call after a runner cold-boots; nothing amortizes that
+#:            across a fresh VM. This is the exact command that produced
+#:            three separate hosted-runner failures on 2026-09-08 (cold
+#:            `windows-latest` images), all `rustc --version` exceeding the
+#:            old 10s default.
+#:   dotnet   the muxer resolves and JITs the SDK CLI on its first call.
+#:   java, kotlinc  a cold JVM pays class loading and JIT warmup that a
+#:            container image's page cache has not amortized yet.
+#:   swift    the toolchain driver does its own first-call discovery, the
+#:            same shape as `dotnet`.
+#:
+#: NOT the safety net — the retry in `_probe_version` and `report()`'s
+#: refusal to trust a bare timeout apply to EVERY command whether or not it
+#: is listed here. This table only buys a probe more time before it counts
+#: as one; a command absent from it (`go`, `node`, `python3`, ...) still
+#: gets the retry and the same non-demotion on a timeout, just at the plain
+#: 10s default — which is exactly how a LATER 2026-09-08 hosted-runner
+#: failure reproduced with plain `go version`, no proxy and no entry here at
+#: all, and was fixed by the same two changes rather than a fifth entry.
+#:
+#: Measured on THIS host (mise-managed rustc 1.97.1, ARM64 Ubuntu 24.04 —
+#: already warm, no rustup proxy in the path): `rustc --version` answers in
+#: ~60-70ms whether it is the first call in the process or the fifth, so
+#: this host cannot reproduce the slow-start cost itself — see the PR body
+#: for the reproduction against a fake proxy that actually blocks, which is
+#: what proves the retry and the raised ceiling below actually help.
+_PROBE_TIMEOUT_S: dict[str, float] = {
+    "rustc": 25.0,
+    "dotnet": 25.0,
+    "java": 25.0,
+    "kotlinc": 25.0,
+    "swift": 25.0,
+}
+
+
+def _probe_version(command: str, path: str | None) -> (
+        tuple[str | None, str | None, bool, bool, float | None]):
+    """`(version, probe_error, hard_failure, timed_out, probe_ms)`.
 
     `version`/`probe_error` are never both non-None. NONE MEANS NOT MEASURED,
     NEVER "no version". Doctor is asked to report versions; it is not asked
@@ -767,47 +874,90 @@ def _probe_version(command: str, path: str | None) -> tuple[str | None, str | No
     TRUST a non-None `probe_error` as evidence of brokenness, and is False
     whenever `probe_error` is None:
 
-      True   the probe never got an answer at all — a spawn error (the
-             resolved path exists but refuses to execute) or a timeout. That
-             is real evidence regardless of which flag was used: a command
-             `_runtime_status` just found on PATH that will not run AT ALL
-             is broken.
-      False  the probe RAN and exited non-zero. That is real evidence ONLY
-             when the flag used is one this code has been explicitly TOLD is
-             correct for `command` (`_VERSION_FLAG` has an entry) — this is
-             the exact case Apple's java stub reproduces: `-version` IS
-             java's documented flag, and it still exits non-zero printing
-             "Unable to locate a Java Runtime." A command still on the
-             untested `--version` DEFAULT that exits non-zero proves nothing
-             except that the guess was probably wrong: `go --version` exits
-             2 (`go version` is correct), `lua --version` exits 1 (`-v` is
-             correct), `zig --version` exits 1 (`zig version` is correct) —
-             none of them speak GNU `--version`, and reporting any of them
-             `unhealthy` from this alone is a failure this function's own
-             wrong guess manufactured, not one the runtime produced. The
-             caller decides what "trust" means for its `False` case
-             (`cmd in _VERSION_FLAG`); this function only reports what kind
-             of failure it was.
+      True   the probe never even SPAWNED — a resolved path that refuses to
+             execute at all (permission revoked, file removed between
+             `_runtime_status` and here). That is real evidence regardless
+             of which flag was used: a command `_runtime_status` just found
+             on PATH that will not run AT ALL is broken.
+      False  either the probe RAN to completion and exited non-zero, or it
+             TIMED OUT without ever answering. `timed_out` (below) is what
+             tells those two apart — they used to share `hard_failure=True`,
+             and that was the bug: a nonzero exit and "never got an answer
+             in time" are not the same claim about the runtime.
+
+    A nonzero exit is trusted as real evidence ONLY when the flag used is one
+    this code has been explicitly TOLD is correct for `command`
+    (`_VERSION_FLAG` has an entry) — this is the exact case Apple's java stub
+    reproduces: `-version` IS java's documented flag, and it still exits
+    non-zero printing "Unable to locate a Java Runtime." A command still on
+    the untested `--version` DEFAULT that exits non-zero proves nothing
+    except that the guess was probably wrong: `go --version` exits 2 (`go
+    version` is correct), `lua --version` exits 1 (`-v` is correct), `zig
+    --version` exits 1 (`zig version` is correct) — none of them speak GNU
+    `--version`, and reporting any of them `unhealthy` from this alone is a
+    failure this function's own wrong guess manufactured, not one the
+    runtime produced. The caller decides what "trust" means for a soft
+    failure (`cmd in _VERSION_FLAG`); this function only reports what kind of
+    failure it was.
+
+    `timed_out` is True only when NEITHER attempt (see the retry below)
+    answered before its deadline. A caller (`report()`) must NEVER trust a
+    timeout as evidence of brokenness on its own, confirmed flag or not, FOR
+    ANY COMMAND — not only the ones in `_PROBE_TIMEOUT_S`: "did not answer in
+    time" measures the runner, not the runtime, and treating it like a hard
+    failure is exactly what turned cold `windows-latest` probes of both
+    `rustc` (three hits, via the rustup proxy) and plain `go` (a fourth, no
+    proxy, no per-command entry) into a false `unhealthy`/`healthy: false`
+    on a perfectly working toolchain. See this module's docstring for the
+    incident and `_PROBE_TIMEOUT_S` for the mitigation at the source — that
+    table only raises the per-attempt deadline for a few audited proxies; it
+    is not what makes a timeout stop being trusted, `report()`'s rule is.
+
+    Retried ONCE before a timeout is reported: a slow-start proxy (see
+    `_PROBE_TIMEOUT_S`) has usually already resolved the real binary by its
+    second invocation, so the retry is warm and often answers well inside
+    the deadline — this is the cheaper half of the fix, catching the case
+    the raised per-command ceiling does not. `probe_ms` is the TOTAL wall
+    time across every attempt (so "answered promptly" and "answered, but
+    only after a retry" are distinguishable from the report alone, without a
+    human re-running `--deep` by hand); it is `None` only when no attempt was
+    made at all (no path, or `command` has no version flag worth calling).
 
     Runs under the executor's 23-entry env allowlist rather than the doctor
     process's own environment. This is a diagnostic, but it is still spawning
     host binaries, and there is no reason for `gcc --version` to see an API key.
     """
     if not path or command in _NO_VERSION:
-        return None, None, False
+        return None, None, False, False, None
     flag = _VERSION_FLAG.get(command, "--version")
-    try:
-        proc = subprocess.run(
-            [path, flag],
-            capture_output=True, timeout=10, env=executor._env(), check=False,
-        )
-    except subprocess.TimeoutExpired:
-        return None, f"{command} {flag} timed out after 10s", True
-    except (OSError, subprocess.SubprocessError) as exc:
-        # A resolved path that fails to even SPAWN (permission revoked, file
-        # removed, between `_runtime_status` and here) is the same kind of
-        # broken-not-missing signal as a nonzero exit — not "not measured".
-        return None, f"{command} {flag}: {exc}", True
+    timeout_s = _PROBE_TIMEOUT_S.get(command, _DEFAULT_PROBE_TIMEOUT_S)
+    start = time.monotonic()
+    proc = None
+    for attempt in range(2):
+        try:
+            proc = subprocess.run(
+                [path, flag],
+                capture_output=True, timeout=timeout_s, env=executor._env(), check=False,
+            )
+            break
+        except subprocess.TimeoutExpired:
+            if attempt == 0:
+                # One retry only: a slow-start proxy is warm by its second
+                # call, and a third attempt would only double the cost paid
+                # by a command that is genuinely hung.
+                continue
+            probe_ms = (time.monotonic() - start) * 1000
+            return (None,
+                    f"{command} {flag} timed out after {timeout_s:g}s (2 attempts)",
+                    False, True, probe_ms)
+        except (OSError, subprocess.SubprocessError) as exc:
+            # A resolved path that fails to even SPAWN (permission revoked,
+            # file removed, between `_runtime_status` and here) is the same
+            # kind of broken-not-missing signal as a nonzero exit — not "not
+            # measured", and not a timeout either, so it is never retried.
+            probe_ms = (time.monotonic() - start) * 1000
+            return None, f"{command} {flag}: {exc}", True, False, probe_ms
+    probe_ms = (time.monotonic() - start) * 1000
     # stdout OR stderr: `java -version` uses stderr, and a runtime that answers
     # on the stream we did not read is indistinguishable from one that did not
     # answer at all.
@@ -828,10 +978,10 @@ def _probe_version(command: str, path: str | None) -> tuple[str | None, str | No
         # is a SOFT failure (it ran); `hard_failure=False` regardless of
         # `command` — the caller is the one that knows whether this
         # `command`'s flag is trusted, not this function.
-        return None, text or f"{command} {flag} exited {proc.returncode}", False
+        return None, text or f"{command} {flag} exited {proc.returncode}", False, False, probe_ms
     # First non-empty line, capped. Some runtimes print a paragraph (gcc
     # prints its licence), and the report is a diagnostic, not a transcript.
-    return (text[:120] or None), None, False
+    return (text[:120] or None), None, False, False, probe_ms
 
 
 def _runtime_version(command: str, path: str | None) -> str | None:
