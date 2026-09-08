@@ -418,6 +418,193 @@ else:
           not (_after - _before), f"-> leaked pids: {_after - _before}")
 
 
+# ── TRUST BOUNDARY: trace sink forgery / server-side amplification ─────────
+# Cross-vendor review, DO-NOT-MERGE #1. The traced program can derive its own
+# trace sink path from `__file__` (a sibling of the workdir the envelope
+# already discloses) and write to it directly — reproduced by the review with
+# a forged trailing `return` event kept last via `os._exit(0)` to skip the
+# harness's own cleanup entirely. These assert the load-bearing mitigations:
+# a bounded parser read, per-event schema validation, and the harness's own
+# `end` marker as a consistency check `os._exit` cannot fake.
+
+# (a) 5 MB of junk appended to the trace path AFTER a normal, complete run —
+# the parser must stay bounded (fast) regardless of how much extra data sits
+# on disk, and must disclose that the file was bigger than the harness could
+# legitimately have written.
+_JUNK_PROGRAM = (
+    "import atexit\n"
+    "import os\n"
+    "trace_path = os.path.join(os.path.dirname(__file__), '.codecalc-run', "
+    "'trace_events.jsonl')\n"
+    "def _append_junk():\n"
+    "    with open(trace_path, 'a') as f:\n"
+    "        f.write('x' * (5 * 1024 * 1024))\n"
+    "atexit.register(_append_junk)\n"
+    "print('done')\n"
+)
+_junk_started = time.monotonic()
+_junk_result = tracing.execute_trace("python3", _JUNK_PROGRAM)
+_junk_elapsed = time.monotonic() - _junk_started
+check("5 MB appended to the trace sink: the parser stays bounded (fast), "
+      "not proportional to the file size on disk",
+      _junk_elapsed < 10, f"-> {_junk_elapsed:.2f}s")
+check("...truncated_reason is trace_file_exceeded",
+      _junk_result.get("truncated") is True
+      and _junk_result.get("truncated_reason") == "trace_file_exceeded",
+      f"-> truncated={_junk_result.get('truncated')} "
+      f"reason={_junk_result.get('truncated_reason')}")
+check("...the program's own real output is unaffected",
+      _junk_result.get("stdout") == "done\n" and _junk_result.get("verdict") == "OK",
+      f"-> stdout={_junk_result.get('stdout')!r} verdict={_junk_result.get('verdict')}")
+
+# (b) A well-formed FORGED event, appended after disabling tracing (so
+# nothing the harness itself writes afterward can clobber it) and skipping
+# the harness's own `end`-line write via os._exit(0). This is the exact
+# review reproduction. The forged event may pass per-line validation if it
+# happens to guess the correct next `step` (as this one deliberately does),
+# but `events_consistent` must be false because the harness's own trailing
+# `end` marker — the one thing `os._exit` cannot fake — is missing.
+_FORGE_PROGRAM = (
+    "import sys, os, json\n"
+    "sys.settrace(None)\n"
+    "trace_path = os.path.join(os.path.dirname(__file__), '.codecalc-run', "
+    "'trace_events.jsonl')\n"
+    "with open(trace_path, 'a') as f:\n"
+    "    f.write(json.dumps({'step': 4, 'line': 1, 'event': 'return', "
+    "'func': 'forged', 'locals': {}, 'return_value': \"'PWNED'\"}) + chr(10))\n"
+    "os._exit(0)\n"
+)
+_forge_result = tracing.execute_trace("python3", _FORGE_PROGRAM)
+check("a well-formed forged trailing event is reported events_consistent=False "
+      "(the harness's own 'end' line is missing — os._exit skipped it)",
+      _forge_result.get("events_consistent") is False,
+      f"-> events_consistent={_forge_result.get('events_consistent')} "
+      f"events={_forge_result.get('events')}")
+check("...the run itself still completed normally (the forgery does not "
+      "crash or hang codecalc)",
+      _forge_result.get("exit_code") == 0, f"-> {_forge_result.get('exit_code')}")
+
+# (c) Malformed lines (not JSON, or JSON that isn't a dict) written after
+# disabling tracing — must be silently discarded, counted, never raised.
+_MALFORMED_PROGRAM = (
+    "import sys, os\n"
+    "sys.settrace(None)\n"
+    "trace_path = os.path.join(os.path.dirname(__file__), '.codecalc-run', "
+    "'trace_events.jsonl')\n"
+    "with open(trace_path, 'a') as f:\n"
+    "    f.write('not json at all\\n')\n"
+    "    f.write('{unbalanced\\n')\n"
+    "    f.write('null\\n')\n"
+    "    f.write('42\\n')\n"
+    "os._exit(0)\n"
+)
+_malformed_result = tracing.execute_trace("python3", _MALFORMED_PROGRAM)
+check("malformed trace lines are discarded, counted, and never raise",
+      _malformed_result.get("discarded_events", 0) > 0
+      and _malformed_result.get("exit_code") == 0,
+      f"-> discarded_events={_malformed_result.get('discarded_events')} "
+      f"exit_code={_malformed_result.get('exit_code')}")
+_clean_result = tracing.execute_trace("python3", 'print("clean")\n')
+check("...a well-formed run with no tampering reports discarded_events=0 "
+      "and events_consistent=True (the positive control for both checks "
+      "above)",
+      _clean_result.get("discarded_events") == 0
+      and _clean_result.get("events_consistent") is True,
+      f"-> discarded_events={_clean_result.get('discarded_events')} "
+      f"events_consistent={_clean_result.get('events_consistent')}")
+
+
+# ── THREADS: sys.settrace is per-thread ─────────────────────────────────────
+# Cross-vendor review #2. A second thread's frames are invisible to this
+# tracer regardless of filename; the harness must disclose that rather than
+# silently returning an incomplete trace as if it were complete.
+_THREAD_PROGRAM = (
+    "import threading, time\n"
+    "def worker():\n"
+    "    time.sleep(0.05)\n"
+    "t = threading.Thread(target=worker)\n"
+    "t.start()\n"
+    "t.join()\n"
+    "print('done')\n"
+)
+_thread_result = tracing.execute_trace("python3", _THREAD_PROGRAM)
+check("a program that starts a thread discloses the tracing limitation in "
+      "unenforced",
+      "threads: only the main thread is traced" in (_thread_result.get("unenforced") or []),
+      f"-> unenforced={_thread_result.get('unenforced')}")
+check("...and still runs to completion normally",
+      _thread_result.get("stdout") == "done\n" and _thread_result.get("exit_code") == 0,
+      f"-> stdout={_thread_result.get('stdout')!r} exit_code={_thread_result.get('exit_code')}")
+_single_threaded = tracing.execute_trace("python3", 'print("solo")\n')
+check("a single-threaded program does NOT get the threads disclosure "
+      "(the check is real, not unconditional)",
+      "threads: only the main thread is traced" not in (_single_threaded.get("unenforced") or []),
+      f"-> unenforced={_single_threaded.get('unenforced')}")
+
+
+# ── sys.modules['__main__'] must not leak the harness's own identity ───────
+# Cross-vendor review #3.
+_MODULES_PROGRAM = "import sys\nprint(sys.modules['__main__'].__file__ == __file__)\n"
+_modules_trace = tracing.execute_trace("python3", _MODULES_PROGRAM)
+_modules_exec = executor.execute("python3", _MODULES_PROGRAM)
+check("trace_execution: sys.modules['__main__'].__file__ matches __file__ "
+      "(the user's own source, not this harness's)",
+      _modules_trace.get("stdout") == "True\n", f"-> {_modules_trace.get('stdout')!r}")
+check("execute_code shows the identical invariant for the same program "
+      "(parity of BEHAVIOUR, not of the literal temp path, which "
+      "necessarily differs between the two mechanisms)",
+      _modules_exec.get("stdout") == "True\n", f"-> {_modules_exec.get('stdout')!r}")
+
+
+# ── Fallback-backend OLE exit_code race: Rust stays deterministic ──────────
+# Cross-vendor review #4. The pure-Python fallback's own output-cap
+# enforcement polls on a timer, racing the child's natural exit — confirmed
+# PRE-EXISTING (plain execute_code on this backend already flips exit_code
+# between 0 and a negative signal across repeated runs at sizes near the
+# cap) and independently reproducible, not something a single run can pin.
+# What IS pinned here: the Rust backend has no such race, so
+# trace_execution's exit_code must match execute_code's on Rust, every
+# time, and trace_execution must disclose the fallback's own limitation in
+# unenforced whenever it actually hits an OLE verdict on that backend.
+_OLE_PROGRAM = "for i in range(3000):\n    print('x' * 50)\n"
+_saved_ole = executor._rust
+try:
+    _rust_mismatches = []
+    for _ in range(8):
+        a = executor.execute("python3", _OLE_PROGRAM, max_output_kb=1)
+        b = tracing.execute_trace("python3", _OLE_PROGRAM, max_output_kb=1)
+        if a.get("exit_code") != b.get("exit_code"):
+            _rust_mismatches.append((a.get("exit_code"), b.get("exit_code")))
+    check("rust: trace_execution's exit_code matches execute_code's on every "
+          "OLE trial (the fallback's race does not exist on this backend)",
+          not _rust_mismatches, f"-> mismatches={_rust_mismatches}")
+
+    executor._rust = None
+    _fallback_ole = None
+    for _ in range(12):
+        r = tracing.execute_trace("python3", _OLE_PROGRAM, max_output_kb=1)
+        if r.get("verdict") == "OLE":
+            _fallback_ole = r
+            break
+    check("python fallback: an OLE run was actually reached within the "
+          "trial budget (an existence floor for the assertion below)",
+          _fallback_ole is not None, "-> got verdict(s) up to the budget")
+    if _fallback_ole is not None:
+        check("python fallback: an OLE verdict discloses the fallback-only "
+              "exit_code race in unenforced",
+              "exit_code: fallback backend may differ on output-limit kills"
+              in (_fallback_ole.get("unenforced") or []),
+              f"-> unenforced={_fallback_ole.get('unenforced')}")
+        check("...verdict and output_truncated still agree with execute_code "
+              "regardless of the exit_code race",
+              _fallback_ole.get("verdict") == "OLE"
+              and _fallback_ole.get("output_truncated") is True,
+              f"-> verdict={_fallback_ole.get('verdict')} "
+              f"output_truncated={_fallback_ole.get('output_truncated')}")
+finally:
+    executor._rust = _saved_ole
+
+
 print(f"\n=== {len(FAILS)} FAILURES ===" if FAILS else
       "\n=== ALL TRACE_EXECUTION TESTS PASS ===")
 for _f in FAILS:
