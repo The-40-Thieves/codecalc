@@ -667,6 +667,244 @@ def _inference_properties() -> dict:
     }
 
 
+def _execution_envelope_properties() -> dict:
+    """The property set `execution_envelope` and `execution_trace` (1.13.0)
+    both carry — trace_execution stamps the SAME envelope `execute_code`
+    does, plus its own trace fields, so the two defs share this rather than
+    each hand-copying it and drifting the way `check_contract.py`'s own
+    module docstring warns a hand-copied enum drifts.
+    """
+    return {
+        "ok": {"type": "boolean"},
+        "language": {"type": "string"},
+        "phase": {"type": "string", "enum": list(PHASES)},
+        "backend": {
+            "type": "string", "enum": list(BACKENDS),
+            "description": (
+                "Which executor answered. 'python' is the pure-"
+                "Python fallback and enforces strictly less; read "
+                "`unenforced` for what it could not apply."
+            ),
+        },
+        "platform": {"type": "string"},
+        "stdout": {"type": "string"},
+        "stderr": {"type": "string"},
+        "exit_code": {
+            "type": ["integer", "null"],
+            "description": (
+                "null when the process never produced a real exit "
+                "status at all — a timeout kill, or a runtime/"
+                "compiler that never spawned. A real, non-null "
+                "value when it spawned and was then killed "
+                "ABNORMALLY, in whatever convention the OS "
+                "itself uses — never this contract's own "
+                "invention: on POSIX (Linux, macOS), NEGATIVE, "
+                "the signal number (e.g. -11 for SIGSEGV on "
+                "Linux glibc, but -5 for SIGTRAP on macOS/Apple "
+                "silicon for the identical null-deref — the "
+                "number is platform-specific, the SIGN is not), "
+                "the same convention Python's own "
+                "subprocess.Popen.returncode uses and the "
+                "pure-Python fallback already returned; on "
+                "Windows, POSITIVE, the raw NTSTATUS itself "
+                "(e.g. 3221225477 / 0xC0000005 for "
+                "STATUS_ACCESS_VIOLATION) — Windows has no "
+                "signals, so an abnormal exit is just a large "
+                "exit code. The native backend used to report "
+                "null for a POSIX signal death, indistinguishable "
+                "from a process that never ran at all; it now "
+                "matches the fallback's own convention on each OS."
+            ),
+        },
+        "timed_out": {"type": "boolean"},
+        "verdict": {
+            "type": "string", "enum": list(VERDICTS),
+            "description": (
+                "OK ran and exited 0 · TLE wall-clock kill · OLE "
+                "output over cap · MLE memory ceiling · RTE nonzero "
+                "exit or signal. MLE is native-only: the fallback "
+                "cannot measure it and reports RTE instead of "
+                "guessing."
+            ),
+        },
+        "output_truncated": {
+            "type": "boolean",
+            "description": (
+                "True when stdout/stderr was cut at the cap. Slice 1 "
+                "(#120) exists because the Rust backend computed "
+                "this, raised the OLE verdict from it, and did not "
+                "emit it, while the fallback did."
+            ),
+        },
+        "output_error": {
+            "type": ["string", "null"],
+            "description": (
+                "Why output could not be read, when it could not. "
+                "null is 'no problem'; a string here means the "
+                "output is unreliable even if stdout looks fine."
+            ),
+        },
+        "stdout_bytes": {
+            "type": ["integer", "null"],
+            "minimum": 0,
+            "description": (
+                "Bytes of stdout OBSERVED before the response cap "
+                "was applied. When `output_truncated` is false this "
+                "is exact and both backends agree. When it is true "
+                "this is a LOWER BOUND on what the program would "
+                "have produced, and the two backends can differ: "
+                "the fallback kills the process as soon as its "
+                "drain crosses the cap, while the native executor "
+                "lets it run on under a separate file-size ceiling. "
+                "Measured on one 200 KiB writer at a 1 KiB cap: "
+                "native 204800, fallback 65536. Useful for sizing a "
+                "retry — raise `max_output_kb` above this — but not "
+                "a promise about total output. null means not "
+                "measured, never zero; a program that printed "
+                "nothing reports 0."
+            ),
+        },
+        "stderr_bytes": {
+            "type": ["integer", "null"],
+            "minimum": 0,
+            "description": "As stdout_bytes, for stderr.",
+        },
+        "duration_ms": {"type": "integer", "minimum": 0},
+        "compile_ms": {"type": "integer", "minimum": 0},
+        "total_ms": {"type": "integer", "minimum": 0},
+        "cpu_ms": {"type": "integer", "minimum": 0},
+        "peak_memory_kb": {
+            "type": ["integer", "null"],
+            "minimum": 0,
+            "description": (
+                "Peak resident memory, or null when this host could "
+                "not attribute it to this run. The pure-Python "
+                "fallback always returns null and names the reason "
+                "in `unenforced`: ru_maxrss is a high-water mark "
+                "for the whole process. null is 'not measured', "
+                "never 'measured as zero'."
+            ),
+        },
+        "unenforced": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Bounds this host could not apply, named. An empty "
+                "array is a claim that everything requested was "
+                "enforced; a non-empty one is the sandbox telling "
+                "you what it did not do."
+            ),
+        },
+        "workdir": {"type": "string"},
+        "dependencies": _dependencies_property(),
+        # `code`/`error`/`remedy`/`code_inferred` on an envelope
+        # that DID reach a runtime, not just on the short
+        # `rejected` shape below: a spawn failure (a missing
+        # runtime/compiler) still carries `verdict` — the code
+        # ran as far as it could — but a caller needs the same
+        # `code`/`error` pair every OTHER failure gets. 1.9.0
+        # is the first version either backend actually SETS
+        # `error` here (see docs/contract/README.md); this
+        # `properties` entry already declared it beforehand
+        # because `_error_properties()` is shared with the
+        # dead-worker session shape, so no schema property
+        # changed shape at this bump — only what a real result
+        # populates.
+        **{k: v for k, v in _error_properties().items() if k != "ok"},
+    }
+
+
+def _execution_trace_only_properties() -> dict:
+    """The properties `execution_trace` (1.13.0) adds ON TOP of the shared
+    envelope set above — see `trace_execution`'s docstring (codecalc/
+    server.py) for what each one means to a caller.
+    """
+    return {
+        "events": {
+            "type": "array",
+            "description": (
+                "Ordered trace events for USER-CODE frames only (library/"
+                "stdlib frames are excluded by filename). Each item is "
+                "`{step, line, event, func, locals}`; `event` is one of "
+                "line/call/return/exception. `locals` carries only the "
+                "names that CHANGED since the previous event in that same "
+                "frame, each value a repr capped at ~200 chars. A `return` "
+                "event also carries `return_value`; an `exception` event "
+                "carries `exception_type`/`exception_message`."
+            ),
+            "items": {
+                "type": "object",
+                "required": ["step", "line", "event", "func", "locals"],
+                "properties": {
+                    "step": {"type": "integer", "minimum": 1},
+                    "line": {"type": "integer"},
+                    "event": {"type": "string",
+                              "enum": ["line", "call", "return", "exception"]},
+                    "func": {"type": "string"},
+                    "locals": {"type": "object"},
+                    "return_value": {"type": "string"},
+                    "exception_type": {"type": "string"},
+                    "exception_message": {"type": "string"},
+                },
+            },
+        },
+        "event_count": {
+            "type": "integer", "minimum": 0,
+            "description": "Total events actually recorded — `len(events)`.",
+        },
+        "steps_before_truncation": {
+            "type": "integer", "minimum": 0,
+            "description": (
+                "Equal to `event_count` by construction: nothing is "
+                "recorded after tracing stops. Named separately because a "
+                "caller reasoning about a truncated trace wants the count "
+                "of what stopped it, not a second lookup of `event_count`."
+            ),
+        },
+        "truncated": {
+            "type": "boolean",
+            "description": (
+                "True only when `max_events` or the internal trace-size "
+                "ceiling stopped RECORDING — the program itself always ran "
+                "to completion regardless; `stdout`/`exit_code`/`verdict` "
+                "above are the real, complete ones either way. A hard kill "
+                "(TLE/OLE/MLE) before either cap is reached reports this "
+                "false — see `verdict`/`timed_out`/`output_truncated` for "
+                "that story instead; this field is scoped to this tool's "
+                "own two recording caps and no others."
+            ),
+        },
+        "truncated_reason": {
+            "type": "string",
+            "enum": ["max_events", "max_trace_bytes"],
+            "description": "Present only when `truncated` is true.",
+        },
+        "branches": {
+            "type": "object",
+            "description": (
+                "Source line number (as a string key) -> how many times "
+                "that if/elif/while/for/try line executed. Derived from a "
+                "static AST parse of the submitted `code`, so a source that "
+                "failed to compile reports an empty object here — nothing "
+                "ran, so nothing to count."
+            ),
+            "additionalProperties": {"type": "integer", "minimum": 0},
+        },
+        "lines_executed": {
+            "type": "array", "items": {"type": "integer"},
+            "description": "Sorted, unique line numbers a `line` event fired on.",
+        },
+        "lines_never_executed": {
+            "type": "array", "items": {"type": "integer"},
+            "description": (
+                "Sorted line numbers among the program's statically-"
+                "detected executable lines that never appear in "
+                "`lines_executed` — the cheap 'which branch never ran' view."
+            ),
+        },
+    }
+
+
 def build_schema(dialect: str | None = None, schema_id: str | None = None) -> dict:
     """The published schema, as a dict. Single source of truth.
 
@@ -718,14 +956,24 @@ def build_schema(dialect: str | None = None, schema_id: str | None = None) -> di
                 ),
             },
         },
-        # FIVE execution shapes, discriminated so that exactly one branch can
+        # SIX execution shapes, discriminated so that exactly one branch can
         # match:
         #
-        #   envelope       verdict present, backend in (rust, python)
+        #   envelope       verdict present, backend in (rust, python), NO `events`
+        #   execution_trace  verdict present, backend in (rust, python), `events` present
         #   session        backend == "session-worker"
         #   compact        verdict present, NO backend key
         #   rejected       no verdict at all, carries `error`
         #   run_lifecycle  a run_id, a state, and NO verdict/error/backend
+        #
+        # `execution_trace` (1.13.0) is `trace_execution`'s own shape: the
+        # identical envelope `execute_code` returns, plus a per-line event
+        # trace and a static branch/line-coverage report. It would otherwise
+        # double-match `envelope` (this schema's own `additionalProperties`
+        # is left open, so an envelope-shaped def does not by itself reject
+        # a result carrying EXTRA keys) — closed by adding `not: {required:
+        # [events]}` to `envelope`'s own def, the same technique `compact`/
+        # `rejected` already use against `backend`/`verdict`.
         #
         # The first version of this schema had two branches and asserted that
         # `executor.execute` was the single choke point for every execution
@@ -800,6 +1048,7 @@ def build_schema(dialect: str | None = None, schema_id: str | None = None) -> di
         # own refusal.
         "oneOf": [
             {"$ref": "#/$defs/execution_envelope"},
+            {"$ref": "#/$defs/execution_trace"},
             {"$ref": "#/$defs/session_result"},
             {"$ref": "#/$defs/compact_result"},
             {"$ref": "#/$defs/rejected"},
@@ -820,143 +1069,37 @@ def build_schema(dialect: str | None = None, schema_id: str | None = None) -> di
                 ),
                 "type": "object",
                 "required": list(ENVELOPE_KEYS),
+                # `trace_execution` (1.13.0) stamps this SAME envelope plus an
+                # `events` array — additive, but additive is exactly what
+                # would otherwise make BOTH this branch and `execution_trace`
+                # validate at once (this def's `additionalProperties` is left
+                # open, per this file's own module docstring), which fails
+                # `oneOf`'s exactly-one rule rather than merely under-
+                # documenting the result. `events` appears on no other shape
+                # in this document, so excluding it here is what keeps a
+                # trace result matching `execution_trace` ALONE — the same
+                # `not: {required: [...]}` technique `compact_result` and
+                # `rejected` already use against `backend`/`verdict`.
+                "not": {"required": ["events"]},
+                "properties": _execution_envelope_properties(),
+            },
+            "execution_trace": {
+                "title": "a trace_execution result",
+                "description": (
+                    "trace_execution's own shape (1.13.0): the identical "
+                    "execution_envelope execute_code returns for the SAME "
+                    "python3 program, plus a per-line event trace and a "
+                    "static branch/line-coverage report. Discriminated from "
+                    "`execution_envelope` by `events` — required here, "
+                    "excluded there (see that def's own `not` clause)."
+                ),
+                "type": "object",
+                "required": [*ENVELOPE_KEYS, "events", "event_count",
+                             "steps_before_truncation", "truncated",
+                             "branches", "lines_executed", "lines_never_executed"],
                 "properties": {
-                    "ok": {"type": "boolean"},
-                    "language": {"type": "string"},
-                    "phase": {"type": "string", "enum": list(PHASES)},
-                    "backend": {
-                        "type": "string", "enum": list(BACKENDS),
-                        "description": (
-                            "Which executor answered. 'python' is the pure-"
-                            "Python fallback and enforces strictly less; read "
-                            "`unenforced` for what it could not apply."
-                        ),
-                    },
-                    "platform": {"type": "string"},
-                    "stdout": {"type": "string"},
-                    "stderr": {"type": "string"},
-                    "exit_code": {
-                        "type": ["integer", "null"],
-                        "description": (
-                            "null when the process never produced a real exit "
-                            "status at all — a timeout kill, or a runtime/"
-                            "compiler that never spawned. A real, non-null "
-                            "value when it spawned and was then killed "
-                            "ABNORMALLY, in whatever convention the OS "
-                            "itself uses — never this contract's own "
-                            "invention: on POSIX (Linux, macOS), NEGATIVE, "
-                            "the signal number (e.g. -11 for SIGSEGV on "
-                            "Linux glibc, but -5 for SIGTRAP on macOS/Apple "
-                            "silicon for the identical null-deref — the "
-                            "number is platform-specific, the SIGN is not), "
-                            "the same convention Python's own "
-                            "subprocess.Popen.returncode uses and the "
-                            "pure-Python fallback already returned; on "
-                            "Windows, POSITIVE, the raw NTSTATUS itself "
-                            "(e.g. 3221225477 / 0xC0000005 for "
-                            "STATUS_ACCESS_VIOLATION) — Windows has no "
-                            "signals, so an abnormal exit is just a large "
-                            "exit code. The native backend used to report "
-                            "null for a POSIX signal death, indistinguishable "
-                            "from a process that never ran at all; it now "
-                            "matches the fallback's own convention on each OS."
-                        ),
-                    },
-                    "timed_out": {"type": "boolean"},
-                    "verdict": {
-                        "type": "string", "enum": list(VERDICTS),
-                        "description": (
-                            "OK ran and exited 0 · TLE wall-clock kill · OLE "
-                            "output over cap · MLE memory ceiling · RTE nonzero "
-                            "exit or signal. MLE is native-only: the fallback "
-                            "cannot measure it and reports RTE instead of "
-                            "guessing."
-                        ),
-                    },
-                    "output_truncated": {
-                        "type": "boolean",
-                        "description": (
-                            "True when stdout/stderr was cut at the cap. Slice 1 "
-                            "(#120) exists because the Rust backend computed "
-                            "this, raised the OLE verdict from it, and did not "
-                            "emit it, while the fallback did."
-                        ),
-                    },
-                    "output_error": {
-                        "type": ["string", "null"],
-                        "description": (
-                            "Why output could not be read, when it could not. "
-                            "null is 'no problem'; a string here means the "
-                            "output is unreliable even if stdout looks fine."
-                        ),
-                    },
-                    "stdout_bytes": {
-                        "type": ["integer", "null"],
-                        "minimum": 0,
-                        "description": (
-                            "Bytes of stdout OBSERVED before the response cap "
-                            "was applied. When `output_truncated` is false this "
-                            "is exact and both backends agree. When it is true "
-                            "this is a LOWER BOUND on what the program would "
-                            "have produced, and the two backends can differ: "
-                            "the fallback kills the process as soon as its "
-                            "drain crosses the cap, while the native executor "
-                            "lets it run on under a separate file-size ceiling. "
-                            "Measured on one 200 KiB writer at a 1 KiB cap: "
-                            "native 204800, fallback 65536. Useful for sizing a "
-                            "retry — raise `max_output_kb` above this — but not "
-                            "a promise about total output. null means not "
-                            "measured, never zero; a program that printed "
-                            "nothing reports 0."
-                        ),
-                    },
-                    "stderr_bytes": {
-                        "type": ["integer", "null"],
-                        "minimum": 0,
-                        "description": "As stdout_bytes, for stderr.",
-                    },
-                    "duration_ms": {"type": "integer", "minimum": 0},
-                    "compile_ms": {"type": "integer", "minimum": 0},
-                    "total_ms": {"type": "integer", "minimum": 0},
-                    "cpu_ms": {"type": "integer", "minimum": 0},
-                    "peak_memory_kb": {
-                        "type": ["integer", "null"],
-                        "minimum": 0,
-                        "description": (
-                            "Peak resident memory, or null when this host could "
-                            "not attribute it to this run. The pure-Python "
-                            "fallback always returns null and names the reason "
-                            "in `unenforced`: ru_maxrss is a high-water mark "
-                            "for the whole process. null is 'not measured', "
-                            "never 'measured as zero'."
-                        ),
-                    },
-                    "unenforced": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": (
-                            "Bounds this host could not apply, named. An empty "
-                            "array is a claim that everything requested was "
-                            "enforced; a non-empty one is the sandbox telling "
-                            "you what it did not do."
-                        ),
-                    },
-                    "workdir": {"type": "string"},
-                    "dependencies": _dependencies_property(),
-                    # `code`/`error`/`remedy`/`code_inferred` on an envelope
-                    # that DID reach a runtime, not just on the short
-                    # `rejected` shape below: a spawn failure (a missing
-                    # runtime/compiler) still carries `verdict` — the code
-                    # ran as far as it could — but a caller needs the same
-                    # `code`/`error` pair every OTHER failure gets. 1.9.0
-                    # is the first version either backend actually SETS
-                    # `error` here (see docs/contract/README.md); this
-                    # `properties` entry already declared it beforehand
-                    # because `_error_properties()` is shared with the
-                    # dead-worker session shape, so no schema property
-                    # changed shape at this bump — only what a real result
-                    # populates.
-                    **{k: v for k, v in _error_properties().items() if k != "ok"},
+                    **_execution_envelope_properties(),
+                    **_execution_trace_only_properties(),
                 },
             },
             "session_result": {

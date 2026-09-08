@@ -24,6 +24,9 @@
       "$ref": "#/$defs/execution_envelope"
     },
     {
+      "$ref": "#/$defs/execution_trace"
+    },
+    {
       "$ref": "#/$defs/session_result"
     },
     {
@@ -75,6 +78,228 @@
         "workdir",
         "stdout_bytes",
         "stderr_bytes"
+      ],
+      "not": {
+        "required": [
+          "events"
+        ]
+      },
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "language": {
+          "type": "string"
+        },
+        "phase": {
+          "type": "string",
+          "enum": [
+            "compile",
+            "run"
+          ]
+        },
+        "backend": {
+          "type": "string",
+          "enum": [
+            "rust",
+            "python"
+          ],
+          "description": "Which executor answered. 'python' is the pure-Python fallback and enforces strictly less; read `unenforced` for what it could not apply."
+        },
+        "platform": {
+          "type": "string"
+        },
+        "stdout": {
+          "type": "string"
+        },
+        "stderr": {
+          "type": "string"
+        },
+        "exit_code": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "null when the process never produced a real exit status at all \u2014 a timeout kill, or a runtime/compiler that never spawned. A real, non-null value when it spawned and was then killed ABNORMALLY, in whatever convention the OS itself uses \u2014 never this contract's own invention: on POSIX (Linux, macOS), NEGATIVE, the signal number (e.g. -11 for SIGSEGV on Linux glibc, but -5 for SIGTRAP on macOS/Apple silicon for the identical null-deref \u2014 the number is platform-specific, the SIGN is not), the same convention Python's own subprocess.Popen.returncode uses and the pure-Python fallback already returned; on Windows, POSITIVE, the raw NTSTATUS itself (e.g. 3221225477 / 0xC0000005 for STATUS_ACCESS_VIOLATION) \u2014 Windows has no signals, so an abnormal exit is just a large exit code. The native backend used to report null for a POSIX signal death, indistinguishable from a process that never ran at all; it now matches the fallback's own convention on each OS."
+        },
+        "timed_out": {
+          "type": "boolean"
+        },
+        "verdict": {
+          "type": "string",
+          "enum": [
+            "OK",
+            "TLE",
+            "OLE",
+            "MLE",
+            "RTE"
+          ],
+          "description": "OK ran and exited 0 \u00b7 TLE wall-clock kill \u00b7 OLE output over cap \u00b7 MLE memory ceiling \u00b7 RTE nonzero exit or signal. MLE is native-only: the fallback cannot measure it and reports RTE instead of guessing."
+        },
+        "output_truncated": {
+          "type": "boolean",
+          "description": "True when stdout/stderr was cut at the cap. Slice 1 (#120) exists because the Rust backend computed this, raised the OLE verdict from it, and did not emit it, while the fallback did."
+        },
+        "output_error": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Why output could not be read, when it could not. null is 'no problem'; a string here means the output is unreliable even if stdout looks fine."
+        },
+        "stdout_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "Bytes of stdout OBSERVED before the response cap was applied. When `output_truncated` is false this is exact and both backends agree. When it is true this is a LOWER BOUND on what the program would have produced, and the two backends can differ: the fallback kills the process as soon as its drain crosses the cap, while the native executor lets it run on under a separate file-size ceiling. Measured on one 200 KiB writer at a 1 KiB cap: native 204800, fallback 65536. Useful for sizing a retry \u2014 raise `max_output_kb` above this \u2014 but not a promise about total output. null means not measured, never zero; a program that printed nothing reports 0."
+        },
+        "stderr_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "As stdout_bytes, for stderr."
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "compile_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cpu_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "peak_memory_kb": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "Peak resident memory, or null when this host could not attribute it to this run. The pure-Python fallback always returns null and names the reason in `unenforced`: ru_maxrss is a high-water mark for the whole process. null is 'not measured', never 'measured as zero'."
+        },
+        "unenforced": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Bounds this host could not apply, named. An empty array is a claim that everything requested was enforced; a non-empty one is the sandbox telling you what it did not do."
+        },
+        "workdir": {
+          "type": "string"
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "spec",
+              "language",
+              "ok",
+              "installer",
+              "elapsed_ms"
+            ],
+            "properties": {
+              "spec": {
+                "type": "string",
+                "description": "The dependency as declared, verbatim."
+              },
+              "language": {
+                "type": "string"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "installer": {
+                "type": "string",
+                "description": "The package manager invoked (uv, npm, ...)."
+              },
+              "elapsed_ms": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Wall-clock time this ONE install took, milliseconds. Not the run's own `timeout`: a separate, fixed aggregate budget governs installs (see README/SECURITY.md); exceeding it fails the run before this array gains a further entry."
+              },
+              "unenforced": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "This install's own confinement disclosure \u2014 packages.install's `unenforced`, carried per-entry rather than merged into the run's own."
+              }
+            }
+          },
+          "description": "Present only when the run declared dependencies. Installed BEFORE the sandboxed step, through the confined install_package path \u2014 never inside the sandbox."
+        },
+        "code": {
+          "type": "string",
+          "enum": [
+            "dependency_missing",
+            "internal",
+            "permission_denied",
+            "resource_exhausted",
+            "runtime_unavailable",
+            "timeout",
+            "validation",
+            "worker_failure"
+          ],
+          "description": "Stable machine-readable failure category. A caller MAY branch on this. An unrecognised value MUST be treated as 'internal' rather than as a protocol violation \u2014 that is what makes adding a code a MINOR change."
+        },
+        "error": {
+          "type": "string",
+          "description": "Human-facing explanation. NOT stable and NOT a branch target: the whole point of `code` is that this text is free to improve."
+        },
+        "remedy": {
+          "type": "string",
+          "description": "What the caller can do about it, one line."
+        },
+        "code_inferred": {
+          "type": "boolean",
+          "description": "True when the code was derived from the message text rather than chosen where the failure was raised. A weaker claim, marked as such. Absent means the code came from the raise site."
+        }
+      }
+    },
+    "execution_trace": {
+      "title": "a trace_execution result",
+      "description": "trace_execution's own shape (1.13.0): the identical execution_envelope execute_code returns for the SAME python3 program, plus a per-line event trace and a static branch/line-coverage report. Discriminated from `execution_envelope` by `events` \u2014 required here, excluded there (see that def's own `not` clause).",
+      "type": "object",
+      "required": [
+        "ok",
+        "language",
+        "phase",
+        "backend",
+        "platform",
+        "stdout",
+        "stderr",
+        "exit_code",
+        "timed_out",
+        "verdict",
+        "output_truncated",
+        "output_error",
+        "duration_ms",
+        "compile_ms",
+        "total_ms",
+        "cpu_ms",
+        "peak_memory_kb",
+        "unenforced",
+        "workdir",
+        "stdout_bytes",
+        "stderr_bytes",
+        "events",
+        "event_count",
+        "steps_before_truncation",
+        "truncated",
+        "branches",
+        "lines_executed",
+        "lines_never_executed"
       ],
       "properties": {
         "ok": {
@@ -256,6 +481,97 @@
         "code_inferred": {
           "type": "boolean",
           "description": "True when the code was derived from the message text rather than chosen where the failure was raised. A weaker claim, marked as such. Absent means the code came from the raise site."
+        },
+        "events": {
+          "type": "array",
+          "description": "Ordered trace events for USER-CODE frames only (library/stdlib frames are excluded by filename). Each item is `{step, line, event, func, locals}`; `event` is one of line/call/return/exception. `locals` carries only the names that CHANGED since the previous event in that same frame, each value a repr capped at ~200 chars. A `return` event also carries `return_value`; an `exception` event carries `exception_type`/`exception_message`.",
+          "items": {
+            "type": "object",
+            "required": [
+              "step",
+              "line",
+              "event",
+              "func",
+              "locals"
+            ],
+            "properties": {
+              "step": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "line": {
+                "type": "integer"
+              },
+              "event": {
+                "type": "string",
+                "enum": [
+                  "line",
+                  "call",
+                  "return",
+                  "exception"
+                ]
+              },
+              "func": {
+                "type": "string"
+              },
+              "locals": {
+                "type": "object"
+              },
+              "return_value": {
+                "type": "string"
+              },
+              "exception_type": {
+                "type": "string"
+              },
+              "exception_message": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "event_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total events actually recorded \u2014 `len(events)`."
+        },
+        "steps_before_truncation": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Equal to `event_count` by construction: nothing is recorded after tracing stops. Named separately because a caller reasoning about a truncated trace wants the count of what stopped it, not a second lookup of `event_count`."
+        },
+        "truncated": {
+          "type": "boolean",
+          "description": "True only when `max_events` or the internal trace-size ceiling stopped RECORDING \u2014 the program itself always ran to completion regardless; `stdout`/`exit_code`/`verdict` above are the real, complete ones either way. A hard kill (TLE/OLE/MLE) before either cap is reached reports this false \u2014 see `verdict`/`timed_out`/`output_truncated` for that story instead; this field is scoped to this tool's own two recording caps and no others."
+        },
+        "truncated_reason": {
+          "type": "string",
+          "enum": [
+            "max_events",
+            "max_trace_bytes"
+          ],
+          "description": "Present only when `truncated` is true."
+        },
+        "branches": {
+          "type": "object",
+          "description": "Source line number (as a string key) -> how many times that if/elif/while/for/try line executed. Derived from a static AST parse of the submitted `code`, so a source that failed to compile reports an empty object here \u2014 nothing ran, so nothing to count.",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "lines_executed": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "description": "Sorted, unique line numbers a `line` event fired on."
+        },
+        "lines_never_executed": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "description": "Sorted line numbers among the program's statically-detected executable lines that never appear in `lines_executed` \u2014 the cheap 'which branch never ran' view."
         }
       }
     },
