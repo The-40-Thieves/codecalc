@@ -2074,10 +2074,10 @@ def verify_optimization(original: str, candidate: str, language: str,
     confirm they still agree, then TIMES both at increasing sizes (5 runs each)
     and compares. Accepted only if the median ratio clears `min_speedup` AND a
     one-sided Mann-Whitney U test rejects "not faster" at every measured size
-    (three or fewer) or a Bonferroni-corrected majority (more) — a ratio alone
-    is not evidence the gap is real rather than noise; see the result's
-    `inference` field for the per-size U statistic, p-value, and effect size
-    behind the verdict.
+    (two or three) or a Bonferroni-corrected majority (more); a single size
+    can never be accepted — a ratio alone is not evidence the gap is real
+    rather than noise; see the result's `inference` field for the per-size U
+    statistic, p-value, and effect size behind the verdict.
 
     A rejection tells you which gate failed and by how much — "correct, 1.3x
     median, but only 1/4 sizes significant" is the answer an optimiser that

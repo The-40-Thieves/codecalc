@@ -319,7 +319,10 @@ network-blocking shim. Each has a security-relevant design decision:
     and run through the standard sandbox. No LLM in the loop.
 11. **verify_optimization**: the speedup gate is MEASURED (same sizes, min-of-repeats,
     baseline-subtracted) AND statistically tested (a one-sided Mann-Whitney U
-    test per size, majority must reject at alpha=0.05 — codecalc/stats.py),
+    test per size — codecalc/stats.py; every counted size must reject when
+    three or fewer are counted, a Bonferroni-corrected majority above that,
+    and at least two sizes must be counted at all — codecalc/optimization.py's
+    `_fwer_satisfied`),
     never the LLM's claim. Already-optimal code is
     honestly rejected ("no accepted optimization after retry" with the
     measured ratio) rather than fabricating a pass. Sub-noise-floor baselines

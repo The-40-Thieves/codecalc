@@ -32,7 +32,10 @@ additive — nothing a `1.10.0` client already reads changes shape or meaning:
   caller already reads. A bare majority at the nominal `alpha`, always, is
   what let the CI incident's two false-positive sizes (out of three) carry
   the vote; unanimity at `sizes_total <= 3` alone would already have refused
-  it (2 of 3 is not 3 of 3).
+  it (2 of 3 is not 3 of 3). Unanimity over a SINGLE counted size is no
+  correction at all (one uncorrected test at the nominal `alpha`), so
+  `accepted` is never `true` with `sizes_total` below 2; `decision_basis`
+  says so in words when that is the reason.
 * **`reason`, on a `sizes_below_floor[]` entry**, present only when that
   entry was excluded for one of two NEW reasons: fewer than
   `stats.min_testable_n(alpha)` runs a side (structurally unable to ever

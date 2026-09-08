@@ -488,6 +488,21 @@ _NORMAL_APPROX_MIN_N = 8
 #: 0.05 on their own (assuming independence, ~0.05^3). See `_fwer_correction`.
 _FWER_UNANIMITY_MAX = 3
 
+#: Fewer COUNTED sizes than this can never yield accepted=True. Unanimity
+#: over ONE size is no correction at all: it is a single uncorrected test at
+#: the nominal alpha — exactly the shape the layered fix above exists to
+#: refuse, reached by a different road (the other planned sizes excluded as
+#: tied/overlapping/under-populated, the one survivor rejecting by chance).
+#: Measured by adversarial review with a 500,000-trial Monte Carlo of
+#: IDENTICAL code (Gaussian jitter, integer ms, REPEATS=5, 3 sizes): a
+#: 0.357% false-accept rate, 97.6% of it through a lone surviving size. A
+#: single testable size is a data-poverty condition, and the honest verdict
+#: for it is "not enough was measurable to certify", stated as such in
+#: `decision_basis`, not "verified faster". A caller who hits it can raise
+#: repeats or sizes; the `sizes_below_floor` reasons say which sizes fell out
+#: and why.
+_MIN_COUNTED_SIZES = 2
+
 
 def _fwer_correction(k: int, alpha: float) -> tuple[float, str]:
     """Family-wise error control for the "how many of `k` counted sizes must
@@ -577,6 +592,11 @@ def _fwer_satisfied(sizes_total: int, sizes_rejecting: int, correction: str | No
     """
     if sizes_total == 0:
         return False
+    if correction is not None and sizes_total < _MIN_COUNTED_SIZES:
+        # A lone counted size is a single uncorrected test — see
+        # `_MIN_COUNTED_SIZES`. Only the legacy (correction=None) path keeps
+        # its original answer, for the same reason it keeps the majority rule.
+        return False
     if correction == "unanimity":
         return sizes_rejecting == sizes_total
     return sizes_rejecting * 2 > sizes_total
@@ -596,13 +616,13 @@ def _infer_speedup(before: dict, after: dict, alpha: float = ALPHA,
     Per-size, not pooled across sizes: the sizes are different workloads (an
     O(n) algorithm at n=2000 and n=20000 are not exchangeable observations of
     "the same thing"), so pooling their raw ratios into one test would treat
-    a real complexity-class difference as within-test noise. Combining
-    per-size verdicts into ONE decision instead — "does a MAJORITY of sizes
-    reject the null" — is the simple, honestly-stated middle ground: it does
-    not require every size to be individually significant (a single size with
-    few distinguishable values, e.g. after auto-scale collapsed to n=1 usable
-    triple, can be underpowered on its own) but does require the win to show
-    up at more sizes than not, not just in the aggregate median.
+    a real complexity-class difference as within-test noise. The per-size
+    verdicts are combined into ONE decision by `_fwer_satisfied`: every
+    counted size must reject when there are `_FWER_UNANIMITY_MAX` or fewer,
+    a majority at a Bonferroni-corrected alpha above that, and never fewer
+    than `_MIN_COUNTED_SIZES` counted sizes at all. (The original rule here
+    was a bare "majority of sizes reject"; the CI incident described below is
+    what that rule let through.)
 
     Comparability is `_comparable_positions`'s ASYMMETRIC rule: a position
     counts whenever the BASELINE is itself measurable and floor-clearing,
@@ -733,6 +753,14 @@ def _infer_speedup(before: dict, after: dict, alpha: float = ALPHA,
                           if r["p_value"] < effective_alpha and r["ratio"] >= min_speedup)
     if sizes_total == 0:
         decision_basis = "no size had enough comparable runs for a significance test"
+    elif sizes_total < _MIN_COUNTED_SIZES:
+        decision_basis = (f"only {sizes_total} size was testable (it "
+                          f"{'rejects' if sizes_rejecting else 'does not reject'} "
+                          f"the null at alpha={alpha}), and a single counted size "
+                          f"is one uncorrected test, not a verified speedup: at "
+                          f"least {_MIN_COUNTED_SIZES} counted sizes are required "
+                          f"— raise repeats or add sizes so more of them clear "
+                          f"the floor")
     elif correction == "unanimity":
         decision_basis = (f"{sizes_rejecting}/{sizes_total} size(s) reject the null "
                           f"(after not faster, at its own ratio >= {min_speedup}x) at "

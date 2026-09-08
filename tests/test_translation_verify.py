@@ -250,8 +250,9 @@ def _timed_stub(min_ms, n=5, sizes=(1000,)):
     Mann-Whitney test on them is unambiguous (see `_run843`'s docstring for
     when overlap is wanted instead)."""
     runs = [min_ms + i for i in range(n)]
-    return {"ok": True, "sizes": list(sizes), "durations_ms": [runs[0]],
-            "all_runs_ms": [runs]}
+    return {"ok": True, "sizes": list(sizes),
+            "durations_ms": [runs[0]] * len(sizes),
+            "all_runs_ms": [list(runs) for _ in sizes]}
 
 
 def _run843(ratio, min_speedup):
@@ -268,7 +269,11 @@ def _run843(ratio, min_speedup):
     unambiguously significant, matching what a REAL 2x win would look like.
     """
     optimization.verify_translation = lambda *a, **k: {"passed": True, "matched": 2, "total": 2}
-    _seq = iter([_timed_stub(100.0 * ratio), _timed_stub(100.0)])
+    # Two sizes: a single counted size can never be accepted
+    # (`optimization._MIN_COUNTED_SIZES`), and the "genuine win" case below
+    # is here to exercise the accept path, not that floor.
+    _seq = iter([_timed_stub(100.0 * ratio, sizes=(1000, 2000)),
+                 _timed_stub(100.0, sizes=(1000, 2000))])
     optimization._timed = lambda *a, **k: next(_seq)
     try:
         return optimization.verify_optimization("orig", "cand", "python3",
@@ -931,14 +936,52 @@ check("size 4000 (3 runs a side, structurally unable to reject at alpha=0.05) "
       and "fewer than 4 runs" in _284_inf["sizes_below_floor"][0]["reason"],
       f"-> {_284_inf}")
 check("size 2000's perfect separation is the ONLY counted size and rejects "
-      "on its own (unanimity at sizes_total=1 is trivially satisfied)",
+      "on its own",
       _284_inf["sizes_total"] == 1 and _284_inf["sizes_rejecting"] == 1,
       f"-> {_284_inf.get('per_size')}")
 _284_accepted, _284_reason = optimization._accept_decision(
     {"measurable": True, "ratio": 10.0}, 1.15, _284_inf)
-check("THE FIX: the reported 10x win is accepted, not rejected as "
-      "'no size had enough comparable runs'",
-      _284_accepted is True, f"-> accepted={_284_accepted} {_284_reason!r}")
+# Unanimity over ONE counted size is a single uncorrected test (see
+# `optimization._MIN_COUNTED_SIZES`): the honest verdict for the issue's
+# repro is "only one size was testable", stated as such — NOT "could be
+# noise" (the old, misleading reason) and NOT an accept on one size's say-so.
+check("THE FIX: the two-size repro is refused for the STATED reason that only "
+      "one size was testable, not as 'could be noise'",
+      _284_accepted is False and "only 1 size was testable" in _284_reason
+      and "could be noise" not in _284_reason.split("—")[0],
+      f"-> accepted={_284_accepted} {_284_reason!r}")
+# The issue's headline complaint — measuring ONE FEWER size flipped the
+# verdict — cannot recur: with only the testable size measured, the verdict
+# and its stated reason are the same.
+_284_one_inf = optimization._infer_speedup(
+    {"sizes": [2000], "durations_ms": [100.0], "all_runs_ms": [[100., 101., 102., 103., 104.]]},
+    {"sizes": [2000], "durations_ms": [10.0], "all_runs_ms": [[10., 11., 12., 13., 14.]]})
+_284_one_accepted, _284_one_reason = optimization._accept_decision(
+    {"measurable": True, "ratio": 10.0}, 1.15, _284_one_inf)
+check("  ...and measuring one size fewer gives the SAME verdict (no flip either way)",
+      _284_one_accepted is _284_accepted
+      and "only 1 size was testable" in _284_one_reason,
+      f"-> accepted={_284_one_accepted} {_284_one_reason!r}")
+# Adversarial review's own single-survivor false-accept shape: identical
+# code whose jitter happened to separate the ranges at one size (p=0.0037
+# on its own) while the other two sizes were excluded as tied/overlapping.
+# One survivor, one uncorrected test — never an accept.
+_lone_before = {"sizes": [1000, 2000, 4000], "durations_ms": [45.0, 50.0, 50.0],
+                "all_runs_ms": [[45., 45., 45., 45., 46.], [50., 50., 51., 50., 52.],
+                                [50., 51., 50., 50., 52.]]}
+_lone_after = {"sizes": [1000, 2000, 4000], "durations_ms": [42.0, 50.0, 50.0],
+               "all_runs_ms": [[42., 42., 42., 42., 44.], [50., 51., 50., 52., 50.],
+                               [50., 50., 52., 51., 50.]]}
+_lone_inf = optimization._infer_speedup(_lone_before, _lone_after, min_speedup=1.05)
+_lone_accepted, _lone_reason = optimization._accept_decision(
+    {"measurable": True, "ratio": 1.07}, 1.05, _lone_inf)
+check("control: the review's shape leaves exactly one counted size, and it rejects",
+      _lone_inf["sizes_total"] == 1 and _lone_inf["sizes_rejecting"] == 1
+      and len(_lone_inf["sizes_below_floor"]) == 2,
+      f"-> {_lone_inf}")
+check("a lone surviving size that rejects by chance is NEVER an accept",
+      _lone_accepted is False and "only 1 size was testable" in _lone_reason,
+      f"-> accepted={_lone_accepted} {_lone_reason!r}")
 
 
 # ═══ codecalc issue #285: _infer_speedup dropped mann_whitney_u's `method`, ═

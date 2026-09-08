@@ -308,7 +308,16 @@ behind it.
     2-rejecting case falls in, and enough on its own to have refused it),
     or a majority at a Bonferroni-corrected `alpha / k` when there are more
     than 3 (`_fwer_correction`) — a bare majority, always, is what let one
-    false-positive size carry a three-size vote.
+    false-positive size carry a three-size vote. And never fewer than two
+    counted sizes at all: unanimity over ONE surviving size is a single
+    uncorrected test at the nominal alpha, and adversarial review measured
+    that road at a 0.357% false-accept rate on identical code (500,000-trial
+    Monte Carlo, 97.6% of it through a lone survivor). A lone testable size
+    now yields `accepted: false` with a `decision_basis` that says so and
+    what to raise, not "verified faster" — which also means issue #284's
+    two-size repro (one size structurally untestable) is now REJECTED for
+    that stated reason rather than accepted on the one size that could
+    reject; measuring one size fewer no longer flips the verdict either way.
   - A size counts as rejecting only when its OWN before/after ratio also
     clears `min_speedup`, not only its p-value — a size can be statistically
     significant on a difference too small to be the speedup the caller
