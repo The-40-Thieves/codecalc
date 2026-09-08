@@ -77,7 +77,9 @@ REQUIRES_USER_INTERACTION = {"install_package", "update_runtimes"}
 ALWAYS_LOAD = {"calc_exact", "execute_code", "verify_translation", "verify_optimization",
                "list_languages"}
 MAX_RESULT_SIZE_CHARS_TOOLS = {"execute_code", "execute_code_stream", "session_run",
-                               "compare_execution", "run_inspect"}
+                               "compare_execution", "run_inspect",
+    "trace_execution",  # events + stdout: same result-size shape as execute_code
+}
 # 240 KiB per stream: the largest static hint under Claude Code's documented
 # hard maximum of 500,000 characters for `anthropic/maxResultSizeChars`
 # (code.claude.com/docs/en/mcp) that this file can compute from a round KiB
@@ -110,7 +112,7 @@ async def main() -> None:
         has_cap = {n: meta_of(n).get("anthropic/maxResultSizeChars")
                   for n, t in listed.items()
                   if meta_of(n).get("anthropic/maxResultSizeChars") is not None}
-        check("anthropic/maxResultSizeChars is set on exactly the 5 named tools",
+        check(f"anthropic/maxResultSizeChars is set on exactly the {len(MAX_RESULT_SIZE_CHARS_TOOLS)} named tools",
               set(has_cap) == MAX_RESULT_SIZE_CHARS_TOOLS, f"-> {sorted(has_cap)}")
         wrong_values = {n: v for n, v in has_cap.items() if v != EXPECTED_MAX_RESULT_SIZE_CHARS}
         check(f"every maxResultSizeChars equals {EXPECTED_MAX_RESULT_SIZE_CHARS} "
