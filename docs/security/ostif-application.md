@@ -29,7 +29,7 @@ exactly that gap.
 | **Languages** | Python (server + tool surface) and Rust (`executor/`, the sandbox binary). |
 | **Size** | ~81,000 lines total: Python ~75.7k (of which the `codecalc/` package is ~33.4k; the rest is tests and gate scripts) and Rust ~5.3k (`executor/src/`). Measured, see §8. |
 | **Tool surface** | **57 MCP tools**, **31 execution languages** (`README.md`, gated live against the code by `scripts/check_claims.py` so this table cannot go stale the way the numbers below once did). |
-| **Maturity** | Published to PyPI, crates.io, and the MCP registry; latest release **0.11.0** (`pyproject.toml`, `executor/Cargo.toml`). Every release since 0.2.0 carries a keyless sigstore build-provenance attestation and, on PyPI, PEP 740 attestations from Trusted Publishing, plus a CycloneDX SBOM of the dependency closure — see §5. Single maintainer (`MAINTAINERS.md`). |
+| **Maturity** | Published to PyPI, crates.io, and the MCP registry; latest release **0.12.0** (`pyproject.toml`, `executor/Cargo.toml`). Every release since 0.2.0 carries a keyless sigstore build-provenance attestation and, on PyPI, PEP 740 attestations from Trusted Publishing, plus a CycloneDX SBOM of the dependency closure — see §5. Single maintainer (`MAINTAINERS.md`). |
 | **Users at risk** | Anyone running an AI agent that can call these tools — the caller string reaching the executor and the expression parser is, by construction, adversary-controlled, and (§3) may itself be attacker-steered rather than operator-typed. |
 
 ## 2. Why an audit matters here
@@ -319,7 +319,7 @@ An adversarial source-and-runtime review of, in priority order:
 
 **Next step beyond this engagement:** application to upstream **OSS-Fuzz** for
 continuous fuzzing on Google's infrastructure, now that the ClusterFuzzLite
-harnesses have run in-repo across multiple releases (0.4.0 through 0.11.0)
+harnesses have run in-repo across multiple releases (0.4.0 through 0.12.0)
 and proven able to catch real crashes, per the findings listed above.
 
 ## 6. Concrete questions we want answered
