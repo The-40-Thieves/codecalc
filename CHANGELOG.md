@@ -139,6 +139,67 @@ behind it.
   `truncated_reason` enum member (`trace_file_exceeded`) are declared in the
   `execution_trace` contract shape alongside the rest of it — still additive,
   landing before this tool's own first release.
+- **`branch_reachability`** (54th MCP tool, `execution` group): decides,
+  with z3, which `if`/`elif`/`else` arms and `while`/`for(range, static
+  bounds)` loops in ONE python3 function can ever be taken — for ANY input,
+  not the one you happened to try, which is what `trace_execution` already
+  answers. Parses with the stdlib `ast`, builds each arm's path condition as
+  the conjunction of every ancestor guard on the way to it (negated for an
+  elif/else exactly the way Python's own `not` negates it, with an
+  unconditional `return` on every arm of an earlier `if` cutting that path
+  out of what reaches the code after it), and hands each condition to z3:
+  `+ - * // %` on ints, `and`/`or`/`not` on bools, `== != < <= > >=`, `==`/
+  `!=` plus `len()` on strings (`z3.Length`), and `abs`/`min`/`max` built
+  from `z3.If` — the same solver-setup shape `z3_check` already uses.
+  Returns, per branch, `line`/`kind`/`condition` (source text, negations
+  spelled out) and `verdict` (`reachable`/`dead`/`unknown` — a solver
+  timeout or an unsupported construct that slipped past the upfront scan
+  on THIS path, never a crash), a `witness` input dict when reachable, and
+  `boundary_inputs`: for each `Compare` in the arm's own guard with a
+  numeric side, the MINIMUM and MAXIMUM satisfying value (z3 `Optimize`,
+  boxed to ±1,000,000 so an unbounded objective still terminates) and the
+  "equality edge" (a witness where the guard's own literal threshold is hit
+  exactly) — every input dict shaped to drop straight into
+  `compare_edge_cases`'s `test_inputs`. Top level adds `supported`
+  (`inputs`/`dead_count`/`reachable_count`/`unknown_count`/`truncated`/
+  `suggested_test_inputs` — a deduped pool of every witness and boundary
+  input, ordered by line). Loops are analyzed as ONE representative
+  iteration, never unrolled: the loop variable is bound to a fresh symbolic
+  value ranged over the loop's own real static bounds (sound for the
+  loop's OWN branch and whatever is nested directly inside it — a `for`
+  body is analyzed with the actual iteration values available, never an
+  unconstrained one), but a loop's own effect on variables is NOT carried
+  into the code AFTER it — a documented, known-imprecise choice (see
+  `docs/design/2026-09-08-branch-reachability.md`) that can under-report:
+  a later branch reachable only via the loop's accumulated effect can be
+  reported `dead` here. `witness`es are never taken on faith regardless —
+  every `verdict: reachable` in the test suite is corroborated by actually
+  running the program through `tracing.execute_trace` on its witness and
+  checking the branch's own line fired. Refuses up front, before ever
+  calling z3, naming the
+  construct and its line: floats/`None`/bytes/complex literals, attribute
+  access, f-strings, comprehensions, classes, `async`, `try`/`except`,
+  imports, subscripts, chained or `is`/`in` comparisons, any call outside
+  `abs`/`min`/`max`/`len`, a data-dependent loop bound, `//`/`%` by
+  anything but a positive integer literal (z3's Euclidean division and
+  Python's floor division disagree on the sign convention otherwise —
+  measured, not assumed), and more than one top-level function; a
+  non-python `language` is refused the same shape `trace_execution` uses.
+  Every refusal names `trace_execution` as the remedy: run the concrete
+  case instead. New result contract shape `branch_reachability`
+  (`docs/contract/README.md`, `CONTRACT_VERSION` `1.14.0` -> `1.16.0`,
+  MINOR — additive; `1.15.0` is reserved for a change landing separately),
+  discriminated from every execution shape by carrying neither `verdict`
+  nor `backend`. `tests/test_branch_reachability.py` covers reachable/
+  dead/unknown verdicts on an if/elif/else-plus-static-loop program, a
+  dead branch (`x > 5 and x < 3`), every reachable witness verified by
+  running it through `tracing.execute_trace` and checking the branch's own
+  line actually executed, boundary inputs for `<`/`<=`/`==`/`!=` guards,
+  `str` equality and `len()` guards, `bool` inputs, early return cutting a
+  later branch dead, every refusal case (asserting the `validation` code
+  and the exact line), the non-python refusal, the `max_branches` cap
+  (`truncated: true`), and a timeout landing on `unknown` rather than a
+  crash.
 - MCP Apps (`io.modelcontextprotocol/ui`) graphical views for
   `verify_translation` and `verify_optimization`: each tool now carries
   `_meta.ui.resourceUri` pointing at a self-contained `ui://` HTML resource

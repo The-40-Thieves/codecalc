@@ -6,7 +6,7 @@
 calculator, a code runner, and a logic checker — so it gets a *correct* answer
 instead of a guessed one.** It runs code in **31 languages**, does exact
 symbolic math, solves SMT/logic problems, and measures complexity, all exposed
-as **53 MCP tools**.
+as **54 MCP tools**.
 
 **Fastest path:** `uvx 'codecalc[full]' setup --write` registers codecalc with your MCP client automatically. New to MCP, or want more detail first? See [QUICKSTART.md](QUICKSTART.md), or the Install section below.
 
@@ -474,7 +474,7 @@ Linux kernel with seccomp support enforces it in-kernel either way), and
 [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild)
 for the static cross-builds (zig is used as the linker; no x86_64 GCC needed).
 
-## MCP tools (53) + MCP resources
+## MCP tools (54) + MCP resources
 
 Every session file is also exposed as an MCP resource:
 `codecalc://session/<session_id>/files/<path>` — images render inline for the
@@ -523,6 +523,7 @@ analysis, binary64 introspection.
 | `execute_code` | Run code in any language → stdout/stderr/exit_code/**verdict** (OK/TLE/MLE/OLE/RTE)/cpu_ms/peak_memory_kb; per-call limits (`max_memory_mb`, `max_output_kb`, `max_cpu`), `no_net`, `compact`. With a session and no explicit `max_output_kb`, oversized output **spills** into the session workspace (`stdout_spill`/`stderr_spill`) instead of just truncating |
 | `execute_code_stream` | Provider-selected execution using the same canonical limits as `execute_code`, with progress + partial output when the provider supports streaming |
 | `trace_execution` | **python3 only.** Runs the same sandboxed executor `execute_code` uses, plus a per-line event trace (`events`: line/call/return/exception, changed locals per step) and a static branch/line-coverage report (`branches`, `lines_executed`, `lines_never_executed`) from an AST parse — answers "which lines ran, in what order, and why" rather than just "what did it print" |
+| `branch_reachability` | **python3 only.** Decides, with z3, which if/elif/else arms and while/for(range, static bounds) loops in ONE function can ever be taken for ANY input — `reachable`/`dead`/`unknown` per branch, a `witness` when reachable, and `boundary_inputs` (min/max/equality-edge, via z3 Optimize) shaped for `compare_edge_cases`'s `test_inputs`. Refuses up front, naming the construct and line, for anything outside `+ - * // %`/`and or not`/`== != < <= > >=`/`abs min max len` on int/bool/str |
 | `run_submit` | Submit code for **background execution**; returns a `run_id` immediately instead of holding the call open |
 | `run_inspect` | Poll a background run: status while running, the full `execute_code` result shape once terminal |
 | `run_cancel` | Cancel a background run; idempotent on an already-terminal run, honest about providers that cannot cancel mid-flight |
@@ -787,7 +788,7 @@ number this section exists to track.
 
 codecalc does not hide its tools behind a discovery facade, and that is
 deliberate: the tool surface is where per-operation approval prompts, audit
-names and typed schemas live, and collapsing 53 tools into one dispatcher makes
+names and typed schemas live, and collapsing 54 tools into one dispatcher makes
 `install_package` and `percentage` look like the same permission to a client
 that approves by tool name. The cost is real, but the client is the better place
 to solve it, because the client can defer definitions **without** giving up the
@@ -857,7 +858,7 @@ If you are paying too much for codecalc's definitions:
   https://modelcontextprotocol.io/specification/2026-07-28/server/tools,
   retrieved 2026-09-07). A client without one of the mechanisms above pays the
   full cost regardless of what codecalc does.
-- **Any client** can filter which of the 53 tools it exposes to the model.
+- **Any client** can filter which of the 54 tools it exposes to the model.
   Nothing here requires codecalc to change.
 
 A server-side facade remains under consideration for clients with no such
@@ -907,12 +908,13 @@ all narrow what a given session sees without touching the server.
 Every tool also now carries a `ToolAnnotations` hint (`readOnlyHint`,
 `destructiveHint`, `idempotentHint`, `openWorldHint` — see
 `codecalc/server.py`'s `GROUP_ANNOTATIONS`/`TOOL_ANNOTATION_OVERRIDES` tables
-for the value on each of the 53). Codex CLI's `writes` approval mode
+for the value on each of the 54). Codex CLI's `writes` approval mode
 (v0.144.0+) reads `readOnlyHint` directly: a tool marked `readOnlyHint: true`
 skips the approval prompt, everything else still asks. That covers the whole
 `calculator` group (25/25 pure) plus the read-only members of the mixed
-groups — `list_languages`/`list_execution_providers`/`runtimes_status` in
-`execution`, `z3_check`/`algebraic_equiv` in `verification`,
+groups — `list_languages`/`list_execution_providers`/`runtimes_status`/
+`branch_reachability` in `execution`, `z3_check`/`algebraic_equiv` in
+`verification`,
 `session_list`/`session_files`/`session_read_file`/`session_artifacts`/
 `run_inspect` in `sessions`, and `analyze_complexity` in `analysis` — without
 codecalc doing anything client-specific; the annotation is the same hint
@@ -931,7 +933,7 @@ Every tool belongs to exactly one group:
 |---|---|
 | `calculator` (25) | `calc_exact`, `compare_threshold`, `percentage`, `calc_stats`, `percentiles`, `collision_probability`, `data_sizes`, `human_duration`, `epoch_time`, `base_repr`, `radix_convert`, `float_repr`, `int_widths`, `bit_analysis`, `bitop`, `solve_expression`, `limit_expression`, `simplify_expression`, `convert_units`, `physical_constants`, `list_units`, `evaluate_expression`, `truth_table`, `solve_linear`, `matrix` |
 | `verification` (5) | `verify_translation`, `verify_optimization`, `algebraic_equiv`, `compare_edge_cases`, `z3_check` |
-| `execution` (7) | `list_languages`, `list_execution_providers`, `execute_code`, `execute_code_stream`, `trace_execution`, `compare_execution`, `runtimes_status` |
+| `execution` (8) | `list_languages`, `list_execution_providers`, `execute_code`, `execute_code_stream`, `trace_execution`, `branch_reachability`, `compare_execution`, `runtimes_status` |
 | `sessions` (11) | `session_start`, `session_stop`, `session_list`, `session_files`, `session_write_file`, `session_read_file`, `session_run`, `session_artifacts`, `run_submit`, `run_inspect`, `run_cancel` |
 | `analysis` (3) | `analyze_complexity`, `benchmark`, `extract_function` |
 | `admin` (2) | `install_package`, `update_runtimes` |
@@ -952,7 +954,7 @@ CODECALC_TOOLS=calculator,execution  # two groups, unioned
 CODECALC_TOOLS=dev                   # a coding-assistant slice (40 tools)
 ```
 
-Unset or empty registers every group — 53 tools, same as today —
+Unset or empty registers every group — 54 tools, same as today —
 so nothing changes for an operator who does not set this. An unknown group or
 preset name is a loud startup failure naming the bad value and every known
 group/preset, never a silent fallback to "everything" or "nothing": either

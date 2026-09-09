@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/The-40-Thieves/codecalc/main/docs/contract/result-v1.schema.json",
   "title": "codecalc execution result",
-  "description": "The result contract for codecalc's execution tools, version 1.14.0. Generated from codecalc/contract.py by scripts/check_contract.py \u2014 edit the module, not this file.",
+  "description": "The result contract for codecalc's execution tools, version 1.16.0. Generated from codecalc/contract.py by scripts/check_contract.py \u2014 edit the module, not this file.",
   "type": "object",
   "required": [
     "ok",
@@ -49,6 +49,9 @@
     },
     {
       "$ref": "#/$defs/comparison_rows"
+    },
+    {
+      "$ref": "#/$defs/branch_reachability"
     }
   ],
   "$defs": {
@@ -1754,6 +1757,177 @@
                 "type": "string"
               }
             }
+          }
+        }
+      }
+    },
+    "branch_reachability": {
+      "title": "a branch_reachability result",
+      "description": "The `branch_reachability` tool's result (1.16.0): every if/elif/else arm and while/for(range) loop in one python3 function, decided reachable/dead/unknown by z3 rather than shown from one concrete run. Carries neither `verdict` nor `backend` (nothing here ran), which is what keeps it from colliding with the six execution shapes above; `count`/`succeeded`/`fastest`/`accepted`/`divergence_count`/`passed` \u2014 the other four non-execution shapes' own discriminators \u2014 never appear here either. Its own refusal (an unsupported construct, a non-python `language`, more than one top-level function, no function and no `inputs`) is `{ok: false, error, code: 'validation'}` with no shape-specific key, so it already matches `rejected` above and needed no branch of its own \u2014 the identical pattern `compare_edge_cases`'s and `verify_optimization`'s own refusal shapes follow.",
+      "type": "object",
+      "required": [
+        "ok",
+        "supported",
+        "inputs",
+        "branches",
+        "dead_count",
+        "reachable_count",
+        "unknown_count",
+        "truncated",
+        "suggested_test_inputs"
+      ],
+      "not": {
+        "anyOf": [
+          {
+            "required": [
+              "verdict"
+            ]
+          },
+          {
+            "required": [
+              "backend"
+            ]
+          }
+        ]
+      },
+      "properties": {
+        "ok": {
+          "const": true
+        },
+        "supported": {
+          "type": "boolean",
+          "description": "False only when a construct on some path could not be translated despite passing the upfront scan (an unbound/undefined name is the one case that scan cannot catch, since name binding is a flow property) \u2014 the branch it broke is `verdict: unknown`, marked here rather than only buried in one entry. A plain solver timeout does NOT flip this; see `verdict`'s own description."
+        },
+        "inputs": {
+          "type": "object",
+          "description": "Resolved name -> 'int'/'bool'/'str' for every analyzed parameter.",
+          "additionalProperties": {
+            "type": "string",
+            "enum": [
+              "int",
+              "bool",
+              "str"
+            ]
+          }
+        },
+        "branches": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "line",
+              "kind",
+              "condition",
+              "verdict",
+              "boundary_inputs"
+            ],
+            "properties": {
+              "line": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "if",
+                  "elif",
+                  "else",
+                  "while",
+                  "for"
+                ]
+              },
+              "condition": {
+                "type": "string",
+                "description": "Source text of the guard reaching this arm \u2014 the accumulated conjunction of every ancestor guard on the path, negated ('not (...)') for an elif/else arm exactly the way Python's own control flow negates it."
+              },
+              "verdict": {
+                "type": "string",
+                "enum": [
+                  "reachable",
+                  "dead",
+                  "unknown"
+                ],
+                "description": "reachable: z3 found a satisfying input. dead: z3 proved no input reaches this arm. unknown: the solver's own timeout expired, OR a construct on this one path could not be translated even though the upfront scan let it through (see codecalc/branch_reachability.py's `_record_unknown`) \u2014 either way, never a crash."
+              },
+              "witness": {
+                "type": "object",
+                "description": "Present only when verdict is reachable: one concrete input dict (parameter name -> value) that reaches this arm \u2014 shaped to pass straight to compare_edge_cases's `test_inputs`."
+              },
+              "boundary_inputs": {
+                "type": "array",
+                "description": "One entry per `Compare` node in THIS arm's own guard (not its ancestors) that has a numeric side to bound \u2014 empty for a guard with none (a bare string-equality guard, for instance) and for an else arm (no guard of its own).",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "guard",
+                    "operator",
+                    "min_input",
+                    "max_input",
+                    "equality_edge_input"
+                  ],
+                  "properties": {
+                    "guard": {
+                      "type": "string"
+                    },
+                    "operator": {
+                      "type": "string",
+                      "enum": [
+                        "==",
+                        "!=",
+                        "<",
+                        "<=",
+                        ">",
+                        ">="
+                      ]
+                    },
+                    "min_input": {
+                      "type": [
+                        "object",
+                        "null"
+                      ],
+                      "description": "A full input dict at the MINIMUM value of the compared expression that still satisfies this arm's own full path condition (z3 Optimize, boxed to \u00b11,000,000 so an unbounded objective still terminates). null when no such value exists in the box \u2014 always null for a dead branch."
+                    },
+                    "max_input": {
+                      "type": [
+                        "object",
+                        "null"
+                      ],
+                      "description": "As min_input, at the MAXIMUM value."
+                    },
+                    "equality_edge_input": {
+                      "type": [
+                        "object",
+                        "null"
+                      ],
+                      "description": "A full input dict where the compared expression equals the guard's own literal threshold, checked against the guards ABOVE this one only \u2014 so the edge can appear even when it sits just outside this particular arm. null when the other side of the comparison is not a literal, or no such input exists."
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "dead_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "reachable_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unknown_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "truncated": {
+          "type": "boolean",
+          "description": "True when `max_branches` was reached before every branch in the source was discovered."
+        },
+        "suggested_test_inputs": {
+          "type": "array",
+          "description": "Every witness and every non-null boundary input, deduped, ordered by the line of the branch it came from \u2014 ready to pass as compare_edge_cases's `test_inputs`.",
+          "items": {
+            "type": "object"
           }
         }
       }

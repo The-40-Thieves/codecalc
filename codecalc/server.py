@@ -75,6 +75,9 @@ from . import (
     audit as audit_module,
 )
 from . import (
+    branch_reachability as branch_reachability_module,
+)
+from . import (
     dependencies as dependencies_module,
 )
 from .mcp_middleware import redact_validation_errors_middleware, timeout_middleware
@@ -1487,6 +1490,41 @@ def trace_execution(
         language, code, stdin=stdin, timeout=timeout, max_events=max_events,
         max_memory_mb=max_memory_mb, max_output_kb=max_output_kb,
         max_cpu=max_cpu, no_net=no_net, provider=provider,
+    )
+
+
+@mcp.tool(group="execution")
+def branch_reachability(
+    language: str,
+    code: str,
+    inputs: dict[str, str] | None = None,
+    timeout: int = 30,
+    max_branches: int = 64,
+) -> dict[str, Any]:
+    """Decide, with z3, which if/elif/else arms and while/for(range) loops in
+    ONE python3 function can ever be taken, for ANY input — not just the one
+    you tried.
+
+    Use branch_reachability, not trace_execution, when you want "which
+    branches are reachable at all" proved for every input rather than shown
+    for one concrete run — trace_execution answers "which branch did THIS
+    input take" by actually executing the code. Use z3_check, not this,
+    when you already have an SMT-LIB2 formula to check directly rather than
+    Python source to translate.
+
+    `inputs` (name -> 'int'/'bool'/'str') narrows or overrides a parameter's
+    type; unannotated parameters default to int. Each branch reports
+    `verdict` (reachable/dead/unknown), a `witness` when reachable, and
+    `boundary_inputs` (min/max/equality-edge for each comparison in its own
+    guard) — every input dict is shaped to drop straight into
+    compare_edge_cases's `test_inputs`. Refuses, naming the construct and
+    line, before ever calling z3: floats, attribute access, comprehensions,
+    try/except, imports, data-dependent loop bounds, and anything else
+    outside `+ - * // %`, `and/or/not`, `== != < <= > >=`, and
+    `abs/min/max/len` on int/bool/str.
+    """
+    return branch_reachability_module.analyze(
+        language, code, inputs=inputs, timeout=timeout, max_branches=max_branches,
     )
 
 
