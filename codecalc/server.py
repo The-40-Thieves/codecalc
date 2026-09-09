@@ -1668,10 +1668,12 @@ def trace_execution(
     no_net: bool = False,
     provider: str | None = None,
 ) -> dict[str, Any]:
-    """Debug WHY, line by line: which statements fired, in what order, with
-    what variable values at each step, and which if/elif/while/for/try
-    branch was taken versus never taken. Want just the printed output
-    instead? Use execute_code.
+    """Debug WHY, line by line, for the ONE input you actually ran it on:
+    which statements fired, in what order, with what variable values at
+    each step, and which if/elif/while/for/try branch was taken versus
+    never taken. Want just the printed output instead? Use execute_code.
+    Want to know if a branch is reachable by ANY input, without running
+    anything? Use branch_reachability.
 
     Returns `events`: ordered `{step, line, event, func, locals}`, one entry
     per traced line/call/return/exception in YOUR code only (library
@@ -1716,16 +1718,14 @@ def branch_reachability(
     timeout: int = 30,
     max_branches: int = 64,
 ) -> dict[str, Any]:
-    """Decide, with z3, which if/elif/else arms and while/for(range) loops in
-    ONE python3 function can ever be taken, for ANY input — not just the one
-    you tried.
+    """Decide STATICALLY, WITHOUT running the program, whether each
+    if/elif/else arm and while/for(range) loop in ONE python3 function is
+    reachable — proved by z3 for every possible input, not shown for one.
 
-    Use branch_reachability, not trace_execution, when you want "which
-    branches are reachable at all" proved for every input rather than shown
-    for one concrete run — trace_execution answers "which branch did THIS
-    input take" by actually executing the code. Use z3_check, not this,
-    when you already have an SMT-LIB2 formula to check directly rather than
-    Python source to translate.
+    To see what a SPECIFIC run actually did, use trace_execution instead —
+    this tool never executes the program at all. Use z3_check, not this,
+    when you already have an SMT-LIB2 formula to check directly rather
+    than Python source to translate.
 
     `inputs` (name -> 'int'/'bool'/'str') narrows or overrides a parameter's
     type; unannotated parameters default to int. Each branch reports

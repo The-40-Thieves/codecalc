@@ -41,30 +41,62 @@ recursively, with an `elif` handled as nothing more than a nested `If` in
 the negation chain falls out of the recursion instead of needing separate
 bookkeeping. An unconditional `return` on every path through an arm cuts
 that arm's condition out of what reaches the CODE AFTER the enclosing
-if/elif/else — `_walk_block` returns `(falls_through, continuation_cond)`
-for exactly that reason: `continuation_cond` is `None` when every arm
+if/elif/else — `_walk_block` returns `(falls_through, continuation_cond,
+env)` for exactly that reason: `continuation_cond` is `None` when every arm
 returns, and the `or` of whichever arms didn't otherwise.
 
-LOOPS ARE NOT UNROLLED. `while` and `for` bodies are analyzed as ONE
-representative iteration — real reachability of a branch nested inside a
-loop, real refusal of anything unsupported inside it, but the loop's own
-effect on variables is NOT carried into the code AFTER the loop (this
-module walks the loop body against a COPY of the environment and discards
-it afterward). A precise account would need loop-invariant reasoning this
-tool does not attempt; the conservative choice — the body's own bindings do
-not leak out — never turns a genuinely dead branch into a falsely reachable
-one and is documented, not hidden, in the design note.
+MERGING ENVIRONMENTS AT A JOIN POINT. A variable assigned inside an if/elif/
+else arm is NOT visible to the code after it merely by mutating a shared
+dict — the two (or more) arms are MUTUALLY EXCLUSIVE at runtime, so the
+value reaching the code after the join depends on which arm actually ran.
+`_merge_envs` builds that value as a z3 `If(guard, value_if_arm_ran,
+value_otherwise)` per variable, where `guard` is the LOCAL condition for
+this if/elif/else only (not the accumulated ancestor path — that is already
+baked into the branch conditions the merged value later participates in).
+An arm that ends in an unconditional `return` contributes NOTHING to the
+merge (`_walk_if` passes `None` for that side): the phi is built from
+whichever arm(s) actually fall through, exactly mirroring how
+`continuation_cond` itself is built from the same set. A variable assigned
+in only SOME of the surviving arms is deliberately DROPPED from the merged
+environment rather than guessed at — a later reference to it then raises
+the ordinary "undefined name" `_TranslateError` `_translate`'s `ast.Name`
+case already raises, which is exactly correct: Python itself would raise
+`UnboundLocalError` on the very path that never assigned it. Two envs
+agreeing on a variable BY IDENTITY (neither arm reassigned it) skip the
+`If` entirely and keep the original binding, which is what keeps a program
+with few reassignments from growing an `If` for every untouched parameter.
+
+LOOPS ARE NOT UNROLLED, but their ONE representative iteration's effect IS
+merged. `while` and `for` bodies are analyzed as one pass through the body
+— real reachability of a branch nested inside it, real refusal of anything
+unsupported inside it — and the merge back into the code AFTER the loop
+uses the exact same `_merge_envs` machinery an if/else does: `If(entered,
+value_after_one_iteration, value_before_the_loop)`, where `entered` is the
+loop's own guard evaluated against the PRE-loop environment (the `while`
+test itself, or whether a `for`'s static range is non-empty). This is
+still NOT a precise multi-iteration account — a variable that only
+stabilizes after two or more iterations is modeled as if the loop ran at
+most once — but it is no longer the STRICTLY WORSE "the loop might as well
+not exist" the previous version implemented; a single iteration's real
+effect on a variable now legitimately narrows what is reachable afterward,
+documented as a known (not hidden) imprecision in the design note.
 
 BOUNDARY INPUTS. For every `Compare` node appearing in an arm's OWN guard
 (not the accumulated ancestors — see the design note for why that line was
 drawn there) with at least one int/str-length side, `_boundary_for` uses a
 z3 `Optimize` to find the MINIMUM and MAXIMUM value of that side reachable
-under the arm's full path condition (boxed to
-`_OPT_BOUND` so an unbounded objective still terminates — see the design
-note), plus, when the OTHER side is a literal constant, the "equality
-edge" — a witness where the compared expression equals that literal,
-checked against the guards ABOVE this one only, so the edge shows up even
-when it sits just outside the branch currently being reported on.
+under the arm's full path condition, plus, when the OTHER side is a
+literal constant, the "equality edge" — a witness where the compared
+expression equals that literal, checked against the guards ABOVE this one
+only, so the edge shows up even when it sits just outside the branch
+currently being reported on. No artificial box is placed on the objective:
+z3's own `Optimize` handle reports an unbounded direction directly
+(`.lower()`/`.upper()` come back as a non-concrete `oo`/`-1*oo` term,
+`z3.is_int_value` false on it — measured, not assumed, against the
+installed z3), so `_optimum_input` reads THAT rather than a box edge that
+would otherwise be indistinguishable from a real extremum. `null` means
+"unbounded or unsatisfiable", never a value quietly capped at some
+internal constant.
 
 REFUSAL IS THE RESULT. Every refusal — an unsupported construct, a
 non-python `language`, more than one top-level function, no function and no
@@ -99,13 +131,6 @@ _HARD_MAX_BRANCHES = 256
 #: 5000ms default embodies, just derived from the caller's own budget here
 #: instead of a constant.
 _PER_CALL_TIMEOUT_MS_CAP = 5_000
-#: Box constraint added ONLY to the Optimize calls behind `boundary_inputs`
-#: (never to the reachability check itself) so a min/max search over an
-#: unbounded int objective terminates instead of running forever looking
-#: for a smaller (or larger) satisfying value that does not exist. Python
-#: ints are unbounded; z3 Ints are too. A real boundary outside this box
-#: is reported as absent, not wrong — see the design note.
-_OPT_BOUND = 1_000_000
 
 _TYPE_NAMES = ("int", "bool", "str")
 
@@ -494,6 +519,31 @@ def _decide(cond, ctx: _Ctx) -> tuple[str, dict[str, Any] | None]:
     return "unknown", None
 
 
+def _optimum_input(full_cond, objective, direction: str, ctx: _Ctx) -> tuple[dict[str, Any] | None, str | None]:
+    """`(input_or_None, note_or_None)` for the MIN/MAX value of `objective`
+    subject to `full_cond`. `input_or_None` is `None` when unsatisfiable, a
+    solver timeout, OR the true optimum is UNBOUNDED in that direction —
+    see the module docstring's BOUNDARY INPUTS section for how the
+    unbounded case is detected (`z3.is_int_value` on the `Optimize`
+    handle's own `.lower()`/`.upper()`) rather than assumed from an
+    artificial box. `note_or_None` is set ONLY for the confirmed-unbounded
+    case — a plain unsat or timeout says nothing more than the existing
+    `null` already does, and would be noise on top of it.
+    """
+    z3 = ctx.z3
+    opt = z3.Optimize()
+    opt.set("timeout", ctx.call_timeout_ms())
+    opt.add(full_cond)
+    handle = opt.minimize(objective) if direction == "min" else opt.maximize(objective)
+    if opt.check() != z3.sat:
+        return None, None
+    bound = handle.lower() if direction == "min" else handle.upper()
+    if not z3.is_int_value(bound):
+        word = "below" if direction == "min" else "above"
+        return None, f"unbounded {word}: no {direction}imum exists under this branch's own path condition"
+    return ctx.witness(opt.model()), None
+
+
 def _boundary_for(node: ast.expr, parent_cond, full_cond, env: dict[str, tuple[Any, str]], ctx: _Ctx) -> list[dict[str, Any]]:
     """One `boundary_inputs` entry per `Compare` found in `node` (an arm's
     OWN guard — see the module docstring for why ancestor guards are not
@@ -520,17 +570,12 @@ def _boundary_for(node: ast.expr, parent_cond, full_cond, env: dict[str, tuple[A
         objective, threshold = (r, l) if left_is_const else (l, None if not right_is_const else r)
         entry: dict[str, Any] = {"guard": _unparse(cmp), "operator": _COMPARE_TEXT[type(cmp.ops[0])]}
 
-        opt = z3.Optimize()
-        opt.set("timeout", ctx.call_timeout_ms())
-        opt.add(full_cond, objective >= -_OPT_BOUND, objective <= _OPT_BOUND)
-        opt.minimize(objective)
-        entry["min_input"] = ctx.witness(opt.model()) if opt.check() == z3.sat else None
-
-        opt2 = z3.Optimize()
-        opt2.set("timeout", ctx.call_timeout_ms())
-        opt2.add(full_cond, objective >= -_OPT_BOUND, objective <= _OPT_BOUND)
-        opt2.maximize(objective)
-        entry["max_input"] = ctx.witness(opt2.model()) if opt2.check() == z3.sat else None
+        entry["min_input"], min_note = _optimum_input(full_cond, objective, "min", ctx)
+        if min_note is not None:
+            entry["min_note"] = min_note
+        entry["max_input"], max_note = _optimum_input(full_cond, objective, "max", ctx)
+        if max_note is not None:
+            entry["max_note"] = max_note
 
         if threshold is not None:
             edge = z3.Solver()
@@ -561,8 +606,48 @@ def _record(ctx: _Ctx, *, line: int, kind: str, condition: str, cond, guard_node
     ctx.branches.append(entry)
 
 
+def _merge_envs(local_guard, env_true: dict[str, tuple[Any, str]] | None,
+                 env_false: dict[str, tuple[Any, str]] | None, ctx: _Ctx) -> dict[str, tuple[Any, str]]:
+    """The post-join environment for a LOCAL two-way split — an if/else's
+    two arms, or a loop's "entered" vs "never entered" split. See the
+    module docstring's MERGING ENVIRONMENTS section.
+
+    `env_true`/`env_false` is `None` when that side's own path is CLOSED
+    (an unconditional `return` — never applicable to the loop case, which
+    always calls this with both sides present) and contributes nothing to
+    the merge; the other side is then used AS IS, with no `If` needed.
+
+    A variable present in only one of the two (surviving) envs — assigned
+    in only one arm — is dropped from the result rather than guessed at:
+    `_translate`'s `ast.Name` case already raises `_TranslateError`
+    ("undefined name") for a later reference to it, which is the exactly
+    correct answer on the path that never assigned it (Python itself would
+    raise `UnboundLocalError` there).
+    """
+    if env_true is None:
+        return env_false
+    if env_false is None:
+        return env_true
+    z3 = ctx.z3
+    merged: dict[str, tuple[Any, str]] = {}
+    for name in set(env_true) & set(env_false):
+        entry_true = env_true[name]
+        entry_false = env_false[name]
+        if entry_true is entry_false:
+            merged[name] = entry_true  # neither arm reassigned it — no If needed
+            continue
+        val_t, dt_t = entry_true
+        val_f, dt_f = entry_false
+        if dt_t != dt_f:
+            raise _TranslateError(
+                f"{name!r} holds different types across branches ({dt_t} vs {dt_f})"
+            )
+        merged[name] = (z3.If(local_guard, val_t, val_f), dt_t)
+    return merged
+
+
 def _walk_if(node: ast.If, env: dict[str, tuple[Any, str]], parent_pieces: list[str],
-             parent_cond, ctx: _Ctx, *, kind: str) -> tuple[bool, Any]:
+             parent_cond, ctx: _Ctx, *, kind: str) -> tuple[bool, Any, dict[str, tuple[Any, str]]]:
     z3 = ctx.z3
     guard_val, guard_dt = _translate(node.test, env, ctx)
     if guard_dt != "bool":
@@ -571,27 +656,35 @@ def _walk_if(node: ast.If, env: dict[str, tuple[Any, str]], parent_pieces: list[
     if_cond = z3.And(parent_cond, guard_val)
     _record(ctx, line=node.lineno, kind=kind, condition=" and ".join(parent_pieces + [guard_text]) or guard_text,
             cond=if_cond, guard_node=node.test, parent_cond=parent_cond, env=env)
-    body_falls, body_cont = _walk_block(node.body, dict(env), ctx, if_cond)
+    body_falls, body_cont, body_env = _walk_block(node.body, dict(env), ctx, if_cond)
 
     not_text = f"not ({guard_text})"
     else_cond = z3.And(parent_cond, z3.Not(guard_val))
     else_pieces = parent_pieces + [not_text]
     if len(node.orelse) == 1 and isinstance(node.orelse[0], ast.If):
-        else_falls, else_cont = _walk_if(node.orelse[0], dict(env), else_pieces, else_cond, ctx, kind="elif")
+        else_falls, else_cont, else_env = _walk_if(
+            node.orelse[0], dict(env), else_pieces, else_cond, ctx, kind="elif")
     elif node.orelse:
         _record(ctx, line=node.orelse[0].lineno, kind="else", condition=" and ".join(else_pieces),
                 cond=else_cond, guard_node=None, parent_cond=parent_cond, env=env)
-        else_falls, else_cont = _walk_block(node.orelse, dict(env), ctx, else_cond)
+        else_falls, else_cont, else_env = _walk_block(node.orelse, dict(env), ctx, else_cond)
     else:
-        else_falls, else_cont = True, else_cond
+        # An implicit, empty else: its "arm" is simply the pre-if bindings,
+        # unchanged — exactly the fallback `_merge_envs` needs for a variable
+        # only assigned in the `if` body.
+        else_falls, else_cont, else_env = True, else_cond, dict(env)
 
     conds = [c for ok, c in ((body_falls, body_cont), (else_falls, else_cont)) if ok and c is not None]
     if not conds:
-        return False, None
-    return True, conds[0] if len(conds) == 1 else z3.Or(*conds)
+        return False, None, env
+    merge_cond = conds[0] if len(conds) == 1 else z3.Or(*conds)
+    merged_env = _merge_envs(guard_val, body_env if body_falls else None,
+                              else_env if else_falls else None, ctx)
+    return True, merge_cond, merged_env
 
 
-def _walk_loop(node: ast.While | ast.For, env: dict[str, tuple[Any, str]], ctx: _Ctx, cur_cond) -> None:
+def _walk_loop(node: ast.While | ast.For, env: dict[str, tuple[Any, str]], ctx: _Ctx,
+               cur_cond) -> dict[str, tuple[Any, str]]:
     z3 = ctx.z3
     if isinstance(node, ast.While):
         guard_val, guard_dt = _translate(node.test, env, ctx)
@@ -602,6 +695,7 @@ def _walk_loop(node: ast.While | ast.For, env: dict[str, tuple[Any, str]], ctx: 
         _record(ctx, line=node.lineno, kind="while", condition=condition, cond=loop_cond,
                 guard_node=node.test, parent_cond=cur_cond, env=env)
         body_env = dict(env)
+        entered_guard = guard_val  # the loop's OWN guard, evaluated pre-loop
     else:
         start, stop, step = _static_range_bounds(node.iter)
         entered = start < stop if step > 0 else start > stop
@@ -613,13 +707,20 @@ def _walk_loop(node: ast.While | ast.For, env: dict[str, tuple[Any, str]], ctx: 
         # The loop variable is bound to an UNCONSTRAINED-but-in-range symbolic
         # Int for the purpose of analyzing the body once — see the module
         # docstring's LOOPS section: this is a single representative
-        # iteration, not an unrolling.
+        # iteration, not an unrolling. It never appears in `env` (pre-loop),
+        # so `_merge_envs`'s intersection drops it from the post-loop result
+        # automatically — no special-casing needed here.
         var = z3.Int(f"__loop_{node.lineno}_{node.target.id}")
         lo, hi = (start, stop - 1) if step > 0 else (stop + 1, start)
         body_env[node.target.id] = (var, "int")
         loop_cond = z3.And(loop_cond, var >= lo, var <= hi)
+        entered_guard = z3.BoolVal(entered)
 
-    _walk_block(node.body, body_env, ctx, loop_cond)
+    _, _, body_env_after = _walk_block(node.body, body_env, ctx, loop_cond)
+    # See the module docstring's LOOPS section: `If(entered, after-one-
+    # iteration, before-the-loop)` — a real, if imprecise, merge of the
+    # loop's own effect, not a discard of it.
+    return _merge_envs(entered_guard, body_env_after, env, ctx)
 
 
 def _apply_assign(stmt: ast.Assign, env: dict[str, tuple[Any, str]], ctx: _Ctx) -> None:
@@ -645,20 +746,28 @@ def _record_unknown(ctx: _Ctx, line: int, kind: str) -> None:
                           "verdict": "unknown", "boundary_inputs": []})
 
 
-def _walk_block(stmts: list[ast.stmt], env: dict[str, tuple[Any, str]], ctx: _Ctx, cur_cond) -> tuple[bool, Any]:
-    """`(falls_through, continuation_cond)` for a straight-line list of
-    statements — see the module docstring's PATH CONDITIONS section.
+def _walk_block(stmts: list[ast.stmt], env: dict[str, tuple[Any, str]], ctx: _Ctx,
+                 cur_cond) -> tuple[bool, Any, dict[str, tuple[Any, str]]]:
+    """`(falls_through, continuation_cond, env)` for a straight-line list of
+    statements — see the module docstring's PATH CONDITIONS and MERGING
+    ENVIRONMENTS sections. The returned `env` is the (possibly merged)
+    environment after every statement in `stmts` — the caller (an
+    enclosing `_walk_if`/`_walk_loop`/`_walk_block`) must use IT for
+    whatever comes next, not the `env` object it originally passed in:
+    an `If`/`While`/`For` inside `stmts` can rebind `env` to a freshly
+    merged dict, and mutating the ORIGINAL object further would silently
+    discard that join.
 
     A guard that fails to translate (see `_record_unknown`) does not abort
     the whole analysis: that one branch is recorded `unknown` and the block
-    is conservatively treated as falling through with the condition
-    UNCHANGED — this may under-report nested branches inside it, but never
-    turns a real dead branch into a falsely-reachable one, the same
-    "over-approximate rather than guess" rule the loop-body handling above
-    follows. An assignment that fails to translate is different in kind —
-    every LATER statement in this function depends on `env` staying
-    accurate — so that one propagates out to a top-level refusal instead
-    (see `analyze`'s own try/except around this call).
+    is conservatively treated as falling through with the condition and
+    environment UNCHANGED — this may under-report nested branches inside
+    it, but never turns a real dead branch into a falsely-reachable one,
+    the same "over-approximate rather than guess" rule the loop-body
+    handling follows. An assignment that fails to translate is different
+    in kind — every LATER statement in this function depends on `env`
+    staying accurate — so that one propagates out to a top-level refusal
+    instead (see `analyze`'s own try/except around this call).
     """
     for stmt in stmts:
         # Deliberately NOT short-circuited on `ctx.budget_exhausted()` here:
@@ -677,34 +786,35 @@ def _walk_block(stmts: list[ast.stmt], env: dict[str, tuple[Any, str]], ctx: _Ct
             _apply_assign(stmt, env, ctx)
             continue
         if isinstance(stmt, ast.Return):
-            return False, None
+            return False, None, env
         if isinstance(stmt, ast.If):
             try:
-                falls, cont = _walk_if(stmt, env, [], cur_cond, ctx, kind="if")
+                falls, cont, merged_env = _walk_if(stmt, env, [], cur_cond, ctx, kind="if")
             except _TranslateError:
                 ctx.supported = False
                 _record_unknown(ctx, stmt.lineno, "if")
-                falls, cont = True, cur_cond
+                falls, cont, merged_env = True, cur_cond, env
             if not falls:
-                return False, None
+                return False, None, env
             cur_cond = cont
+            env = merged_env
             continue
         if isinstance(stmt, ast.While):
             try:
-                _walk_loop(stmt, env, ctx, cur_cond)
+                env = _walk_loop(stmt, env, ctx, cur_cond)
             except _TranslateError:
                 ctx.supported = False
                 _record_unknown(ctx, stmt.lineno, "while")
             continue
         if isinstance(stmt, ast.For):
             try:
-                _walk_loop(stmt, env, ctx, cur_cond)
+                env = _walk_loop(stmt, env, ctx, cur_cond)
             except _TranslateError:
                 ctx.supported = False
                 _record_unknown(ctx, stmt.lineno, "for")
             continue
         raise _TranslateError(f"unsupported statement {type(stmt).__name__}")
-    return True, cur_cond
+    return True, cur_cond, env
 
 
 def _param_type(name: str, annotation: ast.expr | None, inputs: dict[str, str] | None) -> str:
@@ -737,6 +847,18 @@ def analyze(language: str, code: str, inputs: dict[str, str] | None = None,
     except SyntaxError as exc:
         return _refusal(f"source does not parse: {exc}", line=getattr(exc, "lineno", None))
 
+    # Runs BEFORE any structural (function-count / inputs-required) check —
+    # a module-scope `class`, for instance, has zero top-level FunctionDefs,
+    # and used to be refused with the generic "no top-level function and no
+    # `inputs`" message instead of naming the actual construct and its line.
+    # This scan is cheap (a single AST walk, no z3), so running it first
+    # costs nothing and gives every unsupported-construct case the same,
+    # more specific refusal.
+    hit = _first_unsupported(tree)
+    if hit is not None:
+        construct, line = hit
+        return _refusal(f"unsupported construct: {construct}", line=line)
+
     top_funcs = [n for n in tree.body if isinstance(n, ast.FunctionDef)]
     if len(top_funcs) > 1:
         return _refusal(
@@ -762,11 +884,6 @@ def analyze(language: str, code: str, inputs: dict[str, str] | None = None,
         param_names = list(inputs)
         body = tree.body
         fn = None
-
-    hit = _first_unsupported(tree)
-    if hit is not None:
-        construct, line = hit
-        return _refusal(f"unsupported construct: {construct}", line=line)
 
     z3 = optional.require("z3")
 

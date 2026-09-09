@@ -153,15 +153,23 @@ for _entry in _dead_branch["boundary_inputs"]:
               f"by a real trace run, not just the solver)", not hit, f"-> hit={hit}")
 
 
-# ── boundary inputs for <, <=, ==, != ───────────────────────────────────────
+# ── boundary inputs for <, <=, >, >=, ==, != ────────────────────────────────
+# `None` in the expected tables means the TRUE optimum is unbounded in that
+# direction — SHOULD-FIX 3 (adversarial review, e0708864): a boundary
+# outside a search box must report null with a note, never the box's own
+# edge dressed up as if it were a real extremum. x > 5 has no maximum;
+# x < 5 has no minimum; x == 5 is bounded both ways at 5; x != 5 is
+# unbounded both ways.
 _OPS = {
-    "<": "def f(x):\n    if x < 10:\n        return 1\n    return 0\n",
-    "<=": "def f(x):\n    if x <= 10:\n        return 1\n    return 0\n",
-    "==": "def f(x):\n    if x == 10:\n        return 1\n    return 0\n",
-    "!=": "def f(x):\n    if x != 10:\n        return 1\n    return 0\n",
+    "<": "def f(x):\n    if x < 5:\n        return 1\n    return 0\n",
+    "<=": "def f(x):\n    if x <= 5:\n        return 1\n    return 0\n",
+    ">": "def f(x):\n    if x > 5:\n        return 1\n    return 0\n",
+    ">=": "def f(x):\n    if x >= 5:\n        return 1\n    return 0\n",
+    "==": "def f(x):\n    if x == 5:\n        return 1\n    return 0\n",
+    "!=": "def f(x):\n    if x != 5:\n        return 1\n    return 0\n",
 }
-_EXPECTED_MIN = {"<": -1_000_000, "<=": -1_000_000, "==": 10, "!=": -1_000_000}
-_EXPECTED_MAX = {"<": 9, "<=": 10, "==": 10, "!=": 1_000_000}
+_EXPECTED_MIN = {"<": None, "<=": None, ">": 6, ">=": 5, "==": 5, "!=": None}
+_EXPECTED_MAX = {"<": 4, "<=": 5, ">": None, ">=": None, "==": 5, "!=": None}
 for _op, _code in _OPS.items():
     _ro = br.analyze("python3", _code)
     _b = _by_line(_ro, 2)
@@ -170,20 +178,36 @@ for _op, _code in _OPS.items():
     check(f"op {_op}: exactly one boundary_inputs entry", len(_entries) == 1, f"-> {_entries}")
     _entry = _entries[0]
     check(f"op {_op}: operator recorded correctly", _entry["operator"] == _op, f"-> {_entry}")
-    check(f"op {_op}: min_input.x == {_EXPECTED_MIN[_op]}",
-          _entry["min_input"] is not None and _entry["min_input"]["x"] == _EXPECTED_MIN[_op],
-          f"-> {_entry['min_input']}")
-    check(f"op {_op}: max_input.x == {_EXPECTED_MAX[_op]}",
-          _entry["max_input"] is not None and _entry["max_input"]["x"] == _EXPECTED_MAX[_op],
-          f"-> {_entry['max_input']}")
-    check(f"op {_op}: equality_edge_input.x == 10",
-          _entry["equality_edge_input"] is not None and _entry["equality_edge_input"]["x"] == 10,
+
+    _exp_min = _EXPECTED_MIN[_op]
+    if _exp_min is None:
+        check(f"op {_op}: min_input is null (unbounded below), with a min_note",
+              _entry["min_input"] is None and bool(_entry.get("min_note")), f"-> {_entry}")
+    else:
+        check(f"op {_op}: min_input.x == {_exp_min}, no min_note (a real bound)",
+              _entry["min_input"] is not None and _entry["min_input"]["x"] == _exp_min
+              and "min_note" not in _entry, f"-> {_entry}")
+
+    _exp_max = _EXPECTED_MAX[_op]
+    if _exp_max is None:
+        check(f"op {_op}: max_input is null (unbounded above), with a max_note",
+              _entry["max_input"] is None and bool(_entry.get("max_note")), f"-> {_entry}")
+    else:
+        check(f"op {_op}: max_input.x == {_exp_max}, no max_note (a real bound)",
+              _entry["max_input"] is not None and _entry["max_input"]["x"] == _exp_max
+              and "max_note" not in _entry, f"-> {_entry}")
+
+    check(f"op {_op}: equality_edge_input.x == 5",
+          _entry["equality_edge_input"] is not None and _entry["equality_edge_input"]["x"] == 5,
           f"-> {_entry['equality_edge_input']}")
+
     _proof = _proof_line(_code, _b["line"], _b["kind"])
-    check(f"op {_op}: min_input actually reaches the branch's own body (trace-corroborated)",
-          _hits_line(_code, "f", _entry["min_input"], _proof), f"-> {_entry['min_input']}")
-    check(f"op {_op}: max_input actually reaches the branch's own body (trace-corroborated)",
-          _hits_line(_code, "f", _entry["max_input"], _proof), f"-> {_entry['max_input']}")
+    if _entry["min_input"] is not None:
+        check(f"op {_op}: min_input actually reaches the branch's own body (trace-corroborated)",
+              _hits_line(_code, "f", _entry["min_input"], _proof), f"-> {_entry['min_input']}")
+    if _entry["max_input"] is not None:
+        check(f"op {_op}: max_input actually reaches the branch's own body (trace-corroborated)",
+              _hits_line(_code, "f", _entry["max_input"], _proof), f"-> {_entry['max_input']}")
 
 
 # ── str equality and len() guards ───────────────────────────────────────────
@@ -344,6 +368,267 @@ check("expired budget: unknown_count matches, no false reachable/dead claims",
       and _r_expired.get("dead_count") == 0, f"-> {_r_expired}")
 check("expired budget: `supported` stays True (a timeout is not an unsupported "
       "construct)", _r_expired.get("supported") is True, f"-> {_r_expired.get('supported')}")
+
+
+# ── MERGE/JOIN: adversarial review e0708864, BLOCKER 1+2 ───────────────────
+# `_walk_if`/`_walk_loop` used to process each arm against a COPY of `env`,
+# so an assignment inside a non-returning arm was silently discarded for
+# the code after the `if` — every later branch's path condition was built
+# over the PRE-if bindings regardless of which arm actually ran. Both
+# repros below are the review's own, verified failing before the
+# `_merge_envs` fix (repro a used to report `if y == 5` DEAD; repro b used
+# to report the nested `if x > 100` REACHABLE with an invalid witness).
+
+# Repro (a): a single if with no else — the code after it must see y=5 on
+# the path where the if ran, and y=0 (unchanged) on the path where it did
+# not.
+_REPRO_A = (
+    "def f(x):\n"
+    "    y = 0\n"
+    "    if x > 0:\n"
+    "        y = 5\n"
+    "    if y == 5:\n"
+    "        return 1\n"
+    "    return 0\n"
+)
+_ra = br.analyze("python3", _REPRO_A)
+_ra_second = _by_line(_ra, 5)
+check("repro (a): `if y == 5` is REACHABLE (x > 0 makes y = 5)",
+      _ra_second is not None and _ra_second["verdict"] == "reachable", f"-> {_ra_second}")
+check("repro (a): its witness has x > 0 (the only way y becomes 5)",
+      _ra_second.get("witness", {}).get("x", 0) > 0, f"-> {_ra_second.get('witness')}")
+_verify_every_witness(_ra, _REPRO_A, "f", "repro-a")
+
+# Repro (b): a nested if inside an `if y == 0:` guard, where y == 0 is only
+# possible when the EARLIER if did NOT set y = 1 — so x > 100 (which
+# requires the earlier if's guard x > 0 true, forcing y = 1) can never
+# coexist with y == 0. The nested if must be DEAD, not reachable.
+_REPRO_B = (
+    "def f(x):\n"
+    "    y = 0\n"
+    "    if x > 0:\n"
+    "        y = 1\n"
+    "    if y == 0:\n"
+    "        if x > 100:\n"
+    "            return 1\n"
+    "    return 0\n"
+)
+_rb2 = br.analyze("python3", _REPRO_B)
+_rb2_nested = _by_line(_rb2, 6)
+check("repro (b): the nested `if x > 100` is DEAD (y == 0 implies x <= 0)",
+      _rb2_nested is not None and _rb2_nested["verdict"] == "dead", f"-> {_rb2_nested}")
+check("repro (b): no witness on the dead nested branch", "witness" not in (_rb2_nested or {}))
+for _entry in _rb2_nested["boundary_inputs"]:
+    edge = _entry.get("equality_edge_input")
+    if edge is not None:
+        _proof = _proof_line(_REPRO_B, _rb2_nested["line"], _rb2_nested["kind"])
+        check(f"repro (b): boundary edge {edge!r} for {_entry['guard']!r} does NOT "
+              f"actually reach the dead nested body (trace-corroborated)",
+              not _hits_line(_REPRO_B, "f", edge, _proof), f"-> edge={edge}")
+_verify_every_witness(_rb2, _REPRO_B, "f", "repro-b")
+
+
+# ── assignment in the else arm only ─────────────────────────────────────────
+_ELSE_ONLY = (
+    "def f(x):\n"
+    "    y = 0\n"
+    "    if x > 0:\n"
+    "        pass\n"
+    "    else:\n"
+    "        y = 9\n"
+    "    if y == 9:\n"
+    "        return 1\n"
+    "    return 0\n"
+)
+_reo = br.analyze("python3", _ELSE_ONLY)
+_reo_branch = _by_line(_reo, 7)
+check("else-only assignment: `if y == 9` is reachable, witness has x <= 0",
+      _reo_branch["verdict"] == "reachable" and _reo_branch["witness"]["x"] <= 0,
+      f"-> {_reo_branch}")
+_verify_every_witness(_reo, _ELSE_ONLY, "f", "else-only")
+
+
+# ── assignment in BOTH arms; a later branch reachable only via the else value ─
+_BOTH_ARMS = (
+    "def f(x):\n"
+    "    if x > 0:\n"
+    "        y = 100\n"
+    "    else:\n"
+    "        y = 5\n"
+    "    if y == 5:\n"
+    "        return 1\n"
+    "    return 0\n"
+)
+_rba = br.analyze("python3", _BOTH_ARMS)
+_rba_branch = _by_line(_rba, 6)
+check("both-arms assignment: `if y == 5` is reachable ONLY via the else value "
+      "(witness has x <= 0, never the if-arm's x > 0)",
+      _rba_branch["verdict"] == "reachable" and _rba_branch["witness"]["x"] <= 0,
+      f"-> {_rba_branch}")
+_verify_every_witness(_rba, _BOTH_ARMS, "f", "both-arms")
+
+
+# ── an elif chain assigning three different values, each read back later ───
+_ELIF_THREE = (
+    "def f(x):\n"
+    "    if x == 1:\n"
+    "        y = 10\n"
+    "    elif x == 2:\n"
+    "        y = 20\n"
+    "    else:\n"
+    "        y = 30\n"
+    "    if y == 10:\n"
+    "        return 1\n"
+    "    if y == 20:\n"
+    "        return 2\n"
+    "    if y == 30:\n"
+    "        return 3\n"
+    "    return 0\n"
+)
+_ret3 = br.analyze("python3", _ELIF_THREE)
+for _val, _line in ((10, 8), (20, 10), (30, 12)):
+    _b3 = _by_line(_ret3, _line)
+    check(f"elif chain: `if y == {_val}` is reachable", _b3["verdict"] == "reachable", f"-> {_b3}")
+check("elif chain: y == 10's witness has x == 1 (only x == 1 sets y = 10)",
+      _by_line(_ret3, 8)["witness"]["x"] == 1, f"-> {_by_line(_ret3, 8)['witness']}")
+check("elif chain: y == 20's witness has x == 2 (only x == 2 sets y = 20)",
+      _by_line(_ret3, 10)["witness"]["x"] == 2, f"-> {_by_line(_ret3, 10)['witness']}")
+check("elif chain: y == 30's witness has x not in {1, 2} (the else arm)",
+      _by_line(_ret3, 12)["witness"]["x"] not in (1, 2), f"-> {_by_line(_ret3, 12)['witness']}")
+_verify_every_witness(_ret3, _ELIF_THREE, "f", "elif-three")
+
+
+# ── an arm ending in `return`: its assignment must NOT leak ────────────────
+_RETURN_NO_LEAK = (
+    "def f(x):\n"
+    "    y = 0\n"
+    "    if x > 0:\n"
+    "        y = 5\n"
+    "        return 1\n"
+    "    if y == 5:\n"
+    "        return 2\n"
+    "    return 0\n"
+)
+_rnl = br.analyze("python3", _RETURN_NO_LEAK)
+_rnl_branch = _by_line(_rnl, 6)
+check("return-no-leak: `if y == 5` is DEAD (the only y = 5 assignment sits on "
+      "an arm that unconditionally returns, so it never reaches here)",
+      _rnl_branch["verdict"] == "dead", f"-> {_rnl_branch}")
+for _entry in _rnl_branch["boundary_inputs"]:
+    edge = _entry.get("equality_edge_input")
+    if edge is not None:
+        _proof = _proof_line(_RETURN_NO_LEAK, _rnl_branch["line"], _rnl_branch["kind"])
+        check(f"return-no-leak: boundary edge {edge!r} does not actually reach "
+              f"the dead branch (trace-corroborated)",
+              not _hits_line(_RETURN_NO_LEAK, "f", edge, _proof), f"-> edge={edge}")
+_verify_every_witness(_rnl, _RETURN_NO_LEAK, "f", "return-no-leak")
+
+
+# ── a variable introduced only inside an arm, read after: unknown, not a crash ─
+_UNDEF_AFTER = (
+    "def f(x):\n"
+    "    if x > 0:\n"
+    "        z = 5\n"
+    "    if z == 5:\n"
+    "        return 1\n"
+    "    return 0\n"
+)
+_rua = br.analyze("python3", _UNDEF_AFTER)
+check("undefined-after: the whole call still succeeds (ok=True), never a crash",
+      _rua.get("ok") is True, f"-> {_rua}")
+check("undefined-after: `supported` is False (z is undefined on the path where "
+      "the if did not run — an unsupported construct on THIS path, not a "
+      "solver timeout)", _rua.get("supported") is False, f"-> {_rua}")
+_rua_branch = _by_line(_rua, 4)
+check("undefined-after: `if z == 5` is verdict unknown, not a false reachable/dead",
+      _rua_branch is not None and _rua_branch["verdict"] == "unknown", f"-> {_rua_branch}")
+check("undefined-after: the FIRST if (x > 0, well-defined) is unaffected and reachable",
+      _by_line(_rua, 2)["verdict"] == "reachable", f"-> {_by_line(_rua, 2)}")
+
+
+# ── for range(3) body assignment followed by an if ──────────────────────────
+# `flag = 1` is IDEMPOTENT across iterations — real execution ends with
+# flag == 1 whether the loop runs once or three times — so the one-
+# representative-iteration merge is not just an approximation here, it is
+# EXACT, and every witness below is fully trace-verifiable against the
+# REAL 3-iteration run, not merely the model's own one-iteration story.
+_FOR_ASSIGN = (
+    "def f(n):\n"
+    "    flag = 0\n"
+    "    for i in range(3):\n"
+    "        flag = 1\n"
+    "    if flag == 1:\n"
+    "        return 1\n"
+    "    return 0\n"
+)
+_rfa = br.analyze("python3", _FOR_ASSIGN)
+check("for-assign: `if flag == 1` is reachable (the loop's merged effect, "
+      "not the pre-loop value)", _by_line(_rfa, 5)["verdict"] == "reachable",
+      f"-> {_by_line(_rfa, 5)}")
+_verify_every_witness(_rfa, _FOR_ASSIGN, "f", "for-assign")
+
+# A SEPARATE, explicitly-labeled case documents the known, ACCEPTED
+# imprecision the module docstring's LOOPS section describes: `total`
+# ACCUMULATES across iterations (not idempotent like `flag` above), so the
+# one-representative-iteration model reflects `total = 1` (one iteration's
+# real effect) but NOT `total = 3` (the real, 3-iteration result) — a
+# genuinely reachable branch (`total == 3` really does happen) can be
+# under-reported `dead` here. This is the documented direction of error
+# (never the reverse — see the design note); NOT run through
+# `_verify_every_witness`, because `total == 1`'s witness does not
+# correspond to what an actual `range(3)` run of THIS program does, and
+# asserting a trace match here would be asserting the wrong thing on
+# purpose.
+_FOR_ACCUMULATE = (
+    "def f(n):\n"
+    "    total = 0\n"
+    "    for i in range(3):\n"
+    "        total = total + 1\n"
+    "    if total == 1:\n"
+    "        return 1\n"
+    "    if total == 3:\n"
+    "        return 2\n"
+    "    return 0\n"
+)
+_rfacc = br.analyze("python3", _FOR_ACCUMULATE)
+check("for-accumulate: `if total == 1` is reachable per the one-iteration "
+      "model (documented imprecision, not asserted against a real trace)",
+      _by_line(_rfacc, 5)["verdict"] == "reachable", f"-> {_by_line(_rfacc, 5)}")
+check("for-accumulate: `if total == 3` (the REAL result) is under-reported "
+      "dead — the direction the design note says this imprecision always "
+      "goes",
+      _by_line(_rfacc, 7)["verdict"] == "dead", f"-> {_by_line(_rfacc, 7)}")
+
+
+# ── nested ifs assigning at two depths ──────────────────────────────────────
+_NESTED_TWO = (
+    "def f(x, y):\n"
+    "    z = 0\n"
+    "    if x > 0:\n"
+    "        if y > 0:\n"
+    "            z = 1\n"
+    "        else:\n"
+    "            z = 2\n"
+    "    if z == 1:\n"
+    "        return 1\n"
+    "    return 0\n"
+)
+_rnt = br.analyze("python3", _NESTED_TWO)
+_rnt_branch = _by_line(_rnt, 8)
+check("nested two depths: `if z == 1` is reachable exactly when x > 0 and y > 0",
+      _rnt_branch["verdict"] == "reachable" and _rnt_branch["witness"]["x"] > 0
+      and _rnt_branch["witness"]["y"] > 0, f"-> {_rnt_branch}")
+_verify_every_witness(_rnt, _NESTED_TWO, "f", "nested-two-depths")
+
+
+# ── NIT 5: a module-scope class names the construct, not the generic "no
+# top-level function" refusal ────────────────────────────────────────────
+_CLASS_SCOPE = "class Foo:\n    pass\n"
+_rcls = br.analyze("python3", _CLASS_SCOPE)
+check("module-scope class: refused naming 'class definition', not the generic message",
+      _rcls.get("ok") is False and "class definition" in (_rcls.get("error") or ""),
+      f"-> {_rcls}")
+check("module-scope class: line == 1", _rcls.get("line") == 1, f"-> {_rcls}")
 
 
 print(f"\n=== {len(FAILS)} FAILURES ===" if FAILS else

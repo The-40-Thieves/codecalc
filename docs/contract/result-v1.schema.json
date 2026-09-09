@@ -2115,7 +2115,11 @@
                         "object",
                         "null"
                       ],
-                      "description": "A full input dict at the MINIMUM value of the compared expression that still satisfies this arm's own full path condition (z3 Optimize, boxed to \u00b11,000,000 so an unbounded objective still terminates). null when no such value exists in the box \u2014 always null for a dead branch."
+                      "description": "A full input dict at the MINIMUM value of the compared expression that still satisfies this arm's own full path condition (z3 Optimize \u2014 no artificial box; an unbounded direction is detected from the Optimize handle itself, see min_note). null when no such value exists at all (always null for a dead branch) OR the true minimum is unbounded."
+                    },
+                    "min_note": {
+                      "type": "string",
+                      "description": "Present only when min_input is null BECAUSE the expression is unbounded below under this arm's path condition \u2014 absent for a plain unsatisfiable or solver-timeout null, which say nothing more."
                     },
                     "max_input": {
                       "type": [
@@ -2123,6 +2127,10 @@
                         "null"
                       ],
                       "description": "As min_input, at the MAXIMUM value."
+                    },
+                    "max_note": {
+                      "type": "string",
+                      "description": "As min_note, for max_input (unbounded above)."
                     },
                     "equality_edge_input": {
                       "type": [

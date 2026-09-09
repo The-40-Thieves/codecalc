@@ -661,10 +661,10 @@
   "dev": {
     "n": 184,
     "skipped": 50,
-    "top1_hits": 113,
-    "top3_hits": 152,
-    "top1": 0.6141,
-    "top3": 0.8261,
+    "top1_hits": 117,
+    "top3_hits": 150,
+    "top1": 0.6359,
+    "top3": 0.8152,
     "per_tool": {
       "algebraic_equiv": {
         "n": 4,
@@ -703,7 +703,7 @@
       },
       "branch_reachability": {
         "n": 6,
-        "top1": 0.8333,
+        "top1": 1.0,
         "top3": 1.0
       },
       "calc_exact": {
@@ -723,7 +723,7 @@
       },
       "compare_edge_cases": {
         "n": 4,
-        "top1": 0.75,
+        "top1": 1.0,
         "top3": 1.0
       },
       "compare_execution": {
@@ -764,7 +764,7 @@
       "execute_code_stream": {
         "n": 4,
         "top1": 0.5,
-        "top3": 1.0
+        "top3": 0.75
       },
       "extract_function": {
         "n": 3,
@@ -789,7 +789,7 @@
       "limit_expression": {
         "n": 4,
         "top1": 0.25,
-        "top3": 0.5
+        "top3": 0.25
       },
       "list_execution_providers": {
         "n": 3,
@@ -858,7 +858,7 @@
       },
       "trace_execution": {
         "n": 7,
-        "top1": 0.8571,
+        "top1": 1.0,
         "top3": 1.0
       },
       "truth_table": {
@@ -878,7 +878,7 @@
       },
       "verify_translation": {
         "n": 4,
-        "top1": 0.5,
+        "top1": 0.75,
         "top3": 1.0
       },
       "z3_check": {
@@ -919,7 +919,7 @@
         ],
         "got": "list_languages",
         "top3": [
-          "compare_edge_cases",
+          "branch_reachability",
           "list_languages",
           "truth_table"
         ]
@@ -1123,11 +1123,11 @@
         "expected": [
           "percentiles"
         ],
-        "got": "calc_stats",
+        "got": "trace_execution",
         "top3": [
-          "branch_reachability",
           "calc_stats",
-          "execute_code_stream"
+          "execute_code_stream",
+          "trace_execution"
         ]
       },
       {
@@ -1221,9 +1221,9 @@
         ],
         "got": "data_sizes",
         "top3": [
-          "bits",
           "data_sizes",
-          "float_repr"
+          "float_repr",
+          "trace_execution"
         ]
       },
       {
@@ -1335,8 +1335,8 @@
         "got": "analyze_complexity",
         "top3": [
           "analyze_complexity",
-          "limit_expression",
-          "symbolic"
+          "symbolic",
+          "trace_execution"
         ]
       },
       {
@@ -1348,7 +1348,7 @@
         "got": "benchmark",
         "top3": [
           "benchmark",
-          "compare_edge_cases",
+          "trace_execution",
           "verify_optimization"
         ]
       },
@@ -1387,30 +1387,6 @@
         "top3": [
           "branch_reachability",
           "list_languages",
-          "verify_translation"
-        ]
-      },
-      {
-        "prompt": "I converted this one script from ruby to python \u2014 actually run both and check they match, don't just eyeball the diff",
-        "expected": [
-          "verify_translation"
-        ],
-        "got": "branch_reachability",
-        "top3": [
-          "branch_reachability",
-          "int_widths",
-          "verify_translation"
-        ]
-      },
-      {
-        "prompt": "I want a full GRID across many snippets and many tricky inputs, not a single before/after equivalence check",
-        "expected": [
-          "compare_edge_cases"
-        ],
-        "got": "branch_reachability",
-        "top3": [
-          "branch_reachability",
-          "compare_edge_cases",
           "verify_translation"
         ]
       },
@@ -1469,8 +1445,8 @@
         ],
         "got": "trace_execution",
         "top3": [
-          "branch_reachability",
           "compare_threshold",
+          "int_widths",
           "trace_execution"
         ]
       },
@@ -1493,7 +1469,7 @@
         ],
         "got": "trace_execution",
         "top3": [
-          "execute_code_stream",
+          "branch_reachability",
           "trace_execution",
           "verify_translation"
         ]
@@ -1518,8 +1494,8 @@
         "got": "benchmark",
         "top3": [
           "benchmark",
-          "branch_reachability",
-          "calc_stats"
+          "calc_stats",
+          "trace_execution"
         ]
       },
       {
@@ -1527,11 +1503,11 @@
         "expected": [
           "analyze_complexity"
         ],
-        "got": "list_languages",
+        "got": "branch_reachability",
         "top3": [
           "branch_reachability",
-          "list_execution_providers",
-          "list_languages"
+          "list_languages",
+          "trace_execution"
         ]
       },
       {
@@ -1715,18 +1691,6 @@
         ]
       },
       {
-        "prompt": "Which branch of this if/elif actually fired when I ran this input, and which one never did",
-        "expected": [
-          "trace_execution"
-        ],
-        "got": "branch_reachability",
-        "top3": [
-          "branch_reachability",
-          "trace_execution",
-          "verify_translation"
-        ]
-      },
-      {
         "prompt": "Just run this python snippet once and tell me what it prints and how long it took",
         "expected": [
           "execute_code"
@@ -1737,28 +1701,16 @@
           "extract_function",
           "z3_check"
         ]
-      },
-      {
-        "prompt": "Find me an input that actually triggers this specific elif case, or prove that none exists",
-        "expected": [
-          "branch_reachability"
-        ],
-        "got": "verify_translation",
-        "top3": [
-          "branch_reachability",
-          "compare_edge_cases",
-          "verify_translation"
-        ]
       }
     ]
   },
   "full": {
     "n": 234,
     "skipped": 0,
-    "top1_hits": 137,
-    "top3_hits": 187,
-    "top1": 0.5855,
-    "top3": 0.7991,
+    "top1_hits": 138,
+    "top3_hits": 184,
+    "top1": 0.5897,
+    "top3": 0.7863,
     "per_tool": {
       "algebraic_equiv": {
         "n": 4,
@@ -1797,7 +1749,7 @@
       },
       "branch_reachability": {
         "n": 6,
-        "top1": 0.8333,
+        "top1": 1.0,
         "top3": 1.0
       },
       "calc_exact": {
@@ -1817,7 +1769,7 @@
       },
       "compare_edge_cases": {
         "n": 4,
-        "top1": 0.75,
+        "top1": 1.0,
         "top3": 1.0
       },
       "compare_execution": {
@@ -1868,7 +1820,7 @@
       "float_repr": {
         "n": 4,
         "top1": 0.25,
-        "top3": 0.75
+        "top3": 0.5
       },
       "human_duration": {
         "n": 4,
@@ -1888,7 +1840,7 @@
       "limit_expression": {
         "n": 4,
         "top1": 0.25,
-        "top3": 1.0
+        "top3": 0.75
       },
       "list_execution_providers": {
         "n": 3,
@@ -1967,7 +1919,7 @@
       },
       "session_read_file": {
         "n": 4,
-        "top1": 0.5,
+        "top1": 0.25,
         "top3": 0.5
       },
       "session_run": {
@@ -1977,7 +1929,7 @@
       },
       "session_snapshot": {
         "n": 7,
-        "top1": 0.7143,
+        "top1": 0.5714,
         "top3": 0.8571
       },
       "session_start": {
@@ -2017,17 +1969,17 @@
       },
       "trace_execution": {
         "n": 7,
-        "top1": 0.8571,
+        "top1": 1.0,
         "top3": 1.0
       },
       "truth_table": {
         "n": 4,
         "top1": 0.25,
-        "top3": 0.75
+        "top3": 0.5
       },
       "update_runtimes": {
         "n": 3,
-        "top1": 1.0,
+        "top1": 0.6667,
         "top3": 1.0
       },
       "verify_optimization": {
@@ -2037,7 +1989,7 @@
       },
       "verify_translation": {
         "n": 4,
-        "top1": 0.5,
+        "top1": 0.75,
         "top3": 1.0
       },
       "z3_check": {
@@ -2078,9 +2030,9 @@
         ],
         "got": "list_languages",
         "top3": [
+          "branch_reachability",
           "list_languages",
-          "session_artifacts",
-          "truth_table"
+          "session_artifacts"
         ]
       },
       {
@@ -2270,11 +2222,11 @@
         "expected": [
           "percentiles"
         ],
-        "got": "calc_stats",
+        "got": "trace_execution",
         "top3": [
-          "branch_reachability",
           "calc_stats",
-          "execute_code_stream"
+          "execute_code_stream",
+          "trace_execution"
         ]
       },
       {
@@ -2368,8 +2320,8 @@
         ],
         "got": "evaluate_expression",
         "top3": [
+          "calc_exact",
           "evaluate_expression",
-          "float_repr",
           "int_widths"
         ]
       },
@@ -2380,9 +2332,9 @@
         ],
         "got": "data_sizes",
         "top3": [
-          "bits",
           "data_sizes",
-          "float_repr"
+          "float_repr",
+          "trace_execution"
         ]
       },
       {
@@ -2494,8 +2446,8 @@
         "got": "analyze_complexity",
         "top3": [
           "analyze_complexity",
-          "limit_expression",
-          "symbolic"
+          "symbolic",
+          "trace_execution"
         ]
       },
       {
@@ -2547,30 +2499,6 @@
           "branch_reachability",
           "session_snapshot",
           "verify_translation"
-        ]
-      },
-      {
-        "prompt": "I converted this one script from ruby to python \u2014 actually run both and check they match, don't just eyeball the diff",
-        "expected": [
-          "verify_translation"
-        ],
-        "got": "branch_reachability",
-        "top3": [
-          "branch_reachability",
-          "update_runtimes",
-          "verify_translation"
-        ]
-      },
-      {
-        "prompt": "I want a full GRID across many snippets and many tricky inputs, not a single before/after equivalence check",
-        "expected": [
-          "compare_edge_cases"
-        ],
-        "got": "branch_reachability",
-        "top3": [
-          "branch_reachability",
-          "compare_edge_cases",
-          "run_inspect"
         ]
       },
       {
@@ -2640,9 +2568,9 @@
         ],
         "got": "run_inspect",
         "top3": [
+          "compare_execution",
           "run_inspect",
-          "run_submit",
-          "session_run"
+          "run_submit"
         ]
       },
       {
@@ -2652,9 +2580,21 @@
         ],
         "got": "trace_execution",
         "top3": [
-          "benchmark",
+          "branch_reachability",
           "trace_execution",
           "verify_translation"
+        ]
+      },
+      {
+        "prompt": "I don't just want to know what's outdated \u2014 actually perform the upgrade this time",
+        "expected": [
+          "update_runtimes"
+        ],
+        "got": "trace_execution",
+        "top3": [
+          "human_duration",
+          "trace_execution",
+          "update_runtimes"
         ]
       },
       {
@@ -2798,7 +2738,7 @@
         "top3": [
           "session_read_file",
           "session_snapshot",
-          "verify_translation"
+          "trace_execution"
         ]
       },
       {
@@ -2823,6 +2763,18 @@
           "calc_exact",
           "run_cancel",
           "session_start"
+        ]
+      },
+      {
+        "prompt": "I want a restore point for this workspace I can return to if the next few changes go badly",
+        "expected": [
+          "session_snapshot"
+        ],
+        "got": "trace_execution",
+        "top3": [
+          "session_read_file",
+          "session_snapshot",
+          "trace_execution"
         ]
       },
       {
@@ -2859,6 +2811,18 @@
           "evaluate_expression",
           "session_start",
           "session_write_file"
+        ]
+      },
+      {
+        "prompt": "I know exactly which single file I want the CONTENTS of \u2014 I don't need a whole listing",
+        "expected": [
+          "session_read_file"
+        ],
+        "got": "trace_execution",
+        "top3": [
+          "session_read_file",
+          "session_write_file",
+          "trace_execution"
         ]
       },
       {
@@ -2990,7 +2954,7 @@
         "top3": [
           "benchmark",
           "calc_stats",
-          "session_read_file"
+          "trace_execution"
         ]
       },
       {
@@ -2998,11 +2962,11 @@
         "expected": [
           "analyze_complexity"
         ],
-        "got": "list_languages",
+        "got": "branch_reachability",
         "top3": [
-          "list_execution_providers",
+          "branch_reachability",
           "list_languages",
-          "update_runtimes"
+          "trace_execution"
         ]
       },
       {
@@ -3154,7 +3118,7 @@
         "expected": [
           "symbolic"
         ],
-        "got": "z3_check",
+        "got": "branch_reachability",
         "top3": [
           "branch_reachability",
           "list_units",
@@ -3186,18 +3150,6 @@
         ]
       },
       {
-        "prompt": "Which branch of this if/elif actually fired when I ran this input, and which one never did",
-        "expected": [
-          "trace_execution"
-        ],
-        "got": "branch_reachability",
-        "top3": [
-          "branch_reachability",
-          "trace_execution",
-          "verify_translation"
-        ]
-      },
-      {
         "prompt": "Just run this python snippet once and tell me what it prints and how long it took",
         "expected": [
           "execute_code"
@@ -3208,23 +3160,11 @@
           "run_inspect",
           "run_submit"
         ]
-      },
-      {
-        "prompt": "Find me an input that actually triggers this specific elif case, or prove that none exists",
-        "expected": [
-          "branch_reachability"
-        ],
-        "got": "verify_translation",
-        "top3": [
-          "branch_reachability",
-          "compare_edge_cases",
-          "verify_translation"
-        ]
       }
     ]
   },
   "codecalc_version": "0.10.0",
-  "generated_at": "2026-09-09T00:45:26+00:00",
+  "generated_at": "2026-09-09T01:23:55+00:00",
   "prompt_count": 234,
-  "prompt_set_sha256": "59baa74819a839e82541e2f48be3c77d67635d1269a26a072b3817a7eaeb85e8"
+  "prompt_set_sha256": "98637b4247bf8a2b15698fd302877cde9d7d68b98713f2157aae056f6f2f01ed"
 }

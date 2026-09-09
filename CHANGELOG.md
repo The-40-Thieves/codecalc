@@ -163,26 +163,38 @@ behind it.
   on THIS path, never a crash), a `witness` input dict when reachable, and
   `boundary_inputs`: for each `Compare` in the arm's own guard with a
   numeric side, the MINIMUM and MAXIMUM satisfying value (z3 `Optimize`,
-  boxed to ±1,000,000 so an unbounded objective still terminates) and the
-  "equality edge" (a witness where the guard's own literal threshold is hit
-  exactly) — every input dict shaped to drop straight into
-  `compare_edge_cases`'s `test_inputs`. Top level adds `supported`
-  (`inputs`/`dead_count`/`reachable_count`/`unknown_count`/`truncated`/
-  `suggested_test_inputs` — a deduped pool of every witness and boundary
-  input, ordered by line). Loops are analyzed as ONE representative
-  iteration, never unrolled: the loop variable is bound to a fresh symbolic
-  value ranged over the loop's own real static bounds (sound for the
-  loop's OWN branch and whatever is nested directly inside it — a `for`
-  body is analyzed with the actual iteration values available, never an
-  unconstrained one), but a loop's own effect on variables is NOT carried
-  into the code AFTER it — a documented, known-imprecise choice (see
-  `docs/design/2026-09-08-branch-reachability.md`) that can under-report:
-  a later branch reachable only via the loop's accumulated effect can be
-  reported `dead` here. `witness`es are never taken on faith regardless —
-  every `verdict: reachable` in the test suite is corroborated by actually
-  running the program through `tracing.execute_trace` on its witness and
-  checking the branch's own line fired. Refuses up front, before ever
-  calling z3, naming the
+  no artificial box — an unbounded direction is detected straight from the
+  `Optimize` handle's own `.lower()`/`.upper()`, `null` plus a `min_note`/
+  `max_note` rather than a box edge quietly standing in for a real
+  extremum) and the "equality edge" (a witness where the guard's own
+  literal threshold is hit exactly) — every input dict shaped to drop
+  straight into `compare_edge_cases`'s `test_inputs`. Top level adds
+  `supported` (`inputs`/`dead_count`/`reachable_count`/`unknown_count`/
+  `truncated`/`suggested_test_inputs` — a deduped pool of every witness and
+  boundary input, ordered by line). An if/elif/else's arms are joined back
+  at a real phi/`If`-merge on every variable either arm assigned — an arm
+  that ends in an unconditional `return` contributes nothing to the merge
+  (its path is closed), and a variable assigned in only some surviving
+  arms is dropped rather than guessed at, so a later reference to it
+  raises the same "undefined name" `unknown` a genuine `UnboundLocalError`
+  path would. Loops get the identical merge treatment, analyzed as ONE
+  representative iteration rather than unrolled: the loop variable is
+  bound to a fresh symbolic value ranged over the loop's own real static
+  bounds, and the post-loop environment is `If(entered, value-after-one-
+  iteration, value-before)` — a real, if imprecise, account of the loop's
+  effect, not a discard of it. The ONE known remaining imprecision (see
+  `docs/design/2026-09-08-branch-reachability.md`) is a variable that only
+  stabilizes after two-or-more iterations (an accumulator, for instance):
+  modeled as if the loop ran at most once, which can under-report a
+  genuinely reachable later branch as `dead` — never the reverse.
+  `witness`es are never taken on faith regardless — every `verdict:
+  reachable` in the test suite is corroborated by actually running the
+  program through `tracing.execute_trace` on its witness and checking the
+  branch's own line fired. Refuses up front, before ever calling z3, the
+  unsupported-construct scan running BEFORE any function-count/`inputs`
+  structural check (so a module-scope `class`, for instance, is refused
+  naming `class definition` and its line, not a generic "no function
+  found" message), naming the
   construct and its line: floats/`None`/bytes/complex literals, attribute
   access, f-strings, comprehensions, classes, `async`, `try`/`except`,
   imports, subscripts, chained or `is`/`in` comparisons, any call outside
@@ -200,12 +212,25 @@ behind it.
   dead/unknown verdicts on an if/elif/else-plus-static-loop program, a
   dead branch (`x > 5 and x < 3`), every reachable witness verified by
   running it through `tracing.execute_trace` and checking the branch's own
-  line actually executed, boundary inputs for `<`/`<=`/`==`/`!=` guards,
-  `str` equality and `len()` guards, `bool` inputs, early return cutting a
-  later branch dead, every refusal case (asserting the `validation` code
-  and the exact line), the non-python refusal, the `max_branches` cap
-  (`truncated: true`), and a timeout landing on `unknown` rather than a
-  crash.
+  line actually executed, boundary inputs (including confirmed-unbounded
+  `null`s) for `<`/`<=`/`>`/`>=`/`==`/`!=` guards, `str` equality and
+  `len()` guards, `bool` inputs, early return cutting a later branch dead,
+  every refusal case (asserting the `validation` code and the exact line,
+  a module-scope `class` among them), the non-python refusal, the
+  `max_branches` cap (`truncated: true`), a timeout landing on `unknown`
+  rather than a crash, and — closing a cross-vendor review's two BLOCKER
+  findings against the first cut (an assignment inside a non-returning
+  if/elif/else arm, or a loop body, was silently discarded for the code
+  after it, so a later branch's path condition never saw it) — the
+  environment-merge fix itself: an assignment in the else arm only, in
+  both arms with a later branch reachable ONLY via the else value, an
+  elif chain assigning three different values each read back separately,
+  an arm ending in `return` whose assignment must not leak, a variable
+  introduced in only one arm producing `unknown` (not a false verdict) on
+  a later reference, a `for range(3)` body assignment merged into a later
+  `if`, and nested ifs assigning at two depths — every one of those
+  witnesses is ALSO corroborated by `tracing.execute_trace` on the real
+  program, not merely on the model.
 - MCP Apps (`io.modelcontextprotocol/ui`) graphical views for
   `verify_translation` and `verify_optimization`: each tool now carries
   `_meta.ui.resourceUri` pointing at a self-contained `ui://` HTML resource
