@@ -226,9 +226,9 @@
 {"prompt": "I need to debug why my loop never hits the else case \u2014 show me a step-by-step record of what ran", "expected": ["trace_execution"]}
 {"prompt": "Just run this python snippet once and tell me what it prints and how long it took", "expected": ["execute_code"]}
 {"prompt": "What's the Big-O time complexity of this function, just from reading its structure", "expected": ["analyze_complexity"]}
-{"prompt": "Prove that this arm of my if/elif chain can never execute, for any possible input, not just the one I tried", "expected": ["branch_reachability"]}
+{"prompt": "Show me that this if/elif arm is dead code for every possible input, not just one I already tested", "expected": ["branch_reachability"]}
 {"prompt": "What input satisfies this elif guard, or prove nothing does", "expected": ["branch_reachability"]}
 {"prompt": "Which of these if/else branches are truly dead code versus actually reachable by some input", "expected": ["branch_reachability"]}
 {"prompt": "Given this function, tell me exactly which if/elif arms can never execute, proved for every possible input", "expected": ["branch_reachability"]}
-{"prompt": "I need the boundary value where this comparison flips from true to false, as an actual test input I can pass in", "expected": ["branch_reachability"]}
-{"prompt": "Check every arm of this python function against every possible input with a real constraint solver, not just the case I ran", "expected": ["branch_reachability"]}
+{"prompt": "What is the boundary value for this if guard, the point where the comparison flips, as a usable input", "expected": ["branch_reachability"]}
+{"prompt": "For every possible input, decide which if/elif arms of this python function are reachable, using a real solver", "expected": ["branch_reachability"]}

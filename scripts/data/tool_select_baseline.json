@@ -661,10 +661,10 @@
   "dev": {
     "n": 184,
     "skipped": 50,
-    "top1_hits": 117,
-    "top3_hits": 150,
-    "top1": 0.6359,
-    "top3": 0.8152,
+    "top1_hits": 119,
+    "top3_hits": 153,
+    "top1": 0.6467,
+    "top3": 0.8315,
     "per_tool": {
       "algebraic_equiv": {
         "n": 4,
@@ -764,7 +764,7 @@
       "execute_code_stream": {
         "n": 4,
         "top1": 0.5,
-        "top3": 0.75
+        "top3": 1.0
       },
       "extract_function": {
         "n": 3,
@@ -789,7 +789,7 @@
       "limit_expression": {
         "n": 4,
         "top1": 0.25,
-        "top3": 0.25
+        "top3": 0.75
       },
       "list_execution_providers": {
         "n": 3,
@@ -838,7 +838,7 @@
       },
       "simplify_expression": {
         "n": 4,
-        "top1": 0.75,
+        "top1": 1.0,
         "top3": 1.0
       },
       "solve_expression": {
@@ -878,7 +878,7 @@
       },
       "verify_translation": {
         "n": 4,
-        "top1": 0.75,
+        "top1": 1.0,
         "top3": 1.0
       },
       "z3_check": {
@@ -895,7 +895,7 @@
         ],
         "got": "compare_threshold",
         "top3": [
-          "algebraic_equiv",
+          "branch_reachability",
           "compare_execution",
           "compare_threshold"
         ]
@@ -919,7 +919,7 @@
         ],
         "got": "list_languages",
         "top3": [
-          "branch_reachability",
+          "compare_edge_cases",
           "list_languages",
           "truth_table"
         ]
@@ -931,9 +931,9 @@
         ],
         "got": "list_languages",
         "top3": [
-          "branch_reachability",
           "list_languages",
-          "truth_table"
+          "truth_table",
+          "verify_translation"
         ]
       },
       {
@@ -944,8 +944,8 @@
         ],
         "got": "verify_translation",
         "top3": [
-          "human_duration",
           "solve_linear",
+          "symbolic",
           "verify_translation"
         ]
       },
@@ -1123,7 +1123,7 @@
         "expected": [
           "percentiles"
         ],
-        "got": "trace_execution",
+        "got": "execute_code_stream",
         "top3": [
           "calc_stats",
           "execute_code_stream",
@@ -1221,9 +1221,9 @@
         ],
         "got": "data_sizes",
         "top3": [
+          "bits",
           "data_sizes",
-          "float_repr",
-          "trace_execution"
+          "float_repr"
         ]
       },
       {
@@ -1335,8 +1335,8 @@
         "got": "analyze_complexity",
         "top3": [
           "analyze_complexity",
-          "symbolic",
-          "trace_execution"
+          "limit_expression",
+          "symbolic"
         ]
       },
       {
@@ -1348,22 +1348,8 @@
         "got": "benchmark",
         "top3": [
           "benchmark",
-          "trace_execution",
+          "limit_expression",
           "verify_optimization"
-        ]
-      },
-      {
-        "prompt": "Take this messy algebraic formula and give me its cleanest possible form",
-        "expected": [
-          "evaluate_expression",
-          "simplify_expression",
-          "symbolic"
-        ],
-        "got": "branch_reachability",
-        "top3": [
-          "algebraic_equiv",
-          "branch_reachability",
-          "evaluate_expression"
         ]
       },
       {
@@ -1376,18 +1362,6 @@
           "solve_expression",
           "truth_table",
           "z3_check"
-        ]
-      },
-      {
-        "prompt": "I have ONE original and ONE new rewrite \u2014 did the rewrite actually preserve behavior, run and checked, not just eyeballed?",
-        "expected": [
-          "verify_translation"
-        ],
-        "got": "branch_reachability",
-        "top3": [
-          "branch_reachability",
-          "list_languages",
-          "verify_translation"
         ]
       },
       {
@@ -1455,9 +1429,9 @@
         "expected": [
           "execute_code_stream"
         ],
-        "got": "compare_execution",
+        "got": "branch_reachability",
         "top3": [
-          "compare_execution",
+          "branch_reachability",
           "execute_code",
           "execute_code_stream"
         ]
@@ -1469,7 +1443,7 @@
         ],
         "got": "trace_execution",
         "top3": [
-          "branch_reachability",
+          "execute_code_stream",
           "trace_execution",
           "verify_translation"
         ]
@@ -1494,8 +1468,8 @@
         "got": "benchmark",
         "top3": [
           "benchmark",
-          "calc_stats",
-          "trace_execution"
+          "branch_reachability",
+          "calc_stats"
         ]
       },
       {
@@ -1506,8 +1480,8 @@
         "got": "branch_reachability",
         "top3": [
           "branch_reachability",
-          "list_languages",
-          "trace_execution"
+          "list_execution_providers",
+          "list_languages"
         ]
       },
       {
@@ -1661,8 +1635,8 @@
         ],
         "got": "z3_check",
         "top3": [
-          "branch_reachability",
           "list_units",
+          "physical_constants",
           "z3_check"
         ]
       },
@@ -1707,10 +1681,10 @@
   "full": {
     "n": 234,
     "skipped": 0,
-    "top1_hits": 138,
-    "top3_hits": 184,
-    "top1": 0.5897,
-    "top3": 0.7863,
+    "top1_hits": 142,
+    "top3_hits": 187,
+    "top1": 0.6068,
+    "top3": 0.7991,
     "per_tool": {
       "algebraic_equiv": {
         "n": 4,
@@ -1820,7 +1794,7 @@
       "float_repr": {
         "n": 4,
         "top1": 0.25,
-        "top3": 0.5
+        "top3": 0.75
       },
       "human_duration": {
         "n": 4,
@@ -1840,7 +1814,7 @@
       "limit_expression": {
         "n": 4,
         "top1": 0.25,
-        "top3": 0.75
+        "top3": 1.0
       },
       "list_execution_providers": {
         "n": 3,
@@ -1919,7 +1893,7 @@
       },
       "session_read_file": {
         "n": 4,
-        "top1": 0.25,
+        "top1": 0.5,
         "top3": 0.5
       },
       "session_run": {
@@ -1949,7 +1923,7 @@
       },
       "simplify_expression": {
         "n": 4,
-        "top1": 0.75,
+        "top1": 1.0,
         "top3": 1.0
       },
       "solve_expression": {
@@ -1975,11 +1949,11 @@
       "truth_table": {
         "n": 4,
         "top1": 0.25,
-        "top3": 0.5
+        "top3": 0.75
       },
       "update_runtimes": {
         "n": 3,
-        "top1": 0.6667,
+        "top1": 1.0,
         "top3": 1.0
       },
       "verify_optimization": {
@@ -1989,7 +1963,7 @@
       },
       "verify_translation": {
         "n": 4,
-        "top1": 0.75,
+        "top1": 1.0,
         "top3": 1.0
       },
       "z3_check": {
@@ -2006,7 +1980,7 @@
         ],
         "got": "session_artifacts",
         "top3": [
-          "compare_execution",
+          "branch_reachability",
           "compare_threshold",
           "session_artifacts"
         ]
@@ -2030,9 +2004,9 @@
         ],
         "got": "list_languages",
         "top3": [
-          "branch_reachability",
           "list_languages",
-          "session_artifacts"
+          "session_artifacts",
+          "truth_table"
         ]
       },
       {
@@ -2042,9 +2016,9 @@
         ],
         "got": "list_languages",
         "top3": [
-          "branch_reachability",
           "list_languages",
-          "truth_table"
+          "truth_table",
+          "verify_translation"
         ]
       },
       {
@@ -2222,7 +2196,7 @@
         "expected": [
           "percentiles"
         ],
-        "got": "trace_execution",
+        "got": "execute_code_stream",
         "top3": [
           "calc_stats",
           "execute_code_stream",
@@ -2260,9 +2234,9 @@
         ],
         "got": "human_duration",
         "top3": [
-          "analyze_complexity",
           "convert_units",
-          "human_duration"
+          "human_duration",
+          "runtimes_status"
         ]
       },
       {
@@ -2320,8 +2294,8 @@
         ],
         "got": "evaluate_expression",
         "top3": [
-          "calc_exact",
           "evaluate_expression",
+          "float_repr",
           "int_widths"
         ]
       },
@@ -2332,9 +2306,9 @@
         ],
         "got": "data_sizes",
         "top3": [
+          "bits",
           "data_sizes",
-          "float_repr",
-          "trace_execution"
+          "float_repr"
         ]
       },
       {
@@ -2446,8 +2420,8 @@
         "got": "analyze_complexity",
         "top3": [
           "analyze_complexity",
-          "symbolic",
-          "trace_execution"
+          "limit_expression",
+          "symbolic"
         ]
       },
       {
@@ -2464,20 +2438,6 @@
         ]
       },
       {
-        "prompt": "Take this messy algebraic formula and give me its cleanest possible form",
-        "expected": [
-          "evaluate_expression",
-          "simplify_expression",
-          "symbolic"
-        ],
-        "got": "branch_reachability",
-        "top3": [
-          "algebraic_equiv",
-          "branch_reachability",
-          "evaluate_expression"
-        ]
-      },
-      {
         "prompt": "I need a real constraint solver's verdict on Int/Real constraints, not an enumerated boolean truth table",
         "expected": [
           "z3_check"
@@ -2487,18 +2447,6 @@
           "solve_expression",
           "truth_table",
           "z3_check"
-        ]
-      },
-      {
-        "prompt": "I have ONE original and ONE new rewrite \u2014 did the rewrite actually preserve behavior, run and checked, not just eyeballed?",
-        "expected": [
-          "verify_translation"
-        ],
-        "got": "branch_reachability",
-        "top3": [
-          "branch_reachability",
-          "session_snapshot",
-          "verify_translation"
         ]
       },
       {
@@ -2568,9 +2516,9 @@
         ],
         "got": "run_inspect",
         "top3": [
-          "compare_execution",
           "run_inspect",
-          "run_submit"
+          "run_submit",
+          "session_run"
         ]
       },
       {
@@ -2580,21 +2528,9 @@
         ],
         "got": "trace_execution",
         "top3": [
-          "branch_reachability",
+          "benchmark",
           "trace_execution",
           "verify_translation"
-        ]
-      },
-      {
-        "prompt": "I don't just want to know what's outdated \u2014 actually perform the upgrade this time",
-        "expected": [
-          "update_runtimes"
-        ],
-        "got": "trace_execution",
-        "top3": [
-          "human_duration",
-          "trace_execution",
-          "update_runtimes"
         ]
       },
       {
@@ -2602,9 +2538,9 @@
         "expected": [
           "session_start"
         ],
-        "got": "run_submit",
+        "got": "branch_reachability",
         "top3": [
-          "execute_code_stream",
+          "branch_reachability",
           "run_inspect",
           "run_submit"
         ]
@@ -2748,7 +2684,7 @@
         ],
         "got": "run_inspect",
         "top3": [
-          "branch_reachability",
+          "list_languages",
           "run_cancel",
           "run_inspect"
         ]
@@ -2760,7 +2696,7 @@
         ],
         "got": "run_cancel",
         "top3": [
-          "calc_exact",
+          "branch_reachability",
           "run_cancel",
           "session_start"
         ]
@@ -2814,18 +2750,6 @@
         ]
       },
       {
-        "prompt": "I know exactly which single file I want the CONTENTS of \u2014 I don't need a whole listing",
-        "expected": [
-          "session_read_file"
-        ],
-        "got": "trace_execution",
-        "top3": [
-          "session_read_file",
-          "session_write_file",
-          "trace_execution"
-        ]
-      },
-      {
         "prompt": "This program is spread across SEVERAL files already saved in a workspace, not one self-contained snippet I'm pasting in",
         "expected": [
           "session_run"
@@ -2854,11 +2778,11 @@
         "expected": [
           "run_submit"
         ],
-        "got": "runtimes_status",
+        "got": "branch_reachability",
         "top3": [
+          "branch_reachability",
           "extract_function",
-          "runtimes_status",
-          "z3_check"
+          "runtimes_status"
         ]
       },
       {
@@ -2954,7 +2878,7 @@
         "top3": [
           "benchmark",
           "calc_stats",
-          "trace_execution"
+          "session_read_file"
         ]
       },
       {
@@ -2965,8 +2889,8 @@
         "got": "branch_reachability",
         "top3": [
           "branch_reachability",
-          "list_languages",
-          "trace_execution"
+          "list_execution_providers",
+          "list_languages"
         ]
       },
       {
@@ -3118,10 +3042,10 @@
         "expected": [
           "symbolic"
         ],
-        "got": "branch_reachability",
+        "got": "z3_check",
         "top3": [
-          "branch_reachability",
           "list_units",
+          "physical_constants",
           "z3_check"
         ]
       },
@@ -3164,7 +3088,7 @@
     ]
   },
   "codecalc_version": "0.10.0",
-  "generated_at": "2026-09-09T01:23:55+00:00",
+  "generated_at": "2026-09-09T02:06:27+00:00",
   "prompt_count": 234,
-  "prompt_set_sha256": "98637b4247bf8a2b15698fd302877cde9d7d68b98713f2157aae056f6f2f01ed"
+  "prompt_set_sha256": "ff517584676b4b4f31bdf6e19d18a9965a460d4d5eb06104fcc73b081616a09d"
 }

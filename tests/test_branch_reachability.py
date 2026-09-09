@@ -567,18 +567,15 @@ check("for-assign: `if flag == 1` is reachable (the loop's merged effect, "
       f"-> {_by_line(_rfa, 5)}")
 _verify_every_witness(_rfa, _FOR_ASSIGN, "f", "for-assign")
 
-# A SEPARATE, explicitly-labeled case documents the known, ACCEPTED
-# imprecision the module docstring's LOOPS section describes: `total`
-# ACCUMULATES across iterations (not idempotent like `flag` above), so the
-# one-representative-iteration model reflects `total = 1` (one iteration's
-# real effect) but NOT `total = 3` (the real, 3-iteration result) — a
-# genuinely reachable branch (`total == 3` really does happen) can be
-# under-reported `dead` here. This is the documented direction of error
-# (never the reverse — see the design note); NOT run through
-# `_verify_every_witness`, because `total == 1`'s witness does not
-# correspond to what an actual `range(3)` run of THIS program does, and
-# asserting a trace match here would be asserting the wrong thing on
-# purpose.
+# A SEPARATE case confirms that a `for` loop WITHIN the unroll cap is now
+# EXACT even for an ACCUMULATOR (not merely an idempotent assignment like
+# `flag` above) — `total` genuinely reaches 3 after three real iterations,
+# and unrolling sees that directly rather than approximating it as one
+# iteration's effect. Before the loop-soundness fix (confirmation review on
+# d163c8f) this exact program was the one used to document a "known,
+# accepted imprecision" that no longer exists for anything within the cap
+# — see `_ABOVE_CAP`/`_WHILE_ACCUM` below for where that imprecision still
+# genuinely applies (above the cap, and for `while`).
 _FOR_ACCUMULATE = (
     "def f(n):\n"
     "    total = 0\n"
@@ -591,13 +588,13 @@ _FOR_ACCUMULATE = (
     "    return 0\n"
 )
 _rfacc = br.analyze("python3", _FOR_ACCUMULATE)
-check("for-accumulate: `if total == 1` is reachable per the one-iteration "
-      "model (documented imprecision, not asserted against a real trace)",
-      _by_line(_rfacc, 5)["verdict"] == "reachable", f"-> {_by_line(_rfacc, 5)}")
-check("for-accumulate: `if total == 3` (the REAL result) is under-reported "
-      "dead — the direction the design note says this imprecision always "
-      "goes",
-      _by_line(_rfacc, 7)["verdict"] == "dead", f"-> {_by_line(_rfacc, 7)}")
+check("for-accumulate (within the unroll cap): `if total == 1` is DEAD — "
+      "the loop always runs all 3 iterations, total is never left at 1",
+      _by_line(_rfacc, 5)["verdict"] == "dead", f"-> {_by_line(_rfacc, 5)}")
+check("for-accumulate (within the unroll cap): `if total == 3` (the REAL, "
+      "exact result) is reachable",
+      _by_line(_rfacc, 7)["verdict"] == "reachable", f"-> {_by_line(_rfacc, 7)}")
+_verify_every_witness(_rfacc, _FOR_ACCUMULATE, "f", "for-accumulate")
 
 
 # ── nested ifs assigning at two depths ──────────────────────────────────────
@@ -629,6 +626,222 @@ check("module-scope class: refused naming 'class definition', not the generic me
       _rcls.get("ok") is False and "class definition" in (_rcls.get("error") or ""),
       f"-> {_rcls}")
 check("module-scope class: line == 1", _rcls.get("line") == 1, f"-> {_rcls}")
+
+
+# ── LOOP SOUNDNESS: confirmation-review BLOCKER on d163c8f ─────────────────
+# `_walk_loop`'s old single-mechanism approach bound the loop variable to a
+# fresh, RANGE-CONSTRAINED-but-otherwise-free symbol, walked the body once,
+# then MERGED the result — which made a variable that is only ever "the
+# last iteration's value" look like "any value in the range" for the code
+# after the loop. The review's own repro, verified failing before the fix
+# (`_merge_envs`/taint rewrite): `if x == 5` reported REACHABLE with witness
+# `{}`, when `f()` is fully deterministic (zero parameters) and always has
+# `x == 9` there — a false `reachable`, the one error class this tool
+# promises never to produce.
+_LOOP_REPRO = (
+    "def f():\n"
+    "    x = -1\n"
+    "    for i in range(0, 10):\n"
+    "        x = i\n"
+    "    if x == 5:\n"
+    "        return 1\n"
+    "    return 0\n"
+)
+_rlr = br.analyze("python3", _LOOP_REPRO)
+_rlr_branch = _by_line(_rlr, 5)
+check("loop repro: `if x == 5` is DEAD (x is always 9 after the loop, "
+      "never 5 — the exact confirmation-review repro)",
+      _rlr_branch["verdict"] == "dead", f"-> {_rlr_branch}")
+for _entry in _rlr_branch["boundary_inputs"]:
+    edge = _entry.get("equality_edge_input")
+    if edge is not None:
+        _proof = _proof_line(_LOOP_REPRO, _rlr_branch["line"], _rlr_branch["kind"])
+        check(f"loop repro: boundary edge {edge!r} does not actually reach the "
+              f"dead branch (trace-corroborated)",
+              not _hits_line(_LOOP_REPRO, "f", edge, _proof), f"-> edge={edge}")
+
+# The positive control: `if x == 9` (the REAL post-loop value) must be
+# reachable, with a real (here, trivially empty — zero parameters) witness,
+# proving unrolling gives the EXACT post-loop value, not merely "not the
+# wrong one".
+_LOOP_REPRO_POS = _LOOP_REPRO.replace("x == 5", "x == 9")
+_rlrp = br.analyze("python3", _LOOP_REPRO_POS)
+_rlrp_branch = _by_line(_rlrp, 5)
+check("loop repro positive control: `if x == 9` (the real post-loop value) "
+      "is reachable", _rlrp_branch["verdict"] == "reachable", f"-> {_rlrp_branch}")
+_verify_every_witness(_rlrp, _LOOP_REPRO_POS, "f", "loop-repro-positive")
+
+
+# ── a range of 0: the loop is dead, post-loop state is the PRE-loop value ──
+_RANGE_ZERO = (
+    "def f():\n"
+    "    x = 7\n"
+    "    for i in range(0):\n"
+    "        x = i\n"
+    "    if x == 7:\n"
+    "        return 1\n"
+    "    return 0\n"
+)
+_rz = br.analyze("python3", _RANGE_ZERO)
+check("range(0): the for-line is dead", _by_line(_rz, 3)["verdict"] == "dead", f"-> {_by_line(_rz, 3)}")
+check("range(0): the loop never ran, so x is still 7 afterward (reachable)",
+      _by_line(_rz, 5)["verdict"] == "reachable", f"-> {_by_line(_rz, 5)}")
+_verify_every_witness(_rz, _RANGE_ZERO, "f", "range-zero")
+
+
+# ── inner if reachable only at one specific unrolled iteration ─────────────
+_INNER_IF_ITER3 = (
+    "def f():\n"
+    "    y = 0\n"
+    "    for i in range(5):\n"
+    "        if i == 3:\n"
+    "            y = 1\n"
+    "    if y == 1:\n"
+    "        return 1\n"
+    "    return 0\n"
+)
+_rii = br.analyze("python3", _INNER_IF_ITER3)
+check("inner-if-iter3: the inner `if i == 3` is reachable (unrolling checks "
+      "it at every concrete i, including 3)",
+      _by_line(_rii, 4)["verdict"] == "reachable", f"-> {_by_line(_rii, 4)}")
+check("inner-if-iter3: `if y == 1` after the loop is reachable (the merge of "
+      "all 5 unrolled iterations correctly keeps the i==3 case's effect)",
+      _by_line(_rii, 6)["verdict"] == "reachable", f"-> {_by_line(_rii, 6)}")
+_verify_every_witness(_rii, _INNER_IF_ITER3, "f", "inner-if-iter3")
+
+
+# ── above the unroll cap: post-loop read is unknown+reason; an in-body
+# branch sat on the FIRST iteration is still reachable ─────────────────────
+_ABOVE_CAP = (
+    "def f(n):\n"
+    "    total = 0\n"
+    "    for i in range(100):\n"
+    "        total = total + n\n"
+    "    if total == 5:\n"
+    "        return 1\n"
+    "    return 0\n"
+)
+assert br._MAX_UNROLL_ITERATIONS < 100, "test assumes range(100) exceeds the unroll cap"
+_rac = br.analyze("python3", _ABOVE_CAP)
+_rac_for = _by_line(_rac, 3)
+check("above-cap: the for-line's own reachability is unaffected by the cap "
+      "(reachable, a real witness)",
+      _rac_for["verdict"] == "reachable" and "witness" in _rac_for, f"-> {_rac_for}")
+_verify_every_witness(_rac, _ABOVE_CAP, "f", "above-cap (for-line only)")
+_rac_post = _by_line(_rac, 5)
+check("above-cap: `if total == 5` (reads a value the loop computed) is "
+      "unknown, NEVER dead or reachable, with the tainted-by-loop reason",
+      _rac_post["verdict"] == "unknown"
+      and _rac_post.get("reason") == br._REASON_TAINTED_BY_LOOP, f"-> {_rac_post}")
+check("above-cap: the tainted branch carries no witness and no boundary_inputs",
+      "witness" not in _rac_post and _rac_post["boundary_inputs"] == [], f"-> {_rac_post}")
+
+_ABOVE_CAP_INNER = (
+    "def f(n):\n"
+    "    for i in range(100):\n"
+    "        if n == 0:\n"
+    "            return 1\n"
+    "    return 0\n"
+)
+_raci = br.analyze("python3", _ABOVE_CAP_INNER)
+_raci_inner = _by_line(_raci, 3)
+check("above-cap: an in-body branch SAT on the representative (first) "
+      "iteration is reachable — a real witness is a real witness regardless "
+      "of which iteration produced it",
+      _raci_inner["verdict"] == "reachable" and _raci_inner.get("witness", {}).get("n") == 0,
+      f"-> {_raci_inner}")
+_verify_every_witness(_raci, _ABOVE_CAP_INNER, "f", "above-cap-inner")
+
+
+# ── while accumulator: neither dead nor reachable, tainted ─────────────────
+_WHILE_ACCUM = (
+    "def f():\n"
+    "    total = 0\n"
+    "    while total < 7:\n"
+    "        total = total + 2\n"
+    "    if total > 5:\n"
+    "        return 1\n"
+    "    return 0\n"
+)
+_rwa = br.analyze("python3", _WHILE_ACCUM)
+_rwa_while = _by_line(_rwa, 3)
+check("while-accumulator: the while's own line is reachable (its guard "
+      "does not depend on anything the body computed YET)",
+      _rwa_while["verdict"] == "reachable", f"-> {_rwa_while}")
+_verify_every_witness(_rwa, _WHILE_ACCUM, "f", "while-accumulator (while-line only)")
+_rwa_post = _by_line(_rwa, 5)
+check("while-accumulator: `if total > 5` — total is REALLY 8 here, so this "
+      "IS truly reachable, but this tool correctly refuses to claim either "
+      "reachable or dead from a one-iteration model and reports unknown",
+      _rwa_post["verdict"] == "unknown"
+      and _rwa_post.get("reason") == br._REASON_TAINTED_BY_LOOP, f"-> {_rwa_post}")
+
+
+# ── while whose inner branch is unsat on the first iteration: unknown,
+# never dead ────────────────────────────────────────────────────────────────
+# A COUNTER-BOUNDED while (not `while x > 0:` with nothing decrementing
+# `x`, which never terminates for x > 0 and would hang the trace-
+# corroboration run below) — `n < 3` guarantees real termination while
+# still exercising the identical "unsat on the one checked iteration"
+# mechanism.
+_WHILE_UNSAT_FIRST = (
+    "def f():\n"
+    "    y = 0\n"
+    "    n = 0\n"
+    "    while n < 3:\n"
+    "        if y == 999:\n"
+    "            return 2\n"
+    "        n = n + 1\n"
+    "    return 0\n"
+)
+_rwuf = br.analyze("python3", _WHILE_UNSAT_FIRST)
+_rwuf_while = _by_line(_rwuf, 4)
+check("while-unsat-first: the while's own line is reachable",
+      _rwuf_while["verdict"] == "reachable", f"-> {_rwuf_while}")
+_verify_every_witness(_rwuf, _WHILE_UNSAT_FIRST, "f", "while-unsat-first (while-line only)")
+_rwuf_inner = _by_line(_rwuf, 5)
+check("while-unsat-first: `if y == 999` is unsat on the one iteration this "
+      "tool checks (y is always 0 there), so it is UNKNOWN — never `dead` —"
+      " with the first-iteration-only reason",
+      _rwuf_inner["verdict"] == "unknown"
+      and _rwuf_inner.get("reason") == br._REASON_FIRST_ITERATION_ONLY,
+      f"-> {_rwuf_inner}")
+
+
+# ── break inside a loop: refused, naming the construct ──────────────────────
+_BREAK_LOOP = (
+    "def f():\n"
+    "    for i in range(5):\n"
+    "        if i == 3:\n"
+    "            break\n"
+    "    return 0\n"
+)
+_rbrk = br.analyze("python3", _BREAK_LOOP)
+check("break inside a loop: refused, naming 'break statement'",
+      _rbrk.get("ok") is False and "break statement" in (_rbrk.get("error") or ""),
+      f"-> {_rbrk}")
+check("break inside a loop: line == 4", _rbrk.get("line") == 4, f"-> {_rbrk}")
+
+
+# ── phi inside unrolling: an unrolled loop nested inside an if arm ─────────
+_UNROLL_INSIDE_IF = (
+    "def f(x):\n"
+    "    total = 0\n"
+    "    if x > 0:\n"
+    "        for i in range(3):\n"
+    "            total = i\n"
+    "    if total == 2:\n"
+    "        return 1\n"
+    "    return 0\n"
+)
+_ruii = br.analyze("python3", _UNROLL_INSIDE_IF)
+_ruii_branch = _by_line(_ruii, 6)
+check("unroll-inside-if: `if total == 2` is reachable ONLY via x > 0 (the "
+      "unrolled loop's last-iteration value, i == 2, merged through the "
+      "enclosing if's own phi)",
+      _ruii_branch["verdict"] == "reachable" and _ruii_branch["witness"]["x"] > 0,
+      f"-> {_ruii_branch}")
+_verify_every_witness(_ruii, _UNROLL_INSIDE_IF, "f", "unroll-inside-if")
 
 
 print(f"\n=== {len(FAILS)} FAILURES ===" if FAILS else

@@ -2077,7 +2077,15 @@
                   "dead",
                   "unknown"
                 ],
-                "description": "reachable: z3 found a satisfying input. dead: z3 proved no input reaches this arm. unknown: the solver's own timeout expired, OR a construct on this one path could not be translated even though the upfront scan let it through (see codecalc/branch_reachability.py's `_record_unknown`) \u2014 either way, never a crash."
+                "description": "reachable: z3 found a satisfying input (always a real witness, whichever mechanism decided it). dead: PROVEN unreachable \u2014 z3 found no satisfying input across every case considered; for a for-loop body within the unroll cap, this means every concrete iteration was checked, never just one. unknown: the solver's own timeout expired, a construct on this one path could not be translated even though the upfront scan let it through (`_record_unknown`), THIS arm's guard was checked on only the first iteration of a while/above-cap-for loop and came back unsatisfiable (proof on one iteration is not proof for all of them), or the guard depends on a value a non-unrolled loop computed (tainted, never solved) \u2014 see `reason` and codecalc/branch_reachability.py's LOOPS section for which. Never a crash, and never `dead` for the last two loop-related cases: a false proof-of-absence is the one error class this shape promises not to produce."
+              },
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "loop body analysed for the first iteration only",
+                  "depends on a value computed by a loop"
+                ],
+                "description": "Present only on a `verdict: unknown` produced by the conservative (non-unrolled) loop path \u2014 see codecalc/branch_reachability.py's `_REASON_FIRST_ITERATION_ONLY`/`_REASON_TAINTED_BY_LOOP`. Absent for every other `unknown` (a solver timeout, or an untranslatable construct)."
               },
               "witness": {
                 "type": "object",

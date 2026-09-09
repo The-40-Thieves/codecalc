@@ -66,20 +66,48 @@ agreeing on a variable BY IDENTITY (neither arm reassigned it) skip the
 `If` entirely and keep the original binding, which is what keeps a program
 with few reassignments from growing an `If` for every untouched parameter.
 
-LOOPS ARE NOT UNROLLED, but their ONE representative iteration's effect IS
-merged. `while` and `for` bodies are analyzed as one pass through the body
-— real reachability of a branch nested inside it, real refusal of anything
-unsupported inside it — and the merge back into the code AFTER the loop
-uses the exact same `_merge_envs` machinery an if/else does: `If(entered,
-value_after_one_iteration, value_before_the_loop)`, where `entered` is the
-loop's own guard evaluated against the PRE-loop environment (the `while`
-test itself, or whether a `for`'s static range is non-empty). This is
-still NOT a precise multi-iteration account — a variable that only
-stabilizes after two or more iterations is modeled as if the loop ran at
-most once — but it is no longer the STRICTLY WORSE "the loop might as well
-not exist" the previous version implemented; a single iteration's real
-effect on a variable now legitimately narrows what is reachable afterward,
-documented as a known (not hidden) imprecision in the design note.
+LOOPS: EXACT WHERE CHEAP, `unknown` WHERE NOT — NEVER A FALSE VERDICT.
+Two genuinely different mechanisms, chosen by `_walk_loop`:
+
+  * `for x in range(<static>)` with at most `_MAX_UNROLL_ITERATIONS`
+    (32) iterations is UNROLLED EXACTLY (`_walk_for_unrolled`): the body
+    is walked once per concrete value of `x`, threading the environment
+    SEQUENTIALLY (real symbolic execution, not an approximation). A
+    branch inside the body is `reachable` if ANY iteration's own path
+    condition is sat, `dead` only if EVERY iteration's is unsat
+    (aggregated per source line by `_Ctx.commit_branch`/
+    `flush_unroll_frame`, since the same AST node is visited once per
+    iteration). Post-loop state is therefore EXACT, including the loop
+    target variable itself, which — matching real Python scoping — ends
+    up bound to its LAST iteration's value.
+  * A `while` loop, or a `for` above that cap, is walked ONE
+    representative iteration (`_walk_loop_conservative`), and the earlier
+    cut's real defect lived here: binding the loop variable to a fresh,
+    RANGE-CONSTRAINED but otherwise unconstrained symbol and then MERGING
+    the result made a value that is only ever "the last iteration's
+    value" look like "any value in the range" — a real, adversarially-
+    confirmed false `reachable` for code after the loop. The fix drops
+    the merge for this path entirely: a branch INSIDE the body is
+    `reachable` when this one iteration's path condition is sat (a real
+    witness is always a real witness, regardless of which iteration
+    produced it — sound), and `unknown` — never `dead` — when it is
+    unsat (proof on ONE iteration is not proof for all of them;
+    `_REASON_FIRST_ITERATION_ONLY`). EVERY variable the body assigns
+    anywhere, directly or through a nested arm's own merge, is TAINTED
+    afterward: rebound to a brand-new, entirely unconstrained symbol
+    (`_Ctx.fresh_tainted_symbol`) carrying no information at all, rather
+    than the range-bound-but-still-informative symbol that caused the
+    false positive. A later guard whose translated z3 expression mentions
+    a tainted symbol ANYWHERE — including buried inside arithmetic, since
+    `_apply_assign` never launders it away — is caught by
+    `_mentions_tainted` and reported `unknown` (`_REASON_TAINTED_BY_LOOP`)
+    WITHOUT ever being solved: the fresh symbol is unconstrained, so z3
+    would call it `sat` for nearly anything, which is exactly the false-
+    confidence failure mode being closed here.
+
+Both mechanisms are sound in the sense this tool promises: a `reachable`
+verdict always carries a witness that is a witness, and only unrolling
+(never the conservative path) is trusted to produce `dead`.
 
 BOUNDARY INPUTS. For every `Compare` node appearing in an arm's OWN guard
 (not the accumulated ancestors — see the design note for why that line was
@@ -125,6 +153,18 @@ _DEFAULT_TIMEOUT_S = 30
 _MAX_TIMEOUT_S = 120
 _DEFAULT_MAX_BRANCHES = 64
 _HARD_MAX_BRANCHES = 256
+#: A `for x in range(<static>)` loop with at most this many iterations is
+#: UNROLLED exactly (see `_walk_for_unrolled`) rather than analyzed as one
+#: representative iteration — see the module docstring's LOOPS section for
+#: why an unconstrained-but-ranged loop variable is unsound for anything
+#: AFTER the loop, and why a real, if imprecise, taint-based fallback is
+#: used above this cap and for `while`.
+_MAX_UNROLL_ITERATIONS = 32
+#: `verdict` ranking used to merge the same source line's outcome across
+#: unrolled iterations (see `_Ctx.commit_branch`): reachable (proof exists,
+#: from ANY iteration) beats unknown beats dead (proof of absence, needed
+#: from EVERY iteration).
+_VERDICT_RANK = {"dead": 0, "unknown": 1, "reachable": 2}
 #: Per-z3-call deadline never exceeds this, regardless of how much of the
 #: caller's own `timeout` budget remains — one pathological call must not
 #: eat the whole response, the same reasoning logic.z3_check's fixed
@@ -353,6 +393,29 @@ class _Ctx:
         self.truncated = False
         self.deadline = time.monotonic() + timeout_s
         self.supported = True  # flips false on a per-branch translation failure
+        # Aggregation frames for `for`-unrolling — see `_walk_for_unrolled` and
+        # `commit_branch`. One dict per ACTIVE unroll (nested unrolled loops
+        # push a frame each), keyed by source line, so the same line visited
+        # once per unrolled iteration collapses to ONE entry.
+        self._unroll_stack: list[dict[int, dict[str, Any]]] = []
+        # > 0 while walking a loop body that is NOT being exactly unrolled
+        # (a `while`, or a `for` above `_MAX_UNROLL_ITERATIONS`) — see the
+        # module docstring's LOOPS section: an UNSAT verdict found in this
+        # mode only proves "not reachable on the first iteration", not "dead
+        # forever", so `_decide` downgrades it to `unknown` instead.
+        self._conservative_loop_depth = 0
+        # Declared NAMES of the fresh, unconstrained symbols `commit_taint`
+        # binds a variable to after a conservative loop — see that method's
+        # docstring. Checked structurally (does a guard's own z3 expression
+        # tree mention one of these names ANYWHERE, including nested inside
+        # arithmetic) by `_mentions_tainted`, never by the ORIGINAL variable
+        # name, so a later, clean reassignment correctly clears the taint.
+        self.tainted_names: set[str] = set()
+        self._taint_counter = 0
+
+    @property
+    def unrolling(self) -> bool:
+        return bool(self._unroll_stack)
 
     def time_left_ms(self) -> int:
         remaining = self.deadline - time.monotonic()
@@ -363,6 +426,59 @@ class _Ctx:
 
     def budget_exhausted(self) -> bool:
         return time.monotonic() >= self.deadline
+
+    def commit_branch(self, entry: dict[str, Any]) -> None:
+        """Append `entry` to the result, OR — while `unrolling` — merge it
+        into the top aggregation frame keyed by `entry["line"]` instead.
+
+        The same source line is visited once per unrolled iteration; the
+        merged verdict is `reachable` if ANY iteration's own path condition
+        was sat (keeping that iteration's witness/boundary — the FIRST such
+        iteration, since iterations commit in order and a later, higher-rank
+        entry only replaces a strictly lower-ranked existing one), else
+        `unknown` if any iteration could not be decided, else `dead` only
+        when EVERY iteration proved it unsatisfiable — see `_VERDICT_RANK`.
+        A nested unrolled loop's own frame flushes into the frame below it
+        on the stack (or into `branches`, once the stack is empty), so
+        aggregation composes correctly to any nesting depth.
+        """
+        if self._unroll_stack:
+            frame = self._unroll_stack[-1]
+            existing = frame.get(entry["line"])
+            if existing is None or _VERDICT_RANK[entry["verdict"]] > _VERDICT_RANK[existing["verdict"]]:
+                frame[entry["line"]] = entry
+            return
+        if len(self.branches) >= self.max_branches:
+            self.truncated = True
+            return
+        self.branches.append(entry)
+
+    def flush_unroll_frame(self) -> None:
+        """Pop the top aggregation frame and commit each of its (already
+        cross-iteration-merged) entries — via `commit_branch` again, so a
+        NESTED unroll's frame lands in its parent frame rather than
+        `branches` directly if one is still active.
+        """
+        frame = self._unroll_stack.pop()
+        for entry in frame.values():
+            self.commit_branch(entry)
+
+    def fresh_tainted_symbol(self, dtype: str, hint: str):
+        """A brand-new, entirely unconstrained z3 constant of `dtype`,
+        registered in `tainted_names` so `_mentions_tainted` recognizes any
+        later guard built from it (directly, or buried inside arithmetic —
+        the check walks the whole expression tree). `hint` (the original
+        variable name) is cosmetic, folded into the generated name only to
+        make a raw z3 dump readable; nothing compares against it.
+        """
+        self._taint_counter += 1
+        name = f"__tainted_{self._taint_counter}_{hint}"
+        self.tainted_names.add(name)
+        if dtype == "int":
+            return self.z3.Int(name)
+        if dtype == "bool":
+            return self.z3.Bool(name)
+        return self.z3.String(name)
 
     def witness(self, model) -> dict[str, Any]:
         """One concrete input dict off `model` — every parameter, not just
@@ -501,22 +617,70 @@ def _unparse(node: ast.AST) -> str:
         return "<unprintable>"
 
 
-def _decide(cond, ctx: _Ctx) -> tuple[str, dict[str, Any] | None]:
-    """`(verdict, witness)` for one path condition. `witness` is `None`
-    unless `verdict == "reachable"`.
+#: Set only for the two conservative-loop cases `_decide`/`_walk_if` can
+#: produce — never for a plain solver timeout or an ordinary dead/reachable
+#: verdict, which say nothing more than the verdict itself already does.
+_REASON_FIRST_ITERATION_ONLY = "loop body analysed for the first iteration only"
+_REASON_TAINTED_BY_LOOP = "depends on a value computed by a loop"
+
+
+def _mentions_tainted(expr, ctx: _Ctx) -> bool:
+    """Whether `expr`'s own z3 AST contains, ANYWHERE (including buried
+    inside arithmetic built on top of it — `_apply_assign` never launders
+    this away, since the new binding's z3 expression literally embeds the
+    tainted term), a constant declared with one of `ctx.tainted_names`.
+
+    A plain iterative walk over `.children()`, not a z3-provided utility:
+    z3's own AST nodes are DAGs (a shared subterm appears once but is
+    referenced from multiple parents), so `id()`-based visited-tracking is
+    what keeps this from doing exponential re-work on a deeply-nested
+    expression, the same reasoning `_boundary_for`'s own bounded work
+    already applies elsewhere in this module.
+    """
+    if not ctx.tainted_names:
+        return False
+    stack = [expr]
+    seen: set[int] = set()
+    while stack:
+        node = stack.pop()
+        node_id = id(node)
+        if node_id in seen:
+            continue
+        seen.add(node_id)
+        try:
+            if node.num_args() == 0 and node.decl().name() in ctx.tainted_names:
+                return True
+        except Exception:
+            pass
+        try:
+            stack.extend(node.children())
+        except Exception:
+            pass
+    return False
+
+
+def _decide(cond, ctx: _Ctx) -> tuple[str, dict[str, Any] | None, str | None]:
+    """`(verdict, witness, reason)` for one path condition. `witness` is
+    `None` unless `verdict == "reachable"`; `reason` is set only for the
+    conservative-loop UNSAT-downgraded-to-`unknown` case (see
+    `_REASON_FIRST_ITERATION_ONLY`) — see the module docstring's LOOPS
+    section for why an UNSAT found while `ctx._conservative_loop_depth > 0`
+    proves only "not reachable on the first iteration", never "dead".
     """
     if ctx.budget_exhausted():
-        return "unknown", None
+        return "unknown", None, None
     z3 = ctx.z3
     solver = z3.Solver()
     solver.set("timeout", ctx.call_timeout_ms())
     solver.add(cond)
     verdict = solver.check()
     if verdict == z3.sat:
-        return "reachable", ctx.witness(solver.model())
+        return "reachable", ctx.witness(solver.model()), None
     if verdict == z3.unsat:
-        return "dead", None
-    return "unknown", None
+        if ctx._conservative_loop_depth > 0:
+            return "unknown", None, _REASON_FIRST_ITERATION_ONLY
+        return "dead", None, None
+    return "unknown", None, None
 
 
 def _optimum_input(full_cond, objective, direction: str, ctx: _Ctx) -> tuple[dict[str, Any] | None, str | None]:
@@ -590,11 +754,17 @@ def _boundary_for(node: ast.expr, parent_cond, full_cond, env: dict[str, tuple[A
 
 def _record(ctx: _Ctx, *, line: int, kind: str, condition: str, cond, guard_node: ast.expr | None,
             parent_cond, env: dict[str, tuple[Any, str]]) -> None:
-    if len(ctx.branches) >= ctx.max_branches:
+    # The early truncation check only applies OUTSIDE an active unroll: the
+    # final, merged branch count is not known until the whole unrolled loop
+    # has been walked and its frame flushed (see `commit_branch`), so
+    # solving must continue through every iteration regardless of how many
+    # entries are ALREADY in `ctx.branches`.
+    if not ctx.unrolling and len(ctx.branches) >= ctx.max_branches:
         ctx.truncated = True
         return
+    reason = None
     try:
-        verdict, witness = _decide(cond, ctx)
+        verdict, witness, reason = _decide(cond, ctx)
         boundary = _boundary_for(guard_node, parent_cond, cond, env, ctx) if guard_node is not None else []
     except _TranslateError:
         verdict, witness, boundary = "unknown", None, []
@@ -602,8 +772,28 @@ def _record(ctx: _Ctx, *, line: int, kind: str, condition: str, cond, guard_node
     entry: dict[str, Any] = {"line": line, "kind": kind, "condition": condition, "verdict": verdict}
     if witness is not None:
         entry["witness"] = witness
+    if reason is not None:
+        entry["reason"] = reason
     entry["boundary_inputs"] = boundary
-    ctx.branches.append(entry)
+    ctx.commit_branch(entry)
+
+
+def _record_tainted(ctx: _Ctx, *, line: int, kind: str, condition: str) -> None:
+    """A branch whose OWN guard mentions a value a loop computed — see
+    `_mentions_tainted`. Never solved: the fresh symbol is by construction
+    unconstrained, so z3 would report `sat` for almost anything, which
+    would silently launder a genuinely unknown answer into a false
+    `reachable`. Recorded `unknown` directly instead, with `reason` naming
+    why, and NO `boundary_inputs` (nothing to optimize over that means
+    anything).
+    """
+    if not ctx.unrolling and len(ctx.branches) >= ctx.max_branches:
+        ctx.truncated = True
+        return
+    ctx.commit_branch({
+        "line": line, "kind": kind, "condition": condition,
+        "verdict": "unknown", "reason": _REASON_TAINTED_BY_LOOP, "boundary_inputs": [],
+    })
 
 
 def _merge_envs(local_guard, env_true: dict[str, tuple[Any, str]] | None,
@@ -653,6 +843,21 @@ def _walk_if(node: ast.If, env: dict[str, tuple[Any, str]], parent_pieces: list[
     if guard_dt != "bool":
         raise _TranslateError("if/elif condition is not a bool expression")
     guard_text = _unparse(node.test)
+    if _mentions_tainted(guard_val, ctx):
+        # This guard depends on a value a (non-unrolled) loop computed —
+        # see the module docstring's LOOPS section. z3 would call the
+        # fresh, unconstrained symbol `sat` for almost anything, which
+        # would silently launder "we do not know" into a false
+        # `reachable`, so this is recorded `unknown` directly and NEITHER
+        # arm is walked: whatever either arm would assign is exactly the
+        # unresolved question this conservative approximation declines to
+        # guess at. The whole if/elif/else is treated as an opaque
+        # pass-through — falls through unconditionally, with the
+        # environment UNCHANGED — the same "over-approximate rather than
+        # guess" rule an untranslatable guard already follows.
+        _record_tainted(ctx, line=node.lineno, kind=kind,
+                         condition=" and ".join(parent_pieces + [guard_text]) or guard_text)
+        return True, parent_cond, env
     if_cond = z3.And(parent_cond, guard_val)
     _record(ctx, line=node.lineno, kind=kind, condition=" and ".join(parent_pieces + [guard_text]) or guard_text,
             cond=if_cond, guard_node=node.test, parent_cond=parent_cond, env=env)
@@ -685,42 +890,137 @@ def _walk_if(node: ast.If, env: dict[str, tuple[Any, str]], parent_pieces: list[
 
 def _walk_loop(node: ast.While | ast.For, env: dict[str, tuple[Any, str]], ctx: _Ctx,
                cur_cond) -> dict[str, tuple[Any, str]]:
+    """Dispatch to an exact unroll (`for` within `_MAX_UNROLL_ITERATIONS`)
+    or the conservative, taint-based walk (`while`, or a `for` above the
+    cap) — see the module docstring's LOOPS section for why these are two
+    genuinely different mechanisms rather than one approximation applied
+    uniformly.
+    """
+    if isinstance(node, ast.For):
+        start, stop, step = _static_range_bounds(node.iter)
+        count = len(range(start, stop, step))
+        if count <= _MAX_UNROLL_ITERATIONS:
+            return _walk_for_unrolled(node, env, ctx, cur_cond, range(start, stop, step))
+        return _walk_loop_conservative(node, env, ctx, cur_cond, static_bounds=(start, stop, step))
+    return _walk_loop_conservative(node, env, ctx, cur_cond, static_bounds=None)
+
+
+def _walk_for_unrolled(node: ast.For, env: dict[str, tuple[Any, str]], ctx: _Ctx, cur_cond,
+                        values: range) -> dict[str, tuple[Any, str]]:
+    """Exact reachability for a `for x in range(<static>)` loop with at
+    most `_MAX_UNROLL_ITERATIONS` iterations: the body is walked ONCE PER
+    CONCRETE VALUE of the loop variable, threading the environment
+    sequentially (real symbolic execution, not the merge-based
+    approximation the conservative path uses) — so the post-loop state is
+    EXACT, not an over- or under-approximation. See the module docstring's
+    LOOPS section.
+
+    Branches inside the body are recorded once PER SOURCE LINE, aggregated
+    across iterations by `ctx.commit_branch`/`flush_unroll_frame`: reachable
+    if any iteration's own path condition was sat, dead only if every
+    iteration's was unsat.
+
+    A pleasant side effect of real threading rather than merging: the loop
+    target variable (`node.target.id`) ends up bound, after the loop, to
+    its LAST iteration's concrete value — exactly Python's own scoping
+    (a `for` target survives the loop) — for free, with no special-casing.
+    An empty range leaves it unbound, also matching Python: nothing in
+    `values` means the body, and the assignment to the target, never ran.
+    """
+    z3 = ctx.z3
+    entered = len(values) > 0
+    loop_entry_cond = z3.And(cur_cond, z3.BoolVal(entered))
+    condition = _unparse(node.iter)
+    _record(ctx, line=node.lineno, kind="for", condition=condition, cond=loop_entry_cond,
+            guard_node=None, parent_cond=cur_cond, env=env)
+    if not entered:
+        return env
+
+    ctx._unroll_stack.append({})
+    cur_env = env
+    for v in values:
+        iter_env = dict(cur_env)
+        iter_env[node.target.id] = (z3.IntVal(v), "int")
+        # The body's own `falls_through`/`continuation_cond` are not used
+        # here: an unconditional `return` inside an unrolled loop body is a
+        # narrow, undocumented-elsewhere edge case this tool does not
+        # attempt to reason about precisely (which concrete iterations
+        # would even reach the return depends on the free parameters, not
+        # just the loop variable) — env threading continues regardless,
+        # the same "over-approximate rather than guess" default this
+        # module already applies to constructs it cannot fully resolve.
+        _, _, cur_env = _walk_block(node.body, iter_env, ctx, cur_cond)
+    ctx.flush_unroll_frame()
+    return cur_env
+
+
+def _walk_loop_conservative(node: ast.While | ast.For, env: dict[str, tuple[Any, str]], ctx: _Ctx,
+                             cur_cond, *, static_bounds: tuple[int, int, int] | None
+                             ) -> dict[str, tuple[Any, str]]:
+    """The ONE-representative-iteration walk for a `while` loop, or a `for`
+    above `_MAX_UNROLL_ITERATIONS` — see the module docstring's LOOPS
+    section. Two things distinguish this from a plain merge:
+
+      * A branch inside the body that is UNSAT on this one iteration is
+        `unknown` (`_REASON_FIRST_ITERATION_ONLY`), never `dead` — see
+        `_decide`'s own handling of `ctx._conservative_loop_depth`. Only
+        `sat` is trusted here: a real witness IS a real witness regardless
+        of which iteration produced it.
+      * Every variable the body assigns ANYWHERE (directly, or via a
+        nested arm's own merge) is TAINTED afterward — rebound to a fresh,
+        entirely unconstrained symbol (`ctx.fresh_tainted_symbol`) rather
+        than merged with `_merge_envs`, which is exactly the mechanism
+        that produced the BLOCKER this design replaces: an unconstrained-
+        but-RANGE-BOUND loop variable made a value look like "any value in
+        the range" instead of "some value this tool cannot pin down at
+        all". A later guard mentioning a tainted symbol is caught by
+        `_walk_if`'s own `_mentions_tainted` check and reported `unknown`
+        (`_REASON_TAINTED_BY_LOOP`) without ever being solved.
+    """
     z3 = ctx.z3
     if isinstance(node, ast.While):
         guard_val, guard_dt = _translate(node.test, env, ctx)
         if guard_dt != "bool":
             raise _TranslateError("while condition is not a bool expression")
+        if _mentions_tainted(guard_val, ctx):
+            _record_tainted(ctx, line=node.lineno, kind="while", condition=_unparse(node.test))
+            return env
         loop_cond = z3.And(cur_cond, guard_val)
         condition = _unparse(node.test)
         _record(ctx, line=node.lineno, kind="while", condition=condition, cond=loop_cond,
                 guard_node=node.test, parent_cond=cur_cond, env=env)
         body_env = dict(env)
-        entered_guard = guard_val  # the loop's OWN guard, evaluated pre-loop
     else:
-        start, stop, step = _static_range_bounds(node.iter)
+        start, stop, step = static_bounds
         entered = start < stop if step > 0 else start > stop
         loop_cond = z3.And(cur_cond, z3.BoolVal(entered))
         condition = _unparse(node.iter)
         _record(ctx, line=node.lineno, kind="for", condition=condition, cond=loop_cond,
                 guard_node=None, parent_cond=cur_cond, env=env)
         body_env = dict(env)
-        # The loop variable is bound to an UNCONSTRAINED-but-in-range symbolic
-        # Int for the purpose of analyzing the body once — see the module
-        # docstring's LOOPS section: this is a single representative
-        # iteration, not an unrolling. It never appears in `env` (pre-loop),
-        # so `_merge_envs`'s intersection drops it from the post-loop result
-        # automatically — no special-casing needed here.
+        # The loop variable is bound to an UNCONSTRAINED-but-in-range
+        # symbolic Int for the purpose of analyzing the body once — sound
+        # for branches INSIDE the body (a real value in the real range),
+        # but everything the body assigns using it is tainted below rather
+        # than merged, which is exactly what makes this sound for the code
+        # AFTER the loop too.
         var = z3.Int(f"__loop_{node.lineno}_{node.target.id}")
         lo, hi = (start, stop - 1) if step > 0 else (stop + 1, start)
         body_env[node.target.id] = (var, "int")
         loop_cond = z3.And(loop_cond, var >= lo, var <= hi)
-        entered_guard = z3.BoolVal(entered)
 
-    _, _, body_env_after = _walk_block(node.body, body_env, ctx, loop_cond)
-    # See the module docstring's LOOPS section: `If(entered, after-one-
-    # iteration, before-the-loop)` — a real, if imprecise, merge of the
-    # loop's own effect, not a discard of it.
-    return _merge_envs(entered_guard, body_env_after, env, ctx)
+    ctx._conservative_loop_depth += 1
+    try:
+        _, _, body_env_after = _walk_block(node.body, body_env, ctx, loop_cond)
+    finally:
+        ctx._conservative_loop_depth -= 1
+
+    tainted_env = dict(env)
+    for name, entry in body_env_after.items():
+        if name not in env or entry is env[name]:
+            continue  # loop-local (e.g. the loop var), or never touched
+        tainted_env[name] = (ctx.fresh_tainted_symbol(entry[1], name), entry[1])
+    return tainted_env
 
 
 def _apply_assign(stmt: ast.Assign, env: dict[str, tuple[Any, str]], ctx: _Ctx) -> None:
@@ -738,12 +1038,12 @@ def _record_unknown(ctx: _Ctx, line: int, kind: str) -> None:
     undefined name is the one case it does not attempt, since name binding
     is a flow property, not a node-type property).
     """
-    if len(ctx.branches) >= ctx.max_branches:
+    if not ctx.unrolling and len(ctx.branches) >= ctx.max_branches:
         ctx.truncated = True
         return
-    ctx.branches.append({"line": line, "kind": kind,
-                          "condition": "<could not translate this guard>",
-                          "verdict": "unknown", "boundary_inputs": []})
+    ctx.commit_branch({"line": line, "kind": kind,
+                        "condition": "<could not translate this guard>",
+                        "verdict": "unknown", "boundary_inputs": []})
 
 
 def _walk_block(stmts: list[ast.stmt], env: dict[str, tuple[Any, str]], ctx: _Ctx,

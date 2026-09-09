@@ -136,41 +136,87 @@ assigned it. Two envs agreeing on a variable BY IDENTITY (neither arm
 reassigned it) skip the `If` entirely, which is what keeps a program with
 few reassignments from growing an `If` for every untouched parameter.
 
-## Loops are analyzed once, not unrolled — but their effect IS merged
+## Loops: exact where cheap, `unknown` where not — never a false verdict
 
-A `for`/`while` body is walked exactly ONE time, against a copy of the
-environment. For a `for` loop the loop variable is bound to a fresh
-symbolic `Int`, constrained to the loop's own REAL static range (from its
-literal `range(...)` bounds) — sound for the loop's own branch and for
-whatever is nested directly inside it, since the model has exactly the
-values the real loop would produce available to it, not an arbitrary one.
+**This section was rewritten after a confirmation review found the
+previous design (merging a single representative iteration for EVERY
+loop) was unsound, not merely imprecise.** The failure mode: a `for`
+loop's variable was bound to a fresh symbolic `Int` constrained to the
+loop's own real range, the body was walked once, and the result was
+MERGED with the pre-loop state using `entered` (true for any non-empty
+static range) as the condition — which collapses to "trust the one-
+iteration walk unconditionally" for every `for` loop, every time. A
+variable that is only ever *the last iteration's value* in reality then
+looked, to everything after the loop, like *any value in the range* — a
+real, adversarially-confirmed false `reachable`, checked by direct
+execution:
 
-The loop's own effect on the code AFTER it now goes through the identical
-`_merge_envs` machinery an if/else does: the post-loop value of every
-variable the body touched is `If(entered, value-after-one-iteration,
-value-before-the-loop)`, where `entered` is the loop's own guard (the
-`while` test, or whether the `for`'s static range is non-empty) evaluated
-against the PRE-loop environment. This is a real, if imprecise, account
-of the loop's effect — no longer the strictly-worse "the loop's own
-bindings never leave it at all" the first cut implemented.
+```python
+def f():
+    x = -1
+    for i in range(0, 10):
+        x = i
+    if x == 5:
+        return 1
+    return 0
+```
 
-What is STILL not modeled is more than one iteration's worth of change: a
-variable that only stabilizes after two-or-more iterations (an
-accumulator like `total = total + 1` run three times) is modeled as if
-the loop ran AT MOST ONCE, so a later branch reachable only via the
-loop's fully-accumulated effect (`total == 3` after three iterations, for
-instance) can still be reported `dead` here even though it is not. This
-is a known, documented imprecision — a real account would need loop-
-invariant reasoning this tool does not attempt — not a hidden one: it
-never widens a `verdict: reachable` into something false, only narrows a
-genuinely reachable branch into a false `dead`, and every `reachable`
-verdict this tool DOES produce still ships a `witness`, which the test
-suite corroborates by actually running the program (`tracing.execute_
-trace`) rather than trusting the model — EXCEPT for the one class of
-witness this imprecision itself produces (a post-loop value that reflects
-one iteration, not the real trip count), which the test suite labels
-explicitly rather than asserting a trace match that would fail for an
-unrelated, expected reason.
+reported `if x == 5` **reachable** with witness `{}` — `f()` is fully
+deterministic, `x` is always `9` at that line, and the branch never runs.
+That is exactly the error class this tool's own docstring and this
+document promised never to produce, so "only narrows a reachable branch
+into a false dead" (this section's own earlier claim) was wrong: the old
+design could widen too.
+
+The fix uses TWO genuinely different mechanisms rather than patching the
+one:
+
+**`for x in range(<static>)` within `_MAX_UNROLL_ITERATIONS` (32) is
+unrolled EXACTLY.** The body is walked once per concrete value of `x`,
+threading the environment sequentially — real symbolic execution, not an
+approximation. A branch inside the body is `reachable` if ANY unrolled
+iteration's own path condition is sat, `dead` only if EVERY iteration's
+is unsat; `_Ctx.commit_branch`/`flush_unroll_frame` aggregate this per
+source line, since the same AST node is visited once per iteration.
+Post-loop state is therefore EXACT — including an accumulator like
+`total = total + 1` run three times, which this design's own earlier
+draft used as an example of an accepted imprecision and which is now
+simply correct within the cap (see `tests/test_branch_reachability.py`'s
+`for-accumulate` case). A pleasant side effect of real sequential
+threading rather than merging: the loop's target variable ends up bound,
+after the loop, to its LAST iteration's value — matching Python's own
+scoping — for free.
+
+**A `while` loop, or a `for` above the cap, keeps the one-representative-
+iteration walk, made SOUND by dropping the merge for it.** A branch
+inside the body is `reachable` when this one iteration's path condition
+is sat (a real witness is a real witness regardless of which iteration
+produced it), and `unknown` — never `dead` — when it is unsat: proof on
+one iteration is not proof for all of them (`_REASON_FIRST_ITERATION_
+ONLY`). The real fix, though, is what happens to the code AFTER the loop:
+every variable the body assigns anywhere — directly, or through a nested
+arm's own merge — is TAINTED, rebound to a brand-new, entirely
+unconstrained z3 symbol (`_Ctx.fresh_tainted_symbol`) that carries no
+information at all, in place of the range-bound-but-still-informative
+symbol that caused the false positive above. A later guard whose
+translated z3 expression mentions a tainted symbol ANYWHERE — including
+buried inside arithmetic, since `_apply_assign` never launders it away —
+is caught by `_mentions_tainted` (a plain iterative walk of the z3 AST,
+`id()`-based visited-tracking since z3 terms are a DAG) and reported
+`unknown` (`_REASON_TAINTED_BY_LOOP`) WITHOUT ever being solved: the
+fresh symbol is unconstrained, so z3 would call it `sat` for nearly
+anything, which is exactly the false-confidence failure mode being
+closed. A guard's OWN reassignment to something that does not reference
+the tainted symbol (`total = 10` after a tainted `total`, say) correctly
+clears the taint with no extra bookkeeping, because the check is
+STRUCTURAL — it walks whatever z3 expression the variable currently
+holds, not a per-name flag that would need to be reset by hand.
+
+Both mechanisms honor the one invariant this tool promises: a
+`reachable` verdict always carries a witness that is a real witness
+(every one in the test suite is corroborated by `tracing.execute_trace`
+against the real program), and only unrolling — never the conservative
+path — is trusted to produce `dead`.
 
 ## Why z3 `Optimize` for boundary inputs, and no box around it
 
@@ -268,3 +314,44 @@ the changelog entry's own numbers); the target prompt routes to
 the final corpus and descriptions together, per that script's own
 documented policy ("regenerate ... after an intentional description OR
 corpus change, never to paper over a regression").
+
+**Round two** (a confirmation review) found that the emphatic first
+sentence this round-one fix landed on — "Decide STATICALLY, WITHOUT
+running the program ... proved by z3 for every possible input" — while it
+fixed the `trace_execution` misroute, now pulled TWO of `main`'s OTHER
+labeled prompts onto `branch_reachability`: one whose vocabulary
+("formula", "cleanest possible form") belongs to `symbolic`/
+`evaluate_expression`, and one ("rewrite", "preserve ... behavior") that
+belongs to `verify_translation`. `proved`/`prove` and `formula` turned out
+to be exactly the words those two tools' own descriptions are built
+around, so ANY generic "z3 proves things" framing in `branch_reachability`
+inevitably leaks into their territory. The rewritten lead sentence
+("Which if/elif/else arms and while/for loops of this python3 function
+can ever run, which are dead code, and what inputs reach each") avoids
+both words entirely while keeping the `if`/`elif`/`while`/`for` vocabulary
+6 of the corpus's own `branch_reachability`-labeled prompts depend on —
+dropping that vocabulary (an earlier, even-shorter draft of this same
+lead sentence) fixed the `main`-prompt regressions but broke 4 of those 6
+in the process, confirming the two goals pull in different directions and
+both need their own words present. Two more direct steals (a
+`compare_edge_cases` prompt, an `update_runtimes`/`session_read_file`
+pair caused by a courtesy cross-reference this round ALSO added to
+`trace_execution`'s own docstring — dropped again, since a "see the other
+tool" sentence is worth less than the false steals its extra tokens
+caused) were closed the same way round one's was: trim the specific
+overlapping word (`check` appeared twice — once from the tool name
+`z3_check`, unavoidable, once from "to check directly", replaced with "to
+solve directly"; `before`/`after` similarly reworded to `prior to`/`past`)
+rather than reach for a wholesale rewrite. One regression proved
+structurally unrelated to any word choice: "What does the computer
+actually store in memory for the number 0.1?" flips from `float_repr` to
+`evaluate_expression` (2.93 vs 2.88 on `main`; 2.92 vs 2.77 here) purely
+because BM25's length normalization is corpus-relative — adding ANY 57th
+document shifts the average document length every score is normalized
+against, regardless of whether that document shares a single word with
+the query. Confirmed by testing: no wording change to `branch_reachability`
+moved this pair at all. This is the same coupling this codebase's own
+memory index already names (`reference_lexical_eval_corpus_coupling`) —
+not a defect in this change, a property of an unstemmed, corpus-relative
+lexical scorer that any 57th tool addition would trigger for SOME
+near-tied pair somewhere in a 228-prompt corpus.

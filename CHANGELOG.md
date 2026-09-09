@@ -177,17 +177,22 @@ behind it.
   (its path is closed), and a variable assigned in only some surviving
   arms is dropped rather than guessed at, so a later reference to it
   raises the same "undefined name" `unknown` a genuine `UnboundLocalError`
-  path would. Loops get the identical merge treatment, analyzed as ONE
-  representative iteration rather than unrolled: the loop variable is
-  bound to a fresh symbolic value ranged over the loop's own real static
-  bounds, and the post-loop environment is `If(entered, value-after-one-
-  iteration, value-before)` — a real, if imprecise, account of the loop's
-  effect, not a discard of it. The ONE known remaining imprecision (see
-  `docs/design/2026-09-08-branch-reachability.md`) is a variable that only
-  stabilizes after two-or-more iterations (an accumulator, for instance):
-  modeled as if the loop ran at most once, which can under-report a
-  genuinely reachable later branch as `dead` — never the reverse.
-  `witness`es are never taken on faith regardless — every `verdict:
+  path would. Loops use TWO mechanisms, chosen by iteration count (see
+  `docs/design/2026-09-08-branch-reachability.md` for why one mechanism
+  applied to both was unsound, not merely imprecise, confirmed by direct
+  execution): a `for x in range(<static>)` loop of at most 32 iterations
+  is UNROLLED exactly — the body walked once per concrete value, threading
+  the environment sequentially, so post-loop state (including an
+  accumulator like `total = total + 1` run three times) is EXACT, and a
+  branch inside the body is `reachable` if ANY unrolled iteration's own
+  path condition is sat, `dead` only if EVERY one is. A `while` loop, or a
+  `for` above that cap, keeps a ONE-iteration walk, but a branch inside it
+  that is UNSAT on that one iteration is `unknown` — never `dead` — and
+  every variable the body assigns anywhere is TAINTED afterward (rebound
+  to a fresh, entirely unconstrained symbol); a later guard whose z3
+  expression mentions a tainted symbol anywhere, including buried inside
+  arithmetic, is `unknown` too, without ever being solved. `witness`es are
+  never taken on faith regardless — every `verdict:
   reachable` in the test suite is corroborated by actually running the
   program through `tracing.execute_trace` on its witness and checking the
   branch's own line fired. Refuses up front, before ever calling z3, the
@@ -230,7 +235,45 @@ behind it.
   a later reference, a `for range(3)` body assignment merged into a later
   `if`, and nested ifs assigning at two depths — every one of those
   witnesses is ALSO corroborated by `tracing.execute_trace` on the real
-  program, not merely on the model.
+  program, not merely on the model. A SECOND, confirmation review found
+  that same merge, applied to loops, was unsound — a `for` loop's
+  variable being both "fresh" and "range-constrained" made a value that is
+  only ever the LAST iteration's real value look, after the loop, like
+  ANY value in the range: `x = -1; for i in range(0, 10): x = i; if x ==
+  5: ...` reported the `if` reachable with witness `{}`, though `f()` is
+  fully deterministic and `x` is always `9` there — checked by direct
+  execution. Fixed by unrolling any `for` within a 32-iteration cap
+  exactly and, above that cap or for `while`, tainting every loop-body-
+  assigned variable to a fresh unconstrained symbol instead of merging it
+  (see the loop mechanism described above); covered by the review's own
+  exact repro (now `dead`) plus its positive control (`if x == 9`,
+  reachable), a `range(0)` loop, an inner `if` reachable only at one
+  specific unrolled iteration, a loop above the cap (a post-loop read is
+  `unknown` with its reason; an in-body branch sat on the first checked
+  iteration is still `reachable`), a `while` accumulator and a `while`
+  whose inner branch is unsat on the first iteration (both `unknown`,
+  never `dead`), `break` inside a loop (still refused, unchanged), and an
+  unrolled loop nested inside an `if` arm together with an `if` nested
+  inside an unrolled loop (phi composing correctly through unrolling in
+  both directions) — every reachable witness trace-corroborated as above,
+  every dead/unknown verdict checked against what the reason claims. The
+  tool's own description went through two rounds of tuning against
+  `scripts/tool_select_eval.py`'s BM25 corpus: the first fixed a regression
+  it introduced on an EXISTING `trace_execution` prompt; a confirmation
+  review found the fix's own emphatic wording then pulled two of `main`'s
+  OTHER prompts (one `symbolic`, one `verify_translation`) onto
+  `branch_reachability` instead, closed by avoiding vocabulary those two
+  tools' own descriptions are built around (`formula`, `prove`/`proved`,
+  `simplest`/`cleanest`, `rewrite`, `preserve`) rather than a further
+  rewrite. `full` moved 137/234 (58.55%) on `main` -> 133/234 mid-fix ->
+  142/234 (60.68%) final; `dev` 113/184 (61.41%) -> 111/184 -> 119/184
+  (64.67%); `core` 74/116 (63.79%) unchanged throughout (neither tool is
+  in that group). One `main` prompt ("What does the computer actually
+  store in memory for the number 0.1?", `float_repr` vs `evaluate_
+  expression`) stays flipped regardless of wording — a corpus-relative
+  BM25 length-normalization artifact any 57th tool addition would trigger
+  for SOME near-tied pair, not a defect this change introduced; see the
+  design note's own measurement.
 - MCP Apps (`io.modelcontextprotocol/ui`) graphical views for
   `verify_translation` and `verify_optimization`: each tool now carries
   `_meta.ui.resourceUri` pointing at a self-contained `ui://` HTML resource

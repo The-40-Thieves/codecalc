@@ -1672,8 +1672,6 @@ def trace_execution(
     which statements fired, in what order, with what variable values at
     each step, and which if/elif/while/for/try branch was taken versus
     never taken. Want just the printed output instead? Use execute_code.
-    Want to know if a branch is reachable by ANY input, without running
-    anything? Use branch_reachability.
 
     Returns `events`: ordered `{step, line, event, func, locals}`, one entry
     per traced line/call/return/exception in YOUR code only (library
@@ -1718,14 +1716,13 @@ def branch_reachability(
     timeout: int = 30,
     max_branches: int = 64,
 ) -> dict[str, Any]:
-    """Decide STATICALLY, WITHOUT running the program, whether each
-    if/elif/else arm and while/for(range) loop in ONE python3 function is
-    reachable — proved by z3 for every possible input, not shown for one.
+    """Which if/elif/else arms and while/for loops of this python3
+    function can ever run, which are dead code, and what inputs reach
+    each — decided with z3, without running the program.
 
-    To see what a SPECIFIC run actually did, use trace_execution instead —
-    this tool never executes the program at all. Use z3_check, not this,
-    when you already have an SMT-LIB2 formula to check directly rather
-    than Python source to translate.
+    Use trace_execution instead to see what happened on one run. Use
+    z3_check, not this, when you already have an SMT-LIB2 script to solve
+    directly rather than Python source to translate.
 
     `inputs` (name -> 'int'/'bool'/'str') narrows or overrides a parameter's
     type; unannotated parameters default to int. Each branch reports
@@ -1733,10 +1730,14 @@ def branch_reachability(
     `boundary_inputs` (min/max/equality-edge for each comparison in its own
     guard) — every input dict is shaped to drop straight into
     compare_edge_cases's `test_inputs`. Refuses, naming the construct and
-    line, before ever calling z3: floats, attribute access, comprehensions,
+    line, prior to any z3 call: floats, attribute access, comprehensions,
     try/except, imports, data-dependent loop bounds, and anything else
     outside `+ - * // %`, `and/or/not`, `== != < <= > >=`, and
-    `abs/min/max/len` on int/bool/str.
+    `abs/min/max/len` on int/bool/str. A `for` loop of at most 32
+    iterations is unrolled exactly; a longer `for`, or a `while`, is
+    checked one iteration at a time — a branch can still come back
+    reachable there, but never `dead`, and anything past the loop that
+    depends on what it computed comes back `unknown` rather than a guess.
     """
     return branch_reachability_module.analyze(
         language, code, inputs=inputs, timeout=timeout, max_branches=max_branches,
