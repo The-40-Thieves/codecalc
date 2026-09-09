@@ -35,10 +35,12 @@ import re
 import shutil
 import stat
 import subprocess
+import tarfile
 import tempfile
 import threading
 import time
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 from . import errors, executor, landlock, registry
@@ -157,6 +159,54 @@ _DEFAULT_MAX_ARTIFACT_BYTES = 16 * 1024 * 1024
 _DEFAULT_MAX_ARTIFACT_COUNT = 500
 _DEFAULT_MIN_HOST_FREE_MB = 256.0
 
+# ── session_snapshot: archive/restore a workspace ───────────────────────────
+#: Snapshots live OUTSIDE every jailed workspace, in their own subtree of the
+#: sessions root — `.codecalc-snapshots/<session_id>/<snapshot_id>.{tar.gz,
+#: json}` — specifically so a session's own sandboxed program (which shares
+#: the WORKSPACE dir as its cwd, and on some hosts can reach arbitrary paths
+#: this OS user owns beyond it — see `_session_unenforced`'s filesystem-
+#: confinement caveat) cannot read, tamper with, or delete an archive of its
+#: own past state via the ordinary workspace path. `_SNAPSHOT_DIRNAME` starts
+#: with the module's usual leading dot (`.codecalc-spill`, `.codecalc-
+#: session-lock`); `list_sessions()` excludes it by name so this bookkeeping
+#: directory is never reported back as a phantom session.
+_SNAPSHOT_DIRNAME = ".codecalc-snapshots"
+
+#: A snapshot id is server-generated (`uuid.uuid4().hex`), never caller-
+#: chosen at creation — but `action="restore"`/`"delete"` DO take one back
+#: from a caller, so it is validated against this exact shape before it ever
+#: reaches a path. 32 lowercase hex characters is deliberately narrower than
+#: `_SAFE_NAME` (which also allows `-`/`_` and up to 64 chars, for a session
+#: id a caller never chooses either but that is generated in a different
+#: shape): a fixed-width hex string has no traversal characters to defend
+#: against in the first place, rather than relying on a boundary check alone.
+_SNAPSHOT_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+
+#: A snapshot's `label` is free text a caller supplies and this module stores
+#: verbatim in the sidecar JSON — bounded so a caller cannot use it to write
+#: an unbounded amount of data into a file this module writes with no other
+#: size ceiling (the archive itself is capped by MAX_SNAPSHOT_BYTES_ENV below;
+#: the label is a separate, much smaller field with no ceiling of its own
+#: otherwise).
+_MAX_LABEL_LEN = 200
+
+#: A snapshot archive is written to disk OUTSIDE any session's own quota —
+#: `_disk_quota_refusal`/`_max_artifact_bytes` bound what a WORKSPACE holds,
+#: and say nothing about a tar.gz sitting next to it. Same "generous, not
+#: unlimited" reasoning as the disk quotas above: large enough that a
+#: legitimate multi-file workspace snapshot never trips it, small enough that
+#: a caller cannot use `session_snapshot` to grow the sessions root without
+#: bound merely by saving the same large workspace repeatedly.
+MAX_SNAPSHOT_BYTES_ENV = "CODECALC_MAX_SNAPSHOT_BYTES"
+_DEFAULT_MAX_SNAPSHOT_BYTES = 256 * 1024 * 1024
+
+#: Independent of the byte cap — a session that saves many SMALL snapshots
+#: repeatedly (each one individually tiny) can still exhaust inodes / grow the
+#: sessions root without bound, the same "count cap alongside the byte cap"
+#: reasoning `_max_artifact_count` already applies to workspace files.
+MAX_SNAPSHOTS_PER_SESSION_ENV = "CODECALC_MAX_SNAPSHOTS_PER_SESSION"
+_DEFAULT_MAX_SNAPSHOTS_PER_SESSION = 10
+
 #: Written by `_write_lock_file` (below) at the session root the moment a
 #: stateful worker spawns — see that function's docstring for what it
 #: proves. Defined here (rather than at that call site) because
@@ -261,6 +311,15 @@ def _max_artifact_count() -> int:
 def _min_host_free_bytes() -> int:
     return int(_env_positive_float(MIN_HOST_FREE_MB_ENV,
                                    _DEFAULT_MIN_HOST_FREE_MB) * 1024 * 1024)
+
+
+def _max_snapshot_bytes() -> int:
+    return _env_positive_int(MAX_SNAPSHOT_BYTES_ENV, _DEFAULT_MAX_SNAPSHOT_BYTES)
+
+
+def _max_snapshots_per_session() -> int:
+    return _env_positive_int(MAX_SNAPSHOTS_PER_SESSION_ENV,
+                             _DEFAULT_MAX_SNAPSHOTS_PER_SESSION)
 
 
 def _iter_regular_files(d: Path):
@@ -1372,7 +1431,7 @@ def start(language: str = "python3", name: str | None = None) -> dict:
     }
 
 
-def stop(session_id: str) -> dict:
+def stop(session_id: str, *, keep_snapshots: bool = False) -> dict:
     """Kill the worker (if any) and delete the workspace.
 
     Deletion is identity-checked (device, inode recorded at creation,
@@ -1380,6 +1439,15 @@ def stop(session_id: str) -> dict:
     it can rename another directory into this path before stop() is called.
     `deleted` reports whether removal actually happened rather than assuming
     it did.
+
+    Snapshots (`session_snapshot`) die with their session: `keep_snapshots`
+    unset/False (the default) also deletes every `session_snapshot` archive
+    this session ever saved, once the workspace is gone. This is the
+    simplest lifecycle that has no separate "orphaned snapshot" state to
+    reason about later — a snapshot a caller actually wants to keep past its
+    origin session's lifetime is one call away (`keep_snapshots=True`), and
+    the default matches `session_stop`'s own existing framing: it destroys
+    "a session", and a snapshot only ever exists because that session did.
     """
     with _lock:
         w = _workers.pop(session_id, None)
@@ -1406,7 +1474,10 @@ def stop(session_id: str) -> dict:
     except ValueError as exc:
         return _guard_error(exc)
     deleted = executor._rmtree_checked(d, created)
-    return {"ok": True, "session_id": session_id, "deleted": deleted}
+    result = {"ok": True, "session_id": session_id, "deleted": deleted}
+    if not keep_snapshots:
+        result["snapshots_deleted"] = _delete_all_snapshots(session_id)
+    return result
 
 
 def list_sessions() -> dict:
@@ -1416,10 +1487,827 @@ def list_sessions() -> dict:
             out.append({"session_id": sid, "language": w.language, "stateful": True,
                         "workdir": str(_session_dir(sid)), "alive": w.alive()})
     for d in SESSION_ROOT.iterdir() if SESSION_ROOT.is_dir() else []:
+        # `.codecalc-snapshots` is this module's OWN bookkeeping directory
+        # (session_snapshot's archive store — see its own constant's
+        # docstring), a sibling of every real session workspace under
+        # SESSION_ROOT, not a session itself; without this exclusion it would
+        # be reported back as a phantom "session" named ".codecalc-snapshots".
+        # A name starting with `_RESTORE_TMP_PREFIX` is the same shape of
+        # non-session: a `session_snapshot(action="restore")` in flight (its
+        # temp extraction directory, or — for replace=True — the old
+        # workspace set aside for the moment between the two swap renames).
+        if d.name == _SNAPSHOT_DIRNAME or d.name.startswith(_RESTORE_TMP_PREFIX):
+            continue
         if d.is_dir() and not any(s["session_id"] == d.name for s in out):
             out.append({"session_id": d.name, "language": "?", "stateful": False,
                         "workdir": str(d), "alive": False})
     return {"ok": True, "sessions": out}
+
+
+#: ── session_snapshot: archive/restore a workspace ───────────────────────
+
+def _utcnow_iso() -> str:
+    """RFC 3339 / ISO 8601 UTC, seconds precision, `Z` suffix — a stable,
+    sortable string a caller can compare or store without parsing a timezone
+    offset."""
+    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _snapshot_session_dir(session_id: str) -> Path:
+    """The per-session snapshot directory, jailed under `SNAPSHOT_ROOT` the
+    same way `_session_dir` jails a workspace under `SESSION_ROOT` — same
+    `_SAFE_NAME` charset (a snapshot's OWN session_id is never caller-chosen
+    at creation, but IS caller-supplied on every `action="restore"/"list"/
+    "delete"` call, so it gets the identical validation the workspace path
+    already applies to it elsewhere).
+    """
+    if not _SAFE_NAME.match(session_id):
+        raise ValueError("invalid session id")
+    root = (SESSION_ROOT / _SNAPSHOT_DIRNAME).resolve()
+    d = (root / session_id).resolve()
+    if not d.is_relative_to(root):
+        raise ValueError("session path escapes snapshot root")
+    return d
+
+
+def _snapshot_paths(session_id: str, snapshot_id: str) -> tuple[Path, Path]:
+    """(archive path, metadata path) for one snapshot. Raises ValueError for
+    a malformed `session_id` (see `_snapshot_session_dir`) or a `snapshot_id`
+    that does not match `_SNAPSHOT_ID_RE` — the same "refuse before ever
+    building a path" shape `_jail`'s length/segment checks use, except here
+    the whole id is checked at once rather than bounded, because a snapshot
+    id has exactly one legitimate shape (a `uuid4().hex` this module itself
+    generated), not a caller-composed relative path.
+    """
+    if not _SNAPSHOT_ID_RE.match(snapshot_id):
+        raise ValueError("invalid snapshot id")
+    d = _snapshot_session_dir(session_id)
+    return d / f"{snapshot_id}.tar.gz", d / f"{snapshot_id}.json"
+
+
+def _session_language(session_id: str) -> str:
+    """The language a session was started with, for `snapshot_save` to record
+    so `snapshot_restore` knows what kind of session to start.
+
+    A live worker knows its own language directly. A workspace-only session
+    (or a worker session whose worker has since died/reaped) has none to ask,
+    so this falls back to parsing the SAME scheme `start()` uses to generate
+    the id in the first place (`f"{canonical_name}-{uuid4().hex[:8]}"`) — safe
+    because no entry in `registry.LANGUAGES` contains a hyphen (checked: 'c++'
+    has a plus, not a hyphen) and a uuid4 hex suffix cannot form one of these
+    names by coincidence. `registry.canonical` re-validates the guess rather
+    than trusting the split blindly, so a session id that does not fit the
+    pattern (or names something no longer registered) falls back to the same
+    'python3' default `start()` itself uses for an unrecognised language.
+    """
+    with _lock:
+        w = _workers.get(session_id)
+    if w is not None:
+        return w.language
+    prefix = session_id.rsplit("-", 1)[0] if "-" in session_id else session_id
+    return registry.canonical(prefix) or "python3"
+
+
+def snapshot_save(session_id: str, *, label: str | None = None) -> dict:
+    """Archive a session's current workspace files into a snapshot stored
+    OUTSIDE the jailed workspace (see `_SNAPSHOT_DIRNAME`'s docstring).
+
+    Applies the EXACT artifact rules `session_artifacts`/`_artifact_entries`
+    use — `.codecalc-run/` and `.codecalc-spill/` excluded, a symlink never
+    followed or archived (it is not `S_ISREG`, so `_workspace_scan` already
+    drops it from `entries`) — plus one more this module's read paths do not
+    need: a HARDLINK (`st_nlink != 1`) is excluded too, because a hardlink
+    inside the workspace can alias a file OUTSIDE it that this OS user can
+    otherwise reach (`ln existing-outside-file leaked-in`), and archiving that
+    would smuggle its bytes into a snapshot a caller can later restore
+    anywhere — the same class of leak a symlink is, one layer of indirection
+    over.
+
+    Identity-checked before anything is read: session code shares the
+    workspace as its cwd (see `_SESSION_DIR_IDENTITY`'s module-level
+    docstring) and can rename an unrelated directory into its place, and
+    archiving THAT would read whatever the swap put there rather than this
+    session's own files. `created is None` — no identity was ever recorded,
+    including for a session this process did not itself `start()` — refuses
+    for the same "cannot verify, so do not proceed" reason `_rmtree_checked`
+    refuses a delete it cannot verify.
+    """
+    try:
+        d = _session_dir(session_id)
+    except ValueError as exc:
+        return _guard_error(exc)
+    if not d.is_dir():
+        return {"ok": False, "error": f"unknown session '{session_id}'"}
+    if label is not None and len(label) > _MAX_LABEL_LEN:
+        return errors.error_result(
+            errors.VALIDATION,
+            f"label is {len(label)} chars, over the {_MAX_LABEL_LEN}-char cap",
+            remedy=f"shorten the label to {_MAX_LABEL_LEN} characters or fewer")
+    _reap_then_note(session_id)  # F4: reap an expired worker, never revive it
+    with _lock:
+        created = _SESSION_DIR_IDENTITY.get(session_id)
+    if created is None or executor._dir_identity(d) != created:
+        return errors.error_result(
+            errors.PERMISSION_DENIED,
+            f"session '{session_id}' workspace identity could not be verified "
+            "(swapped since creation, or this server never recorded one for "
+            "it) — refusing to snapshot",
+            remedy="use a session this server process started")
+    entries, _total = _workspace_scan(d)
+    to_archive: list[tuple[Path, os.stat_result]] = []
+    skipped_hardlinks = 0
+    raw_bytes = 0
+    for p, st in entries:
+        if st.st_nlink != 1:
+            skipped_hardlinks += 1
+            continue
+        to_archive.append((p, st))
+        raw_bytes += st.st_size
+    max_bytes = _max_snapshot_bytes()
+    if raw_bytes > max_bytes:
+        return errors.error_result(
+            errors.RESOURCE_EXHAUSTED,
+            f"snapshot would be at least {raw_bytes} bytes, over the "
+            f"{max_bytes}-byte cap ({MAX_SNAPSHOT_BYTES_ENV})",
+            remedy=(f"delete files from the session first, or raise "
+                    f"{MAX_SNAPSHOT_BYTES_ENV}"),
+            raw_bytes=raw_bytes, max_snapshot_bytes=max_bytes)
+    # The archive itself is written OUTSIDE the workspace `_disk_quota_
+    # refusal` was written to bound, but it still lands on the SAME disk —
+    # `write_file` never lets a write proceed without this same check, and a
+    # multi-hundred-MB archive is exactly the kind of write that check exists
+    # for. `_global_disk_usage()` already walks every directory directly
+    # under SESSION_ROOT, `.codecalc-snapshots` included, so a PRIOR
+    # snapshot's bytes already count toward the global ceiling here; this
+    # call is what makes a NEW one actually gated by it — and by the
+    # per-session ceiling and the host-free-space floor, the same three
+    # checks in the same order `write_file` gets — rather than the total
+    # snapshot cap above being the only thing standing between a save and a
+    # full disk.
+    refusal = _disk_quota_refusal(session_id, raw_bytes)
+    if refusal is not None:
+        return refusal
+    snap_dir = _snapshot_session_dir(session_id)
+    existing = sorted(snap_dir.glob("*.json")) if snap_dir.is_dir() else []
+    max_count = _max_snapshots_per_session()
+    if len(existing) >= max_count:
+        return errors.error_result(
+            errors.RESOURCE_EXHAUSTED,
+            f"session '{session_id}' already has {len(existing)} snapshot(s), "
+            f"at the {max_count}-snapshot cap ({MAX_SNAPSHOTS_PER_SESSION_ENV})",
+            remedy=("delete an old snapshot first (session_snapshot "
+                    f"action=\"delete\"), or raise {MAX_SNAPSHOTS_PER_SESSION_ENV}"),
+            snapshot_count=len(existing), max_snapshots=max_count)
+    snap_dir.mkdir(parents=True, exist_ok=True)
+    snapshot_id = uuid.uuid4().hex
+    tar_path, meta_path = _snapshot_paths(session_id, snapshot_id)
+    tmp_path = tar_path.with_suffix(tar_path.suffix + ".tmp")
+    try:
+        with tarfile.open(tmp_path, "w:gz") as tf:
+            for p, _st in to_archive:
+                tf.add(p, arcname=p.relative_to(d).as_posix(), recursive=False)
+        tmp_path.replace(tar_path)
+    except OSError as exc:
+        with contextlib.suppress(OSError):
+            tmp_path.unlink()
+        return errors.error_result(errors.INTERNAL, f"failed to write snapshot: {exc}")
+    actual_bytes = tar_path.stat().st_size
+    created_at = _utcnow_iso()
+    language = _session_language(session_id)
+    meta = {
+        "snapshot_id": snapshot_id, "session_id": session_id, "label": label,
+        "created_at": created_at, "bytes": actual_bytes, "files": len(to_archive),
+        "raw_bytes": raw_bytes, "language": language,
+    }
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    result = {"ok": True, "action": "save", "session_id": session_id,
+              "snapshot_id": snapshot_id, "bytes": actual_bytes,
+              "files": len(to_archive), "created_at": created_at, "label": label}
+    if skipped_hardlinks:
+        result["skipped_hardlinks"] = skipped_hardlinks
+    return result
+
+
+def snapshot_list(session_id: str) -> dict:
+    """Every snapshot saved for `session_id`, oldest first. An unknown or
+    never-snapshotted session reports an empty list rather than an error —
+    the same "the directory listing is the ground truth" stance
+    `list_sessions()` already takes, and there is nothing to refuse here: a
+    caller listing a session that happens to have never called
+    `action="save"` has made no mistake."""
+    try:
+        d = _snapshot_session_dir(session_id)
+    except ValueError as exc:
+        return _guard_error(exc)
+    out = []
+    if d.is_dir():
+        for meta_path in sorted(d.glob("*.json")):
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue  # a sidecar this module did not write cleanly; skip it
+            out.append({
+                "snapshot_id": meta.get("snapshot_id", meta_path.stem),
+                "bytes": meta.get("bytes"),
+                "files": meta.get("files"),
+                "created_at": meta.get("created_at"),
+                "label": meta.get("label"),
+            })
+    out.sort(key=lambda e: e.get("created_at") or "")
+    return {"ok": True, "action": "list", "session_id": session_id, "snapshots": out}
+
+
+def snapshot_delete(session_id: str, snapshot_id: str) -> dict:
+    """Remove one snapshot. Identity-safe by construction, the same
+    reasoning `_prune_spill` already applies to its own glob-then-unlink: the
+    path is composed ENTIRELY from a validated session id and a validated
+    32-hex-char snapshot id (`_snapshot_paths`), never from anything read out
+    of the target directory, and each candidate is `lstat`-checked as a
+    REGULAR file before it is unlinked — so this can only ever remove the
+    two files (`<id>.tar.gz`, `<id>.json`) this module itself would have
+    written at that exact path, never a symlink or anything else planted
+    there under the real name.
+    """
+    try:
+        tar_path, meta_path = _snapshot_paths(session_id, snapshot_id)
+    except ValueError as exc:
+        return _guard_error(exc)
+    existed = False
+    for p in (tar_path, meta_path):
+        try:
+            st = p.lstat()
+        except OSError:
+            continue
+        if stat.S_ISREG(st.st_mode):
+            existed = True
+            p.unlink(missing_ok=True)
+    return {"ok": True, "action": "delete", "session_id": session_id,
+            "snapshot_id": snapshot_id, "deleted": existed}
+
+
+def _delete_all_snapshots(session_id: str) -> int:
+    """Remove every snapshot `session_id` owns; the count of archives
+    actually removed. Called from `stop()` unless `keep_snapshots=True`.
+
+    Unlike the WORKSPACE `stop()` deletes a few lines above this call, the
+    snapshot directory carries none of the rename-swap risk `_rmtree_checked`
+    exists to guard against: it is never a session's own cwd, so code
+    executed inside the session has no ordinary path to it to rename
+    anything into (the same-uid residual `_session_unenforced` already
+    documents for filesystem confinement is unrelated — it is about reading
+    an ARBITRARY path this OS user owns, not about swapping THIS specific
+    directory, which nothing but this module and an operator with shell
+    access on the host has any reason to touch). A plain existence check and
+    `shutil.rmtree` is therefore enough here, best-effort like every other
+    background cleanup in this module (the idle-expiry marker, the lock
+    file): a failure to remove a snapshot on session teardown must not fail
+    the teardown itself.
+    """
+    try:
+        snap_dir = _snapshot_session_dir(session_id)
+    except ValueError:
+        return 0
+    if not snap_dir.is_dir():
+        return 0
+    count = len(list(snap_dir.glob("*.tar.gz")))
+    shutil.rmtree(snap_dir, ignore_errors=True)
+    return count
+
+
+#: Sibling-of-SESSION_ROOT prefix for a restore's temp extraction directory
+#: and (during `replace=True`) the old workspace set aside during the
+#: atomic swap. Dot-prefixed so `_SAFE_NAME` (no session id may start with
+#: `.`) can never resolve a real session id to one of these — the same
+#: non-collision guarantee `_SNAPSHOT_DIRNAME` already relies on — and
+#: `list_sessions()` excludes anything with this prefix for the identical
+#: "not a phantom session" reason it already excludes `_SNAPSHOT_DIRNAME`.
+_RESTORE_TMP_PREFIX = ".codecalc-restore-"
+
+
+def _extraction_byte_budget() -> int:
+    """The hard ceiling `_plan_tar_extraction` refuses ANY archive past —
+    checked as a RUNNING total while walking members, not only once at the
+    end. This is what actually bounds a gzip bomb's decompression cost:
+    `tf.next()` only ever decompresses/skips as far as the CURRENT
+    member's data when asked for the NEXT header, so aborting the instant
+    the running total crosses this line means `_plan_tar_extraction` never
+    makes that next call — the (potentially gigabytes-large) decompression
+    for whatever comes after simply never happens, because nothing ever
+    asks for it. No separate byte-counting stream wrapper is needed for
+    the same reason: the expensive work only occurs on demand, one member
+    at a time, and this stops the demand.
+
+    `_max_snapshot_bytes()` (plus one member's slack, so a snapshot sitting
+    right at the cap when it was saved is never refused restoring itself)
+    rather than a new, independently-tunable constant: no archive
+    `session_snapshot` itself ever produced can exceed `_max_snapshot_
+    bytes()` of raw content — `snapshot_save` refuses to write one that
+    would — so a restore SOURCE that does is already established as not
+    one of ours, the same "the sidecar is advisory, the archive's own
+    structure is authoritative" rule this module applies to `raw_bytes`
+    everywhere else.
+    """
+    return _max_snapshot_bytes() + _max_artifact_bytes()
+
+
+class _TarPlanError(Exception):
+    """Internal control-flow signal from `_plan_tar_extraction`'s member
+    loop, carrying the exact `errors.error_result(...)` dict to return. A
+    bare `return` cannot escape both the `while True:` member loop and the
+    enclosing `with tarfile.open(...) as tf:` in one step as cleanly as
+    raising and catching once, outside both.
+    """
+
+    def __init__(self, result: dict) -> None:
+        super().__init__(result.get("error"))
+        self.result = result
+
+
+def _tar_path_collision(known_paths: dict[str, str], relpath: str, kind: str) -> str | None:
+    """None if `relpath` (`kind` "file" or "dir") can coexist with every
+    member already registered in `known_paths`; otherwise the refusal
+    message. Mutates `known_paths` to register `relpath`, and every
+    ancestor directory it implies, on success.
+
+    Two collision shapes are refused, found live by adversarial review
+    against a `replace=True` restore that had already wiped the caller's
+    workspace before hitting either one mid-extraction:
+
+    - a path used as a plain FILE by one member while another member (or
+      a longer path that implies it as an ancestor directory — a file `a`
+      followed by a member `a/b`) requires it to be a DIRECTORY, in
+      either order;
+    - the same path declared as a file twice (`O_EXCL` would refuse the
+      second write anyway, but that is a partial-extraction failure this
+      function exists to catch BEFORE any write, not after the first one
+      already landed). Two DIRECTORY entries for the same path are a
+      harmless, common tar quirk and are allowed — `mkdir(exist_ok=True)`
+      already treats a repeat the same way.
+    """
+    parts = relpath.split("/")
+    for i in range(1, len(parts)):
+        ancestor = "/".join(parts[:i])
+        existing = known_paths.get(ancestor)
+        if existing == "file":
+            return (f"snapshot member {relpath!r} treats {ancestor!r} as a "
+                    "directory, but an earlier member declared it a file")
+        known_paths[ancestor] = "dir"
+    existing = known_paths.get(relpath)
+    if existing is not None and not (existing == "dir" and kind == "dir"):
+        return (f"snapshot member {relpath!r} collides with an earlier member "
+                f"of a different kind ({existing} vs {kind})")
+    known_paths[relpath] = kind
+    return None
+
+
+def _plan_tar_extraction(archive_path: Path, *, max_members: int,
+                         max_member_bytes: int) -> dict:
+    """Walk `archive_path` member-by-member and validate every one, WITHOUT
+    extracting anything or resolving against a real destination yet.
+
+    On success: `{"ok": True, "members": [(relpath, is_dir, size), ...],
+    "total_bytes": N, "file_count": N}`. `total_bytes`/`file_count` are
+    RE-DERIVED from the archive's own structure here — never taken from a
+    snapshot's `.json` sidecar, a file this function does not even open.
+    Adversarial review reproduced the sidecar being trusted for a quota
+    decision live: a hand-placed 20 MB archive with a sidecar lying
+    `raw_bytes: 1` sailed through a 1 MB/10 MB quota, because the ONLY
+    number `snapshot_restore` used to be checked was that lie. Every
+    caller of this function must use `total_bytes`/`file_count` from HERE,
+    not from `meta.get(...)`, for any quota or safety decision — the
+    sidecar stays useful only for what it always was, a human-facing label
+    and a starting-language hint.
+
+    On any refusal: `errors.error_result(...)` — `ok` tells the two shapes
+    apart, the same way `_extract_planned_tar`'s `None`-or-dict return
+    already does for its own two shapes.
+
+    Uses `tf.next()` in a loop, never `tf.getmembers()`. `getmembers()`
+    walks the ENTIRE archive up front — for a compressed stream that means
+    decompressing every member's data just to skip past it and find the
+    next header, including a member this function is about to refuse for
+    being oversized. Reproduced live: a single member honestly declaring a
+    multi-GiB size, compressed to a couple of MiB of highly-repetitive
+    content, cost several seconds of CPU under `getmembers()` before this
+    function ever got a chance to reject it. `tf.next()` returns one
+    header at a time with its size already known and NO data read yet;
+    checking a member's declared size immediately and refusing WITHOUT
+    calling `tf.next()` again is what stops tarfile from ever skipping —
+    decompressing — past that member's data at all. The running
+    `total_bytes` check below (against `_extraction_byte_budget()`) closes
+    the complementary shape: many individually-small members whose SUM is
+    still a bomb. Aborting the instant the running total crosses the
+    budget means every member after that point is never asked for either,
+    for the identical reason — the cost is bounded by the budget plus one
+    member's slack, not by the archive's real (undecompressed) size.
+
+    Collisions are refused here too, before extraction ever begins — see
+    `_tar_path_collision`'s own docstring for the two shapes and why
+    catching them here, rather than partway through a write pass, is what
+    makes "a refusal leaves nothing on disk" true for a caller whose
+    `replace=True` restore has already committed to using this snapshot.
+    """
+    budget = _extraction_byte_budget()
+    members: list[tuple[str, bool, int]] = []
+    known_paths: dict[str, str] = {}
+    total_bytes = 0
+    member_count = 0
+    try:
+        with tarfile.open(archive_path, "r:gz") as tf:
+            while True:
+                try:
+                    member = tf.next()
+                except (tarfile.TarError, OSError, EOFError) as exc:
+                    raise _TarPlanError(errors.error_result(
+                        errors.VALIDATION, f"corrupt snapshot archive: {exc}")) from exc
+                if member is None:
+                    break
+                name = member.name
+                if not name or name in (".", "./"):
+                    continue  # the bare root entry some tar writers emit
+                member_count += 1
+                if member_count > max_members:
+                    raise _TarPlanError(errors.error_result(
+                        errors.RESOURCE_EXHAUSTED,
+                        f"snapshot has more than {max_members} member(s), over "
+                        f"the cap ({MAX_ARTIFACT_COUNT_ENV})",
+                        remedy=f"raise {MAX_ARTIFACT_COUNT_ENV}",
+                        max_members=max_members))
+                if "\x00" in name or "\\" in name:
+                    raise _TarPlanError(errors.error_result(
+                        errors.PERMISSION_DENIED,
+                        f"snapshot member name is malformed: {name!r}", member=name))
+                if name.startswith("/") or re.match(r"^[A-Za-z]:", name):
+                    raise _TarPlanError(errors.error_result(
+                        errors.PERMISSION_DENIED,
+                        f"snapshot member has an absolute path: {name!r}", member=name))
+                parts = name.split("/")
+                if any(part in ("", ".", "..") for part in parts):
+                    raise _TarPlanError(errors.error_result(
+                        errors.PERMISSION_DENIED,
+                        f"snapshot member path traverses out of the workspace: {name!r}",
+                        member=name))
+                if member.issym() or member.islnk():
+                    raise _TarPlanError(errors.error_result(
+                        errors.PERMISSION_DENIED,
+                        f"snapshot member {name!r} is a symlink/hardlink — refused",
+                        member=name))
+                is_dir = member.isdir()
+                if not is_dir and not member.isreg():
+                    raise _TarPlanError(errors.error_result(
+                        errors.PERMISSION_DENIED,
+                        f"snapshot member {name!r} is not a regular file or "
+                        "directory (device/FIFO/socket) — refused", member=name))
+                relpath = "/".join(parts)
+                member_bytes = 0
+                if not is_dir:
+                    if member.size > max_member_bytes:
+                        raise _TarPlanError(errors.error_result(
+                            errors.RESOURCE_EXHAUSTED,
+                            f"snapshot member {name!r} is {member.size} bytes, "
+                            f"over the {max_member_bytes}-byte per-file cap "
+                            f"({MAX_ARTIFACT_BYTES_ENV})",
+                            remedy=f"raise {MAX_ARTIFACT_BYTES_ENV}",
+                            member=name, member_bytes=member.size,
+                            max_member_bytes=max_member_bytes))
+                    member_bytes = member.size
+                    total_bytes += member_bytes
+                    if total_bytes > budget:
+                        raise _TarPlanError(errors.error_result(
+                            errors.RESOURCE_EXHAUSTED,
+                            f"snapshot content exceeds the {budget}-byte "
+                            "decompression budget — refusing to read further",
+                            remedy=f"raise {MAX_SNAPSHOT_BYTES_ENV}",
+                            budget_bytes=budget))
+                collision = _tar_path_collision(
+                    known_paths, relpath, "dir" if is_dir else "file")
+                if collision is not None:
+                    raise _TarPlanError(errors.error_result(
+                        errors.PERMISSION_DENIED, collision, member=name))
+                members.append((relpath, is_dir, member_bytes))
+    except _TarPlanError as exc:
+        return exc.result
+    except (tarfile.TarError, OSError, EOFError) as exc:
+        return errors.error_result(errors.VALIDATION, f"corrupt snapshot archive: {exc}")
+    file_count = sum(1 for _, is_dir, _ in members if not is_dir)
+    return {"ok": True, "members": members, "total_bytes": total_bytes,
+           "file_count": file_count}
+
+
+def _extract_planned_tar(archive_path: Path, members: list[tuple[str, bool, int]],
+                         dest: Path) -> dict | None:
+    """Write an ALREADY-VALIDATED `_plan_tar_extraction` plan into `dest`.
+    `dest` must be a directory this call creates fresh and nothing else has
+    ever written to — every member is written with `O_EXCL`, so this can
+    never overwrite, or follow, an existing path.
+
+    `None` on success; an `errors.error_result(...)` dict otherwise — never
+    raises. Re-walks `archive_path` from the start (planning already
+    consumed the first read of the stream) and cross-checks each member
+    against the plan by position/name/kind/size, refusing on any mismatch
+    rather than trusting a second read of the same path to agree with the
+    first — belt-and-suspenders against the archive changing on disk
+    between the two passes, not a scenario this module's own callers can
+    trigger (both passes run back to back, on a path only this module
+    wrote to), but the tar-parsing library itself offers no guarantee two
+    reads of a corrupt or unusual stream produce identical results.
+
+    RESIDUAL, stated rather than implied: `O_NOFOLLOW` on the open() below
+    refuses a symlink at the FINAL path component only — the identical,
+    accepted parent-component TOCTOU `_write_nofollow`'s and `_jail`'s own
+    docstrings already document for every other write in this module (a
+    session's own code sharing a PARENT directory as its cwd could, in
+    principle, swap a component between this function's `mkdir`/`resolve`
+    calls and its `open`). It is narrower here than it is for those two:
+    `dest` is a temp directory nothing but this restore call has any
+    reason to touch, not a live session workspace shared with executing
+    code, so the window has no ordinary attacker on the other side of it.
+    """
+    dest = dest.resolve()
+    index = 0
+    try:
+        with tarfile.open(archive_path, "r:gz") as tf:
+            while True:
+                try:
+                    member = tf.next()
+                except (tarfile.TarError, OSError, EOFError) as exc:
+                    return errors.error_result(
+                        errors.VALIDATION, f"corrupt snapshot archive: {exc}")
+                if member is None:
+                    break
+                name = member.name
+                if not name or name in (".", "./"):
+                    continue
+                if index >= len(members):
+                    return errors.error_result(
+                        errors.PERMISSION_DENIED,
+                        "snapshot archive changed between validation and "
+                        "extraction (more members than planned)")
+                relpath, is_dir, size = members[index]
+                index += 1
+                if name != relpath or member.isdir() != is_dir or (
+                        not is_dir and member.size != size):
+                    return errors.error_result(
+                        errors.PERMISSION_DENIED,
+                        "snapshot archive changed between validation and "
+                        f"extraction at member {relpath!r}")
+                target = (dest / relpath).resolve()
+                if not target.is_relative_to(dest):
+                    return errors.error_result(
+                        errors.PERMISSION_DENIED,
+                        f"snapshot member resolves outside the new workspace: {relpath!r}",
+                        member=relpath)
+                if is_dir:
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                fileobj = tf.extractfile(member)
+                if fileobj is None:
+                    continue
+                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW
+                fd = os.open(target, flags, 0o600)
+                try:
+                    with os.fdopen(fd, "wb") as out:
+                        shutil.copyfileobj(fileobj, out, length=1024 * 1024)
+                finally:
+                    fileobj.close()
+    except OSError as exc:
+        return errors.error_result(
+            errors.PERMISSION_DENIED,
+            f"snapshot extraction failed on {exc.filename or '?'}: {exc}")
+    if index != len(members):
+        return errors.error_result(
+            errors.PERMISSION_DENIED,
+            "snapshot archive changed between validation and extraction "
+            "(fewer members than planned)")
+    return None
+
+
+def _materialize_tar_plan(archive_path: Path, plan: dict, base_dir: Path) -> Path | dict:
+    """Extract an already-validated plan into a FRESH temp directory,
+    created as a sibling of every real session directory under `base_dir`
+    (always `SESSION_ROOT` in practice — `_session_dir(sid).parent` is
+    always `SESSION_ROOT`, for a brand-new session and for `replace=True`
+    alike). This is the atomicity primitive `snapshot_restore` builds on:
+    nothing about a caller's real session directory is touched until AFTER
+    this call has already fully succeeded, so a failure here — a hostile
+    member the plan somehow missed, a disk error mid-write — leaves the
+    caller's existing workspace (if any) completely untouched, and this
+    function has already cleaned up its own temp directory before
+    returning.
+
+    `Path` (the temp directory, now fully populated and owned by the
+    caller) on success; an `errors.error_result(...)` dict otherwise, with
+    the temp directory already removed.
+    """
+    temp_dir = base_dir / f"{_RESTORE_TMP_PREFIX}{uuid.uuid4().hex}"
+    temp_dir.mkdir(parents=True)
+    failure = _extract_planned_tar(archive_path, plan["members"], temp_dir)
+    if failure is not None:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return failure
+    return temp_dir
+
+
+def snapshot_restore(session_id: str, snapshot_id: str, *, replace: bool = False) -> dict:
+    """Restore a snapshot's files.
+
+    `replace=False` (default): start a brand-new session (same language the
+    snapshot was saved from) and extract into ITS workspace. Returns the new
+    session's own `start()` shape plus `restored_files`/`bytes`.
+
+    `replace=True`: extract into a temp directory first, THEN wipe and
+    recreate `session_id`'s OWN workspace by swapping it in — see
+    `_snapshot_restore_replace`'s own docstring for the exact swap order and
+    why extraction happens before anything about the existing workspace is
+    touched at all. A stateful (python3/node) session's REPL worker is
+    killed and a fresh one respawned once the swap lands — restoring FILES
+    never restores interpreter state (variables, imports); nothing in this
+    module keeps that around once a worker process exits, snapshot or no
+    snapshot.
+
+    The snapshot's `.json` sidecar is read for exactly one thing —
+    `language`, a convenience default for which kind of session to start —
+    and NEVER for a quota or safety decision: `_plan_tar_extraction` below
+    re-derives `total_bytes`/`file_count` from the archive's own structure,
+    because the sidecar sits beside an archive a caller (the hostile-archive
+    tests in test_session_snapshot.py; in principle anything with the same
+    filesystem access a session's own executed code has) can place, or
+    replace, independently of the archive's real content.
+    """
+    try:
+        tar_path, meta_path = _snapshot_paths(session_id, snapshot_id)
+    except ValueError as exc:
+        return _guard_error(exc)
+    if not tar_path.is_file() or not meta_path.is_file():
+        return {"ok": False,
+                "error": f"unknown snapshot '{snapshot_id}' for session '{session_id}'"}
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return errors.error_result(errors.INTERNAL, f"snapshot metadata unreadable: {exc}")
+    language = registry.canonical(meta.get("language") or "") or "python3"
+
+    plan = _plan_tar_extraction(tar_path, max_members=_max_artifact_count(),
+                                max_member_bytes=_max_artifact_bytes())
+    if not plan.get("ok"):
+        return plan
+
+    if replace:
+        return _snapshot_restore_replace(session_id, tar_path, plan, language)
+    return _snapshot_restore_new(session_id, tar_path, plan, language)
+
+
+def _finish_restored_session(session_id: str, d: Path, language: str,
+                             plan: dict, *, replaced: bool) -> dict:
+    """The shared tail of both restore paths: spawn a worker for a
+    stateful language (never before this point — see each caller's own
+    docstring for why), then build the result shape. `d` is already the
+    session's FINAL, real directory by the time this runs.
+    """
+    result = {"ok": True, "action": "restore", "session_id": session_id,
+              "language": language, "workdir": str(d),
+              "restored_files": plan["file_count"], "bytes": plan["total_bytes"]}
+    if replaced:
+        result["replaced"] = True
+    if language in _WORKER_LANGS:
+        neww, why = _spawn_worker(language, d)
+        if neww is not None:
+            _write_lock_file(d)
+            with _lock:
+                _workers[session_id] = neww
+                _touch(session_id)
+            result["stateful"] = True
+            result["confined"] = neww.confined
+            result["unenforced"] = _session_unenforced(neww)
+        else:
+            result["stateful"] = False
+            result["worker_restart_error"] = why or "unknown cause"
+    else:
+        result["stateful"] = False
+    result["files"] = _list(d)
+    return result
+
+
+def _snapshot_restore_new(origin_session_id: str, tar_path: Path, plan: dict,
+                          language: str) -> dict:
+    """`snapshot_restore(replace=False)`: extract into a temp directory,
+    THEN mint a new session id and rename the temp directory into place.
+    Nothing named `origin_session_id` is written to at all — it is only
+    where the SNAPSHOT lives; the new session gets its own fresh id and
+    directory.
+    """
+    # Checked against a session that does not exist yet: `_session_dir_
+    # size` (inside `_disk_quota_refusal`) reports 0 bytes for a directory
+    # that has not been created — exactly right here, since nothing exists
+    # at the eventual path until the rename below succeeds, and this way a
+    # refusal costs nothing (no temp directory created only to be deleted).
+    refusal = _disk_quota_refusal(origin_session_id, plan["total_bytes"])
+    if refusal is not None:
+        return refusal
+    materialized = _materialize_tar_plan(tar_path, plan, SESSION_ROOT)
+    if isinstance(materialized, dict):
+        return materialized
+    temp_dir = materialized
+    new_id = f"{language}-{uuid.uuid4().hex[:8]}"
+    final_dir = SESSION_ROOT / new_id
+    try:
+        temp_dir.rename(final_dir)
+    except OSError as exc:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return errors.error_result(
+            errors.INTERNAL, f"could not finalize the restored workspace: {exc}")
+    with _lock:
+        _SESSION_DIR_IDENTITY[new_id] = executor._dir_identity(final_dir)
+    return _finish_restored_session(new_id, final_dir, language, plan, replaced=False)
+
+
+def _snapshot_restore_replace(session_id: str, tar_path: Path, plan: dict,
+                              language: str) -> dict:
+    """`snapshot_restore(replace=True)`: extract into a temp directory
+    FIRST, and only once that has fully succeeded, swap it in for
+    `session_id`'s existing workspace — identity-check, rename the old
+    workspace ASIDE, rename the new one IN, then delete the old one. A
+    failure at ANY point before the first rename leaves the existing
+    workspace (and its worker, if any) completely untouched; a failure
+    between the two renames restores the original by renaming it back
+    before returning. The worker is killed only once extraction has
+    already succeeded (immediately before the first rename) and a
+    replacement is spawned only after the second — never while the
+    caller's existing workspace was the only copy of its files on disk.
+
+    This ordering is the fix for a live-reproduced defect: the previous
+    implementation wiped the workspace with `_rmtree_checked` BEFORE
+    extracting, so a hostile or malformed archive caught only partway
+    through extraction (a path-type collision on member 40 of 100, say)
+    left the session with an empty workspace, no worker, and 39 files on
+    disk — contradicting the "leaves nothing on disk" claim the extractor's
+    own docstring made at the time.
+    """
+    try:
+        d = _session_dir(session_id)
+    except ValueError as exc:
+        return _guard_error(exc)
+    if not d.is_dir():
+        return {"ok": False, "error": f"unknown session '{session_id}'"}
+    _reap_then_note(session_id)
+    with _lock:
+        created = _SESSION_DIR_IDENTITY.get(session_id)
+    if created is None or executor._dir_identity(d) != created:
+        return errors.error_result(
+            errors.PERMISSION_DENIED,
+            f"session '{session_id}' workspace identity could not be "
+            "verified — refusing to replace it",
+            remedy="use a session this server process started")
+    refusal = _disk_quota_refusal(session_id, plan["total_bytes"])
+    if refusal is not None:
+        return refusal
+    materialized = _materialize_tar_plan(tar_path, plan, SESSION_ROOT)
+    if isinstance(materialized, dict):
+        return materialized
+    temp_dir = materialized
+    # Re-checked immediately before the swap, not just at the top of this
+    # function: extraction just did real (bounded, but non-zero) work, and
+    # this is the LAST point before `d` itself is touched at all — the
+    # identity guarantee this whole path exists for is only as strong as
+    # the final check before the write it protects.
+    with _lock:
+        created_now = _SESSION_DIR_IDENTITY.get(session_id)
+    if created_now is None or executor._dir_identity(d) != created_now:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return errors.error_result(
+            errors.PERMISSION_DENIED,
+            f"session '{session_id}' workspace identity changed during "
+            "restore — refusing to replace it",
+            remedy="use a session this server process started")
+    with _lock:
+        w = _workers.pop(session_id, None)
+        _LAST_ACTIVITY.pop(session_id, None)
+        _discard_expired_locked(session_id)
+    if w is not None:
+        w.close()
+        _remove_lock_file(session_id)
+    old_aside = d.with_name(f"{_RESTORE_TMP_PREFIX}old-{uuid.uuid4().hex}")
+    try:
+        d.rename(old_aside)
+    except OSError as exc:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return errors.error_result(
+            errors.INTERNAL, f"could not set aside the existing workspace: {exc}")
+    try:
+        temp_dir.rename(d)
+    except OSError as exc:
+        # The one case where a failure must not leave the caller with
+        # NEITHER workspace: put the original back before giving up.
+        with contextlib.suppress(OSError):
+            old_aside.rename(d)
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return errors.error_result(
+            errors.INTERNAL, f"could not finalize the restored workspace: {exc}")
+    shutil.rmtree(old_aside, ignore_errors=True)
+    with _lock:
+        _SESSION_DIR_IDENTITY[session_id] = executor._dir_identity(d)
+    return _finish_restored_session(session_id, d, language, plan, replaced=True)
 
 
 #: Per-call ceilings a STATEFUL worker cannot honour, and why.

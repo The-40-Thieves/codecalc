@@ -1,7 +1,7 @@
 {
   "core": {
     "n": 100,
-    "skipped": 111,
+    "skipped": 118,
     "top1_hits": 69,
     "top3_hits": 84,
     "top1": 0.69,
@@ -512,7 +512,7 @@
   },
   "dev": {
     "n": 168,
-    "skipped": 43,
+    "skipped": 50,
     "top1_hits": 113,
     "top3_hits": 139,
     "top1": 0.6726,
@@ -1395,12 +1395,12 @@
     ]
   },
   "full": {
-    "n": 211,
+    "n": 218,
     "skipped": 0,
-    "top1_hits": 134,
-    "top3_hits": 165,
-    "top1": 0.6351,
-    "top3": 0.782,
+    "top1_hits": 136,
+    "top3_hits": 170,
+    "top1": 0.6239,
+    "top3": 0.7798,
     "per_tool": {
       "algebraic_equiv": {
         "n": 4,
@@ -1594,7 +1594,7 @@
       },
       "session_files": {
         "n": 4,
-        "top1": 0.75,
+        "top1": 0.5,
         "top3": 1.0
       },
       "session_list": {
@@ -1612,6 +1612,11 @@
         "top1": 0.6667,
         "top3": 0.6667
       },
+      "session_snapshot": {
+        "n": 7,
+        "top1": 0.7143,
+        "top3": 0.8571
+      },
       "session_start": {
         "n": 3,
         "top1": 0.6667,
@@ -1619,12 +1624,12 @@
       },
       "session_stop": {
         "n": 3,
-        "top1": 0.3333,
-        "top3": 1.0
+        "top1": 0.0,
+        "top3": 0.6667
       },
       "session_write_file": {
         "n": 3,
-        "top1": 1.0,
+        "top1": 0.6667,
         "top3": 1.0
       },
       "simplify_expression": {
@@ -1694,7 +1699,7 @@
         "got": "update_runtimes",
         "top3": [
           "calc_exact",
-          "compare_execution",
+          "session_stop",
           "update_runtimes"
         ]
       },
@@ -2152,7 +2157,7 @@
         "got": "branch_reachability",
         "top3": [
           "branch_reachability",
-          "list_languages",
+          "session_snapshot",
           "verify_translation"
         ]
       },
@@ -2284,6 +2289,18 @@
         "got": "session_start",
         "top3": [
           "session_files",
+          "session_snapshot",
+          "session_start"
+        ]
+      },
+      {
+        "prompt": "Kill the REPL worker behind that workspace id and wipe its files",
+        "expected": [
+          "session_stop"
+        ],
+        "got": "session_snapshot",
+        "top3": [
+          "session_snapshot",
           "session_start",
           "session_stop"
         ]
@@ -2295,7 +2312,7 @@
         ],
         "got": "session_start",
         "top3": [
-          "execute_code",
+          "session_snapshot",
           "session_start",
           "session_stop"
         ]
@@ -2319,9 +2336,9 @@
         ],
         "got": "session_start",
         "top3": [
-          "compare_execution",
           "list_languages",
-          "session_start"
+          "session_start",
+          "session_stop"
         ]
       },
       {
@@ -2329,11 +2346,23 @@
         "expected": [
           "session_list"
         ],
-        "got": "execute_code_stream",
+        "got": "session_snapshot",
         "top3": [
           "execute_code_stream",
           "session_files",
-          "session_read_file"
+          "session_snapshot"
+        ]
+      },
+      {
+        "prompt": "What files exist inside my saved workspace right now?",
+        "expected": [
+          "session_files"
+        ],
+        "got": "session_snapshot",
+        "top3": [
+          "session_files",
+          "session_snapshot",
+          "session_stop"
         ]
       },
       {
@@ -2346,6 +2375,18 @@
           "execute_code_stream",
           "session_files",
           "trace_execution"
+        ]
+      },
+      {
+        "prompt": "Save this CSV data into my workspace so a later script can read it as input",
+        "expected": [
+          "session_write_file"
+        ],
+        "got": "session_snapshot",
+        "top3": [
+          "session_read_file",
+          "session_snapshot",
+          "session_write_file"
         ]
       },
       {
@@ -2368,7 +2409,7 @@
         "got": "session_read_file",
         "top3": [
           "session_read_file",
-          "trace_execution",
+          "session_snapshot",
           "verify_translation"
         ]
       },
@@ -2382,6 +2423,30 @@
           "branch_reachability",
           "run_cancel",
           "run_inspect"
+        ]
+      },
+      {
+        "prompt": "Back up everything in my persistent workspace right now so I can come back to this exact state later",
+        "expected": [
+          "session_snapshot"
+        ],
+        "got": "run_cancel",
+        "top3": [
+          "calc_exact",
+          "run_cancel",
+          "session_start"
+        ]
+      },
+      {
+        "prompt": "Get rid of one of those old workspace backups, I don't need it anymore",
+        "expected": [
+          "session_snapshot"
+        ],
+        "got": "session_start",
+        "top3": [
+          "session_snapshot",
+          "session_start",
+          "update_runtimes"
         ]
       },
       {
@@ -2413,11 +2478,11 @@
         "expected": [
           "session_run"
         ],
-        "got": "session_files",
+        "got": "session_snapshot",
         "top3": [
           "compare_execution",
           "session_files",
-          "session_read_file"
+          "session_snapshot"
         ]
       },
       {
@@ -2477,7 +2542,7 @@
         "top3": [
           "run_cancel",
           "run_inspect",
-          "runtimes_status"
+          "session_snapshot"
         ]
       },
       {
@@ -2488,7 +2553,7 @@
         "got": "session_stop",
         "top3": [
           "run_cancel",
-          "run_submit",
+          "run_inspect",
           "session_stop"
         ]
       },
@@ -2524,7 +2589,7 @@
         "got": "update_runtimes",
         "top3": [
           "install_package",
-          "list_execution_providers",
+          "session_snapshot",
           "update_runtimes"
         ]
       },
@@ -2603,7 +2668,7 @@
     ]
   },
   "codecalc_version": "0.10.0",
-  "generated_at": "2026-09-09T00:24:07+00:00",
-  "prompt_count": 211,
-  "prompt_set_sha256": "858e5a6672263244dd3f1271fee719e760888f5ede3de6aa7e2aaf072d92590c"
+  "generated_at": "2026-09-09T00:29:59+00:00",
+  "prompt_count": 218,
+  "prompt_set_sha256": "4a5dbfeb84f97402c8e37dba8721f2e47fec02958b0175e463a5a94a8b871f60"
 }

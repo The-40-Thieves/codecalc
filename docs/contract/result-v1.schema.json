@@ -51,6 +51,9 @@
       "$ref": "#/$defs/comparison_rows"
     },
     {
+      "$ref": "#/$defs/session_snapshot_result"
+    },
+    {
       "$ref": "#/$defs/branch_reachability"
     }
   ],
@@ -1761,9 +1764,236 @@
         }
       }
     },
+    "session_snapshot_result": {
+      "title": "a session_snapshot result",
+      "description": "session_snapshot(session_id, action=...) archives or restores a session's workspace files. `action` discriminates the four success shapes this tool can return; a failure (`ok: false`) matches `rejected` instead, same as every other tool. The archive itself is stored OUTSIDE the jailed session workspace \u2014 sandboxed code run inside a session can never read or tamper with it \u2014 so nothing here overlaps `session_result`'s own shape, which describes what runs INSIDE one.",
+      "type": "object",
+      "required": [
+        "ok",
+        "action"
+      ],
+      "properties": {
+        "ok": {
+          "const": true
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "save",
+            "restore",
+            "list",
+            "delete"
+          ]
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "save"
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "required": [
+              "snapshot_id",
+              "bytes",
+              "files",
+              "created_at",
+              "label"
+            ],
+            "properties": {
+              "snapshot_id": {
+                "type": "string"
+              },
+              "bytes": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "The archive's own size on disk (post-gzip), not the sum of the files it holds."
+              },
+              "files": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "created_at": {
+                "type": "string"
+              },
+              "label": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "list"
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "required": [
+              "session_id",
+              "snapshots"
+            ],
+            "properties": {
+              "snapshots": {
+                "type": "array",
+                "description": "Oldest first, by created_at.",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "snapshot_id",
+                    "bytes",
+                    "files",
+                    "created_at",
+                    "label"
+                  ],
+                  "properties": {
+                    "snapshot_id": {
+                      "type": "string"
+                    },
+                    "bytes": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "files": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "created_at": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "label": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "delete"
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "required": [
+              "session_id",
+              "snapshot_id",
+              "deleted"
+            ],
+            "properties": {
+              "snapshot_id": {
+                "type": "string"
+              },
+              "deleted": {
+                "type": "boolean",
+                "description": "false for a snapshot_id that was already gone \u2014 delete is idempotent, not an error on a repeat call."
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "restore"
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "description": "The restored session's own session_start shape (session_id/language/stateful/workdir/files), plus what this call itself restored.",
+            "required": [
+              "session_id",
+              "language",
+              "stateful",
+              "workdir",
+              "files",
+              "restored_files",
+              "bytes"
+            ],
+            "properties": {
+              "session_id": {
+                "type": "string"
+              },
+              "language": {
+                "type": "string"
+              },
+              "stateful": {
+                "type": "boolean"
+              },
+              "workdir": {
+                "type": "string"
+              },
+              "files": {
+                "type": "array",
+                "description": "The restored workspace's own file listing (session_files' own shape), NOT a count \u2014 see action=\"save\"'s `files`, which is one."
+              },
+              "restored_files": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "bytes": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Bytes actually written to disk by this restore (uncompressed), not the archive's own on-disk size."
+              },
+              "replaced": {
+                "type": "boolean",
+                "description": "Present and true only when replace=True restored into the SAME session_id that named the snapshot's origin, instead of starting a new one."
+              },
+              "confined": {
+                "type": "boolean"
+              },
+              "unenforced": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
     "branch_reachability": {
       "title": "a branch_reachability result",
-      "description": "The `branch_reachability` tool's result (1.16.0): every if/elif/else arm and while/for(range) loop in one python3 function, decided reachable/dead/unknown by z3 rather than shown from one concrete run. Carries neither `verdict` nor `backend` (nothing here ran), which is what keeps it from colliding with the six execution shapes above; `count`/`succeeded`/`fastest`/`accepted`/`divergence_count`/`passed` \u2014 the other four non-execution shapes' own discriminators \u2014 never appear here either. Its own refusal (an unsupported construct, a non-python `language`, more than one top-level function, no function and no `inputs`) is `{ok: false, error, code: 'validation'}` with no shape-specific key, so it already matches `rejected` above and needed no branch of its own \u2014 the identical pattern `compare_edge_cases`'s and `verify_optimization`'s own refusal shapes follow.",
+      "description": "The `branch_reachability` tool's result (1.16.0): every if/elif/else arm and while/for(range) loop in one python3 function, decided reachable/dead/unknown by z3 rather than shown from one concrete run. Carries neither `verdict` nor `backend` (nothing here ran), which is what keeps it from colliding with the six execution shapes above; `count`/`succeeded`/`fastest`/`accepted`/`divergence_count`/`passed`/`action` \u2014 the other non-execution shapes' own discriminators \u2014 never appear here either. Its own refusal (an unsupported construct, a non-python `language`, more than one top-level function, no function and no `inputs`) is `{ok: false, error, code: 'validation'}` with no shape-specific key, so it already matches `rejected` above and needed no branch of its own \u2014 the identical pattern `compare_edge_cases`'s and `verify_optimization`'s own refusal shapes follow.",
       "type": "object",
       "required": [
         "ok",

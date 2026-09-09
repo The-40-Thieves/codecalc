@@ -171,6 +171,16 @@ TOOL_TIMEOUTS: dict[str, float] = {
     "run_submit": 15,
     "run_inspect": 10,
     "run_cancel": 15,
+    # session_snapshot does real disk I/O (tar/gzip on save, extraction on
+    # restore) rather than execute_code's own subprocess-bounded work, so it
+    # gets an explicit deadline instead of falling into DEFAULT_TIMEOUT_
+    # SECONDS (900s) by omission. 60s is generous relative to what it is
+    # actually bounded to: MAX_SNAPSHOT_BYTES_ENV caps a single archive at
+    # 256 MiB by default, and gzip on local disk comfortably clears that in a
+    # small fraction of this deadline — the same "bounded work gets a short
+    # deadline, sandboxed/caller-timed work gets the generous default" split
+    # run_submit/run_inspect/run_cancel already draw above.
+    "session_snapshot": 60,
 }
 
 #: Applied to any tool not named above. Generous on purpose: `execute_code` and

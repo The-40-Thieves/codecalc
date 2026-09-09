@@ -1173,7 +1173,7 @@ def build_schema(dialect: str | None = None, schema_id: str | None = None) -> di
         #
         # Before this version, `verify_translation` and `verify_optimization`
         # were stamped `contract_version` the same as every other tool (see
-        # `codecalc/server.py`'s `_coded` wrapper, applied to all 52 tools) but
+        # `codecalc/server.py`'s `_coded` wrapper, applied to all 53 tools) but
         # matched NONE of the five execution shapes above — the same defect
         # `run_lifecycle` closed for the background-run tools, found here by
         # re-reading docs/contract/README.md's own caveat that these results
@@ -1217,6 +1217,17 @@ def build_schema(dialect: str | None = None, schema_id: str | None = None) -> di
         # code: ...}` with no `accepted` key, so it matches `rejected` rather
         # than `optimization_verification`, exactly like `compare_edge_cases`'s
         # own refusal.
+        # ONE MORE, added in 1.15.0: `session_snapshot_result`, for
+        # `session_snapshot`. It is not an execution result at all — no
+        # `verdict`, no `backend`, no `run_id`/`state` — the same "unmodeled
+        # success shape" gap `comparison_rows`/`edge_case_comparison` closed
+        # above, found the same way: every tool's result is stamped
+        # `contract_version` (server.py's `_coded` wrapper covers all 53),
+        # but nothing published what a SUCCESSFUL `session_snapshot` call
+        # returns. Discriminated by `action` (`"save"|"restore"|"list"|
+        # "delete"`), a property no other branch here declares at all, so it
+        # cannot collide with any of the eight above; a FAILING call (`ok:
+        # false`) matches `rejected` instead, same as every other tool.
         "oneOf": [
             {"$ref": "#/$defs/execution_envelope"},
             {"$ref": "#/$defs/execution_trace"},
@@ -1228,6 +1239,7 @@ def build_schema(dialect: str | None = None, schema_id: str | None = None) -> di
             {"$ref": "#/$defs/optimization_verification"},
             {"$ref": "#/$defs/edge_case_comparison"},
             {"$ref": "#/$defs/comparison_rows"},
+            {"$ref": "#/$defs/session_snapshot_result"},
             {"$ref": "#/$defs/branch_reachability"},
         ],
         "$defs": {
@@ -1631,6 +1643,124 @@ def build_schema(dialect: str | None = None, schema_id: str | None = None) -> di
                     },
                 },
             },
+            "session_snapshot_result": {
+                "title": "a session_snapshot result",
+                "description": (
+                    "session_snapshot(session_id, action=...) archives or "
+                    "restores a session's workspace files. `action` "
+                    "discriminates the four success shapes this tool can "
+                    "return; a failure (`ok: false`) matches `rejected` "
+                    "instead, same as every other tool. The archive itself is "
+                    "stored OUTSIDE the jailed session workspace — sandboxed "
+                    "code run inside a session can never read or tamper with "
+                    "it — so nothing here overlaps `session_result`'s own "
+                    "shape, which describes what runs INSIDE one."
+                ),
+                "type": "object",
+                "required": ["ok", "action"],
+                "properties": {
+                    "ok": {"const": True},
+                    "action": {
+                        "type": "string",
+                        "enum": ["save", "restore", "list", "delete"],
+                    },
+                    "session_id": {"type": "string"},
+                },
+                "allOf": [
+                    {
+                        "if": {"properties": {"action": {"const": "save"}},
+                              "required": ["action"]},
+                        "then": {
+                            "required": ["snapshot_id", "bytes", "files",
+                                        "created_at", "label"],
+                            "properties": {
+                                "snapshot_id": {"type": "string"},
+                                "bytes": {
+                                    "type": "integer", "minimum": 0,
+                                    "description": "The archive's own size on disk (post-gzip), not the sum of the files it holds.",
+                                },
+                                "files": {"type": "integer", "minimum": 0},
+                                "created_at": {"type": "string"},
+                                "label": {"type": ["string", "null"]},
+                            },
+                        },
+                    },
+                    {
+                        "if": {"properties": {"action": {"const": "list"}},
+                              "required": ["action"]},
+                        "then": {
+                            "required": ["session_id", "snapshots"],
+                            "properties": {
+                                "snapshots": {
+                                    "type": "array",
+                                    "description": "Oldest first, by created_at.",
+                                    "items": {
+                                        "type": "object",
+                                        "required": ["snapshot_id", "bytes",
+                                                    "files", "created_at", "label"],
+                                        "properties": {
+                                            "snapshot_id": {"type": "string"},
+                                            "bytes": {"type": ["integer", "null"]},
+                                            "files": {"type": ["integer", "null"]},
+                                            "created_at": {"type": ["string", "null"]},
+                                            "label": {"type": ["string", "null"]},
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                    {
+                        "if": {"properties": {"action": {"const": "delete"}},
+                              "required": ["action"]},
+                        "then": {
+                            "required": ["session_id", "snapshot_id", "deleted"],
+                            "properties": {
+                                "snapshot_id": {"type": "string"},
+                                "deleted": {
+                                    "type": "boolean",
+                                    "description": "false for a snapshot_id that was already gone — delete is idempotent, not an error on a repeat call.",
+                                },
+                            },
+                        },
+                    },
+                    {
+                        "if": {"properties": {"action": {"const": "restore"}},
+                              "required": ["action"]},
+                        "then": {
+                            "description": (
+                                "The restored session's own session_start "
+                                "shape (session_id/language/stateful/workdir/"
+                                "files), plus what this call itself restored."
+                            ),
+                            "required": ["session_id", "language", "stateful",
+                                        "workdir", "files", "restored_files",
+                                        "bytes"],
+                            "properties": {
+                                "session_id": {"type": "string"},
+                                "language": {"type": "string"},
+                                "stateful": {"type": "boolean"},
+                                "workdir": {"type": "string"},
+                                "files": {
+                                    "type": "array",
+                                    "description": "The restored workspace's own file listing (session_files' own shape), NOT a count — see action=\"save\"'s `files`, which is one.",
+                                },
+                                "restored_files": {"type": "integer", "minimum": 0},
+                                "bytes": {
+                                    "type": "integer", "minimum": 0,
+                                    "description": "Bytes actually written to disk by this restore (uncompressed), not the archive's own on-disk size.",
+                                },
+                                "replaced": {
+                                    "type": "boolean",
+                                    "description": "Present and true only when replace=True restored into the SAME session_id that named the snapshot's origin, instead of starting a new one.",
+                                },
+                                "confined": {"type": "boolean"},
+                                "unenforced": {"type": "array", "items": {"type": "string"}},
+                            },
+                        },
+                    },
+                ],
+            },
             "branch_reachability": {
                 "title": "a branch_reachability result",
                 "description": (
@@ -1641,8 +1771,8 @@ def build_schema(dialect: str | None = None, schema_id: str | None = None) -> di
                     "neither `verdict` nor `backend` (nothing here ran), "
                     "which is what keeps it from colliding with the six "
                     "execution shapes above; `count`/`succeeded`/`fastest`/"
-                    "`accepted`/`divergence_count`/`passed` — the other "
-                    "four non-execution shapes' own discriminators — never "
+                    "`accepted`/`divergence_count`/`passed`/`action` — the "
+                    "other non-execution shapes' own discriminators — never "
                     "appear here either. Its own refusal (an unsupported "
                     "construct, a non-python `language`, more than one "
                     "top-level function, no function and no `inputs`) is "

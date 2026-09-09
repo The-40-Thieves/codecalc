@@ -554,6 +554,11 @@ jobs:
       # and covers the ceiling with the portable spawn probe instead.
       - name: security regressions (on the fallback)
         run: uv run --no-sync python tests/test_security.py
+      # `serve-http --oauth-issuer`: real subprocesses, real loopback HTTP,
+      # an in-process fake issuer minting real JWTs — no dependency on the
+      # native executor, so it belongs here rather than in `sandbox` below.
+      - name: serve-http OAuth bearer-token validation
+        run: uv run --no-sync python tests/test_serve_http_oauth.py
 
   sandbox:
     # The security suite. Split out from `tests` because it needs the Rust binary built first, and

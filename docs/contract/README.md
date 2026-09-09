@@ -3,11 +3,11 @@
 **Current version: `1.16.0`** · Schema: [`result-v1.schema.json`](result-v1.schema.json) ·
 Source of truth: [`codecalc/contract.py`](../../codecalc/contract.py)
 
-`1.16.0` is a MINOR bump over `1.14.0` (`1.15.0` is reserved for a sibling
-change landing separately). It adds an ELEVENTH shape, `branch_reachability`,
-for the new tool of the same name: every if/elif/else arm and while/
-for(range, static bounds) loop in one python3 function, decided
-`reachable`/`dead`/`unknown` by z3 rather than shown from one concrete run —
+`1.16.0` is a MINOR bump over `1.15.0`. It adds a TWELFTH shape,
+`branch_reachability`, for the new tool of the same name: every if/elif/else
+arm and while/for(range, static bounds) loop in one python3 function,
+decided `reachable`/`dead`/`unknown` by z3 rather than shown from one
+concrete run —
 
 * **`supported`** — `false` only when a construct on some path could not be
   translated despite passing the tool's own upfront scan (an undefined name
@@ -44,8 +44,8 @@ subset and the boundary/loop semantics were drawn where they were.
 
 ---
 
-`1.14.0` (superseded by the entry above) was a MINOR bump over `1.13.0`. It
-added a TENTH shape,
+`1.14.0` (superseded by the two entries above) was a MINOR bump over
+`1.13.0`. It added a TENTH shape,
 `execution_trace`, for the new `trace_execution` tool: the identical
 `execution_envelope` `execute_code` returns for the same python3 program
 (same 20 envelope keys, same `stdout`/`stderr`/`exit_code`/`verdict`/
@@ -145,6 +145,20 @@ to `execution_envelope`'s own definition, the same technique `compact`
 already uses against `backend` and `rejected` against `verdict`, so
 `oneOf`'s "exactly one shape matches" claim still holds for a trace result,
 a plain envelope, and every other shape in this document.
+
+`1.15.0` is a MINOR bump over `1.14.0`. It adds an ELEVENTH shape,
+`session_snapshot_result`, for the new `session_snapshot` tool — archive a
+session's workspace files to a snapshot stored outside the jailed workspace,
+and restore one into a new or the same session. Purely additive: nothing an
+existing `1.14.0` client already reads changes shape or meaning: no existing
+tool's result gained, lost, or renamed a field, and the new shape's own
+discriminator (`action`) appears on none of the other ten. A failing
+`session_snapshot` call was already representable — it matches `rejected`,
+same as every other tool — so this bump is the SUCCESS shape becoming
+describable, not a new failure mode. See CHANGELOG.md's `[Unreleased]` entry
+for the tool's own design (caps, the identity checks at save/replace, the
+closed-enum refusals a hostile archive gets on restore) and "Examples" below
+for one real transcript per action.
 
 `1.13.0` is a MINOR bump over `1.12.0`, on the **doctor** schema
 (`doctor-v1.schema.json`) rather than the execution result — the two share
@@ -571,7 +585,7 @@ it license to produce — measured on `execute_code`:
 ```
 
 — an object with no fields, no `required`, no enums. This document's schema
-(the eleven shapes, the 21 envelope fields, the verdict/code enumerations) is
+(the twelve shapes, the 21 envelope fields, the verdict/code enumerations) is
 still the one worth validating against; it is just not the one a client reads
 back from `tools/list`. Getting the SDK to emit *this* schema verbatim would
 need a `TypedDict` (or `BaseModel`) per shape, one of which — `run_lifecycle` vs
@@ -588,14 +602,14 @@ still works exactly as before.
 
 ---
 
-## The eleven shapes
+## The twelve shapes
 
 Every result carries `ok` and `contract_version`, and a client discriminates
-the eleven shapes in this order:
+the twelve shapes in this order:
 
 | Shape | Discriminator | What it is |
 |---|---|---|
-| **rejected** | no `verdict`, carries `error` | Nothing ran — unknown language, malformed request, an executor that would not start. Carries `error` and a `code`. Also covers a `verify_optimization` measurement failure and a `compare_edge_cases` refusal (see below) — both are `{ok: false, error, code}` with no shape-specific key, so neither needed its own branch. |
+| **rejected** | no `verdict`, carries `error` | Nothing ran — unknown language, malformed request, an executor that would not start. Carries `error` and a `code`. Also covers a `verify_optimization` measurement failure, a `compare_edge_cases` refusal, and any failing `session_snapshot` call (see below) — all three are `{ok: false, error, code}` with no shape-specific key, so none needed its own branch. |
 | **run_lifecycle** | a `run_id` and `state`, no `verdict`/`error`/`backend` | A background-run response from `run_submit`, `run_inspect` *while the run is still active*, or `run_cancel`. Names the run; nothing has run through it yet. |
 | **session** | `backend == "session-worker"` | Ran in a warm session worker. |
 | **compact** | `verdict` present, no `backend` | `execute_code(compact=True)`. |
@@ -605,6 +619,7 @@ the eleven shapes in this order:
 | **optimization_verification** | `accepted` present | `verify_optimization`'s result: is `candidate` a genuine, measurably-faster optimisation of `original`. |
 | **edge_case_comparison** | `divergence_count` present | `compare_edge_cases`'s success result: the same logic run in N languages, and where it diverged. |
 | **comparison_rows** | `count`/`succeeded`/`fastest` present | `compare_execution`'s result: the same code run in N languages side by side, which was fastest, and any cross-language discrepancies noticed. |
+| **session_snapshot_result** | `action` present | `session_snapshot`'s result: archived or restored a session's workspace files. `action` (`save`/`restore`/`list`/`delete`) picks which of the four success shapes applies; see below. |
 | **branch_reachability** | `supported`/`dead_count`/`reachable_count`/`unknown_count` present, no `verdict`/`backend` | `branch_reachability`'s result (added `1.16.0`): every if/elif/else arm and while/for(range) loop in one python3 function, decided reachable/dead/unknown by z3. |
 
 The first six are **execution** shapes — their discriminators only ever
@@ -652,6 +667,17 @@ it collides with none of them structurally (`count`/`succeeded`/`fastest`
 appear on no other shape) and needed no failure-shape reasoning of its own,
 because it has no failure shape: `ok` is unconditionally `true` once the
 comparison ran, the same as `edge_case_comparison`.
+
+**`session_snapshot_result`**, added in `1.15.0`, is `session_snapshot`'s own
+result — the identical "unmodeled success shape" gap `comparison_rows` and
+`edge_case_comparison` each closed above, found the same way: every tool's
+result is stamped `contract_version` at the same `_coded` wrapper, but
+`session_snapshot` matched none of the ten existing branches. It is not an
+execution shape at all — no `verdict`, no `backend`, no `run_id`/`state` — and
+collides with none of them: `action` (required, one of `save`/`restore`/
+`list`/`delete`) appears on no other shape here. A failing call (`ok: false`)
+falls through to `rejected` like every other tool, so this shape only ever
+describes success. See "Examples" below for one real transcript per action.
 
 **`branch_reachability`**, added in `1.16.0`, is `branch_reachability`'s own
 result — nothing here ran, so it collides with none of the six execution
@@ -715,7 +741,7 @@ implementation and the one that was a defect (#117).
 > Both were wrong, and a cross-vendor review found it: compact results, native
 > streaming and session workers all returned shapes the published schema
 > rejected. The version is now stamped at the MCP tool boundary, which is the
-> only place that actually reaches all 52 tools.
+> only place that actually reaches all 53 tools.
 
 Padding the short shapes with nulls so one schema fits everything was considered
 and rejected. It would have made "we could not tell you the exit code" and "the
@@ -1278,6 +1304,92 @@ and carries none of the three; a row that ran and failed on its OWN terms
   "fastest": "python3",
   "fastest_note": null,
   "discrepancies": []
+}
+```
+
+### `session_snapshot`, one transcript per action
+
+Captured from a real `python3` session that wrote one file (`model.py`),
+saved it, restored it into a new session, then deleted the snapshot.
+
+```json
+{
+  "ok": true,
+  "action": "save",
+  "session_id": "python3-812e07bf",
+  "snapshot_id": "d452eb8b6cd649aa8beaf7a2b7de0d52",
+  "bytes": 243,
+  "files": 1,
+  "created_at": "2026-09-08T22:04:56Z",
+  "label": "before-refactor",
+  "contract_version": "1.14.0"
+}
+```
+
+```json
+{
+  "ok": true,
+  "action": "list",
+  "session_id": "python3-812e07bf",
+  "snapshots": [
+    {
+      "snapshot_id": "d452eb8b6cd649aa8beaf7a2b7de0d52",
+      "bytes": 243,
+      "files": 1,
+      "created_at": "2026-09-08T22:04:56Z",
+      "label": "before-refactor"
+    }
+  ],
+  "contract_version": "1.14.0"
+}
+```
+
+`restore` without `replace=True` returns the NEW session's own `session_start`
+shape, plus what this call itself restored (`restored_files`, `bytes` —
+uncompressed bytes actually written, not the archive's own on-disk size):
+
+```json
+{
+  "ok": true,
+  "session_id": "python3-6ef239e3",
+  "language": "python3",
+  "stateful": true,
+  "workdir": "/path/to/codecalc/sessions/python3-6ef239e3",
+  "files": [
+    {"path": ".codecalc-session-lock", "type": "file", "size": 7},
+    {"path": "model.py", "type": "file", "size": 14}
+  ],
+  "confined": true,
+  "unenforced": ["sandbox_backend: ...", "no_net: ...", "process_group_kill: ...", "peak_memory_kb: ..."],
+  "action": "restore",
+  "restored_files": 1,
+  "bytes": 14,
+  "contract_version": "1.14.0"
+}
+```
+
+```json
+{
+  "ok": true,
+  "action": "delete",
+  "session_id": "python3-812e07bf",
+  "snapshot_id": "d452eb8b6cd649aa8beaf7a2b7de0d52",
+  "deleted": true,
+  "contract_version": "1.14.0"
+}
+```
+
+A failing call — an unknown `snapshot_id`, a workspace whose identity could
+not be verified, a hostile archive on restore — matches `rejected` instead:
+
+```json
+{
+  "ok": false,
+  "contract_version": "1.14.0",
+  "code": "permission_denied",
+  "error": "snapshot member 'link' is a symlink/hardlink — refused",
+  "remedy": "the path or operation is outside what this server permits; it will not succeed on retry",
+  "member": "link"
 }
 ```
 

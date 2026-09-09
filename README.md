@@ -6,7 +6,7 @@
 calculator, a code runner, and a logic checker — so it gets a *correct* answer
 instead of a guessed one.** It runs code in **31 languages**, does exact
 symbolic math, solves SMT/logic problems, and measures complexity, all exposed
-as **54 MCP tools**.
+as **55 MCP tools**.
 
 **Fastest path:** `uvx 'codecalc[full]' setup --write` registers codecalc with your MCP client automatically. New to MCP, or want more detail first? See [QUICKSTART.md](QUICKSTART.md), or the Install section below.
 
@@ -474,7 +474,7 @@ Linux kernel with seccomp support enforces it in-kernel either way), and
 [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild)
 for the static cross-builds (zig is used as the linker; no x86_64 GCC needed).
 
-## MCP tools (54) + MCP resources
+## MCP tools (55) + MCP resources
 
 Every session file is also exposed as an MCP resource:
 `codecalc://session/<session_id>/files/<path>` — images render inline for the
@@ -532,6 +532,7 @@ analysis, binary64 introspection.
 | `session_files` / `session_read_file` / `session_write_file` | Workspace file tools, jailed to the session dir; listings support `page_size`/`cursor`, and reads return images inline (`as_image`) |
 | `session_run` | **Multi-file programs**: execute an entry file that imports other session files (helper.py, data/...) in the workspace |
 | `session_artifacts` | List files created by executed code (results, images, CSVs) |
+| `session_snapshot` | Archive a session's workspace to a snapshot stored OUTSIDE the jailed workspace (`action="save"`), or restore one into a new session or, with `replace=True`, back into the same session (`action="restore"`); `action="list"`/`"delete"` manage them. Files only — never a stateful session's REPL variables. Snapshots die with `session_stop` unless `keep_snapshots=True` |
 | `install_package` | Install packages (uv pip/npm/gem/go/cargo...) into a session or shared cache |
 | `verify_translation` | **Prove a port is equivalent**: you write the translation, the executor runs both versions on the same inputs and reports match / diverged / inconclusive per input. A pass is graded `cross_checked` (see [Grade vocabulary](#grade-vocabulary)) |
 | `verify_optimization` | **Prove an optimisation**: you write the candidate, the executor confirms it still agrees with the original AND times both — accepted only if equivalent and measurably faster. Accepted is graded `cross_checked` |
@@ -624,13 +625,42 @@ cd /path/to/codecalc && .venv/bin/python -m codecalc.server
 
 Streamable HTTP binds to loopback by default. Bearer-token auth
 (`CODECALC_HTTP_TOKEN`) is **required** for any non-loopback bind — `serve-http`
-refuses to start on a routable address if the token is unset, and the token
-comparison is constant-time — and **optional** on loopback, where an MCP
-client spawning the process is already inside the trust boundary. Setting a
-token does not change the single-operator threat model: put an authenticating
-reverse proxy and the stronger process/container isolation described in
-`SECURITY.md` in front of it before exposing it beyond one operator's own
-machine.
+refuses to start on a routable address if neither it nor `--oauth-issuer` (below)
+is set, and the static-token comparison is constant-time — and **optional** on
+loopback, where an MCP client spawning the process is already inside the trust
+boundary. Setting a token does not change the single-operator threat model: put
+an authenticating reverse proxy and the stronger process/container isolation
+described in `SECURITY.md` in front of it before exposing it beyond one
+operator's own machine.
+
+For hosted use only, `serve-http` also accepts `--oauth-issuer URL` (or
+`CODECALC_OAUTH_ISSUER`) as an alternative to the static token — **off by
+default**; the static-token path above is unchanged when it is unset, and
+setting the variable costs nothing outside `serve-http` itself: `doctor`,
+`--help`, `serve-strict`, and the bare stdio server never touch the network
+over it, only `serve-http`'s own startup does. The issuer and JWKS URLs must
+be `https://` unless the host is loopback (for local testing); an issuer that
+is plain `http://` on a real host, or cannot be reached at all, fails
+`serve-http`'s startup outright with a message on stderr rather than starting
+a server no token could ever pass. Given a reachable issuer, `serve-http`
+validates each bearer token as a JWT against that issuer's own JWKS
+(RS256/ES256; the JWKS URL is discovered once from
+`<issuer>/.well-known/openid-configuration`, or pinned with
+`--oauth-jwks-url`) and checks its issuer, audience, expiry, and
+not-before. It also serves RFC 9728 Protected Resource Metadata at
+`/.well-known/oauth-protected-resource/mcp`, and a request with a missing or
+invalid token gets `WWW-Authenticate: Bearer resource_metadata="..."` pointing
+at it, per the MCP authorization spec (2025-06-18 and later). `--oauth-audience`
+defaults to this server's own resource URL; `--oauth-scopes "s1 s2"` requires
+every named scope on the token, checked by the SDK's own auth middleware. If
+both a static token and an issuer end up configured at once, **the issuer
+wins** — a request bearing the static token's exact value is rejected like any
+other invalid bearer value, and a warning naming both settings is printed to
+stderr at startup. codecalc runs no `/authorize` or `/token` endpoint of its
+own (it is a resource server only, never an authorization server), so there is
+no dynamic client registration surface here either; a 2026-07-28-era client
+that needs one uses a Client ID Metadata Document against its OWN
+authorization server, not against codecalc.
 
 Point an MCP client at it:
 
@@ -713,6 +743,10 @@ All optional. codecalc runs with none of these set.
 |---|---|---|
 | `CODECALC_HTTP_TOKEN` | *(unset)* | Bearer token for the Streamable HTTP transport (`serve-http`). Unset, the transport is loopback-only — binding a non-loopback address without this set is refused outright. Set, the token gates every request via a constant-time comparison; stdio ignores this entirely. |
 | `CODECALC_HTTP_URL` | `http://127.0.0.1:8000` | What the HTTP transport's auth metadata advertises as its own URL. Only consulted when `CODECALC_HTTP_TOKEN` is set; the loopback default matches the offline-by-default posture rather than guessing a public one. |
+| `CODECALC_OAUTH_ISSUER` | *(unset)* | Same as `--oauth-issuer`: validate `serve-http` bearer tokens as JWTs against this issuer instead of the static `CODECALC_HTTP_TOKEN`. Off by default. If both end up set, the issuer wins and the static token is rejected — see "Run the server" above. |
+| `CODECALC_OAUTH_AUDIENCE` | this server's own resource URL (`CODECALC_HTTP_URL` + `/mcp`) | Same as `--oauth-audience`: the expected JWT `aud` claim, and the RFC 8707 resource this server advertises at its own `/.well-known/oauth-protected-resource`. Only consulted when `CODECALC_OAUTH_ISSUER` is set. |
+| `CODECALC_OAUTH_JWKS_URL` | *(unset)* — discovered from `<issuer>/.well-known/openid-configuration` | Same as `--oauth-jwks-url`: pin the JWKS endpoint instead of discovering it. Only consulted when `CODECALC_OAUTH_ISSUER` is set. |
+| `CODECALC_OAUTH_SCOPES` | *(unset)* | Same as `--oauth-scopes`: space-separated scopes a token must carry. Unset, any token that otherwise verifies is accepted regardless of scope. Only consulted when `CODECALC_OAUTH_ISSUER` is set. |
 | `CODECALC_RUNTIME_PATH` | the server's own `PATH`, else `/usr/local/bin:/usr/bin:/bin` | The `PATH` executed code resolves runtimes on. **Set this when an MCP client spawns the server**: clients often launch with a stripped environment, so an inherited `PATH` can miss a toolchain manager's shims entirely and most languages silently become unavailable. `list_languages` reports what actually resolved. |
 | `CODECALC_EXEC_BIN` | `bin/codecalc-exec` (arch-matched) | Override the sandbox binary. Without one, codecalc falls back to a pure-Python executor — `list_languages` and `execute_code` still work, but the Rust path is the production one. |
 | `CODECALC_REQUIRE_NATIVE` | *(unset)* | Fail-closed: refuse to start if no usable `codecalc-exec` binary was found (checked at import, so this is also a server-start check), instead of silently answering every call on the weaker Python fallback. Raises naming `CODECALC_REQUIRE_NATIVE` and the paths that were checked. |
@@ -733,6 +767,8 @@ All optional. codecalc runs with none of these set.
 | `CODECALC_MAX_ARTIFACT_BYTES` | `16777216` (16 MiB) | Per-write size ceiling for anything a session write path creates — independent of the total quotas above, so one runaway file cannot hide under a generous session/global total. A WRITE-time cap; distinct from `RESOURCE_MAX_BYTES` (4 MiB), which caps what a *read* may serve back. |
 | `CODECALC_MAX_ARTIFACT_COUNT` | `500` | Per-session ceiling on the number of artifact files — catches a session writing one byte at a time into thousands of tiny files, a shape no byte-sized cap alone bounds. Only a write that creates a NEW file is checked; overwriting an existing one always succeeds regardless of the count. |
 | `CODECALC_MIN_HOST_FREE_MB` | `256` | Refuse a session write when the HOST's free disk space drops below this — protects the host even when every quota above is generous, since a shared host can be driven low by something that is not a codecalc session at all. Measured with `shutil.disk_usage`, which works identically on Windows, unlike `statvfs`. |
+| `CODECALC_MAX_SNAPSHOT_BYTES` | `268435456` (256 MiB) | `session_snapshot(action="save")` refuses to archive a workspace whose files sum to more than this — independent of the SESSION disk quotas above, since a snapshot is written OUTSIDE any session's own workspace and quota. |
+| `CODECALC_MAX_SNAPSHOTS_PER_SESSION` | `10` | Per-session ceiling on the number of snapshots kept at once — catches many small snapshots the byte cap alone would not, the same "count cap alongside the byte cap" shape `CODECALC_MAX_ARTIFACT_COUNT` already applies to workspace files. |
 | `CODECALC_CAPABILITY_POLICY` | *(unset)* | Capability broker. Unset, no brokering — a job's capabilities run as requested (today's behaviour); the execution receipt still discloses them under `provider.capabilities` with `brokered: false`. Set, comma-separated directives narrow them: `deny-network` forces `no_net` on a job that did not request network (enforced where the provider can, disclosed as `effective` where it cannot); `allow-network` explicitly grants network to a job that requested it; `strict` rejects a job whose denial the provider cannot enforce. The broker never approves a capability the request did not ask for — an escalation is refused with `permission_denied` / `capability_not_requested`, before any side effect. |
 | `CODECALC_AUDIT_LOG` | `~/.codecalc/audit/audit.log` | Append-only JSON-lines audit stream for broker decisions and security-relevant side effects (denied capability, refused install, cleanup). Each event carries a source-safe timestamp, the run/session id, the decision and reason, and never the executed source or a credential. Set to a path to relocate it; set empty to disable. Best effort — a write failure never fails a run. |
 | `CODECALC_PROCESS_HEADROOM` | `512` | Fork-bomb guard. `RLIMIT_NPROC` is a **uid-wide task budget**, not a per-sandbox one — the kernel compares it against every thread your user owns, machine-wide. So codecalc measures the ambient count per execution and sets the limit to *ambient + headroom*: a bomb can add at most this many tasks, while a runtime wanting a few threads always has room however busy the box is. |
@@ -766,7 +802,7 @@ way back into the default.
 
 ## Tool-definition token cost
 
-codecalc's `tools/list` returns 53 definitions. Measured with `o200k_base` as a
+codecalc's `tools/list` returns 54 definitions. Measured with `o200k_base` as a
 proxy, that is roughly 9,200 tokens of descriptions and input schemas, and every
 client pays it before the first user message.
 
@@ -788,7 +824,7 @@ number this section exists to track.
 
 codecalc does not hide its tools behind a discovery facade, and that is
 deliberate: the tool surface is where per-operation approval prompts, audit
-names and typed schemas live, and collapsing 54 tools into one dispatcher makes
+names and typed schemas live, and collapsing 55 tools into one dispatcher makes
 `install_package` and `percentage` look like the same permission to a client
 that approves by tool name. The cost is real, but the client is the better place
 to solve it, because the client can defer definitions **without** giving up the
@@ -858,7 +894,7 @@ If you are paying too much for codecalc's definitions:
   https://modelcontextprotocol.io/specification/2026-07-28/server/tools,
   retrieved 2026-09-07). A client without one of the mechanisms above pays the
   full cost regardless of what codecalc does.
-- **Any client** can filter which of the 54 tools it exposes to the model.
+- **Any client** can filter which of the 55 tools it exposes to the model.
   Nothing here requires codecalc to change.
 
 A server-side facade remains under consideration for clients with no such
@@ -897,7 +933,7 @@ measured numbers live in `docs/tool-selection-eval.md` next to BM25's own.
 
 For an operator who would rather not configure every client, codecalc also has
 a first-party knob: `CODECALC_TOOLS` registers only a chosen slice of the
-53-tool surface, so a client that never enables tool search still pays for a
+54-tool surface, so a client that never enables tool search still pays for a
 smaller `tools/list`.
 
 On a client with no deferral mechanism of its own, the client's own allow-list
@@ -908,7 +944,7 @@ all narrow what a given session sees without touching the server.
 Every tool also now carries a `ToolAnnotations` hint (`readOnlyHint`,
 `destructiveHint`, `idempotentHint`, `openWorldHint` — see
 `codecalc/server.py`'s `GROUP_ANNOTATIONS`/`TOOL_ANNOTATION_OVERRIDES` tables
-for the value on each of the 54). Codex CLI's `writes` approval mode
+for the value on each of the 55). Codex CLI's `writes` approval mode
 (v0.144.0+) reads `readOnlyHint` directly: a tool marked `readOnlyHint: true`
 skips the approval prompt, everything else still asks. That covers the whole
 `calculator` group (25/25 pure) plus the read-only members of the mixed
@@ -934,7 +970,7 @@ Every tool belongs to exactly one group:
 | `calculator` (25) | `calc_exact`, `compare_threshold`, `percentage`, `calc_stats`, `percentiles`, `collision_probability`, `data_sizes`, `human_duration`, `epoch_time`, `base_repr`, `radix_convert`, `float_repr`, `int_widths`, `bit_analysis`, `bitop`, `solve_expression`, `limit_expression`, `simplify_expression`, `convert_units`, `physical_constants`, `list_units`, `evaluate_expression`, `truth_table`, `solve_linear`, `matrix` |
 | `verification` (5) | `verify_translation`, `verify_optimization`, `algebraic_equiv`, `compare_edge_cases`, `z3_check` |
 | `execution` (8) | `list_languages`, `list_execution_providers`, `execute_code`, `execute_code_stream`, `trace_execution`, `branch_reachability`, `compare_execution`, `runtimes_status` |
-| `sessions` (11) | `session_start`, `session_stop`, `session_list`, `session_files`, `session_write_file`, `session_read_file`, `session_run`, `session_artifacts`, `run_submit`, `run_inspect`, `run_cancel` |
+| `sessions` (12) | `session_start`, `session_stop`, `session_list`, `session_files`, `session_write_file`, `session_read_file`, `session_run`, `session_artifacts`, `session_snapshot`, `run_submit`, `run_inspect`, `run_cancel` |
 | `analysis` (3) | `analyze_complexity`, `benchmark`, `extract_function` |
 | `admin` (2) | `install_package`, `update_runtimes` |
 
@@ -954,7 +990,7 @@ CODECALC_TOOLS=calculator,execution  # two groups, unioned
 CODECALC_TOOLS=dev                   # a coding-assistant slice (40 tools)
 ```
 
-Unset or empty registers every group — 54 tools, same as today —
+Unset or empty registers every group — 55 tools, same as today —
 so nothing changes for an operator who does not set this. An unknown group or
 preset name is a loud startup failure naming the bad value and every known
 group/preset, never a silent fallback to "everything" or "nothing": either
@@ -991,7 +1027,7 @@ PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py         # every tool over MC
 PYTHONPATH=. .venv/bin/python tests/test_executor_sweep.py  # sandbox regressions
 ```
 
-66 test files and 19 CI-invoked scripts, **2184 assertions**. "CI-invoked"
+69 test files and 19 CI-invoked scripts, **2184 assertions**. "CI-invoked"
 means referenced by path (`scripts/<name>.py`) from a job in
 `.github/workflows/*.yml` — `scripts/check_claims.py` derives the count that
 way and gates it, so a script wired into a workflow without this sentence
