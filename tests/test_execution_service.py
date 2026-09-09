@@ -1061,8 +1061,8 @@ def test_mcp_session_adapters_delegate_to_the_shared_service() -> None:
             calls.append(("start", language))
             return {"operation": "start"}
 
-        def stop(self, session_id: str) -> dict:
-            calls.append(("stop", session_id))
+        def stop(self, session_id: str, *, keep_snapshots: bool = False) -> dict:
+            calls.append(("stop", session_id, keep_snapshots))
             return {"operation": "stop"}
 
         def list_sessions(self) -> dict:
@@ -1107,6 +1107,12 @@ def test_mcp_session_adapters_delegate_to_the_shared_service() -> None:
                           dependencies))
             return {"operation": "run"}
 
+        def snapshot(self, session_id: str, action: str, *,
+                    snapshot_id: str | None = None, label: str | None = None,
+                    replace: bool = False) -> dict:
+            calls.append(("snapshot", session_id, action, snapshot_id, label, replace))
+            return {"operation": "snapshot"}
+
     old_service = getattr(server, "_session_service", None)
     check("MCP server owns a shared session service", old_service is not None)
     if old_service is None:
@@ -1123,6 +1129,7 @@ def test_mcp_session_adapters_delegate_to_the_shared_service() -> None:
             server.session_read_file("sid", "data/x", 7),
             server.session_file_resource("sid", "data/x"),
             server.session_run("sid", "main.py", "python3", "input", 9),
+            server.session_snapshot("sid", "save", "snap1", "my label", True),
         ]
     finally:
         server._session_service = old_service
@@ -1131,10 +1138,10 @@ def test_mcp_session_adapters_delegate_to_the_shared_service() -> None:
           [result if isinstance(result, str) else result["operation"]
            for result in results]
           == ["start", "stop", "list", "files", "write", "artifacts",
-              "read", "abc", "run"])
+              "read", "abc", "run", "snapshot"])
     check("MCP session adapters preserve canonical arguments", calls == [
         ("start", "bash"),
-        ("stop", "sid"),
+        ("stop", "sid", False),
         ("list",),
         ("files", "sid", "data", 10, "20"),
         ("write", "sid", "data/x", "value"),
@@ -1142,6 +1149,7 @@ def test_mcp_session_adapters_delegate_to_the_shared_service() -> None:
         ("read", "sid", "data/x", 7, False),
         ("read", "sid", "data/x", 4 * 1024 * 1024, False),
         ("run", "sid", "main.py", "python3", "input", 9, None),
+        ("snapshot", "sid", "save", "snap1", "my label", True),
     ])
 
 
@@ -1339,7 +1347,7 @@ def test_main_runs_the_same_server_over_explicit_streamable_http() -> None:
 
 def test_serve_http_refuses_a_non_loopback_bind_without_a_token() -> None:
     """Residual: fail CLOSED. serve-http on a non-loopback host with no
-    CODECALC_HTTP_TOKEN would expose 52 unauthenticated code-execution tools to
+    CODECALC_HTTP_TOKEN would expose 53 unauthenticated code-execution tools to
     whatever network the interface reaches. Refusing to start is the only
     answer that cannot be misconfigured into an open server."""
     calls: list[dict] = []

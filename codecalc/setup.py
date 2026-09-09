@@ -568,7 +568,7 @@ def run_setup(client: str | None = None, do_write: bool = False, *,
     #
     # The literal "CODECALC_TOOLS" below (matching server.TOOLS_ENV's own
     # value) is checked BEFORE importing server.py, deliberately: importing
-    # it builds the full 52-tool MCP registry and needs the `mcp` package,
+    # it builds the full 53-tool MCP registry and needs the `mcp` package,
     # which is heavier than anything else this module touches (module
     # docstring: REUSE, NOT REIMPLEMENT — doctor/executor/logic only). A
     # caller who already set CODECALC_TOOLS never pays for that import.
