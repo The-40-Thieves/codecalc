@@ -702,7 +702,7 @@ def _coded(fn):
 _mcp_tool = mcp.tool
 
 
-# ── tool GROUPS, so a client can register a slice of the 53-tool ────────
+# ── tool GROUPS, so a client can register a slice of the full ───────────
 # surface instead of paying its full ~9.2k-token tools/list cost. This is NOT
 # the facade docs/design/2026-08-10-tool-facade.md rejected: every tool a
 # group activates keeps its own name, its own typed schema and its own
@@ -731,8 +731,9 @@ PRESETS: dict[str, frozenset[str]] = {
 }
 
 #: Comma-separated group and/or preset names. Empty/unset = every group, which
-#: is also what makes the default registration count 53 — the invariant
-#: scripts/check_tool_groups.py and the round-trip tests both depend on.
+#: is also what makes the default registration count the full tool surface —
+#: the invariant scripts/check_tool_groups.py and the round-trip tests both
+#: depend on.
 TOOLS_ENV = "CODECALC_TOOLS"
 
 #: tool name -> its group, populated by `_tool` below as each `@mcp.tool()`
@@ -743,26 +744,24 @@ TOOL_GROUPS: dict[str, str] = {}
 
 #: Tool clusters Glama's public v0.5.0 review named as lexically
 #: indistinguishable from a description alone — a model reading `tools/list`
-#: could not tell `calc_exact` from `evaluate_expression`, or `bit_analysis`
-#: from `bitop`, without opening the docstrings. Kept as data here, not just
-#: prose in each docstring, so tests/test_tool_meta.py can assert every
-#: member's description names at least one of its own siblings without
-#: hand-copying (and silently drifting from) this exact list.
+#: could not tell `calc_exact` from `evaluate_expression`, or either from a
+#: satisfiability check, without opening the docstrings. Kept as data here,
+#: not just prose in each docstring, so tests/test_tool_meta.py can assert
+#: every member's description names at least one of its own siblings
+#: without hand-copying (and silently drifting from) this exact list.
 #:
-#: The 2026-09-08 merge folded the second cluster's four members into one
-#: `bits(mode=...)` tool, and did the same for `solve_expression`/
-#: `solve_linear`/`simplify_expression`/`limit_expression` into
-#: `symbolic(op=...)` — see docs/design/2026-08-10-tool-facade.md's "Scope
-#: amendment on tool count". The eight old names stay registered as
-#: deprecated aliases for one minor release, so they are now MORE
-#: confusable with their replacement (and each other) than before, not
-#: less: `bits`/`symbolic` join their own alias sets as clusters below,
-#: each alias's deprecation-prefixed description names its replacement.
+#: The 2026-09-08 merge folded four bit-twiddling tools into one
+#: `bits(mode=...)` tool, and four symbolic-algebra tools into one
+#: `symbolic(op=...)` tool — see docs/design/2026-08-10-tool-facade.md's
+#: "Scope amendment on tool count". The eight old names stayed registered
+#: as deprecated aliases for one minor release and were retired in 0.12.0
+#: (CHANGELOG.md). `bits` and `symbolic` now each have no lexically-similar
+#: sibling of their own, so the two clusters that existed only to flag
+#: `bits`/`symbolic` against their own retired aliases are gone; the one
+#: cluster below survives because `solve` is still a `symbolic` op and
+#: "z3_check vs. solve for x" is exactly the confusion Glama named.
 DESCRIPTION_CLUSTERS: tuple[frozenset[str], ...] = (
-    frozenset({"evaluate_expression", "calc_exact", "solve_expression", "solve_linear", "z3_check"}),
-    frozenset({"bits", "bit_analysis", "bitop", "int_widths", "base_repr"}),
-    frozenset({"symbolic", "solve_expression", "solve_linear",
-               "simplify_expression", "limit_expression"}),
+    frozenset({"evaluate_expression", "calc_exact", "symbolic", "z3_check"}),
 )
 
 
@@ -2097,8 +2096,8 @@ def evaluate_expression(expression: str) -> dict[str, Any]:
     plain arithmetic on literal values. Symbolically evaluate to a value or
     closed form via sympify: 'integrate(x**2, x)', 'sqrt(144) + 2**10'. Not
     simplification — for simplified/factored/expanded forms, use
-    simplify_expression. Returns `value` (if the result is a number) or the
-    evaluated expression, plus `type`."""
+    symbolic(op="simplify"). Returns `value` (if the result is a number) or
+    the evaluated expression, plus `type`."""
     return logic.evaluate_expression(expression)
 
 
@@ -2110,7 +2109,7 @@ def truth_table(expression: str) -> dict[str, Any]:
 
 @mcp.tool(group="verification")
 def z3_check(smt2: str) -> dict[str, Any]:
-    """Use z3_check, not solve_expression, for satisfiability over
+    """Use z3_check, not symbolic(op="solve"), for satisfiability over
     inequalities, boolean combinations, or several variables at once: sat/
     unsat/unknown plus a model. Example:
     '(declare-const x Int)(assert (> x 5))(check-sat)'.
@@ -2123,16 +2122,6 @@ def z3_check(smt2: str) -> dict[str, Any]:
     `ungraded`.
     """
     return grades.grade_z3_check(logic.z3_check(smt2))
-
-
-@mcp.tool(group="calculator")
-def solve_linear(system: str, variables: str) -> dict[str, Any]:
-    """Deprecated alias for symbolic(op="solve_linear"); removed in the next
-    minor release. Use solve_linear, not solve_expression, for a system of
-    equations sharing variables. `system` is ';'-separated equations,
-    `variables` comma-separated. Example: system='x + y = 10; x - y = 2',
-    variables='x, y'."""
-    return symbolic(op="solve_linear", system=system, variables=variables)
 
 
 @mcp.tool(group="calculator")
@@ -2693,10 +2682,9 @@ def bits(mode: str, n: int | None = None, align: int | None = None,
          a: int | None = None, op: str | None = None, b: int | None = None,
          width: int | None = None) -> dict[str, Any]:
     """Programmer-mode integer facts and operations, selected by `mode` —
-    replaces bit_analysis, bitop, int_widths and base_repr, each now a
-    deprecated one-minor-release alias for one of the four modes below.
-    Every mode returns exactly that alias's own result, plus `mode`
-    (additive).
+    replaces the four former standalone tools bit_analysis, bitop,
+    int_widths and base_repr, retired in 0.12.0 (CHANGELOG.md). Every mode
+    returns exactly its former tool's own result, plus `mode` (additive).
 
     mode="analysis" (was bit_analysis) — facts about a single N: popcount,
     bit length, trailing zeros, power-of-two check, next power of two, and
@@ -2740,15 +2728,6 @@ def bits(mode: str, n: int | None = None, align: int | None = None,
 
 
 @mcp.tool(group="calculator")
-def base_repr(n: int, width: int | None = None) -> dict[str, Any]:
-    """Deprecated alias for bits(mode="repr"); removed in the next minor
-    release. Use base_repr, not int_widths, for a single specified width.
-    hex/oct/bin of N; with WIDTH, two's complement and signed-overflow
-    detection. `base_repr(3000000000, 32)` says plainly it does not fit i32."""
-    return bits(mode="repr", n=n, width=width)
-
-
-@mcp.tool(group="calculator")
 def radix_convert(value: str, from_base: int = 10, to_base: int = 10) -> dict[str, Any]:
     """Convert a value between ANY bases 2..36, fractions included; bases that
     cannot represent the fraction (e.g. 0.1 in base 2) are flagged
@@ -2763,40 +2742,6 @@ def float_repr(x: float) -> dict[str, Any]:
     shows 0.1000000000000000055511151231257827...; `float_repr(0.25)` says
     EXACT. Above 2^53 warns consecutive integers are indistinguishable."""
     return exact.float_repr(x)
-
-
-@mcp.tool(group="calculator")
-def int_widths(n: int) -> dict[str, Any]:
-    """Deprecated alias for bits(mode="widths"); removed in the next minor
-    release. Use int_widths, not base_repr, to scan across widths, not just
-    one. Which widths (i8..i64/u8..u64) hold N, and the wrapped value where
-    they do not. Flags anything past 2^53 as unable to round-trip through a
-    JS number or JSON float. `int_widths(3000000000)` shows the i32 wrap."""
-    return bits(mode="widths", n=n)
-
-
-@mcp.tool(group="calculator")
-def bit_analysis(n: int, align: int | None = None) -> dict[str, Any]:
-    """Deprecated alias for bits(mode="analysis"); removed in the next minor
-    release. Use bit_analysis, not bitop, for facts about a single N:
-    popcount, bit length, trailing zeros, power-of-two check, next power of
-    two, and (with align) padding needed to reach an alignment boundary."""
-    return bits(mode="analysis", n=n, align=align)
-
-
-@mcp.tool(group="calculator")
-def bitop(a: int, op: str, b: int | None = None, width: int = 64) -> dict[str, Any]:
-    """Deprecated alias for bits(mode="op"); removed in the next minor
-    release. Use bitop, not bit_analysis, to apply an operation (and/or/xor/
-    not/shifts/rotates) rather than describe a value. Programmer-mode bit
-    ops: and or xor nand nor xnor not shl shr sar rol ror at width
-    8/16/32/64. Every result shows unsigned, signed (two's complement), hex,
-    octal and binary. shr is logical (zero-fill); sar is arithmetic
-    (sign-propagating) — 0x80 shr 1 = 0x40 (+64) but 0x80 sar 1 = 0xC0
-    (-64). A left shift that drops bits says OVERFLOW and shows the
-    unbounded answer.
-    """
-    return bits(mode="op", a=a, op=op, b=b, width=width)
 
 
 @mcp.tool(group="verification")
@@ -2827,10 +2772,10 @@ _SYMBOLIC_MODE_PARAMS = {
 def symbolic(op: str, expr: str | None = None, var: str | None = None,
             point: str | None = None, system: str | None = None,
             variables: str | None = None) -> dict[str, Any]:
-    """Symbolic algebra, selected by `op` — replaces solve_expression,
-    solve_linear, simplify_expression and limit_expression, each now a
-    deprecated one-minor-release alias for one of the four ops below. Every
-    op returns exactly that alias's own result, plus `op` (additive).
+    """Symbolic algebra, selected by `op` — replaces the four former
+    standalone tools solve_expression, solve_linear, simplify_expression
+    and limit_expression, retired in 0.12.0 (CHANGELOG.md). Every op
+    returns exactly its former tool's own result, plus `op` (additive).
 
     op="solve" (was solve_expression) — the roots of one equation:
     'x**2 - 4 = 0', '2*x + 1 = 7'. For a system of several equations, use
@@ -2875,37 +2820,6 @@ def symbolic(op: str, expr: str | None = None, var: str | None = None,
             expr, var if var is not None else "x", point if point is not None else "oo")
     result["op"] = op
     return result
-
-
-@mcp.tool(group="calculator")
-def solve_expression(expr: str, var: str = "x") -> dict[str, Any]:
-    """Deprecated alias for symbolic(op="solve"); removed in the next minor
-    release. Use solve_expression, not z3_check, for the roots of one
-    equation: 'x**2 - 4 = 0', '2*x + 1 = 7'. For a system of several
-    equations, use solve_linear. For general constraint satisfiability
-    (inequalities, boolean constraints, multiple solvers), use z3_check.
-    Returns `solutions` as a list of strings alongside the parsed
-    `equation` and `variable`."""
-    return symbolic(op="solve", expr=expr, var=var)
-
-
-@mcp.tool(group="calculator")
-def limit_expression(expr: str, var: str = "x", point: str = "oo") -> dict[str, Any]:
-    """Deprecated alias for symbolic(op="limit"); removed in the next minor
-    release. Asymptotic behaviour: limit of EXPR as var -> point (default
-    oo). 'limit_expression(\"n*log(n)/n**2\", \"n\")' returns 0 — settles
-    complexity arguments faster than arguing."""
-    return symbolic(op="limit", expr=expr, var=var, point=point)
-
-
-@mcp.tool(group="calculator")
-def simplify_expression(expr: str) -> dict[str, Any]:
-    """Deprecated alias for symbolic(op="simplify"); removed in the next
-    minor release. Simplify, factor, and expand an expression — algebraic
-    forms, not solving (use solve_expression) and not a numeric value (use
-    calc_exact). Returns `simplified`, `factored`, and `expanded` as
-    strings alongside the parsed `original`."""
-    return symbolic(op="simplify", expr=expr)
 
 
 @mcp.tool(group="verification")
@@ -3047,21 +2961,18 @@ _GROUP_ROUTING_TEXT: dict[str, str] = {
     "calculator": (
         "math/logic/units/numbers: evaluate_expression (symbolic, has "
         "variables/calculus) vs calc_exact (exact arithmetic on literal "
-        "numbers); symbolic (op=simplify/solve/solve_linear/limit — the "
-        "deprecated simplify_expression/solve_expression/solve_linear/"
-        "limit_expression aliases still work); truth_table (boolean "
-        "logic); matrix, calc_stats, percentiles, percentage, "
-        "compare_threshold, collision_probability; bits (mode: one-value "
-        "facts/op/widths/repr — the deprecated bit_analysis/bitop/"
-        "int_widths/base_repr aliases still work) vs radix_convert "
+        "numbers); symbolic (op=simplify/solve/solve_linear/limit); "
+        "truth_table (boolean logic); matrix, calc_stats, percentiles, "
+        "percentage, compare_threshold, collision_probability; bits "
+        "(mode: one-value facts/op/widths/repr) vs radix_convert "
         "(base-to-base); "
         "float_repr, data_sizes, human_duration (elapsed seconds), "
         "epoch_time (timestamp to date); convert_units, list_units, "
         "physical_constants."
     ),
     "verification": (
-        "z3_check (SMT satisfiability) vs solve_expression (one equation's "
-        "roots); algebraic_equiv (symbolic identity); "
+        "z3_check (SMT satisfiability) vs symbolic (op=solve, one "
+        "equation's roots); algebraic_equiv (symbolic identity); "
         "verify_translation/verify_optimization (prove two programs match "
         "by running both); compare_edge_cases (find divergent inputs)."
     ),

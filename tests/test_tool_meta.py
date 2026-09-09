@@ -148,17 +148,28 @@ async def main() -> None:
         # A gate that loops over an empty collection reports "0 checks, 0
         # failures" — indistinguishable from "every check passed" by its
         # exit code alone. Pin BOTH that clusters exist and that the loop
-        # below actually runs the 9 checks (5 + 4 tools) this ticket's two
-        # named clusters are supposed to produce, so a future edit that
-        # empties/shrinks `DESCRIPTION_CLUSTERS` fails LOUDLY here instead
-        # of just quietly running fewer checks with no red anywhere.
+        # below actually runs checks, so a future edit that empties/shrinks
+        # `DESCRIPTION_CLUSTERS` fails LOUDLY here instead of just quietly
+        # running fewer checks with no red anywhere.
+        #
+        # This floor was 9 (5 + 4 tools) while the eight retired bit/symbolic
+        # aliases were still registered: `bits`/`symbolic` were each their
+        # own 5-member cluster against their own (still-live) aliases. Once
+        # those eight names were removed in 0.12.0 (CHANGELOG.md), `bits`
+        # and `symbolic` had no lexically-similar sibling left, so those two
+        # clusters were removed rather than kept as meaningless singletons —
+        # the one surviving cluster (evaluate_expression/calc_exact/
+        # symbolic/z3_check) covers 4. The floor moved down with it because
+        # the confusability surface genuinely shrank; not to paper over a
+        # regression, since removed-alias descriptions cannot be scored at
+        # all any more.
         check(f"DESCRIPTION_CLUSTERS is non-empty ({len(codecalc_server.DESCRIPTION_CLUSTERS)} "
               "cluster(s))",
               len(codecalc_server.DESCRIPTION_CLUSTERS) > 0)
         cluster_member_count = sum(len(c) for c in codecalc_server.DESCRIPTION_CLUSTERS)
-        check(f"DESCRIPTION_CLUSTERS covers >= 9 tools (existence floor, not just "
+        check(f"DESCRIPTION_CLUSTERS covers >= 4 tools (existence floor, not just "
               f"non-empty): {cluster_member_count}",
-              cluster_member_count >= 9, f"-> {cluster_member_count}")
+              cluster_member_count >= 4, f"-> {cluster_member_count}")
 
         # ── each description-cluster tool names at least one of its own ─────
         # siblings — derived from `codecalc_server.DESCRIPTION_CLUSTERS`, not
@@ -174,9 +185,9 @@ async def main() -> None:
                       f"cluster {sorted(cluster)}",
                       bool(named), f"-> named={sorted(named)}")
                 cluster_checks_run += 1
-        check(f"the cluster-sibling loop above actually ran >= 9 checks "
+        check(f"the cluster-sibling loop above actually ran >= 4 checks "
               f"(not vacuously zero): {cluster_checks_run}",
-              cluster_checks_run >= 9, f"-> {cluster_checks_run}")
+              cluster_checks_run >= 4, f"-> {cluster_checks_run}")
 
     # ── CODECALC_TOOLS=core/dev: instructions never names an absent ─────────
     # group or tool. Fresh subprocess per value — tool REGISTRATION is

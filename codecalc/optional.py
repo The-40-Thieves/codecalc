@@ -44,8 +44,7 @@ from types import ModuleType
 _EXTRAS = {
     "symbolic": (
         "codecalc[symbolic]",
-        ("evaluate_expression, simplify_expression, solve_expression, "
-         "limit_expression, algebraic_equiv, solve_linear, truth_table, "
+        ("evaluate_expression, symbolic, algebraic_equiv, truth_table, "
          "z3_check, branch_reachability, convert_units"),
     ),
     "parsing": (

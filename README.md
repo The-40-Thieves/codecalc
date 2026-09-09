@@ -6,7 +6,7 @@
 calculator, a code runner, and a logic checker — so it gets a *correct* answer
 instead of a guessed one.** It runs code in **31 languages**, does exact
 symbolic math, solves SMT/logic problems, and measures complexity, all exposed
-as **57 MCP tools**.
+as **49 MCP tools**.
 
 **Fastest path:** `uvx 'codecalc[full]' setup --write` registers codecalc with your MCP client automatically. New to MCP, or want more detail first? See [QUICKSTART.md](QUICKSTART.md), or the Install section below.
 
@@ -163,7 +163,7 @@ tool that appears to exist and doesn't work.
 
 | Edition | Install | What you get |
 |---|---|---|
-| **Full** | `uvx 'codecalc[full]'` / `pip install 'codecalc[full]'` | The recommended local product: the native (Rust) executor, symbolic tools (`evaluate_expression`, `solve_linear`, `z3_check`, …), and parsing (`analyze_complexity`). Everything this README documents actually runs. |
+| **Full** | `uvx 'codecalc[full]'` / `pip install 'codecalc[full]'` | The recommended local product: the native (Rust) executor, symbolic tools (`evaluate_expression`, `symbolic`, `z3_check`, …), and parsing (`analyze_complexity`). Everything this README documents actually runs. |
 | **Core** | `uvx codecalc` / `pip install codecalc` | Execution + non-symbolic tools only — the base install in the table above. Every symbolic/parsing tool is still *listed* by `tools/list` (MCP doesn't support per-install schemas), but calling one returns `dependency_missing` naming the extra, before any other work happens. |
 | **Docker** | `docker build -f docker/mcp-server.Dockerfile .` | The MCP server itself, packaged to run as an ordinary container. Core-shaped **by default**: ships `python3`/`node`/`ruby`/`php`/`perl`/`gawk`/`lua`/`c`/`cpp`/`jq`/`sqlite3` and the default rlimit sandbox — symbolic/parsing are absent by design (no `[full]` in the base image; see the Dockerfile's own comment for why, including an arm64 z3-solver wheel gap). `--build-arg CODECALC_EXTRA=full` adds them. This image cannot nest the Strict Host boundary below inside itself (no privileged docker-in-docker), and `codecalc doctor` inside it says so rather than claiming a boundary it doesn't have. |
 | **Strict Host** | opt-in; `CODECALC_STRICT_URL` (client) or the gVisor+Docker host itself (server) — see [`docs/deployment/README.md`](docs/deployment/README.md) | Not an install, a *boundary*: the gVisor `runsc` sandbox on Linux, or AppContainer hardening on Windows, layered above whichever install above is already running. Fails closed — no digest pinned, no fallback to unenforced local execution. |
@@ -475,7 +475,7 @@ Linux kernel with seccomp support enforces it in-kernel either way), and
 [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild)
 for the static cross-builds (zig is used as the linker; no x86_64 GCC needed).
 
-## MCP tools (57) + MCP resources
+## MCP tools (49) + MCP resources
 
 Every session file is also exposed as an MCP resource:
 `codecalc://session/<session_id>/files/<path>` — images render inline for the
@@ -504,18 +504,11 @@ analysis, binary64 introspection.
 | `data_sizes` | Byte sizes both ways: KiB/MiB (binary) AND KB/MB (decimal) |
 | `human_duration` | Humanised duration + per-day/per-30d rates |
 | `epoch_time` | Epoch s/ms/µs/ns → ISO 8601 UTC, implausible readings suppressed |
-| `base_repr` | Deprecated — hex/oct/bin + two's complement at WIDTH + signed-overflow detection; alias for `bits(mode="repr")`, removed in 0.12.0 |
 | `radix_convert` | Any base 2..36, fractions included, non-termination flagged (`0.1` base 2) |
 | `float_repr` | What binary64 actually stores: exact value, raw bits, ULP, neighbours, representable-or-not |
-| `int_widths` | Deprecated — which i8..i64/u8..u64 hold N + wrapped values; 2^53 JS/JSON caveat; alias for `bits(mode="widths")`, removed in 0.12.0 |
-| `bit_analysis` | Deprecated — popcount, bit length, trailing zeros, next pow2, alignment padding; alias for `bits(mode="analysis")`, removed in 0.12.0 |
-| `bitop` | Deprecated — programmer mode and/or/xor/nand/nor/xnor/not/shl/shr/sar/rol/ror at 8/16/32/64; alias for `bits(mode="op")`, removed in 0.12.0 |
-| `bits` | Programmer-mode integer facts and operations, selected by `mode`: `analysis` (was `bit_analysis`), `op` (was `bitop`), `widths` (was `int_widths`), `repr` (was `base_repr`) — see [Deprecated tool aliases](#deprecated-tool-aliases) |
+| `bits` | Programmer-mode integer facts and operations, selected by `mode`: `analysis` (was `bit_analysis`), `op` (was `bitop`), `widths` (was `int_widths`), `repr` (was `base_repr`) — those four former standalone tools were retired in 0.12.0 (CHANGELOG.md) |
 | `algebraic_equiv` | Are `(a*b)/c` and `a*(b/c)` identical? refactor verification (with float/truncation caveat) |
-| `solve_expression` | Deprecated — solve roots/crossovers: `x**2 - 4 = 0`, `2*x + 1 = 7`; alias for `symbolic(op="solve")`, removed in 0.12.0 |
-| `limit_expression` | Deprecated — asymptotic limits: `n*log(n)/n**2` → 0; alias for `symbolic(op="limit")`, removed in 0.12.0 |
-| `simplify_expression` | Deprecated — simplified + factored + expanded forms; alias for `symbolic(op="simplify")`, removed in 0.12.0 |
-| `symbolic` | Symbolic algebra, selected by `op`: `solve` (was `solve_expression`), `solve_linear` (was `solve_linear`, name unchanged), `simplify` (was `simplify_expression`), `limit` (was `limit_expression`) — see [Deprecated tool aliases](#deprecated-tool-aliases) |
+| `symbolic` | Symbolic algebra, selected by `op`: `solve` (was `solve_expression`), `solve_linear` (was `solve_linear`, name unchanged), `simplify` (was `simplify_expression`), `limit` (was `limit_expression`) — those four former standalone tools were retired in 0.12.0 (CHANGELOG.md) |
 
 **Core tools**
 
@@ -547,7 +540,6 @@ analysis, binary64 introspection.
 | `evaluate_expression` | Symbolic math: `integrate(x**2, x)`, `sqrt(144) + 2**10` |
 | `truth_table` | Boolean algebra: `a and b or not c`, `p xor q`, `a implies b` |
 | `z3_check` | SMT-LIB2 satisfiability + model. An `unsat` verdict is graded `solver_proven`; `sat` is graded `ungraded` (decided, but not proof-shaped — see [Grade vocabulary](#grade-vocabulary)) |
-| `solve_linear` | Deprecated — systems of equations: `x + y = 10; x - y = 2`; alias for `symbolic(op="solve_linear")`, removed in 0.12.0 |
 | `matrix` | Structured matrix ops: det/inverse/eigenvalues/transpose/rank/trace on a `rows` array — never a caller string through sympify, so `evaluate_expression`'s `[`/`]` RCE screen never applies. Each entry screened individually |
 | `analyze_complexity` | Static Big-O estimate from code structure, parsed with **tree-sitter** (every supported language). Reports `analysis: tree-sitter\|regex-fallback` so you can tell a parse from a guess |
 | `benchmark` | Empirical Big-O: runs code at increasing N, fits growth curve |
@@ -555,30 +547,26 @@ analysis, binary64 introspection.
 | `runtimes_status` | **Non-mutating** update check: current vs latest for every language runtime, which package manager owns it, and the command that would run |
 | `update_runtimes` | Update runtimes. **Dry-run by default** (`apply=False` returns the commands); `apply=True` executes them |
 
-### Deprecated tool aliases
+### Retired tool aliases
 
-The 2026-09-08 merge folded two lexically-overlapping clusters — flagged by
-Glama's public review as indistinguishable from a description alone — into
-one enum-selected tool each, keeping every mode's own parameters,
-annotations and result shape. The eight retired names stay registered as
-thin aliases for one minor release so nothing breaks mid-upgrade, then are
-removed:
+The 2026-09-08 merge (0.11.0) folded two lexically-overlapping clusters —
+flagged by Glama's public review as indistinguishable from a description
+alone — into one enum-selected tool each, keeping every mode's own
+parameters, annotations and result shape. The eight old names stayed
+registered as thin aliases for one minor release so nothing broke
+mid-upgrade, then were removed in 0.12.0 (CHANGELOG.md). Calling one of
+them now gets the MCP SDK's own unknown-tool error, not a result:
 
-| Deprecated alias | Replacement | Removed in |
-|---|---|---|
-| `bit_analysis` | `bits(mode="analysis")` | 0.12.0 |
-| `bitop` | `bits(mode="op")` | 0.12.0 |
-| `int_widths` | `bits(mode="widths")` | 0.12.0 |
-| `base_repr` | `bits(mode="repr")` | 0.12.0 |
-| `solve_expression` | `symbolic(op="solve")` | 0.12.0 |
-| `solve_linear` | `symbolic(op="solve_linear")` | 0.12.0 |
-| `simplify_expression` | `symbolic(op="simplify")` | 0.12.0 |
-| `limit_expression` | `symbolic(op="limit")` | 0.12.0 |
-
-Each alias's own description is prefixed "Deprecated alias for
-`bits(mode=...)`/`symbolic(op=...)`; removed in the next minor release." —
-call the replacement directly in new code; the alias exists only to give an
-already-integrated caller one release to migrate.
+| Retired name | Replacement |
+|---|---|
+| `bit_analysis` | `bits(mode="analysis")` |
+| `bitop` | `bits(mode="op")` |
+| `int_widths` | `bits(mode="widths")` |
+| `base_repr` | `bits(mode="repr")` |
+| `solve_expression` | `symbolic(op="solve")` |
+| `solve_linear` | `symbolic(op="solve_linear")` |
+| `simplify_expression` | `symbolic(op="simplify")` |
+| `limit_expression` | `symbolic(op="limit")` |
 
 ## Grade vocabulary
 
@@ -852,7 +840,7 @@ number this section exists to track.
 
 codecalc does not hide its tools behind a discovery facade, and that is
 deliberate: the tool surface is where per-operation approval prompts, audit
-names and typed schemas live, and collapsing 57 tools into one dispatcher makes
+names and typed schemas live, and collapsing 49 tools into one dispatcher makes
 `install_package` and `percentage` look like the same permission to a client
 that approves by tool name. The cost is real, but the client is the better place
 to solve it, because the client can defer definitions **without** giving up the
@@ -922,7 +910,7 @@ If you are paying too much for codecalc's definitions:
   https://modelcontextprotocol.io/specification/2026-07-28/server/tools,
   retrieved 2026-09-07). A client without one of the mechanisms above pays the
   full cost regardless of what codecalc does.
-- **Any client** can filter which of the 57 tools it exposes to the model.
+- **Any client** can filter which of the 49 tools it exposes to the model.
   Nothing here requires codecalc to change.
 
 A server-side facade remains under consideration for clients with no such
@@ -972,10 +960,10 @@ all narrow what a given session sees without touching the server.
 Every tool also now carries a `ToolAnnotations` hint (`readOnlyHint`,
 `destructiveHint`, `idempotentHint`, `openWorldHint` — see
 `codecalc/server.py`'s `GROUP_ANNOTATIONS`/`TOOL_ANNOTATION_OVERRIDES` tables
-for the value on each of the 57). Codex CLI's `writes` approval mode
+for the value on each of the 49). Codex CLI's `writes` approval mode
 (v0.144.0+) reads `readOnlyHint` directly: a tool marked `readOnlyHint: true`
 skips the approval prompt, everything else still asks. That covers the whole
-`calculator` group (27/27 pure) plus the read-only members of the mixed
+`calculator` group (19/19 pure) plus the read-only members of the mixed
 groups — `list_languages`/`list_execution_providers`/`runtimes_status`/
 `branch_reachability` in `execution`, `z3_check`/`algebraic_equiv` in
 `verification`,
@@ -995,7 +983,7 @@ Every tool belongs to exactly one group:
 
 | Group | Tools |
 |---|---|
-| `calculator` (27) | `calc_exact`, `compare_threshold`, `percentage`, `calc_stats`, `percentiles`, `collision_probability`, `data_sizes`, `human_duration`, `epoch_time`, `bits`, `base_repr`, `radix_convert`, `float_repr`, `int_widths`, `bit_analysis`, `bitop`, `symbolic`, `solve_expression`, `limit_expression`, `simplify_expression`, `convert_units`, `physical_constants`, `list_units`, `evaluate_expression`, `truth_table`, `solve_linear`, `matrix` |
+| `calculator` (19) | `calc_exact`, `compare_threshold`, `percentage`, `calc_stats`, `percentiles`, `collision_probability`, `data_sizes`, `human_duration`, `epoch_time`, `bits`, `radix_convert`, `float_repr`, `symbolic`, `convert_units`, `physical_constants`, `list_units`, `evaluate_expression`, `truth_table`, `matrix` |
 | `verification` (5) | `verify_translation`, `verify_optimization`, `algebraic_equiv`, `compare_edge_cases`, `z3_check` |
 | `execution` (8) | `list_languages`, `list_execution_providers`, `execute_code`, `execute_code_stream`, `trace_execution`, `branch_reachability`, `compare_execution`, `runtimes_status` |
 | `sessions` (12) | `session_start`, `session_stop`, `session_list`, `session_files`, `session_write_file`, `session_read_file`, `session_run`, `session_artifacts`, `session_snapshot`, `run_submit`, `run_inspect`, `run_cancel` |
@@ -1012,13 +1000,13 @@ both:
 | `full` | every group (the default) |
 
 ```bash
-CODECALC_TOOLS=calculator            # just the calculator (27 tools)
+CODECALC_TOOLS=calculator            # just the calculator (19 tools)
 CODECALC_TOOLS=core                  # same thing, by preset name
 CODECALC_TOOLS=calculator,execution  # two groups, unioned
-CODECALC_TOOLS=dev                   # a coding-assistant slice (42 tools)
+CODECALC_TOOLS=dev                   # a coding-assistant slice (35 tools)
 ```
 
-Unset or empty registers every group — 57 tools, same as today —
+Unset or empty registers every group — 49 tools, same as today —
 so nothing changes for an operator who does not set this. An unknown group or
 preset name is a loud startup failure naming the bad value and every known
 group/preset, never a silent fallback to "everything" or "nothing": either

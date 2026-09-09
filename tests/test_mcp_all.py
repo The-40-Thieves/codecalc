@@ -2,7 +2,7 @@
 
 This file used to print each tool's output and exit 0 unconditionally — no
 assertions, no conditionals. It caught a tool that crashed or changed shape and
-nothing else: a `solve_linear` returning the wrong roots, or a `z3_check`
+nothing else: a `symbolic` returning the wrong roots, or a `z3_check`
 answering unsat for a satisfiable system, passed silently.
 
 Each answer below is pinned to a value that is checkable by hand. Two are not,
@@ -263,9 +263,10 @@ async def main():
               and reach_branches[0].get("witness", {}).get("x", -999) > 5,
               f"-> {reach_branches}")
 
-        # ── solve_linear ──────────────────────────────────────────────────
+        # ── symbolic(op="solve_linear") ──────────────────────────────────
         r = data(await client.call_tool(
-            "solve_linear", {"system": "x + y = 10; x - y = 2", "variables": "x, y"}))
+            "symbolic", {"op": "solve_linear", "system": "x + y = 10; x - y = 2",
+                        "variables": "x, y"}))
         solutions = str(r.get("solutions"))
         # x + y = 10, x - y = 2  ->  x = 6, y = 4. One answer, and it is checkable.
         check("solve_linear: x = 6", "x: 6" in solutions, f"-> {solutions[:60]}")

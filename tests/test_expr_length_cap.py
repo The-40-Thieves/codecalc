@@ -53,16 +53,21 @@ _HUGE_BOOL = "A & " * 30000 + "A"             # boolean expression (truth_table)
 
 # Warm the symbolic import once, untimed, so the first cap rejection below is not
 # charged for SymPy's ~0.4s module load.
-server.simplify_expression("x + 1")
+server.symbolic(op="simplify", expr="x + 1")
 
 # (label, thunk) for every public tool that hands a caller string to sp.sympify.
+# simplify_expression/solve_expression/solve_linear/limit_expression were
+# retired in 0.12.0 (CHANGELOG.md) — each op below is now reached through the
+# single `symbolic` tool that replaced them.
 _CASES = [
     ("evaluate_expression", lambda: server.evaluate_expression(_HUGE)),
-    ("simplify_expression", lambda: server.simplify_expression(_HUGE)),
-    ("solve_expression", lambda: server.solve_expression(_HUGE)),
-    ("solve_linear", lambda: server.solve_linear(_HUGE_SYS, "x")),
-    ("limit_expression", lambda: server.limit_expression(_HUGE)),
-    ("limit_expression (point arg)", lambda: server.limit_expression("x", "x", _HUGE)),
+    ("symbolic(op=simplify)", lambda: server.symbolic(op="simplify", expr=_HUGE)),
+    ("symbolic(op=solve)", lambda: server.symbolic(op="solve", expr=_HUGE)),
+    ("symbolic(op=solve_linear)",
+     lambda: server.symbolic(op="solve_linear", system=_HUGE_SYS, variables="x")),
+    ("symbolic(op=limit)", lambda: server.symbolic(op="limit", expr=_HUGE)),
+    ("symbolic(op=limit, point arg)",
+     lambda: server.symbolic(op="limit", expr="x", var="x", point=_HUGE)),
     ("truth_table", lambda: server.truth_table(_HUGE_BOOL)),
     ("algebraic_equiv (a)", lambda: server.algebraic_equiv(_HUGE, "x")),
     ("algebraic_equiv (b)", lambda: server.algebraic_equiv("x", _HUGE)),
