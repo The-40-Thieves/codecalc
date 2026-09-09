@@ -1321,7 +1321,9 @@ def execute_code(
     dependencies: Annotated[list[str] | None, Field(description="Packages to install before running, e.g. ['requests==2.31.0']; merged with any PEP 723 block")] = None,
     ctx: Context = None,
 ) -> dict[str, Any]:
-    """Execute `code` in `language` in a sandbox.
+    """Execute `code` in `language` in a sandbox. Use this, not
+    execute_code_stream/run_submit/session_run, for one program whose result
+    you can wait for within a 120s cap.
 
     Returns stdout, stderr, exit_code, duration_ms, cpu_ms, peak_memory_kb,
     verdict (OK/TLE/MLE/OLE/RTE).
@@ -1331,10 +1333,7 @@ def execute_code(
       Also reports `artifacts_created` (files just created/modified) since
       that workspace outlives the call; a sessionless run has none. See
       `session_run` for the same field plus inline content blocks.
-    - `max_memory_mb` / `max_cpu`: per-call resource ceilings.
-    - `max_output_kb`: raise/lower the stdout+stderr cap (default 64 KiB
-      each). Any value is honoured up to a hard ceiling of 240 KiB per
-      stream; above that it is clamped to 240, because it is what the
+    - `max_output_kb`: the 240 KiB hard ceiling is what the
       `anthropic/maxResultSizeChars` this tool advertises in its `_meta`
       already assumes — the cap leaves no headroom to raise past it without
       the real result exceeding that hint. A run whose real output needs
@@ -1344,17 +1343,16 @@ def execute_code(
       than truncating — see the spill paragraph further down. An EXPLICIT
       `max_output_kb`, even under the 240 KiB ceiling, is honoured as a
       literal cap with no spill.
-    - `no_net`: block network egress. Linux: enforced in-kernel via a
-      seccomp-bpf filter. macOS / no-seccomp kernel: best-effort symbol
-      shim, disclosed in `unenforced` when that's the only guarantee that
-      held. See SECURITY.md.
-    - `compact`: drop the diagnostic fields (timings, workdir, platform). Never
-      drops `unenforced`, `output_error`, `artifacts_created`, or
-      `dependencies` — if a guarantee you asked for was not applied, or a
-      declared install failed, a compact result still says so.
-    - `dependencies`: packages to install before the code runs (merged with a
-      PEP 723 `# /// script` block for python3, deduped by normalized name with
-      this argument winning; the only source for node). A block ALONE, with no
+    - `no_net`: Linux enforces in-kernel via a seccomp-bpf filter. macOS /
+      no-seccomp kernel: best-effort symbol shim, disclosed in `unenforced`
+      when that's the only guarantee that held. See SECURITY.md.
+    - `compact`: never drops `unenforced`, `output_error`,
+      `artifacts_created`, or `dependencies` — if a guarantee you asked for
+      was not applied, or a declared install failed, a compact result still
+      says so.
+    - `dependencies`: merged with a PEP 723 `# /// script` block for
+      python3, deduped by normalized name with this argument winning; the
+      only source for node. A block ALONE, with no
       `dependencies` argument, is enough to trigger an install — see
       SECURITY.md. Installed BEFORE the sandboxed step, through the same
       confined `install_package` path — never inside the sandbox — and
@@ -1465,7 +1463,9 @@ def session_files(session_id: Annotated[str, Field(description="Id of the sessio
                   path: Annotated[str, Field(description="Subdirectory to list, relative to the workspace root; empty lists the root")] = "",
                   page_size: Annotated[int | None, Field(description="Max entries per page; omit for one unpaginated listing")] = None,
                   cursor: Annotated[str | None, Field(description="Opaque page cursor from a previous session_files call's response, to fetch the next page")] = None) -> dict[str, Any]:
-    """List workspace files, optionally using a bounded cursor page."""
+    """List workspace files, optionally using a bounded cursor page. Use
+    session_artifacts, not this, for only the files executed code produced;
+    use session_read_file for one file's contents."""
     return _session_service.list_files(
         session_id, path, page_size=page_size, cursor=cursor
     )
@@ -1542,8 +1542,7 @@ async def install_package(language: Annotated[str, Field(description="Language w
     codecalc/confirmation.py); a declined or malformed confirmation refuses
     with no install attempted.
 
-    With session_id, installs into that session's workspace so executed code
-    can import it. Without, installs into a shared cache.
+    With session_id, executed code in that session can import the result.
 
     NETWORK: yes, always. The package manager fetches from its registry (PyPI,
     npm, rubygems, crates.io). codecalc opens no socket itself; the child
@@ -1613,21 +1612,15 @@ async def execute_code_stream(
     dependencies: Annotated[list[str] | None, Field(description="Packages to install before running, e.g. ['requests==2.31.0']; merged with any PEP 723 block")] = None,
     ctx: Context = None,
 ) -> dict[str, Any]:
-    """Execute code and STREAM progress + partial output as it runs.
+    """Execute code and STREAM progress + partial output as it runs. Use
+    this, not execute_code/run_submit/session_run, for the same run when you
+    want output while it runs, up to a 300s cap.
 
-    Unlike execute_code (which returns only at exit), this reports progress
-    notifications to the client while the program runs, so agents can see
-    output before the process finishes. Returns the same result shape and
-    applies the SAME ceilings: max_memory_mb, max_output_kb and max_cpu are
-    forwarded to the executor exactly as execute_code forwards them —
-    including the same clamp: `max_output_kb` cannot be raised past a hard
-    ceiling of 240 KiB per stream, since that ceiling is what the
-    `anthropic/maxResultSizeChars` this tool advertises in its `_meta`
-    already assumes.
-
-    One difference, deliberate: the wall-clock cap is 300s here against
-    execute_code's 120s, because streaming exists for runs long enough to
-    want progress.
+    Reports progress notifications to the client while the program runs, so
+    agents can see output before the process finishes. Returns the same
+    result shape and applies the SAME ceilings as execute_code: max_memory_mb,
+    max_output_kb and max_cpu are forwarded to the executor exactly as
+    execute_code forwards them, including the same 240 KiB per-stream clamp.
 
     `dependencies`: same as execute_code's (PEP 723 merge, `no_net`/policy
     refusal, 120s budget, workdir quota) — installed before streaming
@@ -1706,9 +1699,8 @@ def trace_execution(
     (sys.settrace is per-thread) or, fallback backend only, an OLE
     `exit_code` race.
 
-    PYTHON3 ONLY for now; any other `language` is refused up front. For a
-    structural Big-O guess with nothing executed, use analyze_complexity.
-    `provider`: only 'local' (default) is supported here.
+    For a structural Big-O guess with nothing executed, use
+    analyze_complexity.
     """
     timeout = min(timeout, 120)
     max_output_kb = min(max_output_kb, _MAX_OUTPUT_KB_CEILING)
@@ -1735,8 +1727,7 @@ def branch_reachability(
     z3_check, not this, when you already have an SMT-LIB2 script to solve
     directly rather than Python source to translate.
 
-    `inputs` (name -> 'int'/'bool'/'str') narrows or overrides a parameter's
-    type; unannotated parameters default to int. Each branch reports
+    Unannotated parameters default to int. Each branch reports
     `verdict` (reachable/dead/unknown), a `witness` when reachable, and
     `boundary_inputs` (min/max/equality-edge for each comparison in its own
     guard) — every input dict is shaped to drop straight into
@@ -1785,27 +1776,18 @@ def run_submit(
     dependencies: Annotated[list[str] | None, Field(description="Packages to install before running, e.g. ['requests==2.31.0']; merged with any PEP 723 block")] = None,
 ) -> dict[str, Any]:
     """Submit code for BACKGROUND execution; returns a run_id immediately.
+    Use this, not execute_code/execute_code_stream/session_run, when you do
+    not want to hold the call open — poll run_inspect(run_id), and
+    run_cancel(run_id) to stop it early.
 
-    Same request shape as execute_code (minus session_id: a run is a
-    standalone process, not a session workspace). The work proceeds on a
-    background worker; poll it with run_inspect(run_id) and, if needed, stop
-    it early with run_cancel(run_id).
+    Same request shape as execute_code minus `session_id` (a run is a
+    standalone process, not a session workspace). `timeout` bounds the WORK
+    itself, not how long you wait to collect it.
 
-    Use this instead of execute_code when you would rather not hold an MCP
-    call open for the whole computation. `timeout` is still the WORK's own
-    deadline (same 120s ceiling as execute_code) — it bounds the run, not how
-    long you wait to collect it.
-
-    `max_output_kb` is forwarded to the run exactly as execute_code forwards
-    it, including the same clamp to a hard ceiling of 240 KiB per stream
-    (see execute_code's docstring). This tool's OWN reply carries no
-    output — it is a small run_id handle, which is why it carries no
-    `anthropic/maxResultSizeChars` `_meta` itself. The eventual terminal
-    `run_inspect(run_id)` is what
-    returns the full envelope this call's `max_output_kb` produced — same
-    shape execute_code returns, and `run_inspect` advertises the SAME
-    `anthropic/maxResultSizeChars` execute_code does, so the clamp applied
-    here is what keeps that advertised value true.
+    This call's own reply carries no output — a small run_id handle — so
+    the `anthropic/maxResultSizeChars` hint lives on `run_inspect` instead,
+    which returns the full envelope, same shape execute_code returns,
+    once the run lands.
 
     Admission is capped (CODECALC_MAX_ACTIVE_RUNS, default 64): past that
     many runs still running/cancelling at once, this returns a
@@ -1814,15 +1796,11 @@ def run_submit(
 
     Retention: see run_inspect.
 
-    `dependencies`: same semantics as execute_code's own `dependencies` (PEP
-    723 merge, `no_net`/policy refusal, 120s budget, workdir quota). A
-    refusal is returned directly with no run created. Otherwise this call
-    still returns immediately: the install itself runs on the background
-    worker, ahead of the code, and a failed install becomes the run's own
-    terminal error — readable via run_inspect(run_id) like any other
-    outcome, same `dependencies` field execute_code returns. Its temp
-    workdir is freed on first collection (inspect, the next submission's own
-    reap of finished runs, or a startup sweep after a restart).
+    `dependencies`: same semantics as execute_code's own. A refusal is
+    returned directly with no run created. Otherwise this call still
+    returns immediately: the install itself runs on the background worker,
+    ahead of the code, and a failed install becomes the run's own terminal
+    error — readable via run_inspect(run_id) like any other outcome.
     """
     if _run_supervisor is None:
         return errors.error_result(
@@ -2115,7 +2093,15 @@ def evaluate_expression(expression: Annotated[str, Field(description="Symbolic m
 
 @mcp.tool(group="calculator")
 def truth_table(expression: Annotated[str, Field(description="Boolean logic expression to tabulate, e.g. 'a and b or not c', 'p xor q', 'a implies b'")]) -> dict[str, Any]:
-    """Build the truth table for a boolean expression: 'a and b or not c', 'p xor q', 'a implies b'."""
+    """Build the truth table for a boolean expression over and/or/not/xor/
+    implies/iff (plus true/false constants and variables): 'a and b or not
+    c', 'p xor q', 'a implies b'. Use z3_check, not this, for satisfiability
+    over inequalities or non-boolean variables; use evaluate_expression for
+    symbolic (non-boolean) math.
+
+    Returns `variables` (sorted names) and `rows` (one dict per assignment,
+    each variable name -> bool plus `result`), plus `row_count`,
+    `satisfiable` (any row true), and `tautology` (every row true)."""
     return logic.truth_table(expression)
 
 
@@ -2148,8 +2134,7 @@ def matrix(rows: Annotated[list[list[int | float | str]], Field(description="Row
     never a string to parse. Each entry is either a JSON number, used
     directly, or a scalar expression string ('1/2', 'sqrt(2)', 'x+1'),
     screened per-entry the same way evaluate_expression screens its input
-    before anything reaches SymPy. `op` is one of det/inverse/eigenvalues/
-    transpose/rank/trace. Example: rows=[[1,2],[3,4]], op='det' -> -2.
+    before anything reaches SymPy. Example: rows=[[1,2],[3,4]], op='det' -> -2.
     """
     return linalg.matrix(rows, op)
 
@@ -2170,8 +2155,8 @@ def benchmark(code: Annotated[str, Field(description="Program that reads integer
     """Empirically measure time complexity by running code at increasing input sizes.
 
     Contract: the code must read an integer N from stdin (first line) and do work
-    sized by N. codecalc runs it at each size in `sizes` (comma-separated) and fits
-    the growth curve to estimate Big-O (O(1), O(log n), O(n), O(n log n), O(n^2)...).
+    sized by N. codecalc runs it at each size in `sizes` and fits the growth
+    curve to estimate Big-O (O(1), O(log n), O(n), O(n log n), O(n^2)...).
     Example python: 'import sys\\nn=int(sys.stdin.readline()); s=0\\nfor i in range(n): s+=i\\nprint(s)'
     """
     # Progress deliberately NOT documented in the docstring above: the
@@ -2194,17 +2179,14 @@ def compare_execution(snippets: Annotated[dict[str, str], Field(description="Lan
                       ctx: Context = None) -> dict[str, Any]:
     """Run the same code in multiple languages side by side.
 
-    `snippets` maps language name -> code (each snippet must be valid in its own
-    language). Returns per-language stdout/stderr/exit/duration plus which was fastest.
+    Returns per-language stdout/stderr/exit/duration plus which was fastest.
     Example: {"python3": "print(6*7)", "node": "console.log(6*7)"}
 
-    `dependencies` is NOT supported here (a truthy value is a `validation`
-    error) — this tool fans out across every language with no per-language
-    install plumbing behind it; use `install_package`/
-    `execute_code(dependencies=...)` beforehand instead. A `# /// script`
-    block in a snippet is likewise never installed, but is DISCLOSED, not
-    dropped: a python3 row that carries one gets
-    `dependencies: {"status": "unsupported", "reason": ...}`.
+    This tool fans out across every language with no per-language install
+    plumbing behind it; use `install_package`/`execute_code(dependencies=...)`
+    beforehand instead. A `# /// script` block in a snippet is likewise never
+    installed, but is DISCLOSED, not dropped: a python3 row that carries one
+    gets `dependencies: {"status": "unsupported", "reason": ...}`.
     """
     # Progress not documented in the docstring above — same reasoning as
     # benchmark's own comment just above it: the docstring feeds
@@ -2232,7 +2214,6 @@ def runtimes_status(languages: Annotated[str, Field(description="Comma-separated
 
     Reports current vs latest version per language, which package manager owns
     it (mise/rustup/swiftly/apt/npm/uv), and the exact command that would run.
-    Optional `languages` = comma-separated subset, e.g. "python3,node,rust".
 
     Each entry also carries `tier` (registry.RELIABILITY_TIERS) — see
     list_languages for what `tested`/`best_effort`/`plan_only` mean. A
@@ -2255,7 +2236,7 @@ async def update_runtimes(languages: Annotated[str, Field(description="Comma-sep
     dry run — it returns the update commands that WOULD run without changing
     anything. Pass apply=True to actually execute them (mise up, rustup update,
     swiftly update, apt-get upgrade of language packages, npm -g update, uv tool
-    upgrade). `languages` = comma-separated subset; empty = all.
+    upgrade).
 
     apply=True asks the caller to confirm first (a protocol-level gate, not
     just the `anthropic/requiresUserInteraction` `_meta` hint — see
@@ -2479,8 +2460,10 @@ def session_run(session_id: Annotated[str, Field(description="Id of the session 
                 timeout: Annotated[int, Field(description="Wall-clock seconds before the run is killed")] = 30,
                 dependencies: Annotated[list[str] | None, Field(description="Packages to install before running, e.g. ['requests==2.31.0']")] = None,
                 ctx: Context = None):
-    """Run a multi-file program in a session: execute `entry_file`, which may
-    import other files already in the session workspace (helper.py, data/...).
+    """Run a multi-file program already written into a session workspace
+    (via session_write_file). Use this, not
+    execute_code/execute_code_stream/run_submit, when `entry_file` may
+    import other files already in that workspace (helper.py, data/...).
 
     Runs as a fresh process in the session workdir (not the REPL worker), so
     relative imports and data files resolve. Returns stdout/stderr/verdict
@@ -2581,10 +2564,12 @@ def compare_threshold(a: Annotated[str, Field(description="Left-hand numeric exp
                       op: Annotated[str, Field(description="Comparison operator: one of ==, !=, >, >=, <, <= ('=' also accepted for ==)")],
                       b: Annotated[str, Field(description="Right-hand numeric expression, evaluated exactly")]) -> dict[str, Any]:
     """Exact threshold check with a verdict and the shortfall when it fails.
+    Use calc_exact, not this, when you want the computed VALUE rather than a
+    threshold comparison.
 
-    `a OP b` with op in ==, !=, >, >=, <, <= (= accepted for ==). Both sides
-    are evaluated exactly and printed as fractions — a threshold comparison
-    written out cannot be gotten backwards. Example: ('1/25', '>', '0.05').
+    `a OP b`. Both sides are evaluated exactly and printed as fractions — a
+    threshold comparison written out cannot be gotten backwards. Example:
+    ('1/25', '>', '0.05').
     """
     return exact.compare_threshold(a, op, b)
 
@@ -2592,7 +2577,9 @@ def compare_threshold(a: Annotated[str, Field(description="Left-hand numeric exp
 @mcp.tool(group="calculator")
 def percentage(part: Annotated[str, Field(description="Numerator expression (rationals accepted), evaluated exactly")],
               total: Annotated[str, Field(description="Denominator expression (rationals accepted), evaluated exactly")]) -> dict[str, Any]:
-    """Exact share and percentage of PART / TOTAL (rationals accepted)."""
+    """Exact share and percentage of PART / TOTAL. Use calc_exact for a
+    single arithmetic expression, or compare_threshold to check the result
+    against a threshold rather than just compute it."""
     return exact.percentage(part, total)
 
 
@@ -2610,7 +2597,10 @@ def calc_stats(nums: Annotated[list[float], Field(description="Sample of numbers
 
 @mcp.tool(group="calculator")
 def percentiles(nums: Annotated[list[float], Field(description="Sample of numbers to compute p50/p90/p95/p99 for, by nearest-rank and linear interpolation")]) -> dict[str, Any]:
-    """p50/p90/p95/p99 by nearest-rank AND linear interpolation.
+    """p50/p90/p95/p99 (the 50th/90th/95th/99th percentile cutoffs) by
+    nearest-rank AND linear interpolation. Pairs with calc_stats, which
+    gives mean/median/stdev/CV on the same sample instead of these
+    distribution points.
 
     Warns when n < 100 that p99 is just the maximum wearing a label.
     """
@@ -2630,22 +2620,22 @@ def collision_probability(items: Annotated[int, Field(description="Number of ite
 
 @mcp.tool(group="calculator")
 def data_sizes(n: Annotated[int, Field(description="Byte count to express in both binary (KiB/MiB/GiB/TiB, /1024) and decimal (KB/MB/GB/TB, /1000) units")]) -> dict[str, Any]:
-    """Byte counts for a plain integer, both binary (KiB/MiB/GiB/TiB, /1024)
-    and decimal (KB/MB/GB/TB, /1000) — the gap between them is where '291 MB'
-    and '277 MiB' silently disagree by 5%. For units other than bytes, use
-    convert_units. For a duration, not a byte count, use human_duration.
-    Returns `bytes` plus `binary` and `decimal` dicts of unit -> value.
+    """Byte counts for a plain integer, both binary and decimal — the gap
+    between them is where '291 MB' and '277 MiB' silently disagree by 5%.
+    For units other than bytes, use convert_units. For a duration, not a
+    byte count, use human_duration. Returns `bytes` plus `binary` and
+    `decimal` dicts of unit -> value.
     """
     return exact.data_sizes(n)
 
 
 @mcp.tool(group="calculator")
 def human_duration(seconds: Annotated[float, Field(description="Elapsed span in seconds (not a point-in-time timestamp) to humanize, e.g. into '2d 3h 4m 5s'")]) -> dict[str, Any]:
-    """Convert a SPAN of elapsed seconds (not a point-in-time timestamp) into
-    a humanised duration (e.g. '2d 3h 4m 5s') plus per-day and per-30d rates.
-    For an epoch timestamp to a calendar date, use epoch_time instead. For
-    byte counts, not seconds, use data_sizes. Returns `human`, `per_day`,
-    `per_30d`, and the echoed `seconds`."""
+    """Convert a SPAN of elapsed seconds into a humanised duration (e.g.
+    '2d 3h 4m 5s') plus per-day and per-30d rates. For an epoch timestamp
+    to a calendar date, use epoch_time instead. For byte counts, not
+    seconds, use data_sizes. Returns `human`, `per_day`, `per_30d`, and the
+    echoed `seconds`."""
     return exact.human_duration(seconds)
 
 
@@ -2724,19 +2714,18 @@ def bits(mode: Annotated[str, Field(description="Which fact/operation to compute
     returns exactly its former tool's own result, plus `mode` (additive).
 
     mode="analysis" (was bit_analysis) — facts about a single N: popcount,
-    bit length, trailing zeros, power-of-two check, next power of two, and
-    (with `align`) padding needed to reach an alignment boundary. Used by
-    this mode: `n` (required), `align` (optional).
+    bit length, trailing zeros, power-of-two check, next power of two. Used
+    by this mode: `n` (required), `align` (optional).
 
-    mode="op" (was bitop) — apply an operation to `a` (and `b`, required
-    unless op="not") at a fixed `width` (8/16/32/64, default 64): and/or/
-    xor/nand/nor/xnor/not/shl/shr/sar/rol/ror. Every result shows unsigned,
+    mode="op" (was bitop) — combine two integers `a`/`b` with
+    and/or/xor/nand/nor/xnor/not/shl/shr/sar/rol/ror at a fixed `width`
+    (8/16/32/64). Every result shows unsigned,
     signed (two's complement), hex, octal and binary. shr is logical
     (zero-fill); sar is arithmetic (sign-propagating) — 0x80 shr 1 = 0x40
-    (+64) but 0x80 sar 1 = 0xC0 (-64). A left shift that drops bits says
+    (+64) but 0x80 sar 1 = 0xC0 (-64); rol/ror rotate bits around the width
+    instead of shifting them out. A left shift that drops bits says
     OVERFLOW and shows the unbounded answer. Used by this mode: `a`, `op`
-    (required), `b` (required unless op="not"), `width` (optional, default
-    64).
+    (required), `b` (required unless op="not"), `width` (optional).
 
     mode="widths" (was int_widths) — which widths (i8..i64/u8..u64) hold
     `n`, and the wrapped value where they do not; flags anything past 2^53
@@ -2745,7 +2734,7 @@ def bits(mode: Annotated[str, Field(description="Which fact/operation to compute
 
     mode="repr" (was base_repr) — hex/oct/bin of `n`; with `width`, two's
     complement and signed-overflow detection. Used by this mode: `n`
-    (required), `width` (optional; None skips width analysis entirely).
+    (required), `width` (optional).
     """
     err = _mode_dispatch_error(
         "bits", "mode", mode, _BITS_MODE_PARAMS,
@@ -2786,9 +2775,12 @@ def float_repr(x: Annotated[float, Field(description="Value to inspect as binary
 @mcp.tool(group="verification")
 def algebraic_equiv(a: Annotated[str, Field(description="First symbolic expression to compare for algebraic identity")],
                     b: Annotated[str, Field(description="Second symbolic expression to compare for algebraic identity")]) -> dict[str, Any]:
-    """Are two expressions algebraically identical? Refs: 'is (a*b)/c the same
-    as a*(b/c)?' answered exactly. Caveat: symbolic identity says nothing
-    about float rounding, integer truncation or modular overflow."""
+    """Are two expressions algebraically identical? 'is (a*b)/c the same as
+    a*(b/c)?' answered exactly. Use symbolic(op="simplify"), not this, to
+    see one expression's own simplified/factored/expanded forms rather than
+    compare two; use verify_translation to compare running PROGRAMS, not
+    expressions. Caveat: symbolic identity says nothing about float
+    rounding, integer truncation or modular overflow."""
     return exact.algebraic_equiv(a, b)
 
 
@@ -2825,14 +2817,11 @@ def symbolic(op: Annotated[str, Field(description="Which symbolic operation to r
     op="solve_linear". For general constraint satisfiability (inequalities,
     boolean constraints, multiple solvers), use z3_check. Returns
     `solutions` as a list of strings alongside the parsed `equation` and
-    `variable`. Used by this op: `expr` (required), `var` (optional,
-    default "x").
+    `variable`. Used by this op: `expr` (required), `var` (optional).
 
     op="solve_linear" (was solve_linear) — a system of equations sharing
-    variables. `system` is ';'-separated equations, `variables`
-    comma-separated. Example: system='x + y = 10; x - y = 2',
-    variables='x, y'. Used by this op: `system`, `variables` (both
-    required).
+    variables. Example: system='x + y = 10; x - y = 2', variables='x, y'.
+    Used by this op: `system`, `variables` (both required).
 
     op="simplify" (was simplify_expression) — simplify, factor, and expand
     an expression — algebraic forms, not solving (use op="solve") and not a
@@ -2841,10 +2830,9 @@ def symbolic(op: Annotated[str, Field(description="Which symbolic operation to r
     `expr` (required).
 
     op="limit" (was limit_expression) — asymptotic behaviour: limit of
-    `expr` as `var` -> `point` (default "oo"). 'symbolic("limit",
-    "n*log(n)/n**2", "n")' returns 0 — settles complexity arguments faster
-    than arguing. Used by this op: `expr` (required), `var` (optional,
-    default "x"), `point` (optional, default "oo").
+    `expr` as `var` -> `point`. 'symbolic("limit", "n*log(n)/n**2", "n")'
+    returns 0 — settles complexity arguments faster than arguing. Used by
+    this op: `expr` (required), `var` (optional), `point` (optional).
     """
     err = _mode_dispatch_error(
         "symbolic", "op", op, _SYMBOLIC_MODE_PARAMS,
@@ -2915,11 +2903,10 @@ def compare_edge_cases(snippets: Annotated[dict[str, str], Field(description="La
                        inputs: Annotated[list[str] | None, Field(description="Inputs to run every snippet on; omit for the default set covering empty/zero/negative/float cases")] = None) -> dict[str, Any]:
     """Run the same logic in N languages on edge-case inputs and flag divergence.
 
-    `snippets` maps language -> code (provide a correct snippet per language;
-    write one per language). Default inputs cover empty,
-    zero, negative, and float-precision cases: ['', '0', '1', '-1', '10',
-    '100', '0.1\\n0.2']. Returns a per-input matrix plus a divergences list
-    where languages disagree on identical input.
+    Default inputs cover empty, zero, negative, and float-precision cases:
+    ['', '0', '1', '-1', '10', '100', '0.1\\n0.2']. Returns a per-input
+    matrix plus a divergences list where languages disagree on identical
+    input.
     """
     return translation.compare_edge_cases(snippets, inputs=inputs)
 
@@ -2932,27 +2919,22 @@ def verify_optimization(original: Annotated[str, Field(description="Baseline pro
                         sizes: Annotated[list[int] | None, Field(description="Input sizes to time both programs at (2-3+ sizes needed for significance); omit for defaults")] = None,
                         min_speedup: Annotated[float, Field(description="Minimum median speedup ratio required to accept the optimisation; default 1.15 (15% faster)")] = optimization.DEFAULT_MIN_SPEEDUP,
                         ctx: Context = None) -> dict[str, Any]:
-    """PROVE an optimisation: same outputs, and measurably AND SIGNIFICANTLY faster.
+    """PROVE an optimisation: same outputs, measurably AND SIGNIFICANTLY faster.
 
-    You write the optimised version. This runs both against the same inputs to
-    confirm they still agree, then TIMES both at increasing sizes (5 runs each)
-    and compares. Accepted only if the median ratio clears `min_speedup` AND a
-    one-sided Mann-Whitney U test rejects "not faster" at every measured size
-    (two or three) or a Bonferroni-corrected majority (more); a single size
-    can never be accepted — a ratio alone is not evidence the gap is real
-    rather than noise; see the result's `inference` field for the per-size U
-    statistic, p-value, and effect size behind the verdict.
+    Two gates, in order. Correctness: runs `candidate` against `original` on
+    shared inputs — a faster-but-wrong candidate fails here and is never
+    timed. Speed: times both at increasing sizes; accepts only when the
+    median ratio clears `min_speedup` AND a one-sided Mann-Whitney U test
+    rejects "not faster" at every counted size (2-3), or a
+    Bonferroni-corrected majority above that — one size never accepts alone.
+    See `inference` for the per-size U statistic, p-value, effect size.
 
-    A rejection tells you which gate failed and by how much — "correct, 1.3x
-    median, but only 1/4 sizes significant" is the answer an optimiser that
-    fabricates wins cannot give. A candidate that is faster but wrong fails the
-    first gate, and its speed is never measured, because a faster wrong answer
-    is not an optimisation.
+    A rejection names which gate failed and by how much, e.g. "correct, 1.3x
+    median, but only 1/4 sizes significant."
 
-    An accepted result is graded `cross_checked` (see `grade_basis` for the
-    runtime and the measured speedup). A rejection — wrong, not faster enough,
-    or not significantly faster — is graded `ungraded`: correctness alone does
-    not earn a grade for the optimisation claim this tool exists to answer.
+    Accepted grades `cross_checked`; any rejection — wrong, not faster
+    enough, not significant — grades `ungraded`: correctness alone earns no
+    grade for the speed claim this tool answers.
     """
     # Progress not documented in the docstring above — same reasoning as
     # benchmark's/compare_execution's own comments: the docstring feeds
