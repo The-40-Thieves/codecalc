@@ -1,310 +1,15 @@
 {
-  "core": {
-    "n": 116,
-    "skipped": 118,
-    "top1_hits": 79,
-    "top3_hits": 100,
-    "top1": 0.681,
-    "top3": 0.8621,
-    "per_tool": {
-      "bits": {
-        "n": 24,
-        "top1": 0.8333,
-        "top3": 1.0
-      },
-      "calc_exact": {
-        "n": 3,
-        "top1": 0.6667,
-        "top3": 1.0
-      },
-      "calc_stats": {
-        "n": 5,
-        "top1": 1.0,
-        "top3": 1.0
-      },
-      "collision_probability": {
-        "n": 4,
-        "top1": 1.0,
-        "top3": 1.0
-      },
-      "compare_threshold": {
-        "n": 4,
-        "top1": 0.5,
-        "top3": 0.75
-      },
-      "convert_units": {
-        "n": 4,
-        "top1": 0.5,
-        "top3": 0.5
-      },
-      "data_sizes": {
-        "n": 4,
-        "top1": 1.0,
-        "top3": 1.0
-      },
-      "epoch_time": {
-        "n": 4,
-        "top1": 0.75,
-        "top3": 1.0
-      },
-      "evaluate_expression": {
-        "n": 6,
-        "top1": 0.6667,
-        "top3": 0.8333
-      },
-      "float_repr": {
-        "n": 4,
-        "top1": 0.5,
-        "top3": 1.0
-      },
-      "human_duration": {
-        "n": 4,
-        "top1": 1.0,
-        "top3": 1.0
-      },
-      "list_units": {
-        "n": 4,
-        "top1": 1.0,
-        "top3": 1.0
-      },
-      "matrix": {
-        "n": 4,
-        "top1": 0.5,
-        "top3": 0.5
-      },
-      "percentage": {
-        "n": 4,
-        "top1": 0.75,
-        "top3": 0.75
-      },
-      "percentiles": {
-        "n": 4,
-        "top1": 0.25,
-        "top3": 0.5
-      },
-      "physical_constants": {
-        "n": 4,
-        "top1": 0.75,
-        "top3": 0.75
-      },
-      "radix_convert": {
-        "n": 4,
-        "top1": 1.0,
-        "top3": 1.0
-      },
-      "symbolic": {
-        "n": 22,
-        "top1": 0.3636,
-        "top3": 0.7727
-      },
-      "truth_table": {
-        "n": 4,
-        "top1": 0.5,
-        "top3": 0.75
-      }
-    }
-  },
-  "dev": {
-    "n": 184,
-    "skipped": 50,
-    "top1_hits": 128,
-    "top3_hits": 153,
-    "top1": 0.6957,
-    "top3": 0.8315,
-    "per_tool": {
-      "algebraic_equiv": {
-        "n": 4,
-        "top1": 1.0,
-        "top3": 1.0
-      },
-      "analyze_complexity": {
-        "n": 5,
-        "top1": 0.6,
-        "top3": 0.6
-      },
-      "benchmark": {
-        "n": 4,
-        "top1": 0.75,
-        "top3": 0.75
-      },
-      "bits": {
-        "n": 24,
-        "top1": 0.875,
-        "top3": 1.0
-      },
-      "branch_reachability": {
-        "n": 6,
-        "top1": 1.0,
-        "top3": 1.0
-      },
-      "calc_exact": {
-        "n": 3,
-        "top1": 0.6667,
-        "top3": 0.6667
-      },
-      "calc_stats": {
-        "n": 5,
-        "top1": 0.6,
-        "top3": 1.0
-      },
-      "collision_probability": {
-        "n": 4,
-        "top1": 0.75,
-        "top3": 1.0
-      },
-      "compare_edge_cases": {
-        "n": 4,
-        "top1": 1.0,
-        "top3": 1.0
-      },
-      "compare_execution": {
-        "n": 3,
-        "top1": 1.0,
-        "top3": 1.0
-      },
-      "compare_threshold": {
-        "n": 4,
-        "top1": 0.5,
-        "top3": 0.5
-      },
-      "convert_units": {
-        "n": 4,
-        "top1": 0.5,
-        "top3": 0.5
-      },
-      "data_sizes": {
-        "n": 4,
-        "top1": 1.0,
-        "top3": 1.0
-      },
-      "epoch_time": {
-        "n": 4,
-        "top1": 0.75,
-        "top3": 0.75
-      },
-      "evaluate_expression": {
-        "n": 6,
-        "top1": 0.8333,
-        "top3": 0.8333
-      },
-      "execute_code": {
-        "n": 5,
-        "top1": 0.0,
-        "top3": 0.0
-      },
-      "execute_code_stream": {
-        "n": 4,
-        "top1": 0.5,
-        "top3": 0.75
-      },
-      "extract_function": {
-        "n": 3,
-        "top1": 1.0,
-        "top3": 1.0
-      },
-      "float_repr": {
-        "n": 4,
-        "top1": 0.25,
-        "top3": 0.75
-      },
-      "human_duration": {
-        "n": 4,
-        "top1": 1.0,
-        "top3": 1.0
-      },
-      "list_execution_providers": {
-        "n": 3,
-        "top1": 1.0,
-        "top3": 1.0
-      },
-      "list_languages": {
-        "n": 4,
-        "top1": 1.0,
-        "top3": 1.0
-      },
-      "list_units": {
-        "n": 4,
-        "top1": 1.0,
-        "top3": 1.0
-      },
-      "matrix": {
-        "n": 4,
-        "top1": 0.5,
-        "top3": 0.75
-      },
-      "percentage": {
-        "n": 4,
-        "top1": 0.5,
-        "top3": 0.75
-      },
-      "percentiles": {
-        "n": 4,
-        "top1": 0.25,
-        "top3": 0.5
-      },
-      "physical_constants": {
-        "n": 4,
-        "top1": 0.75,
-        "top3": 0.75
-      },
-      "radix_convert": {
-        "n": 4,
-        "top1": 1.0,
-        "top3": 1.0
-      },
-      "runtimes_status": {
-        "n": 3,
-        "top1": 0.6667,
-        "top3": 1.0
-      },
-      "symbolic": {
-        "n": 22,
-        "top1": 0.2273,
-        "top3": 0.6364
-      },
-      "trace_execution": {
-        "n": 7,
-        "top1": 1.0,
-        "top3": 1.0
-      },
-      "truth_table": {
-        "n": 4,
-        "top1": 0.25,
-        "top3": 0.75
-      },
-      "update_runtimes": {
-        "n": 1,
-        "top1": 1.0,
-        "top3": 1.0
-      },
-      "verify_optimization": {
-        "n": 4,
-        "top1": 1.0,
-        "top3": 1.0
-      },
-      "verify_translation": {
-        "n": 4,
-        "top1": 1.0,
-        "top3": 1.0
-      },
-      "z3_check": {
-        "n": 4,
-        "top1": 0.75,
-        "top3": 1.0
-      }
-    }
-  },
   "full": {
     "n": 234,
     "skipped": 0,
-    "top1_hits": 151,
-    "top3_hits": 186,
-    "top1": 0.6453,
-    "top3": 0.7949,
+    "top1_hits": 150,
+    "top3_hits": 183,
+    "top1": 0.641,
+    "top3": 0.7821,
     "per_tool": {
       "algebraic_equiv": {
         "n": 4,
-        "top1": 1.0,
+        "top1": 0.75,
         "top3": 1.0
       },
       "analyze_complexity": {
@@ -334,7 +39,7 @@
       },
       "calc_stats": {
         "n": 5,
-        "top1": 0.8,
+        "top1": 0.6,
         "top3": 0.8
       },
       "collision_probability": {
@@ -344,8 +49,8 @@
       },
       "compare_edge_cases": {
         "n": 4,
-        "top1": 1.0,
-        "top3": 1.0
+        "top1": 0.75,
+        "top3": 0.75
       },
       "compare_execution": {
         "n": 3,
@@ -374,7 +79,7 @@
       },
       "evaluate_expression": {
         "n": 6,
-        "top1": 0.6667,
+        "top1": 0.8333,
         "top3": 0.8333
       },
       "execute_code": {
@@ -404,7 +109,7 @@
       },
       "install_package": {
         "n": 4,
-        "top1": 0.75,
+        "top1": 0.5,
         "top3": 1.0
       },
       "list_execution_providers": {
@@ -425,17 +130,17 @@
       "matrix": {
         "n": 4,
         "top1": 0.5,
-        "top3": 0.75
+        "top3": 0.5
       },
       "percentage": {
         "n": 4,
-        "top1": 0.5,
+        "top1": 0.75,
         "top3": 0.75
       },
       "percentiles": {
         "n": 4,
-        "top1": 0.25,
-        "top3": 0.5
+        "top1": 0.75,
+        "top3": 1.0
       },
       "physical_constants": {
         "n": 4,
@@ -455,12 +160,12 @@
       "run_inspect": {
         "n": 3,
         "top1": 0.0,
-        "top3": 1.0
+        "top3": 0.6667
       },
       "run_submit": {
         "n": 4,
-        "top1": 0.5,
-        "top3": 0.5
+        "top1": 0.75,
+        "top3": 0.75
       },
       "runtimes_status": {
         "n": 3,
@@ -474,7 +179,7 @@
       },
       "session_files": {
         "n": 4,
-        "top1": 0.5,
+        "top1": 0.25,
         "top3": 1.0
       },
       "session_list": {
@@ -484,8 +189,8 @@
       },
       "session_read_file": {
         "n": 4,
-        "top1": 0.5,
-        "top3": 0.5
+        "top1": 0.25,
+        "top3": 0.25
       },
       "session_run": {
         "n": 3,
@@ -495,7 +200,7 @@
       "session_snapshot": {
         "n": 7,
         "top1": 0.5714,
-        "top3": 0.8571
+        "top3": 0.7143
       },
       "session_start": {
         "n": 3,
@@ -515,7 +220,7 @@
       "symbolic": {
         "n": 22,
         "top1": 0.2273,
-        "top3": 0.6364
+        "top3": 0.5909
       },
       "trace_execution": {
         "n": 7,
@@ -524,8 +229,8 @@
       },
       "truth_table": {
         "n": 4,
-        "top1": 0.25,
-        "top3": 0.75
+        "top1": 0.5,
+        "top3": 1.0
       },
       "update_runtimes": {
         "n": 3,
@@ -534,15 +239,310 @@
       },
       "verify_optimization": {
         "n": 4,
+        "top1": 0.75,
+        "top3": 0.75
+      },
+      "verify_translation": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 1.0
+      },
+      "z3_check": {
+        "n": 4,
+        "top1": 1.0,
+        "top3": 1.0
+      }
+    }
+  },
+  "dev": {
+    "n": 184,
+    "skipped": 50,
+    "top1_hits": 130,
+    "top3_hits": 152,
+    "top1": 0.7065,
+    "top3": 0.8261,
+    "per_tool": {
+      "algebraic_equiv": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 1.0
+      },
+      "analyze_complexity": {
+        "n": 5,
+        "top1": 0.6,
+        "top3": 0.6
+      },
+      "benchmark": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 0.75
+      },
+      "bits": {
+        "n": 24,
+        "top1": 0.9167,
+        "top3": 1.0
+      },
+      "branch_reachability": {
+        "n": 6,
         "top1": 1.0,
         "top3": 1.0
       },
-      "verify_translation": {
+      "calc_exact": {
+        "n": 3,
+        "top1": 0.6667,
+        "top3": 1.0
+      },
+      "calc_stats": {
+        "n": 5,
+        "top1": 0.6,
+        "top3": 0.8
+      },
+      "collision_probability": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 1.0
+      },
+      "compare_edge_cases": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 0.75
+      },
+      "compare_execution": {
+        "n": 3,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "compare_threshold": {
+        "n": 4,
+        "top1": 0.5,
+        "top3": 0.5
+      },
+      "convert_units": {
+        "n": 4,
+        "top1": 0.5,
+        "top3": 0.5
+      },
+      "data_sizes": {
         "n": 4,
         "top1": 1.0,
         "top3": 1.0
       },
+      "epoch_time": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 0.75
+      },
+      "evaluate_expression": {
+        "n": 6,
+        "top1": 0.8333,
+        "top3": 0.8333
+      },
+      "execute_code": {
+        "n": 5,
+        "top1": 0.0,
+        "top3": 0.2
+      },
+      "execute_code_stream": {
+        "n": 4,
+        "top1": 0.5,
+        "top3": 0.75
+      },
+      "extract_function": {
+        "n": 3,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "float_repr": {
+        "n": 4,
+        "top1": 0.25,
+        "top3": 0.75
+      },
+      "human_duration": {
+        "n": 4,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "list_execution_providers": {
+        "n": 3,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "list_languages": {
+        "n": 4,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "list_units": {
+        "n": 4,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "matrix": {
+        "n": 4,
+        "top1": 0.5,
+        "top3": 0.5
+      },
+      "percentage": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 0.75
+      },
+      "percentiles": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 1.0
+      },
+      "physical_constants": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 0.75
+      },
+      "radix_convert": {
+        "n": 4,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "runtimes_status": {
+        "n": 3,
+        "top1": 0.6667,
+        "top3": 1.0
+      },
+      "symbolic": {
+        "n": 22,
+        "top1": 0.2273,
+        "top3": 0.5455
+      },
+      "trace_execution": {
+        "n": 7,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "truth_table": {
+        "n": 4,
+        "top1": 0.5,
+        "top3": 1.0
+      },
+      "update_runtimes": {
+        "n": 1,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "verify_optimization": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 0.75
+      },
+      "verify_translation": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 1.0
+      },
       "z3_check": {
+        "n": 4,
+        "top1": 1.0,
+        "top3": 1.0
+      }
+    }
+  },
+  "core": {
+    "n": 116,
+    "skipped": 118,
+    "top1_hits": 78,
+    "top3_hits": 99,
+    "top1": 0.6724,
+    "top3": 0.8534,
+    "per_tool": {
+      "bits": {
+        "n": 24,
+        "top1": 0.875,
+        "top3": 1.0
+      },
+      "calc_exact": {
+        "n": 3,
+        "top1": 0.6667,
+        "top3": 1.0
+      },
+      "calc_stats": {
+        "n": 5,
+        "top1": 0.6,
+        "top3": 1.0
+      },
+      "collision_probability": {
+        "n": 4,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "compare_threshold": {
+        "n": 4,
+        "top1": 0.5,
+        "top3": 0.5
+      },
+      "convert_units": {
+        "n": 4,
+        "top1": 0.5,
+        "top3": 0.5
+      },
+      "data_sizes": {
+        "n": 4,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "epoch_time": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 1.0
+      },
+      "evaluate_expression": {
+        "n": 6,
+        "top1": 0.6667,
+        "top3": 0.8333
+      },
+      "float_repr": {
+        "n": 4,
+        "top1": 0.5,
+        "top3": 1.0
+      },
+      "human_duration": {
+        "n": 4,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "list_units": {
+        "n": 4,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "matrix": {
+        "n": 4,
+        "top1": 0.5,
+        "top3": 0.5
+      },
+      "percentage": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 0.75
+      },
+      "percentiles": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 1.0
+      },
+      "physical_constants": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 0.75
+      },
+      "radix_convert": {
+        "n": 4,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "symbolic": {
+        "n": 22,
+        "top1": 0.2273,
+        "top3": 0.6364
+      },
+      "truth_table": {
         "n": 4,
         "top1": 0.75,
         "top3": 1.0
@@ -550,7 +550,7 @@
     }
   },
   "codecalc_version": "0.11.0",
-  "generated_at": "2026-09-09T08:19:25+00:00",
+  "generated_at": "2026-09-09T10:27:39.256829+00:00",
   "prompt_count": 234,
   "prompt_set_sha256": "fbae4abde1fc3893ad3cbc571c4c4e65d7c5da073aa4fc0decb7a3424343a353"
 }
