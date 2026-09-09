@@ -101,9 +101,9 @@ check("'stack overflow' message -> resource_exhausted (3.14 wording backstop)",
 # in the wrong direction.
 for _label, _call, _want in [
     ("unknown language", lambda: server.execute_code("klingon", "x"), errors.VALIDATION),
-    ("bad expression", lambda: server.simplify_expression("x +++ ***"), errors.VALIDATION),
+    ("bad expression", lambda: server.symbolic(op="simplify", expr="x +++ ***"), errors.VALIDATION),
     ("truth_table parse error", lambda: server.truth_table("A &&& B"), errors.VALIDATION),
-    ("oversized expression", lambda: server.simplify_expression("x*" * 60000 + "x"),
+    ("oversized expression", lambda: server.symbolic(op="simplify", expr="x*" * 60000 + "x"),
      errors.RESOURCE_EXHAUSTED),
 ]:
     _r = _call()
@@ -128,8 +128,8 @@ for _label, _call in [
     ("collision_probability: zero bits", lambda: server.collision_probability(10, 0)),
     ("human_duration: negative seconds", lambda: server.human_duration(-5)),
     ("epoch_time: negative epoch", lambda: server.epoch_time("-5")),
-    ("bitop: negative shift count", lambda: server.bitop(1, "shl", -1)),
-    ("bitop: unknown op", lambda: server.bitop(1, "zzz", 2)),
+    ("bitop: negative shift count", lambda: server.bits(mode="op", a=1, op="shl", b=-1)),
+    ("bitop: unknown op", lambda: server.bits(mode="op", a=1, op="zzz", b=2)),
     ("compare_edge_cases: no snippets", lambda: server.compare_edge_cases({})),
 ]:
     _r = _call()
@@ -148,9 +148,9 @@ _huge = "x*" * 60000 + "x"
 for _label, _call in [
     ("algebraic_equiv oversized a", lambda: server.algebraic_equiv(_huge, "x")),
     ("algebraic_equiv oversized b", lambda: server.algebraic_equiv("x", _huge)),
-    ("solve_expression oversized", lambda: server.solve_expression(_huge)),
-    ("limit_expression oversized expr", lambda: server.limit_expression(_huge)),
-    ("limit_expression oversized point", lambda: server.limit_expression("x", "x", _huge)),
+    ("solve_expression oversized", lambda: server.symbolic(op="solve", expr=_huge)),
+    ("limit_expression oversized expr", lambda: server.symbolic(op="limit", expr=_huge)),
+    ("limit_expression oversized point", lambda: server.symbolic(op="limit", expr="x", var="x", point=_huge)),
 ]:
     _r = _call()
     # Assert the CAP's own message, not merely the code: "too long" proves the
@@ -180,12 +180,12 @@ for _label, _call in [
         "__import__('os').system('x')")),
     ("evaluate_expression: attribute access", lambda: server.evaluate_expression(
         "().__class__.__bases__")),
-    ("simplify_expression: string literal", lambda: server.simplify_expression(
+    ("simplify_expression: string literal", lambda: server.symbolic(op="simplify", expr=
         "open('/tmp/x','w')")),
-    ("solve_expression: attribute access", lambda: server.solve_expression(
+    ("solve_expression: attribute access", lambda: server.symbolic(op="solve", expr=
         "os.system('x')")),
-    ("solve_linear: attribute access", lambda: server.solve_linear(
-        "os.system(1) = 0", "x")),
+    ("solve_linear: attribute access", lambda: server.symbolic(op="solve_linear", system=
+        "os.system(1) = 0", variables="x")),
 ]:
     _r = _call()
     check(f"{_label} -> not internal", _r.get("code") != errors.INTERNAL,

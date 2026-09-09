@@ -66,8 +66,8 @@ check("every registered tool has a non-empty title", not missing_title, f"-> {mi
 
 # ── the invariant a reviewer checks by hand: calculator is pure ────────────
 calculator_tools = [name for name, g in server.TOOL_GROUPS.items() if g == "calculator"]
-check("the calculator group has 27 tools (matches the README table)",
-      len(calculator_tools) == 27, f"-> {len(calculator_tools)}")
+check("the calculator group has 19 tools (matches the README table)",
+      len(calculator_tools) == 19, f"-> {len(calculator_tools)}")
 non_read_only_calc = [
     name for name in calculator_tools
     if not (tools[name].annotations and tools[name].annotations.read_only_hint is True)

@@ -40,7 +40,7 @@ against image size; see the Dockerfile's own comments for what was tried and
 dropped (`go`, notably — ~450MB on its own) and how to add more.
 
 **Symbolic extras:** ships base `codecalc`, not `codecalc[full]` —
-`evaluate_expression`, `z3_check`, `solve_linear`, and `analyze_complexity`'s
+`evaluate_expression`, `z3_check`, `symbolic`, and `analyze_complexity`'s
 grammar-based parsing report their extra as not installed. See the
 Dockerfile for why (short version: the current top-of-range `z3-solver`
 version has no prebuilt wheel for `linux/arm64`, and this image targets both

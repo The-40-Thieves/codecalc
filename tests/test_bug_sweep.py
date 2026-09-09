@@ -283,10 +283,11 @@ r = exact.eval_exact("1+" * 1001 + "1")
 check("eval_exact rejects an over-length expression",
       r.get("ok") is False and "too long" in (r.get("error") or ""), f"-> {r.get('error')}")
 # calc_exact and its sympy-backed siblings must carry the same 20s deadline
-# as their logic.py counterparts (evaluate_expression, solve_linear,
+# as their logic.py counterparts (evaluate_expression, symbolic,
 # analyze_complexity) instead of silently inheriting the 900s default.
-for name in ("calc_exact", "algebraic_equiv", "solve_expression",
-             "limit_expression", "simplify_expression"):
+# solve_expression/limit_expression/simplify_expression were retired in
+# 0.12.0 (CHANGELOG.md); `symbolic` is their replacement's own entry.
+for name in ("calc_exact", "algebraic_equiv", "symbolic"):
     check(f"{name} has a bounded TOOL_TIMEOUTS entry",
           mcp_middleware.TOOL_TIMEOUTS.get(name) == 20,
           f"-> {mcp_middleware.TOOL_TIMEOUTS.get(name)}")

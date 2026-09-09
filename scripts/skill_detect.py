@@ -258,7 +258,7 @@ RULES: list[tuple[str, Callable[[str], list[str]], list[str], str]] = [
     ("big_o_claim", _rule_big_o_claim, ["analyze_complexity", "benchmark"], "high"),
     ("speedup_claim", _rule_speedup_claim, ["verify_optimization"], "medium"),
     ("non_decimal_base_value", _rule_non_decimal_base_value,
-     ["radix_convert", "base_repr"], "medium"),
+     ["radix_convert", "bits"], "medium"),
 ]
 
 

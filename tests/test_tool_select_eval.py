@@ -142,24 +142,33 @@ check("the checked-in prompt set has ZERO name-token violations "
       "(including after singular/plural normalization)",
       len(real_violations) == 0, f"-> {real_violations[:5]}")
 
-# ── label-quality fixes: 7 prompts gained a verified acceptable alternate ───
+# ── label-quality fixes: prompts that gained a verified acceptable alternate ─
 # Each was checked against the REAL implementation (not taken on a review's
 # word) — see the commit that added these for the exact verification run.
 # Recorded here as content assertions, not just "the file changed", so a
 # future edit that silently drops one of these is caught.
+#
+# This was 7 entries. The `simplify_expression` fix for the "symbolic math
+# formula" prompt is gone, not renamed: that tool was retired in 0.12.0
+# (CHANGELOG.md), and its successor `symbolic` cannot replace it here —
+# the prompt's own text contains the literal word "symbolic"
+# (validate_prompts() would reject it as the tool naming itself, the same
+# reason 12 of the original 14 solve_expression/solve_linear/
+# simplify_expression/limit_expression prompts never got `symbolic` added
+# as an alternate when PR #312 first merged the cluster). The prompt keeps
+# its one remaining verified answer, `evaluate_expression`, with no
+# alternate.
 LABEL_FIXES = {
-    # evaluate_expression's OWN docstring uses this exact input as its
-    # example; simplify_expression("sqrt(144) + 2**10") independently
-    # verified to return the same numeric answer under all three of its
-    # forms (original/simplified/factored/expanded all "1036").
-    "Please simplify this symbolic math formula for me: sqrt(144) + 2**10": "simplify_expression",
     # logic.evaluate_expression('2**64 - 1') verified to return the exact
     # arbitrary-precision integer '18446744073709551615'.
     "I need an arbitrary-precision rational computation of 2 to the 64th power minus 1": "evaluate_expression",
     "give me the exact rational result of this expression before I judge whether it clears a limit": "evaluate_expression",
-    # logic.solve_linear('2*x + 1 = 7', ['x']) verified to return {x: 3} —
-    # a system of ONE equation/ONE unknown is a valid degenerate input.
-    "For 2*x + 1 = 7, what's x?": "solve_linear",
+    # logic.solve_linear('2*x + 1 = 7', ['x']) verified to return {x: 3} — a
+    # system of ONE equation/ONE unknown is a valid degenerate input.
+    # solve_linear itself was retired in 0.12.0 (CHANGELOG.md); its
+    # successor symbolic(op="solve_linear") reaches the same logic.py call,
+    # so the verified alternate is now `symbolic`.
+    "For 2*x + 1 = 7, what's x?": "symbolic",
     # logic.evaluate_expression's own result shape carries BOTH 'simplified'
     # and 'expanded' keys (verified directly), matching this prompt's dual
     # ask ("simplest form" + "multiplied out") almost exactly.

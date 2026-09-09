@@ -33,6 +33,25 @@ behind it.
 
 ## [Unreleased]
 
+### Removed
+
+- **`bit_analysis`, `bitop`, `int_widths`, `base_repr`, `solve_expression`,
+  `solve_linear`, `simplify_expression`, `limit_expression`** — the eight
+  tools 0.11.0 deprecated as one-release aliases for `bits(mode=...)`/
+  `symbolic(op=...)` are now removed, completing that deprecation:
+  - `bit_analysis` -> `bits(mode="analysis")`
+  - `bitop` -> `bits(mode="op")`
+  - `int_widths` -> `bits(mode="widths")`
+  - `base_repr` -> `bits(mode="repr")`
+  - `solve_expression` -> `symbolic(op="solve")`
+  - `solve_linear` -> `symbolic(op="solve_linear")`
+  - `simplify_expression` -> `symbolic(op="simplify")`
+  - `limit_expression` -> `symbolic(op="limit")`
+
+  Calling one of the eight old names now gets the MCP SDK's own unknown-tool
+  result, not a result shaped like the tool used to return. The served
+  surface moves from 57 to **49 tools**.
+
 ## [0.11.0] — 2026-09-09
 
 ### Added

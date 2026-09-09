@@ -14,7 +14,7 @@ uvx 'codecalc[full]'
 pip install 'codecalc[full]'
 ```
 
-Use `[full]`: the symbolic tools (`evaluate_expression`, `solve_linear`,
+Use `[full]`: the symbolic tools (`evaluate_expression`, `symbolic`,
 `z3_check`, `analyze_complexity`, …) live in extras, and `[full]` guarantees
 every tool this doc mentions actually runs. Want a smaller footprint? See
 the editions table in [README.md](README.md#install).

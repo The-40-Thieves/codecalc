@@ -70,7 +70,6 @@ TOOL_TIMEOUTS: dict[str, float] = {
     "evaluate_expression": 20,
     "truth_table": 20,
     "z3_check": 30,
-    "solve_linear": 20,
     "analyze_complexity": 20,
     # branch_reachability's own `timeout` argument (codecalc/
     # branch_reachability.py) caps the whole in-process z3 budget at 120s —
@@ -81,24 +80,19 @@ TOOL_TIMEOUTS: dict[str, float] = {
     "branch_reachability": 150,
     # calc_exact and its sympy-backed siblings in exact.py were absent here,
     # so they inherited DEFAULT_TIMEOUT_SECONDS (900s) instead of the 20s
-    # deadline their logic.py counterparts (evaluate_expression, solve_linear,
+    # deadline their logic.py counterparts (evaluate_expression, symbolic,
     # analyze_complexity) get for the same class of in-process CPU work.
     "calc_exact": 20,
     "algebraic_equiv": 20,
-    "solve_expression": 20,
-    "limit_expression": 20,
-    "simplify_expression": 20,
-    # `symbolic` is the 2026-09-08 merge of solve_expression/solve_linear/
-    # simplify_expression/limit_expression behind one op=-selected tool
-    # (server.py). Each alias above still carries its own entry for when a
-    # client calls it BY THAT NAME — this entry is for when a client calls
-    # the merged tool directly. Omitting it would be exactly the silent
-    # 900s-fallback failure this table's own module docstring and
-    # scripts/check_tool_dispatch.py warn about: `symbolic` reaches the same
-    # sympy work as its four aliases via a plain Python call (never
-    # `.call_tool`, so check_tool_dispatch.py stays green), but the INBOUND
-    # name the middleware sees for that call is "symbolic", not one of the
-    # four names already in this table.
+    # `symbolic` is the 2026-09-08 merge of the four former standalone
+    # tools solve_expression/solve_linear/simplify_expression/
+    # limit_expression (retired in 0.12.0, CHANGELOG.md) behind one
+    # op=-selected tool (server.py). It reaches the same sympy work those
+    # four used to via a plain Python call (never `.call_tool`, so
+    # scripts/check_tool_dispatch.py stays green), but the INBOUND name the
+    # middleware sees for that call is "symbolic" — omitting this entry
+    # would be exactly the silent 900s-fallback failure this table's own
+    # module docstring and check_tool_dispatch.py warn about.
     "symbolic": 20,
     "matrix": 20,
     # Verification gates: they run BOTH programs, and verify_optimization

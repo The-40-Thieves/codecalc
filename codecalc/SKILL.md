@@ -43,10 +43,6 @@ the number.
 boundary, and `bits(mode="widths")` will not show it to you — that mode
 reports machine integer widths (i8…u64), which is a different question.
 
-`bit_analysis`/`bitop`/`int_widths`/`base_repr` and `solve_expression`/
-`solve_linear`/`simplify_expression`/`limit_expression` still work — they are
-deprecated one-release aliases for `bits`/`symbolic` above, removed in 0.12.0.
-
 ## Do not call these — no justification needed
 
 Calling a tool for these is noise, and a rule that fires constantly is a rule
