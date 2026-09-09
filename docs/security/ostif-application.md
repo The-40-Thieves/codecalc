@@ -1,6 +1,6 @@
 # Independent security audit — request for engagement (draft)
 
-**Status: draft, submission-ready.** This is a prepared application for a
+**Status: submitted 2026-09-09 via OSTIF's intake form ("Reach out to OSTIF!"); awaiting the coordination call.** OpenSSF Scorecard at submission: 4.7/10 (v5 CLI; zero-scoring checks and their follow-ups are tracked in the project tracker). This is a prepared application for a
 coordinated, independently-funded security audit — written for
 [OSTIF](https://ostif.org) (which pairs open-source projects with a security
 firm and helps fund the work), and equally usable as a scope document for a

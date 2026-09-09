@@ -127,9 +127,9 @@ PR copies into `servers/codecalc/` in a `docker/mcp-registry` fork:
 - **`tools.json`** — the live `tools/list` response of the exact image
   `docker build -f docker/mcp-server.Dockerfile .` produces, captured over
   the real MCP stdio handshake (`initialize` → `notifications/initialized`
-  → `tools/list`), 52 entries. `CODECALC_TOOLS` is unset in the Dockerfile,
+  → `tools/list`), 57 entries, each argument carrying `optional: true` when the tool's input schema does not require it. `CODECALC_TOOLS` is unset in the Dockerfile,
   which registers every tool group (the `full` preset) — so this is the
-  actual shipped surface, not `core`. A few of those 52 (`evaluate_expression`,
+  actual shipped surface, not `core`. A few of those 57 (`evaluate_expression`,
   `z3_check`, `solve_linear`, and `analyze_complexity`'s grammar-based
   parsing) report their extra as not installed rather than erroring when
   called, because this image ships base `codecalc`, not `codecalc[full]`

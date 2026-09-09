@@ -100,8 +100,9 @@ server stays exactly as it was) and backs up the original to
 | Smithery | hosted listing and one-click client config | [smithery.ai/servers/@The-40-Thieves/codecalc](https://smithery.ai/servers/@The-40-Thieves/codecalc) |
 | Glama | hosted listing and the score badge above | [glama.ai/mcp/servers/The-40-Thieves/codecalc](https://glama.ai/mcp/servers/The-40-Thieves/codecalc) |
 | MCPB (Claude Desktop) | the drag-and-drop bundle, attached to every GitHub Release | see GitHub Releases, above |
+| Docker MCP Catalog | the `mcp/codecalc` image Docker builds from this repo's `docker/mcp-server.Dockerfile`, for Docker Desktop's MCP Toolkit (`docker mcp server enable codecalc`) | submitted as [docker/mcp-registry#5025](https://github.com/docker/mcp-registry/pull/5025); listed at [hub.docker.com/mcp/server/codecalc](https://hub.docker.com/mcp/server/codecalc) once merged |
 
-**Not yet listed:** PulseMCP and mcp.so do not carry a codecalc entry yet.
+**Not yet listed:** PulseMCP and mcp.so do not carry a codecalc entry yet; the Docker MCP Catalog entry is pending review.
 PulseMCP's own submission page (checked 2026-09-08) says it is not accepting
 new submissions and that publishing to the official MCP registry — already
 done, row above — is what it indexes from once submissions reopen, so there
