@@ -28,7 +28,7 @@ codecalc **runs untrusted code in 31 languages**. That is its function, not a si
 
 A second adversarial pass (`docs/security/audit-2026-08-21.md`) found one over-reported guarantee — `no_net` reporting itself enforced when a `ctypes`/raw-syscall call could still reach the network, since fixed — and is likewise an in-family review plus fuzzing, not a third party (a cross-vendor attempt was refused by the other vendor's own security content filter). **No independent third-party review has been done yet.** One is prepared (`docs/security/ostif-application.md`), and until a second maintainer exists, security-critical changes carry a mandatory adversarial review under the policy in `MAINTAINERS.md`. That is the honest state: audited by its author, twice, with outside review openly sought rather than claimed.
 
-An application requesting a coordinated, independently-funded third-party review is prepared and submission-ready at `docs/security/ostif-application.md`, and is pending submission.
+An application requesting a coordinated, independently-funded third-party review (`docs/security/ostif-application.md`) was submitted to OSTIF through its intake form on 2026-09-09; the next step is OSTIF's coordination call. An OpenSSF Scorecard run the same day scored the repository 4.7/10; the actionable zero-score checks are tracked and being closed.
 
 ## Threat model
 
