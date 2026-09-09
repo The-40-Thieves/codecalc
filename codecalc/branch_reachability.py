@@ -340,10 +340,24 @@ class _Ctx:
         return time.monotonic() >= self.deadline
 
     def witness(self, model) -> dict[str, Any]:
+        """One concrete input dict off `model` — every parameter, not just
+        the ones that turned out to be free variables in the formula z3
+        actually solved. `model[sym]` (indexing, not the model's own
+        `.eval(..., model_completion=True)` — this package's zero-`eval`
+        invariant is enforced by `scripts/check_no_eval.py`'s AST scan,
+        which cannot tell z3's `Model.eval` from the dynamic-execution
+        builtin of the same name, so this avoids the name entirely) is
+        `None` for a parameter that never appears in the path condition at
+        all (an ignored argument, for instance) — measured to match
+        `model_completion=True`'s own defaults exactly: `0` for Int, `False`
+        for Bool, `""` for String.
+        """
         out: dict[str, Any] = {}
         for name, (sym, dtype) in self.params.items():
-            val = model.eval(sym, model_completion=True)
-            if dtype == "int":
+            val = model[sym]
+            if val is None:
+                out[name] = 0 if dtype == "int" else False if dtype == "bool" else ""
+            elif dtype == "int":
                 out[name] = val.as_long()
             elif dtype == "bool":
                 out[name] = bool(self.z3.is_true(val))
@@ -509,7 +523,7 @@ def _boundary_for(node: ast.expr, parent_cond, full_cond, env: dict[str, tuple[A
         opt = z3.Optimize()
         opt.set("timeout", ctx.call_timeout_ms())
         opt.add(full_cond, objective >= -_OPT_BOUND, objective <= _OPT_BOUND)
-        h_min = opt.minimize(objective)
+        opt.minimize(objective)
         entry["min_input"] = ctx.witness(opt.model()) if opt.check() == z3.sat else None
 
         opt2 = z3.Optimize()
