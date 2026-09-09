@@ -6,7 +6,7 @@
 calculator, a code runner, and a logic checker — so it gets a *correct* answer
 instead of a guessed one.** It runs code in **31 languages**, does exact
 symbolic math, solves SMT/logic problems, and measures complexity, all exposed
-as **53 MCP tools**.
+as **54 MCP tools**.
 
 **Fastest path:** `uvx 'codecalc[full]' setup --write` registers codecalc with your MCP client automatically. New to MCP, or want more detail first? See [QUICKSTART.md](QUICKSTART.md), or the Install section below.
 
@@ -474,7 +474,7 @@ Linux kernel with seccomp support enforces it in-kernel either way), and
 [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild)
 for the static cross-builds (zig is used as the linker; no x86_64 GCC needed).
 
-## MCP tools (53) + MCP resources
+## MCP tools (54) + MCP resources
 
 Every session file is also exposed as an MCP resource:
 `codecalc://session/<session_id>/files/<path>` — images render inline for the
@@ -531,6 +531,7 @@ analysis, binary64 introspection.
 | `session_files` / `session_read_file` / `session_write_file` | Workspace file tools, jailed to the session dir; listings support `page_size`/`cursor`, and reads return images inline (`as_image`) |
 | `session_run` | **Multi-file programs**: execute an entry file that imports other session files (helper.py, data/...) in the workspace |
 | `session_artifacts` | List files created by executed code (results, images, CSVs) |
+| `session_snapshot` | Archive a session's workspace to a snapshot stored OUTSIDE the jailed workspace (`action="save"`), or restore one into a new session or, with `replace=True`, back into the same session (`action="restore"`); `action="list"`/`"delete"` manage them. Files only — never a stateful session's REPL variables. Snapshots die with `session_stop` unless `keep_snapshots=True` |
 | `install_package` | Install packages (uv pip/npm/gem/go/cargo...) into a session or shared cache |
 | `verify_translation` | **Prove a port is equivalent**: you write the translation, the executor runs both versions on the same inputs and reports match / diverged / inconclusive per input. A pass is graded `cross_checked` (see [Grade vocabulary](#grade-vocabulary)) |
 | `verify_optimization` | **Prove an optimisation**: you write the candidate, the executor confirms it still agrees with the original AND times both — accepted only if equivalent and measurably faster. Accepted is graded `cross_checked` |
@@ -765,6 +766,8 @@ All optional. codecalc runs with none of these set.
 | `CODECALC_MAX_ARTIFACT_BYTES` | `16777216` (16 MiB) | Per-write size ceiling for anything a session write path creates — independent of the total quotas above, so one runaway file cannot hide under a generous session/global total. A WRITE-time cap; distinct from `RESOURCE_MAX_BYTES` (4 MiB), which caps what a *read* may serve back. |
 | `CODECALC_MAX_ARTIFACT_COUNT` | `500` | Per-session ceiling on the number of artifact files — catches a session writing one byte at a time into thousands of tiny files, a shape no byte-sized cap alone bounds. Only a write that creates a NEW file is checked; overwriting an existing one always succeeds regardless of the count. |
 | `CODECALC_MIN_HOST_FREE_MB` | `256` | Refuse a session write when the HOST's free disk space drops below this — protects the host even when every quota above is generous, since a shared host can be driven low by something that is not a codecalc session at all. Measured with `shutil.disk_usage`, which works identically on Windows, unlike `statvfs`. |
+| `CODECALC_MAX_SNAPSHOT_BYTES` | `268435456` (256 MiB) | `session_snapshot(action="save")` refuses to archive a workspace whose files sum to more than this — independent of the SESSION disk quotas above, since a snapshot is written OUTSIDE any session's own workspace and quota. |
+| `CODECALC_MAX_SNAPSHOTS_PER_SESSION` | `10` | Per-session ceiling on the number of snapshots kept at once — catches many small snapshots the byte cap alone would not, the same "count cap alongside the byte cap" shape `CODECALC_MAX_ARTIFACT_COUNT` already applies to workspace files. |
 | `CODECALC_CAPABILITY_POLICY` | *(unset)* | Capability broker. Unset, no brokering — a job's capabilities run as requested (today's behaviour); the execution receipt still discloses them under `provider.capabilities` with `brokered: false`. Set, comma-separated directives narrow them: `deny-network` forces `no_net` on a job that did not request network (enforced where the provider can, disclosed as `effective` where it cannot); `allow-network` explicitly grants network to a job that requested it; `strict` rejects a job whose denial the provider cannot enforce. The broker never approves a capability the request did not ask for — an escalation is refused with `permission_denied` / `capability_not_requested`, before any side effect. |
 | `CODECALC_AUDIT_LOG` | `~/.codecalc/audit/audit.log` | Append-only JSON-lines audit stream for broker decisions and security-relevant side effects (denied capability, refused install, cleanup). Each event carries a source-safe timestamp, the run/session id, the decision and reason, and never the executed source or a credential. Set to a path to relocate it; set empty to disable. Best effort — a write failure never fails a run. |
 | `CODECALC_PROCESS_HEADROOM` | `512` | Fork-bomb guard. `RLIMIT_NPROC` is a **uid-wide task budget**, not a per-sandbox one — the kernel compares it against every thread your user owns, machine-wide. So codecalc measures the ambient count per execution and sets the limit to *ambient + headroom*: a bomb can add at most this many tasks, while a runtime wanting a few threads always has room however busy the box is. |
@@ -798,7 +801,7 @@ way back into the default.
 
 ## Tool-definition token cost
 
-codecalc's `tools/list` returns 53 definitions. Measured with `o200k_base` as a
+codecalc's `tools/list` returns 54 definitions. Measured with `o200k_base` as a
 proxy, that is roughly 9,200 tokens of descriptions and input schemas, and every
 client pays it before the first user message.
 
@@ -820,7 +823,7 @@ number this section exists to track.
 
 codecalc does not hide its tools behind a discovery facade, and that is
 deliberate: the tool surface is where per-operation approval prompts, audit
-names and typed schemas live, and collapsing 53 tools into one dispatcher makes
+names and typed schemas live, and collapsing 54 tools into one dispatcher makes
 `install_package` and `percentage` look like the same permission to a client
 that approves by tool name. The cost is real, but the client is the better place
 to solve it, because the client can defer definitions **without** giving up the
@@ -890,7 +893,7 @@ If you are paying too much for codecalc's definitions:
   https://modelcontextprotocol.io/specification/2026-07-28/server/tools,
   retrieved 2026-09-07). A client without one of the mechanisms above pays the
   full cost regardless of what codecalc does.
-- **Any client** can filter which of the 53 tools it exposes to the model.
+- **Any client** can filter which of the 54 tools it exposes to the model.
   Nothing here requires codecalc to change.
 
 A server-side facade remains under consideration for clients with no such
@@ -929,7 +932,7 @@ measured numbers live in `docs/tool-selection-eval.md` next to BM25's own.
 
 For an operator who would rather not configure every client, codecalc also has
 a first-party knob: `CODECALC_TOOLS` registers only a chosen slice of the
-53-tool surface, so a client that never enables tool search still pays for a
+54-tool surface, so a client that never enables tool search still pays for a
 smaller `tools/list`.
 
 On a client with no deferral mechanism of its own, the client's own allow-list
@@ -940,7 +943,7 @@ all narrow what a given session sees without touching the server.
 Every tool also now carries a `ToolAnnotations` hint (`readOnlyHint`,
 `destructiveHint`, `idempotentHint`, `openWorldHint` — see
 `codecalc/server.py`'s `GROUP_ANNOTATIONS`/`TOOL_ANNOTATION_OVERRIDES` tables
-for the value on each of the 53). Codex CLI's `writes` approval mode
+for the value on each of the 54). Codex CLI's `writes` approval mode
 (v0.144.0+) reads `readOnlyHint` directly: a tool marked `readOnlyHint: true`
 skips the approval prompt, everything else still asks. That covers the whole
 `calculator` group (25/25 pure) plus the read-only members of the mixed
@@ -965,7 +968,7 @@ Every tool belongs to exactly one group:
 | `calculator` (25) | `calc_exact`, `compare_threshold`, `percentage`, `calc_stats`, `percentiles`, `collision_probability`, `data_sizes`, `human_duration`, `epoch_time`, `base_repr`, `radix_convert`, `float_repr`, `int_widths`, `bit_analysis`, `bitop`, `solve_expression`, `limit_expression`, `simplify_expression`, `convert_units`, `physical_constants`, `list_units`, `evaluate_expression`, `truth_table`, `solve_linear`, `matrix` |
 | `verification` (5) | `verify_translation`, `verify_optimization`, `algebraic_equiv`, `compare_edge_cases`, `z3_check` |
 | `execution` (7) | `list_languages`, `list_execution_providers`, `execute_code`, `execute_code_stream`, `trace_execution`, `compare_execution`, `runtimes_status` |
-| `sessions` (11) | `session_start`, `session_stop`, `session_list`, `session_files`, `session_write_file`, `session_read_file`, `session_run`, `session_artifacts`, `run_submit`, `run_inspect`, `run_cancel` |
+| `sessions` (12) | `session_start`, `session_stop`, `session_list`, `session_files`, `session_write_file`, `session_read_file`, `session_run`, `session_artifacts`, `session_snapshot`, `run_submit`, `run_inspect`, `run_cancel` |
 | `analysis` (3) | `analyze_complexity`, `benchmark`, `extract_function` |
 | `admin` (2) | `install_package`, `update_runtimes` |
 
@@ -985,7 +988,7 @@ CODECALC_TOOLS=calculator,execution  # two groups, unioned
 CODECALC_TOOLS=dev                   # a coding-assistant slice (40 tools)
 ```
 
-Unset or empty registers every group — 53 tools, same as today —
+Unset or empty registers every group — 54 tools, same as today —
 so nothing changes for an operator who does not set this. An unknown group or
 preset name is a loud startup failure naming the bad value and every known
 group/preset, never a silent fallback to "everything" or "nothing": either
@@ -1022,7 +1025,7 @@ PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py         # every tool over MC
 PYTHONPATH=. .venv/bin/python tests/test_executor_sweep.py  # sandbox regressions
 ```
 
-67 test files and 19 CI-invoked scripts, **2184 assertions**. "CI-invoked"
+68 test files and 19 CI-invoked scripts, **2184 assertions**. "CI-invoked"
 means referenced by path (`scripts/<name>.py`) from a job in
 `.github/workflows/*.yml` — `scripts/check_claims.py` derives the count that
 way and gates it, so a script wired into a workflow without this sentence

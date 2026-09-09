@@ -465,6 +465,49 @@ finally:
     if _sid:
         server.session_stop(_sid)
 
+# ── session_snapshot: the tenth shape, added in 1.14.0 ─────────────────────
+# The same "run it for real, not just the module" reasoning as the block
+# above: `session_snapshot_result` is a NEW branch, and the only way to know
+# the schema accepts what the tool actually emits — for all four actions, not
+# just the one most likely to be exercised by hand — is to call it.
+_snap_sid = server.session_start("bash").get("session_id")
+try:
+    if _snap_sid:
+        server.session_write_file(_snap_sid, "a.txt", "hi")
+        _save = server.session_snapshot(_snap_sid, action="save", label="t")
+        check("session_snapshot save validates", not errors_for(_save),
+              f"-> {errors_for(_save)[:1]}")
+        check_stamped("session_snapshot save", _save)
+
+        _list = server.session_snapshot(_snap_sid, action="list")
+        check("session_snapshot list validates", not errors_for(_list),
+              f"-> {errors_for(_list)[:1]}")
+
+        _restore = server.session_snapshot(
+            _snap_sid, action="restore", snapshot_id=_save.get("snapshot_id"))
+        check("session_snapshot restore validates", not errors_for(_restore),
+              f"-> {errors_for(_restore)[:1]}")
+        try:
+            _delete = server.session_snapshot(
+                _snap_sid, action="delete", snapshot_id=_save.get("snapshot_id"))
+            check("session_snapshot delete validates", not errors_for(_delete),
+                  f"-> {errors_for(_delete)[:1]}")
+
+            # A failure (unknown action) matches `rejected`, not the new shape.
+            _bad = server.session_snapshot(_snap_sid, action="bogus")
+            check("session_snapshot bad action validates as rejected",
+                  not errors_for(_bad), f"-> {errors_for(_bad)[:1]}")
+            check("...and carries no `action` key of its own",
+                  "action" not in _bad, f"-> {sorted(_bad)}")
+        finally:
+            if _restore.get("session_id"):
+                server.session_stop(_restore["session_id"])
+    else:
+        print("SKIP session_snapshot surfaces — could not start a bash session")
+finally:
+    if _snap_sid:
+        server.session_stop(_snap_sid)
+
 # The failure path carries an allowlist, not everything-but-one. A synthetic
 # outcome with a `value` proves the allowlist rather than the absence of a
 # current producer that would populate it.

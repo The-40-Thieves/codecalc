@@ -655,7 +655,7 @@ def _sync_progress(ctx: Context):
 def _coded(fn):
     """Attach an error code to any failing dict a tool returns.
 
-    Wraps at REGISTRATION so all 52 tools are covered by one change instead of
+    Wraps at REGISTRATION so all 53 tools are covered by one change instead of
     121 edits at the return sites. The first attempt put this on
     `guarded_call`, which measured 0 of 8 on the most reachable failures
     because those paths return rather than raise — see errors.py.
@@ -675,7 +675,7 @@ def _coded(fn):
     # executor.execute at all. All three returned unversioned results while the
     # documentation said every result carries a version.
     #
-    # This wrapper is applied to all 52 tools, so stamping here makes that claim
+    # This wrapper is applied to all 53 tools, so stamping here makes that claim
     # true by construction. `stamp` uses setdefault, so the executor's own stamp
     # is not overwritten and the two cannot disagree.
     if inspect.iscoroutinefunction(fn):
@@ -690,16 +690,16 @@ def _coded(fn):
     return _sync
 
 
-# Rebind `mcp.tool` rather than renaming 52 decorator lines. The rename was the
+# Rebind `mcp.tool` rather than renaming 53 decorator lines. The rename was the
 # first attempt and broke four suites plus the CI round-trip check, all of which
-# count declarations with `grep -c '^@mcp\.tool'` and read 0 against 52 served.
+# count declarations with `grep -c '^@mcp\.tool'` and read 0 against 53 served.
 # That identity is load-bearing here, so the change that preserves it is the
 # right one: every `@mcp.tool()` below is unchanged and every counter still
 # works, while the wrapper is applied underneath.
 _mcp_tool = mcp.tool
 
 
-# ── tool GROUPS, so a client can register a slice of the 52-tool ────────
+# ── tool GROUPS, so a client can register a slice of the 53-tool ────────
 # surface instead of paying its full ~9.2k-token tools/list cost. This is NOT
 # the facade docs/design/2026-08-10-tool-facade.md rejected: every tool a
 # group activates keeps its own name, its own typed schema and its own
@@ -728,7 +728,7 @@ PRESETS: dict[str, frozenset[str]] = {
 }
 
 #: Comma-separated group and/or preset names. Empty/unset = every group, which
-#: is also what makes the default registration count 52 — the invariant
+#: is also what makes the default registration count 53 — the invariant
 #: scripts/check_tool_groups.py and the round-trip tests both depend on.
 TOOLS_ENV = "CODECALC_TOOLS"
 
@@ -764,7 +764,7 @@ DESCRIPTION_CLUSTERS: tuple[frozenset[str], ...] = (
 # actual behaviour differs from its group's default gets an entry in
 # TOOL_ANNOTATION_OVERRIDES instead of a bespoke `annotations=` at its own
 # `@mcp.tool()` line, so a reviewer sees every value in two tables rather than
-# scattered across 52 call sites. `_tool()` below resolves
+# scattered across 53 call sites. `_tool()` below resolves
 # `TOOL_ANNOTATION_OVERRIDES.get(name, GROUP_ANNOTATIONS[group])`.
 #
 # `calculator` is 25/25 pure — exact/symbolic arithmetic, unit conversion,
@@ -863,6 +863,22 @@ TOOL_ANNOTATION_OVERRIDES: dict[str, ToolAnnotations] = {
         read_only_hint=False, destructive_hint=True, idempotent_hint=True, open_world_hint=False),
     "run_cancel": ToolAnnotations(
         read_only_hint=False, destructive_hint=True, idempotent_hint=True, open_world_hint=False),
+    # session_snapshot is ONE tool covering four actions with different
+    # destructive/idempotent shapes: action="save"/"list" destroy nothing
+    # (save only ever ADDS a new archive; list only reads), while
+    # action="restore" with replace=True wipes an existing workspace before
+    # re-extracting into it, and action="delete" permanently removes an
+    # archive. ToolAnnotations describes the TOOL, not a per-call argument
+    # combination, so this carries the worst case across all four the same
+    # way session_write_file's single annotation already covers both "create
+    # a new file" (harmless) and "overwrite an existing one" (irrecoverable)
+    # under one destructive_hint=True. `idempotent_hint=False` for the same
+    # reason session_start has it: action="save" mints a fresh snapshot_id
+    # every call even with identical arguments, and action="restore" without
+    # replace=True mints a fresh session_id every call — neither settles into
+    # a repeatable end state the way action="list"/"delete" alone would.
+    "session_snapshot": ToolAnnotations(
+        read_only_hint=False, destructive_hint=True, idempotent_hint=False, open_world_hint=False),
     # analysis: both execute code (benchmark runs the snippet at each size;
     # extract_function runs the extracted program), unlike analyze_complexity's
     # static structural pass.
@@ -897,7 +913,7 @@ def _default_title(name: str) -> str:
     `mcp/server/mcpserver/tools/base.py`) that reaches the wire as `MCPTool.title`
     — a display string separate from `name` (still the identifier a client
     calls) and from `description` (still the full docstring). Derived rather
-    than hand-typed at each of 52 call sites, so it cannot drift from the name
+    than hand-typed at each of 53 call sites, so it cannot drift from the name
     the way a hand-typed string could.
     """
     return name.replace("_", " ").title()
@@ -1027,7 +1043,7 @@ def _active_groups() -> frozenset[str]:
     `@mcp.tool()` line runs, not re-read per call like `_idle_ttl_seconds`).
 
     Unset or blank -> every known group, so a bare checkout with nothing
-    configured still serves all 52 tools. An unknown group or preset name is
+    configured still serves all 53 tools. An unknown group or preset name is
     a loud `ValueError` that kills the import — never a warning, and never
     "falls back to all" or "falls back to none" — because either silent
     fallback turns a typo into a footgun: one exposes everything the operator
@@ -1406,15 +1422,16 @@ def session_start(language: str = "python3") -> dict[str, Any]:
 
 
 @mcp.tool(group="sessions")
-def session_stop(session_id: str, ctx: Context = None) -> dict[str, Any]:
-    """Stop a session: kill its REPL worker (if any) and delete its workspace."""
+def session_stop(session_id: str, keep_snapshots: bool = False, ctx: Context = None) -> dict[str, Any]:
+    """Stop a session: kill its REPL worker (if any) and delete its workspace.
+    Also deletes every session_snapshot saved for it, unless keep_snapshots=True."""
     # Resource-change notification not documented in the docstring above —
     # same tool_select_eval reasoning as execute_code's own comment. Fires
     # one `resources/list` change notification (best effort) when the
     # workspace was actually removed (`deleted: true`) — a second
     # `session_stop` on an already-gone session is idempotent and changes
     # nothing, so it stays silent. See CHANGELOG.md.
-    result = _session_service.stop(session_id)
+    result = _session_service.stop(session_id, keep_snapshots=keep_snapshots)
     if result.get("ok") and result.get("deleted"):
         _notify_resources_changed(ctx)
     return result
@@ -1459,6 +1476,29 @@ def session_artifacts(session_id: str) -> dict[str, Any]:
     """List files created by executed code in a session (excluding runner
     internals like main.py/run.out)."""
     return _session_service.artifacts(session_id)
+
+
+@mcp.tool(group="sessions")
+def session_snapshot(session_id: str, action: str = "save",
+                     snapshot_id: str | None = None, label: str | None = None,
+                     replace: bool = False) -> dict[str, Any]:
+    """Archive or restore a session's workspace files. `action`:
+
+    - "save": tar.gz the session's current files (same rules as
+      session_artifacts: .codecalc-run/ excluded, symlinks/hardlinks
+      refused) into a snapshot stored OUTSIDE the workspace, so sandboxed
+      code can never read or tamper with it. Returns snapshot_id.
+    - "restore": extract snapshot_id's files into a brand-new session
+      (default) or, with replace=True, wipe and recreate session_id's OWN
+      workspace first. Only files are restored — a python3/node session's
+      REPL variables/imports are never part of a snapshot.
+    - "list": snapshots saved for session_id, oldest first.
+    - "delete": remove one snapshot (snapshot_id required).
+
+    Snapshots are deleted when their session is stopped
+    (session_stop(keep_snapshots=True) to keep them)."""
+    return _session_service.snapshot(session_id, action, snapshot_id=snapshot_id,
+                                     label=label, replace=replace)
 
 
 @mcp.tool(group="admin")

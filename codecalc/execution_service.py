@@ -482,11 +482,49 @@ class SessionService:
             no_net=spec.no_net,
         )
 
-    def stop(self, session_id: str) -> dict:
-        return sessions.stop(session_id)
+    def stop(self, session_id: str, *, keep_snapshots: bool = False) -> dict:
+        return sessions.stop(session_id, keep_snapshots=keep_snapshots)
 
     def list_sessions(self) -> dict:
         return sessions.list_sessions()
+
+    #: `action` values `session_snapshot` accepts, in the order server.py's
+    #: docstring lists them. Named here, not just in the docstring, so
+    #: `snapshot`'s own "unknown action" refusal can quote the exact set
+    #: rather than a hand-typed copy of it that could drift.
+    SNAPSHOT_ACTIONS = ("save", "restore", "list", "delete")
+
+    def snapshot(self, session_id: str, action: str, *,
+                snapshot_id: str | None = None, label: str | None = None,
+                replace: bool = False) -> dict:
+        """Dispatch `session_snapshot`'s four actions to `sessions.py`.
+
+        A thin dispatcher, not a fifth session-lifecycle mechanism of its
+        own: each action is one existing `sessions.snapshot_*` function, and
+        this only validates the ONE thing none of them can — that
+        `snapshot_id` was actually supplied for the two actions that need
+        one — before handing off. `sessions.py` still validates the id's
+        SHAPE itself (`_SNAPSHOT_ID_RE`), because a malformed id reaching it
+        directly (a future caller of `sessions.snapshot_restore` that is not
+        this method) must be refused there too, not only here.
+        """
+        if action == "save":
+            return sessions.snapshot_save(session_id, label=label)
+        if action == "restore":
+            if not snapshot_id:
+                return errors.error_result(
+                    errors.VALIDATION, "snapshot_id is required for action='restore'")
+            return sessions.snapshot_restore(session_id, snapshot_id, replace=replace)
+        if action == "list":
+            return sessions.snapshot_list(session_id)
+        if action == "delete":
+            if not snapshot_id:
+                return errors.error_result(
+                    errors.VALIDATION, "snapshot_id is required for action='delete'")
+            return sessions.snapshot_delete(session_id, snapshot_id)
+        return errors.error_result(
+            errors.VALIDATION,
+            f"unknown action {action!r}; expected one of {self.SNAPSHOT_ACTIONS}")
 
     def list_files(self, session_id: str, path: str = "", *,
                    page_size: int | None = None,
