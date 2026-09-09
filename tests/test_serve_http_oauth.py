@@ -431,8 +431,21 @@ def _run_one_static_server(codecalc_root: pathlib.Path, port: int, token: str) -
             return {}, {}
         ok_status, _ok_headers, ok_body = started
         bad_status, bad_headers, _ = _post(port, token="wrong-token")  # noqa: S106 -- deliberately-invalid test token
+        # Compare the SHAPE of the authenticated response, not the whole
+        # tools/list body: this check exists to prove the static-token path
+        # still authenticates and answers, and the tool catalogue is not part
+        # of that claim. Comparing full bodies made every branch that adds a
+        # tool or edits a description fail here for a reason unrelated to
+        # auth (first tripped by a branch merging two tool clusters).
+        body = json.loads(ok_body)
+        result = body.get("result") if isinstance(body, dict) else None
+        tools = result.get("tools") if isinstance(result, dict) else None
         return (
-            {"status": ok_status, "body": json.loads(ok_body)},
+            {"status": ok_status,
+             "jsonrpc": body.get("jsonrpc") if isinstance(body, dict) else None,
+             "id": body.get("id") if isinstance(body, dict) else None,
+             "result_keys": sorted(result) if isinstance(result, dict) else None,
+             "tools_is_nonempty_list": isinstance(tools, list) and len(tools) > 0},
             {"status": bad_status,
              "www_authenticate": bad_headers.get("WWW-Authenticate", "").split("resource_metadata=")[0]},
         )
@@ -451,7 +464,8 @@ def _run_and_compare(main_root: pathlib.Path) -> None:
              f"one server never came up (ours={bool(ours_ok)}, main={bool(main_ok)})")
         return
     check("valid-token response is structurally identical to main "
-          "(same status, same tools/list result)",
+          "(same status, same JSON-RPC envelope, a non-empty tools/list — "
+          "the catalogue's contents are not compared)",
           ours_ok == main_ok, f"-> ours={ours_ok!r} main={main_ok!r}")
     check("invalid-token response is structurally identical to main "
           "(same status, same WWW-Authenticate error/description)",
