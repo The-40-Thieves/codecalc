@@ -1,11 +1,11 @@
 {
   "core": {
-    "n": 100,
+    "n": 116,
     "skipped": 118,
-    "top1_hits": 69,
-    "top3_hits": 84,
-    "top1": 0.69,
-    "top3": 0.84,
+    "top1_hits": 74,
+    "top3_hits": 97,
+    "top1": 0.6379,
+    "top3": 0.8362,
     "per_tool": {
       "base_repr": {
         "n": 4,
@@ -20,7 +20,12 @@
       "bitop": {
         "n": 4,
         "top1": 0.75,
-        "top3": 0.75
+        "top3": 1.0
+      },
+      "bits": {
+        "n": 8,
+        "top1": 0.25,
+        "top3": 1.0
       },
       "calc_exact": {
         "n": 3,
@@ -29,7 +34,7 @@
       },
       "calc_stats": {
         "n": 5,
-        "top1": 0.8,
+        "top1": 1.0,
         "top3": 1.0
       },
       "collision_probability": {
@@ -74,8 +79,8 @@
       },
       "int_widths": {
         "n": 4,
-        "top1": 0.5,
-        "top3": 0.5
+        "top1": 0.75,
+        "top3": 0.75
       },
       "limit_expression": {
         "n": 4,
@@ -94,7 +99,7 @@
       },
       "percentage": {
         "n": 4,
-        "top1": 0.5,
+        "top1": 0.75,
         "top3": 0.75
       },
       "percentiles": {
@@ -126,6 +131,11 @@
         "n": 4,
         "top1": 0.75,
         "top3": 1.0
+      },
+      "symbolic": {
+        "n": 8,
+        "top1": 0.0,
+        "top3": 0.375
       },
       "truth_table": {
         "n": 4,
@@ -173,7 +183,8 @@
       {
         "prompt": "I need both unknowns pinned down from two equations that share them",
         "expected": [
-          "solve_linear"
+          "solve_linear",
+          "symbolic"
         ],
         "got": "percentage",
         "top3": [
@@ -250,8 +261,8 @@
         "got": "human_duration",
         "top3": [
           "calc_exact",
-          "compare_threshold",
-          "human_duration"
+          "human_duration",
+          "symbolic"
         ]
       },
       {
@@ -291,38 +302,14 @@
         ]
       },
       {
-        "prompt": "give me the ratio of these two rational numbers as a share, not a pass/fail check",
-        "expected": [
-          "percentage"
-        ],
-        "got": "bit_analysis",
-        "top3": [
-          "bit_analysis",
-          "percentage",
-          "solve_expression"
-        ]
-      },
-      {
-        "prompt": "These five benchmark runs are noisy \u2014 is the spread too large to trust a single number, and what's the average anyway?",
-        "expected": [
-          "calc_stats"
-        ],
-        "got": "bit_analysis",
-        "top3": [
-          "base_repr",
-          "bit_analysis",
-          "calc_stats"
-        ]
-      },
-      {
-        "prompt": "Rank this list of measurements and tell me the value at the 90th and 99th cutoff",
+        "prompt": "What's the p95 and p99 latency across these numbers?",
         "expected": [
           "percentiles"
         ],
-        "got": "list_units",
+        "got": "calc_stats",
         "top3": [
-          "convert_units",
-          "list_units",
+          "calc_stats",
+          "int_widths",
           "percentiles"
         ]
       },
@@ -382,7 +369,7 @@
         "got": "base_repr",
         "top3": [
           "base_repr",
-          "int_widths",
+          "bits",
           "radix_convert"
         ]
       },
@@ -391,7 +378,7 @@
         "expected": [
           "radix_convert"
         ],
-        "got": "base_repr",
+        "got": "evaluate_expression",
         "top3": [
           "base_repr",
           "evaluate_expression",
@@ -415,7 +402,7 @@
         "expected": [
           "float_repr"
         ],
-        "got": "compare_threshold",
+        "got": "calc_exact",
         "top3": [
           "calc_exact",
           "compare_threshold",
@@ -423,58 +410,49 @@
         ]
       },
       {
-        "prompt": "Tell me every fixed-width signed and unsigned type that this value fits into, and how it wraps in the ones it doesn't",
-        "expected": [
-          "int_widths"
-        ],
-        "got": "bitop",
-        "top3": [
-          "base_repr",
-          "bitop",
-          "evaluate_expression"
-        ]
-      },
-      {
         "prompt": "I don't need hex or binary output \u2014 just tell me every bit-width container this number fits or overflows",
         "expected": [
           "int_widths"
         ],
-        "got": "bitop",
+        "got": "bits",
         "top3": [
           "base_repr",
-          "bit_analysis",
-          "bitop"
+          "bitop",
+          "bits"
         ]
       },
       {
         "prompt": "I need the RESULT of combining two integers with a boolean operator, not properties of a single one",
         "expected": [
-          "bitop"
+          "bitop",
+          "bits"
         ],
         "got": "bit_analysis",
         "top3": [
           "base_repr",
           "bit_analysis",
-          "solve_expression"
+          "bits"
         ]
       },
       {
         "prompt": "What value of x makes x squared minus 4 equal zero?",
         "expected": [
-          "solve_expression"
+          "solve_expression",
+          "symbolic"
         ],
         "got": "bitop",
         "top3": [
           "bitop",
-          "evaluate_expression",
-          "radix_convert"
+          "bits",
+          "evaluate_expression"
         ]
       },
       {
         "prompt": "For 2*x + 1 = 7, what's x?",
         "expected": [
           "solve_expression",
-          "solve_linear"
+          "solve_linear",
+          "symbolic"
         ],
         "got": "base_repr",
         "top3": [
@@ -486,7 +464,8 @@
       {
         "prompt": "As n grows without bound, what does n*log(n)/n**2 approach?",
         "expected": [
-          "limit_expression"
+          "limit_expression",
+          "symbolic"
         ],
         "got": "collision_probability",
         "top3": [
@@ -499,7 +478,8 @@
         "prompt": "Reduce this formula to its simplest form and also show it multiplied out",
         "expected": [
           "evaluate_expression",
-          "simplify_expression"
+          "simplify_expression",
+          "symbolic"
         ],
         "got": "compare_threshold",
         "top3": [
@@ -507,16 +487,184 @@
           "compare_threshold",
           "evaluate_expression"
         ]
+      },
+      {
+        "prompt": "Is 512 a power of two, and what's the very next power of two above 200?",
+        "expected": [
+          "bits"
+        ],
+        "got": "bit_analysis",
+        "top3": [
+          "base_repr",
+          "bit_analysis",
+          "bits"
+        ]
+      },
+      {
+        "prompt": "Combine 12 and 10 with a boolean XOR at a byte width of 8, and show me every base.",
+        "expected": [
+          "bits"
+        ],
+        "got": "truth_table",
+        "top3": [
+          "base_repr",
+          "bits",
+          "truth_table"
+        ]
+      },
+      {
+        "prompt": "Rotate the value 0x1 left by four positions within a 32-wide word, and give me the hex result.",
+        "expected": [
+          "bits"
+        ],
+        "got": "bitop",
+        "top3": [
+          "bitop",
+          "bits",
+          "collision_probability"
+        ]
+      },
+      {
+        "prompt": "Tell me every integer size this value fits or overflows, without giving me any hex or octal output.",
+        "expected": [
+          "bits"
+        ],
+        "got": "bitop",
+        "top3": [
+          "bitop",
+          "bits",
+          "data_sizes"
+        ]
+      },
+      {
+        "prompt": "Render 4000000000 in hexadecimal, octal and binary, and say whether it fits as a signed 32-wide integer.",
+        "expected": [
+          "bits"
+        ],
+        "got": "bitop",
+        "top3": [
+          "bitop",
+          "bits",
+          "data_sizes"
+        ]
+      },
+      {
+        "prompt": "Give me the two's complement view of this integer at a specific word width, with overflow flagged.",
+        "expected": [
+          "bits"
+        ],
+        "got": "base_repr",
+        "top3": [
+          "base_repr",
+          "bitop",
+          "bits"
+        ]
+      },
+      {
+        "prompt": "Find the value of y where y squared minus nine equals zero.",
+        "expected": [
+          "symbolic"
+        ],
+        "got": "data_sizes",
+        "top3": [
+          "bitop",
+          "data_sizes",
+          "int_widths"
+        ]
+      },
+      {
+        "prompt": "What input makes this single equation cross zero?",
+        "expected": [
+          "symbolic"
+        ],
+        "got": "solve_expression",
+        "top3": [
+          "base_repr",
+          "bit_analysis",
+          "solve_expression"
+        ]
+      },
+      {
+        "prompt": "I have two equations that both share the same two variables \u2014 solve for both at once.",
+        "expected": [
+          "symbolic"
+        ],
+        "got": "solve_linear",
+        "top3": [
+          "bit_analysis",
+          "solve_linear",
+          "symbolic"
+        ]
+      },
+      {
+        "prompt": "Pin down x and y together from a pair of equations that both depend on them.",
+        "expected": [
+          "symbolic"
+        ],
+        "got": "data_sizes",
+        "top3": [
+          "data_sizes",
+          "solve_linear",
+          "symbolic"
+        ]
+      },
+      {
+        "prompt": "Give me this algebraic expression in its simplified, factored and expanded forms.",
+        "expected": [
+          "symbolic"
+        ],
+        "got": "simplify_expression",
+        "top3": [
+          "evaluate_expression",
+          "simplify_expression",
+          "symbolic"
+        ]
+      },
+      {
+        "prompt": "Reduce this messy formula down and also multiply it all the way out.",
+        "expected": [
+          "symbolic"
+        ],
+        "got": "list_units",
+        "top3": [
+          "compare_threshold",
+          "list_units",
+          "physical_constants"
+        ]
+      },
+      {
+        "prompt": "As x heads toward infinity, what does this ratio settle on?",
+        "expected": [
+          "symbolic"
+        ],
+        "got": "base_repr",
+        "top3": [
+          "base_repr",
+          "bit_analysis",
+          "bitop"
+        ]
+      },
+      {
+        "prompt": "Compute the exact asymptotic value of n over log n as n becomes arbitrarily large.",
+        "expected": [
+          "symbolic"
+        ],
+        "got": "limit_expression",
+        "top3": [
+          "calc_exact",
+          "float_repr",
+          "limit_expression"
+        ]
       }
     ]
   },
   "dev": {
-    "n": 168,
+    "n": 184,
     "skipped": 50,
     "top1_hits": 113,
-    "top3_hits": 139,
-    "top1": 0.6726,
-    "top3": 0.8274,
+    "top3_hits": 152,
+    "top1": 0.6141,
+    "top3": 0.8261,
     "per_tool": {
       "algebraic_equiv": {
         "n": 4,
@@ -530,7 +678,7 @@
       },
       "base_repr": {
         "n": 4,
-        "top1": 0.75,
+        "top1": 0.5,
         "top3": 1.0
       },
       "benchmark": {
@@ -540,13 +688,18 @@
       },
       "bit_analysis": {
         "n": 4,
-        "top1": 1.0,
+        "top1": 0.75,
         "top3": 1.0
       },
       "bitop": {
         "n": 4,
         "top1": 0.75,
-        "top3": 0.75
+        "top3": 1.0
+      },
+      "bits": {
+        "n": 8,
+        "top1": 0.25,
+        "top3": 1.0
       },
       "branch_reachability": {
         "n": 6,
@@ -561,7 +714,7 @@
       "calc_stats": {
         "n": 5,
         "top1": 0.6,
-        "top3": 0.8
+        "top3": 1.0
       },
       "collision_probability": {
         "n": 4,
@@ -630,13 +783,13 @@
       },
       "int_widths": {
         "n": 4,
-        "top1": 0.5,
-        "top3": 0.5
+        "top1": 0.75,
+        "top3": 0.75
       },
       "limit_expression": {
         "n": 4,
         "top1": 0.25,
-        "top3": 1.0
+        "top3": 0.5
       },
       "list_execution_providers": {
         "n": 3,
@@ -661,7 +814,7 @@
       "percentage": {
         "n": 4,
         "top1": 0.5,
-        "top3": 0.5
+        "top3": 0.75
       },
       "percentiles": {
         "n": 4,
@@ -690,13 +843,18 @@
       },
       "solve_expression": {
         "n": 4,
-        "top1": 0.5,
+        "top1": 0.25,
         "top3": 0.5
       },
       "solve_linear": {
         "n": 4,
         "top1": 0.5,
         "top3": 1.0
+      },
+      "symbolic": {
+        "n": 8,
+        "top1": 0.0,
+        "top3": 0.375
       },
       "trace_execution": {
         "n": 7,
@@ -761,8 +919,8 @@
         ],
         "got": "list_languages",
         "top3": [
+          "compare_edge_cases",
           "list_languages",
-          "list_units",
           "truth_table"
         ]
       },
@@ -781,11 +939,12 @@
       {
         "prompt": "find x and y at the same time from a pair of coupled equations",
         "expected": [
-          "solve_linear"
+          "solve_linear",
+          "symbolic"
         ],
         "got": "verify_translation",
         "top3": [
-          "solve_expression",
+          "human_duration",
           "solve_linear",
           "verify_translation"
         ]
@@ -793,7 +952,8 @@
       {
         "prompt": "I need both unknowns pinned down from two equations that share them",
         "expected": [
-          "solve_linear"
+          "solve_linear",
+          "symbolic"
         ],
         "got": "percentage",
         "top3": [
@@ -871,7 +1031,7 @@
         "top3": [
           "algebraic_equiv",
           "human_duration",
-          "limit_expression"
+          "symbolic"
         ]
       },
       {
@@ -894,8 +1054,8 @@
         "got": "algebraic_equiv",
         "top3": [
           "algebraic_equiv",
-          "execute_code",
-          "float_repr"
+          "compare_execution",
+          "execute_code"
         ]
       },
       {
@@ -917,7 +1077,7 @@
         ],
         "got": "verify_optimization",
         "top3": [
-          "bit_analysis",
+          "percentage",
           "verify_optimization",
           "verify_translation"
         ]
@@ -942,7 +1102,7 @@
         "got": "benchmark",
         "top3": [
           "benchmark",
-          "bit_analysis",
+          "calc_stats",
           "verify_optimization"
         ]
       },
@@ -1015,7 +1175,19 @@
         "top3": [
           "base_repr",
           "bitop",
-          "int_widths"
+          "bits"
+        ]
+      },
+      {
+        "prompt": "I need the two's-complement view of this integer at a specific bit width, plus overflow detection",
+        "expected": [
+          "base_repr"
+        ],
+        "got": "bits",
+        "top3": [
+          "base_repr",
+          "bitop",
+          "bits"
         ]
       },
       {
@@ -1026,7 +1198,7 @@
         "got": "base_repr",
         "top3": [
           "base_repr",
-          "int_widths",
+          "bits",
           "radix_convert"
         ]
       },
@@ -1038,7 +1210,7 @@
         "got": "base_repr",
         "top3": [
           "base_repr",
-          "int_widths",
+          "evaluate_expression",
           "radix_convert"
         ]
       },
@@ -1049,7 +1221,7 @@
         ],
         "got": "data_sizes",
         "top3": [
-          "algebraic_equiv",
+          "bits",
           "data_sizes",
           "float_repr"
         ]
@@ -1059,7 +1231,7 @@
         "expected": [
           "float_repr"
         ],
-        "got": "compare_threshold",
+        "got": "compare_edge_cases",
         "top3": [
           "calc_exact",
           "compare_edge_cases",
@@ -1067,58 +1239,73 @@
         ]
       },
       {
-        "prompt": "Tell me every fixed-width signed and unsigned type that this value fits into, and how it wraps in the ones it doesn't",
-        "expected": [
-          "int_widths"
-        ],
-        "got": "bitop",
-        "top3": [
-          "base_repr",
-          "bitop",
-          "evaluate_expression"
-        ]
-      },
-      {
         "prompt": "I don't need hex or binary output \u2014 just tell me every bit-width container this number fits or overflows",
         "expected": [
           "int_widths"
         ],
-        "got": "bitop",
+        "got": "bits",
         "top3": [
           "base_repr",
           "bitop",
-          "calc_exact"
+          "bits"
         ]
       },
       {
-        "prompt": "I need the RESULT of combining two integers with a boolean operator, not properties of a single one",
+        "prompt": "I want facts ABOUT one number's bit pattern, not an operation combining it with another number",
+        "expected": [
+          "bit_analysis"
+        ],
+        "got": "bits",
+        "top3": [
+          "bit_analysis",
+          "bitop",
+          "bits"
+        ]
+      },
+      {
+        "prompt": "What's 12 XOR 10 at 8-bit width, shown in every base?",
         "expected": [
           "bitop"
         ],
-        "got": "bit_analysis",
+        "got": "bits",
         "top3": [
           "base_repr",
-          "bit_analysis",
-          "verify_optimization"
+          "bitop",
+          "bits"
         ]
       },
       {
         "prompt": "What value of x makes x squared minus 4 equal zero?",
         "expected": [
-          "solve_expression"
+          "solve_expression",
+          "symbolic"
         ],
         "got": "bitop",
         "top3": [
           "bitop",
+          "bits",
+          "compare_edge_cases"
+        ]
+      },
+      {
+        "prompt": "Find where this single-variable expression crosses zero",
+        "expected": [
+          "solve_expression",
+          "symbolic"
+        ],
+        "got": "compare_edge_cases",
+        "top3": [
           "compare_edge_cases",
-          "evaluate_expression"
+          "solve_expression",
+          "symbolic"
         ]
       },
       {
         "prompt": "For 2*x + 1 = 7, what's x?",
         "expected": [
           "solve_expression",
-          "solve_linear"
+          "solve_linear",
+          "symbolic"
         ],
         "got": "algebraic_equiv",
         "top3": [
@@ -1130,13 +1317,14 @@
       {
         "prompt": "As n grows without bound, what does n*log(n)/n**2 approach?",
         "expected": [
-          "limit_expression"
+          "limit_expression",
+          "symbolic"
         ],
         "got": "collision_probability",
         "top3": [
           "benchmark",
           "collision_probability",
-          "limit_expression"
+          "z3_check"
         ]
       },
       {
@@ -1148,18 +1336,19 @@
         "top3": [
           "analyze_complexity",
           "limit_expression",
-          "trace_execution"
+          "symbolic"
         ]
       },
       {
         "prompt": "As the input size grows huge, does n/log(n) eventually dominate or vanish?",
         "expected": [
-          "limit_expression"
+          "limit_expression",
+          "symbolic"
         ],
         "got": "benchmark",
         "top3": [
           "benchmark",
-          "limit_expression",
+          "compare_edge_cases",
           "verify_optimization"
         ]
       },
@@ -1167,7 +1356,8 @@
         "prompt": "Take this messy algebraic formula and give me its cleanest possible form",
         "expected": [
           "evaluate_expression",
-          "simplify_expression"
+          "simplify_expression",
+          "symbolic"
         ],
         "got": "branch_reachability",
         "top3": [
@@ -1219,9 +1409,9 @@
         ],
         "got": "branch_reachability",
         "top3": [
-          "bit_analysis",
           "branch_reachability",
-          "compare_edge_cases"
+          "compare_edge_cases",
+          "verify_translation"
         ]
       },
       {
@@ -1357,6 +1547,174 @@
         ]
       },
       {
+        "prompt": "Is 512 a power of two, and what's the very next power of two above 200?",
+        "expected": [
+          "bits"
+        ],
+        "got": "bit_analysis",
+        "top3": [
+          "base_repr",
+          "bit_analysis",
+          "bits"
+        ]
+      },
+      {
+        "prompt": "Combine 12 and 10 with a boolean XOR at a byte width of 8, and show me every base.",
+        "expected": [
+          "bits"
+        ],
+        "got": "base_repr",
+        "top3": [
+          "base_repr",
+          "bits",
+          "truth_table"
+        ]
+      },
+      {
+        "prompt": "Rotate the value 0x1 left by four positions within a 32-wide word, and give me the hex result.",
+        "expected": [
+          "bits"
+        ],
+        "got": "bitop",
+        "top3": [
+          "bitop",
+          "bits",
+          "collision_probability"
+        ]
+      },
+      {
+        "prompt": "Tell me every integer size this value fits or overflows, without giving me any hex or octal output.",
+        "expected": [
+          "bits"
+        ],
+        "got": "benchmark",
+        "top3": [
+          "benchmark",
+          "bitop",
+          "bits"
+        ]
+      },
+      {
+        "prompt": "Render 4000000000 in hexadecimal, octal and binary, and say whether it fits as a signed 32-wide integer.",
+        "expected": [
+          "bits"
+        ],
+        "got": "bitop",
+        "top3": [
+          "benchmark",
+          "bitop",
+          "bits"
+        ]
+      },
+      {
+        "prompt": "Give me the two's complement view of this integer at a specific word width, with overflow flagged.",
+        "expected": [
+          "bits"
+        ],
+        "got": "base_repr",
+        "top3": [
+          "algebraic_equiv",
+          "base_repr",
+          "bits"
+        ]
+      },
+      {
+        "prompt": "Find the value of y where y squared minus nine equals zero.",
+        "expected": [
+          "symbolic"
+        ],
+        "got": "compare_edge_cases",
+        "top3": [
+          "compare_edge_cases",
+          "data_sizes",
+          "int_widths"
+        ]
+      },
+      {
+        "prompt": "What input makes this single equation cross zero?",
+        "expected": [
+          "symbolic"
+        ],
+        "got": "compare_edge_cases",
+        "top3": [
+          "compare_edge_cases",
+          "solve_expression",
+          "verify_translation"
+        ]
+      },
+      {
+        "prompt": "I have two equations that both share the same two variables \u2014 solve for both at once.",
+        "expected": [
+          "symbolic"
+        ],
+        "got": "solve_linear",
+        "top3": [
+          "solve_linear",
+          "symbolic",
+          "verify_translation"
+        ]
+      },
+      {
+        "prompt": "Pin down x and y together from a pair of equations that both depend on them.",
+        "expected": [
+          "symbolic"
+        ],
+        "got": "data_sizes",
+        "top3": [
+          "data_sizes",
+          "solve_linear",
+          "verify_translation"
+        ]
+      },
+      {
+        "prompt": "Give me this algebraic expression in its simplified, factored and expanded forms.",
+        "expected": [
+          "symbolic"
+        ],
+        "got": "simplify_expression",
+        "top3": [
+          "evaluate_expression",
+          "simplify_expression",
+          "symbolic"
+        ]
+      },
+      {
+        "prompt": "Reduce this messy formula down and also multiply it all the way out.",
+        "expected": [
+          "symbolic"
+        ],
+        "got": "z3_check",
+        "top3": [
+          "branch_reachability",
+          "list_units",
+          "z3_check"
+        ]
+      },
+      {
+        "prompt": "As x heads toward infinity, what does this ratio settle on?",
+        "expected": [
+          "symbolic"
+        ],
+        "got": "verify_optimization",
+        "top3": [
+          "algebraic_equiv",
+          "analyze_complexity",
+          "verify_optimization"
+        ]
+      },
+      {
+        "prompt": "Compute the exact asymptotic value of n over log n as n becomes arbitrarily large.",
+        "expected": [
+          "symbolic"
+        ],
+        "got": "limit_expression",
+        "top3": [
+          "calc_exact",
+          "limit_expression",
+          "symbolic"
+        ]
+      },
+      {
         "prompt": "Which branch of this if/elif actually fired when I ran this input, and which one never did",
         "expected": [
           "trace_execution"
@@ -1395,12 +1753,12 @@
     ]
   },
   "full": {
-    "n": 218,
+    "n": 234,
     "skipped": 0,
-    "top1_hits": 136,
-    "top3_hits": 170,
-    "top1": 0.6239,
-    "top3": 0.7798,
+    "top1_hits": 137,
+    "top3_hits": 187,
+    "top1": 0.5855,
+    "top3": 0.7991,
     "per_tool": {
       "algebraic_equiv": {
         "n": 4,
@@ -1414,7 +1772,7 @@
       },
       "base_repr": {
         "n": 4,
-        "top1": 0.75,
+        "top1": 0.5,
         "top3": 1.0
       },
       "benchmark": {
@@ -1424,13 +1782,18 @@
       },
       "bit_analysis": {
         "n": 4,
-        "top1": 1.0,
+        "top1": 0.75,
         "top3": 1.0
       },
       "bitop": {
         "n": 4,
         "top1": 0.75,
-        "top3": 0.75
+        "top3": 1.0
+      },
+      "bits": {
+        "n": 8,
+        "top1": 0.25,
+        "top3": 1.0
       },
       "branch_reachability": {
         "n": 6,
@@ -1445,12 +1808,12 @@
       "calc_stats": {
         "n": 5,
         "top1": 0.8,
-        "top3": 0.8
+        "top3": 1.0
       },
       "collision_probability": {
         "n": 4,
         "top1": 0.75,
-        "top3": 1.0
+        "top3": 0.75
       },
       "compare_edge_cases": {
         "n": 4,
@@ -1505,7 +1868,7 @@
       "float_repr": {
         "n": 4,
         "top1": 0.25,
-        "top3": 0.5
+        "top3": 0.75
       },
       "human_duration": {
         "n": 4,
@@ -1519,8 +1882,8 @@
       },
       "int_widths": {
         "n": 4,
-        "top1": 0.5,
-        "top3": 0.5
+        "top1": 0.75,
+        "top3": 0.75
       },
       "limit_expression": {
         "n": 4,
@@ -1550,7 +1913,7 @@
       "percentage": {
         "n": 4,
         "top1": 0.5,
-        "top3": 0.5
+        "top3": 0.75
       },
       "percentiles": {
         "n": 4,
@@ -1575,7 +1938,7 @@
       "run_inspect": {
         "n": 3,
         "top1": 0.0,
-        "top3": 0.6667
+        "top3": 1.0
       },
       "run_submit": {
         "n": 4,
@@ -1600,7 +1963,7 @@
       "session_list": {
         "n": 3,
         "top1": 0.0,
-        "top3": 0.0
+        "top3": 0.3333
       },
       "session_read_file": {
         "n": 4,
@@ -1646,6 +2009,11 @@
         "n": 4,
         "top1": 0.5,
         "top3": 1.0
+      },
+      "symbolic": {
+        "n": 8,
+        "top1": 0.0,
+        "top3": 0.375
       },
       "trace_execution": {
         "n": 7,
@@ -1730,19 +2098,21 @@
       {
         "prompt": "find x and y at the same time from a pair of coupled equations",
         "expected": [
-          "solve_linear"
+          "solve_linear",
+          "symbolic"
         ],
         "got": "verify_translation",
         "top3": [
-          "solve_expression",
           "solve_linear",
+          "symbolic",
           "verify_translation"
         ]
       },
       {
         "prompt": "I need both unknowns pinned down from two equations that share them",
         "expected": [
-          "solve_linear"
+          "solve_linear",
+          "symbolic"
         ],
         "got": "percentage",
         "top3": [
@@ -1806,8 +2176,8 @@
         ],
         "got": "simplify_expression",
         "top3": [
-          "float_repr",
           "list_execution_providers",
+          "list_languages",
           "simplify_expression"
         ]
       },
@@ -1820,7 +2190,7 @@
         "top3": [
           "algebraic_equiv",
           "human_duration",
-          "limit_expression"
+          "symbolic"
         ]
       },
       {
@@ -1843,7 +2213,7 @@
         "got": "algebraic_equiv",
         "top3": [
           "algebraic_equiv",
-          "float_repr",
+          "execute_code",
           "run_submit"
         ]
       },
@@ -1866,7 +2236,7 @@
         ],
         "got": "verify_optimization",
         "top3": [
-          "bit_analysis",
+          "percentage",
           "verify_optimization",
           "verify_translation"
         ]
@@ -1878,9 +2248,9 @@
         ],
         "got": "benchmark",
         "top3": [
-          "base_repr",
           "benchmark",
-          "bit_analysis"
+          "calc_stats",
+          "run_inspect"
         ]
       },
       {
@@ -1912,7 +2282,7 @@
         "expected": [
           "percentiles"
         ],
-        "got": "session_artifacts",
+        "got": "run_inspect",
         "top3": [
           "compare_threshold",
           "run_inspect",
@@ -1926,8 +2296,8 @@
         ],
         "got": "session_start",
         "top3": [
-          "collision_probability",
           "run_submit",
+          "session_snapshot",
           "session_start"
         ]
       },
@@ -1952,7 +2322,19 @@
         "top3": [
           "base_repr",
           "bitop",
-          "int_widths"
+          "bits"
+        ]
+      },
+      {
+        "prompt": "I need the two's-complement view of this integer at a specific bit width, plus overflow detection",
+        "expected": [
+          "base_repr"
+        ],
+        "got": "bits",
+        "top3": [
+          "base_repr",
+          "bitop",
+          "bits"
         ]
       },
       {
@@ -1963,7 +2345,7 @@
         "got": "base_repr",
         "top3": [
           "base_repr",
-          "int_widths",
+          "bits",
           "radix_convert"
         ]
       },
@@ -1975,7 +2357,7 @@
         "got": "base_repr",
         "top3": [
           "base_repr",
-          "int_widths",
+          "evaluate_expression",
           "radix_convert"
         ]
       },
@@ -1986,8 +2368,8 @@
         ],
         "got": "evaluate_expression",
         "top3": [
-          "calc_exact",
           "evaluate_expression",
+          "float_repr",
           "int_widths"
         ]
       },
@@ -1998,7 +2380,7 @@
         ],
         "got": "data_sizes",
         "top3": [
-          "algebraic_equiv",
+          "bits",
           "data_sizes",
           "float_repr"
         ]
@@ -2016,70 +2398,73 @@
         ]
       },
       {
-        "prompt": "Tell me every fixed-width signed and unsigned type that this value fits into, and how it wraps in the ones it doesn't",
-        "expected": [
-          "int_widths"
-        ],
-        "got": "bitop",
-        "top3": [
-          "base_repr",
-          "bitop",
-          "evaluate_expression"
-        ]
-      },
-      {
         "prompt": "I don't need hex or binary output \u2014 just tell me every bit-width container this number fits or overflows",
         "expected": [
           "int_widths"
         ],
-        "got": "bitop",
+        "got": "bits",
         "top3": [
           "base_repr",
           "bitop",
-          "calc_exact"
+          "bits"
         ]
       },
       {
-        "prompt": "I need the RESULT of combining two integers with a boolean operator, not properties of a single one",
+        "prompt": "I want facts ABOUT one number's bit pattern, not an operation combining it with another number",
+        "expected": [
+          "bit_analysis"
+        ],
+        "got": "bits",
+        "top3": [
+          "bit_analysis",
+          "bits",
+          "list_execution_providers"
+        ]
+      },
+      {
+        "prompt": "What's 12 XOR 10 at 8-bit width, shown in every base?",
         "expected": [
           "bitop"
         ],
-        "got": "bit_analysis",
+        "got": "bits",
         "top3": [
           "base_repr",
-          "bit_analysis",
-          "verify_optimization"
+          "bitop",
+          "bits"
         ]
       },
       {
         "prompt": "What value of x makes x squared minus 4 equal zero?",
         "expected": [
-          "solve_expression"
+          "solve_expression",
+          "symbolic"
         ],
         "got": "bitop",
         "top3": [
           "bitop",
-          "compare_edge_cases",
-          "evaluate_expression"
+          "bits",
+          "compare_edge_cases"
         ]
       },
       {
         "prompt": "Find where this single-variable expression crosses zero",
         "expected": [
-          "solve_expression"
+          "solve_expression",
+          "symbolic"
         ],
         "got": "compare_edge_cases",
         "top3": [
-          "bit_analysis",
           "compare_edge_cases",
-          "solve_expression"
+          "solve_expression",
+          "symbolic"
         ]
       },
       {
         "prompt": "For 2*x + 1 = 7, what's x?",
         "expected": [
           "solve_expression",
-          "solve_linear"
+          "solve_linear",
+          "symbolic"
         ],
         "got": "algebraic_equiv",
         "top3": [
@@ -2091,7 +2476,8 @@
       {
         "prompt": "As n grows without bound, what does n*log(n)/n**2 approach?",
         "expected": [
-          "limit_expression"
+          "limit_expression",
+          "symbolic"
         ],
         "got": "benchmark",
         "top3": [
@@ -2109,13 +2495,14 @@
         "top3": [
           "analyze_complexity",
           "limit_expression",
-          "trace_execution"
+          "symbolic"
         ]
       },
       {
         "prompt": "As the input size grows huge, does n/log(n) eventually dominate or vanish?",
         "expected": [
-          "limit_expression"
+          "limit_expression",
+          "symbolic"
         ],
         "got": "benchmark",
         "top3": [
@@ -2128,7 +2515,8 @@
         "prompt": "Take this messy algebraic formula and give me its cleanest possible form",
         "expected": [
           "evaluate_expression",
-          "simplify_expression"
+          "simplify_expression",
+          "symbolic"
         ],
         "got": "branch_reachability",
         "top3": [
@@ -2180,9 +2568,9 @@
         ],
         "got": "branch_reachability",
         "top3": [
-          "bit_analysis",
           "branch_reachability",
-          "compare_edge_cases"
+          "compare_edge_cases",
+          "run_inspect"
         ]
       },
       {
@@ -2324,8 +2712,8 @@
         ],
         "got": "session_start",
         "top3": [
-          "install_package",
-          "int_widths",
+          "compare_edge_cases",
+          "session_list",
           "session_start"
         ]
       },
@@ -2481,8 +2869,8 @@
         "got": "session_snapshot",
         "top3": [
           "compare_execution",
-          "session_files",
-          "session_snapshot"
+          "session_snapshot",
+          "session_stop"
         ]
       },
       {
@@ -2504,8 +2892,8 @@
         ],
         "got": "runtimes_status",
         "top3": [
+          "extract_function",
           "runtimes_status",
-          "solve_expression",
           "z3_check"
         ]
       },
@@ -2530,7 +2918,7 @@
         "top3": [
           "list_languages",
           "run_cancel",
-          "z3_check"
+          "run_inspect"
         ]
       },
       {
@@ -2553,7 +2941,7 @@
         "got": "session_stop",
         "top3": [
           "run_cancel",
-          "run_inspect",
+          "run_submit",
           "session_stop"
         ]
       },
@@ -2630,6 +3018,174 @@
         ]
       },
       {
+        "prompt": "Is 512 a power of two, and what's the very next power of two above 200?",
+        "expected": [
+          "bits"
+        ],
+        "got": "bit_analysis",
+        "top3": [
+          "base_repr",
+          "bit_analysis",
+          "bits"
+        ]
+      },
+      {
+        "prompt": "Combine 12 and 10 with a boolean XOR at a byte width of 8, and show me every base.",
+        "expected": [
+          "bits"
+        ],
+        "got": "base_repr",
+        "top3": [
+          "base_repr",
+          "bits",
+          "truth_table"
+        ]
+      },
+      {
+        "prompt": "Rotate the value 0x1 left by four positions within a 32-wide word, and give me the hex result.",
+        "expected": [
+          "bits"
+        ],
+        "got": "bitop",
+        "top3": [
+          "bitop",
+          "bits",
+          "collision_probability"
+        ]
+      },
+      {
+        "prompt": "Tell me every integer size this value fits or overflows, without giving me any hex or octal output.",
+        "expected": [
+          "bits"
+        ],
+        "got": "benchmark",
+        "top3": [
+          "benchmark",
+          "bitop",
+          "bits"
+        ]
+      },
+      {
+        "prompt": "Render 4000000000 in hexadecimal, octal and binary, and say whether it fits as a signed 32-wide integer.",
+        "expected": [
+          "bits"
+        ],
+        "got": "bitop",
+        "top3": [
+          "bitop",
+          "bits",
+          "data_sizes"
+        ]
+      },
+      {
+        "prompt": "Give me the two's complement view of this integer at a specific word width, with overflow flagged.",
+        "expected": [
+          "bits"
+        ],
+        "got": "base_repr",
+        "top3": [
+          "algebraic_equiv",
+          "base_repr",
+          "bits"
+        ]
+      },
+      {
+        "prompt": "Find the value of y where y squared minus nine equals zero.",
+        "expected": [
+          "symbolic"
+        ],
+        "got": "compare_edge_cases",
+        "top3": [
+          "compare_edge_cases",
+          "data_sizes",
+          "int_widths"
+        ]
+      },
+      {
+        "prompt": "What input makes this single equation cross zero?",
+        "expected": [
+          "symbolic"
+        ],
+        "got": "compare_edge_cases",
+        "top3": [
+          "compare_edge_cases",
+          "solve_expression",
+          "verify_translation"
+        ]
+      },
+      {
+        "prompt": "I have two equations that both share the same two variables \u2014 solve for both at once.",
+        "expected": [
+          "symbolic"
+        ],
+        "got": "solve_linear",
+        "top3": [
+          "solve_linear",
+          "symbolic",
+          "verify_translation"
+        ]
+      },
+      {
+        "prompt": "Pin down x and y together from a pair of equations that both depend on them.",
+        "expected": [
+          "symbolic"
+        ],
+        "got": "verify_translation",
+        "top3": [
+          "data_sizes",
+          "solve_linear",
+          "verify_translation"
+        ]
+      },
+      {
+        "prompt": "Give me this algebraic expression in its simplified, factored and expanded forms.",
+        "expected": [
+          "symbolic"
+        ],
+        "got": "simplify_expression",
+        "top3": [
+          "evaluate_expression",
+          "simplify_expression",
+          "symbolic"
+        ]
+      },
+      {
+        "prompt": "Reduce this messy formula down and also multiply it all the way out.",
+        "expected": [
+          "symbolic"
+        ],
+        "got": "z3_check",
+        "top3": [
+          "branch_reachability",
+          "list_units",
+          "z3_check"
+        ]
+      },
+      {
+        "prompt": "As x heads toward infinity, what does this ratio settle on?",
+        "expected": [
+          "symbolic"
+        ],
+        "got": "verify_optimization",
+        "top3": [
+          "algebraic_equiv",
+          "analyze_complexity",
+          "verify_optimization"
+        ]
+      },
+      {
+        "prompt": "Compute the exact asymptotic value of n over log n as n becomes arbitrarily large.",
+        "expected": [
+          "symbolic"
+        ],
+        "got": "limit_expression",
+        "top3": [
+          "calc_exact",
+          "limit_expression",
+          "symbolic"
+        ]
+      },
+      {
         "prompt": "Which branch of this if/elif actually fired when I ran this input, and which one never did",
         "expected": [
           "trace_execution"
@@ -2668,7 +3224,7 @@
     ]
   },
   "codecalc_version": "0.10.0",
-  "generated_at": "2026-09-09T00:29:59+00:00",
-  "prompt_count": 218,
-  "prompt_set_sha256": "4a5dbfeb84f97402c8e37dba8721f2e47fec02958b0175e463a5a94a8b871f60"
+  "generated_at": "2026-09-09T00:45:26+00:00",
+  "prompt_count": 234,
+  "prompt_set_sha256": "59baa74819a839e82541e2f48be3c77d67635d1269a26a072b3817a7eaeb85e8"
 }

@@ -748,9 +748,21 @@ TOOL_GROUPS: dict[str, str] = {}
 #: prose in each docstring, so tests/test_tool_meta.py can assert every
 #: member's description names at least one of its own siblings without
 #: hand-copying (and silently drifting from) this exact list.
+#:
+#: The 2026-09-08 merge folded the second cluster's four members into one
+#: `bits(mode=...)` tool, and did the same for `solve_expression`/
+#: `solve_linear`/`simplify_expression`/`limit_expression` into
+#: `symbolic(op=...)` — see docs/design/2026-08-10-tool-facade.md's "Scope
+#: amendment on tool count". The eight old names stay registered as
+#: deprecated aliases for one minor release, so they are now MORE
+#: confusable with their replacement (and each other) than before, not
+#: less: `bits`/`symbolic` join their own alias sets as clusters below,
+#: each alias's deprecation-prefixed description names its replacement.
 DESCRIPTION_CLUSTERS: tuple[frozenset[str], ...] = (
     frozenset({"evaluate_expression", "calc_exact", "solve_expression", "solve_linear", "z3_check"}),
-    frozenset({"bit_analysis", "bitop", "int_widths", "base_repr"}),
+    frozenset({"bits", "bit_analysis", "bitop", "int_widths", "base_repr"}),
+    frozenset({"symbolic", "solve_expression", "solve_linear",
+               "simplify_expression", "limit_expression"}),
 )
 
 
@@ -2114,11 +2126,12 @@ def z3_check(smt2: str) -> dict[str, Any]:
 
 @mcp.tool(group="calculator")
 def solve_linear(system: str, variables: str) -> dict[str, Any]:
-    """Use solve_linear, not solve_expression, for a system of equations
-    sharing variables. `system` is ';'-separated equations, `variables`
-    comma-separated. Example: system='x + y = 10; x - y = 2', variables='x, y'."""
-    vars_ = [v.strip() for v in variables.split(",") if v.strip()]
-    return logic.solve_linear(system, vars_)
+    """Deprecated alias for symbolic(op="solve_linear"); removed in the next
+    minor release. Use solve_linear, not solve_expression, for a system of
+    equations sharing variables. `system` is ';'-separated equations,
+    `variables` comma-separated. Example: system='x + y = 10; x - y = 2',
+    variables='x, y'."""
+    return symbolic(op="solve_linear", system=system, variables=variables)
 
 
 @mcp.tool(group="calculator")
@@ -2620,12 +2633,118 @@ def epoch_time(n: str) -> dict[str, Any]:
     return exact.epoch_time(n)
 
 
+def _mode_dispatch_error(tool_name: str, mode_arg: str, mode: str, mode_params: dict,
+                          values: dict) -> dict | None:
+    """Closed-enum validation shared by `bits`/`symbolic`.
+
+    Both are the 2026-09-08 merge of four single-purpose tools each into one
+    `mode`/`op`-selected tool — a same-signature-UNION merge
+    (docs/design/2026-08-10-tool-facade.md's "Scope amendment on tool
+    count"), not the generic `call_capability(name, args)` facade that
+    document's §2 rejects: every mode still resolves to the ORIGINAL
+    function with the ORIGINAL validation and result shape, plus one
+    additive selector key. `mode_arg` is the caller-facing parameter name
+    ("mode" for `bits`, "op" for `symbolic`) used only in the error text.
+
+    Returns an `errors.VALIDATION` result naming the missing or extra
+    parameter, or None when `values` holds exactly what `mode_params[mode]`
+    calls for — checked with `is None`, never truthiness, so a legitimate
+    falsy argument (`n=0`, `align=0`) is never mistaken for "not given".
+    """
+    if mode not in mode_params:
+        return errors.error_result(
+            errors.VALIDATION,
+            f"{tool_name}: unknown {mode_arg} {mode!r}; expected one of "
+            f"{tuple(mode_params)}")
+    spec = mode_params[mode]
+    allowed = set(spec["required"]) | set(spec["optional"])
+    missing = [p for p in spec["required"] if values.get(p) is None]
+    if missing:
+        return errors.error_result(
+            errors.VALIDATION,
+            f"{tool_name}({mode_arg}={mode!r}) requires {', '.join(missing)}")
+    extra = sorted(p for p, v in values.items() if p not in allowed and v is not None)
+    if extra:
+        return errors.error_result(
+            errors.VALIDATION,
+            f"{tool_name}({mode_arg}={mode!r}) does not accept {', '.join(extra)}; "
+            f"that parameter belongs to a different {mode_arg}")
+    return None
+
+
+#: mode -> which of `bits`' union parameters that mode requires/accepts.
+#: `width` defaults to None at the SIGNATURE level, not bitop's original 64
+#: default, so "not given" stays distinguishable from mode="repr"'s own,
+#: genuinely different, None default (base_repr's width=None means "skip
+#: width analysis", not "use 64") — `bits` itself substitutes 64 for
+#: mode="op" below, after this table has already decided width is optional
+#: there.
+_BITS_MODE_PARAMS = {
+    "analysis": {"required": ("n",), "optional": ("align",)},
+    "op": {"required": ("a", "op"), "optional": ("b", "width")},
+    "widths": {"required": ("n",), "optional": ()},
+    "repr": {"required": ("n",), "optional": ("width",)},
+}
+
+
+@mcp.tool(group="calculator")
+def bits(mode: str, n: int | None = None, align: int | None = None,
+         a: int | None = None, op: str | None = None, b: int | None = None,
+         width: int | None = None) -> dict[str, Any]:
+    """Programmer-mode integer facts and operations, selected by `mode` —
+    replaces bit_analysis, bitop, int_widths and base_repr, each now a
+    deprecated one-minor-release alias for one of the four modes below.
+    Every mode returns exactly that alias's own result, plus `mode`
+    (additive).
+
+    mode="analysis" (was bit_analysis) — facts about a single N: popcount,
+    bit length, trailing zeros, power-of-two check, next power of two, and
+    (with `align`) padding needed to reach an alignment boundary. Used by
+    this mode: `n` (required), `align` (optional).
+
+    mode="op" (was bitop) — apply an operation to `a` (and `b`, required
+    unless op="not") at a fixed `width` (8/16/32/64, default 64): and/or/
+    xor/nand/nor/xnor/not/shl/shr/sar/rol/ror. Every result shows unsigned,
+    signed (two's complement), hex, octal and binary. shr is logical
+    (zero-fill); sar is arithmetic (sign-propagating) — 0x80 shr 1 = 0x40
+    (+64) but 0x80 sar 1 = 0xC0 (-64). A left shift that drops bits says
+    OVERFLOW and shows the unbounded answer. Used by this mode: `a`, `op`
+    (required), `b` (required unless op="not"), `width` (optional, default
+    64).
+
+    mode="widths" (was int_widths) — which widths (i8..i64/u8..u64) hold
+    `n`, and the wrapped value where they do not; flags anything past 2^53
+    as unable to round-trip through a JS number or JSON float. Used by this
+    mode: `n` (required).
+
+    mode="repr" (was base_repr) — hex/oct/bin of `n`; with `width`, two's
+    complement and signed-overflow detection. Used by this mode: `n`
+    (required), `width` (optional; None skips width analysis entirely).
+    """
+    err = _mode_dispatch_error(
+        "bits", "mode", mode, _BITS_MODE_PARAMS,
+        {"n": n, "align": align, "a": a, "op": op, "b": b, "width": width})
+    if err is not None:
+        return err
+    if mode == "analysis":
+        result = exact.bit_analysis(n, align)
+    elif mode == "op":
+        result = exact.bitop(a, op, b, width if width is not None else 64)
+    elif mode == "widths":
+        result = exact.int_widths(n)
+    else:  # mode == "repr"
+        result = exact.base_repr(n, width)
+    result["mode"] = mode
+    return result
+
+
 @mcp.tool(group="calculator")
 def base_repr(n: int, width: int | None = None) -> dict[str, Any]:
-    """Use base_repr, not int_widths, for a single specified width. hex/
-    oct/bin of N; with WIDTH, two's complement and signed-overflow
+    """Deprecated alias for bits(mode="repr"); removed in the next minor
+    release. Use base_repr, not int_widths, for a single specified width.
+    hex/oct/bin of N; with WIDTH, two's complement and signed-overflow
     detection. `base_repr(3000000000, 32)` says plainly it does not fit i32."""
-    return exact.base_repr(n, width)
+    return bits(mode="repr", n=n, width=width)
 
 
 @mcp.tool(group="calculator")
@@ -2647,32 +2766,36 @@ def float_repr(x: float) -> dict[str, Any]:
 
 @mcp.tool(group="calculator")
 def int_widths(n: int) -> dict[str, Any]:
-    """Use int_widths, not base_repr, to scan across widths, not just one.
-    Which widths (i8..i64/u8..u64) hold N, and the wrapped value where they
-    do not. Flags anything past 2^53 as unable to round-trip through a JS
-    number or JSON float. `int_widths(3000000000)` shows the i32 wrap."""
-    return exact.int_widths(n)
+    """Deprecated alias for bits(mode="widths"); removed in the next minor
+    release. Use int_widths, not base_repr, to scan across widths, not just
+    one. Which widths (i8..i64/u8..u64) hold N, and the wrapped value where
+    they do not. Flags anything past 2^53 as unable to round-trip through a
+    JS number or JSON float. `int_widths(3000000000)` shows the i32 wrap."""
+    return bits(mode="widths", n=n)
 
 
 @mcp.tool(group="calculator")
 def bit_analysis(n: int, align: int | None = None) -> dict[str, Any]:
-    """Use bit_analysis, not bitop, for facts about a single N: popcount,
-    bit length, trailing zeros, power-of-two check, next power of two, and
-    (with align) padding needed to reach an alignment boundary."""
-    return exact.bit_analysis(n, align)
+    """Deprecated alias for bits(mode="analysis"); removed in the next minor
+    release. Use bit_analysis, not bitop, for facts about a single N:
+    popcount, bit length, trailing zeros, power-of-two check, next power of
+    two, and (with align) padding needed to reach an alignment boundary."""
+    return bits(mode="analysis", n=n, align=align)
 
 
 @mcp.tool(group="calculator")
 def bitop(a: int, op: str, b: int | None = None, width: int = 64) -> dict[str, Any]:
-    """Use bitop, not bit_analysis, to apply an operation (and/or/xor/not/
-    shifts/rotates) rather than describe a value. Programmer-mode bit ops:
-    and or xor nand nor xnor not shl shr sar rol ror at width 8/16/32/64.
-    Every result shows unsigned, signed (two's complement),
-    hex, octal and binary. shr is logical (zero-fill); sar is arithmetic
-    (sign-propagating) — 0x80 shr 1 = 0x40 (+64) but 0x80 sar 1 = 0xC0 (-64).
-    A left shift that drops bits says OVERFLOW and shows the unbounded answer.
+    """Deprecated alias for bits(mode="op"); removed in the next minor
+    release. Use bitop, not bit_analysis, to apply an operation (and/or/xor/
+    not/shifts/rotates) rather than describe a value. Programmer-mode bit
+    ops: and or xor nand nor xnor not shl shr sar rol ror at width
+    8/16/32/64. Every result shows unsigned, signed (two's complement), hex,
+    octal and binary. shr is logical (zero-fill); sar is arithmetic
+    (sign-propagating) — 0x80 shr 1 = 0x40 (+64) but 0x80 sar 1 = 0xC0
+    (-64). A left shift that drops bits says OVERFLOW and shows the
+    unbounded answer.
     """
-    return exact.bitop(a, op, b, width)
+    return bits(mode="op", a=a, op=op, b=b, width=width)
 
 
 @mcp.tool(group="verification")
@@ -2683,32 +2806,105 @@ def algebraic_equiv(a: str, b: str) -> dict[str, Any]:
     return exact.algebraic_equiv(a, b)
 
 
+#: op -> which of `symbolic`' union parameters that op requires/accepts.
+#: `var`/`point` default to None at the SIGNATURE level rather than
+#: solve_expression/limit_expression's original "x"/"oo" — a real string
+#: default is indistinguishable from "the caller explicitly passed the
+#: default", which would make `_mode_dispatch_error` unable to reject
+#: `op="simplify", var="x"` (var does not belong to simplify) as an extra
+#: parameter. The dispatch below substitutes "x"/"oo" itself once validation
+#: has already decided the combination is well-formed.
+_SYMBOLIC_MODE_PARAMS = {
+    "solve": {"required": ("expr",), "optional": ("var",)},
+    "solve_linear": {"required": ("system", "variables"), "optional": ()},
+    "simplify": {"required": ("expr",), "optional": ()},
+    "limit": {"required": ("expr",), "optional": ("var", "point")},
+}
+
+
 @mcp.tool(group="calculator")
-def solve_expression(expr: str, var: str = "x") -> dict[str, Any]:
-    """Use solve_expression, not z3_check, for the roots of one equation:
+def symbolic(op: str, expr: str | None = None, var: str | None = None,
+            point: str | None = None, system: str | None = None,
+            variables: str | None = None) -> dict[str, Any]:
+    """Symbolic algebra, selected by `op` — replaces solve_expression,
+    solve_linear, simplify_expression and limit_expression, each now a
+    deprecated one-minor-release alias for one of the four ops below. Every
+    op returns exactly that alias's own result, plus `op` (additive).
+
+    op="solve" (was solve_expression) — the roots of one equation:
     'x**2 - 4 = 0', '2*x + 1 = 7'. For a system of several equations, use
-    solve_linear. For general constraint satisfiability (inequalities,
+    op="solve_linear". For general constraint satisfiability (inequalities,
     boolean constraints, multiple solvers), use z3_check. Returns
     `solutions` as a list of strings alongside the parsed `equation` and
-    `variable`."""
-    return exact.solve_expression(expr, var)
+    `variable`. Used by this op: `expr` (required), `var` (optional,
+    default "x").
+
+    op="solve_linear" (was solve_linear) — a system of equations sharing
+    variables. `system` is ';'-separated equations, `variables`
+    comma-separated. Example: system='x + y = 10; x - y = 2',
+    variables='x, y'. Used by this op: `system`, `variables` (both
+    required).
+
+    op="simplify" (was simplify_expression) — simplify, factor, and expand
+    an expression — algebraic forms, not solving (use op="solve") and not a
+    numeric value (use calc_exact). Returns `simplified`, `factored`, and
+    `expanded` as strings alongside the parsed `original`. Used by this op:
+    `expr` (required).
+
+    op="limit" (was limit_expression) — asymptotic behaviour: limit of
+    `expr` as `var` -> `point` (default "oo"). 'symbolic("limit",
+    "n*log(n)/n**2", "n")' returns 0 — settles complexity arguments faster
+    than arguing. Used by this op: `expr` (required), `var` (optional,
+    default "x"), `point` (optional, default "oo").
+    """
+    err = _mode_dispatch_error(
+        "symbolic", "op", op, _SYMBOLIC_MODE_PARAMS,
+        {"expr": expr, "var": var, "point": point, "system": system, "variables": variables})
+    if err is not None:
+        return err
+    if op == "solve":
+        result = exact.solve_expression(expr, var if var is not None else "x")
+    elif op == "solve_linear":
+        vars_ = [v.strip() for v in variables.split(",") if v.strip()]
+        result = logic.solve_linear(system, vars_)
+    elif op == "simplify":
+        result = exact.simplify_expression(expr)
+    else:  # op == "limit"
+        result = exact.limit_expression(
+            expr, var if var is not None else "x", point if point is not None else "oo")
+    result["op"] = op
+    return result
+
+
+@mcp.tool(group="calculator")
+def solve_expression(expr: str, var: str = "x") -> dict[str, Any]:
+    """Deprecated alias for symbolic(op="solve"); removed in the next minor
+    release. Use solve_expression, not z3_check, for the roots of one
+    equation: 'x**2 - 4 = 0', '2*x + 1 = 7'. For a system of several
+    equations, use solve_linear. For general constraint satisfiability
+    (inequalities, boolean constraints, multiple solvers), use z3_check.
+    Returns `solutions` as a list of strings alongside the parsed
+    `equation` and `variable`."""
+    return symbolic(op="solve", expr=expr, var=var)
 
 
 @mcp.tool(group="calculator")
 def limit_expression(expr: str, var: str = "x", point: str = "oo") -> dict[str, Any]:
-    """Asymptotic behaviour: limit of EXPR as var -> point (default oo).
-    'limit_expression(\"n*log(n)/n**2\", \"n\")' returns 0 — settles complexity
-    arguments faster than arguing."""
-    return exact.limit_expression(expr, var, point)
+    """Deprecated alias for symbolic(op="limit"); removed in the next minor
+    release. Asymptotic behaviour: limit of EXPR as var -> point (default
+    oo). 'limit_expression(\"n*log(n)/n**2\", \"n\")' returns 0 — settles
+    complexity arguments faster than arguing."""
+    return symbolic(op="limit", expr=expr, var=var, point=point)
 
 
 @mcp.tool(group="calculator")
 def simplify_expression(expr: str) -> dict[str, Any]:
-    """Simplify, factor, and expand an expression — algebraic forms, not
-    solving (use solve_expression) and not a numeric value (use
+    """Deprecated alias for symbolic(op="simplify"); removed in the next
+    minor release. Simplify, factor, and expand an expression — algebraic
+    forms, not solving (use solve_expression) and not a numeric value (use
     calc_exact). Returns `simplified`, `factored`, and `expanded` as
     strings alongside the parsed `original`."""
-    return exact.simplify_expression(expr)
+    return symbolic(op="simplify", expr=expr)
 
 
 @mcp.tool(group="verification")
@@ -2850,13 +3046,14 @@ _GROUP_ROUTING_TEXT: dict[str, str] = {
     "calculator": (
         "math/logic/units/numbers: evaluate_expression (symbolic, has "
         "variables/calculus) vs calc_exact (exact arithmetic on literal "
-        "numbers); simplify_expression (rewrite forms) vs solve_expression "
-        "(one-variable roots) vs solve_linear (systems); truth_table "
-        "(boolean logic); matrix, calc_stats, percentiles, percentage, "
-        "compare_threshold, limit_expression, collision_probability; "
-        "bit_analysis (one value's bit layout) vs bitop (apply an "
-        "operation) vs int_widths (which widths hold N) vs base_repr "
-        "(hex/oct/bin at a width) vs radix_convert (base-to-base); "
+        "numbers); symbolic (op=simplify/solve/solve_linear/limit — the "
+        "deprecated simplify_expression/solve_expression/solve_linear/"
+        "limit_expression aliases still work); truth_table (boolean "
+        "logic); matrix, calc_stats, percentiles, percentage, "
+        "compare_threshold, collision_probability; bits (mode: one-value "
+        "facts/op/widths/repr — the deprecated bit_analysis/bitop/"
+        "int_widths/base_repr aliases still work) vs radix_convert "
+        "(base-to-base); "
         "float_repr, data_sizes, human_duration (elapsed seconds), "
         "epoch_time (timestamp to date); convert_units, list_units, "
         "physical_constants."

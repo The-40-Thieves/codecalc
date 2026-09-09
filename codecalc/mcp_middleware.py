@@ -88,6 +88,18 @@ TOOL_TIMEOUTS: dict[str, float] = {
     "solve_expression": 20,
     "limit_expression": 20,
     "simplify_expression": 20,
+    # `symbolic` is the 2026-09-08 merge of solve_expression/solve_linear/
+    # simplify_expression/limit_expression behind one op=-selected tool
+    # (server.py). Each alias above still carries its own entry for when a
+    # client calls it BY THAT NAME — this entry is for when a client calls
+    # the merged tool directly. Omitting it would be exactly the silent
+    # 900s-fallback failure this table's own module docstring and
+    # scripts/check_tool_dispatch.py warn about: `symbolic` reaches the same
+    # sympy work as its four aliases via a plain Python call (never
+    # `.call_tool`, so check_tool_dispatch.py stays green), but the INBOUND
+    # name the middleware sees for that call is "symbolic", not one of the
+    # four names already in this table.
+    "symbolic": 20,
     "matrix": 20,
     # Verification gates: they run BOTH programs, and verify_optimization
     # additionally times each at four sizes, 5 runs per size (REPEATS in
