@@ -25,7 +25,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import anyio
 from mcp.server import CacheHint, MCPServer
@@ -42,6 +42,7 @@ from mcp.types import (
     TextResourceContents,
     ToolAnnotations,
 )
+from pydantic import Field
 
 from . import (
     __version__,
@@ -1306,21 +1307,23 @@ def compact_result(result: dict) -> dict:
 
 @mcp.tool(group="execution")
 def execute_code(
-    language: str,
-    code: str,
-    stdin: str = "",
-    timeout: int = 10,
-    session_id: str | None = None,
-    max_memory_mb: int = 0,
-    max_output_kb: int = 0,
-    max_cpu: int = 0,
-    no_net: bool = False,
-    compact: bool = False,
-    provider: str | None = None,
-    dependencies: list[str] | None = None,
+    language: Annotated[str, Field(description="Runtime to execute in, e.g. 'python3', 'node'; see list_languages for the full catalog")],
+    code: Annotated[str, Field(description="Source code to run in `language`")],
+    stdin: Annotated[str, Field(description="Text piped to the program's standard input; empty means no input")] = "",
+    timeout: Annotated[int, Field(description="Wall-clock seconds before the run is killed as TLE; clamped to a 120s ceiling")] = 10,
+    session_id: Annotated[str | None, Field(description="Run inside this session's workspace (from session_start) instead of a throwaway sandbox")] = None,
+    max_memory_mb: Annotated[int, Field(description="Per-call memory ceiling in MiB; 0 means no explicit limit is set")] = 0,
+    max_output_kb: Annotated[int, Field(description="Stdout/stderr capture cap in KiB per stream; 0 uses the 64 KiB default, hard-clamped to 240")] = 0,
+    max_cpu: Annotated[int, Field(description="Per-call CPU-time ceiling in seconds; 0 means no explicit limit is set")] = 0,
+    no_net: Annotated[bool, Field(description="Block outbound network access for this run; best-effort on platforms without seccomp")] = False,
+    compact: Annotated[bool, Field(description="Drop diagnostic fields (timings, workdir, platform) from the result; safety disclosures are always kept")] = False,
+    provider: Annotated[str | None, Field(description="Execution backend id to use (see list_execution_providers); default picks automatically")] = None,
+    dependencies: Annotated[list[str] | None, Field(description="Packages to install before running, e.g. ['requests==2.31.0']; merged with any PEP 723 block")] = None,
     ctx: Context = None,
 ) -> dict[str, Any]:
-    """Execute `code` in `language` in a sandbox.
+    """Execute `code` in `language` in a sandbox. Use this, not
+    execute_code_stream/run_submit/session_run, for one program whose result
+    you can wait for within a 120s cap.
 
     Returns stdout, stderr, exit_code, duration_ms, cpu_ms, peak_memory_kb,
     verdict (OK/TLE/MLE/OLE/RTE).
@@ -1330,10 +1333,7 @@ def execute_code(
       Also reports `artifacts_created` (files just created/modified) since
       that workspace outlives the call; a sessionless run has none. See
       `session_run` for the same field plus inline content blocks.
-    - `max_memory_mb` / `max_cpu`: per-call resource ceilings.
-    - `max_output_kb`: raise/lower the stdout+stderr cap (default 64 KiB
-      each). Any value is honoured up to a hard ceiling of 240 KiB per
-      stream; above that it is clamped to 240, because it is what the
+    - `max_output_kb`: the 240 KiB hard ceiling is what the
       `anthropic/maxResultSizeChars` this tool advertises in its `_meta`
       already assumes — the cap leaves no headroom to raise past it without
       the real result exceeding that hint. A run whose real output needs
@@ -1343,17 +1343,16 @@ def execute_code(
       than truncating — see the spill paragraph further down. An EXPLICIT
       `max_output_kb`, even under the 240 KiB ceiling, is honoured as a
       literal cap with no spill.
-    - `no_net`: block network egress. Linux: enforced in-kernel via a
-      seccomp-bpf filter. macOS / no-seccomp kernel: best-effort symbol
-      shim, disclosed in `unenforced` when that's the only guarantee that
-      held. See SECURITY.md.
-    - `compact`: drop the diagnostic fields (timings, workdir, platform). Never
-      drops `unenforced`, `output_error`, `artifacts_created`, or
-      `dependencies` — if a guarantee you asked for was not applied, or a
-      declared install failed, a compact result still says so.
-    - `dependencies`: packages to install before the code runs (merged with a
-      PEP 723 `# /// script` block for python3, deduped by normalized name with
-      this argument winning; the only source for node). A block ALONE, with no
+    - `no_net`: Linux enforces in-kernel via a seccomp-bpf filter. macOS /
+      no-seccomp kernel: best-effort symbol shim, disclosed in `unenforced`
+      when that's the only guarantee that held. See SECURITY.md.
+    - `compact`: never drops `unenforced`, `output_error`,
+      `artifacts_created`, or `dependencies` — if a guarantee you asked for
+      was not applied, or a declared install failed, a compact result still
+      says so.
+    - `dependencies`: merged with a PEP 723 `# /// script` block for
+      python3, deduped by normalized name with this argument winning; the
+      only source for node. A block ALONE, with no
       `dependencies` argument, is enough to trigger an install — see
       SECURITY.md. Installed BEFORE the sandboxed step, through the same
       confined `install_package` path — never inside the sandbox — and
@@ -1428,7 +1427,7 @@ def execute_code(
 
 
 @mcp.tool(group="sessions")
-def session_start(language: str = "python3") -> dict[str, Any]:
+def session_start(language: Annotated[str, Field(description="Language for the new session's worker/workspace; default 'python3' gets a stateful REPL")] = "python3") -> dict[str, Any]:
     """Start a persistent session. python3/node get a stateful REPL worker
     (variables/imports persist across execute_code calls); other languages get
     a persistent workspace directory. Returns session_id."""
@@ -1436,7 +1435,9 @@ def session_start(language: str = "python3") -> dict[str, Any]:
 
 
 @mcp.tool(group="sessions")
-def session_stop(session_id: str, keep_snapshots: bool = False, ctx: Context = None) -> dict[str, Any]:
+def session_stop(session_id: Annotated[str, Field(description="Id of the session to stop, as returned by session_start")],
+                 keep_snapshots: Annotated[bool, Field(description="Keep this session's saved session_snapshot archives instead of deleting them")] = False,
+                 ctx: Context = None) -> dict[str, Any]:
     """Stop a session: kill its REPL worker (if any) and delete its workspace.
     Also deletes every session_snapshot saved for it, unless keep_snapshots=True."""
     # Resource-change notification not documented in the docstring above —
@@ -1458,16 +1459,23 @@ def session_list() -> dict[str, Any]:
 
 
 @mcp.tool(group="sessions")
-def session_files(session_id: str, path: str = "", page_size: int | None = None,
-                  cursor: str | None = None) -> dict[str, Any]:
-    """List workspace files, optionally using a bounded cursor page."""
+def session_files(session_id: Annotated[str, Field(description="Id of the session whose workspace files to list")],
+                  path: Annotated[str, Field(description="Subdirectory to list, relative to the workspace root; empty lists the root")] = "",
+                  page_size: Annotated[int | None, Field(description="Max entries per page; omit for one unpaginated listing")] = None,
+                  cursor: Annotated[str | None, Field(description="Opaque page cursor from a previous session_files call's response, to fetch the next page")] = None) -> dict[str, Any]:
+    """List workspace files, optionally using a bounded cursor page. Use
+    session_artifacts, not this, for only the files executed code produced;
+    use session_read_file for one file's contents."""
     return _session_service.list_files(
         session_id, path, page_size=page_size, cursor=cursor
     )
 
 
 @mcp.tool(group="sessions")
-def session_write_file(session_id: str, path: str, content: str, ctx: Context = None) -> dict[str, Any]:
+def session_write_file(session_id: Annotated[str, Field(description="Id of the session workspace to write into")],
+                       path: Annotated[str, Field(description="Relative destination path inside the workspace; path escapes (e.g. '../') are refused")],
+                       content: Annotated[str, Field(description="Text content to write to `path`, overwriting any existing file")],
+                       ctx: Context = None) -> dict[str, Any]:
     """Write a file into a session workspace (relative path, no escapes).
     Use this to seed input data for executed code."""
     # Resource-change notifications not documented in the docstring above —
@@ -1486,16 +1494,18 @@ def session_write_file(session_id: str, path: str, content: str, ctx: Context = 
 
 
 @mcp.tool(group="sessions")
-def session_artifacts(session_id: str) -> dict[str, Any]:
+def session_artifacts(session_id: Annotated[str, Field(description="Id of the session whose executed-code output files to list")]) -> dict[str, Any]:
     """List files created by executed code in a session (excluding runner
     internals like main.py/run.out)."""
     return _session_service.artifacts(session_id)
 
 
 @mcp.tool(group="sessions")
-def session_snapshot(session_id: str, action: str = "save",
-                     snapshot_id: str | None = None, label: str | None = None,
-                     replace: bool = False) -> dict[str, Any]:
+def session_snapshot(session_id: Annotated[str, Field(description="Id of the session the snapshot belongs to or is restored into")],
+                     action: Annotated[str, Field(description="One of 'save', 'restore', 'list', 'delete'; default 'save' archives the workspace")] = "save",
+                     snapshot_id: Annotated[str | None, Field(description="Id of an existing snapshot; required for action='restore' or action='delete'")] = None,
+                     label: Annotated[str | None, Field(description="Optional human-readable label to store with a new snapshot; only used by action='save'")] = None,
+                     replace: Annotated[bool, Field(description="For action='restore', wipe and reuse session_id's own workspace instead of creating a new session")] = False) -> dict[str, Any]:
     """Archive or restore a session's workspace files. `action`:
 
     - "save": tar.gz the session's current files (same rules as
@@ -1520,8 +1530,10 @@ def session_snapshot(session_id: str, action: str = "save",
 # original report of install-time hook risk (npm postinstall, Python build
 # backends, Cargo build scripts) that the docstring's warning below exists
 # to carry forward to every caller.
-async def install_package(language: str, package: str, session_id: str | None = None,
-                          version: str | None = None,
+async def install_package(language: Annotated[str, Field(description="Language whose package manager installs the package, e.g. 'python3', 'node'")],
+                          package: Annotated[str, Field(description="Package name to install via that language's manager (uv pip/npm/gem/go get/cargo add)")],
+                          session_id: Annotated[str | None, Field(description="Install into this session's workspace instead of the shared cache; omit for the shared cache")] = None,
+                          version: Annotated[str | None, Field(description="Exact version to install; omit to install the manager's default/latest")] = None,
                           ctx: Context = None) -> dict[str, Any] | InputRequiredResult:
     """Install a package for a language (uv pip / npm / gem / go get / cargo add...).
 
@@ -1530,8 +1542,7 @@ async def install_package(language: str, package: str, session_id: str | None = 
     codecalc/confirmation.py); a declined or malformed confirmation refuses
     with no install attempted.
 
-    With session_id, installs into that session's workspace so executed code
-    can import it. Without, installs into a shared cache.
+    With session_id, executed code in that session can import the result.
 
     NETWORK: yes, always. The package manager fetches from its registry (PyPI,
     npm, rubygems, crates.io). codecalc opens no socket itself; the child
@@ -1589,33 +1600,27 @@ async def install_package(language: str, package: str, session_id: str | None = 
 
 @mcp.tool(group="execution")
 async def execute_code_stream(
-    language: str,
-    code: str,
-    stdin: str = "",
-    timeout: int = 30,
-    max_memory_mb: int = 0,
-    max_output_kb: int = 0,
-    max_cpu: int = 0,
-    no_net: bool = False,
-    provider: str | None = None,
-    dependencies: list[str] | None = None,
+    language: Annotated[str, Field(description="Runtime to execute in, e.g. 'python3', 'node'; see list_languages for the full catalog")],
+    code: Annotated[str, Field(description="Source code to run in `language`")],
+    stdin: Annotated[str, Field(description="Text piped to the program's standard input; empty means no input")] = "",
+    timeout: Annotated[int, Field(description="Wall-clock seconds before the run is killed; clamped to a 300s ceiling (longer than execute_code's)")] = 30,
+    max_memory_mb: Annotated[int, Field(description="Per-call memory ceiling in MiB; 0 means no explicit limit is set")] = 0,
+    max_output_kb: Annotated[int, Field(description="Stdout/stderr capture cap in KiB per stream; 0 uses the 64 KiB default, hard-clamped to 240")] = 0,
+    max_cpu: Annotated[int, Field(description="Per-call CPU-time ceiling in seconds; 0 means no explicit limit is set")] = 0,
+    no_net: Annotated[bool, Field(description="Block outbound network access for this run; best-effort on platforms without seccomp")] = False,
+    provider: Annotated[str | None, Field(description="Execution backend id to use (see list_execution_providers); default picks automatically")] = None,
+    dependencies: Annotated[list[str] | None, Field(description="Packages to install before running, e.g. ['requests==2.31.0']; merged with any PEP 723 block")] = None,
     ctx: Context = None,
 ) -> dict[str, Any]:
-    """Execute code and STREAM progress + partial output as it runs.
+    """Execute code and STREAM progress + partial output as it runs. Use
+    this, not execute_code/run_submit/session_run, for the same run when you
+    want output while it runs, up to a 300s cap.
 
-    Unlike execute_code (which returns only at exit), this reports progress
-    notifications to the client while the program runs, so agents can see
-    output before the process finishes. Returns the same result shape and
-    applies the SAME ceilings: max_memory_mb, max_output_kb and max_cpu are
-    forwarded to the executor exactly as execute_code forwards them —
-    including the same clamp: `max_output_kb` cannot be raised past a hard
-    ceiling of 240 KiB per stream, since that ceiling is what the
-    `anthropic/maxResultSizeChars` this tool advertises in its `_meta`
-    already assumes.
-
-    One difference, deliberate: the wall-clock cap is 300s here against
-    execute_code's 120s, because streaming exists for runs long enough to
-    want progress.
+    Reports progress notifications to the client while the program runs, so
+    agents can see output before the process finishes. Returns the same
+    result shape and applies the SAME ceilings as execute_code: max_memory_mb,
+    max_output_kb and max_cpu are forwarded to the executor exactly as
+    execute_code forwards them, including the same 240 KiB per-stream clamp.
 
     `dependencies`: same as execute_code's (PEP 723 merge, `no_net`/policy
     refusal, 120s budget, workdir quota) — installed before streaming
@@ -1656,16 +1661,16 @@ async def execute_code_stream(
 
 @mcp.tool(group="execution")
 def trace_execution(
-    language: str,
-    code: str,
-    stdin: str = "",
-    timeout: int = 30,
-    max_events: int = 2000,
-    max_memory_mb: int = 0,
-    max_output_kb: int = 0,
-    max_cpu: int = 0,
-    no_net: bool = False,
-    provider: str | None = None,
+    language: Annotated[str, Field(description="Runtime to trace; only 'python3' is supported, any other value is refused")],
+    code: Annotated[str, Field(description="Source code to trace line by line")],
+    stdin: Annotated[str, Field(description="Text piped to the program's standard input; empty means no input")] = "",
+    timeout: Annotated[int, Field(description="Wall-clock seconds before the run is killed; clamped to a 120s ceiling")] = 30,
+    max_events: Annotated[int, Field(description="Max trace events to record before truncating; the run's own stdout/exit code are unaffected")] = 2000,
+    max_memory_mb: Annotated[int, Field(description="Per-call memory ceiling in MiB; 0 means no explicit limit is set")] = 0,
+    max_output_kb: Annotated[int, Field(description="Stdout/stderr capture cap in KiB per stream; 0 uses the 64 KiB default, hard-clamped to 240")] = 0,
+    max_cpu: Annotated[int, Field(description="Per-call CPU-time ceiling in seconds; 0 means no explicit limit is set")] = 0,
+    no_net: Annotated[bool, Field(description="Block outbound network access for this run; best-effort on platforms without seccomp")] = False,
+    provider: Annotated[str | None, Field(description="Execution backend id; only 'local' (the default) is supported here")] = None,
 ) -> dict[str, Any]:
     """Debug WHY, line by line, for the ONE input you actually ran it on:
     which statements fired, in what order, with what variable values at
@@ -1694,9 +1699,8 @@ def trace_execution(
     (sys.settrace is per-thread) or, fallback backend only, an OLE
     `exit_code` race.
 
-    PYTHON3 ONLY for now; any other `language` is refused up front. For a
-    structural Big-O guess with nothing executed, use analyze_complexity.
-    `provider`: only 'local' (default) is supported here.
+    For a structural Big-O guess with nothing executed, use
+    analyze_complexity.
     """
     timeout = min(timeout, 120)
     max_output_kb = min(max_output_kb, _MAX_OUTPUT_KB_CEILING)
@@ -1709,11 +1713,11 @@ def trace_execution(
 
 @mcp.tool(group="execution")
 def branch_reachability(
-    language: str,
-    code: str,
-    inputs: dict[str, str] | None = None,
-    timeout: int = 30,
-    max_branches: int = 64,
+    language: Annotated[str, Field(description="Source language of `code`; only python3 functions are analyzed")],
+    code: Annotated[str, Field(description="Python3 function source to analyze for reachable/dead branches")],
+    inputs: Annotated[dict[str, str] | None, Field(description="Parameter name -> 'int'/'bool'/'str', to narrow or override an unannotated parameter's inferred type")] = None,
+    timeout: Annotated[int, Field(description="Wall-clock seconds before the z3 solver call is abandoned")] = 30,
+    max_branches: Annotated[int, Field(description="Max branches to analyze before stopping; default 64")] = 64,
 ) -> dict[str, Any]:
     """Which if/elif/else arms and while/for loops of this python3
     function can ever run, which are dead code, and what inputs reach
@@ -1723,8 +1727,7 @@ def branch_reachability(
     z3_check, not this, when you already have an SMT-LIB2 script to solve
     directly rather than Python source to translate.
 
-    `inputs` (name -> 'int'/'bool'/'str') narrows or overrides a parameter's
-    type; unannotated parameters default to int. Each branch reports
+    Unannotated parameters default to int. Each branch reports
     `verdict` (reachable/dead/unknown), a `witness` when reachable, and
     `boundary_inputs` (min/max/equality-edge for each comparison in its own
     guard) — every input dict is shaped to drop straight into
@@ -1761,39 +1764,30 @@ _RUN_EXTRA_KEYS = frozenset({
 
 @mcp.tool(group="sessions")
 def run_submit(
-    language: str,
-    code: str,
-    stdin: str = "",
-    timeout: int = 30,
-    max_memory_mb: int = 0,
-    max_output_kb: int = 0,
-    max_cpu: int = 0,
-    no_net: bool = False,
-    provider: str | None = None,
-    dependencies: list[str] | None = None,
+    language: Annotated[str, Field(description="Runtime to execute in, e.g. 'python3', 'node'; see list_languages for the full catalog")],
+    code: Annotated[str, Field(description="Source code to run in `language`")],
+    stdin: Annotated[str, Field(description="Text piped to the program's standard input; empty means no input")] = "",
+    timeout: Annotated[int, Field(description="Wall-clock seconds before the run is killed; clamped to a 120s ceiling, same as execute_code")] = 30,
+    max_memory_mb: Annotated[int, Field(description="Per-call memory ceiling in MiB; 0 means no explicit limit is set")] = 0,
+    max_output_kb: Annotated[int, Field(description="Stdout/stderr capture cap in KiB per stream; 0 uses the 64 KiB default, hard-clamped to 240")] = 0,
+    max_cpu: Annotated[int, Field(description="Per-call CPU-time ceiling in seconds; 0 means no explicit limit is set")] = 0,
+    no_net: Annotated[bool, Field(description="Block outbound network access for this run; best-effort on platforms without seccomp")] = False,
+    provider: Annotated[str | None, Field(description="Execution backend id to use (see list_execution_providers); default picks automatically")] = None,
+    dependencies: Annotated[list[str] | None, Field(description="Packages to install before running, e.g. ['requests==2.31.0']; merged with any PEP 723 block")] = None,
 ) -> dict[str, Any]:
     """Submit code for BACKGROUND execution; returns a run_id immediately.
+    Use this, not execute_code/execute_code_stream/session_run, when you do
+    not want to hold the call open — poll run_inspect(run_id), and
+    run_cancel(run_id) to stop it early.
 
-    Same request shape as execute_code (minus session_id: a run is a
-    standalone process, not a session workspace). The work proceeds on a
-    background worker; poll it with run_inspect(run_id) and, if needed, stop
-    it early with run_cancel(run_id).
+    Same request shape as execute_code minus `session_id` (a run is a
+    standalone process, not a session workspace). `timeout` bounds the WORK
+    itself, not how long you wait to collect it.
 
-    Use this instead of execute_code when you would rather not hold an MCP
-    call open for the whole computation. `timeout` is still the WORK's own
-    deadline (same 120s ceiling as execute_code) — it bounds the run, not how
-    long you wait to collect it.
-
-    `max_output_kb` is forwarded to the run exactly as execute_code forwards
-    it, including the same clamp to a hard ceiling of 240 KiB per stream
-    (see execute_code's docstring). This tool's OWN reply carries no
-    output — it is a small run_id handle, which is why it carries no
-    `anthropic/maxResultSizeChars` `_meta` itself. The eventual terminal
-    `run_inspect(run_id)` is what
-    returns the full envelope this call's `max_output_kb` produced — same
-    shape execute_code returns, and `run_inspect` advertises the SAME
-    `anthropic/maxResultSizeChars` execute_code does, so the clamp applied
-    here is what keeps that advertised value true.
+    This call's own reply carries no output — a small run_id handle — so
+    the `anthropic/maxResultSizeChars` hint lives on `run_inspect` instead,
+    which returns the full envelope, same shape execute_code returns,
+    once the run lands.
 
     Admission is capped (CODECALC_MAX_ACTIVE_RUNS, default 64): past that
     many runs still running/cancelling at once, this returns a
@@ -1802,15 +1796,11 @@ def run_submit(
 
     Retention: see run_inspect.
 
-    `dependencies`: same semantics as execute_code's own `dependencies` (PEP
-    723 merge, `no_net`/policy refusal, 120s budget, workdir quota). A
-    refusal is returned directly with no run created. Otherwise this call
-    still returns immediately: the install itself runs on the background
-    worker, ahead of the code, and a failed install becomes the run's own
-    terminal error — readable via run_inspect(run_id) like any other
-    outcome, same `dependencies` field execute_code returns. Its temp
-    workdir is freed on first collection (inspect, the next submission's own
-    reap of finished runs, or a startup sweep after a restart).
+    `dependencies`: same semantics as execute_code's own. A refusal is
+    returned directly with no run created. Otherwise this call still
+    returns immediately: the install itself runs on the background worker,
+    ahead of the code, and a failed install becomes the run's own terminal
+    error — readable via run_inspect(run_id) like any other outcome.
     """
     if _run_supervisor is None:
         return errors.error_result(
@@ -1953,7 +1943,7 @@ def run_submit(
 
 
 @mcp.tool(group="sessions")
-def run_inspect(run_id: str) -> dict[str, Any]:
+def run_inspect(run_id: Annotated[str, Field(description="Id of a background run, as returned by run_submit")]) -> dict[str, Any]:
     """Poll a background run started with run_submit.
 
     While running: {"ok": True, "state": "running"|"cancelling", "run_id",
@@ -2042,7 +2032,7 @@ def run_inspect(run_id: str) -> dict[str, Any]:
 
 
 @mcp.tool(group="sessions")
-def run_cancel(run_id: str) -> dict[str, Any]:
+def run_cancel(run_id: Annotated[str, Field(description="Id of a background run, as returned by run_submit")]) -> dict[str, Any]:
     """Cancel a background run started with run_submit.
 
     Idempotent: calling this on a run that is already finished/cleaned
@@ -2091,7 +2081,7 @@ def run_cancel(run_id: str) -> dict[str, Any]:
 
 
 @mcp.tool(group="calculator")
-def evaluate_expression(expression: str) -> dict[str, Any]:
+def evaluate_expression(expression: Annotated[str, Field(description="Symbolic math expression to evaluate via SymPy, e.g. 'integrate(x**2, x)', 'sqrt(144) + 2**10'")]) -> dict[str, Any]:
     """Use evaluate_expression, not calc_exact, for something other than
     plain arithmetic on literal values. Symbolically evaluate to a value or
     closed form via sympify: 'integrate(x**2, x)', 'sqrt(144) + 2**10'. Not
@@ -2102,13 +2092,21 @@ def evaluate_expression(expression: str) -> dict[str, Any]:
 
 
 @mcp.tool(group="calculator")
-def truth_table(expression: str) -> dict[str, Any]:
-    """Build the truth table for a boolean expression: 'a and b or not c', 'p xor q', 'a implies b'."""
+def truth_table(expression: Annotated[str, Field(description="Boolean logic expression to tabulate, e.g. 'a and b or not c', 'p xor q', 'a implies b'")]) -> dict[str, Any]:
+    """Build the truth table for a boolean expression over and/or/not/xor/
+    implies/iff (plus true/false constants and variables): 'a and b or not
+    c', 'p xor q', 'a implies b'. Use z3_check, not this, for satisfiability
+    over inequalities or non-boolean variables; use evaluate_expression for
+    symbolic (non-boolean) math.
+
+    Returns `variables` (sorted names) and `rows` (one dict per assignment,
+    each variable name -> bool plus `result`), plus `row_count`,
+    `satisfiable` (any row true), and `tautology` (every row true)."""
     return logic.truth_table(expression)
 
 
 @mcp.tool(group="verification")
-def z3_check(smt2: str) -> dict[str, Any]:
+def z3_check(smt2: Annotated[str, Field(description="SMT-LIB2 script to check for satisfiability, e.g. '(declare-const x Int)(assert (> x 5))(check-sat)'")]) -> dict[str, Any]:
     """Use z3_check, not symbolic(op="solve"), for satisfiability over
     inequalities, boolean combinations, or several variables at once: sat/
     unsat/unknown plus a model. Example:
@@ -2125,7 +2123,8 @@ def z3_check(smt2: str) -> dict[str, Any]:
 
 
 @mcp.tool(group="calculator")
-def matrix(rows: list[list[int | float | str]], op: str) -> dict[str, Any]:
+def matrix(rows: Annotated[list[list[int | float | str]], Field(description="Row-major matrix as a JSON array of arrays; each entry is a number or a scalar expression string like 'sqrt(2)'")],
+          op: Annotated[str, Field(description="Operation to apply: one of det, inverse, eigenvalues, transpose, rank, trace")]) -> dict[str, Any]:
     """Structured matrix operations: det, inverse, eigenvalues, transpose, rank, trace.
 
     `evaluate_expression` refuses `Matrix([[1,2],[3,4]])` on purpose — `[`/`]`
@@ -2135,26 +2134,29 @@ def matrix(rows: list[list[int | float | str]], op: str) -> dict[str, Any]:
     never a string to parse. Each entry is either a JSON number, used
     directly, or a scalar expression string ('1/2', 'sqrt(2)', 'x+1'),
     screened per-entry the same way evaluate_expression screens its input
-    before anything reaches SymPy. `op` is one of det/inverse/eigenvalues/
-    transpose/rank/trace. Example: rows=[[1,2],[3,4]], op='det' -> -2.
+    before anything reaches SymPy. Example: rows=[[1,2],[3,4]], op='det' -> -2.
     """
     return linalg.matrix(rows, op)
 
 
 @mcp.tool(group="analysis")
-def analyze_complexity(code: str, language: str = "python3") -> dict[str, Any]:
+def analyze_complexity(code: Annotated[str, Field(description="Source code snippet to analyze structurally for its asymptotic time complexity")],
+                       language: Annotated[str, Field(description="Language `code` is written in; default 'python3'")] = "python3") -> dict[str, Any]:
     """Estimate the asymptotic (Big-O) time complexity of a code snippet via structural analysis."""
     return complexity.analyze(code, language)
 
 
 @mcp.tool(group="analysis")
-def benchmark(code: str, language: str = "python3", sizes: str = "100,1000,10000,100000",
-              timeout: int = 30, ctx: Context = None) -> dict[str, Any]:
+def benchmark(code: Annotated[str, Field(description="Program that reads integer N from stdin's first line and does work sized by N")],
+              language: Annotated[str, Field(description="Language `code` is written in; default 'python3'")] = "python3",
+              sizes: Annotated[str, Field(description="Comma-separated input sizes to run at, e.g. '100,1000,10000,100000'")] = "100,1000,10000,100000",
+              timeout: Annotated[int, Field(description="Wall-clock seconds allowed per size before that run is killed")] = 30,
+              ctx: Context = None) -> dict[str, Any]:
     """Empirically measure time complexity by running code at increasing input sizes.
 
     Contract: the code must read an integer N from stdin (first line) and do work
-    sized by N. codecalc runs it at each size in `sizes` (comma-separated) and fits
-    the growth curve to estimate Big-O (O(1), O(log n), O(n), O(n log n), O(n^2)...).
+    sized by N. codecalc runs it at each size in `sizes` and fits the growth
+    curve to estimate Big-O (O(1), O(log n), O(n), O(n log n), O(n^2)...).
     Example python: 'import sys\\nn=int(sys.stdin.readline()); s=0\\nfor i in range(n): s+=i\\nprint(s)'
     """
     # Progress deliberately NOT documented in the docstring above: the
@@ -2170,22 +2172,21 @@ def benchmark(code: str, language: str = "python3", sizes: str = "100,1000,10000
 
 
 @mcp.tool(group="execution")
-def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 15,
-                      dependencies: dict[str, list[str]] | None = None,
+def compare_execution(snippets: Annotated[dict[str, str], Field(description="Language name -> code; each snippet must be a complete, valid program in its own language")],
+                      stdin: Annotated[str, Field(description="Text piped to every snippet's standard input; empty means no input")] = "",
+                      timeout: Annotated[int, Field(description="Wall-clock seconds allowed per language before that run is killed")] = 15,
+                      dependencies: Annotated[dict[str, list[str]] | None, Field(description="Not supported here; any truthy value is refused — install packages beforehand instead")] = None,
                       ctx: Context = None) -> dict[str, Any]:
     """Run the same code in multiple languages side by side.
 
-    `snippets` maps language name -> code (each snippet must be valid in its own
-    language). Returns per-language stdout/stderr/exit/duration plus which was fastest.
+    Returns per-language stdout/stderr/exit/duration plus which was fastest.
     Example: {"python3": "print(6*7)", "node": "console.log(6*7)"}
 
-    `dependencies` is NOT supported here (a truthy value is a `validation`
-    error) — this tool fans out across every language with no per-language
-    install plumbing behind it; use `install_package`/
-    `execute_code(dependencies=...)` beforehand instead. A `# /// script`
-    block in a snippet is likewise never installed, but is DISCLOSED, not
-    dropped: a python3 row that carries one gets
-    `dependencies: {"status": "unsupported", "reason": ...}`.
+    This tool fans out across every language with no per-language install
+    plumbing behind it; use `install_package`/`execute_code(dependencies=...)`
+    beforehand instead. A `# /// script` block in a snippet is likewise never
+    installed, but is DISCLOSED, not dropped: a python3 row that carries one
+    gets `dependencies: {"status": "unsupported", "reason": ...}`.
     """
     # Progress not documented in the docstring above — same reasoning as
     # benchmark's own comment just above it: the docstring feeds
@@ -2208,12 +2209,11 @@ def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 
 
 
 @mcp.tool(group="execution")
-def runtimes_status(languages: str = "") -> dict[str, Any]:
+def runtimes_status(languages: Annotated[str, Field(description="Comma-separated languages to check, e.g. 'python3,node,rust'; empty checks all")] = "") -> dict[str, Any]:
     """Check every language runtime for available updates (NON-MUTATING).
 
     Reports current vs latest version per language, which package manager owns
     it (mise/rustup/swiftly/apt/npm/uv), and the exact command that would run.
-    Optional `languages` = comma-separated subset, e.g. "python3,node,rust".
 
     Each entry also carries `tier` (registry.RELIABILITY_TIERS) — see
     list_languages for what `tested`/`best_effort`/`plan_only` mean. A
@@ -2228,13 +2228,15 @@ def runtimes_status(languages: str = "") -> dict[str, Any]:
 
 
 @mcp.tool(group="admin")
-async def update_runtimes(languages: str = "", apply: bool = False, timeout: int = 600,
+async def update_runtimes(languages: Annotated[str, Field(description="Comma-separated languages to update, e.g. 'python3,node,rust'; empty updates all")] = "",
+                          apply: Annotated[bool, Field(description="False (default) is a dry run reporting commands only; True actually runs them and asks for confirmation first")] = False,
+                          timeout: Annotated[int, Field(description="Wall-clock seconds allowed for the update commands to complete")] = 600,
                           ctx: Context = None) -> dict[str, Any] | InputRequiredResult:
     """Update language runtimes. SAFE BY DEFAULT: with apply=False this is a
     dry run — it returns the update commands that WOULD run without changing
     anything. Pass apply=True to actually execute them (mise up, rustup update,
     swiftly update, apt-get upgrade of language packages, npm -g update, uv tool
-    upgrade). `languages` = comma-separated subset; empty = all.
+    upgrade).
 
     apply=True asks the caller to confirm first (a protocol-level gate, not
     just the `anthropic/requiresUserInteraction` `_meta` hint — see
@@ -2325,8 +2327,10 @@ def verify_optimization_view() -> str:
 # does not document. session_run has the same untyped treatment, for the
 # same reason with a list instead of ImageContent — see its own comment.
 @mcp.tool(group="sessions")
-def session_read_file(session_id: str, path: str, max_bytes: int = 65536,
-                      as_image: bool = False):
+def session_read_file(session_id: Annotated[str, Field(description="Id of the session whose workspace file to read")],
+                      path: Annotated[str, Field(description="Relative path inside the workspace to read")],
+                      max_bytes: Annotated[int, Field(description="Max bytes to read from the file; default 65536 (64 KiB)")] = 65536,
+                      as_image: Annotated[bool, Field(description="Return the file as an inline image the model can see, instead of text")] = False):
     """Read a file from a session workspace.
 
     Text files return content. With as_image=True (or for image files), the
@@ -2449,11 +2453,17 @@ def _inline_artifact_blocks(session_id: str, artifacts: list[dict]) -> tuple[lis
 # DictModel ... Input should be a valid dictionary". Left untyped, both
 # branches pass through unvalidated exactly as before.
 @mcp.tool(group="sessions")
-def session_run(session_id: str, entry_file: str, language: str | None = None,
-                stdin: str = "", timeout: int = 30,
-                dependencies: list[str] | None = None, ctx: Context = None):
-    """Run a multi-file program in a session: execute `entry_file`, which may
-    import other files already in the session workspace (helper.py, data/...).
+def session_run(session_id: Annotated[str, Field(description="Id of the session workspace to run in")],
+                entry_file: Annotated[str, Field(description="Relative path of the file to execute; may import other files already in the workspace")],
+                language: Annotated[str | None, Field(description="Language to run `entry_file` as; omit to infer it from the session/file")] = None,
+                stdin: Annotated[str, Field(description="Text piped to the program's standard input; empty means no input")] = "",
+                timeout: Annotated[int, Field(description="Wall-clock seconds before the run is killed")] = 30,
+                dependencies: Annotated[list[str] | None, Field(description="Packages to install before running, e.g. ['requests==2.31.0']")] = None,
+                ctx: Context = None):
+    """Run a multi-file program already written into a session workspace
+    (via session_write_file). Use this, not
+    execute_code/execute_code_stream/run_submit, when `entry_file` may
+    import other files already in that workspace (helper.py, data/...).
 
     Runs as a fresh process in the session workdir (not the REPL worker), so
     relative imports and data files resolve. Returns stdout/stderr/verdict
@@ -2506,7 +2516,9 @@ def session_run(session_id: str, entry_file: str, language: str | None = None,
 
 
 @mcp.tool(group="calculator")
-def convert_units(value: float, from_unit: str, to_unit: str) -> dict[str, Any]:
+def convert_units(value: Annotated[float, Field(description="Numeric quantity to convert, in `from_unit`")],
+                  from_unit: Annotated[str, Field(description="Source unit alias, e.g. 'mph', 'celsius', 'gb'; see list_units for all aliases")],
+                  to_unit: Annotated[str, Field(description="Target unit alias, e.g. 'km/h', 'fahrenheit', 'mib'; see list_units for all aliases")]) -> dict[str, Any]:
     """Convert a value between units (dimensional analysis via sympy).
 
     Supports metric/imperial length, mass, time, speed, energy, power, force,
@@ -2518,7 +2530,7 @@ def convert_units(value: float, from_unit: str, to_unit: str) -> dict[str, Any]:
 
 
 @mcp.tool(group="calculator")
-def physical_constants(name: str | None = None) -> dict[str, Any]:
+def physical_constants(name: Annotated[str | None, Field(description="Constant to look up, e.g. 'speed_of_light', 'planck', 'avogadro'; omit to list all 22")] = None) -> dict[str, Any]:
     """Look up a physical constant (speed_of_light, planck, avogadro,
     gravity, electron_mass, gas_constant, ...) or list all 22 with values."""
     return units.constants(name)
@@ -2533,7 +2545,7 @@ def list_units() -> dict[str, Any]:
 # ── exact arithmetic & programmer-mode (ported from the Claude calc skill) ──
 
 @mcp.tool(group="calculator")
-def calc_exact(expr: str) -> dict[str, Any]:
+def calc_exact(expr: Annotated[str, Field(description="Literal arithmetic expression with no symbols, e.g. '2**64 - 1', 'comb(52,5)', '0.1+0.2 == 0.3'")]) -> dict[str, Any]:
     """Use calc_exact, not evaluate_expression, for a literal arithmetic
     expression with no symbols in it. EXACT arithmetic: 0.1 + 0.2 == 0.3 is
     True here (False in plain Python).
@@ -2548,24 +2560,31 @@ def calc_exact(expr: str) -> dict[str, Any]:
 
 
 @mcp.tool(group="calculator")
-def compare_threshold(a: str, op: str, b: str) -> dict[str, Any]:
+def compare_threshold(a: Annotated[str, Field(description="Left-hand numeric expression, evaluated exactly")],
+                      op: Annotated[str, Field(description="Comparison operator: one of ==, !=, >, >=, <, <= ('=' also accepted for ==)")],
+                      b: Annotated[str, Field(description="Right-hand numeric expression, evaluated exactly")]) -> dict[str, Any]:
     """Exact threshold check with a verdict and the shortfall when it fails.
+    Use calc_exact, not this, when you want the computed VALUE rather than a
+    threshold comparison.
 
-    `a OP b` with op in ==, !=, >, >=, <, <= (= accepted for ==). Both sides
-    are evaluated exactly and printed as fractions — a threshold comparison
-    written out cannot be gotten backwards. Example: ('1/25', '>', '0.05').
+    `a OP b`. Both sides are evaluated exactly and printed as fractions — a
+    threshold comparison written out cannot be gotten backwards. Example:
+    ('1/25', '>', '0.05').
     """
     return exact.compare_threshold(a, op, b)
 
 
 @mcp.tool(group="calculator")
-def percentage(part: str, total: str) -> dict[str, Any]:
-    """Exact share and percentage of PART / TOTAL (rationals accepted)."""
+def percentage(part: Annotated[str, Field(description="Numerator expression (rationals accepted), evaluated exactly")],
+              total: Annotated[str, Field(description="Denominator expression (rationals accepted), evaluated exactly")]) -> dict[str, Any]:
+    """Exact share and percentage of PART / TOTAL. Use calc_exact for a
+    single arithmetic expression, or compare_threshold to check the result
+    against a threshold rather than just compute it."""
     return exact.percentage(part, total)
 
 
 @mcp.tool(group="calculator")
-def calc_stats(nums: list[float]) -> dict[str, Any]:
+def calc_stats(nums: Annotated[list[float], Field(description="Sample of numbers to summarize (mean, median, sample stdev, coefficient of variation)")]) -> dict[str, Any]:
     """Mean, median, sample stdev, and coefficient of variation (CV) for a
     sample of numbers. Pairs with percentiles for distribution shape
     (p50/p90/p95/p99) on the same sample, and with benchmark or
@@ -2577,8 +2596,11 @@ def calc_stats(nums: list[float]) -> dict[str, Any]:
 
 
 @mcp.tool(group="calculator")
-def percentiles(nums: list[float]) -> dict[str, Any]:
-    """p50/p90/p95/p99 by nearest-rank AND linear interpolation.
+def percentiles(nums: Annotated[list[float], Field(description="Sample of numbers to compute p50/p90/p95/p99 for, by nearest-rank and linear interpolation")]) -> dict[str, Any]:
+    """p50/p90/p95/p99 (the 50th/90th/95th/99th percentile cutoffs) by
+    nearest-rank AND linear interpolation. Pairs with calc_stats, which
+    gives mean/median/stdev/CV on the same sample instead of these
+    distribution points.
 
     Warns when n < 100 that p99 is just the maximum wearing a label.
     """
@@ -2586,7 +2608,8 @@ def percentiles(nums: list[float]) -> dict[str, Any]:
 
 
 @mcp.tool(group="calculator")
-def collision_probability(items: int, bits: int) -> dict[str, Any]:
+def collision_probability(items: Annotated[int, Field(description="Number of items being hashed")],
+                          bits: Annotated[int, Field(description="Width of the hash in bits, e.g. 32, 64, 128")]) -> dict[str, Any]:
     """Birthday-bound hash collision probability: 1 - exp(-n^2 / (2*2^b)).
 
     Sizes hashes: 1e6 items into 64 bits is ~2.7e-8; 1e5 into 32 bits is ~0.69
@@ -2596,28 +2619,28 @@ def collision_probability(items: int, bits: int) -> dict[str, Any]:
 
 
 @mcp.tool(group="calculator")
-def data_sizes(n: int) -> dict[str, Any]:
-    """Byte counts for a plain integer, both binary (KiB/MiB/GiB/TiB, /1024)
-    and decimal (KB/MB/GB/TB, /1000) — the gap between them is where '291 MB'
-    and '277 MiB' silently disagree by 5%. For units other than bytes, use
-    convert_units. For a duration, not a byte count, use human_duration.
-    Returns `bytes` plus `binary` and `decimal` dicts of unit -> value.
+def data_sizes(n: Annotated[int, Field(description="Byte count to express in both binary (KiB/MiB/GiB/TiB, /1024) and decimal (KB/MB/GB/TB, /1000) units")]) -> dict[str, Any]:
+    """Byte counts for a plain integer, both binary and decimal — the gap
+    between them is where '291 MB' and '277 MiB' silently disagree by 5%.
+    For units other than bytes, use convert_units. For a duration, not a
+    byte count, use human_duration. Returns `bytes` plus `binary` and
+    `decimal` dicts of unit -> value.
     """
     return exact.data_sizes(n)
 
 
 @mcp.tool(group="calculator")
-def human_duration(seconds: float) -> dict[str, Any]:
-    """Convert a SPAN of elapsed seconds (not a point-in-time timestamp) into
-    a humanised duration (e.g. '2d 3h 4m 5s') plus per-day and per-30d rates.
-    For an epoch timestamp to a calendar date, use epoch_time instead. For
-    byte counts, not seconds, use data_sizes. Returns `human`, `per_day`,
-    `per_30d`, and the echoed `seconds`."""
+def human_duration(seconds: Annotated[float, Field(description="Elapsed span in seconds (not a point-in-time timestamp) to humanize, e.g. into '2d 3h 4m 5s'")]) -> dict[str, Any]:
+    """Convert a SPAN of elapsed seconds into a humanised duration (e.g.
+    '2d 3h 4m 5s') plus per-day and per-30d rates. For an epoch timestamp
+    to a calendar date, use epoch_time instead. For byte counts, not
+    seconds, use data_sizes. Returns `human`, `per_day`, `per_30d`, and the
+    echoed `seconds`."""
     return exact.human_duration(seconds)
 
 
 @mcp.tool(group="calculator")
-def epoch_time(n: str) -> dict[str, Any]:
+def epoch_time(n: Annotated[str, Field(description="Epoch timestamp to convert to ISO 8601 UTC; units (seconds/millis/micros/nanos) are inferred from magnitude")]) -> dict[str, Any]:
     """Epoch seconds/millis/micros/nanos to ISO 8601 UTC (implausible readings
     suppressed)."""
     return exact.epoch_time(n)
@@ -2678,28 +2701,31 @@ _BITS_MODE_PARAMS = {
 
 
 @mcp.tool(group="calculator")
-def bits(mode: str, n: int | None = None, align: int | None = None,
-         a: int | None = None, op: str | None = None, b: int | None = None,
-         width: int | None = None) -> dict[str, Any]:
+def bits(mode: Annotated[str, Field(description="Which fact/operation to compute: 'analysis', 'op', 'widths', or 'repr' (each has its own required params)")],
+         n: Annotated[int | None, Field(description="The integer to inspect; required by modes 'analysis', 'widths', and 'repr'")] = None,
+         align: Annotated[int | None, Field(description="Alignment boundary for mode='analysis'; reports padding needed to reach it")] = None,
+         a: Annotated[int | None, Field(description="First operand for mode='op'; required by that mode")] = None,
+         op: Annotated[str | None, Field(description="Bit operation for mode='op': and/or/xor/nand/nor/xnor/not/shl/shr/sar/rol/ror")] = None,
+         b: Annotated[int | None, Field(description="Second operand for mode='op'; required unless op='not'")] = None,
+         width: Annotated[int | None, Field(description="Bit width for mode='op' (8/16/32/64, default 64) or mode='repr' (omit to skip width analysis)")] = None) -> dict[str, Any]:
     """Programmer-mode integer facts and operations, selected by `mode` —
     replaces the four former standalone tools bit_analysis, bitop,
     int_widths and base_repr, retired in 0.12.0 (CHANGELOG.md). Every mode
     returns exactly its former tool's own result, plus `mode` (additive).
 
     mode="analysis" (was bit_analysis) — facts about a single N: popcount,
-    bit length, trailing zeros, power-of-two check, next power of two, and
-    (with `align`) padding needed to reach an alignment boundary. Used by
-    this mode: `n` (required), `align` (optional).
+    bit length, trailing zeros, power-of-two check, next power of two. Used
+    by this mode: `n` (required), `align` (optional).
 
-    mode="op" (was bitop) — apply an operation to `a` (and `b`, required
-    unless op="not") at a fixed `width` (8/16/32/64, default 64): and/or/
-    xor/nand/nor/xnor/not/shl/shr/sar/rol/ror. Every result shows unsigned,
+    mode="op" (was bitop) — combine two integers `a`/`b` with
+    and/or/xor/nand/nor/xnor/not/shl/shr/sar/rol/ror at a fixed `width`
+    (8/16/32/64). Every result shows unsigned,
     signed (two's complement), hex, octal and binary. shr is logical
     (zero-fill); sar is arithmetic (sign-propagating) — 0x80 shr 1 = 0x40
-    (+64) but 0x80 sar 1 = 0xC0 (-64). A left shift that drops bits says
+    (+64) but 0x80 sar 1 = 0xC0 (-64); rol/ror rotate bits around the width
+    instead of shifting them out. A left shift that drops bits says
     OVERFLOW and shows the unbounded answer. Used by this mode: `a`, `op`
-    (required), `b` (required unless op="not"), `width` (optional, default
-    64).
+    (required), `b` (required unless op="not"), `width` (optional).
 
     mode="widths" (was int_widths) — which widths (i8..i64/u8..u64) hold
     `n`, and the wrapped value where they do not; flags anything past 2^53
@@ -2708,7 +2734,7 @@ def bits(mode: str, n: int | None = None, align: int | None = None,
 
     mode="repr" (was base_repr) — hex/oct/bin of `n`; with `width`, two's
     complement and signed-overflow detection. Used by this mode: `n`
-    (required), `width` (optional; None skips width analysis entirely).
+    (required), `width` (optional).
     """
     err = _mode_dispatch_error(
         "bits", "mode", mode, _BITS_MODE_PARAMS,
@@ -2728,7 +2754,9 @@ def bits(mode: str, n: int | None = None, align: int | None = None,
 
 
 @mcp.tool(group="calculator")
-def radix_convert(value: str, from_base: int = 10, to_base: int = 10) -> dict[str, Any]:
+def radix_convert(value: Annotated[str, Field(description="Digit string to convert (fractions with '.' accepted), in `from_base`")],
+                  from_base: Annotated[int, Field(description="Base `value` is written in; valid range 2..36, default 10")] = 10,
+                  to_base: Annotated[int, Field(description="Base to convert `value` into; valid range 2..36, default 10")] = 10) -> dict[str, Any]:
     """Convert a value between ANY bases 2..36, fractions included; bases that
     cannot represent the fraction (e.g. 0.1 in base 2) are flagged
     non-terminating. `radix_convert('zz', 36, 7)` is one call."""
@@ -2736,7 +2764,7 @@ def radix_convert(value: str, from_base: int = 10, to_base: int = 10) -> dict[st
 
 
 @mcp.tool(group="calculator")
-def float_repr(x: float) -> dict[str, Any]:
+def float_repr(x: Annotated[float, Field(description="Value to inspect as binary64: exact stored value, raw bits, ULP, neighbours, and representability")]) -> dict[str, Any]:
     """What binary64 actually stores for X: exact value, raw bits, ULP, both
     neighbours, and whether the literal is representable. `float_repr(0.1)`
     shows 0.1000000000000000055511151231257827...; `float_repr(0.25)` says
@@ -2745,10 +2773,14 @@ def float_repr(x: float) -> dict[str, Any]:
 
 
 @mcp.tool(group="verification")
-def algebraic_equiv(a: str, b: str) -> dict[str, Any]:
-    """Are two expressions algebraically identical? Refs: 'is (a*b)/c the same
-    as a*(b/c)?' answered exactly. Caveat: symbolic identity says nothing
-    about float rounding, integer truncation or modular overflow."""
+def algebraic_equiv(a: Annotated[str, Field(description="First symbolic expression to compare for algebraic identity")],
+                    b: Annotated[str, Field(description="Second symbolic expression to compare for algebraic identity")]) -> dict[str, Any]:
+    """Are two expressions algebraically identical? 'is (a*b)/c the same as
+    a*(b/c)?' answered exactly. Use symbolic(op="simplify"), not this, to
+    see one expression's own simplified/factored/expanded forms rather than
+    compare two; use verify_translation to compare running PROGRAMS, not
+    expressions. Caveat: symbolic identity says nothing about float
+    rounding, integer truncation or modular overflow."""
     return exact.algebraic_equiv(a, b)
 
 
@@ -2769,9 +2801,12 @@ _SYMBOLIC_MODE_PARAMS = {
 
 
 @mcp.tool(group="calculator")
-def symbolic(op: str, expr: str | None = None, var: str | None = None,
-            point: str | None = None, system: str | None = None,
-            variables: str | None = None) -> dict[str, Any]:
+def symbolic(op: Annotated[str, Field(description="Which symbolic operation to run: 'solve', 'solve_linear', 'simplify', or 'limit' (each has its own required params)")],
+            expr: Annotated[str | None, Field(description="Expression or equation to solve/simplify/take the limit of; required by op='solve'/'simplify'/'limit'")] = None,
+            var: Annotated[str | None, Field(description="Variable to solve for or take the limit over; optional, default 'x'; used by op='solve'/'limit'")] = None,
+            point: Annotated[str | None, Field(description="Point `var` approaches for op='limit'; optional, default 'oo' (infinity)")] = None,
+            system: Annotated[str | None, Field(description="';'-separated equations for op='solve_linear', e.g. 'x + y = 10; x - y = 2'; required by that op")] = None,
+            variables: Annotated[str | None, Field(description="Comma-separated variable names for op='solve_linear', e.g. 'x, y'; required by that op")] = None) -> dict[str, Any]:
     """Symbolic algebra, selected by `op` — replaces the four former
     standalone tools solve_expression, solve_linear, simplify_expression
     and limit_expression, retired in 0.12.0 (CHANGELOG.md). Every op
@@ -2782,14 +2817,11 @@ def symbolic(op: str, expr: str | None = None, var: str | None = None,
     op="solve_linear". For general constraint satisfiability (inequalities,
     boolean constraints, multiple solvers), use z3_check. Returns
     `solutions` as a list of strings alongside the parsed `equation` and
-    `variable`. Used by this op: `expr` (required), `var` (optional,
-    default "x").
+    `variable`. Used by this op: `expr` (required), `var` (optional).
 
     op="solve_linear" (was solve_linear) — a system of equations sharing
-    variables. `system` is ';'-separated equations, `variables`
-    comma-separated. Example: system='x + y = 10; x - y = 2',
-    variables='x, y'. Used by this op: `system`, `variables` (both
-    required).
+    variables. Example: system='x + y = 10; x - y = 2', variables='x, y'.
+    Used by this op: `system`, `variables` (both required).
 
     op="simplify" (was simplify_expression) — simplify, factor, and expand
     an expression — algebraic forms, not solving (use op="solve") and not a
@@ -2798,10 +2830,9 @@ def symbolic(op: str, expr: str | None = None, var: str | None = None,
     `expr` (required).
 
     op="limit" (was limit_expression) — asymptotic behaviour: limit of
-    `expr` as `var` -> `point` (default "oo"). 'symbolic("limit",
-    "n*log(n)/n**2", "n")' returns 0 — settles complexity arguments faster
-    than arguing. Used by this op: `expr` (required), `var` (optional,
-    default "x"), `point` (optional, default "oo").
+    `expr` as `var` -> `point`. 'symbolic("limit", "n*log(n)/n**2", "n")'
+    returns 0 — settles complexity arguments faster than arguing. Used by
+    this op: `expr` (required), `var` (optional), `point` (optional).
     """
     err = _mode_dispatch_error(
         "symbolic", "op", op, _SYMBOLIC_MODE_PARAMS,
@@ -2823,9 +2854,11 @@ def symbolic(op: str, expr: str | None = None, var: str | None = None,
 
 
 @mcp.tool(group="verification")
-def verify_translation(source_code: str, source_language: str,
-                       target_code: str, target_language: str,
-                       test_inputs: list[str] | None = None) -> dict[str, Any]:
+def verify_translation(source_code: Annotated[str, Field(description="Original program, in `source_language`")],
+                       source_language: Annotated[str, Field(description="Language of `source_code`")],
+                       target_code: Annotated[str, Field(description="Ported program, in `target_language`, to check against `source_code`")],
+                       target_language: Annotated[str, Field(description="Language of `target_code`")],
+                       test_inputs: Annotated[list[str] | None, Field(description="Inputs to run both programs on and compare; omit to use the default edge-case set")] = None) -> dict[str, Any]:
     """PROVE that a port is equivalent: run both programs, compare their output.
 
     You write the translation — you are the language model. This runs your
@@ -2866,46 +2899,42 @@ def verify_translation(source_code: str, source_language: str,
 
 
 @mcp.tool(group="verification")
-def compare_edge_cases(snippets: dict[str, str],
-                       inputs: list[str] | None = None) -> dict[str, Any]:
+def compare_edge_cases(snippets: Annotated[dict[str, str], Field(description="Language name -> code; provide one correct snippet per language, implementing the same logic")],
+                       inputs: Annotated[list[str] | None, Field(description="Inputs to run every snippet on; omit for the default set covering empty/zero/negative/float cases")] = None) -> dict[str, Any]:
     """Run the same logic in N languages on edge-case inputs and flag divergence.
 
-    `snippets` maps language -> code (provide a correct snippet per language;
-    write one per language). Default inputs cover empty,
-    zero, negative, and float-precision cases: ['', '0', '1', '-1', '10',
-    '100', '0.1\\n0.2']. Returns a per-input matrix plus a divergences list
-    where languages disagree on identical input.
+    Default inputs cover empty, zero, negative, and float-precision cases:
+    ['', '0', '1', '-1', '10', '100', '0.1\\n0.2']. Returns a per-input
+    matrix plus a divergences list where languages disagree on identical
+    input.
     """
     return translation.compare_edge_cases(snippets, inputs=inputs)
 
 
 @mcp.tool(group="verification")
-def verify_optimization(original: str, candidate: str, language: str,
-                        test_inputs: list[str] | None = None,
-                        sizes: list[int] | None = None,
-                        min_speedup: float = optimization.DEFAULT_MIN_SPEEDUP,
+def verify_optimization(original: Annotated[str, Field(description="Baseline program to compare against")],
+                        candidate: Annotated[str, Field(description="Optimised version of `original`, to prove correct and measurably faster")],
+                        language: Annotated[str, Field(description="Language both `original` and `candidate` are written in")],
+                        test_inputs: Annotated[list[str] | None, Field(description="Inputs to confirm both programs still agree on; omit to use the default set")] = None,
+                        sizes: Annotated[list[int] | None, Field(description="Input sizes to time both programs at (2-3+ sizes needed for significance); omit for defaults")] = None,
+                        min_speedup: Annotated[float, Field(description="Minimum median speedup ratio required to accept the optimisation; default 1.15 (15% faster)")] = optimization.DEFAULT_MIN_SPEEDUP,
                         ctx: Context = None) -> dict[str, Any]:
-    """PROVE an optimisation: same outputs, and measurably AND SIGNIFICANTLY faster.
+    """PROVE an optimisation: same outputs, measurably AND SIGNIFICANTLY faster.
 
-    You write the optimised version. This runs both against the same inputs to
-    confirm they still agree, then TIMES both at increasing sizes (5 runs each)
-    and compares. Accepted only if the median ratio clears `min_speedup` AND a
-    one-sided Mann-Whitney U test rejects "not faster" at every measured size
-    (two or three) or a Bonferroni-corrected majority (more); a single size
-    can never be accepted — a ratio alone is not evidence the gap is real
-    rather than noise; see the result's `inference` field for the per-size U
-    statistic, p-value, and effect size behind the verdict.
+    Two gates, in order. Correctness: runs `candidate` against `original` on
+    shared inputs — a faster-but-wrong candidate fails here and is never
+    timed. Speed: times both at increasing sizes; accepts only when the
+    median ratio clears `min_speedup` AND a one-sided Mann-Whitney U test
+    rejects "not faster" at every counted size (2-3), or a
+    Bonferroni-corrected majority above that — one size never accepts alone.
+    See `inference` for the per-size U statistic, p-value, effect size.
 
-    A rejection tells you which gate failed and by how much — "correct, 1.3x
-    median, but only 1/4 sizes significant" is the answer an optimiser that
-    fabricates wins cannot give. A candidate that is faster but wrong fails the
-    first gate, and its speed is never measured, because a faster wrong answer
-    is not an optimisation.
+    A rejection names which gate failed and by how much, e.g. "correct, 1.3x
+    median, but only 1/4 sizes significant."
 
-    An accepted result is graded `cross_checked` (see `grade_basis` for the
-    runtime and the measured speedup). A rejection — wrong, not faster enough,
-    or not significantly faster — is graded `ungraded`: correctness alone does
-    not earn a grade for the optimisation claim this tool exists to answer.
+    Accepted grades `cross_checked`; any rejection — wrong, not faster
+    enough, not significant — grades `ungraded`: correctness alone earns no
+    grade for the speed claim this tool answers.
     """
     # Progress not documented in the docstring above — same reasoning as
     # benchmark's/compare_execution's own comments: the docstring feeds
@@ -2921,9 +2950,11 @@ def verify_optimization(original: str, candidate: str, language: str,
 
 
 @mcp.tool(group="analysis")
-def extract_function(code: str, language: str, function_name: str,
-                     call: str | None = None,
-                     test_inputs: list[str] | None = None) -> dict[str, Any]:
+def extract_function(code: Annotated[str, Field(description="Source containing the function to extract, plus its imports and helpers")],
+                     language: Annotated[str, Field(description="Language `code` is written in; python3 gets exact ast extraction, others best-effort block extraction")],
+                     function_name: Annotated[str, Field(description="Name of the function within `code` to extract into a standalone program")],
+                     call: Annotated[str | None, Field(description="Call expression to invoke the extracted function; required for non-python3 languages")] = None,
+                     test_inputs: Annotated[list[str] | None, Field(description="Inputs to run the extracted program with, one run per input")] = None) -> dict[str, Any]:
     """Extract a named function (with its imports + referenced helpers) into a
     standalone program and run it in the sandbox.
 
