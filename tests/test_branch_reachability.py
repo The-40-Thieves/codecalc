@@ -1060,6 +1060,177 @@ check("closure-taint-return: `if y != -20` — downstream of an unconditional "
       f"-> {_ctr_last}")
 
 
+# ── fourth review's BLOCKER: `_walk_loop_conservative` hardcoded
+# `falls_through = True` regardless of what the one-iteration walk itself
+# said, so an unconditional `return` in a `while` (or a `for` above the
+# unroll cap) never narrowed the path condition after the loop ──────────
+
+# Exact repro 1: an unconditional `return` inside a `while` whose entry is
+# ALWAYS taken (`n = 0; while n < 4`) means entering the loop at all
+# means returning — case (a), EXACT closure.
+_WHILE_UNCOND_RETURN_CLOSES = (
+    "def f(x):\n"
+    "    if x == 1:\n"
+    "        n = 0\n"
+    "        while n < 4:\n"
+    "            return 6\n"
+    "    if x == 1:\n"
+    "        return 999\n"
+    "    return 0\n"
+)
+_wucr = br.analyze("python3", _WHILE_UNCOND_RETURN_CLOSES)
+check("while-uncond-return-closes: the SECOND `if x == 1` is dead — every "
+      "call with x == 1 returns 6 at the while, never gets there",
+      _by_line(_wucr, 6)["verdict"] == "dead", f"-> {_by_line(_wucr, 6)}")
+_verify_every_witness(_wucr, _WHILE_UNCOND_RETURN_CLOSES, "f", "while-uncond-return-closes")
+
+# Exact repro 2: same shape, a `for` ABOVE `_MAX_UNROLL_ITERATIONS` (so it
+# goes through the SAME conservative mechanism, not the unroll one).
+_FOR_ABOVE_CAP_UNCOND_RETURN_CLOSES = (
+    "def f(x):\n"
+    "    for i in range(40):\n"
+    "        return 9\n"
+    "    if x == 1:\n"
+    "        return 999\n"
+    "    return 0\n"
+)
+assert br._MAX_UNROLL_ITERATIONS < 40, "this repro needs the conservative (above-cap) path, not the unroll one"
+_facr = br.analyze("python3", _FOR_ABOVE_CAP_UNCOND_RETURN_CLOSES)
+check("for-above-cap-uncond-return-closes: `if x == 1` is dead — "
+      "`range(40)` always enters and its body always returns first",
+      _by_line(_facr, 4)["verdict"] == "dead", f"-> {_by_line(_facr, 4)}")
+_verify_every_witness(_facr, _FOR_ABOVE_CAP_UNCOND_RETURN_CLOSES, "f",
+                       "for-above-cap-uncond-return-closes")
+
+# Case (b): the body falls through on the one representative iteration but
+# CONTAINS a `return` (input-dependent) — later, unmodeled iterations
+# might take it, so anything after must be `unknown`, never a fabricated
+# `reachable` — EXCEPT a branch that is dead regardless (contradicts the
+# one iteration's own necessary "didn't return" condition), which must
+# still correctly come back `dead`.
+_WHILE_COND_RETURN_POSTLOOP = (
+    "def f(x):\n"
+    "    n = 0\n"
+    "    while n < 3:\n"
+    "        if x > 0:\n"
+    "            return 1\n"
+    "        n = n + 1\n"
+    "    if x == 100:\n"
+    "        return 2\n"
+    "    if x == -5:\n"
+    "        return 3\n"
+    "    return 0\n"
+)
+_wcrp = br.analyze("python3", _WHILE_COND_RETURN_POSTLOOP)
+check("while-cond-return-postloop: `if x == 100` is dead — contradicts the "
+      "one-iteration walk's own necessary `not (x > 0)`",
+      _by_line(_wcrp, 7)["verdict"] == "dead", f"-> {_by_line(_wcrp, 7)}")
+check("while-cond-return-postloop: `if x == -5` is `unknown`, not a "
+      "fabricated `reachable` — a later, unmodeled iteration might have "
+      "returned first",
+      _by_line(_wcrp, 9)["verdict"] == "unknown", f"-> {_by_line(_wcrp, 9)}")
+_verify_every_witness(_wcrp, _WHILE_COND_RETURN_POSTLOOP, "f", "while-cond-return-postloop")
+_ns_wcrp: dict = {}
+exec(compile(_WHILE_COND_RETURN_POSTLOOP, "<t>", "exec"), _ns_wcrp)  # exec is a global ruff-ignore (S102); check_no_eval.py is the real gate
+check("while-cond-return-postloop: ground truth — f(1) == 1 (conditional "
+      "return fires) and f(100) != 2 (the dead line's own return value "
+      "never comes back; x == 100 > 0 also fires the SAME conditional "
+      "return at the while, for a different reason than x == 1 does — "
+      "either way it never reaches the dead line)",
+      _ns_wcrp["f"](1) == 1 and _ns_wcrp["f"](100) != 2,
+      f"-> f(1)={_ns_wcrp['f'](1)} f(100)={_ns_wcrp['f'](100)}")
+
+# Same case (b), but for a `for` ABOVE the unroll cap.
+_FOR_ABOVE_CAP_COND_RETURN = (
+    "def f(x):\n"
+    "    for i in range(40):\n"
+    "        if x > 0:\n"
+    "            return 1\n"
+    "    if x == 5:\n"
+    "        return 2\n"
+    "    if x == -3:\n"
+    "        return 4\n"
+    "    return 0\n"
+)
+_facrd = br.analyze("python3", _FOR_ABOVE_CAP_COND_RETURN)
+check("for-above-cap-cond-return: `if x == 5` is dead — `x == 5` "
+      "contradicts the necessary `not (x > 0)`",
+      _by_line(_facrd, 5)["verdict"] == "dead", f"-> {_by_line(_facrd, 5)}")
+check("for-above-cap-cond-return: `if x == -3` is `unknown`, not a "
+      "fabricated `reachable`",
+      _by_line(_facrd, 7)["verdict"] == "unknown", f"-> {_by_line(_facrd, 7)}")
+_verify_every_witness(_facrd, _FOR_ABOVE_CAP_COND_RETURN, "f", "for-above-cap-cond-return")
+
+# A `while` nested INSIDE an unrolled `for`, whose body returns
+# UNCONDITIONALLY: every unrolled copy's own while always fires (case (a),
+# EXACT), which must close not just that one copy but every LATER copy
+# AND the code after the whole outer loop.
+_NESTED_WHILE_IN_UNROLLED_FOR = (
+    "def f(x):\n"
+    "    for i in range(3):\n"
+    "        n = 0\n"
+    "        while n < 2:\n"
+    "            return 5\n"
+    "        y = 1\n"
+    "    if x == 1:\n"
+    "        return 2\n"
+    "    return 0\n"
+)
+_nwuf = br.analyze("python3", _NESTED_WHILE_IN_UNROLLED_FOR)
+check("nested-while-in-unrolled-for: post-loop `if x == 1` is dead — the "
+      "outer loop's every copy always enters the inner `while`, which "
+      "always returns first",
+      _by_line(_nwuf, 7)["verdict"] == "dead", f"-> {_by_line(_nwuf, 7)}")
+_verify_every_witness(_nwuf, _NESTED_WHILE_IN_UNROLLED_FOR, "f", "nested-while-in-unrolled-for")
+_ns_nwuf: dict = {}
+exec(compile(_NESTED_WHILE_IN_UNROLLED_FOR, "<t>", "exec"), _ns_nwuf)  # exec is a global ruff-ignore (S102); check_no_eval.py is the real gate
+check("nested-while-in-unrolled-for: ground truth — every call returns 5 "
+      "at the inner while on the very first outer iteration",
+      all(_ns_nwuf["f"](v) == 5 for v in (-9, 0, 1, 2, 999)),
+      f"-> {[_ns_nwuf['f'](v) for v in (-9, 0, 1, 2, 999)]}")
+
+# The reviewer's own SEED=111 differential-corpus program, verbatim, as a
+# standing regression (recovered by rerunning that seed's generator
+# against the pre-fix `branch_reachability.py`, at commit 676f55f, and
+# taking the first program that failed): the unconditional `return`
+# inside the `if (x + (x + 3)) == 5:`-guarded `while` used to leave later
+# code free to pick a witness (`x == 1`) that in reality returns `6` at
+# the `while` and never gets there.
+_SEED_111_LOOP_RETURN = (
+    "def f(x):\n"
+    "    if (x + (x + 3)) == 5:\n"
+    "        n1 = 0\n"
+    "        while n1 < 4:\n"
+    "            return 6\n"
+    "            n1 = n1 + 1\n"
+    "    else:\n"
+    "        v2 = -3\n"
+    "        v2 = (x * 0)\n"
+    "    if (4 * -1) != x:\n"
+    "        if x <= ((x * 1) + x):\n"
+    "            if (x >= x and ((x * 5) + x) != x):\n"
+    "                x = x\n"
+    "                v3 = ((x + x) + (x + -3))\n"
+    "            else:\n"
+    "                v4 = x\n"
+    "            if x <= -5:\n"
+    "                x = (-3 + x)\n"
+    "            else:\n"
+    "                return 2\n"
+    "    return 0\n"
+)
+_s111 = br.analyze("python3", _SEED_111_LOOP_RETURN)
+check("seed-111: `if x <= -5` is dead — contradicts the necessary `not "
+      "(x + (x + 3) == 5)` combined with `x <= x * 1 + x` (i.e. x >= 0)",
+      _by_line(_s111, 17)["verdict"] == "dead", f"-> {_by_line(_s111, 17)}")
+_verify_every_witness(_s111, _SEED_111_LOOP_RETURN, "f", "seed-111")
+_ns_s111: dict = {}
+exec(compile(_SEED_111_LOOP_RETURN, "<t>", "exec"), _ns_s111)  # exec is a global ruff-ignore (S102); check_no_eval.py is the real gate
+check("seed-111: ground truth — f(1) == 6 (the old bad witness for a "
+      "downstream branch actually returns 6 at the while)",
+      _ns_s111["f"](1) == 6, f"-> f(1)={_ns_s111['f'](1)}")
+
+
 print(f"\n=== {len(FAILS)} FAILURES ===" if FAILS else
       "\n=== ALL BRANCH_REACHABILITY TESTS PASS ===")
 for _f in FAILS:

@@ -729,7 +729,6 @@ def _take_closure_taint(ctx: _Ctx) -> bool:
     taken = ctx._pending_closure_taint
     ctx._pending_closure_taint = False
     return taken
-    return False
 
 
 def _decide(cond, ctx: _Ctx) -> tuple[str, dict[str, Any] | None, str | None]:
@@ -1123,18 +1122,69 @@ def _walk_for_unrolled(node: ast.For, env: dict[str, tuple[Any, str]], ctx: _Ctx
     return last_falls, last_cont, cur_env
 
 
+def _contains_return(stmts: list[ast.stmt]) -> bool:
+    """Whether ANY `return` appears anywhere in `stmts`, at any nesting
+    depth (inside a nested if/while/for included) — a purely syntactic
+    check, independent of whether that `return` is provably reachable.
+    Used by `_walk_loop_conservative` to tell "this loop body can never
+    return, so falling through is the only possibility" (no closure risk
+    at all) apart from "it might, on some iteration this one-iteration
+    walk does not model" (closure risk that must propagate downstream).
+    """
+    return any(isinstance(n, ast.Return) for stmt in stmts for n in ast.walk(stmt))
+
+
 def _walk_loop_conservative(node: ast.While | ast.For, env: dict[str, tuple[Any, str]], ctx: _Ctx,
                              cur_cond, *, static_bounds: tuple[int, int, int] | None
                              ) -> tuple[bool, Any, dict[str, tuple[Any, str]]]:
     """`(falls_through, continuation_cond, env)` for the ONE-representative-
     iteration walk of a `while` loop, or a `for` above
     `_MAX_UNROLL_ITERATIONS` — see the module docstring's LOOPS section.
-    Unlike `_walk_for_unrolled`, `falls_through` here is ALWAYS `True`: this
-    mechanism does not attempt to reason about whether the body's own
-    return closes off the loop, only about VALUE taint (below) — a
-    conservative choice consistent with everything else this path already
-    declines to decide precisely. Two things distinguish it from a plain
-    merge:
+
+    A FOURTH review confirmed the first three fixes by direct execution and
+    found this function was still unsound: it used to hardcode
+    `falls_through = True` regardless of what the one-iteration walk
+    itself reported, on the theory that this mechanism "does not attempt
+    to reason about whether the body's own return closes off the loop,
+    only about VALUE taint". That is fine for a body that CANNOT return at
+    all, but wrong whenever it can: `if x == 1: n = 0; while n < 4: return
+    6` reported the LATER `if x == 1: return 999` reachable with witness
+    `{x: 1}`, when `f(1)` returns `6` at the `while` and never gets there —
+    confirmed by direct execution, and by a multi-seed run of the
+    differential corpus (the shipped seed/size happened not to hit it).
+
+    The one-iteration body walk (`_walk_block` below) already tells us,
+    via its own `(falls_through, continuation_cond)`, exactly how much a
+    single representative iteration can be trusted to say about closure —
+    the fix is to USE that instead of discarding it, in three cases:
+
+      * The body has NO `return` anywhere (`_contains_return` is False):
+        nothing to close with. Unchanged from before — falls through,
+        `cur_cond` unchanged, only VALUE taint applies.
+      * The body falls through this one iteration (`falls_through True`)
+        but DOES contain a `return` somewhere: some OTHER, unmodeled
+        iteration might take it — this walk proves nothing about whether
+        it does. `ctx._pending_closure_taint` is set (see `_walk_if`'s own
+        docstring for the mechanism: `_decide` then reports `unknown`,
+        never `reachable`, for anything sequentially after this loop,
+        while still allowing `dead` — dropping a required conjunct only
+        WIDENS what solves). The one-iteration walk's OWN `continuation_
+        cond` is also conjoined in, rather than discarded for bare
+        `cur_cond`: not reaching a return in the FIRST iteration is a
+        REAL necessary condition for ever falling out of the loop, so
+        keeping it is strictly more precise, for free.
+      * The body does NOT fall through this one iteration at all
+        (`falls_through False`) — every path through it, for ANY input
+        that enters the loop, reaches a `return`. This is EXACT, not a
+        widening: entering the loop AT ALL means returning, so falling
+        through the WHOLE loop requires never entering it —
+        `z3.And(cur_cond, z3.Not(entry_guard))` — with no `_unresolved_
+        closure_depth` bump needed, and branches inside the body keep
+        whatever `reachable`/`unknown` verdicts the walk already gave
+        them (`_conservative_loop_depth`'s existing UNSAT-downgrade is
+        untouched).
+
+    Two things distinguish this from a plain merge, in every case above:
 
       * A branch inside the body that is UNSAT on this one iteration is
         `unknown` (`_REASON_FIRST_ITERATION_ONLY`), never `dead` — see
@@ -1166,10 +1216,12 @@ def _walk_loop_conservative(node: ast.While | ast.For, env: dict[str, tuple[Any,
         _record(ctx, line=node.lineno, kind="while", condition=condition, cond=loop_cond,
                 guard_node=node.test, parent_cond=cur_cond, env=env)
         body_env = dict(env)
+        entry_guard = guard_val
     else:
         start, stop, step = static_bounds
         entered = start < stop if step > 0 else start > stop
-        loop_cond = z3.And(cur_cond, z3.BoolVal(entered))
+        entry_guard = z3.BoolVal(entered)
+        loop_cond = z3.And(cur_cond, entry_guard)
         condition = _unparse(node.iter)
         _record(ctx, line=node.lineno, kind="for", condition=condition, cond=loop_cond,
                 guard_node=None, parent_cond=cur_cond, env=env)
@@ -1187,17 +1239,12 @@ def _walk_loop_conservative(node: ast.While | ast.For, env: dict[str, tuple[Any,
 
     ctx._conservative_loop_depth += 1
     try:
-        _, _, body_env_after = _walk_block(node.body, body_env, ctx, loop_cond)
+        body_falls, body_cont, body_env_after = _walk_block(node.body, body_env, ctx, loop_cond)
     finally:
         ctx._conservative_loop_depth -= 1
     # The body itself may have hit its own opaque pass-through (a tainted
-    # or untranslatable guard) — propagate that same uncertainty to
-    # whatever comes AFTER this loop, for the same reason `_walk_if`
-    # propagates it out of an if/else: this mechanism already declines to
-    # reason about whether the body's OWN return closes the loop (see this
-    # function's docstring), so a return concealed behind an unresolved
-    # guard INSIDE the body is exactly as untrustworthy for the loop's
-    # own value-taint results.
+    # or untranslatable guard) — propagate that same uncertainty onward,
+    # for the same reason `_walk_if` propagates it out of an if/else.
     body_taint = _take_closure_taint(ctx)
 
     tainted_env = dict(env)
@@ -1205,6 +1252,27 @@ def _walk_loop_conservative(node: ast.While | ast.For, env: dict[str, tuple[Any,
         if name not in env or entry is env[name]:
             continue  # loop-local (e.g. the loop var), or never touched
         tainted_env[name] = (ctx.fresh_tainted_symbol(entry[1], name), entry[1])
+
+    if not body_falls:
+        # EXACT: entering the loop at all means returning during this
+        # representative iteration, on ANY input that reaches it (that is
+        # what `falls_through=False` from `_walk_block` already means) —
+        # so falling through the whole loop requires never entering it.
+        ctx._pending_closure_taint = body_taint
+        return True, z3.And(cur_cond, z3.Not(entry_guard)), tainted_env
+    if _contains_return(node.body):
+        # WIDENING, not exact: this one modeled iteration happens not to
+        # return, but some OTHER iteration this walk never sees might —
+        # see this function's own docstring. `body_cont` (a necessary
+        # condition for not returning on THIS iteration) is kept rather
+        # than discarded for bare `cur_cond`, and the closure-uncertainty
+        # signal downgrades anything sequentially after this loop from
+        # `reachable` to `unknown` (never touches `dead`).
+        ctx._pending_closure_taint = True
+        return True, body_cont, tainted_env
+    # No `return` anywhere in the body: nothing to close off with, so this
+    # loop cannot narrow or taint the CONTROL FLOW of what follows, only
+    # the VALUES the body touched (handled above).
     ctx._pending_closure_taint = body_taint
     return True, cur_cond, tainted_env
 

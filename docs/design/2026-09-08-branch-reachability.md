@@ -189,11 +189,14 @@ scoping — for free.
 
 **A `while` loop, or a `for` above the cap, keeps the one-representative-
 iteration walk, made SOUND by dropping the merge for it.** A branch
-inside the body is `reachable` when this one iteration's path condition
+INSIDE the body is `reachable` when this one iteration's path condition
 is sat (a real witness is a real witness regardless of which iteration
 produced it), and `unknown` — never `dead` — when it is unsat: proof on
 one iteration is not proof for all of them (`_REASON_FIRST_ITERATION_
-ONLY`). The real fix, though, is what happens to the code AFTER the loop:
+ONLY`). (What happens to the loop's OWN closure and to code AFTER it is
+a separate question a fourth review found this walk originally got
+wrong — see "a fourth review pass" below.) The real fix, though, is what
+happens to the VALUES the code AFTER the loop can see:
 every variable the body assigns anywhere — directly, or through a nested
 arm's own merge — is TAINTED, rebound to a brand-new, entirely
 unconstrained z3 symbol (`_Ctx.fresh_tainted_symbol`) that carries no
@@ -218,8 +221,10 @@ holds, not a per-name flag that would need to be reset by hand.
 Both mechanisms honor the one invariant this tool promises: a
 `reachable` verdict always carries a witness that is a real witness
 (every one in the test suite is corroborated by `tracing.execute_trace`
-against the real program), and only unrolling — never the conservative
-path — is trusted to produce `dead`.
+against the real program). Whether the conservative path can ALSO
+produce `dead` — for the loop's OWN closure, not for a branch INSIDE the
+body — turned out to be more subtle than the original design assumed;
+see "a fourth review pass" below.
 
 ### A third review pass: unrolling threaded copies independently instead of sequentially
 
@@ -333,6 +338,100 @@ specific failure once found, since a corpus regenerated with a different
 seed, or a future code change that shifts which programs it happens to
 generate, would not by itself guarantee re-trying the exact case that
 failed.
+
+### A fourth review pass: the shipped seed was not a soundness argument
+
+The paragraph immediately above turned out to be exactly right, sooner
+than expected: a FOURTH review ran this file's OWN generator with the
+`SEED` changed (`111`, `20260101`, and the shipped seed at
+`CORPUS_SIZE=500`) and got real failures every time, while the SHIPPED
+seed/size — the one this repo actually runs on every push — happened not
+to generate the triggering shape at all. The bug itself was in
+`_walk_loop_conservative` (every `while`, and every `for` above the
+unroll cap): it hardcoded `falls_through = True` regardless of what the
+one-iteration body walk itself reported, on the theory (stated in its own
+docstring, quoted two sections up) that this mechanism "does not attempt
+to reason about whether the body's own return closes off the loop, only
+about VALUE taint". That is fine for a body that CANNOT return at all,
+but wrong whenever it can:
+
+```python
+def f(x):
+    if x == 1:
+        n = 0
+        while n < 4:
+            return 6
+    if x == 1:
+        return 999
+    return 0
+```
+
+reported the SECOND `if x == 1` **reachable** with witness `{x: 1}`, when
+`f(1)` returns `6` at the `while` and never gets there — the same shape
+with `for i in range(40): return 9` reproduced identically for the
+above-cap `for` path, confirming this was the SAME underlying bug in the
+SAME function, not two.
+
+The fix uses the one-iteration body walk's own `(falls_through,
+continuation_cond)` — already computed, previously discarded — instead
+of hardcoding `True`:
+
+- **The body never falls through on this one iteration** (`_walk_block`
+  itself already proved every path through it, for ANY input that
+  reaches it, returns): EXACT, not a widening. Entering the loop at all
+  means returning, so falling through the WHOLE loop requires never
+  entering it — `z3.And(cur_cond, z3.Not(entry_guard))` — and branches
+  INSIDE the body keep whatever verdict the one-iteration walk already
+  gave them (the UNSAT-downgrade rule two sections up is untouched).
+- **The body falls through this one iteration but contains a `return`
+  SOMEWHERE** (`_contains_return`, a plain structural `ast.walk` over the
+  body — nested included, checked independently of whether that
+  `return` is provably reachable): some OTHER, unmodeled iteration might
+  take it, which this one-iteration walk cannot rule out. Handled with
+  the SAME `ctx._unresolved_closure_depth` mechanism the third review's
+  fix introduced for tainted-guard pass-throughs — `_decide` reports
+  `unknown` for a `sat` result downstream, never `reachable`, while an
+  `unsat` result still safely proves `dead` (dropping a required
+  conjunct only WIDENS what solves). The one-iteration walk's own
+  `continuation_cond` — a real necessary condition for falling through
+  the FIRST iteration — is conjoined in rather than discarded for bare
+  `cur_cond`, for free extra precision.
+- **The body contains no `return` at all**: unchanged from before —
+  falls through, only VALUE taint applies, nothing to close off with.
+
+`while`/`for`-`else` needed no separate handling: `scripts/
+check_no_eval.py`'s upfront scan already refuses `while/else` and
+`for/else` by name, before the walker ever sees one.
+
+Covered by the two repros above (now standing regressions in `tests/
+test_branch_reachability.py`), a `while` whose body returns only under an
+input-dependent condition followed by a post-loop branch that must
+correctly come back `unknown` (never a fabricated `reachable`) alongside
+a SEPARATE post-loop branch that is truly dead (contradicts the
+one-iteration walk's own necessary condition) and must still correctly
+come back `dead`, the identical pair for a `for` above the cap, a `while`
+NESTED inside an unrolled `for` whose body returns unconditionally
+(every outer copy closes, `dead` after the whole thing), and the exact
+`SEED=111` differential-corpus program the review's sweep found —
+recovered, since the review did not hand over its own generated source,
+by rerunning that seed's generator against the pre-fix code (checked out
+at the commit the review was reviewing) and taking the first program that
+failed, verbatim.
+
+This also hardened the differential corpus itself: `SEED`/`CORPUS_SIZE`
+are now overridable via `CODECALC_DIFF_SEED`/`CODECALC_DIFF_CORPUS` env
+vars (shipped defaults unchanged, the effective seed printed at the start
+of every run) so a multi-seed sweep before a push is a command-line
+matter, not a file edit; and the generator itself now produces `for`
+loops ABOVE the unroll cap (previously never generated at all — the
+exact gap this BLOCKER lived in undetected), a `return` biased directly
+into loop bodies (bare and `if`-guarded, since that specific combination
+is what this bug needed), and nested loops (one `for`/`while` inside
+another's body, budgeted via `_Fresh.loops_remaining` so the compounding
+two earlier sections warn about stays bounded). None of this makes the
+shipped seed a soundness argument on its own — see the differential
+test's own module docstring — only running several, including ones
+nobody has run before, does that.
 
 ## Why z3 `Optimize` for boundary inputs, and no box around it
 

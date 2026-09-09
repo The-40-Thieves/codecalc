@@ -369,8 +369,70 @@ behind it.
      the same reason. Both fixes are covered by the differential suite
      (which found them) and by the two repros above, added to
      `tests/test_branch_reachability.py` as standing regressions; the
-     full 209-check hand-written suite and the 150-program differential
+     full 211-check hand-written suite and the 150-program differential
      corpus both pass, deterministically, on both execution backends.
+
+  A FOURTH review pass confirmed all three prior rounds' fixes by direct
+  execution — including that `dead` downstream of an unresolved-closure
+  point is correctly preserved — and found ONE MORE instance of the same
+  class, this time in `_walk_loop_conservative` (every `while`, and every
+  `for` above the unroll cap): it hardcoded `falls_through = True`
+  regardless of what the one-iteration body walk itself reported, per its
+  own docstring's stated design ("does not attempt to reason about
+  whether the body's own return closes off the loop"). `def f(x): if x
+  == 1: n = 0; while n < 4: return 6 \n if x == 1: return 999 \n return
+  0` reported the SECOND `if x == 1` reachable with witness `{x: 1}`, when
+  `f(1)` returns `6` at the `while` and never gets there; the same shape
+  with `for i in range(40): return 9` reproduced identically for the
+  above-cap `for` path. The reviewer's own multi-seed sweep of THIS
+  file's differential corpus (copied to scratch with `SEED` changed)
+  failed at seed `111` (4 failures), `20260101` (6), and the shipped seed
+  at `CORPUS_SIZE=500` (8+) — the shipped seed at its shipped size simply
+  never happened to generate the triggering shape.
+
+  Fixed by USING the one-iteration body walk's own `(falls_through,
+  continuation_cond)` instead of discarding it, in three cases: (a) the
+  body does not fall through AT ALL on the one modeled iteration — every
+  path through it, for any input that reaches it, returns — which is
+  EXACT, not a widening: entering the loop at all means returning, so the
+  post-loop continuation becomes `cur_cond AND NOT(entry_guard)`, and
+  branches inside the body keep whatever verdicts the walk already gave
+  them; (b) the body falls through this one iteration but contains a
+  `return` SOMEWHERE (checked structurally, `_contains_return`, nested
+  included) — some OTHER, unmodeled iteration might take it, so
+  `ctx._unresolved_closure_depth` (the same mechanism the third review's
+  fix introduced) is raised for everything sequentially after the loop
+  (`sat` downgrades to `unknown`, `unsat` still safely proves `dead`),
+  and the one-iteration walk's own `continuation_cond` — a real necessary
+  condition for falling through that first iteration — is conjoined
+  rather than discarded for bare `cur_cond`; (c) the body contains no
+  `return` at all — unchanged, falls through, only VALUE taint applies.
+  `while`/`for`-`else` was already refused by name upfront (`while/else`,
+  `for/else`), so no separate handling was needed there. Covered by the
+  two repros above (now standing regressions), a `while` whose body
+  returns only under an input-dependent condition followed by a
+  post-loop branch that is correctly `unknown` (never a fabricated
+  `reachable`) alongside a SEPARATE post-loop branch that is truly dead
+  and correctly stays `dead`, the same pair for a `for` above the cap, a
+  `while` nested inside an unrolled `for` whose body returns
+  unconditionally (every outer copy closes, post-loop `dead`), and the
+  exact SEED=111 program the reviewer's sweep found, recovered by
+  rerunning that seed's generator against the pre-fix code and taking the
+  first failing program verbatim.
+
+  The differential corpus itself was hardened per the review: `SEED` and
+  `CORPUS_SIZE` are now overridable via `CODECALC_DIFF_SEED`/
+  `CODECALC_DIFF_CORPUS` env vars (shipped defaults unchanged, seed
+  printed at start) for ad hoc multi-seed sweeps without editing the
+  file, and the generator now also produces `for` loops ABOVE the unroll
+  cap (previously never generated — the exact gap this BLOCKER lived in),
+  returns biased directly into loop bodies (bare and `if`-guarded, since
+  that specific combination is what this bug needed), and nested loops
+  (one `for`/`while` inside another's body, budgeted to keep compounding
+  bounded). Verified before push with seeds `20260908` (shipped), `111`,
+  `20260101`, `999999`, `4242` at `CORPUS_SIZE=150`, plus the shipped seed
+  at `CORPUS_SIZE=500` — all six green (see the design note for the exact
+  counts). Full hand-written suite: 239 checks (was 211).
 - MCP Apps (`io.modelcontextprotocol/ui`) graphical views for
   `verify_translation` and `verify_optimization`: each tool now carries
   `_meta.ui.resourceUri` pointing at a self-contained `ui://` HTML resource

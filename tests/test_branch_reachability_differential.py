@@ -1,12 +1,30 @@
 """Differential test for `branch_reachability`: ~150 deterministically
 GENERATED small programs over the supported subset, checked against
 GROUND TRUTH from exhaustive concrete execution — not hand-picked
-examples. Three review rounds each found a DIFFERENT false-verdict bug
-(the if/elif/else merge, the loop-value taint, the unrolled-loop return
-closure) that a hand-written suite missed because nobody happened to
-write the specific combination that triggered it. This suite exists to
-catch the FOURTH one, whatever shape it takes, by trying hundreds of small
-combinations instead of a dozen carefully-chosen ones.
+examples. Four review rounds each found a DIFFERENT false-verdict bug (the
+if/elif/else merge, the loop-value taint, the unrolled-loop return
+closure, the id()-reuse/unresolved-closure pair this file itself caught,
+and the conservative-loop `falls_through` hardcode a fourth review found
+this file's SHIPPED seed/size happened not to hit) that a hand-written
+suite missed because nobody happened to write the specific combination
+that triggered it. This suite exists to catch the NEXT one, whatever
+shape it takes, by trying hundreds of small combinations instead of a
+dozen carefully-chosen ones.
+
+Generated constructs, as of the fourth review's required hardening:
+sequential and nested `if`/`elif`/`else` with comparisons and linear
+arithmetic (`+`/`-`/`*`-by-literal, never variable*variable — see
+`_gen_arith`'s own note on why), assignment and reassignment (before a
+loop and inside if arms), conditional and unconditional early `return`
+— including one biased directly into a loop's own body, both bare and
+`if`-guarded, since that specific combination is what the fourth review's
+BLOCKER lived in — `for` over static ranges both AT MOST and ABOVE
+`_MAX_UNROLL_ITERATIONS` (so both the exact-unroll and the conservative
+one-iteration-plus-taint mechanism are exercised), a counter-bounded
+`while` (provably terminating by construction), and NESTED loops (a
+`for`/`while` inside another `for`/`while`'s body, budgeted by
+`_Fresh.loops_remaining` so compounding stays bounded — see its own
+docstring).
 
 `scripts/check_no_eval.py` only scans `codecalc/` (`PKG = REPO /
 "codecalc"`), not `tests/` — confirmed by reading the script before
@@ -26,16 +44,22 @@ mirroring how `tests/test_branch_reachability.py`'s hand-written cases are
 corroborated via `tracing.execute_trace`, just with a lighter, in-process
 mechanism suited to running hundreds of them quickly. `unknown` is never
 checked against ground truth (allowed anywhere by design — see the module
-docstring's LOOPS section for the two real limitations still `unknown`).
+docstring's LOOPS section for the real limitations still `unknown`).
 
 Standalone script (check()/FAILS/sys.exit), no pytest — the repo
-convention. Deterministic: SEED is fixed, so a failure here reproduces
-identically on any machine.
+convention. Deterministic for a given SEED, so a failure reproduces
+identically on any machine — but a FOURTH review confirmed the shipped
+default seed/size is not itself a soundness guarantee (it happened to
+avoid a real bug three other seeds hit immediately), so SEED and
+CORPUS_SIZE are overridable via `CODECALC_DIFF_SEED`/`CODECALC_DIFF_CORPUS`
+env vars for ad hoc multi-seed sweeps before a push, without editing this
+file. The shipped defaults are unchanged.
 """
 
 from __future__ import annotations
 
 import ast
+import os
 import pathlib
 import random
 import sys
@@ -55,8 +79,9 @@ def check(name: str, cond: bool, detail: str = "") -> None:
         FAILS.append(name)
 
 
-SEED = 20260908
-CORPUS_SIZE = 150
+SEED = int(os.environ.get("CODECALC_DIFF_SEED", 20260908))
+CORPUS_SIZE = int(os.environ.get("CODECALC_DIFF_CORPUS", 150))
+print(f"differential corpus: seed={SEED} corpus_size={CORPUS_SIZE}")
 DOMAIN = list(range(-12, 13))  # exhaustive per int input, as specified
 _MAX_GENERATION_ATTEMPTS = CORPUS_SIZE * 20  # generous — a refused/degenerate
 # draw is regenerated, not counted; this bounds the retry loop itself.
@@ -128,26 +153,57 @@ class _Fresh:
     shadow an outer name (which would be legal Python but would muddy what
     a mismatch is actually testing). Also carries `loops_remaining`: a
     per-PROGRAM budget (not per-branch) on how many `for`/`while`
-    constructs may be generated at all. Sequentially chaining several
-    range(6)-unrolled loops (each itself containing nested ifs) compounds
+    constructs may be generated at all, INCLUDING a nested one inside
+    another loop's own body (the fourth review's required "nested loop"
+    coverage — see `_gen_stmt`'s `loop_depth` parameter). Sequentially
+    chaining several range(6)-unrolled loops, or nesting them, compounds
     the symbolic environment expression built for one variable across
     every copy — genuinely slow for z3 to solve, not a bug, but exactly
     the kind of case this fuzz corpus must not spend its ~90s budget
-    stumbling into by accident. One loop per generated program keeps that
-    compounding bounded while still exercising the unroll/taint paths
-    every generated iteration.
+    stumbling into by accident. Two loop constructs per generated program
+    (one of which may be the other's nested child) keeps that compounding
+    bounded while still exercising nesting.
     """
 
     def __init__(self) -> None:
         self.n = 0
-        self.loops_remaining = 1
+        self.loops_remaining = 2
 
     def var(self, prefix: str) -> str:
         self.n += 1
         return f"{prefix}{self.n}"
 
 
-def _gen_stmt(rng: random.Random, scope: list[str], fresh: _Fresh, depth: int, allow_loop: bool) -> str:
+#: Ranges a generated `for` may iterate over: several AT-OR-BELOW
+#: `br._MAX_UNROLL_ITERATIONS` (exact-unroll path) and one comfortably
+#: ABOVE it (the conservative one-iteration-plus-taint path) — the fourth
+#: review's BLOCKER lived entirely in the latter, which the corpus never
+#: generated before this hardening.
+_FOR_RANGES = (0, 1, 2, 3, 4, 5, 6, 40)
+
+
+def _gen_loop_body_stmt(rng: random.Random, scope: list[str], fresh: _Fresh,
+                         body_depth: int, loop_depth: int) -> str:
+    """One statement for a loop's body, biased toward the SPECIFIC shape
+    the fourth review's BLOCKER lived in — a `return` directly inside a
+    loop body, bare (unconditional) or `if`-guarded (conditional) — since
+    a return buried behind further, unbiased random generation might
+    otherwise show up too rarely across a 150-program corpus to reliably
+    re-catch a regression of that class. Falls back to the general
+    `_gen_stmt` (assignment, nested if without a return, or — budget
+    permitting — a NESTED loop) the rest of the time.
+    """
+    roll = rng.random()
+    if roll < 0.2:
+        return f"return {rng.randint(0, 9)}"  # unconditional
+    if roll < 0.4:
+        cond = _gen_cond(rng, scope)
+        return f"if {cond}:\n" + _indent(f"return {rng.randint(0, 9)}")  # conditional
+    return _gen_stmt(rng, scope, fresh, body_depth, allow_loop=True, loop_depth=loop_depth)
+
+
+def _gen_stmt(rng: random.Random, scope: list[str], fresh: _Fresh, depth: int, allow_loop: bool,
+              loop_depth: int = 0) -> str:
     """One statement's source text, UNINDENTED (the caller adds a
     `_indent` per nesting level). May append to `scope` IN PLACE — but
     only with a name that is guaranteed bound on every path reaching the
@@ -156,11 +212,17 @@ def _gen_stmt(rng: random.Random, scope: list[str], fresh: _Fresh, depth: int, a
     since exercising THAT refusal/`unknown` path is what the hand-written
     suite already covers, and an accidental one here would just shrink the
     valid corpus for no soundness-testing benefit.
+
+    `loop_depth` (separate from `depth`, which only bounds IF-nesting) is
+    how many ENCLOSING loops this statement is already inside; a NEW loop
+    is only offered while it is below 2 (an outer loop plus one nested
+    child — see `_Fresh`'s own docstring for why not deeper) AND the
+    program-wide `loops_remaining` budget allows it.
     """
     choices = ["assign"]
     if depth < _MAX_STMT_DEPTH:
         choices.append("if")
-    if allow_loop and depth < 2 and fresh.loops_remaining > 0:
+    if allow_loop and loop_depth < 2 and fresh.loops_remaining > 0:
         choices += ["for", "while"]
     if rng.random() < 0.12:
         choices.append("return")
@@ -185,7 +247,7 @@ def _gen_stmt(rng: random.Random, scope: list[str], fresh: _Fresh, depth: int, a
 
     if kind == "for":
         fresh.loops_remaining -= 1
-        n = rng.choice([0, 1, 2, 3, 4, 5, 6])
+        n = rng.choice(_FOR_RANGES)
         loop_var = fresh.var("i")
         body_scope = [*scope, loop_var]
         # Body statements are capped at `_MAX_STMT_DEPTH - 1` regardless of
@@ -194,7 +256,7 @@ def _gen_stmt(rng: random.Random, scope: list[str], fresh: _Fresh, depth: int, a
         # of if-nesting) even when the loop itself sits deep inside outer
         # ifs, since it is BODY nesting x ITERATION count that compounds.
         body_depth = max(depth + 1, _MAX_STMT_DEPTH - 1)
-        body_lines = [_gen_stmt(rng, body_scope, fresh, body_depth, allow_loop=False)]
+        body_lines = [_gen_loop_body_stmt(rng, body_scope, fresh, body_depth, loop_depth + 1)]
         # Nothing from body_scope is propagated to `scope`: the loop
         # variable is loop-local by this generator's own choice (never
         # referenced after), and anything ELSE the body assigns is only
@@ -217,21 +279,26 @@ def _gen_stmt(rng: random.Random, scope: list[str], fresh: _Fresh, depth: int, a
         # concrete input, and ground truth for everything AFTER it would
         # never be computable. Excluding it from scope up front rules
         # that out structurally rather than trying to pattern-match
-        # generated source for a reassignment after the fact.
+        # generated source for a reassignment after the fact. A `return`
+        # inside the body (bare or `if`-guarded, from `_gen_loop_body_stmt`)
+        # still terminates fine — Python's own `return` exits the loop
+        # immediately, so `n`'s own bound is only ever needed for the
+        # paths that DON'T return.
         body_depth = max(depth + 1, _MAX_STMT_DEPTH - 1)
-        body_lines = [_gen_stmt(rng, list(scope), fresh, body_depth, allow_loop=False)]
+        body_lines = [_gen_loop_body_stmt(rng, list(scope), fresh, body_depth, loop_depth + 1)]
         body_lines.append(f"{counter} = {counter} + 1")  # guarantees termination
         return f"{counter} = 0\nwhile {counter} < {bound}:\n" + _indent("\n".join(body_lines))
 
     # kind == "if"
     cond = _gen_cond(rng, scope)
     body_scope = list(scope)
-    body_lines = [_gen_stmt(rng, body_scope, fresh, depth + 1, allow_loop=allow_loop and depth < 1)
+    body_lines = [_gen_stmt(rng, body_scope, fresh, depth + 1, allow_loop=allow_loop and depth < 1,
+                             loop_depth=loop_depth)
                   for _ in range(rng.randint(1, 2))]
     lines = [f"if {cond}:", _indent("\n".join(body_lines))]
     if rng.random() < 0.5:
         else_scope = list(scope)
-        else_lines = [_gen_stmt(rng, else_scope, fresh, depth + 1, allow_loop=False)
+        else_lines = [_gen_stmt(rng, else_scope, fresh, depth + 1, allow_loop=False, loop_depth=loop_depth)
                       for _ in range(rng.randint(1, 2))]
         lines += ["else:", _indent("\n".join(else_lines))]
         # A name assigned in BOTH arms is bound on every path past the
