@@ -1,30 +1,2556 @@
 {
   "codecalc_version": "0.10.0",
   "core": {
+    "failures": [
+      {
+        "expected": [
+          "evaluate_expression"
+        ],
+        "got": "compare_threshold",
+        "prompt": "What does integrating x squared with respect to x come out to?",
+        "top3": [
+          "base_repr",
+          "bit_analysis",
+          "compare_threshold"
+        ]
+      },
+      {
+        "expected": [
+          "truth_table"
+        ],
+        "got": "calc_exact",
+        "prompt": "Show me every row of true/false outcomes for 'a and b or not c'",
+        "top3": [
+          "calc_exact",
+          "list_units",
+          "matrix"
+        ]
+      },
+      {
+        "expected": [
+          "truth_table"
+        ],
+        "got": "list_units",
+        "prompt": "list out every combination of inputs and whether 'a implies b' holds for each",
+        "top3": [
+          "compare_threshold",
+          "list_units",
+          "truth_table"
+        ]
+      },
+      {
+        "expected": [
+          "solve_linear"
+        ],
+        "got": "percentage",
+        "prompt": "I need both unknowns pinned down from two equations that share them",
+        "top3": [
+          "data_sizes",
+          "percentage",
+          "solve_linear"
+        ]
+      },
+      {
+        "expected": [
+          "matrix"
+        ],
+        "got": "base_repr",
+        "prompt": "Given the 2x2 grid [[1,2],[3,4]], what's its determinant?",
+        "top3": [
+          "base_repr",
+          "bit_analysis",
+          "bitop"
+        ]
+      },
+      {
+        "expected": [
+          "matrix"
+        ],
+        "got": "percentiles",
+        "prompt": "What are the eigen-decomposition values and the rank of this square grid of numbers?",
+        "top3": [
+          "calc_stats",
+          "percentiles",
+          "physical_constants"
+        ]
+      },
+      {
+        "expected": [
+          "convert_units"
+        ],
+        "got": "base_repr",
+        "prompt": "turn 1 gigabyte into mebibytes",
+        "top3": [
+          "base_repr",
+          "bit_analysis",
+          "bitop"
+        ]
+      },
+      {
+        "expected": [
+          "convert_units"
+        ],
+        "got": "base_repr",
+        "prompt": "What's 500 grams in ounces?",
+        "top3": [
+          "base_repr",
+          "bit_analysis",
+          "bitop"
+        ]
+      },
+      {
+        "expected": [
+          "physical_constants"
+        ],
+        "got": "simplify_expression",
+        "prompt": "I want the exact numeric value codecalc has stored for gravitational acceleration, not a conversion",
+        "top3": [
+          "evaluate_expression",
+          "float_repr",
+          "simplify_expression"
+        ]
+      },
+      {
+        "expected": [
+          "calc_exact"
+        ],
+        "got": "human_duration",
+        "prompt": "Is 0.1 plus 0.2 really exactly equal to 0.3, with no floating point rounding?",
+        "top3": [
+          "calc_exact",
+          "compare_threshold",
+          "human_duration"
+        ]
+      },
+      {
+        "expected": [
+          "compare_threshold"
+        ],
+        "got": "data_sizes",
+        "prompt": "Check precisely whether this fraction is greater than, less than, or equal to that decimal, no rounding",
+        "top3": [
+          "data_sizes",
+          "float_repr",
+          "radix_convert"
+        ]
+      },
+      {
+        "expected": [
+          "compare_threshold"
+        ],
+        "got": "float_repr",
+        "prompt": "Is 3/7 strictly greater than 0.4, exactly, no float error?",
+        "top3": [
+          "collision_probability",
+          "compare_threshold",
+          "float_repr"
+        ]
+      },
+      {
+        "expected": [
+          "percentage"
+        ],
+        "got": "base_repr",
+        "prompt": "What percent of 40 is 8?",
+        "top3": [
+          "base_repr",
+          "bit_analysis",
+          "bitop"
+        ]
+      },
+      {
+        "expected": [
+          "percentage"
+        ],
+        "got": "bit_analysis",
+        "prompt": "give me the ratio of these two rational numbers as a share, not a pass/fail check",
+        "top3": [
+          "bit_analysis",
+          "percentage",
+          "solve_expression"
+        ]
+      },
+      {
+        "expected": [
+          "calc_stats"
+        ],
+        "got": "bit_analysis",
+        "prompt": "These five benchmark runs are noisy \u2014 is the spread too large to trust a single number, and what's the average anyway?",
+        "top3": [
+          "base_repr",
+          "bit_analysis",
+          "calc_stats"
+        ]
+      },
+      {
+        "expected": [
+          "percentiles"
+        ],
+        "got": "list_units",
+        "prompt": "Rank this list of measurements and tell me the value at the 90th and 99th cutoff",
+        "top3": [
+          "convert_units",
+          "list_units",
+          "percentiles"
+        ]
+      },
+      {
+        "expected": [
+          "percentiles"
+        ],
+        "got": "calc_stats",
+        "prompt": "I don't want the average \u2014 I want to know what number 99 percent of these samples fall under",
+        "top3": [
+          "calc_stats",
+          "evaluate_expression",
+          "int_widths"
+        ]
+      },
+      {
+        "expected": [
+          "percentiles"
+        ],
+        "got": "compare_threshold",
+        "prompt": "Out of these hundred response times, what's the tail latency most requests stay under \u2014 say the top 5%?",
+        "top3": [
+          "base_repr",
+          "bit_analysis",
+          "compare_threshold"
+        ]
+      },
+      {
+        "expected": [
+          "collision_probability"
+        ],
+        "got": "int_widths",
+        "prompt": "With a 5-hex-char short ID space, how likely is an accidental clash across 100000 generated ids?",
+        "top3": [
+          "base_repr",
+          "collision_probability",
+          "int_widths"
+        ]
+      },
+      {
+        "expected": [
+          "epoch_time"
+        ],
+        "got": "human_duration",
+        "prompt": "This is a POINT in time, a raw numeric stamp \u2014 tell me the calendar date it refers to, not a length of time",
+        "top3": [
+          "convert_units",
+          "epoch_time",
+          "human_duration"
+        ]
+      },
+      {
+        "expected": [
+          "radix_convert"
+        ],
+        "got": "base_repr",
+        "prompt": "this isn't hex/oct/bin specifically \u2014 I need an arbitrary base-to-base translation, any base from 2 to 36",
+        "top3": [
+          "base_repr",
+          "int_widths",
+          "radix_convert"
+        ]
+      },
+      {
+        "expected": [
+          "radix_convert"
+        ],
+        "got": "base_repr",
+        "prompt": "Translate the fractional value 0.1 from base 10 into base 2 and tell me if it terminates",
+        "top3": [
+          "base_repr",
+          "evaluate_expression",
+          "radix_convert"
+        ]
+      },
+      {
+        "expected": [
+          "float_repr"
+        ],
+        "got": "data_sizes",
+        "prompt": "I want to know if this decimal literal is EXACTLY representable in double precision, not which integer width holds it",
+        "top3": [
+          "data_sizes",
+          "evaluate_expression",
+          "float_repr"
+        ]
+      },
+      {
+        "expected": [
+          "float_repr"
+        ],
+        "got": "compare_threshold",
+        "prompt": "Is 0.25 stored exactly in double precision, or does it lose precision like 0.1 does?",
+        "top3": [
+          "calc_exact",
+          "compare_threshold",
+          "float_repr"
+        ]
+      },
+      {
+        "expected": [
+          "int_widths"
+        ],
+        "got": "bitop",
+        "prompt": "Tell me every fixed-width signed and unsigned type that this value fits into, and how it wraps in the ones it doesn't",
+        "top3": [
+          "base_repr",
+          "bitop",
+          "evaluate_expression"
+        ]
+      },
+      {
+        "expected": [
+          "int_widths"
+        ],
+        "got": "bitop",
+        "prompt": "I don't need hex or binary output \u2014 just tell me every bit-width container this number fits or overflows",
+        "top3": [
+          "base_repr",
+          "bit_analysis",
+          "bitop"
+        ]
+      },
+      {
+        "expected": [
+          "bitop"
+        ],
+        "got": "bit_analysis",
+        "prompt": "I need the RESULT of combining two integers with a boolean operator, not properties of a single one",
+        "top3": [
+          "base_repr",
+          "bit_analysis",
+          "solve_expression"
+        ]
+      },
+      {
+        "expected": [
+          "solve_expression"
+        ],
+        "got": "bitop",
+        "prompt": "What value of x makes x squared minus 4 equal zero?",
+        "top3": [
+          "bitop",
+          "evaluate_expression",
+          "radix_convert"
+        ]
+      },
+      {
+        "expected": [
+          "solve_expression",
+          "solve_linear"
+        ],
+        "got": "base_repr",
+        "prompt": "For 2*x + 1 = 7, what's x?",
+        "top3": [
+          "base_repr",
+          "bit_analysis",
+          "bitop"
+        ]
+      },
+      {
+        "expected": [
+          "limit_expression"
+        ],
+        "got": "collision_probability",
+        "prompt": "As n grows without bound, what does n*log(n)/n**2 approach?",
+        "top3": [
+          "calc_exact",
+          "collision_probability",
+          "limit_expression"
+        ]
+      },
+      {
+        "expected": [
+          "evaluate_expression",
+          "simplify_expression"
+        ],
+        "got": "compare_threshold",
+        "prompt": "Reduce this formula to its simplest form and also show it multiplied out",
+        "top3": [
+          "base_repr",
+          "compare_threshold",
+          "evaluate_expression"
+        ]
+      }
+    ],
     "n": 100,
-    "skipped": 103,
-    "top1": 0.68,
-    "top1_hits": 68,
-    "top3": 0.83,
-    "top3_hits": 83
+    "per_tool": {
+      "base_repr": {
+        "n": 4,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "bit_analysis": {
+        "n": 4,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "bitop": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 0.75
+      },
+      "calc_exact": {
+        "n": 3,
+        "top1": 0.6667,
+        "top3": 1.0
+      },
+      "calc_stats": {
+        "n": 5,
+        "top1": 0.8,
+        "top3": 1.0
+      },
+      "collision_probability": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 1.0
+      },
+      "compare_threshold": {
+        "n": 4,
+        "top1": 0.5,
+        "top3": 0.75
+      },
+      "convert_units": {
+        "n": 4,
+        "top1": 0.5,
+        "top3": 0.5
+      },
+      "data_sizes": {
+        "n": 4,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "epoch_time": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 1.0
+      },
+      "evaluate_expression": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 0.75
+      },
+      "float_repr": {
+        "n": 4,
+        "top1": 0.5,
+        "top3": 1.0
+      },
+      "human_duration": {
+        "n": 4,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "int_widths": {
+        "n": 4,
+        "top1": 0.5,
+        "top3": 0.5
+      },
+      "limit_expression": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 1.0
+      },
+      "list_units": {
+        "n": 4,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "matrix": {
+        "n": 4,
+        "top1": 0.5,
+        "top3": 0.5
+      },
+      "percentage": {
+        "n": 4,
+        "top1": 0.5,
+        "top3": 0.75
+      },
+      "percentiles": {
+        "n": 4,
+        "top1": 0.25,
+        "top3": 0.5
+      },
+      "physical_constants": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 0.75
+      },
+      "radix_convert": {
+        "n": 4,
+        "top1": 0.5,
+        "top3": 1.0
+      },
+      "simplify_expression": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 1.0
+      },
+      "solve_expression": {
+        "n": 4,
+        "top1": 0.5,
+        "top3": 0.5
+      },
+      "solve_linear": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 1.0
+      },
+      "truth_table": {
+        "n": 4,
+        "top1": 0.5,
+        "top3": 0.75
+      }
+    },
+    "skipped": 112,
+    "top1": 0.69,
+    "top1_hits": 69,
+    "top3": 0.84,
+    "top3_hits": 84
   },
   "dev": {
-    "n": 153,
+    "failures": [
+      {
+        "expected": [
+          "evaluate_expression"
+        ],
+        "got": "compare_threshold",
+        "prompt": "What does integrating x squared with respect to x come out to?",
+        "top3": [
+          "algebraic_equiv",
+          "compare_execution",
+          "compare_threshold"
+        ]
+      },
+      {
+        "expected": [
+          "truth_table"
+        ],
+        "got": "calc_exact",
+        "prompt": "Show me every row of true/false outcomes for 'a and b or not c'",
+        "top3": [
+          "calc_exact",
+          "compare_execution",
+          "matrix"
+        ]
+      },
+      {
+        "expected": [
+          "truth_table"
+        ],
+        "got": "list_languages",
+        "prompt": "list out every combination of inputs and whether 'a implies b' holds for each",
+        "top3": [
+          "compare_edge_cases",
+          "list_languages",
+          "list_units"
+        ]
+      },
+      {
+        "expected": [
+          "truth_table"
+        ],
+        "got": "list_languages",
+        "prompt": "Enumerate every input combination for 'p implies q' and whether it holds",
+        "top3": [
+          "list_languages",
+          "truth_table",
+          "verify_translation"
+        ]
+      },
+      {
+        "expected": [
+          "solve_linear"
+        ],
+        "got": "verify_translation",
+        "prompt": "find x and y at the same time from a pair of coupled equations",
+        "top3": [
+          "solve_expression",
+          "solve_linear",
+          "verify_translation"
+        ]
+      },
+      {
+        "expected": [
+          "solve_linear"
+        ],
+        "got": "percentage",
+        "prompt": "I need both unknowns pinned down from two equations that share them",
+        "top3": [
+          "data_sizes",
+          "percentage",
+          "solve_linear"
+        ]
+      },
+      {
+        "expected": [
+          "matrix"
+        ],
+        "got": "list_execution_providers",
+        "prompt": "Given the 2x2 grid [[1,2],[3,4]], what's its determinant?",
+        "top3": [
+          "algebraic_equiv",
+          "analyze_complexity",
+          "list_execution_providers"
+        ]
+      },
+      {
+        "expected": [
+          "matrix"
+        ],
+        "got": "percentiles",
+        "prompt": "What are the eigen-decomposition values and the rank of this square grid of numbers?",
+        "top3": [
+          "calc_stats",
+          "matrix",
+          "percentiles"
+        ]
+      },
+      {
+        "expected": [
+          "convert_units"
+        ],
+        "got": "algebraic_equiv",
+        "prompt": "turn 1 gigabyte into mebibytes",
+        "top3": [
+          "algebraic_equiv",
+          "analyze_complexity",
+          "base_repr"
+        ]
+      },
+      {
+        "expected": [
+          "convert_units"
+        ],
+        "got": "algebraic_equiv",
+        "prompt": "What's 500 grams in ounces?",
+        "top3": [
+          "algebraic_equiv",
+          "analyze_complexity",
+          "base_repr"
+        ]
+      },
+      {
+        "expected": [
+          "physical_constants"
+        ],
+        "got": "simplify_expression",
+        "prompt": "I want the exact numeric value codecalc has stored for gravitational acceleration, not a conversion",
+        "top3": [
+          "list_execution_providers",
+          "list_languages",
+          "simplify_expression"
+        ]
+      },
+      {
+        "expected": [
+          "calc_exact"
+        ],
+        "got": "algebraic_equiv",
+        "prompt": "Is 0.1 plus 0.2 really exactly equal to 0.3, with no floating point rounding?",
+        "top3": [
+          "algebraic_equiv",
+          "human_duration",
+          "limit_expression"
+        ]
+      },
+      {
+        "expected": [
+          "compare_threshold"
+        ],
+        "got": "data_sizes",
+        "prompt": "Check precisely whether this fraction is greater than, less than, or equal to that decimal, no rounding",
+        "top3": [
+          "algebraic_equiv",
+          "data_sizes",
+          "z3_check"
+        ]
+      },
+      {
+        "expected": [
+          "compare_threshold"
+        ],
+        "got": "algebraic_equiv",
+        "prompt": "Is 3/7 strictly greater than 0.4, exactly, no float error?",
+        "top3": [
+          "algebraic_equiv",
+          "execute_code",
+          "float_repr"
+        ]
+      },
+      {
+        "expected": [
+          "percentage"
+        ],
+        "got": "algebraic_equiv",
+        "prompt": "What percent of 40 is 8?",
+        "top3": [
+          "algebraic_equiv",
+          "analyze_complexity",
+          "base_repr"
+        ]
+      },
+      {
+        "expected": [
+          "percentage"
+        ],
+        "got": "verify_optimization",
+        "prompt": "give me the ratio of these two rational numbers as a share, not a pass/fail check",
+        "top3": [
+          "bit_analysis",
+          "verify_optimization",
+          "verify_translation"
+        ]
+      },
+      {
+        "expected": [
+          "calc_stats"
+        ],
+        "got": "list_execution_providers",
+        "prompt": "I have a list of numbers from repeated runs \u2014 summarize their central tendency and spread, and tell me if the noise is too high to trust them",
+        "top3": [
+          "calc_stats",
+          "list_execution_providers",
+          "verify_translation"
+        ]
+      },
+      {
+        "expected": [
+          "calc_stats"
+        ],
+        "got": "benchmark",
+        "prompt": "These five benchmark runs are noisy \u2014 is the spread too large to trust a single number, and what's the average anyway?",
+        "top3": [
+          "base_repr",
+          "benchmark",
+          "bit_analysis"
+        ]
+      },
+      {
+        "expected": [
+          "percentiles"
+        ],
+        "got": "calc_stats",
+        "prompt": "What's the p95 and p99 latency across these numbers?",
+        "top3": [
+          "calc_stats",
+          "int_widths",
+          "percentiles"
+        ]
+      },
+      {
+        "expected": [
+          "percentiles"
+        ],
+        "got": "execute_code_stream",
+        "prompt": "I don't want the average \u2014 I want to know what number 99 percent of these samples fall under",
+        "top3": [
+          "calc_stats",
+          "execute_code_stream",
+          "trace_execution"
+        ]
+      },
+      {
+        "expected": [
+          "percentiles"
+        ],
+        "got": "compare_threshold",
+        "prompt": "Out of these hundred response times, what's the tail latency most requests stay under \u2014 say the top 5%?",
+        "top3": [
+          "compare_execution",
+          "compare_threshold",
+          "verify_optimization"
+        ]
+      },
+      {
+        "expected": [
+          "collision_probability"
+        ],
+        "got": "execute_code",
+        "prompt": "With a 5-hex-char short ID space, how likely is an accidental clash across 100000 generated ids?",
+        "top3": [
+          "base_repr",
+          "collision_probability",
+          "execute_code"
+        ]
+      },
+      {
+        "expected": [
+          "epoch_time"
+        ],
+        "got": "human_duration",
+        "prompt": "This is a POINT in time, a raw numeric stamp \u2014 tell me the calendar date it refers to, not a length of time",
+        "top3": [
+          "analyze_complexity",
+          "convert_units",
+          "human_duration"
+        ]
+      },
+      {
+        "expected": [
+          "base_repr"
+        ],
+        "got": "bitop",
+        "prompt": "Show me 3000000000 in hex, octal and binary, and whether it fits in a signed 32-bit int",
+        "top3": [
+          "base_repr",
+          "bitop",
+          "int_widths"
+        ]
+      },
+      {
+        "expected": [
+          "radix_convert"
+        ],
+        "got": "base_repr",
+        "prompt": "this isn't hex/oct/bin specifically \u2014 I need an arbitrary base-to-base translation, any base from 2 to 36",
+        "top3": [
+          "base_repr",
+          "int_widths",
+          "radix_convert"
+        ]
+      },
+      {
+        "expected": [
+          "radix_convert"
+        ],
+        "got": "base_repr",
+        "prompt": "Translate the fractional value 0.1 from base 10 into base 2 and tell me if it terminates",
+        "top3": [
+          "base_repr",
+          "evaluate_expression",
+          "radix_convert"
+        ]
+      },
+      {
+        "expected": [
+          "float_repr"
+        ],
+        "got": "data_sizes",
+        "prompt": "I want to know if this decimal literal is EXACTLY representable in double precision, not which integer width holds it",
+        "top3": [
+          "algebraic_equiv",
+          "data_sizes",
+          "float_repr"
+        ]
+      },
+      {
+        "expected": [
+          "float_repr"
+        ],
+        "got": "compare_threshold",
+        "prompt": "Is 0.25 stored exactly in double precision, or does it lose precision like 0.1 does?",
+        "top3": [
+          "calc_exact",
+          "compare_edge_cases",
+          "compare_threshold"
+        ]
+      },
+      {
+        "expected": [
+          "int_widths"
+        ],
+        "got": "bitop",
+        "prompt": "Tell me every fixed-width signed and unsigned type that this value fits into, and how it wraps in the ones it doesn't",
+        "top3": [
+          "base_repr",
+          "bitop",
+          "evaluate_expression"
+        ]
+      },
+      {
+        "expected": [
+          "int_widths"
+        ],
+        "got": "bitop",
+        "prompt": "I don't need hex or binary output \u2014 just tell me every bit-width container this number fits or overflows",
+        "top3": [
+          "base_repr",
+          "bitop",
+          "calc_exact"
+        ]
+      },
+      {
+        "expected": [
+          "bitop"
+        ],
+        "got": "bit_analysis",
+        "prompt": "I need the RESULT of combining two integers with a boolean operator, not properties of a single one",
+        "top3": [
+          "base_repr",
+          "bit_analysis",
+          "verify_optimization"
+        ]
+      },
+      {
+        "expected": [
+          "solve_expression"
+        ],
+        "got": "bitop",
+        "prompt": "What value of x makes x squared minus 4 equal zero?",
+        "top3": [
+          "bitop",
+          "compare_edge_cases",
+          "evaluate_expression"
+        ]
+      },
+      {
+        "expected": [
+          "solve_expression",
+          "solve_linear"
+        ],
+        "got": "algebraic_equiv",
+        "prompt": "For 2*x + 1 = 7, what's x?",
+        "top3": [
+          "algebraic_equiv",
+          "analyze_complexity",
+          "base_repr"
+        ]
+      },
+      {
+        "expected": [
+          "limit_expression"
+        ],
+        "got": "collision_probability",
+        "prompt": "As n grows without bound, what does n*log(n)/n**2 approach?",
+        "top3": [
+          "benchmark",
+          "collision_probability",
+          "limit_expression"
+        ]
+      },
+      {
+        "expected": [
+          "limit_expression"
+        ],
+        "got": "analyze_complexity",
+        "prompt": "I don't want a structural code estimate \u2014 I want the exact symbolic limit as the variable grows unbounded",
+        "top3": [
+          "analyze_complexity",
+          "limit_expression",
+          "trace_execution"
+        ]
+      },
+      {
+        "expected": [
+          "limit_expression"
+        ],
+        "got": "benchmark",
+        "prompt": "As the input size grows huge, does n/log(n) eventually dominate or vanish?",
+        "top3": [
+          "benchmark",
+          "limit_expression",
+          "verify_optimization"
+        ]
+      },
+      {
+        "expected": [
+          "evaluate_expression",
+          "simplify_expression"
+        ],
+        "got": "algebraic_equiv",
+        "prompt": "Take this messy algebraic formula and give me its cleanest possible form",
+        "top3": [
+          "algebraic_equiv",
+          "evaluate_expression",
+          "simplify_expression"
+        ]
+      },
+      {
+        "expected": [
+          "z3_check"
+        ],
+        "got": "truth_table",
+        "prompt": "I need a real constraint solver's verdict on Int/Real constraints, not an enumerated boolean truth table",
+        "top3": [
+          "solve_expression",
+          "truth_table",
+          "z3_check"
+        ]
+      },
+      {
+        "expected": [
+          "list_languages"
+        ],
+        "got": "extract_function",
+        "prompt": "I want the roster of programming LANGUAGES available, not the sandbox backends that run them",
+        "top3": [
+          "extract_function",
+          "list_languages",
+          "runtimes_status"
+        ]
+      },
+      {
+        "expected": [
+          "execute_code"
+        ],
+        "got": "compare_execution",
+        "prompt": "Run this Python snippet and give me its stdout",
+        "top3": [
+          "compare_edge_cases",
+          "compare_execution",
+          "extract_function"
+        ]
+      },
+      {
+        "expected": [
+          "execute_code"
+        ],
+        "got": "trace_execution",
+        "prompt": "Execute the following program in a sandbox and return what it printed, its exit status, and how long it took",
+        "top3": [
+          "execute_code_stream",
+          "extract_function",
+          "trace_execution"
+        ]
+      },
+      {
+        "expected": [
+          "execute_code"
+        ],
+        "got": "execute_code_stream",
+        "prompt": "I want to wait right here for this program to finish and get the result back in this same call",
+        "top3": [
+          "execute_code_stream",
+          "extract_function",
+          "trace_execution"
+        ]
+      },
+      {
+        "expected": [
+          "execute_code"
+        ],
+        "got": "trace_execution",
+        "prompt": "Just run this one-liner right now and tell me what it printed and how long it took",
+        "top3": [
+          "compare_threshold",
+          "int_widths",
+          "trace_execution"
+        ]
+      },
+      {
+        "expected": [
+          "execute_code_stream"
+        ],
+        "got": "compare_execution",
+        "prompt": "Run this long-running script but show me its output as it goes, not just at the very end",
+        "top3": [
+          "compare_execution",
+          "execute_code",
+          "execute_code_stream"
+        ]
+      },
+      {
+        "expected": [
+          "execute_code_stream"
+        ],
+        "got": "trace_execution",
+        "prompt": "I need to see this program's output line by line as it happens, live, not all dumped at the end",
+        "top3": [
+          "execute_code_stream",
+          "trace_execution",
+          "verify_translation"
+        ]
+      },
+      {
+        "expected": [
+          "runtimes_status"
+        ],
+        "got": "list_languages",
+        "prompt": "just tell me what's outdated and what the upgrade command WOULD be \u2014 don't actually touch my system",
+        "top3": [
+          "list_languages",
+          "runtimes_status",
+          "solve_linear"
+        ]
+      },
+      {
+        "expected": [
+          "analyze_complexity"
+        ],
+        "got": "benchmark",
+        "prompt": "I want a quick READ of the source to guess its growth class, not an empirical timing experiment",
+        "top3": [
+          "benchmark",
+          "calc_stats",
+          "trace_execution"
+        ]
+      },
+      {
+        "expected": [
+          "analyze_complexity"
+        ],
+        "got": "list_languages",
+        "prompt": "Without running anything, can you eyeball this loop nest and guess whether it's quadratic or worse?",
+        "top3": [
+          "list_execution_providers",
+          "list_languages",
+          "verify_translation"
+        ]
+      },
+      {
+        "expected": [
+          "benchmark"
+        ],
+        "got": "verify_translation",
+        "prompt": "Feed this program bigger and bigger N and clock how the runtime actually scales",
+        "top3": [
+          "list_execution_providers",
+          "list_languages",
+          "verify_translation"
+        ]
+      },
+      {
+        "expected": [
+          "execute_code"
+        ],
+        "got": "extract_function",
+        "prompt": "Just run this python snippet once and tell me what it prints and how long it took",
+        "top3": [
+          "compare_execution",
+          "extract_function",
+          "z3_check"
+        ]
+      }
+    ],
+    "n": 162,
+    "per_tool": {
+      "algebraic_equiv": {
+        "n": 4,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "analyze_complexity": {
+        "n": 5,
+        "top1": 0.6,
+        "top3": 0.6
+      },
+      "base_repr": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 1.0
+      },
+      "benchmark": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 0.75
+      },
+      "bit_analysis": {
+        "n": 4,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "bitop": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 0.75
+      },
+      "calc_exact": {
+        "n": 3,
+        "top1": 0.6667,
+        "top3": 0.6667
+      },
+      "calc_stats": {
+        "n": 5,
+        "top1": 0.6,
+        "top3": 0.8
+      },
+      "collision_probability": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 1.0
+      },
+      "compare_edge_cases": {
+        "n": 4,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "compare_execution": {
+        "n": 3,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "compare_threshold": {
+        "n": 4,
+        "top1": 0.5,
+        "top3": 0.5
+      },
+      "convert_units": {
+        "n": 4,
+        "top1": 0.5,
+        "top3": 0.5
+      },
+      "data_sizes": {
+        "n": 4,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "epoch_time": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 0.75
+      },
+      "evaluate_expression": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 0.75
+      },
+      "execute_code": {
+        "n": 5,
+        "top1": 0.0,
+        "top3": 0.0
+      },
+      "execute_code_stream": {
+        "n": 4,
+        "top1": 0.5,
+        "top3": 1.0
+      },
+      "extract_function": {
+        "n": 3,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "float_repr": {
+        "n": 4,
+        "top1": 0.5,
+        "top3": 0.75
+      },
+      "human_duration": {
+        "n": 4,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "int_widths": {
+        "n": 4,
+        "top1": 0.5,
+        "top3": 0.5
+      },
+      "limit_expression": {
+        "n": 4,
+        "top1": 0.25,
+        "top3": 1.0
+      },
+      "list_execution_providers": {
+        "n": 3,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "list_languages": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 1.0
+      },
+      "list_units": {
+        "n": 4,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "matrix": {
+        "n": 4,
+        "top1": 0.5,
+        "top3": 0.75
+      },
+      "percentage": {
+        "n": 4,
+        "top1": 0.5,
+        "top3": 0.5
+      },
+      "percentiles": {
+        "n": 4,
+        "top1": 0.25,
+        "top3": 0.5
+      },
+      "physical_constants": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 0.75
+      },
+      "radix_convert": {
+        "n": 4,
+        "top1": 0.5,
+        "top3": 1.0
+      },
+      "runtimes_status": {
+        "n": 3,
+        "top1": 0.6667,
+        "top3": 1.0
+      },
+      "simplify_expression": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 1.0
+      },
+      "solve_expression": {
+        "n": 4,
+        "top1": 0.5,
+        "top3": 0.5
+      },
+      "solve_linear": {
+        "n": 4,
+        "top1": 0.5,
+        "top3": 1.0
+      },
+      "trace_execution": {
+        "n": 7,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "truth_table": {
+        "n": 4,
+        "top1": 0.25,
+        "top3": 0.5
+      },
+      "update_runtimes": {
+        "n": 1,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "verify_optimization": {
+        "n": 4,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "verify_translation": {
+        "n": 4,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "z3_check": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 1.0
+      }
+    },
     "skipped": 50,
-    "top1": 0.6536,
-    "top1_hits": 100,
-    "top3": 0.817,
-    "top3_hits": 125
+    "top1": 0.6914,
+    "top1_hits": 112,
+    "top3": 0.8148,
+    "top3_hits": 132
   },
   "full": {
-    "n": 203,
+    "failures": [
+      {
+        "expected": [
+          "evaluate_expression"
+        ],
+        "got": "session_artifacts",
+        "prompt": "What does integrating x squared with respect to x come out to?",
+        "top3": [
+          "compare_execution",
+          "compare_threshold",
+          "session_artifacts"
+        ]
+      },
+      {
+        "expected": [
+          "truth_table"
+        ],
+        "got": "update_runtimes",
+        "prompt": "Show me every row of true/false outcomes for 'a and b or not c'",
+        "top3": [
+          "calc_exact",
+          "session_stop",
+          "update_runtimes"
+        ]
+      },
+      {
+        "expected": [
+          "truth_table"
+        ],
+        "got": "list_languages",
+        "prompt": "list out every combination of inputs and whether 'a implies b' holds for each",
+        "top3": [
+          "compare_edge_cases",
+          "list_languages",
+          "session_artifacts"
+        ]
+      },
+      {
+        "expected": [
+          "truth_table"
+        ],
+        "got": "list_languages",
+        "prompt": "Enumerate every input combination for 'p implies q' and whether it holds",
+        "top3": [
+          "list_languages",
+          "truth_table",
+          "verify_translation"
+        ]
+      },
+      {
+        "expected": [
+          "solve_linear"
+        ],
+        "got": "verify_translation",
+        "prompt": "find x and y at the same time from a pair of coupled equations",
+        "top3": [
+          "solve_expression",
+          "solve_linear",
+          "verify_translation"
+        ]
+      },
+      {
+        "expected": [
+          "solve_linear"
+        ],
+        "got": "percentage",
+        "prompt": "I need both unknowns pinned down from two equations that share them",
+        "top3": [
+          "data_sizes",
+          "percentage",
+          "solve_linear"
+        ]
+      },
+      {
+        "expected": [
+          "matrix"
+        ],
+        "got": "list_execution_providers",
+        "prompt": "Given the 2x2 grid [[1,2],[3,4]], what's its determinant?",
+        "top3": [
+          "algebraic_equiv",
+          "analyze_complexity",
+          "list_execution_providers"
+        ]
+      },
+      {
+        "expected": [
+          "matrix"
+        ],
+        "got": "percentiles",
+        "prompt": "What are the eigen-decomposition values and the rank of this square grid of numbers?",
+        "top3": [
+          "calc_stats",
+          "matrix",
+          "percentiles"
+        ]
+      },
+      {
+        "expected": [
+          "convert_units"
+        ],
+        "got": "algebraic_equiv",
+        "prompt": "turn 1 gigabyte into mebibytes",
+        "top3": [
+          "algebraic_equiv",
+          "analyze_complexity",
+          "base_repr"
+        ]
+      },
+      {
+        "expected": [
+          "convert_units"
+        ],
+        "got": "algebraic_equiv",
+        "prompt": "What's 500 grams in ounces?",
+        "top3": [
+          "algebraic_equiv",
+          "analyze_complexity",
+          "base_repr"
+        ]
+      },
+      {
+        "expected": [
+          "physical_constants"
+        ],
+        "got": "simplify_expression",
+        "prompt": "I want the exact numeric value codecalc has stored for gravitational acceleration, not a conversion",
+        "top3": [
+          "float_repr",
+          "list_execution_providers",
+          "simplify_expression"
+        ]
+      },
+      {
+        "expected": [
+          "calc_exact"
+        ],
+        "got": "algebraic_equiv",
+        "prompt": "Is 0.1 plus 0.2 really exactly equal to 0.3, with no floating point rounding?",
+        "top3": [
+          "algebraic_equiv",
+          "human_duration",
+          "limit_expression"
+        ]
+      },
+      {
+        "expected": [
+          "compare_threshold"
+        ],
+        "got": "data_sizes",
+        "prompt": "Check precisely whether this fraction is greater than, less than, or equal to that decimal, no rounding",
+        "top3": [
+          "algebraic_equiv",
+          "data_sizes",
+          "radix_convert"
+        ]
+      },
+      {
+        "expected": [
+          "compare_threshold"
+        ],
+        "got": "algebraic_equiv",
+        "prompt": "Is 3/7 strictly greater than 0.4, exactly, no float error?",
+        "top3": [
+          "algebraic_equiv",
+          "float_repr",
+          "run_submit"
+        ]
+      },
+      {
+        "expected": [
+          "percentage"
+        ],
+        "got": "algebraic_equiv",
+        "prompt": "What percent of 40 is 8?",
+        "top3": [
+          "algebraic_equiv",
+          "analyze_complexity",
+          "base_repr"
+        ]
+      },
+      {
+        "expected": [
+          "percentage"
+        ],
+        "got": "verify_optimization",
+        "prompt": "give me the ratio of these two rational numbers as a share, not a pass/fail check",
+        "top3": [
+          "bit_analysis",
+          "verify_optimization",
+          "verify_translation"
+        ]
+      },
+      {
+        "expected": [
+          "calc_stats"
+        ],
+        "got": "benchmark",
+        "prompt": "These five benchmark runs are noisy \u2014 is the spread too large to trust a single number, and what's the average anyway?",
+        "top3": [
+          "base_repr",
+          "benchmark",
+          "bit_analysis"
+        ]
+      },
+      {
+        "expected": [
+          "percentiles"
+        ],
+        "got": "calc_stats",
+        "prompt": "What's the p95 and p99 latency across these numbers?",
+        "top3": [
+          "calc_stats",
+          "percentiles",
+          "session_start"
+        ]
+      },
+      {
+        "expected": [
+          "percentiles"
+        ],
+        "got": "execute_code_stream",
+        "prompt": "I don't want the average \u2014 I want to know what number 99 percent of these samples fall under",
+        "top3": [
+          "calc_stats",
+          "execute_code_stream",
+          "trace_execution"
+        ]
+      },
+      {
+        "expected": [
+          "percentiles"
+        ],
+        "got": "session_artifacts",
+        "prompt": "Out of these hundred response times, what's the tail latency most requests stay under \u2014 say the top 5%?",
+        "top3": [
+          "compare_threshold",
+          "run_inspect",
+          "session_artifacts"
+        ]
+      },
+      {
+        "expected": [
+          "collision_probability"
+        ],
+        "got": "session_start",
+        "prompt": "With a 5-hex-char short ID space, how likely is an accidental clash across 100000 generated ids?",
+        "top3": [
+          "collision_probability",
+          "run_submit",
+          "session_start"
+        ]
+      },
+      {
+        "expected": [
+          "epoch_time"
+        ],
+        "got": "human_duration",
+        "prompt": "This is a POINT in time, a raw numeric stamp \u2014 tell me the calendar date it refers to, not a length of time",
+        "top3": [
+          "analyze_complexity",
+          "convert_units",
+          "human_duration"
+        ]
+      },
+      {
+        "expected": [
+          "base_repr"
+        ],
+        "got": "bitop",
+        "prompt": "Show me 3000000000 in hex, octal and binary, and whether it fits in a signed 32-bit int",
+        "top3": [
+          "base_repr",
+          "bitop",
+          "int_widths"
+        ]
+      },
+      {
+        "expected": [
+          "radix_convert"
+        ],
+        "got": "base_repr",
+        "prompt": "this isn't hex/oct/bin specifically \u2014 I need an arbitrary base-to-base translation, any base from 2 to 36",
+        "top3": [
+          "base_repr",
+          "int_widths",
+          "radix_convert"
+        ]
+      },
+      {
+        "expected": [
+          "radix_convert"
+        ],
+        "got": "base_repr",
+        "prompt": "Translate the fractional value 0.1 from base 10 into base 2 and tell me if it terminates",
+        "top3": [
+          "base_repr",
+          "int_widths",
+          "radix_convert"
+        ]
+      },
+      {
+        "expected": [
+          "float_repr"
+        ],
+        "got": "evaluate_expression",
+        "prompt": "What does the computer actually store in memory for the number 0.1?",
+        "top3": [
+          "evaluate_expression",
+          "float_repr",
+          "int_widths"
+        ]
+      },
+      {
+        "expected": [
+          "float_repr"
+        ],
+        "got": "data_sizes",
+        "prompt": "I want to know if this decimal literal is EXACTLY representable in double precision, not which integer width holds it",
+        "top3": [
+          "algebraic_equiv",
+          "data_sizes",
+          "float_repr"
+        ]
+      },
+      {
+        "expected": [
+          "float_repr"
+        ],
+        "got": "compare_edge_cases",
+        "prompt": "Is 0.25 stored exactly in double precision, or does it lose precision like 0.1 does?",
+        "top3": [
+          "calc_exact",
+          "compare_edge_cases",
+          "compare_threshold"
+        ]
+      },
+      {
+        "expected": [
+          "int_widths"
+        ],
+        "got": "bitop",
+        "prompt": "Tell me every fixed-width signed and unsigned type that this value fits into, and how it wraps in the ones it doesn't",
+        "top3": [
+          "base_repr",
+          "bitop",
+          "evaluate_expression"
+        ]
+      },
+      {
+        "expected": [
+          "int_widths"
+        ],
+        "got": "bitop",
+        "prompt": "I don't need hex or binary output \u2014 just tell me every bit-width container this number fits or overflows",
+        "top3": [
+          "base_repr",
+          "bitop",
+          "calc_exact"
+        ]
+      },
+      {
+        "expected": [
+          "bitop"
+        ],
+        "got": "bit_analysis",
+        "prompt": "I need the RESULT of combining two integers with a boolean operator, not properties of a single one",
+        "top3": [
+          "base_repr",
+          "bit_analysis",
+          "verify_optimization"
+        ]
+      },
+      {
+        "expected": [
+          "solve_expression"
+        ],
+        "got": "bitop",
+        "prompt": "What value of x makes x squared minus 4 equal zero?",
+        "top3": [
+          "bitop",
+          "compare_edge_cases",
+          "evaluate_expression"
+        ]
+      },
+      {
+        "expected": [
+          "solve_expression"
+        ],
+        "got": "compare_edge_cases",
+        "prompt": "Find where this single-variable expression crosses zero",
+        "top3": [
+          "bit_analysis",
+          "compare_edge_cases",
+          "solve_expression"
+        ]
+      },
+      {
+        "expected": [
+          "solve_expression",
+          "solve_linear"
+        ],
+        "got": "algebraic_equiv",
+        "prompt": "For 2*x + 1 = 7, what's x?",
+        "top3": [
+          "algebraic_equiv",
+          "analyze_complexity",
+          "base_repr"
+        ]
+      },
+      {
+        "expected": [
+          "limit_expression"
+        ],
+        "got": "benchmark",
+        "prompt": "As n grows without bound, what does n*log(n)/n**2 approach?",
+        "top3": [
+          "benchmark",
+          "collision_probability",
+          "limit_expression"
+        ]
+      },
+      {
+        "expected": [
+          "limit_expression"
+        ],
+        "got": "analyze_complexity",
+        "prompt": "I don't want a structural code estimate \u2014 I want the exact symbolic limit as the variable grows unbounded",
+        "top3": [
+          "analyze_complexity",
+          "limit_expression",
+          "trace_execution"
+        ]
+      },
+      {
+        "expected": [
+          "limit_expression"
+        ],
+        "got": "benchmark",
+        "prompt": "As the input size grows huge, does n/log(n) eventually dominate or vanish?",
+        "top3": [
+          "benchmark",
+          "limit_expression",
+          "verify_optimization"
+        ]
+      },
+      {
+        "expected": [
+          "evaluate_expression",
+          "simplify_expression"
+        ],
+        "got": "algebraic_equiv",
+        "prompt": "Take this messy algebraic formula and give me its cleanest possible form",
+        "top3": [
+          "algebraic_equiv",
+          "evaluate_expression",
+          "simplify_expression"
+        ]
+      },
+      {
+        "expected": [
+          "z3_check"
+        ],
+        "got": "truth_table",
+        "prompt": "I need a real constraint solver's verdict on Int/Real constraints, not an enumerated boolean truth table",
+        "top3": [
+          "solve_expression",
+          "truth_table",
+          "z3_check"
+        ]
+      },
+      {
+        "expected": [
+          "list_languages"
+        ],
+        "got": "extract_function",
+        "prompt": "I want the roster of programming LANGUAGES available, not the sandbox backends that run them",
+        "top3": [
+          "extract_function",
+          "list_languages",
+          "runtimes_status"
+        ]
+      },
+      {
+        "expected": [
+          "execute_code"
+        ],
+        "got": "compare_execution",
+        "prompt": "Run this Python snippet and give me its stdout",
+        "top3": [
+          "compare_edge_cases",
+          "compare_execution",
+          "extract_function"
+        ]
+      },
+      {
+        "expected": [
+          "execute_code"
+        ],
+        "got": "trace_execution",
+        "prompt": "Execute the following program in a sandbox and return what it printed, its exit status, and how long it took",
+        "top3": [
+          "execute_code_stream",
+          "extract_function",
+          "trace_execution"
+        ]
+      },
+      {
+        "expected": [
+          "execute_code"
+        ],
+        "got": "run_submit",
+        "prompt": "I want to wait right here for this program to finish and get the result back in this same call",
+        "top3": [
+          "execute_code_stream",
+          "run_inspect",
+          "run_submit"
+        ]
+      },
+      {
+        "expected": [
+          "execute_code"
+        ],
+        "got": "run_inspect",
+        "prompt": "Just run this one-liner right now and tell me what it printed and how long it took",
+        "top3": [
+          "run_inspect",
+          "run_submit",
+          "trace_execution"
+        ]
+      },
+      {
+        "expected": [
+          "execute_code_stream"
+        ],
+        "got": "run_inspect",
+        "prompt": "Run this long-running script but show me its output as it goes, not just at the very end",
+        "top3": [
+          "run_inspect",
+          "run_submit",
+          "session_run"
+        ]
+      },
+      {
+        "expected": [
+          "execute_code_stream"
+        ],
+        "got": "trace_execution",
+        "prompt": "I need to see this program's output line by line as it happens, live, not all dumped at the end",
+        "top3": [
+          "benchmark",
+          "trace_execution",
+          "verify_translation"
+        ]
+      },
+      {
+        "expected": [
+          "session_start"
+        ],
+        "got": "run_submit",
+        "prompt": "I don't want a one-shot run \u2014 open a long-lived workspace I can come back to",
+        "top3": [
+          "execute_code_stream",
+          "run_inspect",
+          "run_submit"
+        ]
+      },
+      {
+        "expected": [
+          "session_stop"
+        ],
+        "got": "session_start",
+        "prompt": "Tear down that persistent workspace I opened earlier and free its resources",
+        "top3": [
+          "session_files",
+          "session_snapshot",
+          "session_start"
+        ]
+      },
+      {
+        "expected": [
+          "session_stop"
+        ],
+        "got": "session_snapshot",
+        "prompt": "Kill the REPL worker behind that workspace id and wipe its files",
+        "top3": [
+          "session_snapshot",
+          "session_start",
+          "session_stop"
+        ]
+      },
+      {
+        "expected": [
+          "session_stop"
+        ],
+        "got": "session_start",
+        "prompt": "I want to permanently shut down and delete an entire persistent workspace, not just interrupt one background job inside it",
+        "top3": [
+          "session_snapshot",
+          "session_start",
+          "session_stop"
+        ]
+      },
+      {
+        "expected": [
+          "session_list"
+        ],
+        "got": "session_start",
+        "prompt": "What persistent workspaces do I currently have open, and in which languages?",
+        "top3": [
+          "install_package",
+          "int_widths",
+          "session_start"
+        ]
+      },
+      {
+        "expected": [
+          "session_list"
+        ],
+        "got": "session_start",
+        "prompt": "Show me every live stateful workspace right now and its status",
+        "top3": [
+          "list_languages",
+          "session_start",
+          "session_stop"
+        ]
+      },
+      {
+        "expected": [
+          "session_list"
+        ],
+        "got": "session_snapshot",
+        "prompt": "I want an inventory of the WORKSPACES themselves, not the files inside any one of them",
+        "top3": [
+          "execute_code_stream",
+          "session_files",
+          "session_snapshot"
+        ]
+      },
+      {
+        "expected": [
+          "session_files"
+        ],
+        "got": "session_snapshot",
+        "prompt": "What files exist inside my saved workspace right now?",
+        "top3": [
+          "session_files",
+          "session_snapshot",
+          "session_stop"
+        ]
+      },
+      {
+        "expected": [
+          "session_files"
+        ],
+        "got": "execute_code_stream",
+        "prompt": "I want EVERYTHING in there, including files I planted myself, not just what my program generated",
+        "top3": [
+          "execute_code_stream",
+          "session_files",
+          "trace_execution"
+        ]
+      },
+      {
+        "expected": [
+          "session_write_file"
+        ],
+        "got": "session_snapshot",
+        "prompt": "Save this CSV data into my workspace so a later script can read it as input",
+        "top3": [
+          "session_read_file",
+          "session_snapshot",
+          "session_write_file"
+        ]
+      },
+      {
+        "expected": [
+          "session_artifacts"
+        ],
+        "got": "session_run",
+        "prompt": "What output files did my program generate in that workspace, ignoring the runner's own internal files?",
+        "top3": [
+          "session_artifacts",
+          "session_files",
+          "session_run"
+        ]
+      },
+      {
+        "expected": [
+          "session_artifacts"
+        ],
+        "got": "session_read_file",
+        "prompt": "Show me only what the code I RAN produced, not the input files I planted myself",
+        "top3": [
+          "session_read_file",
+          "session_snapshot",
+          "verify_translation"
+        ]
+      },
+      {
+        "expected": [
+          "session_artifacts"
+        ],
+        "got": "run_inspect",
+        "prompt": "Of everything sitting in my workspace, which parts did my LAST run actually produce, versus what I put there myself?",
+        "top3": [
+          "list_languages",
+          "run_cancel",
+          "run_inspect"
+        ]
+      },
+      {
+        "expected": [
+          "session_snapshot"
+        ],
+        "got": "run_cancel",
+        "prompt": "Back up everything in my persistent workspace right now so I can come back to this exact state later",
+        "top3": [
+          "calc_exact",
+          "run_cancel",
+          "session_start"
+        ]
+      },
+      {
+        "expected": [
+          "session_snapshot"
+        ],
+        "got": "trace_execution",
+        "prompt": "I want a restore point for this workspace I can return to if the next few changes go badly",
+        "top3": [
+          "session_read_file",
+          "session_snapshot",
+          "trace_execution"
+        ]
+      },
+      {
+        "expected": [
+          "session_snapshot"
+        ],
+        "got": "session_start",
+        "prompt": "Get rid of one of those old workspace backups, I don't need it anymore",
+        "top3": [
+          "session_snapshot",
+          "session_start",
+          "update_runtimes"
+        ]
+      },
+      {
+        "expected": [
+          "session_read_file"
+        ],
+        "got": "session_run",
+        "prompt": "Pull the contents of that output file back out of my workspace so I can look at it",
+        "top3": [
+          "execute_code",
+          "session_run",
+          "session_write_file"
+        ]
+      },
+      {
+        "expected": [
+          "session_read_file"
+        ],
+        "got": "session_start",
+        "prompt": "Fetch a file from the persistent workspace, and if it's a picture, hand it back as something I can actually view",
+        "top3": [
+          "evaluate_expression",
+          "session_start",
+          "session_write_file"
+        ]
+      },
+      {
+        "expected": [
+          "session_run"
+        ],
+        "got": "session_snapshot",
+        "prompt": "This program is spread across SEVERAL files already saved in a workspace, not one self-contained snippet I'm pasting in",
+        "top3": [
+          "compare_execution",
+          "session_files",
+          "session_snapshot"
+        ]
+      },
+      {
+        "expected": [
+          "run_submit"
+        ],
+        "got": "human_duration",
+        "prompt": "I don't want to hold this connection open for the entire duration \u2014 hand me a ticket right away instead",
+        "top3": [
+          "compare_execution",
+          "human_duration",
+          "run_cancel"
+        ]
+      },
+      {
+        "expected": [
+          "run_submit"
+        ],
+        "got": "runtimes_status",
+        "prompt": "Fire off this slow job and let me come back and check on it whenever \u2014 don't block my current request on it",
+        "top3": [
+          "runtimes_status",
+          "solve_expression",
+          "z3_check"
+        ]
+      },
+      {
+        "expected": [
+          "run_inspect"
+        ],
+        "got": "run_cancel",
+        "prompt": "Has that background job I kicked off earlier finished yet, and if so what was the result?",
+        "top3": [
+          "run_cancel",
+          "run_inspect",
+          "run_submit"
+        ]
+      },
+      {
+        "expected": [
+          "run_inspect"
+        ],
+        "got": "list_languages",
+        "prompt": "Check on the status of a job running asynchronously, and once it's done, hand me the full output",
+        "top3": [
+          "list_languages",
+          "run_cancel",
+          "z3_check"
+        ]
+      },
+      {
+        "expected": [
+          "run_inspect"
+        ],
+        "got": "run_cancel",
+        "prompt": "I already started that job \u2014 I'm asking about its CURRENT STATE now, not launching a new one",
+        "top3": [
+          "run_cancel",
+          "run_inspect",
+          "session_snapshot"
+        ]
+      },
+      {
+        "expected": [
+          "run_cancel"
+        ],
+        "got": "session_stop",
+        "prompt": "Stop that background job I kicked off \u2014 I don't need its result anymore",
+        "top3": [
+          "run_cancel",
+          "run_inspect",
+          "session_stop"
+        ]
+      },
+      {
+        "expected": [
+          "run_cancel"
+        ],
+        "got": "execute_code_stream",
+        "prompt": "Try to abort an asynchronous job that's still in progress before it finishes on its own",
+        "top3": [
+          "execute_code_stream",
+          "run_submit",
+          "trace_execution"
+        ]
+      },
+      {
+        "expected": [
+          "run_cancel"
+        ],
+        "got": "list_languages",
+        "prompt": "I'm not asking for its status, I want it actively STOPPED",
+        "top3": [
+          "list_execution_providers",
+          "list_languages",
+          "trace_execution"
+        ]
+      },
+      {
+        "expected": [
+          "install_package"
+        ],
+        "got": "update_runtimes",
+        "prompt": "I want to add a brand-new LIBRARY dependency, not upgrade the language runtime itself",
+        "top3": [
+          "install_package",
+          "session_snapshot",
+          "update_runtimes"
+        ]
+      },
+      {
+        "expected": [
+          "analyze_complexity"
+        ],
+        "got": "benchmark",
+        "prompt": "I want a quick READ of the source to guess its growth class, not an empirical timing experiment",
+        "top3": [
+          "benchmark",
+          "calc_stats",
+          "session_read_file"
+        ]
+      },
+      {
+        "expected": [
+          "analyze_complexity"
+        ],
+        "got": "list_languages",
+        "prompt": "Without running anything, can you eyeball this loop nest and guess whether it's quadratic or worse?",
+        "top3": [
+          "list_execution_providers",
+          "list_languages",
+          "update_runtimes"
+        ]
+      },
+      {
+        "expected": [
+          "benchmark"
+        ],
+        "got": "verify_translation",
+        "prompt": "Feed this program bigger and bigger N and clock how the runtime actually scales",
+        "top3": [
+          "list_execution_providers",
+          "list_languages",
+          "verify_translation"
+        ]
+      },
+      {
+        "expected": [
+          "execute_code"
+        ],
+        "got": "run_inspect",
+        "prompt": "Just run this python snippet once and tell me what it prints and how long it took",
+        "top3": [
+          "compare_execution",
+          "run_inspect",
+          "run_submit"
+        ]
+      }
+    ],
+    "n": 212,
+    "per_tool": {
+      "algebraic_equiv": {
+        "n": 4,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "analyze_complexity": {
+        "n": 5,
+        "top1": 0.6,
+        "top3": 0.6
+      },
+      "base_repr": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 1.0
+      },
+      "benchmark": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 0.75
+      },
+      "bit_analysis": {
+        "n": 4,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "bitop": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 0.75
+      },
+      "calc_exact": {
+        "n": 3,
+        "top1": 0.6667,
+        "top3": 0.6667
+      },
+      "calc_stats": {
+        "n": 5,
+        "top1": 0.8,
+        "top3": 0.8
+      },
+      "collision_probability": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 1.0
+      },
+      "compare_edge_cases": {
+        "n": 4,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "compare_execution": {
+        "n": 3,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "compare_threshold": {
+        "n": 4,
+        "top1": 0.5,
+        "top3": 0.5
+      },
+      "convert_units": {
+        "n": 4,
+        "top1": 0.5,
+        "top3": 0.5
+      },
+      "data_sizes": {
+        "n": 4,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "epoch_time": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 0.75
+      },
+      "evaluate_expression": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 0.75
+      },
+      "execute_code": {
+        "n": 5,
+        "top1": 0.0,
+        "top3": 0.0
+      },
+      "execute_code_stream": {
+        "n": 4,
+        "top1": 0.5,
+        "top3": 0.5
+      },
+      "extract_function": {
+        "n": 3,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "float_repr": {
+        "n": 4,
+        "top1": 0.25,
+        "top3": 0.75
+      },
+      "human_duration": {
+        "n": 4,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "install_package": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 1.0
+      },
+      "int_widths": {
+        "n": 4,
+        "top1": 0.5,
+        "top3": 0.5
+      },
+      "limit_expression": {
+        "n": 4,
+        "top1": 0.25,
+        "top3": 1.0
+      },
+      "list_execution_providers": {
+        "n": 3,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "list_languages": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 1.0
+      },
+      "list_units": {
+        "n": 4,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "matrix": {
+        "n": 4,
+        "top1": 0.5,
+        "top3": 0.75
+      },
+      "percentage": {
+        "n": 4,
+        "top1": 0.5,
+        "top3": 0.5
+      },
+      "percentiles": {
+        "n": 4,
+        "top1": 0.25,
+        "top3": 0.5
+      },
+      "physical_constants": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 0.75
+      },
+      "radix_convert": {
+        "n": 4,
+        "top1": 0.5,
+        "top3": 1.0
+      },
+      "run_cancel": {
+        "n": 3,
+        "top1": 0.0,
+        "top3": 0.3333
+      },
+      "run_inspect": {
+        "n": 3,
+        "top1": 0.0,
+        "top3": 0.6667
+      },
+      "run_submit": {
+        "n": 4,
+        "top1": 0.5,
+        "top3": 0.5
+      },
+      "runtimes_status": {
+        "n": 3,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "session_artifacts": {
+        "n": 4,
+        "top1": 0.25,
+        "top3": 0.5
+      },
+      "session_files": {
+        "n": 4,
+        "top1": 0.5,
+        "top3": 1.0
+      },
+      "session_list": {
+        "n": 3,
+        "top1": 0.0,
+        "top3": 0.0
+      },
+      "session_read_file": {
+        "n": 4,
+        "top1": 0.5,
+        "top3": 0.5
+      },
+      "session_run": {
+        "n": 3,
+        "top1": 0.6667,
+        "top3": 0.6667
+      },
+      "session_snapshot": {
+        "n": 7,
+        "top1": 0.5714,
+        "top3": 0.8571
+      },
+      "session_start": {
+        "n": 3,
+        "top1": 0.6667,
+        "top3": 0.6667
+      },
+      "session_stop": {
+        "n": 3,
+        "top1": 0.0,
+        "top3": 0.6667
+      },
+      "session_write_file": {
+        "n": 3,
+        "top1": 0.6667,
+        "top3": 1.0
+      },
+      "simplify_expression": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 1.0
+      },
+      "solve_expression": {
+        "n": 4,
+        "top1": 0.25,
+        "top3": 0.5
+      },
+      "solve_linear": {
+        "n": 4,
+        "top1": 0.5,
+        "top3": 1.0
+      },
+      "trace_execution": {
+        "n": 7,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "truth_table": {
+        "n": 4,
+        "top1": 0.25,
+        "top3": 0.5
+      },
+      "update_runtimes": {
+        "n": 3,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "verify_optimization": {
+        "n": 4,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "verify_translation": {
+        "n": 4,
+        "top1": 1.0,
+        "top3": 1.0
+      },
+      "z3_check": {
+        "n": 4,
+        "top1": 0.75,
+        "top3": 1.0
+      }
+    },
     "skipped": 0,
-    "top1": 0.6256,
-    "top1_hits": 127,
-    "top3": 0.7833,
-    "top3_hits": 159
+    "top1": 0.6321,
+    "top1_hits": 134,
+    "top3": 0.7736,
+    "top3_hits": 164
   },
-  "generated_at": "2026-09-08T22:24:40Z",
-  "prompt_count": 203,
-  "prompt_set_sha256": "72c8ffadb47ee679b641c77b501d571ef7891fdbbd3c5cd3aff27ac9c936696f"
+  "generated_at": "2026-09-09T00:04:37+00:00",
+  "prompt_count": 212,
+  "prompt_set_sha256": "64b6377cf709906c58194fdbbd24bffa4cd1d4de0c25bbfd3bd5a91f4a5ea1ba"
 }

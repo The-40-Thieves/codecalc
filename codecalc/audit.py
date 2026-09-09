@@ -71,6 +71,20 @@ CLEANUP = "cleanup"
 #: for this" from "the source text alone triggered it" (codecalc/dependencies.py
 #: `Resolution.implicit`).
 DEPENDENCY_INSTALL_IMPLICIT = "dependency_install_implicit"
+#: A side-effecting admin tool's confirmation gate (codecalc/confirmation.py)
+#: resolved to "proceed" — the client answered `confirm: true`, on either
+#: protocol generation.
+CONFIRMATION_GRANTED = "confirmation_granted"
+#: The same gate refused: `decision` distinguishes "declined"/"cancelled"
+#: (the user was asked and said no) from "malformed" (the retry carried no
+#: usable answer at all). No side effect happens either way.
+CONFIRMATION_REFUSED = "confirmation_refused"
+#: The gate was not asked at all: a legacy (< 2026-07-28) connection whose
+#: client never declared the elicitation capability, so there was nobody to
+#: ask. The operation proceeds unconfirmed, same as before this gate
+#: existed — recorded so the trail can tell "confirmed" apart from "nobody
+#: was asked" rather than reading the two the same way.
+CONFIRMATION_GATE_SKIPPED = "confirmation_gate_skipped"
 
 #: the live-file size ceiling that triggers a rotation.
 AUDIT_MAX_MB_ENV = "CODECALC_AUDIT_MAX_MB"

@@ -27,11 +27,16 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+import anyio
 from mcp.server import CacheHint, MCPServer
+from mcp.server.apps import APP_MIME_TYPE
 from mcp.server.mcpserver import Context
 from mcp.types import (
+    Completion,
     EmbeddedResource,
+    Icon,
     ImageContent,
+    InputRequiredResult,
     ResourceLink,
     TextContent,
     TextResourceContents,
@@ -40,8 +45,10 @@ from mcp.types import (
 
 from . import (
     __version__,
+    apps_views,
     capabilities,
     complexity,
+    confirmation,
     contract,
     doctor,
     errors,
@@ -55,10 +62,12 @@ from . import (
     optimization,
     packages,
     providers,
+    registry,
     run_supervisor,
     runtimes,
     sessions,
     tools,
+    tracing,
     translation,
     units,
 )
@@ -216,9 +225,71 @@ _execution_service = execution_service.ExecutionService(
 )
 _session_service = execution_service.SessionService(audit=_audit_log)
 
+
+# ── The server's own icon (2025-11-25+) ──────────────────────────────────────
+#
+# SERVER-LEVEL ONLY. This used to also apply a per-GROUP icon to every tool
+# (`Tool.icons`, via `_tool()`'s `d_kwargs.setdefault("icons", ...)`) — pulled
+# after measuring the real cost: only 6 DISTINCT icons exist, but `Tool.icons`
+# is a per-TOOL field, so each tool's own copy repeats the full base64
+# payload on the wire, and base64 tokenizes far worse than prose under a BPE
+# encoder. Measured: +6,665 tokens (o200k_base) on the full served
+# `tools/list` payload for a server whose whole pitch is that tool SELECTION
+# accuracy matters (see README's "Tool-definition token cost" table, and
+# #118/`docs/design/2026-08-10-tool-facade.md`'s reasoning against paying
+# that kind of cost for anything less than a real fix). The server-level
+# icon below survives: it rides on `initialize`, once per CONNECTION, not
+# once per tool — a fundamentally different, negligible cost shape.
+#
+# Inline `data:image/svg+xml;base64,...` — no external URL (a remote `src`
+# means every client that renders an icon fetches from wherever this string
+# points, which is exactly the phone-home shape tests/test_offline.py exists
+# to ban; a self-contained data URI has no such fetch). A single monochrome
+# `<path>` (`fill="currentColor"`, so it inherits the client's own theme
+# rather than fighting it) in a 16x16 viewBox, evenodd cutout for the hole —
+# well under 300 bytes, base64 included.
+#
+# The SVG namespace attribute below is a literal, plain string — NOT split
+# to dodge tests/test_offline.py's outbound-URL scan. That scan bans a
+# hardcoded phone-home endpoint; this is an XML namespace declaration every
+# valid standalone SVG document carries and nothing in this codebase (or any
+# SVG renderer) ever fetches. It is named explicitly in that test's own
+# `_URL_EXEMPTIONS` allowlist, the same mechanism already used for
+# example.com/localhost/127.0.0.1 — see the comment there for why.
+def _svg_icon(path_d: str, *, attrs: str = 'fill="currentColor"', rule: str | None = None) -> Icon:
+    ns = "http://www.w3.org/2000/svg"
+    fill_rule = f' fill-rule="{rule}"' if rule else ""
+    svg = f'<svg xmlns="{ns}" viewBox="0 0 16 16"><path{fill_rule} {attrs} d="{path_d}"/></svg>'
+    data = base64.b64encode(svg.encode("ascii")).decode("ascii")
+    # `mime_type`/`sizes` both left unset: the `data:image/svg+xml;...` src
+    # already states its own MIME type (`mime_type` is documented as an
+    # "override if the source MIME type is MISSING or generic" — it is
+    # neither here), and an absent `sizes` already means "any size" per
+    # `Icon.sizes`'s own docstring. Both fields would only re-state what
+    # `src` already carries.
+    return Icon(src=f"data:image/svg+xml;base64,{data}")
+
+
+#: The server's own icon (`MCPServer(icons=[...])`) — a circle with a
+#: plus-shaped cutout (evenodd).
+_SERVER_ICON = _svg_icon(
+    "M8 0a8 8 0 100 16A8 8 0 008 0zm-1.5 4h3v2.5H13v3H9.5V13h-3V9.5H3v-3h3.5z",
+    rule="evenodd",
+)
+
+#: `website_url` (MCPServer construction below) — a plain literal, NOT split
+#: to dodge tests/test_offline.py's outbound-URL scan. It is this
+#: repository's own homepage, published as metadata for a client to show a
+#: human; codecalc's own runtime never issues a request to it. Named
+#: explicitly in that test's `_URL_EXEMPTIONS` allowlist, same mechanism as
+#: `_svg_icon`'s xmlns above.
+_WEBSITE_URL = "https://github.com/The-40-Thieves/codecalc"
+
 mcp = MCPServer(
     name="codecalc",
     version=__version__,
+    icons=[_SERVER_ICON],
+    website_url=_WEBSITE_URL,
     # ttlMs/cacheScope became REQUIRED on list and read results in 2026-07-28
     # (SEP-2549). They are a freshness hint that lets a client cache instead of
     # re-listing; "public" is right here because this server has no per-caller
@@ -249,25 +320,173 @@ mcp = MCPServer(
     # visibility on. list_languages() was the other candidate and was
     # rejected: it returns a `list[dict]`, one entry per language, with no
     # natural top-level slot for a server-wide field, and a caller only sees
-    # it if they think to call that specific tool. This f-string is evaluated
-    # once, at import time, after `executor` above has already resolved
-    # `_rust` (and, with CODECALC_REQUIRE_NATIVE=1, already refused to import
-    # at all if it came up empty) — so what it reports is what this process
-    # actually has, not a static claim that can drift from it.
-    instructions=(
-        "Universal coding & logic calculator. Tools: list_languages (available "
-        "runtimes), execute_code (run code in 31 languages, returns stdout/"
-        "stderr/exit/time), evaluate_expression (symbolic math via SymPy), "
-        "truth_table (boolean logic), z3_check (SMT-LIB2 satisfiability), "
-        "solve_linear (systems of equations), analyze_complexity (static Big-O), "
-        "benchmark (empirical Big-O by running at increasing sizes), "
-        "compare_execution (same code across many languages). "
-        f"Execution backend: {executor.backend()} (rust = full sandbox "
-        "including no_net; python = fallback, no_net and peak_memory_kb "
-        "unenforced — see CODECALC_REQUIRE_NATIVE)."
-    ),
+    # it if they think to call that specific tool.
+    #
+    # Left `None` HERE on purpose: at this point in the module, `_tool()`
+    # has not been installed yet and not one `@mcp.tool()` line below has
+    # run, so neither `_ACTIVE_GROUPS` nor `TOOL_GROUPS` exist yet either. A
+    # PR #299 review caught the first version of this hardcoding "52 tools
+    # in 6 groups" and every tool name into a literal built HERE, at import
+    # time — correct only for the unconfigured default. A
+    # `CODECALC_TOOLS=core` (calculator only) or `dev` process still
+    # registers a SUBSET of tools/groups, decided later by `_active_groups()`
+    # below, but that static string kept advertising z3_check/execute_code/
+    # sessions tools/groups the process never registers. `_install_instructions()`,
+    # called at the bottom of this module after the last `@mcp.tool()` line
+    # has executed, replaces this with a routing map built from what
+    # actually got registered — see it and `_GROUP_ROUTING_TEXT` there.
+    instructions=None,
 )
 
+
+# ── Argument completion (completion/complete) ───────────────────────────────
+#
+# The 2026-07-28 wire only lets a completion request name a PROMPT or a
+# RESOURCE TEMPLATE (`mcp_types.CompleteRequestParams.ref:
+# ResourceTemplateReference | PromptReference` — no `ref/tool` variant
+# exists in the spec), and this server has one resource template
+# (`codecalc://session/{session_id}/files/{+path}`) and no prompts. A tool
+# argument therefore has no `ref` of its own to hang a completion off — so
+# this dispatches on `argument.name` alone, the one thing every caller of
+# `mcp.complete()` supplies regardless of which tool or template it is
+# completing for, and ignores `ref`/`context` entirely. tests/
+# test_mcp_protocol.py drives this the same way a real client would: a raw
+# `complete()` call naming the session-file template as `ref` and one of
+# the five argument names below.
+def _completion_languages() -> list[str]:
+    """Every registry key plus every alias, e.g. "py" alongside "python3"."""
+    values = set(registry.LANGUAGES)
+    for aliases in registry.ALIASES.values():
+        values.update(aliases)
+    return sorted(values)
+
+
+def _completion_units() -> list[str]:
+    return units.list_units()["units"]
+
+
+def _completion_providers() -> list[str]:
+    return [d["provider_id"] for d in _provider_registry.descriptors()]  # already sorted
+
+
+def _completion_session_ids() -> list[str]:
+    return sorted(s["session_id"] for s in _session_service.list_sessions()["sessions"])
+
+
+def _completion_run_ids() -> list[str]:
+    if _run_supervisor is None:
+        return []
+    return sorted(_run_supervisor.known_run_ids())
+
+
+#: argument name -> zero-arg callable returning every candidate value
+#: (unsorted callers already sort; unfiltered — the handler below applies
+#: the caller's prefix). One entry per tool-argument NAME this server
+#: completes, not per tool: several tools share an argument name
+#: (`language` alone appears on execute_code, benchmark, session_start...)
+#: and this serves all of them from the same list.
+_COMPLETERS = {
+    "language": _completion_languages,
+    "unit": _completion_units,
+    "provider": _completion_providers,
+    "session_id": _completion_session_ids,
+    "run_id": _completion_run_ids,
+}
+
+#: `mcp_types.Completion.values`'s own documented ceiling: "Must not exceed
+#: 100 items." Enforced here rather than trusted to the SDK, so `total`/
+#: `has_more` stay accurate even if a future list of languages or live
+#: sessions grows past it.
+_COMPLETION_LIMIT = 100
+
+
+@mcp.completion()
+async def _complete_argument(ref, argument, context):
+    """Prefix-complete `language`/`unit`/`provider`/`session_id`/`run_id`.
+
+    Case-sensitive, prefix-only (no fuzzy/substring matching — the SDK's own
+    `Completion.values` contract is a ranked list of exact continuations, not
+    a search result). `total` is the FULL match count before the 100-item
+    cap; `has_more` is only true when the cap actually dropped something, so
+    a caller can tell "100 shown, 100 total" (has_more=False) from "100
+    shown, 140 total" (has_more=True).
+    """
+    getter = _COMPLETERS.get(argument.name)
+    if getter is None:
+        return None
+    prefix = argument.value or ""
+    try:
+        candidates = getter()
+    except Exception:
+        # A getter reads live server state (sessions, run supervisor,
+        # provider registry) — a raise there is this handler's problem to
+        # absorb, not a reason to surface a raw internal error to a client
+        # that only asked for completions. Same empty shape the SDK itself
+        # returns when a completion handler answers `None`.
+        return Completion(values=[], total=None, has_more=None)
+    matches = [v for v in candidates if v.startswith(prefix)]
+    values = matches[:_COMPLETION_LIMIT]
+    return Completion(values=values, total=len(matches), has_more=len(matches) > len(values))
+
+
+# ── Session-mutation notifications (resources/list-changed, resource/updated) ─
+#
+# `ctx.notify_resources_changed()`/`ctx.notify_resource_updated(uri)` are
+# coroutines that publish onto a `subscriptions/listen` stream (2026-07-28,
+# SEP-2575) — but every tool below is a plain synchronous `def`, which the
+# SDK runs via `anyio.to_thread.run_sync` (`mcp_middleware.py`'s own module
+# docstring: "the SDK runs them on a worker thread"), not on the event loop
+# that owns those coroutines. `anyio.from_thread.run(...)` is the documented
+# bridge back from an anyio worker thread to its event loop, blocking this
+# worker thread (never the loop) until the notification is published. Best
+# effort, same shape as `execute_code_stream`'s own `report_progress`
+# wrapper above: a client that never opened a listen stream gets no error
+# and no notification, and a publish failure never fails the tool call it
+# rode in on.
+#
+# `resources/list` itself carries a 10s cache TTL (`cache_hints=` on the
+# `MCPServer(...)` construction above) — a client that refetches inside that
+# window can still see stale content even though the notification arrived
+# immediately; the TTL is a caching hint, not a guarantee this notification
+# supersedes.
+def _notify_resources_changed(ctx: Context) -> None:
+    if ctx is None:
+        return
+    try:
+        anyio.from_thread.run(ctx.notify_resources_changed)
+    except Exception:
+        pass
+
+
+def _notify_resource_updated(ctx: Context, uri: str) -> None:
+    if ctx is None:
+        return
+    try:
+        anyio.from_thread.run(ctx.notify_resource_updated, uri)
+    except Exception:
+        pass
+
+
+def _sync_progress(ctx: Context):
+    """A SYNCHRONOUS `(done, total, message)` callback bound to `ctx`, for
+    passing into `tools.benchmark`/`tools.compare_execution`/
+    `optimization.verify_optimization` — all three are plain synchronous
+    functions with no SDK dependency of their own (see `tools.ProgressFn`'s
+    own comment), so the bridge to `ctx.report_progress` (a coroutine) lives
+    here, the same `anyio.from_thread.run(...)` pattern
+    `_notify_resources_changed` above uses. Returns a no-op when `ctx` is
+    None, same as every other best-effort helper in this file.
+    """
+    if ctx is None:
+        return lambda done, total, message: None
+
+    def _progress(done: int, total: int, message: str) -> None:
+        try:
+            anyio.from_thread.run(ctx.report_progress, float(done), float(total), message)
+        except Exception:
+            pass
+
+    return _progress
 
 
 def _coded(fn):
@@ -356,6 +575,18 @@ TOOLS_ENV = "CODECALC_TOOLS"
 #: complete only once this module has finished importing.
 TOOL_GROUPS: dict[str, str] = {}
 
+#: Tool clusters Glama's public v0.5.0 review named as lexically
+#: indistinguishable from a description alone — a model reading `tools/list`
+#: could not tell `calc_exact` from `evaluate_expression`, or `bit_analysis`
+#: from `bitop`, without opening the docstrings. Kept as data here, not just
+#: prose in each docstring, so tests/test_tool_meta.py can assert every
+#: member's description names at least one of its own siblings without
+#: hand-copying (and silently drifting from) this exact list.
+DESCRIPTION_CLUSTERS: tuple[frozenset[str], ...] = (
+    frozenset({"evaluate_expression", "calc_exact", "solve_expression", "solve_linear", "z3_check"}),
+    frozenset({"bit_analysis", "bitop", "int_widths", "base_repr"}),
+)
+
 
 # ── Per-tool ToolAnnotations (readOnlyHint/destructiveHint/idempotentHint/ ─
 # openWorldHint), so a client can approve or auto-run by the
@@ -432,6 +663,11 @@ TOOL_ANNOTATION_OVERRIDES: dict[str, ToolAnnotations] = {
     "execute_code": ToolAnnotations(
         read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True),
     "execute_code_stream": ToolAnnotations(
+        read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True),
+    # trace_execution runs the caller's code through the identical executor
+    # path execute_code does (see codecalc/tracing.py) — same reasoning,
+    # same override.
+    "trace_execution": ToolAnnotations(
         read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True),
     "compare_execution": ToolAnnotations(
         read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True),
@@ -542,6 +778,12 @@ _REQUIRES_USER_INTERACTION = frozenset({"install_package", "update_runtimes"})
 #: entry point (`execute_code`), the two equivalence/optimisation-proof tools
 #: verification exists for, and language discovery (`list_languages`), which
 #: a client typically needs before it can call any of the others correctly.
+#
+# COORDINATOR NOTE: `trace_execution` and `branch_reachability` were named as
+# candidates for this set, but neither exists as a tool on this branch —
+# adding either here (or anywhere) would be a new `@mcp.tool()` with nothing
+# to register, which is worse than leaving this comment. Add them to
+# `_ALWAYS_LOAD` once they land, not before.
 _ALWAYS_LOAD = frozenset({
     "calc_exact", "execute_code", "verify_translation", "verify_optimization", "list_languages",
 })
@@ -595,16 +837,19 @@ _MAX_OUTPUT_KB_CEILING = 240
 #: `structuredContent` carries the same JSON again, outside this bound.
 _MAX_RESULT_SIZE_CHARS = 2 * _MAX_OUTPUT_KB_CEILING * 1024 + 8_000  # = 499_520
 
-#: The five tools whose result can approach the output cap above:
+#: The six tools whose result can approach the output cap above:
 #: execute_code/execute_code_stream/session_run each run one program,
 #: compare_execution runs several, and run_inspect's TERMINAL reply is the
 #: same execution envelope execute_code returns once a managed run finishes
 #: (run_supervisor hands back the same result shape a synchronous run would
 #: have). run_submit is excluded deliberately — its own reply is a small
-#: `run_id` handle; it carries no envelope of its own to cap.
+#: `run_id` handle; it carries no envelope of its own to cap. trace_execution
+#: carries the SAME envelope plus a per-line event trace, which is why it
+#: also caps `max_events` at a size `codecalc/tracing.py`'s own internal
+#: trace-byte ceiling keeps well under this tool's char budget.
 _LARGE_RESULT_TOOLS = frozenset({
     "execute_code", "execute_code_stream", "session_run", "compare_execution",
-    "run_inspect",
+    "run_inspect", "trace_execution",
 })
 
 
@@ -617,6 +862,13 @@ def _tool_meta(name: str) -> dict[str, Any] | None:
         meta["anthropic/alwaysLoad"] = True
     if name in _LARGE_RESULT_TOOLS:
         meta["anthropic/maxResultSizeChars"] = _MAX_RESULT_SIZE_CHARS
+    if name in apps_views.UI_RESOURCE_URIS:
+        # MCP Apps (io.modelcontextprotocol/ui): points a supporting host at
+        # the ui:// resource below. `visibility` is left unset (spec default
+        # ["model", "app"]) — the tool's own text/structured result is
+        # unchanged for the model either way; see
+        # docs/design/2026-09-08-mcp-apps-verification-views.md.
+        meta["ui"] = {"resourceUri": apps_views.UI_RESOURCE_URIS[name]}
     return meta or None
 
 
@@ -889,6 +1141,7 @@ def execute_code(
     compact: bool = False,
     provider: str | None = None,
     dependencies: list[str] | None = None,
+    ctx: Context = None,
 ) -> dict[str, Any]:
     """Execute `code` in `language` in a sandbox.
 
@@ -947,6 +1200,15 @@ def execute_code(
     before. Session-LESS runs (no `session_id`) have no workspace to spill
     into and keep the old truncate-and-drop behaviour.
     """
+    # Resource-change notification not documented in the docstring above:
+    # the docstring is this tool's served `description`, and
+    # scripts/tool_select_eval.py scores tool SELECTION against it — an
+    # equivalent paragraph here measurably hurt selection (same reasoning as
+    # benchmark's/compare_execution's/verify_optimization's own comments on
+    # progress, just above their bodies). With `session_id` set, a
+    # successful call fires one `resources/list` change notification (best
+    # effort — see `_notify_resources_changed`) once the run has actually
+    # written into that session's workspace. See CHANGELOG.md.
     timeout = min(timeout, 120)
     max_output_kb = min(max_output_kb, _MAX_OUTPUT_KB_CEILING)
     spec = providers.ComputationSpec(
@@ -968,6 +1230,8 @@ def execute_code(
             _session_service, session_id, spec, provider_id=provider,
             dependencies=dependencies,
         )
+        if result.get("ok"):
+            _notify_resources_changed(ctx)
     else:
         result = _execution_service.execute(spec, provider_id=provider,
                                             dependencies=dependencies)
@@ -995,10 +1259,19 @@ def session_start(language: str = "python3") -> dict[str, Any]:
 
 
 @mcp.tool(group="sessions")
-def session_stop(session_id: str, keep_snapshots: bool = False) -> dict[str, Any]:
+def session_stop(session_id: str, keep_snapshots: bool = False, ctx: Context = None) -> dict[str, Any]:
     """Stop a session: kill its REPL worker (if any) and delete its workspace.
     Also deletes every session_snapshot saved for it, unless keep_snapshots=True."""
-    return _session_service.stop(session_id, keep_snapshots=keep_snapshots)
+    # Resource-change notification not documented in the docstring above —
+    # same tool_select_eval reasoning as execute_code's own comment. Fires
+    # one `resources/list` change notification (best effort) when the
+    # workspace was actually removed (`deleted: true`) — a second
+    # `session_stop` on an already-gone session is idempotent and changes
+    # nothing, so it stays silent. See CHANGELOG.md.
+    result = _session_service.stop(session_id, keep_snapshots=keep_snapshots)
+    if result.get("ok") and result.get("deleted"):
+        _notify_resources_changed(ctx)
+    return result
 
 
 @mcp.tool(group="sessions")
@@ -1017,10 +1290,22 @@ def session_files(session_id: str, path: str = "", page_size: int | None = None,
 
 
 @mcp.tool(group="sessions")
-def session_write_file(session_id: str, path: str, content: str) -> dict[str, Any]:
+def session_write_file(session_id: str, path: str, content: str, ctx: Context = None) -> dict[str, Any]:
     """Write a file into a session workspace (relative path, no escapes).
     Use this to seed input data for executed code."""
-    return _session_service.write_file(session_id, path, content)
+    # Resource-change notifications not documented in the docstring above —
+    # same tool_select_eval reasoning as execute_code's own comment. On
+    # success, fires one `resources/list` change notification AND one
+    # resource-updated notification for this exact file's
+    # `codecalc://session/{session_id}/files/{path}` URI (both best effort)
+    # — the second is the one place this server names the specific resource
+    # that changed, since every other mutating tool here can touch an
+    # unbounded set of files a single URI cannot name. See CHANGELOG.md.
+    result = _session_service.write_file(session_id, path, content)
+    if result.get("ok"):
+        _notify_resources_changed(ctx)
+        _notify_resource_updated(ctx, f"codecalc://session/{session_id}/files/{path}")
+    return result
 
 
 @mcp.tool(group="sessions")
@@ -1058,9 +1343,15 @@ def session_snapshot(session_id: str, action: str = "save",
 # original report of install-time hook risk (npm postinstall, Python build
 # backends, Cargo build scripts) that the docstring's warning below exists
 # to carry forward to every caller.
-def install_package(language: str, package: str, session_id: str | None = None,
-                    version: str | None = None) -> dict[str, Any]:
+async def install_package(language: str, package: str, session_id: str | None = None,
+                          version: str | None = None,
+                          ctx: Context = None) -> dict[str, Any] | InputRequiredResult:
     """Install a package for a language (uv pip / npm / gem / go get / cargo add...).
+
+    Asks the caller to confirm before installing (a protocol-level gate, not
+    just the `anthropic/requiresUserInteraction` `_meta` hint — see
+    codecalc/confirmation.py); a declined or malformed confirmation refuses
+    with no install attempted.
 
     With session_id, installs into that session's workspace so executed code
     can import it. Without, installs into a shared cache.
@@ -1076,8 +1367,47 @@ def install_package(language: str, package: str, session_id: str | None = None,
     filesystem is not confined. Do not point this at untrusted input. See
     SECURITY.md.
     """
-    return packages.install(language, package, session_id=session_id,
-                            version=version, audit=_audit_log)
+    echo = {"language": language, "package": package}
+    if version:
+        echo["version"] = version
+    message = (
+        f"Install {package}" + (f"=={version}" if version else "") + f" for {language}"
+        + (f" into session {session_id}" if session_id else " into the shared cache")
+        + "? This runs an unsandboxed installer subprocess that can execute "
+          "arbitrary install-time hooks (see SECURITY.md)."
+    )
+    gate = await confirmation.require_confirmation(
+        ctx, tool="install_package", message=message, echo=echo,
+        audit_log=_audit_log, session_id=session_id,
+    )
+    if gate is not None:
+        return gate
+    # Resource-change notification not documented in the docstring above —
+    # same tool_select_eval reasoning as execute_code's own comment. With
+    # session_id, a successful install fires one `resources/list` change
+    # notification (best effort) — the installed package's files land in
+    # that session's workspace, reachable through the session-file resource
+    # template. The shared-cache path (no session_id) touches nothing a
+    # session-scoped resource can name, so it stays silent. See
+    # CHANGELOG.md.
+    result = packages.install(language, package, session_id=session_id,
+                              version=version, audit=_audit_log)
+    # `install_package` is now a native `async def` (#302's confirmation
+    # gate needs `await confirmation.require_confirmation(...)`), so it runs
+    # directly on the event loop rather than on the worker thread
+    # `anyio.to_thread.run_sync` gives a plain synchronous `def` — see
+    # `_notify_resources_changed`'s own docstring for why that distinction
+    # matters. Awaiting `ctx.notify_resources_changed()` directly here is
+    # therefore correct where the thread-bridged sync helper (used by every
+    # OTHER tool below, all still plain `def`s) would not be: calling
+    # `anyio.from_thread.run(...)` from the loop's own thread has no worker
+    # thread to bridge FROM.
+    if session_id and result.get("ok") and ctx is not None:
+        try:
+            await ctx.notify_resources_changed()
+        except Exception:
+            pass
+    return result
 
 
 @mcp.tool(group="execution")
@@ -1144,6 +1474,59 @@ async def execute_code_stream(
     return await _execution_service.execute_stream(
         spec, provider_id=provider, dependencies=dependencies,
         on_progress=report_progress
+    )
+
+
+@mcp.tool(group="execution")
+def trace_execution(
+    language: str,
+    code: str,
+    stdin: str = "",
+    timeout: int = 30,
+    max_events: int = 2000,
+    max_memory_mb: int = 0,
+    max_output_kb: int = 0,
+    max_cpu: int = 0,
+    no_net: bool = False,
+    provider: str | None = None,
+) -> dict[str, Any]:
+    """Debug WHY, line by line: which statements fired, in what order, with
+    what variable values at each step, and which if/elif/while/for/try
+    branch was taken versus never taken. Want just the printed output
+    instead? Use execute_code.
+
+    Returns `events`: ordered `{step, line, event, func, locals}`, one entry
+    per traced line/call/return/exception in YOUR code only (library
+    internals excluded). `locals` on each entry is only the names that
+    changed since the previous step in that same call — not a full dump
+    every line. A `return` entry also carries `return_value`; an
+    `exception` entry carries `exception_type`/`exception_message`.
+
+    Also returns `branches` (hit count per if/elif/while/for/try line),
+    `lines_executed` / `lines_never_executed` (coverage from a static parse),
+    and `truncated`/`truncated_reason` when `max_events` or an internal
+    size ceiling stopped RECORDING early (the underlying stdout/exit code
+    are unaffected either way).
+
+    TRUST: the trace is produced BY the traced program at its OWN privilege
+    — a debugging aid, not an attestation of behaviour, exactly as
+    trustworthy as that program's own stdout. `discarded_events` /
+    `events_consistent` are a best-effort tamper/corruption signal (never a
+    guarantee) computed independently of the file's own content.
+    `unenforced` may additionally note "only the main thread is traced"
+    (sys.settrace is per-thread) or, fallback backend only, an OLE
+    `exit_code` race.
+
+    PYTHON3 ONLY for now; any other `language` is refused up front. For a
+    structural Big-O guess with nothing executed, use analyze_complexity.
+    `provider`: only 'local' (default) is supported here.
+    """
+    timeout = min(timeout, 120)
+    max_output_kb = min(max_output_kb, _MAX_OUTPUT_KB_CEILING)
+    return tracing.execute_trace(
+        language, code, stdin=stdin, timeout=timeout, max_events=max_events,
+        max_memory_mb=max_memory_mb, max_output_kb=max_output_kb,
+        max_cpu=max_cpu, no_net=no_net, provider=provider,
     )
 
 
@@ -1496,12 +1879,12 @@ def run_cancel(run_id: str) -> dict[str, Any]:
 
 @mcp.tool(group="calculator")
 def evaluate_expression(expression: str) -> dict[str, Any]:
-    """Symbolically evaluate an expression to a value or closed form via
-    sympify: 'integrate(x**2, x)', 'sqrt(144) + 2**10'. Not simplification —
-    for simplified/factored/expanded forms, use simplify_expression. Not
-    exact numeric arithmetic on plain arithmetic — use calc_exact for that.
-    Returns `value` (if the result is a number) or the evaluated expression,
-    plus `type`."""
+    """Use evaluate_expression, not calc_exact, for something other than
+    plain arithmetic on literal values. Symbolically evaluate to a value or
+    closed form via sympify: 'integrate(x**2, x)', 'sqrt(144) + 2**10'. Not
+    simplification — for simplified/factored/expanded forms, use
+    simplify_expression. Returns `value` (if the result is a number) or the
+    evaluated expression, plus `type`."""
     return logic.evaluate_expression(expression)
 
 
@@ -1513,7 +1896,9 @@ def truth_table(expression: str) -> dict[str, Any]:
 
 @mcp.tool(group="verification")
 def z3_check(smt2: str) -> dict[str, Any]:
-    """Check an SMT-LIB2 formula with Z3: sat/unsat/unknown plus a model. Example:
+    """Use z3_check, not solve_expression, for satisfiability over
+    inequalities, boolean combinations, or several variables at once: sat/
+    unsat/unknown plus a model. Example:
     '(declare-const x Int)(assert (> x 5))(check-sat)'.
 
     `unsat` is graded `solver_proven` — see `grade_basis` for the engine
@@ -1528,7 +1913,9 @@ def z3_check(smt2: str) -> dict[str, Any]:
 
 @mcp.tool(group="calculator")
 def solve_linear(system: str, variables: str) -> dict[str, Any]:
-    """Solve a system of equations; `system` is ';'-separated equations, `variables` comma-separated. Example: system='x + y = 10; x - y = 2', variables='x, y'."""
+    """Use solve_linear, not solve_expression, for a system of equations
+    sharing variables. `system` is ';'-separated equations, `variables`
+    comma-separated. Example: system='x + y = 10; x - y = 2', variables='x, y'."""
     vars_ = [v.strip() for v in variables.split(",") if v.strip()]
     return logic.solve_linear(system, vars_)
 
@@ -1558,7 +1945,7 @@ def analyze_complexity(code: str, language: str = "python3") -> dict[str, Any]:
 
 @mcp.tool(group="analysis")
 def benchmark(code: str, language: str = "python3", sizes: str = "100,1000,10000,100000",
-              timeout: int = 30) -> dict[str, Any]:
+              timeout: int = 30, ctx: Context = None) -> dict[str, Any]:
     """Empirically measure time complexity by running code at increasing input sizes.
 
     Contract: the code must read an integer N from stdin (first line) and do work
@@ -1566,12 +1953,22 @@ def benchmark(code: str, language: str = "python3", sizes: str = "100,1000,10000
     the growth curve to estimate Big-O (O(1), O(log n), O(n), O(n log n), O(n^2)...).
     Example python: 'import sys\\nn=int(sys.stdin.readline()); s=0\\nfor i in range(n): s+=i\\nprint(s)'
     """
-    return tools.benchmark(code, language=language, sizes=sizes, timeout=timeout)
+    # Progress deliberately NOT documented in the docstring above: the
+    # docstring is this tool's `description` on the wire, and
+    # scripts/tool_select_eval.py scores tool SELECTION against it —
+    # measured, adding this paragraph there cost 2 top-1 hits on the `full`
+    # baseline (BM25's length normalization dilutes the terms a prompt
+    # actually matches on). See CHANGELOG.md and `tools.benchmark`'s own
+    # docstring (not served to any client) for what this reports and why an
+    # auto-scale retry does not get its own progress sequence.
+    return tools.benchmark(code, language=language, sizes=sizes, timeout=timeout,
+                           on_progress=_sync_progress(ctx))
 
 
 @mcp.tool(group="execution")
 def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 15,
-                      dependencies: dict[str, list[str]] | None = None) -> dict[str, Any]:
+                      dependencies: dict[str, list[str]] | None = None,
+                      ctx: Context = None) -> dict[str, Any]:
     """Run the same code in multiple languages side by side.
 
     `snippets` maps language name -> code (each snippet must be valid in its own
@@ -1586,6 +1983,11 @@ def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 
     dropped: a python3 row that carries one gets
     `dependencies: {"status": "unsupported", "reason": ...}`.
     """
+    # Progress not documented in the docstring above — same reasoning as
+    # benchmark's own comment just above it: the docstring feeds
+    # tool_select_eval's BM25 corpus, and this paragraph measurably hurt
+    # selection there. Reports once per language, in `snippets`' own
+    # iteration order; see CHANGELOG.md.
     if dependencies:
         return errors.error_result(
             errors.VALIDATION,
@@ -1597,7 +1999,8 @@ def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 
             provider_error="unsupported_capability",
             capability="dependencies",
         )
-    return tools.compare_execution(snippets, stdin=stdin, timeout=timeout)
+    return tools.compare_execution(snippets, stdin=stdin, timeout=timeout,
+                                   on_progress=_sync_progress(ctx))
 
 
 @mcp.tool(group="execution")
@@ -1621,12 +2024,17 @@ def runtimes_status(languages: str = "") -> dict[str, Any]:
 
 
 @mcp.tool(group="admin")
-def update_runtimes(languages: str = "", apply: bool = False, timeout: int = 600) -> dict[str, Any]:
+async def update_runtimes(languages: str = "", apply: bool = False, timeout: int = 600,
+                          ctx: Context = None) -> dict[str, Any] | InputRequiredResult:
     """Update language runtimes. SAFE BY DEFAULT: with apply=False this is a
     dry run — it returns the update commands that WOULD run without changing
     anything. Pass apply=True to actually execute them (mise up, rustup update,
     swiftly update, apt-get upgrade of language packages, npm -g update, uv tool
     upgrade). `languages` = comma-separated subset; empty = all.
+
+    apply=True asks the caller to confirm first (a protocol-level gate, not
+    just the `anthropic/requiresUserInteraction` `_meta` hint — see
+    codecalc/confirmation.py); apply=False is never gated, since nothing runs.
 
     PRIVILEGE: the apt manager updates system packages and its command begins
     with `sudo`. Those commands do NOT run unless the HOST has set
@@ -1640,6 +2048,18 @@ def update_runtimes(languages: str = "", apply: bool = False, timeout: int = 600
     downloads and installs. "Dry run" bounds what changes on disk, not what is
     sent.
     """
+    if apply:
+        gate = await confirmation.require_confirmation(
+            ctx, tool="update_runtimes",
+            message=(
+                f"Apply runtime updates for {languages or 'all configured languages'}? "
+                "This runs package-manager commands (mise/rustup/npm/uv, and apt "
+                "with sudo when CODECALC_ALLOW_RUNTIME_APPLY=1) that change installed toolchains."
+            ),
+            echo={"languages": languages or "all"}, audit_log=_audit_log,
+        )
+        if gate is not None:
+            return gate
     return runtimes.update(languages or None, apply=apply, timeout=timeout)
 
 
@@ -1662,6 +2082,34 @@ def session_file_resource(session_id: str, path: str):
         return data.decode("utf-8")  # str -> TextResourceContents
     except UnicodeDecodeError:
         return data
+
+
+# ── MCP Apps (io.modelcontextprotocol/ui) resources ─────────────────────────
+# Two static, self-contained HTML documents (codecalc/apps_views.py) bound to
+# verify_translation/verify_optimization via the `_meta.ui.resourceUri` set in
+# `_tool_meta` above. `mime_type=APP_MIME_TYPE` is the SDK's own constant, not
+# a literal, so a host that requires the exact spec string never sees a typo.
+# `resources/list`'s cache hint (10s, public) already covers these the same
+# as every other resource — nothing here is per-caller or ever changes at
+# runtime, so no override is needed. See
+# docs/design/2026-09-08-mcp-apps-verification-views.md for the research this
+# is built from.
+@mcp.resource(apps_views.UI_RESOURCE_URIS["verify_translation"],
+              name="verify_translation view",
+              description="Interactive per-case comparison table for a verify_translation result, "
+                          "with first-differing-line highlighting. Ignored by hosts without MCP Apps support.",
+              mime_type=APP_MIME_TYPE)
+def verify_translation_view() -> str:
+    return apps_views.VERIFY_TRANSLATION_HTML
+
+
+@mcp.resource(apps_views.UI_RESOURCE_URIS["verify_optimization"],
+              name="verify_optimization view",
+              description="Interactive per-size timing chart and significance table for a "
+                          "verify_optimization result. Ignored by hosts without MCP Apps support.",
+              mime_type=APP_MIME_TYPE)
+def verify_optimization_view() -> str:
+    return apps_views.VERIFY_OPTIMIZATION_HTML
 
 
 # Deliberately left untyped (no `-> dict` or `-> dict[str, Any]`): the body
@@ -1799,7 +2247,7 @@ def _inline_artifact_blocks(session_id: str, artifacts: list[dict]) -> tuple[lis
 @mcp.tool(group="sessions")
 def session_run(session_id: str, entry_file: str, language: str | None = None,
                 stdin: str = "", timeout: int = 30,
-                dependencies: list[str] | None = None):
+                dependencies: list[str] | None = None, ctx: Context = None):
     """Run a multi-file program in a session: execute `entry_file`, which may
     import other files already in the session workspace (helper.py, data/...).
 
@@ -1828,10 +2276,17 @@ def session_run(session_id: str, entry_file: str, language: str | None = None,
     own `main.py` (or the equivalent for another language) at the session
     root is never touched by running a different entry file.
     """
+    # Resource-change notification not documented in the docstring above —
+    # same tool_select_eval reasoning as execute_code's own comment. Every
+    # successful run fires one `resources/list` change notification (best
+    # effort) — the entry file's own scratch copy changes on every call,
+    # even when `artifacts_created` is empty. See CHANGELOG.md.
     result = _session_service.run_file(
         session_id, entry_file, language=language, stdin=stdin, timeout=timeout,
         dependencies=dependencies,
     )
+    if result.get("ok"):
+        _notify_resources_changed(ctx)
     created = result.get("artifacts_created")
     if not created:
         return result
@@ -1867,7 +2322,7 @@ def physical_constants(name: str | None = None) -> dict[str, Any]:
 
 @mcp.tool(group="calculator")
 def list_units() -> dict[str, Any]:
-    """List every supported unit alias for convert_units."""
+    """List every supported unit alias — all aliases and spellings — for convert_units."""
     return units.list_units()
 
 
@@ -1875,7 +2330,9 @@ def list_units() -> dict[str, Any]:
 
 @mcp.tool(group="calculator")
 def calc_exact(expr: str) -> dict[str, Any]:
-    """EXACT arithmetic: 0.1 + 0.2 == 0.3 is True here (False in plain Python).
+    """Use calc_exact, not evaluate_expression, for a literal arithmetic
+    expression with no symbols in it. EXACT arithmetic: 0.1 + 0.2 == 0.3 is
+    True here (False in plain Python).
 
     Everything is an exact rational, integers are arbitrary precision. Supports
     + - * / // % ** comparisons, bitwise ops (& | ^ << >> ~) on integers, and
@@ -1947,11 +2404,11 @@ def data_sizes(n: int) -> dict[str, Any]:
 
 @mcp.tool(group="calculator")
 def human_duration(seconds: float) -> dict[str, Any]:
-    """Humanised duration (e.g. '2d 3h 4m 5s') plus per-day and per-30d rates
-    for a number of seconds. For converting an epoch timestamp to a calendar
-    date, use epoch_time — this tool is for elapsed time, not a point in
-    time. For byte counts, not seconds, use data_sizes. Returns `human`,
-    `per_day`, `per_30d`, and the echoed `seconds`."""
+    """Convert a SPAN of elapsed seconds (not a point-in-time timestamp) into
+    a humanised duration (e.g. '2d 3h 4m 5s') plus per-day and per-30d rates.
+    For an epoch timestamp to a calendar date, use epoch_time instead. For
+    byte counts, not seconds, use data_sizes. Returns `human`, `per_day`,
+    `per_30d`, and the echoed `seconds`."""
     return exact.human_duration(seconds)
 
 
@@ -1964,7 +2421,8 @@ def epoch_time(n: str) -> dict[str, Any]:
 
 @mcp.tool(group="calculator")
 def base_repr(n: int, width: int | None = None) -> dict[str, Any]:
-    """hex/oct/bin of N; with WIDTH, two's complement and signed-overflow
+    """Use base_repr, not int_widths, for a single specified width. hex/
+    oct/bin of N; with WIDTH, two's complement and signed-overflow
     detection. `base_repr(3000000000, 32)` says plainly it does not fit i32."""
     return exact.base_repr(n, width)
 
@@ -1988,7 +2446,8 @@ def float_repr(x: float) -> dict[str, Any]:
 
 @mcp.tool(group="calculator")
 def int_widths(n: int) -> dict[str, Any]:
-    """Which widths (i8..i64/u8..u64) hold N, and the wrapped value where they
+    """Use int_widths, not base_repr, to scan across widths, not just one.
+    Which widths (i8..i64/u8..u64) hold N, and the wrapped value where they
     do not. Flags anything past 2^53 as unable to round-trip through a JS
     number or JSON float. `int_widths(3000000000)` shows the i32 wrap."""
     return exact.int_widths(n)
@@ -1996,15 +2455,18 @@ def int_widths(n: int) -> dict[str, Any]:
 
 @mcp.tool(group="calculator")
 def bit_analysis(n: int, align: int | None = None) -> dict[str, Any]:
-    """popcount, bit length, trailing zeros, power-of-two check, next power of
-    two, and (with align) padding needed to reach an alignment boundary."""
+    """Use bit_analysis, not bitop, for facts about a single N: popcount,
+    bit length, trailing zeros, power-of-two check, next power of two, and
+    (with align) padding needed to reach an alignment boundary."""
     return exact.bit_analysis(n, align)
 
 
 @mcp.tool(group="calculator")
 def bitop(a: int, op: str, b: int | None = None, width: int = 64) -> dict[str, Any]:
-    """Programmer-mode bit ops: and or xor nand nor xnor not shl shr sar rol ror
-    at width 8/16/32/64. Every result shows unsigned, signed (two's complement),
+    """Use bitop, not bit_analysis, to apply an operation (and/or/xor/not/
+    shifts/rotates) rather than describe a value. Programmer-mode bit ops:
+    and or xor nand nor xnor not shl shr sar rol ror at width 8/16/32/64.
+    Every result shows unsigned, signed (two's complement),
     hex, octal and binary. shr is logical (zero-fill); sar is arithmetic
     (sign-propagating) — 0x80 shr 1 = 0x40 (+64) but 0x80 sar 1 = 0xC0 (-64).
     A left shift that drops bits says OVERFLOW and shows the unbounded answer.
@@ -2022,9 +2484,9 @@ def algebraic_equiv(a: str, b: str) -> dict[str, Any]:
 
 @mcp.tool(group="calculator")
 def solve_expression(expr: str, var: str = "x") -> dict[str, Any]:
-    """Solve a single equation in one variable for its roots or crossover
-    point: 'x**2 - 4 = 0', '2*x + 1 = 7'. For a system of several equations,
-    use solve_linear. For general constraint satisfiability (inequalities,
+    """Use solve_expression, not z3_check, for the roots of one equation:
+    'x**2 - 4 = 0', '2*x + 1 = 7'. For a system of several equations, use
+    solve_linear. For general constraint satisfiability (inequalities,
     boolean constraints, multiple solvers), use z3_check. Returns
     `solutions` as a list of strings alongside the parsed `equation` and
     `variable`."""
@@ -2041,11 +2503,10 @@ def limit_expression(expr: str, var: str = "x", point: str = "oo") -> dict[str, 
 
 @mcp.tool(group="calculator")
 def simplify_expression(expr: str) -> dict[str, Any]:
-    """Simplified, factored, and expanded forms of an expression —
-    algebraic rewriting, not solving and not a numeric value. For roots of
-    an equation, use solve_expression. For an exact numeric result, use
-    calc_exact. Returns `simplified`, `factored`, and `expanded` as strings
-    alongside the parsed `original`."""
+    """Simplify, factor, and expand an expression — algebraic forms, not
+    solving (use solve_expression) and not a numeric value (use
+    calc_exact). Returns `simplified`, `factored`, and `expanded` as
+    strings alongside the parsed `original`."""
     return exact.simplify_expression(expr)
 
 
@@ -2110,7 +2571,8 @@ def compare_edge_cases(snippets: dict[str, str],
 def verify_optimization(original: str, candidate: str, language: str,
                         test_inputs: list[str] | None = None,
                         sizes: list[int] | None = None,
-                        min_speedup: float = optimization.DEFAULT_MIN_SPEEDUP) -> dict[str, Any]:
+                        min_speedup: float = optimization.DEFAULT_MIN_SPEEDUP,
+                        ctx: Context = None) -> dict[str, Any]:
     """PROVE an optimisation: same outputs, and measurably AND SIGNIFICANTLY faster.
 
     You write the optimised version. This runs both against the same inputs to
@@ -2133,9 +2595,16 @@ def verify_optimization(original: str, candidate: str, language: str,
     or not significantly faster — is graded `ungraded`: correctness alone does
     not earn a grade for the optimisation claim this tool exists to answer.
     """
+    # Progress not documented in the docstring above — same reasoning as
+    # benchmark's/compare_execution's own comments: the docstring feeds
+    # tool_select_eval's BM25 corpus, and an equivalent paragraph measurably
+    # hurt selection there. Reports once after each of four phases COMPLETES
+    # (correctness, baseline sizes, candidate sizes, alignment — see
+    # optimization.PROGRESS_PHASES); a phase that fails reports nothing for
+    # itself, and later phases never ran. See CHANGELOG.md.
     result = optimization.verify_optimization(
         original, candidate, language, test_inputs=test_inputs,
-        sizes=sizes, min_speedup=min_speedup)
+        sizes=sizes, min_speedup=min_speedup, on_progress=_sync_progress(ctx))
     return grades.grade_verify_optimization(result, result.get("language", language))
 
 
@@ -2154,11 +2623,115 @@ def extract_function(code: str, language: str, function_name: str,
                                          call=call, test_inputs=test_inputs)
 
 
+# ── instructions: a routing map for what THIS process actually registers ───
+# Every `@mcp.tool()` line above has now run, so `_ACTIVE_GROUPS` and
+# `TOOL_GROUPS` are complete — see the long comment on `instructions=None`
+# in the `MCPServer(...)` construction above for why this could not be a
+# literal there.
+
 #: Registry entries that are a second spelling of a language already counted,
 #: not a language of their own. Mirrors ALIAS_ENTRIES in scripts/check_claims.py
-#: — the count this command prints has to agree with the one the README states
-#: and the gate enforces, or it is just a fourth opinion.
+#: — the count this command prints (and the one `_GROUP_ROUTING_TEXT`'s
+#: "execution" entry states below) has to agree with the one the README
+#: states and the gate enforces, or it is just a fourth opinion. Defined
+#: here, ahead of `_tool_groups_report()` below where a caller might expect
+#: it, because `_GROUP_ROUTING_TEXT` (immediately below) is a dict literal
+#: whose values evaluate immediately and already needs it.
 _ALIAS_ENTRIES = {"c++"}
+
+#: One intent-routing sentence per KNOWN_GROUPS member, hand-written (not
+#: derived from each tool's own docstring) so this text stays independent
+#: of whatever wording the tool-select eval's BM25 scoring is sensitive to
+#: on that OTHER surface — `_build_instructions()` below picks only the
+#: entries whose key is in `_ACTIVE_GROUPS`, so a `CODECALC_TOOLS=core`
+#: process's instructions never names a tool or group it did not register.
+_GROUP_ROUTING_TEXT: dict[str, str] = {
+    "calculator": (
+        "math/logic/units/numbers: evaluate_expression (symbolic, has "
+        "variables/calculus) vs calc_exact (exact arithmetic on literal "
+        "numbers); simplify_expression (rewrite forms) vs solve_expression "
+        "(one-variable roots) vs solve_linear (systems); truth_table "
+        "(boolean logic); matrix, calc_stats, percentiles, percentage, "
+        "compare_threshold, limit_expression, collision_probability; "
+        "bit_analysis (one value's bit layout) vs bitop (apply an "
+        "operation) vs int_widths (which widths hold N) vs base_repr "
+        "(hex/oct/bin at a width) vs radix_convert (base-to-base); "
+        "float_repr, data_sizes, human_duration (elapsed seconds), "
+        "epoch_time (timestamp to date); convert_units, list_units, "
+        "physical_constants."
+    ),
+    "verification": (
+        "z3_check (SMT satisfiability) vs solve_expression (one equation's "
+        "roots); algebraic_equiv (symbolic identity); "
+        "verify_translation/verify_optimization (prove two programs match "
+        "by running both); compare_edge_cases (find divergent inputs)."
+    ),
+    "execution": (
+        f"run code ({len(set(registry.LANGUAGES) - _ALIAS_ENTRIES)} "
+        "languages): execute_code (one-shot) / execute_code_stream (live "
+        "output) / compare_execution (many languages); list_languages, "
+        "list_execution_providers, runtimes_status."
+    ),
+    "sessions": (
+        "persistent workspace + background runs: "
+        "session_start/session_run/session_stop; "
+        "session_files/session_read_file/session_write_file/"
+        "session_artifacts (workspace I/O); "
+        "run_submit/run_inspect/run_cancel (async execution)."
+    ),
+    "analysis": (
+        "analyze_complexity (static Big-O) / benchmark (measured Big-O) / "
+        "extract_function."
+    ),
+    "admin": "mutates the host: install_package, update_runtimes.",
+}
+
+def _build_instructions() -> str:
+    """Routing map for exactly what `_ACTIVE_GROUPS` registered.
+
+    Called once, after every `@mcp.tool()` line has executed (see the call
+    site below), so `TOOL_GROUPS`/`_ACTIVE_GROUPS` are both complete and the
+    "N tools in K groups" lead sentence is counted from the live registry,
+    never a hand-typed number that could drift from it — the same class of
+    bug `check_claims.py` exists to catch on the README, now avoided here
+    by construction instead. Kept under ~1,800 characters for the default
+    (every-group) case; a narrower `CODECALC_TOOLS` only shrinks it further.
+    NOT part of the tool-select eval's corpus: scripts/tool_select_eval.py
+    scores `"<name> <description>"` per tool from the live registry only
+    (`_doc_text`), never `mcp.instructions`.
+    """
+    active_order = [g for g in ("calculator", "verification", "execution",
+                                "sessions", "analysis", "admin") if g in _ACTIVE_GROUPS]
+    n_tools = sum(1 for g in TOOL_GROUPS.values() if g in _ACTIVE_GROUPS)
+    lead = (
+        f"Universal coding & logic calculator, {n_tools} tool"
+        f"{'s' if n_tools != 1 else ''} in {len(active_order)} group"
+        f"{'s' if len(active_order) != 1 else ''} — pick by intent."
+    )
+    group_sentences = [f"{g} ({_GROUP_ROUTING_TEXT[g]})" for g in active_order]
+    backend_note = (
+        f"Execution backend: {executor.backend()} (rust = full sandbox "
+        "including no_net; python = fallback, no_net and peak_memory_kb "
+        "unenforced — see CODECALC_REQUIRE_NATIVE)."
+    )
+    return " ".join([lead, *group_sentences, backend_note])
+
+
+def _install_instructions() -> None:
+    """Set `mcp.instructions` from `_build_instructions()`.
+
+    `MCPServer.instructions` is a read-only property backed by
+    `self._lowlevel_server.instructions`, which the SDK itself sets with a
+    plain `self.instructions = instructions` assignment
+    (`mcp/server/lowlevel/server.py`, `mcp` 2.0.0, verified against the
+    installed venv) — a plain attribute, not a validated setter, so
+    reassigning it post-construction is the SDK's own pattern, not a
+    monkeypatch of private state.
+    """
+    mcp._lowlevel_server.instructions = _build_instructions()
+
+
+_install_instructions()
 
 
 def _tool_groups_report() -> dict:

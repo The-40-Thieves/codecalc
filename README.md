@@ -6,7 +6,7 @@
 calculator, a code runner, and a logic checker — so it gets a *correct* answer
 instead of a guessed one.** It runs code in **31 languages**, does exact
 symbolic math, solves SMT/logic problems, and measures complexity, all exposed
-as **53 MCP tools**.
+as **54 MCP tools**.
 
 **Fastest path:** `uvx 'codecalc[full]' setup --write` registers codecalc with your MCP client automatically. New to MCP, or want more detail first? See [QUICKSTART.md](QUICKSTART.md), or the Install section below.
 
@@ -88,6 +88,27 @@ server stays exactly as it was) and backs up the original to
 > artifact carries a keyless sigstore **build-provenance attestation** — verify
 > one with `gh attestation verify <file> --repo The-40-Thieves/codecalc`; PyPI
 > wheels additionally carry PEP 740 attestations.
+
+### Where to find codecalc
+
+| Where | What you get | Link |
+|---|---|---|
+| PyPI | `pip install codecalc` / `uvx codecalc` | [pypi.org/project/codecalc](https://pypi.org/project/codecalc/) |
+| crates.io | the `codecalc-exec` Rust executor crate | [crates.io/crates/codecalc-exec](https://crates.io/crates/codecalc-exec) |
+| GitHub Releases | wheels for every platform, the executor binaries, the `.mcpb` bundle, an SBOM, and `SHA256SUMS` | [github.com/The-40-Thieves/codecalc/releases](https://github.com/The-40-Thieves/codecalc/releases) |
+| MCP registry (official) | the `io.github.The-40-Thieves/codecalc` server entry `server.json` publishes to | [registry.modelcontextprotocol.io](https://registry.modelcontextprotocol.io/v0/servers?search=codecalc) |
+| Smithery | hosted listing and one-click client config | [smithery.ai/servers/@The-40-Thieves/codecalc](https://smithery.ai/servers/@The-40-Thieves/codecalc) |
+| Glama | hosted listing and the score badge above | [glama.ai/mcp/servers/The-40-Thieves/codecalc](https://glama.ai/mcp/servers/The-40-Thieves/codecalc) |
+| MCPB (Claude Desktop) | the drag-and-drop bundle, attached to every GitHub Release | see GitHub Releases, above |
+
+**Not yet listed:** PulseMCP and mcp.so do not carry a codecalc entry yet.
+PulseMCP's own submission page (checked 2026-09-08) says it is not accepting
+new submissions and that publishing to the official MCP registry — already
+done, row above — is what it indexes from once submissions reopen, so there
+is nothing to submit there today. mcp.so takes a submission through its own
+form. See [docs/distribution.md](docs/distribution.md) for the exact steps,
+kept there rather than here because submitting is an action for whoever runs
+it, not a fact about the current release.
 
 **The published install** (simplest — no build step, and what most people want):
 
@@ -453,11 +474,20 @@ Linux kernel with seccomp support enforces it in-kernel either way), and
 [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild)
 for the static cross-builds (zig is used as the linker; no x86_64 GCC needed).
 
-## MCP tools (53) + MCP resources
+## MCP tools (54) + MCP resources
 
 Every session file is also exposed as an MCP resource:
 `codecalc://session/<session_id>/files/<path>` — images render inline for the
 model, text returns as text, other files download.
+
+**Graphical results in MCP Apps hosts**: `verify_translation` and
+`verify_optimization` also carry an [MCP Apps](https://modelcontextprotocol.io)
+`ui://` view (`ui://verify-translation/view.html`,
+`ui://verify-optimization/view.html`) — a per-case diff table and a per-size
+timing chart, respectively, rendered inline by a host that supports the
+extension. Both are self-contained (inline CSS/JS, no network, no external
+assets); a host without MCP Apps support sees exactly today's text/structured
+result, unchanged.
 
 **Exact arithmetic & programmer-mode**: exact rationals, threshold checks, bit
 analysis, binary64 introspection.
@@ -492,6 +522,7 @@ analysis, binary64 introspection.
 | `list_execution_providers` | Execution-provider identity, interface version, host class, and machine-readable capabilities |
 | `execute_code` | Run code in any language → stdout/stderr/exit_code/**verdict** (OK/TLE/MLE/OLE/RTE)/cpu_ms/peak_memory_kb; per-call limits (`max_memory_mb`, `max_output_kb`, `max_cpu`), `no_net`, `compact`. With a session and no explicit `max_output_kb`, oversized output **spills** into the session workspace (`stdout_spill`/`stderr_spill`) instead of just truncating |
 | `execute_code_stream` | Provider-selected execution using the same canonical limits as `execute_code`, with progress + partial output when the provider supports streaming |
+| `trace_execution` | **python3 only.** Runs the same sandboxed executor `execute_code` uses, plus a per-line event trace (`events`: line/call/return/exception, changed locals per step) and a static branch/line-coverage report (`branches`, `lines_executed`, `lines_never_executed`) from an AST parse — answers "which lines ran, in what order, and why" rather than just "what did it print" |
 | `run_submit` | Submit code for **background execution**; returns a `run_id` immediately instead of holding the call open |
 | `run_inspect` | Poll a background run: status while running, the full `execute_code` result shape once terminal |
 | `run_cancel` | Cancel a background run; idempotent on an already-terminal run, honest about providers that cannot cancel mid-flight |
@@ -737,13 +768,29 @@ way back into the default.
 
 ## Tool-definition token cost
 
-codecalc's `tools/list` returns 53 definitions. Measured with `o200k_base` as a
+codecalc's `tools/list` returns 54 definitions. Measured with `o200k_base` as a
 proxy, that is roughly 9,200 tokens of descriptions and input schemas, and every
 client pays it before the first user message.
 
+A per-tool `icons` field (2025-11-25+) was tried and measured, not assumed:
+one tiny inline `data:image/svg+xml;base64,...` glyph per tool GROUP, under
+300 bytes even for the largest of six — small per icon, but `Tool.icons` is a
+per-TOOL field, so each of the 52 tools repeats its group's full base64
+payload on the wire, and base64 tokenizes far worse than prose under a BPE
+encoder. Measured on the full served `tools/list` payload: **+11,540 bytes,
++6,665 tokens** (`o200k_base`) — real and non-trivial on a server whose whole
+pitch (see "Reducing the tool surface" below and `docs/design/
+2026-08-10-tool-facade.md`) is that tool SELECTION accuracy matters more than
+saving a few tokens elsewhere. Removed. codecalc's `MCPServer` still carries
+one SERVER-level icon plus a `website_url` — both ride on `initialize`, once
+per **connection**, not once per **tool**, so they do not touch `tools/list`
+at all: measured before/after, the served `tools/list` payload is
+byte-identical (59,902 bytes / 15,952 tokens either way) — **+0** on the
+number this section exists to track.
+
 codecalc does not hide its tools behind a discovery facade, and that is
 deliberate: the tool surface is where per-operation approval prompts, audit
-names and typed schemas live, and collapsing 53 tools into one dispatcher makes
+names and typed schemas live, and collapsing 54 tools into one dispatcher makes
 `install_package` and `percentage` look like the same permission to a client
 that approves by tool name. The cost is real, but the client is the better place
 to solve it, because the client can defer definitions **without** giving up the
@@ -813,7 +860,7 @@ If you are paying too much for codecalc's definitions:
   https://modelcontextprotocol.io/specification/2026-07-28/server/tools,
   retrieved 2026-09-07). A client without one of the mechanisms above pays the
   full cost regardless of what codecalc does.
-- **Any client** can filter which of the 53 tools it exposes to the model.
+- **Any client** can filter which of the 54 tools it exposes to the model.
   Nothing here requires codecalc to change.
 
 A server-side facade remains under consideration for clients with no such
@@ -842,11 +889,17 @@ three of `full`/`dev`/`core`, wired into CI via
 `tests/test_tool_select_eval.py` so the gate is proven live, on every
 surface, on every run — not just at the PR that added it.
 
+BM25 is a lexical proxy, not a model — `scripts/tool_select_llm_eval.py` is
+the model-driven half, calling a real chat model over a live gateway with
+the identical tool catalog and labeled corpus; it is opt-in (`workflow_dispatch`,
+advisory rather than a hard gate) rather than wired into every PR, and its
+measured numbers live in `docs/tool-selection-eval.md` next to BM25's own.
+
 ## Reducing the tool surface
 
 For an operator who would rather not configure every client, codecalc also has
 a first-party knob: `CODECALC_TOOLS` registers only a chosen slice of the
-53-tool surface, so a client that never enables tool search still pays for a
+54-tool surface, so a client that never enables tool search still pays for a
 smaller `tools/list`.
 
 On a client with no deferral mechanism of its own, the client's own allow-list
@@ -857,7 +910,7 @@ all narrow what a given session sees without touching the server.
 Every tool also now carries a `ToolAnnotations` hint (`readOnlyHint`,
 `destructiveHint`, `idempotentHint`, `openWorldHint` — see
 `codecalc/server.py`'s `GROUP_ANNOTATIONS`/`TOOL_ANNOTATION_OVERRIDES` tables
-for the value on each of the 53). Codex CLI's `writes` approval mode
+for the value on each of the 54). Codex CLI's `writes` approval mode
 (v0.144.0+) reads `readOnlyHint` directly: a tool marked `readOnlyHint: true`
 skips the approval prompt, everything else still asks. That covers the whole
 `calculator` group (25/25 pure) plus the read-only members of the mixed
@@ -881,7 +934,7 @@ Every tool belongs to exactly one group:
 |---|---|
 | `calculator` (25) | `calc_exact`, `compare_threshold`, `percentage`, `calc_stats`, `percentiles`, `collision_probability`, `data_sizes`, `human_duration`, `epoch_time`, `base_repr`, `radix_convert`, `float_repr`, `int_widths`, `bit_analysis`, `bitop`, `solve_expression`, `limit_expression`, `simplify_expression`, `convert_units`, `physical_constants`, `list_units`, `evaluate_expression`, `truth_table`, `solve_linear`, `matrix` |
 | `verification` (5) | `verify_translation`, `verify_optimization`, `algebraic_equiv`, `compare_edge_cases`, `z3_check` |
-| `execution` (6) | `list_languages`, `list_execution_providers`, `execute_code`, `execute_code_stream`, `compare_execution`, `runtimes_status` |
+| `execution` (7) | `list_languages`, `list_execution_providers`, `execute_code`, `execute_code_stream`, `trace_execution`, `compare_execution`, `runtimes_status` |
 | `sessions` (12) | `session_start`, `session_stop`, `session_list`, `session_files`, `session_write_file`, `session_read_file`, `session_run`, `session_artifacts`, `session_snapshot`, `run_submit`, `run_inspect`, `run_cancel` |
 | `analysis` (3) | `analyze_complexity`, `benchmark`, `extract_function` |
 | `admin` (2) | `install_package`, `update_runtimes` |
@@ -899,10 +952,10 @@ both:
 CODECALC_TOOLS=calculator            # just the calculator (25 tools)
 CODECALC_TOOLS=core                  # same thing, by preset name
 CODECALC_TOOLS=calculator,execution  # two groups, unioned
-CODECALC_TOOLS=dev                   # a coding-assistant slice (39 tools)
+CODECALC_TOOLS=dev                   # a coding-assistant slice (40 tools)
 ```
 
-Unset or empty registers every group — 53 tools, same as today —
+Unset or empty registers every group — 54 tools, same as today —
 so nothing changes for an operator who does not set this. An unknown group or
 preset name is a loud startup failure naming the bad value and every known
 group/preset, never a silent fallback to "everything" or "nothing": either
@@ -939,7 +992,7 @@ PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py         # every tool over MC
 PYTHONPATH=. .venv/bin/python tests/test_executor_sweep.py  # sandbox regressions
 ```
 
-63 test files and 16 CI-invoked scripts, **2184 assertions**. "CI-invoked"
+67 test files and 19 CI-invoked scripts, **2184 assertions**. "CI-invoked"
 means referenced by path (`scripts/<name>.py`) from a job in
 `.github/workflows/*.yml` — `scripts/check_claims.py` derives the count that
 way and gates it, so a script wired into a workflow without this sentence

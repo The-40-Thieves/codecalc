@@ -23,6 +23,7 @@ never runs or has to be threaded through an async fixture it does not need.
 
 from __future__ import annotations
 
+import asyncio
 import pathlib
 import sys
 
@@ -242,7 +243,14 @@ check("  ...with a human message, not the exception's constructor arg",
 # documented POLICY decision (packages.py's _UNSUPPORTED/_DECLINED_REASON),
 # same taxonomy as the allowlist denial a few lines below it in packages.py
 # that already returned permission_denied.
-_r = server.install_package(language="ruby", package="nokogiri")
+#
+# install_package is `async def` (it awaits ctx.elicit on a legacy connection
+# with elicitation — codecalc/confirmation.py); called directly like this,
+# with no `ctx`, the confirmation gate is a no-op (require_confirmation
+# returns None outside an active MCP request) and the unsupported-language
+# refusal below is unaffected by that gate — it fires from packages.install()
+# either way.
+_r = asyncio.run(server.install_package(language="ruby", package="nokogiri"))
 check("install_package(ruby) -> permission_denied, not internal",
       _r.get("code") == errors.PERMISSION_DENIED, f"-> {_r.get('code')}")
 

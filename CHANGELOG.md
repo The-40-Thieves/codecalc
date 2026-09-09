@@ -33,6 +33,278 @@ behind it.
 
 ## [Unreleased]
 
+### Added
+
+- **`session_snapshot(session_id, action="save"|"restore"|"list"|"delete", snapshot_id=None, label=None, replace=False)`** — archive a session's workspace files to a `tar.gz` and restore one later, into a new session or back into the same one. One tool with an `action` parameter rather than four separate tools, to keep the 53-tool surface from growing by three at once for one feature; `action`'s four shapes are close enough in signature (`session_id` plus an optional `snapshot_id`/`label`/`replace`) that splitting them would mostly duplicate the same three parameters four times over.
+  - `action="save"` applies the EXACT artifact rules `session_artifacts` already uses (`.codecalc-run/`, `.codecalc-spill/`, and the session lock file excluded) plus one more: a hardlinked file is excluded too, because — unlike a symlink, which `_workspace_scan` already drops before this ever runs — a hardlink is `S_ISREG` and would otherwise be archived, silently smuggling the bytes of whatever it aliases outside the workspace into a snapshot a caller can later restore anywhere. The archive is written OUTSIDE the jailed session workspace, in its own subtree of the sessions root (`.codecalc-snapshots/<session_id>/`), specifically so a session's own sandboxed program can never read, tamper with, or delete an archive of its own past state through the ordinary workspace path. Identity-checked before anything is read (`_dir_identity`, the same check `session_stop` already applies before deleting a workspace) — a session whose directory was swapped out from under it (the same rename-swap attack `tests/test_python_sweep.py`/`tests/test_execution_service.py` already regression-test for `stop()`) is refused rather than archived.
+  - `action="restore"` extracts through a safe extractor that refuses, before a single byte of ANY member is written: an absolute path, a `..` component, a symlink or hardlink member, a device/FIFO/socket member, a member over the existing per-artifact byte cap (`CODECALC_MAX_ARTIFACT_BYTES`), and an archive over the existing per-session artifact-count cap (`CODECALC_MAX_ARTIFACT_COUNT`) — reusing both existing caps rather than inventing new ones for the restore path specifically. Every member is written with `O_EXCL | O_NOFOLLOW`, so a hostile archive can never overwrite or follow an existing file. Without `replace=True`, restores into a brand-new session (same language the snapshot was saved from) and returns that session's own `session_start` shape plus `restored_files`/`bytes`; with `replace=True`, wipes and recreates the SAME session's workspace first (identity-checked the same way `save` is) and, for a stateful python3/node session, kills and respawns its REPL worker — restoring FILES only, never REPL variables/imports, which nothing in this module keeps around once a worker process exits.
+  - Two new caps, env-configurable like the existing session disk quotas: `CODECALC_MAX_SNAPSHOT_BYTES` (default 256 MiB) bounds one archive's raw content size, and `CODECALC_MAX_SNAPSHOTS_PER_SESSION` (default 10) bounds how many a session accumulates — both because a snapshot lives OUTSIDE any session's own disk quota, so nothing existing would otherwise bound it.
+  - Lifecycle: `session_stop` now also deletes every snapshot the session ever saved, unless called with the new `keep_snapshots=True` — the simplest lifecycle with no separate "orphaned snapshot" state to reason about, since a snapshot only ever existed because its origin session did. `session_stop`'s result carries a new `snapshots_deleted` count when it did so.
+  - `CONTRACT_VERSION` bumped `1.14.0` -> `1.15.0` (MINOR): adds the `session_snapshot_result` shape (discriminated by the new `action` field, which collides with no existing shape) — purely additive, no existing tool's result changed shape or meaning.
+- **`trace_execution`** (53rd MCP tool, `execution` group): line-level execution
+  tracing for python3 — answers "which lines ran, in what order, and why did
+  this input produce that output", where `execute_code` only answers "what did
+  it print". Runs the submitted code through the SAME sandboxed executor
+  `execute_code` uses (Rust with the pure-Python fallback, both backends,
+  identical `stdout`/`stderr`/`exit_code`/`verdict`/timing) via a generated
+  harness that installs `sys.settrace`, execs the user's source from a
+  sibling file written at the run's workdir root, and streams JSON-lines
+  trace events into `.codecalc-run/` — the same scratch-directory-write/read-
+  after/caller-deletes pattern `execute_code_stream` already uses for
+  `run.out` (see `codecalc/tracing.py`'s module docstring). Returns the
+  standard envelope PLUS `events` (ordered `{step, line, event, func,
+  locals}` for user-code frames only, `event` one of line/call/return/
+  exception, `locals` holding only the names that CHANGED since the frame's
+  previous event, each repr capped at ~200 chars; `return` events also carry
+  `return_value`, `exception` events carry `exception_type`/
+  `exception_message`), `branches` (hit count per `if`/`elif`/`while`/`for`/
+  `try` line from a static AST parse), `lines_executed`/
+  `lines_never_executed`, and `truncated`/`truncated_reason` (`max_events` or
+  an internal trace-byte ceiling — RECORDING stops, the program always runs
+  to completion, so `stdout`/`exit_code`/`verdict` are always the real,
+  complete ones even when `events` is partial). A CPython trace-protocol
+  quirk — a spurious `return` event with `arg=None` fired for every frame an
+  exception is UNWINDING through, indistinguishable read naively from a
+  function that genuinely returned `None` — is tracked and suppressed, so a
+  `return` in `events` always means the function actually returned.
+  Python3-only in v1 (`sys.settrace` has no cross-language equivalent this
+  package can drive uniformly); any other `language` is refused
+  (`code: validation`, naming `execute_code` as the remedy) before anything
+  is spawned. A non-`local` `provider` is refused the same way: the harness's
+  own workdir-staging/reading contract only the local Rust/Python-fallback
+  executor can satisfy. New result contract shape `execution_trace`
+  (`docs/contract/README.md`, `CONTRACT_VERSION` `1.13.0` -> `1.14.0`, MINOR —
+  additive), discriminated from the plain `execution_envelope` shape by a
+  new `not: {required: [events]}` exclusion on that def (mirrors how
+  `compact`/`rejected` already exclude `backend`/`verdict`), so `oneOf`'s
+  "exactly one shape matches" claim still holds. `tests/test_trace_execution.py`
+  covers both backends: event order/changed-locals/branch counts/
+  `lines_never_executed` on an if/else+loop+function-call program, the
+  exception-unwind suppression above, the `max_events` cap (program
+  completes, trace is cut, `truncated_reason: "max_events"`), stdin
+  passthrough, byte-for-byte `stdout`/`exit_code`/`verdict` parity against
+  `execute_code` on three programs, `SyntaxError` parity (no `Traceback`
+  header, matching CPython's own uncaught-syntax-error convention), a
+  non-python refusal that spawns nothing (asserted via a tripwire on
+  `executor.execute`, not by absence-of-observation), a wall-clock timeout
+  (`verdict: TLE`, partial events, `truncated: false` — a sandbox kill is
+  disclosed via `verdict`/`timed_out`, not this tool's own two recording
+  caps), and no leaked `codecalc-exec` process after either a normal run or
+  a timeout kill.
+
+  **Hardened after cross-vendor review flagged the first cut DO NOT MERGE**,
+  before this tool ever shipped:
+  * **Trace-sink forgery / server-side amplification.** The traced program
+    can derive its own trace file's path from `__file__` and write to it
+    directly — the review reproduced a forged trailing `return` event kept
+    last via `os._exit(0)` to skip the harness's own cleanup. Mitigated,
+    not eliminated (in-process code sharing the traced program's own uid is
+    not a boundary this package can construct — see `codecalc/tracing.py`'s
+    "TRUST BOUNDARY" section): the parser now reads AT MOST
+    `_MAX_TRACE_BYTES + 4 KiB` off disk (`os.open`/`os.read` in a bounded
+    loop, never `Path.read_text()` of the whole file — a program appending
+    megabytes cannot force this UNSANDBOXED parser into unbounded work;
+    `truncated_reason: "trace_file_exceeded"` when the file on disk is
+    bigger than that), every event is schema-validated (exact key set,
+    correct types, `step` continuing the harness's own monotonic sequence —
+    anything else is discarded into a new `discarded_events` count, never
+    raised), and the harness now writes a final `{"event": "end", "step":
+    N, "emitted": N}` line on every path it returns through normally — a
+    new `events_consistent` result field is `false` whenever that line is
+    missing, its count disagrees with what was actually accepted, or
+    anything follows it, which an `os._exit` bypass cannot fake by
+    definition.
+  * **Threads.** `sys.settrace` is a per-thread hook; a second thread's
+    frames were silently absent from `events` with no disclosure. The
+    harness now checks `threading.active_count()` cheaply per `call` event
+    and once more at exit, adding `"threads: only the main thread is
+    traced"` to the result's own `unenforced` array the first time it
+    observes more than one thread.
+  * **`sys.modules['__main__']` leaked the harness's own module and temp
+    file**, not the user's — `sys.modules['__main__'].__file__` showed this
+    harness's internal path instead of matching `execute_code`. Fixed by
+    installing a FRESH `__main__` module (the user's own `__file__`) before
+    `exec()`-ing their code, restored afterward.
+  * **Fallback-backend OLE `exit_code` race.** The pure-Python fallback's
+    own output-cap enforcement (`executor._run_step`) polls a flag on a
+    20ms timer, racing the traced child's natural exit — confirmed
+    PRE-EXISTING and already nondeterministic for plain `execute_code` on
+    this backend (the identical program's `exit_code` flips between `0`
+    and a negative signal across repeated runs at sizes near the cap).
+    `trace_execution`'s extra per-event file I/O shifts that race's timing
+    enough to make its own `exit_code` on an OLE verdict, fallback backend
+    only, unreliable to compare against `execute_code`'s — `verdict`/
+    `output_truncated` are unaffected and always agree. Not fixed at the
+    root (the race lives in shared executor code every tool depends on);
+    disclosed instead via a new `"exit_code: fallback backend may differ
+    on output-limit kills"` entry in `unenforced`, added only when
+    `backend == "python"` and `verdict == "OLE"` — confirmed the Rust
+    backend has no such race across dozens of trials.
+
+  New result fields (`discarded_events`, `events_consistent`) and the third
+  `truncated_reason` enum member (`trace_file_exceeded`) are declared in the
+  `execution_trace` contract shape alongside the rest of it — still additive,
+  landing before this tool's own first release.
+- MCP Apps (`io.modelcontextprotocol/ui`) graphical views for
+  `verify_translation` and `verify_optimization`: each tool now carries
+  `_meta.ui.resourceUri` pointing at a self-contained `ui://` HTML resource
+  (inline CSS/JS, no external assets, no network) that a supporting host
+  (Claude, ChatGPT, VS Code, and others per the ext-apps spec's own host
+  list) renders alongside the tool's answer — a per-case diff table with
+  first-differing-line highlighting for the translation proof, and a
+  per-size before/after timing chart plus the significance table for the
+  optimization proof. `tools/call` is unchanged for hosts without Apps
+  support — the `_meta` key is additive and ignorable — confirmed once
+  during development by byte-comparing a live run of `main`'s server, and
+  guarded going forward by a live in-process equivalence check plus a
+  structural diff against `origin/main`'s merge-base (best-effort: only
+  where `origin/main` is fetchable, which the CI job that runs it is not
+  currently guaranteed to be). See
+  `docs/design/2026-09-08-mcp-apps-verification-views.md` for the spec
+  research this was built from.
+- `llms.txt` at the repo root (the [llmstxt.org](https://llmstxt.org/)
+  convention) indexing README, QUICKSTART, the result contract docs and
+  schemas, SECURITY.md, AUDIT.md, CONTRIBUTING.md, and the packaged skill, so
+  an LLM client can find codecalc's own docs without crawling the repo.
+  `scripts/build_llms_full.py` builds `llms-full.txt` (the full text of
+  everything `llms.txt` links) from that index; it is not committed —
+  instead `.github/workflows/release.yml`'s `release-assets` job builds it
+  fresh and attaches it to each GitHub Release next to the SBOM, and
+  `llms.txt`'s own entry for it points at the stable
+  `releases/latest/download/llms-full.txt` URL. `scripts/check_llms_txt.py`
+  gates the index offline: every linked path must exist, every section must
+  carry at least one verifiable link, and the generator must still run
+  cleanly end to end. README.md gained a "Where to find codecalc" table
+  (PyPI, crates.io, GitHub Releases, the MCP registry, Smithery, Glama,
+  MCPB) and `docs/distribution.md` records the submission steps for the two
+  directories that do not list codecalc yet (PulseMCP, mcp.so).
+- `docker/mcp-catalog/server.yaml` (+ `tools.json`, `readme.md`): a prepared
+  submission for the [Docker MCP Catalog](https://hub.docker.com/mcp),
+  targeting `docker/mcp-server.Dockerfile` (already shipped) as a
+  Docker-built image (`mcp/codecalc`) so it gets Docker's own signatures,
+  SBOM, provenance and Docker Desktop listing rather than a self-hosted
+  image. `tools.json` is the live `tools/list` response from that exact
+  image (52 tools — `CODECALC_TOOLS` is unset in the image, which registers
+  every group; the symbolic-extra tools among them already report "extra
+  not installed" rather than erroring, per the image's existing documented
+  tradeoff), so the registry's own `build --tools` reads it instead of
+  spinning up the container. Validated against the registry's own
+  `task validate`/`task build --tools` tooling — see `docs/distribution.md`
+  for the exact submission steps; this commit does not open that PR.
+- **Argument completion (`completion/complete`) for `language`, `unit`,
+  `provider`, `session_id` and `run_id`.** The 2026-07-28 wire only lets a
+  completion request name a prompt or a resource template
+  (`mcp_types.CompleteRequestParams.ref` has no `ref/tool` variant), and
+  this server has one resource template and no prompts — so the new
+  `@mcp.completion()` handler (`server.py`'s `_complete_argument`) dispatches
+  on `argument.name` alone rather than on `ref`, and serves any of the five
+  names regardless of which tool or template the request nominally targets.
+  `language` completes registry keys plus every alias (`registry.py`);
+  `unit` completes `units.list_units()`; `provider` completes
+  `_provider_registry.descriptors()`'s ids; `session_id` completes live and
+  on-disk sessions (`SessionService.list_sessions()`); `run_id` completes
+  `RunSupervisor.known_run_ids()` (new — the alternative was server.py
+  reaching into `RunSupervisor`'s private `_runs` table directly). Matching
+  is prefix-only and case-sensitive, capped at the SDK's own 100-item
+  ceiling on `Completion.values`, with `total`/`has_more` reporting the full
+  match count and whether the cap actually dropped anything. A getter that
+  raises (each reads live server state — sessions, the run supervisor, the
+  provider registry) is caught and answered with an empty completion rather
+  than surfacing a raw internal error to a client that only asked for
+  completions.
+- **`resources/list`-changed and resource-updated notifications on every
+  tool that mutates a session's workspace.** `session_run`,
+  `execute_code(session_id=...)`, `session_write_file`, `session_stop`
+  (only when it actually removed a workspace — a second stop on an
+  already-gone session is idempotent and stays silent), and
+  `install_package(session_id=...)` each now fire one
+  `ctx.notify_resources_changed()` (best effort) on success;
+  `session_write_file` additionally fires `ctx.notify_resource_updated()`
+  for the exact `codecalc://session/{session_id}/files/{path}` URI it just
+  rewrote, since it is the one mutating tool here that names a single file
+  rather than an unbounded set. Both are coroutines published onto a
+  `subscriptions/listen` stream (2026-07-28, SEP-2575); every tool above is
+  a plain synchronous `def` that the SDK runs on a worker thread, so the new
+  `_notify_resources_changed`/`_notify_resource_updated` helpers bridge back
+  to the event loop via `anyio.from_thread.run(...)` rather than making
+  these tools async. `resources/list` itself still carries the existing 10s
+  cache TTL (`cache_hints=` on the `MCPServer` construction) — a client
+  refetching inside that window can still see stale content even though the
+  notification arrived immediately. Documented in a code comment on each of
+  the five tools above, not their docstrings: the docstring is each tool's
+  served `description`, and `scripts/tool_select_eval.py` scores tool
+  selection against it — measured, an earlier draft of this same paragraph
+  in the docstrings cost 1-2 top-1 hits against the checked-in `full`/`dev`
+  baselines (one flip: a CSV-save prompt started picking `session_read_file`
+  over `session_write_file`) before it was moved out, the same fix already
+  applied to the progress-notification comments below.
+- **A server `icons` entry (2025-11-25+) and `website_url`.**
+  `MCPServer(icons=[...], website_url=...)` carries one server-level icon (a
+  monochrome, under-300-byte inline `data:image/svg+xml;base64,...` glyph)
+  and a `website_url` pointing at this repository. Both are inline/self-
+  contained data, never an external `src` — the same no-phone-home reasoning
+  `tests/test_offline.py` already enforces elsewhere in this package. Both
+  literals are written plainly (not string-split to dodge that test's
+  outbound-URL scan); `tests/test_offline.py` instead gained an explicit,
+  commented `_URL_EXEMPTIONS` entry for each — the SVG namespace declaration
+  every standalone SVG carries, and this repository's own homepage — the
+  same mechanism already used for example.com/localhost/127.0.0.1. Both
+  ride on `initialize`, once per **connection** —
+  measured before/after, `tools/list`'s served payload is byte-identical
+  (59,902 bytes / 15,952 tokens, `o200k_base`, either way): **+0** tokens on
+  the number README's "Tool-definition token cost" section exists to track.
+
+  A per-GROUP `Tool.icons` entry on every tool was tried first, and pulled
+  after measuring its real cost: `Tool.icons` is a per-TOOL field, so each
+  of the 52 tools repeated its group's full base64 payload on the wire, and
+  base64 tokenizes far worse than prose under a BPE encoder — **+6,665
+  tokens** (`o200k_base`, +11,540 bytes) on the full served `tools/list`
+  payload, on a server whose whole pitch (see README's "Reducing the tool
+  surface" and `docs/design/2026-08-10-tool-facade.md`) is that tool
+  SELECTION accuracy matters more than a marginal token saving elsewhere.
+  Not an acceptable trade; removed before release.
+- **Progress notifications on `benchmark`, `verify_optimization` and
+  `compare_execution`**, the same `ctx.report_progress` mechanism
+  `execute_code_stream` already used. `benchmark` reports once per
+  requested size, during the first (non-rescaled) measurement pass only —
+  an auto-scale retry is a distinct, unpredictable-length phase, and giving
+  it its own 1..total sequence would stop the WHOLE call being monotone.
+  `compare_execution` reports once per language, in `snippets`' own
+  iteration order. `verify_optimization` reports once after each of four
+  phases COMPLETES — correctness, baseline sizes, candidate sizes,
+  alignment (`optimization.PROGRESS_PHASES`) — so a phase that fails
+  reports nothing for itself, and the phases after it never ran. All three
+  tools are plain synchronous `def`s that the SDK runs on a worker thread,
+  so `tools.py`/`optimization.py` gained a synchronous `on_progress(done,
+  total, message)` callback parameter (`tools.ProgressFn`) with no SDK
+  dependency of its own; server.py's new `_sync_progress(ctx)` is the one
+  place that bridges it to the async `ctx.report_progress` via
+  `anyio.from_thread.run(...)`, the same pattern the resource-change
+  notifications above use.
+- `scripts/tool_select_llm_eval.py` — the MODEL-driven half of the
+  tool-selection eval `scripts/tool_select_eval.py`'s own docstring says its
+  BM25 selector "cannot tell you whether an actual LLM tool-selector would
+  pick correctly." This calls a real chat model over an OpenAI-compatible
+  `/chat/completions` endpoint (`CODECALC_EVAL_BASE_URL`/`CODECALC_EVAL_API_KEY`,
+  env only — never a CLI argument, never logged), offering the exact tool
+  catalog (name + description + `inputSchema`) an MCP client would see via
+  `tools/list`, per `full`/`dev`/`core` group. Two calls per prompt (a real
+  `tools=[...]` call for top-1, a ranked-list call for a STRICT top-3 — a
+  hit iff LIST mode's own three names intersect `expected`, never unioned
+  with the separate TOOLS-mode pick, which is reported on its own honest
+  `top1_or_list_top3` column instead — with LIST mode's own #1 serving as
+  the top-1 fallback when a model has no function-calling support), a
+  resumable on-disk cache keyed by `(model, group, prompt, tools_hash)` —
+  `tools_hash` is a hash of the exact `tools=[...]` payload, so an edited
+  description or `inputSchema` invalidates the cache instead of silently
+  replaying a stale response — and an advisory (non-blocking by default;
+  `--strict` to fail) regression compare against a checked-in baseline that
+  also warns when a group gets zero cache hits despite an existing baseline
+  entry (a likely description change). See `docs/tool-selection-eval.md`
+  for the measured numbers next to the BM25 baseline. A new
+  `tool-select-llm-eval` CI job (`workflow_dispatch` only, gated on the
+  `CODECALC_EVAL_API_KEY` secret) runs it live and uploads the JSON report.
+
 ### Fixed
 
 - `codecalc doctor --deep` demoted a `tested`-tier toolchain to `unhealthy`
@@ -183,14 +455,73 @@ behind it.
   successful — and the cancellation still propagates to the caller rather
   than coming back as a `stream failed:` result.
 
-### Added
+### Changed
 
-- **`session_snapshot(session_id, action="save"|"restore"|"list"|"delete", snapshot_id=None, label=None, replace=False)`** — archive a session's workspace files to a `tar.gz` and restore one later, into a new session or back into the same one. One tool with an `action` parameter rather than four separate tools, to keep the 53-tool surface from growing by three at once for one feature; `action`'s four shapes are close enough in signature (`session_id` plus an optional `snapshot_id`/`label`/`replace`) that splitting them would mostly duplicate the same three parameters four times over.
-  - `action="save"` applies the EXACT artifact rules `session_artifacts` already uses (`.codecalc-run/`, `.codecalc-spill/`, and the session lock file excluded) plus one more: a hardlinked file is excluded too, because — unlike a symlink, which `_workspace_scan` already drops before this ever runs — a hardlink is `S_ISREG` and would otherwise be archived, silently smuggling the bytes of whatever it aliases outside the workspace into a snapshot a caller can later restore anywhere. The archive is written OUTSIDE the jailed session workspace, in its own subtree of the sessions root (`.codecalc-snapshots/<session_id>/`), specifically so a session's own sandboxed program can never read, tamper with, or delete an archive of its own past state through the ordinary workspace path. Identity-checked before anything is read (`_dir_identity`, the same check `session_stop` already applies before deleting a workspace) — a session whose directory was swapped out from under it (the same rename-swap attack `tests/test_python_sweep.py`/`tests/test_execution_service.py` already regression-test for `stop()`) is refused rather than archived.
-  - `action="restore"` extracts through a safe extractor that refuses, before a single byte of ANY member is written: an absolute path, a `..` component, a symlink or hardlink member, a device/FIFO/socket member, a member over the existing per-artifact byte cap (`CODECALC_MAX_ARTIFACT_BYTES`), and an archive over the existing per-session artifact-count cap (`CODECALC_MAX_ARTIFACT_COUNT`) — reusing both existing caps rather than inventing new ones for the restore path specifically. Every member is written with `O_EXCL | O_NOFOLLOW`, so a hostile archive can never overwrite or follow an existing file. Without `replace=True`, restores into a brand-new session (same language the snapshot was saved from) and returns that session's own `session_start` shape plus `restored_files`/`bytes`; with `replace=True`, wipes and recreates the SAME session's workspace first (identity-checked the same way `save` is) and, for a stateful python3/node session, kills and respawns its REPL worker — restoring FILES only, never REPL variables/imports, which nothing in this module keeps around once a worker process exits.
-  - Two new caps, env-configurable like the existing session disk quotas: `CODECALC_MAX_SNAPSHOT_BYTES` (default 256 MiB) bounds one archive's raw content size, and `CODECALC_MAX_SNAPSHOTS_PER_SESSION` (default 10) bounds how many a session accumulates — both because a snapshot lives OUTSIDE any session's own disk quota, so nothing existing would otherwise bound it.
-  - Lifecycle: `session_stop` now also deletes every snapshot the session ever saved, unless called with the new `keep_snapshots=True` — the simplest lifecycle with no separate "orphaned snapshot" state to reason about, since a snapshot only ever existed because its origin session did. `session_stop`'s result carries a new `snapshots_deleted` count when it did so.
-  - `CONTRACT_VERSION` bumped `1.13.0` -> `1.14.0` (MINOR): adds the `session_snapshot_result` shape (discriminated by the new `action` field, which collides with no existing shape) — purely additive, no existing tool's result changed shape or meaning.
+- **Docs:** `docs/security/ostif-application.md` brought current with 0.10.0
+  (version, size, sandbox tiers, the seccomp-bpf/sigstore/SBOM/ClusterFuzzLite
+  work landed since the draft), a named-incident-class threat model, a
+  prioritized audit scope, and a submission checklist with the OSTIF intake
+  channel. `SECURITY.md` now says the application is submission-ready and
+  pending submission.
+- **`install_package` and `update_runtimes(apply=True)` now gate on a
+  protocol-level confirmation instead of only the `anthropic/
+  requiresUserInteraction` `_meta` hint.** That hint is read by exactly one
+  client (Claude Code) and forces a permission prompt there; every other
+  client, or that one with the hint stripped, previously called straight
+  through with nothing asking whether the install/apply should happen. On a
+  2026-07-28 connection the tool now returns the SDK's multi-round-trip
+  `input_required` result on the first call, asking the caller to confirm
+  (echoing back the package/language, or the languages being updated); the
+  client's retry carries the answer, and the tool proceeds on `confirm: true`
+  or refuses — `permission_denied` for a decline/cancel, `validation` for a
+  missing or malformed answer — with no install or update attempted either
+  way. On an older connection whose client declared the elicitation
+  capability, the same question goes out as a standalone `elicitation/create`
+  request instead. A client on an older connection that never declared
+  elicitation is unaffected: the gate is skipped and behaviour is unchanged,
+  `_meta` hint included — which is also why that hint stays on both tools
+  rather than being replaced outright. Every outcome (confirmed, declined,
+  cancelled, malformed, or skipped) is recorded in the audit log.
+  `update_runtimes(apply=False)` — the default, dry-run form — is never
+  gated, since nothing runs.
+- **Tool descriptions now name the sibling a caller would otherwise confuse
+  them with, and the MCP `instructions` string is a routing map instead of
+  a 9-tool digest.** Glama's public review scored `human_duration` and
+  `simplify_expression` lowest (2.4/5) and flagged two clusters a model
+  cannot tell apart from description text alone: {`evaluate_expression`,
+  `calc_exact`, `solve_expression`, `solve_linear`, `z3_check`} and
+  {`bit_analysis`, `bitop`, `int_widths`, `base_repr`}. Every tool in both
+  clusters now leads with "use X, not Y, when Z" naming the sibling and the
+  discriminating condition (e.g. `calc_exact` for literal arithmetic with
+  no symbols vs `evaluate_expression` for a symbolic expression;
+  `bit_analysis` for facts about one value's bits vs `bitop` to apply an
+  operation — not "combine two operands", the first cut's wording, which a
+  cross-vendor review caught as false for `bitop`'s own unary `not`);
+  `human_duration` and `simplify_expression` lead with the vocabulary an
+  agent would actually search on instead of a noun-phrase summary.
+  `scripts/tool_select_eval.py`'s checked-in baseline (the lexical proxy
+  for whether a description still carries its discriminating vocabulary,
+  regenerated with this change) does not regress on any of
+  `full`/`dev`/`core` — all three measured better after the rewrite.
+  Separately, `instructions` previously named only 9 of the (then) 52
+  tools; it now maps every ACTIVE tool group (calculator, verification,
+  execution, sessions, analysis, admin) to its member tools by intent,
+  under ~1,800 characters, so a client that defers tool loading (tool
+  search / progressive disclosure) has a starting point for the rest.
+  "Active" is load-bearing: the first cut built this string once, at
+  import, before `CODECALC_TOOLS` had decided which groups actually get
+  registered, so a `core`/`dev` server advertised tools (`z3_check`,
+  `execute_code`, whole session/admin groups) it never registers — caught
+  by the same review. `instructions` is now built AFTER every tool has
+  registered, filtered to `_ACTIVE_GROUPS`, with its "N tools in K groups"
+  lead counted from the live registration, not a hand-typed number.
+  `instructions` is not part of the tool-select eval's corpus — that eval
+  scores only `"<name> <description>"` per tool from the live registry —
+  so this is gated separately: every active group is named in
+  `instructions` and no absent group or tool leaks in under
+  `CODECALC_TOOLS=core`/`dev`, plus every cluster tool names a sibling,
+  all three checked against constants `codecalc/server.py` declares rather
+  than hand-copied lists that could drift from them.
 
 ## [0.10.0] — 2026-09-08
 
@@ -433,7 +764,6 @@ behind it.
   `code`/`error`/`remedy`/`code_inferred` are treated as non-droppable
   disclosure (same bucket as `unenforced`/`output_error`) so they survive
   the compaction that follows.
-||||||| parent of dca51c2 (fix: stop verify_optimization certifying identical code as a speedup)
 - **`verify_optimization` certified IDENTICAL before/after code as a verified
   speedup.** Reproduced live in CI (macOS sandbox job, native executor, main):
   `accepted=True` at a measured ratio of 1.21x, `sizes_rejecting` 2/3 —

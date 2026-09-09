@@ -32,6 +32,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
+from _helpers import expected_tool_count
+
 FAILS: list[str] = []
 
 
@@ -110,8 +112,8 @@ check("unset CODECALC_TOOLS: exactly the declared tools register (none missing, 
       f"-> {len(default_data.get('registered', []))} registered vs {len(DECLARED)} declared; "
       f"missing={sorted(set(DECLARED) - set(default_data.get('registered', [])))}, "
       f"extra={sorted(set(default_data.get('registered', [])) - set(DECLARED))}")
-check("unset CODECALC_TOOLS: registers all 53",
-      default.returncode == 0 and len(default_data.get("registered", [])) == 53,
+check(f"unset CODECALC_TOOLS: registers all {expected_tool_count()}",
+      default.returncode == 0 and len(default_data.get("registered", [])) == expected_tool_count(),
       f"-> {len(default_data.get('registered', []))}")
 check("unset CODECALC_TOOLS: every known group is active",
       default.returncode == 0

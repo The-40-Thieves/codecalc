@@ -673,7 +673,28 @@ jobs:
       # once run against the real executor in CI. Running it again here, after the backend assertion
       # above confirms `rust`, is what actually exercises them.
       - name: translation/optimization verification gate (native executor path)
-        run: uv run --no-sync python tests/test_translation_verify.py
+        shell: bash
+        run: |
+          uv run --no-sync python tests/test_translation_verify.py 2>&1 | tee /tmp/translation-verify.out
+          exit "${PIPESTATUS[0]}"
+      # FLOOR, same reason as the executor-sweep grep above: both live real-win
+      # checks in that file now calibrate against the runner and SKIP (with a
+      # printed diagnostic) when the runner cannot reach the measurement floor
+      # inside the budget. A skip is honest on a slow hosted macOS/Windows
+      # runner; on Linux it would mean the accept path of verify_optimization
+      # was never exercised anywhere in CI while every job stayed green. Grep
+      # for the two PASS lines from OUTSIDE the file so a double SKIP here fails
+      # the job instead of hiding.
+      - name: 'FLOOR: both live real-win checks ran on this runner'
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          for line in 'PASS a real O(n)->O(1) win is accepted' 'PASS a real O(n^2)->O(1) win at CALIBRATED sizes is accepted'; do
+            if ! grep -qF "$line" /tmp/translation-verify.out; then
+              echo "::error::tests/test_translation_verify.py did not print '$line' on Linux — the live accept path skipped or failed"
+              exit 1
+            fi
+          done
       # SECOND invocation of this file too — same shape, same reason, as the
       # translation/optimization step just above. The `tests` job (full OS
       # matrix, no Rust binary) already runs this file, but every path that
@@ -802,6 +823,11 @@ jobs:
       # supposed to, and nowhere else.
       - name: tool policy metadata
         run: uv run --no-sync python tests/test_tool_meta.py
+      # MCP Apps ui:// views for verify_translation/verify_optimization: the
+      # resources list/read correctly, the _meta.ui shape matches the spec,
+      # and tools/call is unchanged for hosts without Apps support.
+      - name: MCP Apps verification views
+        run: uv run --no-sync python tests/test_mcp_apps_views.py
       # every declared tool names a real CODECALC_TOOLS group, and the default
       # (unset) configuration still registers all of them — the tool-surface-reduction
       # analogue of the check just above. Needs `mcp` installed to import codecalc.server,

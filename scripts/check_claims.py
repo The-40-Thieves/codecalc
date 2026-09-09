@@ -42,6 +42,7 @@ matching nothing.
 from __future__ import annotations
 
 import argparse
+import ast
 import re
 import sys
 import tomllib
@@ -119,15 +120,57 @@ else:
 # the one that rots. `\+?` makes the same regex match "30+" too, so a FUTURE
 # reversion to the vaguer phrasing fails loudly instead of silently un-gating
 # itself again.
-_srv_langs = [int(n) for n in re.findall(r"(\d+)\+?\s+languages", SERVER)]
-if not _srv_langs:
-    fail("server.py's instructions= no longer states 'N languages' — the "
-         "extractor matched nothing, so this gate proves nothing rather than passing")
-elif any(n != actual_langs for n in _srv_langs):
-    fail(f"server.py's instructions= claims {sorted(set(_srv_langs))} languages; "
-         f"the registry defines {actual_langs}")
+#
+# `instructions` stopped being a source-text LITERAL a regex could grep once
+# a PR #299 review found the earlier hardcoded string kept advertising
+# tools/groups a `CODECALC_TOOLS=core`/`dev` process never registers:
+# `_build_instructions()` now COMPUTES the language count, at import time,
+# as `len(set(registry.LANGUAGES) - _ALIAS_ENTRIES)`.
+#
+# A first fix imported `codecalc.server` here to read the COMPUTED string —
+# and broke the "README claims match the code" CI job, which runs this
+# script on a BARE checkout with NO `uv sync` (.github/workflows/
+# ci-quality.yml): `codecalc/server.py` imports the `mcp` SDK eagerly at
+# module level (`from mcp.server import CacheHint, MCPServer`), a real pip
+# dependency that job never installs, unlike `codecalc.registry`/
+# `codecalc.executor` above, which are pure stdlib BY DESIGN — that is
+# exactly what lets the rest of this script run there at all. `mcp` is
+# required for the package (`dependencies` in pyproject.toml), just not
+# present on THIS job's bare checkout.
+#
+# Fixed here without importing `codecalc.server` (or `mcp`) at all: parse
+# the SOURCE TEXT (already loaded as `SERVER`) for the exact derivation
+# expression instead of executing it. This still catches the two
+# regressions that matter — (1) the expression reverting to a hand-typed
+# literal ("31 languages"): the regex below stops matching, the same
+# "matched nothing" failure the old text-scan gave; (2) the alias SET
+# server.py subtracts drifting from THIS file's own `ALIAS_ENTRIES`, so the
+# two "31"s could silently diverge even with the expression shape intact —
+# checked by `ast.literal_eval`-ing server.py's `_ALIAS_ENTRIES` literal and
+# comparing it to this file's own.
+_lang_expr = re.search(r"len\(set\(registry\.LANGUAGES\)\s*-\s*_ALIAS_ENTRIES\)", SERVER)
+if not _lang_expr:
+    fail("server.py's instructions template no longer derives its language "
+         "count from `len(set(registry.LANGUAGES) - _ALIAS_ENTRIES)` — either "
+         "it reverted to a hand-typed literal, or the expression's shape "
+         "changed and this check needs updating alongside it, never silently")
 else:
-    print(f"ok   server.py instructions=: language count matches the registry ({actual_langs})")
+    _srv_alias_literal = re.search(r"_ALIAS_ENTRIES\s*=\s*(\{[^}]*\})", SERVER)
+    if not _srv_alias_literal:
+        fail("server.py references _ALIAS_ENTRIES in its instructions template "
+             "but no `_ALIAS_ENTRIES = {...}` literal was found to check its value")
+    else:
+        _srv_alias_entries = ast.literal_eval(_srv_alias_literal.group(1))
+        if _srv_alias_entries != ALIAS_ENTRIES:
+            fail(f"server.py's _ALIAS_ENTRIES is {_srv_alias_entries!r}; this "
+                 f"file's own ALIAS_ENTRIES (used to compute {actual_langs} "
+                 f"above) is {ALIAS_ENTRIES!r} — they must agree, or the "
+                 f"instructions template's claimed count and the registry can "
+                 f"silently diverge")
+        else:
+            print("ok   server.py instructions=: language-count expression "
+                  f"derives from registry.LANGUAGES minus the same alias set "
+                  f"this file uses ({actual_langs})")
 
 # ── 3. license coherence ────────────────────────────────────────────────────
 # The crate shipped `license = "MIT"` while the repo LICENSE and pyproject were

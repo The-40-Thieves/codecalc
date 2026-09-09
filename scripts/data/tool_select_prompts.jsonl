@@ -201,3 +201,12 @@
 {"prompt": "Pull just this one function, plus whatever it imports, out of my larger file and run it on its own", "expected": ["extract_function"]}
 {"prompt": "Isolate a single named function (with its helpers) from this codebase into a standalone runnable program", "expected": ["extract_function"]}
 {"prompt": "I don't have a clean snippet — I need you to CARVE one named function out of a bigger file first, then run it", "expected": ["extract_function"]}
+{"prompt": "Show me exactly which lines of this Python script ran and in what order", "expected": ["trace_execution"]}
+{"prompt": "I want to see the value of every variable at each step while this script runs, not just the final printout", "expected": ["trace_execution"]}
+{"prompt": "Walk me through why this python program produced that output, step by step", "expected": ["trace_execution"]}
+{"prompt": "Which branch of this if/elif actually fired when I ran this input, and which one never did", "expected": ["trace_execution"]}
+{"prompt": "Step through this program and show me the call stack and local variables at each point", "expected": ["trace_execution"]}
+{"prompt": "Give me a line-by-line record of this Python script with how each variable changed at every step", "expected": ["trace_execution"]}
+{"prompt": "I need to debug why my loop never hits the else case — show me a step-by-step record of what ran", "expected": ["trace_execution"]}
+{"prompt": "Just run this python snippet once and tell me what it prints and how long it took", "expected": ["execute_code"]}
+{"prompt": "What's the Big-O time complexity of this function, just from reading its structure", "expected": ["analyze_complexity"]}

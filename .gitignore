@@ -51,3 +51,11 @@ graphify-out/*
 # scripts/check_opengrep_baseline.py --findings reads this; the opengrep job writes it
 # into the workspace root. It is a CI artifact, never a tracked file.
 opengrep.json
+
+# scripts/build_llms_full.py's default output. Derived from llms.txt and every
+# file it links — see that script's module docstring for why it is built in CI
+# and attached to each GitHub release instead of being committed here.
+/llms-full.txt
+# scripts/tool_select_llm_eval.py's resumable per-(model, group, prompt) cache —
+# machine-local, and a rerun regenerates it from nothing.
+scripts/data/.llm_eval_cache/

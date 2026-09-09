@@ -859,11 +859,18 @@ def _accept_decision(sp: dict, min_speedup: float, inference: dict) -> tuple[boo
                   f"alpha={inference.get('effective_alpha', inference.get('alpha'))}")
 
 
+#: The four phases `verify_optimization` reports progress for, in order —
+#: named here once so the tool docstring, this function and any test
+#: asserting the sequence all read the same four strings.
+PROGRESS_PHASES = ("correctness", "baseline sizes", "candidate sizes", "alignment")
+
+
 def verify_optimization(original: str, candidate: str, language: str,
                         test_inputs: list[str] | None = None,
                         sizes: list[int] | None = None,
                         min_speedup: float = DEFAULT_MIN_SPEEDUP,
-                        timeout: int = 30) -> dict:
+                        timeout: int = 30,
+                        on_progress: tools.ProgressFn | None = None) -> dict:
     """Decide whether `candidate` is a genuine optimisation of `original`.
 
     Two gates, both measured, neither of them an opinion:
@@ -906,7 +913,18 @@ def verify_optimization(original: str, candidate: str, language: str,
     candidate by calling a second, separately configured model, which put the
     weakest link in the loop in charge of the creative half and left the
     measurement half unreachable on its own.
+
+    `on_progress(done, total, message)`, if given, fires once after each of
+    the four phases in `PROGRESS_PHASES` COMPLETES (`total` = 4, `done` =
+    1..4, monotone) — correctness, baseline sizes, candidate sizes,
+    alignment. A phase that fails returns early without firing for that
+    phase, so a failure in phase N reports N-1 events, not N; a phase never
+    reached (because an earlier one failed) never reports at all.
     """
+    def _progress(done: int) -> None:
+        if on_progress is not None:
+            on_progress(done, len(PROGRESS_PHASES), PROGRESS_PHASES[done - 1])
+
     language = executor.registry.canonical(language) or language
 # The FULL set, not DEFAULT_EDGE_INPUTS[:4]. The slice kept '', '0', '1', '-1'
     # and discarded '10', '100' and '0.1\n0.2' — the multi-digit cases and the
@@ -934,6 +952,7 @@ def verify_optimization(original: str, candidate: str, language: str,
                 "detail": "the candidate does not reproduce the original's "
                           "output; speed was not measured, because a faster "
                           "wrong answer is not an optimisation"}
+    _progress(1)  # "correctness"
 
     # One shared wall-clock budget for the ENTIRE measurement phase — both
     # `_timed` calls (including every auto-scale round each makes) and
@@ -946,9 +965,11 @@ def verify_optimization(original: str, candidate: str, language: str,
     before = _timed(original, language, size_list, timeout=timeout, deadline=deadline)
     if not before.get("ok"):
         return {"ok": False, "error": f"baseline measurement failed: {before.get('error')}"}
+    _progress(2)  # "baseline sizes"
     after = _timed(candidate, language, size_list, timeout=timeout, deadline=deadline)
     if not after.get("ok"):
         return {"ok": False, "error": f"candidate measurement failed: {after.get('error')}"}
+    _progress(3)  # "candidate sizes"
 
     # Each side's own auto-scale in `_timed` runs independently, so they can
     # converge on different sizes (see `_align_sizes`'s docstring). Bring the
@@ -963,6 +984,7 @@ def verify_optimization(original: str, candidate: str, language: str,
         return {"ok": False, "error": f"baseline re-measurement failed: {before.get('error')}"}
     if not after.get("ok"):
         return {"ok": False, "error": f"candidate re-measurement failed: {after.get('error')}"}
+    _progress(4)  # "alignment"
 
     sp = _speedup(before, after)
     inference = _infer_speedup(before, after, min_speedup=min_speedup)

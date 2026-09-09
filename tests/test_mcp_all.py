@@ -119,6 +119,27 @@ async def main():
         check("execute_code returns 6*7 = 42", (r.get("stdout") or "").strip() == "mcp ok 42",
               f"-> {(r.get('stdout') or '').strip()!r}")
 
+        # ── trace_execution ──────────────────────────────────────────────
+        tr = data(await client.call_tool(
+            "trace_execution",
+            {"language": "python3",
+             "code": "def sq(n):\n    return n * n\nprint(sq(6))\n"}))
+        check("trace_execution returns the real program output",
+              (tr.get("stdout") or "").strip() == "36", f"-> {tr.get('stdout')!r}")
+        check("trace_execution recorded a call event for sq()",
+              any(e.get("event") == "call" and e.get("func") == "sq"
+                  for e in tr.get("events") or []),
+              f"-> events={tr.get('events')}")
+        check("trace_execution's return event for sq(6) reports 36",
+              any(e.get("event") == "return" and e.get("func") == "sq"
+                  and e.get("return_value") == "36" for e in tr.get("events") or []),
+              f"-> events={tr.get('events')}")
+        tr_refused = data(await client.call_tool(
+            "trace_execution", {"language": "ruby", "code": "puts 1"}))
+        check("trace_execution refuses a non-python3 language over the real "
+              "MCP round trip", tr_refused.get("code") == "validation",
+              f"-> {tr_refused}")
+
         # ── run_submit / run_inspect / run_cancel ──────────────────────────
         submitted = data(await client.call_tool(
             "run_submit", {"language": "python3", "code": "print('run ok', 6*7)"}))

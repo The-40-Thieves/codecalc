@@ -23,6 +23,8 @@ asserted explicitly rather than inferred from a constant.
 from __future__ import annotations
 
 import asyncio
+import base64
+import itertools
 import pathlib
 import sys
 
@@ -30,7 +32,9 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from mcp import Client
+from mcp.client.subscriptions import ResourcesListChanged, ResourceUpdated
 from mcp.server.context import ServerRequestContext
+from mcp.types import ResourceTemplateReference
 
 from codecalc import mcp_middleware, server
 from codecalc.mcp_middleware import DEFAULT_TIMEOUT_SECONDS, TOOL_TIMEOUTS, timeout_middleware
@@ -130,10 +134,231 @@ async def main() -> None:
         check("template uses reserved expansion {+path}",
               any("{+path}" in u for u in uris), f"-> {uris}")
 
+        # ── completion/complete: no `ref/tool` in the spec, so this server
+        # dispatches on the argument NAME alone (see server.py's own
+        # comment on `_complete_argument`) — any resource-template ref will
+        # do, since the handler never inspects `ref`.
+        tpl_ref = ResourceTemplateReference(uri=uris[0])
+
+        async def complete(name: str, value: str):
+            return await c.complete(tpl_ref, {"name": name, "value": value})
+
+        comp = await complete("language", "py")
+        check("language completion is prefix-filtered",
+              set(comp.completion.values) == {"py", "python", "python3", "python3.12", "python3.14"},
+              f"-> {comp.completion.values}")
+        check("language completion reports total/has_more accurately",
+              comp.completion.total == 5 and comp.completion.has_more is False,
+              f"-> total={comp.completion.total} has_more={comp.completion.has_more}")
+
+        comp = await complete("language", "zzz-no-such-language")
+        check("an unmatched prefix completes to nothing", comp.completion.values == [],
+              f"-> {comp.completion.values}")
+
+        comp = await complete("unit", "kg")
+        check("unit completion finds a known unit", "kg" in comp.completion.values,
+              f"-> {comp.completion.values}")
+
+        comp = await complete("provider", "")
+        check("provider completion includes the local provider",
+              "local" in comp.completion.values, f"-> {comp.completion.values}")
+
+        started = await c.call_tool("session_start", {"language": "python3"})
+        sid = started.structured_content["session_id"]
+        comp = await complete("session_id", sid[:4])
+        check("session_id completion includes a just-started session",
+              sid in comp.completion.values, f"-> {comp.completion.values}")
+        await c.call_tool("session_stop", {"session_id": sid})
+
+        comp = await complete("run_id", "")
+        check("run_id completion returns a list (possibly empty) with no error",
+              isinstance(comp.completion.values, list), f"-> {comp.completion.values}")
+
+        comp = await complete("not_a_completed_argument", "")
+        check("an argument name this server does not complete gets an empty completion",
+              comp.completion.values == [] and comp.completion.total is None,
+              f"-> {comp.completion}")
+
+        # `total` capped display, `has_more` set — asserted directly against
+        # the handler's own limit rather than trying to grow >100 live
+        # sessions/languages through the protocol.
+        from codecalc.server import _COMPLETION_LIMIT
+        check("the completion cap matches the SDK's documented ceiling",
+              _COMPLETION_LIMIT == 100, f"-> {_COMPLETION_LIMIT}")
+
         # ── a real round-trip through a tool ────────────────────────────────
         r = await c.call_tool("calc_exact", {"expr": "0.1+0.2 == 0.3"})
         text = "".join(getattr(b, "text", "") for b in r.content)
         check("calc_exact round-trips", "true" in text.lower(), f"-> {text[:60]}")
+
+        # ── session-mutation notifications (resources/list-changed) ─────────
+        # `subscriptions/listen` is 2026-07-28-only — the connection above
+        # already negotiated it (see the headline check at the top of this
+        # file). One notification per mutating call, none on a read-only one.
+        async def next_event(sub, timeout=1.0):
+            try:
+                return await asyncio.wait_for(sub.__anext__(), timeout=timeout)
+            except TimeoutError:
+                return None
+
+        async with c.listen(resources_list_changed=True) as sub:
+            await c.call_tool("session_list", {})
+            check("session_list (read-only) fires no resources-changed event",
+                  await next_event(sub, 0.3) is None)
+
+            started = await c.call_tool("session_start", {"language": "python3"})
+            sid = started.structured_content["session_id"]
+
+            await c.call_tool("session_write_file",
+                              {"session_id": sid, "path": "a.txt", "content": "hi"})
+            check("session_write_file fires a resources-changed event",
+                  isinstance(await next_event(sub), ResourcesListChanged))
+            check("...and only one", await next_event(sub, 0.3) is None)
+
+            await c.call_tool("session_read_file", {"session_id": sid, "path": "a.txt"})
+            check("session_read_file (read-only) fires no event",
+                  await next_event(sub, 0.3) is None)
+
+            await c.call_tool(
+                "execute_code",
+                {"language": "python3", "code": "1+1", "session_id": sid},
+            )
+            check("execute_code(session_id=...) fires a resources-changed event",
+                  isinstance(await next_event(sub), ResourcesListChanged))
+            check("...and only one", await next_event(sub, 0.3) is None)
+
+            await c.call_tool("session_stop", {"session_id": sid})
+            check("session_stop fires a resources-changed event",
+                  isinstance(await next_event(sub), ResourcesListChanged))
+            check("...and only one", await next_event(sub, 0.3) is None)
+
+            # idempotent: an already-gone session changes nothing on a
+            # second stop.
+            await c.call_tool("session_stop", {"session_id": sid})
+            check("a second session_stop on an already-gone session fires no event",
+                  await next_event(sub, 0.3) is None)
+
+        # ── resource-updated for the ONE named file that changed ────────────
+        started = await c.call_tool("session_start", {"language": "python3"})
+        sid = started.structured_content["session_id"]
+        uri = f"codecalc://session/{sid}/files/b.txt"
+        async with c.listen(resource_subscriptions=[uri]) as sub:
+            await c.call_tool("session_write_file",
+                              {"session_id": sid, "path": "b.txt", "content": "hi"})
+            event = await next_event(sub)
+            check("session_write_file fires resource-updated for its own URI",
+                  isinstance(event, ResourceUpdated) and event.uri == uri, f"-> {event}")
+            check("...and only one", await next_event(sub, 0.3) is None)
+
+            # a DIFFERENT file's write does not match this subscription's URI.
+            await c.call_tool("session_write_file",
+                              {"session_id": sid, "path": "c.txt", "content": "hi"})
+            check("a write to a different file fires no event on this subscription",
+                  await next_event(sub, 0.3) is None)
+        await c.call_tool("session_stop", {"session_id": sid})
+
+        # ── website_url + the SERVER icon, and NO per-tool icons ─────────────
+        # Per-tool icons were removed after measuring their real tools/list
+        # cost (+6,665 tokens, o200k_base) — see server.py's own comment on
+        # `_SERVER_ICON`. Only the server-level icon (rides on `initialize`,
+        # once per connection) and `website_url` remain.
+        from codecalc.server import _WEBSITE_URL
+
+        check("website_url is a real https URL naming this repository",
+              server.mcp.website_url == _WEBSITE_URL
+              and _WEBSITE_URL.startswith("https://github.com/"),
+              f"-> {server.mcp.website_url}")
+
+        server_icons = server.mcp.icons or []
+        check("the server carries exactly one icon", len(server_icons) == 1,
+              f"-> {server_icons}")
+        icon_src = server_icons[0].src if server_icons else ""
+        check("the server icon's data URI is under 600 bytes",
+              len(icon_src.encode("utf-8")) < 600, f"-> {len(icon_src)}")
+        check("the server icon's data URI is a monochrome inline SVG",
+              icon_src.startswith("data:image/svg+xml;base64,"), f"-> {icon_src[:40]}")
+        if icon_src:
+            # A structural check, not a full XML parse: this icon is
+            # generated by this same codebase's own `_svg_icon`, not
+            # untrusted input, so a stdlib XML parser (XXE/entity-expansion
+            # exposure on arbitrary input) is the wrong tool for what is
+            # really "did the string builder produce a single well-formed
+            # <svg>...</svg> element with no embedded DOCTYPE/ENTITY it
+            # should never contain".
+            raw = base64.b64decode(icon_src.split(",", 1)[1]).decode("ascii")
+            check("the server icon decodes to well-formed SVG XML",
+                  raw.startswith("<svg ") and raw.endswith("</svg>")
+                  and "<!DOCTYPE" not in raw and "<!ENTITY" not in raw
+                  and raw.count("<svg") == 1 and raw.count("</svg>") == 1,
+                  f"-> {raw}")
+
+        listed = await c.list_tools()
+        with_icons = [t.name for t in listed.tools if getattr(t, "icons", None)]
+        check("no tool carries a per-tool icon (removed for tools/list cost)",
+              not with_icons, f"-> {with_icons}")
+
+        # ── progress notifications (feature 4) ───────────────────────────────
+        progress_events: list[tuple[float, float | None, str | None]] = []
+
+        async def on_progress(progress: float, total: float | None, message: str | None) -> None:
+            progress_events.append((progress, total, message))
+
+        progress_events.clear()
+        await c.call_tool(
+            "compare_execution",
+            {"snippets": {"python3": "print(1)", "node": "console.log(1)"}},
+            progress_callback=on_progress,
+        )
+        check("compare_execution reports one progress event per language, in order",
+              [p for p, t, m in progress_events] == [1.0, 2.0], f"-> {progress_events}")
+        check("compare_execution's progress total is fixed at the language count",
+              all(t == 2.0 for p, t, m in progress_events), f"-> {progress_events}")
+
+        progress_events.clear()
+        bench_code = ("import sys\nn=int(sys.stdin.readline())\ns=0\n"
+                      "for i in range(n): s+=i\nprint(s)")
+        await c.call_tool(
+            "benchmark",
+            {"code": bench_code, "sizes": "2000,4000,8000,16000"},
+            progress_callback=on_progress,
+        )
+        check("benchmark reports one progress event per requested size, in order",
+              [p for p, t, m in progress_events][:4] == [1.0, 2.0, 3.0, 4.0],
+              f"-> {progress_events}")
+        check("benchmark's progress sequence is monotone non-decreasing",
+              all(a[0] <= b[0] for a, b in itertools.pairwise(progress_events)),
+              f"-> {progress_events}")
+
+        progress_events.clear()
+        opt_code = ("import sys\nn=int(sys.stdin.readline())\ns=0\n"
+                    "for i in range(n): s+=i\nprint(s)")
+        await c.call_tool(
+            "verify_optimization",
+            {"original": opt_code, "candidate": opt_code, "language": "python3",
+             "sizes": [2000, 5000, 10000]},
+            progress_callback=on_progress,
+        )
+        check("verify_optimization reports exactly one progress event per phase "
+              "(correctness, baseline sizes, candidate sizes, alignment)",
+              len(progress_events) == 4, f"-> {progress_events}")
+        check("verify_optimization's progress sequence is 1..4, monotone, total 4",
+              [p for p, t, m in progress_events] == [1.0, 2.0, 3.0, 4.0]
+              and all(t == 4.0 for p, t, m in progress_events),
+              f"-> {progress_events}")
+
+        # a rejected candidate (wrong output) fails IN phase 1 — a progress
+        # event marks a phase COMPLETING, so the phase that failed reports
+        # nothing, and neither do the three phases after it that never ran.
+        progress_events.clear()
+        wrong_candidate = "import sys\nsys.stdin.readline()\nprint('nope')"
+        await c.call_tool(
+            "verify_optimization",
+            {"original": opt_code, "candidate": wrong_candidate, "language": "python3",
+             "sizes": [2000, 5000, 10000]},
+            progress_callback=on_progress,
+        )
+        check("a candidate that fails correctness reports no progress at all",
+              progress_events == [], f"-> {progress_events}")
 
         # ── the timeout backstop still covers what it used to ───────────────
         # AUDIT.md HIGH-05. MCPServer.tool() has no timeout= parameter, so these

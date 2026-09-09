@@ -818,6 +818,57 @@ if _gate.exists():
           "SPEC_VECTORS_PATH" in _src and "canonical_bytes" in _src)
 
 
+# ── execution_trace (1.13.0): accepted, refused-language, compile-error ────
+# `oneOf`'s own "exactly one branch matches" semantics means `errors_for`
+# returning empty IS the proof: if a trace result matched `execution_trace`
+# AND `execution_envelope` at once (the double-match `execution_envelope`'s
+# own `not: {required: [events]}` clause exists to prevent — see
+# codecalc/contract.py), the validator would report a `oneOf` failure here,
+# not silently accept it.
+from codecalc import tracing
+
+for _tlabel in ("rust", "python"):
+    _saved_trace = executor._rust
+    if _tlabel == "python":
+        executor._rust = None
+    try:
+        _accepted = tracing.execute_trace(
+            "python3", 'x = 1\nfor i in range(3):\n    x += i\nprint(x)\n')
+        check(f"{_tlabel}: an accepted trace_execution result validates "
+              f"against the published schema (execution_trace, not "
+              f"execution_envelope)",
+              not errors_for(_accepted), f"-> {errors_for(_accepted)[:2]}")
+        check(f"{_tlabel}: the accepted result carries events/branches",
+              isinstance(_accepted.get("events"), list) and _accepted["events"]
+              and isinstance(_accepted.get("branches"), dict),
+              f"-> events={len(_accepted.get('events') or [])} "
+              f"branches={_accepted.get('branches')}")
+        check_stamped(f"{_tlabel} accepted trace_execution", _accepted)
+
+        _refused = tracing.execute_trace("ruby", "puts 1")
+        check(f"{_tlabel}: a refused-language trace_execution result "
+              f"validates as `rejected` (no verdict, carries error)",
+              not errors_for(_refused), f"-> {errors_for(_refused)[:2]}")
+        check(f"{_tlabel}: the refused result carries no verdict",
+              "verdict" not in _refused, f"-> {_refused.get('verdict')}")
+        check_stamped(f"{_tlabel} refused trace_execution", _refused)
+
+        _compile_err = tracing.execute_trace("python3", "def broken(\n    pass\n")
+        check(f"{_tlabel}: a compile-error trace_execution result still "
+              f"validates as execution_trace (it ran, and failed)",
+              not errors_for(_compile_err), f"-> {errors_for(_compile_err)[:2]}")
+        check(f"{_tlabel}: a compile error carries an empty trace "
+              f"(nothing executed)",
+              _compile_err.get("events") == [] and _compile_err.get("branches") == {}
+              and _compile_err.get("verdict") == "RTE",
+              f"-> events={_compile_err.get('events')} "
+              f"branches={_compile_err.get('branches')} "
+              f"verdict={_compile_err.get('verdict')}")
+        check_stamped(f"{_tlabel} compile-error trace_execution", _compile_err)
+    finally:
+        executor._rust = _saved_trace
+
+
 print(f"\n=== {len(FAILS)} FAILURES ===" if FAILS else
       "\n=== ALL CONTRACT TESTS PASS ===")
 for _f in FAILS:

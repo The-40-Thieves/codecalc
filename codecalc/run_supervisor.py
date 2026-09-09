@@ -290,6 +290,20 @@ class RunSupervisor:
         except KeyError:
             raise KeyError(f"unknown run {run_id!r}") from None
 
+    def known_run_ids(self) -> list[str]:
+        """Every run_id this process still holds a record for (any state).
+
+        Snapshotted under the lock, same as `descriptors()`'s own pattern
+        elsewhere in this package — `dict.keys()` is a live view and
+        `run_inspect`'s own `cleanup()` call can mutate `self._runs` from
+        another thread while a caller (server.py's completion handler) is
+        iterating it. Exists for completion/complete's `run_id` argument:
+        the alternative was server.py reaching into `_run_supervisor._runs`
+        directly, a private attribute this module owns.
+        """
+        with self._lock:
+            return list(self._runs)
+
     def inspect(self, run_id: str) -> dict:
         with self._lock:
             run = self._get(run_id)
