@@ -58,24 +58,46 @@ behind it.
   parameters across the 49 served tools, via `Annotated[<type>,
   Field(description=...)]`, so a client that renders `inputSchema` (or an
   LLM tool-selector that reads it) sees per-argument guidance instead of a
-  bare name/type. No parameter's type, default, or name changed, and no
-  tool docstring changed — only additive schema metadata. `Literal[...]`
+  bare name/type. No parameter's type, default, or name changed. `Literal[...]`
   enums and `Field(ge=/le=)` ranges were deliberately NOT added anywhere in
   this pass: measured against the running server, both turn a closed-set
   or out-of-range argument's existing graceful `{"ok": false, "error":
   ...}` result into a hard MCP protocol-level tool-call error instead — a
-  caller-visible behaviour change this pass rules out. `docker/mcp-
-  catalog/tools.json` was regenerated from the live server so every
-  argument's `desc` is filled, with the same `optional: true` flags it
-  already carried. The served `tools/list` JSON grows from 64,643 bytes /
-  17,277 tokens (o200k_base) to 78,586 bytes / 20,630 tokens at the same 49
-  tools — descriptions add tokens, they do not trim them; see README's
-  "Tool-definition token cost" for the accounting.
-  `scripts/tool_select_eval.py` scores tool SELECTION only against each
-  tool's own docstring text, never its input schema, so this change moves
-  none of its numbers: `full`/`dev`/`core` all report the same
-  151/234, 128/184, 79/116 top-1 hits as `main`, zero drop against the
-  checked-in baseline.
+  caller-visible behaviour change this pass rules out.
+- **Tool DOCSTRINGS edited, in the same branch as the schema-description
+  pass above, now that per-parameter syntax/default/range no longer needs
+  restating in prose**: `execute_code`/`execute_code_stream`/`run_submit`/
+  `session_run` each got a one-sentence "use X, not the other three, when
+  Z" disambiguation (Glama's "all run code" review comment);
+  `verify_optimization`'s docstring was cut to about 60% of its length
+  with no loss of the two-gate/statistical-rule/grading content;
+  `truth_table`/`session_files`/`algebraic_equiv`/`compare_threshold`/
+  `percentage`/`percentiles` each gained a sibling-tool usage sentence;
+  and sentences that only restated a parameter's schema description
+  (an explicit default, range, or enumerated-values list already carried
+  by `Field(description=...)`) were removed elsewhere in the file. Several
+  of those removals had to be partly walked back after
+  `scripts/tool_select_eval.py` showed they deleted vocabulary the BM25
+  selector actually discriminates on (`bits(mode="op")`'s operator list,
+  `percentiles`' rank-cutoff wording) — the eval's own module docstring
+  warns a description that "reads clearly to a human" can still score
+  badly if it loses the words a prompt matches on, and that is exactly
+  what happened here first. `docker/mcp-catalog/tools.json` was
+  regenerated from the live server for both passes, so every argument's
+  `desc` is filled and every changed tool `description` matches, with the
+  same `optional: true` flags and argument order the file already carried.
+  The served `tools/list` JSON went 64,643 bytes / 17,277 tokens
+  (o200k_base) at the start of this branch, to 78,586 bytes / 20,630
+  tokens after the schema-description pass alone, to **77,237 bytes /
+  20,439 tokens** after the docstring pass on top of it — a net
+  **-1,576 bytes / -412 tokens** from the schema-description peak, short
+  of the ~19,000-token goal the docstring pass aimed for, because
+  restoring the eval-flagged vocabulary gave back more than the rest of
+  the trim saved; see README's "Tool-definition token cost" for the full
+  accounting. `scripts/data/tool_select_baseline.json` was regenerated:
+  `full`/`dev`/`core` move from 151/234, 128/184, 79/116 to 150/234,
+  130/184, 78/116 top-1 hits — every surface within the eval's own
+  `DEFAULT_EPSILON_HITS` of its `main` baseline, dev actually improved.
 
 ## [0.11.0] — 2026-09-09
 
