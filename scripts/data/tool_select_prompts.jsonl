@@ -6,10 +6,10 @@
 {"prompt": "I need the full combinatorial truth breakdown of the boolean statement 'p xor q'", "expected": ["truth_table"]}
 {"prompt": "list out every combination of inputs and whether 'a implies b' holds for each", "expected": ["truth_table"]}
 {"prompt": "Enumerate every input combination for 'p implies q' and whether it holds", "expected": ["truth_table"]}
-{"prompt": "Solve this system: x + y = 10 and x - y = 2, for x and y", "expected": ["solve_linear"]}
-{"prompt": "I've got two simultaneous equations sharing variables x and y — find the values that satisfy both", "expected": ["solve_linear"]}
-{"prompt": "find x and y at the same time from a pair of coupled equations", "expected": ["solve_linear"]}
-{"prompt": "I need both unknowns pinned down from two equations that share them", "expected": ["solve_linear"]}
+{"prompt": "Solve this system: x + y = 10 and x - y = 2, for x and y", "expected": ["solve_linear", "symbolic"]}
+{"prompt": "I've got two simultaneous equations sharing variables x and y — find the values that satisfy both", "expected": ["solve_linear", "symbolic"]}
+{"prompt": "find x and y at the same time from a pair of coupled equations", "expected": ["solve_linear", "symbolic"]}
+{"prompt": "I need both unknowns pinned down from two equations that share them", "expected": ["solve_linear", "symbolic"]}
 {"prompt": "Given the 2x2 grid [[1,2],[3,4]], what's its determinant?", "expected": ["matrix"]}
 {"prompt": "Compute the eigenvalues of this square array of numbers", "expected": ["matrix"]}
 {"prompt": "I tried writing that grid of numbers directly into a symbolic algebra expression using bracket notation and it got refused for security reasons — how do I invert a square array of numbers structurally instead?", "expected": ["matrix"]}
@@ -65,7 +65,7 @@
 {"prompt": "Show me 3000000000 in hex, octal and binary, and whether it fits in a signed 32-bit int", "expected": ["base_repr"]}
 {"prompt": "I need the two's-complement view of this integer at a specific bit width, plus overflow detection", "expected": ["base_repr"]}
 {"prompt": "does this number fit as a signed 32-bit value, and what does it look like in hex either way", "expected": ["base_repr"]}
-{"prompt": "Show me every base representation of this integer at once — hex, octal and binary — plus whether it's a valid signed value at a given width", "expected": ["base_repr"]}
+{"prompt": "Show me every base representation of this integer at once — hex, octal and binary — plus whether it's a valid signed value at a given width", "expected": ["base_repr", "bits"]}
 {"prompt": "Convert 'zz' from base 36 into base 7", "expected": ["radix_convert"]}
 {"prompt": "I have a fractional value written in one arbitrary numeral base and need it re-expressed in a different arbitrary base", "expected": ["radix_convert"]}
 {"prompt": "this isn't hex/oct/bin specifically — I need an arbitrary base-to-base translation, any base from 2 to 36", "expected": ["radix_convert"]}
@@ -74,30 +74,30 @@
 {"prompt": "Show me the raw bits, exact stored value, and neighboring representable values for this floating point literal", "expected": ["float_repr"]}
 {"prompt": "I want to know if this decimal literal is EXACTLY representable in double precision, not which integer width holds it", "expected": ["float_repr"]}
 {"prompt": "Is 0.25 stored exactly in double precision, or does it lose precision like 0.1 does?", "expected": ["float_repr"]}
-{"prompt": "Which integer types — i8 through i64 — can actually hold the number 300?", "expected": ["int_widths"]}
-{"prompt": "Tell me every fixed-width signed and unsigned type that this value fits into, and how it wraps in the ones it doesn't", "expected": ["int_widths"]}
+{"prompt": "Which integer types — i8 through i64 — can actually hold the number 300?", "expected": ["int_widths", "bits"]}
+{"prompt": "Tell me every fixed-width signed and unsigned type that this value fits into, and how it wraps in the ones it doesn't", "expected": ["int_widths", "bits"]}
 {"prompt": "I don't need hex or binary output — just tell me every bit-width container this number fits or overflows", "expected": ["int_widths"]}
 {"prompt": "If I try to cram 3000000000 into a signed 32-bit slot, what value do I actually get after it overflows?", "expected": ["int_widths", "base_repr"]}
 {"prompt": "How many bits are set to 1 in the number 202, and what's its bit length?", "expected": ["bit_analysis"]}
-{"prompt": "Tell me the population count, trailing zero count, and whether this integer is a power of two", "expected": ["bit_analysis"]}
+{"prompt": "Tell me the population count, trailing zero count, and whether this integer is a power of two", "expected": ["bit_analysis", "bits"]}
 {"prompt": "I want facts ABOUT one number's bit pattern, not an operation combining it with another number", "expected": ["bit_analysis"]}
 {"prompt": "Is 256 a power of two, and how many trailing zero bits does it have?", "expected": ["bit_analysis"]}
 {"prompt": "What's 12 XOR 10 at 8-bit width, shown in every base?", "expected": ["bitop"]}
-{"prompt": "Apply a logical shift right by 1 to 0x80 and also show me the arithmetic (sign-propagating) version", "expected": ["bitop"]}
-{"prompt": "I need the RESULT of combining two integers with a boolean operator, not properties of a single one", "expected": ["bitop"]}
+{"prompt": "Apply a logical shift right by 1 to 0x80 and also show me the arithmetic (sign-propagating) version", "expected": ["bitop", "bits"]}
+{"prompt": "I need the RESULT of combining two integers with a boolean operator, not properties of a single one", "expected": ["bitop", "bits"]}
 {"prompt": "Rotate this 32-bit value left by 4 positions and show me the hex result", "expected": ["bitop"]}
-{"prompt": "What value of x makes x squared minus 4 equal zero?", "expected": ["solve_expression"]}
-{"prompt": "Find where this single-variable expression crosses zero", "expected": ["solve_expression"]}
-{"prompt": "I only have ONE unknown and one equation — find the root, not a shared solution across multiple equations", "expected": ["solve_expression"]}
-{"prompt": "For 2*x + 1 = 7, what's x?", "expected": ["solve_expression", "solve_linear"]}
-{"prompt": "As n grows without bound, what does n*log(n)/n**2 approach?", "expected": ["limit_expression"]}
-{"prompt": "Settle a Big-O argument by computing the actual asymptotic limit of this ratio as the variable heads to infinity", "expected": ["limit_expression"]}
+{"prompt": "What value of x makes x squared minus 4 equal zero?", "expected": ["solve_expression", "symbolic"]}
+{"prompt": "Find where this single-variable expression crosses zero", "expected": ["solve_expression", "symbolic"]}
+{"prompt": "I only have ONE unknown and one equation — find the root, not a shared solution across multiple equations", "expected": ["solve_expression", "symbolic"]}
+{"prompt": "For 2*x + 1 = 7, what's x?", "expected": ["solve_expression", "solve_linear", "symbolic"]}
+{"prompt": "As n grows without bound, what does n*log(n)/n**2 approach?", "expected": ["limit_expression", "symbolic"]}
+{"prompt": "Settle a Big-O argument by computing the actual asymptotic limit of this ratio as the variable heads to infinity", "expected": ["limit_expression", "symbolic"]}
 {"prompt": "I don't want a structural code estimate — I want the exact symbolic limit as the variable grows unbounded", "expected": ["limit_expression"]}
-{"prompt": "As the input size grows huge, does n/log(n) eventually dominate or vanish?", "expected": ["limit_expression"]}
-{"prompt": "Give me the factored and expanded forms of this algebraic expression", "expected": ["simplify_expression"]}
-{"prompt": "Reduce this formula to its simplest form and also show it multiplied out", "expected": ["simplify_expression", "evaluate_expression"]}
+{"prompt": "As the input size grows huge, does n/log(n) eventually dominate or vanish?", "expected": ["limit_expression", "symbolic"]}
+{"prompt": "Give me the factored and expanded forms of this algebraic expression", "expected": ["simplify_expression", "symbolic"]}
+{"prompt": "Reduce this formula to its simplest form and also show it multiplied out", "expected": ["simplify_expression", "evaluate_expression", "symbolic"]}
 {"prompt": "I don't want a single symbolic answer — I want three different equivalent rewritings: simplified, factored, expanded", "expected": ["simplify_expression"]}
-{"prompt": "Take this messy algebraic formula and give me its cleanest possible form", "expected": ["simplify_expression", "evaluate_expression"]}
+{"prompt": "Take this messy algebraic formula and give me its cleanest possible form", "expected": ["simplify_expression", "evaluate_expression", "symbolic"]}
 {"prompt": "Are (a*b)/c and a*(b/c) actually the same expression algebraically?", "expected": ["algebraic_equiv"]}
 {"prompt": "Prove or disprove that these two symbolic formulas are identical, ignoring float rounding", "expected": ["algebraic_equiv"]}
 {"prompt": "I'm not comparing two PROGRAMS in different languages, just two symbolic math formulas — are they the same?", "expected": ["algebraic_equiv"]}
@@ -201,6 +201,22 @@
 {"prompt": "Pull just this one function, plus whatever it imports, out of my larger file and run it on its own", "expected": ["extract_function"]}
 {"prompt": "Isolate a single named function (with its helpers) from this codebase into a standalone runnable program", "expected": ["extract_function"]}
 {"prompt": "I don't have a clean snippet — I need you to CARVE one named function out of a bigger file first, then run it", "expected": ["extract_function"]}
+{"prompt": "How many one-value binary digits does 202 set, and how many trailing zero digits does it end with in base two?", "expected": ["bits"]}
+{"prompt": "Is 512 a power of two, and what's the very next power of two above 200?", "expected": ["bits"]}
+{"prompt": "Combine 12 and 10 with a boolean XOR at a byte width of 8, and show me every base.", "expected": ["bits"]}
+{"prompt": "Rotate the value 0x1 left by four positions within a 32-wide word, and give me the hex result.", "expected": ["bits"]}
+{"prompt": "Which fixed-size signed and unsigned integer containers, from 8 through 64 wide, can hold the number 500?", "expected": ["bits"]}
+{"prompt": "Tell me every integer size this value fits or overflows, without giving me any hex or octal output.", "expected": ["bits"]}
+{"prompt": "Render 4000000000 in hexadecimal, octal and binary, and say whether it fits as a signed 32-wide integer.", "expected": ["bits"]}
+{"prompt": "Give me the two's complement view of this integer at a specific word width, with overflow flagged.", "expected": ["bits"]}
+{"prompt": "Find the value of y where y squared minus nine equals zero.", "expected": ["symbolic"]}
+{"prompt": "What input makes this single equation cross zero?", "expected": ["symbolic"]}
+{"prompt": "I have two equations that both share the same two variables — solve for both at once.", "expected": ["symbolic"]}
+{"prompt": "Pin down x and y together from a pair of equations that both depend on them.", "expected": ["symbolic"]}
+{"prompt": "Give me this algebraic expression in its simplified, factored and expanded forms.", "expected": ["symbolic"]}
+{"prompt": "Reduce this messy formula down and also multiply it all the way out.", "expected": ["symbolic"]}
+{"prompt": "As x heads toward infinity, what does this ratio settle on?", "expected": ["symbolic"]}
+{"prompt": "Compute the exact asymptotic value of n over log n as n becomes arbitrarily large.", "expected": ["symbolic"]}
 {"prompt": "Show me exactly which lines of this Python script ran and in what order", "expected": ["trace_execution"]}
 {"prompt": "I want to see the value of every variable at each step while this script runs, not just the final printout", "expected": ["trace_execution"]}
 {"prompt": "Walk me through why this python program produced that output, step by step", "expected": ["trace_execution"]}
