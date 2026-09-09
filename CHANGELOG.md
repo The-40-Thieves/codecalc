@@ -145,7 +145,7 @@ behind it.
   `truncated_reason` enum member (`trace_file_exceeded`) are declared in the
   `execution_trace` contract shape alongside the rest of it — still additive,
   landing before this tool's own first release.
-- **`branch_reachability`** (54th MCP tool, `execution` group): decides,
+- **`branch_reachability`** (`execution` group): decides,
   with z3, which `if`/`elif`/`else` arms and `while`/`for(range, static
   bounds)` loops in ONE python3 function can ever be taken — for ANY input,
   not the one you happened to try, which is what `trace_execution` already
@@ -193,9 +193,9 @@ behind it.
   non-python `language` is refused the same shape `trace_execution` uses.
   Every refusal names `trace_execution` as the remedy: run the concrete
   case instead. New result contract shape `branch_reachability`
-  (`docs/contract/README.md`, `CONTRACT_VERSION` `1.14.0` -> `1.16.0`,
-  MINOR — additive; `1.15.0` is reserved for a change landing separately),
-  discriminated from every execution shape by carrying neither `verdict`
+  (`docs/contract/README.md`, `CONTRACT_VERSION` `1.15.0` -> `1.16.0`,
+  MINOR — additive, the twelfth shape, `session_snapshot_result` above
+  being the eleventh), discriminated from every execution shape by carrying neither `verdict`
   nor `backend`. `tests/test_branch_reachability.py` covers reachable/
   dead/unknown verdicts on an if/elif/else-plus-static-loop program, a
   dead branch (`x > 5 and x < 3`), every reachable witness verified by
