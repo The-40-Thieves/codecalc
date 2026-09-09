@@ -27,10 +27,14 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+import anyio
 from mcp.server import CacheHint, MCPServer
+from mcp.server.apps import APP_MIME_TYPE
 from mcp.server.mcpserver import Context
 from mcp.types import (
+    Completion,
     EmbeddedResource,
+    Icon,
     ImageContent,
     InputRequiredResult,
     ResourceLink,
@@ -41,6 +45,7 @@ from mcp.types import (
 
 from . import (
     __version__,
+    apps_views,
     capabilities,
     complexity,
     confirmation,
@@ -62,6 +67,7 @@ from . import (
     runtimes,
     sessions,
     tools,
+    tracing,
     translation,
     units,
 )
@@ -75,7 +81,7 @@ from .mcp_middleware import redact_validation_errors_middleware, timeout_middlew
 
 #: Bearer token for the Streamable HTTP transport. Unset means the
 #: transport is loopback-only: `serve-http` REFUSES a non-loopback bind
-#: without it, because a token-less bind on a routable interface exposes 52
+#: without it, because a token-less bind on a routable interface exposes 53
 #: unauthenticated code-execution tools to whatever the interface reaches.
 #: stdio ignores this entirely — auth is HTTP middleware, and an MCP client
 #: spawning the server over stdio is already inside the trust boundary.
@@ -87,36 +93,61 @@ HTTP_TOKEN_ENV = "CODECALC_HTTP_TOKEN"  # noqa: S105 -- the env var's NAME, not 
 #: binding a real interface knows the real URL.
 HTTP_URL_ENV = "CODECALC_HTTP_URL"
 
+#: Off by default. Set, `serve-http` validates bearer tokens as JWTs against
+#: this OAuth/OIDC issuer instead of the static `CODECALC_HTTP_TOKEN` above —
+#: see `_http_auth`'s precedence rule when BOTH are set. This is the resource
+#: server (RS) role only: codecalc never runs its own `/authorize`/`/token`
+#: endpoints, so there is no dynamic client registration surface to secure.
+OAUTH_ISSUER_ENV = "CODECALC_OAUTH_ISSUER"
 
-def _http_auth() -> dict:
-    """Constructor kwargs wiring bearer auth into the server, or {}.
+#: Expected `aud` claim, and the RFC 8707 "resource" this server advertises at
+#: its own `/.well-known/oauth-protected-resource`. Defaults to this server's
+#: own resource URL (`CODECALC_HTTP_URL` + `/mcp`) — the common case where the
+#: token was minted specifically for this server, not shared with others.
+OAUTH_AUDIENCE_ENV = "CODECALC_OAUTH_AUDIENCE"
 
-    Computed at import because `token_verifier`/`auth` are constructor-only in
-    the SDK (both must be supplied together), and the module-level server below
-    is the one every transport serves. The token comparison is constant-time:
-    a timing oracle on an auth check is the classic way a static token leaks.
+#: Override the JWKS endpoint. Unset, it is discovered once at startup from
+#: the issuer's `/.well-known/openid-configuration` (`codecalc/auth/`).
+OAUTH_JWKS_URL_ENV = "CODECALC_OAUTH_JWKS_URL"
 
-    The SDK's `BearerAuthBackend` does the header parsing and 401s; this
-    verifier is the part that is OURS — it decides what counts as valid.
+#: Space-separated scopes a token must carry. Unset, any successfully
+#: verified token is accepted regardless of scope.
+OAUTH_SCOPES_ENV = "CODECALC_OAUTH_SCOPES"
+
+
+def _static_token_auth() -> dict:
+    """Constructor kwargs for the static `CODECALC_HTTP_TOKEN` path, or {}.
+
+    NO NETWORK, ever — this is deliberately blind to `CODECALC_OAUTH_ISSUER`,
+    so it is safe to call at import time regardless of which subcommand is
+    about to run: `doctor`, `--help`, `serve-strict`, the bare stdio server,
+    or `serve-http` itself before its own OAuth-aware recomputation. See
+    `_http_auth()` below for the superset that DOES know about the issuer,
+    and why it must never be the thing the module-level `mcp = MCPServer(...)`
+    call is built from.
+
+    The token comparison is constant-time: a timing oracle on an auth check
+    is the classic way a static token leaks.
     """
     import hmac
-
-    token = os.environ.get(HTTP_TOKEN_ENV, "")
-    if not token:
-        return {}
 
     from mcp.server.auth.provider import AccessToken, TokenVerifier
     from mcp.server.auth.settings import AuthSettings
     from pydantic import AnyHttpUrl
 
+    static_token = os.environ.get(HTTP_TOKEN_ENV, "")
+    if not static_token:
+        return {}
+
+    base = os.environ.get(HTTP_URL_ENV, "").strip() or "http://127.0.0.1:8000"
+
     class _StaticTokenVerifier(TokenVerifier):
         async def verify_token(self, presented: str) -> AccessToken | None:
-            if not hmac.compare_digest(presented.encode(), token.encode()):
+            if not hmac.compare_digest(presented.encode(), static_token.encode()):
                 return None
             return AccessToken(token=presented, client_id="codecalc-operator",
                                scopes=["codecalc"])
 
-    base = os.environ.get(HTTP_URL_ENV, "").strip() or "http://127.0.0.1:8000"
     return {
         "token_verifier": _StaticTokenVerifier(),
         "auth": AuthSettings(
@@ -125,6 +156,139 @@ def _http_auth() -> dict:
             required_scopes=["codecalc"],
         ),
     }
+
+
+def _http_auth(*, oauth_issuer: str | None = None, oauth_audience: str | None = None,
+                oauth_jwks_url: str | None = None, oauth_scopes: str | None = None) -> dict:
+    """Constructor kwargs wiring bearer auth into the server, or {}. OAuth-aware
+    superset of `_static_token_auth()` above — the ONLY function that may build
+    the OAuth-issuer path, because doing so performs a REAL NETWORK CALL (JWKS
+    discovery, `codecalc/auth/oauth_verifier.py`) whenever an issuer ends up
+    configured.
+
+    CALLED EXACTLY ONCE PER `serve-http` INVOCATION, from that command's own
+    branch of `main()`, after argv is parsed — NEVER at module import. That is
+    why the module-level `mcp = MCPServer(..., **_static_token_auth())` a few
+    lines below uses the issuer-blind helper instead of this one: `doctor`,
+    `--help`, `serve-strict`, and the bare stdio server all import this same
+    module, and an operator whose shell profile sets `CODECALC_OAUTH_ISSUER`
+    for `serve-http` sets it for THOSE invocations too — none of which touch
+    HTTP auth at all. A DNS lookup and an HTTP round trip on every `codecalc
+    doctor` because of a variable that command never reads is exactly the
+    "declared but not enforced where it matters" failure this repo's own
+    AUDIT.md keeps finding, pointed at network access instead of a permission.
+
+    Every `oauth_*` keyword left `None` falls back to its environment
+    variable — `serve-http`'s CLI flags are what pass these explicitly, so a
+    flag overrides the env only where actually given. `main()`'s serve-http
+    branch calls this — and reassigns `mcp.settings.auth`/`mcp._token_verifier`
+    from the result via `_apply_oauth_auth()` below, right before `mcp.run()`
+    — ONLY when an issuer ends up configured; when it does not, `mcp` keeps
+    exactly what `_static_token_auth()` already gave it at import, untouched.
+    `Settings` is a plain pydantic model — mutable — and the SDK only reads
+    `.settings.auth`/`._token_verifier` lazily, inside `streamable_http_app()`,
+    which does not run until `mcp.run` is called; that laziness is what makes
+    reassigning them there, instead of at import, actually take effect.
+
+    Precedence when BOTH `CODECALC_HTTP_TOKEN` and an issuer are configured:
+    **the issuer wins**. Only a JWT that verifies against it is accepted; the
+    static token is not treated as a second valid credential — presenting it
+    fails JWT decoding like any other garbage bearer value — and a warning is
+    printed to stderr so a leftover token in the environment does not read as
+    "also still active". Rationale: an operator who added `--oauth-issuer`
+    almost certainly means to move OFF the static token, and silently
+    accepting either would leave the weaker credential live with no signal
+    that it still works.
+
+    Raises `ValueError` (a malformed or non-HTTPS issuer/JWKS URL, a
+    discovery document with no `jwks_uri`) or `OSError` (DNS/connection
+    failure reaching the issuer) when an issuer is configured and building it
+    fails. `main()`'s serve-http branch is expected to catch both and fail
+    closed with a clear message — refusing to start a server no token could
+    ever pass beats starting one that is quietly unauthenticated.
+    """
+    import sys
+
+    from mcp.server.auth.settings import AuthSettings
+    from pydantic import AnyHttpUrl
+
+    if oauth_issuer is None:
+        oauth_issuer = os.environ.get(OAUTH_ISSUER_ENV, "").strip()
+
+    if not oauth_issuer:
+        return _static_token_auth()
+
+    oauth_issuer = oauth_issuer.rstrip("/")
+
+    # Lazy, and from codecalc/auth/ rather than a top-level import: this
+    # module is the ONE outbound HTTP path here (JWKS discovery), gated
+    # behind explicit `--oauth-issuer` configuration — see
+    # codecalc/auth/__init__.py for why it cannot live at top level.
+    from .auth.oauth_verifier import JWTTokenVerifier, discover_jwks_uri, require_https_or_loopback
+
+    require_https_or_loopback(oauth_issuer, what="--oauth-issuer")
+
+    base = os.environ.get(HTTP_URL_ENV, "").strip() or "http://127.0.0.1:8000"
+    resource_url = base.rstrip("/") + "/mcp"
+    if oauth_audience is None:
+        oauth_audience = os.environ.get(OAUTH_AUDIENCE_ENV, "").strip()
+    oauth_audience = oauth_audience or resource_url
+    if oauth_jwks_url is None:
+        oauth_jwks_url = os.environ.get(OAUTH_JWKS_URL_ENV, "").strip()
+    if oauth_scopes is None:
+        oauth_scopes = os.environ.get(OAUTH_SCOPES_ENV, "").strip()
+    required_scopes = oauth_scopes.split() if oauth_scopes else None
+
+    if os.environ.get(HTTP_TOKEN_ENV, ""):
+        print(
+            f"codecalc serve-http: both {OAUTH_ISSUER_ENV} and {HTTP_TOKEN_ENV} "
+            "are set. The issuer wins — only a JWT that verifies against it is "
+            f"accepted, and the static {HTTP_TOKEN_ENV} value is REJECTED like "
+            "any other invalid bearer token. Unset one to silence this warning.",
+            file=sys.stderr,
+        )
+
+    jwks_url = oauth_jwks_url or discover_jwks_uri(oauth_issuer)
+    return {
+        "token_verifier": JWTTokenVerifier(
+            issuer=oauth_issuer, audience=oauth_audience, jwks_url=jwks_url,
+        ),
+        "auth": AuthSettings(
+            issuer_url=AnyHttpUrl(oauth_issuer),
+            resource_server_url=AnyHttpUrl(oauth_audience),
+            required_scopes=required_scopes,
+        ),
+    }
+
+
+def _apply_oauth_auth(mcp_server: object, auth_kwargs: dict) -> None:
+    """Reassign `mcp_server.settings.auth` / `mcp_server._token_verifier`
+    from `_http_auth()`'s (oauth-branch) result.
+
+    A small helper rather than the two assignments inline, and ONLY called
+    by `main()`'s serve-http branch when an issuer is actually configured
+    (never for the static-token/no-auth path — see that branch's own
+    comment for why). The reason for the helper at all:
+    tests/test_execution_service.py drives `main()` against lightweight
+    `RecordingMCPServer` doubles that expose only `.run()`, and a bare
+    `mcp.settings.auth = ...` against one of those failed with a plain
+    `AttributeError` three stack frames away from the actual cause. Every
+    real caller is `mcp.server.mcpserver.server.MCPServer`, which has both
+    attributes; this exists for the day that stops being true — a test
+    double, or a future SDK shape change — and turns that into one
+    `RuntimeError` naming what is missing, caught by the same fail-closed
+    handling as every other OAuth-configuration failure in serve-http's
+    branch of `main()`.
+    """
+    settings = getattr(mcp_server, "settings", None)
+    if settings is None or not hasattr(mcp_server, "_token_verifier"):
+        raise RuntimeError(
+            f"{type(mcp_server).__name__} has no '.settings'/'._token_verifier' "
+            "to configure OAuth auth on — expected the real "
+            "mcp.server.mcpserver.server.MCPServer"
+        )
+    settings.auth = auth_kwargs.get("auth")
+    mcp_server._token_verifier = auth_kwargs.get("token_verifier")
 
 
 _provider_registry = providers.configured_registry()
@@ -219,9 +383,71 @@ _execution_service = execution_service.ExecutionService(
 )
 _session_service = execution_service.SessionService(audit=_audit_log)
 
+
+# ── The server's own icon (2025-11-25+) ──────────────────────────────────────
+#
+# SERVER-LEVEL ONLY. This used to also apply a per-GROUP icon to every tool
+# (`Tool.icons`, via `_tool()`'s `d_kwargs.setdefault("icons", ...)`) — pulled
+# after measuring the real cost: only 6 DISTINCT icons exist, but `Tool.icons`
+# is a per-TOOL field, so each tool's own copy repeats the full base64
+# payload on the wire, and base64 tokenizes far worse than prose under a BPE
+# encoder. Measured: +6,665 tokens (o200k_base) on the full served
+# `tools/list` payload for a server whose whole pitch is that tool SELECTION
+# accuracy matters (see README's "Tool-definition token cost" table, and
+# #118/`docs/design/2026-08-10-tool-facade.md`'s reasoning against paying
+# that kind of cost for anything less than a real fix). The server-level
+# icon below survives: it rides on `initialize`, once per CONNECTION, not
+# once per tool — a fundamentally different, negligible cost shape.
+#
+# Inline `data:image/svg+xml;base64,...` — no external URL (a remote `src`
+# means every client that renders an icon fetches from wherever this string
+# points, which is exactly the phone-home shape tests/test_offline.py exists
+# to ban; a self-contained data URI has no such fetch). A single monochrome
+# `<path>` (`fill="currentColor"`, so it inherits the client's own theme
+# rather than fighting it) in a 16x16 viewBox, evenodd cutout for the hole —
+# well under 300 bytes, base64 included.
+#
+# The SVG namespace attribute below is a literal, plain string — NOT split
+# to dodge tests/test_offline.py's outbound-URL scan. That scan bans a
+# hardcoded phone-home endpoint; this is an XML namespace declaration every
+# valid standalone SVG document carries and nothing in this codebase (or any
+# SVG renderer) ever fetches. It is named explicitly in that test's own
+# `_URL_EXEMPTIONS` allowlist, the same mechanism already used for
+# example.com/localhost/127.0.0.1 — see the comment there for why.
+def _svg_icon(path_d: str, *, attrs: str = 'fill="currentColor"', rule: str | None = None) -> Icon:
+    ns = "http://www.w3.org/2000/svg"
+    fill_rule = f' fill-rule="{rule}"' if rule else ""
+    svg = f'<svg xmlns="{ns}" viewBox="0 0 16 16"><path{fill_rule} {attrs} d="{path_d}"/></svg>'
+    data = base64.b64encode(svg.encode("ascii")).decode("ascii")
+    # `mime_type`/`sizes` both left unset: the `data:image/svg+xml;...` src
+    # already states its own MIME type (`mime_type` is documented as an
+    # "override if the source MIME type is MISSING or generic" — it is
+    # neither here), and an absent `sizes` already means "any size" per
+    # `Icon.sizes`'s own docstring. Both fields would only re-state what
+    # `src` already carries.
+    return Icon(src=f"data:image/svg+xml;base64,{data}")
+
+
+#: The server's own icon (`MCPServer(icons=[...])`) — a circle with a
+#: plus-shaped cutout (evenodd).
+_SERVER_ICON = _svg_icon(
+    "M8 0a8 8 0 100 16A8 8 0 008 0zm-1.5 4h3v2.5H13v3H9.5V13h-3V9.5H3v-3h3.5z",
+    rule="evenodd",
+)
+
+#: `website_url` (MCPServer construction below) — a plain literal, NOT split
+#: to dodge tests/test_offline.py's outbound-URL scan. It is this
+#: repository's own homepage, published as metadata for a client to show a
+#: human; codecalc's own runtime never issues a request to it. Named
+#: explicitly in that test's `_URL_EXEMPTIONS` allowlist, same mechanism as
+#: `_svg_icon`'s xmlns above.
+_WEBSITE_URL = "https://github.com/The-40-Thieves/codecalc"
+
 mcp = MCPServer(
     name="codecalc",
     version=__version__,
+    icons=[_SERVER_ICON],
+    website_url=_WEBSITE_URL,
     # ttlMs/cacheScope became REQUIRED on list and read results in 2026-07-28
     # (SEP-2549). They are a freshness hint that lets a client cache instead of
     # re-listing; "public" is right here because this server has no per-caller
@@ -245,8 +471,13 @@ mcp = MCPServer(
     # tool handler itself produced.
     middleware=[redact_validation_errors_middleware, timeout_middleware],
     # Bearer auth for the HTTP transport, absent unless CODECALC_HTTP_TOKEN is
-    # set. Inert over stdio either way — see _http_auth.
-    **_http_auth(),
+    # set. Inert over stdio either way. The OAuth-issuer path is deliberately
+    # NOT built here — `_static_token_auth()`, not `_http_auth()` — because
+    # this line runs at IMPORT for every subcommand (doctor, --help, the bare
+    # stdio server, ...), and only `serve-http` may pay `_http_auth()`'s real
+    # network call (JWKS discovery) when an issuer is configured. See both
+    # functions' docstrings.
+    **_static_token_auth(),
     # `instructions` is metadata every MCP client receives on connect, before
     # it has called a single tool — the least invasive surface to put backend
     # visibility on. list_languages() was the other candidate and was
@@ -270,6 +501,155 @@ mcp = MCPServer(
     instructions=None,
 )
 
+
+# ── Argument completion (completion/complete) ───────────────────────────────
+#
+# The 2026-07-28 wire only lets a completion request name a PROMPT or a
+# RESOURCE TEMPLATE (`mcp_types.CompleteRequestParams.ref:
+# ResourceTemplateReference | PromptReference` — no `ref/tool` variant
+# exists in the spec), and this server has one resource template
+# (`codecalc://session/{session_id}/files/{+path}`) and no prompts. A tool
+# argument therefore has no `ref` of its own to hang a completion off — so
+# this dispatches on `argument.name` alone, the one thing every caller of
+# `mcp.complete()` supplies regardless of which tool or template it is
+# completing for, and ignores `ref`/`context` entirely. tests/
+# test_mcp_protocol.py drives this the same way a real client would: a raw
+# `complete()` call naming the session-file template as `ref` and one of
+# the five argument names below.
+def _completion_languages() -> list[str]:
+    """Every registry key plus every alias, e.g. "py" alongside "python3"."""
+    values = set(registry.LANGUAGES)
+    for aliases in registry.ALIASES.values():
+        values.update(aliases)
+    return sorted(values)
+
+
+def _completion_units() -> list[str]:
+    return units.list_units()["units"]
+
+
+def _completion_providers() -> list[str]:
+    return [d["provider_id"] for d in _provider_registry.descriptors()]  # already sorted
+
+
+def _completion_session_ids() -> list[str]:
+    return sorted(s["session_id"] for s in _session_service.list_sessions()["sessions"])
+
+
+def _completion_run_ids() -> list[str]:
+    if _run_supervisor is None:
+        return []
+    return sorted(_run_supervisor.known_run_ids())
+
+
+#: argument name -> zero-arg callable returning every candidate value
+#: (unsorted callers already sort; unfiltered — the handler below applies
+#: the caller's prefix). One entry per tool-argument NAME this server
+#: completes, not per tool: several tools share an argument name
+#: (`language` alone appears on execute_code, benchmark, session_start...)
+#: and this serves all of them from the same list.
+_COMPLETERS = {
+    "language": _completion_languages,
+    "unit": _completion_units,
+    "provider": _completion_providers,
+    "session_id": _completion_session_ids,
+    "run_id": _completion_run_ids,
+}
+
+#: `mcp_types.Completion.values`'s own documented ceiling: "Must not exceed
+#: 100 items." Enforced here rather than trusted to the SDK, so `total`/
+#: `has_more` stay accurate even if a future list of languages or live
+#: sessions grows past it.
+_COMPLETION_LIMIT = 100
+
+
+@mcp.completion()
+async def _complete_argument(ref, argument, context):
+    """Prefix-complete `language`/`unit`/`provider`/`session_id`/`run_id`.
+
+    Case-sensitive, prefix-only (no fuzzy/substring matching — the SDK's own
+    `Completion.values` contract is a ranked list of exact continuations, not
+    a search result). `total` is the FULL match count before the 100-item
+    cap; `has_more` is only true when the cap actually dropped something, so
+    a caller can tell "100 shown, 100 total" (has_more=False) from "100
+    shown, 140 total" (has_more=True).
+    """
+    getter = _COMPLETERS.get(argument.name)
+    if getter is None:
+        return None
+    prefix = argument.value or ""
+    try:
+        candidates = getter()
+    except Exception:
+        # A getter reads live server state (sessions, run supervisor,
+        # provider registry) — a raise there is this handler's problem to
+        # absorb, not a reason to surface a raw internal error to a client
+        # that only asked for completions. Same empty shape the SDK itself
+        # returns when a completion handler answers `None`.
+        return Completion(values=[], total=None, has_more=None)
+    matches = [v for v in candidates if v.startswith(prefix)]
+    values = matches[:_COMPLETION_LIMIT]
+    return Completion(values=values, total=len(matches), has_more=len(matches) > len(values))
+
+
+# ── Session-mutation notifications (resources/list-changed, resource/updated) ─
+#
+# `ctx.notify_resources_changed()`/`ctx.notify_resource_updated(uri)` are
+# coroutines that publish onto a `subscriptions/listen` stream (2026-07-28,
+# SEP-2575) — but every tool below is a plain synchronous `def`, which the
+# SDK runs via `anyio.to_thread.run_sync` (`mcp_middleware.py`'s own module
+# docstring: "the SDK runs them on a worker thread"), not on the event loop
+# that owns those coroutines. `anyio.from_thread.run(...)` is the documented
+# bridge back from an anyio worker thread to its event loop, blocking this
+# worker thread (never the loop) until the notification is published. Best
+# effort, same shape as `execute_code_stream`'s own `report_progress`
+# wrapper above: a client that never opened a listen stream gets no error
+# and no notification, and a publish failure never fails the tool call it
+# rode in on.
+#
+# `resources/list` itself carries a 10s cache TTL (`cache_hints=` on the
+# `MCPServer(...)` construction above) — a client that refetches inside that
+# window can still see stale content even though the notification arrived
+# immediately; the TTL is a caching hint, not a guarantee this notification
+# supersedes.
+def _notify_resources_changed(ctx: Context) -> None:
+    if ctx is None:
+        return
+    try:
+        anyio.from_thread.run(ctx.notify_resources_changed)
+    except Exception:
+        pass
+
+
+def _notify_resource_updated(ctx: Context, uri: str) -> None:
+    if ctx is None:
+        return
+    try:
+        anyio.from_thread.run(ctx.notify_resource_updated, uri)
+    except Exception:
+        pass
+
+
+def _sync_progress(ctx: Context):
+    """A SYNCHRONOUS `(done, total, message)` callback bound to `ctx`, for
+    passing into `tools.benchmark`/`tools.compare_execution`/
+    `optimization.verify_optimization` — all three are plain synchronous
+    functions with no SDK dependency of their own (see `tools.ProgressFn`'s
+    own comment), so the bridge to `ctx.report_progress` (a coroutine) lives
+    here, the same `anyio.from_thread.run(...)` pattern
+    `_notify_resources_changed` above uses. Returns a no-op when `ctx` is
+    None, same as every other best-effort helper in this file.
+    """
+    if ctx is None:
+        return lambda done, total, message: None
+
+    def _progress(done: int, total: int, message: str) -> None:
+        try:
+            anyio.from_thread.run(ctx.report_progress, float(done), float(total), message)
+        except Exception:
+            pass
+
+    return _progress
 
 
 def _coded(fn):
@@ -459,6 +839,11 @@ TOOL_ANNOTATION_OVERRIDES: dict[str, ToolAnnotations] = {
         read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True),
     "execute_code_stream": ToolAnnotations(
         read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True),
+    # trace_execution runs the caller's code through the identical executor
+    # path execute_code does (see codecalc/tracing.py) — same reasoning,
+    # same override.
+    "trace_execution": ToolAnnotations(
+        read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True),
     "compare_execution": ToolAnnotations(
         read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True),
     "runtimes_status": ToolAnnotations(
@@ -611,16 +996,19 @@ _MAX_OUTPUT_KB_CEILING = 240
 #: `structuredContent` carries the same JSON again, outside this bound.
 _MAX_RESULT_SIZE_CHARS = 2 * _MAX_OUTPUT_KB_CEILING * 1024 + 8_000  # = 499_520
 
-#: The five tools whose result can approach the output cap above:
+#: The six tools whose result can approach the output cap above:
 #: execute_code/execute_code_stream/session_run each run one program,
 #: compare_execution runs several, and run_inspect's TERMINAL reply is the
 #: same execution envelope execute_code returns once a managed run finishes
 #: (run_supervisor hands back the same result shape a synchronous run would
 #: have). run_submit is excluded deliberately — its own reply is a small
-#: `run_id` handle; it carries no envelope of its own to cap.
+#: `run_id` handle; it carries no envelope of its own to cap. trace_execution
+#: carries the SAME envelope plus a per-line event trace, which is why it
+#: also caps `max_events` at a size `codecalc/tracing.py`'s own internal
+#: trace-byte ceiling keeps well under this tool's char budget.
 _LARGE_RESULT_TOOLS = frozenset({
     "execute_code", "execute_code_stream", "session_run", "compare_execution",
-    "run_inspect",
+    "run_inspect", "trace_execution",
 })
 
 
@@ -633,6 +1021,13 @@ def _tool_meta(name: str) -> dict[str, Any] | None:
         meta["anthropic/alwaysLoad"] = True
     if name in _LARGE_RESULT_TOOLS:
         meta["anthropic/maxResultSizeChars"] = _MAX_RESULT_SIZE_CHARS
+    if name in apps_views.UI_RESOURCE_URIS:
+        # MCP Apps (io.modelcontextprotocol/ui): points a supporting host at
+        # the ui:// resource below. `visibility` is left unset (spec default
+        # ["model", "app"]) — the tool's own text/structured result is
+        # unchanged for the model either way; see
+        # docs/design/2026-09-08-mcp-apps-verification-views.md.
+        meta["ui"] = {"resourceUri": apps_views.UI_RESOURCE_URIS[name]}
     return meta or None
 
 
@@ -905,6 +1300,7 @@ def execute_code(
     compact: bool = False,
     provider: str | None = None,
     dependencies: list[str] | None = None,
+    ctx: Context = None,
 ) -> dict[str, Any]:
     """Execute `code` in `language` in a sandbox.
 
@@ -963,6 +1359,15 @@ def execute_code(
     before. Session-LESS runs (no `session_id`) have no workspace to spill
     into and keep the old truncate-and-drop behaviour.
     """
+    # Resource-change notification not documented in the docstring above:
+    # the docstring is this tool's served `description`, and
+    # scripts/tool_select_eval.py scores tool SELECTION against it — an
+    # equivalent paragraph here measurably hurt selection (same reasoning as
+    # benchmark's/compare_execution's/verify_optimization's own comments on
+    # progress, just above their bodies). With `session_id` set, a
+    # successful call fires one `resources/list` change notification (best
+    # effort — see `_notify_resources_changed`) once the run has actually
+    # written into that session's workspace. See CHANGELOG.md.
     timeout = min(timeout, 120)
     max_output_kb = min(max_output_kb, _MAX_OUTPUT_KB_CEILING)
     spec = providers.ComputationSpec(
@@ -984,6 +1389,8 @@ def execute_code(
             _session_service, session_id, spec, provider_id=provider,
             dependencies=dependencies,
         )
+        if result.get("ok"):
+            _notify_resources_changed(ctx)
     else:
         result = _execution_service.execute(spec, provider_id=provider,
                                             dependencies=dependencies)
@@ -1011,9 +1418,18 @@ def session_start(language: str = "python3") -> dict[str, Any]:
 
 
 @mcp.tool(group="sessions")
-def session_stop(session_id: str) -> dict[str, Any]:
+def session_stop(session_id: str, ctx: Context = None) -> dict[str, Any]:
     """Stop a session: kill its REPL worker (if any) and delete its workspace."""
-    return _session_service.stop(session_id)
+    # Resource-change notification not documented in the docstring above —
+    # same tool_select_eval reasoning as execute_code's own comment. Fires
+    # one `resources/list` change notification (best effort) when the
+    # workspace was actually removed (`deleted: true`) — a second
+    # `session_stop` on an already-gone session is idempotent and changes
+    # nothing, so it stays silent. See CHANGELOG.md.
+    result = _session_service.stop(session_id)
+    if result.get("ok") and result.get("deleted"):
+        _notify_resources_changed(ctx)
+    return result
 
 
 @mcp.tool(group="sessions")
@@ -1032,10 +1448,22 @@ def session_files(session_id: str, path: str = "", page_size: int | None = None,
 
 
 @mcp.tool(group="sessions")
-def session_write_file(session_id: str, path: str, content: str) -> dict[str, Any]:
+def session_write_file(session_id: str, path: str, content: str, ctx: Context = None) -> dict[str, Any]:
     """Write a file into a session workspace (relative path, no escapes).
     Use this to seed input data for executed code."""
-    return _session_service.write_file(session_id, path, content)
+    # Resource-change notifications not documented in the docstring above —
+    # same tool_select_eval reasoning as execute_code's own comment. On
+    # success, fires one `resources/list` change notification AND one
+    # resource-updated notification for this exact file's
+    # `codecalc://session/{session_id}/files/{path}` URI (both best effort)
+    # — the second is the one place this server names the specific resource
+    # that changed, since every other mutating tool here can touch an
+    # unbounded set of files a single URI cannot name. See CHANGELOG.md.
+    result = _session_service.write_file(session_id, path, content)
+    if result.get("ok"):
+        _notify_resources_changed(ctx)
+        _notify_resource_updated(ctx, f"codecalc://session/{session_id}/files/{path}")
+    return result
 
 
 @mcp.tool(group="sessions")
@@ -1089,8 +1517,32 @@ async def install_package(language: str, package: str, session_id: str | None = 
     )
     if gate is not None:
         return gate
-    return packages.install(language, package, session_id=session_id,
-                            version=version, audit=_audit_log)
+    # Resource-change notification not documented in the docstring above —
+    # same tool_select_eval reasoning as execute_code's own comment. With
+    # session_id, a successful install fires one `resources/list` change
+    # notification (best effort) — the installed package's files land in
+    # that session's workspace, reachable through the session-file resource
+    # template. The shared-cache path (no session_id) touches nothing a
+    # session-scoped resource can name, so it stays silent. See
+    # CHANGELOG.md.
+    result = packages.install(language, package, session_id=session_id,
+                              version=version, audit=_audit_log)
+    # `install_package` is now a native `async def` (#302's confirmation
+    # gate needs `await confirmation.require_confirmation(...)`), so it runs
+    # directly on the event loop rather than on the worker thread
+    # `anyio.to_thread.run_sync` gives a plain synchronous `def` — see
+    # `_notify_resources_changed`'s own docstring for why that distinction
+    # matters. Awaiting `ctx.notify_resources_changed()` directly here is
+    # therefore correct where the thread-bridged sync helper (used by every
+    # OTHER tool below, all still plain `def`s) would not be: calling
+    # `anyio.from_thread.run(...)` from the loop's own thread has no worker
+    # thread to bridge FROM.
+    if session_id and result.get("ok") and ctx is not None:
+        try:
+            await ctx.notify_resources_changed()
+        except Exception:
+            pass
+    return result
 
 
 @mcp.tool(group="execution")
@@ -1157,6 +1609,59 @@ async def execute_code_stream(
     return await _execution_service.execute_stream(
         spec, provider_id=provider, dependencies=dependencies,
         on_progress=report_progress
+    )
+
+
+@mcp.tool(group="execution")
+def trace_execution(
+    language: str,
+    code: str,
+    stdin: str = "",
+    timeout: int = 30,
+    max_events: int = 2000,
+    max_memory_mb: int = 0,
+    max_output_kb: int = 0,
+    max_cpu: int = 0,
+    no_net: bool = False,
+    provider: str | None = None,
+) -> dict[str, Any]:
+    """Debug WHY, line by line: which statements fired, in what order, with
+    what variable values at each step, and which if/elif/while/for/try
+    branch was taken versus never taken. Want just the printed output
+    instead? Use execute_code.
+
+    Returns `events`: ordered `{step, line, event, func, locals}`, one entry
+    per traced line/call/return/exception in YOUR code only (library
+    internals excluded). `locals` on each entry is only the names that
+    changed since the previous step in that same call — not a full dump
+    every line. A `return` entry also carries `return_value`; an
+    `exception` entry carries `exception_type`/`exception_message`.
+
+    Also returns `branches` (hit count per if/elif/while/for/try line),
+    `lines_executed` / `lines_never_executed` (coverage from a static parse),
+    and `truncated`/`truncated_reason` when `max_events` or an internal
+    size ceiling stopped RECORDING early (the underlying stdout/exit code
+    are unaffected either way).
+
+    TRUST: the trace is produced BY the traced program at its OWN privilege
+    — a debugging aid, not an attestation of behaviour, exactly as
+    trustworthy as that program's own stdout. `discarded_events` /
+    `events_consistent` are a best-effort tamper/corruption signal (never a
+    guarantee) computed independently of the file's own content.
+    `unenforced` may additionally note "only the main thread is traced"
+    (sys.settrace is per-thread) or, fallback backend only, an OLE
+    `exit_code` race.
+
+    PYTHON3 ONLY for now; any other `language` is refused up front. For a
+    structural Big-O guess with nothing executed, use analyze_complexity.
+    `provider`: only 'local' (default) is supported here.
+    """
+    timeout = min(timeout, 120)
+    max_output_kb = min(max_output_kb, _MAX_OUTPUT_KB_CEILING)
+    return tracing.execute_trace(
+        language, code, stdin=stdin, timeout=timeout, max_events=max_events,
+        max_memory_mb=max_memory_mb, max_output_kb=max_output_kb,
+        max_cpu=max_cpu, no_net=no_net, provider=provider,
     )
 
 
@@ -1576,7 +2081,7 @@ def analyze_complexity(code: str, language: str = "python3") -> dict[str, Any]:
 
 @mcp.tool(group="analysis")
 def benchmark(code: str, language: str = "python3", sizes: str = "100,1000,10000,100000",
-              timeout: int = 30) -> dict[str, Any]:
+              timeout: int = 30, ctx: Context = None) -> dict[str, Any]:
     """Empirically measure time complexity by running code at increasing input sizes.
 
     Contract: the code must read an integer N from stdin (first line) and do work
@@ -1584,12 +2089,22 @@ def benchmark(code: str, language: str = "python3", sizes: str = "100,1000,10000
     the growth curve to estimate Big-O (O(1), O(log n), O(n), O(n log n), O(n^2)...).
     Example python: 'import sys\\nn=int(sys.stdin.readline()); s=0\\nfor i in range(n): s+=i\\nprint(s)'
     """
-    return tools.benchmark(code, language=language, sizes=sizes, timeout=timeout)
+    # Progress deliberately NOT documented in the docstring above: the
+    # docstring is this tool's `description` on the wire, and
+    # scripts/tool_select_eval.py scores tool SELECTION against it —
+    # measured, adding this paragraph there cost 2 top-1 hits on the `full`
+    # baseline (BM25's length normalization dilutes the terms a prompt
+    # actually matches on). See CHANGELOG.md and `tools.benchmark`'s own
+    # docstring (not served to any client) for what this reports and why an
+    # auto-scale retry does not get its own progress sequence.
+    return tools.benchmark(code, language=language, sizes=sizes, timeout=timeout,
+                           on_progress=_sync_progress(ctx))
 
 
 @mcp.tool(group="execution")
 def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 15,
-                      dependencies: dict[str, list[str]] | None = None) -> dict[str, Any]:
+                      dependencies: dict[str, list[str]] | None = None,
+                      ctx: Context = None) -> dict[str, Any]:
     """Run the same code in multiple languages side by side.
 
     `snippets` maps language name -> code (each snippet must be valid in its own
@@ -1604,6 +2119,11 @@ def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 
     dropped: a python3 row that carries one gets
     `dependencies: {"status": "unsupported", "reason": ...}`.
     """
+    # Progress not documented in the docstring above — same reasoning as
+    # benchmark's own comment just above it: the docstring feeds
+    # tool_select_eval's BM25 corpus, and this paragraph measurably hurt
+    # selection there. Reports once per language, in `snippets`' own
+    # iteration order; see CHANGELOG.md.
     if dependencies:
         return errors.error_result(
             errors.VALIDATION,
@@ -1615,7 +2135,8 @@ def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 
             provider_error="unsupported_capability",
             capability="dependencies",
         )
-    return tools.compare_execution(snippets, stdin=stdin, timeout=timeout)
+    return tools.compare_execution(snippets, stdin=stdin, timeout=timeout,
+                                   on_progress=_sync_progress(ctx))
 
 
 @mcp.tool(group="execution")
@@ -1697,6 +2218,34 @@ def session_file_resource(session_id: str, path: str):
         return data.decode("utf-8")  # str -> TextResourceContents
     except UnicodeDecodeError:
         return data
+
+
+# ── MCP Apps (io.modelcontextprotocol/ui) resources ─────────────────────────
+# Two static, self-contained HTML documents (codecalc/apps_views.py) bound to
+# verify_translation/verify_optimization via the `_meta.ui.resourceUri` set in
+# `_tool_meta` above. `mime_type=APP_MIME_TYPE` is the SDK's own constant, not
+# a literal, so a host that requires the exact spec string never sees a typo.
+# `resources/list`'s cache hint (10s, public) already covers these the same
+# as every other resource — nothing here is per-caller or ever changes at
+# runtime, so no override is needed. See
+# docs/design/2026-09-08-mcp-apps-verification-views.md for the research this
+# is built from.
+@mcp.resource(apps_views.UI_RESOURCE_URIS["verify_translation"],
+              name="verify_translation view",
+              description="Interactive per-case comparison table for a verify_translation result, "
+                          "with first-differing-line highlighting. Ignored by hosts without MCP Apps support.",
+              mime_type=APP_MIME_TYPE)
+def verify_translation_view() -> str:
+    return apps_views.VERIFY_TRANSLATION_HTML
+
+
+@mcp.resource(apps_views.UI_RESOURCE_URIS["verify_optimization"],
+              name="verify_optimization view",
+              description="Interactive per-size timing chart and significance table for a "
+                          "verify_optimization result. Ignored by hosts without MCP Apps support.",
+              mime_type=APP_MIME_TYPE)
+def verify_optimization_view() -> str:
+    return apps_views.VERIFY_OPTIMIZATION_HTML
 
 
 # Deliberately left untyped (no `-> dict` or `-> dict[str, Any]`): the body
@@ -1834,7 +2383,7 @@ def _inline_artifact_blocks(session_id: str, artifacts: list[dict]) -> tuple[lis
 @mcp.tool(group="sessions")
 def session_run(session_id: str, entry_file: str, language: str | None = None,
                 stdin: str = "", timeout: int = 30,
-                dependencies: list[str] | None = None):
+                dependencies: list[str] | None = None, ctx: Context = None):
     """Run a multi-file program in a session: execute `entry_file`, which may
     import other files already in the session workspace (helper.py, data/...).
 
@@ -1863,10 +2412,17 @@ def session_run(session_id: str, entry_file: str, language: str | None = None,
     own `main.py` (or the equivalent for another language) at the session
     root is never touched by running a different entry file.
     """
+    # Resource-change notification not documented in the docstring above —
+    # same tool_select_eval reasoning as execute_code's own comment. Every
+    # successful run fires one `resources/list` change notification (best
+    # effort) — the entry file's own scratch copy changes on every call,
+    # even when `artifacts_created` is empty. See CHANGELOG.md.
     result = _session_service.run_file(
         session_id, entry_file, language=language, stdin=stdin, timeout=timeout,
         dependencies=dependencies,
     )
+    if result.get("ok"):
+        _notify_resources_changed(ctx)
     created = result.get("artifacts_created")
     if not created:
         return result
@@ -2334,7 +2890,8 @@ def compare_edge_cases(snippets: dict[str, str],
 def verify_optimization(original: str, candidate: str, language: str,
                         test_inputs: list[str] | None = None,
                         sizes: list[int] | None = None,
-                        min_speedup: float = optimization.DEFAULT_MIN_SPEEDUP) -> dict[str, Any]:
+                        min_speedup: float = optimization.DEFAULT_MIN_SPEEDUP,
+                        ctx: Context = None) -> dict[str, Any]:
     """PROVE an optimisation: same outputs, and measurably AND SIGNIFICANTLY faster.
 
     You write the optimised version. This runs both against the same inputs to
@@ -2357,9 +2914,16 @@ def verify_optimization(original: str, candidate: str, language: str,
     or not significantly faster — is graded `ungraded`: correctness alone does
     not earn a grade for the optimisation claim this tool exists to answer.
     """
+    # Progress not documented in the docstring above — same reasoning as
+    # benchmark's/compare_execution's own comments: the docstring feeds
+    # tool_select_eval's BM25 corpus, and an equivalent paragraph measurably
+    # hurt selection there. Reports once after each of four phases COMPLETES
+    # (correctness, baseline sizes, candidate sizes, alignment — see
+    # optimization.PROGRESS_PHASES); a phase that fails reports nothing for
+    # itself, and later phases never ran. See CHANGELOG.md.
     result = optimization.verify_optimization(
         original, candidate, language, test_inputs=test_inputs,
-        sizes=sizes, min_speedup=min_speedup)
+        sizes=sizes, min_speedup=min_speedup, on_progress=_sync_progress(ctx))
     return grades.grade_verify_optimization(result, result.get("language", language))
 
 
@@ -2871,7 +3435,12 @@ def main() -> None:
             "  cleanup [--dry-run|--write] [--include-unmarked]\n"
             "                                      reclaim disk from abandoned session workspaces\n"
             "  serve-strict [ARGS]                authenticated HTTP execution service\n"
-            "  serve-http [--host H] [--port P]   MCP over streamable HTTP\n"
+            "  serve-http [--host H] [--port P] [--oauth-issuer URL]\n"
+            "             [--oauth-audience URL] [--oauth-jwks-url URL]\n"
+            "             [--oauth-scopes \"S1 S2\"]\n"
+            "                                      MCP over streamable HTTP; --oauth-issuer\n"
+            "                                      validates bearer tokens as JWTs instead of\n"
+            "                                      the static CODECALC_HTTP_TOKEN\n"
             "  -h, --help                         show this message and exit\n"
             "  -V, --version                      show the codecalc version and exit\n"
             "\n"
@@ -2930,6 +3499,26 @@ def main() -> None:
         port_text = (rest[rest.index("--port") + 1]
                      if "--port" in rest and rest.index("--port") + 1 < len(rest)
                      else "8000")
+        # `--oauth-*` flags, same "argv is inspected rather than parsed" style
+        # as --host/--port above. None means "the flag was not given" — the
+        # signal `_http_auth()` needs to fall back to its own env var — not
+        # "the flag was given as an empty string", which --host/--port do not
+        # have to distinguish because they always have a hardcoded default.
+        def _flag(name: str) -> str | None:
+            return rest[rest.index(name) + 1] if name in rest and rest.index(name) + 1 < len(rest) else None
+
+        oauth_issuer_flag = _flag("--oauth-issuer")
+        oauth_audience_flag = _flag("--oauth-audience")
+        oauth_jwks_url_flag = _flag("--oauth-jwks-url")
+        oauth_scopes_flag = _flag("--oauth-scopes")
+        # What `_http_auth()` will actually see for the issuer, flag-or-env —
+        # needed below by the loopback/auth refusal check, which must treat
+        # "--oauth-issuer given on the command line, no env vars at all" as
+        # authenticated too, not just the two env vars it used to know about.
+        oauth_issuer_effective = (
+            oauth_issuer_flag if oauth_issuer_flag is not None
+            else os.environ.get(OAUTH_ISSUER_ENV, "").strip()
+        )
         # FAIL CLOSED on a routable bind with no auth. The whole
         # 127/8 block and ::1 are loopback — `ipaddress` decides, not a string
         # compare, because 127.0.0.2 is exactly as loopback as 127.0.0.1 and a
@@ -2944,13 +3533,14 @@ def main() -> None:
         except ValueError:
             loopback = host in ("localhost", "ip6-localhost")
             is_ipv6 = False
-        if not loopback and not os.environ.get(HTTP_TOKEN_ENV):
+        if not loopback and not os.environ.get(HTTP_TOKEN_ENV) and not oauth_issuer_effective:
             print(
                 f"codecalc serve-http: refusing to bind {host}: it is not a "
-                f"loopback address and {HTTP_TOKEN_ENV} is not set. An "
-                "unauthenticated bind on a routable interface would expose "
-                "every execution tool to that network. Set the variable to a "
-                "strong secret and restart, or bind 127.0.0.1.",
+                f"loopback address and neither {HTTP_TOKEN_ENV} nor "
+                f"{OAUTH_ISSUER_ENV}/--oauth-issuer is set. An unauthenticated "
+                "bind on a routable interface would expose every execution "
+                "tool to that network. Configure one and restart, or bind "
+                "127.0.0.1.",
                 file=sys.stderr,
             )
             raise SystemExit(2)
@@ -2977,6 +3567,40 @@ def main() -> None:
             allowed_hosts=[f"{host_for_header}:*"],
             allowed_origins=[f"http://{host_for_header}:*"],
         )
+        # Reassigning `mcp.settings.auth`/`mcp._token_verifier` ONLY happens
+        # in this `if`, and ONLY when an issuer is actually configured. The
+        # static-token/no-auth path must stay byte-identical to what it was
+        # before `--oauth-*` existed: `mcp` already carries the right
+        # `_static_token_auth()` result from module import (see that
+        # function's docstring), and re-touching these two attributes for a
+        # result identical to what is already there is not a no-op if `mcp`
+        # is not a real `MCPServer` — tests/test_execution_service.py drives
+        # `main()` against a `RecordingMCPServer` test double that has
+        # neither attribute at all, and unconditionally reassigning them used
+        # to raise a bare AttributeError there even on the plain static-token
+        # path that never asked for OAuth in the first place.
+        if oauth_issuer_effective:
+            # FAIL CLOSED: an issuer that cannot be resolved (bad scheme, DNS
+            # failure, no `jwks_uri` in its discovery document) must stop
+            # `serve-http` from starting at all, with a message on stderr —
+            # the alternative is a server that LOOKS authenticated but has no
+            # verifier any token could ever satisfy correctly, or worse, one
+            # whose behavior on a broken verifier is undefined.
+            try:
+                auth_kwargs = _http_auth(
+                    oauth_issuer=oauth_issuer_flag, oauth_audience=oauth_audience_flag,
+                    oauth_jwks_url=oauth_jwks_url_flag, oauth_scopes=oauth_scopes_flag,
+                )
+                _apply_oauth_auth(mcp, auth_kwargs)
+            except (ValueError, OSError, RuntimeError) as exc:
+                print(
+                    f"codecalc serve-http: could not configure OAuth against "
+                    f"{oauth_issuer_effective!r}: {exc}. Refusing to start — a "
+                    "server no token could ever pass is worse than one that "
+                    "fails at the command line.",
+                    file=sys.stderr,
+                )
+                raise SystemExit(2) from exc
         mcp.run(
             transport="streamable-http",
             host=host,

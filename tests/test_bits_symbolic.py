@@ -21,8 +21,9 @@ This file asserts the merge is honest, both ways:
     sentence the ticket specified;
   * annotations are unchanged (still the calculator group's read-only
     default) on all ten names (2 merged + 8 aliases);
-  * the tool count is 54 (52 + 2 — the aliases still count) and the group
-    taxonomy is unchanged (all ten stay `calculator`).
+  * the tool count matches `_helpers.expected_tool_count()` (the aliases
+    still count) and the group taxonomy is unchanged (all ten stay
+    `calculator`).
 
 Standalone runner (check()/FAILS/sys.exit), no pytest — the repo convention
 (see CONTRIBUTING.md and tests/conftest.py for why).
@@ -38,6 +39,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from _helpers import expected_tool_count
 from _mcp_client import data, in_process, over_stdio
 
 from codecalc import errors, server
@@ -187,11 +189,12 @@ for name in (*ALL_ALIASES, "bits", "symbolic"):
     check(f"{name} has no bespoke TOOL_ANNOTATION_OVERRIDES entry",
           name not in server.TOOL_ANNOTATION_OVERRIDES)
 
-# ── tool count: 54 (52 + 2 — the 8 aliases still count) ────────────────────
-check("54 tools declared in TOOL_GROUPS", len(server.TOOL_GROUPS) == 54,
-      f"-> {len(server.TOOL_GROUPS)}")
-check("54 tools actually registered (default CODECALC_TOOLS)",
-      len(server.mcp._tool_manager._tools) == 54, f"-> {len(server.mcp._tool_manager._tools)}")
+# ── tool count: README's gated total (the 8 aliases still count) ───────────
+check(f"{expected_tool_count()} tools declared in TOOL_GROUPS",
+      len(server.TOOL_GROUPS) == expected_tool_count(), f"-> {len(server.TOOL_GROUPS)}")
+check(f"{expected_tool_count()} tools actually registered (default CODECALC_TOOLS)",
+      len(server.mcp._tool_manager._tools) == expected_tool_count(),
+      f"-> {len(server.mcp._tool_manager._tools)}")
 
 
 # ── protocol-layer round trip: in-process AND real stdio ───────────────────
@@ -199,8 +202,8 @@ async def _protocol_checks() -> None:
     for client_name, client_cm in (("in-process", in_process), ("stdio", over_stdio)):
         async with client_cm() as client:
             listed = {t.name for t in (await client.list_tools()).tools}
-            check(f"[{client_name}] tools/list serves 54 tools", len(listed) == 54,
-                  f"-> {len(listed)}")
+            check(f"[{client_name}] tools/list serves {expected_tool_count()} tools",
+                  len(listed) == expected_tool_count(), f"-> {len(listed)}")
             missing_new = {"bits", "symbolic"} - listed
             check(f"[{client_name}] tools/list serves bits and symbolic",
                   not missing_new, f"-> missing {missing_new}")

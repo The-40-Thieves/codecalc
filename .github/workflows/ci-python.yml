@@ -554,6 +554,11 @@ jobs:
       # and covers the ceiling with the portable spawn probe instead.
       - name: security regressions (on the fallback)
         run: uv run --no-sync python tests/test_security.py
+      # `serve-http --oauth-issuer`: real subprocesses, real loopback HTTP,
+      # an in-process fake issuer minting real JWTs — no dependency on the
+      # native executor, so it belongs here rather than in `sandbox` below.
+      - name: serve-http OAuth bearer-token validation
+        run: uv run --no-sync python tests/test_serve_http_oauth.py
 
   sandbox:
     # The security suite. Split out from `tests` because it needs the Rust binary built first, and
@@ -823,6 +828,11 @@ jobs:
       # supposed to, and nowhere else.
       - name: tool policy metadata
         run: uv run --no-sync python tests/test_tool_meta.py
+      # MCP Apps ui:// views for verify_translation/verify_optimization: the
+      # resources list/read correctly, the _meta.ui shape matches the spec,
+      # and tools/call is unchanged for hosts without Apps support.
+      - name: MCP Apps verification views
+        run: uv run --no-sync python tests/test_mcp_apps_views.py
       # every declared tool names a real CODECALC_TOOLS group, and the default
       # (unset) configuration still registers all of them — the tool-surface-reduction
       # analogue of the check just above. Needs `mcp` installed to import codecalc.server,

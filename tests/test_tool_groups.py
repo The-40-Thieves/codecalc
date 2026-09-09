@@ -1,8 +1,8 @@
-"""CODECALC_TOOLS: registering a SLICE of the 54-tool surface.
+"""CODECALC_TOOLS: registering a SLICE of the 52-tool surface.
 
 The tool-definition token cost (README: "Tool-definition token cost") is real,
 and the fix that stayed unbuilt on purpose is a facade
-(docs/design/2026-08-10-tool-facade.md) — collapsing 54 typed tools behind one
+(docs/design/2026-08-10-tool-facade.md) — collapsing 52 typed tools behind one
 dispatcher erases per-tool schemas and per-tool approval boundaries. What this
 adds instead is server-side REGISTRATION filtering: a tool outside the active
 group set is never handed to `_mcp_tool(...)` at all, so it is absent from
@@ -31,6 +31,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
+
+from _helpers import expected_tool_count
 
 FAILS: list[str] = []
 
@@ -110,8 +112,8 @@ check("unset CODECALC_TOOLS: exactly the declared tools register (none missing, 
       f"-> {len(default_data.get('registered', []))} registered vs {len(DECLARED)} declared; "
       f"missing={sorted(set(DECLARED) - set(default_data.get('registered', [])))}, "
       f"extra={sorted(set(default_data.get('registered', [])) - set(DECLARED))}")
-check("unset CODECALC_TOOLS: registers all 54",
-      default.returncode == 0 and len(default_data.get("registered", [])) == 54,
+check(f"unset CODECALC_TOOLS: registers all {expected_tool_count()}",
+      default.returncode == 0 and len(default_data.get("registered", [])) == expected_tool_count(),
       f"-> {len(default_data.get('registered', []))}")
 check("unset CODECALC_TOOLS: every known group is active",
       default.returncode == 0

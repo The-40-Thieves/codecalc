@@ -220,7 +220,7 @@ tests/test_features.py    → ALL NEW-FEATURE TESTS PASS (62 checks, 19 async:
                              the async half used to be dead code, see the file's own docstring)
 tests/test_gap4.py        → ITEMS 1-4 ALL PASS (resources, inline images, multi-file, units)
 tests/test_calc_port.py   → ALL 19 PORTED FEATURES PASS (calc skill parity: exact, bitop, float, radix, ...)
-tests/test_mcp_all.py     → 54/54 tools round-trip over stdio + session file resources
+tests/test_mcp_all.py     → 55/55 tools round-trip over stdio + session file resources
 tests/test_runtimes_mcp.py → runtimes_status: dry-run safe, summary agrees with
                              the per-language detail (the counts are whatever
                              that machine has installed)
@@ -473,6 +473,19 @@ network-blocking shim. Each has a security-relevant design decision:
    transport became reachable off-box — see the README's "Run the server" and
    configuration sections, and `SECURITY.md`'s "Known limitations" for the
    current wording.
+
+   **UPDATE — `--oauth-issuer` also satisfies this gate.** The same
+   non-loopback-bind refusal now also accepts `CODECALC_OAUTH_ISSUER` (or
+   `--oauth-issuer`) as an alternative to `CODECALC_HTTP_TOKEN`: bearer
+   tokens are then verified as JWTs against the issuer's own JWKS instead of
+   a static value. It is off by default, requires `https://` for the issuer
+   and JWKS URLs except a loopback host, and is built ONLY inside
+   `serve-http`'s own code path — never at module import — so a
+   `CODECALC_OAUTH_ISSUER` set in the environment costs `doctor`, `--help`,
+   `serve-strict`, and the bare stdio server nothing; only `serve-http`
+   itself pays the one JWKS-discovery network call, and fails closed with a
+   clear error if that issuer cannot be reached, rather than starting a
+   server no token could ever pass.
 
 ## Re-audit recommendation
 
