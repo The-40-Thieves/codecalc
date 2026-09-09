@@ -202,7 +202,10 @@ symbol that caused the false positive above. A later guard whose
 translated z3 expression mentions a tainted symbol ANYWHERE — including
 buried inside arithmetic, since `_apply_assign` never launders it away —
 is caught by `_mentions_tainted` (a plain iterative walk of the z3 AST,
-`id()`-based visited-tracking since z3 terms are a DAG) and reported
+visited-tracking keyed on `node.get_id()` — z3's own hash-consing id,
+NOT Python's `id()`, since z3 terms are a DAG — see this section's own
+"a third review pass" subsection below for why that distinction turned
+out to matter) and reported
 `unknown` (`_REASON_TAINTED_BY_LOOP`) WITHOUT ever being solved: the
 fresh symbol is unconstrained, so z3 would call it `sat` for nearly
 anything, which is exactly the false-confidence failure mode being
@@ -217,6 +220,119 @@ Both mechanisms honor the one invariant this tool promises: a
 (every one in the test suite is corroborated by `tracing.execute_trace`
 against the real program), and only unrolling — never the conservative
 path — is trusted to produce `dead`.
+
+### A third review pass: unrolling threaded copies independently instead of sequentially
+
+Confirmation of everything above by direct execution ALSO found that
+`_walk_for_unrolled` — the exact-unroll mechanism two paragraphs up —
+was itself unsound in a narrower way. It hand-threaded the environment
+across the N concrete-value copies of the body, but fed every copy the
+SAME, unnarrowed path condition, discarding each copy's own
+`falls_through`/`continuation_cond`:
+
+```python
+def f(x):
+    y = 0
+    for i in range(5):
+        if i == 2:
+            return 100
+        if i == 4:
+            y = 99
+    if y == 99:
+        return 1
+    return 0
+```
+
+reported the post-loop `if y == 99` **reachable**, when every real call
+returns `100` at `i == 2` and the loop body never even reaches `i == 4` —
+confirmed by direct execution for `x` in `{0, 1, -5, 999}`. The fix feeds
+the N copies through the EXACT SAME sequential-statement machinery
+`_walk_block` already uses for two consecutive `if` statements: copy
+`k+1` is walked starting from copy `k`'s own `continuation_cond`, not the
+loop's original entry condition, so a copy whose own walk reports
+`falls_through=False` — a bare `return`, the same structural signal
+`_walk_block`'s `ast.Return` case reports — closes every LATER copy (each
+still walked, so its own internal branches are discovered and correctly
+reported `dead` rather than silently dropped) and the loop's own
+`(falls_through, continuation_cond)` reported to its caller becomes
+`(False, None, ...)`, closing the enclosing block exactly as a bare
+`return` would. `tests/test_branch_reachability.py`'s `unroll-return-*`
+cases cover a return at the first iteration, at the last, nested two
+`if`s deep, and a return gated on an INPUT-dependent condition (whose
+post-loop reachability then correctly depends on that same input) — every
+witness trace-corroborated as above.
+
+### `tests/test_branch_reachability_differential.py`, and the two bugs it found that three hand-written reviews had not
+
+Three review rounds each found a DIFFERENT instance of the same underlying
+failure mode — a hand-written test suite only tries the combinations
+someone thought to write down. `tests/test_branch_reachability_
+differential.py` exists to try hundreds of small, randomly generated ones
+instead: a deterministic (fixed-seed) generator over the supported
+subset, checked against ground truth from exhaustive concrete execution
+(every witness is run for real and must hit the arm's own body line;
+every `dead` line must never fire for any input in a bounded domain).
+Running it surfaced two MORE instances, in mechanisms none of the three
+reviews above had touched:
+
+1. **`_mentions_tainted`'s visited-set was keyed on Python's `id()`.**
+   z3's Python bindings mint a fresh wrapper object on every
+   `.children()` call rather than interning one per underlying
+   (hash-consed) node, so a wrapper can be garbage-collected and its
+   `id()` reused by an unrelated LATER node within the SAME walk. When
+   that happened, a tainted symbol nested inside a `z3.If`'s second
+   branch could be skipped as an already-"seen" duplicate of a
+   completely different node — a guard that genuinely depended on a
+   tainted value then solved as an ordinary `reachable`, with a witness
+   that pinned the "unconstrained" tainted symbol to whatever value made
+   the query satisfiable. This reproduced non-deterministically (it
+   depends on GC timing, not on the input), which is exactly why the
+   fixed-seed differential corpus — run repeatedly — caught it where a
+   one-shot hand-written case would not have. Fixed by keying the
+   visited set on `node.get_id()` instead — z3's OWN id for the
+   underlying node, identical across every wrapper around it, with no
+   such aliasing risk.
+2. **A tainted (or untranslatable) guard's "opaque pass-through" was sound
+   for the environment but not for control flow.** Neither arm of such a
+   guard is walked — by design, since guessing which one executes is
+   exactly the false confidence this mechanism exists to avoid — so the
+   tool genuinely does not know whether one of them held an unconditional
+   `return`. The existing code returned `falls_through=True` regardless,
+   which is correct for "nothing was applied to the environment" but
+   wrong for "so execution definitely continues past here": a `return`
+   inside an unwalked arm closes off everything after it in reality, and
+   trusting a `reachable` witness for code several statements later
+   amounts to trusting that a `return` this tool declined to resolve did
+   not fire. Fixed with a new ambient counter, `ctx._unresolved_closure_
+   depth` (parallel to the existing `ctx._conservative_loop_depth`),
+   raised for every statement sequentially after such a pass-through
+   within the same block. `_decide` reports `unknown` — never `reachable`
+   — for a `sat` result found under it: the full path condition used
+   there is missing a conjunct this tool could not model ("the earlier,
+   unresolved `return` did not fire"), so its solution set is a SUPERSET
+   of the true reachable set, and a witness in a superset need not be in
+   the true set. An `unsat` result still safely proves `dead`, because
+   dropping a required conjunct only WIDENS what solves — unsatisfiability
+   of the wider condition survives narrowing to the true one. The signal
+   itself (`ctx._pending_closure_taint`, one-shot: set by whichever
+   construct hit the pass-through, read-and-cleared by
+   `_take_closure_taint`) threads through `_walk_if`, `_walk_block`,
+   `_walk_for_unrolled`, and `_walk_loop_conservative` exactly the way
+   `falls_through`/`continuation_cond` already do — composing correctly
+   through elif chains, nested ifs, and chained unrolled-loop copies
+   without leaking into an unrelated SIBLING arm (an `if`'s `else`, or a
+   different branch of an enclosing construct), the same "only surviving
+   arms contribute" rule `_walk_if`'s own continuation-condition merge
+   already follows.
+
+Both are covered by minimized, deterministic regressions in
+`tests/test_branch_reachability.py` (`taint-id-reuse`,
+`closure-taint-return`) in addition to the differential corpus that found
+them — the fixed-seed corpus is not a substitute for pinning down the
+specific failure once found, since a corpus regenerated with a different
+seed, or a future code change that shifts which programs it happens to
+generate, would not by itself guarantee re-trying the exact case that
+failed.
 
 ## Why z3 `Optimize` for boundary inputs, and no box around it
 

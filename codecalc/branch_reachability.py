@@ -77,9 +77,15 @@ Two genuinely different mechanisms, chosen by `_walk_loop`:
     condition is sat, `dead` only if EVERY iteration's is unsat
     (aggregated per source line by `_Ctx.commit_branch`/
     `flush_unroll_frame`, since the same AST node is visited once per
-    iteration). Post-loop state is therefore EXACT, including the loop
-    target variable itself, which — matching real Python scoping — ends
-    up bound to its LAST iteration's value.
+    iteration). The N copies are CHAINED exactly like N consecutive `if`
+    statements — copy `k+1` starts from copy `k`'s own `continuation_cond`,
+    not the original path condition — so an unconditional `return` reached
+    at some concrete iteration correctly closes off every later copy
+    (their own branches still discovered and reported `dead`, never
+    dropped) and whatever comes after the loop. Post-loop state is
+    therefore EXACT, including the loop target variable itself, which —
+    matching real Python scoping — ends up bound to its LAST iteration's
+    value.
   * A `while` loop, or a `for` above that cap, is walked ONE
     representative iteration (`_walk_loop_conservative`), and the earlier
     cut's real defect lived here: binding the loop variable to a fresh,
@@ -412,6 +418,24 @@ class _Ctx:
         # name, so a later, clean reassignment correctly clears the taint.
         self.tainted_names: set[str] = set()
         self._taint_counter = 0
+        # > 0 while walking statements sequentially AFTER a construct whose
+        # own closure behaviour (does it unconditionally `return`, or not?)
+        # this tool declined to resolve — see `_REASON_AFTER_UNRESOLVED_RETURN`
+        # and `_walk_block`'s bookkeeping around this counter. `_decide`
+        # downgrades EITHER a sat or an unsat result to `unknown` while this
+        # is positive: unlike `_conservative_loop_depth` (where a `sat`
+        # witness is still trustworthy), here a witness for code after an
+        # unresolved-closure point may never be reached at runtime, and a
+        # `dead` claim may be wrong whenever the unresolved return does not
+        # actually fire.
+        self._unresolved_closure_depth = 0
+        # One-shot signal: set by `_walk_if` immediately before returning
+        # from its tainted-guard opaque-pass-through path, consumed (and
+        # cleared) by `_walk_block` right after the call that might have set
+        # it. Plain instance state rather than a return value so it composes
+        # with the existing `(falls_through, continuation_cond, env)`
+        # contract every caller of `_walk_if`/`_walk_loop` already relies on.
+        self._pending_closure_taint = False
 
     @property
     def unrolling(self) -> bool:
@@ -617,11 +641,25 @@ def _unparse(node: ast.AST) -> str:
         return "<unprintable>"
 
 
-#: Set only for the two conservative-loop cases `_decide`/`_walk_if` can
+#: Set only for the conservative-loop / tainted-guard cases `_decide` can
 #: produce — never for a plain solver timeout or an ordinary dead/reachable
 #: verdict, which say nothing more than the verdict itself already does.
 _REASON_FIRST_ITERATION_ONLY = "loop body analysed for the first iteration only"
 _REASON_TAINTED_BY_LOOP = "depends on a value computed by a loop"
+#: A guard EARLIER in the same block had a tainted condition (see
+#: `_REASON_TAINTED_BY_LOOP`) and was therefore treated as an opaque
+#: pass-through: neither of ITS OWN arms was walked, so this tool does not
+#: know whether one of them contained an unconditional `return` that would
+#: have closed off everything after it. Trusting a `sat`/`unsat` verdict
+#: for code sequentially AFTER that point would mean trusting a witness
+#: that might never actually be reached at runtime (the earlier, unresolved
+#: `return` may fire first) or a `dead` claim for code that IS reached
+#: whenever that return does not fire — see `_Ctx._unresolved_closure_depth`
+#: and the differential fuzz failure that found this: a `return` gated on a
+#: tainted condition silently failed to close off a `reachable` claim (with
+#: a witness that, in real execution, never got there) for code several
+#: statements later in the same block.
+_REASON_AFTER_UNRESOLVED_RETURN = "may be preceded by a return this tool could not resolve"
 
 
 def _mentions_tainted(expr, ctx: _Ctx) -> bool:
@@ -632,10 +670,23 @@ def _mentions_tainted(expr, ctx: _Ctx) -> bool:
 
     A plain iterative walk over `.children()`, not a z3-provided utility:
     z3's own AST nodes are DAGs (a shared subterm appears once but is
-    referenced from multiple parents), so `id()`-based visited-tracking is
-    what keeps this from doing exponential re-work on a deeply-nested
-    expression, the same reasoning `_boundary_for`'s own bounded work
-    already applies elsewhere in this module.
+    referenced from multiple parents), so visited-tracking is what keeps
+    this from doing exponential re-work on a deeply-nested expression, the
+    same reasoning `_boundary_for`'s own bounded work already applies
+    elsewhere in this module. The visited key is `node.get_id()` — z3's
+    OWN hash-consing id for the underlying AST node — never Python's
+    `id()`: z3's Python bindings mint a FRESH wrapper object on every
+    `.children()` call rather than interning one wrapper per underlying
+    node, so a wrapper can be garbage-collected and its `id()` reused by
+    an unrelated later node WITHIN THE SAME WALK. A confirmed differential
+    fuzz failure traced to exactly this: a tainted symbol nested inside a
+    z3.If's second branch was skipped as an already-"seen" duplicate of a
+    completely different node that happened to reuse its freed Python
+    object's memory address, silently laundering a false `reachable`
+    verdict (with a fabricated witness) out of what should have been
+    `unknown`. `get_id()` returns the SAME integer for every wrapper
+    around the same underlying (hash-consed) node, so it has no such
+    aliasing risk.
     """
     if not ctx.tainted_names:
         return False
@@ -643,10 +694,14 @@ def _mentions_tainted(expr, ctx: _Ctx) -> bool:
     seen: set[int] = set()
     while stack:
         node = stack.pop()
-        node_id = id(node)
-        if node_id in seen:
-            continue
-        seen.add(node_id)
+        try:
+            node_id = node.get_id()
+        except Exception:
+            node_id = None
+        if node_id is not None:
+            if node_id in seen:
+                continue
+            seen.add(node_id)
         try:
             if node.num_args() == 0 and node.decl().name() in ctx.tainted_names:
                 return True
@@ -659,13 +714,44 @@ def _mentions_tainted(expr, ctx: _Ctx) -> bool:
     return False
 
 
+def _take_closure_taint(ctx: _Ctx) -> bool:
+    """Read-and-clear `ctx._pending_closure_taint` — the one-shot signal a
+    just-completed `_walk_if`/`_walk_loop`/`_walk_block` call may have left
+    behind to mean "something I walked had an unresolved (tainted) guard
+    that MIGHT have returned, and I could not tell". Every caller that
+    makes such a call reads it with this helper immediately afterward,
+    both to decide whether ITS OWN subsequent statements need
+    `ctx._unresolved_closure_depth` raised (see `_decide`), and to fold
+    into the aggregate signal it leaves for ITS OWN caller in turn before
+    returning — read-and-clear rather than a plain read so two sibling
+    calls (an `if`'s body, then separately its `else`) never see the
+    other's leftover signal."""
+    taken = ctx._pending_closure_taint
+    ctx._pending_closure_taint = False
+    return taken
+    return False
+
+
 def _decide(cond, ctx: _Ctx) -> tuple[str, dict[str, Any] | None, str | None]:
     """`(verdict, witness, reason)` for one path condition. `witness` is
-    `None` unless `verdict == "reachable"`; `reason` is set only for the
-    conservative-loop UNSAT-downgraded-to-`unknown` case (see
-    `_REASON_FIRST_ITERATION_ONLY`) — see the module docstring's LOOPS
-    section for why an UNSAT found while `ctx._conservative_loop_depth > 0`
-    proves only "not reachable on the first iteration", never "dead".
+    `None` unless `verdict == "reachable"`; `reason` is set for either
+    conservative downgrade this can apply:
+
+      * UNSAT while `ctx._conservative_loop_depth > 0` becomes `unknown`
+        (`_REASON_FIRST_ITERATION_ONLY`) — see the module docstring's LOOPS
+        section for why that only proves "not reachable on the first
+        iteration", never "dead".
+      * SAT while `ctx._unresolved_closure_depth > 0` becomes `unknown`
+        (`_REASON_AFTER_UNRESOLVED_RETURN`) instead of `reachable`: `cond`
+        here is missing a conjunct this tool could not model — "the
+        earlier, tainted-guarded `return` it declined to resolve did NOT
+        fire" — so `cond`'s solution set is a SUPERSET of the true
+        reachable set. A `sat` witness in that superset might not be in
+        the true set (not trustworthy), but an UNSAT result still proves
+        the (smaller) true set is ALSO empty — dropping a required
+        conjunct only WIDENS what solves, so unsatisfiability of the wider
+        condition survives narrowing — which is why only the sat direction
+        needs downgrading here, unlike the loop case above.
     """
     if ctx.budget_exhausted():
         return "unknown", None, None
@@ -675,6 +761,8 @@ def _decide(cond, ctx: _Ctx) -> tuple[str, dict[str, Any] | None, str | None]:
     solver.add(cond)
     verdict = solver.check()
     if verdict == z3.sat:
+        if ctx._unresolved_closure_depth > 0:
+            return "unknown", None, _REASON_AFTER_UNRESOLVED_RETURN
         return "reachable", ctx.witness(solver.model()), None
     if verdict == z3.unsat:
         if ctx._conservative_loop_depth > 0:
@@ -765,7 +853,15 @@ def _record(ctx: _Ctx, *, line: int, kind: str, condition: str, cond, guard_node
     reason = None
     try:
         verdict, witness, reason = _decide(cond, ctx)
-        boundary = _boundary_for(guard_node, parent_cond, cond, env, ctx) if guard_node is not None else []
+        # `boundary_inputs`' own min/max/equality-edge inputs are each a
+        # witness for a specific edge value — exactly as untrustworthy as
+        # the branch's own `reachable` witness would be here, for the same
+        # reason (see `_decide`'s docstring) — so skipped downstream of an
+        # unresolved closure point, the same "no boundary_inputs" rule
+        # `_record_tainted` already applies to its own directly-tainted
+        # guard.
+        boundary = (_boundary_for(guard_node, parent_cond, cond, env, ctx)
+                    if guard_node is not None and ctx._unresolved_closure_depth == 0 else [])
     except _TranslateError:
         verdict, witness, boundary = "unknown", None, []
         ctx.supported = False
@@ -857,11 +953,23 @@ def _walk_if(node: ast.If, env: dict[str, tuple[Any, str]], parent_pieces: list[
         # guess" rule an untranslatable guard already follows.
         _record_tainted(ctx, line=node.lineno, kind=kind,
                          condition=" and ".join(parent_pieces + [guard_text]) or guard_text)
+        # Signal outward (see `_take_closure_taint`): neither arm was
+        # walked, so this tool genuinely does not know whether one of them
+        # contained an unconditional `return` — a confirmed differential
+        # fuzz failure traced a false `reachable` verdict (with a witness
+        # that never actually got there at runtime) to code SEVERAL
+        # STATEMENTS LATER in the same block trusting a solve that this
+        # opaque pass-through should have made untrustworthy. The caller
+        # (`_walk_block`, or an enclosing `_walk_if` composing an
+        # elif-chain) is responsible for turning this into
+        # `ctx._unresolved_closure_depth` for whatever it walks next.
+        ctx._pending_closure_taint = True
         return True, parent_cond, env
     if_cond = z3.And(parent_cond, guard_val)
     _record(ctx, line=node.lineno, kind=kind, condition=" and ".join(parent_pieces + [guard_text]) or guard_text,
             cond=if_cond, guard_node=node.test, parent_cond=parent_cond, env=env)
     body_falls, body_cont, body_env = _walk_block(node.body, dict(env), ctx, if_cond)
+    body_taint = _take_closure_taint(ctx)
 
     not_text = f"not ({guard_text})"
     else_cond = z3.And(parent_cond, z3.Not(guard_val))
@@ -878,6 +986,7 @@ def _walk_if(node: ast.If, env: dict[str, tuple[Any, str]], parent_pieces: list[
         # unchanged — exactly the fallback `_merge_envs` needs for a variable
         # only assigned in the `if` body.
         else_falls, else_cont, else_env = True, else_cond, dict(env)
+    else_taint = _take_closure_taint(ctx)
 
     conds = [c for ok, c in ((body_falls, body_cont), (else_falls, else_cont)) if ok and c is not None]
     if not conds:
@@ -885,14 +994,24 @@ def _walk_if(node: ast.If, env: dict[str, tuple[Any, str]], parent_pieces: list[
     merge_cond = conds[0] if len(conds) == 1 else z3.Or(*conds)
     merged_env = _merge_envs(guard_val, body_env if body_falls else None,
                               else_env if else_falls else None, ctx)
+    # This whole if/elif/else is closure-uncertain for WHATEVER COMES NEXT
+    # if either SURVIVING arm (one that didn't itself definitely `return`)
+    # was — exactly the same "only surviving arms contribute" rule
+    # `merge_cond` above already applies to continuation conditions.
+    ctx._pending_closure_taint = (body_taint and body_falls) or (else_taint and else_falls)
     return True, merge_cond, merged_env
 
 
 def _walk_loop(node: ast.While | ast.For, env: dict[str, tuple[Any, str]], ctx: _Ctx,
-               cur_cond) -> dict[str, tuple[Any, str]]:
-    """Dispatch to an exact unroll (`for` within `_MAX_UNROLL_ITERATIONS`)
-    or the conservative, taint-based walk (`while`, or a `for` above the
-    cap) — see the module docstring's LOOPS section for why these are two
+               cur_cond) -> tuple[bool, Any, dict[str, tuple[Any, str]]]:
+    """`(falls_through, continuation_cond, env)` — the SAME triple
+    `_walk_block`/`_walk_if` return, for the SAME reason: a loop can close
+    off everything after it exactly as a bare `return` can (see
+    `_walk_for_unrolled`'s own docstring for the case that matters — an
+    unconditional `return` reached at SOME concrete iteration). Dispatches
+    to an exact unroll (`for` within `_MAX_UNROLL_ITERATIONS`) or the
+    conservative, taint-based walk (`while`, or a `for` above the cap) —
+    see the module docstring's LOOPS section for why these are two
     genuinely different mechanisms rather than one approximation applied
     uniformly.
     """
@@ -906,14 +1025,35 @@ def _walk_loop(node: ast.While | ast.For, env: dict[str, tuple[Any, str]], ctx: 
 
 
 def _walk_for_unrolled(node: ast.For, env: dict[str, tuple[Any, str]], ctx: _Ctx, cur_cond,
-                        values: range) -> dict[str, tuple[Any, str]]:
+                        values: range) -> tuple[bool, Any, dict[str, tuple[Any, str]]]:
     """Exact reachability for a `for x in range(<static>)` loop with at
-    most `_MAX_UNROLL_ITERATIONS` iterations: the body is walked ONCE PER
-    CONCRETE VALUE of the loop variable, threading the environment
-    sequentially (real symbolic execution, not the merge-based
-    approximation the conservative path uses) — so the post-loop state is
-    EXACT, not an over- or under-approximation. See the module docstring's
-    LOOPS section.
+    most `_MAX_UNROLL_ITERATIONS` iterations. The N concrete-value copies
+    of the body are NOT independent: they are fed through the exact SAME
+    sequential-statement machinery `_walk_block` already uses for two
+    consecutive `if` statements — copy `k+1` is walked starting from copy
+    `k`'s own `continuation_cond`, not from the ORIGINAL `cur_cond` — so
+    real symbolic execution, not merging, produces the EXACT post-loop
+    state, AND an unconditional `return` reached at some concrete
+    iteration correctly closes off every later copy and whatever comes
+    after the loop, exactly as it would for two consecutive `if`
+    statements today.
+
+    A prior cut hand-threaded the environment across copies but fed every
+    copy the SAME, unnarrowed `cur_cond`, discarding each copy's own
+    `falls_through`/`continuation_cond` — confirmed by a THIRD review to
+    under-count what a return closes off: `x = -1; for i in range(5): if
+    i == 2: return 100 \\n if i == 4: y = 99` reported the post-loop `if y
+    == 99` REACHABLE with a witness, when every real call returns at
+    `i == 2` and the loop body never even reaches `i == 4` — verified by
+    direct execution. `closed` below is what fixes it: once ANY copy's own
+    walk reports `falls_through=False` (a return with no wrapping
+    condition left to narrow — the same structural signal `_walk_block`'s
+    own `ast.Return` case reports), every REMAINING copy is still walked
+    (so its own internal branches are discovered and correctly reported
+    `dead`, rather than silently omitted) but under an UNSATISFIABLE path
+    condition, and the loop's own final `(falls_through, continuation_
+    cond)` reported to ITS caller is `(False, None, ...)` — the loop
+    closes the enclosing block exactly as a bare `return` would.
 
     Branches inside the body are recorded once PER SOURCE LINE, aggregated
     across iterations by `ctx.commit_branch`/`flush_unroll_frame`: reachable
@@ -934,32 +1074,67 @@ def _walk_for_unrolled(node: ast.For, env: dict[str, tuple[Any, str]], ctx: _Ctx
     _record(ctx, line=node.lineno, kind="for", condition=condition, cond=loop_entry_cond,
             guard_node=None, parent_cond=cur_cond, env=env)
     if not entered:
-        return env
+        ctx._pending_closure_taint = False
+        return True, cur_cond, env
 
     ctx._unroll_stack.append({})
+    iter_cond = cur_cond
     cur_env = env
-    for v in values:
-        iter_env = dict(cur_env)
-        iter_env[node.target.id] = (z3.IntVal(v), "int")
-        # The body's own `falls_through`/`continuation_cond` are not used
-        # here: an unconditional `return` inside an unrolled loop body is a
-        # narrow, undocumented-elsewhere edge case this tool does not
-        # attempt to reason about precisely (which concrete iterations
-        # would even reach the return depends on the free parameters, not
-        # just the loop variable) — env threading continues regardless,
-        # the same "over-approximate rather than guess" default this
-        # module already applies to constructs it cannot fully resolve.
-        _, _, cur_env = _walk_block(node.body, iter_env, ctx, cur_cond)
-    ctx.flush_unroll_frame()
-    return cur_env
+    closed = False
+    closure_uncertain = False
+    bumped = False
+    last_falls, last_cont = True, cur_cond
+    try:
+        for v in values:
+            iter_env = dict(cur_env)
+            iter_env[node.target.id] = (z3.IntVal(v), "int")
+            falls, cont, cur_env = _walk_block(node.body, iter_env, ctx, iter_cond)
+            # This copy's own body may have hit a tainted-guard (or
+            # untranslatable-guard) opaque pass-through — same signal
+            # `_walk_block` leaves for any caller, see `_take_closure_taint`.
+            # Once true, it stays true for every LATER copy too (chained
+            # sequentially, exactly like consecutive statements — an
+            # unresolved "might have returned" earlier in the chain makes
+            # everything after it equally unresolved) and for whatever
+            # comes after the whole loop.
+            if _take_closure_taint(ctx):
+                closure_uncertain = True
+                if not bumped:
+                    ctx._unresolved_closure_depth += 1
+                    bumped = True
+            last_falls, last_cont = falls, cont
+            if falls:
+                iter_cond = cont
+            else:
+                # A bare return in THIS copy closes everything from here on —
+                # keep walking the remaining copies (for discovery: their own
+                # branches must still be reported `dead`, not dropped), but
+                # under a path condition nothing can ever satisfy.
+                closed = True
+                iter_cond = z3.BoolVal(False)
+    finally:
+        if bumped:
+            ctx._unresolved_closure_depth -= 1
+        ctx.flush_unroll_frame()
+    if closed:
+        ctx._pending_closure_taint = False  # falls=False — caller won't use it
+        return False, None, cur_env
+    ctx._pending_closure_taint = closure_uncertain
+    return last_falls, last_cont, cur_env
 
 
 def _walk_loop_conservative(node: ast.While | ast.For, env: dict[str, tuple[Any, str]], ctx: _Ctx,
                              cur_cond, *, static_bounds: tuple[int, int, int] | None
-                             ) -> dict[str, tuple[Any, str]]:
-    """The ONE-representative-iteration walk for a `while` loop, or a `for`
-    above `_MAX_UNROLL_ITERATIONS` — see the module docstring's LOOPS
-    section. Two things distinguish this from a plain merge:
+                             ) -> tuple[bool, Any, dict[str, tuple[Any, str]]]:
+    """`(falls_through, continuation_cond, env)` for the ONE-representative-
+    iteration walk of a `while` loop, or a `for` above
+    `_MAX_UNROLL_ITERATIONS` — see the module docstring's LOOPS section.
+    Unlike `_walk_for_unrolled`, `falls_through` here is ALWAYS `True`: this
+    mechanism does not attempt to reason about whether the body's own
+    return closes off the loop, only about VALUE taint (below) — a
+    conservative choice consistent with everything else this path already
+    declines to decide precisely. Two things distinguish it from a plain
+    merge:
 
       * A branch inside the body that is UNSAT on this one iteration is
         `unknown` (`_REASON_FIRST_ITERATION_ONLY`), never `dead` — see
@@ -984,7 +1159,8 @@ def _walk_loop_conservative(node: ast.While | ast.For, env: dict[str, tuple[Any,
             raise _TranslateError("while condition is not a bool expression")
         if _mentions_tainted(guard_val, ctx):
             _record_tainted(ctx, line=node.lineno, kind="while", condition=_unparse(node.test))
-            return env
+            ctx._pending_closure_taint = True  # same opaque pass-through as `_walk_if`'s
+            return True, cur_cond, env
         loop_cond = z3.And(cur_cond, guard_val)
         condition = _unparse(node.test)
         _record(ctx, line=node.lineno, kind="while", condition=condition, cond=loop_cond,
@@ -1014,13 +1190,23 @@ def _walk_loop_conservative(node: ast.While | ast.For, env: dict[str, tuple[Any,
         _, _, body_env_after = _walk_block(node.body, body_env, ctx, loop_cond)
     finally:
         ctx._conservative_loop_depth -= 1
+    # The body itself may have hit its own opaque pass-through (a tainted
+    # or untranslatable guard) — propagate that same uncertainty to
+    # whatever comes AFTER this loop, for the same reason `_walk_if`
+    # propagates it out of an if/else: this mechanism already declines to
+    # reason about whether the body's OWN return closes the loop (see this
+    # function's docstring), so a return concealed behind an unresolved
+    # guard INSIDE the body is exactly as untrustworthy for the loop's
+    # own value-taint results.
+    body_taint = _take_closure_taint(ctx)
 
     tainted_env = dict(env)
     for name, entry in body_env_after.items():
         if name not in env or entry is env[name]:
             continue  # loop-local (e.g. the loop var), or never touched
         tainted_env[name] = (ctx.fresh_tainted_symbol(entry[1], name), entry[1])
-    return tainted_env
+    ctx._pending_closure_taint = body_taint
+    return True, cur_cond, tainted_env
 
 
 def _apply_assign(stmt: ast.Assign, env: dict[str, tuple[Any, str]], ctx: _Ctx) -> None:
@@ -1068,53 +1254,94 @@ def _walk_block(stmts: list[ast.stmt], env: dict[str, tuple[Any, str]], ctx: _Ct
     in kind — every LATER statement in this function depends on `env`
     staying accurate — so that one propagates out to a top-level refusal
     instead (see `analyze`'s own try/except around this call).
+
+    Both of those "opaque pass-through" cases above — and a tainted guard
+    (see `_walk_if`) — mean this function does not know whether the
+    statement it just walked contained an unconditional `return`. Once
+    one of them fires, every LATER statement in THIS SAME call has
+    `ctx._unresolved_closure_depth` raised for as long as this call is on
+    the stack (`_decide` then reports `unknown` rather than a `reachable`
+    witness that a real run might never get to — see its own docstring),
+    and the aggregate is left on `ctx._pending_closure_taint` for
+    whichever caller (an enclosing `_walk_if`'s body/else, another
+    `_walk_block`, or `_walk_for_unrolled`'s next copy) reads it via
+    `_take_closure_taint` right after this call returns — exactly the same
+    propagation `falls_through`/`continuation_cond` already do, just for
+    "is the path we're returning even certain to exist" instead of "what
+    condition reaches it".
     """
-    for stmt in stmts:
-        # Deliberately NOT short-circuited on `ctx.budget_exhausted()` here:
-        # discovering a branch (walking the AST, translating a guard) is
-        # cheap and unbounded-CPU-free, so it keeps happening even once the
-        # time budget for SOLVING is gone. `_decide`/`_boundary_for` are the
-        # only things that actually spend wall-clock time, and each already
-        # degrades to `verdict: "unknown"` on its own once the deadline
-        # passes — see `_Ctx.budget_exhausted`. Skipping discovery here too
-        # would silently DROP a branch instead of reporting it `unknown`,
-        # which is exactly the "timeout -> unknown, never a missing result"
-        # contract this tool promises.
-        if isinstance(stmt, (ast.Pass, ast.Expr)):
-            continue
-        if isinstance(stmt, ast.Assign):
-            _apply_assign(stmt, env, ctx)
-            continue
-        if isinstance(stmt, ast.Return):
-            return False, None, env
-        if isinstance(stmt, ast.If):
-            try:
-                falls, cont, merged_env = _walk_if(stmt, env, [], cur_cond, ctx, kind="if")
-            except _TranslateError:
-                ctx.supported = False
-                _record_unknown(ctx, stmt.lineno, "if")
-                falls, cont, merged_env = True, cur_cond, env
-            if not falls:
+    closure_uncertain = False
+    bumped = False
+    try:
+        for stmt in stmts:
+            # Deliberately NOT short-circuited on `ctx.budget_exhausted()`
+            # here: discovering a branch (walking the AST, translating a
+            # guard) is cheap and unbounded-CPU-free, so it keeps happening
+            # even once the time budget for SOLVING is gone.
+            # `_decide`/`_boundary_for` are the only things that actually
+            # spend wall-clock time, and each already degrades to `verdict:
+            # "unknown"` on its own once the deadline passes — see
+            # `_Ctx.budget_exhausted`. Skipping discovery here too would
+            # silently DROP a branch instead of reporting it `unknown`,
+            # which is exactly the "timeout -> unknown, never a missing
+            # result" contract this tool promises.
+            if isinstance(stmt, (ast.Pass, ast.Expr)):
+                continue
+            if isinstance(stmt, ast.Assign):
+                _apply_assign(stmt, env, ctx)
+                continue
+            if isinstance(stmt, ast.Return):
                 return False, None, env
-            cur_cond = cont
-            env = merged_env
-            continue
-        if isinstance(stmt, ast.While):
-            try:
-                env = _walk_loop(stmt, env, ctx, cur_cond)
-            except _TranslateError:
-                ctx.supported = False
-                _record_unknown(ctx, stmt.lineno, "while")
-            continue
-        if isinstance(stmt, ast.For):
-            try:
-                env = _walk_loop(stmt, env, ctx, cur_cond)
-            except _TranslateError:
-                ctx.supported = False
-                _record_unknown(ctx, stmt.lineno, "for")
-            continue
-        raise _TranslateError(f"unsupported statement {type(stmt).__name__}")
-    return True, cur_cond, env
+            stmt_taint = False
+            if isinstance(stmt, ast.If):
+                try:
+                    falls, cont, merged_env = _walk_if(stmt, env, [], cur_cond, ctx, kind="if")
+                    stmt_taint = _take_closure_taint(ctx)
+                except _TranslateError:
+                    ctx.supported = False
+                    _record_unknown(ctx, stmt.lineno, "if")
+                    falls, cont, merged_env = True, cur_cond, env
+                    stmt_taint = True  # same opaque pass-through risk as a tainted guard
+                if not falls:
+                    return False, None, env
+                cur_cond = cont
+                env = merged_env
+            elif isinstance(stmt, ast.While):
+                try:
+                    falls, cont, env = _walk_loop(stmt, env, ctx, cur_cond)
+                    stmt_taint = _take_closure_taint(ctx)
+                except _TranslateError:
+                    ctx.supported = False
+                    _record_unknown(ctx, stmt.lineno, "while")
+                    falls, cont = True, cur_cond
+                    stmt_taint = True
+                if not falls:
+                    return False, None, env
+                cur_cond = cont
+            elif isinstance(stmt, ast.For):
+                try:
+                    falls, cont, env = _walk_loop(stmt, env, ctx, cur_cond)
+                    stmt_taint = _take_closure_taint(ctx)
+                except _TranslateError:
+                    ctx.supported = False
+                    _record_unknown(ctx, stmt.lineno, "for")
+                    falls, cont = True, cur_cond
+                    stmt_taint = True
+                if not falls:
+                    return False, None, env
+                cur_cond = cont
+            else:
+                raise _TranslateError(f"unsupported statement {type(stmt).__name__}")
+            if stmt_taint:
+                closure_uncertain = True
+                if not bumped:
+                    ctx._unresolved_closure_depth += 1
+                    bumped = True
+        return True, cur_cond, env
+    finally:
+        if bumped:
+            ctx._unresolved_closure_depth -= 1
+        ctx._pending_closure_taint = closure_uncertain
 
 
 def _param_type(name: str, annotation: ast.expr | None, inputs: dict[str, str] | None) -> str:

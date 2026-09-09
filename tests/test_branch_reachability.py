@@ -844,6 +844,222 @@ check("unroll-inside-if: `if total == 2` is reachable ONLY via x > 0 (the "
 _verify_every_witness(_ruii, _UNROLL_INSIDE_IF, "f", "unroll-inside-if")
 
 
+# ── UNROLLED-LOOP RETURN CLOSURE: third-review BLOCKER on 59ff14d ───────────
+# `_walk_for_unrolled` used to hand-thread the environment across the N
+# unrolled copies but feed EVERY copy the SAME, unnarrowed path condition,
+# discarding each copy's own `falls_through`/`continuation_cond` — the
+# THIRD instance of "a copy's own control flow is not propagated," after
+# the if/else merge (e0708864) and the loop-value taint (d163c8f) fixes.
+# The review's own repro, verified failing before this fix: every real
+# call returns at `i == 2`, so the loop body never even reaches `i == 4`,
+# but the tool reported the post-loop `if y == 99` REACHABLE with a
+# witness.
+_UNROLL_RETURN_REPRO = (
+    "def f(x):\n"
+    "    y = 0\n"
+    "    for i in range(5):\n"
+    "        if i == 2:\n"
+    "            return 100\n"
+    "        if i == 4:\n"
+    "            y = 99\n"
+    "    if y == 99:\n"
+    "        return 1\n"
+    "    return 0\n"
+)
+_rurr = br.analyze("python3", _UNROLL_RETURN_REPRO)
+_rurr_i2 = _by_line(_rurr, 4)
+_rurr_i4 = _by_line(_rurr, 6)
+_rurr_post = _by_line(_rurr, 8)
+check("unroll-return repro: `if i == 2` (the return arm) is reachable",
+      _rurr_i2["verdict"] == "reachable", f"-> {_rurr_i2}")
+check("unroll-return repro: `if i == 4` is DEAD (the loop never gets past "
+      "i == 2 — every input returns there first)",
+      _rurr_i4["verdict"] == "dead", f"-> {_rurr_i4}")
+check("unroll-return repro: the post-loop `if y == 99` is DEAD — the "
+      "review's own repro, previously a false reachable with a "
+      "fabricated witness",
+      _rurr_post["verdict"] == "dead", f"-> {_rurr_post}")
+for _branch in (_rurr_i4, _rurr_post):
+    for _entry in _branch["boundary_inputs"]:
+        edge = _entry.get("equality_edge_input")
+        if edge is not None:
+            _proof = _proof_line(_UNROLL_RETURN_REPRO, _branch["line"], _branch["kind"])
+            check(f"unroll-return repro: boundary edge {edge!r} on line "
+                  f"{_branch['line']} does NOT actually reach that dead "
+                  f"branch (trace-corroborated)",
+                  not _hits_line(_UNROLL_RETURN_REPRO, "f", edge, _proof), f"-> edge={edge}")
+_verify_every_witness(_rurr, _UNROLL_RETURN_REPRO, "f", "unroll-return-repro")
+
+
+# ── an input-dependent return partway through unrolling ────────────────────
+_UNROLL_RETURN_COND = (
+    "def f(x):\n"
+    "    y = 0\n"
+    "    for i in range(5):\n"
+    "        if i == 2 and x > 0:\n"
+    "            return 100\n"
+    "        if i == 4:\n"
+    "            y = 99\n"
+    "    if y == 99:\n"
+    "        return 1\n"
+    "    return 0\n"
+)
+_rurc = br.analyze("python3", _UNROLL_RETURN_COND)
+_rurc_post = _by_line(_rurc, 8)
+check("unroll-return conditional: the post-loop `if y == 99` is reachable "
+      "ONLY when x <= 0 (x > 0 always returns at i == 2 first)",
+      _rurc_post["verdict"] == "reachable" and _rurc_post["witness"]["x"] <= 0,
+      f"-> {_rurc_post}")
+_verify_every_witness(_rurc, _UNROLL_RETURN_COND, "f", "unroll-return-cond")
+
+
+# ── return at iteration 0: everything after is dead ─────────────────────────
+_UNROLL_RETURN_ITER0 = (
+    "def f(x):\n"
+    "    y = 0\n"
+    "    for i in range(3):\n"
+    "        if i == 0:\n"
+    "            return 1\n"
+    "        if i == 1:\n"
+    "            y = 5\n"
+    "    if y == 5:\n"
+    "        return 2\n"
+    "    return 0\n"
+)
+_ruri0 = br.analyze("python3", _UNROLL_RETURN_ITER0)
+check("unroll-return iter0: `if i == 0` is reachable",
+      _by_line(_ruri0, 4)["verdict"] == "reachable", f"-> {_by_line(_ruri0, 4)}")
+check("unroll-return iter0: `if i == 1` is dead (iteration 0 always returns first)",
+      _by_line(_ruri0, 6)["verdict"] == "dead", f"-> {_by_line(_ruri0, 6)}")
+check("unroll-return iter0: the post-loop `if y == 5` is dead",
+      _by_line(_ruri0, 8)["verdict"] == "dead", f"-> {_by_line(_ruri0, 8)}")
+_verify_every_witness(_ruri0, _UNROLL_RETURN_ITER0, "f", "unroll-return-iter0")
+
+
+# ── return at the LAST iteration: post-loop dead, earlier arms unaffected ──
+_UNROLL_RETURN_LAST = (
+    "def f(x):\n"
+    "    y = 0\n"
+    "    for i in range(3):\n"
+    "        if i == 0:\n"
+    "            y = 5\n"
+    "        if i == 2:\n"
+    "            return 1\n"
+    "    if y == 5:\n"
+    "        return 2\n"
+    "    return 0\n"
+)
+_rurl = br.analyze("python3", _UNROLL_RETURN_LAST)
+check("unroll-return last-iter: `if i == 0` (an earlier arm) is unaffected "
+      "— still reachable",
+      _by_line(_rurl, 4)["verdict"] == "reachable", f"-> {_by_line(_rurl, 4)}")
+check("unroll-return last-iter: `if i == 2` (the return, at the LAST "
+      "iteration) is reachable",
+      _by_line(_rurl, 6)["verdict"] == "reachable", f"-> {_by_line(_rurl, 6)}")
+check("unroll-return last-iter: the post-loop `if y == 5` is dead (the "
+      "last iteration always returns before falling out of the loop)",
+      _by_line(_rurl, 8)["verdict"] == "dead", f"-> {_by_line(_rurl, 8)}")
+_verify_every_witness(_rurl, _UNROLL_RETURN_LAST, "f", "unroll-return-last")
+
+
+# ── a return nested two ifs deep inside the unrolled loop body ─────────────
+_UNROLL_RETURN_NESTED = (
+    "def f(x):\n"
+    "    for i in range(3):\n"
+    "        if i == 1:\n"
+    "            if x > 0:\n"
+    "                return 1\n"
+    "    return 0\n"
+)
+_rurn = br.analyze("python3", _UNROLL_RETURN_NESTED)
+_rurn_inner = _by_line(_rurn, 4)
+check("unroll-return nested: the doubly-nested `if x > 0` (inside `if i "
+      "== 1`, inside the unrolled loop) is reachable, witness x > 0",
+      _rurn_inner["verdict"] == "reachable" and _rurn_inner["witness"]["x"] > 0,
+      f"-> {_rurn_inner}")
+_verify_every_witness(_rurn, _UNROLL_RETURN_NESTED, "f", "unroll-return-nested")
+
+
+# ── differential-fuzz find #1: id()-reuse in _mentions_tainted's DAG walk ──
+# z3's Python bindings mint a FRESH wrapper object on every `.children()`
+# call rather than interning one per underlying (hash-consed) node, so a
+# wrapper can be garbage-collected and its `id()` reused by an unrelated
+# LATER node within the SAME walk. `_mentions_tainted` used to key its
+# "already visited" set on `id(node)`; when that happened, a tainted
+# symbol nested inside a z3.If's second branch could be skipped as an
+# already-"seen" duplicate of a totally different node, laundering a
+# genuinely-tainted guard into an ordinary `reachable` verdict with a
+# fabricated witness. `tests/test_branch_reachability_differential.py`
+# caught this non-deterministically (it depends on GC timing); this is
+# the minimized, deterministic repro, fixed by keying on `node.get_id()`
+# (z3's own id, stable across every wrapper around the same node) instead.
+_TAINT_ID_REUSE = (
+    "def f(x, y):\n"
+    "    if x < 0:\n"
+    "        n1 = 0\n"
+    "        while n1 < 2:\n"
+    "            x = ((x - x) - 1)\n"
+    "            n1 = n1 + 1\n"
+    "    else:\n"
+    "        if (((y + -3) + (x + y)) >= ((3 * -3) + y) and y == (x * -4)):\n"
+    "            v2 = x\n"
+    "        else:\n"
+    "            y = 1\n"
+    "        y = -2\n"
+    "    if y >= (x - 6):\n"
+    "        return 1\n"
+    "    return 0\n"
+)
+_tir = br.analyze("python3", _TAINT_ID_REUSE)
+_tir_last = _by_line(_tir, 13)
+check("taint-id-reuse: `if y >= (x - 6)` — downstream of a while-tainted "
+      "`x` merged into an if/else — is `unknown`, not a fabricated "
+      "`reachable`",
+      _tir_last is not None and _tir_last["verdict"] == "unknown",
+      f"-> {_tir_last}")
+
+
+# ── differential-fuzz find #2: a tainted-guard `return` didn't close off
+# what came after it ────────────────────────────────────────────────────
+# A tainted (or untranslatable) if/elif/else guard is an opaque
+# pass-through by design: neither arm is walked, so this tool cannot tell
+# whether one of them held an unconditional `return`. The environment was
+# correctly left unchanged either way, but CONTROL FLOW was not: code
+# after such a pass-through was treated as certainly falling through, when
+# in reality an unresolved `return` earlier could have closed it off —
+# `tests/test_branch_reachability_differential.py` found a witness that,
+# run for real, hit an earlier `return` first and never reached the branch
+# it was supposedly proving reachable. Fixed by `ctx._unresolved_closure_
+# depth`: `_decide` now reports `unknown` (never a `reachable` witness)
+# for anything sequentially after such a pass-through in the same block —
+# an `unsat` there still safely proves `dead`, since dropping a required
+# conjunct only widens what solves.
+_CLOSURE_TAINT_RETURN = (
+    "def f(x, y):\n"
+    "    n1 = 0\n"
+    "    while n1 < 4:\n"
+    "        if y != y:\n"
+    "            x = x\n"
+    "        n1 = n1 + 1\n"
+    "    if x != ((-3 * -2) * 0):\n"
+    "        if not (x == -3):\n"
+    "            x = y\n"
+    "    if (4 - x) != ((y - x) + (y - y)):\n"
+    "        return 2\n"
+    "    if y != ((5 * 1) * -4):\n"
+    "        return 3\n"
+    "    return 0\n"
+)
+_ctr = br.analyze("python3", _CLOSURE_TAINT_RETURN)
+_ctr_last = _by_line(_ctr, 12)
+check("closure-taint-return: `if y != -20` — downstream of an unconditional "
+      "`return` gated on a tainted-adjacent guard — is `unknown`, not a "
+      "fabricated `reachable`",
+      _ctr_last is not None and _ctr_last["verdict"] == "unknown"
+      and _ctr_last.get("reason") == br._REASON_AFTER_UNRESOLVED_RETURN,
+      f"-> {_ctr_last}")
+
+
 print(f"\n=== {len(FAILS)} FAILURES ===" if FAILS else
       "\n=== ALL BRANCH_REACHABILITY TESTS PASS ===")
 for _f in FAILS:
