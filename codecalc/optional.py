@@ -46,7 +46,7 @@ _EXTRAS = {
         "codecalc[symbolic]",
         ("evaluate_expression, simplify_expression, solve_expression, "
          "limit_expression, algebraic_equiv, solve_linear, truth_table, "
-         "z3_check, convert_units"),
+         "z3_check, branch_reachability, convert_units"),
     ),
     "parsing": (
         "codecalc[parsing]",

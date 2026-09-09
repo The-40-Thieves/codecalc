@@ -72,6 +72,13 @@ TOOL_TIMEOUTS: dict[str, float] = {
     "z3_check": 30,
     "solve_linear": 20,
     "analyze_complexity": 20,
+    # branch_reachability's own `timeout` argument (codecalc/
+    # branch_reachability.py) caps the whole in-process z3 budget at 120s —
+    # this deadline sits above that, the same margin verify_translation/
+    # verify_optimization below keep over THEIR own internal budgets, so a
+    # caller who actually asks for the full 120s gets a real answer back
+    # instead of this middleware cutting the response off first.
+    "branch_reachability": 150,
     # calc_exact and its sympy-backed siblings in exact.py were absent here,
     # so they inherited DEFAULT_TIMEOUT_SECONDS (900s) instead of the 20s
     # deadline their logic.py counterparts (evaluate_expression, solve_linear,

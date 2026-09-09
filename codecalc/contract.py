@@ -51,7 +51,7 @@ from . import errors, grades
 #: each component is allowed to change — the short form is that MAJOR is the
 #: only one that may break a reader, and it carries a twelve-month deprecation
 #: window before anything is removed.
-CONTRACT_VERSION = "1.15.0"
+CONTRACT_VERSION = "1.16.0"
 
 # THE `$schema` AND `$id` URIs ARE NOT HERE ON PURPOSE.
 #
@@ -936,6 +936,183 @@ def _execution_trace_only_properties() -> dict:
     }
 
 
+#: One `branches[]` entry's own properties — `branch_reachability`'s result
+#: (1.16.0). Read straight off `branch_reachability._record`'s own dict
+#: literal, not designed independently of it.
+_BRANCH_REACHABILITY_ENTRY_PROPERTIES: dict = {
+    "line": {"type": "integer", "minimum": 1},
+    "kind": {"type": "string", "enum": ["if", "elif", "else", "while", "for"]},
+    "condition": {
+        "type": "string",
+        "description": (
+            "Source text of the guard reaching this arm — the accumulated "
+            "conjunction of every ancestor guard on the path, negated "
+            "('not (...)') for an elif/else arm exactly the way Python's "
+            "own control flow negates it."
+        ),
+    },
+    "verdict": {
+        "type": "string", "enum": ["reachable", "dead", "unknown"],
+        "description": (
+            "reachable: z3 found a satisfying input (always a real "
+            "witness, whichever mechanism decided it). dead: PROVEN "
+            "unreachable — z3 found no satisfying input across every case "
+            "considered; for a for-loop body within the unroll cap, this "
+            "means every concrete iteration was checked, never just one. "
+            "unknown: the solver's own timeout expired, a construct on "
+            "this one path could not be translated even though the "
+            "upfront scan let it through (`_record_unknown`), THIS arm's "
+            "guard was checked on only the first iteration of a while/"
+            "above-cap-for loop and came back unsatisfiable (proof on one "
+            "iteration is not proof for all of them), or the guard "
+            "depends on a value a non-unrolled loop computed (tainted, "
+            "never solved) — see `reason` and codecalc/"
+            "branch_reachability.py's LOOPS section for which. Never a "
+            "crash, and never `dead` for the last two loop-related cases: "
+            "a false proof-of-absence is the one error class this shape "
+            "promises not to produce."
+        ),
+    },
+    "reason": {
+        "type": "string",
+        "enum": ["loop body analysed for the first iteration only",
+                 "depends on a value computed by a loop"],
+        "description": (
+            "Present only on a `verdict: unknown` produced by the "
+            "conservative (non-unrolled) loop path — see codecalc/"
+            "branch_reachability.py's `_REASON_FIRST_ITERATION_ONLY`/"
+            "`_REASON_TAINTED_BY_LOOP`. Absent for every other `unknown` "
+            "(a solver timeout, or an untranslatable construct)."
+        ),
+    },
+    "witness": {
+        "type": "object",
+        "description": (
+            "Present only when verdict is reachable: one concrete input "
+            "dict (parameter name -> value) that reaches this arm — shaped "
+            "to pass straight to compare_edge_cases's `test_inputs`."
+        ),
+    },
+    "boundary_inputs": {
+        "type": "array",
+        "description": (
+            "One entry per `Compare` node in THIS arm's own guard (not its "
+            "ancestors) that has a numeric side to bound — empty for a "
+            "guard with none (a bare string-equality guard, for instance) "
+            "and for an else arm (no guard of its own)."
+        ),
+        "items": {
+            "type": "object",
+            "required": ["guard", "operator", "min_input", "max_input", "equality_edge_input"],
+            "properties": {
+                "guard": {"type": "string"},
+                "operator": {"type": "string", "enum": ["==", "!=", "<", "<=", ">", ">="]},
+                "min_input": {
+                    "type": ["object", "null"],
+                    "description": (
+                        "A full input dict at the MINIMUM value of the "
+                        "compared expression that still satisfies this "
+                        "arm's own full path condition (z3 Optimize — no "
+                        "artificial box; an unbounded direction is detected "
+                        "from the Optimize handle itself, see min_note). "
+                        "null when no such value exists at all (always null "
+                        "for a dead branch) OR the true minimum is unbounded."
+                    ),
+                },
+                "min_note": {
+                    "type": "string",
+                    "description": (
+                        "Present only when min_input is null BECAUSE the "
+                        "expression is unbounded below under this arm's "
+                        "path condition — absent for a plain unsatisfiable "
+                        "or solver-timeout null, which say nothing more."
+                    ),
+                },
+                "max_input": {
+                    "type": ["object", "null"],
+                    "description": "As min_input, at the MAXIMUM value.",
+                },
+                "max_note": {
+                    "type": "string",
+                    "description": "As min_note, for max_input (unbounded above).",
+                },
+                "equality_edge_input": {
+                    "type": ["object", "null"],
+                    "description": (
+                        "A full input dict where the compared expression "
+                        "equals the guard's own literal threshold, checked "
+                        "against the guards ABOVE this one only — so the "
+                        "edge can appear even when it sits just outside "
+                        "this particular arm. null when the other side of "
+                        "the comparison is not a literal, or no such input "
+                        "exists."
+                    ),
+                },
+            },
+        },
+    },
+}
+
+
+def _branch_reachability_properties() -> dict:
+    """`branch_reachability`'s own result shape (1.16.0) — see
+    `codecalc/branch_reachability.py`'s module docstring for the mechanism
+    and `docs/design/2026-09-08-branch-reachability.md` for why the
+    boundary/loop/refusal lines were drawn where they were.
+    """
+    return {
+        "ok": {"const": True},
+        "supported": {
+            "type": "boolean",
+            "description": (
+                "False only when a construct on some path could not be "
+                "translated despite passing the upfront scan (an "
+                "unbound/undefined name is the one case that scan cannot "
+                "catch, since name binding is a flow property) — the "
+                "branch it broke is `verdict: unknown`, marked here rather "
+                "than only buried in one entry. A plain solver timeout "
+                "does NOT flip this; see `verdict`'s own description."
+            ),
+        },
+        "inputs": {
+            "type": "object",
+            "description": "Resolved name -> 'int'/'bool'/'str' for every analyzed parameter.",
+            "additionalProperties": {"type": "string", "enum": list(_TYPE_NAMES_FOR_SCHEMA)},
+        },
+        "branches": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["line", "kind", "condition", "verdict", "boundary_inputs"],
+                "properties": _BRANCH_REACHABILITY_ENTRY_PROPERTIES,
+            },
+        },
+        "dead_count": {"type": "integer", "minimum": 0},
+        "reachable_count": {"type": "integer", "minimum": 0},
+        "unknown_count": {"type": "integer", "minimum": 0},
+        "truncated": {
+            "type": "boolean",
+            "description": "True when `max_branches` was reached before every branch in the source was discovered.",
+        },
+        "suggested_test_inputs": {
+            "type": "array",
+            "description": (
+                "Every witness and every non-null boundary input, deduped, "
+                "ordered by the line of the branch it came from — ready to "
+                "pass as compare_edge_cases's `test_inputs`."
+            ),
+            "items": {"type": "object"},
+        },
+    }
+
+
+#: Mirrors `branch_reachability._TYPE_NAMES` without importing that module
+#: at schema-build time — the same reasoning `build_doctor_schema` states
+#: for its own late imports, applied here to keep this module's own import
+#: graph from growing a dependency on the tool module it is documenting.
+_TYPE_NAMES_FOR_SCHEMA = ("int", "bool", "str")
+
+
 def build_schema(dialect: str | None = None, schema_id: str | None = None) -> dict:
     """The published schema, as a dict. Single source of truth.
 
@@ -1100,6 +1277,7 @@ def build_schema(dialect: str | None = None, schema_id: str | None = None) -> di
             {"$ref": "#/$defs/edge_case_comparison"},
             {"$ref": "#/$defs/comparison_rows"},
             {"$ref": "#/$defs/session_snapshot_result"},
+            {"$ref": "#/$defs/branch_reachability"},
         ],
         "$defs": {
             "execution_envelope": {
@@ -1619,6 +1797,34 @@ def build_schema(dialect: str | None = None, schema_id: str | None = None) -> di
                         },
                     },
                 ],
+            },
+            "branch_reachability": {
+                "title": "a branch_reachability result",
+                "description": (
+                    "The `branch_reachability` tool's result (1.16.0): every "
+                    "if/elif/else arm and while/for(range) loop in one "
+                    "python3 function, decided reachable/dead/unknown by "
+                    "z3 rather than shown from one concrete run. Carries "
+                    "neither `verdict` nor `backend` (nothing here ran), "
+                    "which is what keeps it from colliding with the six "
+                    "execution shapes above; `count`/`succeeded`/`fastest`/"
+                    "`accepted`/`divergence_count`/`passed`/`action` — the "
+                    "other non-execution shapes' own discriminators — never "
+                    "appear here either. Its own refusal (an unsupported "
+                    "construct, a non-python `language`, more than one "
+                    "top-level function, no function and no `inputs`) is "
+                    "`{ok: false, error, code: 'validation'}` with no "
+                    "shape-specific key, so it already matches `rejected` "
+                    "above and needed no branch of its own — the identical "
+                    "pattern `compare_edge_cases`'s and `verify_"
+                    "optimization`'s own refusal shapes follow."
+                ),
+                "type": "object",
+                "required": ["ok", "supported", "inputs", "branches", "dead_count",
+                             "reachable_count", "unknown_count", "truncated",
+                             "suggested_test_inputs"],
+                "not": {"anyOf": [{"required": ["verdict"]}, {"required": ["backend"]}]},
+                "properties": _branch_reachability_properties(),
             },
         },
     }

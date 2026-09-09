@@ -1,9 +1,51 @@
 # The codecalc result contract
 
-**Current version: `1.15.0`** · Schema: [`result-v1.schema.json`](result-v1.schema.json) ·
+**Current version: `1.16.0`** · Schema: [`result-v1.schema.json`](result-v1.schema.json) ·
 Source of truth: [`codecalc/contract.py`](../../codecalc/contract.py)
 
-`1.14.0` is a MINOR bump over `1.13.0`. It adds a TENTH shape,
+`1.16.0` is a MINOR bump over `1.15.0`. It adds a TWELFTH shape,
+`branch_reachability`, for the new tool of the same name: every if/elif/else
+arm and while/for(range, static bounds) loop in one python3 function,
+decided `reachable`/`dead`/`unknown` by z3 rather than shown from one
+concrete run —
+
+* **`supported`** — `false` only when a construct on some path could not be
+  translated despite passing the tool's own upfront scan (an undefined name
+  is the one case that scan cannot catch, since name binding is a flow
+  property, not a node-type property); the branch it broke is reported
+  `verdict: "unknown"` rather than aborting the whole call. A plain solver
+  timeout leaves this `true`.
+* **`inputs`** — resolved `name -> 'int'/'bool'/'str'` for every analyzed
+  parameter, after applying the caller's own `inputs` override/narrowing.
+* **`branches`** — one entry per if/elif/else arm and while/for line, each
+  `{line, kind, condition, verdict, witness?, boundary_inputs}`. `condition`
+  is the accumulated guard text reaching that arm, with `not (...)` spelled
+  out for an elif/else's implicit negation. `witness` (present only when
+  `verdict` is `reachable`) and every non-null `min_input`/`max_input`/
+  `equality_edge_input` inside `boundary_inputs` are full parameter dicts,
+  shaped to pass straight into `compare_edge_cases`'s `test_inputs`.
+* **`dead_count`** / **`reachable_count`** / **`unknown_count`** — the same
+  totals a reader could derive from `branches` themselves, kept as a cheap
+  top-level summary.
+* **`truncated`** — `true` when `max_branches` cut discovery short.
+* **`suggested_test_inputs`** — every witness and boundary input, deduped,
+  ordered by the line of the branch it came from.
+
+Its own refusal — an unsupported construct, a non-python `language`, more
+than one top-level function, or no function and no `inputs` declaring the
+free variables — is `{ok: false, error, code: "validation"}` with no
+shape-specific key, naming the construct and its line where one applies.
+That already matches `rejected` below (`ok` + `error`, no `verdict`) and
+needed no branch of its own, the same pattern `compare_edge_cases`'s and
+`verify_optimization`'s own refusal shapes follow. See `codecalc/
+branch_reachability.py`'s module docstring for the mechanism end to end and
+`docs/design/2026-09-08-branch-reachability.md` for why the supported
+subset and the boundary/loop semantics were drawn where they were.
+
+---
+
+`1.14.0` (superseded by the two entries above) was a MINOR bump over
+`1.13.0`. It added a TENTH shape,
 `execution_trace`, for the new `trace_execution` tool: the identical
 `execution_envelope` `execute_code` returns for the same python3 program
 (same 20 envelope keys, same `stdout`/`stderr`/`exit_code`/`verdict`/
@@ -543,7 +585,7 @@ it license to produce — measured on `execute_code`:
 ```
 
 — an object with no fields, no `required`, no enums. This document's schema
-(the eleven shapes, the 21 envelope fields, the verdict/code enumerations) is
+(the twelve shapes, the 21 envelope fields, the verdict/code enumerations) is
 still the one worth validating against; it is just not the one a client reads
 back from `tools/list`. Getting the SDK to emit *this* schema verbatim would
 need a `TypedDict` (or `BaseModel`) per shape, one of which — `run_lifecycle` vs
@@ -560,10 +602,10 @@ still works exactly as before.
 
 ---
 
-## The eleven shapes
+## The twelve shapes
 
 Every result carries `ok` and `contract_version`, and a client discriminates
-the eleven shapes in this order:
+the twelve shapes in this order:
 
 | Shape | Discriminator | What it is |
 |---|---|---|
@@ -578,6 +620,7 @@ the eleven shapes in this order:
 | **edge_case_comparison** | `divergence_count` present | `compare_edge_cases`'s success result: the same logic run in N languages, and where it diverged. |
 | **comparison_rows** | `count`/`succeeded`/`fastest` present | `compare_execution`'s result: the same code run in N languages side by side, which was fastest, and any cross-language discrepancies noticed. |
 | **session_snapshot_result** | `action` present | `session_snapshot`'s result: archived or restored a session's workspace files. `action` (`save`/`restore`/`list`/`delete`) picks which of the four success shapes applies; see below. |
+| **branch_reachability** | `supported`/`dead_count`/`reachable_count`/`unknown_count` present, no `verdict`/`backend` | `branch_reachability`'s result (added `1.16.0`): every if/elif/else arm and while/for(range) loop in one python3 function, decided reachable/dead/unknown by z3. |
 
 The first six are **execution** shapes — their discriminators only ever
 fire for something that ran code (or explicitly refused to). The next three,
@@ -635,6 +678,17 @@ collides with none of them: `action` (required, one of `save`/`restore`/
 `list`/`delete`) appears on no other shape here. A failing call (`ok: false`)
 falls through to `rejected` like every other tool, so this shape only ever
 describes success. See "Examples" below for one real transcript per action.
+
+**`branch_reachability`**, added in `1.16.0`, is `branch_reachability`'s own
+result — nothing here ran, so it collides with none of the six execution
+shapes (no `verdict`, no `backend`) and, unlike the three verification
+shapes and `comparison_rows`, its own refusal (an unsupported construct, a
+non-python `language`, more than one top-level function, or no function and
+no `inputs`) IS `{ok: false, error, code}` with no shape-specific key —
+already `rejected`, needing no branch of its own, the same as `compare_
+edge_cases`'s and `verify_optimization`'s own refusals. Only its `ok: true`
+success shape needed one: `supported`/`dead_count`/`reachable_count`/
+`unknown_count` together appear on no other shape here.
 
 **The run_lifecycle shape** (added in `1.1.0`) is the reply the background-run
 tools return before a run finishes — `run_submit`'s handle, a poll of a

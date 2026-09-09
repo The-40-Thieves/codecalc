@@ -145,6 +145,294 @@ behind it.
   `truncated_reason` enum member (`trace_file_exceeded`) are declared in the
   `execution_trace` contract shape alongside the rest of it — still additive,
   landing before this tool's own first release.
+- **`branch_reachability`** (`execution` group): decides,
+  with z3, which `if`/`elif`/`else` arms and `while`/`for(range, static
+  bounds)` loops in ONE python3 function can ever be taken — for ANY input,
+  not the one you happened to try, which is what `trace_execution` already
+  answers. Parses with the stdlib `ast`, builds each arm's path condition as
+  the conjunction of every ancestor guard on the way to it (negated for an
+  elif/else exactly the way Python's own `not` negates it, with an
+  unconditional `return` on every arm of an earlier `if` cutting that path
+  out of what reaches the code after it), and hands each condition to z3:
+  `+ - * // %` on ints, `and`/`or`/`not` on bools, `== != < <= > >=`, `==`/
+  `!=` plus `len()` on strings (`z3.Length`), and `abs`/`min`/`max` built
+  from `z3.If` — the same solver-setup shape `z3_check` already uses.
+  Returns, per branch, `line`/`kind`/`condition` (source text, negations
+  spelled out) and `verdict` (`reachable`/`dead`/`unknown` — a solver
+  timeout or an unsupported construct that slipped past the upfront scan
+  on THIS path, never a crash), a `witness` input dict when reachable, and
+  `boundary_inputs`: for each `Compare` in the arm's own guard with a
+  numeric side, the MINIMUM and MAXIMUM satisfying value (z3 `Optimize`,
+  no artificial box — an unbounded direction is detected straight from the
+  `Optimize` handle's own `.lower()`/`.upper()`, `null` plus a `min_note`/
+  `max_note` rather than a box edge quietly standing in for a real
+  extremum) and the "equality edge" (a witness where the guard's own
+  literal threshold is hit exactly) — every input dict shaped to drop
+  straight into `compare_edge_cases`'s `test_inputs`. Top level adds
+  `supported` (`inputs`/`dead_count`/`reachable_count`/`unknown_count`/
+  `truncated`/`suggested_test_inputs` — a deduped pool of every witness and
+  boundary input, ordered by line). An if/elif/else's arms are joined back
+  at a real phi/`If`-merge on every variable either arm assigned — an arm
+  that ends in an unconditional `return` contributes nothing to the merge
+  (its path is closed), and a variable assigned in only some surviving
+  arms is dropped rather than guessed at, so a later reference to it
+  raises the same "undefined name" `unknown` a genuine `UnboundLocalError`
+  path would. Loops use TWO mechanisms, chosen by iteration count (see
+  `docs/design/2026-09-08-branch-reachability.md` for why one mechanism
+  applied to both was unsound, not merely imprecise, confirmed by direct
+  execution): a `for x in range(<static>)` loop of at most 32 iterations
+  is UNROLLED exactly — the body walked once per concrete value, threading
+  the environment sequentially, so post-loop state (including an
+  accumulator like `total = total + 1` run three times) is EXACT, and a
+  branch inside the body is `reachable` if ANY unrolled iteration's own
+  path condition is sat, `dead` only if EVERY one is. A `while` loop, or a
+  `for` above that cap, keeps a ONE-iteration walk, but a branch inside it
+  that is UNSAT on that one iteration is `unknown` — never `dead` — and
+  every variable the body assigns anywhere is TAINTED afterward (rebound
+  to a fresh, entirely unconstrained symbol); a later guard whose z3
+  expression mentions a tainted symbol anywhere, including buried inside
+  arithmetic, is `unknown` too, without ever being solved. `witness`es are
+  never taken on faith regardless — every `verdict:
+  reachable` in the test suite is corroborated by actually running the
+  program through `tracing.execute_trace` on its witness and checking the
+  branch's own line fired. Refuses up front, before ever calling z3, the
+  unsupported-construct scan running BEFORE any function-count/`inputs`
+  structural check (so a module-scope `class`, for instance, is refused
+  naming `class definition` and its line, not a generic "no function
+  found" message), naming the
+  construct and its line: floats/`None`/bytes/complex literals, attribute
+  access, f-strings, comprehensions, classes, `async`, `try`/`except`,
+  imports, subscripts, chained or `is`/`in` comparisons, any call outside
+  `abs`/`min`/`max`/`len`, a data-dependent loop bound, `//`/`%` by
+  anything but a positive integer literal (z3's Euclidean division and
+  Python's floor division disagree on the sign convention otherwise —
+  measured, not assumed), and more than one top-level function; a
+  non-python `language` is refused the same shape `trace_execution` uses.
+  Every refusal names `trace_execution` as the remedy: run the concrete
+  case instead. New result contract shape `branch_reachability`
+  (`docs/contract/README.md`, `CONTRACT_VERSION` `1.15.0` -> `1.16.0`,
+  MINOR — additive, the twelfth shape, `session_snapshot_result` above
+  being the eleventh), discriminated from every execution shape by carrying neither `verdict`
+  nor `backend`. `tests/test_branch_reachability.py` covers reachable/
+  dead/unknown verdicts on an if/elif/else-plus-static-loop program, a
+  dead branch (`x > 5 and x < 3`), every reachable witness verified by
+  running it through `tracing.execute_trace` and checking the branch's own
+  line actually executed, boundary inputs (including confirmed-unbounded
+  `null`s) for `<`/`<=`/`>`/`>=`/`==`/`!=` guards, `str` equality and
+  `len()` guards, `bool` inputs, early return cutting a later branch dead,
+  every refusal case (asserting the `validation` code and the exact line,
+  a module-scope `class` among them), the non-python refusal, the
+  `max_branches` cap (`truncated: true`), a timeout landing on `unknown`
+  rather than a crash, and — closing a cross-vendor review's two BLOCKER
+  findings against the first cut (an assignment inside a non-returning
+  if/elif/else arm, or a loop body, was silently discarded for the code
+  after it, so a later branch's path condition never saw it) — the
+  environment-merge fix itself: an assignment in the else arm only, in
+  both arms with a later branch reachable ONLY via the else value, an
+  elif chain assigning three different values each read back separately,
+  an arm ending in `return` whose assignment must not leak, a variable
+  introduced in only one arm producing `unknown` (not a false verdict) on
+  a later reference, a `for range(3)` body assignment merged into a later
+  `if`, and nested ifs assigning at two depths — every one of those
+  witnesses is ALSO corroborated by `tracing.execute_trace` on the real
+  program, not merely on the model. A SECOND, confirmation review found
+  that same merge, applied to loops, was unsound — a `for` loop's
+  variable being both "fresh" and "range-constrained" made a value that is
+  only ever the LAST iteration's real value look, after the loop, like
+  ANY value in the range: `x = -1; for i in range(0, 10): x = i; if x ==
+  5: ...` reported the `if` reachable with witness `{}`, though `f()` is
+  fully deterministic and `x` is always `9` there — checked by direct
+  execution. Fixed by unrolling any `for` within a 32-iteration cap
+  exactly and, above that cap or for `while`, tainting every loop-body-
+  assigned variable to a fresh unconstrained symbol instead of merging it
+  (see the loop mechanism described above); covered by the review's own
+  exact repro (now `dead`) plus its positive control (`if x == 9`,
+  reachable), a `range(0)` loop, an inner `if` reachable only at one
+  specific unrolled iteration, a loop above the cap (a post-loop read is
+  `unknown` with its reason; an in-body branch sat on the first checked
+  iteration is still `reachable`), a `while` accumulator and a `while`
+  whose inner branch is unsat on the first iteration (both `unknown`,
+  never `dead`), `break` inside a loop (still refused, unchanged), and an
+  unrolled loop nested inside an `if` arm together with an `if` nested
+  inside an unrolled loop (phi composing correctly through unrolling in
+  both directions) — every reachable witness trace-corroborated as above,
+  every dead/unknown verdict checked against what the reason claims. The
+  tool's own description went through two rounds of tuning against
+  `scripts/tool_select_eval.py`'s BM25 corpus: the first fixed a regression
+  it introduced on an EXISTING `trace_execution` prompt; a confirmation
+  review found the fix's own emphatic wording then pulled two of `main`'s
+  OTHER prompts (one `symbolic`, one `verify_translation`) onto
+  `branch_reachability` instead, closed by avoiding vocabulary those two
+  tools' own descriptions are built around (`formula`, `prove`/`proved`,
+  `simplest`/`cleanest`, `rewrite`, `preserve`) rather than a further
+  rewrite. `full` moved 137/234 (58.55%) on `main` -> 133/234 mid-fix ->
+  142/234 (60.68%) final; `dev` 113/184 (61.41%) -> 111/184 -> 119/184
+  (64.67%); `core` 74/116 (63.79%) unchanged throughout (neither tool is
+  in that group). One `main` prompt ("What does the computer actually
+  store in memory for the number 0.1?", `float_repr` vs `evaluate_
+  expression`) stays flipped regardless of wording — a corpus-relative
+  BM25 length-normalization artifact any 57th tool addition would trigger
+  for SOME near-tied pair, not a defect this change introduced; see the
+  design note's own measurement. A THIRD review pass confirmed everything
+  above by direct execution and found one more BLOCKER of the same class:
+  `_walk_for_unrolled` hand-threaded the environment across an unrolled
+  `for`'s N concrete-value copies but fed every copy the SAME, unnarrowed
+  path condition, discarding each copy's own `falls_through`/
+  `continuation_cond` — `x = 0; for i in range(5): if i == 2: return
+  100 \n if i == 4: y = 99` reported the post-loop `if y == 99` REACHABLE
+  with a witness, when every real call returns `100` at `i == 2` and the
+  loop body never reaches `i == 4` — checked by direct execution for
+  `x` in `{0, 1, -5, 999}`. Fixed by feeding the N copies through the
+  exact same sequential-statement machinery `_walk_block` already uses
+  for two consecutive `if` statements — copy `k+1` starts from copy `k`'s
+  own `continuation_cond`, and a copy whose own walk reports
+  `falls_through=False` (a bare `return`) closes every later copy (still
+  walked, so ITS OWN branches are discovered and correctly `dead`, never
+  silently dropped) and the code after the whole loop — covered by the
+  review's exact repro (post-loop `dead`, the `i == 4` arm `dead`, the
+  `return 100` arm `reachable`), an input-dependent return (`if i == 2 and
+  x > 0: return`) whose post-loop read is reachable only for `x <= 0`
+  (asserted on the witness), a return at the first iteration (everything
+  after `dead`), a return at the LAST iteration (post-loop `dead`, an
+  earlier arm still `reachable`), and a return nested two `if`s deep —
+  every reachable witness trace-corroborated as above.
+
+  That third pass also required `tests/test_branch_reachability_
+  differential.py`: a deterministic (fixed-seed) generator of small
+  programs over the supported subset — sequential and nested `if`/`else`
+  with comparisons and linear arithmetic, reassignment before and inside
+  arms, conditional and unconditional early `return`, `for` over static
+  ranges up to 6 (including `range(0)`), and a counter-bounded `while` —
+  checked against GROUND TRUTH from exhaustive concrete execution (every
+  int input in `[-12, 12]`, both params for a 2-arg program): every
+  `reachable` witness is run for real and must actually execute that
+  arm's own body line; every `dead` line must never execute for ANY input
+  in the domain; `unknown` is allowed anywhere. `scripts/check_no_eval.py`
+  only scans `codecalc/`, so ground truth runs the generated function
+  in-process (`sys.settrace` scoped to its own code object) rather than
+  through the sandboxed executor, keeping the full 150-program corpus
+  under ten seconds. Multiplying two live variables (`y * y`, `x * y`)
+  puts z3 in genuinely slow nonlinear arithmetic, and a generated `while`
+  body could reassign its own bound counter, both hanging individual
+  `analyze()` calls — the generator restricts `*` to a variable times a
+  literal and keeps the loop counter out of its own body's assignment
+  scope, so every generated program is fast AND provably terminating.
+
+  Running this corpus caught TWO more real bugs — a fourth and fifth
+  instance of the same "false `reachable` with a fabricated witness"
+  class, in two mechanisms neither prior review had touched:
+
+  1. `_mentions_tainted`'s DAG-dedup used Python's `id()` of each z3 AST
+     wrapper as its "already visited" key. z3's Python bindings mint a
+     FRESH wrapper object on every `.children()` call rather than
+     interning one per underlying (hash-consed) node, so a wrapper could
+     be garbage-collected and its `id()` reused by an unrelated LATER
+     node within the SAME walk — a tainted symbol nested inside a
+     `z3.If`'s second branch was then skipped as an already-"seen"
+     duplicate of a completely different node, so a guard that genuinely
+     depended on a tainted (loop-computed) value solved as an ordinary
+     `reachable` with a real-looking witness instead of `unknown`.
+     Reproduced with `if x < 0: while n < 2: x = ((x - x) - 1); n += 1
+     \n else: if <guard mentioning x>: ... \n if y >= (x - 6): ...` — the
+     last `if` came back `reachable` more often than not, non-
+     deterministically, because `id()` reuse depends on GC timing.
+     Fixed by keying the visited set on `node.get_id()` (z3's own
+     hash-consing id, stable across every wrapper around the same node)
+     instead.
+  2. A tainted (or untranslatable) `if`/`elif`/`else` guard is, by
+     design, an opaque pass-through: neither arm is walked, so this tool
+     cannot tell whether one of them held an unconditional `return`. The
+     existing code treated that as "falls through unconditionally,
+     nothing changes" — sound for the ENVIRONMENT (nothing WAS applied),
+     but not for CONTROL FLOW: a `return` inside either unwalked arm
+     would close off everything after it, and the tool had no way to
+     know it hadn't. `if x < 0: while n < 2: x = 5; n += 1 \n else: if
+     <tainted-adjacent guard>: ... else: ... \n if y != -20: <reachable
+     with a witness>` — the final `if` came back `reachable` with a
+     witness that, run for real, hit an EARLIER unconditional `return`
+     first and never got there. Fixed with a new ambient counter,
+     `_unresolved_closure_depth` (alongside the existing
+     `_conservative_loop_depth`), raised for every statement sequentially
+     AFTER such a pass-through within the same block: `_decide` now
+     reports `unknown` (not `reachable`) for a SAT result found under it
+     — an UNSAT result still safely proves `dead`, since dropping a
+     required conjunct only WIDENS what solves, so the narrower true
+     condition being unsatisfiable follows from the wider one being
+     unsatisfiable. The signal (`ctx._pending_closure_taint`, one-shot,
+     read-and-cleared by `_take_closure_taint`) threads through
+     `_walk_if`, `_walk_block`, `_walk_for_unrolled`, and
+     `_walk_loop_conservative` exactly the way `falls_through`/
+     `continuation_cond` already do, so it composes correctly through
+     elif chains, nested ifs, and unrolled-loop copies without leaking
+     into an unrelated sibling arm. `boundary_inputs`' own min/max/
+     equality-edge witnesses are suppressed under the same condition, for
+     the same reason. Both fixes are covered by the differential suite
+     (which found them) and by the two repros above, added to
+     `tests/test_branch_reachability.py` as standing regressions; the
+     full 211-check hand-written suite and the 150-program differential
+     corpus both pass, deterministically, on both execution backends.
+
+  A FOURTH review pass confirmed all three prior rounds' fixes by direct
+  execution — including that `dead` downstream of an unresolved-closure
+  point is correctly preserved — and found ONE MORE instance of the same
+  class, this time in `_walk_loop_conservative` (every `while`, and every
+  `for` above the unroll cap): it hardcoded `falls_through = True`
+  regardless of what the one-iteration body walk itself reported, per its
+  own docstring's stated design ("does not attempt to reason about
+  whether the body's own return closes off the loop"). `def f(x): if x
+  == 1: n = 0; while n < 4: return 6 \n if x == 1: return 999 \n return
+  0` reported the SECOND `if x == 1` reachable with witness `{x: 1}`, when
+  `f(1)` returns `6` at the `while` and never gets there; the same shape
+  with `for i in range(40): return 9` reproduced identically for the
+  above-cap `for` path. The reviewer's own multi-seed sweep of THIS
+  file's differential corpus (copied to scratch with `SEED` changed)
+  failed at seed `111` (4 failures), `20260101` (6), and the shipped seed
+  at `CORPUS_SIZE=500` (8+) — the shipped seed at its shipped size simply
+  never happened to generate the triggering shape.
+
+  Fixed by USING the one-iteration body walk's own `(falls_through,
+  continuation_cond)` instead of discarding it, in three cases: (a) the
+  body does not fall through AT ALL on the one modeled iteration — every
+  path through it, for any input that reaches it, returns — which is
+  EXACT, not a widening: entering the loop at all means returning, so the
+  post-loop continuation becomes `cur_cond AND NOT(entry_guard)`, and
+  branches inside the body keep whatever verdicts the walk already gave
+  them; (b) the body falls through this one iteration but contains a
+  `return` SOMEWHERE (checked structurally, `_contains_return`, nested
+  included) — some OTHER, unmodeled iteration might take it, so
+  `ctx._unresolved_closure_depth` (the same mechanism the third review's
+  fix introduced) is raised for everything sequentially after the loop
+  (`sat` downgrades to `unknown`, `unsat` still safely proves `dead`),
+  and the one-iteration walk's own `continuation_cond` — a real necessary
+  condition for falling through that first iteration — is conjoined
+  rather than discarded for bare `cur_cond`; (c) the body contains no
+  `return` at all — unchanged, falls through, only VALUE taint applies.
+  `while`/`for`-`else` was already refused by name upfront (`while/else`,
+  `for/else`), so no separate handling was needed there. Covered by the
+  two repros above (now standing regressions), a `while` whose body
+  returns only under an input-dependent condition followed by a
+  post-loop branch that is correctly `unknown` (never a fabricated
+  `reachable`) alongside a SEPARATE post-loop branch that is truly dead
+  and correctly stays `dead`, the same pair for a `for` above the cap, a
+  `while` nested inside an unrolled `for` whose body returns
+  unconditionally (every outer copy closes, post-loop `dead`), and the
+  exact SEED=111 program the reviewer's sweep found, recovered by
+  rerunning that seed's generator against the pre-fix code and taking the
+  first failing program verbatim.
+
+  The differential corpus itself was hardened per the review: `SEED` and
+  `CORPUS_SIZE` are now overridable via `CODECALC_DIFF_SEED`/
+  `CODECALC_DIFF_CORPUS` env vars (shipped defaults unchanged, seed
+  printed at start) for ad hoc multi-seed sweeps without editing the
+  file, and the generator now also produces `for` loops ABOVE the unroll
+  cap (previously never generated — the exact gap this BLOCKER lived in),
+  returns biased directly into loop bodies (bare and `if`-guarded, since
+  that specific combination is what this bug needed), and nested loops
+  (one `for`/`while` inside another's body, budgeted to keep compounding
+  bounded). Verified before push with seeds `20260908` (shipped), `111`,
+  `20260101`, `999999`, `4242` at `CORPUS_SIZE=150`, plus the shipped seed
+  at `CORPUS_SIZE=500` — all six green (see the design note for the exact
+  counts). Full hand-written suite: 239 checks (was 211).
 - MCP Apps (`io.modelcontextprotocol/ui`) graphical views for
   `verify_translation` and `verify_optimization`: each tool now carries
   `_meta.ui.resourceUri` pointing at a self-contained `ui://` HTML resource

@@ -240,6 +240,29 @@ async def main():
         check("z3_check: the model actually satisfies 5 < x < 10",
               "x" in model and 5 < int(model["x"]) < 10, f"-> {model}")
 
+        # ── branch_reachability ──────────────────────────────────────────
+        r = data(await client.call_tool(
+            "branch_reachability",
+            {"language": "python3",
+             "code": "def f(x):\n    if x > 5 and x < 3:\n        return 1\n    return 0\n"}))
+        branches = r.get("branches") or []
+        check("branch_reachability: exactly one branch found (the outer if)",
+              len(branches) == 1, f"-> {branches}")
+        check("branch_reachability: x > 5 and x < 3 is proven dead",
+              branches[0].get("verdict") == "dead", f"-> {branches[0]}")
+        check("branch_reachability: dead_count/reachable_count agree with branches",
+              r.get("dead_count") == 1 and r.get("reachable_count") == 0,
+              f"-> dead={r.get('dead_count')} reachable={r.get('reachable_count')}")
+        r_reach = data(await client.call_tool(
+            "branch_reachability",
+            {"language": "python3",
+             "code": "def f(x):\n    if x > 5:\n        return 1\n    return 0\n"}))
+        reach_branches = r_reach.get("branches") or []
+        check("branch_reachability: x > 5 alone is reachable, with a real witness",
+              len(reach_branches) == 1 and reach_branches[0].get("verdict") == "reachable"
+              and reach_branches[0].get("witness", {}).get("x", -999) > 5,
+              f"-> {reach_branches}")
+
         # ── solve_linear ──────────────────────────────────────────────────
         r = data(await client.call_tool(
             "solve_linear", {"system": "x + y = 10; x - y = 2", "variables": "x, y"}))

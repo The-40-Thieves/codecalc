@@ -75,6 +75,9 @@ from . import (
     audit as audit_module,
 )
 from . import (
+    branch_reachability as branch_reachability_module,
+)
+from . import (
     dependencies as dependencies_module,
 )
 from .mcp_middleware import redact_validation_errors_middleware, timeout_middleware
@@ -1665,10 +1668,10 @@ def trace_execution(
     no_net: bool = False,
     provider: str | None = None,
 ) -> dict[str, Any]:
-    """Debug WHY, line by line: which statements fired, in what order, with
-    what variable values at each step, and which if/elif/while/for/try
-    branch was taken versus never taken. Want just the printed output
-    instead? Use execute_code.
+    """Debug WHY, line by line, for the ONE input you actually ran it on:
+    which statements fired, in what order, with what variable values at
+    each step, and which if/elif/while/for/try branch was taken versus
+    never taken. Want just the printed output instead? Use execute_code.
 
     Returns `events`: ordered `{step, line, event, func, locals}`, one entry
     per traced line/call/return/exception in YOUR code only (library
@@ -1702,6 +1705,42 @@ def trace_execution(
         language, code, stdin=stdin, timeout=timeout, max_events=max_events,
         max_memory_mb=max_memory_mb, max_output_kb=max_output_kb,
         max_cpu=max_cpu, no_net=no_net, provider=provider,
+    )
+
+
+@mcp.tool(group="execution")
+def branch_reachability(
+    language: str,
+    code: str,
+    inputs: dict[str, str] | None = None,
+    timeout: int = 30,
+    max_branches: int = 64,
+) -> dict[str, Any]:
+    """Which if/elif/else arms and while/for loops of this python3
+    function can ever run, which are dead code, and what inputs reach
+    each — decided with z3, without running the program.
+
+    Use trace_execution instead to see what happened on one run. Use
+    z3_check, not this, when you already have an SMT-LIB2 script to solve
+    directly rather than Python source to translate.
+
+    `inputs` (name -> 'int'/'bool'/'str') narrows or overrides a parameter's
+    type; unannotated parameters default to int. Each branch reports
+    `verdict` (reachable/dead/unknown), a `witness` when reachable, and
+    `boundary_inputs` (min/max/equality-edge for each comparison in its own
+    guard) — every input dict is shaped to drop straight into
+    compare_edge_cases's `test_inputs`. Refuses, naming the construct and
+    line, prior to any z3 call: floats, attribute access, comprehensions,
+    try/except, imports, data-dependent loop bounds, and anything else
+    outside `+ - * // %`, `and/or/not`, `== != < <= > >=`, and
+    `abs/min/max/len` on int/bool/str. A `for` loop of at most 32
+    iterations is unrolled exactly; a longer `for`, or a `while`, is
+    checked one iteration at a time — a branch can still come back
+    reachable there, but never `dead`, and anything past the loop that
+    depends on what it computed comes back `unknown` rather than a guess.
+    """
+    return branch_reachability_module.analyze(
+        language, code, inputs=inputs, timeout=timeout, max_branches=max_branches,
     )
 
 
