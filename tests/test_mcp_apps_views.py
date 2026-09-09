@@ -323,21 +323,39 @@ if have_base:
           "are byte-identical to origin/main's merge-base",
           not changed, f"-> changed: {changed}")
 
-    # The two @mcp.tool() bodies themselves (docstring + dispatch line) must
-    # also be untouched -- only their decorator's kwargs may have gained
-    # `meta=` indirectly via `_tool_meta`, which lives in `_tool_meta` itself
-    # (covered by the file-level diff above, since `_tool_meta` is in the
-    # same file). This checks the SERVER.PY diff is additive-only around
-    # these two tools: neither tool's own docstring or return line moved.
-    server_diff = _git("diff", "-U0", merge_base, "--", "codecalc/server.py")
-    removed_lines = [line[1:] for line in server_diff.splitlines()
-                     if line.startswith("-") and not line.startswith("---")]
-    touched_translation = [line for line in removed_lines if "verify_translation" in line]
-    touched_optimization = [line for line in removed_lines if "verify_optimization" in line]
-    check("no line naming verify_translation was REMOVED from server.py",
-          not touched_translation, f"-> {touched_translation}")
-    check("no line naming verify_optimization was REMOVED from server.py",
-          not touched_optimization, f"-> {touched_optimization}")
+    # The two @mcp.tool() bodies must still do the same thing: dispatch into
+    # the value-producing modules above. Compared as an AST with the docstring
+    # and every annotation stripped, so a description edit, a schema
+    # description on a parameter, or a re-wrapped signature line does not
+    # trip it -- the first version of this lock diffed raw removed lines and
+    # failed on the first later change to either signature. What it still
+    # catches is a changed body: a different call, a new branch, a dropped
+    # return.
+    import ast
+
+    def _tool_body(source: str, name: str) -> str:
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == name:
+                body = list(node.body)
+                if (body and isinstance(body[0], ast.Expr)
+                        and isinstance(body[0].value, ast.Constant)
+                        and isinstance(body[0].value.value, str)):
+                    body = body[1:]
+                for sub in body:
+                    for inner in ast.walk(sub):
+                        if isinstance(inner, ast.arg):
+                            inner.annotation = None
+                return "\n".join(ast.dump(stmt) for stmt in body)
+        return f"<{name} not found>"
+
+    base_source = _git("show", f"{merge_base}:codecalc/server.py")
+    head_source = (REPO_ROOT / "codecalc" / "server.py").read_text(encoding="utf-8")
+    for tool in ("verify_translation", "verify_optimization"):
+        check(f"{tool}'s body (docstring and annotations aside) is unchanged "
+              "from origin/main's merge-base",
+              _tool_body(base_source, tool) == _tool_body(head_source, tool),
+              f"-> body differs for {tool}")
 
 
 print(f"\n=== {len(FAILS)} FAILURES ===" if FAILS else "\n=== ALL MCP APPS VIEW TESTS PASS ===")
