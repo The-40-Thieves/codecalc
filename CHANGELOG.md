@@ -33,6 +33,8 @@ behind it.
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-09-09
+
 ### Removed
 
 - **`bit_analysis`, `bitop`, `int_widths`, `base_repr`, `solve_expression`,
@@ -3283,7 +3285,8 @@ it, so there was no upgrade path to describe — only what the thing is.
   `ok: false` through the sandbox. Tracked, with a dated reproduction, at
   [#42](https://github.com/The-40-Thieves/codecalc/issues/42).
 
-[Unreleased]: https://github.com/The-40-Thieves/codecalc/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/The-40-Thieves/codecalc/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.12.0
 [0.11.0]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.11.0
 [0.10.0]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.10.0
 [0.9.0]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.9.0
