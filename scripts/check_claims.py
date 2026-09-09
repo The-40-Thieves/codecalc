@@ -499,7 +499,7 @@ _NOT_TOOLS = {
     "method", "output_error", "ok", "error", "stdout", "stderr", "no_net",
     "peak_memory_kb", "stored", "mismatched", "identical", "divergences",
     "static-estimate", "empirical", "regex-fallback", "python", "true", "false",
-    "int_widths", "DEFAULT_EDGE_INPUTS", "algebraic_equiv",
+    "DEFAULT_EDGE_INPUTS", "algebraic_equiv",
 }
 _named_but_absent = sorted(_skill_tools - _declared_tools - _NOT_TOOLS)
 if _named_but_absent:
