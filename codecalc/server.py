@@ -2247,7 +2247,9 @@ def runtimes_status(languages: Annotated[str, Field(description="Comma-separated
 
 
 @mcp.tool(group="admin")
-async def update_runtimes(languages: str = "", apply: bool = False, timeout: int = 600,
+async def update_runtimes(languages: Annotated[str, Field(description="Comma-separated languages to update, e.g. 'python3,node,rust'; empty updates all")] = "",
+                          apply: Annotated[bool, Field(description="False (default) is a dry run reporting commands only; True actually runs them and asks for confirmation first")] = False,
+                          timeout: Annotated[int, Field(description="Wall-clock seconds allowed for the update commands to complete")] = 600,
                           ctx: Context = None) -> dict[str, Any] | InputRequiredResult:
     """Update language runtimes. SAFE BY DEFAULT: with apply=False this is a
     dry run — it returns the update commands that WOULD run without changing
@@ -2344,8 +2346,10 @@ def verify_optimization_view() -> str:
 # does not document. session_run has the same untyped treatment, for the
 # same reason with a list instead of ImageContent — see its own comment.
 @mcp.tool(group="sessions")
-def session_read_file(session_id: str, path: str, max_bytes: int = 65536,
-                      as_image: bool = False):
+def session_read_file(session_id: Annotated[str, Field(description="Id of the session whose workspace file to read")],
+                      path: Annotated[str, Field(description="Relative path inside the workspace to read")],
+                      max_bytes: Annotated[int, Field(description="Max bytes to read from the file; default 65536 (64 KiB)")] = 65536,
+                      as_image: Annotated[bool, Field(description="Return the file as an inline image the model can see, instead of text")] = False):
     """Read a file from a session workspace.
 
     Text files return content. With as_image=True (or for image files), the
@@ -2468,9 +2472,13 @@ def _inline_artifact_blocks(session_id: str, artifacts: list[dict]) -> tuple[lis
 # DictModel ... Input should be a valid dictionary". Left untyped, both
 # branches pass through unvalidated exactly as before.
 @mcp.tool(group="sessions")
-def session_run(session_id: str, entry_file: str, language: str | None = None,
-                stdin: str = "", timeout: int = 30,
-                dependencies: list[str] | None = None, ctx: Context = None):
+def session_run(session_id: Annotated[str, Field(description="Id of the session workspace to run in")],
+                entry_file: Annotated[str, Field(description="Relative path of the file to execute; may import other files already in the workspace")],
+                language: Annotated[str | None, Field(description="Language to run `entry_file` as; omit to infer it from the session/file")] = None,
+                stdin: Annotated[str, Field(description="Text piped to the program's standard input; empty means no input")] = "",
+                timeout: Annotated[int, Field(description="Wall-clock seconds before the run is killed")] = 30,
+                dependencies: Annotated[list[str] | None, Field(description="Packages to install before running, e.g. ['requests==2.31.0']")] = None,
+                ctx: Context = None):
     """Run a multi-file program in a session: execute `entry_file`, which may
     import other files already in the session workspace (helper.py, data/...).
 
@@ -2525,7 +2533,9 @@ def session_run(session_id: str, entry_file: str, language: str | None = None,
 
 
 @mcp.tool(group="calculator")
-def convert_units(value: float, from_unit: str, to_unit: str) -> dict[str, Any]:
+def convert_units(value: Annotated[float, Field(description="Numeric quantity to convert, in `from_unit`")],
+                  from_unit: Annotated[str, Field(description="Source unit alias, e.g. 'mph', 'celsius', 'gb'; see list_units for all aliases")],
+                  to_unit: Annotated[str, Field(description="Target unit alias, e.g. 'km/h', 'fahrenheit', 'mib'; see list_units for all aliases")]) -> dict[str, Any]:
     """Convert a value between units (dimensional analysis via sympy).
 
     Supports metric/imperial length, mass, time, speed, energy, power, force,
@@ -2537,7 +2547,7 @@ def convert_units(value: float, from_unit: str, to_unit: str) -> dict[str, Any]:
 
 
 @mcp.tool(group="calculator")
-def physical_constants(name: str | None = None) -> dict[str, Any]:
+def physical_constants(name: Annotated[str | None, Field(description="Constant to look up, e.g. 'speed_of_light', 'planck', 'avogadro'; omit to list all 22")] = None) -> dict[str, Any]:
     """Look up a physical constant (speed_of_light, planck, avogadro,
     gravity, electron_mass, gas_constant, ...) or list all 22 with values."""
     return units.constants(name)
@@ -2552,7 +2562,7 @@ def list_units() -> dict[str, Any]:
 # ── exact arithmetic & programmer-mode (ported from the Claude calc skill) ──
 
 @mcp.tool(group="calculator")
-def calc_exact(expr: str) -> dict[str, Any]:
+def calc_exact(expr: Annotated[str, Field(description="Literal arithmetic expression with no symbols, e.g. '2**64 - 1', 'comb(52,5)', '0.1+0.2 == 0.3'")]) -> dict[str, Any]:
     """Use calc_exact, not evaluate_expression, for a literal arithmetic
     expression with no symbols in it. EXACT arithmetic: 0.1 + 0.2 == 0.3 is
     True here (False in plain Python).
@@ -2567,7 +2577,9 @@ def calc_exact(expr: str) -> dict[str, Any]:
 
 
 @mcp.tool(group="calculator")
-def compare_threshold(a: str, op: str, b: str) -> dict[str, Any]:
+def compare_threshold(a: Annotated[str, Field(description="Left-hand numeric expression, evaluated exactly")],
+                      op: Annotated[str, Field(description="Comparison operator: one of ==, !=, >, >=, <, <= ('=' also accepted for ==)")],
+                      b: Annotated[str, Field(description="Right-hand numeric expression, evaluated exactly")]) -> dict[str, Any]:
     """Exact threshold check with a verdict and the shortfall when it fails.
 
     `a OP b` with op in ==, !=, >, >=, <, <= (= accepted for ==). Both sides
@@ -2578,13 +2590,14 @@ def compare_threshold(a: str, op: str, b: str) -> dict[str, Any]:
 
 
 @mcp.tool(group="calculator")
-def percentage(part: str, total: str) -> dict[str, Any]:
+def percentage(part: Annotated[str, Field(description="Numerator expression (rationals accepted), evaluated exactly")],
+              total: Annotated[str, Field(description="Denominator expression (rationals accepted), evaluated exactly")]) -> dict[str, Any]:
     """Exact share and percentage of PART / TOTAL (rationals accepted)."""
     return exact.percentage(part, total)
 
 
 @mcp.tool(group="calculator")
-def calc_stats(nums: list[float]) -> dict[str, Any]:
+def calc_stats(nums: Annotated[list[float], Field(description="Sample of numbers to summarize (mean, median, sample stdev, coefficient of variation)")]) -> dict[str, Any]:
     """Mean, median, sample stdev, and coefficient of variation (CV) for a
     sample of numbers. Pairs with percentiles for distribution shape
     (p50/p90/p95/p99) on the same sample, and with benchmark or
@@ -2596,7 +2609,7 @@ def calc_stats(nums: list[float]) -> dict[str, Any]:
 
 
 @mcp.tool(group="calculator")
-def percentiles(nums: list[float]) -> dict[str, Any]:
+def percentiles(nums: Annotated[list[float], Field(description="Sample of numbers to compute p50/p90/p95/p99 for, by nearest-rank and linear interpolation")]) -> dict[str, Any]:
     """p50/p90/p95/p99 by nearest-rank AND linear interpolation.
 
     Warns when n < 100 that p99 is just the maximum wearing a label.
@@ -2605,7 +2618,8 @@ def percentiles(nums: list[float]) -> dict[str, Any]:
 
 
 @mcp.tool(group="calculator")
-def collision_probability(items: int, bits: int) -> dict[str, Any]:
+def collision_probability(items: Annotated[int, Field(description="Number of items being hashed")],
+                          bits: Annotated[int, Field(description="Width of the hash in bits, e.g. 32, 64, 128")]) -> dict[str, Any]:
     """Birthday-bound hash collision probability: 1 - exp(-n^2 / (2*2^b)).
 
     Sizes hashes: 1e6 items into 64 bits is ~2.7e-8; 1e5 into 32 bits is ~0.69
@@ -2615,7 +2629,7 @@ def collision_probability(items: int, bits: int) -> dict[str, Any]:
 
 
 @mcp.tool(group="calculator")
-def data_sizes(n: int) -> dict[str, Any]:
+def data_sizes(n: Annotated[int, Field(description="Byte count to express in both binary (KiB/MiB/GiB/TiB, /1024) and decimal (KB/MB/GB/TB, /1000) units")]) -> dict[str, Any]:
     """Byte counts for a plain integer, both binary (KiB/MiB/GiB/TiB, /1024)
     and decimal (KB/MB/GB/TB, /1000) — the gap between them is where '291 MB'
     and '277 MiB' silently disagree by 5%. For units other than bytes, use
@@ -2626,7 +2640,7 @@ def data_sizes(n: int) -> dict[str, Any]:
 
 
 @mcp.tool(group="calculator")
-def human_duration(seconds: float) -> dict[str, Any]:
+def human_duration(seconds: Annotated[float, Field(description="Elapsed span in seconds (not a point-in-time timestamp) to humanize, e.g. into '2d 3h 4m 5s'")]) -> dict[str, Any]:
     """Convert a SPAN of elapsed seconds (not a point-in-time timestamp) into
     a humanised duration (e.g. '2d 3h 4m 5s') plus per-day and per-30d rates.
     For an epoch timestamp to a calendar date, use epoch_time instead. For
@@ -2636,7 +2650,7 @@ def human_duration(seconds: float) -> dict[str, Any]:
 
 
 @mcp.tool(group="calculator")
-def epoch_time(n: str) -> dict[str, Any]:
+def epoch_time(n: Annotated[str, Field(description="Epoch timestamp to convert to ISO 8601 UTC; units (seconds/millis/micros/nanos) are inferred from magnitude")]) -> dict[str, Any]:
     """Epoch seconds/millis/micros/nanos to ISO 8601 UTC (implausible readings
     suppressed)."""
     return exact.epoch_time(n)
@@ -2697,9 +2711,13 @@ _BITS_MODE_PARAMS = {
 
 
 @mcp.tool(group="calculator")
-def bits(mode: str, n: int | None = None, align: int | None = None,
-         a: int | None = None, op: str | None = None, b: int | None = None,
-         width: int | None = None) -> dict[str, Any]:
+def bits(mode: Annotated[str, Field(description="Which fact/operation to compute: 'analysis', 'op', 'widths', or 'repr' (each has its own required params)")],
+         n: Annotated[int | None, Field(description="The integer to inspect; required by modes 'analysis', 'widths', and 'repr'")] = None,
+         align: Annotated[int | None, Field(description="Alignment boundary for mode='analysis'; reports padding needed to reach it")] = None,
+         a: Annotated[int | None, Field(description="First operand for mode='op'; required by that mode")] = None,
+         op: Annotated[str | None, Field(description="Bit operation for mode='op': and/or/xor/nand/nor/xnor/not/shl/shr/sar/rol/ror")] = None,
+         b: Annotated[int | None, Field(description="Second operand for mode='op'; required unless op='not'")] = None,
+         width: Annotated[int | None, Field(description="Bit width for mode='op' (8/16/32/64, default 64) or mode='repr' (omit to skip width analysis)")] = None) -> dict[str, Any]:
     """Programmer-mode integer facts and operations, selected by `mode` —
     replaces the four former standalone tools bit_analysis, bitop,
     int_widths and base_repr, retired in 0.12.0 (CHANGELOG.md). Every mode
@@ -2747,7 +2765,9 @@ def bits(mode: str, n: int | None = None, align: int | None = None,
 
 
 @mcp.tool(group="calculator")
-def radix_convert(value: str, from_base: int = 10, to_base: int = 10) -> dict[str, Any]:
+def radix_convert(value: Annotated[str, Field(description="Digit string to convert (fractions with '.' accepted), in `from_base`")],
+                  from_base: Annotated[int, Field(description="Base `value` is written in; valid range 2..36, default 10")] = 10,
+                  to_base: Annotated[int, Field(description="Base to convert `value` into; valid range 2..36, default 10")] = 10) -> dict[str, Any]:
     """Convert a value between ANY bases 2..36, fractions included; bases that
     cannot represent the fraction (e.g. 0.1 in base 2) are flagged
     non-terminating. `radix_convert('zz', 36, 7)` is one call."""
@@ -2755,7 +2775,7 @@ def radix_convert(value: str, from_base: int = 10, to_base: int = 10) -> dict[st
 
 
 @mcp.tool(group="calculator")
-def float_repr(x: float) -> dict[str, Any]:
+def float_repr(x: Annotated[float, Field(description="Value to inspect as binary64: exact stored value, raw bits, ULP, neighbours, and representability")]) -> dict[str, Any]:
     """What binary64 actually stores for X: exact value, raw bits, ULP, both
     neighbours, and whether the literal is representable. `float_repr(0.1)`
     shows 0.1000000000000000055511151231257827...; `float_repr(0.25)` says
@@ -2764,7 +2784,8 @@ def float_repr(x: float) -> dict[str, Any]:
 
 
 @mcp.tool(group="verification")
-def algebraic_equiv(a: str, b: str) -> dict[str, Any]:
+def algebraic_equiv(a: Annotated[str, Field(description="First symbolic expression to compare for algebraic identity")],
+                    b: Annotated[str, Field(description="Second symbolic expression to compare for algebraic identity")]) -> dict[str, Any]:
     """Are two expressions algebraically identical? Refs: 'is (a*b)/c the same
     as a*(b/c)?' answered exactly. Caveat: symbolic identity says nothing
     about float rounding, integer truncation or modular overflow."""
@@ -2788,9 +2809,12 @@ _SYMBOLIC_MODE_PARAMS = {
 
 
 @mcp.tool(group="calculator")
-def symbolic(op: str, expr: str | None = None, var: str | None = None,
-            point: str | None = None, system: str | None = None,
-            variables: str | None = None) -> dict[str, Any]:
+def symbolic(op: Annotated[str, Field(description="Which symbolic operation to run: 'solve', 'solve_linear', 'simplify', or 'limit' (each has its own required params)")],
+            expr: Annotated[str | None, Field(description="Expression or equation to solve/simplify/take the limit of; required by op='solve'/'simplify'/'limit'")] = None,
+            var: Annotated[str | None, Field(description="Variable to solve for or take the limit over; optional, default 'x'; used by op='solve'/'limit'")] = None,
+            point: Annotated[str | None, Field(description="Point `var` approaches for op='limit'; optional, default 'oo' (infinity)")] = None,
+            system: Annotated[str | None, Field(description="';'-separated equations for op='solve_linear', e.g. 'x + y = 10; x - y = 2'; required by that op")] = None,
+            variables: Annotated[str | None, Field(description="Comma-separated variable names for op='solve_linear', e.g. 'x, y'; required by that op")] = None) -> dict[str, Any]:
     """Symbolic algebra, selected by `op` — replaces the four former
     standalone tools solve_expression, solve_linear, simplify_expression
     and limit_expression, retired in 0.12.0 (CHANGELOG.md). Every op
@@ -2842,9 +2866,11 @@ def symbolic(op: str, expr: str | None = None, var: str | None = None,
 
 
 @mcp.tool(group="verification")
-def verify_translation(source_code: str, source_language: str,
-                       target_code: str, target_language: str,
-                       test_inputs: list[str] | None = None) -> dict[str, Any]:
+def verify_translation(source_code: Annotated[str, Field(description="Original program, in `source_language`")],
+                       source_language: Annotated[str, Field(description="Language of `source_code`")],
+                       target_code: Annotated[str, Field(description="Ported program, in `target_language`, to check against `source_code`")],
+                       target_language: Annotated[str, Field(description="Language of `target_code`")],
+                       test_inputs: Annotated[list[str] | None, Field(description="Inputs to run both programs on and compare; omit to use the default edge-case set")] = None) -> dict[str, Any]:
     """PROVE that a port is equivalent: run both programs, compare their output.
 
     You write the translation — you are the language model. This runs your
@@ -2885,8 +2911,8 @@ def verify_translation(source_code: str, source_language: str,
 
 
 @mcp.tool(group="verification")
-def compare_edge_cases(snippets: dict[str, str],
-                       inputs: list[str] | None = None) -> dict[str, Any]:
+def compare_edge_cases(snippets: Annotated[dict[str, str], Field(description="Language name -> code; provide one correct snippet per language, implementing the same logic")],
+                       inputs: Annotated[list[str] | None, Field(description="Inputs to run every snippet on; omit for the default set covering empty/zero/negative/float cases")] = None) -> dict[str, Any]:
     """Run the same logic in N languages on edge-case inputs and flag divergence.
 
     `snippets` maps language -> code (provide a correct snippet per language;
@@ -2899,10 +2925,12 @@ def compare_edge_cases(snippets: dict[str, str],
 
 
 @mcp.tool(group="verification")
-def verify_optimization(original: str, candidate: str, language: str,
-                        test_inputs: list[str] | None = None,
-                        sizes: list[int] | None = None,
-                        min_speedup: float = optimization.DEFAULT_MIN_SPEEDUP,
+def verify_optimization(original: Annotated[str, Field(description="Baseline program to compare against")],
+                        candidate: Annotated[str, Field(description="Optimised version of `original`, to prove correct and measurably faster")],
+                        language: Annotated[str, Field(description="Language both `original` and `candidate` are written in")],
+                        test_inputs: Annotated[list[str] | None, Field(description="Inputs to confirm both programs still agree on; omit to use the default set")] = None,
+                        sizes: Annotated[list[int] | None, Field(description="Input sizes to time both programs at (2-3+ sizes needed for significance); omit for defaults")] = None,
+                        min_speedup: Annotated[float, Field(description="Minimum median speedup ratio required to accept the optimisation; default 1.15 (15% faster)")] = optimization.DEFAULT_MIN_SPEEDUP,
                         ctx: Context = None) -> dict[str, Any]:
     """PROVE an optimisation: same outputs, and measurably AND SIGNIFICANTLY faster.
 
@@ -2940,9 +2968,11 @@ def verify_optimization(original: str, candidate: str, language: str,
 
 
 @mcp.tool(group="analysis")
-def extract_function(code: str, language: str, function_name: str,
-                     call: str | None = None,
-                     test_inputs: list[str] | None = None) -> dict[str, Any]:
+def extract_function(code: Annotated[str, Field(description="Source containing the function to extract, plus its imports and helpers")],
+                     language: Annotated[str, Field(description="Language `code` is written in; python3 gets exact ast extraction, others best-effort block extraction")],
+                     function_name: Annotated[str, Field(description="Name of the function within `code` to extract into a standalone program")],
+                     call: Annotated[str | None, Field(description="Call expression to invoke the extracted function; required for non-python3 languages")] = None,
+                     test_inputs: Annotated[list[str] | None, Field(description="Inputs to run the extracted program with, one run per input")] = None) -> dict[str, Any]:
     """Extract a named function (with its imports + referenced helpers) into a
     standalone program and run it in the sandbox.
 

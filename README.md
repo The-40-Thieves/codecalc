@@ -819,12 +819,17 @@ way back into the default.
 ## Tool-definition token cost
 
 codecalc's `tools/list` returns 49 definitions. Measured with `o200k_base` as a
-proxy on the served JSON (64,643 bytes, re-measured after the eight bit/symbolic
-aliases were retired), that is roughly 17,300 tokens of descriptions and input
-schemas, and every client pays it before the first user message. The number
+proxy on the served JSON, that is 78,586 bytes / 20,630 tokens of descriptions
+and input schemas (up from 64,643 bytes / 17,277 tokens at the same 49 tools),
+and every client pays it before the first user message. The number
 has grown with the descriptions, not the count: the disambiguation sentences
 and the per-mode text on `bits`/`symbolic` are what a selection-accuracy-first
-server spends its tokens on.
+server spends its tokens on. The latest jump (+13,943 bytes, +3,353 tokens) is
+every one of the 152 tool PARAMETERS gaining its own `description` in the
+input schema (`Annotated[<type>, Field(description=...)]`) — the docstrings
+above did not change, so `scripts/tool_select_eval.py`'s selection-accuracy
+numbers (it scores only name + docstring, never the input schema) are
+unaffected by this change.
 
 A per-tool `icons` field (2025-11-25+) was tried and measured, not assumed:
 one tiny inline `data:image/svg+xml;base64,...` glyph per tool GROUP, under

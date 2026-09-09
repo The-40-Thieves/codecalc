@@ -52,6 +52,31 @@ behind it.
   result, not a result shaped like the tool used to return. The served
   surface moves from 57 to **49 tools**.
 
+### Changed
+
+- **Every tool parameter now carries a schema `description`** — all 152
+  parameters across the 49 served tools, via `Annotated[<type>,
+  Field(description=...)]`, so a client that renders `inputSchema` (or an
+  LLM tool-selector that reads it) sees per-argument guidance instead of a
+  bare name/type. No parameter's type, default, or name changed, and no
+  tool docstring changed — only additive schema metadata. `Literal[...]`
+  enums and `Field(ge=/le=)` ranges were deliberately NOT added anywhere in
+  this pass: measured against the running server, both turn a closed-set
+  or out-of-range argument's existing graceful `{"ok": false, "error":
+  ...}` result into a hard MCP protocol-level tool-call error instead — a
+  caller-visible behaviour change this pass rules out. `docker/mcp-
+  catalog/tools.json` was regenerated from the live server so every
+  argument's `desc` is filled, with the same `optional: true` flags it
+  already carried. The served `tools/list` JSON grows from 64,643 bytes /
+  17,277 tokens (o200k_base) to 78,586 bytes / 20,630 tokens at the same 49
+  tools — descriptions add tokens, they do not trim them; see README's
+  "Tool-definition token cost" for the accounting.
+  `scripts/tool_select_eval.py` scores tool SELECTION only against each
+  tool's own docstring text, never its input schema, so this change moves
+  none of its numbers: `full`/`dev`/`core` all report the same
+  151/234, 128/184, 79/116 top-1 hits as `main`, zero drop against the
+  checked-in baseline.
+
 ## [0.11.0] — 2026-09-09
 
 ### Added
