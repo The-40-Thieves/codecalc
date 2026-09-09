@@ -25,7 +25,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import anyio
 from mcp.server import CacheHint, MCPServer
@@ -42,6 +42,7 @@ from mcp.types import (
     TextResourceContents,
     ToolAnnotations,
 )
+from pydantic import Field
 
 from . import (
     __version__,
@@ -1306,18 +1307,18 @@ def compact_result(result: dict) -> dict:
 
 @mcp.tool(group="execution")
 def execute_code(
-    language: str,
-    code: str,
-    stdin: str = "",
-    timeout: int = 10,
-    session_id: str | None = None,
-    max_memory_mb: int = 0,
-    max_output_kb: int = 0,
-    max_cpu: int = 0,
-    no_net: bool = False,
-    compact: bool = False,
-    provider: str | None = None,
-    dependencies: list[str] | None = None,
+    language: Annotated[str, Field(description="Runtime to execute in, e.g. 'python3', 'node'; see list_languages for the full catalog")],
+    code: Annotated[str, Field(description="Source code to run in `language`")],
+    stdin: Annotated[str, Field(description="Text piped to the program's standard input; empty means no input")] = "",
+    timeout: Annotated[int, Field(description="Wall-clock seconds before the run is killed as TLE; clamped to a 120s ceiling")] = 10,
+    session_id: Annotated[str | None, Field(description="Run inside this session's workspace (from session_start) instead of a throwaway sandbox")] = None,
+    max_memory_mb: Annotated[int, Field(description="Per-call memory ceiling in MiB; 0 means no explicit limit is set")] = 0,
+    max_output_kb: Annotated[int, Field(description="Stdout/stderr capture cap in KiB per stream; 0 uses the 64 KiB default, hard-clamped to 240")] = 0,
+    max_cpu: Annotated[int, Field(description="Per-call CPU-time ceiling in seconds; 0 means no explicit limit is set")] = 0,
+    no_net: Annotated[bool, Field(description="Block outbound network access for this run; best-effort on platforms without seccomp")] = False,
+    compact: Annotated[bool, Field(description="Drop diagnostic fields (timings, workdir, platform) from the result; safety disclosures are always kept")] = False,
+    provider: Annotated[str | None, Field(description="Execution backend id to use (see list_execution_providers); default picks automatically")] = None,
+    dependencies: Annotated[list[str] | None, Field(description="Packages to install before running, e.g. ['requests==2.31.0']; merged with any PEP 723 block")] = None,
     ctx: Context = None,
 ) -> dict[str, Any]:
     """Execute `code` in `language` in a sandbox.
@@ -1428,7 +1429,7 @@ def execute_code(
 
 
 @mcp.tool(group="sessions")
-def session_start(language: str = "python3") -> dict[str, Any]:
+def session_start(language: Annotated[str, Field(description="Language for the new session's worker/workspace; default 'python3' gets a stateful REPL")] = "python3") -> dict[str, Any]:
     """Start a persistent session. python3/node get a stateful REPL worker
     (variables/imports persist across execute_code calls); other languages get
     a persistent workspace directory. Returns session_id."""
@@ -1436,7 +1437,9 @@ def session_start(language: str = "python3") -> dict[str, Any]:
 
 
 @mcp.tool(group="sessions")
-def session_stop(session_id: str, keep_snapshots: bool = False, ctx: Context = None) -> dict[str, Any]:
+def session_stop(session_id: Annotated[str, Field(description="Id of the session to stop, as returned by session_start")],
+                 keep_snapshots: Annotated[bool, Field(description="Keep this session's saved session_snapshot archives instead of deleting them")] = False,
+                 ctx: Context = None) -> dict[str, Any]:
     """Stop a session: kill its REPL worker (if any) and delete its workspace.
     Also deletes every session_snapshot saved for it, unless keep_snapshots=True."""
     # Resource-change notification not documented in the docstring above —
@@ -1458,8 +1461,10 @@ def session_list() -> dict[str, Any]:
 
 
 @mcp.tool(group="sessions")
-def session_files(session_id: str, path: str = "", page_size: int | None = None,
-                  cursor: str | None = None) -> dict[str, Any]:
+def session_files(session_id: Annotated[str, Field(description="Id of the session whose workspace files to list")],
+                  path: Annotated[str, Field(description="Subdirectory to list, relative to the workspace root; empty lists the root")] = "",
+                  page_size: Annotated[int | None, Field(description="Max entries per page; omit for one unpaginated listing")] = None,
+                  cursor: Annotated[str | None, Field(description="Opaque page cursor from a previous session_files call's response, to fetch the next page")] = None) -> dict[str, Any]:
     """List workspace files, optionally using a bounded cursor page."""
     return _session_service.list_files(
         session_id, path, page_size=page_size, cursor=cursor
@@ -1467,7 +1472,10 @@ def session_files(session_id: str, path: str = "", page_size: int | None = None,
 
 
 @mcp.tool(group="sessions")
-def session_write_file(session_id: str, path: str, content: str, ctx: Context = None) -> dict[str, Any]:
+def session_write_file(session_id: Annotated[str, Field(description="Id of the session workspace to write into")],
+                       path: Annotated[str, Field(description="Relative destination path inside the workspace; path escapes (e.g. '../') are refused")],
+                       content: Annotated[str, Field(description="Text content to write to `path`, overwriting any existing file")],
+                       ctx: Context = None) -> dict[str, Any]:
     """Write a file into a session workspace (relative path, no escapes).
     Use this to seed input data for executed code."""
     # Resource-change notifications not documented in the docstring above —
@@ -1486,16 +1494,18 @@ def session_write_file(session_id: str, path: str, content: str, ctx: Context = 
 
 
 @mcp.tool(group="sessions")
-def session_artifacts(session_id: str) -> dict[str, Any]:
+def session_artifacts(session_id: Annotated[str, Field(description="Id of the session whose executed-code output files to list")]) -> dict[str, Any]:
     """List files created by executed code in a session (excluding runner
     internals like main.py/run.out)."""
     return _session_service.artifacts(session_id)
 
 
 @mcp.tool(group="sessions")
-def session_snapshot(session_id: str, action: str = "save",
-                     snapshot_id: str | None = None, label: str | None = None,
-                     replace: bool = False) -> dict[str, Any]:
+def session_snapshot(session_id: Annotated[str, Field(description="Id of the session the snapshot belongs to or is restored into")],
+                     action: Annotated[str, Field(description="One of 'save', 'restore', 'list', 'delete'; default 'save' archives the workspace")] = "save",
+                     snapshot_id: Annotated[str | None, Field(description="Id of an existing snapshot; required for action='restore' or action='delete'")] = None,
+                     label: Annotated[str | None, Field(description="Optional human-readable label to store with a new snapshot; only used by action='save'")] = None,
+                     replace: Annotated[bool, Field(description="For action='restore', wipe and reuse session_id's own workspace instead of creating a new session")] = False) -> dict[str, Any]:
     """Archive or restore a session's workspace files. `action`:
 
     - "save": tar.gz the session's current files (same rules as
@@ -1520,8 +1530,10 @@ def session_snapshot(session_id: str, action: str = "save",
 # original report of install-time hook risk (npm postinstall, Python build
 # backends, Cargo build scripts) that the docstring's warning below exists
 # to carry forward to every caller.
-async def install_package(language: str, package: str, session_id: str | None = None,
-                          version: str | None = None,
+async def install_package(language: Annotated[str, Field(description="Language whose package manager installs the package, e.g. 'python3', 'node'")],
+                          package: Annotated[str, Field(description="Package name to install via that language's manager (uv pip/npm/gem/go get/cargo add)")],
+                          session_id: Annotated[str | None, Field(description="Install into this session's workspace instead of the shared cache; omit for the shared cache")] = None,
+                          version: Annotated[str | None, Field(description="Exact version to install; omit to install the manager's default/latest")] = None,
                           ctx: Context = None) -> dict[str, Any] | InputRequiredResult:
     """Install a package for a language (uv pip / npm / gem / go get / cargo add...).
 
@@ -1589,16 +1601,16 @@ async def install_package(language: str, package: str, session_id: str | None = 
 
 @mcp.tool(group="execution")
 async def execute_code_stream(
-    language: str,
-    code: str,
-    stdin: str = "",
-    timeout: int = 30,
-    max_memory_mb: int = 0,
-    max_output_kb: int = 0,
-    max_cpu: int = 0,
-    no_net: bool = False,
-    provider: str | None = None,
-    dependencies: list[str] | None = None,
+    language: Annotated[str, Field(description="Runtime to execute in, e.g. 'python3', 'node'; see list_languages for the full catalog")],
+    code: Annotated[str, Field(description="Source code to run in `language`")],
+    stdin: Annotated[str, Field(description="Text piped to the program's standard input; empty means no input")] = "",
+    timeout: Annotated[int, Field(description="Wall-clock seconds before the run is killed; clamped to a 300s ceiling (longer than execute_code's)")] = 30,
+    max_memory_mb: Annotated[int, Field(description="Per-call memory ceiling in MiB; 0 means no explicit limit is set")] = 0,
+    max_output_kb: Annotated[int, Field(description="Stdout/stderr capture cap in KiB per stream; 0 uses the 64 KiB default, hard-clamped to 240")] = 0,
+    max_cpu: Annotated[int, Field(description="Per-call CPU-time ceiling in seconds; 0 means no explicit limit is set")] = 0,
+    no_net: Annotated[bool, Field(description="Block outbound network access for this run; best-effort on platforms without seccomp")] = False,
+    provider: Annotated[str | None, Field(description="Execution backend id to use (see list_execution_providers); default picks automatically")] = None,
+    dependencies: Annotated[list[str] | None, Field(description="Packages to install before running, e.g. ['requests==2.31.0']; merged with any PEP 723 block")] = None,
     ctx: Context = None,
 ) -> dict[str, Any]:
     """Execute code and STREAM progress + partial output as it runs.
@@ -1656,16 +1668,16 @@ async def execute_code_stream(
 
 @mcp.tool(group="execution")
 def trace_execution(
-    language: str,
-    code: str,
-    stdin: str = "",
-    timeout: int = 30,
-    max_events: int = 2000,
-    max_memory_mb: int = 0,
-    max_output_kb: int = 0,
-    max_cpu: int = 0,
-    no_net: bool = False,
-    provider: str | None = None,
+    language: Annotated[str, Field(description="Runtime to trace; only 'python3' is supported, any other value is refused")],
+    code: Annotated[str, Field(description="Source code to trace line by line")],
+    stdin: Annotated[str, Field(description="Text piped to the program's standard input; empty means no input")] = "",
+    timeout: Annotated[int, Field(description="Wall-clock seconds before the run is killed; clamped to a 120s ceiling")] = 30,
+    max_events: Annotated[int, Field(description="Max trace events to record before truncating; the run's own stdout/exit code are unaffected")] = 2000,
+    max_memory_mb: Annotated[int, Field(description="Per-call memory ceiling in MiB; 0 means no explicit limit is set")] = 0,
+    max_output_kb: Annotated[int, Field(description="Stdout/stderr capture cap in KiB per stream; 0 uses the 64 KiB default, hard-clamped to 240")] = 0,
+    max_cpu: Annotated[int, Field(description="Per-call CPU-time ceiling in seconds; 0 means no explicit limit is set")] = 0,
+    no_net: Annotated[bool, Field(description="Block outbound network access for this run; best-effort on platforms without seccomp")] = False,
+    provider: Annotated[str | None, Field(description="Execution backend id; only 'local' (the default) is supported here")] = None,
 ) -> dict[str, Any]:
     """Debug WHY, line by line, for the ONE input you actually ran it on:
     which statements fired, in what order, with what variable values at
@@ -1709,11 +1721,11 @@ def trace_execution(
 
 @mcp.tool(group="execution")
 def branch_reachability(
-    language: str,
-    code: str,
-    inputs: dict[str, str] | None = None,
-    timeout: int = 30,
-    max_branches: int = 64,
+    language: Annotated[str, Field(description="Source language of `code`; only python3 functions are analyzed")],
+    code: Annotated[str, Field(description="Python3 function source to analyze for reachable/dead branches")],
+    inputs: Annotated[dict[str, str] | None, Field(description="Parameter name -> 'int'/'bool'/'str', to narrow or override an unannotated parameter's inferred type")] = None,
+    timeout: Annotated[int, Field(description="Wall-clock seconds before the z3 solver call is abandoned")] = 30,
+    max_branches: Annotated[int, Field(description="Max branches to analyze before stopping; default 64")] = 64,
 ) -> dict[str, Any]:
     """Which if/elif/else arms and while/for loops of this python3
     function can ever run, which are dead code, and what inputs reach
@@ -1761,16 +1773,16 @@ _RUN_EXTRA_KEYS = frozenset({
 
 @mcp.tool(group="sessions")
 def run_submit(
-    language: str,
-    code: str,
-    stdin: str = "",
-    timeout: int = 30,
-    max_memory_mb: int = 0,
-    max_output_kb: int = 0,
-    max_cpu: int = 0,
-    no_net: bool = False,
-    provider: str | None = None,
-    dependencies: list[str] | None = None,
+    language: Annotated[str, Field(description="Runtime to execute in, e.g. 'python3', 'node'; see list_languages for the full catalog")],
+    code: Annotated[str, Field(description="Source code to run in `language`")],
+    stdin: Annotated[str, Field(description="Text piped to the program's standard input; empty means no input")] = "",
+    timeout: Annotated[int, Field(description="Wall-clock seconds before the run is killed; clamped to a 120s ceiling, same as execute_code")] = 30,
+    max_memory_mb: Annotated[int, Field(description="Per-call memory ceiling in MiB; 0 means no explicit limit is set")] = 0,
+    max_output_kb: Annotated[int, Field(description="Stdout/stderr capture cap in KiB per stream; 0 uses the 64 KiB default, hard-clamped to 240")] = 0,
+    max_cpu: Annotated[int, Field(description="Per-call CPU-time ceiling in seconds; 0 means no explicit limit is set")] = 0,
+    no_net: Annotated[bool, Field(description="Block outbound network access for this run; best-effort on platforms without seccomp")] = False,
+    provider: Annotated[str | None, Field(description="Execution backend id to use (see list_execution_providers); default picks automatically")] = None,
+    dependencies: Annotated[list[str] | None, Field(description="Packages to install before running, e.g. ['requests==2.31.0']; merged with any PEP 723 block")] = None,
 ) -> dict[str, Any]:
     """Submit code for BACKGROUND execution; returns a run_id immediately.
 
@@ -1953,7 +1965,7 @@ def run_submit(
 
 
 @mcp.tool(group="sessions")
-def run_inspect(run_id: str) -> dict[str, Any]:
+def run_inspect(run_id: Annotated[str, Field(description="Id of a background run, as returned by run_submit")]) -> dict[str, Any]:
     """Poll a background run started with run_submit.
 
     While running: {"ok": True, "state": "running"|"cancelling", "run_id",
@@ -2042,7 +2054,7 @@ def run_inspect(run_id: str) -> dict[str, Any]:
 
 
 @mcp.tool(group="sessions")
-def run_cancel(run_id: str) -> dict[str, Any]:
+def run_cancel(run_id: Annotated[str, Field(description="Id of a background run, as returned by run_submit")]) -> dict[str, Any]:
     """Cancel a background run started with run_submit.
 
     Idempotent: calling this on a run that is already finished/cleaned
@@ -2091,7 +2103,7 @@ def run_cancel(run_id: str) -> dict[str, Any]:
 
 
 @mcp.tool(group="calculator")
-def evaluate_expression(expression: str) -> dict[str, Any]:
+def evaluate_expression(expression: Annotated[str, Field(description="Symbolic math expression to evaluate via SymPy, e.g. 'integrate(x**2, x)', 'sqrt(144) + 2**10'")]) -> dict[str, Any]:
     """Use evaluate_expression, not calc_exact, for something other than
     plain arithmetic on literal values. Symbolically evaluate to a value or
     closed form via sympify: 'integrate(x**2, x)', 'sqrt(144) + 2**10'. Not
@@ -2102,13 +2114,13 @@ def evaluate_expression(expression: str) -> dict[str, Any]:
 
 
 @mcp.tool(group="calculator")
-def truth_table(expression: str) -> dict[str, Any]:
+def truth_table(expression: Annotated[str, Field(description="Boolean logic expression to tabulate, e.g. 'a and b or not c', 'p xor q', 'a implies b'")]) -> dict[str, Any]:
     """Build the truth table for a boolean expression: 'a and b or not c', 'p xor q', 'a implies b'."""
     return logic.truth_table(expression)
 
 
 @mcp.tool(group="verification")
-def z3_check(smt2: str) -> dict[str, Any]:
+def z3_check(smt2: Annotated[str, Field(description="SMT-LIB2 script to check for satisfiability, e.g. '(declare-const x Int)(assert (> x 5))(check-sat)'")]) -> dict[str, Any]:
     """Use z3_check, not symbolic(op="solve"), for satisfiability over
     inequalities, boolean combinations, or several variables at once: sat/
     unsat/unknown plus a model. Example:
@@ -2125,7 +2137,8 @@ def z3_check(smt2: str) -> dict[str, Any]:
 
 
 @mcp.tool(group="calculator")
-def matrix(rows: list[list[int | float | str]], op: str) -> dict[str, Any]:
+def matrix(rows: Annotated[list[list[int | float | str]], Field(description="Row-major matrix as a JSON array of arrays; each entry is a number or a scalar expression string like 'sqrt(2)'")],
+          op: Annotated[str, Field(description="Operation to apply: one of det, inverse, eigenvalues, transpose, rank, trace")]) -> dict[str, Any]:
     """Structured matrix operations: det, inverse, eigenvalues, transpose, rank, trace.
 
     `evaluate_expression` refuses `Matrix([[1,2],[3,4]])` on purpose — `[`/`]`
@@ -2142,14 +2155,18 @@ def matrix(rows: list[list[int | float | str]], op: str) -> dict[str, Any]:
 
 
 @mcp.tool(group="analysis")
-def analyze_complexity(code: str, language: str = "python3") -> dict[str, Any]:
+def analyze_complexity(code: Annotated[str, Field(description="Source code snippet to analyze structurally for its asymptotic time complexity")],
+                       language: Annotated[str, Field(description="Language `code` is written in; default 'python3'")] = "python3") -> dict[str, Any]:
     """Estimate the asymptotic (Big-O) time complexity of a code snippet via structural analysis."""
     return complexity.analyze(code, language)
 
 
 @mcp.tool(group="analysis")
-def benchmark(code: str, language: str = "python3", sizes: str = "100,1000,10000,100000",
-              timeout: int = 30, ctx: Context = None) -> dict[str, Any]:
+def benchmark(code: Annotated[str, Field(description="Program that reads integer N from stdin's first line and does work sized by N")],
+              language: Annotated[str, Field(description="Language `code` is written in; default 'python3'")] = "python3",
+              sizes: Annotated[str, Field(description="Comma-separated input sizes to run at, e.g. '100,1000,10000,100000'")] = "100,1000,10000,100000",
+              timeout: Annotated[int, Field(description="Wall-clock seconds allowed per size before that run is killed")] = 30,
+              ctx: Context = None) -> dict[str, Any]:
     """Empirically measure time complexity by running code at increasing input sizes.
 
     Contract: the code must read an integer N from stdin (first line) and do work
@@ -2170,8 +2187,10 @@ def benchmark(code: str, language: str = "python3", sizes: str = "100,1000,10000
 
 
 @mcp.tool(group="execution")
-def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 15,
-                      dependencies: dict[str, list[str]] | None = None,
+def compare_execution(snippets: Annotated[dict[str, str], Field(description="Language name -> code; each snippet must be a complete, valid program in its own language")],
+                      stdin: Annotated[str, Field(description="Text piped to every snippet's standard input; empty means no input")] = "",
+                      timeout: Annotated[int, Field(description="Wall-clock seconds allowed per language before that run is killed")] = 15,
+                      dependencies: Annotated[dict[str, list[str]] | None, Field(description="Not supported here; any truthy value is refused — install packages beforehand instead")] = None,
                       ctx: Context = None) -> dict[str, Any]:
     """Run the same code in multiple languages side by side.
 
@@ -2208,7 +2227,7 @@ def compare_execution(snippets: dict[str, str], stdin: str = "", timeout: int = 
 
 
 @mcp.tool(group="execution")
-def runtimes_status(languages: str = "") -> dict[str, Any]:
+def runtimes_status(languages: Annotated[str, Field(description="Comma-separated languages to check, e.g. 'python3,node,rust'; empty checks all")] = "") -> dict[str, Any]:
     """Check every language runtime for available updates (NON-MUTATING).
 
     Reports current vs latest version per language, which package manager owns
