@@ -103,7 +103,7 @@ A stateless Streamable HTTP transport (`serve-http`) also exists, for the same s
 
 ## Supported versions
 
-Published as **`codecalc` 0.10.0** on PyPI and the **`codecalc-exec` 0.10.0** executor on crates.io
+Published as **`codecalc` 0.11.0** on PyPI and the **`codecalc-exec` 0.11.0** executor on crates.io
 (README, "Published install"). The supported versions are the latest tagged release plus `main`;
 fixes land on `main` and are picked up by the next release.
 

@@ -33,6 +33,8 @@ behind it.
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-09-09
+
 ### Added
 
 - **`session_snapshot(session_id, action="save"|"restore"|"list"|"delete", snapshot_id=None, label=None, replace=False)`** — archive a session's workspace files to a `tar.gz` and restore one later, into a new session or back into the same one. One tool with an `action` parameter rather than four separate tools, to keep the 53-tool surface from growing by three at once for one feature; `action`'s four shapes are close enough in signature (`session_id` plus an optional `snapshot_id`/`label`/`replace`) that splitting them would mostly duplicate the same three parameters four times over.
@@ -3215,7 +3217,8 @@ it, so there was no upgrade path to describe — only what the thing is.
   `ok: false` through the sandbox. Tracked, with a dated reproduction, at
   [#42](https://github.com/The-40-Thieves/codecalc/issues/42).
 
-[Unreleased]: https://github.com/The-40-Thieves/codecalc/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/The-40-Thieves/codecalc/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.11.0
 [0.10.0]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.10.0
 [0.9.0]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.9.0
 [0.8.0]: https://github.com/The-40-Thieves/codecalc/releases/tag/v0.8.0
