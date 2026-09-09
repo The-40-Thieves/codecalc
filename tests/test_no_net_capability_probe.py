@@ -1,4 +1,4 @@
-"""Hardening of the `--capabilities` no_net probe (THE-914).
+"""Hardening of the `--capabilities` no_net probe.
 
 Codex's security review of the `network_control`-from-probe change (the one
 that made `no_net_kernel_enforcement_available()` derive from the Rust
