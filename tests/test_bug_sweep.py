@@ -1348,20 +1348,21 @@ _symbolic_tree = _pe("x*y*z", transformations=_T, evaluate=False)
 check("a symbolic product (x*y*z) is not refused",
       _rx(_symbolic_tree) is None, f"-> {_rx(_symbolic_tree)!r}")
 
-# The two existing Pow-only refusals must be byte-for-byte unchanged: the new
-# Mul/Add check only fires on Mul/Add nodes, and neither of these is one at
-# the top level.
-_pow_cases = [
-    ("2**100000", ("the result would have about 30103 digits, over the limit "
-                   "of 4000: it cannot be rendered as a decimal string")),
-    ("9**9**9**9", ("a power tower (an exponent that is itself a power) is not "
-                    "evaluated: the result grows faster than any useful bound")),
-]
-for _expr, _want_msg in _pow_cases:
+# The two original Pow-only refusals must STILL refuse -- wording is no
+# longer pinned byte-for-byte as of round 4 (cross-vendor review): the scan
+# now descends into Pow's own base/exponent (finding 1), so `2**100000` is
+# caught by the scan's num/den check directly, and `9**9**9**9` (a genuine
+# 3-level tower) is caught one level down, at `9**(9**9)` -- both COMPOUND
+# exponents that reduce to a safely-small exact integer via
+# `_safe_multiset_rational`'s per-term-gated arithmetic, so the scan resolves
+# them fully before the Pow loop's own dedicated "power tower" wording ever
+# gets a chance to fire. Still refused either way -- see the "digits" check.
+_pow_cases = ["2**100000", "9**9**9**9"]
+for _expr in _pow_cases:
     _tree = _pe(_expr, transformations=_T, evaluate=False)
     _got = _rx(_tree)
-    check(f"{_expr!r} is still refused exactly as before",
-          _got == _want_msg, f"-> {_got!r}")
+    check(f"{_expr!r} is still refused",
+          _got is not None and "digits" in _got, f"-> {_got!r}")
 
 # exact.py's catch-alls now route through errors.classify() instead of a bare
 # str(exc) -- a CPython digit-limit ValueError must classify to the ceiling
@@ -1556,6 +1557,126 @@ for _pow_expr, _want_value in _POW_CANCELLATION_CASES:
           f"simplified={_pow_result.get('simplified')!r}")
     check("  ...promptly, not after a multi-second burn",
           _pow_elapsed < 5.0, f"-> {_pow_elapsed:.3f}s")
+
+# ═══ round 4 of cross-vendor review (grok, on 2ba7ef2) — three more High ═══
+# ═══ findings, all traced to the SAME root cause and fixed by the SAME ════
+# ═══ redesign, not three separate patches ══════════════════════════════════
+#
+# THE INVARIANT this module now enforces, restated at the top of
+# `_factor_multiset`'s own docstring: no numeric subtree whose PRINTED
+# numerator or denominator would exceed MAX_NUMERIC_DIGITS is ever
+# evaluated. Rounds 1-3 enforced "no numeric subtree whose VALUE is large,
+# checked without regard to a combination that provably cancels it" --
+# correct as far as it went, but a VALUE can be tiny while its printed
+# DENOMINATOR is enormous (`1/(factorial(1463)*factorial(1463))`), and the
+# `Pow` node itself was simply not part of the check that enforced any of
+# it (`_numeric_ceiling_scan` `continue`d on every `Pow` without pushing
+# its base or exponent). Round 4 replaced the scalar
+# "log10(|value|)" model (`_log10_magnitude`) with a numerator/denominator
+# PAIR tracked in log space throughout (`_log10_num_den`/
+# `_factor_multiset`/`_multiset_log_num_den`), and folded `Pow` into the
+# scan's own trigger set instead of leaving it to a separate loop.
+_CANCELLING_PAIR = "factorial(1463)*factorial(1463)"
+
+# Finding 1 (High): the scan `continue`d on every Pow without pushing its
+# base or exponent, and the Pow loop only ever looked past a TRIVIAL
+# exponent (`|exp| <= 1`) without checking what the base itself would
+# print as -- so an over-cap numeric part hidden ONLY behind a Pow (a
+# trivial `**1`, or a reciprocal `**-1`) walked straight through both.
+_POW_BYPASS_CASES = [
+    (_PRODUCT_BOMB + "**1", "(bomb)**1"),
+    (f"1/({_CANCELLING_PAIR})", "1/(f*f)"),
+    (f"({_CANCELLING_PAIR})**-1", "(f*f)**-1"),
+]
+for _expr, _label in _POW_BYPASS_CASES:
+    _t0 = time.time()
+    _r = _exact.simplify_expression(_expr)
+    _elapsed = time.time() - _t0
+    check(f"{_label} ({_expr[:40]!r}...) is refused, not silently allowed through a Pow",
+          _r.get("ok") is False and _r.get("code") == _errors.RESOURCE_EXHAUSTED,
+          f"-> ok={_r.get('ok')} code={_r.get('code')}")
+    check("  ...promptly, not after materializing the huge value",
+          _elapsed < 2.0, f"-> {_elapsed:.3f}s")
+
+# Finding 2 (High): printability was measured as log10(|value|), so a
+# RECIPROCAL has a negative log and the old scalar check read that as "at
+# most one digit" -- `x/(f*f)` "cancels" to a tiny coefficient in log-space
+# terms, but the printer still has to render the huge DENOMINATOR. Fixed by
+# tracking numerator and denominator magnitude separately (this test overlaps
+# `1/(f*f)` above, deliberately -- the reviewer named both the reciprocal
+# AND the symbolic-numerator variant as distinct reproductions).
+_x_over_ff = f"x/({_CANCELLING_PAIR})"
+_t0 = time.time()
+_r = _exact.simplify_expression(_x_over_ff)
+_elapsed = time.time() - _t0
+check(f"x/(f*f) ({_x_over_ff!r}) is refused on its DENOMINATOR, not waived through "
+      "because the value's sign/magnitude looks small",
+      _r.get("ok") is False and _r.get("code") == _errors.RESOURCE_EXHAUSTED,
+      f"-> {_r}")
+check("  ...promptly", _elapsed < 2.0, f"-> {_elapsed:.3f}s")
+
+# A mixed Pow base (part numeric, part symbolic) alongside a sibling numeric
+# factor -- the base `factorial(1463)*x` does not fully resolve (x is a free
+# symbol), but `factorial(1463)`'s own ~3998-digit contribution must still
+# propagate out of the Pow (a real bug caught writing this: an earlier
+# version discarded ANY partial base info whenever the base did not fully
+# resolve, so this reached real evaluation and crashed on CPython's own
+# digit-limit ValueError -- classified correctly by exact.py's catch, but
+# AFTER the crash, not refused BEFORE it like every other case here).
+_mixed_pow_expr = "(factorial(1463)*x)**1*factorial(1463)"
+_r = _exact.simplify_expression(_mixed_pow_expr)
+check(f"{_mixed_pow_expr!r} (f*x)**1*f is refused",
+      _r.get("ok") is False and _r.get("code") == _errors.RESOURCE_EXHAUSTED,
+      f"-> {_r}")
+check("  ...refused BEFORE evaluation (a real digit-count message), not "
+      "classified after a raw CPython crash",
+      "sys.set_int_max_str_digits" not in str(_r.get("error"))
+      and "digits" in str(_r.get("error")),
+      f"-> {_r.get('error')!r}")
+
+# Finding 3 (High): `_resolve_numeric_exactly`'s `type(node)(*args)`
+# (evaluate=True) reconstruction was not a BOUNDED operation -- SymPy's own
+# `Mul.flatten` folds integer powers of a numeric base internally, so a Pow
+# whose exponent is a DIFFERENT-base product that happens to have a small
+# NET log (`2**N * 3**(-N)`, N huge) still tried to materialize the literal
+# `2**N` on the way to computing that net value. Round 4 removed
+# `_resolve_numeric_exactly` (and the evaluate=True reconstruction it did)
+# entirely; the exponent's value is now derived purely from log-space
+# arithmetic and a per-term-gated exact `Fraction`
+# (`_safe_multiset_rational`) that checks EVERY individual factor's
+# magnitude before ever raising anything to a power. N here has ~300
+# decimal digits (bit_length ~994, matching the reviewer's own reproduction)
+# -- large enough that materializing `2**N` would never finish in this
+# process's lifetime, so this test's own timeout bound (well under the 10s
+# guarded_call ceiling) is the actual assertion.
+_N = 10**299 + 7
+_diff_base_pow_expr = f"2**(2**{_N}*3**(-{_N}))"
+check(f"the exponent literal is {len(str(_N))} digits, under the 2000-char expr cap "
+      f"(full expr {len(_diff_base_pow_expr)} chars)",
+      len(_diff_base_pow_expr) < 2000, f"-> {len(_diff_base_pow_expr)}")
+_t0 = time.time()
+_diff_base_result = _exact.simplify_expression(_diff_base_pow_expr)
+_diff_base_elapsed = time.time() - _t0
+check("2**(2**N * 3**(-N)) for a ~300-digit N: refuses or evaluates in "
+      "milliseconds, never seconds -- never reconstructs 2**N",
+      _diff_base_elapsed < 1.0, f"-> {_diff_base_elapsed:.3f}s ok={_diff_base_result.get('ok')}")
+check("  ...and the outcome is a real answer either way (ok, or a coded refusal)",
+      _diff_base_result.get("ok") is True
+      or (_diff_base_result.get("ok") is False
+          and _diff_base_result.get("code") == _errors.RESOURCE_EXHAUSTED),
+      f"-> {_diff_base_result}")
+
+# Finding 4 (Low): the RecursionError guard wrapped only the scan; the Pow
+# loop's own exponent resolution runs the identical recursive machinery
+# (`_factor_multiset`) and needed the same guard. Structural check -- the
+# Pow loop's own try/except is in the source, not just the scan's.
+import inspect as _inspect5
+
+_reject_explosive_source = _inspect5.getsource(_rx)
+check("reject_explosive's Pow loop is ALSO wrapped in its own RecursionError guard "
+      "(not just the scan's)",
+      _reject_explosive_source.count("except RecursionError:") >= 2,
+      f"-> {_reject_explosive_source.count('except RecursionError:')} guard(s) found")
 
 # ═══ the fail-closed choice above was ITSELF too broad — cross-vendor ══════
 # ═══ differential probe (main vs. this branch) found 5 benign expressions ══

@@ -755,344 +755,443 @@ def _safe_log10_pow(base_mag: float, exp_int: int) -> float:
     return base_mag * exp_int
 
 
-def _log10_magnitude(node, memo: dict) -> float | None:
-    """log10(|value|) of a numeric-only subtree, or None if inconclusive
-    (free symbols, a `Function` call, an irrational `NumberSymbol`, or
-    float-mode overflow — NOT evidence of anything, same convention as
-    `_bounded_numeric_value`). Memoized per node (keyed by `id`, not
-    structural equality — cheap and correct for a tree that is never
-    mutated during one `reject_explosive` call) so a node shared by
-    several ancestors is resolved once, not once per ancestor.
+def _factor_multiset(node, memo_ms: dict):
+    """Decompose a numeric-only subtree into an EXACT signed multiset of
+    `{base_magnitude_key: net_integer_exponent}`, or `None` if this node's
+    shape is not decomposable this way (anything but `Integer` / `Mul` /
+    `Pow` with a plain `Integer` exponent — a `Rational` literal, `Float`,
+    `Add`, `Function`, symbol, or irrational `NumberSymbol`). Returns
+    `(terms, sign)`, where `sign` is -1/0/+1 and the true value is
+    `sign * prod(base**exp for base, exp in terms.items())` — `terms` never
+    holds a zero exponent (a base that fully cancels is deleted, not kept
+    at 0).
 
-    Two bugs, found by cross-vendor review of the first version of this
-    fix (#326/THE-1091), both traced to the SAME root cause: the first
-    version delegated to `_bounded_numeric_value`, which accumulates an
-    EXACT Rational product/sum step by step and checks the INTERMEDIATE
-    accumulator's bit length against a budget after every step.
+    THE INVARIANT THIS FILE NOW ENFORCES (#326, four cross-vendor review
+    rounds in): no numeric subtree whose PRINTED numerator or denominator
+    would exceed `MAX_NUMERIC_DIGITS` is ever evaluated — not "no numeric
+    subtree whose VALUE is large" (round 1's bug: `str()` renders a
+    Rational's numerator and denominator SEPARATELY, so a value near zero
+    with an 8000-digit denominator — `1/(factorial(1463)*factorial(1463))`
+    — is exactly as dangerous to print as a value with an 8000-digit
+    numerator, even though its magnitude/log is deeply negative) and "no
+    numeric subtree is checked in isolation from a combination that
+    provably cancels it" (rounds 2 and 3's bug: an ORDERED accumulator —
+    `_bounded_numeric_value`, still used elsewhere in this module for
+    nothing `reject_explosive` calls anymore — blows its own intermediate
+    budget on `factorial(1463)*factorial(1463)` before ever seeing the
+    factor that cancels it back to 1, and `SymPy`'s `evaluate=True`
+    reconstruction has the identical problem one level deeper: `Mul.flatten`
+    computes `coeff *= Pow(base, exp)` for each integer power of a numeric
+    base BEFORE the whole product is known to cancel, so `2**(2**N *
+    3**(-N))` — final magnitude negligible — still tries to materialize the
+    literal ~10**298-digit integer `2**N` on the way there for a ~300-digit
+    `N`, whether that materialization happens through this module's own
+    accumulator or through SymPy's).
 
-      1. ORDER-DEPENDENT false refusal. `factorial(1463) * factorial(1463)
-         / (factorial(1463) * factorial(1463))` is exactly 1 — the two
-         factors cancel — but `evaluate=False` parses it as `Mul(f, f,
-         Pow(Mul(f, f), -1))`: the accumulator multiplies the first two `f`
-         factors together (~8000 digits) and exceeds `_SUBTREE_BIT_BUDGET`
-         BEFORE the reciprocal third factor is ever multiplied in and
-         cancels it back down to 1. Refused as `resource_exhausted`, wrong.
-      2. SUPERLINEAR walk. `reject_explosive`'s loop calls the ceiling
-         check on every `Integer`/`Mul`/`Add` node `_walk` visits, and the
-         old check re-resolved its ENTIRE subtree from scratch every time —
-         so a node at depth d got re-resolved once for itself and again for
-         every numeric ancestor above it. An alternating Add/Mul chain of
-         depth 250 measured 0.311s in `reject_explosive` alone (vs ~0.0002s
-         on main), and the growth was clearly superlinear (0.009s at depth
-         50, not ~5x that at depth 250).
+    This function is the fix for the residual half of that: EXACT
+    cancellation via matching a repeated base by VALUE (Python integer
+    equality, not floating-point log comparison — `f*f/(f*f)`'s two `f`
+    factors are the literal same materialized `Integer`, and grouping by
+    `abs(int(base))` cancels their net exponent to precisely 0, not merely
+    "close to 0"), followed by measuring the SURVIVING terms' magnitude in
+    log space (`_safe_log10_pow`, never `base**exp` itself) — so a factor
+    that does not cancel and is individually enormous (`2**N` with no
+    matching `3**N` to pair against) is measured, never materialized,
+    regardless of what the surrounding product's NET value turns out to be.
 
-    This function fixes both by construction, not by tuning the old one's
-    budget. Logarithms turn a product into a SUM and a reciprocal into a
-    SUBTRACTION: `f * f / (f * f)` becomes `log(f) + log(f) - log(f) -
-    log(f)`, which is exactly `0.0` in IEEE float — not an approximation,
-    because it is the identical float value added then subtracted twice, so
-    there is no intermediate to blow a budget on in the first place, and no
-    dependence on which order the Mul's args happen to be visited in. And
-    because every node's result is cached by `id(node)` in the caller-owned
-    `memo` dict, an ancestor's magnitude is a handful of dict lookups plus
-    O(number of direct children) float additions, never a re-walk of the
-    whole subtree — the walk becomes bottom-up and single-pass overall,
-    each node resolved exactly once regardless of how many ancestors ask.
-
-    The trade against `_bounded_numeric_value` (still used, UNCHANGED, by
-    the `Pow` branch below for a base/exponent `evaluate=False` left
-    un-folded — that machinery is proven and this function does not touch
-    it): this is magnitude-only, never an exact value, so a refusal message
-    always says "about N digits" (matching the `Pow` branch's own numeric-
-    base wording) rather than sometimes reporting an exact count. Good
-    enough here: nothing downstream of this function's caller needs the
-    exact value, only whether to refuse.
-
-    `Add`'s case is the one place this is a DELIBERATE OVER-approximation
-    rather than exact: log does not distribute over addition, so this uses
-    the safe bound `|sum(x_i)| <= sum(|x_i|) <= max(|x_i|) * len(args)`,
-    i.e. `log10|sum| <= max(log10|x_i|) + log10(len(args))`. That can
-    over-refuse an Add that happens to cancel (`huge - huge + 1`, the
-    Add-shaped analogue of bug 1 above) — never a false NEGATIVE, only a
-    conceivably-too-cautious refusal — and is not reachable from a
-    legitimate input in the first place: summing bounded-size heavy-call
-    results grows the digit count by at most `log10(term count)`, and the
-    2000-char expression cap admits at most roughly 125 heavy-call terms,
-    nowhere near enough addition alone to cross `MAX_NUMERIC_DIGITS` from
-    UNDER the cap — see `reject_explosive`'s own test coverage for the
-    measured numbers. A future caller relying on Add being exact here
-    should not assume it.
+    Recurses through `Mul` (summing each arg's own multiset, net-cancelling
+    matching bases as it merges) and through `Pow(base, k)` for a plain
+    Integer `k` (recursing into `base`'s own multiset first, then scaling
+    every net exponent by `k` — `Pow(Mul(f, f), -1)` becomes `{f: -2}` by
+    resolving `Mul(f, f)` to `{f: 2}` first and scaling by -1). A `Pow`
+    whose exponent is not a plain `Integer` — the compound/cancelling
+    exponent shape above — is NOT resolved here: it is left for the caller
+    (`_log10_num_den`) to treat as opaque, because the EXPONENT position
+    needs a fundamentally different question answered (is this an exact
+    small integer, safe to use as a multiplier?) than the base-position
+    multiset this function builds.
     """
+    from sympy import Integer, Mul, Pow
+
+    key = id(node)
+    if key in memo_ms:
+        return memo_ms[key]
+    result = None
+    if isinstance(node, Integer):
+        n = int(node)
+        result = ({}, 0) if n == 0 else ({abs(n): 1}, 1 if n > 0 else -1)
+    elif isinstance(node, Mul):
+        terms: dict = {}
+        sign = 1
+        for arg in node.args:
+            sub = _factor_multiset(arg, memo_ms)
+            if sub is None:
+                terms, sign = None, None
+                break
+            sub_terms, sub_sign = sub
+            if sub_sign == 0:
+                terms, sign = {}, 0
+                break
+            sign *= sub_sign
+            for base_key, exp in sub_terms.items():
+                net = terms.get(base_key, 0) + exp
+                if net:
+                    terms[base_key] = net
+                else:
+                    terms.pop(base_key, None)
+        if terms is not None:
+            result = (terms, sign)
+    elif isinstance(node, Pow) and isinstance(node.exp, Integer):
+        exp_int = int(node.exp)
+        if exp_int == 0:
+            result = ({}, 1)
+        else:
+            sub = _factor_multiset(node.base, memo_ms)
+            if sub is not None:
+                sub_terms, sub_sign = sub
+                if sub_sign == 0:
+                    # 0**positive is 0; 0**negative is undefined (would be
+                    # a ZeroDivisionError at real evaluation) -- not this
+                    # function's business to predict, so treat as opaque
+                    # rather than guessing.
+                    result = ({}, 0) if exp_int > 0 else None
+                else:
+                    scaled = {base_key: exp * exp_int for base_key, exp in sub_terms.items()}
+                    # value = (sub_sign * positive)**exp_int = sub_sign**exp_int *
+                    # positive**exp_int, and sub_sign is -1 or 1, so sub_sign**exp_int
+                    # is 1 for an even exponent and sub_sign itself for an odd one
+                    # (Python's `%` follows the divisor's sign, so this is correct
+                    # for a negative exp_int too: -3 % 2 == 1, treated as odd).
+                    new_sign = 1 if exp_int % 2 == 0 else sub_sign
+                    result = (scaled, new_sign)
+    memo_ms[key] = result
+    return result
+
+
+def _multiset_log_num_den(terms: dict) -> tuple:
+    """log10(|numerator|), log10(|denominator|) for an exact `_factor_
+    multiset` result, via `_safe_log10_pow` per term (never `base**exp`
+    itself) — a positive net exponent is a numerator factor, negative is a
+    denominator factor, matching how `str()` would actually render the
+    reduced fraction.
+    """
+    num_parts = [_safe_log10_pow(_log10_of_int(base_key), exp)
+                 for base_key, exp in terms.items() if exp > 0]
+    den_parts = [_safe_log10_pow(_log10_of_int(base_key), -exp)
+                 for base_key, exp in terms.items() if exp < 0]
+    log_num = math.fsum(num_parts) if num_parts else 0.0
+    log_den = math.fsum(den_parts) if den_parts else 0.0
+    if math.isnan(log_num):
+        log_num = float("inf")
+    if math.isnan(log_den):
+        log_den = float("inf")
+    return log_num, log_den
+
+
+def _safe_multiset_rational(terms: dict, sign: int):
+    """The EXACT `Fraction` an `_factor_multiset` result represents, or
+    `None` if any INDIVIDUAL term is too large to safely materialize — a
+    per-term gate, not a check on the combined/final magnitude, and that
+    distinction is the whole point (#326 finding 3, round 4): checking
+    only the FINAL magnitude is exactly the bug in `_resolve_numeric_
+    exactly`, the previous version of this idea, which let `2**(2**N *
+    3**(-N))` through because the NET log was small even though the
+    individual factor `2**N` (N a ~300-digit number) was not.
+
+    Needed because `_factor_multiset`'s own cancellation is structural —
+    it matches an IDENTICAL base by value, not by common factor — so
+    `Mul(30000, Pow(2, -1))` (`30000/2`, an exact integer, 15000) does
+    NOT reduce to `{}` the way `Pow(Mul(f, f), -1)` reduces against a
+    matching `Mul(f, f)`: 30000 and 2 are different multiset keys, and
+    `{30000: 1, 2: -1}` looks "genuinely fractional" (a negative net
+    exponent survives) even though the TRUE value is an integer. Only
+    Python's own `Fraction` (or SymPy's `Rational`) knows 30000 and 2
+    share a factor of 2 — computing it is the only way to learn that —
+    so this function exists to do so SAFELY: every term is checked
+    against `_SAFE_RECONSTRUCT_DIGITS` (the same "generous but still
+    cheap" bit-budget line `_SUBTREE_BIT_BUDGET` has used throughout this
+    module) via `_safe_log10_pow` — never `base**exp` itself — BEFORE any
+    of them are actually raised to a power. Only once every term
+    individually clears that bound does this function touch real
+    arithmetic (`Fraction`, which auto-reduces via `gcd` on every
+    multiply), and at that point it is bounded: at most roughly 125 terms
+    reach here at all (the 2000-char expression cap), each individually
+    under ~6,021 decimal digits.
+    """
+    from fractions import Fraction
+
+    for base_key, exp in terms.items():
+        if _safe_log10_pow(_log10_of_int(base_key), abs(exp)) > _SAFE_RECONSTRUCT_DIGITS:
+            return None
+    value = Fraction(1)
+    for base_key, exp in terms.items():
+        value *= Fraction(base_key) ** exp
+    return value * sign
+
+
+def _log10_num_den(node, memo: dict) -> tuple:
+    """`(log_num, log_den, fully_resolved)` for a subtree — log10 of the
+    magnitude of the numerator and denominator `str()` would actually
+    render if this subtree's value were printed as a reduced fraction, and
+    whether that accounting is COMPLETE (no free symbol, `Function` call,
+    irrational constant, or other opaque node anywhere inside).
+
+    ALWAYS returns real numbers, never `None`: an opaque sub-node
+    contributes `(0.0, 0.0)` — "nothing known, not assumed dangerous" — to
+    whatever combines it, and `fully_resolved=False` propagates outward so
+    a caller knows this is a PARTIAL answer (finding 1, cross-vendor review
+    round 4 — a chain like `x * factorial(1463) * ... * factorial(1463)`
+    is one flat `Mul`, and the danger is in the siblings that DO resolve,
+    not in `x`; baking the partial-answer into this function's own return
+    value, rather than a separate wrapper only the top of a scan remembers
+    to call, is what makes every caller — the scan, an enclosing Mul/Add,
+    a Pow's own base — see the same partial information automatically).
+
+    Tries `_factor_multiset` first for an EXACT, cancellation-aware
+    answer (the `Integer`/`Mul`/`Pow`-of-integer-exponent chain it
+    handles). Falls back per node type otherwise:
+
+      - `Rational` (rare from `evaluate=False` parsing, but not assumed
+        impossible): `(log10|p|, log10|q|)`, exact, `fully_resolved=True`.
+      - `Float`: SymPy prints a `Float` at fixed (default ~15 significant
+        digit) precision regardless of its magnitude or exponent — it
+        never routes through CPython's int->str ceiling at all, so it is
+        never a hazard by this function's own definition. `(0.0, 0.0,
+        True)`.
+      - `Mul` whose full multiset did not resolve (a symbolic or opaque
+        factor is mixed in): recurse into each arg and combine — num/den
+        ADD independently across args (multiplication: `(a/b)*(c/d) =
+        ac/bd`).
+      - `Add`: a safe UPPER bound, not exact — combining fractions over a
+        common denominator would need per-term GCD reduction, exactly the
+        materialization this module exists to avoid. The combined
+        denominator is bounded by the PRODUCT of every term's own
+        denominator (summing logs), and each term's numerator, once
+        placed over that common denominator, is scaled up by (up to) the
+        OTHER terms' denominators too — so `log_num` is `max(term
+        numerators) + log_den + log10(term count)`, not just the largest
+        term's own numerator (omitting the `+ log_den` was a real bug
+        caught writing this: `1/2 + 1/(factorial(1463)*factorial(1463))`
+        has TINY per-term numerators (1 and 1) but an ~7996-digit
+        COMBINED numerator once put over the shared denominator).
+        `fully_resolved` is the AND of every arg's, either way.
+      - `Pow(base, k)` for a plain Integer `k`: scale `base`'s own
+        `(log_num, log_den)` by `_safe_log10_pow` (never `base**k`
+        itself) — `k>0` grows the numerator side, `k<0` swaps and grows
+        the denominator side. `fully_resolved` follows the base's.
+      - `Pow` with any other exponent shape (compound, symbolic, or
+        itself a `Pow` — a tower): `(0.0, 0.0, False)`. Deliberately NOT
+        resolved here, even for the "exponent cancels to a small exact
+        integer" case (`2**(f*f/(f*f))`) — attempting to combine an
+        unresolved exponent's OWN value with a base is exactly the
+        pattern that broke in three different ways across rounds 2-4.
+        Instead, the SCAN (`_numeric_ceiling_scan`, which now descends
+        into a `Pow`'s base AND exponent as ordinary child nodes — finding
+        1) visits the exponent as its own subtree and checks IT through
+        this exact same function; a fully-cancelling exponent resolves to
+        `(0, 0, True)` there and is correctly let through, and a
+        genuinely dangerous one (`2**N * 3**(-N)`, non-cancelling
+        different bases) is caught there too, without this function ever
+        needing to know which case it is.
+      - Anything else (`Symbol`, `Function`, an irrational `NumberSymbol`,
+        `Rational`-with-non-Integer-parts, ...): `(0.0, 0.0, False)`.
+    """
+    from sympy import Add, Float, Integer, Mul, Pow, Rational
+
     key = id(node)
     if key in memo:
         return memo[key]
-    from sympy import Add, Float, Integer, Mul, Pow, Rational
 
-    result: float | None
-    if isinstance(node, Integer):
-        n = int(node)
-        result = _log10_of_int(n) if n else float("-inf")
-    elif isinstance(node, Rational):  # Integer is also a Rational; caught above
-        result = (_log10_of_int(node.p) - _log10_of_int(node.q)) if node.p else float("-inf")
+    multiset = _factor_multiset(node, memo.setdefault("__multiset__", {}))
+    if multiset is not None:
+        terms, _sign = multiset
+        log_num, log_den = _multiset_log_num_den(terms)
+        result = (log_num, log_den, True)
+    elif isinstance(node, Rational):
+        log_num = _log10_of_int(node.p) if node.p else 0.0
+        log_den = _log10_of_int(node.q) if node.q != 1 else 0.0
+        result = (log_num, log_den, True)
     elif isinstance(node, Float):
-        try:
-            v = abs(float(node))
-        except (OverflowError, ValueError):
-            result = None
-        else:
-            result = math.log10(v) if v else float("-inf")
+        result = (0.0, 0.0, True)
     elif isinstance(node, Mul):
-        parts = [_log10_magnitude(arg, memo) for arg in node.args]
-        if any(p is None for p in parts):
-            result = None
-        else:
-            total = math.fsum(parts)
-            # `inf + (-inf)` is `nan` in IEEE float -- reachable if this Mul
-            # combines two DIFFERENT astronomically-extreme Pow factors (see
-            # the Pow branch's own `_safe_log10_pow` for where +-inf comes
-            # from at all). `nan > 0` is always False, so an unguarded nan
-            # would silently read as "not over cap" -- the wrong direction
-            # for two colliding extreme magnitudes we have no real evidence
-            # about. Treat it as the maximally cautious answer instead.
-            result = float("inf") if math.isnan(total) else total
+        parts = [_log10_num_den(arg, memo) for arg in node.args]
+        log_num = math.fsum(p[0] for p in parts)
+        log_den = math.fsum(p[1] for p in parts)
+        result = (log_num, log_den, all(p[2] for p in parts))
     elif isinstance(node, Add):
-        parts = [_log10_magnitude(arg, memo) for arg in node.args]
-        if any(p is None for p in parts):
-            result = None
-        else:
-            finite = [p for p in parts if p != float("-inf")]
-            result = (max(finite) + math.log10(len(node.args))) if finite else float("-inf")
+        # Safe upper bound, not exact (combining fractions over a common
+        # denominator would need per-term GCD reduction this module exists
+        # to avoid materializing): the combined denominator is bounded by
+        # the PRODUCT of every term's own denominator (summing their logs
+        # is exact for that bound, never an under-count), and putting each
+        # term's numerator over that common denominator SCALES IT UP by
+        # (up to) the other terms' denominators too -- so the numerator
+        # bound must add `log_den` in, not just the largest term's own
+        # numerator. Omitting that was a real bug caught while writing
+        # this: `1/2 + 1/(factorial(1463)*factorial(1463))` combines to
+        # `(factorial(1463)*factorial(1463) + 2) / (2*factorial(1463)*
+        # factorial(1463))` -- an ~7996-digit NUMERATOR -- and a formula
+        # that only looked at each term's OWN numerator (1 and 1, both
+        # tiny) would have reported `log_num=0`, missing it entirely.
+        parts = [_log10_num_den(arg, memo) for arg in node.args]
+        log_den = math.fsum(p[1] for p in parts)
+        log_num = ((max(p[0] for p in parts) + log_den + math.log10(len(parts)))
+                   if parts else 0.0)
+        result = (log_num, log_den, all(p[2] for p in parts))
     elif isinstance(node, Pow) and isinstance(node.exp, Integer):
-        # Only a plain Integer exponent -- a Mul/Rational-shaped one
-        # (`evaluate=False`'s `Pow(base, Mul(30000, Pow(2,-1)))` for a
-        # fractional exponent that happens to reduce to an integer) is left
-        # to the `Pow` branch below, which already resolves that case via
-        # `_bounded_numeric_value`; this function returning None for it is
-        # inconclusive, not a regression -- the outer Mul/Add this Pow sits
-        # in simply does not get refused by THIS check, and the existing
-        # Pow-only logic still inspects the Pow node directly regardless.
         exp_int = int(node.exp)
         if exp_int == 0:
-            result = 0.0
+            result = (0.0, 0.0, True)
         else:
-            base_mag = _log10_magnitude(node.base, memo)
-            result = None if base_mag is None else _safe_log10_pow(base_mag, exp_int)
+            b_num, b_den, b_res = _log10_num_den(node.base, memo)
+            if not b_res and abs(exp_int).bit_length() > 1000:
+                # The base did not fully resolve (a free symbol, most
+                # commonly — `x**20000`, whose Pow-loop-owned
+                # MAX_SYMBOLIC_EXPONENT check is a COST ceiling, not a
+                # print-digit one: `x**20000` is never rendered as a
+                # decimal) AND the exponent is itself enormous, so there is
+                # nothing sound to scale a merely PARTIAL base magnitude
+                # by. Scaling an unresolved base's small partial numerator
+                # by a huge `exp_int` was a real bug caught writing this:
+                # `(x+1)**20000!!...` (`factorial2(20000)`, an exact
+                # Integer with thousands of digits) scaled `(x+1)`'s own
+                # tiny partial numerator (from its `+1` term alone) by
+                # that huge exponent via `_safe_log10_pow`, producing a
+                # spurious `+inf` and refusing on "unbounded digits in its
+                # numerator" instead of correctly deferring to the Pow
+                # loop's own, more accurate `MAX_SYMBOLIC_EXPONENT`
+                # reason. `bit_length() > 1000` is the SAME threshold
+                # `_safe_log10_pow` itself uses for "large enough that
+                # scaling anything by this is not safely informative" —
+                # below it, scaling a PARTIAL base's own known magnitude
+                # (e.g. `(factorial(1463)*x)**1`'s base contributes
+                # `factorial(1463)`'s own ~3998-digit numerator even
+                # though `x` keeps the base itself unresolved) is exactly
+                # the KNOWN-part accounting finding 1 already established
+                # this file must not discard.
+                result = (0.0, 0.0, False)
+            elif exp_int > 0:
+                result = (_safe_log10_pow(b_num, exp_int), _safe_log10_pow(b_den, exp_int), b_res)
+            else:
+                result = (_safe_log10_pow(b_den, -exp_int), _safe_log10_pow(b_num, -exp_int), b_res)
+    elif isinstance(node, Pow):
+        # A COMPOUND exponent -- not itself a bare Integer, but possibly
+        # still an exact integer VALUE once reduced (`Mul(30000,
+        # Pow(2, -1))` for `30000/2`, exactly 15000 — `_factor_multiset`'s
+        # own cancellation cannot see that 30000 and 2 share a factor of
+        # 2, since it only cancels an IDENTICAL repeated base, so this
+        # needs `_safe_multiset_rational`'s per-term-gated exact value
+        # instead (see its own docstring). A tower (`node.exp` itself a
+        # `Pow`) or a symbolic exponent falls through to the final `else`
+        # below via `_factor_multiset` returning `None` for it.
+        multiset = _factor_multiset(node.exp, memo.setdefault("__multiset__", {}))
+        if multiset is None:
+            result = (0.0, 0.0, False)
+        else:
+            terms, sign = multiset
+            value = _safe_multiset_rational(terms, sign) if sign else 0
+            if value is None:
+                # An individual term of the EXPONENT was itself too large
+                # to safely materialize -- the scan's own independent
+                # visit to this exponent (pushed alongside the base by
+                # `_numeric_ceiling_scan`'s explicit Pow-descent) already
+                # catches and refuses cases like `2**N * 3**(-N)` on the
+                # exponent's own print-profile; this Pow's combined
+                # contribution is simply unknown, not a hazard by itself.
+                result = (0.0, 0.0, False)
+            elif value.denominator != 1:
+                result = (0.0, 0.0, False)  # genuinely fractional -- no huge-integer RESULT to bound
+            else:
+                exp_int = int(value)
+                b_num, b_den, b_res = _log10_num_den(node.base, memo)
+                if exp_int == 0 or not b_res:
+                    result = (0.0, 0.0, exp_int == 0)
+                elif exp_int > 0:
+                    result = (_safe_log10_pow(b_num, exp_int), _safe_log10_pow(b_den, exp_int), True)
+                else:
+                    result = (_safe_log10_pow(b_den, -exp_int), _safe_log10_pow(b_num, -exp_int), True)
     else:
-        result = None
+        result = (0.0, 0.0, False)
     memo[key] = result
     return result
 
 
-def _resolve_numeric_exactly(node, memo: dict):
-    """`_bounded_numeric_value`'s own contract (an exact `Rational`/
-    `Integer`/`float`, `None` if inconclusive, or `_NumericTooLarge` if too
-    large to bother with) but order-independent: `_log10_magnitude` — the
-    same order-independent log-space arithmetic `_numeric_ceiling_scan`
-    already trusts — decides the SIZE verdict FIRST, and an exact value is
-    only reconstructed once that verdict says doing so is safe (cheap).
-
-    #326 finding 3 (cross-vendor review, round 3): `reject_explosive`'s Pow
-    branch below calls this (replacing a direct call to
-    `_bounded_numeric_value`) for a Mul/Rational-shaped base or exponent
-    `evaluate=False` left un-folded (`Pow(base, Mul(30000, Pow(2, -1)))`
-    for a fractional-looking exponent, say) — and `_bounded_numeric_value`
-    inherits the SAME order-dependent accumulator bug round 2 fixed at the
-    top level: `2**(f*f/(f*f))` (an exponent that cancels to exactly 1) and
-    `(f*f/(f*f))**2` (a base that cancels to exactly 1) both false-refused,
-    for the identical reason — the accumulator multiplied the numerator's
-    two `f` factors together BEFORE the cancelling reciprocal factor was
-    ever multiplied in.
-
-    Reconstructing the exact value — `type(node)(*node.args)`, SymPy's
-    ORDINARY evaluate=True constructor, which reduces a Rational via GCD
-    the normal way, not through this module's own incremental bit-budget
-    check — is only attempted once `_log10_magnitude` has already shown
-    the true magnitude is small enough to be worth materializing (reusing
-    `_SUBTREE_BIT_BUDGET`'s own "generous but still cheap" line, expressed
-    in decimal digits as `_SAFE_RECONSTRUCT_DIGITS`). A magnitude beyond
-    that — or one `_log10_magnitude` could not determine at all — is
-    treated exactly like `_bounded_numeric_value`'s own two failure modes
-    (`_NumericTooLarge` / `None` respectively), without ever attempting to
-    materialize a value that large.
+def _ceiling_message_num_den(log_num: float, log_den: float) -> str | None:
+    """Refusal text if EITHER side of a `(log_num, log_den)` pair already
+    exceeds `MAX_NUMERIC_DIGITS`, or None. The printer renders a Rational's
+    numerator and denominator separately, so both sides are checked
+    independently — a huge denominator refuses exactly like a huge
+    numerator (round 4's fix: `1/(factorial(1463)*factorial(1463))` has a
+    NEGLIGIBLE value but an ~8000-digit denominator, and `str()` of that
+    denominator alone hits CPython's ceiling regardless of how small the
+    printed VALUE is).
     """
-    from sympy import Float, Integer, Rational
-
-    magnitude = _log10_magnitude(node, memo)
-    if magnitude is None:
-        return None
-    if not math.isfinite(magnitude) or magnitude > _SAFE_RECONSTRUCT_DIGITS:
-        return _NumericTooLarge(_SUBTREE_BIT_BUDGET)
-    args = getattr(node, "args", ())
-    if not args:
-        # A leaf `_log10_magnitude` resolved (an Integer/Rational/Float
-        # would already have been a bare Integer/Float upstream and never
-        # reached this function at all -- see the Pow branch's own
-        # `isinstance(exponent, (Integer, Float))` gate) but that has no
-        # `.args` to reconstruct from, e.g. a NumberSymbol with a resolved
-        # numeric magnitude by some path this function has no case for.
-        return None
-    try:
-        exact = type(node)(*args)
-    except Exception:
-        # Reconstruction is not expected to fail for anything
-        # `_log10_magnitude` already proved numeric -- but this function's
-        # whole contract is "fall through when uncertain", so a defect in
-        # that expectation degrades to inconclusive rather than raising.
-        return None
-    if isinstance(exact, Float):
-        try:
-            return float(exact)
-        except (OverflowError, ValueError):
-            return None
-    if isinstance(exact, (Integer, Rational)):
-        return exact
-    return None  # reconstruction did not land on a plain number -- inconclusive
-
-
-def _ceiling_message(magnitude: float) -> str | None:
-    """Refusal text for a resolved log10 magnitude already over
-    `MAX_NUMERIC_DIGITS`, or None. Shared by `_numeric_ceiling_scan`'s
-    full-node check and `_partial_ceiling_violation`'s partial one, so the
-    "±inf/nan-safe, digit-count-plus-one" logic exists in exactly one
-    place rather than twice with a chance to drift.
-    """
-    if magnitude <= 0:  # at most one digit, never over cap
-        return None
-    if not math.isfinite(magnitude):
-        # `_safe_log10_pow`'s own +-inf shortcut for an astronomically huge
-        # exponent, or (rarer) two such Pow factors colliding into `nan`
-        # inside a Mul -- `int(magnitude)` below would raise OverflowError
-        # on the former and give a wrong answer on the latter (nan compares
-        # False to everything, but is caught upstream by `_log10_magnitude`
-        # 's own nan-to-inf fallback before it ever reaches here).
-        return ("the result would have an unbounded number of digits, over "
-                f"the limit of {MAX_NUMERIC_DIGITS}: it cannot be rendered as "
-                "a decimal string")
-    digit_count = int(magnitude) + 1
-    if digit_count > MAX_NUMERIC_DIGITS:
-        return (f"the result would have about {digit_count} digits, over the "
-                f"limit of {MAX_NUMERIC_DIGITS}: it cannot be rendered as a "
-                "decimal string")
+    for magnitude, side in ((log_num, "numerator"), (log_den, "denominator")):
+        if magnitude <= 0:  # at most one digit on this side, never over cap
+            continue
+        # `magnitude` itself can be finite yet astronomically large (`2**
+        # (1000000**6)`'s numerator has log10 ~ 3e35 -- a REAL, exact
+        # answer, not an overflow), so `digit_count` would need dozens of
+        # its own digits to spell out. Past this line, describing "how
+        # many digits" is no longer useful information, so this reports
+        # the same "unbounded" wording `not math.isfinite` uses below
+        # rather than interpolating an unreadable number.
+        if not math.isfinite(magnitude) or magnitude > 1e15:
+            return (f"the result would have an unbounded number of digits in "
+                    f"its {side}, over the limit of {MAX_NUMERIC_DIGITS}: it "
+                    "cannot be rendered as a decimal string")
+        digit_count = int(magnitude) + 1
+        if digit_count > MAX_NUMERIC_DIGITS:
+            return (f"the result would have about {digit_count} digits in its "
+                    f"{side}, over the limit of {MAX_NUMERIC_DIGITS}: it cannot "
+                    "be rendered as a decimal string")
     return None
 
 
-def _partial_ceiling_violation(node, memo: dict) -> str | None:
-    """Refusal text if the RESOLVABLE part of a `Mul`/`Add` node ALONE
-    already exceeds `MAX_NUMERIC_DIGITS`, ignoring any sibling
-    `_log10_magnitude` cannot resolve, or None.
-
-    #326 finding 1 (cross-vendor review, round 3): `_log10_magnitude` on a
-    `Mul`/`Add` returns `None` the moment ANY child is inconclusive — a
-    free symbol, a `Function` call, an irrational `NumberSymbol`, a
-    non-integer-exponent `Pow` — because the TRUE combined magnitude
-    genuinely cannot be known without evaluating that child. But SymPy
-    FLATTENS a chain of the same operator into one n-ary node: `x *
-    factorial(1463) * factorial(1463) * ...` (117 of them) is ONE `Mul`
-    with 118 args, not a `Mul` wrapping a smaller, fully-numeric `Mul` —
-    there is no nested numeric island for `_numeric_ceiling_scan`'s
-    fallback descent to find. Prefixing the original 117-factorial bomb
-    with `x*`, `cos(0)*`, `pi*`, `E*`, or `2**(1/2)*` (a non-integer-
-    exponent `Pow`, which `_log10_magnitude`'s own `Pow` branch does not
-    handle) all kept it 1990 characters or fewer, under the 2000-char cap,
-    and every `factorial(1463)` sibling stayed individually under 4000
-    digits — so the scan fell through to the generic descent and checked
-    each `Integer` sibling ALONE, finding nothing, while `simplify_
-    expression` still materialized the same ~467,766-digit product before
-    `str()`'ing it.
-
-    A symbolic factor cannot make an already-over-cap numeric PART smaller
-    in any way the printer would rescue — `x` stays `x` (never resolves to
-    a magnitude-shrinking value here; SymPy still combines the OTHER,
-    purely numeric siblings into one coefficient during `simplify`/
-    `expand`/`factor`), and a `Function`/irrational sibling this module
-    cannot evaluate is not evidence its magnitude is small either. So the
-    right rule is not "the whole node is inconclusive, therefore safe" —
-    it is "the part that DOES resolve is refused on its own if it is
-    already too large, independent of what the rest might be." Called
-    only after `_numeric_ceiling_scan` has already found the FULL node's
-    own magnitude to be `None` — computing this unconditionally for every
-    Mul/Add would repeat that same `None` check for nothing.
-    """
-    from sympy import Mul
-
-    parts = [_log10_magnitude(arg, memo) for arg in node.args]
-    resolved = [p for p in parts if p is not None]
-    if not resolved:
-        return None
-    if isinstance(node, Mul):
-        magnitude = math.fsum(resolved)
-        if math.isnan(magnitude):  # see _log10_magnitude's own Mul branch
-            magnitude = float("inf")
-    else:  # Add -- the only other type this function is ever called with
-        finite = [p for p in resolved if p != float("-inf")]
-        magnitude = (max(finite) + math.log10(len(resolved))) if finite else float("-inf")
-    return _ceiling_message(magnitude)
-
-
 def _numeric_ceiling_scan(tree, memo: dict) -> str | None:
-    """Reason some numeric-only (no free symbols) `Integer`/`Mul`/`Add`
-    subtree of `tree` already exceeds `MAX_NUMERIC_DIGITS`, or None. A
-    SEPARATE pass from `reject_explosive`'s own `Pow`-focused `_walk` loop
-    below — see that function for why the two are not merged into one.
+    """Reason some numeric-only subtree of `tree` would print a numerator
+    or denominator over `MAX_NUMERIC_DIGITS`, or None. A SEPARATE pass from
+    `reject_explosive`'s own `Pow`-focused `_walk` loop below — see that
+    function for why the two remain distinct passes.
 
-    #326 (THE-1091): `reject_explosive` used to inspect only `Pow` nodes, on
-    the assumption that unbounded growth enters exclusively through
-    exponentiation. `"*".join(["factorial(1463)"] * 117)` disproved that.
-    Each `factorial(1463)` is individually legal — `MAX_HEAVY_ARG` admits an
-    argument of 1463, and the result is 3998 digits, under
-    `MAX_NUMERIC_DIGITS` — and it materializes to a plain `Integer` during
-    PARSING itself (see the `_HEAVY_FUNCTIONS` comment above: a function
-    call on a literal argument evaluates at parse time regardless of
-    `evaluate=False`). `Mul(Integer, Integer, ..., 117 of them)` contains no
-    `Pow` at all, so the old loop walked straight past a 467,766-digit
-    product and let CPython's own int->str ceiling (4300 digits by default)
-    raise from deep inside SymPy's printer — an uncaught `ValueError`, not a
-    refusal.
+    #326 (THE-1091), four cross-vendor review rounds: `reject_explosive`
+    used to inspect only `Pow` nodes, on the assumption that unbounded
+    growth enters exclusively through exponentiation. It does not — see
+    `_factor_multiset`'s and `_log10_num_den`'s own docstrings for the
+    full history (a flat n-ary product of pre-materialized `Integer`s with
+    no `Pow` at all; an ordered accumulator that blows its own budget on
+    an intermediate before a later factor cancels it; a value whose
+    magnitude is tiny but whose printed DENOMINATOR is enormous; a sibling
+    that resists resolution — symbolic, transcendental, a non-integer-
+    exponent `Pow` — hiding an already-dangerous numeric partner in the
+    SAME flat `Mul`; and `Pow` itself, entirely unvisited by this scan
+    until this round, hiding the same dangers one level down).
 
-    TWO FOLLOW-ON BUGS, both found by cross-vendor review of the first
-    version of this fix, drove this shape specifically:
+    THE INVARIANT: no numeric subtree whose printed numerator or
+    denominator would exceed `MAX_NUMERIC_DIGITS` is ever evaluated. Every
+    `Integer`/`Mul`/`Add`/`Pow` node is checked via `_log10_num_den`, which
+    ALWAYS returns a real `(log_num, log_den)` pair (see its own docstring
+    for why: a partial answer from an unresolvable sibling is still
+    checked, not discarded). Once a node's own accounting is COMPLETE
+    (`fully_resolved=True` — every leaf underneath it was a real number,
+    not a symbol/Function/irrational), that is the entire, correctly-
+    cancelled answer for the WHOLE subtree rooted there, and this scan does
+    not descend into its children: a piece of an already-resolved
+    combination checked in isolation is exactly the round-2/3 mistake
+    (the DENOMINATOR of a cancelling fraction, refused on its own ~8000
+    digits even though the fraction it is part of reduces to 1). Only when
+    a node's accounting is PARTIAL does the scan need to look inside for a
+    smaller — or sibling — numeric hazard `_log10_num_den` could not
+    already see from here.
 
-      1. Checking every Mul/Add node the walk happened to visit,
-         independently, is WRONG once a node can be part of a larger
-         numeric combination: `factorial(1463) * factorial(1463) /
-         (factorial(1463) * factorial(1463))` is exactly 1 (the ORIGINAL
-         report, via `_bounded_numeric_value`'s order-dependent
-         accumulation — see `_log10_magnitude`'s docstring), but even
-         after fixing the magnitude computation to be order-independent,
-         the OLD per-node walk still separately visited the DENOMINATOR's
-         own `Mul(f, f)` (the base of the `Pow(..., -1)` reciprocal) and
-         refused IT on its own ~7996-digit magnitude — correct if that
-         `Mul` were going to be printed standalone (a lone `1/(f*f)`, with
-         nothing to cancel it, genuinely cannot be rendered: `str()` on
-         an 8000-digit DENOMINATOR hits the exact same CPython ceiling),
-         but wrong here, where an ENCLOSING `Mul` already accounts for it
-         and reduces to 1.
-      2. The same per-node-independent design is where the superlinear
-         walk (finding 3 below `reject_explosive`) came from: every
-         numeric ancestor of a node re-triggered a check of that node.
-
-    The fix for both: once a node's OWN magnitude is known (not `None` —
-    i.e. it is fully numeric, `_log10_magnitude` did not bottom out on a
-    free symbol, a `Function` call, or float-mode overflow anywhere inside
-    it), that ONE number is the complete, correctly-cancelled answer for
-    the ENTIRE subtree rooted there — `_log10_magnitude` already resolved
-    every descendant to get it. So this scan does NOT descend into a
-    node's children once its magnitude resolves: whatever is inside has
-    already been accounted for, and looking at a piece of it in isolation
-    (the denominator bug above) is exactly the mistake to avoid. Only when
-    a node's magnitude is `None` (mixed with a free symbol, or otherwise
-    inconclusive) does the scan need to look inside FOR A SMALLER numeric
-    island that might still be dangerous on its own (`x +
-    "*".join(["factorial(1463)"] * 117)`, say).
-
-    Iterative (a stack, like `_walk`), not recursive: a Python recursive
-    descent here would reintroduce the exact `RecursionError` risk
-    `_walk`'s own docstring already rules out for deep trees. Cheap by
-    construction rather than by tuning: a fully-numeric tree (the common
-    dangerous case) resolves in ONE `_log10_magnitude` call at the ROOT and
-    the scan's own stack never grows past that; a symbolic tree with no
-    numeric island anywhere pushes every node once and finds nothing,
-    matching the old loop's own baseline cost.
+    Iterative (a stack, like `_walk`), not recursive, for the SAME reason
+    `_walk` is: a Python recursive descent over the scan's own traversal
+    would reintroduce a `RecursionError` risk on a deep tree.
+    `_log10_num_den`/`_factor_multiset` are themselves still Python
+    recursive descents over one node's OWN subtree (bounded by that
+    subtree's depth, memoized so no node is resolved twice) — guarded at
+    `reject_explosive`'s call site, and again around the `Pow` loop below,
+    which now also calls into this same recursive machinery.
     """
     from sympy import Add, Integer, Mul, Pow
 
@@ -1113,58 +1212,47 @@ def _numeric_ceiling_scan(tree, memo: dict) -> str | None:
             # surface and this scan would walk past whatever it wraps.
             stack.extend(node)
             continue
-        if isinstance(node, Pow):
-            # Entirely the Pow-focused loop's domain (below — it visits
-            # every node in the tree via `_walk` regardless of what this
-            # scan chooses to skip, so nothing is lost by deferring). This
-            # scan's job is the coverage gap where NO Pow node exists at
-            # all; reaching into a Pow's own base/exponent here duplicates
-            # that loop's job with DIFFERENT, less specific wording, and
-            # for a SYMBOLIC-base Pow with a huge numeric exponent, this
-            # scan would treat the bare exponent Integer as if it were a
-            # value about to be PRINTED (refusing it on `MAX_NUMERIC_
-            # DIGITS` grounds) when the loop below already has a dedicated,
-            # more accurate reason for that exact shape (`MAX_SYMBOLIC_
-            # EXPONENT` — expanding a symbolic power is superlinear in the
-            # exponent, a cost bound, not a print-ceiling one). Confirmed
-            # by `tests/test_bug_sweep.py`'s `_EXPLOSIVE_CRASH_INPUTS[1]`
-            # (`(x+1)**20000!!...`), which this scan used to intercept
-            # with the wrong reason before this fix.
-            #
-            # `_log10_magnitude` (used above and below by an ENCLOSING
-            # Mul/Add) still resolves straight through a Pow when it needs
-            # to — e.g. `factorial(1463) * factorial(1463) * 2**50`'s
-            # combined magnitude correctly includes the `2**50` factor.
-            # This skip only affects where THIS scan independently
-            # descends and checks IN ISOLATION, not what a parent's own
-            # magnitude computation is allowed to look through.
-            continue
-        if isinstance(node, (Integer, Mul, Add)):
-            magnitude = _log10_magnitude(node, memo)
-            if magnitude is not None:
-                # Fully numeric: already the complete, cancellation-correct
-                # answer for this whole subtree. Do not push its children —
-                # checking a piece of an already-resolved combination
-                # independently is finding 1 above.
-                violation = _ceiling_message(magnitude)
-                if violation:
-                    return violation
+        if isinstance(node, (Integer, Mul, Add, Pow)):
+            log_num, log_den, resolved = _log10_num_den(node, memo)
+            violation = _ceiling_message_num_den(log_num, log_den)
+            if violation:
+                return violation
+            if resolved:
+                # Fully accounted for -- see this function's own docstring
+                # for why checking a piece of it independently, below,
+                # would be wrong rather than merely redundant.
                 continue
-            # magnitude is None: mixed with a free symbol, or otherwise
-            # inconclusive as a WHOLE -- but the part that DOES resolve
-            # might already be dangerous on its own (finding 1, round 3):
-            # SymPy flattens a chain of the same operator into one n-ary
-            # node, so there is no nested numeric-only island to find by
-            # descending when the danger is a sibling AWAY, not a level
-            # down. Checked before falling through to the generic descent
-            # below (which still runs regardless — an inconclusive sibling
-            # like `cos(...)` or a nested Function argument can itself
-            # hide a separate numeric bomb one level further in, and this
-            # partial check only looks at `node`'s OWN direct args).
-            if isinstance(node, (Mul, Add)):
-                violation = _partial_ceiling_violation(node, memo)
-                if violation:
-                    return violation
+            # Partial: the KNOWN part was just checked above and cleared.
+            # Fall through to the generic descent so an unresolved sibling
+            # (a Function argument, ...) still gets its own chance to
+            # reveal a hazard `_log10_num_den` could not see from here —
+            # EXCEPT a `Pow` node, which needs its OWN descent rule, not
+            # the generic one below: a `Pow` with a plain Integer exponent
+            # whose BASE did not resolve (a symbolic base, most commonly)
+            # must push ONLY the base, never the exponent. The exponent
+            # there is not a value about to be PRINTED — it is a count
+            # `reject_explosive`'s own Pow loop uses for a completely
+            # different ceiling (`MAX_SYMBOLIC_EXPONENT`, a CPU-cost bound
+            # on `sp.expand`, never rendered as a decimal) — and pushing
+            # it onto this stack anyway was a real bug caught writing
+            # this: `(x+1)**20000!!...` (`factorial2(20000)`, an exact
+            # Integer with thousands of digits, used AS AN EXPONENT on a
+            # symbolic base) had its bare exponent independently checked
+            # here as if it were a print target and refused on "digits in
+            # its numerator" instead of correctly falling through to the
+            # Pow loop's own, more accurate `MAX_SYMBOLIC_EXPONENT`
+            # reason. A `Pow` whose exponent is NOT a plain Integer
+            # (compound or itself a tower) still gets both children
+            # pushed — `_log10_num_den` never even looked at the base in
+            # that case, so both remain to be independently checked
+            # (`2**(2**N * 3**(-N))`'s exponent is exactly this shape).
+            if isinstance(node, Pow):
+                if isinstance(node.exp, Integer):
+                    stack.append(node.base)
+                else:
+                    stack.append(node.base)
+                    stack.append(node.exp)
+                continue
         args = getattr(node, "args", ())
         if isinstance(args, tuple):
             stack.extend(args)
@@ -1222,27 +1310,32 @@ def reject_explosive(tree) -> str | None:
     either alone as sufficient. See `tests/test_bug_sweep.py`'s block
     for the assertion that the backstop actually holds for this shape.
     """
-    from sympy import Float, Integer, Pow
+    from sympy import Integer, Pow
 
     # #326 (THE-1091): a SEPARATE pass, before the Pow-only walk below,
-    # covers a numeric-only Mul/Add/Integer that the Pow-only loop cannot
-    # see at all — see `_numeric_ceiling_scan`'s own docstring for the
-    # `factorial(1463)` product this closes, and for why it is a genuinely
-    # separate pass rather than folded into the loop below: that loop's
-    # `_walk` visits every node unconditionally (needed for Pow, which can
-    # appear anywhere), while the scan must NOT independently re-examine a
-    # node once an ancestor has already resolved it — the two have
-    # different, incompatible descent rules, not just different node-type
-    # filters.
+    # covers a numeric-only Integer/Mul/Add/Pow that the Pow-loop's own
+    # cost-focused logic does not try to (round 4 folded Pow INTO this
+    # scan too — see `_numeric_ceiling_scan`'s own docstring for why the
+    # two remain separate passes rather than one merged loop, and why
+    # `Pow` needed to join the scan's trigger set: `("*".join(
+    # ["factorial(1463)"] * 117) + "**1")`, `(f*f)**-1`, and `1/(f*f)`
+    # each hid an over-cap numeric part ONLY reachable through a Pow node
+    # — the old scan skipped Pow entirely, and the Pow-loop below only
+    # ever looked past a TRIVIAL exponent (`|exp| <= 1`) without checking
+    # what the base itself would print as).
+    #
     # `_numeric_ceiling_scan` itself is iterative (an explicit stack, the
     # same reason `_walk` below is) specifically so a deep TREE cannot
-    # `RecursionError` its own traversal -- but `_log10_magnitude`, which
-    # it calls once per numeric-only node, is a genuine Python recursive
-    # descent over that SAME `evaluate=False` tree (#326 finding 2,
-    # cross-vendor review round 3). Ordinarily this never matters: a tree
-    # deep enough to threaten it is, empirically, already deep enough that
-    # `parse_expr` itself either failed to build it (caught, separately,
-    # by `safe_parse`'s own `try/except` around THAT call) or hit its own
+    # `RecursionError` its own traversal — but `_log10_num_den`/
+    # `_factor_multiset`, which it calls once per numeric-only node, are
+    # genuine Python recursive descents over that SAME `evaluate=False`
+    # tree (#326 finding 2, cross-vendor review round 3; the Pow loop
+    # below now calls the identical machinery for its own symbolic-
+    # exponent resolution, so it is wrapped the same way too — finding 4,
+    # round 4). Ordinarily this never matters: a tree deep enough to
+    # threaten it is, empirically, already deep enough that `parse_expr`
+    # itself either failed to build it (caught, separately, by
+    # `safe_parse`'s own `try/except` around THAT call) or hit its own
     # parser recursion ceiling well before this function's simpler
     # per-node recursion would — measured directly against a left-nested
     # `"1+" * n + "1"` chain, `parse_expr` starts raising `RecursionError`
@@ -1257,179 +1350,98 @@ def reject_explosive(tree) -> str | None:
     # `errors._MESSAGE_HINTS`' `"too deeply nested"` entry already maps to
     # `resource_exhausted` — though `reject_explosive`'s own refusals get
     # there via `CATEGORY_CEILING` regardless of message text).
+    #
+    # One `memo` dict for BOTH passes below: `_log10_num_den` memoizes by
+    # `id(node)`, so a node either pass visits (or the Pow loop's own
+    # exponent resolution visits again) is resolved once total.
+    memo: dict = {}
     try:
-        # Shared with the Pow loop below (#326 finding 3, round 3): a Pow's
-        # base/exponent is now also resolved through `_log10_magnitude`,
-        # and reusing this dict means a node visited by both passes (or by
-        # the scan and then again through a Pow's own base/exponent) is
-        # only ever resolved once.
-        memo: dict = {}
         _ceiling_violation = _numeric_ceiling_scan(tree, memo)
     except RecursionError:
         return "expression too deeply nested to evaluate safely"
     if _ceiling_violation:
         return _ceiling_violation
 
-    for node in _walk(tree):
-        if not isinstance(node, Pow):
-            continue
-        base, exponent = node.base, node.exp
+    try:
+        for node in _walk(tree):
+            if not isinstance(node, Pow):
+                continue
+            base, exponent = node.base, node.exp
 
-        # A tower: the exponent is itself a power. `9**9**9**9` is four
-        # characters of input and an integer with more digits than there are
-        # atoms in the observable universe. There is no threshold worth
-        # picking here — the shape itself is the problem.
-        if isinstance(exponent, Pow):
-            return ("a power tower (an exponent that is itself a power) is not "
-                    "evaluated: the result grows faster than any useful bound")
+            # A tower: the exponent is itself a power. `9**9**9**9` is four
+            # characters of input and an integer with more digits than there
+            # are atoms in the observable universe. There is no threshold
+            # worth picking here — the shape itself is the problem. (Also
+            # exactly the shape `_log10_num_den`'s own Pow branch declines to
+            # resolve, deferring to this dedicated check.)
+            if isinstance(exponent, Pow):
+                return ("a power tower (an exponent that is itself a power) is not "
+                        "evaluated: the result grows faster than any useful bound")
 
-        if not isinstance(exponent, (Integer, Float)):
             if exponent.free_symbols:
                 continue  # symbolic exponent, e.g. x**n — nothing to expand
-            # A NUMERIC exponent that is not already a bare Integer/Float —
-            # `evaluate=False` leaves `30000/2` as `Mul(30000, Pow(2, -1))`
-            # rather than folding it to a plain Integer, even though its
-            # VALUE is the ordinary integer 15000. Resolve it through
-            # `_resolve_numeric_exactly` (order-independent, via
-            # `_log10_magnitude` — #326 finding 3, round 3: a bare
-            # `_bounded_numeric_value` call here inherited its ORDER-
-            # DEPENDENT accumulator bug, so `2**(f*f/(f*f))`, an exponent
-            # that cancels to exactly 1, used to false-refuse) rather than
-            # `int(exponent)` directly, which — unbounded — is the exact
-            # mistake this module exists to avoid if the subtree turns out
-            # to hide something enormous.
-            resolved_exp = _resolve_numeric_exactly(exponent, memo)
-            if resolved_exp is None:
-                # INCONCLUSIVE, not proof of anything — a Function call
-                # (`2**cos(0)`, the true value is 2), an irrational
-                # NumberSymbol, or float-mode precision loss. Refusing here
-                # would be worse than doing nothing: fall through to
-                # whatever the existing downstream screen already does
-                # (guarded_call's CPU/wall backstop, and each caller's own
-                # resource-error catch), exactly as main's behavior for any
-                # exponent shape this function has no case for.
-                continue
-            if isinstance(resolved_exp, _NumericTooLarge):
-                # The OPPOSITE case: PROVED too large by exact bit-length
-                # arithmetic (e.g. `2**(2**20000 * 3**20000)`, factors that
-                # do not cancel) — real evidence, refuse.
-                return (f"the exponent is a numeric expression whose magnitude "
-                        f"already exceeds the limit of {MAX_NUMERIC_DIGITS} "
-                        "digits: it cannot be evaluated safely")
-            if isinstance(resolved_exp, float):
-                if not resolved_exp.is_integer():
-                    continue  # a genuinely fractional exponent — no huge-integer result to bound
-                exponent = Integer(int(resolved_exp))
-            else:
-                if resolved_exp.q != 1:
-                    continue  # a genuinely fractional exponent — no huge-integer result to bound
-                exponent = resolved_exp
-        try:
-            exp_value = int(exponent)
-        except (TypeError, ValueError, OverflowError):
-            return "the exponent is not a value this can bound"
-        # abs(), because the danger is the MAGNITUDE. `2**(-1000000)` is a
-        # rational with a million-bit denominator, and `exp_value <= 1` waved
-        # every negative exponent through on its way to catching 0 and 1.
-        if abs(exp_value) <= 1:
-            continue
 
-        if base.free_symbols:
-            if exp_value > MAX_SYMBOLIC_EXPONENT:
-                # NEVER interpolate exp_value itself: `2**100000!!` makes it
-                # `factorial2(100000)`, an exact Integer with thousands of
-                # digits, and formatting that directly hits Python's int->str
-                # conversion limit (4300 digits) — the refusal MESSAGE would
-                # raise before it could even report the refusal. Report the
-                # (cheap, bounded) digit count instead of the value.
-                return (f"a symbolic power with an exponent of about "
-                        f"{_approx_decimal_digits(exp_value)} digits exceeds "
-                        f"the limit of {MAX_SYMBOLIC_EXPONENT}: expanding it "
-                        "is superlinear in the exponent")
-        else:
-            # Cheap to compute, impossible to print. Estimated by digit count
-            # rather than by computing it, which would be the very thing this
-            # is here to avoid.
-            #
-            # `log10_magnitude` is computed via `_log10_of_int` for an
-            # `Integer` base rather than the previous `abs(float(base))`:
-            # for a base with hundreds of digits, `float(base)` either
-            # raises `OverflowError` (as Python's own `int` would) or — the
-            # crash this fixes — returns `inf` WITHOUT raising, because
-            # SymPy's `Integer.__float__` differs from `int.__float__` here.
-            # `_log10_of_int` gets to the same log10(magnitude) with no float
-            # conversion of the (potentially huge) base at all. A `Float`
-            # base is already double-precision internally, so converting it
-            # is the cheap, ordinary case.
-            try:
-                if isinstance(base, Integer):
-                    log10_magnitude = _log10_of_int(int(base))
-                elif isinstance(base, Float):
-                    magnitude = abs(float(base))
-                    log10_magnitude = (math.log10(magnitude) if magnitude
-                                        else float("-inf"))
-                else:
-                    # A NUMERIC base that is not already a bare Integer/
-                    # Float — `evaluate=False` leaves `3/2` as `Mul(3,
-                    # Pow(2, -1))`, bypassing the isinstance checks above
-                    # even though its value is the ordinary Rational 3/2.
-                    # `_log10_magnitude` directly (order-independent —
-                    # #326 finding 3, round 3: the old `_bounded_numeric_
-                    # value` call here inherited its ORDER-DEPENDENT
-                    # accumulator bug, so `(f*f/(f*f))**2`, a base that
-                    # cancels to exactly 1, used to false-refuse), not
-                    # `_resolve_numeric_exactly`: this branch only ever
-                    # needs a MAGNITUDE, never an exact value the way the
-                    # exponent branch above does (to test integer-ness), so
-                    # there is no reason to pay for reconstructing one.
-                    log10_magnitude = _log10_magnitude(base, memo)
-                    if log10_magnitude is None:
-                        # Inconclusive (a Function call, an irrational
-                        # constant, float-mode overflow, ...) — no ceiling
-                        # check for THIS node; fall through the same way an
-                        # unresolvable exponent does above.
-                        continue
-            except (TypeError, ValueError, OverflowError):
+            if not base.free_symbols:
+                # A NUMERIC base with a NUMERIC exponent — the scan above
+                # already refused this exact Pow node if its PRINTED result
+                # (numerator or denominator) would be over cap, including a
+                # compound/cancelling exponent like `f*f/(f*f)` (the scan
+                # visited it as its own subtree via `_factor_multiset`'s
+                # exact cancellation). Round 4 removed the digit-math that
+                # used to live here entirely: the scan now covers every
+                # numeric-base Pow case it used to, and several it did not
+                # (findings 1-3) — this branch has nothing left to do.
                 continue
-            if log10_magnitude > 0:  # equivalent to magnitude > 1
-                # abs() here too. A negative exponent produces a rational
-                # whose DENOMINATOR has that many digits, which costs the same
-                # to build; without it `digits` came out negative and every
-                # negative exponent compared under the cap.
-                #
-                # `exp_value` itself can be an enormous Integer (again,
-                # `2**100000!!` — the exponent, not the base, is the huge one
-                # this time): `abs(exp_value) * log10_magnitude` is int-times-
-                # float, and Python resolves that by converting the int to
-                # float FIRST — which is the original `OverflowError` this
-                # fixes if `exp_value` doesn't fit a double. `bit_length()`
-                # again sidesteps ever attempting that conversion: past ~1000
-                # bits the result is already astronomically over
-                # `MAX_NUMERIC_DIGITS` for any `log10_magnitude > 0`, so
-                # there is nothing the exact product could add.
-                abs_exp = abs(exp_value)
-                if abs_exp.bit_length() > 1000:
-                    over_cap, digit_desc = True, "an unbounded number of"
-                else:
-                    digits = abs_exp * log10_magnitude
-                    if math.isfinite(digits):
-                        # `digits` IS log10(result), not the digit count: a
-                        # value with N digits has log10 in [N-1, N), so the
-                        # true count is floor(digits) + 1. Comparing `digits`
-                        # itself against the cap (the previous code) admits
-                        # EQUALITY at the boundary — `10**4000` has 4001
-                        # digits but log10(10**4000) == 4000 exactly, which
-                        # is not > MAX_NUMERIC_DIGITS(4000), so it slipped
-                        # through as "allowed" one digit over the stated cap.
-                        digit_count = int(digits) + 1
-                        over_cap = digit_count > MAX_NUMERIC_DIGITS
-                        digit_desc = f"about {digit_count}"
-                    else:
-                        over_cap, digit_desc = True, "an unbounded number of"
-                if over_cap:
-                    return (f"the result would have {digit_desc} digits, "
-                            f"over the limit of {MAX_NUMERIC_DIGITS}: it cannot be "
-                            "rendered as a decimal string")
+
+            # A SYMBOLIC base with a NUMERIC exponent is the one case that
+            # IS this loop's own business: not a print-digit ceiling (the
+            # result never gets rendered as a decimal — `x**20000` stays
+            # symbolic, or gets partially EXPANDED), but a CPU-cost ceiling
+            # (`MAX_SYMBOLIC_EXPONENT`; see its own definition above for the
+            # measured superlinear cost of `sp.expand`/`sp.factor` on a
+            # large symbolic power). Needs the exponent's sign and
+            # magnitude — `_factor_multiset` gives both WITHOUT ever
+            # materializing the exponent's actual value (#326 finding 3,
+            # round 4: the previous version of this branch used
+            # `_resolve_numeric_exactly`, which reconstructed via SymPy's
+            # own `evaluate=True` `Mul`/`Pow` constructor once a log-space
+            # verdict said the FINAL magnitude was small — but
+            # `Mul.flatten` computes `coeff *= Pow(b, e)` for each integer
+            # power of a numeric base internally, so `2**(2**N * 3**(-N))`,
+            # final log negligible, still tried to materialize the literal
+            # ~10**298-digit integer `2**N` for a ~300-digit `N` on the way
+            # there).
+            if isinstance(exponent, Integer):
+                exp_int = int(exponent)
+                exp_magnitude = _log10_of_int(exp_int) if exp_int else 0.0
+                exp_sign = 0 if exp_int == 0 else (1 if exp_int > 0 else -1)
+            else:
+                multiset = _factor_multiset(exponent, memo.setdefault("__multiset__", {}))
+                if multiset is None:
+                    continue  # inconclusive -- a Function call, irrational constant, ...
+                terms, exp_sign = multiset
+                if exp_sign != 0 and any(v < 0 for v in terms.values()):
+                    continue  # genuinely fractional -- no huge-integer RESULT to bound
+                exp_magnitude, _ = _multiset_log_num_den(terms)
+
+            # abs(), because the danger is the MAGNITUDE — a large negative
+            # exponent on a symbolic base is not expanded the same way a
+            # large positive one is, so only the positive side is bounded
+            # below, matching this loop's behavior since #214.
+            if exp_magnitude <= 0:  # |value| <= 1 (or exactly 0) -- trivial
+                continue
+            if exp_sign > 0 and exp_magnitude > math.log10(MAX_SYMBOLIC_EXPONENT):
+                # NEVER interpolate the exponent's own value: report the
+                # (cheap, bounded) digit count instead — see
+                # `_approx_decimal_digits`'s own docstring for why
+                # interpolating a huge exponent directly can crash the
+                # refusal MESSAGE before it is ever returned.
+                return (f"a symbolic power with an exponent of about "
+                        f"{int(exp_magnitude) + 1} digits exceeds the limit of "
+                        f"{MAX_SYMBOLIC_EXPONENT}: expanding it is superlinear "
+                        "in the exponent")
+    except RecursionError:
+        return "expression too deeply nested to evaluate safely"
     return None
 
 

@@ -555,7 +555,28 @@ behind it.
   false-refused even though the identical cancellation at the top level
   was already fixed; both now resolve through `_log10_magnitude` first
   (`_resolve_numeric_exactly`), falling back to an exact reconstruction
-  only once that confirms it is safe (cheap) to.
+  only once that confirms it is safe (cheap) to. A fourth review round
+  found the residual gap was architectural, not three more instances:
+  printability was still being measured as a single signed
+  log10(|value|), when the actual invariant this module needs is that no
+  numeric subtree's PRINTED numerator or denominator ever exceeds
+  `MAX_NUMERIC_DIGITS` — a value can be tiny (even negative in log space,
+  a reciprocal) while its denominator alone is thousands of digits
+  (`1/(factorial(1463)*factorial(1463))`), and `Pow` itself was not part
+  of the ceiling scan at all, so a trivial `**1` or a reciprocal `**-1`
+  walked an over-cap numeric part straight through it
+  (`("*".join(["factorial(1463)"]*117)+"**1")`, `(f*f)**-1`). Replaced
+  the scalar magnitude model with a numerator/denominator pair tracked in
+  log space throughout (`_log10_num_den`/`_factor_multiset`/
+  `_multiset_log_num_den`/`_safe_multiset_rational`), folded `Pow` into
+  the scan's own trigger set instead of a separate loop, and removed
+  `_resolve_numeric_exactly`'s `evaluate=True` reconstruction entirely —
+  SymPy's own `Mul.flatten` folds integer powers of a numeric base
+  internally regardless of the final combined magnitude, so
+  `2**(2**N * 3**(-N))` for a large `N` tried to materialize the literal
+  `2**N` on the way to a negligible net value; the exponent's value is
+  now derived purely from log-space arithmetic and a per-term-gated exact
+  `Fraction`, never SymPy's own evaluator.
 
 ## [0.12.0] — 2026-09-09
 
