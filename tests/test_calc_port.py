@@ -137,7 +137,7 @@ check("percent_change: '1e100_000' is refused BEFORE Fraction() runs "
       and "_" in r.get("error", ""), f"-> {r}")
 r = exact.percent_change("1", "1_000")
 check("percent_change: '1_000' (an ordinary small number, just spelled "
-      "with an underscore) is refused cleanly, not silently mis-scored",
+      "with an underscore) is refused cleanly, not silently scored wrong",
       r["ok"] is False and r.get("code") == "resource_exhausted", f"-> {r}")
 r = exact.percent_change("1", "+1e3")
 check("percent_change: a leading '+' sign still works",
