@@ -204,7 +204,7 @@ exactly where the forgery started, overwriting its opening bytes rather
 than landing after it (confirmed with a two-writer experiment on this
 exact pattern: `open(p,"w")` writes and flushes, a second `open(p,"a")`
 appends more, the first object writes again — the second write ends up
-INSIDE the appended region, not after it, leaving a corrupted, unparseable
+INSIDE the appended region, not after it, leaving a corrupted, unparsable
 remainder rather than a clean second event). A forged line planted this way
 self-destructs into `discarded_events`, not a clean displacement. What
 `events_consistent`'s `discarded_events == 0` leg actually defends against
