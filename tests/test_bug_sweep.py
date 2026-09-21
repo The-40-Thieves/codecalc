@@ -2221,6 +2221,152 @@ check("...but 3*f*f - f*f - f*f (coefficients sum to +1, not 0) is still refused
       _r.get("ok") is False and _r.get("code") == _errors.RESOURCE_EXHAUSTED,
       f"-> {_r}")
 
+# ═══ round 8 of cross-vendor review (grok PASS with two Low notes; ═════════
+# ═══ Codex FAIL with one High and one Low, on ab0f5cc) ══════════════════════
+
+# Codex finding 1 (High): the round-seven per-function caps were enforced
+# ONLY per numeric TOKEN -- factorint(<25-digit literal>*<25-digit
+# literal>) (two individually-permitted literals whose PRODUCT is ~50
+# digits, hard to factor) and sqrt(<990-digit literal>*<990-digit literal>)
+# (product ~1980 digits, 2.1s to compute) both passed classify_unsafe
+# clean. Fixed structurally: ONE table (_FUNCTION_ARG_CAPS) now drives (a)
+# a token-level check that sums every literal's digit count WITHIN one
+# top-level argument (an upper bound on their PRODUCT, catching both repros
+# below at the token level, before parse_expr ever runs) and (b) two
+# tree-level backstops for the shapes a token-only check cannot reach at
+# all: a Function-node check (value-kind and, structurally, any future
+# digit-kind Function name) and a NEW Pow-loop branch for a unit-fraction
+# exponent (sqrt/root/cbrt's actual tree shape, since none of them leave a
+# Function node named after themselves).
+_A25 = "1000000000000000987654327"
+_B25 = "8000000000000000123456849"
+_t0 = time.time()
+_r = _se5.classify_unsafe(f"factorint({_A25}*{_B25})")
+_dt = time.time() - _t0
+check("factorint(<25-digit literal>*<25-digit literal>) is refused at the "
+      "token level (round 7 passed this clean)",
+      _r is not None, f"-> {_r}")
+check(f"  ...promptly ({_dt:.3f}s)", _dt < 1.0, f"-> {_dt:.3f}s")
+
+_d990a, _d990b = "9" * 990, "8" * 990
+_t0 = time.time()
+_v, _e = _boundary_parse(f"sqrt({_d990a}*{_d990b})")
+_dt = time.time() - _t0
+check("sqrt(<990-digit literal>*<990-digit literal>) is refused, not computed "
+      "(round 7 passed this clean, took 2.1s to compute)",
+      _v is None and _e is not None, f"-> value={_v!r} err={_e!r}")
+check(f"  ...promptly ({_dt:.3f}s)", _dt < 1.0, f"-> {_dt:.3f}s")
+
+# A literal AT the cap (one factor alone, not a product) must still work.
+_v, _e = _boundary_parse(f"factorint({_A25})")
+check("factorint(<one 25-digit literal, at the cap>) still evaluates",
+      _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("sqrt(10**1000)")
+check("sqrt(10**1000) still evaluates", _v is not None and _e is None,
+      f"-> value={_v!r} err={_e!r}")
+
+# Self-check: every name in _FUNCTION_ARG_CAPS is exercised by an
+# appropriate layer for a COMPUTED (not bare-literal) argument. Value-kind
+# names (_HEAVY_FUNCTIONS) get the tree-level Function-node backstop
+# (`_numeric_ceiling_scan`); the root family gets the NEW tree-level Pow
+# unit-fraction-exponent backstop (a nested heavy call as the argument, so
+# no literal token names the true magnitude at all). The eager factor
+# family (factorint and its five siblings) genuinely has NO tree-level
+# backstop possible -- none of the six are sympy.Function subclasses, and
+# each coerces its argument to a concrete int internally regardless of
+# evaluate=False, so the danger is baked into the very act of PARSING
+# (documented in MAX_FACTOR_ARG_DIGITS's own comment) -- so those six are
+# exercised via the token-level COMBINED-literal-product check instead,
+# the one protection that family can structurally have.
+_EAGER_FACTOR_FAMILY = {"factorint", "primefactors", "divisors", "mobius", "nextprime", "isprime"}
+# `sqrt`/`cbrt` both stay a genuinely unevaluated `Pow(base, Rational(1,
+# n))` for a CONCRETE (already-materialized) base under `evaluate=False`,
+# reaching this round's new Pow-loop branch cleanly (verified live).
+# `root(x, n)` does NOT share that path for every `n` -- probed live:
+# `root(factorial(1463), 2)` parses to a `Mul` (`Pow`'s `.eval()` pulled
+# perfect-square-ish factors out of the ALREADY-CONCRETE base eagerly, at
+# construction time, a different code path from bare `sqrt`/`cbrt`) -- so
+# `root` is checked via the token-level combined-literal path instead,
+# below, alongside the factor family, rather than asserting a tree shape
+# that does not actually occur for it.
+_TREE_ONLY_ROOT_FAMILY = {"sqrt", "cbrt"}
+_TOKEN_ONLY_ROOT_FAMILY = {"root"}
+_EXTRA_CALL_ARGS = {"root": ", 2"}
+# Self-check scope, and why: this round's OWN work is the "digits"-kind
+# entries (the factor and root families) and their two enforcement layers
+# -- that is what gets a genuine COMPUTED-argument check below, at
+# whichever layer actually applies to each. The PRE-EXISTING "value"-kind
+# entries (`_HEAVY_FUNCTIONS`) already had a computed-argument tree-level
+# backstop from round 6 -- but probing every member for THIS self-check
+# surfaced that it is not uniform across all 27 names, none of which
+# round 6 (or this round) ever claimed: `rf`/`ff`'s actual SymPy class
+# names are `RisingFactorial`/`FallingFactorial`, not `rf`/`ff`, so the
+# `type(node).__name__ in _FUNCTION_ARG_CAPS` lookup never matches them;
+# `digamma` gets REWRITTEN to `polygamma` at construction (a different
+# name again); `primepi` and `binomial` with certain small second
+# arguments evaluate their own argument eagerly regardless of
+# `evaluate=False`; `primorial`/`prime`/`motzkin` reject a non-integer
+# argument outright with a `ValueError` (safe, just a different failure
+# mode). None of that is this round's regression to fix -- it predates
+# it -- so the "value"-kind branch below checks only what round 6 already
+# established and this round did not touch: the TOKEN-level bare-literal
+# cap, unconditionally reliable regardless of any of the above.
+_checked_names = set()
+for _fn_name, (_kind, _cap) in _se5._FUNCTION_ARG_CAPS.items():
+    _checked_names.add(_fn_name)
+    _extra = _EXTRA_CALL_ARGS.get(_fn_name, "")
+    if _fn_name in _EAGER_FACTOR_FAMILY or _fn_name in _TOKEN_ONLY_ROOT_FAMILY:
+        _big1 = "9" * (_cap // 2 + 2)
+        _big2 = "9" * (_cap - _cap // 2 + 2)
+        _r = _se5.classify_unsafe(f"{_fn_name}({_big1}*{_big2}{_extra})")
+        check(f"self-check: {_fn_name}() combined-literal computed argument "
+              "is refused at the token level",
+              _r is not None, f"-> {_r}")
+    elif _fn_name in _TREE_ONLY_ROOT_FAMILY:
+        _t0 = time.time()
+        _v, _e = _boundary_parse(f"{_fn_name}(factorial(1463){_extra})")
+        _dt = time.time() - _t0
+        check(f"self-check: {_fn_name}(factorial(1463)) (a computed, "
+              "tree-only-catchable argument) is refused",
+              _v is None and _e is not None, f"-> value={_v!r} err={_e!r}")
+        check(f"  ...promptly ({_dt:.3f}s)", _dt < 2.0, f"-> {_dt:.3f}s")
+    else:
+        # value-kind (_HEAVY_FUNCTIONS): the token-level bare-literal cap
+        # -- round 1's own protection, unconditionally reliable, and the
+        # one property every member of this set actually shares (see the
+        # comment above for why the tree-level backstop is NOT that).
+        _r = _se5.classify_unsafe(f"{_fn_name}({_cap + 1})")
+        check(f"self-check: {_fn_name}({_cap + 1}) (one over cap, a bare "
+              "literal) is refused at the token level",
+              _r is not None, f"-> {_r}")
+check(f"self-check covered every name in _FUNCTION_ARG_CAPS "
+      f"({len(_checked_names)} names)",
+      _checked_names == set(_se5._FUNCTION_ARG_CAPS),
+      f"-> missing={set(_se5._FUNCTION_ARG_CAPS) - _checked_names!r}")
+
+# Codex finding 2 (Low): _approx_decimal_digits() truncates a float log and
+# overcounts at exact power-of-ten boundaries (a 25-digit all-9s literal
+# read as 26 digits; a 1,200-digit all-9s literal as 1,201) -- and the
+# digit-cap enforcement decision used that approximation directly. Fixed by
+# using the EXACT digit count for a plain decimal literal (its token
+# string length, cheap and exact) instead.
+_lit25, _lit26 = "9" * 25, "9" * 26
+check("factorint(<25-digit literal, exactly at MAX_FACTOR_ARG_DIGITS>) "
+      "still has no token-level opinion",
+      _se5.classify_unsafe(f"factorint({_lit25})") is None,
+      f"-> {_se5.classify_unsafe(f'factorint({_lit25})')!r}")
+check("factorint(<26-digit literal, one over the cap>) is refused",
+      _se5.classify_unsafe(f"factorint({_lit26})") is not None,
+      f"-> {_se5.classify_unsafe(f'factorint({_lit26})')!r}")
+_lit1200, _lit1201 = "9" * 1200, "9" * 1201
+check("sqrt(<1200-digit literal, exactly at MAX_ROOT_ARG_DIGITS>) "
+      "still has no token-level opinion",
+      _se5.classify_unsafe(f"sqrt({_lit1200})") is None,
+      f"-> {_se5.classify_unsafe(f'sqrt({_lit1200})')!r}")
+check("sqrt(<1201-digit literal, one over the cap>) is refused",
+      _se5.classify_unsafe(f"sqrt({_lit1201})") is not None,
+      f"-> {_se5.classify_unsafe(f'sqrt({_lit1201})')!r}")
+
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== ALL BUG-SWEEP REGRESSIONS FIXED ===")
 sys.exit(1 if FAILS else 0)

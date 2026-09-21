@@ -714,6 +714,46 @@ behind it.
   (`3*factorial(1463)*factorial(1463) - factorial(1463)*factorial(1463) -
   factorial(1463)*factorial(1463)`) still falls through to the
   unmodified per-term upper bound and is correctly refused.
+  An eighth review round (grok PASS with two Low notes; Codex FAIL with
+  one High and one Low, both on the round-seven head) closed the last
+  three: (High, Codex) round seven's new per-function caps (the 25-digit
+  factoring family, the 1,200-digit root family) were enforced ONLY per
+  numeric TOKEN — `factorint(<25-digit literal>*<25-digit literal>)` (two
+  individually-permitted literals whose PRODUCT is ~50 digits, hard to
+  factor) and `sqrt(<990-digit literal>*<990-digit literal>)` (product
+  ~1980 digits, 2.1s to compute) both passed `classify_unsafe` clean —
+  the same "new caps added to one layer" pattern as before, just one
+  layer over. Fixed structurally rather than patched a third time: ONE
+  table (`_FUNCTION_ARG_CAPS`, name -> `(cap_kind, cap_value)`) now
+  drives every enforcement site in the module — the token screen's
+  per-literal check, a NEW token-screen check that sums every literal's
+  digit count within one top-level ARGUMENT (an upper bound on their
+  product, closing both repros above at the token level), the tree-level
+  `Function`-node check in `_numeric_ceiling_scan` (generalized from
+  `_HEAVY_FUNCTIONS` alone), and a NEW tree-level `Pow`-loop branch for a
+  unit-fraction exponent (`1/2`, `1/3`, ...) on a numeric base — the
+  actual tree shape `sqrt`/`cbrt` compile to, since neither ever appears
+  as a `Function` node named after itself; `root` shares the token-level
+  path instead, since its own construction was found (live) to take a
+  different, more eager code path than `sqrt`/`cbrt` for at least one
+  concrete-base case. (Low, Codex) `_approx_decimal_digits()` truncates a
+  float `log10` and overcounts at an exact power-of-ten boundary — a
+  25-digit all-9s literal read as 26 digits, a 1,200-digit one as 1,201 —
+  and the digit-cap enforcement decision used that approximation
+  directly. Fixed with a new `_exact_decimal_digit_count`: the EXACT
+  digit count of a plain decimal literal is just its token string length
+  (stripped of underscores and leading zeros), cheap and exact, with the
+  log-based approximation kept only for a hex/octal/binary literal (whose
+  character count bears no relation to its decimal value) and for prose.
+  (Low, grok) two stale docstring passages rewritten to describe current
+  behaviour: `_log10_num_den`'s compound-`Pow` case no longer claims a
+  flat `(0.0, 0.0, False)` (it resolves a unit-magnitude base to
+  `(0.0, 0.0, True)` without ever reading the exponent, and otherwise
+  scales the base by an upper bound on the exponent's magnitude); the
+  scan's own comment no longer claims `_log10_num_den` "never even looked
+  at the base" for a non-Integer exponent (the compound-`Pow` branch
+  loads the base first, for its own unit-base check, before the "push
+  both children" case this comment explains is even reached).
 
 ## [0.12.0] — 2026-09-09
 
