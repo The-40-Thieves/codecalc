@@ -177,14 +177,38 @@ behind it.
   (the coefficient); the new intercept is exposed only under its own name,
   `intercept`, alongside an explicit `coefficient` alias for `c` so a fresh
   reader is not stuck decoding a single letter. (THE-1092)
+- **A second cross-vendor review round found the `STRONG_EXPONENTIAL_RATIO`
+  shortcut above still trusted a SINGLE ratio.** "Every available ratio
+  agrees" was checked with `all()` over whatever `ratios` held, with no floor
+  on its length — a set of one vacuously "agrees with itself". Reproduced on
+  data that is quadratic-ish and startup-dominated, NOT exponential: sizes
+  `[10,20,40]` / times `[1000,1004,1064]` baseline-subtract to corrected
+  `[0,4,64]`; the first gap is dropped as always, leaving exactly one ratio
+  (`64/4 = 16.0`) — a legitimate `> 3.0` corrected denominator (4ms) still
+  small enough to inflate, exactly the failure mode `_classify_by_ratio`'s
+  own docstring already warns about for the ordinary median path, now
+  reachable by a shortcut allowed to decide on FEWER samples than that path
+  ever is. Two independent guards, both required: a new
+  `MIN_STRONG_EXPONENTIAL_RATIOS` (2) — the shortcut cannot fire below it,
+  so (since 3 sizes yield at most 1 doubling ratio) 3-size data can never
+  trigger the exponential override at all, only `noise-floor` or
+  `"inconclusive"`; and a new `raw_ratios` cross-check — for each doubling
+  pair, `benchmark()` now also computes that pair's ratio from UNSUBTRACTED
+  times, and `_decide_estimate` requires BOTH the corrected ratio AND its
+  raw counterpart to independently clear `STRONG_EXPONENTIAL_RATIO`. A raw
+  ratio, dominated by real subprocess/interpreter overhead, does not look
+  exponential from noise alone the way a small corrected denominator can —
+  confirmed on the original passing repro (`[10,20,40,80]`/`[1,10,200,5000]`:
+  raw ratios `20.0`/`25.0`, both still clear the floor) and on the new
+  quadratic-ish one (raw ratio `1.06`, nowhere close). (THE-1092)
 - `benchmark`'s docs still called 3 sizes a plain "minimum" after the first
   fix above made 3 sizes unable to decide a polynomial/log-family growth
   class — the `sizes` size-count floor, its `Field` description, and
   `benchmark`'s docstrings (`server.py` and `tools.py`) now say so
   explicitly: 3 is still accepted (unchanged, backward compatible), but can
-  only return noise-floor `O(1)`, the `STRONG_EXPONENTIAL_RATIO` override
-  above (`O(c^n)`, only when the lone available ratio is itself extreme), or
-  `"inconclusive"` — never any OTHER growth class. 4+ sizes are needed before
+  only return noise-floor `O(1)` or `"inconclusive"` — never any OTHER
+  growth class, not even exponential (see the guard above: 3 sizes cannot
+  reach `MIN_STRONG_EXPONENTIAL_RATIOS` either). 4+ sizes are needed before
   the curve fit is trusted, 5+ doubling sizes before the general ratio median
   is. The default `sizes` ("100,1000,10000,100000", 4 sizes 10x apart)
   always decides via `estimate_basis: "curve-fit"` — verified against 3 live

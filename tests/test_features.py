@@ -480,15 +480,24 @@ check("a benchmark against a missing runtime is classified runtime_unavailable, 
 
 
 def _decide(sizes, times):
-    """Run the same two-estimator decision `benchmark()` runs, on canned data."""
+    """Run the same two-estimator decision `benchmark()` runs, on canned data.
+
+    Mirrors `benchmark()`'s own loop exactly, including `raw_ratios` (the
+    SAME doubling pairs as `ratios`, from UNSUBTRACTED `times`) -- the
+    round-3 cross-vendor-review cross-check `_decide_estimate`'s
+    STRONG_EXPONENTIAL_RATIO shortcut now requires alongside `ratios` itself.
+    """
     baseline = min(times)
     corrected = [max(t - baseline, 0.0) for t in times]
     fit = _tools._fit_class(sizes, times)  # raw times: see _fit_class's docstring
     ratios = []
-    for (na, ta), (nb, tb) in zip(zip(sizes, corrected), zip(sizes[1:], corrected[1:])):
+    raw_ratios = []
+    for (na, ta, tra), (nb, tb, trb) in zip(
+            zip(sizes, corrected, times), zip(sizes[1:], corrected[1:], times[1:])):
         if nb == 2 * na and ta > 3.0:
             ratios.append(round(tb / ta, 2))
-    estimate, basis = _tools._decide_estimate(ratios, fit)
+            raw_ratios.append(round(trb / tra, 2))
+    estimate, basis = _tools._decide_estimate(ratios, fit, raw_ratios)
     return estimate, basis, fit, ratios
 
 
@@ -557,6 +566,41 @@ check("exponential shape, non-doubling sizes (no ratios at all): quality gate al
       _basisexp2 == "inconclusive" and _rexp2 == [],
       f"-> estimate={_eexp2!r} basis={_basisexp2!r} best={_fitexp2.get('best_score')}")
 
+# A SECOND cross-vendor review round found the STRONG_EXPONENTIAL_RATIO
+# shortcut above still trusted a SINGLE ratio: "every available ratio
+# agrees" with `all()` over a set of one is vacuously true. Repro: sizes
+# [10,20,40] / times [1000,1004,1064] is quadratic-ish and startup-dominated
+# -- NOT exponential -- but baseline-subtracts to corrected [0,4,64]; the
+# first gap is dropped as always, leaving exactly ONE ratio (64/4 = 16.0), a
+# legitimate `> 3.0` corrected denominator (4ms) still small enough to
+# inflate. Must now be `inconclusive` (3 sizes: MIN_FIT_POINTS and
+# MIN_ROBUST_RATIOS both out of reach, and 1 ratio is below
+# MIN_STRONG_EXPONENTIAL_RATIOS too) -- never O(c^n), and never any other
+# confident class either.
+_equad, _basisquad, _fitquad, _rquad = _decide([10, 20, 40], [1000, 1004, 1064])
+check("quadratic-ish 3-size table (round-3 review) does not fire the exponential shortcut",
+      not _equad.startswith("O(c^n)"), f"-> estimate={_equad!r} basis={_basisquad!r} ratios={_rquad}")
+check("  ...specifically: exactly 1 ratio, below MIN_STRONG_EXPONENTIAL_RATIOS (2)",
+      len(_rquad) == 1 and len(_rquad) < _tools.MIN_STRONG_EXPONENTIAL_RATIOS,
+      f"-> ratios={_rquad} MIN_STRONG_EXPONENTIAL_RATIOS={_tools.MIN_STRONG_EXPONENTIAL_RATIOS}")
+check("  ...and lands honestly inconclusive (3 sizes can decide nothing else here)",
+      _basisquad == "inconclusive", f"-> basis={_basisquad!r} estimate={_equad!r}")
+
+# The documented COST of both round-3 guards together: a GENUINELY
+# exponential 3-size table can no longer trigger the override either -- 3
+# sizes structurally cannot produce the 2 ratios MIN_STRONG_EXPONENTIAL_
+# RATIOS now requires (at most 1 doubling ratio exists at 3 sizes at all;
+# see `_classify_by_ratio`'s "first gap always discarded" note). This is
+# intentional, not a regression: a real single ratio and a noise-manufactured
+# one are indistinguishable from inside `_decide_estimate` without a second
+# ratio to check it against, so the guard costs real 3-size exponential
+# detection to close the false-positive hole above. `inconclusive` here is
+# the documented right answer, not a bug.
+_e3xp, _basis3xp, _fit3xp, _r3xp = _decide([100_000, 200_000, 400_000], [10, 50, 900])
+check("genuinely exponential 3-size table: cannot trigger the override either (documented cost)",
+      _basis3xp == "inconclusive" and not _e3xp.startswith("O(c^n)"),
+      f"-> estimate={_e3xp!r} basis={_basis3xp!r} ratios={_r3xp}")
+
 # A 3-size table where interpreter/subprocess startup (~300ms) swamps a tiny
 # real signal: the doubling ratio computed from it is unreliable (a single
 # ratio, from near-noise-floor corrected times) and the fit is starved to 3
@@ -569,7 +613,8 @@ check("3-size startup-dominated table (tiny real signal) is not a confident O(n^
 # `estimate_basis` is new: a caller must be able to tell WHICH estimator
 # produced `estimate` without parsing prose out of `ratio_confidence`.
 check("estimate_basis is one of the documented values",
-      {_basis1, _basis2, _basis3, _basis4, _basis5, _basisexp, _basisexp2} <= set(_tools.ESTIMATE_BASES),
+      {_basis1, _basis2, _basis3, _basis4, _basis5, _basisexp, _basisexp2,
+       _basisquad, _basis3xp} <= set(_tools.ESTIMATE_BASES),
       f"-> {_tools.ESTIMATE_BASES}")
 
 # One live run of the issue's actual O(n) program at exactly 3 sizes (this
@@ -598,22 +643,28 @@ check("live 3-size run of the issue's O(n) program: not a confident O(n^2)/O(n^3
 # return the issue's own 3-size table deterministically -- on old code it
 # still RUNS to completion and asserts the wrong class, a real failure
 # instead of a crash.
-_orig_measure = _tools._measure
-_canned_durations_ms = {200_000: 49.0, 400_000: 56.0, 800_000: 107.0}
+def _public_benchmark(sizes_csv: str, durations_by_n: dict):
+    """Call the real `tools.benchmark()` with only `_measure` stubbed to
+    return `durations_by_n` deterministically -- everything else (auto-scale
+    check, `_fit_class`, `_decide_estimate`, result assembly) runs for real.
+    """
+    orig_measure = _tools._measure
+
+    def _stub_measure(language, code, sizes, timeout, repeats, deadline=None, on_progress=None):
+        return ([{"n": n, "ok": True, "duration_ms": durations_by_n[n],
+                  "all_runs_ms": [durations_by_n[n]], "stdout": "", "stderr": ""}
+                 for n in sizes], None)
+
+    _tools._measure = _stub_measure
+    try:
+        return _tools.benchmark("ignored -- _measure is stubbed, never actually run",
+                                sizes=sizes_csv)
+    finally:
+        _tools._measure = orig_measure
 
 
-def _stub_measure(language, code, sizes, timeout, repeats, deadline=None, on_progress=None):
-    return ([{"n": n, "ok": True, "duration_ms": _canned_durations_ms[n],
-              "all_runs_ms": [_canned_durations_ms[n]], "stdout": "", "stderr": ""}
-             for n in sizes], None)
-
-
-_tools._measure = _stub_measure
-try:
-    _pub = _tools.benchmark("ignored -- _measure is stubbed below, never actually run",
-                            sizes="200000,400000,800000")
-finally:
-    _tools._measure = _orig_measure
+_pub = _public_benchmark("200000,400000,800000",
+                         {200_000: 49.0, 400_000: 56.0, 800_000: 107.0})
 _pub_est = _pub.get("estimate", "")
 check("public tools.benchmark(), with only timing stubbed, reproduces the same honest verdict",
       _pub.get("ok") is True and _pub.get("method") == "empirical" and
@@ -623,6 +674,21 @@ check("public tools.benchmark(), with only timing stubbed, reproduces the same h
 check("  ...and the durations it reasoned over are exactly the canned ones (the stub took effect)",
       [r["duration_ms"] for r in _pub.get("runs", [])] == [49.0, 56.0, 107.0],
       f"-> {[r.get('duration_ms') for r in _pub.get('runs', [])]}")
+
+# Round-3 cross-vendor review's own repro, through the SAME public path: sizes
+# [10,20,40] / durations [1000,1004,1064] (quadratic-ish, startup-dominated,
+# NOT exponential) -- on the code this fixes, the lone ratio (16.0) vacuously
+# "agreed with itself" and fired the STRONG_EXPONENTIAL_RATIO shortcut for a
+# confident O(c^n). Required outcome per review: inconclusive or O(n^2),
+# never O(c^n).
+_pub2 = _public_benchmark("10,20,40", {10: 1000.0, 20: 1004.0, 40: 1064.0})
+_pub2_est = _pub2.get("estimate", "")
+check("public tools.benchmark() on the round-3 repro table: inconclusive or O(n^2), never O(c^n)",
+      _pub2.get("ok") is True and
+      (_pub2.get("estimate_basis") == "inconclusive" or _pub2_est.startswith("O(n^2)")) and
+      not _pub2_est.startswith("O(c^n)"),
+      f"-> ok={_pub2.get('ok')} estimate={_pub2_est!r} basis={_pub2.get('estimate_basis')!r} "
+      f"ratios={_pub2.get('doubling_ratios')} runs={[(r['n'], r['duration_ms']) for r in _pub2.get('runs', [])]}")
 
 # ── the shipped skill (#88) ───────────────────────────────────────────────
 # The tools exist to stop a model asserting numbers it did not compute. Nothing

@@ -316,11 +316,38 @@ INTERCEPT_NOISE_TOLERANCE_MS = 5.0
 #: median, before it is allowed to decide with FEWER than `MIN_ROBUST_RATIOS`
 #: ratios: the one deliberate exception to "too few samples, do not decide",
 #: because a magnitude this large is unambiguous regardless of how few
-#: samples produced it. Added after the same cross-vendor review: 2 ratios
+#: samples produced it. Added after cross-vendor review: 2 ratios
 #: ([22.11, 25.12], both genuinely exponential) is one short of
 #: `MIN_ROBUST_RATIOS` and would otherwise have fallen all the way through to
 #: the curve fit above, which has no exponential candidate to offer at all.
+#:
+#: But "a single ratio can never decide a class" applies to THIS shortcut too
+#: — a second cross-vendor review round reproduced exactly that: sizes
+#: [10,20,40] / times [1000,1004,1064] (quadratic-ish, startup-dominated —
+#: NOT exponential) baseline-subtract to corrected [0,4,64]; the first gap is
+#: dropped as usual, leaving exactly ONE ratio (64/4 = 16.0) — which cleared
+#: this floor and "every available ratio agrees" was vacuously true for a set
+#: of one. `MIN_STRONG_EXPONENTIAL_RATIOS` (below) closes the "only one"
+#: half; the raw-time cross-check in `_decide_estimate` closes the other
+#: half it does not: TWO ratios both manufactured the same way (a small-but-
+#: technically-real corrected denominator a few ms above the noise floor)
+#: could otherwise still agree with each other while agreeing with nothing
+#: real. `ta = 4ms` clears `> 3.0` legitimately, but dividing by a
+#: denominator that small still inflates — the same warning
+#: `_classify_by_ratio`'s own docstring already gives for the ordinary
+#: ratio-median path applies here with a vengeance, since this path is
+#: allowed to decide on FEWER samples than that one ever is.
 STRONG_EXPONENTIAL_RATIO = 12.0
+
+#: However large the ratios, ONE of them is a single data point, not
+#: evidence of agreement — the whole premise of "every available ratio
+#: agrees" needs at least two ratios to agree WITH EACH OTHER. Below this,
+#: `_decide_estimate` cannot use the shortcut regardless of magnitude; 3
+#: sizes can produce at most 1 doubling ratio at all (the first gap is
+#: always dropped — see `_classify_by_ratio`'s docstring), so this also means
+#: 3-size data can never trigger the exponential override, only `noise-floor`
+#: or `inconclusive` — the documented cost of this guard.
+MIN_STRONG_EXPONENTIAL_RATIOS = 2
 
 
 def _fit_class(sizes: list[int], times_ms: list[float]) -> dict:
@@ -442,7 +469,7 @@ def _classify_by_ratio(ratios: list[float]) -> str:
 ESTIMATE_BASES = ("ratio-median", "curve-fit", "noise-floor", "inconclusive")
 
 
-def _decide_estimate(ratios: list[float], fit: dict) -> tuple[str, str]:
+def _decide_estimate(ratios: list[float], fit: dict, raw_ratios: list[float]) -> tuple[str, str]:
     """Pick the growth-class estimate and say which estimator actually produced it.
 
     This is the exact decision GH #327 found broken: the old
@@ -466,9 +493,25 @@ def _decide_estimate(ratios: list[float], fit: dict) -> tuple[str, str]:
     [10,20,40,80]/[1,10,200,5000] (2 ratios, both >20x, curve-fit "O(n^3)" at
     relative_error 41.0). A ratio magnitude this large, agreed on by EVERY
     available ratio, is not the kind of ambiguity `MIN_ROBUST_RATIOS` exists
-    to guard against, so it is allowed to decide on its own.
+    to guard against, so it is allowed to decide on its own — but "agreed on"
+    now means two independent things, both required (`MIN_STRONG_EXPONENTIAL_
+    RATIOS`'s and this parameter's own docstrings have the round-3 review
+    that found each was needed): at least `MIN_STRONG_EXPONENTIAL_RATIOS`
+    corrected ratios (a set of one cannot "agree" with itself), AND
+    `raw_ratios` — the SAME doubling pairs' ratios computed from
+    unsubtracted, unbaselined times — independently clearing the same floor.
+    A corrected ratio can be legitimately large from measurement noise alone
+    (a denominator a few ms above the noise floor still inflates); its raw
+    counterpart, dominated by real subprocess/interpreter overhead, will NOT
+    also look exponential unless the growth is large enough to swamp that
+    overhead outright. `raw_ratios` must be the same length as `ratios`, in
+    the same pair order — `benchmark()` builds both from one loop for exactly
+    that reason.
     """
-    if ratios and all(r >= STRONG_EXPONENTIAL_RATIO for r in ratios):
+    if (len(ratios) >= MIN_STRONG_EXPONENTIAL_RATIOS
+            and len(raw_ratios) == len(ratios)
+            and all(r >= STRONG_EXPONENTIAL_RATIO for r in ratios)
+            and all(r >= STRONG_EXPONENTIAL_RATIO for r in raw_ratios)):
         return "O(c^n) (exponential or worse)", "ratio-median"
 
     if len(ratios) >= MIN_ROBUST_RATIOS:
@@ -600,19 +643,25 @@ def benchmark(code: str, language: str = "python3", sizes: str = "100,1000,10000
 
     3 is the accepted MINIMUM (unchanged, for backward compatibility — see
     `MIN_FIT_POINTS`/`MIN_ROBUST_RATIOS`'s comments for the GH #327 history of
-    why), but 3 sizes can NEVER decide a polynomial/log-family growth class:
-    a 2-parameter curve fit against 3 points has only 1 residual degree of
-    freedom, not enough to discriminate reliably across the 8 candidate
-    classes in `_CLASSES` (`estimate_basis` never reaches `"curve-fit"`), and
-    3 sizes can produce at most 1 doubling ratio, never the >= 3
-    `MIN_ROBUST_RATIOS` needs for a median. What 3 sizes CAN return:
-    `"O(1) (work below noise floor...)"` (`estimate_basis: "noise-floor"`,
-    when the work is flat enough); `"O(c^n) (exponential or worse)"`
-    (`estimate_basis: "ratio-median"`, ONLY when that lone ratio is itself
-    extreme — see `STRONG_EXPONENTIAL_RATIO`, a deliberate exception because
-    that magnitude is unambiguous regardless of sample size); or, for
-    everything else, `"inconclusive (...)"`. At least 4 sizes are needed
-    before the curve fit is actually trusted (`estimate_basis: "curve-fit"`);
+    why), but 3 sizes can NEVER decide a growth class at all — not even the
+    exponential override: a 2-parameter curve fit against 3 points has only 1
+    residual degree of freedom, not enough to discriminate reliably across
+    the 8 candidate classes in `_CLASSES` (`estimate_basis` never reaches
+    `"curve-fit"`); 3 sizes can produce at most 1 doubling ratio, never the
+    >= 3 `MIN_ROBUST_RATIOS` needs for a median; and 1 ratio is also below
+    `MIN_STRONG_EXPONENTIAL_RATIOS` (2 — "every available ratio agrees" needs
+    at least two ratios to agree WITH EACH OTHER, a lesson from a round-3
+    cross-vendor review repro: [10,20,40]/[1000,1004,1064], quadratic-ish and
+    NOT exponential, produced exactly 1 noisy ratio that vacuously "agreed
+    with itself"). What 3 sizes CAN return: `"O(1) (work below noise
+    floor...)"` (`estimate_basis: "noise-floor"`, when the work is flat
+    enough), or, for everything else, `"inconclusive (...)"` — that is the
+    documented COST of the round-3 guard: no 3-size result can ever be a
+    confident growth class of any kind, exponential included — the
+    exponential override needs >= 4 sizes too (N sizes yield at most N-2
+    doubling ratios, and `MIN_STRONG_EXPONENTIAL_RATIOS` is 2). At least 4
+    sizes are needed before the curve fit is actually trusted
+    (`estimate_basis: "curve-fit"`);
     this module's own default `sizes` ("100,1000,10000,100000") is 4 sizes
     10x apart — no doubling pairs at all, so it always decides via curve-fit,
     never the ratio median. At least 5 DOUBLING sizes (n, 2n, 4n, 8n, 16n)
@@ -635,11 +684,11 @@ def benchmark(code: str, language: str = "python3", sizes: str = "100,1000,10000
         return {"ok": False, "error": "sizes must be comma-separated integers"}
     if len(size_list) < 3:
         return {"ok": False, "error": "need at least 3 sizes (3 is accepted but can only "
-                                      "return noise-floor O(1), an unambiguous O(c^n) "
-                                      "override, or an inconclusive estimate — never any "
-                                      "other growth class; 4+ sizes for a trusted curve fit, "
-                                      "5+ doubling sizes for a robust ratio median; see "
-                                      "benchmark's own docstring)"}
+                                      "return noise-floor O(1) or an inconclusive estimate "
+                                      "— never a growth class, not even exponential; 4+ "
+                                      "sizes for a trusted curve fit, 5+ doubling sizes for "
+                                      "a robust ratio median; see benchmark's own "
+                                      "docstring)"}
     repeats = max(1, min(repeats, 5))
 
     runs, error = _measure(language, code, size_list, timeout, repeats, on_progress=on_progress)
@@ -704,10 +753,19 @@ def benchmark(code: str, language: str = "python3", sizes: str = "100,1000,10000
     # always deliberately discarded that same first gap as sub-noise.
     fit = _fit_class(sizes_n, times)
     ratios = []
-    for (na, ta), (nb, tb) in zip(zip(sizes_n, corrected), zip(sizes_n[1:], corrected[1:])):
+    # `raw_ratios`: the SAME doubling pairs as `ratios`, same order, but from
+    # UNSUBTRACTED `times` — built in this one loop so the two are guaranteed
+    # to correspond 1:1. Only consumed by `_decide_estimate`'s
+    # STRONG_EXPONENTIAL_RATIO shortcut, as a cross-check against a
+    # corrected ratio baseline subtraction alone manufactured (see that
+    # constant's docstring for the round-3 review repro).
+    raw_ratios = []
+    for (na, ta, tra), (nb, tb, trb) in zip(
+            zip(sizes_n, corrected, times), zip(sizes_n[1:], corrected[1:], times[1:])):
         if nb == 2 * na and ta > 3.0:  # ignore ratios from sub-noise baselines
             ratios.append(round(tb / ta, 2))
-    estimate, estimate_basis = _decide_estimate(ratios, fit)
+            raw_ratios.append(round(trb / tra, 2))
+    estimate, estimate_basis = _decide_estimate(ratios, fit, raw_ratios)
 
     return {
         "ok": True,
