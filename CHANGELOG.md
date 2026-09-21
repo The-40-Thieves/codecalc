@@ -245,6 +245,9 @@ behind it.
   `events_consistent` now additionally requires `discarded_events == 0` —
   an honest harness never produces a discarded event on its own — which
   closes that gap without costing the legitimate over-cap case.
+  `CONTRACT_VERSION` `1.17.0` -> `1.18.0`, MINOR — additive: `truncated_reason` gains
+  `"event_detail_over_cap"` and `events[]` items gain the optional `detail_dropped: true`
+  marker; no shape a `1.17.0` client already validates changes otherwise.
 
 ## [0.12.0] — 2026-09-09
 
