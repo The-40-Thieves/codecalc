@@ -1010,6 +1010,99 @@ check("  ...and a decisive, non-overlapping win still counts as rejecting "
       f"-> {_285_inf}")
 
 
+# ═══ codecalc issue #328: the headline speedup.ratio must come from the ════
+#     SAME positions the significance test kept, never a wider pool ════════
+# `_speedup(before, after)` (no `comparable=`) always used
+# `_comparable_positions`'s WIDER pool — `_infer_speedup` narrows it twice
+# more (gates (c)/(b), now `_testable_positions`) and neither narrowing fed
+# back, so a size excluded as too noisy to test could still set the
+# headline median. The reporter's own repro, reproduced here: two clean
+# sizes (1000, 2000) genuinely ~1.3x/~1.2x faster with n=5 non-overlapping
+# samples, plus two sizes (3000, 4000) whose before/after ranges overlap and
+# tie into the normal approximation, each with one lucky min-of-5 `after`
+# run (1 out of ~50-60) that inflates the RAW ratio to 50x/60x. Only the
+# `_speedup`/`_accept_decision` behaviour is new here; `_infer_speedup`
+# already excluded 3000/4000 before this fix (see #285's gate (b) above) —
+# what it did NOT do was stop `_speedup` from using them anyway.
+_328_b1000, _328_a1000 = [130.0, 131.0, 132.0, 133.0, 134.0], [100.0, 101.0, 102.0, 103.0, 104.0]
+_328_b2000, _328_a2000 = [240.0, 241.0, 242.0, 243.0, 244.0], [200.0, 201.0, 202.0, 203.0, 204.0]
+_328_b3000, _328_a3000 = [50, 50, 51, 52, 53], [50, 51, 50, 52, 1]     # lucky min=1 -> raw 50x
+_328_b4000, _328_a4000 = [60, 61, 62, 63, 64], [63, 62, 1, 64, 60]     # lucky min=1 -> raw 60x
+_328_before = {"sizes": [1000, 2000, 3000, 4000],
+              "durations_ms": [min(_328_b1000), min(_328_b2000), min(_328_b3000), min(_328_b4000)],
+              "all_runs_ms": [_328_b1000, _328_b2000, _328_b3000, _328_b4000]}
+_328_after = {"sizes": [1000, 2000, 3000, 4000],
+             "durations_ms": [min(_328_a1000), min(_328_a2000), min(_328_a3000), min(_328_a4000)],
+             "all_runs_ms": [_328_a1000, _328_a2000, _328_a3000, _328_a4000]}
+_328_inf = optimization._infer_speedup(_328_before, _328_after)
+check("control: 3000/4000 tie into the normal approximation with overlapping "
+      "ranges and are excluded to sizes_below_floor, same as #285's gate (b)",
+      {e["size"] for e in _328_inf["sizes_below_floor"]} == {3000, 4000}
+      and all("normal approximation" in e.get("reason", "")
+              for e in _328_inf["sizes_below_floor"]),
+      f"-> {_328_inf['sizes_below_floor']}")
+check("control: 1000/2000 survive as the only two counted sizes, both rejecting",
+      _328_inf["sizes_total"] == 2 and _328_inf["sizes_rejecting"] == 2,
+      f"-> {_328_inf.get('per_size')}")
+_328_sp_wide = optimization._speedup(_328_before, _328_after)
+check("control: the OLD, unfiltered _speedup pool is dominated by the two "
+      "excluded sizes' lucky-low-run ratios (~50x/~60x), not 1.2x-1.3x",
+      _328_sp_wide["measurable"] and _328_sp_wide["ratio"] > 10,
+      f"-> {_328_sp_wide['ratio']}")
+_328_survivors, _328_excluded, _328_min_n = optimization._testable_positions(_328_before, _328_after)
+_328_sp = optimization._speedup(_328_before, _328_after, comparable=_328_survivors)
+check("THE FIX: the headline ratio, built from _testable_positions' survivors, "
+      "is the clean ~1.2x-1.3x sizes' median, not the excluded sizes' lucky ratio",
+      _328_sp["measurable"] and 1.15 < _328_sp["ratio"] < 1.35,
+      f"-> {_328_sp['ratio']}")
+check("  ...per_size lists ONLY the two surviving sizes (1000, 2000) — 3000/4000 "
+      "stay visible in inference.sizes_below_floor, not duplicated here",
+      {row["n"] for row in _328_sp["per_size"]} == {1000, 2000},
+      f"-> {_328_sp['per_size']}")
+_328_accepted, _328_reason = optimization._accept_decision(_328_sp, 1.15, _328_inf)
+check("  ...and the reason string carries THAT number, not the inflated one",
+      _328_accepted is True and f"{_328_sp['ratio']}x median" in _328_reason
+      and "50" not in _328_reason and "60" not in _328_reason,
+      f"-> accepted={_328_accepted} {_328_reason!r}")
+
+# Control: an all-clean case (every size testable, none excluded) must be
+# UNCHANGED by this fix — the filtered and unfiltered pools are identical
+# when nothing was excluded, so the headline ratio does not move.
+_328_clean_before = {"sizes": [1000, 2000],
+                     "durations_ms": [min(_328_b1000), min(_328_b2000)],
+                     "all_runs_ms": [_328_b1000, _328_b2000]}
+_328_clean_after = {"sizes": [1000, 2000],
+                    "durations_ms": [min(_328_a1000), min(_328_a2000)],
+                    "all_runs_ms": [_328_a1000, _328_a2000]}
+_328_clean_survivors, _, _ = optimization._testable_positions(_328_clean_before, _328_clean_after)
+_328_clean_sp_wide = optimization._speedup(_328_clean_before, _328_clean_after)
+_328_clean_sp_filtered = optimization._speedup(_328_clean_before, _328_clean_after,
+                                               comparable=_328_clean_survivors)
+check("control: an all-clean case (nothing excluded) is unchanged by the fix — "
+      "filtered and unfiltered headline ratios agree",
+      _328_clean_sp_wide["ratio"] == _328_clean_sp_filtered["ratio"] == 1.25,
+      f"-> wide={_328_clean_sp_wide['ratio']} filtered={_328_clean_sp_filtered['ratio']}")
+
+# Every size excluded -> measurable False, same "no comparable size" shape
+# `_speedup` always reported, now also naming the significance-test filters.
+_328_all_excluded_survivors, _, _ = optimization._testable_positions(
+    {"sizes": [3000, 4000], "durations_ms": [min(_328_b3000), min(_328_b4000)],
+     "all_runs_ms": [_328_b3000, _328_b4000]},
+    {"sizes": [3000, 4000], "durations_ms": [min(_328_a3000), min(_328_a4000)],
+     "all_runs_ms": [_328_a3000, _328_a4000]})
+_328_all_excluded_sp = optimization._speedup(
+    {"sizes": [3000, 4000], "durations_ms": [min(_328_b3000), min(_328_b4000)],
+     "all_runs_ms": [_328_b3000, _328_b4000]},
+    {"sizes": [3000, 4000], "durations_ms": [min(_328_a3000), min(_328_a4000)],
+     "all_runs_ms": [_328_a3000, _328_a4000]},
+    comparable=_328_all_excluded_survivors)
+check("a case where EVERY size is excluded by the significance test's own "
+      "filters is measurable=False, not silently falling back to the wide pool",
+      _328_all_excluded_survivors == [] and _328_all_excluded_sp["measurable"] is False
+      and _328_all_excluded_sp["ratio"] is None,
+      f"-> {_328_all_excluded_sp}")
+
+
 # ═══ identical before/after code is never accepted (the false-accept rate) ══
 # The strongest form of the guarantee above: original and candidate are the
 # SAME program, run through the REAL executor with REAL timing noise, not an
