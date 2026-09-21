@@ -266,33 +266,162 @@ _CLASSES: dict[str, object] = {
 }
 
 
-def _fit_class(sizes: list[int], times_ms: list[float]) -> dict:
-    """Least-squares fit of t = c·f(n) over candidate classes (relative error)."""
-    pts = [(n, max(t, 1e-3)) for n, t in zip(sizes, times_ms) if n > 0 and t > 0]
-    if len(pts) < 3:
-        return {"estimate": "insufficient data (need >=3 sizes)", "scores": []}
+#: `_fit_class` needs >=2 residual degrees of freedom (points minus the 2
+#: fitted params, intercept and coefficient) before its ranking across the
+#: 8-candidate family in `_CLASSES` means anything. At exactly 3 points (1 df)
+#: the fit still RUNS — that is the GH #327 fix, `candidate_scores` is no
+#: longer starved to `[]` at the documented minimum — but its "winner" is not
+#: trustworthy: a 2-parameter line has enough freedom to land close to almost
+#: any 3 noisy points for SEVERAL candidate shapes at once, so whichever shape
+#: happens to graze closest is largely which shape the noise favoured, not
+#: which one is true. Measured on the issue's own repro (49, 56, 107 ms @
+#: 200k/400k/800k, a genuinely O(n) program): at 3 points the fit's #1 pick is
+#: O(n^3) at relative_error 0.0038 -- a deceptively tight-looking fit for the
+#: wrong answer -- while O(n) itself sits 24x worse in 5th place.
+#: `_decide_estimate` below is what actually withholds a confident answer
+#: until n_points clears this floor (or the ratio median clears its own,
+#: `MIN_ROBUST_RATIOS`) -- AND, separately, until the fit's own quality signal
+#: (`MAX_TRUSTED_RELATIVE_ERROR`, `INTERCEPT_NOISE_TOLERANCE_MS`) clears too.
+MIN_FIT_POINTS = 4
 
+#: A relative_error this high means the fit's own "best" candidate does not
+#: actually describe the data — it only ranked ahead of seven worse options.
+#: Cross-vendor review (Codex) of the #327 fix reproduced this on genuinely
+#: EXPONENTIAL data with too few doubling ratios to use the median (see
+#: `STRONG_EXPONENTIAL_RATIO` below): [10,20,40,80] / [1,10,200,5000] cleared
+#: `MIN_FIT_POINTS` (4 points) and fell to the curve fit, whose 8 candidates
+#: in `_CLASSES` do not include an exponential shape at all — every candidate
+#: fit badly, but `_fit_class` still ranked them and handed back a "winner"
+#: (O(n^3), relative_error 41.0 -- a 4100% average miss, worse than just
+#: guessing the mean). 1.0 (100% average error) sits well above every genuine
+#: fit measured during this fix (worst clean-signal winner seen: 0.0762 for a
+#: 5-point O(n)/O(n log n) tie) and well below that failure's 41.0.
+MAX_TRUSTED_RELATIVE_ERROR = 1.0
+
+#: A fit's `intercept` models interpreter/subprocess startup overhead, which
+#: cannot be negative — a small negative value is measurement noise (the same
+#: ~5ms floor `benchmark()`'s own noise-floor check uses), but the same
+#: exponential-data failure above put the winning candidate's intercept at
+#: -162.4ms: nothing costs LESS than nothing to start up. A fit whose winner
+#: needs a startup cost this impossible is not a fit, however low its
+#: relative_error.
+INTERCEPT_NOISE_TOLERANCE_MS = 5.0
+
+#: A single doubling ratio this large is not ambiguous the way a ratio near a
+#: polynomial boundary is: the largest polynomial candidate in `_CLASSES`
+#: (O(n^3)) tops out around ratio 8 (2^3), and `_classify_by_ratio`'s own
+#: `r < 11` boundary already treats anything above that as exponential. This
+#: floor is set higher again, and — unlike every other path in
+#: `_decide_estimate` — requires EVERY available ratio to agree, not just the
+#: median, before it is allowed to decide with FEWER than `MIN_ROBUST_RATIOS`
+#: ratios: the one deliberate exception to "too few samples, do not decide",
+#: because a magnitude this large is unambiguous regardless of how few
+#: samples produced it. Added after cross-vendor review: 2 ratios
+#: ([22.11, 25.12], both genuinely exponential) is one short of
+#: `MIN_ROBUST_RATIOS` and would otherwise have fallen all the way through to
+#: the curve fit above, which has no exponential candidate to offer at all.
+#:
+#: But "a single ratio can never decide a class" applies to THIS shortcut too
+#: — a second cross-vendor review round reproduced exactly that: sizes
+#: [10,20,40] / times [1000,1004,1064] (quadratic-ish, startup-dominated —
+#: NOT exponential) baseline-subtract to corrected [0,4,64]; the first gap is
+#: dropped as usual, leaving exactly ONE ratio (64/4 = 16.0) — which cleared
+#: this floor and "every available ratio agrees" was vacuously true for a set
+#: of one. `MIN_STRONG_EXPONENTIAL_RATIOS` (below) closes the "only one"
+#: half; the raw-time cross-check in `_decide_estimate` closes the other
+#: half it does not: TWO ratios both manufactured the same way (a small-but-
+#: technically-real corrected denominator a few ms above the noise floor)
+#: could otherwise still agree with each other while agreeing with nothing
+#: real. `ta = 4ms` clears `> 3.0` legitimately, but dividing by a
+#: denominator that small still inflates — the same warning
+#: `_classify_by_ratio`'s own docstring already gives for the ordinary
+#: ratio-median path applies here with a vengeance, since this path is
+#: allowed to decide on FEWER samples than that one ever is.
+STRONG_EXPONENTIAL_RATIO = 12.0
+
+#: However large the ratios, ONE of them is a single data point, not
+#: evidence of agreement — the whole premise of "every available ratio
+#: agrees" needs at least two ratios to agree WITH EACH OTHER. Below this,
+#: `_decide_estimate` cannot use the shortcut regardless of magnitude; 3
+#: sizes can produce at most 1 doubling ratio at all (the first gap is
+#: always dropped — see `_classify_by_ratio`'s docstring), so this also means
+#: 3-size data can never trigger the exponential override, only `noise-floor`
+#: or `inconclusive` — the documented cost of this guard.
+MIN_STRONG_EXPONENTIAL_RATIOS = 2
+
+
+def _fit_class(sizes: list[int], times_ms: list[float]) -> dict:
+    """Least-squares fit of t = intercept + coefficient·f(n) (relative error).
+
+    The additive `intercept` absorbs interpreter/subprocess startup directly
+    inside the fit, so — unlike the multiplicative t = c·f(n) this replaced —
+    NOTHING needs to be baseline-subtracted before calling this. That matters
+    at exactly 3 sizes: the old multiplicative fit was fed `corrected` times
+    (baseline = min(times) subtracted first), which forced the smallest
+    size's corrected duration to exactly 0 and dropped it as `t > 0`-filtered
+    noise, leaving only 2 points against this function's own `len(pts) >= 3`
+    floor -- "insufficient data" at the one size count where this fit was the
+    only fallback left (GH #327). Callers now pass RAW times; every requested
+    size that produced a real measurement counts as a point.
+
+    `coefficient < 0` (work shrinking as n grows) is rejected per candidate as
+    physically nonsensical for a growth measurement — without that guard,
+    fitting noise can hand a decreasing "best fit" to an unrelated shape.
+    O(1) is exempt (its f(n) is a constant 1.0, so `var_f` is 0 and
+    `coefficient` is pinned to 0 rather than solved for), which also
+    guarantees `scores` is never empty once `len(pts) >= 3`.
+
+    Each score's `c` field is the fit's `coefficient` — its PRE-#327 meaning,
+    from the multiplicative model this replaced, where `c` was the only
+    parameter (t = c·f(n)). A cross-vendor review of the #327 fix flagged an
+    early draft that quietly repurposed `c` to mean the new `intercept`
+    instead — a silent, undocumented meaning change on an existing field
+    nothing else would have caught. `c` now keeps meaning "coefficient" so an
+    existing consumer reading it is not silently misled; `intercept` and
+    `coefficient` are the same two numbers under explicit, unambiguous names
+    for anyone reading fresh. NEITHER number alone says whether a candidate
+    is a GOOD fit — pair `relative_error` with `intercept`: a fit whose best
+    candidate has a high `relative_error` or a deeply negative `intercept`
+    (startup overhead cannot be negative) is not describing the data, only
+    ranking ahead of seven worse options — `_decide_estimate` is what
+    actually withholds trust from a fit like that.
+    """
+    pts = [(n, t) for n, t in zip(sizes, times_ms) if n > 0 and t >= 0]
+    if len(pts) < 3:
+        return {"estimate": "insufficient data (need >=3 sizes)", "scores": [], "n_points": len(pts)}
+
+    n_pts = len(pts)
+    mean_t = sum(t for _, t in pts) / n_pts
     scores = []
     for label, fn in _CLASSES.items():
         try:
             f = [fn(float(n)) for n, _ in pts]
         except Exception:
             continue
-        if any(v <= 0 for v in f):
+        if any(v != v or math.isinf(v) for v in f):  # NaN/inf candidate values
             continue
-        num = sum(t * fv for (_, t), fv in zip(pts, f))
-        den = sum(fv * fv for fv in f)
-        if den == 0:
+        mean_f = sum(f) / n_pts
+        var_f = sum((fv - mean_f) ** 2 for fv in f)
+        if var_f > 0:
+            cov_ft = sum((fv - mean_f) * (t - mean_t) for (_, t), fv in zip(pts, f))
+            coefficient = cov_ft / var_f
+            intercept = mean_t - coefficient * mean_f
+        else:
+            coefficient, intercept = 0.0, mean_t  # O(1): f is constant, nothing to regress on
+        if coefficient < 0:
             continue
-        c = num / den
-        rel_err = sum(abs(t - c * fv) / t for (_, t), fv in zip(pts, f)) / len(pts)
-        scores.append({"class": label, "relative_error": round(rel_err, 4), "c": round(c, 4)})
+        rel_err = sum(abs(t - (intercept + coefficient * fv)) / max(t, 1e-3)
+                      for (_, t), fv in zip(pts, f)) / n_pts
+        scores.append({"class": label, "relative_error": round(rel_err, 4),
+                       "c": round(coefficient, 6), "coefficient": round(coefficient, 6),
+                       "intercept": round(intercept, 4)})
     scores.sort(key=lambda s: s["relative_error"])
     best = scores[0] if scores else None
     return {
         "estimate": best["class"] if best else "unknown",
         "best_score": best,
         "scores": scores,
+        "n_points": n_pts,
     }
 
 
@@ -331,6 +460,87 @@ def _classify_by_ratio(ratios: list[float]) -> str:
     if r < 11:
         return "O(n^3)"
     return "O(c^n) (exponential or worse)"
+
+
+#: `estimate_basis` values `benchmark()` can report. Pure data, not code, but
+#: kept next to `_decide_estimate` (the one function that produces them) so
+#: the two stay in sync — a caller can `in` this without importing `tools`'s
+#: whole module-level surface.
+ESTIMATE_BASES = ("ratio-median", "curve-fit", "noise-floor", "inconclusive")
+
+
+def _decide_estimate(ratios: list[float], fit: dict, raw_ratios: list[float]) -> tuple[str, str]:
+    """Pick the growth-class estimate and say which estimator actually produced it.
+
+    This is the exact decision GH #327 found broken: the old
+    `_classify_by_ratio(ratios) if ratios else fit["estimate"]` trusted the
+    ratio median the moment `ratios` was non-empty, with no floor on ITS
+    length either — one doubling ratio (no median at all) outranked a fit
+    that, at 3 sizes, could not even run (see `_fit_class`'s baseline-
+    subtraction note). Two floors now gate the two estimators independently:
+    `MIN_ROBUST_RATIOS` for the ratio median, `MIN_FIT_POINTS` plus a fit
+    QUALITY check (`MAX_TRUSTED_RELATIVE_ERROR`/`INTERCEPT_NOISE_TOLERANCE_MS`)
+    for the curve fit. When NEITHER clears its floor, that is said plainly in
+    `estimate` itself — not only in the advisory `ratio_confidence` side
+    field, which is what let a caller read `estimate` + `method: "empirical"`
+    and reasonably believe a number nobody actually established.
+
+    One deliberate exception sits ABOVE both floors: `STRONG_EXPONENTIAL_RATIO`.
+    `_CLASSES` has no exponential candidate (the curve fit cannot ever name
+    O(c^n)), so genuinely exponential data with too few ratios for a robust
+    median used to fall all the way through to the curve fit and come back as
+    a confident polynomial — cross-vendor review reproduced this on
+    [10,20,40,80]/[1,10,200,5000] (2 ratios, both >20x, curve-fit "O(n^3)" at
+    relative_error 41.0). A ratio magnitude this large, agreed on by EVERY
+    available ratio, is not the kind of ambiguity `MIN_ROBUST_RATIOS` exists
+    to guard against, so it is allowed to decide on its own — but "agreed on"
+    now means two independent things, both required (`MIN_STRONG_EXPONENTIAL_
+    RATIOS`'s and this parameter's own docstrings have the round-3 review
+    that found each was needed): at least `MIN_STRONG_EXPONENTIAL_RATIOS`
+    corrected ratios (a set of one cannot "agree" with itself), AND
+    `raw_ratios` — the SAME doubling pairs' ratios computed from
+    unsubtracted, unbaselined times — independently clearing the same floor.
+    A corrected ratio can be legitimately large from measurement noise alone
+    (a denominator a few ms above the noise floor still inflates); its raw
+    counterpart, dominated by real subprocess/interpreter overhead, will NOT
+    also look exponential unless the growth is large enough to swamp that
+    overhead outright. `raw_ratios` must be the same length as `ratios`, in
+    the same pair order — `benchmark()` builds both from one loop for exactly
+    that reason.
+    """
+    if (len(ratios) >= MIN_STRONG_EXPONENTIAL_RATIOS
+            and len(raw_ratios) == len(ratios)
+            and all(r >= STRONG_EXPONENTIAL_RATIO for r in ratios)
+            and all(r >= STRONG_EXPONENTIAL_RATIO for r in raw_ratios)):
+        return "O(c^n) (exponential or worse)", "ratio-median"
+
+    if len(ratios) >= MIN_ROBUST_RATIOS:
+        return _classify_by_ratio(ratios), "ratio-median"
+
+    best = fit.get("best_score")
+    n_pts = fit.get("n_points", 0)
+    fit_is_trustworthy = (
+        best is not None
+        and n_pts >= MIN_FIT_POINTS
+        and best["relative_error"] <= MAX_TRUSTED_RELATIVE_ERROR
+        and best["intercept"] >= -INTERCEPT_NOISE_TOLERANCE_MS
+    )
+    if fit_is_trustworthy:
+        return fit["estimate"], "curve-fit"
+
+    reasons = [f"{len(ratios)} doubling ratio(s) (<{MIN_ROBUST_RATIOS} needed for a robust median)"]
+    if not fit.get("scores"):
+        reasons.append("the curve fit found no viable candidate class")
+    elif n_pts < MIN_FIT_POINTS:
+        reasons.append(
+            f"the curve fit only had {n_pts} usable point(s) (<{MIN_FIT_POINTS} needed for a "
+            f"2-parameter fit to discriminate reliably across {len(_CLASSES)} candidate classes)")
+    else:
+        reasons.append(
+            f"the curve fit's best candidate ({fit['estimate']}) does not actually describe the "
+            f"data (relative_error={best['relative_error']}, intercept={best['intercept']}ms) — "
+            f"none of the {len(_CLASSES)} candidate shapes fit")
+    return "inconclusive (" + "; ".join(reasons) + ")", "inconclusive"
 
 
 def _measure(language: str, code: str, sizes: list[int], timeout: int, repeats: int,
@@ -431,6 +641,36 @@ def benchmark(code: str, language: str = "python3", sizes: str = "100,1000,10000
     sizes are multiplied by 10 and re-measured (up to 4x) so the fit sees real
     compute, not subprocess spawn noise.
 
+    3 is the accepted MINIMUM (unchanged, for backward compatibility — see
+    `MIN_FIT_POINTS`/`MIN_ROBUST_RATIOS`'s comments for the GH #327 history of
+    why), but 3 sizes can NEVER decide a growth class at all — not even the
+    exponential override: a 2-parameter curve fit against 3 points has only 1
+    residual degree of freedom, not enough to discriminate reliably across
+    the 8 candidate classes in `_CLASSES` (`estimate_basis` never reaches
+    `"curve-fit"`); 3 sizes can produce at most 1 doubling ratio, never the
+    >= 3 `MIN_ROBUST_RATIOS` needs for a median; and 1 ratio is also below
+    `MIN_STRONG_EXPONENTIAL_RATIOS` (2 — "every available ratio agrees" needs
+    at least two ratios to agree WITH EACH OTHER, a lesson from a round-3
+    cross-vendor review repro: [10,20,40]/[1000,1004,1064], quadratic-ish and
+    NOT exponential, produced exactly 1 noisy ratio that vacuously "agreed
+    with itself"). What 3 sizes CAN return: `"O(1) (work below noise
+    floor...)"` (`estimate_basis: "noise-floor"`, when the work is flat
+    enough), or, for everything else, `"inconclusive (...)"` — that is the
+    documented COST of the round-3 guard: no 3-size result can ever be a
+    confident growth class of any kind, exponential included — the
+    exponential override needs >= 4 sizes too (N sizes yield at most N-2
+    doubling ratios, and `MIN_STRONG_EXPONENTIAL_RATIOS` is 2). At least 4
+    sizes are needed before the curve fit is actually trusted
+    (`estimate_basis: "curve-fit"`);
+    this module's own default `sizes` ("100,1000,10000,100000") is 4 sizes
+    10x apart — no doubling pairs at all, so it always decides via curve-fit,
+    never the ratio median. At least 5 DOUBLING sizes (n, 2n, 4n, 8n, 16n)
+    are needed for a robust ratio median (`estimate_basis: "ratio-median"`
+    via the general path, not the exponential exception above): N doubling
+    sizes yield N-2 usable ratios (baseline subtraction always discards the
+    first gap as sub-noise — see `_classify_by_ratio`'s docstring), so 5
+    sizes is the floor for the 3 ratios `MIN_ROBUST_RATIOS` requires.
+
     `on_progress(done, total, message)`, if given, fires once PER SIZE
     (`total` = the requested size count, fixed) during the FIRST measurement
     pass only — an auto-scale re-measurement is a distinct, unpredictable-
@@ -443,7 +683,12 @@ def benchmark(code: str, language: str = "python3", sizes: str = "100,1000,10000
     except ValueError:
         return {"ok": False, "error": "sizes must be comma-separated integers"}
     if len(size_list) < 3:
-        return {"ok": False, "error": "need at least 3 sizes for a meaningful fit"}
+        return {"ok": False, "error": "need at least 3 sizes (3 is accepted but can only "
+                                      "return noise-floor O(1) or an inconclusive estimate "
+                                      "— never a growth class, not even exponential; 4+ "
+                                      "sizes for a trusted curve fit, 5+ doubling sizes for "
+                                      "a robust ratio median; see benchmark's own "
+                                      "docstring)"}
     repeats = max(1, min(repeats, 5))
 
     runs, error = _measure(language, code, size_list, timeout, repeats, on_progress=on_progress)
@@ -488,18 +733,39 @@ def benchmark(code: str, language: str = "python3", sizes: str = "100,1000,10000
             "language": language,
             "method": "empirical",
             "estimate": "O(1) (work below noise floor at all sizes)",
+            # Neither estimator below ran: this is a third, earlier verdict,
+            # not a stand-in for "curve-fit" or "ratio-median" (GH #327 wants
+            # a caller able to tell which one produced the answer, and here
+            # it is neither — the noise floor decided it before either ran).
+            "estimate_basis": "noise-floor",
             "auto_scaled": scale_steps > 0,
             "candidate_scores": [],
             "doubling_ratios": [],
             "runs": runs,
         }
 
-    fit = _fit_class(sizes_n, corrected)
+    # `_fit_class` gets the RAW times, not `corrected`: its additive-constant
+    # model (t = intercept + coefficient·f(n)) fits its own startup offset, so
+    # nothing needs zeroing out first. Feeding it `corrected` here is exactly the GH #327
+    # bug — baseline subtraction forces `corrected[0]` to 0, which used to
+    # cost the fit the third point it needed at the 3-size floor. `corrected`
+    # stays reserved for the doubling-ratio computation below, which has
+    # always deliberately discarded that same first gap as sub-noise.
+    fit = _fit_class(sizes_n, times)
     ratios = []
-    for (na, ta), (nb, tb) in zip(zip(sizes_n, corrected), zip(sizes_n[1:], corrected[1:])):
+    # `raw_ratios`: the SAME doubling pairs as `ratios`, same order, but from
+    # UNSUBTRACTED `times` — built in this one loop so the two are guaranteed
+    # to correspond 1:1. Only consumed by `_decide_estimate`'s
+    # STRONG_EXPONENTIAL_RATIO shortcut, as a cross-check against a
+    # corrected ratio baseline subtraction alone manufactured (see that
+    # constant's docstring for the round-3 review repro).
+    raw_ratios = []
+    for (na, ta, tra), (nb, tb, trb) in zip(
+            zip(sizes_n, corrected, times), zip(sizes_n[1:], corrected[1:], times[1:])):
         if nb == 2 * na and ta > 3.0:  # ignore ratios from sub-noise baselines
             ratios.append(round(tb / ta, 2))
-    estimate = _classify_by_ratio(ratios) if ratios else fit["estimate"]
+            raw_ratios.append(round(trb / tra, 2))
+    estimate, estimate_basis = _decide_estimate(ratios, fit, raw_ratios)
 
     return {
         "ok": True,
@@ -509,9 +775,20 @@ def benchmark(code: str, language: str = "python3", sizes: str = "100,1000,10000
         # this one ran the program at increasing sizes and timed it. The two
         # sit next to each other in the tool list and a caller relaying either
         # as "the complexity" without saying which has lost the distinction
-        # that makes one of them evidence.
+        # that makes one of them evidence. `method` staying "empirical" even
+        # on an "inconclusive" `estimate` is deliberate, not a contradiction:
+        # the MEASUREMENT still happened and is still real evidence, it is
+        # only the CLASSIFICATION that came back honest instead of confident.
         "method": "empirical",
         "estimate": estimate,
+        # Which estimator actually produced `estimate` — see
+        # `_decide_estimate`'s docstring. A caller that only reads `estimate`
+        # + `method` has no way to tell a robust ratio median apart from a
+        # single noisy doubling ratio; this field is that distinction, made
+        # explicit instead of buried in `ratio_confidence` (which only ever
+        # spoke to the ratio path, and stayed silent when the curve fit or
+        # neither estimator was the one deciding).
+        "estimate_basis": estimate_basis,
         "best_score": fit.get("best_score"),
         "candidate_scores": fit.get("scores", []),
         "doubling_ratios": ratios,

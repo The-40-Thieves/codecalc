@@ -122,6 +122,100 @@ behind it.
   passes it explicitly, so the ratio and `speedup.per_size` can only ever be
   built from a size the significance test also kept (GH #328, THE-1093).
 
+- **`benchmark` could report a confident `O(n^2)`/`O(n^3)`/`O(n log n)` for a
+  genuinely `O(n)` program at its own documented 3-size minimum** — `estimate
+  = _classify_by_ratio(ratios) if ratios else fit["estimate"]` trusted the
+  ratio median the moment `ratios` was non-empty, with no floor on how many
+  (one noisy doubling ratio decided the answer outright), while the curve fit
+  that should have arbitrated could not even run: baseline subtraction forced
+  the smallest of 3 sizes' corrected duration to exactly 0, leaving `_fit_class`
+  with 2 points against its own `len(pts) >= 3` floor and an empty
+  `candidate_scores`. Reproduced on the issue's own O(n) program: 200k/400k/
+  800k sizes reported `O(n^3)` (`doubling_ratios: [8.29]`) on one run and
+  `O(n^2)` (`[4.29]`) on a rerun, both with `method: "empirical"` and
+  `candidate_scores: []`. `_fit_class` now fits an additive model
+  (`t = intercept + coefficient·f(n)`) directly against raw measured times
+  instead of baseline-subtracted ones, so nothing is zeroed out and the fit
+  is reachable at exactly 3 sizes.
+  A new `_decide_estimate` gates BOTH estimators independently —
+  `MIN_ROBUST_RATIOS` (3) for the ratio median, a new `MIN_FIT_POINTS` (4,
+  the degrees-of-freedom floor for a 2-parameter fit to discriminate across 8
+  candidate classes) for the curve fit — and when neither clears its floor,
+  `estimate` now reads `"inconclusive (...)"` with the reason, instead of a
+  guess dressed as a measurement. A new `estimate_basis` field
+  (`"ratio-median"` | `"curve-fit"` | `"noise-floor"` | `"inconclusive"`)
+  names which estimator actually produced `estimate`, so a caller no longer
+  has to parse `ratio_confidence` prose to tell a robust answer from a guess.
+  `method` stays `"empirical"` throughout — the measurement is still real
+  evidence even when the classification is honestly inconclusive.
+  (GH #327, THE-1092)
+- **Cross-vendor review (Codex) of the fix above found the opposite failure
+  mode: genuinely exponential growth confidently misclassified as
+  polynomial.** `_CLASSES` (the curve fit's 8 candidate shapes) has no
+  exponential entry, so data with too few doubling ratios for a robust median
+  fell all the way through to the curve fit, which ranked its 8 bad options
+  and handed back the least-bad one regardless of how bad. Reproduced:
+  `[10,20,40,80]` / `[1,10,200,5000]` (genuinely exponential; 2 doubling
+  ratios, `[22.11, 25.12]`, one short of `MIN_ROBUST_RATIOS`) returned
+  `O(n^3)` at `relative_error: 41.0` (a 4100% average miss) with a
+  physically-impossible negative `intercept` (`-162.4`ms — startup overhead
+  cannot be negative). Two independent guards now cover this: (1)
+  `_decide_estimate` no longer trusts a curve fit whose winning candidate's
+  `relative_error` exceeds `MAX_TRUSTED_RELATIVE_ERROR` (1.0) or whose
+  `intercept` is more negative than `INTERCEPT_NOISE_TOLERANCE_MS` allows for
+  noise (-5ms) — such a fit now reports `"inconclusive (...)"` instead of its
+  nominal "winner"; (2) a new `STRONG_EXPONENTIAL_RATIO` (12) lets an
+  unambiguous exponential SIGNAL decide with fewer than `MIN_ROBUST_RATIOS`
+  ratios — the one deliberate exception to "too few samples, do not decide" —
+  but only when EVERY available ratio clears it, not just the median.
+  (THE-1092)
+- **`candidate_scores[*].c` silently changed meaning in the fix above** — it
+  was the coefficient of `f(n)` in the old multiplicative fit (`t = c·f(n)`);
+  an early draft of the additive-model fix quietly repurposed it to mean the
+  new intercept instead, an undocumented field-meaning change an existing
+  consumer would never have noticed. `c` now keeps its PRE-#327 meaning
+  (the coefficient); the new intercept is exposed only under its own name,
+  `intercept`, alongside an explicit `coefficient` alias for `c` so a fresh
+  reader is not stuck decoding a single letter. (THE-1092)
+- **A second cross-vendor review round found the `STRONG_EXPONENTIAL_RATIO`
+  shortcut above still trusted a SINGLE ratio.** "Every available ratio
+  agrees" was checked with `all()` over whatever `ratios` held, with no floor
+  on its length — a set of one vacuously "agrees with itself". Reproduced on
+  data that is quadratic-ish and startup-dominated, NOT exponential: sizes
+  `[10,20,40]` / times `[1000,1004,1064]` baseline-subtract to corrected
+  `[0,4,64]`; the first gap is dropped as always, leaving exactly one ratio
+  (`64/4 = 16.0`) — a legitimate `> 3.0` corrected denominator (4ms) still
+  small enough to inflate, exactly the failure mode `_classify_by_ratio`'s
+  own docstring already warns about for the ordinary median path, now
+  reachable by a shortcut allowed to decide on FEWER samples than that path
+  ever is. Two independent guards, both required: a new
+  `MIN_STRONG_EXPONENTIAL_RATIOS` (2) — the shortcut cannot fire below it,
+  so (since 3 sizes yield at most 1 doubling ratio) 3-size data can never
+  trigger the exponential override at all, only `noise-floor` or
+  `"inconclusive"`; and a new `raw_ratios` cross-check — for each doubling
+  pair, `benchmark()` now also computes that pair's ratio from UNSUBTRACTED
+  times, and `_decide_estimate` requires BOTH the corrected ratio AND its
+  raw counterpart to independently clear `STRONG_EXPONENTIAL_RATIO`. A raw
+  ratio, dominated by real subprocess/interpreter overhead, does not look
+  exponential from noise alone the way a small corrected denominator can —
+  confirmed on the original passing repro (`[10,20,40,80]`/`[1,10,200,5000]`:
+  raw ratios `20.0`/`25.0`, both still clear the floor) and on the new
+  quadratic-ish one (raw ratio `1.06`, nowhere close). (THE-1092)
+- `benchmark`'s docs still called 3 sizes a plain "minimum" after the first
+  fix above made 3 sizes unable to decide a polynomial/log-family growth
+  class — the `sizes` size-count floor, its `Field` description, and
+  `benchmark`'s docstrings (`server.py` and `tools.py`) now say so
+  explicitly: 3 is still accepted (unchanged, backward compatible), but can
+  only return noise-floor `O(1)` or `"inconclusive"` — never any OTHER
+  growth class, not even exponential (see the guard above: 3 sizes cannot
+  reach `MIN_STRONG_EXPONENTIAL_RATIOS` either). 4+ sizes are needed before
+  the curve fit is trusted, 5+ doubling sizes before the general ratio median
+  is. The default `sizes` ("100,1000,10000,100000", 4 sizes 10x apart)
+  always decides via `estimate_basis: "curve-fit"` — verified against 3 live
+  runs, never `"ratio-median"` (10x-apart sizes produce no doubling pairs at
+  all) and never `"inconclusive"` (4 points clears `MIN_FIT_POINTS`).
+  (THE-1092)
+
 ## [0.12.0] — 2026-09-09
 
 ### Removed
