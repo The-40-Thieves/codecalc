@@ -122,6 +122,33 @@ behind it.
   passes it explicitly, so the ratio and `speedup.per_size` can only ever be
   built from a size the significance test also kept (GH #328, THE-1093).
 
+- **`benchmark` could report a confident `O(n^2)`/`O(n^3)`/`O(n log n)` for a
+  genuinely `O(n)` program at its own documented 3-size minimum** — `estimate
+  = _classify_by_ratio(ratios) if ratios else fit["estimate"]` trusted the
+  ratio median the moment `ratios` was non-empty, with no floor on how many
+  (one noisy doubling ratio decided the answer outright), while the curve fit
+  that should have arbitrated could not even run: baseline subtraction forced
+  the smallest of 3 sizes' corrected duration to exactly 0, leaving `_fit_class`
+  with 2 points against its own `len(pts) >= 3` floor and an empty
+  `candidate_scores`. Reproduced on the issue's own O(n) program: 200k/400k/
+  800k sizes reported `O(n^3)` (`doubling_ratios: [8.29]`) on one run and
+  `O(n^2)` (`[4.29]`) on a rerun, both with `method: "empirical"` and
+  `candidate_scores: []`. `_fit_class` now fits an additive model (`t = c +
+  a·f(n)`) directly against raw measured times instead of baseline-subtracted
+  ones, so nothing is zeroed out and the fit is reachable at exactly 3 sizes.
+  A new `_decide_estimate` gates BOTH estimators independently —
+  `MIN_ROBUST_RATIOS` (3) for the ratio median, a new `MIN_FIT_POINTS` (4,
+  the degrees-of-freedom floor for a 2-parameter fit to discriminate across 8
+  candidate classes) for the curve fit — and when neither clears its floor,
+  `estimate` now reads `"inconclusive (...)"` with the reason, instead of a
+  guess dressed as a measurement. A new `estimate_basis` field
+  (`"ratio-median"` | `"curve-fit"` | `"noise-floor"` | `"inconclusive"`)
+  names which estimator actually produced `estimate`, so a caller no longer
+  has to parse `ratio_confidence` prose to tell a robust answer from a guess.
+  `method` stays `"empirical"` throughout — the measurement is still real
+  evidence even when the classification is honestly inconclusive.
+  (GH #327, THE-1092)
+
 ## [0.12.0] — 2026-09-09
 
 ### Removed

@@ -2199,7 +2199,9 @@ def benchmark(code: Annotated[str, Field(description="Program that reads integer
 
     Contract: the code must read an integer N from stdin (first line) and do work
     sized by N. codecalc runs it at each size in `sizes` and fits the growth
-    curve to estimate Big-O (O(1), O(log n), O(n), O(n log n), O(n^2)...).
+    curve to estimate Big-O (O(1), O(log n), O(n), O(n log n), O(n^2)...); with
+    too little signal (e.g. exactly 3 sizes) `estimate` says "inconclusive"
+    instead of guessing, and `estimate_basis` names which estimator decided.
     Example python: 'import sys\\nn=int(sys.stdin.readline()); s=0\\nfor i in range(n): s+=i\\nprint(s)'
     """
     # Progress deliberately NOT documented in the docstring above: the

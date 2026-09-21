@@ -32,9 +32,18 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 FAILS: list[str] = []
 
 #: What the structural analyser is allowed to conclude. Membership is asserted
-#: rather than a specific value, for the timing-derived estimates only.
-COMPLEXITY_ESTIMATES = {"O(1)", "O(log n)", "O(n)", "O(n log n)", "O(n^2)", "O(n^3)",
-                        "O(2^n)", "O(n!)", "unknown"}
+#: rather than a specific value, for the timing-derived estimates only. Mirrors
+#: `tools._CLASSES` (the curve fit's candidate labels) plus
+#: `_classify_by_ratio`'s own exponential label -- the two `benchmark()`
+#: estimators don't share one enum, so this has to cover both. GH #327 made
+#: the curve fit reachable at more size counts than before (it used to run
+#: only when `doubling_ratios` came back empty), so labels that were
+#: effectively dead here -- O(sqrt n), O(n^2 log n) -- are now really
+#: reachable. `benchmark`'s own "O(1) (work below noise floor...)" and
+#: "inconclusive (...)" wording is checked separately below, by prefix, since
+#: both carry a reason that is deliberately NOT part of a fixed enum.
+COMPLEXITY_ESTIMATES = {"O(1)", "O(log n)", "O(sqrt n)", "O(n)", "O(n log n)", "O(n^2)",
+                        "O(n^2 log n)", "O(n^3)", "O(2^n)", "O(n!)", "unknown"}
 
 
 def check(name: str, cond: bool, detail: str = "") -> None:
@@ -294,8 +303,16 @@ async def main():
             "benchmark",
             {"code": "import sys\nn=int(sys.stdin.readline())\ns=0\nfor i in range(n): s+=i\nprint(s)",
              "sizes": ",".join(str(s) for s in sizes), "timeout": 15}))
+        _bench_estimate = r.get("estimate") or ""
         check("benchmark returns a recognised estimate",
-              r.get("estimate") in COMPLEXITY_ESTIMATES, f"-> {r.get('estimate')!r}")
+              _bench_estimate in COMPLEXITY_ESTIMATES
+              or _bench_estimate.startswith(("O(1) (work below noise floor",
+                                             "O(c^n) (exponential or worse)",
+                                             "inconclusive (")),
+              f"-> {_bench_estimate!r}")
+        check("  ...and estimate_basis says which estimator produced it",
+              r.get("estimate_basis") in ("ratio-median", "curve-fit", "noise-floor", "inconclusive"),
+              f"-> {r.get('estimate_basis')!r}")
         # Coverage is asserted on `runs`, not on the ratio count. A first draft
         # demanded len(sizes) - 1 ratios and failed: the classifier subtracts the
         # smallest measurement as a baseline, so the smallest size's corrected
