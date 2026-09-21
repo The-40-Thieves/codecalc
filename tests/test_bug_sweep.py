@@ -1471,14 +1471,20 @@ def _alternating_tree(depth):
 _depth_timings = {}
 for _depth in (50, 100, 150, 200, 250):
     _tree = _alternating_tree(_depth)
-    _t0 = time.time()
+    # perf_counter, not time.time(): on the Windows runners time.time() ticks at
+    # ~15 ms, so a 0.4 ms depth-50 walk read as 0.0000 s and the ratio check
+    # below divided by zero-ish (measured on PR #334 CI, windows-latest py3.11).
+    _t0 = time.perf_counter()
     _rx(_tree)
-    _depth_timings[_depth] = time.time() - _t0
+    _depth_timings[_depth] = time.perf_counter() - _t0
 check(f"an alternating Add/Mul tree of depth 250 stays under 20ms in reject_explosive "
       f"(was 0.311s before the fix) -> {_depth_timings}",
       _depth_timings[250] < 0.020, f"-> {_depth_timings[250]:.4f}s")
 check("  ...and depth 250 is not many times slower than depth 50 (no superlinear blowup)",
-      _depth_timings[250] < _depth_timings[50] * 20,
+      # A 1 ms floor on the denominator: the point is "no superlinear blowup",
+      # and a sub-millisecond depth-50 walk must not turn timer jitter into a
+      # 20x "regression" on a fast runner.
+      _depth_timings[250] < max(_depth_timings[50], 0.001) * 20,
       f"-> depth50={_depth_timings[50]:.4f}s depth250={_depth_timings[250]:.4f}s")
 
 # Finding 4 (Low): errors.classify()'s digit-limit special case matched on
