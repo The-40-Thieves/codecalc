@@ -301,9 +301,18 @@ for _label, (_code, _expected_line) in _REFUSAL_CASES.items():
 # escape `analyze()` as an uncaught exception instead of the documented
 # refusal every other unsupported construct gets. `_first_unsupported`'s
 # static-bounds check now catches a literal step of 0 before a single z3
-# call is made, naming the construct; `analyze()`'s own exception handler
-# is separately widened (belt and braces) so it is not the ONLY thing
-# standing between this input and a raised exception.
+# call is made, naming the construct. Belt and braces: `_walk_loop` ALSO
+# refuses a step of 0 on its own, narrowly, right where it would otherwise
+# build `range(start, stop, 0)` — via the ordinary `_TranslateError` path
+# `analyze()` already catches — so the scan and the walker agreeing is not
+# the ONLY thing standing between this input and a raised exception. An
+# earlier version of this fix instead widened `analyze()`'s exception
+# handler to a blanket `except Exception`; cross-vendor review (Codex, PR
+# #330) showed that masked a genuine internal defect (an injected
+# RuntimeError) as an "unsupported construct" refusal just as readily as
+# it caught the intended ValueError, so it was replaced with this narrow,
+# construct-specific guard instead — see the "internal errors still
+# propagate" test below, the review's own probe made permanent.
 check("range() step of 0: message names the construct",
       "step of 0" in _rr.get("error", ""), f"-> {_rr}")
 
@@ -341,6 +350,40 @@ check("range() step of -1: the nested if (i == 5, in range(10,0,-1)) is reachabl
       _by_line(_rtn, 3) is not None and _by_line(_rtn, 3)["verdict"] == "reachable",
       f"-> {_by_line(_rtn, 3)}")
 _verify_every_witness(_rtn, _STEP_NEG, "f", "step-of-neg-1")
+
+# `analyze()` must NOT mask a genuine internal defect as an "unsupported
+# construct" refusal — the cross-vendor review (Codex, PR #330) that
+# rejected a blanket `except Exception` around the whole walk probed
+# exactly this: inject an internal RuntimeError into a helper the walk
+# calls for perfectly ordinary, fully-supported code, and confirm it still
+# PROPAGATES out of `analyze()` rather than coming back as `ok: False,
+# code: "validation"`. Monkeypatching `_translate` (called on every `if`
+# condition) is the same tripwire idiom the non-python-language case below
+# uses on `optional.require`.
+_INTERNAL_ERROR_PROBE = "def f(x):\n    if x > 0:\n        return 1\n    return 0\n"
+_real_translate = br._translate
+
+
+def _raise_internal_error(*args, **kwargs):
+    raise RuntimeError("injected internal defect — must propagate, not be refused")
+
+
+br._translate = _raise_internal_error
+try:
+    try:
+        br.analyze("python3", _INTERNAL_ERROR_PROBE)
+        check("internal RuntimeError during the walk: propagated (analyze() did not "
+              "return a value)", False, "-> analyze() returned instead of raising")
+    except RuntimeError as _exc:
+        check("internal RuntimeError during the walk: propagated as RuntimeError, "
+              "not swallowed into a validation refusal",
+              str(_exc) == "injected internal defect — must propagate, not be refused",
+              f"-> {_exc!r}")
+    except Exception as _exc:  # deliberately broad: prove it's NOT some OTHER exception type
+        check("internal RuntimeError during the walk: propagated as RuntimeError "
+              "(not laundered into some other exception type)", False, f"-> {_exc!r}")
+finally:
+    br._translate = _real_translate
 
 # non-python refusal spawns nothing — a tripwire on optional.require (the one
 # function that would import z3) proves branch_reachability never reaches the

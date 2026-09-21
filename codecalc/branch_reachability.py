@@ -372,7 +372,11 @@ def _first_unsupported(tree: ast.AST) -> tuple[str, int] | None:
                 # zero` — an uncaught exception escaping `analyze()` instead of
                 # the documented refusal every other unsupported construct
                 # gets. Caught HERE, before a single z3 call, with the same
-                # construct-naming refusal shape.
+                # construct-naming refusal shape. `_walk_loop` ALSO refuses a
+                # step of 0 on its own (see its own guard, right where the
+                # unrolled/conservative dispatch would otherwise construct
+                # `range(start, stop, 0)`) — belt and braces, in case this
+                # scan and that walker ever drift apart again.
                 if all_static and len(it.args) == 3:
                     step = it.args[2]
                     step_val = (
@@ -1033,6 +1037,25 @@ def _walk_loop(node: ast.While | ast.For, env: dict[str, tuple[Any, str]], ctx: 
     """
     if isinstance(node, ast.For):
         start, stop, step = _static_range_bounds(node.iter)
+        if step == 0:
+            # Belt and braces (GH #322, THE-1087): `_first_unsupported`'s
+            # up-front scan already refuses a literal step of 0 before a
+            # single z3 call is made (see its ast.For case, above) — this
+            # walker should never actually reach here with step == 0. It
+            # is guarded anyway, narrowly, right where the unguarded
+            # `len(range(start, stop, step))` below would otherwise raise
+            # CPython's own `ValueError: range() arg 3 must not be zero`
+            # straight out of `analyze()`: if the scan and this walker
+            # ever drift apart again on some future construct, THIS loop
+            # still refuses on its own via the ordinary `_TranslateError`
+            # path, rather than the caller catching a bare ValueError. A
+            # broad `except Exception` around the whole walk was
+            # considered and rejected — cross-vendor review (Codex, PR
+            # #330) showed it would just as readily mask a genuine
+            # implementation bug (RuntimeError, TypeError, ...) as an
+            # "unsupported construct" refusal, silently misclassifying
+            # OUR OWN defects as bad user input.
+            raise _TranslateError("range() with a step of 0")
         count = len(range(start, stop, step))
         if count <= _MAX_UNROLL_ITERATIONS:
             return _walk_for_unrolled(node, env, ctx, cur_cond, range(start, stop, step))
@@ -1521,27 +1544,6 @@ def analyze(language: str, code: str, inputs: dict[str, str] | None = None,
         _walk_block(body, env, ctx, z3.BoolVal(True))
     except _TranslateError as exc:
         return _refusal(f"unsupported construct: {exc}")
-    except z3.Z3Exception:
-        # A genuine z3-side failure (solver, model, or expression-building
-        # error) is NOT a "this construct is unsupported" refusal — it is
-        # left to propagate rather than silently reported as one.
-        raise
-    except Exception as exc:
-        # Belt and braces (GH #322, THE-1087): `_first_unsupported`'s
-        # up-front scan and this walk's own bounds/translation logic have
-        # drifted apart before — a literal `range()` step of 0 passed the
-        # scan's static-bounds check and reached a bare `len(range(...))`
-        # in `_walk_loop`, raising CPython's `ValueError` straight out of
-        # `analyze()` instead of the documented refusal (now fixed in the
-        # scan itself, above). Any OTHER unexpected exception surfacing
-        # from the translation/bounds-computation path this try wraps gets
-        # the same refusal treatment, so the module docstring's "REFUSAL IS
-        # THE RESULT ... never a raised exception" contract holds even if
-        # the scan and the walker disagree again on some future construct.
-        # `z3.Z3Exception` is excluded above: that is a solver-side
-        # failure, not an unsupported-construct refusal, and is never
-        # swallowed here.
-        return _refusal(f"unsupported construct: unexpected {type(exc).__name__}: {exc}")
 
     dead = sum(1 for b in ctx.branches if b["verdict"] == "dead")
     reachable = sum(1 for b in ctx.branches if b["verdict"] == "reachable")
