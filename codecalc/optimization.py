@@ -408,29 +408,40 @@ def _comparable_positions(before: dict, after: dict) -> tuple[list[dict], list[d
 def _speedup(before: dict, after: dict, comparable: list[dict] | None = None) -> dict:
     """Ratio after/before per size (median used as the headline).
 
-    `comparable=None` (the default): built from EVERY position
-    `_comparable_positions` calls comparable, with no significance filtering
-    at all — this is the WIDER, unfiltered pool, kept as the default only
-    because this module's own tests call `_speedup` directly to document
-    what the raw measurement looked like BEFORE `_infer_speedup`'s filters
-    run (see e.g. the codecalc issue #328 CI reproductions in
-    tests/test_translation_verify.py).
-
-    `verify_optimization` never uses that default: it passes the SURVIVORS
-    of `_testable_positions` (the same testability floor and
-    normal-approximation-reliability gate `_infer_speedup` applies) as
-    `comparable` explicitly, so the headline ratio and `per_size` can only
-    ever be built from a size the significance test also kept — a size
-    `_infer_speedup` excluded as too noisy to test (fewer than
+    `comparable=None` (the default): built from `_testable_positions`'
+    SURVIVORS — the same testability floor and normal-approximation-
+    reliability gate `_infer_speedup` applies — so the headline ratio and
+    `per_size` can only ever be built from a size the significance test also
+    kept. A size `_infer_speedup` excludes as too noisy to test (fewer than
     `stats.min_testable_n` runs a side, or a tie routed to the normal
     approximation with overlapping ranges below `_NORMAL_APPROX_MIN_N`) can
     no longer set the median ratio while `inference.sizes_below_floor` says
-    it was excluded (codecalc issue #328 — an earlier version of this fix
-    only reconciled `_speedup` with `_comparable_positions`'s OWN floor,
-    leaving `_infer_speedup`'s two further, narrower filters unfed-back).
+    it was excluded — true of EVERY call, not just `verify_optimization`'s
+    (codecalc issue #328 — an earlier version of this fix only reconciled
+    `_speedup` with `_comparable_positions`'s OWN floor, leaving
+    `_infer_speedup`'s two further, narrower filters unfed-back; a second
+    pass closed the remaining gap: the default itself used to reproduce the
+    bug for any caller that omitted `comparable`, with only
+    `verify_optimization` passing survivors explicitly).
+
+    Pass `comparable` explicitly for two reasons: `verify_optimization`
+    does it to reuse the ONE `_testable_positions` call it also makes for
+    `inference`, rather than have this function repeat it; a caller that
+    genuinely wants the WIDER, unfiltered `_comparable_positions` pool
+    (no significance filtering at all — the pre-#328-fix behaviour) passes
+    `_comparable_positions(before, after)[0]` — this module's own tests do,
+    to document what the raw measurement looked like before
+    `_infer_speedup`'s filters run (see the codecalc issue #328 CI
+    reproductions in tests/test_translation_verify.py). `comparable` also
+    accepts raw duration-only entries with no `b_sample`/`a_sample` (as
+    `_comparable_positions` returns when `before`/`after` carry no
+    `all_runs_ms`) — the default does NOT: with no raw runs,
+    `_testable_positions`' own testability floor excludes every position,
+    so a caller measuring bare `durations_ms` (no significance test
+    possible at all) must pass `_comparable_positions(...)[0]` explicitly.
     """
     if comparable is None:
-        comparable, _excluded = _comparable_positions(before, after)
+        comparable, _excluded, _min_n = _testable_positions(before, after)
     if not comparable:
         return {"ratio": None, "measurable": False, "per_size": [],
                 "reason": "no size survived both the visibility floor and "
