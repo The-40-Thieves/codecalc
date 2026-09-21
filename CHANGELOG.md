@@ -148,6 +148,16 @@ behind it.
   `method` stays `"empirical"` throughout — the measurement is still real
   evidence even when the classification is honestly inconclusive.
   (GH #327, THE-1092)
+- `benchmark`'s docs still called 3 sizes a plain "minimum" after the fix
+  above made 3 sizes ALWAYS decide `"inconclusive"` — the `sizes` size-count
+  floor, its `Field` description, and `benchmark`'s docstrings (`server.py`
+  and `tools.py`) now say so explicitly: 3 is still accepted (unchanged,
+  backward compatible), but 4+ sizes are needed before the curve fit is
+  trusted and 5+ doubling sizes before the ratio median is. The default
+  `sizes` ("100,1000,10000,100000", 4 sizes 10x apart) always decides via
+  `estimate_basis: "curve-fit"` — verified against 3 live runs, never
+  `"ratio-median"` (10x-apart sizes produce no doubling pairs at all) and
+  never `"inconclusive"` (4 points clears `MIN_FIT_POINTS`). (THE-1092)
 
 ## [0.12.0] — 2026-09-09
 

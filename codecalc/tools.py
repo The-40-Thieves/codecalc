@@ -516,6 +516,24 @@ def benchmark(code: str, language: str = "python3", sizes: str = "100,1000,10000
     sizes are multiplied by 10 and re-measured (up to 4x) so the fit sees real
     compute, not subprocess spawn noise.
 
+    3 is the accepted MINIMUM (unchanged, for backward compatibility — see
+    `MIN_FIT_POINTS`/`MIN_ROBUST_RATIOS`'s comments for the GH #327 history of
+    why), but at 3 sizes `estimate` is ALWAYS `"inconclusive (...)"`
+    (`estimate_basis: "inconclusive"`, unless the work is flat enough to hit
+    the noise floor first): a 2-parameter curve fit against 3 points has only
+    1 residual degree of freedom, not enough to discriminate reliably across
+    the 8 candidate classes in `_CLASSES`, and 3 sizes can produce at most 1
+    doubling ratio, never the >= 3 `MIN_ROBUST_RATIOS` needs for a median. At
+    least 4 sizes are needed before the curve fit is actually trusted
+    (`estimate_basis: "curve-fit"`); this module's own default `sizes`
+    ("100,1000,10000,100000") is 4 sizes 10x apart — no doubling pairs at all,
+    so it always decides via curve-fit, never the ratio median. At least 5
+    DOUBLING sizes (n, 2n, 4n, 8n, 16n) are needed for a robust ratio median
+    (`estimate_basis: "ratio-median"`): N doubling sizes yield N-2 usable
+    ratios (baseline subtraction always discards the first gap as sub-noise —
+    see `_classify_by_ratio`'s docstring), so 5 sizes is the floor for the 3
+    ratios `MIN_ROBUST_RATIOS` requires.
+
     `on_progress(done, total, message)`, if given, fires once PER SIZE
     (`total` = the requested size count, fixed) during the FIRST measurement
     pass only — an auto-scale re-measurement is a distinct, unpredictable-
@@ -528,7 +546,10 @@ def benchmark(code: str, language: str = "python3", sizes: str = "100,1000,10000
     except ValueError:
         return {"ok": False, "error": "sizes must be comma-separated integers"}
     if len(size_list) < 3:
-        return {"ok": False, "error": "need at least 3 sizes for a meaningful fit"}
+        return {"ok": False, "error": "need at least 3 sizes (3 is accepted but always "
+                                      "reports estimate: \"inconclusive\" — 4+ sizes for a "
+                                      "trusted curve fit, 5+ doubling sizes for a robust "
+                                      "ratio median; see benchmark's own docstring)"}
     repeats = max(1, min(repeats, 5))
 
     runs, error = _measure(language, code, size_list, timeout, repeats, on_progress=on_progress)
