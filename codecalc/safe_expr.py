@@ -236,18 +236,22 @@ MAX_FACTOR_ARG_DIGITS = 25
 #: same CLASS of hazard `_numeric_ceiling_scan`'s own `Pow` handling exists
 #: to catch generally (an intermediate that is expensive to CONSTRUCT
 #: regardless of how small the printed RESULT turns out to be, #326
-#: findings 1-2, round 7). Unlike the six above, these three DO respect
+#: findings 1-2, round 7). Unlike the six above, `sqrt`/`cbrt` DO respect
 #: `evaluate=False` — `sqrt(x)` IS `Pow(x, Rational(1, 2))`, and stays
 #: that way, unevaluated, under `evaluate=False` (confirmed live) — so
 #: their construction-cost hazard gets a genuine TREE-level backstop
 #: instead, in `reject_explosive`'s Pow loop (see its own comment on the
-#: unit-fraction-exponent branch): no `Function` node named `sqrt`/
-#: `root`/`cbrt` ever appears in the tree to look up in `_FUNCTION_ARG_
-#: CAPS` by name, so this family's entry in that table drives a
-#: DIFFERENT recognition rule than the other two. `root` takes an
-#: optional second (integer index) argument — `root(n, 2)` is `sqrt(n)`
-#: under a different name, so both argument positions are checked at the
-#: token level, not just the first.
+#: unit-fraction-exponent branch). `root` does NOT share that path for
+#: every call shape (probed live: `root(factorial(1463), 2)` parses to a
+#: `Mul`, not a `Pow` — a different, more eager construction path — see
+#: `_oversized_call_arg_violation`'s own comment), so it stays on the
+#: token-level layer alone, same as the factoring family. No `Function`
+#: node named `sqrt`/`root`/`cbrt` ever appears in the tree to look up in
+#: `_FUNCTION_ARG_CAPS` by name either way, so this family's entry in
+#: that table drives a DIFFERENT recognition rule than the other two.
+#: `root` takes an optional second (integer index) argument — `root(n,
+#: 2)` is `sqrt(n)` under a different name, so both argument positions
+#: are checked at the token level, not just the first.
 MAX_ROOT_ARG_DIGITS = 1_200
 
 #: This started at 50_000, chosen from measured PARSE time:
@@ -552,9 +556,20 @@ def _call_arg_cap_violation(func_name: str, kind: str, cap: int, literals: list)
         return (f"an argument to {func_name}() has about {total_digits} "
                 f"digits, over the limit of {cap}: computing it is not "
                 "safely bounded")
-    return (f"the literals combined in one argument to {func_name}() total "
-            f"about {total_digits} digits, over the limit of {cap}: "
-            "computing their product is not safely bounded")
+    # #326 finding 3 (cross-vendor review, round 9, grok): `total_digits`
+    # is the SUM of each literal's own digit count, a safe UPPER BOUND on
+    # their product's true digit count (never an under-count, off by at
+    # most one over) — not the exact product, which this module never
+    # materializes to check. That means a small multiplier can tip an
+    # otherwise-legal literal over the cap on the SUM alone even though
+    # the true product still fits (`factorint(<25-digit literal>*2)`:
+    # 25 + 1 = 26 > 25, refused, though the real product is still exactly
+    # 25 or 26 digits either way) — accepted, documented conservatism,
+    # not a bug: the message says "the sum of ... digits", explicitly,
+    # so a caller sees why a small extra factor was enough to refuse.
+    return (f"the sum of the literal digits combined in one argument to "
+            f"{func_name}() is about {total_digits}, over the limit of "
+            f"{cap}: computing their product is not safely bounded")
 
 
 def _oversized_call_arg_violation(tokens: list) -> str | None:
@@ -585,6 +600,20 @@ def _oversized_call_arg_violation(tokens: list) -> str | None:
     for why combining several literals into one VALUE has no equivalent
     principled meaning).
 
+    #326 finding 3 (cross-vendor review, round 9, grok): being an upper
+    BOUND, not the exact product, means the sum can tip a literal over
+    the cap by one digit even when the true product would not —
+    `factorint(<25-digit literal>*2)` sums to 26 (over `MAX_FACTOR_ARG_
+    DIGITS`) and is refused, even though the real product is at most 26
+    and possibly still exactly 25 digits. Accepted, documented
+    conservatism, not a bug — this module already trades a rare false
+    refusal for never materializing the product to check exactly (see
+    `_oversized_scientific_literal_violation`'s own docstring for the
+    same trade made elsewhere) — and `_call_arg_cap_violation`'s refusal
+    message says "the sum of the literal digits", explicitly, so a
+    caller who hits this can see why a small extra factor alone was
+    enough to refuse.
+
     Literal-only, same scope and same reasoning as `_heavy_call_violation`:
     a call-shaped COMPUTED argument (`factorint(nextprime(10**2000))`,
     `sqrt(nextprime(10**2000))`) is still NOT caught here — no token-level
@@ -597,11 +626,18 @@ def _oversized_call_arg_violation(tokens: list) -> str | None:
     the very act of PARSING, before any tree exists for `_numeric_ceiling_
     scan` to inspect, so a computed argument to this family relies on
     `guarded_call`'s CPU/wall-clock backstop alone, same as any other
-    hazard this module has not yet named. `sqrt`/`root`/`cbrt` are
-    different: they DO respect `evaluate=False` (stay an unevaluated
-    `Pow`), so THEIR computed-argument gap is closed at the tree level
-    instead, in `reject_explosive`'s Pow loop — see its own comment on the
-    unit-fraction-exponent branch.
+    hazard this module has not yet named. `sqrt`/`cbrt` are different:
+    they DO respect `evaluate=False` (stay an unevaluated `Pow`), so
+    THEIR computed-argument gap is closed at the tree level instead, in
+    `reject_explosive`'s Pow loop — see its own comment on the unit-
+    fraction-exponent branch. `root` does NOT share that path for every
+    call shape — probed live (and pinned in `tests/test_bug_sweep.py`'s
+    round-8 self-check): `root(factorial(1463), 2)` parses to a `Mul`,
+    not a `Pow`, because `root`'s own construction pulls perfect-square-
+    ish factors out of an ALREADY-CONCRETE base eagerly, a different code
+    path from bare `sqrt`/`cbrt` — so `root` stays on THIS token-level
+    layer alone for a computed argument, same as the factoring family,
+    not the Pow loop.
     """
     for i, tok in enumerate(tokens):
         if tok.type != tokenize.NAME or tok.string not in _FUNCTION_ARG_CAPS:
@@ -1675,7 +1711,6 @@ def _numeric_ceiling_scan(tree, memo: dict) -> str | None:
     """
     from sympy import Add, Function, Integer, Mul, Pow
 
-    _log10_max_heavy_arg = math.log10(MAX_HEAVY_ARG)
     stack = [tree]
     seen = 0
     while stack:
@@ -1723,8 +1758,10 @@ def _numeric_ceiling_scan(tree, memo: dict) -> str | None:
             # the tree at all (see `MAX_FACTOR_ARG_DIGITS`'s own comment),
             # and `sqrt`/`root`/`cbrt` compile to a `Pow`, never a
             # `Function` named after themselves (see `MAX_ROOT_ARG_
-            # DIGITS`'s own comment, and the Pow loop's unit-fraction-
-            # exponent branch, which is THEIR actual tree-level backstop).
+            # DIGITS`'s own comment) — `sqrt`/`cbrt`'s actual backstop is
+            # the Pow loop's unit-fraction-exponent branch; `root` does
+            # not share that path for every call shape and stays on the
+            # token-level layer alone instead (same comment).
             # A future name added to the table with this family's shape --
             # a real `sympy.Function` subclass whose hazard is digit-count
             # rather than value -- is covered here without a second copy
@@ -1737,7 +1774,16 @@ def _numeric_ceiling_scan(tree, memo: dict) -> str | None:
                 if not arg_resolved:
                     continue  # inconclusive -- an irrational constant, a nested Function, ...
                 if kind == "value":
-                    over_cap = (arg_log_num - arg_log_den) > _log10_max_heavy_arg
+                    # #326 finding 2 (cross-vendor review, round 9, grok):
+                    # read from THIS name's own row (`cap`, already looked
+                    # up above), not a module-level `MAX_HEAVY_ARG`
+                    # constant precomputed once outside the loop -- every
+                    # "value"-kind row happens to share that same cap
+                    # today, but computing `log10(cap)` HERE, per node,
+                    # means a future per-name override in the table is
+                    # honoured automatically rather than silently ignored
+                    # by a stale precomputed log10.
+                    over_cap = (arg_log_num - arg_log_den) > math.log10(cap)
                 else:
                     over_cap = _digit_count_over_cap(arg_log_num, cap)
                 if over_cap:
@@ -1987,14 +2033,28 @@ def reject_explosive(tree) -> str | None:
                     # a (looser, not construction-cost-aware) backstop.
                     if (isinstance(exponent, Rational) and exponent.p == 1
                             and exponent.q >= 2):
+                        # #326 finding 2 (cross-vendor review, round 9,
+                        # grok): read the cap from `_FUNCTION_ARG_CAPS`'s
+                        # own "sqrt" row (its "cbrt"/"root" rows share the
+                        # identical value by construction -- see that
+                        # table's own comment) rather than the bare
+                        # `MAX_ROOT_ARG_DIGITS` module constant -- this
+                        # shape is reached structurally, by the Pow node's
+                        # own exponent, with no function-name token to key
+                        # a per-name lookup off (`sqrt(x)` and a bare
+                        # `x**(1/2)` in the SOURCE produce the identical
+                        # `Pow` either way), so "sqrt" stands in as this
+                        # family's canonical row rather than this branch
+                        # keeping its own second copy of the cap value.
+                        _root_cap = _FUNCTION_ARG_CAPS["sqrt"][1]
                         base_num, base_den, base_res = _log10_num_den(base, memo)
                         if base_res:
-                            over_cap = (_digit_count_over_cap(base_num, MAX_ROOT_ARG_DIGITS)
-                                        or _digit_count_over_cap(base_den, MAX_ROOT_ARG_DIGITS))
+                            over_cap = (_digit_count_over_cap(base_num, _root_cap)
+                                        or _digit_count_over_cap(base_den, _root_cap))
                             if over_cap:
                                 return (f"the base of a {exponent.q}-th root has "
                                         f"more digits than the limit of "
-                                        f"{MAX_ROOT_ARG_DIGITS}: computing the "
+                                        f"{_root_cap}: computing the "
                                         "root is not safely bounded")
                     # A COMPOUND exponent on a numeric base, any other
                     # shape: nothing new for THIS iteration to do. The

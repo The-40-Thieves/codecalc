@@ -754,6 +754,26 @@ behind it.
   at the base" for a non-Integer exponent (the compound-`Pow` branch
   loads the base first, for its own unit-base check, before the "push
   both children" case this comment explains is even reached).
+  A ninth review round (grok, PASS with no remaining High — three Low
+  notes) closed the last three: a docstring overclaimed that `sqrt`,
+  `root`, and `cbrt` alike "DO respect `evaluate=False`" — true for
+  `sqrt`/`cbrt`, false for `root` (probed live: `root(factorial(1463),
+  2)` parses to a `Mul`, not a `Pow`, a more eager construction path —
+  the docstring now says so and scopes `root` to the token-level layer
+  explicitly, matching its own test and the round-8 entry above); the
+  table did not yet drive EVERY comparison — the `Function`-node "value"
+  check still read a `_log10_max_heavy_arg` derived from the bare
+  `MAX_HEAVY_ARG` module constant rather than the matched row's own
+  `cap`, and the Pow loop's unit-fraction branch hardcoded `MAX_ROOT_
+  ARG_DIGITS` directly — both now read from `_FUNCTION_ARG_CAPS` itself
+  (a monkeypatched row with a deliberately different cap, in a new
+  self-check test, proves both layers actually follow the table); and
+  the summed-digit token rule's refusal message now says "the sum of the
+  literal digits", explicitly, since it is a safe UPPER bound on a
+  product's true digit count, not the exact product — a small extra
+  literal factor can tip the sum over the cap even when the true product
+  still fits (`factorint(<25-digit literal>*2)`, accepted as documented
+  conservatism, not a bug).
 
 ## [0.12.0] — 2026-09-09
 

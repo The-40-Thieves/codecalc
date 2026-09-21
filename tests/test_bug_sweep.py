@@ -2344,6 +2344,61 @@ check(f"self-check covered every name in _FUNCTION_ARG_CAPS "
       _checked_names == set(_se5._FUNCTION_ARG_CAPS),
       f"-> missing={set(_se5._FUNCTION_ARG_CAPS) - _checked_names!r}")
 
+# ═══ round 9 of cross-vendor review (grok PASS, three Low notes, on ════════
+# ═══ 940c6b5) ════════════════════════════════════════════════════════════
+
+# Finding 2: the table did not yet drive EVERY comparison -- the
+# Function-node "value" check used a `_log10_max_heavy_arg` derived from
+# the bare `MAX_HEAVY_ARG` module constant, precomputed once outside the
+# scan's loop, and the Pow loop's unit-fraction branch hardcoded
+# `MAX_ROOT_ARG_DIGITS` directly, rather than either reading the cap from
+# the matched row in `_FUNCTION_ARG_CAPS` itself -- both now do (see
+# their own comments). A monkeypatched row with a deliberately different
+# cap proves both layers actually follow the TABLE, not the module
+# constant it happens to start from.
+_orig_factorial_cap = _se5._FUNCTION_ARG_CAPS["factorial"]
+_se5._FUNCTION_ARG_CAPS["factorial"] = ("value", 10)
+try:
+    _v, _e = _boundary_parse("factorial(20+1)")  # 20, tokenwise, clearly over a cap of 10
+    check("self-check: a monkeypatched 'factorial' row (cap 10, was "
+          f"{_orig_factorial_cap[1]}) is honoured -- factorial(20+1) refused",
+          _v is None and _e is not None, f"-> value={_v!r} err={_e!r}")
+    _v, _e = _boundary_parse("factorial(2+1)")  # 3, clearly under a cap of 10
+    check("  ...and factorial(2+1) (under the patched cap) still evaluates",
+          _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+finally:
+    _se5._FUNCTION_ARG_CAPS["factorial"] = _orig_factorial_cap
+
+_orig_sqrt_cap = _se5._FUNCTION_ARG_CAPS["sqrt"]
+_se5._FUNCTION_ARG_CAPS["sqrt"] = ("digits", 10)
+try:
+    # factorial(20) has 19 digits, over a patched root cap of 10; a
+    # COMPUTED (tree-only-catchable) argument, so this exercises the Pow
+    # loop's unit-fraction branch specifically, not the token screen.
+    _v, _e = _boundary_parse("sqrt(factorial(20))")
+    check("self-check: a monkeypatched 'sqrt' row (cap 10, was "
+          f"{_orig_sqrt_cap[1]}) is honoured -- sqrt(factorial(20)) refused",
+          _v is None and _e is not None, f"-> value={_v!r} err={_e!r}")
+    _v, _e = _boundary_parse("sqrt(factorial(5))")  # 120, 3 digits, under 10
+    check("  ...and sqrt(factorial(5)) (under the patched cap) still evaluates",
+          _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+finally:
+    _se5._FUNCTION_ARG_CAPS["sqrt"] = _orig_sqrt_cap
+
+# Finding 3: the summed-digit token rule is a safe UPPER bound on a
+# product's true digit count, not the exact product -- a small extra
+# literal factor can tip the SUM over the cap even when the true product
+# still fits (`factorial(1463)` is far too big a comparison point here;
+# use the same factoring-family shape the docstring's own example names).
+_lit25 = "9" * 25
+_r = _se5.classify_unsafe(f"factorint({_lit25}*2)")
+check("factorint(<25-digit literal>*2) (sum 26, over MAX_FACTOR_ARG_DIGITS, "
+      "though the true product may still be 25 digits) is refused",
+      _r is not None, f"-> {_r}")
+check("  ...with a message naming the SUM explicitly, not implying an "
+      "exact product was computed",
+      _r is not None and "sum of the literal digits" in _r[1], f"-> {_r}")
+
 # Codex finding 2 (Low): _approx_decimal_digits() truncates a float log and
 # overcounts at exact power-of-ten boundaries (a 25-digit all-9s literal
 # read as 26 digits; a 1,200-digit all-9s literal as 1,201) -- and the
