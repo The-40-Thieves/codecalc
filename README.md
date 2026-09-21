@@ -982,7 +982,7 @@ measured numbers live in `docs/tool-selection-eval.md` next to BM25's own.
 
 For an operator who would rather not configure every client, codecalc also has
 a first-party knob: `CODECALC_TOOLS` registers only a chosen slice of the
-56-tool surface, so a client that never enables tool search still pays for a
+50-tool surface, so a client that never enables tool search still pays for a
 smaller `tools/list`.
 
 On a client with no deferral mechanism of its own, the client's own allow-list

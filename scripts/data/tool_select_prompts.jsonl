@@ -37,6 +37,10 @@
 {"prompt": "Work out the exact share PART represents of TOTAL as a fraction and a percent", "expected": ["percentage"]}
 {"prompt": "give me the ratio of these two rational numbers as a share, not a pass/fail check", "expected": ["percentage"]}
 {"prompt": "Out of a total of 250, what share does 37 represent?", "expected": ["percentage"]}
+{"prompt": "Revenue went from $1.2 million to $900 thousand — by what percent did it drop?", "expected": ["percent_change"]}
+{"prompt": "The price of a widget moved from $80 to $100 — as a percentage, how much did it increase?", "expected": ["percent_change"]}
+{"prompt": "A stock was priced at $50 last month and is now $65 — express the move as an exact percent, not just the dollar difference", "expected": ["percent_change"]}
+{"prompt": "A company's loss was $100k last quarter and is $50k this quarter — by what percent did the loss shrink?", "expected": ["percent_change"]}
 {"prompt": "Give me the mean, median and standard deviation of these benchmark timings", "expected": ["calc_stats"]}
 {"prompt": "I have a list of numbers from repeated runs \u2014 summarize their central tendency and spread, and tell me if the noise is too high to trust them", "expected": ["calc_stats"]}
 {"prompt": "summarize the whole distribution's average and variability, not its ranked cutoffs", "expected": ["calc_stats"]}

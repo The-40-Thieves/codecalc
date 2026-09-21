@@ -123,6 +123,12 @@ for _label, _call in [
     ("benchmark: too few sizes", lambda: server.benchmark("x", sizes="1,2")),
     ("compare_threshold: bad operator", lambda: server.compare_threshold("1", "~=", "2")),
     ("percentage: zero total", lambda: server.percentage("1", "0")),
+    # GH #329: percent_change takes a number or exact rational (Fraction(str)),
+    # not an expression — '2*3' is exactly the input its own Field
+    # description used to invite ("... expression ...") before that was
+    # tightened, so this both proves the refusal and guards the wording.
+    ("percent_change: '2*3' is an expression, not a number/rational",
+     lambda: server.percent_change("2*3", "1")),
     ("calc_stats: too few numbers", lambda: server.calc_stats([1.0])),
     ("percentiles: no numbers", lambda: server.percentiles([])),
     ("collision_probability: zero bits", lambda: server.collision_probability(10, 0)),

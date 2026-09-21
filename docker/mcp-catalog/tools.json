@@ -493,12 +493,12 @@
   },
   {
     "name": "evaluate_expression",
-    "description": "Use evaluate_expression, not calc_exact, for something other than\nplain arithmetic on literal values. Symbolically evaluate to a value or\nclosed form via sympify: 'integrate(x**2, x)', 'sqrt(144) + 2**10'. Not\nsimplification — for simplified/factored/expanded forms, use\nsymbolic(op=\"simplify\"). Returns `value` (if the result is a number) or\nthe evaluated expression, plus `type`.",
+    "description": "Use evaluate_expression, not calc_exact, for something other than\nplain arithmetic on literal values. Symbolically evaluate to a value or\nclosed form via sympify: 'sqrt(144) + 2**10'. Not simplification — for\nsimplified/factored/expanded forms, use symbolic(op=\"simplify\").\n\nAlso the only way to reach calculus forms — none of these have their\nown tool: `diff(expr, x)` (derivative, e.g. 'diff(sin(x)*x, x)' ->\n'x*cos(x) + sin(x)'), `integrate(expr, x)` (indefinite) /\n`integrate(expr, (x, a, b))` (definite, e.g. 'integrate(x**2, (x, 0,\n1))' -> '1/3'), and `series(expr, x, x0, n)` (Taylor/Laurent expansion\nto n terms around x0, e.g. 'series(sin(x), x, 0, 6)' -> 'x - x**3/6 +\nx**5/120 + O(x**6)').\n\nReturns `value` (if the result is a number) or the evaluated\nexpression, plus `type`.",
     "arguments": [
       {
         "name": "expression",
         "type": "string",
-        "desc": "Symbolic math expression to evaluate via SymPy, e.g. 'integrate(x**2, x)', 'sqrt(144) + 2**10'"
+        "desc": "Symbolic math expression to evaluate via SymPy, e.g. 'integrate(x**2, x)', 'diff(sin(x)*x, x)', 'series(sin(x), x, 0, 6)', 'sqrt(144) + 2**10'"
       }
     ]
   },
@@ -806,6 +806,22 @@
     ]
   },
   {
+    "name": "percent_change",
+    "description": "Exact percent change from FROM_VALUE to TO_VALUE. Use percentage,\nnot this, for PART / TOTAL rather than a before/after change.\n\n`(to_value - from_value) / abs(from_value) * 100` — the conventional\nfinance definition, relative to the MAGNITUDE of the base so a negative\nfrom_value does not flip the sign (see `note` when it applies). Refuses\nfrom_value=0 (undefined) rather than returning infinity — report the\nabsolute change instead. Returns `percent_exact` (exact rational),\n`percent_decimal` (rounded), `absolute_change`, `direction`\n(\"increase\"/\"decrease\"/\"unchanged\"), and `multiplier` (to_value /\nfrom_value, exact).",
+    "arguments": [
+      {
+        "name": "from_value",
+        "type": "string",
+        "desc": "Starting value: a number or exact rational (e.g. '3/4', '1e3'), not an expression like '2*3'; must not be zero"
+      },
+      {
+        "name": "to_value",
+        "type": "string",
+        "desc": "Ending value: a number or exact rational (e.g. '3/4', '1e3'), not an expression like '2*3'"
+      }
+    ]
+  },
+  {
     "name": "calc_stats",
     "description": "Mean, median, sample stdev, and coefficient of variation (CV) for a\nsample of numbers. Pairs with percentiles for distribution shape\n(p50/p90/p95/p99) on the same sample, and with benchmark or\nverify_optimization, which are common sources of the timing samples this\ntool summarizes. CV > 0.2 flags run-to-run noise that swamps the effect.\nReturns n/mean/median/stdev/cv plus a cv_note.\n",
     "arguments": [
@@ -975,7 +991,7 @@
   },
   {
     "name": "symbolic",
-    "description": "Symbolic algebra, selected by `op` — replaces the four former\nstandalone tools solve_expression, solve_linear, simplify_expression\nand limit_expression, retired in 0.12.0 (CHANGELOG.md). Every op\nreturns exactly its former tool's own result, plus `op` (additive).\n\nop=\"solve\" (was solve_expression) — the roots of one equation:\n'x**2 - 4 = 0', '2*x + 1 = 7'. For a system of several equations, use\nop=\"solve_linear\". For general constraint satisfiability (inequalities,\nboolean constraints, multiple solvers), use z3_check. Returns\n`solutions` as a list of strings alongside the parsed `equation` and\n`variable`. Used by this op: `expr` (required), `var` (optional).\n\nop=\"solve_linear\" (was solve_linear) — a system of equations sharing\nvariables. Example: system='x + y = 10; x - y = 2', variables='x, y'.\nUsed by this op: `system`, `variables` (both required).\n\nop=\"simplify\" (was simplify_expression) — simplify, factor, and expand\nan expression — algebraic forms, not solving (use op=\"solve\") and not a\nnumeric value (use calc_exact). Returns `simplified`, `factored`, and\n`expanded` as strings alongside the parsed `original`. Used by this op:\n`expr` (required).\n\nop=\"limit\" (was limit_expression) — asymptotic behaviour: limit of\n`expr` as `var` -> `point`. 'symbolic(\"limit\", \"n*log(n)/n**2\", \"n\")'\nreturns 0 — settles complexity arguments faster than arguing. Used by\nthis op: `expr` (required), `var` (optional), `point` (optional).\n",
+    "description": "Symbolic algebra, selected by `op` — replaces the four former\nstandalone tools solve_expression, solve_linear, simplify_expression\nand limit_expression, retired in 0.12.0 (CHANGELOG.md). Every op\nreturns exactly its former tool's own result, plus `op` (additive).\n\nop=\"solve\" (was solve_expression) — the roots of one equation:\n'x**2 - 4 = 0', '2*x + 1 = 7'. For a system of several equations, use\nop=\"solve_linear\". For general constraint satisfiability (inequalities,\nboolean constraints, multiple solvers), use z3_check. Returns\n`solutions` as a list of strings alongside the parsed `equation` and\n`variable`. Used by this op: `expr` (required), `var` (optional).\n\nop=\"solve_linear\" (was solve_linear) — a system of equations sharing\nvariables. Despite the name, this is not limited to LINEAR systems:\nsympy's solver handles non-linear polynomial systems the same way, e.g.\nsystem='x**2 + y**2 = 5; x - y = -1', variables='x, y' -> two\nsolutions. Ordinary linear example: system='x + y = 10; x - y = 2',\nvariables='x, y'. Used by this op: `system`, `variables` (both\nrequired).\n\nop=\"simplify\" (was simplify_expression) — simplify, factor, and expand\nan expression — algebraic forms, not solving (use op=\"solve\") and not a\nnumeric value (use calc_exact). Returns `simplified`, `factored`, and\n`expanded` as strings alongside the parsed `original`. Used by this op:\n`expr` (required).\n\nop=\"limit\" (was limit_expression) — asymptotic behaviour: limit of\n`expr` as `var` -> `point`. 'symbolic(\"limit\", \"n*log(n)/n**2\", \"n\")'\nreturns 0 — settles complexity arguments faster than arguing. Used by\nthis op: `expr` (required), `var` (optional), `point` (optional).\n",
     "arguments": [
       {
         "name": "op",
@@ -1003,7 +1019,7 @@
       {
         "name": "system",
         "type": "string",
-        "desc": "';'-separated equations for op='solve_linear', e.g. 'x + y = 10; x - y = 2'; required by that op",
+        "desc": "';'-separated equations for op='solve_linear' — despite the name, non-linear polynomial systems work too, e.g. 'x + y = 10; x - y = 2' or 'x**2 + y**2 = 5; x - y = -1'; required by that op",
         "optional": true
       },
       {

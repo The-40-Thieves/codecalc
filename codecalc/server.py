@@ -2648,8 +2648,8 @@ def percentage(part: Annotated[str, Field(description="Numerator expression (rat
 
 
 @mcp.tool(group="calculator")
-def percent_change(from_value: Annotated[str, Field(description="Starting value expression (rationals accepted), evaluated exactly; must not be zero")],
-                   to_value: Annotated[str, Field(description="Ending value expression (rationals accepted), evaluated exactly")]) -> dict[str, Any]:
+def percent_change(from_value: Annotated[str, Field(description="Starting value: a number or exact rational (e.g. '3/4', '1e3'), not an expression like '2*3'; must not be zero")],
+                   to_value: Annotated[str, Field(description="Ending value: a number or exact rational (e.g. '3/4', '1e3'), not an expression like '2*3'")]) -> dict[str, Any]:
     """Exact percent change from FROM_VALUE to TO_VALUE. Use percentage,
     not this, for PART / TOTAL rather than a before/after change.
 
