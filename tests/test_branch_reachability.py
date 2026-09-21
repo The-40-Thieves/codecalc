@@ -282,6 +282,9 @@ _REFUSAL_CASES = {
     "try/except": ("def f(x):\n    try:\n        return x\n    except Exception:\n        return 0\n", 2),
     "comprehension": ("def f(xs):\n    y = [i for i in xs]\n    return y\n", 2),
     "I/O call": ("def f(x):\n    if x > 0:\n        print(x)\n    return 0\n", 3),
+    "range() step of 0": (
+        "def f(x):\n    for i in range(0, 10, 0):\n        if i == 5:\n            return 1\n    return 0\n", 2,
+    ),
 }
 for _label, (_code, _expected_line) in _REFUSAL_CASES.items():
     _rr = br.analyze("python3", _code)
@@ -291,6 +294,96 @@ for _label, (_code, _expected_line) in _REFUSAL_CASES.items():
           _rr.get("line") == _expected_line, f"-> {_rr}")
     check(f"refusal ({_label}): remedy names trace_execution",
           "trace_execution" in (_rr.get("remedy") or ""), f"-> {_rr.get('remedy')}")
+
+# ── range() step of 0 is a coded refusal, never a raised exception ─────────
+# GH #322 / THE-1087: CPython's `len(range(start, stop, 0))` raises
+# `ValueError: range() arg 3 must not be zero` at construction, and used to
+# escape `analyze()` as an uncaught exception instead of the documented
+# refusal every other unsupported construct gets. `_first_unsupported`'s
+# static-bounds check now catches a literal step of 0 before a single z3
+# call is made, naming the construct. Belt and braces: `_walk_loop` ALSO
+# refuses a step of 0 on its own, narrowly, right where it would otherwise
+# build `range(start, stop, 0)` — via the ordinary `_TranslateError` path
+# `analyze()` already catches — so the scan and the walker agreeing is not
+# the ONLY thing standing between this input and a raised exception. An
+# earlier version of this fix instead widened `analyze()`'s exception
+# handler to a blanket `except Exception`; cross-vendor review (Codex, PR
+# #330) showed that masked a genuine internal defect (an injected
+# RuntimeError) as an "unsupported construct" refusal just as readily as
+# it caught the intended ValueError, so it was replaced with this narrow,
+# construct-specific guard instead — see the "internal errors still
+# propagate" test below, the review's own probe made permanent.
+check("range() step of 0: message names the construct",
+      "step of 0" in _rr.get("error", ""), f"-> {_rr}")
+
+# unary-minus-zero (`-0`) is the exact same int as a literal `0` — must not
+# slip past the ast.UnaryOp(USub) branch of the static-bounds check.
+_STEP_NEG_ZERO = (
+    "def f(x):\n    for i in range(0, 10, -0):\n        if i == 5:\n            return 1\n    return 0\n"
+)
+_rnz = br.analyze("python3", _STEP_NEG_ZERO)
+check("range() step of -0 (unary minus on a zero literal): refused the same as a literal 0",
+      _rnz.get("ok") is False and _rnz.get("code") == "validation"
+      and _rnz.get("line") == 2 and "step of 0" in _rnz.get("error", ""), f"-> {_rnz}")
+
+# control: a legal nonzero positive step analyses normally (proves the fix
+# does not over-refuse an ordinary range() call).
+_STEP_TWO = (
+    "def f(x):\n    for i in range(0, 10, 2):\n        if i == 4:\n            return 1\n    return 0\n"
+)
+_rt2 = br.analyze("python3", _STEP_TWO)
+check("range() step of 2: analyses normally, no exception, ok is True",
+      _rt2.get("ok") is True, f"-> {_rt2}")
+check("range() step of 2: the nested if (i == 4, in range(0,10,2)) is reachable",
+      _by_line(_rt2, 3) is not None and _by_line(_rt2, 3)["verdict"] == "reachable",
+      f"-> {_by_line(_rt2, 3)}")
+_verify_every_witness(_rt2, _STEP_TWO, "f", "step-of-2")
+
+# control: a legal negative step (a *descending* range) analyses normally too.
+_STEP_NEG = (
+    "def f(x):\n    for i in range(10, 0, -1):\n        if i == 5:\n            return 1\n    return 0\n"
+)
+_rtn = br.analyze("python3", _STEP_NEG)
+check("range() step of -1 (descending): analyses normally, no exception, ok is True",
+      _rtn.get("ok") is True, f"-> {_rtn}")
+check("range() step of -1: the nested if (i == 5, in range(10,0,-1)) is reachable",
+      _by_line(_rtn, 3) is not None and _by_line(_rtn, 3)["verdict"] == "reachable",
+      f"-> {_by_line(_rtn, 3)}")
+_verify_every_witness(_rtn, _STEP_NEG, "f", "step-of-neg-1")
+
+# `analyze()` must NOT mask a genuine internal defect as an "unsupported
+# construct" refusal — the cross-vendor review (Codex, PR #330) that
+# rejected a blanket `except Exception` around the whole walk probed
+# exactly this: inject an internal RuntimeError into a helper the walk
+# calls for perfectly ordinary, fully-supported code, and confirm it still
+# PROPAGATES out of `analyze()` rather than coming back as `ok: False,
+# code: "validation"`. Monkeypatching `_translate` (called on every `if`
+# condition) is the same tripwire idiom the non-python-language case below
+# uses on `optional.require`.
+_INTERNAL_ERROR_PROBE = "def f(x):\n    if x > 0:\n        return 1\n    return 0\n"
+_real_translate = br._translate
+
+
+def _raise_internal_error(*args, **kwargs):
+    raise RuntimeError("injected internal defect — must propagate, not be refused")
+
+
+br._translate = _raise_internal_error
+try:
+    try:
+        br.analyze("python3", _INTERNAL_ERROR_PROBE)
+        check("internal RuntimeError during the walk: propagated (analyze() did not "
+              "return a value)", False, "-> analyze() returned instead of raising")
+    except RuntimeError as _exc:
+        check("internal RuntimeError during the walk: propagated as RuntimeError, "
+              "not swallowed into a validation refusal",
+              str(_exc) == "injected internal defect — must propagate, not be refused",
+              f"-> {_exc!r}")
+    except Exception as _exc:  # deliberately broad: prove it's NOT some OTHER exception type
+        check("internal RuntimeError during the walk: propagated as RuntimeError "
+              "(not laundered into some other exception type)", False, f"-> {_exc!r}")
+finally:
+    br._translate = _real_translate
 
 # non-python refusal spawns nothing — a tripwire on optional.require (the one
 # function that would import z3) proves branch_reachability never reaches the

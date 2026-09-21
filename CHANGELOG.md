@@ -33,6 +33,35 @@ behind it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`branch_reachability` on `for i in range(a, b, 0)` raised an uncaught
+  `ValueError` instead of the documented refusal** (GH #322, THE-1087).
+  `_first_unsupported`'s up-front scan accepted a `for` loop as statically
+  bounded once every `range()` argument was confirmed a literal int (or a
+  negated one), never checking the step was non-zero; `_walk_loop` then
+  handed those bounds to `len(range(start, stop, step))`, and CPython
+  raises `ValueError: range() arg 3 must not be zero` at construction —
+  `analyze()` caught only its own `_TranslateError`, so the `ValueError`
+  escaped as `isError: true` with no result envelope, for one specific
+  loop shape a caller correctly handling every other documented refusal
+  still had to wrap in a try/except. The scan now rejects a literal step
+  of 0 (including `-0`, the same int as `0`) as `unsupported construct:
+  range() with a step of 0`, before a single z3 call — the same coded
+  `validation` refusal, naming the construct and its line, every other
+  unsupported construct already gets. Belt and braces: `_walk_loop` now
+  refuses a step of 0 on its own too, narrowly, right where it would
+  otherwise build `range(start, stop, 0)` — raising the ordinary
+  `_TranslateError` `analyze()` already catches — so the scan and the
+  walker agreeing is not the only thing standing between this input and a
+  raised exception, in case the two drift apart again on some future
+  construct. A blanket `except Exception` around the whole walk in
+  `analyze()` was considered and rejected: cross-vendor review (Codex, PR
+  #330) showed it would just as readily launder a genuine internal defect
+  (an injected `RuntimeError`) into an "unsupported construct" refusal as
+  it caught the intended `ValueError` — a regression test now pins that a
+  real internal error still propagates out of `analyze()` instead.
+
 ## [0.12.0] — 2026-09-09
 
 ### Removed

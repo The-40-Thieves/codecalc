@@ -352,6 +352,7 @@ def _first_unsupported(tree: ast.AST) -> tuple[str, int] | None:
                 add(node, "data-dependent loop bounds (only for x in range(<literal ints>) "
                           "is supported)")
             else:
+                all_static = True
                 for a in it.args:
                     static = isinstance(a, ast.Constant) and isinstance(a.value, int) and not isinstance(a.value, bool)
                     static = static or (
@@ -362,7 +363,27 @@ def _first_unsupported(tree: ast.AST) -> tuple[str, int] | None:
                     if not static:
                         add(node, "data-dependent loop bounds (only for x in "
                                   "range(<literal ints>) is supported)")
+                        all_static = False
                         break
+                # GH #322 / THE-1087: a literal step of 0 passed every check
+                # above (it IS a literal int) and reached `_static_range_bounds`
+                # -> `len(range(start, stop, step))` in `_walk_loop`, which
+                # raises CPython's own `ValueError: range() arg 3 must not be
+                # zero` — an uncaught exception escaping `analyze()` instead of
+                # the documented refusal every other unsupported construct
+                # gets. Caught HERE, before a single z3 call, with the same
+                # construct-naming refusal shape. `_walk_loop` ALSO refuses a
+                # step of 0 on its own (see its own guard, right where the
+                # unrolled/conservative dispatch would otherwise construct
+                # `range(start, stop, 0)`) — belt and braces, in case this
+                # scan and that walker ever drift apart again.
+                if all_static and len(it.args) == 3:
+                    step = it.args[2]
+                    step_val = (
+                        -step.operand.value if isinstance(step, ast.UnaryOp) else step.value
+                    )
+                    if step_val == 0:
+                        add(node, "range() with a step of 0")
 
     if not hits:
         return None
@@ -1016,6 +1037,25 @@ def _walk_loop(node: ast.While | ast.For, env: dict[str, tuple[Any, str]], ctx: 
     """
     if isinstance(node, ast.For):
         start, stop, step = _static_range_bounds(node.iter)
+        if step == 0:
+            # Belt and braces (GH #322, THE-1087): `_first_unsupported`'s
+            # up-front scan already refuses a literal step of 0 before a
+            # single z3 call is made (see its ast.For case, above) — this
+            # walker should never actually reach here with step == 0. It
+            # is guarded anyway, narrowly, right where the unguarded
+            # `len(range(start, stop, step))` below would otherwise raise
+            # CPython's own `ValueError: range() arg 3 must not be zero`
+            # straight out of `analyze()`: if the scan and this walker
+            # ever drift apart again on some future construct, THIS loop
+            # still refuses on its own via the ordinary `_TranslateError`
+            # path, rather than the caller catching a bare ValueError. A
+            # broad `except Exception` around the whole walk was
+            # considered and rejected — cross-vendor review (Codex, PR
+            # #330) showed it would just as readily mask a genuine
+            # implementation bug (RuntimeError, TypeError, ...) as an
+            # "unsupported construct" refusal, silently misclassifying
+            # OUR OWN defects as bad user input.
+            raise _TranslateError("range() with a step of 0")
         count = len(range(start, stop, step))
         if count <= _MAX_UNROLL_ITERATIONS:
             return _walk_for_unrolled(node, env, ctx, cur_cond, range(start, stop, step))
