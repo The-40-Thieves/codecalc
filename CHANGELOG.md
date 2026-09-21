@@ -774,6 +774,25 @@ behind it.
   literal factor can tip the sum over the cap even when the true product
   still fits (`factorint(<25-digit literal>*2)`, accepted as documented
   conservatism, not a bug).
+  A tenth review round (Codex, confirming the round 8-9 delta) verified
+  every prior claim and returned one remaining Low (its one Medium,
+  `isprime(10**24+7)` rejected as "not an integer", behaves identically
+  on `main` and is pre-existing — tracked separately as THE-1095, not
+  touched here): round 8 made the TOKEN-level digit-count check exact,
+  but the TREE-level check (fed by `_log10_of_int`'s float
+  approximation) still rounded the wrong way at an EXACT boundary —
+  `safe_parse("sqrt(" + "9"*1200 + ")")`, a value with EXACTLY 1200
+  digits at `MAX_ROOT_ARG_DIGITS`, passed the token screen but was then
+  refused at the tree level, where the float log10 of an all-9s value
+  rounded up and reported 1201 digits instead of 1200. Fixed with
+  `_exact_digit_count_if_cheap`/`_digit_count_over_cap_for_node`,
+  preferring the exact digit count of an already-materialized
+  `Integer`/`Rational` over the float approximation (a `Mul`/`Pow` chain
+  still uses the float path, unchanged — reconstructing it into a
+  concrete value just to count digits could itself be the expensive
+  operation this file exists to avoid). While there: the unit-fraction
+  root refusal message said "the base of a 2-th root"/"3-th root" —
+  now says "square root"/"cube root"/"n-th root" properly.
 
 ## [0.12.0] — 2026-09-09
 

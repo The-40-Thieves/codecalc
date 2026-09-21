@@ -2405,6 +2405,59 @@ check("  ...with a message naming the SUM explicitly, not implying an "
       "exact product was computed",
       _r is not None and "sum of the literal digits" in _r[1], f"-> {_r}")
 
+# ═══ round 10 of cross-vendor review (Codex, confirming the round 8-9 ═════
+# ═══ delta) — one remaining Low ═════════════════════════════════════════
+
+# Round 8 made the TOKEN-level digit-count check exact (`_exact_decimal_
+# digit_count`), but the TREE-level check (`_digit_count_over_cap`, fed by
+# `_log10_num_den` -> `_log10_of_int`'s float approximation) still rounded
+# the wrong way at an EXACT boundary: `safe_parse("sqrt(" + "9"*1200 +
+# ")")` -- a value with EXACTLY 1200 digits, at MAX_ROOT_ARG_DIGITS --
+# passed the token screen (which sees a single literal and counts its
+# digits exactly) but was then refused at the TREE level, where the float
+# log10 of an all-9s value rounded up and reported 1201 digits instead of
+# 1200. Fixed with `_exact_digit_count_if_cheap`/`_digit_count_over_cap_
+# for_node`, preferring the exact count of an already-materialized
+# Integer/Rational over the float approximation. Tested through
+# `safe_parse` specifically (not `classify_unsafe` alone), since the
+# token screen already got this right in round 8 -- this is pinning the
+# TREE layer.
+_lit1200_nines = "9" * 1200
+_lit1201_nines = "9" * 1201
+_t0 = time.time()
+_v, _e = _boundary_parse(f"sqrt({_lit1200_nines})")
+_dt = time.time() - _t0
+check("safe_parse('sqrt(<1200-digit all-9s literal>)') (exactly at "
+      "MAX_ROOT_ARG_DIGITS) evaluates, not refused on a float-rounding "
+      "artifact",
+      _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+check(f"  ...promptly ({_dt:.3f}s)", _dt < 2.0, f"-> {_dt:.3f}s")
+_v, _e = _boundary_parse(f"sqrt({_lit1201_nines})")
+check("safe_parse('sqrt(<1201-digit all-9s literal>)') (one over the cap) "
+      "is still refused",
+      _v is None and _e is not None, f"-> value={_v!r} err={_e!r}")
+
+# The same boundary for the factor family, through safe_parse.
+_lit25_nines = "9" * 25
+_lit26_nines = "9" * 26
+_v, _e = _boundary_parse(f"factorint({_lit25_nines})")
+check("safe_parse('factorint(<25-digit all-9s literal>)') (exactly at "
+      "MAX_FACTOR_ARG_DIGITS) evaluates",
+      _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse(f"factorint({_lit26_nines})")
+check("safe_parse('factorint(<26-digit all-9s literal>)') (one over the "
+      "cap) is still refused",
+      _v is None and _e is not None, f"-> value={_v!r} err={_e!r}")
+
+# The refusal message names the root properly ("square root"/"cube
+# root"/"n-th root"), not the literal "2-th root"/"3-th root" it used to.
+_v, _e = _boundary_parse("sqrt(factorial(1463))")
+check("sqrt(factorial(1463)) refusal message says 'square root'",
+      _e is not None and "square root" in _e[1], f"-> {_e}")
+_v, _e = _boundary_parse("cbrt(factorial(1463))")
+check("cbrt(factorial(1463)) refusal message says 'cube root'",
+      _e is not None and "cube root" in _e[1], f"-> {_e}")
+
 # Codex finding 2 (Low): _approx_decimal_digits() truncates a float log and
 # overcounts at exact power-of-ten boundaries (a 25-digit all-9s literal
 # read as 26 digits; a 1,200-digit all-9s literal as 1,201) -- and the

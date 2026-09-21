@@ -1627,9 +1627,84 @@ def _digit_count_over_cap(magnitude: float, cap: int) -> bool:
     `reject_explosive`'s Pow loop's unit-fraction-exponent branch, so the
     ONE comparison a "digits"-kind cap needs lives in one place regardless
     of which tree shape triggered it.
+
+    #326 finding (cross-vendor review, round 10, Codex): `magnitude` is a
+    FLOAT log10 approximation (`_log10_of_int`'s bit-shifting estimate,
+    for anything past 53 bits), accurate to within float precision almost
+    everywhere but measured to round the WRONG way at an EXACT boundary:
+    `safe_parse("sqrt(" + "9"*1200 + ")")` — a value with EXACTLY 1200
+    digits, at `MAX_ROOT_ARG_DIGITS` — computed a magnitude that floors to
+    1200 (not 1199), reporting 1201 digits and refusing what the exact
+    count admits. `_digit_count_over_cap_for_node`, below, is the fix —
+    prefer the EXACT digit count whenever the underlying value is cheap
+    to get one from — and calls THIS function only as its fallback for
+    whatever it could not get an exact count for. This function's own
+    float-only contract is otherwise unchanged: it still ALWAYS gets the
+    right answer for the two directions that matter here (never mistaking
+    "moderately over cap" for "under," which is one-sided risk this ONLY
+    approximation-caused an OVER-refusal, never an under-refusal).
     """
     return (not math.isfinite(magnitude) or magnitude > 1e15
             or int(magnitude) + 1 > cap)
+
+
+def _exact_digit_count_if_cheap(n: int) -> int | None:
+    """The EXACT decimal digit count of `abs(n)`, or `None` if `n` is too
+    large to materialize as a decimal string cheaply and safely.
+
+    #326 finding (cross-vendor review, round 10, Codex): the counterpart,
+    for an ALREADY-PARSED integer value, of `_exact_decimal_digit_count`
+    (which does the identical job for a TOKEN's literal source text) —
+    see that function's own docstring for the boundary bug both exist to
+    close, one layer apart. Safe and cheap whenever `n`'s magnitude is
+    small enough that `str()` itself would succeed well within CPython's
+    own int->str conversion limit (`sys.set_int_max_str_digits`, default
+    4300 decimal digits) — the bit-length cutoff here is comfortably
+    under that, not tuned to the specific 25/1200 caps this currently
+    serves, so it stays correct if either grows. `int(a_sympy_Integer)`
+    to get here in the first place is itself O(1) regardless of size —
+    the only cost this avoids is the DECIMAL conversion, not the int
+    conversion.
+    """
+    n = abs(n)
+    if n.bit_length() > 14_000:  # ~4,214 decimal digits, under the 4,300 default
+        return None
+    return len(str(n)) if n else 1
+
+
+def _digit_count_over_cap_for_node(node, side: str, magnitude: float, cap: int) -> bool:
+    """Whether `node`'s `side` ("num" or "den") is a digit count over
+    `cap` — prefers the EXACT digit count when `node` is a bare, already-
+    materialized `Integer`/`Rational` (cheap and safe — see
+    `_exact_digit_count_if_cheap`'s own docstring), falling back to
+    `_digit_count_over_cap`'s float-log comparison (`magnitude`, the
+    caller's own already-computed `_log10_num_den` result for the SAME
+    `side`) for anything else. An `Integer`'s own denominator is always
+    exactly `1` — never over any cap this module would set above `0` —
+    so `side="den"` short-circuits to `False` for one without consulting
+    `magnitude` at all.
+
+    A `Mul`/`Pow`-of-`Integer` CHAIN `node` is not reconstructed into a
+    concrete value here even when `_factor_multiset` resolved it exactly
+    — multiplying it out just to count digits could itself be the
+    expensive operation this whole file exists to avoid (the same reason
+    `_log10_num_den` measures a `Pow`'s magnitude via `_safe_log10_pow`
+    rather than `base ** exponent`) — so those stay on the float-log path,
+    unchanged, same as before this function existed.
+    """
+    from sympy import Integer, Rational
+
+    if isinstance(node, Integer):
+        if side == "den":
+            return False
+        exact = _exact_digit_count_if_cheap(int(node))
+        if exact is not None:
+            return exact > cap
+    elif isinstance(node, Rational):
+        exact = _exact_digit_count_if_cheap(node.p if side == "num" else node.q)
+        if exact is not None:
+            return exact > cap
+    return _digit_count_over_cap(magnitude, cap)
 
 
 def _ceiling_message_num_den(log_num: float, log_den: float) -> str | None:
@@ -1785,7 +1860,7 @@ def _numeric_ceiling_scan(tree, memo: dict) -> str | None:
                     # by a stale precomputed log10.
                     over_cap = (arg_log_num - arg_log_den) > math.log10(cap)
                 else:
-                    over_cap = _digit_count_over_cap(arg_log_num, cap)
+                    over_cap = _digit_count_over_cap_for_node(arg, "num", arg_log_num, cap)
                 if over_cap:
                     return (f"an argument to {type(node).__name__}() exceeds the "
                             f"limit of {cap}: computing it would take an "
@@ -2049,10 +2124,20 @@ def reject_explosive(tree) -> str | None:
                         _root_cap = _FUNCTION_ARG_CAPS["sqrt"][1]
                         base_num, base_den, base_res = _log10_num_den(base, memo)
                         if base_res:
-                            over_cap = (_digit_count_over_cap(base_num, _root_cap)
-                                        or _digit_count_over_cap(base_den, _root_cap))
+                            # #326 finding (cross-vendor review, round 10,
+                            # Codex): prefer the EXACT digit count of the
+                            # already-materialized `base` over the plain
+                            # float-log comparison — see `_digit_count_
+                            # over_cap_for_node`'s own docstring for the
+                            # boundary bug this closes (an all-9s literal
+                            # at EXACTLY the cap, refused on a rounding
+                            # error in the float approximation alone).
+                            over_cap = (_digit_count_over_cap_for_node(base, "num", base_num, _root_cap)
+                                        or _digit_count_over_cap_for_node(base, "den", base_den, _root_cap))
                             if over_cap:
-                                return (f"the base of a {exponent.q}-th root has "
+                                _root_name = {2: "square root", 3: "cube root"}.get(
+                                    exponent.q, f"{exponent.q}-th root")
+                                return (f"the base of a {_root_name} has "
                                         f"more digits than the limit of "
                                         f"{_root_cap}: computing the "
                                         "root is not safely bounded")
