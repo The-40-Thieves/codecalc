@@ -109,6 +109,19 @@ behind it.
   of an OLE run, which can be `ok: true` — corrected to name the real
   condition (`ok=true`, `exit_code` 0, `verdict` `OK`).
 
+- **`verify_optimization`'s headline `speedup.ratio` could be set entirely by
+  a size the significance test itself had already excluded as timer-noise.**
+  `_speedup` sourced its pool from `_comparable_positions` directly, but
+  `_infer_speedup` narrows that pool twice further (a `min_testable_n`
+  floor, and a normal-approximation-reliability gate on tied, overlapping
+  samples — #284/#285) and neither narrowing fed back, so a size excluded
+  to `inference.sizes_below_floor` could still dominate the median a clean
+  `accepted: true, reason: "verified faster: …"` sentence quoted. `_speedup`
+  now accepts the exact survivor list `_infer_speedup`'s filters produce
+  (factored into shared `_testable_positions`), and `verify_optimization`
+  passes it explicitly, so the ratio and `speedup.per_size` can only ever be
+  built from a size the significance test also kept (GH #328, THE-1093).
+
 ## [0.12.0] — 2026-09-09
 
 ### Removed

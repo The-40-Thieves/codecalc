@@ -845,7 +845,16 @@ _ci843_after = {"sizes": [50000, 100000, 150000],
                 "durations_ms": [min(_ci843_a1), min(_ci843_a2), min(_ci843_a3)],
                 "all_runs_ms": [_ci843_a1, _ci843_a2, _ci843_a3]}
 _ci843_inf = optimization._infer_speedup(_ci843_before, _ci843_after)
-_ci843_sp = optimization._speedup(_ci843_before, _ci843_after)
+# `_speedup`'s default (`comparable=None`) now sources `_testable_positions`'
+# survivors (codecalc #328's second pass), so it can no longer reproduce the
+# reported incident's WIDE, unfiltered ratio -- pass the raw
+# `_comparable_positions` pool explicitly to keep documenting the pre-fix
+# number this control is about (1.02 filtered vs 2.0 wide, measured; the
+# reported incident's own 1.21x sits in between, as expected of a
+# reconstruction rather than the identical bytes).
+_ci843_sp = optimization._speedup(
+    _ci843_before, _ci843_after,
+    comparable=optimization._comparable_positions(_ci843_before, _ci843_after)[0])
 check("control: the reproduction's overall median ratio clears min_speedup, "
       "same as the reported incident's 1.21x",
       _ci843_sp.get("ratio", 0) >= 1.15, f"-> {_ci843_sp.get('ratio')}")
@@ -896,7 +905,16 @@ _ci290_after = {"sizes": [50000, 100000, 150000],
                 "durations_ms": [min(_ci290_a1), min(_ci290_a2), min(_ci290_a3)],
                 "all_runs_ms": [_ci290_a1, _ci290_a2, _ci290_a3]}
 _ci290_inf = optimization._infer_speedup(_ci290_before, _ci290_after)
-_ci290_sp = optimization._speedup(_ci290_before, _ci290_after)
+# Same reason as `_ci843_sp` above: all 3 sizes here tie into the normal
+# approximation with overlapping ranges (size 3 reuses `_ci843_a1`/`_b1`,
+# already excluded above), so `_speedup`'s new filtered default reports
+# `measurable: False` for this reproduction -- pass the WIDE pool explicitly
+# to keep reporting the incident's own measured ratio (2.0 here; the
+# accept/reject verdict below is unaffected either way, since a
+# significance-test failure and an unmeasurable ratio both refuse "accepted").
+_ci290_sp = optimization._speedup(
+    _ci290_before, _ci290_after,
+    comparable=optimization._comparable_positions(_ci290_before, _ci290_after)[0])
 _ci290_p = [_ci290_r1["p_value"], _ci290_r2["p_value"], _ci843_r1["p_value"]]
 check("control: under the OLD bare-majority rule this SECOND reproduction "
       "would ALSO have been accepted — 2 of 3 sizes reject at alpha=0.05",
@@ -1008,6 +1026,180 @@ check("  ...and a decisive, non-overlapping win still counts as rejecting "
       _285_inf["sizes_total"] == 1 and _285_inf["sizes_rejecting"] == 1
       and _285_inf["sizes_below_floor"] == [],
       f"-> {_285_inf}")
+
+
+# ═══ codecalc issue #328: the headline speedup.ratio must come from the ════
+#     SAME positions the significance test kept, never a wider pool ════════
+# `_speedup(before, after)` (no `comparable=`) originally always used
+# `_comparable_positions`'s WIDER pool — `_infer_speedup` narrows it twice
+# more (gates (c)/(b), now `_testable_positions`) and neither narrowing fed
+# back, so a size excluded as too noisy to test could still set the
+# headline median. A first fix passed `_testable_positions`' survivors from
+# `verify_optimization`; a second pass flipped `_speedup`'s own DEFAULT to
+# the same survivors, so the invariant holds for every call, not just that
+# one caller (below, the WIDE, pre-fix pool is reproduced only by passing
+# `_comparable_positions(...)[0]` explicitly). The reporter's own repro,
+# reproduced here: two clean
+# sizes (1000, 2000) genuinely ~1.3x/~1.2x faster with n=5 non-overlapping
+# samples, plus two sizes (3000, 4000) whose before/after ranges overlap and
+# tie into the normal approximation, each with one lucky min-of-5 `after`
+# run (1 out of ~50-60) that inflates the RAW ratio to 50x/60x. Only the
+# `_speedup`/`_accept_decision` behaviour is new here; `_infer_speedup`
+# already excluded 3000/4000 before this fix (see #285's gate (b) above) —
+# what it did NOT do was stop `_speedup` from using them anyway.
+_328_b1000, _328_a1000 = [130.0, 131.0, 132.0, 133.0, 134.0], [100.0, 101.0, 102.0, 103.0, 104.0]
+_328_b2000, _328_a2000 = [240.0, 241.0, 242.0, 243.0, 244.0], [200.0, 201.0, 202.0, 203.0, 204.0]
+_328_b3000, _328_a3000 = [50, 50, 51, 52, 53], [50, 51, 50, 52, 1]     # lucky min=1 -> raw 50x
+_328_b4000, _328_a4000 = [60, 61, 62, 63, 64], [63, 62, 1, 64, 60]     # lucky min=1 -> raw 60x
+_328_before = {"sizes": [1000, 2000, 3000, 4000],
+              "durations_ms": [min(_328_b1000), min(_328_b2000), min(_328_b3000), min(_328_b4000)],
+              "all_runs_ms": [_328_b1000, _328_b2000, _328_b3000, _328_b4000]}
+_328_after = {"sizes": [1000, 2000, 3000, 4000],
+             "durations_ms": [min(_328_a1000), min(_328_a2000), min(_328_a3000), min(_328_a4000)],
+             "all_runs_ms": [_328_a1000, _328_a2000, _328_a3000, _328_a4000]}
+_328_inf = optimization._infer_speedup(_328_before, _328_after)
+check("control: 3000/4000 tie into the normal approximation with overlapping "
+      "ranges and are excluded to sizes_below_floor, same as #285's gate (b)",
+      {e["size"] for e in _328_inf["sizes_below_floor"]} == {3000, 4000}
+      and all("normal approximation" in e.get("reason", "")
+              for e in _328_inf["sizes_below_floor"]),
+      f"-> {_328_inf['sizes_below_floor']}")
+check("control: 1000/2000 survive as the only two counted sizes, both rejecting",
+      _328_inf["sizes_total"] == 2 and _328_inf["sizes_rejecting"] == 2,
+      f"-> {_328_inf.get('per_size')}")
+## `_speedup`'s default (`comparable=None`) now itself sources
+## `_testable_positions`' survivors (codecalc #328's second pass, closing the
+## gap where the default reproduced the bug for any caller that omitted
+## `comparable`), so reproducing the OLD, PRE-FIX wide pool for this control
+## requires passing `_comparable_positions`'s own, unfiltered result explicitly.
+_328_sp_wide = optimization._speedup(
+    _328_before, _328_after,
+    comparable=optimization._comparable_positions(_328_before, _328_after)[0])
+check("control: the OLD, unfiltered _speedup pool is dominated by the two "
+      "excluded sizes' lucky-low-run ratios (~50x/~60x), not 1.2x-1.3x",
+      _328_sp_wide["measurable"] and _328_sp_wide["ratio"] > 10,
+      f"-> {_328_sp_wide['ratio']}")
+_328_survivors, _328_excluded, _328_min_n = optimization._testable_positions(_328_before, _328_after)
+_328_sp = optimization._speedup(_328_before, _328_after, comparable=_328_survivors)
+check("THE FIX: the headline ratio, built from _testable_positions' survivors, "
+      "is the clean ~1.2x-1.3x sizes' median, not the excluded sizes' lucky ratio",
+      _328_sp["measurable"] and 1.15 < _328_sp["ratio"] < 1.35,
+      f"-> {_328_sp['ratio']}")
+check("  ...per_size lists ONLY the two surviving sizes (1000, 2000) — 3000/4000 "
+      "stay visible in inference.sizes_below_floor, not duplicated here",
+      {row["n"] for row in _328_sp["per_size"]} == {1000, 2000},
+      f"-> {_328_sp['per_size']}")
+_328_accepted, _328_reason = optimization._accept_decision(_328_sp, 1.15, _328_inf)
+check("  ...and the reason string carries THAT number, not the inflated one",
+      _328_accepted is True and f"{_328_sp['ratio']}x median" in _328_reason
+      and "50" not in _328_reason and "60" not in _328_reason,
+      f"-> accepted={_328_accepted} {_328_reason!r}")
+
+# THE FIX (review round 2): `_speedup`'s own DEFAULT -- no `comparable=` at
+# all -- must independently land on the exact same tested pool, not just
+# the explicitly-filtered call above. This is the whole point of flipping
+# the default: a caller that forgets the keyword gets the fix anyway.
+_328_sp_default = optimization._speedup(_328_before, _328_after)
+check("  ...and _speedup(before, after) with NO comparable= defaults to the "
+      "SAME tested pool (1.25x, sizes 1000/2000) -- not the wide, buggy one",
+      _328_sp_default["measurable"] and _328_sp_default["ratio"] == 1.25
+      and {row["n"] for row in _328_sp_default["per_size"]} == {1000, 2000},
+      f"-> {_328_sp_default}")
+
+# Control: an all-clean case (every size testable, none excluded) must be
+# UNCHANGED by this fix — the filtered and unfiltered pools are identical
+# when nothing was excluded, so the headline ratio does not move.
+_328_clean_before = {"sizes": [1000, 2000],
+                     "durations_ms": [min(_328_b1000), min(_328_b2000)],
+                     "all_runs_ms": [_328_b1000, _328_b2000]}
+_328_clean_after = {"sizes": [1000, 2000],
+                    "durations_ms": [min(_328_a1000), min(_328_a2000)],
+                    "all_runs_ms": [_328_a1000, _328_a2000]}
+_328_clean_survivors, _, _ = optimization._testable_positions(_328_clean_before, _328_clean_after)
+# Pre-fix, unfiltered pool, explicit (see `_328_sp_wide` above) — the point
+# of this control is that it numerically AGREES with the filtered pool when
+# nothing was excluded, which only holds if it is genuinely computed via the
+# wide, pre-#328 path rather than happening to reuse the same default.
+_328_clean_sp_wide = optimization._speedup(
+    _328_clean_before, _328_clean_after,
+    comparable=optimization._comparable_positions(_328_clean_before, _328_clean_after)[0])
+_328_clean_sp_filtered = optimization._speedup(_328_clean_before, _328_clean_after,
+                                               comparable=_328_clean_survivors)
+check("control: an all-clean case (nothing excluded) is unchanged by the fix — "
+      "filtered and unfiltered headline ratios agree",
+      _328_clean_sp_wide["ratio"] == _328_clean_sp_filtered["ratio"] == 1.25,
+      f"-> wide={_328_clean_sp_wide['ratio']} filtered={_328_clean_sp_filtered['ratio']}")
+
+# Every size excluded -> measurable False, same "no comparable size" shape
+# `_speedup` always reported, now also naming the significance-test filters.
+_328_all_excluded_survivors, _, _ = optimization._testable_positions(
+    {"sizes": [3000, 4000], "durations_ms": [min(_328_b3000), min(_328_b4000)],
+     "all_runs_ms": [_328_b3000, _328_b4000]},
+    {"sizes": [3000, 4000], "durations_ms": [min(_328_a3000), min(_328_a4000)],
+     "all_runs_ms": [_328_a3000, _328_a4000]})
+_328_all_excluded_sp = optimization._speedup(
+    {"sizes": [3000, 4000], "durations_ms": [min(_328_b3000), min(_328_b4000)],
+     "all_runs_ms": [_328_b3000, _328_b4000]},
+    {"sizes": [3000, 4000], "durations_ms": [min(_328_a3000), min(_328_a4000)],
+     "all_runs_ms": [_328_a3000, _328_a4000]},
+    comparable=_328_all_excluded_survivors)
+check("a case where EVERY size is excluded by the significance test's own "
+      "filters is measurable=False, not silently falling back to the wide pool",
+      _328_all_excluded_survivors == [] and _328_all_excluded_sp["measurable"] is False
+      and _328_all_excluded_sp["ratio"] is None,
+      f"-> {_328_all_excluded_sp}")
+
+# THE FIX (review round 2), driven end to end through `verify_optimization`
+# itself, not just the module functions directly: `speedup` and `inference`
+# must be built from the SAME pool in the tool's own output, not merely when
+# a test calls `_speedup`/`_infer_speedup` by hand. Same reporter shape
+# (1000/2000 clean, 3000/4000 tied-and-overlapping), but 3000/4000 reuse
+# `_ci843`'s overlapping samples (already proven above to route to the
+# normal approximation and get excluded) instead of `_328_b3000`/`_a3000`'s
+# deliberately extreme lucky-min=1 runs — those dip below
+# `optimization._VISIBILITY_FLOOR_MS` (5ms) and would trigger `_timed`'s own
+# rescale ladder here, which is not what this end-to-end wiring check is
+# about.
+_328e2e_ORIG, _328e2e_CAND = "328 e2e original", "328 e2e candidate"
+_328e2e_samples = {
+    _328e2e_ORIG: {1000: _328_b1000, 2000: _328_b2000, 3000: _ci843_b1, 4000: _ci843_b2},
+    _328e2e_CAND: {1000: _328_a1000, 2000: _328_a2000, 3000: _ci843_a1, 4000: _ci843_a2},
+}
+
+
+def _mock_measure_328e2e(language, code, sizes, timeout, repeats, deadline=None):
+    table = _328e2e_samples[code]
+    return [{"n": n, "ok": True, "duration_ms": min(table[n]), "all_runs_ms": table[n]}
+            for n in sizes], None
+
+
+_orig_verify_translation_328e2e = optimization.verify_translation
+_orig_measure_328e2e = optimization.tools._measure
+# Correctness is not what this check is about — stub it to a pass so the
+# tool proceeds straight to the timing phase this test controls.
+optimization.verify_translation = lambda *a, **kw: {"passed": True, "matched": 1,
+                                                     "mismatched": 0, "inconclusive": 0,
+                                                     "total": 1, "results": []}
+optimization.tools._measure = _mock_measure_328e2e
+try:
+    _328e2e = optimization.verify_optimization(_328e2e_ORIG, _328e2e_CAND, "python3",
+                                               sizes=[1000, 2000, 3000, 4000])
+finally:
+    optimization.verify_translation = _orig_verify_translation_328e2e
+    optimization.tools._measure = _orig_measure_328e2e
+
+check("verify_optimization's own output: speedup.ratio is the tested pool's "
+      "1.25x, not an excluded size's inflated one",
+      _328e2e.get("ok") is True
+      and (_328e2e.get("speedup") or {}).get("ratio") == 1.25,
+      f"-> {_328e2e.get('speedup')}")
+check("  ...and speedup.per_size and inference.per_size name the SAME "
+      "surviving sizes -- the tool wires one pool into both fields, not two",
+      {row["n"] for row in _328e2e["speedup"]["per_size"]}
+      == {row["size"] for row in _328e2e["inference"]["per_size"]}
+      == {1000, 2000},
+      f"-> speedup={_328e2e['speedup']['per_size']} "
+      f"inference={_328e2e['inference']['per_size']}")
 
 
 # ═══ identical before/after code is never accepted (the false-accept rate) ══

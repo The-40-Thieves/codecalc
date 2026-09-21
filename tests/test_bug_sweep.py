@@ -127,10 +127,19 @@ check("benchmark: a timed-out run aborts instead of being recorded",
       inspect.getsource(tools._measure))
 
 # ═══ speedup: division by zero, and misaligned sizes ════════════════════════
+# Pure duration-ratio arithmetic -- these dicts carry `durations_ms` only, no
+# `all_runs_ms`, so there is no significance test to run at all. `_speedup`'s
+# default (`comparable=None`) now sources `_testable_positions`' survivors
+# (codecalc #328's second pass), which excludes every position with fewer
+# than `stats.min_testable_n` raw runs a side -- zero here, always -- so the
+# default would report `measurable: False` regardless of the durations.
+# Pass the raw `_comparable_positions` pool explicitly: these checks are
+# about the per-size ratio computation itself, not the significance filter.
 before = {"sizes": [100, 200, 400], "durations_ms": [50.0, 100.0, 200.0]}
 after = {"sizes": [100, 200, 400], "durations_ms": [0, 10.0, 20.0]}
 try:
-    r = optimization._speedup(before, after)
+    r = optimization._speedup(before, after,
+                              comparable=optimization._comparable_positions(before, after)[0])
     ok = True
 except ZeroDivisionError:
     ok, r = False, {}
@@ -138,7 +147,8 @@ check("_speedup: a 0ms optimized run does not raise", ok)
 
 before = {"sizes": [100, 200, 400, 800], "durations_ms": [0.5, 100.0, 200.0, 400.0]}
 after = {"sizes": [100, 200, 400, 800], "durations_ms": [0.4, 50.0, 100.0, 200.0]}
-r = optimization._speedup(before, after)
+r = optimization._speedup(before, after,
+                          comparable=optimization._comparable_positions(before, after)[0])
 rows = {row["n"]: row["before_ms"] for row in r["per_size"]}
 check("_speedup: per_size keeps n aligned with its measurement",
       rows.get(200) == 100.0 and 100 not in rows, f"-> {rows}")

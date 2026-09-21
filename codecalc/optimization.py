@@ -405,21 +405,51 @@ def _comparable_positions(before: dict, after: dict) -> tuple[list[dict], list[d
     return comparable, excluded
 
 
-def _speedup(before: dict, after: dict) -> dict:
+def _speedup(before: dict, after: dict, comparable: list[dict] | None = None) -> dict:
     """Ratio after/before per size (median used as the headline).
 
-    Built from EXACTLY the positions `_comparable_positions` (shared with
-    `_infer_speedup`) calls comparable — the headline ratio can no longer be
-    computed from a duration the significance test excluded (an earlier
-    version applied its own, looser floor independently).
+    `comparable=None` (the default): built from `_testable_positions`'
+    SURVIVORS — the same testability floor and normal-approximation-
+    reliability gate `_infer_speedup` applies — so the headline ratio and
+    `per_size` can only ever be built from a size the significance test also
+    kept. A size `_infer_speedup` excludes as too noisy to test (fewer than
+    `stats.min_testable_n` runs a side, or a tie routed to the normal
+    approximation with overlapping ranges below `_NORMAL_APPROX_MIN_N`) can
+    no longer set the median ratio while `inference.sizes_below_floor` says
+    it was excluded — true of EVERY call, not just `verify_optimization`'s
+    (codecalc issue #328 — an earlier version of this fix only reconciled
+    `_speedup` with `_comparable_positions`'s OWN floor, leaving
+    `_infer_speedup`'s two further, narrower filters unfed-back; a second
+    pass closed the remaining gap: the default itself used to reproduce the
+    bug for any caller that omitted `comparable`, with only
+    `verify_optimization` passing survivors explicitly).
+
+    Pass `comparable` explicitly for two reasons: `verify_optimization`
+    does it to reuse the ONE `_testable_positions` call it also makes for
+    `inference`, rather than have this function repeat it; a caller that
+    genuinely wants the WIDER, unfiltered `_comparable_positions` pool
+    (no significance filtering at all — the pre-#328-fix behaviour) passes
+    `_comparable_positions(before, after)[0]` — this module's own tests do,
+    to document what the raw measurement looked like before
+    `_infer_speedup`'s filters run (see the codecalc issue #328 CI
+    reproductions in tests/test_translation_verify.py). `comparable` also
+    accepts raw duration-only entries with no `b_sample`/`a_sample` (as
+    `_comparable_positions` returns when `before`/`after` carry no
+    `all_runs_ms`) — the default does NOT: with no raw runs,
+    `_testable_positions`' own testability floor excludes every position,
+    so a caller measuring bare `durations_ms` (no significance test
+    possible at all) must pass `_comparable_positions(...)[0]` explicitly.
     """
-    comparable, _excluded = _comparable_positions(before, after)
+    if comparable is None:
+        comparable, _excluded, _min_n = _testable_positions(before, after)
     if not comparable:
         return {"ratio": None, "measurable": False, "per_size": [],
-                "reason": "no size where both runs were measurable "
-                          "(baseline below the visibility floor, or the "
-                          "optimized run measured 0ms) — see "
-                          "inference.sizes_below_floor"}
+                "reason": "no size survived both the visibility floor and "
+                          "the significance test's own filters (baseline "
+                          "below the visibility floor, the optimized run "
+                          "measured 0ms, too few runs a side, or a tied "
+                          "comparison the normal approximation doesn't "
+                          "trust at that n) — see inference.sizes_below_floor"}
     ratios = [e["before_ms"] / e["after_ms"] for e in comparable]
     import statistics
     median = statistics.median(ratios)
@@ -602,8 +632,103 @@ def _fwer_satisfied(sizes_total: int, sizes_rejecting: int, correction: str | No
     return sizes_rejecting * 2 > sizes_total
 
 
+def _testable_positions(before: dict, after: dict,
+                        alpha: float = ALPHA) -> tuple[list[dict], list[dict], int]:
+    """Narrow `_comparable_positions`'s pool to exactly the sizes
+    `_infer_speedup`'s significance test can actually use — factored out so
+    `_infer_speedup` (to build `per_size`) and `verify_optimization` (to
+    build the headline `speedup.ratio` from the SAME survivors) can never
+    disagree about which positions counted (codecalc issue #328: an earlier
+    fix reconciled `_speedup` with `_comparable_positions`'s own floor but
+    left these two further, narrower filters unfed-back, so a size excluded
+    here could still set the headline median).
+
+    Applies exactly gates (c) and (b) from `_infer_speedup`'s docstring, in
+    the same order, so `excluded`'s shape and content are unchanged from
+    what `_infer_speedup` computed inline before this was extracted:
+
+      (c) fewer than `stats.min_testable_n(alpha)` runs a side is
+          structurally unable to reject the null no matter how clean the
+          separation (#284).
+      (b) a tie routed the comparison to `stats.mann_whitney_u`'s normal
+          approximation at fewer than `_NORMAL_APPROX_MIN_N` runs a side,
+          AND the two samples' raw-run ranges overlap (`_ranges_overlap`) —
+          below the timer's resolution (#285).
+
+    Gate (e) — a surviving size's OWN ratio must also clear the caller's
+    `min_speedup` to count as REJECTING — is deliberately NOT applied here:
+    it decides whether a size counts toward the significance VOTE, not
+    whether the size's measurement is trustworthy enough to report at all,
+    so it stays in `_infer_speedup` (`sizes_rejecting`) and never removes a
+    position from this function's survivors or from `_speedup`'s pool.
+
+    Each survivor carries everything `_comparable_positions` gives it
+    (`size`, `before_ms`, `after_ms`, `b_sample`, `a_sample`, optional
+    `size_after`) plus the `stats.mann_whitney_u` result already computed
+    for it (`mwu`), so `_infer_speedup` never runs the same test twice.
+
+    Returns `(survivors, excluded, min_n)`. `excluded` extends
+    `_comparable_positions`'s own excluded list with (c)/(b)'s reasons —
+    identical in shape to `_infer_speedup`'s `sizes_below_floor`.
+    """
+    comparable, excluded = _comparable_positions(before, after)
+    # (c): a size below the smallest n whose exact p COULD be < alpha is not
+    # merely untested, it is structurally incapable of rejecting — counting
+    # it against the vote it can never contribute a rejection to is exactly
+    # backwards (codecalc #284: dropping one such size flipped a genuine 10x
+    # win from rejected to accepted). Replaces the old flat `< 2` guard,
+    # computed from `alpha` rather than hard-coded so the two never drift.
+    min_n = stats.min_testable_n(alpha)
+    testable = []
+    for e in comparable:
+        if len(e["b_sample"]) < min_n or len(e["a_sample"]) < min_n:
+            excluded.append({
+                "size": e["size"], "before_ms": e["before_ms"], "after_ms": e["after_ms"],
+                "reason": (f"fewer than {min_n} runs per side ({len(e['b_sample'])} "
+                          f"before / {len(e['a_sample'])} after) — the smallest n "
+                          f"whose exact one-sided p can be < alpha={alpha} at all "
+                          f"is {min_n} (1/C(2n,n)); a smaller sample cannot reject "
+                          f"the null no matter how clean the separation"),
+            })
+        else:
+            testable.append(e)
+
+    survivors = []
+    for e in testable:
+        mwu = stats.mann_whitney_u(e["a_sample"], e["b_sample"], alternative="less")
+        n_before, n_after = len(e["b_sample"]), len(e["a_sample"])
+        # (b): a tie routed this size to the normal approximation, and that
+        # approximation is asymptotic — `stats.py`'s own docstring: not "a
+        # number worth calling alpha against" at n=5. Below
+        # `_NORMAL_APPROX_MIN_N` a side, distrust it — but ONLY when the two
+        # samples' ranges actually overlap (`_ranges_overlap`): a tie
+        # confined to duplicate readings WITHIN one side (this tool's own
+        # measurements do this constantly at integer-ms resolution — see
+        # that function's docstring) does not make the comparison ambiguous,
+        # and excluding it anyway measured as nearly BLINDING the tool to
+        # genuine wins, not just conservative.
+        if (mwu["method"] == "normal_approximation"
+                and (n_before < _NORMAL_APPROX_MIN_N or n_after < _NORMAL_APPROX_MIN_N)
+                and _ranges_overlap(e["a_sample"], e["b_sample"])):
+            excluded.append({
+                "size": e["size"], "before_ms": e["before_ms"], "after_ms": e["after_ms"],
+                "reason": (f"a tie routed this size to the normal approximation "
+                          f"(stats.mann_whitney_u's method) AND the two samples' "
+                          f"ranges overlap — below {_NORMAL_APPROX_MIN_N} runs per "
+                          f"side ({n_before} before / {n_after} after here) that is "
+                          f"below the timer's resolution: the timer cannot always "
+                          f"say which side a given pair of runs favoured — see "
+                          f"stats.py's own module docstring on why n=5 is 'not a "
+                          f"number worth calling alpha against'"),
+            })
+            continue
+        survivors.append({**e, "mwu": mwu})
+    return survivors, excluded, min_n
+
+
 def _infer_speedup(before: dict, after: dict, alpha: float = ALPHA,
-                   min_speedup: float = DEFAULT_MIN_SPEEDUP) -> dict:
+                   min_speedup: float = DEFAULT_MIN_SPEEDUP,
+                   positions: tuple[list[dict], list[dict], int] | None = None) -> dict:
     """Test, per size, whether `after` is stochastically faster than `before`.
 
     `_speedup`'s median ratio says HOW MUCH faster the measured runs were; it
@@ -645,7 +770,12 @@ def _infer_speedup(before: dict, after: dict, alpha: float = ALPHA,
     "excluded, and here is why" — never as nothing at all.
 
     Three further gates, all part of the same false-accept fix (a live CI
-    run certified IDENTICAL before/after code as `accepted=True`):
+    run certified IDENTICAL before/after code as `accepted=True`). (b) and
+    (c) are applied by the shared `_testable_positions` (see its own
+    docstring) rather than inline here, so `verify_optimization` can pass
+    the exact same survivors into `_speedup` — the headline ratio used to
+    come from the wider `_comparable_positions` pool regardless of what
+    these two gates excluded (codecalc #328):
 
       (b) a size whose test used `stats.mann_whitney_u`'s `normal_approximation`
           method (routed there by a tie — see `stats.py`'s module docstring)
@@ -676,59 +806,34 @@ def _infer_speedup(before: dict, after: dict, alpha: float = ALPHA,
     original `alpha` (which stays the NOMINAL, uncorrected level throughout
     — `effective_alpha` is what a size's OWN p-value is actually compared to
     for `sizes_rejecting`).
+
+    `positions` (optional): the exact `(survivors, excluded, min_n)` tuple
+    `_testable_positions(before, after, alpha)` would itself compute —
+    pass it to skip that computation (and every `stats.mann_whitney_u` call
+    it makes, one per surviving size) when the caller already has it.
+    `verify_optimization` does this: it calls `_testable_positions` ONCE and
+    passes the SAME tuple here and as `_speedup`'s `comparable`, so a
+    Mann-Whitney test is never run twice for one position and `inference`
+    can never see a different filtered pool than `speedup` does. A caller
+    that omits it (every direct call in this module's own tests) gets the
+    exact same result computed fresh — `positions` is a reuse mechanism,
+    not a second code path with different semantics. The caller is
+    responsible for having computed `positions` with this SAME `alpha`;
+    `_infer_speedup` does not re-check that (it would have to recompute to
+    verify it, defeating the point).
     """
-    comparable, excluded = _comparable_positions(before, after)
-    # (c): a size below the smallest n whose exact p COULD be < alpha is not
-    # merely untested, it is structurally incapable of rejecting — counting
-    # it against the vote it can never contribute a rejection to is exactly
-    # backwards (codecalc #284: dropping one such size flipped a genuine 10x
-    # win from rejected to accepted). Replaces the old flat `< 2` guard,
-    # computed from `alpha` rather than hard-coded so the two never drift.
-    min_n = stats.min_testable_n(alpha)
-    testable = []
-    for e in comparable:
-        if len(e["b_sample"]) < min_n or len(e["a_sample"]) < min_n:
-            excluded.append({
-                "size": e["size"], "before_ms": e["before_ms"], "after_ms": e["after_ms"],
-                "reason": (f"fewer than {min_n} runs per side ({len(e['b_sample'])} "
-                          f"before / {len(e['a_sample'])} after) — the smallest n "
-                          f"whose exact one-sided p can be < alpha={alpha} at all "
-                          f"is {min_n} (1/C(2n,n)); a smaller sample cannot reject "
-                          f"the null no matter how clean the separation"),
-            })
-        else:
-            testable.append(e)
-    comparable = testable
+    if positions is None:
+        # (c) and (b) both live in `_testable_positions` now — shared with
+        # `verify_optimization`, which passes its survivors straight into
+        # `_speedup` so the headline ratio can never include a size excluded
+        # here (codecalc #328).
+        positions = _testable_positions(before, after, alpha)
+    survivors, excluded, min_n = positions
 
     per_size = []
-    for e in comparable:
-        mwu = stats.mann_whitney_u(e["a_sample"], e["b_sample"], alternative="less")
+    for e in survivors:
+        mwu = e["mwu"]
         n_before, n_after = len(e["b_sample"]), len(e["a_sample"])
-        # (b): a tie routed this size to the normal approximation, and that
-        # approximation is asymptotic — `stats.py`'s own docstring: not "a
-        # number worth calling alpha against" at n=5. Below
-        # `_NORMAL_APPROX_MIN_N` a side, distrust it — but ONLY when the two
-        # samples' ranges actually overlap (`_ranges_overlap`): a tie
-        # confined to duplicate readings WITHIN one side (this tool's own
-        # measurements do this constantly at integer-ms resolution — see
-        # that function's docstring) does not make the comparison ambiguous,
-        # and excluding it anyway measured as nearly BLINDING the tool to
-        # genuine wins, not just conservative.
-        if (mwu["method"] == "normal_approximation"
-                and (n_before < _NORMAL_APPROX_MIN_N or n_after < _NORMAL_APPROX_MIN_N)
-                and _ranges_overlap(e["a_sample"], e["b_sample"])):
-            excluded.append({
-                "size": e["size"], "before_ms": e["before_ms"], "after_ms": e["after_ms"],
-                "reason": (f"a tie routed this size to the normal approximation "
-                          f"(stats.mann_whitney_u's method) AND the two samples' "
-                          f"ranges overlap — below {_NORMAL_APPROX_MIN_N} runs per "
-                          f"side ({n_before} before / {n_after} after here) that is "
-                          f"below the timer's resolution: the timer cannot always "
-                          f"say which side a given pair of runs favoured — see "
-                          f"stats.py's own module docstring on why n=5 is 'not a "
-                          f"number worth calling alpha against'"),
-            })
-            continue
         rb = stats.rank_biserial_correlation(mwu["u"], mwu["n1"], mwu["n2"])
         row = {
             "size": e["size"],
@@ -986,8 +1091,20 @@ def verify_optimization(original: str, candidate: str, language: str,
         return {"ok": False, "error": f"candidate re-measurement failed: {after.get('error')}"}
     _progress(4)  # "alignment"
 
-    sp = _speedup(before, after)
-    inference = _infer_speedup(before, after, min_speedup=min_speedup)
+    # `speedup.ratio`/`per_size` are built from `_testable_positions`'s
+    # survivors, NOT the wider `_comparable_positions` pool `_speedup`
+    # defaults to when handed no precomputed positions — otherwise a size
+    # `_infer_speedup` excludes as too noisy to test (below
+    # `stats.min_testable_n`, or a tied normal-approximation comparison with
+    # overlapping ranges) could still set the headline median while
+    # `inference.sizes_below_floor` says it was thrown out (codecalc #328).
+    # Computed ONCE — the same tuple, `stats.mann_whitney_u` calls and all,
+    # is passed to BOTH `_speedup` (as `comparable`) and `_infer_speedup`
+    # (as `positions`), so a size's significance test never runs twice and
+    # `speedup`/`inference` can never see a different filtered pool.
+    positions = _testable_positions(before, after)
+    sp = _speedup(before, after, comparable=positions[0])
+    inference = _infer_speedup(before, after, min_speedup=min_speedup, positions=positions)
     accepted, reason = _accept_decision(sp, min_speedup, inference)
     return {
         "ok": True,
