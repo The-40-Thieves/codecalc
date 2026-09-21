@@ -865,6 +865,46 @@ for _tlabel in ("rust", "python"):
               f"branches={_compile_err.get('branches')} "
               f"verdict={_compile_err.get('verdict')}")
         check_stamped(f"{_tlabel} compile-error trace_execution", _compile_err)
+
+        # (1.18.0, GH #321/THE-1086) An event whose own detail is too big
+        # (a call with more than 200 changed locals) is still admitted as a
+        # bounded stub, with `detail_dropped: true` — schema-validate that
+        # shape explicitly, since `_execution_trace_only_properties`'s
+        # `events[].detail_dropped` and `truncated_reason`'s new enum
+        # member are otherwise only exercised implicitly.
+        _over_cap_params = ", ".join(f"a{i}" for i in range(205))
+        _over_cap_args = ", ".join("1" for _ in range(205))
+        _over_cap = tracing.execute_trace(
+            "python3",
+            f"def big({_over_cap_params}): return 1\nprint(big({_over_cap_args}))\n",
+        )
+        check(f"{_tlabel}: an over-cap trace_execution result still "
+              f"validates against the published schema",
+              not errors_for(_over_cap), f"-> {errors_for(_over_cap)[:2]}")
+        check(f"{_tlabel}: truncated_reason is the new event_detail_over_cap "
+              f"member, not one of the pre-1.18.0 values",
+              _over_cap.get("truncated") is True
+              and _over_cap.get("truncated_reason") == "event_detail_over_cap",
+              f"-> truncated={_over_cap.get('truncated')} "
+              f"reason={_over_cap.get('truncated_reason')}")
+        check(f"{_tlabel}: the stub event carries detail_dropped=true, "
+              f"empty locals, and its own real step/line/func",
+              any(e.get("detail_dropped") is True and e.get("locals") == {}
+                  and e.get("func") == "big" and e.get("line") == 1
+                  for e in (_over_cap.get("events") or [])),
+              f"-> events={_over_cap.get('events')}")
+        check(f"{_tlabel}: no ordinary event in the same result carries "
+              f"detail_dropped at all (present-and-true only, never false)",
+              all(e.get("detail_dropped") is not False
+                  for e in (_over_cap.get("events") or [])),
+              f"-> events={_over_cap.get('events')}")
+        check(f"{_tlabel}: the stub is accepted, not discarded — "
+              f"discarded_events stays 0 and events_consistent stays true",
+              _over_cap.get("discarded_events") == 0
+              and _over_cap.get("events_consistent") is True,
+              f"-> discarded_events={_over_cap.get('discarded_events')} "
+              f"events_consistent={_over_cap.get('events_consistent')}")
+        check_stamped(f"{_tlabel} over-cap trace_execution", _over_cap)
     finally:
         executor._rust = _saved_trace
 

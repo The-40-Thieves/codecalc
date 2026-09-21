@@ -226,12 +226,25 @@ behind it.
   perfectly ordinary event then failed the step-continuity check too — the
   rest of the trace silently vanished, `stdout` proved the "never executed"
   lines had in fact run, and `events_consistent` went `false` for a program
-  nobody tampered with. `_validate_event` now accepts a matching-step event
-  even when only a size cap failed, so the step sequence stays intact and
-  only that one event's own detail is dropped — counted in
-  `discarded_events` and disclosed via a new `truncated_reason` value,
-  `"event_detail_over_cap"`, never through `events_consistent`, which stays
-  reserved for a forged/tampered trace sink.
+  nobody tampered with. A matching-step event that fails only a size cap is
+  now ACCEPTED as a bounded stub — its real `step`/`line`/`event`/`func`
+  kept, `locals` replaced with `{}`, and a new `detail_dropped: true`
+  marker added — rather than discarded outright, so a real, correctly
+  positioned coverage sample is never lost along with the oversized detail
+  (a cross-vendor review of the first version of this fix, which dropped
+  the whole event, caught that a program creating its over-cap locals on
+  line N and nothing else there still came back with line N in
+  `lines_never_executed`). The drop is disclosed via a new
+  `truncated_reason` value, `"event_detail_over_cap"`, and the stub is
+  never counted in `discarded_events` — only a genuinely malformed or
+  tampered line is. The same review also found that accepting oversized
+  events this way reopened a forgery gap: a sandboxed program can pre-write
+  a forged, step-matching event for a step the harness has not emitted yet,
+  which displaces the harness's own later, genuine event for that step
+  (rejected as stale) while the count/step arithmetic alone still balances.
+  `events_consistent` now additionally requires `discarded_events == 0` —
+  an honest harness never produces a discarded event on its own — which
+  closes that gap without costing the legitimate over-cap case.
 
 ## [0.12.0] — 2026-09-09
 

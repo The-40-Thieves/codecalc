@@ -51,7 +51,7 @@ from . import errors, grades
 #: each component is allowed to change — the short form is that MAJOR is the
 #: only one that may break a reader, and it carries a twelve-month deprecation
 #: window before anything is removed.
-CONTRACT_VERSION = "1.17.0"
+CONTRACT_VERSION = "1.18.0"
 
 # THE `$schema` AND `$id` URIs ARE NOT HERE ON PURPOSE.
 #
@@ -830,7 +830,13 @@ def _execution_trace_only_properties() -> dict:
                 "names that CHANGED since the previous event in that same "
                 "frame, each value a repr capped at ~200 chars. A `return` "
                 "event also carries `return_value`; an `exception` event "
-                "carries `exception_type`/`exception_message`."
+                "carries `exception_type`/`exception_message`. (1.18.0) An "
+                "event whose own detail (most often `locals`) was too big "
+                "to admit is still present as a bounded STUB — the real "
+                "`step`/`line`/`event`/`func`, `locals: {}`, and "
+                "`detail_dropped: true` — so it still counts toward "
+                "`lines_executed`/`branches`; see `truncated_reason: "
+                "\"event_detail_over_cap\"` below."
             ),
             "items": {
                 "type": "object",
@@ -845,6 +851,17 @@ def _execution_trace_only_properties() -> dict:
                     "return_value": {"type": "string"},
                     "exception_type": {"type": "string"},
                     "exception_message": {"type": "string"},
+                    "detail_dropped": {
+                        "type": "boolean",
+                        "description": (
+                            "(1.18.0) Present, and true, only on a stub "
+                            "event — see `events`'s own description above "
+                            "and `truncated_reason: \"event_detail_over_"
+                            "cap\"`. Absent (never `false`) on every "
+                            "ordinary event, the same convention "
+                            "`truncated_reason` itself already follows."
+                        ),
+                    },
                 },
             },
         },
@@ -864,50 +881,80 @@ def _execution_trace_only_properties() -> dict:
         "truncated": {
             "type": "boolean",
             "description": (
-                "True only when `max_events` or the internal trace-size "
-                "ceiling stopped RECORDING — the program itself always ran "
-                "to completion regardless; `stdout`/`exit_code`/`verdict` "
-                "above are the real, complete ones either way. A hard kill "
-                "(TLE/OLE/MLE) before either cap is reached reports this "
-                "false — see `verdict`/`timed_out`/`output_truncated` for "
-                "that story instead; this field is scoped to this tool's "
-                "own two recording caps and no others."
+                "True when `max_events` or the internal trace-size ceiling "
+                "stopped RECORDING, or (1.18.0) when at least one event's "
+                "own detail was over a per-event size cap and had to be "
+                "admitted as a bounded stub instead — see `truncated_"
+                "reason`. The program itself always ran to completion "
+                "regardless of which of these fired; `stdout`/`exit_code`/"
+                "`verdict` above are the real, complete ones either way. A "
+                "hard kill (TLE/OLE/MLE) before any of them fires reports "
+                "this false — see `verdict`/`timed_out`/`output_truncated` "
+                "for that story instead; this field is scoped to this "
+                "tool's own recording caps and no others."
             ),
         },
         "truncated_reason": {
             "type": "string",
-            "enum": ["max_events", "max_trace_bytes", "trace_file_exceeded"],
+            "enum": ["max_events", "max_trace_bytes", "trace_file_exceeded",
+                     "event_detail_over_cap"],
             "description": (
-                "Present only when `truncated` is true. `trace_file_exceeded` "
-                "means the trace file on disk was bigger than the harness "
-                "could legitimately have written — a possible sign the "
-                "SANDBOXED program itself appended to it; see this shape's "
-                "own trust-boundary note on `events_consistent`."
+                "Present only when `truncated` is true. `trace_file_"
+                "exceeded` means the trace file on disk was bigger than the "
+                "harness could legitimately have written — a possible sign "
+                "the SANDBOXED program itself appended to it; see this "
+                "shape's own trust-boundary note on `events_consistent`. "
+                "(1.18.0) `event_detail_over_cap` means at least one "
+                "otherwise-legitimate event's own detail (most often "
+                "`locals`, on a function call with more than 200 changed "
+                "locals) exceeded a per-event size cap; that event is still "
+                "present in `events` as a bounded stub (`detail_dropped: "
+                "true`), so `lines_executed`/`branches` still see the line "
+                "it fired on — only its own detail, never the rest of the "
+                "trace, was dropped."
             ),
         },
         "discarded_events": {
             "type": "integer", "minimum": 0,
             "description": (
                 "Lines in the trace file this (unsandboxed) parser read but "
-                "rejected — malformed JSON, an unrecognised or malformed "
-                "shape, or a `step` that did not continue the expected "
-                "monotonic sequence. Always 0 for a trace nothing has "
-                "tampered with; nonzero does not by itself mean tampering — "
-                "see `events_consistent`."
+                "rejected outright — malformed JSON, an unrecognised or "
+                "malformed shape, or a `step` that did not continue the "
+                "expected monotonic sequence. (1.18.0) An event whose `step` "
+                "continued the sequence but whose own detail was over a "
+                "size cap is NOT counted here — it is accepted as a bounded "
+                "stub instead (see `events`'s `detail_dropped` and "
+                "`truncated_reason: \"event_detail_over_cap\"`), because "
+                "the step sequence itself was never in doubt. Always 0 for "
+                "a trace nothing has tampered with — including one that hit "
+                "the over-cap case above — so a nonzero value here always "
+                "means either outright junk in the sink or a displaced, "
+                "genuine event (see `events_consistent`)."
             ),
         },
         "events_consistent": {
             "type": "boolean",
             "description": (
                 "True only when the harness's own trailing `end` marker was "
-                "found, its `emitted` count matches the number of `events` "
-                "this parser accepted, and nothing followed it in the file. "
-                "The trace is produced BY the traced process, at the SAME "
-                "privilege it runs with — this is a best-effort tamper/"
-                "corruption signal, never a cryptographic guarantee; a run "
-                "killed by TLE/OLE/MLE before the harness could write its "
-                "own `end` line also reports this false, honestly, since "
-                "nothing vouches for a partial trace's completeness either."
+                "found, its `emitted`/`step` counts match the number of "
+                "`events` this parser accepted, nothing followed it in the "
+                "file, AND (1.18.0) `discarded_events` is 0. The last "
+                "condition closes a gap the first three cannot: a "
+                "sandboxed program can pre-write a forged, step-matching "
+                "event for a step the harness has not emitted yet, which "
+                "this parser accepts; the harness's own later, GENUINE "
+                "event for that same step number is then rejected as stale "
+                "(a step mismatch), while the totals still balance because "
+                "one accepted event swapped in for one discarded one. An "
+                "honest harness never produces a discarded event on its "
+                "own, so `discarded_events == 0` is what actually catches "
+                "that displacement. The trace is produced BY the traced "
+                "process, at the SAME privilege it runs with — this is a "
+                "best-effort tamper/corruption signal, never a "
+                "cryptographic guarantee; a run killed by TLE/OLE/MLE "
+                "before the harness could write its own `end` line also "
+                "reports this false, honestly, since nothing vouches for a "
+                "partial trace's completeness either."
             ),
         },
         "branches": {

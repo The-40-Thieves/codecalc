@@ -262,6 +262,19 @@ check("a small, uncapped trace reports truncated=False",
 # the rest of the trace vanished: `stdout` proved lines ran that
 # `lines_never_executed` swore never did, and `events_consistent` went
 # `false` for a program nobody tampered with.
+#
+# A cross-vendor review of the first version of this fix (which advanced
+# the step counter but DISCARDED the whole event, including its already-
+# validated `line`) found two further problems, both closed below:
+#   #2 coverage — dropping the whole event cost a real, correctly
+#      positioned coverage sample: a program that creates its over-cap
+#      locals on line N and does nothing else there came back with line N
+#      absent from `lines_executed` and present in `lines_never_executed`,
+#      the identical "stdout disagrees with the report" failure this fix
+#      exists to close, just moved one field over.
+#   #3 forgery — closing #2 by ACCEPTING the event (as a bounded stub) also
+#      needed `events_consistent` tightened: see the forged-displacement
+#      test near the bottom of this section.
 def _big_params_program(n: int) -> str:
     params = ", ".join(f"a{i}" for i in range(n))
     args = ", ".join("1" for _ in range(n))
@@ -274,12 +287,13 @@ def _big_params_program(n: int) -> str:
 # cleanly as any other program. Pinned as the "was already fine" control:
 # a fix that only special-cases the over-cap path must not change this one.
 _r199 = tracing.execute_trace("python3", _big_params_program(199))
-check("199 parameters (at, not over, the locals cap): no event is dropped",
+check("199 parameters (at, not over, the locals cap): no event is stubbed",
       _r199.get("lines_executed") == [1, 2, 4, 5]
       and _r199.get("lines_never_executed") == []
       and _r199.get("events_consistent") is True
       and _r199.get("discarded_events") == 0
-      and _r199.get("truncated") is False,
+      and _r199.get("truncated") is False
+      and not any(e.get("detail_dropped") for e in (_r199.get("events") or [])),
       f"-> lines_executed={_r199.get('lines_executed')} "
       f"lines_never_executed={_r199.get('lines_never_executed')} "
       f"events_consistent={_r199.get('events_consistent')} "
@@ -307,9 +321,43 @@ check("...the drop is disclosed via truncated/truncated_reason, not silently",
       _r205.get("truncated") is True
       and _r205.get("truncated_reason") == "event_detail_over_cap",
       f"-> truncated={_r205.get('truncated')} reason={_r205.get('truncated_reason')}")
-check("...and the dropped event is still counted in discarded_events",
-      _r205.get("discarded_events", 0) > 0,
-      f"-> discarded_events={_r205.get('discarded_events')}")
+check("...the over-cap event is ACCEPTED as a bounded stub (finding #2: "
+      "not discarded, so its own real step/line/func still count for "
+      "coverage), with an empty locals and detail_dropped=true",
+      _r205.get("discarded_events") == 0
+      and any(e.get("event") == "call" and e.get("func") == "big"
+              and e.get("line") == 1 and e.get("locals") == {}
+              and e.get("detail_dropped") is True
+              for e in (_r205.get("events") or [])),
+      f"-> discarded_events={_r205.get('discarded_events')} "
+      f"events={_r205.get('events')}")
+check("...and no ordinary event carries detail_dropped at all (the "
+      "convention truncated_reason itself already follows)",
+      not any("detail_dropped" in e for e in (_r205.get("events") or [])
+              if not (e.get("event") == "call" and e.get("func") == "big")),
+      f"-> events={_r205.get('events')}")
+
+# Finding #2's own minimal repro: a TWO-line program, the over-cap event's
+# own line (1, a one-liner def+return so the call's own frame line is 1)
+# right next to the only other line (2, the print). Before the fix, line 1
+# vanished from `lines_executed` into `lines_never_executed` even though it
+# plainly ran — this is the report's shape, reduced to the smallest program
+# that shows it.
+_TWO_LINE_OVER_CAP = (
+    "def big(" + ", ".join(f"a{i}" for i in range(205)) + "): return 1\n"
+    "print(big(" + ", ".join("1" for _ in range(205)) + "))\n"
+)
+_r2 = tracing.execute_trace("python3", _TWO_LINE_OVER_CAP)
+check("finding #2's minimal 2-line repro: BOTH lines show up executed, "
+      "neither is misreported as never-executed",
+      _r2.get("lines_executed") == [1, 2] and _r2.get("lines_never_executed") == [],
+      f"-> lines_executed={_r2.get('lines_executed')} "
+      f"lines_never_executed={_r2.get('lines_never_executed')}")
+check("...and events_consistent/discarded_events still read like an "
+      "honest, untampered run",
+      _r2.get("events_consistent") is True and _r2.get("discarded_events") == 0,
+      f"-> events_consistent={_r2.get('events_consistent')} "
+      f"discarded_events={_r2.get('discarded_events')}")
 
 # A malformed line that does NOT carry a well-formed, correctly-sequenced
 # `step` must still fail closed: no leniency without a real step match. This
@@ -336,6 +384,65 @@ check("...and events_consistent is still False (the harness's own 'end' "
       "line is missing, same as any other os._exit(0) bypass)",
       _bad_step_result.get("events_consistent") is False,
       f"-> events_consistent={_bad_step_result.get('events_consistent')}")
+
+# ── finding #3: a forged event that DISPLACES a later genuine one must not
+# read as events_consistent=True just because the totals still balance ────
+# Reproduced the same way tests (b)/(c) above do — `sys.settrace(None)`,
+# then the program owns the trace sink outright and authors bytes directly
+# via its own file descriptor — rather than by racing the harness's OWN
+# still-open file handle while it keeps writing: verified empirically (two
+# plain `open()` file objects on the same path, one non-append, one append)
+# that a live race self-corrupts instead of cleanly displacing anything —
+# a non-append writer's next write lands at ITS OWN previously-tracked
+# offset, not at the externally-extended end of file, so it overwrites the
+# start of whatever was appended there rather than landing after it. See
+# codecalc/tracing.py's "TRUST BOUNDARY" section for where this is written
+# down. Once tracing is off, though, the file is entirely the sandboxed
+# program's to write, single-shot, which is sufficient to reproduce the
+# LOGICAL attack the reviewer described: a forged, oversized (over
+# `_MAX_LOCALS_ENTRIES`) event claiming the next step this parser expects,
+# immediately followed by a second, ordinary-looking event claiming that
+# SAME step (standing in for the harness's own genuine one, which in a live
+# run would arrive after the forgery already claimed the slot), one more
+# resynced step, and a matching `end` line. The count/step arithmetic alone
+# balances (one accepted event swapped in for one discarded one), so only
+# `discarded_events == 0` catches it.
+_DISPLACEMENT_PROGRAM = (
+    "import sys, os, json\n"
+    "sys.settrace(None)\n"
+    "trace_path = os.path.join(os.path.dirname(__file__), '.codecalc-run', "
+    "'trace_events.jsonl')\n"
+    "with open(trace_path, 'r') as f:\n"
+    "    existing = sum(1 for ln in f if ln.strip())\n"
+    "next_step = existing + 1\n"
+    "oversized_locals = {'z%d' % i: '1' for i in range(205)}\n"
+    "with open(trace_path, 'a') as f:\n"
+    "    f.write(json.dumps({'step': next_step, 'line': 1, 'event': 'line', "
+    "'func': '<module>', 'locals': oversized_locals}) + chr(10))\n"
+    "    f.write(json.dumps({'step': next_step, 'line': 1, 'event': 'line', "
+    "'func': '<module>', 'locals': {}}) + chr(10))\n"
+    "    f.write(json.dumps({'step': next_step + 1, 'line': 1, "
+    "'event': 'line', 'func': '<module>', 'locals': {}}) + chr(10))\n"
+    "    f.write(json.dumps({'event': 'end', 'step': next_step + 1, "
+    "'emitted': next_step + 1}) + chr(10))\n"
+    "os._exit(0)\n"
+)
+_disp_result = tracing.execute_trace("python3", _DISPLACEMENT_PROGRAM)
+check("finding #3: the forged oversized event for the next expected step "
+      "is accepted as a stub (the carve-out fires exactly as it should for "
+      "a well-formed, step-continuous event)",
+      any(e.get("detail_dropped") for e in (_disp_result.get("events") or [])),
+      f"-> events={_disp_result.get('events')}")
+check("...the displaced 'genuine' duplicate for that same step is "
+      "discarded as stale, not silently dropped from the count",
+      _disp_result.get("discarded_events", 0) > 0,
+      f"-> discarded_events={_disp_result.get('discarded_events')}")
+check("...and events_consistent is False, even though end_emitted/end_step "
+      "still arithmetically match len(events) — discarded_events==0 is "
+      "what actually catches this, not the count comparison alone",
+      _disp_result.get("events_consistent") is False,
+      f"-> events_consistent={_disp_result.get('events_consistent')} "
+      f"discarded_events={_disp_result.get('discarded_events')}")
 
 
 # ── stdin passthrough ────────────────────────────────────────────────────────

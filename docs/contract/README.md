@@ -1,7 +1,42 @@
 # The codecalc result contract
 
-**Current version: `1.17.0`** · Schema: [`result-v1.schema.json`](result-v1.schema.json) ·
+**Current version: `1.18.0`** · Schema: [`result-v1.schema.json`](result-v1.schema.json) ·
 Source of truth: [`codecalc/contract.py`](../../codecalc/contract.py)
+
+`1.18.0` is a MINOR bump over `1.17.0`. It closes the rest of GH #321/THE-1086: `trace_execution`'s `events` items and its
+`truncated_reason` enum both gain a value, additively —
+
+* **`truncated_reason` gains `"event_detail_over_cap"`.** Reported when one
+  trace event's own detail (almost always `locals`, on a function call with
+  more than 200 changed locals) exceeded a per-event size cap. Before this
+  fix, such an event was silently DISCARDED without advancing the parser's
+  internal step counter, which then rejected every later, otherwise-
+  legitimate event too — the rest of the trace vanished, and `lines_never_
+  executed` reported lines the run's own `stdout` proved had executed.
+* **`events[]` items gain an optional `detail_dropped` boolean**, present
+  and `true` only on the stub this fix now admits in place of the event
+  `event_detail_over_cap` describes: `step`/`line`/`event`/`func` are the
+  real ones, `locals` is `{}`. The stub still counts toward `lines_executed`
+  and `branches` — dropping the whole event, an earlier draft of this fix,
+  cost a real coverage sample along with the oversized detail (cross-vendor
+  review finding #2 on this PR).
+* **`events_consistent`'s own definition gains one more condition**:
+  `discarded_events` must be `0`. A sandboxed program can pre-write a
+  forged, step-matching event for a step the harness has not emitted yet;
+  the harness's own later, GENUINE event for that same step number is then
+  rejected as stale, but the count/step arithmetic alone still balances
+  (cross-vendor review finding #3 on this PR — see `codecalc/tracing.py`'s
+  "TRUST BOUNDARY" section for the mechanism and why an honest harness
+  never produces a discarded event on its own). No existing client's read
+  of `events_consistent` narrows in a way that breaks it: this can only
+  turn a `true` a `1.16.0` client would have seen into a `false`, for a
+  trace this exact attack applies to — the field's own documented meaning
+  ("a best-effort tamper/corruption signal, never a cryptographic
+  guarantee") already told a reader not to treat it as absolute proof.
+
+See `codecalc/tracing.py`'s module docstring ("TRUST BOUNDARY" section) and
+`tests/test_trace_execution.py` for the full mechanism and the reporter's
+own repro, now fixed.
 
 `1.17.0` is a MINOR bump over `1.16.0`. It adds `stderr` to `compact_result`,
 closing GH #323 (THE-1088): `execute_code(compact=True)` dropped `stderr`

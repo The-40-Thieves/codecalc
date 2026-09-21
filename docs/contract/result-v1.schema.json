@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/The-40-Thieves/codecalc/main/docs/contract/result-v1.schema.json",
   "title": "codecalc execution result",
-  "description": "The result contract for codecalc's execution tools, version 1.17.0. Generated from codecalc/contract.py by scripts/check_contract.py \u2014 edit the module, not this file.",
+  "description": "The result contract for codecalc's execution tools, version 1.18.0. Generated from codecalc/contract.py by scripts/check_contract.py \u2014 edit the module, not this file.",
   "type": "object",
   "required": [
     "ok",
@@ -492,7 +492,7 @@
         },
         "events": {
           "type": "array",
-          "description": "Ordered trace events for USER-CODE frames only (library/stdlib frames are excluded by filename). Each item is `{step, line, event, func, locals}`; `event` is one of line/call/return/exception. `locals` carries only the names that CHANGED since the previous event in that same frame, each value a repr capped at ~200 chars. A `return` event also carries `return_value`; an `exception` event carries `exception_type`/`exception_message`.",
+          "description": "Ordered trace events for USER-CODE frames only (library/stdlib frames are excluded by filename). Each item is `{step, line, event, func, locals}`; `event` is one of line/call/return/exception. `locals` carries only the names that CHANGED since the previous event in that same frame, each value a repr capped at ~200 chars. A `return` event also carries `return_value`; an `exception` event carries `exception_type`/`exception_message`. (1.18.0) An event whose own detail (most often `locals`) was too big to admit is still present as a bounded STUB \u2014 the real `step`/`line`/`event`/`func`, `locals: {}`, and `detail_dropped: true` \u2014 so it still counts toward `lines_executed`/`branches`; see `truncated_reason: \"event_detail_over_cap\"` below.",
           "items": {
             "type": "object",
             "required": [
@@ -533,6 +533,10 @@
               },
               "exception_message": {
                 "type": "string"
+              },
+              "detail_dropped": {
+                "type": "boolean",
+                "description": "(1.18.0) Present, and true, only on a stub event \u2014 see `events`'s own description above and `truncated_reason: \"event_detail_over_cap\"`. Absent (never `false`) on every ordinary event, the same convention `truncated_reason` itself already follows."
               }
             }
           }
@@ -549,25 +553,26 @@
         },
         "truncated": {
           "type": "boolean",
-          "description": "True only when `max_events` or the internal trace-size ceiling stopped RECORDING \u2014 the program itself always ran to completion regardless; `stdout`/`exit_code`/`verdict` above are the real, complete ones either way. A hard kill (TLE/OLE/MLE) before either cap is reached reports this false \u2014 see `verdict`/`timed_out`/`output_truncated` for that story instead; this field is scoped to this tool's own two recording caps and no others."
+          "description": "True when `max_events` or the internal trace-size ceiling stopped RECORDING, or (1.18.0) when at least one event's own detail was over a per-event size cap and had to be admitted as a bounded stub instead \u2014 see `truncated_reason`. The program itself always ran to completion regardless of which of these fired; `stdout`/`exit_code`/`verdict` above are the real, complete ones either way. A hard kill (TLE/OLE/MLE) before any of them fires reports this false \u2014 see `verdict`/`timed_out`/`output_truncated` for that story instead; this field is scoped to this tool's own recording caps and no others."
         },
         "truncated_reason": {
           "type": "string",
           "enum": [
             "max_events",
             "max_trace_bytes",
-            "trace_file_exceeded"
+            "trace_file_exceeded",
+            "event_detail_over_cap"
           ],
-          "description": "Present only when `truncated` is true. `trace_file_exceeded` means the trace file on disk was bigger than the harness could legitimately have written \u2014 a possible sign the SANDBOXED program itself appended to it; see this shape's own trust-boundary note on `events_consistent`."
+          "description": "Present only when `truncated` is true. `trace_file_exceeded` means the trace file on disk was bigger than the harness could legitimately have written \u2014 a possible sign the SANDBOXED program itself appended to it; see this shape's own trust-boundary note on `events_consistent`. (1.18.0) `event_detail_over_cap` means at least one otherwise-legitimate event's own detail (most often `locals`, on a function call with more than 200 changed locals) exceeded a per-event size cap; that event is still present in `events` as a bounded stub (`detail_dropped: true`), so `lines_executed`/`branches` still see the line it fired on \u2014 only its own detail, never the rest of the trace, was dropped."
         },
         "discarded_events": {
           "type": "integer",
           "minimum": 0,
-          "description": "Lines in the trace file this (unsandboxed) parser read but rejected \u2014 malformed JSON, an unrecognised or malformed shape, or a `step` that did not continue the expected monotonic sequence. Always 0 for a trace nothing has tampered with; nonzero does not by itself mean tampering \u2014 see `events_consistent`."
+          "description": "Lines in the trace file this (unsandboxed) parser read but rejected outright \u2014 malformed JSON, an unrecognised or malformed shape, or a `step` that did not continue the expected monotonic sequence. (1.18.0) An event whose `step` continued the sequence but whose own detail was over a size cap is NOT counted here \u2014 it is accepted as a bounded stub instead (see `events`'s `detail_dropped` and `truncated_reason: \"event_detail_over_cap\"`), because the step sequence itself was never in doubt. Always 0 for a trace nothing has tampered with \u2014 including one that hit the over-cap case above \u2014 so a nonzero value here always means either outright junk in the sink or a displaced, genuine event (see `events_consistent`)."
         },
         "events_consistent": {
           "type": "boolean",
-          "description": "True only when the harness's own trailing `end` marker was found, its `emitted` count matches the number of `events` this parser accepted, and nothing followed it in the file. The trace is produced BY the traced process, at the SAME privilege it runs with \u2014 this is a best-effort tamper/corruption signal, never a cryptographic guarantee; a run killed by TLE/OLE/MLE before the harness could write its own `end` line also reports this false, honestly, since nothing vouches for a partial trace's completeness either."
+          "description": "True only when the harness's own trailing `end` marker was found, its `emitted`/`step` counts match the number of `events` this parser accepted, nothing followed it in the file, AND (1.18.0) `discarded_events` is 0. The last condition closes a gap the first three cannot: a sandboxed program can pre-write a forged, step-matching event for a step the harness has not emitted yet, which this parser accepts; the harness's own later, GENUINE event for that same step number is then rejected as stale (a step mismatch), while the totals still balance because one accepted event swapped in for one discarded one. An honest harness never produces a discarded event on its own, so `discarded_events == 0` is what actually catches that displacement. The trace is produced BY the traced process, at the SAME privilege it runs with \u2014 this is a best-effort tamper/corruption signal, never a cryptographic guarantee; a run killed by TLE/OLE/MLE before the harness could write its own `end` line also reports this false, honestly, since nothing vouches for a partial trace's completeness either."
         },
         "branches": {
           "type": "object",

@@ -136,24 +136,43 @@ otherwise it bounds the DAMAGE and SURFACES the tampering:
     `step` DOES continue that sequence, and which is otherwise well-formed,
     but which fails only a per-event SIZE cap (over `_MAX_LOCALS_ENTRIES`
     changed locals is the reported case — a real function call with more
-    than 200 parameters) still advances the step sequence, because the
-    sequence itself was never in doubt; only that one event's own detail is
-    dropped (counted in `discarded_events`, disclosed via
-    `truncated_reason: "event_detail_over_cap"`, never via
-    `events_consistent`). A bare step match is NOT enough to earn this on
-    its own — steps are sequential and public, so a forger can always guess
-    the next one — every OTHER check still applies before this carve-out
-    fires; see `_validate_event`'s `enforce_size_caps` parameter.
+    than 200 parameters) is still ACCEPTED, as a bounded STUB —
+    `step`/`line`/`event`/`func` kept, `locals` replaced with `{}`, a
+    `detail_dropped: true` marker added — rather than discarded, because an
+    earlier version of this fix that dropped the whole event also dropped
+    its `line` from coverage, misreporting a line that plainly ran as
+    `lines_never_executed` (cross-vendor review finding #2). The stub is
+    NOT counted in `discarded_events` (its slot is genuinely admitted, only
+    its detail is not) and does not, on its own, flip `events_consistent` —
+    the drop is disclosed only via `truncated_reason: "event_detail_over_
+    cap"`. A bare step match is NOT enough to earn this on its own — steps
+    are sequential and public, so a forger can always guess the next one —
+    every OTHER check still applies before this carve-out fires; see
+    `_validate_event`'s `enforce_size_caps` parameter.
   * The harness writes a final `{"event": "end", "step": N, "emitted": N}`
     line, whether or not either cap fired, in every path `_run_source`
     returns through normally. `events_consistent` is `false` whenever that
-    line is missing, its `emitted` count disagrees with how many events this
-    parser actually accepted, or anything appears after it — the ONE thing
-    `os._exit(0)` (or any other bypass of the harness's own return path)
-    cannot fake, because it never runs the code that writes it. A forged
-    event placed BEFORE a genuine `end` line still inflates the accepted
-    count past what `emitted` claims, so `events_consistent` catches that
-    case too, not just an outright-missing terminator.
+    line is missing, its `emitted`/`step` counts disagree with `len(events)`,
+    anything appears after it, OR `discarded_events` is nonzero — the last
+    leg closes a gap a cross-vendor review found (finding #3): a sandboxed
+    program can pre-write a forged, step-matching event for the NEXT step
+    the harness has not emitted yet, so when the harness's own genuine
+    event for that same step number arrives afterward, THIS parser rejects
+    it as stale (a step mismatch — the forger, not the harness, already
+    claimed that slot) while every step after it resyncs normally, because
+    the harness's own counter was never touched. The arithmetic alone
+    cannot see that: `len(events)` still lands on the harness's real
+    `end_emitted`/`end_step` totals (one forged event swapped in for one
+    genuine one the parser discarded), so the count/step comparison alone
+    reports `true`. An honest harness, forged or not, NEVER produces a
+    discarded event on its own — a nonzero `discarded_events` therefore
+    means either the sandboxed program wrote outright junk to the sink, or
+    exactly this displacement — so requiring `discarded_events == 0` closes
+    the gap without costing the legitimate over-cap case (its event is a
+    STUB, accepted, never discarded — see the bullet above). `os._exit(0)`
+    (or any other bypass of the harness's own return path) still cannot
+    fake the `end` line's mere PRESENCE, because it never runs the code
+    that writes it — that half of this check is unchanged.
 
 None of this turns `events` into a signed record — a program that reads its
 own trace file back (it can: the file lives in its cwd) can append a
@@ -167,6 +186,36 @@ per-line level, only via the aggregate `events_consistent` check). What it
 guarantees is that a CARELESS or MODERATE corruption is either rejected
 outright or visibly flagged, and that no amount of appended data can force
 this process to do more than a fixed, small amount of extra work.
+
+A LIVE race — the sandboxed program pre-writing a forged event for a step
+the harness has not emitted yet, WHILE tracing stays on and the harness
+keeps writing more real events afterward (GH #321/THE-1086 cross-vendor
+review finding #3) — does NOT work the way it sounds like it should, and
+this was verified rather than assumed: the harness's own `_trace_file` is
+opened ONCE, in `"w"` mode, and every subsequent `_emit()` just calls
+`.write()` on that SAME still-open file object, whose OS-level file offset
+only ever advances by what IT has written. A second, independent `open(...,
+"a")` from the sandboxed program's own code (a different open file
+description, same underlying inode) starts its own write at the CURRENT
+end of file — which at that moment equals the harness's own offset, since
+nothing else has extended the file — but does not, and cannot, move the
+harness's own tracked offset. So the harness's NEXT `.write()` lands
+exactly where the forgery started, overwriting its opening bytes rather
+than landing after it (confirmed with a two-writer experiment on this
+exact pattern: `open(p,"w")` writes and flushes, a second `open(p,"a")`
+appends more, the first object writes again — the second write ends up
+INSIDE the appended region, not after it, leaving a corrupted, unparseable
+remainder rather than a clean second event). A forged line planted this way
+self-destructs into `discarded_events`, not a clean displacement. What
+`events_consistent`'s `discarded_events == 0` leg actually defends against
+is the STRICTLY STRONGER position a program reaches by calling
+`sys.settrace(None)` first (as the forged-trailing-event test above already
+does): once tracing is off, the sandboxed program owns the sink outright
+and can author ANY byte sequence itself in one shot — including one that
+plays BOTH roles, a forged event AND a hand-written stand-in for the
+"genuine" event it would have displaced — which is indistinguishable, at
+the file level, from the live race actually succeeding. See tests/test_
+trace_execution.py's own forged-displacement test for the reproduction.
 
 THREADS. `sys.settrace` is a per-THREAD hook; installing it in the main
 thread traces only frames running there. A program that starts its own
@@ -269,12 +318,17 @@ _THREAD_MARKER_KEY = "__trace_multithreaded__"
 #: later, otherwise-legitimate event too (a step-continuity cascade) and
 #: reported lines that plainly ran, per the run's own `stdout`, as never
 #: executed. See `_validate_event`'s `enforce_size_caps` parameter and
-#: `_parse_trace_file`'s handling of it for the narrow carve-out this buys:
-#: the event's own detail still costs itself (it is not added to `events`,
-#: and it is still counted in `discarded_events`), but it no longer costs
-#: the rest of the trace, and it is surfaced here — never through
-#: `events_consistent`, which stays reserved for a forged/tampered sink (see
-#: the module docstring's "TRUST BOUNDARY" section).
+#: `_parse_trace_file`'s handling of it for what this actually buys: the
+#: event's own OVERSIZED CONTENT still costs itself — it is accepted only as
+#: a bounded stub (`step`/`line`/`event`/`func`, `locals: {}`, `detail_
+#: dropped: true`; see `_parse_trace_file`'s own comment at the call site
+#: for why dropping the whole event, an earlier version of this fix, cost a
+#: real coverage sample too — cross-vendor review finding #2) — but the
+#: event's SLOT is admitted like any other, so it is never counted in
+#: `discarded_events` and it no longer costs the rest of the trace. The drop
+#: is surfaced here — never through `events_consistent`, which stays
+#: reserved for a forged/tampered sink (see the module docstring's "TRUST
+#: BOUNDARY" section).
 _EVENT_DETAIL_OVER_CAP_REASON = "event_detail_over_cap"
 
 #: Slack ABOVE `_MAX_TRACE_BYTES` the parser will read before concluding the
@@ -672,12 +726,16 @@ def _validate_event(obj: object, expected_step: int, max_line: int,
     ONLY to classify a `None` from the default (`enforce_size_caps=True`)
     call: if the relaxed call accepts an event the strict call rejected, the
     event's `step` was genuinely next in sequence and its SHAPE was
-    otherwise sound, so only its own oversized detail — never the rest of
-    the trace — needs to be dropped (`_EVENT_DETAIL_OVER_CAP_REASON`). This
-    is deliberately the ONLY leniency: a bare `step` match is trivial for a
-    forger to produce (steps are sequential and public knowledge), so
-    nothing else here becomes forgivable just because `expected_step`
-    matched — see `_parse_trace_file`'s own comment at the call site.
+    otherwise sound, so only its own oversized detail needs to be dropped —
+    `_parse_trace_file` builds a bounded STUB from the relaxed dict this
+    call returns (`step`/`line`/`event`/`func`, `locals` replaced with `{}`)
+    rather than discarding the event outright, so a real, correctly
+    positioned coverage sample is never lost to an oversized `locals` dict
+    (`_EVENT_DETAIL_OVER_CAP_REASON`). This is deliberately the ONLY
+    leniency: a bare `step` match is trivial for a forger to produce (steps
+    are sequential and public knowledge), so nothing else here becomes
+    forgivable just because `expected_step` matched — see `_parse_trace_
+    file`'s own comment at the call site.
 
     Returns a FRESH dict built field-by-field, never `obj` itself passed
     through: an attacker-controlled dict reaching the result verbatim would
@@ -752,13 +810,6 @@ def _parse_trace_file(path: Path, code: str, max_events: int) -> dict[str, Any]:
     max_line = max(1, len(code.splitlines()))
     events: list[dict] = []
     discarded_events = 0
-    # Counts the subset of `discarded_events` that were dropped ONLY for
-    # being over a size cap (GH #321/THE-1086) — see the loop's own comment
-    # below. Kept separate so `events_consistent` can still compare against
-    # what the harness's `_step`/`_event_count` actually reached: those
-    # events occupied a real step even though their content never made it
-    # into `events`.
-    detail_dropped_events = 0
     multithreaded = False
     end_seen = False
     events_after_end = 0
@@ -830,40 +881,82 @@ def _parse_trace_file(path: Path, code: str, max_events: int) -> dict[str, Any]:
         # (`_MAX_FUNC_LEN`/`_MAX_LOCALS_ENTRIES`/`_MAX_STR_FIELD_LEN`) is
         # what failed — e.g. a real function call with more than 200
         # changed locals (GH #321/THE-1086). The step SEQUENCE this harness
-        # produced is still intact in that case; only this one event's own
-        # detail is too large to admit. Advance `expected_step` so later,
-        # ordinary events are not cascade-rejected the way the bug report
-        # showed, but do NOT add the oversized content to `events` (the
-        # cap exists to bound the result payload, and skipping it here
-        # would defeat that) — it still counts in `discarded_events`, and
-        # the drop is disclosed via `truncated`/`truncated_reason`, never
+        # produced is still intact in that case, and the LINE it fired on
+        # is still known and trustworthy (it passed the same range check
+        # every other event's `line` does) — dropping the whole event, as
+        # an earlier version of this fix did, cost a real, correctly
+        # positioned coverage sample: a two-line program that binds 205
+        # locals on line 1 and prints on line 2 came back with line 1
+        # missing from `lines_executed` and present in `lines_never_
+        # executed`, which is exactly the "stdout disagrees with the
+        # report" failure mode this fix exists to close, just moved one
+        # field over (cross-vendor review finding #2). So this ACCEPTS the
+        # event as a bounded STUB instead of dropping it: `step`/`line`/
+        # `event`/`func` (clamped to `_MAX_FUNC_LEN` — `func` itself is
+        # never what trips the cap in practice, but the classification
+        # below doesn't distinguish which field did, so this clamps
+        # defensively) survive, `locals` becomes `{}` and any `event`-
+        # specific extra field (`return_value`/`exception_type`/
+        # `exception_message`) is dropped rather than admitted oversized,
+        # and `detail_dropped: true` marks the stub so a reader can tell it
+        # apart from a real empty-locals step. The stub occupies its real
+        # slot in `events` — it is NOT added to `discarded_events` — so
+        # coverage (`lines_executed`/`branches`) sees it and the end-
+        # sentinel arithmetic below balances exactly as it would for an
+        # untampered run with no over-cap event at all. Only the drop
+        # itself is disclosed, via `truncated`/`truncated_reason`, never
         # via `events_consistent` (reserved for a forged/tampered sink —
         # see the module docstring's "TRUST BOUNDARY" section). A step
-        # match alone is NOT enough on its own: `enforce_size_caps=False`
-        # still runs every structural/type check, so a forger cannot buy
-        # this leniency just by guessing the next (sequential, public)
-        # step number — anything actually malformed still falls through
-        # to the plain discard below and still breaks step continuity for
-        # whatever comes after it.
-        if _validate_event(obj, expected_step, max_line, enforce_size_caps=False) is not None:
-            discarded_events += 1
-            detail_dropped_events += 1
+        # match alone is NOT enough to earn any of this: `enforce_size_
+        # caps=False` still runs every structural/type check, so a forger
+        # cannot buy this leniency just by guessing the next (sequential,
+        # public) step number — anything actually malformed still falls
+        # through to the plain discard below and still breaks step
+        # continuity for whatever comes after it.
+        relaxed = _validate_event(obj, expected_step, max_line, enforce_size_caps=False)
+        if relaxed is not None:
+            func = relaxed["func"]
+            if len(func) > _MAX_FUNC_LEN:
+                func = func[:_MAX_FUNC_LEN]
+            events.append({"step": relaxed["step"], "line": relaxed["line"],
+                            "event": relaxed["event"], "func": func,
+                            "locals": {}, "detail_dropped": True})
             expected_step += 1
+            # Same "first cap sets the reason" idiom the truncation-marker
+            # branch above already uses: whichever of the two conditions —
+            # this event's own oversized detail, or the stub pushing
+            # `events` to `max_events` — is true first keeps its reason: a
+            # cap that already fired earlier in this file is never
+            # relabeled by one that fires later on the SAME event.
             if not truncated:
                 truncated = True
                 truncated_reason = _EVENT_DETAIL_OVER_CAP_REASON
+            if len(events) >= max_events:
+                break
             continue
         discarded_events += 1
 
-    # Compare against `len(events) + detail_dropped_events`, not just
-    # `len(events)`: a detail-dropped event still occupied a real step in
-    # the harness's own `_step`/`_event_count` counters (see
-    # `_EVENT_DETAIL_OVER_CAP_REASON`'s docstring), so it must still be
-    # counted here for an ordinary, untampered run to come back consistent.
-    accepted_total = len(events) + detail_dropped_events
+    # `discarded_events == 0` is a second, independent leg of this check
+    # (GH #321/THE-1086 cross-vendor review finding #3), not implied by the
+    # count/step comparison alone. An honest harness NEVER produces a
+    # discarded event: a genuinely malformed line only reaches this parser
+    # if the sandboxed program itself wrote junk to the sink, or if a
+    # forged, step-matching line displaced a later GENUINE event of the
+    # same step number (which this parser then rejects as stale — a
+    # mismatch, not a duplicate). That displacement is invisible to the
+    # count/step comparison alone: the forged line occupies the slot the
+    # displaced genuine one would have, so `len(events)` still lands on
+    # the harness's real `end_emitted`/`end_step` totals even though one
+    # accepted event is not the one the harness actually produced. Verified
+    # against this module's own forgery-probe tests (see tests/test_trace_
+    # execution.py's "pre-write a forged step-N event" case): the forged
+    # line is accepted (well-formed, correct step), the harness's own
+    # later, genuine same-numbered event is discarded as stale, and every
+    # step after that resyncs normally — so `discarded_events` is the ONLY
+    # signal left standing once the arithmetic on its own says "consistent".
     events_consistent = (
-        end_seen and events_after_end == 0
-        and end_emitted == accepted_total and end_step == accepted_total
+        end_seen and events_after_end == 0 and discarded_events == 0
+        and end_emitted == len(events) and end_step == len(events)
     )
     return {
         "events": events, "truncated": truncated,
