@@ -1678,6 +1678,106 @@ check("reject_explosive's Pow loop is ALSO wrapped in its own RecursionError gua
       _reject_explosive_source.count("except RecursionError:") >= 2,
       f"-> {_reject_explosive_source.count('except RecursionError:')} guard(s) found")
 
+# ═══ round 5 of cross-vendor review (grok, on 795c49a) — one remaining ═════
+# ═══ class: a numeric base whose exponent is not a bare Integer and not ═══
+# ═══ a Mul/Pow-int multiset `_factor_multiset` reduces to an integer ══════
+#
+# Round 4 folded `Pow` into the scan and tracked numerator/denominator
+# separately, but the Pow branch still required the exponent to reduce to
+# an EXACT integer (via `_factor_multiset` + the then-still-present
+# `_safe_multiset_rational`) before bounding anything -- an `Add` exponent
+# (`_factor_multiset` has no `Add` case) or a genuinely non-integral
+# rational whose BASE still makes the result a huge integer fell through
+# unrefused. Fixed by deriving an UPPER BOUND on the exponent's magnitude
+# from `_log10_num_den` (which already handles every node type, `Add`
+# included) instead of requiring exactness for the verdict at all --
+# `_safe_multiset_rational` itself is gone (finding 2 below).
+
+# Finding 1 (High): five expressions that must now be refused, none of
+# which have a bare-Integer or exact-multiset-reducible exponent.
+_UNRESOLVED_EXPONENT_CASES = [
+    ("2**(14999+1)", "Add exponent, same value as the already-refused 2**(30000/2)"),
+    ("2**-(14999+1)", "same, negated -- the denominator side of the same bug class"),
+    ("(10**3000)**(3/2)", "non-integral rational exponent, but 10**3000 is a perfect "
+                           "square-ish base -- result is 10**4500, a real huge integer"),
+    ("2**(factorial(1463)+1)", "Add exponent wrapping an already-legal heavy-call result"),
+]
+for _expr, _why in _UNRESOLVED_EXPONENT_CASES:
+    _t0 = time.time()
+    _r = _exact.simplify_expression(_expr)
+    _elapsed = time.time() - _t0
+    check(f"{_expr!r} ({_why}) is refused",
+          _r.get("ok") is False and _r.get("code") == _errors.RESOURCE_EXHAUSTED,
+          f"-> {_r}")
+    check("  ...promptly, not after evaluate=True actually computes it",
+          _elapsed < 2.0, f"-> {_elapsed:.3f}s")
+
+# The symbolic-base side of the identical gap: MAX_SYMBOLIC_EXPONENT used to
+# be skipped entirely for any exponent `_factor_multiset` could not reduce
+# (an Add, here) because the old code `continue`d on `None` outright.
+_t0 = time.time()
+_symbolic_add_exp_result = _exact.simplify_expression("(x+1)**(1000+1000)")
+_symbolic_add_exp_elapsed = time.time() - _t0
+check("(x+1)**(1000+1000) is refused with the symbolic-exponent (cost) wording, "
+      "not silently let through",
+      _symbolic_add_exp_result.get("ok") is False
+      and _symbolic_add_exp_result.get("code") == _errors.RESOURCE_EXHAUSTED
+      and "symbolic power" in str(_symbolic_add_exp_result.get("error")),
+      f"-> {_symbolic_add_exp_result}")
+check("  ...promptly", _symbolic_add_exp_elapsed < 2.0, f"-> {_symbolic_add_exp_elapsed:.3f}s")
+
+# ...and the fix must not turn into a blanket refusal of every compound
+# exponent -- these four must still evaluate (two are the round-1 pins for
+# the ANALOGOUS Mul-shaped gap; two are new, exercising the same bound math
+# on the "clearly small" side).
+_STILL_EVALUATES_COMPOUND_EXPONENT = ["2**(3+2)", "2**(3/2)", "2**(19999/2)", "(3/2)**100"]
+for _expr in _STILL_EVALUATES_COMPOUND_EXPONENT:
+    _r = _exact.simplify_expression(_expr)
+    check(f"{_expr!r} (compound exponent, under cap) still evaluates",
+          _r.get("ok") is True, f"-> {_r}")
+
+# Finding 2 (Medium): `_safe_multiset_rational` (deleted below) gated each
+# term individually but multiplied with no COMBINED bound -- >=20 distinct
+# heavy-call bases as an exponent would each individually clear the
+# per-term gate and then get multiplied into a real ~10**5-digit `Fraction`.
+# The round-5 redesign never materializes an exact exponent value at all
+# (see `_log10_num_den`'s Pow branch), so this is a structural, not a
+# patched, fix -- tested against both a trivial base (1, where the true
+# value is exactly 1 regardless) and a non-trivial one (2, genuinely huge).
+_distinct_heavy_factors = "*".join(f"factorial({1463 - _k})" for _k in range(20))
+check(f"the 20-distinct-factorial exponent is {len(_distinct_heavy_factors)} chars",
+      len(_distinct_heavy_factors) < 1900, f"-> {len(_distinct_heavy_factors)}")
+
+_t0 = time.time()
+_unit_base_result = _exact.simplify_expression(f"1**({_distinct_heavy_factors})")
+_unit_base_elapsed = time.time() - _t0
+check("1**(20 distinct heavy-call factors) evaluates to exactly 1 -- 1**anything is 1, "
+      "no materialization needed regardless of the exponent",
+      _unit_base_result.get("ok") is True and _unit_base_result.get("simplified") == "1",
+      f"-> {_unit_base_result}")
+check("  ...promptly, never materializing the ~10**5-digit combined exponent",
+      _unit_base_elapsed < 2.0, f"-> {_unit_base_elapsed:.3f}s")
+
+_t0 = time.time()
+_nontrivial_base_result = _exact.simplify_expression(f"2**({_distinct_heavy_factors})")
+_nontrivial_base_elapsed = time.time() - _t0
+check("2**(20 distinct heavy-call factors) is refused, not materialized as a Fraction",
+      _nontrivial_base_result.get("ok") is False
+      and _nontrivial_base_result.get("code") == _errors.RESOURCE_EXHAUSTED,
+      f"-> {_nontrivial_base_result}")
+check("  ...promptly", _nontrivial_base_elapsed < 2.0, f"-> {_nontrivial_base_elapsed:.3f}s")
+
+# Finding 3 (Low): `_safe_multiset_rational` / `_bounded_numeric_value` /
+# `_NumericTooLarge` / `_SUBTREE_BIT_BUDGET` / `_SAFE_RECONSTRUCT_DIGITS`
+# were all dead code by round 5 (nothing in `reject_explosive`'s call graph
+# reached them anymore) -- deleted rather than documented as retained.
+import codecalc.safe_expr as _se5
+
+for _dead_name in ("_safe_multiset_rational", "_bounded_numeric_value",
+                   "_NumericTooLarge", "_SUBTREE_BIT_BUDGET", "_SAFE_RECONSTRUCT_DIGITS"):
+    check(f"{_dead_name} was deleted, not merely left unused",
+          not hasattr(_se5, _dead_name), f"-> hasattr={hasattr(_se5, _dead_name)}")
+
 # ═══ the fail-closed choice above was ITSELF too broad — cross-vendor ══════
 # ═══ differential probe (main vs. this branch) found 5 benign expressions ══
 # ═══ that main evaluates fine but an earlier version of this fix refused ═══

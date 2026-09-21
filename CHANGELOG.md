@@ -576,7 +576,28 @@ behind it.
   `2**(2**N * 3**(-N))` for a large `N` tried to materialize the literal
   `2**N` on the way to a negligible net value; the exponent's value is
   now derived purely from log-space arithmetic and a per-term-gated exact
-  `Fraction`, never SymPy's own evaluator.
+  `Fraction`, never SymPy's own evaluator. A fifth review round found one
+  more residual class in that same Pow branch: a numeric base whose
+  exponent is neither a bare `Integer` nor a `Mul`/`Pow`-of-`Integer`
+  multiset reducible to an exact integer (an `Add` exponent —
+  `2**(14999+1)`, the same value as the already-refused `2**(30000/2)`,
+  or `2**(factorial(1463)+1)` — or a genuinely non-integral rational
+  whose base still makes the result a huge integer — `(10**3000)**(3/2)
+  == 10**4500`) fell through unrefused, and the symbolic-base
+  `MAX_SYMBOLIC_EXPONENT` cost ceiling had the identical gap
+  (`(x+1)**(1000+1000)`). Fixed by never requiring exactness for the
+  refusal VERDICT at all: an upper bound on the exponent's magnitude,
+  derived from the same numerator/denominator machinery every other node
+  already uses, is enough to decide whether `base**exponent` would print
+  over cap, without ever resolving the exponent's actual value — which
+  also closes a second, narrower gap in the exact-value path it replaces
+  (`_safe_multiset_rational` gated each individual factor's size but not
+  their combined product, so an exponent built from 20+ distinct heavy-
+  call results, each individually small, still multiplied into a real
+  ~10**5-digit `Fraction`). `_safe_multiset_rational` — along with
+  `_bounded_numeric_value`, `_NumericTooLarge`, `_SUBTREE_BIT_BUDGET`,
+  and `_SAFE_RECONSTRUCT_DIGITS`, all dead code by this point — is
+  deleted rather than patched.
 
 ## [0.12.0] — 2026-09-09
 
