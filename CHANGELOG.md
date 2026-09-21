@@ -286,24 +286,33 @@ behind it.
   RESOLVE_NO_SYMLINKS)`, needing no identity/inode comparison because
   there is no second walk of the same path left for a racing session
   worker (`rename`/`symlink` a component mid-delete — the server process
-  is not Landlocked) to win against (found and closed across two rounds
+  is not Landlocked) to win against (found and closed across four rounds
   of review before this ever shipped; `_DIR_FD_SUPPORTED` gates the
-  platforms where this applies, with a documented residual on Windows).
-  Refuses exactly what `session_artifacts` already excludes
-  (`.codecalc-run/`, `.codecalc-spill/`, the session lock file, the
-  idle-expiry marker, `__pycache__`/`*.pyc` — `_is_runner_internal`,
-  factored out of `_workspace_scan` so the two definitions cannot drift)
-  and a directory — one file/symlink per call, the same granularity
-  `session_write_file` writes at. The reserved-name/pycache checks are
-  case-fold-safe (`_reserved_root_name`, not a bare `==`) and additionally
-  refuse anything shaped like a Windows 8.3 short name (`CODECA~1`) at the
-  session root, since that spelling bears no textual relationship to the
-  long name a casefold/strip comparison could catch; the Windows fallback
-  path also resolves the final component to its long form before that
-  check runs. Deliberately exempt from BOTH the byte and artifact-count
-  quota gates: a delete can only shrink usage, never grow it, so gating it
-  on a cap it can only relieve would refuse the one call that fixes the
-  refusal (see "Fixed" below).
+  platforms where this applies — requiring `O_NOFOLLOW` explicitly, not
+  just `O_DIRECTORY`/`dir_fd` support, so a hypothetical host with the
+  latter but not the former takes the documented Windows-style fallback
+  instead of silently following symlinks per hop — with a documented
+  residual on Windows). The workspace-root open itself is guarded the
+  same way every per-component hop already is, so a failure there is a
+  coded refusal, never an uncaught `OSError`. Refuses exactly what
+  `session_artifacts` already excludes (`.codecalc-run/`, `.codecalc-spill/`,
+  the session lock file, the idle-expiry marker, `__pycache__`/`*.pyc` —
+  `_is_runner_internal`, factored out of `_workspace_scan` so the two
+  definitions cannot drift) and a directory — one file/symlink per call,
+  the same granularity `session_write_file` writes at. Every one of those
+  checks — the two root-level reserved files AND the two runner-directory
+  PREFIXES — now goes through one shared `_normalized_component_matches`
+  (casefold, trailing-`.`/` ` strip, Windows 8.3-short-name shape refused
+  outright at the session root), so `.CODECALC-RUN/main.py` or
+  `.codecalc-run./main.py` are refused the same way `.CODECALC-SESSION-
+  LOCK` already was, instead of the prefix check being a separate, less
+  strict, bare `==`. The Windows fallback path additionally resolves the
+  final component to its long form before that check runs, for an 8.3
+  alias a casefold/strip comparison alone cannot enumerate. Deliberately
+  exempt from BOTH the byte and artifact-count quota gates: a delete can
+  only shrink usage, never grow it, so gating it on a cap it can only
+  relieve would refuse the one call that fixes the refusal (see "Fixed"
+  below).
 
 ### Changed
 

@@ -1072,6 +1072,66 @@ def _test_delete_file_refuses_expired_marker_and_pycache():
 _test_delete_file_refuses_expired_marker_and_pycache()
 
 
+def _test_prefix_dir_normalized_denylist():
+    """MEDIUM, fix round 4 (grok verify-security, in-workspace only —
+    case-insensitive volumes): the prefix-directory check
+    (`.codecalc-run`/`.codecalc-spill`) used to be a bare `in (...)`
+    exact-string match, while the ROOT-level reserved-file check right
+    next to it (`_reserved_root_name`) already casefolded and stripped a
+    trailing `.`/` `. On a case-insensitive volume, `.CODECALC-RUN` and
+    `.codecalc-run.` name the SAME on-disk directory as `.codecalc-run`
+    but read as different strings to a bare `in` check — reaching the
+    runner scratch directory past what `session_artifacts` shows. Both
+    now go through the shared `_normalized_component_matches` the
+    reserved-file check uses. Pure denylist checks (via
+    `_is_runner_internal` directly, and end to end through
+    `delete_file`), so provable on Linux without a case-insensitive
+    filesystem, the same reasoning the round-2 case/trailing-dot test
+    above uses."""
+    variants = [
+        sessions._RUNNER_SCRATCH_DIRNAME,
+        sessions._RUNNER_SCRATCH_DIRNAME.upper(),
+        sessions._RUNNER_SCRATCH_DIRNAME.swapcase(),
+        sessions._RUNNER_SCRATCH_DIRNAME + ".",
+    ]
+    for v in variants:
+        check(f"_is_runner_internal: {v!r}/main.py is refused (runner scratch prefix)",
+              sessions._is_runner_internal((v, "main.py")), f"-> False for {v!r}")
+
+    spill_variants = [
+        sessions._SPILL_DIRNAME,
+        sessions._SPILL_DIRNAME.upper(),
+        sessions._SPILL_DIRNAME + ".",
+    ]
+    for v in spill_variants:
+        check(f"_is_runner_internal: {v!r}/x is refused (spill dir prefix)",
+              sessions._is_runner_internal((v, "x")), f"-> False for {v!r}")
+
+    check("_is_runner_internal: an ordinary prefix directory is NOT refused",
+          not sessions._is_runner_internal(("mydir", "file.txt")))
+
+    # End to end through delete_file(): the case-mangled/trailing-dot
+    # spelling of the prefix directory must be refused the same way the
+    # exact spelling already is.
+    sid = _new_session()
+    try:
+        r = sessions.delete_file(sid, f"{sessions._RUNNER_SCRATCH_DIRNAME.upper()}/main.py")
+        check("delete: an UPPERCASE .codecalc-run/... path is refused "
+              "end to end through delete_file()",
+              r.get("ok") is False and r.get("code") == errors.PERMISSION_DENIED,
+              f"-> {r}")
+        r2 = sessions.delete_file(sid, f"{sessions._RUNNER_SCRATCH_DIRNAME}./main.py")
+        check("delete: a trailing-dot .codecalc-run./... path is refused "
+              "end to end through delete_file()",
+              r2.get("ok") is False and r2.get("code") == errors.PERMISSION_DENIED,
+              f"-> {r2}")
+    finally:
+        sessions.stop(sid)
+
+
+_test_prefix_dir_normalized_denylist()
+
+
 def _test_reserved_root_name_denylist_bypass():
     """MEDIUM: a plain `==` denylist lets `.CODECALC-SESSION-LOCK` through
     on a case-insensitive volume (default APFS, NTFS — the SAME file as

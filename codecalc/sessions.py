@@ -256,6 +256,51 @@ _RUNNER_SCRATCH_DIRNAME = registry.RUN_SCRATCH_DIRNAME
 _EIGHT_DOT_THREE_RE = re.compile(r"~\d")
 
 
+def _normalized_component_matches(name: str, *targets: str) -> bool:
+    """True if `name` — once casefolded and with a trailing `.`/` `
+    stripped — equals any of `targets` (also casefolded), OR `name` is
+    shaped like a Windows 8.3 short name (`_EIGHT_DOT_THREE_RE`) —
+    refused unconditionally there too, regardless of `targets`, since a
+    short name bears no stable textual relationship to whatever it
+    aliases (see `_reserved_root_name`'s docstring, the first caller this
+    was extracted from, for the full reasoning).
+
+    #325 fix round 4 (grok verify-security, MEDIUM): `_is_runner_internal`'s
+    prefix-directory check (`.codecalc-run`/`.codecalc-spill`) used to
+    compare `rel_parts[0]` with a bare `in (...)` — exact-match only —
+    while `_reserved_root_name` (the root-level FILE check right below,
+    this function's other caller) already normalized this way. On a
+    case-insensitive volume, `.CODECALC-RUN/main.py` or
+    `.codecalc-run./main.py` named the SAME on-disk directory as
+    `.codecalc-run` but read as a DIFFERENT string to the exact-match
+    check, so a caller could reach past `session_artifacts`' listing by
+    spelling the prefix directory differently — the same class of gap
+    round 2/3 closed for the two reserved ROOT files, now shared by both
+    call sites instead of drifting into two normalization rules that only
+    happened to agree by coincidence.
+
+    Deliberately `str.casefold()`, NOT `os.path.normcase()`: `normcase`
+    only folds case on Windows (`ntpath.normcase`) — on POSIX it is a
+    documented no-op (`posixpath.normcase` returns its argument
+    unchanged), so a version of this function built on it would silently
+    never catch a mangled spelling on Linux/macOS at all, which is exactly
+    the gap this exists to close and the one a Linux CI run needs to be
+    able to prove is closed. Checked UNCONDITIONALLY, not gated on this
+    host's own case-sensitivity: the rule this enforces is "never act on
+    anything that READS AS a reserved name", not "only when this specific
+    filesystem would alias them" — over-refusing an oddly-cased or
+    trailing-dot name that genuinely is not one of `targets` is a mild
+    inconvenience through this one tool; under-refusing the real one is
+    the CVE.
+    """
+    if _EIGHT_DOT_THREE_RE.search(name):
+        return True
+    stripped = name.rstrip(". ") or name  # never let stripping empty the name
+    normalized_targets = {t.casefold() for t in targets}
+    return any(candidate.casefold() in normalized_targets
+               for candidate in (name, stripped))
+
+
 def _reserved_root_name(name: str) -> bool:
     """True if `name` IS — or, once normalized, resolves to the SAME on-disk
     entry as — one of this module's own root-level reserved filenames: the
@@ -274,19 +319,6 @@ def _reserved_root_name(name: str) -> bool:
     `.`/` ` off a filename at the API boundary before ever reaching the
     filesystem.
 
-    Deliberately `str.casefold()`, NOT `os.path.normcase()`: `normcase` only
-    folds case on Windows (`ntpath.normcase`) — on POSIX it is a documented
-    no-op (`posixpath.normcase` returns its argument unchanged), so a
-    version of this function built on it would silently never catch
-    `.CODECALC-SESSION-LOCK` on Linux/macOS at all, which is exactly the gap
-    this exists to close and the one a Linux CI run needs to be able to
-    prove is closed. Checked UNCONDITIONALLY, not gated on this host's own
-    case-sensitivity: the rule this enforces is "never delete anything that
-    READS AS the reserved name", not "only when this specific filesystem
-    would alias them" — over-refusing an oddly-cased or trailing-dot
-    filename that genuinely is not the reserved one is a mild inconvenience
-    through this one tool; under-refusing the reserved name is the CVE.
-
     #325 fix round 3 (grok verify-security, MEDIUM): case/trailing-dot
     folding still compares against the CALLER-SUPPLIED spelling, which is
     never itself resolved (`_jail_nofollow`/`delete_file` deliberately never
@@ -300,13 +332,13 @@ def _reserved_root_name(name: str) -> bool:
     independent layer — belt and suspenders, and the only one a Linux CI
     run can prove on its own (the long-name resolution needs an actual
     Windows short-name filesystem to exercise for real).
+
+    #325 fix round 4: the casefold/strip/8.3 logic itself moved into
+    `_normalized_component_matches`, shared with `_is_runner_internal`'s
+    prefix-directory check — this function is now a thin call into it with
+    the two reserved root filenames as `targets`.
     """
-    if _EIGHT_DOT_THREE_RE.search(name):
-        return True
-    stripped = name.rstrip(". ") or name  # never let stripping empty the name
-    reserved = (_LOCK_FILE_NAME, _EXPIRED_MARKER_NAME)
-    return any(candidate.casefold() == r.casefold()
-               for candidate in (name, stripped) for r in reserved)
+    return _normalized_component_matches(name, _LOCK_FILE_NAME, _EXPIRED_MARKER_NAME)
 
 
 def _is_runner_internal(rel_parts: tuple[str, ...]) -> bool:
@@ -341,10 +373,22 @@ def _is_runner_internal(rel_parts: tuple[str, ...]) -> bool:
     the reserved-name check for the same reason: in-workspace-only, so not
     a host-escape risk, but a caller told "this is hidden the same way
     session_artifacts hides it" should not find a byte-case loophole.
+
+    #325 fix round 4 (grok verify-security, MEDIUM): the prefix-directory
+    check right below was STILL a bare `in (...)` exact match, unlike
+    `_reserved_root_name`'s casefold/trailing-dot/8.3 normalization one
+    call below it — `.CODECALC-RUN/main.py` or `.codecalc-run./main.py`
+    name the SAME on-disk directory as `.codecalc-run` on a case-
+    insensitive volume but read as a different STRING to a bare `in`
+    check, reaching the runner scratch directory past what
+    `session_artifacts` shows. Now goes through the same
+    `_normalized_component_matches` the reserved-name check uses, so both
+    prefix dirs and both reserved files are normalized identically instead
+    of by two rules that only happened to agree by coincidence.
     """
     if not rel_parts:
         return False
-    if rel_parts[0] in (_SPILL_DIRNAME, _RUNNER_SCRATCH_DIRNAME):
+    if _normalized_component_matches(rel_parts[0], _SPILL_DIRNAME, _RUNNER_SCRATCH_DIRNAME):
         return True
     if (any(part.casefold() == "__pycache__" for part in rel_parts)
             or rel_parts[-1].casefold().endswith(".pyc")):
@@ -3036,20 +3080,37 @@ _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 
-#: True only where the platform supports BOTH opening a directory as an fd
-#: (`os.O_DIRECTORY`, absent on Windows) AND addressing `open`/`unlink`/
+#: True only where the platform supports opening a directory as an fd
+#: (`os.O_DIRECTORY`, absent on Windows), addressing `open`/`unlink`/
 #: `lstat` relative to that fd (`dir_fd=`, `os.supports_dir_fd` — checked
 #: live, never assumed from the OS name, the same reasoning
-#: `os.supports_dir_fd` itself exists for). `_unlink_pinned` (#325 fix
-#: round 3, grok verify-security HIGH) needs all three to walk the
+#: `os.supports_dir_fd` itself exists for), AND refusing a symlink at the
+#: component being opened (`os.O_NOFOLLOW`). `_unlink_pinned` (#325 fix
+#: round 3, grok verify-security HIGH) needs all four to walk the
 #: workspace tree one `openat`-style hop per path component from a pinned
 #: root fd, never re-walking a path STRING a racing worker could swap a
 #: component of between two separate looks — see `_unlink_pinned`'s own
 #: docstring. Where this is False (Windows), `delete_file` falls back to a
 #: plain lstat+unlink and documents the same parent-component TOCTOU
 #: residual `_jail`/`_write_nofollow` already accept there.
+#:
+#: #325 fix round 4 (grok verify-security, LOW): `_O_NOFOLLOW != 0` was
+#: missing from this list. Every platform this module currently ships on
+#: that has `os.O_DIRECTORY`/`dir_fd` support also has `O_NOFOLLOW`, so
+#: this was not reachable in practice — but the whole POINT of
+#: `_unlink_pinned`'s walk is "a symlink at any hop fails that hop's own
+#: open", and that guarantee comes entirely from `O_NOFOLLOW` being a REAL
+#: flag in the `os.open(..., _O_NOFOLLOW | ...)` calls below. A
+#: hypothetical host with `dir_fd` support but no `O_NOFOLLOW` would have
+#: silently made `_O_NOFOLLOW` a no-op `0` (the same degrade-to-0 pattern
+#: `_O_NOFOLLOW`'s own definition uses for Windows) and every hop would
+#: FOLLOW a symlink instead of refusing it — the exact class of bug this
+#: module's several TOCTOU fixes exist to close, reintroduced by a missing
+#: guard on the guard. Asserted here, not discovered by a symlink quietly
+#: being followed on such a host.
 _DIR_FD_SUPPORTED = (
     _O_DIRECTORY != 0
+    and _O_NOFOLLOW != 0
     and os.open in os.supports_dir_fd
     and os.unlink in os.supports_dir_fd
     and os.lstat in os.supports_dir_fd
@@ -3095,8 +3156,22 @@ def _unlink_pinned(d: Path, parts: list[str], display_path: str) -> tuple[os.sta
     Every intermediate fd this opens is closed once it is no longer
     needed (the root fd and the final directory fd both close in the
     `finally`); no fd outlives this call.
+
+    #325 fix round 4 (grok verify-security, LOW): the workspace-root open
+    itself used to sit OUTSIDE any `try`/`except` here — every per-hop
+    open below it is guarded (`ELOOP`/`ENOENT`/`ENOTDIR` all become the
+    ordinary "no such file" refusal), but a failure on THIS one (the
+    session directory itself gone, or — pathologically — replaced by
+    something `O_DIRECTORY|O_NOFOLLOW` refuses) propagated as a raw,
+    uncaught `OSError` instead, which no caller of `delete_file` expects
+    from a tool result. Guarded the same way every hop after it already
+    is, for the same reason.
     """
-    root_fd = os.open(d, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW | _O_CLOEXEC)
+    try:
+        root_fd = os.open(d, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW | _O_CLOEXEC)
+    except OSError:
+        return None, errors.error_result(
+            errors.VALIDATION, f"no such file: {display_path}")
     cur_fd = root_fd
     try:
         for component in parts[:-1]:
