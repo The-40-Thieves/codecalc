@@ -269,33 +269,41 @@ behind it.
 
 - **`session_delete_file(session_id, path)`** (sessions group, 50th MCP
   tool) — remove one file (or symlink entry, never its target) from a
-  session workspace. Uses a new `_jail_nofollow` (sessions.py), not
-  `_jail`: `_jail` resolves a symlink at the FINAL path component too, so a
-  link whose target lies outside the workspace reads as the call itself
-  "escaping" and is correctly refused for a READ or WRITE — deleting the
-  SAME link is a different question, since the entry being removed sits
-  squarely inside the workspace regardless of what it points to, so
-  `_jail_nofollow` resolves only the entry's PARENT and leaves the final
-  component unresolved; `unlink()` on a symlink already never follows it,
-  which is what makes the target survive a delete. The unlink itself is
-  PINNED to the resolved parent directory by `(st_dev, st_ino)` and an
-  `O_DIRECTORY|O_NOFOLLOW` fd opened just before the delete, not re-walked
-  from the path string, so a session worker racing a parent-directory swap
-  (`rename`/`symlink` a path component while the delete is in flight — the
-  server process is not Landlocked) cannot make the server unlink a HOST
-  file outside the workspace (found in review before this ever shipped;
-  `_DIR_FD_SUPPORTED` gates the platforms where this applies, with a
-  documented residual on Windows). Refuses exactly what `session_artifacts`
-  already excludes (`.codecalc-run/`, `.codecalc-spill/`, the session lock
-  file, the idle-expiry marker, `__pycache__`/`*.pyc` — `_is_runner_internal`,
-  factored out of `_workspace_scan` so the two definitions cannot drift;
-  the lock file and expiry-marker check is case/trailing-dot-safe via
-  `_reserved_root_name`, not a bare `==`) and a directory — one
-  file/symlink per call, the same granularity `session_write_file` writes
-  at. Deliberately exempt from BOTH the byte and artifact-count quota
-  gates: a delete can only shrink usage, never grow it, so gating it on a
-  cap it can only relieve would refuse the one call that fixes the refusal
-  (see "Fixed" below).
+  session workspace. `_jail_nofollow` (sessions.py) is pure STRING
+  validation — length, segments, absolute-path/`..` escape — and never
+  touches the filesystem; it returns the path as workspace-relative
+  COMPONENTS, not a resolved `Path`, specifically so nothing here ever
+  resolves a symlink at (or through) the final component the way `_jail`
+  does for a read/write (which is right for THOSE — never disclose or
+  overwrite what an outside-pointing link targets — and wrong for a
+  delete, which removes the in-workspace entry regardless of where it
+  points, so `unlink()` on a symlink already never following it is what
+  makes the target survive). The actual delete (`_unlink_pinned`) walks
+  the real filesystem exactly ONCE: an `openat`-style directory-fd hop per
+  path component from the workspace root, `O_NOFOLLOW|O_DIRECTORY` on
+  every hop, `lstat`/`unlink` on the final name relative to the last hop's
+  fd — the portable equivalent of `openat2(RESOLVE_BENEATH|
+  RESOLVE_NO_SYMLINKS)`, needing no identity/inode comparison because
+  there is no second walk of the same path left for a racing session
+  worker (`rename`/`symlink` a component mid-delete — the server process
+  is not Landlocked) to win against (found and closed across two rounds
+  of review before this ever shipped; `_DIR_FD_SUPPORTED` gates the
+  platforms where this applies, with a documented residual on Windows).
+  Refuses exactly what `session_artifacts` already excludes
+  (`.codecalc-run/`, `.codecalc-spill/`, the session lock file, the
+  idle-expiry marker, `__pycache__`/`*.pyc` — `_is_runner_internal`,
+  factored out of `_workspace_scan` so the two definitions cannot drift)
+  and a directory — one file/symlink per call, the same granularity
+  `session_write_file` writes at. The reserved-name/pycache checks are
+  case-fold-safe (`_reserved_root_name`, not a bare `==`) and additionally
+  refuse anything shaped like a Windows 8.3 short name (`CODECA~1`) at the
+  session root, since that spelling bears no textual relationship to the
+  long name a casefold/strip comparison could catch; the Windows fallback
+  path also resolves the final component to its long form before that
+  check runs. Deliberately exempt from BOTH the byte and artifact-count
+  quota gates: a delete can only shrink usage, never grow it, so gating it
+  on a cap it can only relieve would refuse the one call that fixes the
+  refusal (see "Fixed" below).
 
 ### Changed
 

@@ -113,11 +113,46 @@ delete path itself was a new confused-deputy host-file destructor):
   or `.codecalc-session-lock.` pass a plain `==` denylist while naming the
   SAME file as `.codecalc-session-lock` on a case-insensitive volume
   (default APFS, NTFS) or after Windows strips a trailing `.`/` ` at the
-  API boundary. `_reserved_root_name` now compares `os.path.normcase` of
+  API boundary. `_reserved_root_name` now compares `str.casefold()` of
   both the raw and dot/space-stripped spelling, checked unconditionally
   (not gated on this host's own case-sensitivity), so both spellings are
   provably refused as pure denylist checks even on a case-sensitive Linux
   CI runner.
+
+FIX ROUND 3 (a second grok verify-security pass on round 2's commit found
+round 2's own fix for the HIGH was still incomplete, plus two smaller gaps):
+
+- **HIGH — round 2's "pin" was still two SEPARATE filesystem walks of the
+  same path string** (`_jail_nofollow`'s `resolve()`, then `delete_file`'s
+  own `parent.stat()` + `os.open(parent, O_NOFOLLOW)`), so a worker racing
+  an INTERMEDIATE path component (not the immediate parent) between the
+  two walks made both land on the attacker's directory and silently
+  agree — `O_NOFOLLOW` on the second walk only refuses a symlink at ITS
+  OWN final component, and for a nested path like `a/b/passwd` with `a`
+  swapped, that final component (`b`) is never itself the symlink.
+  Manually reproduced against round 2's commit (559d3d0) before writing
+  this fix (the nested race deleted an outside file, 1/6000 escapes);
+  zero escapes and the target survives after this fix, asserted below.
+  Fixed by replacing BOTH re-walks with exactly ONE: `_unlink_pinned`
+  opens the workspace root once and `openat`s each remaining path
+  component in turn, `dir_fd=` of the PREVIOUS hop, `O_NOFOLLOW|
+  O_DIRECTORY` on every hop — a symlink anywhere in the chain fails THAT
+  hop's own open with `ELOOP`, so there is no later re-walk left for it to
+  hide from. `_jail_nofollow` no longer resolves anything at all; it is
+  pure string validation now (length, segments, absolute-path/`..`
+  escape) and returns path COMPONENTS, never a `Path`.
+- **MEDIUM — Windows 8.3 short names.** `CODECA~1` names the SAME file as
+  `.codecalc-session-lock` on NTFS with short names enabled, and bears no
+  textual relationship to the long name a casefold/strip comparison could
+  catch. `_reserved_root_name` now refuses anything SHAPED like an 8.3
+  short name (a literal `~` immediately followed by a digit) at the
+  session root outright; `delete_file`'s Windows fallback path
+  additionally resolves the final component to its long form
+  (`_final_component_long_name`, via `os.path.realpath`) before the
+  denylist runs.
+- **LOW — `__pycache__`/`*.pyc` were still a byte-exact match**, unlike
+  the reserved-name check, which already casefolds. `.PYC`/`__PYCACHE__`
+  now get the same `str.casefold()` treatment.
 """
 
 from __future__ import annotations
@@ -794,16 +829,21 @@ _test_delete_file_symlink_removes_link_not_target()
 
 # ── GH #325 fix round 2 (grok verify-security) ──────────────────────────────
 def _test_delete_file_parent_swap_toctou():
-    """HIGH: a racing session WORKER can swap a parent path component for a
-    symlink pointing OUTSIDE the workspace between `_jail_nofollow`'s
-    resolve and the eventual unlink — the server process is not Landlocked
-    (see `_write_nofollow`'s own docstring), so nothing stops it. Manually
-    confirmed against the pre-fix commit (8bb24fa) before writing this fix:
-    the identical race below, run against that commit's `sessions.py`
-    directly, deleted the OUTSIDE target on its very first escape. Post-fix,
-    the parent is pinned by `(st_dev, st_ino)` recorded at resolve time and
-    re-verified against an `O_DIRECTORY|O_NOFOLLOW` fd opened just before
-    the unlink, so a swapped parent is refused rather than followed.
+    """HIGH (fix round 2 — the IMMEDIATE-parent case only; see fix round
+    3's nested-parent test right after this one for the case round 2's
+    own fix missed): a racing session WORKER can swap a parent path
+    component for a symlink pointing OUTSIDE the workspace between an
+    earlier resolve/observation and the eventual unlink — the server
+    process is not Landlocked (see `_write_nofollow`'s own docstring), so
+    nothing stops it. Manually confirmed against the round-1 commit
+    (8bb24fa) before round 2's fix: the identical race below, run against
+    that commit's `sessions.py` directly, deleted the OUTSIDE target on
+    its very first escape. Round 2 closed exactly this shape (a symlink
+    swapped in for the file's DIRECT parent) via `_unlink_pinned`'s single
+    `openat`-per-component walk from the workspace root (round 3) — an
+    intermediate symlink at ANY position fails that hop's own open with
+    `ELOOP`, which for a one-component-deep path like `d/passwd` means
+    the very first (and only) hop already refuses it.
 
     Races directly against `sessions.delete_file` rather than through a
     real sandboxed `session_run` worker: the vulnerable window is entirely
@@ -883,6 +923,91 @@ def _test_delete_file_parent_swap_toctou():
 _test_delete_file_parent_swap_toctou()
 
 
+def _test_delete_file_nested_parent_swap_toctou():
+    """HIGH, fix round 3 (grok verify-security): round 2's "pin" was
+    `parent.stat()` followed by a SEPARATE `os.open(parent, O_NOFOLLOW)` —
+    both re-walk the path STRING, and `O_NOFOLLOW` refuses a symlink only
+    at the FINAL component of each of THOSE opens. For a NESTED path
+    (`a/b/passwd`, `a` swapped) the immediate parent (`b`) is never itself
+    a symlink, so both re-walks follow the swapped `a` and land on the
+    SAME attacker directory, agree with each other, and the delete
+    proceeds. Manually confirmed against round 2's commit (559d3d0) before
+    writing this fix: the identical race below, run against that commit's
+    `sessions.py` directly, deleted a file OUTSIDE the workspace (escaped
+    1/6000). Round 3's `_unlink_pinned` walks `openat`-style ONE component
+    at a time from a pinned workspace-root fd — `a` becoming a symlink
+    fails ITS OWN hop's open with `ELOOP`, checked at the exact hop where
+    it matters, so there is no later hop left that could silently follow
+    it.
+
+    Same shape as the immediate-parent test above, one directory deeper:
+    `a/etc/passwd` never legitimately exists inside the workspace (only
+    `outside_dir/etc/passwd` does), so any successful delete during the
+    race is proof `a` was followed through as a symlink.
+    """
+    if not _can_symlink():
+        print("SKIP TOCTOU nested-parent-swap test (no symlink privilege on this host)")
+        return
+    if not sessions._DIR_FD_SUPPORTED:
+        print("SKIP TOCTOU nested-parent-swap test (no dir_fd support on this "
+              "platform — documented residual, see _jail_nofollow's docstring)")
+        return
+    sid = _new_session()
+    outside_dir = pathlib.Path(tempfile.mkdtemp(prefix="codecalc-quota-nested-toctou-target-"))
+    (outside_dir / "etc").mkdir()
+    outside_file = outside_dir / "etc" / "passwd"
+    outside_file.write_text("do not touch")
+    try:
+        base = sessions._session_dir(sid)
+        a_path = base / "a"
+        a_real = base / "a.real"
+        (a_path / "etc").mkdir(parents=True)  # a REAL, unrelated nested dir
+
+        stop = threading.Event()
+
+        def _race():
+            while not stop.is_set():
+                try:
+                    a_path.rename(a_real)
+                    a_path.symlink_to(outside_dir)
+                    a_path.unlink()
+                    a_real.rename(a_path)
+                except OSError:
+                    pass  # expected: the two threads step on each other's renames
+
+        racer = threading.Thread(target=_race, daemon=True)
+        racer.start()
+        try:
+            iterations = 6000
+            escaped = 0
+            for _ in range(iterations):
+                r = sessions.delete_file(sid, "a/etc/passwd")
+                if r.get("ok") is True:
+                    escaped += 1
+        finally:
+            stop.set()
+            racer.join(timeout=5)
+
+        check(f"TOCTOU nested-parent-swap: {iterations} racing delete_file calls "
+              "on a/etc/passwd, zero reported deleting the OUTSIDE file",
+              escaped == 0, f"-> {escaped} call(s) reported ok:true")
+        check("TOCTOU nested-parent-swap: the OUTSIDE target survives, untouched",
+              outside_file.exists() and outside_file.read_text() == "do not touch")
+    finally:
+        try:
+            if (base / "a").is_symlink():
+                (base / "a").unlink()
+            if not (base / "a").exists() and (base / "a.real").is_dir():
+                (base / "a.real").rename(base / "a")
+        except OSError:
+            pass
+        sessions.stop(sid)
+        shutil.rmtree(outside_dir, ignore_errors=True)
+
+
+_test_delete_file_nested_parent_swap_toctou()
+
+
 def _test_delete_file_refuses_expired_marker_and_pycache():
     """MEDIUM: the idle-expiry marker is a plain regular file
     `_workspace_scan` already hides from `session_artifacts`, but pre-fix
@@ -890,7 +1015,11 @@ def _test_delete_file_refuses_expired_marker_and_pycache():
     the next `execute()` miss `_is_expired_on_disk` and silently respawn a
     worker for a session that was already reaped. LOW: `__pycache__`/
     `*.pyc` get the same treatment, alignment rather than a host-facing
-    risk."""
+    risk. LOW, fix round 3 (grok verify-security): that pycache/pyc check
+    was still a byte-exact match, unlike the reserved-name check, which
+    already casefolds (fix round 2) — `.PYC`/`__PYCACHE__` (a real
+    spelling on NTFS, which preserves but does not enforce case) slipped
+    through; the casefolded variants below prove it no longer does."""
     sid = _new_session()
     try:
         marker = sessions._session_dir(sid) / sessions._EXPIRED_MARKER_NAME
@@ -919,6 +1048,23 @@ def _test_delete_file_refuses_expired_marker_and_pycache():
               r_pyc.get("ok") is False
               and r_pyc.get("code") == errors.PERMISSION_DENIED,
               f"-> {r_pyc}")
+
+        upper_pycache = sessions._session_dir(sid) / "__PYCACHE__" / "mod.cpython-312.PYC"
+        upper_pycache.parent.mkdir(parents=True, exist_ok=True)
+        upper_pycache.write_bytes(b"\x00")
+        r_upper_pycache = sessions.delete_file(sid, "__PYCACHE__/mod.cpython-312.PYC")
+        check("delete: an UPPERCASE __PYCACHE__ entry is refused too (casefold)",
+              r_upper_pycache.get("ok") is False
+              and r_upper_pycache.get("code") == errors.PERMISSION_DENIED,
+              f"-> {r_upper_pycache}")
+
+        upper_pyc_at_root = sessions._session_dir(sid) / "MOD.PYC"
+        upper_pyc_at_root.write_bytes(b"\x00")
+        r_upper_pyc = sessions.delete_file(sid, "MOD.PYC")
+        check("delete: an UPPERCASE root-level *.PYC file is refused too (casefold)",
+              r_upper_pyc.get("ok") is False
+              and r_upper_pyc.get("code") == errors.PERMISSION_DENIED,
+              f"-> {r_upper_pyc}")
     finally:
         sessions.stop(sid)
 
@@ -981,6 +1127,56 @@ def _test_reserved_root_name_denylist_bypass():
 
 
 _test_reserved_root_name_denylist_bypass()
+
+
+def _test_eight_dot_three_shape_denylist():
+    """MEDIUM, fix round 3 (grok verify-security): a Windows 8.3 short name
+    (`CODECA~1` for `.codecalc-session-lock`, `LOCKFI~2.TXT`) is a THIRD
+    on-disk spelling of a reserved file that bears no textual relationship
+    to the long name at all — casefold/trailing-dot-strip cannot enumerate
+    it. `_reserved_root_name` refuses anything shaped like a short name
+    (a literal `~` immediately followed by a digit) at the session root
+    outright, regardless of what it would otherwise resolve to. Pure
+    string-SHAPE check, so provable on Linux without an actual NTFS/FAT
+    short-name filesystem — `delete_file`'s own long-name resolution
+    (`_final_component_long_name`) is the platform-specific half this
+    cannot exercise here (it needs a real Windows short-name alias to do
+    anything at all; see that function's own docstring)."""
+    eight_dot_three_names = [
+        "CODECA~1",
+        "CODECA~1.TXT",
+        "LOCKFI~2",
+        "a~9",
+        "~1",
+    ]
+    for name in eight_dot_three_names:
+        check(f"_reserved_root_name: 8.3-shaped {name!r} is refused at the root",
+              sessions._reserved_root_name(name), f"-> False for {name!r}")
+
+    not_eight_dot_three = [
+        "notes.txt",
+        "backup-1.txt",  # hyphen, not tilde
+        "my~file.txt",   # tilde with no digit immediately after
+        "~",              # tilde alone, no digit
+    ]
+    for name in not_eight_dot_three:
+        check(f"_reserved_root_name: ordinary {name!r} is NOT refused as 8.3-shaped",
+              not sessions._reserved_root_name(name), f"-> True for {name!r}")
+
+    # End to end through delete_file(): an 8.3-shaped root name is refused
+    # even though it is not literally the lock/marker spelling.
+    sid = _new_session()
+    try:
+        r = sessions.delete_file(sid, "CODECA~1")
+        check("delete: an 8.3-shaped root name is refused end to end "
+              "through delete_file()",
+              r.get("ok") is False and r.get("code") == errors.PERMISSION_DENIED,
+              f"-> {r}")
+    finally:
+        sessions.stop(sid)
+
+
+_test_eight_dot_three_shape_denylist()
 
 
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
