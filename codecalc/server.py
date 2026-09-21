@@ -2192,7 +2192,7 @@ def analyze_complexity(code: Annotated[str, Field(description="Source code snipp
 @mcp.tool(group="analysis")
 def benchmark(code: Annotated[str, Field(description="Program that reads integer N from stdin's first line and does work sized by N")],
               language: Annotated[str, Field(description="Language `code` is written in; default 'python3'")] = "python3",
-              sizes: Annotated[str, Field(description="Comma-separated input sizes to run at, e.g. '100,1000,10000,100000' (this default: 4 sizes 10x apart, decided via curve-fit). 3 is the accepted minimum but always returns an inconclusive estimate (a 2-parameter curve fit has only 1 degree of freedom at 3 points); 4+ sizes are needed to trust the curve fit; 5+ DOUBLING sizes (n,2n,4n,8n,16n) are needed for a robust ratio median")] = "100,1000,10000,100000",
+              sizes: Annotated[str, Field(description="Comma-separated input sizes to run at, e.g. '100,1000,10000,100000' (this default: 4 sizes 10x apart, decided via curve-fit). 3 is the accepted minimum but can only return noise-floor O(1), an unambiguous O(c^n) override, or an inconclusive estimate — never any other growth class (a 2-parameter curve fit has only 1 degree of freedom at 3 points); 4+ sizes are needed to trust the curve fit; 5+ DOUBLING sizes (n,2n,4n,8n,16n) are needed for a robust ratio median")] = "100,1000,10000,100000",
               timeout: Annotated[int, Field(description="Wall-clock seconds allowed per size before that run is killed")] = 30,
               ctx: Context = None) -> dict[str, Any]:
     """Empirically measure time complexity by running code at increasing input sizes.
@@ -2200,8 +2200,9 @@ def benchmark(code: Annotated[str, Field(description="Program that reads integer
     Contract: the code must read an integer N from stdin (first line) and do work
     sized by N. codecalc runs it at each size in `sizes` and fits the growth
     curve to estimate Big-O (O(1), O(log n), O(n), O(n log n), O(n^2)...). 3
-    sizes (the accepted minimum) always returns "inconclusive" instead of a
-    guess; 4+ sizes are needed to trust the curve fit, 5+ doubling sizes for a
+    sizes (the accepted minimum) can only return noise-floor O(1), an
+    unambiguous O(c^n) override, or "inconclusive" — never any other growth
+    class; 4+ sizes are needed to trust the curve fit, 5+ doubling sizes for a
     robust ratio median — `estimate_basis` names which estimator decided.
     Example python: 'import sys\\nn=int(sys.stdin.readline()); s=0\\nfor i in range(n): s+=i\\nprint(s)'
     """

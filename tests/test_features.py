@@ -531,6 +531,32 @@ _e4, _basis4, _fit4, _r4 = _decide(_quad_sizes, _quad_times)
 check("5-size quadratic table still classifies O(n^2)",
       _e4 == "O(n^2)", f"-> estimate={_e4!r} basis={_basis4!r} ratios={_r4}")
 
+# Cross-vendor review (Codex) of the fix above found the OPPOSITE failure:
+# genuinely exponential growth with too few doubling ratios for a robust
+# median (2, one short of MIN_ROBUST_RATIOS) used to fall all the way through
+# to the curve fit -- which has no exponential shape in `_CLASSES` at all --
+# and confidently reported "O(n^3)" at relative_error 41.0 (a 4100% average
+# miss) with a physically-impossible negative intercept (startup overhead
+# cannot be negative). Must now land on the exponential class itself (via the
+# STRONG_EXPONENTIAL_RATIO override, since both ratios clear it) or say so
+# honestly -- never a confident polynomial.
+_eexp, _basisexp, _fitexp, _rexp = _decide([10, 20, 40, 80], [1, 10, 200, 5000])
+check("exponential 4-size table (Codex review) classifies O(c^n), not a polynomial",
+      _eexp.startswith("O(c^n)") or _basisexp == "inconclusive",
+      f"-> estimate={_eexp!r} basis={_basisexp!r} ratios={_rexp}")
+check("  ...and specifically does NOT trust the curve fit's bad-but-lowest-ranked O(n^3)",
+      not _eexp.startswith("O(n^3)"), f"-> estimate={_eexp!r} best={_fitexp.get('best_score')}")
+
+# The same exponential SHAPE with non-doubling sizes: no doubling_ratios exist
+# at all (STRONG_EXPONENTIAL_RATIO cannot fire on an empty list), so this
+# exercises the OTHER guard -- the curve fit's own quality gate
+# (MAX_TRUSTED_RELATIVE_ERROR / INTERCEPT_NOISE_TOLERANCE_MS) rejecting a
+# technically-ranked but not-actually-fitting "winner" on its own.
+_eexp2, _basisexp2, _fitexp2, _rexp2 = _decide([10, 17, 29, 50], [1, 8, 190, 4800])
+check("exponential shape, non-doubling sizes (no ratios at all): quality gate alone catches it",
+      _basisexp2 == "inconclusive" and _rexp2 == [],
+      f"-> estimate={_eexp2!r} basis={_basisexp2!r} best={_fitexp2.get('best_score')}")
+
 # A 3-size table where interpreter/subprocess startup (~300ms) swamps a tiny
 # real signal: the doubling ratio computed from it is unreliable (a single
 # ratio, from near-noise-floor corrected times) and the fit is starved to 3
@@ -543,7 +569,7 @@ check("3-size startup-dominated table (tiny real signal) is not a confident O(n^
 # `estimate_basis` is new: a caller must be able to tell WHICH estimator
 # produced `estimate` without parsing prose out of `ratio_confidence`.
 check("estimate_basis is one of the documented values",
-      {_basis1, _basis2, _basis3, _basis4, _basis5} <= set(_tools.ESTIMATE_BASES),
+      {_basis1, _basis2, _basis3, _basis4, _basis5, _basisexp, _basisexp2} <= set(_tools.ESTIMATE_BASES),
       f"-> {_tools.ESTIMATE_BASES}")
 
 # One live run of the issue's actual O(n) program at exactly 3 sizes (this
@@ -560,6 +586,43 @@ check("live 3-size run of the issue's O(n) program: not a confident O(n^2)/O(n^3
        not _live_est.startswith(("O(n^2)", "O(n^3)"))),
       f"-> estimate={_live_est!r} basis={_live.get('estimate_basis')!r} "
       f"ratios={_live.get('doubling_ratios')}")
+
+# ── benchmark classifier: a PUBLIC-path regression, not just the private one ─
+# Every check above calls `_tools._fit_class`/`_tools._decide_estimate`
+# directly -- precise and fast, but on the OLD (pre-#327) code they die with
+# `AttributeError` (`_decide_estimate` did not exist yet) instead of actually
+# demonstrating the bad classification; a reviewer flagged that a test
+# suite's own regression protection should not depend on a function that is
+# part of the fix. This one drives the real public entry point, `benchmark()`
+# itself, with only `_measure` (the subprocess-timing layer) stubbed to
+# return the issue's own 3-size table deterministically -- on old code it
+# still RUNS to completion and asserts the wrong class, a real failure
+# instead of a crash.
+_orig_measure = _tools._measure
+_canned_durations_ms = {200_000: 49.0, 400_000: 56.0, 800_000: 107.0}
+
+
+def _stub_measure(language, code, sizes, timeout, repeats, deadline=None, on_progress=None):
+    return ([{"n": n, "ok": True, "duration_ms": _canned_durations_ms[n],
+              "all_runs_ms": [_canned_durations_ms[n]], "stdout": "", "stderr": ""}
+             for n in sizes], None)
+
+
+_tools._measure = _stub_measure
+try:
+    _pub = _tools.benchmark("ignored -- _measure is stubbed below, never actually run",
+                            sizes="200000,400000,800000")
+finally:
+    _tools._measure = _orig_measure
+_pub_est = _pub.get("estimate", "")
+check("public tools.benchmark(), with only timing stubbed, reproduces the same honest verdict",
+      _pub.get("ok") is True and _pub.get("method") == "empirical" and
+      not _pub_est.startswith(("O(n^2)", "O(n^3)")),
+      f"-> ok={_pub.get('ok')} estimate={_pub_est!r} basis={_pub.get('estimate_basis')!r} "
+      f"ratios={_pub.get('doubling_ratios')} runs={[(r['n'], r['duration_ms']) for r in _pub.get('runs', [])]}")
+check("  ...and the durations it reasoned over are exactly the canned ones (the stub took effect)",
+      [r["duration_ms"] for r in _pub.get("runs", [])] == [49.0, 56.0, 107.0],
+      f"-> {[r.get('duration_ms') for r in _pub.get('runs', [])]}")
 
 # ── the shipped skill (#88) ───────────────────────────────────────────────
 # The tools exist to stop a model asserting numbers it did not compute. Nothing
