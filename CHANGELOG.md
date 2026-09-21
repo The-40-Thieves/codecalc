@@ -291,27 +291,83 @@ behind it.
   into the `expression` parameter's own schema description only, and the
   `solve_linear` non-linear example dropped its "-> two solutions"/
   "Ordinary linear example:" framing. `scripts/data/tool_select_baseline.json`
-  regenerated; residual prompt-level rank changes against the pre-PR
-  baseline (`origin/main`, measured over the unchanged 234-prompt
-  corpus): `evaluate_expression` loses top-1 on "I have a formula and I
-  just want its algebraic value worked out, not solved for a variable —
-  sqrt(2)*sqrt(8)" (full+dev; still top-3) and top-1 on "Take this messy
-  algebraic formula and give me its cleanest possible form" (full only;
-  still top-3 on both surfaces); `symbolic` loses top-3 on "Compute the
-  exact asymptotic value of n over log n as n becomes arbitrarily large."
-  (full+dev — `percent_change` now occupies that 2nd/3rd rank slot, a
-  side effect of adding ANY 50th candidate document to the BM25 corpus,
-  not of the description text itself) and top-3 on "I need both unknowns
-  pinned down from two equations that share them" (full only). Partial
-  offsetting gains: `symbolic` gains top-1 on the same "two unknowns"
-  prompt on dev/core, `float_repr` gains top-1 on "What does the
-  computer actually store in memory for the number 0.1?" (dev),
-  `session_read_file`/`compare_threshold` gain a top-3 slot each (full,
-  core). Net top-1 vs the pre-PR baseline on the unchanged 234-prompt
-  corpus: full -2, dev -1, core 0 (`percent_change`'s own 4 new prompts,
-  4/4 top-1 on every surface, are additive on top of this and are why
-  the checked-in baseline's TOTALS still read as a net gain — see
-  GH #337 review discussion).
+  regenerated. GH #337 round-2 review: a first pass at this bullet
+  reported approximate numbers from an earlier, pre-trim measurement.
+  Below is a from-scratch recomputation (`origin/main`'s `codecalc/`
+  checked out via `git archive` to a scratch dir, scored against the
+  identical unchanged 234-prompt corpus with the same BM25 evaluator) —
+  net top-1/top-3 deltas, and every prompt whose hit/miss status
+  actually changed (a much larger set of prompts change RANK without
+  changing hit/miss status at all — pure BM25 score noise from adding a
+  50th candidate document; those are not listed):
+
+  | surface | top-1 delta | top-3 delta |
+  |---|---|---|
+  | full | -2 | -1 |
+  | dev | 0 | -1 |
+  | core | 0 | +1 |
+
+  **full** (5 prompts changed hit/miss status):
+  - top-1 LOST, "I have a formula and I just want its algebraic value
+    worked out, not solved for a variable — sqrt(2)*sqrt(8)" (expected
+    `evaluate_expression`): old top1=`evaluate_expression`
+    top3=[`evaluate_expression`,`compare_threshold`,`calc_exact`] ->
+    new top1=`compare_threshold`
+    top3=[`compare_threshold`,`evaluate_expression`,`calc_exact`] (still
+    top-3).
+  - top-3 LOST, "I need both unknowns pinned down from two equations
+    that share them" (expected `symbolic`): old
+    top3=[`percentage`,`symbolic`,`data_sizes`] -> new
+    top3=[`percentage`,`data_sizes`,`bits`] (`symbolic` drops to rank 4).
+  - top-1 LOST, "Take this messy algebraic formula and give me its
+    cleanest possible form" (expected `evaluate_expression`/`symbolic`):
+    old top1=`evaluate_expression`
+    top3=[`evaluate_expression`,`algebraic_equiv`,`symbolic`] -> new
+    top1=`algebraic_equiv`
+    top3=[`algebraic_equiv`,`evaluate_expression`,`symbolic`] (still
+    top-3 on both).
+  - top-3 GAINED, "Fetch a file from the persistent workspace, and if
+    it's a picture, hand it back as something I can actually view"
+    (expected `session_read_file`): old
+    top3=[`session_start`,`evaluate_expression`,`session_write_file`] ->
+    new top3=[`session_start`,`session_write_file`,`session_read_file`].
+  - top-3 LOST, "Compute the exact asymptotic value of n over log n as n
+    becomes arbitrarily large." (expected `symbolic`): old
+    top3=[`percentage`,`calc_exact`,`symbolic`] -> new
+    top3=[`percentage`,`percent_change`,`calc_exact`] (`percent_change`
+    — a 50th candidate document that did not exist in the old corpus at
+    all — takes the slot `symbolic` held; `symbolic` drops to rank 4).
+
+  **dev** (3 prompts changed hit/miss status, net top-1 delta 0 — one
+  lost, one gained):
+  - top-1 LOST, same "sqrt(2)*sqrt(8)" prompt as full, same ranks.
+  - top-1 GAINED, "What does the computer actually store in memory for
+    the number 0.1?" (expected `float_repr`): old
+    top1=`evaluate_expression`
+    top3=[`evaluate_expression`,`float_repr`,`list_languages`] -> new
+    top1=`float_repr`
+    top3=[`float_repr`,`list_languages`,`calc_exact`].
+  - top-3 LOST, same "asymptotic value of n over log n" prompt as full,
+    same ranks (`percent_change` again).
+
+  **core** (1 prompt changed hit/miss status):
+  - top-3 GAINED, "Is 3/7 strictly greater than 0.4, exactly, no float
+    error?" (expected `compare_threshold`): old
+    top3=[`float_repr`,`collision_probability`,`calc_exact`] -> new
+    top3=[`float_repr`,`collision_probability`,`compare_threshold`].
+
+  Correction to the round-1 version of this bullet: `symbolic` does
+  **not** gain top-1 on the "two unknowns" prompt on dev/core — measured
+  directly (both surfaces, both old and new schemas), `symbolic` sits at
+  rank 4 on both, unchanged. Net top-1 vs the pre-PR baseline on the
+  unchanged 234-prompt corpus: full -2, dev 0, core 0 (`percent_change`'s
+  own 4 new prompts, 4/4 top-1 on every surface, are additive on top of
+  this and are why the checked-in baseline's TOTALS still read as a net
+  gain — see GH #337 review discussion; `tests/test_tool_select_eval.py`
+  now also compares per-prompt outcomes against the pre-PR baseline over
+  this same unchanged-prompt intersection whenever the corpus hash has
+  moved, rather than trusting a self-referential "drop_hits=0" against a
+  baseline just regenerated from the current state).
 
 ### Fixed
 

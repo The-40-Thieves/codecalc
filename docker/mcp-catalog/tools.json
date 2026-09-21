@@ -812,12 +812,12 @@
       {
         "name": "from_value",
         "type": "string",
-        "desc": "Starting value: a number or exact rational (e.g. '3/4', '1e3'), not an expression like '2*3'; must not be zero"
+        "desc": "Starting value: a number or exact rational (e.g. '3/4', '1e3'), not an expression like '2*3'; no '_' digit separators; must not be zero"
       },
       {
         "name": "to_value",
         "type": "string",
-        "desc": "Ending value: a number or exact rational (e.g. '3/4', '1e3'), not an expression like '2*3'"
+        "desc": "Ending value: a number or exact rational (e.g. '3/4', '1e3'), not an expression like '2*3'; no '_' digit separators"
       }
     ]
   },

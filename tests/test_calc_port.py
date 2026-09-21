@@ -100,11 +100,10 @@ check("percent_change('1', '1e5000'): refused BEFORE Fraction() construction, "
       "not an uncaught ValueError",
       r["ok"] is False and r.get("code") == "resource_exhausted"
       and "digits" in r.get("error", ""), f"-> {r}")
-r = exact.percent_change("1", "1" * 3000)
-check("percent_change: a 3000-char literal (over _MAX_EXPR_LEN) is refused, "
-      "not a crash",
-      r["ok"] is False and r.get("code") == "resource_exhausted"
-      and "too long" in r.get("error", ""), f"-> {r}")
+r = exact.percent_change("1", "1" * 5000)
+check("percent_change: a 5000-char plain-digit literal (over "
+      "MAX_NUMERIC_DIGITS on digit count alone) is refused, not a crash",
+      r["ok"] is False and r.get("code") == "resource_exhausted", f"-> {r}")
 r = exact.percent_change("1", "1e3")
 check("percent_change('1', '1e3'): an ordinary scientific-notation input "
       "still works, finite percent_decimal",
@@ -118,6 +117,62 @@ r = exact.percent_change("1e-3999", "1e3999")
 check("percent_change: two individually-in-bounds inputs whose COMBINED "
       "result overflows str() are still refused, not a crash",
       r["ok"] is False and r.get("code") == "resource_exhausted", f"-> {r}")
+
+# PR #337 round 2 (Codex): the exponent regex required `\d+` with no `_`,
+# so '1e4_001' (Fraction's own grammar accepts '_' as a digit-group
+# separator, PEP 515) silently read as "no exponent found" and scored 5
+# raw digit characters instead of the true ~4002 the value implies — the
+# cap bypassed by exactly the syntax it claimed to bound. '_' is now
+# refused outright (see exact.py's _oversized_numeric_literal for why not
+# just taught to parse it). Every spelling the review listed:
+r = exact.percent_change("1", "1e4_001")
+check("percent_change: '1e4_001' no longer bypasses the digit cap via "
+      "underscore grouping — refused, not a 4002-digit result",
+      r["ok"] is False and r.get("code") == "resource_exhausted"
+      and "_" in r.get("error", ""), f"-> {r}")
+r = exact.percent_change("1", "1e100_000")
+check("percent_change: '1e100_000' is refused BEFORE Fraction() runs "
+      "(not merely caught after constructing a 100,001-digit integer)",
+      r["ok"] is False and r.get("code") == "resource_exhausted"
+      and "_" in r.get("error", ""), f"-> {r}")
+r = exact.percent_change("1", "1_000")
+check("percent_change: '1_000' (an ordinary small number, just spelled "
+      "with an underscore) is refused cleanly, not silently mis-scored",
+      r["ok"] is False and r.get("code") == "resource_exhausted", f"-> {r}")
+r = exact.percent_change("1", "+1e3")
+check("percent_change: a leading '+' sign still works",
+      r["ok"] and r["to_value"] == "1000", f"-> {r}")
+r = exact.percent_change("1", "1E400")
+check("percent_change: uppercase 'E' scientific notation is recognised "
+      "the same as lowercase 'e' (null percent_decimal, not Infinity)",
+      r["ok"] and r["percent_decimal"] is None, f"-> {r}")
+r = exact.percent_change("1", " 1e3 ")
+check("percent_change: surrounding whitespace (Fraction's own grammar "
+      "accepts it) still works",
+      r["ok"] and r["to_value"] == "1000", f"-> {r}")
+r = exact.percent_change("1", "0.000001e4000")
+check("percent_change: a decimal mantissa with leading zeros then a huge "
+      "exponent is refused (conservative digit-count estimate), not a crash",
+      r["ok"] is False and r.get("code") == "resource_exhausted", f"-> {r}")
+# Exactly at the boundary: 3999 mantissa digits + exponent 1 = 4000, not
+# over MAX_NUMERIC_DIGITS — allowed, and the 4001-character string is well
+# under _MAX_NUMERIC_LITERAL_LEN (unlike the old, unrelated _MAX_EXPR_LEN
+# reuse a round-1 version of this fix had, which would have refused this
+# for string length alone despite being digit-cap-safe).
+r = exact.percent_change("1", "1" * 3999 + "e1")
+check("percent_change: a 3999-digit mantissa with 'e1' sits exactly at "
+      "the MAX_NUMERIC_DIGITS boundary (4000) and is allowed",
+      r["ok"] and len(r["percent_exact"]) in (4001, 4002), f"-> ok={r.get('ok')} "
+      f"len={len(r.get('percent_exact', ''))}")
+r = exact.percent_change("1", "1/1e400")
+check("percent_change: '1/1e400' (Fraction's own grammar rejects mixing "
+      "'/' with exponent notation) fails cleanly, not a crash",
+      r["ok"] is False and "error" in r, f"-> {r}")
+for _bad in ("inf", "nan"):
+    r = exact.percent_change("1", _bad)
+    check(f"percent_change: {_bad!r} is refused cleanly (Fraction itself "
+          "rejects it), not treated as a real value",
+          r["ok"] is False and "error" in r, f"-> {r}")
 
 # evaluate_expression's calculus forms (GH #329): documented in server.py's
 # docstring but previously undiscoverable from the schema — diff/integrate/

@@ -417,11 +417,45 @@ def percentage(part: str, total: str) -> dict:
 #: `direction: "increase"` (-50 > -100 algebraically) even though the
 #: MAGNITUDE of the value fell from 100 to 50 — the `note` field below spells
 #: that out rather than leaving it to be discovered by surprise.
-#: Scientific-notation exponent suffix `Fraction`'s own grammar accepts,
-#: e.g. '1e400', '1.5E-12', '1e-4000'. Matched so a numeric literal's
-#: resulting DIGIT COUNT can be estimated before `Fraction()` ever builds
-#: the value it implies.
+#: The exact grammar `Fraction(str)` parses (CPython's
+#: `fractions._RATIONAL_FORMAT`, introspected — not a paraphrase):
+#:
+#:   [whitespace] [sign] (
+#:       digits ['/' digits]                          # a plain/rational integer
+#:     | digits? ['.' digits?] ['E' [sign] digits]     # decimal, optional exponent
+#:   ) [whitespace]
+#:
+#: 'E' is case-insensitive, and '_' is allowed between any two digits of
+#: ANY digit run (mantissa, denominator, OR exponent) as a purely visual
+#: separator — '1e4_001' means the same exponent as '1e4001'. That is the
+#: exact bug a round-1 version of this screen had: its exponent regex
+#: required `\d+` with no `_`, so '1e4_001' silently read as "no exponent
+#: found" and scored 5 raw digit characters instead of the true ~4002 the
+#: value implies — the cap it exists to enforce, bypassed by exactly the
+#: syntax it claimed to bound (Codex cross-vendor review, PR #337 round 2).
+#:
+#: Rather than re-deriving underscore GROUPING validity too (risking a
+#: third grammar mismatch the next time this or CPython's own rules move —
+#: see PEP 515 for how many ways '_' placement can be invalid: leading,
+#: trailing, doubled, adjacent to '.'/'/'/E), '_' is refused outright.
+#: `Fraction`'s underscore support exists for large literal constants
+#: written in SOURCE CODE ('1_000_000' in a .py file); every example in
+#: this tool's own Field description already spells numbers without one,
+#: and a caller with a computed value has no reason to add one.
 _SCI_EXP_RE = re.compile(r"[eE]([+-]?\d+)\s*$")
+
+#: A bare literal — this function's whole concern — can legitimately need
+#: up to MAX_NUMERIC_DIGITS characters with NO exponent shorthand at all
+#: ('1' * 3999 + 'e1' is exactly at the digit cap and only 4001 characters
+#: long). Reusing `_MAX_EXPR_LEN` (2000, sized for AST-PARSED EXPRESSIONS
+#: elsewhere in this file — an unrelated concern, and a round-1 mistake
+#: this constant fixes) would refuse a perfectly safe, digit-cap-respecting
+#: literal for tripping a string-length convention that has nothing to do
+#: with numeric magnitude. Sized relative to MAX_NUMERIC_DIGITS instead:
+#: room for every digit plus a sign, a decimal point and an exponent marker
+#: — generous, and still a hard, cheap floor against a multi-megabyte
+#: string before any per-character work runs.
+_MAX_NUMERIC_LITERAL_LEN = MAX_NUMERIC_DIGITS + 32
 
 
 def _oversized_numeric_literal(s: str) -> str | None:
@@ -445,7 +479,12 @@ def _oversized_numeric_literal(s: str) -> str | None:
     Digit count is ESTIMATED (mantissa digit characters + |exponent|), not
     computed by building the value — computing it is the exact cost this
     exists to avoid — and mirrors `MAX_NUMERIC_DIGITS` (safe_expr.py), the
-    same ceiling calc_exact's own literal screen already enforces.
+    same ceiling calc_exact's own literal screen already enforces. That
+    estimate can be conservative right at the boundary for a decimal
+    mantissa with leading zeros ('0.000001e4000' counts the six leading
+    zeros toward the total even though they partly cancel the exponent) —
+    refusing a few digits early is the safe direction for an estimate
+    whose entire point is never computing the real value to find out.
 
     Bounding each input alone is necessary but NOT sufficient — two inputs
     each individually under the cap can still combine (opposite-sign
@@ -455,8 +494,10 @@ def _oversized_numeric_literal(s: str) -> str | None:
     belt-and-suspenders shape `safe_expr.py`'s own module docstring
     describes for its length cap + `guarded_call` combination.
     """
-    if len(s) > _MAX_EXPR_LEN:
-        return f"too long (max {_MAX_EXPR_LEN} chars)"
+    if "_" in s:
+        return "must not contain '_' as a digit separator (write '1000000', not '1_000_000')"
+    if len(s) > _MAX_NUMERIC_LITERAL_LEN:
+        return f"too long (max {_MAX_NUMERIC_LITERAL_LEN} chars)"
     m = _SCI_EXP_RE.search(s)
     exponent = int(m.group(1)) if m else 0
     mantissa = s[: m.start()] if m else s

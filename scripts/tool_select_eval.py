@@ -472,6 +472,35 @@ def evaluate(schemas: dict[str, dict], prompts: list[dict]) -> dict:
     }
 
 
+def per_prompt_hits(schemas: dict[str, dict], prompts: list[dict]) -> dict[str, dict]:
+    """`{prompt_text: {"top1_hit": bool, "top3_hit": bool}}` for every
+    prompt applicable to `schemas` — the same hit definitions `evaluate()`
+    uses, factored out so a corpus-change regression check (GH #337 round
+    2: `evaluate()`'s own aggregate is self-referential against a baseline
+    regenerated FROM the current state — it can never show drift THAT
+    regeneration introduced) can compare PER-PROMPT outcomes against an
+    independent past reference instead of trusting a just-rebuilt total.
+
+    Keyed by the prompt's own TEXT, not its position in the file: the
+    corpus only ever grows by appending (see the module docstring's
+    CHECKED-IN DATA section), so text is what survives a corpus change; an
+    index would silently compare the wrong prompts the moment one is
+    inserted anywhere but the end.
+    """
+    docs = {name: _doc_text(name, info["description"]) for name, info in schemas.items()}
+    bm25 = BM25(docs)
+    out: dict[str, dict] = {}
+    for entry in prompts:
+        expected = set(entry["expected"]) & set(schemas)
+        if not expected:
+            continue
+        ranked = bm25.rank(entry["prompt"])
+        top1 = ranked[0][0] if ranked else None
+        top3 = {name for name, _ in ranked[:3]}
+        out[entry["prompt"]] = {"top1_hit": top1 in expected, "top3_hit": bool(top3 & expected)}
+    return out
+
+
 def run_self_check(tools_group: str, prompts: list[dict], schemas: dict[str, dict]) -> dict:
     """Positive control: a full one-at-a-time ablation SWEEP over every
     candidate tool — see the module docstring's "SELF-CHECK" for why this
