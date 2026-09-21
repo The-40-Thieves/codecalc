@@ -734,13 +734,27 @@ if _guarded.CAN_FORK:
     # whose two factors were ~7919 apart, which Fermat's method factors
     # instantly — it returned in 0.01s and proved nothing. These two run past
     # 25s unguarded, with the screen raising no objection to either.
-    from sympy import nextprime as _nextprime
-
+    #
+    # The first case USED to be a bare literal (`factorint(<62-digit
+    # product>)`) -- #326 finding 4 (round 7, Codex) gave `factorint` its
+    # own token-level digit-count cap (`_FACTOR_ARG_FUNCTIONS`, 25 digits),
+    # which now correctly refuses that literal outright (a strict
+    # improvement -- tested separately, above). To keep testing what THIS
+    # block exists to test (a shape the screen still has no opinion on),
+    # the factors are now COMPUTED `nextprime(...)` calls in the source
+    # text instead of pre-computed Python literals: neither `10**30` nor
+    # `3*10**31` is a bare NUMBER token (each is a small Pow/Mul of
+    # small-digit tokens), so the digit-count screen -- literal-only by
+    # design, same scope as `_heavy_call_violation` -- has no opinion on
+    # either, even though `nextprime` still evaluates each eagerly, and
+    # `factorint` still evaluates the resulting product eagerly, during
+    # the very first (`evaluate=False`) parse.
     from codecalc.safe_expr import reject_unsafe as _screen
 
-    _p, _q = _nextprime(10**30), _nextprime(3 * 10**31)
     _UNBOUNDED = [
-        (f"factorint({_p * _q})", "a 62-digit semiprime with far-apart factors"),
+        ("factorint(nextprime(10**30)*nextprime(3*10**31))",
+         ("factorint of a COMPUTED 62-digit semiprime with far-apart factors "
+          "-- neither factor is a bare literal token")),
         ("nextprime(10**2000)", "primality testing above a 2000-digit number"),
     ]
     for _expr, _why in _UNBOUNDED:
@@ -857,8 +871,11 @@ for _label, _pub, _priv, _args in _PAIRS:
           f"-> can_fork={_guarded.CAN_FORK} marked={_marked}")
 
 if _guarded.CAN_FORK:
-    _p2, _q2 = _nextprime(10**30), _nextprime(3 * 10**31)
-    _payload = f"factorint({_p2 * _q2})"
+    # A COMPUTED product of two far-apart primes, not a pre-computed bare
+    # literal -- same reasoning as the #78 block above (round 7, #326
+    # finding 4 gave `factorint` a literal-only digit-count screen, which
+    # has no opinion on a computed argument like this one).
+    _payload = "factorint(nextprime(10**30)*nextprime(3*10**31))"
     for _label, _call in (("exact.simplify_expression",
                            lambda: _exact.simplify_expression(_payload)),
                           ("logic.solve_linear",
@@ -1280,6 +1297,603 @@ for _expr, _label in _FACE1_UNDER_CAP:
     check(f"safe_parse({_expr!r}) ({_label}, under cap) still evaluates",
           _value is not None and _err is None, f"-> value={_value!r} err={_err!r}")
 
+# ═══ reject_explosive only inspected Pow, so a PRODUCT of individually ═════
+# ═══ legal heavy calls bypassed MAX_NUMERIC_DIGITS entirely (GH #326, ═════
+# ═══ THE-1091) ══════════════════════════════════════════════════════════════
+# The gap above (Mul/Rational-shaped exponents and bases) is still INSIDE a
+# Pow node — the walk finds it because it is looking at a Pow at all. This
+# one is a different shape: `"*".join(["factorial(1463)"] * 117)` (1871
+# chars, under the 2000-char cap) has no Pow anywhere. Each `factorial(1463)`
+# is individually legal (MAX_HEAVY_ARG admits 1463; the result is 3998
+# digits, under MAX_NUMERIC_DIGITS) and materializes to a plain Integer
+# during PARSING itself (a function call on a literal argument evaluates at
+# parse time regardless of `evaluate=False` — see the _HEAVY_FUNCTIONS
+# comment in safe_expr.py). `Mul(Integer, Integer, ..., 117 of them)` walked
+# straight past the old Pow-only loop, and CPython's own int->str ceiling
+# (4300 digits by default) raised from deep inside SymPy's printer as an
+# uncaught ValueError -- coded "internal" (a codecalc defect) rather than
+# "resource_exhausted" (a ceiling the caller can act on by shrinking the
+# input). Confirmed live on main before this fix: exactly that.
+from codecalc import errors as _errors
+
+_PRODUCT_BOMB = "*".join(["factorial(1463)"] * 117)
+check(f"the 117-factorial product is {len(_PRODUCT_BOMB)} chars, under the 2000-char cap",
+      len(_PRODUCT_BOMB) < 2000, f"-> {len(_PRODUCT_BOMB)}")
+
+_t0 = time.time()
+_product_result = _exact.simplify_expression(_PRODUCT_BOMB)
+_product_elapsed = time.time() - _t0
+check("a product of 117 legal factorial(1463) calls is refused, not computed",
+      _product_result.get("ok") is False, f"-> {_product_result}")
+check(f"  ...promptly ({_product_elapsed:.3f}s), before the ~467,766-digit "
+      "product is ever printed",
+      _product_elapsed < 1.0, f"-> {_product_elapsed:.3f}s")
+check("  ...with the ceiling code, not 'internal'",
+      _product_result.get("code") == _errors.RESOURCE_EXHAUSTED,
+      f"-> {_product_result.get('code')}")
+check("  ...and a remedy addressed to the caller (shrink the input), "
+      "not CPython's own sys.set_int_max_str_digits() advice",
+      "sys.set_int_max_str_digits" not in (_product_result.get("error") or ""),
+      f"-> {_product_result.get('error')!r}")
+check("  ...and the remedy names reducing the work",
+      bool(_product_result.get("remedy")), f"-> {_product_result.get('remedy')!r}")
+
+# A single legal call, unmultiplied, must still work -- this is a refusal of
+# the PRODUCT, not a tightening of MAX_HEAVY_ARG itself.
+_single_result = _exact.simplify_expression("factorial(1463)")
+check("a single factorial(1463) is still ok",
+      _single_result.get("ok") is True, f"-> ok={_single_result.get('ok')!r}")
+
+# The Add branch, not just Mul: reject_explosive's walk visits every
+# numeric-only Mul/Add node, not only ones nested inside a Pow. A pure SUM of
+# legal factorial(1463) calls cannot itself cross MAX_NUMERIC_DIGITS within
+# the 2000-char cap (117 copies -- as many as the char budget allows -- sums
+# to exactly 4000 digits, AT the cap, not over it: digit count from adding N
+# equal-magnitude terms grows by log10(N), not by N like a product does), so
+# this exercises the Add branch with a product already over cap as one of
+# its terms instead -- a shape with no Pow anywhere, so the old code walked
+# past this one too.
+_sum_bomb = "factorial(1463)*factorial(1463)+1"
+_sum_tree = _pe(_sum_bomb, transformations=_T, evaluate=False)
+_sum_refusal = _rx(_sum_tree)
+check(f"a sum ({_sum_bomb!r}) wrapping an over-cap product is refused",
+      _sum_refusal is not None and "digits" in _sum_refusal, f"-> {_sum_refusal!r}")
+
+# A purely symbolic product must be untouched -- the new check only fires on
+# a Mul/Add with NO free symbols.
+_symbolic_tree = _pe("x*y*z", transformations=_T, evaluate=False)
+check("a symbolic product (x*y*z) is not refused",
+      _rx(_symbolic_tree) is None, f"-> {_rx(_symbolic_tree)!r}")
+
+# The two original Pow-only refusals must STILL refuse -- wording is no
+# longer pinned byte-for-byte as of round 4 (cross-vendor review): the scan
+# now descends into Pow's own base/exponent (finding 1), so `2**100000` is
+# caught by the scan's num/den check directly, and `9**9**9**9` (a genuine
+# 3-level tower) is caught one level down, at `9**(9**9)` -- both COMPOUND
+# exponents that reduce to a safely-small exact integer via
+# `_safe_multiset_rational`'s per-term-gated arithmetic, so the scan resolves
+# them fully before the Pow loop's own dedicated "power tower" wording ever
+# gets a chance to fire. Still refused either way -- see the "digits" check.
+_pow_cases = ["2**100000", "9**9**9**9"]
+for _expr in _pow_cases:
+    _tree = _pe(_expr, transformations=_T, evaluate=False)
+    _got = _rx(_tree)
+    check(f"{_expr!r} is still refused",
+          _got is not None and "digits" in _got, f"-> {_got!r}")
+
+# exact.py's catch-all clauses now route through errors.classify() instead of a bare
+# str(exc) -- a CPython digit-limit ValueError must classify to the ceiling
+# code, not internal (the classify()-level half of this fix; see
+# test_error_codes.py for the direct unit-level assertion).
+_synthetic_digit_limit_exc = ValueError(
+    "Exceeds the limit (4300 digits) for integer string conversion; use "
+    "sys.set_int_max_str_digits() to increase the limit")
+check("errors.classify() maps a CPython digit-limit ValueError to resource_exhausted",
+      _errors.classify(_synthetic_digit_limit_exc) == _errors.RESOURCE_EXHAUSTED,
+      f"-> {_errors.classify(_synthetic_digit_limit_exc)}")
+check("  ...while an ordinary ValueError is still validation, unaffected",
+      _errors.classify(ValueError("bad expression")) == _errors.VALIDATION,
+      f"-> {_errors.classify(ValueError('bad expression'))}")
+
+# ═══ four findings from cross-vendor review of the first version of this ══
+# ═══ fix (commit 0f276a9), all reproduced and fixed here ══════════════════
+
+# Finding 1 (High): exact.py's Fraction-formatting catch (a SEPARATE
+# `except ValueError` from the generic catch-all fixed above, inside
+# `_eval_exact` itself -- the pow guard bounds the CPU cost of
+# exponentiation but not the FORMATTING cost of str()'ing a cheap-to-compute
+# result) still returned a bare, uncoded dict. `calc_exact("10**5000")`
+# reported `code: "internal"` plus CPython's own raw advice even after the
+# generic catch-all was fixed, because this is a DIFFERENT except block.
+_calc_exact_result = _exact.eval_exact("10**5000")
+check("calc_exact('10**5000'): cheap to compute, too big to format -- ceiling, not internal",
+      _calc_exact_result.get("code") == _errors.RESOURCE_EXHAUSTED,
+      f"-> code={_calc_exact_result.get('code')} err={str(_calc_exact_result.get('error'))[:70]!r}")
+check("  ...with no raw CPython advice in the message",
+      "sys.set_int_max_str_digits" not in str(_calc_exact_result.get("error")),
+      f"-> {_calc_exact_result.get('error')!r}")
+
+# Finding 2 (High): `_bounded_numeric_value`'s ordered accumulator made the
+# refusal decision depend on operand order -- `f*f/(f*f)` is EXACTLY 1 (the
+# two factors cancel), but `evaluate=False` parses it as `Mul(f, f,
+# Pow(Mul(f, f), -1))`: the accumulator multiplied the first two `f` factors
+# together (~8000 digits) and blew the intermediate bit budget BEFORE the
+# cancelling reciprocal factor was ever multiplied in. Refused as
+# resource_exhausted, wrong -- the true value is a one-character integer.
+# Several groupings of the identical cancellation, all of which must
+# compute to exactly 1, not refuse.
+_CANCELLATION_CASES = [
+    "factorial(1463)*factorial(1463)/(factorial(1463)*factorial(1463))",
+    "(factorial(1463)*factorial(1463))/(factorial(1463)*factorial(1463))",
+    "factorial(1463)/factorial(1463)*factorial(1463)/factorial(1463)",
+    ("factorial(1463)*factorial(1463)*factorial(1463)*factorial(1463)"
+     "/(factorial(1463)*factorial(1463)*factorial(1463)*factorial(1463))"),
+]
+for _expr in _CANCELLATION_CASES:
+    _t0 = time.time()
+    _r = _exact.simplify_expression(_expr)
+    _elapsed = time.time() - _t0
+    check(f"{_expr[:55]!r}... cancels to 1, not refused",
+          _r.get("ok") is True and _r.get("simplified") == "1",
+          f"-> ok={_r.get('ok')} code={_r.get('code')} simplified={_r.get('simplified')!r}")
+    check("  ...promptly, not after a multi-second burn",
+          _elapsed < 5.0, f"-> {_elapsed:.3f}s")
+# ...and the ORIGINAL 117-factorial product (no cancellation at all) must
+# still be refused -- the fix for order-independence must not turn into a
+# blanket "never refuse a division" either.
+_confirm_product_result = _exact.simplify_expression(_PRODUCT_BOMB)
+check("  ...while the original 117-factorial product (no cancellation) is still refused",
+      _confirm_product_result.get("ok") is False
+      and _confirm_product_result.get("code") == _errors.RESOURCE_EXHAUSTED,
+      f"-> {_confirm_product_result}")
+
+# Finding 3 (Medium): the walk re-resolved every numeric subtree from
+# scratch at every numeric ancestor -- superlinear in tree depth. An
+# alternating Add/Mul tree (`((...((2+1)*2+1)*2...)`) of depth 250 measured
+# 0.311s in reject_explosive ALONE before the fix (vs ~0.0002s on main);
+# 50/100/150/200/250 were 0.009/0.033/0.073/0.139/0.311s, clearly
+# superlinear rather than a flat per-node cost. Built directly with SymPy's
+# own Add/Mul constructors (not string parsing) for a precisely-controlled,
+# genuinely nested (not auto-flattened) shape.
+from sympy import Add as _Add
+from sympy import Integer as _Integer
+from sympy import Mul as _Mul
+
+
+def _alternating_tree(depth):
+    node = _Integer(2)
+    for i in range(depth):
+        node = (_Add(node, _Integer(1), evaluate=False) if i % 2 == 0
+                else _Mul(node, _Integer(2), evaluate=False))
+    return node
+
+
+_depth_timings = {}
+for _depth in (50, 100, 150, 200, 250):
+    _tree = _alternating_tree(_depth)
+    # perf_counter, not time.time(): on the Windows runners time.time() ticks at
+    # ~15 ms, so a 0.4 ms depth-50 walk read as 0.0000 s and the ratio check
+    # below divided by zero-ish (measured on PR #334 CI, windows-latest py3.11).
+    _t0 = time.perf_counter()
+    _rx(_tree)
+    _depth_timings[_depth] = time.perf_counter() - _t0
+check(f"an alternating Add/Mul tree of depth 250 stays under 20ms in reject_explosive "
+      f"(was 0.311s before the fix) -> {_depth_timings}",
+      _depth_timings[250] < 0.020, f"-> {_depth_timings[250]:.4f}s")
+check("  ...and depth 250 is not many times slower than depth 50 (no superlinear blowup)",
+      # A 1 ms floor on the denominator: the point is "no superlinear blowup",
+      # and a sub-millisecond depth-50 walk must not turn timer jitter into a
+      # 20x "regression" on a fast runner.
+      _depth_timings[250] < max(_depth_timings[50], 0.001) * 20,
+      f"-> depth50={_depth_timings[50]:.4f}s depth250={_depth_timings[250]:.4f}s")
+
+# Finding 4 (Low): errors.classify()'s digit-limit special case matched on
+# "int_max_str_digits" alone -- a plausible substring of ordinary caller
+# prose in a way the full CPython phrase is not. Requires BOTH fragments now.
+check("classify() requires BOTH CPython message fragments, not 'int_max_str_digits' alone",
+      _errors.classify(ValueError("this mentions int_max_str_digits but nothing else")) == _errors.VALIDATION,
+      f"-> {_errors.classify(ValueError('this mentions int_max_str_digits but nothing else'))}")
+check("  ...and the real CPython message (both fragments) still classifies correctly",
+      _errors.classify(_synthetic_digit_limit_exc) == _errors.RESOURCE_EXHAUSTED,
+      f"-> {_errors.classify(_synthetic_digit_limit_exc)}")
+
+# ═══ round 3 of cross-vendor review (grok, on 14e0258) — three more ════════
+# ═══ findings, all fixed here ══════════════════════════════════════════════
+
+# Finding 1 (High): SymPy flattens a chain of the same operator into ONE
+# n-ary node, so `_log10_magnitude` returning `None` the moment ANY child is
+# inconclusive left no nested numeric island for the scan's fallback descent
+# to find -- `x * factorial(1463) * ... * factorial(1463)` (117 of them) is
+# one flat `Mul` with 118 args, not a `Mul` wrapping a smaller all-numeric
+# one. Prefixing the original bomb with any of five different inconclusive
+# leading factors (a free symbol, a Function call, two irrational
+# NumberSymbols, a non-integer-exponent Pow) all bypassed refusal entirely.
+_BYPASS_PREFIXES = ["x*", "cos(0)*", "pi*", "E*", "2**(1/2)*"]
+for _prefix in _BYPASS_PREFIXES:
+    _bypass_expr = _prefix + _PRODUCT_BOMB
+    check(f"{_bypass_expr[:20]!r}... ({len(_bypass_expr)} chars) stays under the 2000-char cap",
+          len(_bypass_expr) < 2000, f"-> {len(_bypass_expr)}")
+    _t0 = time.time()
+    _bypass_result = _exact.simplify_expression(_bypass_expr)
+    _bypass_elapsed = time.time() - _t0
+    check(f"{_prefix!r} + 117-factorial product is refused, not silently allowed through",
+          _bypass_result.get("ok") is False
+          and _bypass_result.get("code") == _errors.RESOURCE_EXHAUSTED,
+          f"-> ok={_bypass_result.get('ok')} code={_bypass_result.get('code')}")
+    check("  ...promptly, not after materializing the ~467,766-digit product",
+          _bypass_elapsed < 2.0, f"-> {_bypass_elapsed:.3f}s")
+# Ordering must not matter either -- the inconclusive sibling in the middle
+# of the flat Mul, not just leading it. Two copies of factorial(1463)
+# (~7996 digits combined) is already over cap on its own, no need for 117.
+for _ordering_expr in ("factorial(1463)*x*factorial(1463)", "x*factorial(1463)*factorial(1463)"):
+    _ordering_result = _exact.simplify_expression(_ordering_expr)
+    check(f"{_ordering_expr!r} is refused regardless of where x sits in the Mul",
+          _ordering_result.get("ok") is False
+          and _ordering_result.get("code") == _errors.RESOURCE_EXHAUSTED,
+          f"-> {_ordering_result}")
+# ...and the fix must not turn into "any Mul with a symbolic factor is
+# refused" -- a SINGLE under-cap factorial alongside x must still evaluate.
+_single_with_symbol = _exact.simplify_expression("x*factorial(1463)")
+check("'x*factorial(1463)' (single under-cap factorial) still evaluates",
+      _single_with_symbol.get("ok") is True, f"-> ok={_single_with_symbol.get('ok')!r}")
+
+# Finding 2 (Medium): `_numeric_ceiling_scan` is iterative specifically to
+# avoid RecursionError on a deep tree, but `_log10_magnitude` (which it
+# calls) is a genuine Python recursive descent over the same tree, and sits
+# outside `safe_parse`'s own `try/except` (that only wraps the PARSE step).
+# The reviewer's own example: 998 levels of redundant parens around `2*2`,
+# 1999 chars, under the cap. Must never raise -- either a value or a
+# refusal, matching the "classify_unsafe/safe_parse never raise" contract
+# every _EXPLOSIVE_CRASH_INPUTS-style regression above already pins.
+_DEEP_NESTING_EXPR = "(" * 998 + "2*2" + ")" * 998
+check(f"the depth-998 nesting shape is {len(_DEEP_NESTING_EXPR)} chars, under the 2000-char cap",
+      len(_DEEP_NESTING_EXPR) < 2000, f"-> {len(_DEEP_NESTING_EXPR)}")
+try:
+    _deep_value, _deep_err = _boundary_parse(_DEEP_NESTING_EXPR)
+    _deep_raised = None
+except Exception as _exc:
+    _deep_value, _deep_err, _deep_raised = None, None, _exc
+check("safe_parse does not raise (RecursionError or otherwise) on the depth-998 nesting shape",
+      _deep_raised is None, f"-> raised {_deep_raised!r}" if _deep_raised else "")
+if _deep_raised is None:
+    check("  ...and returns either a value or a refusal, never both None and no exception",
+          _deep_value is not None or _deep_err is not None,
+          f"-> value={_deep_value!r} err={_deep_err!r}")
+
+# Finding 3 (Medium): the Pow branch's base/exponent resolution still called
+# `_bounded_numeric_value` directly, inheriting its order-dependent
+# accumulator bug for a cancelling Mul used as a Pow's base OR exponent --
+# unlike the top-level Mul/Add scan (round 2), which does not touch this
+# code path at all. `2**(f*f/(f*f))` (exponent cancels to 1) and
+# `(f*f/(f*f))**2` (base cancels to 1) must evaluate, not false-refuse.
+_POW_CANCELLATION_CASES = [
+    ("2**(factorial(1463)*factorial(1463)/(factorial(1463)*factorial(1463)))", "2"),
+    ("(factorial(1463)*factorial(1463)/(factorial(1463)*factorial(1463)))**2", "1"),
+]
+for _pow_expr, _want_value in _POW_CANCELLATION_CASES:
+    _t0 = time.time()
+    _pow_result = _exact.simplify_expression(_pow_expr)
+    _pow_elapsed = time.time() - _t0
+    check(f"{_pow_expr[:55]!r}... evaluates to {_want_value}, not refused",
+          _pow_result.get("ok") is True and _pow_result.get("simplified") == _want_value,
+          f"-> ok={_pow_result.get('ok')} code={_pow_result.get('code')} "
+          f"simplified={_pow_result.get('simplified')!r}")
+    check("  ...promptly, not after a multi-second burn",
+          _pow_elapsed < 5.0, f"-> {_pow_elapsed:.3f}s")
+
+# ═══ round 4 of cross-vendor review (grok, on the round-three head) — three more High ═══
+# ═══ findings, all traced to the SAME root cause and fixed by the SAME ════
+# ═══ redesign, not three separate patches ══════════════════════════════════
+#
+# THE INVARIANT this module now enforces, restated at the top of
+# `_factor_multiset`'s own docstring: no numeric subtree whose PRINTED
+# numerator or denominator would exceed MAX_NUMERIC_DIGITS is ever
+# evaluated. Rounds 1-3 enforced "no numeric subtree whose VALUE is large,
+# checked without regard to a combination that provably cancels it" --
+# correct as far as it went, but a VALUE can be tiny while its printed
+# DENOMINATOR is enormous (`1/(factorial(1463)*factorial(1463))`), and the
+# `Pow` node itself was simply not part of the check that enforced any of
+# it (`_numeric_ceiling_scan` `continue`d on every `Pow` without pushing
+# its base or exponent). Round 4 replaced the scalar
+# "log10(|value|)" model (`_log10_magnitude`) with a numerator/denominator
+# PAIR tracked in log space throughout (`_log10_num_den`/
+# `_factor_multiset`/`_multiset_log_num_den`), and folded `Pow` into the
+# scan's own trigger set instead of leaving it to a separate loop.
+_CANCELLING_PAIR = "factorial(1463)*factorial(1463)"
+
+# Finding 1 (High): the scan `continue`d on every Pow without pushing its
+# base or exponent, and the Pow loop only ever looked past a TRIVIAL
+# exponent (`|exp| <= 1`) without checking what the base itself would
+# print as -- so an over-cap numeric part hidden ONLY behind a Pow (a
+# trivial `**1`, or a reciprocal `**-1`) walked straight through both.
+_POW_BYPASS_CASES = [
+    (_PRODUCT_BOMB + "**1", "(bomb)**1"),
+    (f"1/({_CANCELLING_PAIR})", "1/(f*f)"),
+    (f"({_CANCELLING_PAIR})**-1", "(f*f)**-1"),
+]
+for _expr, _label in _POW_BYPASS_CASES:
+    _t0 = time.time()
+    _r = _exact.simplify_expression(_expr)
+    _elapsed = time.time() - _t0
+    check(f"{_label} ({_expr[:40]!r}...) is refused, not silently allowed through a Pow",
+          _r.get("ok") is False and _r.get("code") == _errors.RESOURCE_EXHAUSTED,
+          f"-> ok={_r.get('ok')} code={_r.get('code')}")
+    check("  ...promptly, not after materializing the huge value",
+          _elapsed < 2.0, f"-> {_elapsed:.3f}s")
+
+# Finding 2 (High): printability was measured as log10(|value|), so a
+# RECIPROCAL has a negative log and the old scalar check read that as "at
+# most one digit" -- `x/(f*f)` "cancels" to a tiny coefficient in log-space
+# terms, but the printer still has to render the huge DENOMINATOR. Fixed by
+# tracking numerator and denominator magnitude separately (this test overlaps
+# `1/(f*f)` above, deliberately -- the reviewer named both the reciprocal
+# AND the symbolic-numerator variant as distinct reproductions).
+_x_over_ff = f"x/({_CANCELLING_PAIR})"
+_t0 = time.time()
+_r = _exact.simplify_expression(_x_over_ff)
+_elapsed = time.time() - _t0
+check(f"x/(f*f) ({_x_over_ff!r}) is refused on its DENOMINATOR, not waived through "
+      "because the value's sign/magnitude looks small",
+      _r.get("ok") is False and _r.get("code") == _errors.RESOURCE_EXHAUSTED,
+      f"-> {_r}")
+check("  ...promptly", _elapsed < 2.0, f"-> {_elapsed:.3f}s")
+
+# A mixed Pow base (part numeric, part symbolic) alongside a sibling numeric
+# factor -- the base `factorial(1463)*x` does not fully resolve (x is a free
+# symbol), but `factorial(1463)`'s own ~3998-digit contribution must still
+# propagate out of the Pow (a real bug caught writing this: an earlier
+# version discarded ANY partial base info whenever the base did not fully
+# resolve, so this reached real evaluation and crashed on CPython's own
+# digit-limit ValueError -- classified correctly by exact.py's catch, but
+# AFTER the crash, not refused BEFORE it like every other case here).
+_mixed_pow_expr = "(factorial(1463)*x)**1*factorial(1463)"
+_r = _exact.simplify_expression(_mixed_pow_expr)
+check(f"{_mixed_pow_expr!r} (f*x)**1*f is refused",
+      _r.get("ok") is False and _r.get("code") == _errors.RESOURCE_EXHAUSTED,
+      f"-> {_r}")
+check("  ...refused BEFORE evaluation (a real digit-count message), not "
+      "classified after a raw CPython crash",
+      "sys.set_int_max_str_digits" not in str(_r.get("error"))
+      and "digits" in str(_r.get("error")),
+      f"-> {_r.get('error')!r}")
+
+# Finding 3 (High): `_resolve_numeric_exactly`'s `type(node)(*args)`
+# (evaluate=True) reconstruction was not a BOUNDED operation -- SymPy's own
+# `Mul.flatten` folds integer powers of a numeric base internally, so a Pow
+# whose exponent is a DIFFERENT-base product that happens to have a small
+# NET log (`2**N * 3**(-N)`, N huge) still tried to materialize the literal
+# `2**N` on the way to computing that net value. Round 4 removed
+# `_resolve_numeric_exactly` (and the evaluate=True reconstruction it did)
+# entirely; the exponent's value is now derived purely from log-space
+# arithmetic and a per-term-gated exact `Fraction`
+# (`_safe_multiset_rational`) that checks EVERY individual factor's
+# magnitude before ever raising anything to a power. N here has ~300
+# decimal digits (bit_length ~994, matching the reviewer's own reproduction)
+# -- large enough that materializing `2**N` would never finish in this
+# process's lifetime, so this test's own timeout bound (well under the 10s
+# guarded_call ceiling) is the actual assertion.
+_N = 10**299 + 7
+_diff_base_pow_expr = f"2**(2**{_N}*3**(-{_N}))"
+check(f"the exponent literal is {len(str(_N))} digits, under the 2000-char expr cap "
+      f"(full expr {len(_diff_base_pow_expr)} chars)",
+      len(_diff_base_pow_expr) < 2000, f"-> {len(_diff_base_pow_expr)}")
+_t0 = time.time()
+_diff_base_result = _exact.simplify_expression(_diff_base_pow_expr)
+_diff_base_elapsed = time.time() - _t0
+check("2**(2**N * 3**(-N)) for a ~300-digit N: refuses or evaluates in "
+      "milliseconds, never seconds -- never reconstructs 2**N",
+      _diff_base_elapsed < 1.0, f"-> {_diff_base_elapsed:.3f}s ok={_diff_base_result.get('ok')}")
+check("  ...and the outcome is a real answer either way (ok, or a coded refusal)",
+      _diff_base_result.get("ok") is True
+      or (_diff_base_result.get("ok") is False
+          and _diff_base_result.get("code") == _errors.RESOURCE_EXHAUSTED),
+      f"-> {_diff_base_result}")
+
+# Finding 4 (Low): the RecursionError guard wrapped only the scan; the Pow
+# loop's own exponent resolution runs the identical recursive machinery
+# (`_factor_multiset`) and needed the same guard. Structural check -- the
+# Pow loop's own try/except is in the source, not just the scan's.
+import inspect as _inspect5
+
+_reject_explosive_source = _inspect5.getsource(_rx)
+check("reject_explosive's Pow loop is ALSO wrapped in its own RecursionError guard "
+      "(not just the scan's)",
+      _reject_explosive_source.count("except RecursionError:") >= 2,
+      f"-> {_reject_explosive_source.count('except RecursionError:')} guard(s) found")
+
+# ═══ round 5 of cross-vendor review (grok, on 795c49a) — one remaining ═════
+# ═══ class: a numeric base whose exponent is not a bare Integer and not ═══
+# ═══ a Mul/Pow-int multiset `_factor_multiset` reduces to an integer ══════
+#
+# Round 4 folded `Pow` into the scan and tracked numerator/denominator
+# separately, but the Pow branch still required the exponent to reduce to
+# an EXACT integer (via `_factor_multiset` + the then-still-present
+# `_safe_multiset_rational`) before bounding anything -- an `Add` exponent
+# (`_factor_multiset` has no `Add` case) or a genuinely non-integral
+# rational whose BASE still makes the result a huge integer fell through
+# unrefused. Fixed by deriving an UPPER BOUND on the exponent's magnitude
+# from `_log10_num_den` (which already handles every node type, `Add`
+# included) instead of requiring exactness for the verdict at all --
+# `_safe_multiset_rational` itself is gone (finding 2 below).
+
+# Finding 1 (High): five expressions that must now be refused, none of
+# which have a bare-Integer or exact-multiset-reducible exponent.
+_UNRESOLVED_EXPONENT_CASES = [
+    ("2**(14999+1)", "Add exponent, same value as the already-refused 2**(30000/2)"),
+    ("2**-(14999+1)", "same, negated -- the denominator side of the same bug class"),
+    ("(10**3000)**(3/2)", ("non-integral rational exponent, but 10**3000 is a perfect "
+                           "square-ish base -- result is 10**4500, a real huge integer")),
+    ("2**(factorial(1463)+1)", "Add exponent wrapping an already-legal heavy-call result"),
+]
+for _expr, _why in _UNRESOLVED_EXPONENT_CASES:
+    _t0 = time.time()
+    _r = _exact.simplify_expression(_expr)
+    _elapsed = time.time() - _t0
+    check(f"{_expr!r} ({_why}) is refused",
+          _r.get("ok") is False and _r.get("code") == _errors.RESOURCE_EXHAUSTED,
+          f"-> {_r}")
+    check("  ...promptly, not after evaluate=True actually computes it",
+          _elapsed < 2.0, f"-> {_elapsed:.3f}s")
+
+# The symbolic-base side of the identical gap: MAX_SYMBOLIC_EXPONENT used to
+# be skipped entirely for any exponent `_factor_multiset` could not reduce
+# (an Add, here) because the old code `continue`d on `None` outright.
+_t0 = time.time()
+_symbolic_add_exp_result = _exact.simplify_expression("(x+1)**(1000+1000)")
+_symbolic_add_exp_elapsed = time.time() - _t0
+check("(x+1)**(1000+1000) is refused with the symbolic-exponent (cost) wording, "
+      "not silently let through",
+      _symbolic_add_exp_result.get("ok") is False
+      and _symbolic_add_exp_result.get("code") == _errors.RESOURCE_EXHAUSTED
+      and "symbolic power" in str(_symbolic_add_exp_result.get("error")),
+      f"-> {_symbolic_add_exp_result}")
+check("  ...promptly", _symbolic_add_exp_elapsed < 2.0, f"-> {_symbolic_add_exp_elapsed:.3f}s")
+
+# ...and the fix must not turn into a blanket refusal of every compound
+# exponent -- these four must still evaluate (two are the round-1 pins for
+# the ANALOGOUS Mul-shaped gap; two are new, exercising the same bound math
+# on the "clearly small" side).
+_STILL_EVALUATES_COMPOUND_EXPONENT = ["2**(3+2)", "2**(3/2)", "2**(19999/2)", "(3/2)**100"]
+for _expr in _STILL_EVALUATES_COMPOUND_EXPONENT:
+    _r = _exact.simplify_expression(_expr)
+    check(f"{_expr!r} (compound exponent, under cap) still evaluates",
+          _r.get("ok") is True, f"-> {_r}")
+
+# Finding 2 (Medium): `_safe_multiset_rational` (deleted below) gated each
+# term individually but multiplied with no COMBINED bound -- >=20 distinct
+# heavy-call bases as an exponent would each individually clear the
+# per-term gate and then get multiplied into a real ~10**5-digit `Fraction`.
+# The round-5 redesign never materializes an exact exponent value at all
+# (see `_log10_num_den`'s Pow branch), so this is a structural, not a
+# patched, fix -- tested against both a trivial base (1, where the true
+# value is exactly 1 regardless) and a non-trivial one (2, genuinely huge).
+_distinct_heavy_factors = "*".join(f"factorial({1463 - _k})" for _k in range(20))
+check(f"the 20-distinct-factorial exponent is {len(_distinct_heavy_factors)} chars",
+      len(_distinct_heavy_factors) < 1900, f"-> {len(_distinct_heavy_factors)}")
+
+_t0 = time.time()
+_unit_base_result = _exact.simplify_expression(f"1**({_distinct_heavy_factors})")
+_unit_base_elapsed = time.time() - _t0
+check("1**(20 distinct heavy-call factors) evaluates to exactly 1 -- 1**anything is 1, "
+      "no materialization needed regardless of the exponent",
+      _unit_base_result.get("ok") is True and _unit_base_result.get("simplified") == "1",
+      f"-> {_unit_base_result}")
+check("  ...promptly, never materializing the ~10**5-digit combined exponent",
+      _unit_base_elapsed < 2.0, f"-> {_unit_base_elapsed:.3f}s")
+
+_t0 = time.time()
+_nontrivial_base_result = _exact.simplify_expression(f"2**({_distinct_heavy_factors})")
+_nontrivial_base_elapsed = time.time() - _t0
+check("2**(20 distinct heavy-call factors) is refused, not materialized as a Fraction",
+      _nontrivial_base_result.get("ok") is False
+      and _nontrivial_base_result.get("code") == _errors.RESOURCE_EXHAUSTED,
+      f"-> {_nontrivial_base_result}")
+check("  ...promptly", _nontrivial_base_elapsed < 2.0, f"-> {_nontrivial_base_elapsed:.3f}s")
+
+# Finding 3 (Low): `_safe_multiset_rational` / `_bounded_numeric_value` /
+# `_NumericTooLarge` / `_SUBTREE_BIT_BUDGET` / `_SAFE_RECONSTRUCT_DIGITS`
+# were all dead code by round 5 (nothing in `reject_explosive`'s call graph
+# reached them anymore) -- deleted rather than documented as retained.
+import codecalc.safe_expr as _se5
+
+for _dead_name in ("_safe_multiset_rational", "_bounded_numeric_value",
+                   "_NumericTooLarge", "_SUBTREE_BIT_BUDGET", "_SAFE_RECONSTRUCT_DIGITS"):
+    check(f"{_dead_name} was deleted, not merely left unused",
+          not hasattr(_se5, _dead_name), f"-> hasattr={hasattr(_se5, _dead_name)}")
+
+# ═══ round 6 of cross-vendor review (Codex, second reviewer family, on ════
+# ═══ 795c49a, in parallel with grok's round 5) — four findings, none ══════
+# ═══ overlapping grok's ════════════════════════════════════════════════════
+
+# Finding 1 (High): a COMPUTED heavy-function argument bypassed the
+# token-level `_heavy_call_violation` entirely -- `factorial(1463+1)`'s
+# tokens are `1463` and `1`, each individually under MAX_HEAVY_ARG, and the
+# unevaluated tree keeps an opaque `Function` node the numeric scan could
+# not bound. `_heavy_call_violation`'s own docstring used to claim this was
+# "caught later by the tree rules" -- it was not, until now.
+_COMPUTED_HEAVY_ARG_CASES = [
+    ("factorial(1463+1)", "factorial, Add argument, same value as the round-1 literal cap"),
+    ("subfactorial(1463+1)", "subfactorial, identical shape"),
+    ("fibonacci(1463*1000)", "fibonacci, Mul argument -- a ~305,749-digit result"),
+]
+for _expr, _why in _COMPUTED_HEAVY_ARG_CASES:
+    _t0 = time.time()
+    _r = _exact.simplify_expression(_expr)
+    _elapsed = time.time() - _t0
+    check(f"{_expr!r} ({_why}) is refused",
+          _r.get("ok") is False and _r.get("code") == _errors.RESOURCE_EXHAUSTED,
+          f"-> {_r}")
+    check("  ...promptly, not after evaluate=True actually computes it",
+          _elapsed < 2.0, f"-> {_elapsed:.3f}s")
+# ...and a LITERAL argument at/under the cap must still evaluate -- the tree
+# check is a backstop alongside the token check, not a replacement that
+# somehow tightens the existing cap.
+for _expr in ("factorial(1463)", "factorial(10+5)"):
+    _r = _exact.simplify_expression(_expr)
+    check(f"{_expr!r} still evaluates", _r.get("ok") is True, f"-> {_r}")
+
+# Finding 2 (High): `bell` (and four siblings) are admitted by the parser's
+# namespace but were absent from `_HEAVY_FUNCTIONS`, so `evaluate=False`
+# parsing itself -- BEFORE any guard runs -- eagerly materialized a growing
+# `Integer`. `bell(1500)` measured 5.48s just to PARSE in the reviewer's
+# own reproduction.
+_NEWLY_HEAVY_FUNCTIONS = [
+    ("bell", 1464, 5),
+    ("genocchi", 1464, 6),
+    ("motzkin", 1464, 7),
+    ("andre", 1464, 5),
+    ("partition", 1464, 5),
+]
+for _name, _over_cap_arg, _small_arg in _NEWLY_HEAVY_FUNCTIONS:
+    check(f"{_name!r} is now in _HEAVY_FUNCTIONS",
+          _name in _se5._HEAVY_FUNCTIONS, f"-> {_name in _se5._HEAVY_FUNCTIONS}")
+    _over_expr = f"{_name}({_over_cap_arg})"
+    _r_over = _exact.simplify_expression(_over_expr)
+    check(f"{_over_expr!r} (one over MAX_HEAVY_ARG) is refused",
+          _r_over.get("ok") is False and _r_over.get("code") == _errors.RESOURCE_EXHAUSTED,
+          f"-> {_r_over}")
+    _small_expr = f"{_name}({_small_arg})"
+    _r_small = _exact.simplify_expression(_small_expr)
+    check(f"{_small_expr!r} (a small, ordinary argument) still evaluates",
+          _r_small.get("ok") is True, f"-> {_r_small}")
+
+# Finding 3 (High): a scientific-notation Float literal is a parse-time CPU
+# bomb -- `1e100000` costs real time to construct the evaluate=False shape,
+# and every Float is unconditionally declared safe once parsed. Fixed at
+# the TOKEN level, before parse_expr ever runs.
+_OVERSIZED_FLOAT_LITERALS = ["1e100000", "1e1000000", "1.5E4001"]
+for _expr in _OVERSIZED_FLOAT_LITERALS:
+    _t0 = time.time()
+    _r = _exact.simplify_expression(_expr)
+    _elapsed = time.time() - _t0
+    check(f"{_expr!r} is refused",
+          _r.get("ok") is False and _r.get("code") == _errors.RESOURCE_EXHAUSTED,
+          f"-> {_r}")
+    check("  ...promptly, at the TOKEN level, before parse_expr ever runs "
+          "(1e1000000 alone measured >30s post-parse in the reviewer's own repro)",
+          _elapsed < 1.0, f"-> {_elapsed:.3f}s")
+for _expr in ("1e300", "1e-300", "2.5e3"):
+    _r = _exact.simplify_expression(_expr)
+    check(f"{_expr!r} (an ordinary scientific-notation literal) still evaluates",
+          _r.get("ok") is True, f"-> {_r}")
+
+# Finding 4 (Medium): Add's bound (max-term + log10(n)) recognized no
+# cancellation at all, so two terms that are EXACT additive inverses of
+# each other -- printable, cheap, the true sum is 0 -- were refused on
+# their own uncancelled magnitude. Give Add the same structural
+# cancellation Mul already has via _factor_multiset.
+_r_cancels = _exact.simplify_expression(
+    "factorial(1463)*factorial(1463) - factorial(1463)*factorial(1463)")
+check("factorial(1463)*factorial(1463) - factorial(1463)*factorial(1463) evaluates to 0",
+      _r_cancels.get("ok") is True and _r_cancels.get("simplified") == "0",
+      f"-> {_r_cancels}")
+_r_still_refused = _exact.simplify_expression(
+    "factorial(1463)*factorial(1463) - factorial(1463)*factorial(1463) + factorial(1463)*factorial(1463)")
+check("...but f*f - f*f + f*f (one term survives cancellation) is still refused",
+      _r_still_refused.get("ok") is False
+      and _r_still_refused.get("code") == _errors.RESOURCE_EXHAUSTED,
+      f"-> {_r_still_refused}")
+
 # ═══ the fail-closed choice above was ITSELF too broad — cross-vendor ══════
 # ═══ differential probe (main vs. this branch) found 5 benign expressions ══
 # ═══ that main evaluates fine but an earlier version of this fix refused ═══
@@ -1386,6 +2000,486 @@ check(f"  ...within a bounded memory peak ({_bomb_peak / 1e6:.1f} MB, was ~2977 
       _bomb_peak < 50 * 1_000_000, f"-> peak={_bomb_peak / 1e6:.1f} MB")
 check(f"  ...and refuses promptly ({_bomb_elapsed:.3f}s), not after a multi-second/GB burn",
       _bomb_elapsed < 5.0, f"-> {_bomb_elapsed:.3f}s")
+
+# ═══ round 7 of cross-vendor review (grok, on the round-five head; Codex, ══
+# ═══ on the round-six head, in parallel) ════════════════════════════════════
+
+# grok's finding: the round-five/six `Pow` short-circuits stopped the scan
+# from ever descending into an exponent that is itself expensive to
+# CONSTRUCT, as opposed to merely expensive to PRINT. A unit-magnitude base
+# (1, -1, 1/1, 2/2, 1.0) resolves to (0, 0, True) without ever inspecting
+# the exponent; a same-base cancelling exponent (2**(2**N * 2**(-N)))
+# resolves to (0, 0, True) via _factor_multiset's own cancellation. Both
+# leave a genuinely expensive inner Pow(2, N)/Pow(3, -N) unchecked, since
+# SymPy's Mul.flatten still constructs that intermediate regardless of what
+# the surrounding expression later does with the result. N is ~300 digits
+# -- big enough that Pow(2, N) alone measured past guarded_call's ~10-13s
+# CPU backstop before this fix; a hard 300-digit floor, not tuned to any
+# looser cliff.
+_N7 = 10**299 + 7
+_UNIT_BASE_PLUS_EXPENSIVE_EXPONENT = [
+    f"1**(2**{_N7}*3**(-{_N7}))",
+    f"(-1)**(2**{_N7}*3**(-{_N7}))",
+    f"(1/1)**(2**{_N7}*3**(-{_N7}))",
+    f"(2/2)**(2**{_N7}*3**(-{_N7}))",
+    f"1.0**(2**{_N7}*3**(-{_N7}))",
+    f"2**(2**{_N7}*2**(-{_N7}))",  # same-base cancelling exponent, not a unit base
+]
+for _expr in _UNIT_BASE_PLUS_EXPENSIVE_EXPONENT:
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"safe_parse({_expr[:40]!r}...) is refused, not evaluated",
+          _v is None and _e is not None, f"-> value={_v!r} err={_e!r}")
+    check(f"  ...promptly ({_dt:.3f}s), not after Pow(2, N) is actually constructed "
+          "(measured >10s before this fix)",
+          _dt < 2.0, f"-> {_dt:.3f}s")
+
+# The exponent in 2**(2**10000*2**-10000) is legal, not merely lucky: N =
+# 10000 makes Pow(2, 10000) itself only ~3011 digits (under MAX_NUMERIC_
+# DIGITS), so constructing it is cheap regardless of the eventual
+# cancellation -- this is what distinguishes it from the ~300-digit-N cases
+# above, where Pow(2, N)'s OWN print profile (~10**298 digits) is already
+# the hazard, before any cancellation is even considered. This must still
+# evaluate, unmodified by round 7's fix, to pin exactly that distinction.
+_v, _e = _boundary_parse("2**(2**10000*2**-10000)")
+check("safe_parse('2**(2**10000*2**-10000)') still evaluates "
+      "(N=10000 -- Pow(2, N) itself is only ~3011 digits, cheap to construct)",
+      _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+if _e is None:
+    check("  ...to the correct value (2)", str(_v) == "2", f"-> {_v!r}")
+
+# grok's own regression, caught mid-fix: an earlier version of this fix made
+# the scan always push a resolved Pow's children regardless of its own
+# verdict -- which then independently judged the EXPONENT's own print
+# profile as if it mattered, refusing 1**(20 distinct factorial factors) on
+# its ~79,347-digit exponent even though that exponent is cheap to
+# construct (20 already-materialized integers multiplied together) and is
+# never printed at all, since 1**anything is always 1. Print-profile-over-
+# cap and expensive-to-construct are different questions; this pins that
+# the scan answers only the first one, deferring the second to the Pow
+# loop's own construction-cost check instead of trying to answer it here.
+_factorial_factors = "*".join(f"factorial({1463 - k})" for k in range(20))
+_unit_pow_expr = f"1**({_factorial_factors})"
+_t0 = time.time()
+_v, _e = _boundary_parse(_unit_pow_expr)
+_dt = time.time() - _t0
+check("safe_parse('1**(20 distinct factorial factors)') still evaluates to 1 "
+      "(each factor is under cap individually; the ~79,347-digit exponent's "
+      "own print profile is irrelevant to a unit base)",
+      _v is not None and _e is None and str(_v) == "1", f"-> value={_v!r} err={_e!r}")
+check(f"  ...promptly ({_dt:.3f}s)", _dt < 2.0, f"-> {_dt:.3f}s")
+
+# Codex finding 1 (High): the identical class from the Add side --
+# _cancel_additive_inverses marks 2**1000000000 - 2**1000000000
+# resolved-to-zero and never descends into either Pow, but SymPy evaluates
+# each child before cancelling, so the ~301-million-digit
+# Pow(2, 1000000000) still gets constructed. Verified already closed by the
+# same Pow-loop fix above (which is agnostic to whether its ancestor is a
+# Mul or an Add) -- this pins it as a regression test.
+_t0 = time.time()
+_v, _e = _boundary_parse("2**1000000000 - 2**1000000000")
+_dt = time.time() - _t0
+check("safe_parse('2**1000000000 - 2**1000000000') is refused, not evaluated",
+      _v is None and _e is not None, f"-> value={_v!r} err={_e!r}")
+check(f"  ...promptly ({_dt:.3f}s)", _dt < 2.0, f"-> {_dt:.3f}s")
+_v, _e = _boundary_parse("x*x - x*x")
+check("safe_parse('x*x - x*x') (ordinary symbolic cancellation) still evaluates",
+      _v is not None and _e is None and str(_v) == "0", f"-> value={_v!r} err={_e!r}")
+
+# Codex finding 2 (High): a heavy call NESTED inside another heavy call's
+# argument was uncaught -- none of factorint/isprime/.../factorial etc. are
+# SymPy Function subclasses, so an INNER heavy call on a literal argument
+# evaluates eagerly even under evaluate=False, and its numeric RESULT (not
+# its short source text) becomes the OUTER call's argument before any tree
+# exists for reject_explosive to inspect. factorial(fibonacci(100)) never
+# returns; fibonacci(factorial(10)) materializes a ~758,374-digit integer;
+# factorial(factorial(8)) a ~168,187-digit one -- all now refused at the
+# TOKEN level, before parse_expr runs even once.
+_NESTED_HEAVY_CASES = ["factorial(fibonacci(100))", "fibonacci(factorial(10))",
+                       "factorial(factorial(8))"]
+for _expr in _NESTED_HEAVY_CASES:
+    _t0 = time.time()
+    _r = _exact.simplify_expression(_expr)
+    _dt = time.time() - _t0
+    check(f"{_expr!r} (heavy call nested in a heavy call's argument) is refused",
+          _r.get("ok") is False and _r.get("code") == _errors.RESOURCE_EXHAUSTED,
+          f"-> {_r}")
+    check(f"  ...promptly ({_dt:.3f}s), at the token level, before parse_expr runs "
+          "(fibonacci(factorial(10)) alone measured 1.5s materializing the result)",
+          _dt < 1.0, f"-> {_dt:.3f}s")
+# factorial(fibonacci(5)) is cheap (= 120) but is refused anyway: this
+# structural rule is deliberately conservative (any nesting of two heavy
+# calls, regardless of whether the inner result happens to be small), the
+# same fail-closed bar this module's other token-level screens already use.
+_r = _exact.simplify_expression("factorial(fibonacci(5))")
+check("'factorial(fibonacci(5))' (= 120, but structurally nested) is refused, "
+      "not evaluated -- documented as deliberately conservative",
+      _r.get("ok") is False and _r.get("code") == _errors.RESOURCE_EXHAUSTED,
+      f"-> {_r}")
+# Two SEPARATE (not nested) heavy calls must not be caught by this rule.
+_r = _exact.simplify_expression("factorial(1000)+fibonacci(1000)")
+check("'factorial(1000)+fibonacci(1000)' (two SIBLING heavy calls, not nested) still evaluates",
+      _r.get("ok") is True, f"-> {_r}")
+
+# Codex finding 3 (High): _oversized_scientific_literal_violation's regex
+# had no allowance for Python's j/J imaginary suffix, so 1e1000000j never
+# matched at all and reached the real parse unbounded; separately, being an
+# unanchored search, it misread the literal hex digits of 0x1e100000 as a
+# fake "exponent of 100000".
+for _expr in ("1e1000000j", "1e+100000j", "1E100_000j"):
+    _t0 = time.time()
+    _r = _exact.simplify_expression(_expr)
+    _dt = time.time() - _t0
+    check(f"{_expr!r} (imaginary-suffixed scientific literal) is refused",
+          _r.get("ok") is False and _r.get("code") == _errors.RESOURCE_EXHAUSTED,
+          f"-> {_r}")
+    check(f"  ...promptly ({_dt:.3f}s), at the token level", _dt < 1.0, f"-> {_dt:.3f}s")
+for _expr in ("0x1e100000", "0o17", "0b101", "1+2j"):
+    _r = _exact.simplify_expression(_expr)
+    check(f"{_expr!r} (hex/octal/binary literal, or an ordinary complex number) "
+          "still evaluates -- not misread as a scientific-notation exponent",
+          _r.get("ok") is True, f"-> {_r}")
+
+# Codex finding 4 (Medium): an audit of every remaining eager name in
+# safe_global_dict() turned up two more hazard shapes needing their own
+# cap, plus digamma/zeta (_HEAVY_FUNCTIONS-shaped after all) and stirling
+# (not actually exposed by sympy 1.14's namespace, so nothing to bound).
+check("'stirling' is not exposed by sympy's namespace (nothing to bound)",
+      not hasattr(__import__("sympy"), "stirling"), "-> hasattr(sympy, 'stirling')")
+for _name in ("digamma", "zeta"):
+    check(f"{_name!r} is now in _HEAVY_FUNCTIONS", _name in _se5._HEAVY_FUNCTIONS,
+          f"-> {_name in _se5._HEAVY_FUNCTIONS}")
+_r = _exact.simplify_expression("digamma(100000)")
+check("'digamma(100000)' is refused", _r.get("ok") is False
+      and _r.get("code") == _errors.RESOURCE_EXHAUSTED, f"-> {_r}")
+_r = _exact.simplify_expression("zeta(-99999)")
+check("'zeta(-99999)' is refused", _r.get("ok") is False
+      and _r.get("code") == _errors.RESOURCE_EXHAUSTED, f"-> {_r}")
+for _expr in ("digamma(1463)", "zeta(-1463)"):
+    _r = _exact.simplify_expression(_expr)
+    check(f"{_expr!r} (at the existing MAX_HEAVY_ARG cap) still evaluates",
+          _r.get("ok") is True, f"-> {_r}")
+
+# factorint/primefactors/divisors/mobius/nextprime/isprime: the hazard
+# scales with the size of the NUMBER under test (factoring is hard), not a
+# growing OUTPUT for a small "count" argument -- a random ~40-digit
+# semiprime measured 27.8s to factor, and a 100-digit RSA modulus hits the
+# process memory/CPU backstop outright.
+_RSA_100 = ("1522605027922533360535618378132637429718068114961380688657"
+            "908494580122963258952897654000350692006139")
+for _name in ("factorint", "primefactors", "divisors", "mobius"):
+    _expr = f"{_name}({_RSA_100})"
+    _r = _exact.simplify_expression(_expr)
+    check(f"{_name}(<100-digit RSA modulus>) is refused, not factored",
+          _r.get("ok") is False and _r.get("code") == _errors.RESOURCE_EXHAUSTED,
+          f"-> {_r}")
+_lit_1900 = "9" * 1900
+for _name in ("nextprime", "isprime"):
+    _expr = f"{_name}({_lit_1900})"
+    _r = _exact.simplify_expression(_expr)
+    check(f"{_name}(<1900-digit literal>) is refused",
+          _r.get("ok") is False and _r.get("code") == _errors.RESOURCE_EXHAUSTED,
+          f"-> {_r}")
+for _name in ("factorint", "primefactors", "divisors", "mobius", "nextprime", "isprime"):
+    _expr = f"{_name}(360)"
+    # safe_parse, not simplify_expression: factorint/primefactors/divisors
+    # return a plain Python dict/list, not a SymPy Expr, and
+    # simplify_expression's sp.simplify()/sp.factor()/sp.expand() calls
+    # have no method of that name on a dict/list -- a genuine, separate,
+    # pre-existing limitation of simplify_expression's post-processing for
+    # these return types, unrelated to reject_explosive/classify_unsafe
+    # (which safe_parse alone exercises), so it is not this round's
+    # concern to fix.
+    _v, _e = _boundary_parse(_expr)
+    check(f"{_expr!r} (an ordinary small argument) still evaluates",
+          _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+
+# sqrt/root/cbrt: the OPPOSITE shape -- cheap to bound in log space (an
+# n-th root's digit count is always comfortably under MAX_NUMERIC_DIGITS)
+# but not cheap to COMPUTE (SymPy's perfect-power check measured 4.0s at
+# 1900 digits).
+for _name, _expr in (("sqrt", f"sqrt({_lit_1900})"), ("root", f"root({_lit_1900}, 3)"),
+                      ("cbrt", f"cbrt({_lit_1900})")):
+    _r = _exact.simplify_expression(_expr)
+    check(f"{_name}(<1900-digit literal>) is refused",
+          _r.get("ok") is False and _r.get("code") == _errors.RESOURCE_EXHAUSTED,
+          f"-> {_r}")
+for _expr in ("sqrt(360)", "root(360, 3)", "cbrt(360)"):
+    _r = _exact.simplify_expression(_expr)
+    check(f"{_expr!r} (an ordinary small argument) still evaluates",
+          _r.get("ok") is True, f"-> {_r}")
+
+# Codex finding 5 (Medium): _cancel_additive_inverses only recognized an
+# EXACT multiset match with opposite sign, so a small INTEGER COEFFICIENT
+# difference (2*f*f - f*f - f*f, exactly 0) was still refused -- the
+# leading 2 makes the first term's multiset a different key from the other
+# two's.
+_r = _exact.simplify_expression(
+    "2*factorial(1463)*factorial(1463) - factorial(1463)*factorial(1463) "
+    "- factorial(1463)*factorial(1463)")
+check("2*f*f - f*f - f*f evaluates to 0 (coefficients 2, -1, -1 sum to 0)",
+      _r.get("ok") is True and _r.get("simplified") == "0", f"-> {_r}")
+_r = _exact.simplify_expression(
+    "3*factorial(1463)*factorial(1463) - factorial(1463)*factorial(1463) "
+    "- factorial(1463)*factorial(1463)")
+check("...but 3*f*f - f*f - f*f (coefficients sum to +1, not 0) is still refused",
+      _r.get("ok") is False and _r.get("code") == _errors.RESOURCE_EXHAUSTED,
+      f"-> {_r}")
+
+# ═══ round 8 of cross-vendor review (grok PASS with two Low notes; ═════════
+# ═══ Codex FAIL with one High and one Low, on ab0f5cc) ══════════════════════
+
+# Codex finding 1 (High): the round-seven per-function caps were enforced
+# ONLY per numeric TOKEN -- factorint(<25-digit literal>*<25-digit
+# literal>) (two individually-permitted literals whose PRODUCT is ~50
+# digits, hard to factor) and sqrt(<990-digit literal>*<990-digit literal>)
+# (product ~1980 digits, 2.1s to compute) both passed classify_unsafe
+# clean. Fixed structurally: ONE table (_FUNCTION_ARG_CAPS) now drives (a)
+# a token-level check that sums every literal's digit count WITHIN one
+# top-level argument (an upper bound on their PRODUCT, catching both repros
+# below at the token level, before parse_expr ever runs) and (b) two
+# tree-level backstops for the shapes a token-only check cannot reach at
+# all: a Function-node check (value-kind and, structurally, any future
+# digit-kind Function name) and a NEW Pow-loop branch for a unit-fraction
+# exponent (sqrt/root/cbrt's actual tree shape, since none of them leave a
+# Function node named after themselves).
+_A25 = "1000000000000000987654327"
+_B25 = "8000000000000000123456849"
+_t0 = time.time()
+_r = _se5.classify_unsafe(f"factorint({_A25}*{_B25})")
+_dt = time.time() - _t0
+check("factorint(<25-digit literal>*<25-digit literal>) is refused at the "
+      "token level (round 7 passed this clean)",
+      _r is not None, f"-> {_r}")
+check(f"  ...promptly ({_dt:.3f}s)", _dt < 1.0, f"-> {_dt:.3f}s")
+
+_d990a, _d990b = "9" * 990, "8" * 990
+_t0 = time.time()
+_v, _e = _boundary_parse(f"sqrt({_d990a}*{_d990b})")
+_dt = time.time() - _t0
+check("sqrt(<990-digit literal>*<990-digit literal>) is refused, not computed "
+      "(round 7 passed this clean, took 2.1s to compute)",
+      _v is None and _e is not None, f"-> value={_v!r} err={_e!r}")
+check(f"  ...promptly ({_dt:.3f}s)", _dt < 1.0, f"-> {_dt:.3f}s")
+
+# A literal AT the cap (one factor alone, not a product) must still work.
+_v, _e = _boundary_parse(f"factorint({_A25})")
+check("factorint(<one 25-digit literal, at the cap>) still evaluates",
+      _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("sqrt(10**1000)")
+check("sqrt(10**1000) still evaluates", _v is not None and _e is None,
+      f"-> value={_v!r} err={_e!r}")
+
+# Self-check: every name in _FUNCTION_ARG_CAPS is exercised by an
+# appropriate layer for a COMPUTED (not bare-literal) argument. Value-kind
+# names (_HEAVY_FUNCTIONS) get the tree-level Function-node backstop
+# (`_numeric_ceiling_scan`); the root family gets the NEW tree-level Pow
+# unit-fraction-exponent backstop (a nested heavy call as the argument, so
+# no literal token names the true magnitude at all). The eager factor
+# family (factorint and its five siblings) genuinely has NO tree-level
+# backstop possible -- none of the six are sympy.Function subclasses, and
+# each coerces its argument to a concrete int internally regardless of
+# evaluate=False, so the danger is baked into the very act of PARSING
+# (documented in MAX_FACTOR_ARG_DIGITS's own comment) -- so those six are
+# exercised via the token-level COMBINED-literal-product check instead,
+# the one protection that family can structurally have.
+_EAGER_FACTOR_FAMILY = {"factorint", "primefactors", "divisors", "mobius", "nextprime", "isprime"}
+# `sqrt`/`cbrt` both stay a genuinely unevaluated `Pow(base, Rational(1,
+# n))` for a CONCRETE (already-materialized) base under `evaluate=False`,
+# reaching this round's new Pow-loop branch cleanly (verified live).
+# `root(x, n)` does NOT share that path for every `n` -- probed live:
+# `root(factorial(1463), 2)` parses to a `Mul` (`Pow`'s `.eval()` pulled
+# perfect-square-ish factors out of the ALREADY-CONCRETE base eagerly, at
+# construction time, a different code path from bare `sqrt`/`cbrt`) -- so
+# `root` is checked via the token-level combined-literal path instead,
+# below, alongside the factor family, rather than asserting a tree shape
+# that does not actually occur for it.
+_TREE_ONLY_ROOT_FAMILY = {"sqrt", "cbrt"}
+_TOKEN_ONLY_ROOT_FAMILY = {"root"}
+_EXTRA_CALL_ARGS = {"root": ", 2"}
+# Self-check scope, and why: this round's OWN work is the "digits"-kind
+# entries (the factor and root families) and their two enforcement layers
+# -- that is what gets a genuine COMPUTED-argument check below, at
+# whichever layer actually applies to each. The PRE-EXISTING "value"-kind
+# entries (`_HEAVY_FUNCTIONS`) already had a computed-argument tree-level
+# backstop from round 6 -- but probing every member for THIS self-check
+# surfaced that it is not uniform across all 27 names, none of which
+# round 6 (or this round) ever claimed: `rf`/`ff`'s actual SymPy class
+# names are `RisingFactorial`/`FallingFactorial`, not `rf`/`ff`, so the
+# `type(node).__name__ in _FUNCTION_ARG_CAPS` lookup never matches them;
+# `digamma` gets REWRITTEN to `polygamma` at construction (a different
+# name again); `primepi` and `binomial` with certain small second
+# arguments evaluate their own argument eagerly regardless of
+# `evaluate=False`; `primorial`/`prime`/`motzkin` reject a non-integer
+# argument outright with a `ValueError` (safe, just a different failure
+# mode). None of that is this round's regression to fix -- it predates
+# it -- so the "value"-kind branch below checks only what round 6 already
+# established and this round did not touch: the TOKEN-level bare-literal
+# cap, unconditionally reliable regardless of any of the above.
+_checked_names = set()
+for _fn_name, (_kind, _cap) in _se5._FUNCTION_ARG_CAPS.items():
+    _checked_names.add(_fn_name)
+    _extra = _EXTRA_CALL_ARGS.get(_fn_name, "")
+    if _fn_name in _EAGER_FACTOR_FAMILY or _fn_name in _TOKEN_ONLY_ROOT_FAMILY:
+        _big1 = "9" * (_cap // 2 + 2)
+        _big2 = "9" * (_cap - _cap // 2 + 2)
+        _r = _se5.classify_unsafe(f"{_fn_name}({_big1}*{_big2}{_extra})")
+        check(f"self-check: {_fn_name}() combined-literal computed argument "
+              "is refused at the token level",
+              _r is not None, f"-> {_r}")
+    elif _fn_name in _TREE_ONLY_ROOT_FAMILY:
+        _t0 = time.time()
+        _v, _e = _boundary_parse(f"{_fn_name}(factorial(1463){_extra})")
+        _dt = time.time() - _t0
+        check(f"self-check: {_fn_name}(factorial(1463)) (a computed, "
+              "tree-only-catchable argument) is refused",
+              _v is None and _e is not None, f"-> value={_v!r} err={_e!r}")
+        check(f"  ...promptly ({_dt:.3f}s)", _dt < 2.0, f"-> {_dt:.3f}s")
+    else:
+        # value-kind (_HEAVY_FUNCTIONS): the token-level bare-literal cap
+        # -- round 1's own protection, unconditionally reliable, and the
+        # one property every member of this set actually shares (see the
+        # comment above for why the tree-level backstop is NOT that).
+        _r = _se5.classify_unsafe(f"{_fn_name}({_cap + 1})")
+        check(f"self-check: {_fn_name}({_cap + 1}) (one over cap, a bare "
+              "literal) is refused at the token level",
+              _r is not None, f"-> {_r}")
+check(f"self-check covered every name in _FUNCTION_ARG_CAPS "
+      f"({len(_checked_names)} names)",
+      _checked_names == set(_se5._FUNCTION_ARG_CAPS),
+      f"-> missing={set(_se5._FUNCTION_ARG_CAPS) - _checked_names!r}")
+
+# ═══ round 9 of cross-vendor review (grok PASS, three Low notes, on ════════
+# ═══ 940c6b5) ════════════════════════════════════════════════════════════
+
+# Finding 2: the table did not yet drive EVERY comparison -- the
+# Function-node "value" check used a `_log10_max_heavy_arg` derived from
+# the bare `MAX_HEAVY_ARG` module constant, precomputed once outside the
+# scan's loop, and the Pow loop's unit-fraction branch hardcoded
+# `MAX_ROOT_ARG_DIGITS` directly, rather than either reading the cap from
+# the matched row in `_FUNCTION_ARG_CAPS` itself -- both now do (see
+# their own comments). A monkeypatched row with a deliberately different
+# cap proves both layers actually follow the TABLE, not the module
+# constant it happens to start from.
+_orig_factorial_cap = _se5._FUNCTION_ARG_CAPS["factorial"]
+_se5._FUNCTION_ARG_CAPS["factorial"] = ("value", 10)
+try:
+    _v, _e = _boundary_parse("factorial(20+1)")  # 20, tokenwise, clearly over a cap of 10
+    check("self-check: a monkeypatched 'factorial' row (cap 10, was "
+          f"{_orig_factorial_cap[1]}) is honoured -- factorial(20+1) refused",
+          _v is None and _e is not None, f"-> value={_v!r} err={_e!r}")
+    _v, _e = _boundary_parse("factorial(2+1)")  # 3, clearly under a cap of 10
+    check("  ...and factorial(2+1) (under the patched cap) still evaluates",
+          _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+finally:
+    _se5._FUNCTION_ARG_CAPS["factorial"] = _orig_factorial_cap
+
+_orig_sqrt_cap = _se5._FUNCTION_ARG_CAPS["sqrt"]
+_se5._FUNCTION_ARG_CAPS["sqrt"] = ("digits", 10)
+try:
+    # factorial(20) has 19 digits, over a patched root cap of 10; a
+    # COMPUTED (tree-only-catchable) argument, so this exercises the Pow
+    # loop's unit-fraction branch specifically, not the token screen.
+    _v, _e = _boundary_parse("sqrt(factorial(20))")
+    check("self-check: a monkeypatched 'sqrt' row (cap 10, was "
+          f"{_orig_sqrt_cap[1]}) is honoured -- sqrt(factorial(20)) refused",
+          _v is None and _e is not None, f"-> value={_v!r} err={_e!r}")
+    _v, _e = _boundary_parse("sqrt(factorial(5))")  # 120, 3 digits, under 10
+    check("  ...and sqrt(factorial(5)) (under the patched cap) still evaluates",
+          _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+finally:
+    _se5._FUNCTION_ARG_CAPS["sqrt"] = _orig_sqrt_cap
+
+# Finding 3: the summed-digit token rule is a safe UPPER bound on a
+# product's true digit count, not the exact product -- a small extra
+# literal factor can tip the SUM over the cap even when the true product
+# still fits (`factorial(1463)` is far too big a comparison point here;
+# use the same factoring-family shape the docstring's own example names).
+_lit25 = "9" * 25
+_r = _se5.classify_unsafe(f"factorint({_lit25}*2)")
+check("factorint(<25-digit literal>*2) (sum 26, over MAX_FACTOR_ARG_DIGITS, "
+      "though the true product may still be 25 digits) is refused",
+      _r is not None, f"-> {_r}")
+check("  ...with a message naming the SUM explicitly, not implying an "
+      "exact product was computed",
+      _r is not None and "sum of the literal digits" in _r[1], f"-> {_r}")
+
+# ═══ round 10 of cross-vendor review (Codex, confirming the round 8-9 ═════
+# ═══ delta) — one remaining Low ═════════════════════════════════════════
+
+# Round 8 made the TOKEN-level digit-count check exact (`_exact_decimal_
+# digit_count`), but the TREE-level check (`_digit_count_over_cap`, fed by
+# `_log10_num_den` -> `_log10_of_int`'s float approximation) still rounded
+# the wrong way at an EXACT boundary: `safe_parse("sqrt(" + "9"*1200 +
+# ")")` -- a value with EXACTLY 1200 digits, at MAX_ROOT_ARG_DIGITS --
+# passed the token screen (which sees a single literal and counts its
+# digits exactly) but was then refused at the TREE level, where the float
+# log10 of an all-9s value rounded up and reported 1201 digits instead of
+# 1200. Fixed with `_exact_digit_count_if_cheap`/`_digit_count_over_cap_
+# for_node`, preferring the exact count of an already-materialized
+# Integer/Rational over the float approximation. Tested through
+# `safe_parse` specifically (not `classify_unsafe` alone), since the
+# token screen already got this right in round 8 -- this is pinning the
+# TREE layer.
+_lit1200_nines = "9" * 1200
+_lit1201_nines = "9" * 1201
+_t0 = time.time()
+_v, _e = _boundary_parse(f"sqrt({_lit1200_nines})")
+_dt = time.time() - _t0
+check("safe_parse('sqrt(<1200-digit all-9s literal>)') (exactly at "
+      "MAX_ROOT_ARG_DIGITS) evaluates, not refused on a float-rounding "
+      "artifact",
+      _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+check(f"  ...promptly ({_dt:.3f}s)", _dt < 2.0, f"-> {_dt:.3f}s")
+_v, _e = _boundary_parse(f"sqrt({_lit1201_nines})")
+check("safe_parse('sqrt(<1201-digit all-9s literal>)') (one over the cap) "
+      "is still refused",
+      _v is None and _e is not None, f"-> value={_v!r} err={_e!r}")
+
+# The same boundary for the factor family, through safe_parse.
+_lit25_nines = "9" * 25
+_lit26_nines = "9" * 26
+_v, _e = _boundary_parse(f"factorint({_lit25_nines})")
+check("safe_parse('factorint(<25-digit all-9s literal>)') (exactly at "
+      "MAX_FACTOR_ARG_DIGITS) evaluates",
+      _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse(f"factorint({_lit26_nines})")
+check("safe_parse('factorint(<26-digit all-9s literal>)') (one over the "
+      "cap) is still refused",
+      _v is None and _e is not None, f"-> value={_v!r} err={_e!r}")
+
+# The refusal message names the root properly ("square root"/"cube
+# root"/"n-th root"), not the literal "2-th root"/"3-th root" it used to.
+_v, _e = _boundary_parse("sqrt(factorial(1463))")
+check("sqrt(factorial(1463)) refusal message says 'square root'",
+      _e is not None and "square root" in _e[1], f"-> {_e}")
+_v, _e = _boundary_parse("cbrt(factorial(1463))")
+check("cbrt(factorial(1463)) refusal message says 'cube root'",
+      _e is not None and "cube root" in _e[1], f"-> {_e}")
+
+# Codex finding 2 (Low): _approx_decimal_digits() truncates a float log and
+# overcounts at exact power-of-ten boundaries (a 25-digit all-9s literal
+# read as 26 digits; a 1,200-digit all-9s literal as 1,201) -- and the
+# digit-cap enforcement decision used that approximation directly. Fixed by
+# using the EXACT digit count for a plain decimal literal (its token
+# string length, cheap and exact) instead.
+_lit25, _lit26 = "9" * 25, "9" * 26
+check("factorint(<25-digit literal, exactly at MAX_FACTOR_ARG_DIGITS>) "
+      "still has no token-level opinion",
+      _se5.classify_unsafe(f"factorint({_lit25})") is None,
+      f"-> {_se5.classify_unsafe(f'factorint({_lit25})')!r}")
+check("factorint(<26-digit literal, one over the cap>) is refused",
+      _se5.classify_unsafe(f"factorint({_lit26})") is not None,
+      f"-> {_se5.classify_unsafe(f'factorint({_lit26})')!r}")
+_lit1200, _lit1201 = "9" * 1200, "9" * 1201
+check("sqrt(<1200-digit literal, exactly at MAX_ROOT_ARG_DIGITS>) "
+      "still has no token-level opinion",
+      _se5.classify_unsafe(f"sqrt({_lit1200})") is None,
+      f"-> {_se5.classify_unsafe(f'sqrt({_lit1200})')!r}")
+check("sqrt(<1201-digit literal, one over the cap>) is refused",
+      _se5.classify_unsafe(f"sqrt({_lit1201})") is not None,
+      f"-> {_se5.classify_unsafe(f'sqrt({_lit1201})')!r}")
 
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== ALL BUG-SWEEP REGRESSIONS FIXED ===")

@@ -292,7 +292,16 @@ def _eval_exact(expr: str) -> dict:
         # forwarding whatever CPython happened to construct.
         return errors.error_result(errors.VALIDATION, "division by zero")
     except Exception as exc:
-        return {"ok": False, "error": str(exc)}
+        # Routed through errors.classify() rather than a bare
+        # `{"ok": False, "error": str(exc)}` — every OTHER refusal path in
+        # this function already names a code, and a catch-all that skips
+        # `classify()` is exactly how a CPython digit-limit ValueError
+        # ("...use sys.set_int_max_str_digits()...", raised from deep in a
+        # printer this code never calls directly) came back `internal`:
+        # a resource ceiling reported as a codecalc defect (GH #326,
+        # THE-1091). `classify()` special-cases that message to
+        # RESOURCE_EXHAUSTED before it reaches the type-only branches.
+        return errors.error_result(errors.classify(exc), str(exc))
     approx_consts = sorted(set(_APPROX_CONSTS_USED))
     float_funcs = sorted(set(_FLOAT_FUNCS_USED))
 
@@ -309,7 +318,27 @@ def _eval_exact(expr: str) -> dict:
             approx = f"{d:.12f}".rstrip("0").rstrip(".")
             exact = str(result) if result.denominator != 1 else str(result.numerator)
         except ValueError as exc:
-            return {"ok": False, "error": f"result too large to format: {exc}"}
+            # errors.classify(), not a bare f-string forwarding CPython's
+            # own message -- this catch is EXACTLY the digit-limit
+            # ValueError (a result cheap to compute but too big to str()),
+            # and a bare dict here skipped classify() entirely:
+            # `server.calc_exact("10**5000")` reported `code: "internal"`
+            # with CPython's raw "...use sys.set_int_max_str_digits()..."
+            # advice -- addressed to nobody the caller can act on, and the
+            # wrong code besides -- even after the generic catch-all below
+            # this one was fixed to route through classify() (GH #326,
+            # THE-1091 follow-up, cross-vendor review of 0f276a9 — this
+            # specific site was missed the first time). The digit count in
+            # the message comes from `.bit_length()` on the already-
+            # computed numerator/denominator, never from `str()` — the
+            # exact conversion that just failed.
+            _bits = max(abs(result.numerator).bit_length(),
+                        abs(result.denominator).bit_length())
+            _digits = int(_bits * 0.301029995663981) + 1  # log10(2)
+            return errors.error_result(
+                errors.classify(exc),
+                f"the result has about {_digits} digits and is too large to "
+                "format as a decimal string; reduce the size of the operands")
         out = {"ok": True, "value": exact, "approx": approx,
                # `exact` previously meant "the exact form differs from the
                # 12-dp decimal", which is a different claim from the one the
@@ -857,7 +886,13 @@ def radix_convert(value: str, from_base: int = 10, to_base: int = 10) -> dict:
         num = whole * frac_den + frac_num
         den = frac_den
     except ValueError as exc:
-        return {"ok": False, "error": str(exc)}
+        # errors.classify(), not a bare str(exc) -- an invalid digit here is
+        # always VALIDATION either way (classify() falls through to the
+        # same type-based mapping a plain ValueError already got), but a
+        # bare dict is still the pattern GH #326/THE-1091's cross-vendor
+        # review flagged as worth closing everywhere in this file, not only
+        # where it happens to matter today.
+        return errors.error_result(errors.classify(exc), str(exc))
     if den == 0:
         return {"ok": True, "value": "0", "non_terminating": False}
 
@@ -1210,7 +1245,10 @@ def _solve_expression(expr: str, var: str = "x") -> dict:
         sym = sp.Symbol(var.strip())
         solutions = sp.solve(eq, sym)
     except Exception as exc:
-        return {"ok": False, "error": str(exc)}
+        # errors.classify(), not a bare str(exc) -- see _eval_exact's catch
+        # above for why a catch-all that skips it is how a CPython
+        # digit-limit ValueError reports as `internal` (GH #326, THE-1091).
+        return errors.error_result(errors.classify(exc), str(exc))
     return {"ok": True, "equation": str(eq), "variable": var,
             "solutions": [str(s) for s in solutions]}
 
@@ -1244,7 +1282,10 @@ def _limit_expression(expr: str, var: str = "x", point: str = "oo") -> dict:
                     errors.code_for_safe_expr_category(_category), f"point: {_message}")
         result = sp.limit(e, sym, pt)
     except Exception as exc:
-        return {"ok": False, "error": str(exc)}
+        # errors.classify(), not a bare str(exc) -- see _eval_exact's catch
+        # above for why a catch-all that skips it is how a CPython
+        # digit-limit ValueError reports as `internal` (GH #326, THE-1091).
+        return errors.error_result(errors.classify(exc), str(exc))
     return {"ok": True, "expression": str(e), "variable": var,
             "point": str(pt), "limit": str(result)}
 
@@ -1266,7 +1307,10 @@ def _simplify_expression(expr: str) -> dict:
                 "factored": str(sp.factor(e)),
                 "expanded": str(sp.expand(e))}
     except Exception as exc:
-        return {"ok": False, "error": str(exc)}
+        # errors.classify(), not a bare str(exc) -- see _eval_exact's catch
+        # above for why a catch-all that skips it is how a CPython
+        # digit-limit ValueError reports as `internal` (GH #326, THE-1091).
+        return errors.error_result(errors.classify(exc), str(exc))
 
 
 # ── the bound (#84) ────────────────────────────────────────────────────────

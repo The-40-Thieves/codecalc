@@ -497,6 +497,303 @@ behind it.
   `remedy` strings now name it instead of a `session_files` listing tool
   that was never able to act on what it showed.
 
+- **`reject_explosive` only inspected `Pow` nodes, so a product (or sum) of
+  individually legal heavy calls bypassed `MAX_NUMERIC_DIGITS` and reached
+  CPython's own int->str ceiling instead** (GH #326, THE-1091).
+  `symbolic(op="simplify", expr="*".join(["factorial(1463)"] * 117))` —
+  1871 chars, under the 2000-char cap, every `factorial(1463)` individually
+  legal at 3998 digits — materializes to `Mul(Integer, Integer, ..., 117 of
+  them)` during PARSING itself (a function call on a literal argument
+  evaluates at parse time regardless of `evaluate=False`), a shape with no
+  `Pow` anywhere for the old Pow-only walk to catch. It returned
+  `"code": "internal"` with a raw CPython message ("...use
+  sys.set_int_max_str_digits()...") addressed to nobody the caller can act
+  on. `reject_explosive` now runs a SEPARATE pass — an order-independent,
+  memoized, single-visit-per-node log-magnitude scan (`_numeric_ceiling_
+  scan`/`_log10_magnitude`) — over every numeric-only `Mul`/`Add`/`Integer`
+  subtree, refusing an over-cap product or sum BEFORE evaluation with
+  `"resource_exhausted"` and a remedy addressed to the caller, without
+  touching the pre-existing `Pow`-only loop at all. Two follow-on bugs, both
+  caught by cross-vendor review before release: the first version delegated
+  to the exact-accumulation bit-budget check the `Pow` branch already used,
+  which is ORDER-DEPENDENT — `factorial(1463)*factorial(1463)/
+  (factorial(1463)*factorial(1463))` is exactly 1, but was refused as
+  over-cap because the numerator's intermediate product blew the budget
+  before the cancelling denominator was multiplied in — and re-resolved
+  every numeric subtree at every numeric ancestor, superlinear in tree
+  depth (an alternating Add/Mul chain of depth 250 measured 0.311s in
+  `reject_explosive` alone, now under 20ms). Separately, `exact.py`'s
+  `except Exception`/`except ValueError` catches that returned a bare
+  `{"ok": False, "error": ...}` (the four generic catch-all clauses in
+  `eval_exact`, `solve_expression`, `limit_expression`,
+  `simplify_expression`, plus `eval_exact`'s own Fraction-formatting catch
+  and `radix_convert`'s digit-parsing catch) now route through
+  `errors.classify`, which requires BOTH fragments of CPython's digit-limit
+  message (not a single overly-broad substring) to map a `ValueError` to
+  `resource_exhausted` instead of falling through to the generic
+  `ValueError` -> `validation` mapping or, previously, `internal`. A third
+  cross-vendor review round found three more gaps in the round-two design:
+  (1) `_log10_magnitude` on a `Mul`/`Add` returned `None` — inconclusive,
+  fall through — the moment ANY child was inconclusive, but SymPy flattens
+  a chain of the same operator into one n-ary node, so `x *
+  factorial(1463) * ... * factorial(1463)` (117 of them; also reproduced
+  with a `cos(0)*`, `pi*`, `E*`, or `2**(1/2)*` prefix) kept every
+  `factorial(1463)` sibling individually under the digit cap and bypassed
+  refusal entirely, still materializing the ~467,766-digit product. Fixed
+  by refusing on the RESOLVABLE part of a Mul/Add alone once the whole
+  node is inconclusive — a symbolic or unresolvable sibling cannot make an
+  already-over-cap numeric part smaller in any way the printer would
+  rescue. (2) `_log10_magnitude`'s recursive descent sat outside
+  `safe_parse`'s own `try/except` (which only wraps the parse step), a
+  latent `RecursionError` risk on a sufficiently deep tree; now guarded at
+  the `reject_explosive` call site, refusing with the same "too deeply
+  nested" wording `logic.py`'s parser already uses for the identical
+  shape. (3) `reject_explosive`'s `Pow` branch still resolved a
+  Mul/Rational-shaped base or exponent via the order-DEPENDENT
+  `_bounded_numeric_value` directly, so a cancelling Mul used as a Pow's
+  base or exponent (`2**(f*f/(f*f))`, `(f*f/(f*f))**2`) still
+  false-refused even though the identical cancellation at the top level
+  was already fixed; both now resolve through `_log10_magnitude` first
+  (`_resolve_numeric_exactly`), falling back to an exact reconstruction
+  only once that confirms it is safe (cheap) to. A fourth review round
+  found the residual gap was architectural, not three more instances:
+  printability was still being measured as a single signed
+  log10(|value|), when the actual invariant this module needs is that no
+  numeric subtree's PRINTED numerator or denominator ever exceeds
+  `MAX_NUMERIC_DIGITS` — a value can be tiny (even negative in log space,
+  a reciprocal) while its denominator alone is thousands of digits
+  (`1/(factorial(1463)*factorial(1463))`), and `Pow` itself was not part
+  of the ceiling scan at all, so a trivial `**1` or a reciprocal `**-1`
+  walked an over-cap numeric part straight through it
+  (`("*".join(["factorial(1463)"]*117)+"**1")`, `(f*f)**-1`). Replaced
+  the scalar magnitude model with a numerator/denominator pair tracked in
+  log space throughout (`_log10_num_den`/`_factor_multiset`/
+  `_multiset_log_num_den`/`_safe_multiset_rational`), folded `Pow` into
+  the scan's own trigger set instead of a separate loop, and removed
+  `_resolve_numeric_exactly`'s `evaluate=True` reconstruction entirely —
+  SymPy's own `Mul.flatten` folds integer powers of a numeric base
+  internally regardless of the final combined magnitude, so
+  `2**(2**N * 3**(-N))` for a large `N` tried to materialize the literal
+  `2**N` on the way to a negligible net value; the exponent's value is
+  now derived purely from log-space arithmetic and a per-term-gated exact
+  `Fraction`, never SymPy's own evaluator. A fifth review round found one
+  more residual class in that same Pow branch: a numeric base whose
+  exponent is neither a bare `Integer` nor a `Mul`/`Pow`-of-`Integer`
+  multiset reducible to an exact integer (an `Add` exponent —
+  `2**(14999+1)`, the same value as the already-refused `2**(30000/2)`,
+  or `2**(factorial(1463)+1)` — or a genuinely non-integral rational
+  whose base still makes the result a huge integer — `(10**3000)**(3/2)
+  == 10**4500`) fell through unrefused, and the symbolic-base
+  `MAX_SYMBOLIC_EXPONENT` cost ceiling had the identical gap
+  (`(x+1)**(1000+1000)`). Fixed by never requiring exactness for the
+  refusal VERDICT at all: an upper bound on the exponent's magnitude,
+  derived from the same numerator/denominator machinery every other node
+  already uses, is enough to decide whether `base**exponent` would print
+  over cap, without ever resolving the exponent's actual value — which
+  also closes a second, narrower gap in the exact-value path it replaces
+  (`_safe_multiset_rational` gated each individual factor's size but not
+  their combined product, so an exponent built from 20+ distinct heavy-
+  call results, each individually small, still multiplied into a real
+  ~10**5-digit `Fraction`). `_safe_multiset_rational` — along with
+  `_bounded_numeric_value`, `_NumericTooLarge`, `_SUBTREE_BIT_BUDGET`,
+  and `_SAFE_RECONSTRUCT_DIGITS`, all dead code by this point — is
+  deleted rather than patched. A second, independent review family
+  (Codex) found four more findings in parallel, none overlapping: (1) a
+  COMPUTED heavy-function argument (`factorial(1463+1)`,
+  `fibonacci(1463*1000)`) bypassed the token-level `_heavy_call_
+  violation` entirely — every token is individually under
+  `MAX_HEAVY_ARG`, and the resulting `Function` node stayed opaque to the
+  numeric scan; fixed by bounding a heavy function's own argument at the
+  TREE level too, via the same `_log10_num_den` machinery, with the
+  token check kept as the cheap first pass. (2) `bell`, `genocchi`,
+  `motzkin`, `andre`, and `partition` are admitted by the parser's
+  namespace but were missing from `_HEAVY_FUNCTIONS` — `bell(1500)` took
+  5.48s and produced a 3,107-digit `Integer` DURING PARSING, before any
+  guard ran; added at the same `MAX_HEAVY_ARG` cap after auditing every
+  eager combinatorial/number-theoretic name sympy 1.14 actually exposes.
+  (3) a scientific-notation `Float` literal (`1e100000`, nine
+  characters) is a parse-time CPU bomb — `1e1000000` ran past 30s just
+  constructing the `evaluate=False` shape, before `reject_explosive` (or
+  even `reject_unsafe`'s existing SECURITY screen) ever got a chance —
+  now refused at the TOKEN level, before `parse_expr` runs at all, for
+  any literal whose scientific-notation exponent magnitude exceeds
+  `MAX_NUMERIC_DIGITS`. (4) `Add`'s upper bound recognized no
+  cancellation at all, so two terms that are EXACT additive inverses of
+  each other (`factorial(1463)*factorial(1463) -
+  factorial(1463)*factorial(1463)`, printable, cheap, truly `0`) were
+  refused on their own uncancelled magnitude — `Add` now gets the same
+  structural cancellation `Mul` already has via `_factor_multiset`,
+  which also fixed a latent bug in how a bare `-1`/`1` Integer encoded
+  its sign in that multiset (a spurious `{1: 1}` entry broke exact
+  structural-equality matching between a term and its own negation).
+  A sixth review round (grok, reviewing the round-five head) found the
+  round-five/six `Pow` short-circuits both stopped the scan from ever
+  descending into an exponent that would itself be expensive to
+  CONSTRUCT, as opposed to merely expensive to PRINT: a unit-magnitude
+  base (`1`, `-1`, `1/1`, `2/2`, `1.0`) resolves to `(0, 0, True)` without
+  ever inspecting the exponent at all, and a same-base cancelling
+  exponent (`2**(2**N * 2**(-N))`) resolves to `(0, 0, True)` via
+  `_factor_multiset`'s own cancellation — both cases leave a genuinely
+  expensive inner `Pow(2, N)`/`Pow(3, -N)` (for a ~300-digit `N`, hangs
+  past `guarded_call`'s CPU backstop) completely unchecked, since
+  `Mul.flatten` still constructs that intermediate during real evaluation
+  regardless of what the surrounding expression later does with the
+  result. Closed not in the scan (an attempt to make the scan always push
+  a resolved `Pow`'s children regardless of its own verdict regressed
+  `1**(20 distinct factorial factors)`, previously legal: the scan would
+  then independently judge the EXPONENT's own ~79,347-digit print
+  profile as if it mattered, when it is cheap to construct — 20 already-
+  materialized integers multiplied together — and never printed at all,
+  since `1 ** anything` is always `1`; print-profile-over-cap and
+  expensive-to-construct are different questions, and the scan only ever
+  answered the first one correctly) but in `reject_explosive`'s separate
+  Pow-only loop, which already walks every node via `_walk` — with no
+  "stop descending" optimization at all — regardless of any Mul/Add
+  ancestor's cancellation or unit-base status: it now bounds a numeric-
+  base `Pow` with a bare integer exponent's own construction cost
+  directly, closing the gap the scan's cancellation-aware "stop
+  descending" rule correctly cannot close on its own. A second,
+  independent review (Codex, reviewing the round-six head in parallel)
+  found five more issues, none overlapping: (1) the identical class from
+  the `Add` side — `_cancel_additive_inverses` marks `2**1000000000 -
+  2**1000000000` resolved-to-zero and never descends into either `Pow`,
+  but SymPy evaluates each child before cancelling, so the ~301-million-
+  digit `Pow(2, 1000000000)` still gets constructed — verified already
+  closed by the same Pow-loop fix above, which is agnostic to whether its
+  ancestor is a `Mul` or an `Add`; added as a regression test rather than
+  a code change. (2) a heavy call NESTED inside another heavy call's
+  argument (`factorial(fibonacci(100))`, `fibonacci(factorial(10))`,
+  `factorial(factorial(8))`) was uncaught: SymPy evaluates a heavy call
+  on an integer-literal argument eagerly even under `evaluate=False`, so
+  the INNER call's numeric result (not its short source text) becomes
+  the OUTER call's argument before any tree exists for `reject_explosive`
+  to inspect — no tree-level rule can run early enough; `_heavy_call_
+  violation` now refuses outright, at the token level, any heavy call
+  whose own argument span contains another heavy-function call token,
+  regardless of either call's individual argument size. (3) `_oversized_
+  scientific_literal_violation`'s regex had no allowance for Python's
+  `j`/`J` imaginary suffix, so `1e1000000j` never matched at all and
+  reached the real parse unbounded; separately, being an unanchored
+  search, it misread the literal hex digits of `0x1e100000` as a fake
+  "exponent of 100000". Fixed by allowing an optional trailing `j`/`J`
+  before the anchor and excluding `0x`/`0o`/`0b`-prefixed tokens (which
+  have no exponent syntax in any of those bases) up front. (4) an audit
+  of every remaining eager name in `safe_global_dict()` turned up two
+  more hazard shapes: `factorint`/`primefactors`/`divisors`/`mobius`/
+  `nextprime`/`isprime` are not `_HEAVY_FUNCTIONS`-shaped at all (the
+  hazard scales with the size of the NUMBER under test, not a growing
+  OUTPUT for a small "count" argument — a random ~40-digit semiprime
+  measured 27.8s to factor, and RSA-100 hits the process memory/CPU
+  backstop outright) and now get their own digit-count cap
+  (`_FACTOR_ARG_FUNCTIONS`, 25 digits); `sqrt`/`root`/`cbrt` are the
+  opposite shape (cheap to bound in log space — an n-th root's digit
+  count is always comfortably under `MAX_NUMERIC_DIGITS` — but not cheap
+  to COMPUTE: SymPy's perfect-power check measured 4.0s at 1900 digits)
+  and get a separate, more generous cap (`_ROOT_ARG_FUNCTIONS`, 1,200
+  digits); `digamma`/`zeta` turned out to be `_HEAVY_FUNCTIONS`-shaped
+  after all and were simply added to that set at the existing
+  `MAX_HEAVY_ARG` cap; `stirling`, the audit's one open hypothesis, is
+  not actually exposed by sympy 1.14's namespace at all, so there was
+  nothing there to bound. Both new families are token-level-literal-only,
+  same scope as the pre-existing `_heavy_call_violation` — a COMPUTED
+  argument to any of these nine functions has no tree-level backstop yet
+  (documented in `_oversized_factor_or_root_arg_violation`'s own
+  docstring as a known gap, not an oversight). (5) `_cancel_additive_
+  inverses` only recognized an EXACT multiset match with opposite sign,
+  so `2*factorial(1463)*factorial(1463) - factorial(1463)*factorial(1463)
+  - factorial(1463)*factorial(1463)` (exactly `0`) was still refused —
+  the leading `2` makes the first term's multiset a different key from
+  the other two's. Fixed by splitting each term into a small-integer
+  `coeff` (`_split_coefficient`, folding only a base/exponent pair small
+  enough on both axes to be a real literal multiplier, never a heavy-
+  function result) and a `rest` key used for grouping instead of the raw
+  multiset, then summing signed coefficients per group; a group's
+  coefficients summing to exactly zero drops every term in it, any other
+  net sum leaves every term in that group untouched (never replaced by
+  one combined term), so a genuinely over-cap residual
+  (`3*factorial(1463)*factorial(1463) - factorial(1463)*factorial(1463) -
+  factorial(1463)*factorial(1463)`) still falls through to the
+  unmodified per-term upper bound and is correctly refused.
+  An eighth review round (grok PASS with two Low notes; Codex FAIL with
+  one High and one Low, both on the round-seven head) closed the last
+  three: (High, Codex) round seven's new per-function caps (the 25-digit
+  factoring family, the 1,200-digit root family) were enforced ONLY per
+  numeric TOKEN — `factorint(<25-digit literal>*<25-digit literal>)` (two
+  individually-permitted literals whose PRODUCT is ~50 digits, hard to
+  factor) and `sqrt(<990-digit literal>*<990-digit literal>)` (product
+  ~1980 digits, 2.1s to compute) both passed `classify_unsafe` clean —
+  the same "new caps added to one layer" pattern as before, just one
+  layer over. Fixed structurally rather than patched a third time: ONE
+  table (`_FUNCTION_ARG_CAPS`, name -> `(cap_kind, cap_value)`) now
+  drives every enforcement site in the module — the token screen's
+  per-literal check, a NEW token-screen check that sums every literal's
+  digit count within one top-level ARGUMENT (an upper bound on their
+  product, closing both repros above at the token level), the tree-level
+  `Function`-node check in `_numeric_ceiling_scan` (generalized from
+  `_HEAVY_FUNCTIONS` alone), and a NEW tree-level `Pow`-loop branch for a
+  unit-fraction exponent (`1/2`, `1/3`, ...) on a numeric base — the
+  actual tree shape `sqrt`/`cbrt` compile to, since neither ever appears
+  as a `Function` node named after itself; `root` shares the token-level
+  path instead, since its own construction was found (live) to take a
+  different, more eager code path than `sqrt`/`cbrt` for at least one
+  concrete-base case. (Low, Codex) `_approx_decimal_digits()` truncates a
+  float `log10` and overcounts at an exact power-of-ten boundary — a
+  25-digit all-9s literal read as 26 digits, a 1,200-digit one as 1,201 —
+  and the digit-cap enforcement decision used that approximation
+  directly. Fixed with a new `_exact_decimal_digit_count`: the EXACT
+  digit count of a plain decimal literal is just its token string length
+  (stripped of underscores and leading zeros), cheap and exact, with the
+  log-based approximation kept only for a hex/octal/binary literal (whose
+  character count bears no relation to its decimal value) and for prose.
+  (Low, grok) two stale docstring passages rewritten to describe current
+  behaviour: `_log10_num_den`'s compound-`Pow` case no longer claims a
+  flat `(0.0, 0.0, False)` (it resolves a unit-magnitude base to
+  `(0.0, 0.0, True)` without ever reading the exponent, and otherwise
+  scales the base by an upper bound on the exponent's magnitude); the
+  scan's own comment no longer claims `_log10_num_den` "never even looked
+  at the base" for a non-Integer exponent (the compound-`Pow` branch
+  loads the base first, for its own unit-base check, before the "push
+  both children" case this comment explains is even reached).
+  A ninth review round (grok, PASS with no remaining High — three Low
+  notes) closed the last three: a docstring overclaimed that `sqrt`,
+  `root`, and `cbrt` alike "DO respect `evaluate=False`" — true for
+  `sqrt`/`cbrt`, false for `root` (probed live: `root(factorial(1463),
+  2)` parses to a `Mul`, not a `Pow`, a more eager construction path —
+  the docstring now says so and scopes `root` to the token-level layer
+  explicitly, matching its own test and the round-8 entry above); the
+  table did not yet drive EVERY comparison — the `Function`-node "value"
+  check still read a `_log10_max_heavy_arg` derived from the bare
+  `MAX_HEAVY_ARG` module constant rather than the matched row's own
+  `cap`, and the Pow loop's unit-fraction branch hardcoded `MAX_ROOT_
+  ARG_DIGITS` directly — both now read from `_FUNCTION_ARG_CAPS` itself
+  (a monkeypatched row with a deliberately different cap, in a new
+  self-check test, proves both layers actually follow the table); and
+  the summed-digit token rule's refusal message now says "the sum of the
+  literal digits", explicitly, since it is a safe UPPER bound on a
+  product's true digit count, not the exact product — a small extra
+  literal factor can tip the sum over the cap even when the true product
+  still fits (`factorint(<25-digit literal>*2)`, accepted as documented
+  conservatism, not a bug).
+  A tenth review round (Codex, confirming the round 8-9 delta) verified
+  every prior claim and returned one remaining Low (its one Medium,
+  `isprime(10**24+7)` rejected as "not an integer", behaves identically
+  on `main` and is pre-existing — tracked separately as THE-1095, not
+  touched here): round 8 made the TOKEN-level digit-count check exact,
+  but the TREE-level check (fed by `_log10_of_int`'s float
+  approximation) still rounded the wrong way at an EXACT boundary —
+  `safe_parse("sqrt(" + "9"*1200 + ")")`, a value with EXACTLY 1200
+  digits at `MAX_ROOT_ARG_DIGITS`, passed the token screen but was then
+  refused at the tree level, where the float log10 of an all-9s value
+  rounded up and reported 1201 digits instead of 1200. Fixed with
+  `_exact_digit_count_if_cheap`/`_digit_count_over_cap_for_node`,
+  preferring the exact digit count of an already-materialized
+  `Integer`/`Rational` over the float approximation (a `Mul`/`Pow` chain
+  still uses the float path, unchanged — reconstructing it into a
+  concrete value just to count digits could itself be the expensive
+  operation this file exists to avoid). While there: the unit-fraction
+  root refusal message said "the base of a 2-th root"/"3-th root" —
+  now says "square root"/"cube root"/"n-th root" properly.
+
 ## [0.12.0] — 2026-09-09
 
 ### Removed
