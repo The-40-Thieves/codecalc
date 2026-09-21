@@ -719,7 +719,7 @@
     },
     "compact_result": {
       "title": "a deliberately small result",
-      "description": "What `execute_code(compact=True)` returns. Diagnostics a caller can live without are dropped to save tokens; `unenforced`, `output_error` and (new \u2014 see below) `code`/`error`/`remedy`/`code_inferred` are NOT droppable and appear whenever they say anything, which is the whole difference between this and the version of compact mode that was a defect (#117). No `backend` key, which is what distinguishes this branch from the full envelope.\n\n`code`/`error`/`remedy`/`code_inferred` are the ENTIRE content of a \"rejected before execution\" failure (validation, permission_denied, ...) \u2014 that shape has no `verdict`/`stdout`/`exit_code` to fall back on, so compact mode dropping all four used to leave such a failure with nothing to say at all: `execute_code(\"nosuchlang\", ..., compact=True)` came back `code: \"internal\"` where `compact=False` on the identical call correctly gave `validation`, because `errors.ensure_code` ran AFTER compaction had already dropped the `error` text it needed to classify from. `errors.ensure_code` now runs BEFORE compaction instead (see `server.compact_result`'s own docstring).",
+      "description": "What `execute_code(compact=True)` returns. Diagnostics a caller can live without are dropped to save tokens; `unenforced`, `output_error` and (new \u2014 see below) `code`/`error`/`remedy`/`code_inferred` are NOT droppable and appear whenever they say anything, which is the whole difference between this and the version of compact mode that was a defect (#117). No `backend` key, which is what distinguishes this branch from the full envelope.\n\n`code`/`error`/`remedy`/`code_inferred` are the ENTIRE content of a \"rejected before execution\" failure (validation, permission_denied, ...) \u2014 that shape has no `verdict`/`stdout`/`exit_code` to fall back on, so compact mode dropping all four used to leave such a failure with nothing to say at all: `execute_code(\"nosuchlang\", ..., compact=True)` came back `code: \"internal\"` where `compact=False` on the identical call correctly gave `validation`, because `errors.ensure_code` ran AFTER compaction had already dropped the `error` text it needed to classify from. `errors.ensure_code` now runs BEFORE compaction instead (see `server.compact_result`'s own docstring).\n\n`stderr` (#323) is the same shape of gap for an EXECUTED-and-failed result: present whenever `ok` is false, `exit_code` is a nonzero integer, or `verdict` is not `OK`, and absent on a clean run. Before this fix `stderr` was dropped unconditionally, so `execute_code(compact=True)` on a program that wrote its own failure reason to stderr and exited nonzero reported `ok: false` with nothing that said why.",
       "type": "object",
       "required": [
         "ok",
@@ -747,6 +747,9 @@
           ]
         },
         "stdout": {
+          "type": "string"
+        },
+        "stderr": {
           "type": "string"
         },
         "exit_code": {

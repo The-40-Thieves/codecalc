@@ -1390,7 +1390,15 @@ def build_schema(dialect: str | None = None, schema_id: str | None = None) -> di
                     "ensure_code` ran AFTER compaction had already dropped "
                     "the `error` text it needed to classify from. `errors."
                     "ensure_code` now runs BEFORE compaction instead (see "
-                    "`server.compact_result`'s own docstring)."
+                    "`server.compact_result`'s own docstring).\n\n"
+                    "`stderr` (#323) is the same shape of gap for an "
+                    "EXECUTED-and-failed result: present whenever `ok` is "
+                    "false, `exit_code` is a nonzero integer, or `verdict` "
+                    "is not `OK`, and absent on a clean run. Before this "
+                    "fix `stderr` was dropped unconditionally, so "
+                    "`execute_code(compact=True)` on a program that wrote "
+                    "its own failure reason to stderr and exited nonzero "
+                    "reported `ok: false` with nothing that said why."
                 ),
                 "type": "object",
                 "required": ["ok", "verdict", "stdout", "exit_code"],
@@ -1399,6 +1407,7 @@ def build_schema(dialect: str | None = None, schema_id: str | None = None) -> di
                     "ok": {"type": "boolean"},
                     "verdict": {"type": "string", "enum": list(VERDICTS)},
                     "stdout": {"type": "string"},
+                    "stderr": {"type": "string"},
                     "exit_code": {"type": ["integer", "null"]},
                     "unenforced": {"type": "array", "items": {"type": "string"}},
                     "output_error": {"type": ["string", "null"]},

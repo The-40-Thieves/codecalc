@@ -734,7 +734,11 @@ diluting it with detail a lexical tool-selector never needs.
 **The compact shape** drops diagnostics to save tokens. It never drops
 `unenforced` or `output_error` — or, since `1.4.0`, `artifacts_created` and
 `truncated_inline` — which is the difference between the current
-implementation and the one that was a defect (#117).
+implementation and the one that was a defect (#117). `stderr` (#323) is
+present whenever the run did not succeed (`ok` false, a nonzero integer
+`exit_code`, or `verdict` other than `OK`) and absent on a clean run — the
+executed-and-failed counterpart to `code`/`error`/`remedy` on `rejected`
+above, which cover the rejected-before-execution case.
 
 > An earlier version of this document claimed there were two shapes and that
 > `executor.execute` was the single point every execution result passes through.

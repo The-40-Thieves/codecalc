@@ -261,6 +261,101 @@ check("  ...and omits a null one",
           {"ok": True, "verdict": "OK", "stdout": "x", "exit_code": 0,
            "output_error": None}))
 
+# ── #323: compact mode must not hide WHY an executed run failed ───────────
+# Same defect class as #117, one shape over: #117 was `code`/`error`/`remedy`
+# for a REJECTED-before-execution result (nothing to fall back on but those
+# four); #323 is `stderr` for an EXECUTED-and-failed one. Before this fix
+# `stderr` was unconditionally absent from `_COMPACT_ALWAYS`/
+# `_COMPACT_DISCLOSURE`, so `execute_code(compact=True)` on a program that
+# wrote its own failure reason to stderr and exited nonzero reported
+# `ok: false` with no statement of why — the exact repro in the ticket.
+import shutil as _shutil323
+
+from codecalc import errors as _errors323
+
+# 1. A real runtime failure: the program's own stderr must survive compact
+# mode verbatim, matching the non-compact call byte for byte.
+_rte_code = 'import sys\nsys.stderr.write("WHY IT FAILED\\n")\nsys.exit(7)'
+_full323 = _srv117.execute_code("python3", _rte_code)
+_comp323 = _srv117.execute_code("python3", _rte_code, compact=True)
+check("compact keeps stderr on a runtime failure",
+      _comp323.get("ok") is False and _comp323.get("exit_code") == 7
+      and "WHY IT FAILED" in _comp323.get("stderr", ""),
+      f"-> {_comp323}")
+check("  ...verbatim against the non-compact call",
+      _comp323.get("stderr") == _full323.get("stderr"),
+      f"-> compact={_comp323.get('stderr')!r} full={_full323.get('stderr')!r}")
+
+# 2. A compile-time failure: the compiler's own diagnostic, not the program's,
+# is what stderr carries here — same rule, different phase. Skipped (not
+# failed) when no C compiler is resolvable, the same shutil.which pattern
+# test_platform_contract.py already uses for this exact language.
+if _shutil323.which("gcc") or _shutil323.which("cc"):
+    _c_src = "int main(){ this is not c ;}"
+    _full323c = _srv117.execute_code("c", _c_src)
+    _comp323c = _srv117.execute_code("c", _c_src, compact=True)
+    check("compact keeps the compiler diagnostic on a C compile failure",
+          _comp323c.get("ok") is False
+          and bool(_comp323c.get("stderr", "").strip()),
+          f"-> {_comp323c}")
+    # Not a byte-for-byte "verbatim" comparison like the runtime-failure case
+    # above: each call compiles into its OWN fresh temp workdir, so the
+    # compiler embeds a different `codecalc-<run>-<hash>/.../main.c` path
+    # per call even for the identical source — comparing full strings would
+    # fail on that path, not on a real difference in what was kept. The
+    # diagnostic TEXT gcc actually produced for this source is
+    # call-invariant, so that is what gets compared instead, with the
+    # per-run directory name (not a literal /tmp path — no S108 concern,
+    # this only ever reads a string the sandbox already produced) normalized
+    # out first.
+    _rundir_re323 = _re_mod.compile(r"codecalc-\S+?/")
+    check("  ...with the same diagnostic text as the non-compact call",
+          "unknown type name" in _comp323c.get("stderr", "")
+          and "unknown type name" in _full323c.get("stderr", "")
+          and _rundir_re323.sub("<rundir>/", _comp323c.get("stderr", ""))
+          == _rundir_re323.sub("<rundir>/", _full323c.get("stderr", "")),
+          f"-> compact={_comp323c.get('stderr')!r} full={_full323c.get('stderr')!r}")
+else:
+    print("SKIP #323 C compile-failure case (no gcc/cc resolvable)")
+
+# 3. A clean run drops stderr — compact mode still saves the tokens it was
+# built for on the success path, which is the one this fix must not regress.
+_clean323 = _srv117.execute_code("python3", "print(6*7)", compact=True)
+check("compact still omits stderr on a successful run",
+      "stderr" not in _clean323, f"-> {sorted(_clean323)}")
+
+# 4. The #117 ordering property must still hold with the new stderr branch in
+# place: a rejected-before-execution result (no real verdict/exit_code to
+# trigger the new check) still classifies IDENTICALLY under compact=True.
+# tests/test_error_codes.py pins this end-to-end already; re-asserted here,
+# next to the fix, so a regression in this exact function is caught locally.
+_reject323 = _srv117.execute_code("nosuchlang", "x", compact=True)
+check("compact_result's stderr branch does not disturb the #117 ordering fix",
+      _reject323.get("code") == _errors323.VALIDATION and bool(_reject323.get("error")),
+      f"-> {_reject323}")
+
+# 5. Unit-level: each of the three independent triggers keeps stderr, in
+# isolation, called through compact_result directly the way output_error is
+# above — this is the case a purely end-to-end test cannot reach, since a
+# real backend never emits ok=false with exit_code=0 (only OLE does, and only
+# on a truncated stream that would make the stderr assertion itself noisy).
+check("ok=false alone keeps stderr",
+      _srv117.compact_result({"ok": False, "verdict": "RTE", "stdout": "",
+                              "stderr": "boom", "exit_code": None}
+                             ).get("stderr") == "boom")
+check("a nonzero exit_code alone keeps stderr",
+      _srv117.compact_result({"ok": True, "verdict": "OK", "stdout": "",
+                              "stderr": "boom", "exit_code": 3}
+                             ).get("stderr") == "boom")
+check("a non-OK verdict alone keeps stderr (the OLE/ok=true/exit_code=0 case)",
+      _srv117.compact_result({"ok": True, "verdict": "OLE", "stdout": "",
+                              "stderr": "boom", "exit_code": 0}
+                             ).get("stderr") == "boom")
+check("a failed run with genuinely empty stderr still carries the key",
+      "stderr" in _srv117.compact_result({"ok": False, "verdict": "RTE", "stdout": "",
+                                          "stderr": "", "exit_code": 1}),
+      "-> the key must say 'nothing more to see', not go missing")
+
 
 # ── #88 item 5: the extras degrade, they do not crash ─────────────────────
 # The imports were ALWAYS lazy; what was missing is what happens when one

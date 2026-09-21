@@ -77,6 +77,21 @@ behind it.
   error — rather than silently falling back to the regex heuristic over
   adversarial input the way every other `parsed=False` reason still does.
 
+- **`execute_code(compact=True)` dropped `stderr` unconditionally, so a
+  failed run could say THAT it failed but never WHY** (GH #323, THE-1088).
+  Same defect class as #117: that fix made `code`/`error`/`remedy` non-
+  droppable because they are the entire content of a rejected-before-
+  execution failure; `stderr` is the executed-and-failed counterpart and
+  was still dropped, along with the compiler diagnostic on a compile
+  failure. `stderr` is now kept, whole, whenever the run did not succeed
+  (`ok` is `false`, `exit_code` is a nonzero integer, or `verdict` is not
+  `OK` — the third catches an OLE run, which can otherwise report
+  `ok: true, exit_code: 0`) and dropped on a clean run exactly as before,
+  so the token saving compact mode exists for is unaffected on the success
+  path. The `compact` parameter's schema description now says so, and
+  `docs/contract/result-v1.schema.json` documents `stderr` on the
+  `compact_result` shape.
+
 ## [0.12.0] — 2026-09-09
 
 ### Removed
