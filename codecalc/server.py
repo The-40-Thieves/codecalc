@@ -1731,13 +1731,21 @@ def trace_execution(
     `lines_executed` / `lines_never_executed` (coverage from a static parse),
     and `truncated`/`truncated_reason` when `max_events` or an internal
     size ceiling stopped RECORDING early (the underlying stdout/exit code
-    are unaffected either way).
+    are unaffected either way). `truncated_reason` is also
+    `"event_detail_over_cap"` when one event's OWN detail (e.g. a call with
+    more than 200 changed locals) was too large to admit — that ONE event is
+    still present in `events`, as a bounded stub (`locals: {}`,
+    `detail_dropped: true`), so its real `step`/`line`/`func` still count
+    toward `lines_executed`/`branches` exactly like any other event; only
+    its own detail, never the rest of the trace, was dropped.
 
     TRUST: the trace is produced BY the traced program at its OWN privilege
     — a debugging aid, not an attestation of behaviour, exactly as
     trustworthy as that program's own stdout. `discarded_events` /
     `events_consistent` are a best-effort tamper/corruption signal (never a
-    guarantee) computed independently of the file's own content.
+    guarantee) computed independently of the file's own content —
+    `events_consistent` requires `discarded_events == 0` among its
+    conditions, since an honest run never produces one.
     `unenforced` may additionally note "only the main thread is traced"
     (sys.settrace is per-thread) or, fallback backend only, an OLE
     `exit_code` race.

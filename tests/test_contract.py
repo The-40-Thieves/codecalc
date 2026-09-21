@@ -30,6 +30,7 @@ the split is deliberate rather than a workaround.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import pathlib
 import sys
@@ -865,6 +866,85 @@ for _tlabel in ("rust", "python"):
               f"branches={_compile_err.get('branches')} "
               f"verdict={_compile_err.get('verdict')}")
         check_stamped(f"{_tlabel} compile-error trace_execution", _compile_err)
+
+        # (1.18.0, GH #321/THE-1086) An event whose own detail is too big
+        # (a call with more than 200 changed locals) is still admitted as a
+        # bounded stub, with `detail_dropped: true` — schema-validate that
+        # shape explicitly, since `_execution_trace_only_properties`'s
+        # `events[].detail_dropped` and `truncated_reason`'s new enum
+        # member are otherwise only exercised implicitly.
+        _over_cap_params = ", ".join(f"a{i}" for i in range(205))
+        _over_cap_args = ", ".join("1" for _ in range(205))
+        _over_cap = tracing.execute_trace(
+            "python3",
+            f"def big({_over_cap_params}): return 1\nprint(big({_over_cap_args}))\n",
+        )
+        check(f"{_tlabel}: an over-cap trace_execution result still "
+              f"validates against the published schema",
+              not errors_for(_over_cap), f"-> {errors_for(_over_cap)[:2]}")
+        check(f"{_tlabel}: truncated_reason is the new event_detail_over_cap "
+              f"member, not one of the pre-1.18.0 values",
+              _over_cap.get("truncated") is True
+              and _over_cap.get("truncated_reason") == "event_detail_over_cap",
+              f"-> truncated={_over_cap.get('truncated')} "
+              f"reason={_over_cap.get('truncated_reason')}")
+        check(f"{_tlabel}: the stub event carries detail_dropped=true, "
+              f"empty locals, and its own real step/line/func",
+              any(e.get("detail_dropped") is True and e.get("locals") == {}
+                  and e.get("func") == "big" and e.get("line") == 1
+                  for e in (_over_cap.get("events") or [])),
+              f"-> events={_over_cap.get('events')}")
+        check(f"{_tlabel}: the REAL parser output obeys the invariant "
+              f"itself — no event has BOTH detail_dropped and non-empty "
+              f"locals (the schema's own if/then, checked against actual "
+              f"output rather than only against hand-forged data below)",
+              all(not (e.get("detail_dropped") and e.get("locals"))
+                  for e in (_over_cap.get("events") or [])),
+              f"-> events={_over_cap.get('events')}")
+        check(f"{_tlabel}: the stub is accepted, not discarded — "
+              f"discarded_events stays 0 and events_consistent stays true",
+              _over_cap.get("discarded_events") == 0
+              and _over_cap.get("events_consistent") is True,
+              f"-> discarded_events={_over_cap.get('discarded_events')} "
+              f"events_consistent={_over_cap.get('events_consistent')}")
+        check_stamped(f"{_tlabel} over-cap trace_execution", _over_cap)
+
+        # ── negative controls (round-two cross-vendor review, GH #321/
+        # THE-1086): `detail_dropped` was `{"type": "boolean"}`, which
+        # admits `false` — a value the parser never emits — right alongside
+        # the documented "present and true, or absent" convention. A test
+        # that only checked real parser output (above) could not catch
+        # that gap: the parser was never going to hand it a `false` to
+        # check in the first place. These probe the SCHEMA directly with
+        # deliberately-forged data, the same "hand it something that ought
+        # to fail" idiom the CONTROL block at the top of this file uses.
+        _forged_false = copy.deepcopy(_over_cap)
+        for _ev in _forged_false["events"]:
+            if _ev.get("detail_dropped"):
+                _ev["detail_dropped"] = False
+                break
+        else:
+            check(f"{_tlabel}: over-cap result actually has a stub event "
+                  f"to forge (existence floor for the two checks below)",
+                  False, "-> no event carried detail_dropped=true")
+        check(f"{_tlabel}: CONTROL — detail_dropped: false FAILS schema "
+              f"validation (const: true, not a bare boolean — a strict "
+              f"client checking `if event.get(\"detail_dropped\")` would "
+              f"otherwise silently treat false the same as true)",
+              bool(errors_for(_forged_false)), f"-> {errors_for(_forged_false)[:2]}")
+
+        _forged_nonempty = copy.deepcopy(_over_cap)
+        for _ev in _forged_nonempty["events"]:
+            if _ev.get("detail_dropped"):
+                _ev["locals"] = {"x": "1"}
+                break
+        check(f"{_tlabel}: CONTROL — detail_dropped: true together with "
+              f"non-empty locals on the SAME event FAILS schema validation "
+              f"(the schema's own if/then: detail_dropped present implies "
+              f"locals is empty, so a client cannot receive both a "
+              f"dropped-detail marker and detail to read)",
+              bool(errors_for(_forged_nonempty)),
+              f"-> {errors_for(_forged_nonempty)[:2]}")
     finally:
         executor._rust = _saved_trace
 
