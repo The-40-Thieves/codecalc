@@ -62,6 +62,21 @@ behind it.
   it caught the intended `ValueError` — a regression test now pins that a
   real internal error still propagates out of `analyze()` instead.
 
+- **`analyze_complexity` raised an uncaught `RecursionError` on deeply nested
+  source instead of a coded refusal** (GH #324, THE-1089). `parsing.analyse`'s
+  docstring promises "Never raises", but its post-parse tree walk was plain
+  unguarded recursion with no depth cap — `analyze_complexity(code="("*4000 +
+  "1" + ")"*4000, language="python3")` blew CPython's stack and the MCP
+  dispatcher flattened it to a bare "Internal server error" with no `code` or
+  `remedy`. `walk` now carries a 300-level tree-depth cap (measured against a
+  realistic 300-line file at depth 20 and the issue's own depth-4000 repro),
+  plus a belt-and-braces `except RecursionError`; either returns
+  `ParseFacts(parsed=False, too_deep=True, reason=...)`, the same shape a
+  grammar failure already produces. `complexity.analyze`/`analyze_complexity`
+  turn that into `resource_exhausted` — a coded refusal, not an internal
+  error — rather than silently falling back to the regex heuristic over
+  adversarial input the way every other `parsed=False` reason still does.
+
 ## [0.12.0] — 2026-09-09
 
 ### Removed

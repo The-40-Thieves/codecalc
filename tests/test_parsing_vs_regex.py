@@ -170,6 +170,62 @@ f = parsing.analyse("def f(:\n  ???", "python3")
 check("syntactically broken source sets has_error", f.parsed and f.has_error,
       f"-> parsed={f.parsed} has_error={f.has_error}")
 
+# ── 13. a deeply nested tree is refused, not a RecursionError (GH #324) ─────
+# `analyse`'s own docstring promises "Never raises" — the post-parse `walk`
+# used to be plain unguarded recursion with no depth cap, so this exact input
+# raised an uncaught RecursionError straight out of the MCP tool. depth=4000
+# is the issue's own repro; depth=10 is its "normal result unaffected" case.
+DEEP = "(" * 4000 + "1" + ")" * 4000
+try:
+    f = parsing.analyse(DEEP, "python3")
+    _raised = None
+except RecursionError as exc:  # pragma: no cover — the bug this file guards
+    f = None
+    _raised = exc
+check("depth-4000 parens: analyse() does not raise", _raised is None, f"-> raised {_raised!r}")
+check("depth-4000 parens: parsed=False, too_deep=True, with a reason",
+      f is not None and f.parsed is False and f.too_deep is True and bool(f.reason),
+      f"-> {f}")
+
+SHALLOW = "(" * 10 + "1" + ")" * 10
+f = parsing.analyse(SHALLOW, "python3")
+check("depth-10 parens: still parses normally (unaffected by the cap)",
+      f.parsed is True and f.too_deep is False, f"-> {f}")
+
+# The tool-facing shape: complexity.analyze()/server.analyze_complexity() turn
+# `too_deep` into a coded refusal rather than an internal error OR a silent
+# regex-fallback guess over adversarial input (unlike every other parsed=False
+# reason, which still falls back to the regex heuristic below, unchanged).
+from codecalc import complexity, errors, server
+
+try:
+    cx = complexity.analyze(DEEP, "python3")
+    tool = server.analyze_complexity(DEEP, "python3")
+    _cx_raised = None
+except RecursionError as exc:  # pragma: no cover — the bug this file guards
+    cx = tool = None
+    _cx_raised = exc
+check("analyze_complexity: depth-4000 parens does not raise",
+      _cx_raised is None, f"-> raised {_cx_raised!r}")
+check("analyze_complexity: depth-4000 parens is a coded refusal, not ok",
+      tool is not None and tool.get("ok") is False
+      and tool.get("code") == errors.RESOURCE_EXHAUSTED and bool(tool.get("remedy")),
+      f"-> {tool}")
+check("complexity.analyze agrees with the tool wrapper",
+      cx is not None and cx.get("ok") is False and cx.get("code") == errors.RESOURCE_EXHAUSTED,
+      f"-> {cx}")
+
+# A normal program is unaffected: same facts, same estimate, as before the cap.
+NORMAL = "for i in range(n):\n    for j in range(n):\n        pass\n"
+f = parsing.analyse(NORMAL, "python3")
+check("normal program: parsing facts unaffected by the depth cap",
+      f.parsed is True and f.too_deep is False and f.loops == 2 and f.max_loop_depth == 2,
+      f"-> {f}")
+normal_result = complexity.analyze(NORMAL, "python3")
+check("normal program: analyze_complexity unaffected by the depth cap",
+      normal_result.get("ok") is True and normal_result.get("estimate") == "O(n^2)",
+      f"-> {normal_result}")
+
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== TREE-SITTER BEATS THE REGEX ON EVERY DIVERGENT CASE ===")
 sys.exit(1 if FAILS else 0)

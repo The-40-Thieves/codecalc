@@ -51,6 +51,11 @@ GRAMMAR_ALIASES: dict[str, str] = {
 #: async with a worker-thread pool, so parsers are per-thread rather than shared.
 _local = threading.local()
 
+#: Depth cap for `analyse`'s post-parse tree walk. See the comment at its use
+#: site (inside `analyse`, on the `walk` closure) for the measurements this
+#: number is based on (GH #324, THE-1089).
+_MAX_TREE_DEPTH = 300
+
 
 def grammar_name(language: str) -> str | None:
     """tree-sitter grammar for a codecalc language, or None if unknown."""
@@ -180,6 +185,13 @@ class ParseFacts:
     #: Populated when the parser could not be used at all, so a caller can say
     #: WHY it fell back instead of silently reporting a heuristic as a parse.
     reason: str | None = None
+    #: True only when `reason` is the depth cap below, never for "no grammar"
+    #: or a rejected parse. A caller (complexity.py) needs to tell "this
+    #: source is pathologically nested" apart from every other parsed=False
+    #: case, and matching that back out of `reason`'s prose would be exactly
+    #: the message-matching fragility errors.py's own module docstring warns
+    #: against — so it is a field, not a substring search (GH #324, THE-1089).
+    too_deep: bool = False
 
 
 def _node_text(node, src: bytes) -> str:
@@ -220,7 +232,22 @@ def analyse(code: str, language: str) -> ParseFacts:
     facts = ParseFacts(language=language, grammar=grammar, parsed=True)
     fn_bodies: list[tuple[str, object]] = []
 
-    def walk(node, loop_depth: int, fn_stack: list[str]) -> None:
+    def walk(node, loop_depth: int, fn_stack: list[str], tree_depth: int = 0) -> None:
+        # Cap on tree-sitter TREE depth (one `walk` stack frame per level, no
+        # multiplier the way `_BoolParser._MAX_NESTING` has one for its six
+        # mutually recursive parse methods). Measured before picking 300: a
+        # realistic 300-line file (codecalc/guarded.py) parses to tree depth
+        # 20; deliberately extreme but plausible generated-code shapes (50
+        # nested `if`s, a 100-deep `.method()` chain) reach 102-202; this
+        # exact walk did not start raising a genuine `RecursionError` against
+        # CPython's default 1000-frame limit until source nesting crossed a
+        # tree depth of ~900 (`"("*n + "1" + ")"*n` for n in 800..1000). 300
+        # sits ~15x above realistic source and ~3x below the observed crash
+        # floor. `"("*4000 + "1" + ")"*4000` (GH #324) reaches tree depth
+        # 4002 and is refused here long before the interpreter would raise.
+        if tree_depth > _MAX_TREE_DEPTH:
+            raise RecursionError(
+                f"tree depth exceeded {_MAX_TREE_DEPTH} (source is too deeply nested)")
         ntype = node.type
         # Only NAMED nodes are constructs. Keyword tokens are anonymous, and a
         # `while_statement` contains a bare `while` token as a child — counting
@@ -260,7 +287,19 @@ def analyse(code: str, language: str) -> ParseFacts:
                     facts.recursive_functions.append(callee)
 
         for child in node.children:
-            walk(child, here, stack)
+            walk(child, here, stack, tree_depth + 1)
 
-    walk(tree.root_node, 0, [])
+    try:
+        walk(tree.root_node, 0, [])
+    except RecursionError as exc:
+        # Belt and braces: the depth cap above should always fire first, but
+        # a single `raise` inside deeply recursive Python does not guarantee
+        # unwinding leaves enough headroom to build this dataclass and return
+        # normally either — catching RecursionError here (both the cap's own
+        # and, as a backstop, one CPython raised on its own) keeps `analyse`'s
+        # "Never raises" contract true even if the cap were ever wrong (GH
+        # #324, THE-1089). Same shape a grammar failure already returns.
+        return ParseFacts(language=language, grammar=grammar, parsed=False,
+                          reason=f"source too deeply nested to analyse safely: {exc}",
+                          too_deep=True)
     return facts
