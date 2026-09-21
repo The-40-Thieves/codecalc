@@ -1161,6 +1161,20 @@ def list_execution_providers() -> list[dict]:
 
 
 #: What a compact result ALWAYS carries.
+#:
+#: `stderr` is deliberately NOT in this tuple, and not in _COMPACT_DISCLOSURE
+#: either — it is neither always-kept nor truthy-gated, it is FAILURE-gated
+#: (#323). `stdout` survives compaction unconditionally because the program's
+#: own output is the point of running it at all; `stderr` only earns the same
+#: treatment when the run did not succeed, where it stops being a diagnostic
+#: a caller can live without and becomes the entire explanation of what went
+#: wrong — the same reasoning #117 already applied to `code`/`error`/`remedy`
+#: for a REJECTED-before-execution failure. compact_result implements this as
+#: its own conditional, right after `stdout` is set, rather than folding it
+#: into either tuple above: _COMPACT_ALWAYS has no room for "sometimes", and
+#: _COMPACT_DISCLOSURE's truthiness gate would drop a genuinely empty stderr
+#: on a failed run (e.g. a bare `sys.exit(7)`) exactly when a caller most
+#: needs to be told there was nothing more to see.
 _COMPACT_ALWAYS = ("ok", "verdict", "stdout", "exit_code")
 
 #: Disclosure and provenance fields, carried at EVERY verbosity whenever they
@@ -1265,9 +1279,38 @@ def compact_result(result: dict) -> dict:
     `validation`: `server.py`'s `_coded` wrapper calls `ensure_code` on
     every tool's result, but only AFTER `execute_code` had already compacted
     it, by which point `error` was gone.
+
+    `stderr` is named in neither tuple (#323): it is kept whenever the run
+    did not succeed and dropped otherwise, which is a THIRD gate — success/
+    failure, not "always" or "truthy" — that `_COMPACT_ALWAYS`/
+    `_COMPACT_DISCLOSURE` cannot express. See the comment on `_COMPACT_ALWAYS`
+    and the one at this function's `stderr` block for the full reasoning.
     """
     out = {k: result.get(k) for k in _COMPACT_ALWAYS}
     out["stdout"] = result.get("stdout", "")
+
+    # #323: `stderr` is the exact stdout-shaped exception documented on
+    # _COMPACT_ALWAYS above — kept, whole and unconditionally (empty string
+    # included), whenever the run did not succeed, dropped otherwise. Three
+    # independent signals count as "did not succeed", because no single one
+    # of them covers every backend's failure shape:
+    #   - `ok is False` — the common case, and the only signal a
+    #     rejected-before-execution result has (no real exit_code to check).
+    #   - a non-zero integer `exit_code` — `sessions.execute` can report a
+    #     failed program with `ok` already narrowed away by an outer wrapper,
+    #     so `exit_code` is checked independently rather than trusted to agree.
+    #   - `verdict` outside {None, "OK"} — the case the first two both miss:
+    #     the Rust executor's own `ok` is `exit_code == 0 && !timed_out &&
+    #     signal.is_none()` (executor/src/main.rs), so an OLE run (output
+    #     truncated, otherwise-clean exit) reports `ok: true, exit_code: 0`
+    #     and only `verdict != "OK"` still catches it. `None` is allowed
+    #     because `compact_result` is called directly in tests with partial
+    #     dicts that never set `verdict` at all.
+    if (result.get("ok") is False
+            or (isinstance(result.get("exit_code"), int) and result.get("exit_code") != 0)
+            or result.get("verdict") not in (None, "OK")):
+        out["stderr"] = result.get("stderr", "")
+
     for key in _COMPACT_DISCLOSURE:
         value = result.get(key)
         # Truthiness, not `is not None`: `unenforced` is [] when everything was
@@ -1316,7 +1359,7 @@ def execute_code(
     max_output_kb: Annotated[int, Field(description="Stdout/stderr capture cap in KiB per stream; 0 uses the 64 KiB default, hard-clamped to 240")] = 0,
     max_cpu: Annotated[int, Field(description="Per-call CPU-time ceiling in seconds; 0 means no explicit limit is set")] = 0,
     no_net: Annotated[bool, Field(description="Block outbound network access for this run; best-effort on platforms without seccomp")] = False,
-    compact: Annotated[bool, Field(description="Drop diagnostic fields (timings, workdir, platform) from the result; safety disclosures are always kept")] = False,
+    compact: Annotated[bool, Field(description="Drop diagnostic fields (timings, workdir, platform) from the result; safety disclosures are always kept, and stderr is kept whenever the run did not succeed — dropped only on a clean successful run (ok=true, exit_code 0, verdict OK)")] = False,
     provider: Annotated[str | None, Field(description="Execution backend id to use (see list_execution_providers); default picks automatically")] = None,
     dependencies: Annotated[list[str] | None, Field(description="Packages to install before running, e.g. ['requests==2.31.0']; merged with any PEP 723 block")] = None,
     ctx: Context = None,

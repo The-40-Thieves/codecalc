@@ -77,6 +77,38 @@ behind it.
   error — rather than silently falling back to the regex heuristic over
   adversarial input the way every other `parsed=False` reason still does.
 
+- **`execute_code(compact=True)` dropped `stderr` unconditionally, so a
+  failed run could say THAT it failed but never WHY** (GH #323, THE-1088).
+  Same defect class as #117: that fix made `code`/`error`/`remedy` non-
+  droppable because they are the entire content of a rejected-before-
+  execution failure; `stderr` is the executed-and-failed counterpart and
+  was still dropped, along with the compiler diagnostic on a compile
+  failure. `stderr` is now kept, whole, whenever the run did not succeed
+  (`ok` is `false`, `exit_code` is a nonzero integer, or `verdict` is not
+  `OK` — the third catches an OLE run, which can otherwise report
+  `ok: true, exit_code: 0`) and dropped on a clean run exactly as before,
+  so the token saving compact mode exists for is unaffected on the success
+  path. The `compact` parameter's schema description now says so. New field
+  `stderr` on the `compact_result` shape (`docs/contract/README.md`,
+  `CONTRACT_VERSION` `1.16.0` -> `1.17.0`, MINOR — additive, no shape a
+  `1.16.0` client already validates changes on the success path), and
+  `docs/contract/result-v1.schema.json`/`doctor-v1.schema.json` regenerated
+  to match.
+
+  Cross-vendor review of that fix (PR #333) found the bounding it relies on
+  did not hold on every backend: the Piston provider's output cap
+  (`codecalc/providers.py`) only applied when a caller passed an EXPLICIT
+  `max_output_kb`, so a caller who left it at its documented default (0)
+  got Piston's raw response back uncapped — reproduced with a simulated
+  1,000,000-byte stderr coming back whole, worst of all in a compact
+  result. Piston now applies `executor.MAX_OUTPUT_BYTES` (64 KiB) as its
+  own default when `max_output_kb` is 0, the same default the native and
+  fallback executors already apply, so all three providers agree on what
+  "the default cap" means. The `compact` parameter's description also said
+  stderr was "dropped only on ok=true" — true of the common case but not
+  of an OLE run, which can be `ok: true` — corrected to name the real
+  condition (`ok=true`, `exit_code` 0, `verdict` `OK`).
+
 ## [0.12.0] — 2026-09-09
 
 ### Removed

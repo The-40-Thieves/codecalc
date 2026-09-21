@@ -1,7 +1,22 @@
 # The codecalc result contract
 
-**Current version: `1.16.0`** · Schema: [`result-v1.schema.json`](result-v1.schema.json) ·
+**Current version: `1.17.0`** · Schema: [`result-v1.schema.json`](result-v1.schema.json) ·
 Source of truth: [`codecalc/contract.py`](../../codecalc/contract.py)
+
+`1.17.0` is a MINOR bump over `1.16.0`. It adds `stderr` to `compact_result`,
+closing GH #323 (THE-1088): `execute_code(compact=True)` dropped `stderr`
+unconditionally, so a failed run could say THAT it failed but never WHY —
+the same defect class as `code`/`error`/`remedy` on `rejected` (#117, below),
+one shape over. `stderr` is now present whenever the run did not succeed
+(`ok` is `false`, `exit_code` is a nonzero integer, or `verdict` is other
+than `OK` — the third clause is what still catches an OLE run, which can
+otherwise report `ok: true, exit_code: 0`) and absent on a clean run exactly
+as before, so a `1.16.0` client that already ignores unknown fields sees no
+change in shape on the success path it already validated against. See
+`codecalc/server.py`'s `compact_result` (the `_COMPACT_ALWAYS` comment block)
+for the full reasoning behind the three-way gate.
+
+---
 
 `1.16.0` is a MINOR bump over `1.15.0`. It adds a TWELFTH shape,
 `branch_reachability`, for the new tool of the same name: every if/elif/else
@@ -734,7 +749,11 @@ diluting it with detail a lexical tool-selector never needs.
 **The compact shape** drops diagnostics to save tokens. It never drops
 `unenforced` or `output_error` — or, since `1.4.0`, `artifacts_created` and
 `truncated_inline` — which is the difference between the current
-implementation and the one that was a defect (#117).
+implementation and the one that was a defect (#117). Since `1.17.0`,
+`stderr` (#323) is present whenever the run did not succeed (`ok` false, a
+nonzero integer `exit_code`, or `verdict` other than `OK`) and absent on a
+clean run — the executed-and-failed counterpart to `code`/`error`/`remedy`
+on `rejected` above, which cover the rejected-before-execution case.
 
 > An earlier version of this document claimed there were two shapes and that
 > `executor.execute` was the single point every execution result passes through.

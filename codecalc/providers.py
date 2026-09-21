@@ -686,15 +686,25 @@ class PistonExecutionProvider:
         stderr = str(stage.get("stderr") or "")
         stdout_bytes = len(stdout.encode())
         stderr_bytes = len(stderr.encode())
-        client_output_overflow = False
         unenforced: list[str] = []
-        if spec.max_output_kb > 0:
-            output_cap = spec.max_output_kb * 1024
-            client_output_overflow = stdout_bytes + stderr_bytes > output_cap
-            stdout = _truncate_utf8(stdout, output_cap)
-            remaining = max(0, output_cap - len(stdout.encode()))
-            stderr = _truncate_utf8(stderr, remaining)
-            unenforced.append("max_output_kb_enforced_after_provider_response")
+        # #333 (F-review on THE-1088): this used to gate the whole cap on
+        # `spec.max_output_kb > 0`, so a caller who left it at its documented
+        # default (0) got Piston's response back UNCAPPED — a 1,000,000-byte
+        # stderr came back whole, in both the full envelope and (worse) a
+        # compact result, whose entire reason for existing is bounded size.
+        # `executor.MAX_OUTPUT_BYTES` (64 KiB) is the SAME default the native
+        # and fallback executors already apply when `max_output_kb` is 0 —
+        # `COMPUTATION_SPEC_FIELD_DOCS["max_output_kb"]` above documents it
+        # as a backend default, not an opt-in — so this now always caps,
+        # using the caller's explicit value when given and that default
+        # otherwise, which is what makes all three providers agree.
+        output_cap = (spec.max_output_kb * 1024 if spec.max_output_kb > 0
+                     else executor.MAX_OUTPUT_BYTES)
+        client_output_overflow = stdout_bytes + stderr_bytes > output_cap
+        stdout = _truncate_utf8(stdout, output_cap)
+        remaining = max(0, output_cap - len(stdout.encode()))
+        stderr = _truncate_utf8(stderr, remaining)
+        unenforced.append("max_output_kb_enforced_after_provider_response")
         exit_code = stage.get("code")
         compile_ms = int(compile_stage.get("wall_time") or 0)
         run_ms = int(run_stage.get("wall_time") or 0)
