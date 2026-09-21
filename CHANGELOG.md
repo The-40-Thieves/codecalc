@@ -216,6 +216,23 @@ behind it.
   all) and never `"inconclusive"` (4 points clears `MIN_FIT_POINTS`).
   (THE-1092)
 
+- **`trace_execution` reported lines that demonstrably ran as `lines_never_executed`**
+  whenever one legitimate trace event's `locals` diff exceeded
+  `_MAX_LOCALS_ENTRIES` (200) — a function called with more than 200
+  parameters is the simplest trigger (GH #321, THE-1086). `_parse_trace_
+  file`'s `expected_step` only advanced on ACCEPTANCE, while the harness's
+  own step counter advanced on EMISSION, so the single over-cap event was
+  discarded without advancing the parser's counter and every later,
+  perfectly ordinary event then failed the step-continuity check too — the
+  rest of the trace silently vanished, `stdout` proved the "never executed"
+  lines had in fact run, and `events_consistent` went `false` for a program
+  nobody tampered with. `_validate_event` now accepts a matching-step event
+  even when only a size cap failed, so the step sequence stays intact and
+  only that one event's own detail is dropped — counted in
+  `discarded_events` and disclosed via a new `truncated_reason` value,
+  `"event_detail_over_cap"`, never through `events_consistent`, which stays
+  reserved for a forged/tampered trace sink.
+
 ## [0.12.0] — 2026-09-09
 
 ### Removed

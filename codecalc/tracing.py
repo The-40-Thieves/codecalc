@@ -131,7 +131,19 @@ otherwise it bounds the DAMAGE and SURFACES the tampering:
     program's own line range, and `step` continuing the exact monotonic
     sequence the harness's OWN counter would have produced. Anything else —
     malformed JSON, an unknown key, a skipped or repeated `step` — is
-    DISCARDED, counted in `discarded_events`, and never raises.
+    DISCARDED, counted in `discarded_events`, and never raises. ONE
+    exception, deliberately narrow (GH #321/THE-1086): an event whose
+    `step` DOES continue that sequence, and which is otherwise well-formed,
+    but which fails only a per-event SIZE cap (over `_MAX_LOCALS_ENTRIES`
+    changed locals is the reported case — a real function call with more
+    than 200 parameters) still advances the step sequence, because the
+    sequence itself was never in doubt; only that one event's own detail is
+    dropped (counted in `discarded_events`, disclosed via
+    `truncated_reason: "event_detail_over_cap"`, never via
+    `events_consistent`). A bare step match is NOT enough to earn this on
+    its own — steps are sequential and public, so a forger can always guess
+    the next one — every OTHER check still applies before this carve-out
+    fires; see `_validate_event`'s `enforce_size_caps` parameter.
   * The harness writes a final `{"event": "end", "step": N, "emitted": N}`
     line, whether or not either cap fired, in every path `_run_source`
     returns through normally. `events_consistent` is `false` whenever that
@@ -246,6 +258,24 @@ _TRUNCATION_MARKER_KEY = "__trace_truncated__"
 #: The JSON key marking the harness's own "more than one thread was alive"
 #: disclosure — see the module docstring's "THREADS" section.
 _THREAD_MARKER_KEY = "__trace_multithreaded__"
+
+#: `truncated_reason` value for an event whose `step` matched exactly what
+#: `_parse_trace_file` expected next (so the step SEQUENCE is intact) but
+#: which failed a per-event size cap (`_MAX_FUNC_LEN`/`_MAX_LOCALS_ENTRIES`/
+#: `_MAX_STR_FIELD_LEN`) — e.g. a real function call with more than 200
+#: changed locals. GH #321 / THE-1086: before this reason existed, such an
+#: event was indistinguishable from a corrupt/forged one, so it was silently
+#: DISCARDED without advancing `expected_step`, which then rejected every
+#: later, otherwise-legitimate event too (a step-continuity cascade) and
+#: reported lines that plainly ran, per the run's own `stdout`, as never
+#: executed. See `_validate_event`'s `enforce_size_caps` parameter and
+#: `_parse_trace_file`'s handling of it for the narrow carve-out this buys:
+#: the event's own detail still costs itself (it is not added to `events`,
+#: and it is still counted in `discarded_events`), but it no longer costs
+#: the rest of the trace, and it is surfaced here — never through
+#: `events_consistent`, which stays reserved for a forged/tampered sink (see
+#: the module docstring's "TRUST BOUNDARY" section).
+_EVENT_DETAIL_OVER_CAP_REASON = "event_detail_over_cap"
 
 #: Slack ABOVE `_MAX_TRACE_BYTES` the parser will read before concluding the
 #: file is bigger than the harness could legitimately have written — enough
@@ -617,7 +647,8 @@ def _bounded_read(path: Path, limit: int) -> tuple[bytes, bool]:
         os.close(fd)
 
 
-def _validate_event(obj: object, expected_step: int, max_line: int) -> dict | None:
+def _validate_event(obj: object, expected_step: int, max_line: int,
+                     enforce_size_caps: bool = True) -> dict | None:
     """A clean, schema-conformant copy of `obj` if it is a legitimate trace
     event for step `expected_step`, else `None`.
 
@@ -632,6 +663,21 @@ def _validate_event(obj: object, expected_step: int, max_line: int) -> dict | No
     catches it instead, because such an event still inflates the accepted
     count past what the harness's real, in-memory counter reported. See the
     module docstring's "TRUST BOUNDARY" section.
+
+    `enforce_size_caps=False` (GH #321/THE-1086) skips ONLY the four
+    length/count ceilings below (`_MAX_FUNC_LEN` on `func`,
+    `_MAX_LOCALS_ENTRIES` on `locals`, `_MAX_FUNC_LEN`/`_MAX_STR_FIELD_LEN`
+    on each locals key/value, `_MAX_STR_FIELD_LEN` on an extra field) — every
+    structural/type check still runs. `_parse_trace_file` calls it this way
+    ONLY to classify a `None` from the default (`enforce_size_caps=True`)
+    call: if the relaxed call accepts an event the strict call rejected, the
+    event's `step` was genuinely next in sequence and its SHAPE was
+    otherwise sound, so only its own oversized detail — never the rest of
+    the trace — needs to be dropped (`_EVENT_DETAIL_OVER_CAP_REASON`). This
+    is deliberately the ONLY leniency: a bare `step` match is trivial for a
+    forger to produce (steps are sequential and public knowledge), so
+    nothing else here becomes forgivable just because `expected_step`
+    matched — see `_parse_trace_file`'s own comment at the call site.
 
     Returns a FRESH dict built field-by-field, never `obj` itself passed
     through: an attacker-controlled dict reaching the result verbatim would
@@ -653,19 +699,27 @@ def _validate_event(obj: object, expected_step: int, max_line: int) -> dict | No
     if not isinstance(line, int) or isinstance(line, bool) or not (0 <= line <= max_line):
         return None
     func = obj.get("func")
-    if not isinstance(func, str) or len(func) > _MAX_FUNC_LEN:
+    if not isinstance(func, str):
+        return None
+    if enforce_size_caps and len(func) > _MAX_FUNC_LEN:
         return None
     locals_ = obj.get("locals")
-    if (not isinstance(locals_, dict) or len(locals_) > _MAX_LOCALS_ENTRIES
-            or not all(isinstance(k, str) and len(k) <= _MAX_FUNC_LEN
-                       and isinstance(v, str) and len(v) <= _MAX_STR_FIELD_LEN
-                       for k, v in locals_.items())):
+    if not isinstance(locals_, dict):
         return None
+    if enforce_size_caps and len(locals_) > _MAX_LOCALS_ENTRIES:
+        return None
+    for k, v in locals_.items():
+        if not (isinstance(k, str) and isinstance(v, str)):
+            return None
+        if enforce_size_caps and (len(k) > _MAX_FUNC_LEN or len(v) > _MAX_STR_FIELD_LEN):
+            return None
     clean = {"step": step, "line": line, "event": event, "func": func,
              "locals": dict(locals_)}
     for key in extra:
         value = obj.get(key)
-        if not isinstance(value, str) or len(value) > _MAX_STR_FIELD_LEN:
+        if not isinstance(value, str):
+            return None
+        if enforce_size_caps and len(value) > _MAX_STR_FIELD_LEN:
             return None
         clean[key] = value
     return clean
@@ -698,6 +752,13 @@ def _parse_trace_file(path: Path, code: str, max_events: int) -> dict[str, Any]:
     max_line = max(1, len(code.splitlines()))
     events: list[dict] = []
     discarded_events = 0
+    # Counts the subset of `discarded_events` that were dropped ONLY for
+    # being over a size cap (GH #321/THE-1086) — see the loop's own comment
+    # below. Kept separate so `events_consistent` can still compare against
+    # what the harness's `_step`/`_event_count` actually reached: those
+    # events occupied a real step even though their content never made it
+    # into `events`.
+    detail_dropped_events = 0
     multithreaded = False
     end_seen = False
     events_after_end = 0
@@ -754,20 +815,55 @@ def _parse_trace_file(path: Path, code: str, max_events: int) -> dict[str, Any]:
                 discarded_events += 1
             continue
         clean = _validate_event(obj, expected_step, max_line)
-        if clean is None:
-            discarded_events += 1
+        if clean is not None:
+            events.append(clean)
+            expected_step += 1
+            if len(events) >= max_events:
+                if not truncated:
+                    truncated = True
+                    truncated_reason = "max_events"
+                break
             continue
-        events.append(clean)
-        expected_step += 1
-        if len(events) >= max_events:
+        # `clean` is None: the event was not admissible as-is. If its `step`
+        # already matched what this parser expected next AND every OTHER
+        # check (key set, types, line range) passes, only a size cap
+        # (`_MAX_FUNC_LEN`/`_MAX_LOCALS_ENTRIES`/`_MAX_STR_FIELD_LEN`) is
+        # what failed — e.g. a real function call with more than 200
+        # changed locals (GH #321/THE-1086). The step SEQUENCE this harness
+        # produced is still intact in that case; only this one event's own
+        # detail is too large to admit. Advance `expected_step` so later,
+        # ordinary events are not cascade-rejected the way the bug report
+        # showed, but do NOT add the oversized content to `events` (the
+        # cap exists to bound the result payload, and skipping it here
+        # would defeat that) — it still counts in `discarded_events`, and
+        # the drop is disclosed via `truncated`/`truncated_reason`, never
+        # via `events_consistent` (reserved for a forged/tampered sink —
+        # see the module docstring's "TRUST BOUNDARY" section). A step
+        # match alone is NOT enough on its own: `enforce_size_caps=False`
+        # still runs every structural/type check, so a forger cannot buy
+        # this leniency just by guessing the next (sequential, public)
+        # step number — anything actually malformed still falls through
+        # to the plain discard below and still breaks step continuity for
+        # whatever comes after it.
+        if _validate_event(obj, expected_step, max_line, enforce_size_caps=False) is not None:
+            discarded_events += 1
+            detail_dropped_events += 1
+            expected_step += 1
             if not truncated:
                 truncated = True
-                truncated_reason = "max_events"
-            break
+                truncated_reason = _EVENT_DETAIL_OVER_CAP_REASON
+            continue
+        discarded_events += 1
 
+    # Compare against `len(events) + detail_dropped_events`, not just
+    # `len(events)`: a detail-dropped event still occupied a real step in
+    # the harness's own `_step`/`_event_count` counters (see
+    # `_EVENT_DETAIL_OVER_CAP_REASON`'s docstring), so it must still be
+    # counted here for an ordinary, untampered run to come back consistent.
+    accepted_total = len(events) + detail_dropped_events
     events_consistent = (
         end_seen and events_after_end == 0
-        and end_emitted == len(events) and end_step == len(events)
+        and end_emitted == accepted_total and end_step == accepted_total
     )
     return {
         "events": events, "truncated": truncated,

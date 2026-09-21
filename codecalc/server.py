@@ -1731,7 +1731,11 @@ def trace_execution(
     `lines_executed` / `lines_never_executed` (coverage from a static parse),
     and `truncated`/`truncated_reason` when `max_events` or an internal
     size ceiling stopped RECORDING early (the underlying stdout/exit code
-    are unaffected either way).
+    are unaffected either way). `truncated_reason` is also
+    `"event_detail_over_cap"` when one event's OWN detail (e.g. a call with
+    more than 200 changed locals) was too large to admit — that event alone
+    is dropped, counted in `discarded_events`, while every other line the
+    program ran still appears in `events`/`lines_executed` normally.
 
     TRUST: the trace is produced BY the traced program at its OWN privilege
     — a debugging aid, not an attestation of behaviour, exactly as

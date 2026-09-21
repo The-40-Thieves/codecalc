@@ -251,6 +251,93 @@ check("a small, uncapped trace reports truncated=False",
       f"-> truncated={_small.get('truncated')} reason={_small.get('truncated_reason')}")
 
 
+# ── event_detail_over_cap: one oversized event costs its OWN detail, never
+# the rest of the trace (GH #321, THE-1086) ─────────────────────────────────
+# Before the fix, `_parse_trace_file` advanced `expected_step` only on
+# ACCEPTANCE, while the harness's own step counter advanced on EMISSION. An
+# event whose `locals` diff exceeded `_MAX_LOCALS_ENTRIES` (200) — a
+# function called with more than 200 parameters is the simplest trigger —
+# was discarded without advancing the parser's counter, so every later,
+# perfectly ordinary event then failed the step-continuity check too and
+# the rest of the trace vanished: `stdout` proved lines ran that
+# `lines_never_executed` swore never did, and `events_consistent` went
+# `false` for a program nobody tampered with.
+def _big_params_program(n: int) -> str:
+    params = ", ".join(f"a{i}" for i in range(n))
+    args = ", ".join("1" for _ in range(n))
+    return (f"def big({params}):\n    return 1\n\nprint(big({args}))\n"
+            "print('LINE5 RAN')\n")
+
+
+# 199 changed locals on the `call` event stays under `_MAX_LOCALS_ENTRIES`
+# (200) — nothing is ever over cap here, so this must trace exactly as
+# cleanly as any other program. Pinned as the "was already fine" control:
+# a fix that only special-cases the over-cap path must not change this one.
+_r199 = tracing.execute_trace("python3", _big_params_program(199))
+check("199 parameters (at, not over, the locals cap): no event is dropped",
+      _r199.get("lines_executed") == [1, 2, 4, 5]
+      and _r199.get("lines_never_executed") == []
+      and _r199.get("events_consistent") is True
+      and _r199.get("discarded_events") == 0
+      and _r199.get("truncated") is False,
+      f"-> lines_executed={_r199.get('lines_executed')} "
+      f"lines_never_executed={_r199.get('lines_never_executed')} "
+      f"events_consistent={_r199.get('events_consistent')} "
+      f"discarded_events={_r199.get('discarded_events')} "
+      f"truncated={_r199.get('truncated')}")
+
+# 205 parameters trips `_MAX_LOCALS_ENTRIES` on the `call` event's locals
+# diff — this is the reporter's exact repro. `stdout` proves lines 2 and 5
+# ran; the fixed parser must agree, not report them as never-executed, and
+# must disclose the drop as a size cap rather than misreporting it as
+# tampering.
+_r205 = tracing.execute_trace("python3", _big_params_program(205))
+check("205 parameters (over the locals cap): stdout proves lines 2 and 5 ran",
+      _r205.get("stdout") == "1\nLINE5 RAN\n", f"-> {_r205.get('stdout')!r}")
+check("...and lines_executed/lines_never_executed agree with stdout, not "
+      "the stale step-continuity cascade",
+      _r205.get("lines_executed") == [1, 2, 4, 5]
+      and _r205.get("lines_never_executed") == [],
+      f"-> lines_executed={_r205.get('lines_executed')} "
+      f"lines_never_executed={_r205.get('lines_never_executed')}")
+check("...events_consistent stays True (an over-cap event is not tampering)",
+      _r205.get("events_consistent") is True,
+      f"-> events_consistent={_r205.get('events_consistent')}")
+check("...the drop is disclosed via truncated/truncated_reason, not silently",
+      _r205.get("truncated") is True
+      and _r205.get("truncated_reason") == "event_detail_over_cap",
+      f"-> truncated={_r205.get('truncated')} reason={_r205.get('truncated_reason')}")
+check("...and the dropped event is still counted in discarded_events",
+      _r205.get("discarded_events", 0) > 0,
+      f"-> discarded_events={_r205.get('discarded_events')}")
+
+# A malformed line that does NOT carry a well-formed, correctly-sequenced
+# `step` must still fail closed: no leniency without a real step match. This
+# is the trust-boundary property the fix must preserve — the carve-out above
+# is earned by step continuity, not just by being "close enough".
+_BAD_STEP_PROGRAM = (
+    "import sys, os, json\n"
+    "sys.settrace(None)\n"
+    "trace_path = os.path.join(os.path.dirname(__file__), '.codecalc-run', "
+    "'trace_events.jsonl')\n"
+    "with open(trace_path, 'a') as f:\n"
+    "    f.write(json.dumps({'step': 9999, 'line': 1, 'event': 'return', "
+    "'func': 'forged', 'locals': {}, 'return_value': \"'PWNED'\"}) + chr(10))\n"
+    "os._exit(0)\n"
+)
+_bad_step_result = tracing.execute_trace("python3", _BAD_STEP_PROGRAM)
+check("a malformed line with the WRONG step (not the expected next one) is "
+      "still discarded and does not advance the counter for free",
+      _bad_step_result.get("discarded_events", 0) > 0
+      and all(e.get("func") != "forged" for e in (_bad_step_result.get("events") or [])),
+      f"-> discarded_events={_bad_step_result.get('discarded_events')} "
+      f"events={_bad_step_result.get('events')}")
+check("...and events_consistent is still False (the harness's own 'end' "
+      "line is missing, same as any other os._exit(0) bypass)",
+      _bad_step_result.get("events_consistent") is False,
+      f"-> events_consistent={_bad_step_result.get('events_consistent')}")
+
+
 # ── stdin passthrough ────────────────────────────────────────────────────────
 _STDIN_PROGRAM = "x = input()\nprint(\"got\", x)\n"
 for _name, _force_fallback in BACKENDS:
