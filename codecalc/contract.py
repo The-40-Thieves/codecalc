@@ -853,16 +853,38 @@ def _execution_trace_only_properties() -> dict:
                     "exception_message": {"type": "string"},
                     "detail_dropped": {
                         "type": "boolean",
+                        "const": True,
                         "description": (
-                            "(1.18.0) Present, and true, only on a stub "
-                            "event — see `events`'s own description above "
-                            "and `truncated_reason: \"event_detail_over_"
-                            "cap\"`. Absent (never `false`) on every "
+                            "(1.18.0) Present, and ALWAYS true, only on a "
+                            "stub event — see `events`'s own description "
+                            "above and `truncated_reason: \"event_detail_"
+                            "over_cap\"`. Absent (never `false`) on every "
                             "ordinary event, the same convention "
-                            "`truncated_reason` itself already follows."
+                            "`truncated_reason` itself already follows. "
+                            "`const: true` is deliberate, not a hedge: a "
+                            "round-two cross-vendor review found the "
+                            "earlier `{\"type\": \"boolean\"}` form let "
+                            "`detail_dropped: false` validate even though "
+                            "the parser never emits it — a strict client "
+                            "reading `if \"detail_dropped\" in event` would "
+                            "have silently mistreated a `false` the same as "
+                            "a `true`. `const` closes that: only the "
+                            "literal `true` (or omitting the key entirely) "
+                            "is a conforming result."
                         ),
                     },
                 },
+                # An event carrying `detail_dropped` at all (the property's
+                # own `const: true` already forbids `false`) must have an
+                # EMPTY `locals` — the whole point of the marker is that the
+                # detail was NOT admitted, so a client can never receive
+                # both a dropped-detail flag and detail to read alongside
+                # it. Expressed here, not only in prose, because a
+                # round-two cross-vendor review asked for whatever
+                # invariant this schema COULD express; `if`/`then` (2020-12)
+                # says it exactly.
+                "if": {"required": ["detail_dropped"]},
+                "then": {"properties": {"locals": {"maxProperties": 0}}},
             },
         },
         "event_count": {

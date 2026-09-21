@@ -536,7 +536,20 @@
               },
               "detail_dropped": {
                 "type": "boolean",
-                "description": "(1.18.0) Present, and true, only on a stub event \u2014 see `events`'s own description above and `truncated_reason: \"event_detail_over_cap\"`. Absent (never `false`) on every ordinary event, the same convention `truncated_reason` itself already follows."
+                "const": true,
+                "description": "(1.18.0) Present, and ALWAYS true, only on a stub event \u2014 see `events`'s own description above and `truncated_reason: \"event_detail_over_cap\"`. Absent (never `false`) on every ordinary event, the same convention `truncated_reason` itself already follows. `const: true` is deliberate, not a hedge: a round-two cross-vendor review found the earlier `{\"type\": \"boolean\"}` form let `detail_dropped: false` validate even though the parser never emits it \u2014 a strict client reading `if \"detail_dropped\" in event` would have silently mistreated a `false` the same as a `true`. `const` closes that: only the literal `true` (or omitting the key entirely) is a conforming result."
+              }
+            },
+            "if": {
+              "required": [
+                "detail_dropped"
+              ]
+            },
+            "then": {
+              "properties": {
+                "locals": {
+                  "maxProperties": 0
+                }
               }
             }
           }
