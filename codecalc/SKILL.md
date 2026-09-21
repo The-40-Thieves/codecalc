@@ -27,6 +27,7 @@ the number.
 | Any **comparison** whose verdict you will state | `compare_threshold` |
 | Integers past **2^53** (9007199254740992) | `calc_exact`, and `float_repr` if a float is involved |
 | Percentages, ratios, shares | `percentage` |
+| Percent change / delta between two values | `percent_change` |
 | Unit, byte, duration or epoch conversion | `convert_units`, `data_sizes`, `human_duration`, `epoch_time` |
 | Any number that appears in your answer **as a claim** rather than an illustration | whichever of the above fits |
 | You ported code A → B and are about to call it a port | `verify_translation` |

@@ -1,11 +1,11 @@
 {
   "full": {
-    "n": 234,
+    "n": 238,
     "skipped": 0,
-    "top1_hits": 150,
-    "top3_hits": 183,
-    "top1": 0.641,
-    "top3": 0.7821,
+    "top1_hits": 152,
+    "top3_hits": 186,
+    "top1": 0.6387,
+    "top3": 0.7815,
     "per_tool": {
       "algebraic_equiv": {
         "n": 4,
@@ -79,7 +79,7 @@
       },
       "evaluate_expression": {
         "n": 6,
-        "top1": 0.8333,
+        "top1": 0.5,
         "top3": 0.8333
       },
       "execute_code": {
@@ -131,6 +131,11 @@
         "n": 4,
         "top1": 0.5,
         "top3": 0.5
+      },
+      "percent_change": {
+        "n": 4,
+        "top1": 1.0,
+        "top3": 1.0
       },
       "percentage": {
         "n": 4,
@@ -190,7 +195,7 @@
       "session_read_file": {
         "n": 4,
         "top1": 0.25,
-        "top3": 0.25
+        "top3": 0.5
       },
       "session_run": {
         "n": 3,
@@ -220,7 +225,7 @@
       "symbolic": {
         "n": 22,
         "top1": 0.2273,
-        "top3": 0.5909
+        "top3": 0.5
       },
       "trace_execution": {
         "n": 7,
@@ -252,15 +257,969 @@
         "top1": 1.0,
         "top3": 1.0
       }
+    },
+    "per_prompt": {
+      "What does integrating x squared with respect to x come out to?": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Please simplify this symbolic math formula for me: sqrt(144) + 2**10": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I have a formula and I just want its algebraic value worked out, not solved for a variable \u2014 sqrt(2)*sqrt(8)": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "What is the closed-form symbolic answer to integrating this polynomial?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Show me every row of true/false outcomes for 'a and b or not c'": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I need the full combinatorial truth breakdown of the boolean statement 'p xor q'": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "list out every combination of inputs and whether 'a implies b' holds for each": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Enumerate every input combination for 'p implies q' and whether it holds": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Solve this system: x + y = 10 and x - y = 2, for x and y": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I've got two simultaneous equations sharing variables x and y \u2014 find the values that satisfy both": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "find x and y at the same time from a pair of coupled equations": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "I need both unknowns pinned down from two equations that share them": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Given the 2x2 grid [[1,2],[3,4]], what's its determinant?": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Compute the eigenvalues of this square array of numbers": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I tried writing that grid of numbers directly into a symbolic algebra expression using bracket notation and it got refused for security reasons \u2014 how do I invert a square array of numbers structurally instead?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "What are the eigen-decomposition values and the rank of this square grid of numbers?": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "How many kilometers per hour is 60 miles per hour?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Translate 100 degrees Celsius into Fahrenheit": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "turn 1 gigabyte into mebibytes": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "What's 500 grams in ounces?": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "What's the value of the speed of light?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Give me Avogadro's number with its precise figure": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I want the exact numeric value codecalc has stored for gravitational acceleration, not a conversion": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "List every fundamental constant this thing knows, with values": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "What are all the unit spellings and aliases this thing understands for conversions?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Enumerate every alias I can pass as a unit name": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Before I convert anything, show me the whole table of supported unit names": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Every possible unit alias I could pass in \u2014 what are they all?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Is 0.1 plus 0.2 really exactly equal to 0.3, with no floating point rounding?": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "I need an arbitrary-precision rational computation of 2 to the 64th power minus 1": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "give me the exact rational result of this expression before I judge whether it clears a limit": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Does 1/25 exceed 0.05, and by exactly how much either way?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Check precisely whether this fraction is greater than, less than, or equal to that decimal, no rounding": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "I want a verdict on whether A clears B as a cutoff, with the shortfall shown if it doesn't": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Is 3/7 strictly greater than 0.4, exactly, no float error?": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "What percent of 40 is 8?": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Work out the exact share PART represents of TOTAL as a fraction and a percent": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "give me the ratio of these two rational numbers as a share, not a pass/fail check": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Out of a total of 250, what share does 37 represent?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Revenue went from $1.2 million to $900 thousand \u2014 by what percent did it drop?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "The price of a widget moved from $80 to $100 \u2014 as a percentage, how much did it increase?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "A stock was priced at $50 last month and is now $65 \u2014 express the move as an exact percent, not just the dollar difference": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "A company's loss was $100k last quarter and is $50k this quarter \u2014 by what percent did the loss shrink?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Give me the mean, median and standard deviation of these benchmark timings": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I have a list of numbers from repeated runs \u2014 summarize their central tendency and spread, and tell me if the noise is too high to trust them": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "summarize the whole distribution's average and variability, not its ranked cutoffs": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "These five benchmark runs are noisy \u2014 is the spread too large to trust a single number, and what's the average anyway?": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "What's the p95 and p99 latency across these numbers?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Rank this list of measurements and tell me the value at the 90th and 99th cutoff": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I don't want the average \u2014 I want to know what number 99 percent of these samples fall under": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Out of these hundred response times, what's the tail latency most requests stay under \u2014 say the top 5%?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Summarize this batch of latency numbers for me": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "If I hash 1 million items into a 64-bit space, what's the chance two collide?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Estimate the odds of an accidental hash clash given this many items and this many bits of output": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "before I decide whether 8 hex characters is safe as an ID, tell me the birthday-bound odds of a clash at that many bits": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "With a 5-hex-char short ID space, how likely is an accidental clash across 100000 generated ids?": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "How many MiB and MB is 3000000000 bytes, both ways?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Show me this byte count expressed in both binary and decimal units side by side": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I specifically want the KiB/MiB/GiB AND KB/MB/GB breakdown for one integer count of bytes, not a general unit conversion": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "For the number 5000000, show me every byte-unit reading, binary and decimal both": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Turn 93000 seconds into something readable, like days and hours": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Give me a friendly readout of this many seconds, plus how that scales per day and per month": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I have a raw seconds COUNT (a span, not a timestamp) \u2014 make it human-legible": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "What's a friendlier way to say 'seven million two hundred thousand seconds'?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "What date does the Unix stamp 1732000000 correspond to in UTC?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Convert this Unix timestamp, in whatever unit it's in, to an ISO 8601 UTC date": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "This is a POINT in time, a raw numeric stamp \u2014 tell me the calendar date it refers to, not a length of time": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "This raw numeric stamp \u2014 is it seconds, millis, or nanos, and what calendar date does it map to?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Show me 3000000000 in hex, octal and binary, and whether it fits in a signed 32-wide integer": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I need the two's-complement view of this integer at a specific storage width, plus overflow detection": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "does this number fit as a signed 32-wide value, and what does it look like in hex either way": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Show me every base representation of this integer at once \u2014 hex, octal and binary \u2014 plus whether it's a valid signed value at a given width": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Convert 'zz' from base 36 into base 7": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I have a fractional value written in one arbitrary numeral base and need it re-expressed in a different arbitrary base": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "this isn't hex/oct/bin specifically \u2014 I need an arbitrary base-to-base translation, any base from 2 to 36": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Translate the fractional value 0.1 from base 10 into base 2 and tell me if it terminates": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "What does the computer actually store in memory for the number 0.1?": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Show me the raw bits, exact stored value, and neighboring representable values for this floating point literal": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I want to know if this decimal literal is EXACTLY representable in double precision, not which integer width holds it": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Is 0.25 stored exactly in double precision, or does it lose precision like 0.1 does?": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Which integer types \u2014 i8 through i64 \u2014 can actually hold the number 300?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Tell me every fixed-width signed and unsigned type that this value fits into, and how it wraps in the ones it doesn't": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I don't need hex or binary output \u2014 just tell me every width class this number fits or overflows": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "If I try to cram 3000000000 into a signed 32-wide slot, what value do I actually get after it overflows?": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "How many of its binary digits are set to 1 in the number 202, and what's its binary length?": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Tell me the population count, trailing zero count, and whether this integer is a power of two": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I want facts ABOUT one number's binary pattern, not an operation combining it with another number": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Is 256 a power of two, and how many trailing zeros does its binary form have?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "What's 12 XOR 10 at a width of 8, shown in every base?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Apply a logical shift right by 1 to 0x80 and also show me the arithmetic (sign-propagating) version": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I need the RESULT of combining two integers with a boolean operator, not properties of a single one": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Rotate this 32-wide value left by 4 positions and show me the hex result": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "What value of x makes x squared minus 4 equal zero?": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Find where this single-variable expression crosses zero": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "I only have ONE unknown and one equation \u2014 find the root, not a shared solution across multiple equations": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "For 2*x + 1 = 7, what's x?": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "As n grows without bound, what does n*log(n)/n**2 approach?": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Settle a Big-O argument by computing the actual asymptotic limit of this ratio as the variable heads to infinity": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I don't want a structural code estimate \u2014 I want the exact algebraic limit as the variable grows unbounded": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "As the input size grows huge, does n/log(n) eventually dominate or vanish?": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Give me the factored and expanded forms of this algebraic expression": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Reduce this formula to its simplest form and also show it multiplied out": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I don't want a single algebraic answer \u2014 I want three different equivalent rewritings: simplified, factored, expanded": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Take this messy algebraic formula and give me its cleanest possible form": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Are (a*b)/c and a*(b/c) actually the same expression algebraically?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Prove or disprove that these two symbolic formulas are identical, ignoring float rounding": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I'm not comparing two PROGRAMS in different languages, just two symbolic math formulas \u2014 are they the same?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Do these two rearranged fractions actually reduce to the same thing symbolically?": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Is this SMT-LIB2 formula satisfiable: (declare-const x Int)(assert (> x 5))(check-sat)?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Run an SMT solver over this constraint and tell me sat, unsat, or unknown, with a model if satisfiable": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I need a real constraint solver's verdict on Int/Real constraints, not an enumerated boolean truth table": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Feed this SMT2 constraint set to a real solver and tell me if a satisfying assignment exists": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I rewrote this Python function in Go \u2014 run both and confirm they actually agree on the same inputs": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Prove my port from node to rust behaves identically by executing both and diffing their output": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I have ONE original and ONE new rewrite \u2014 did the rewrite actually preserve behavior, run and checked, not just eyeballed?": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "I converted this one script from ruby to python \u2014 actually run both and check they match, don't just eyeball the diff": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Run my three language implementations of the same function against tricky edge inputs like empty, zero, and negative, and tell me where they disagree": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Feed boundary-case inputs into several language snippets of the same logic and flag any divergence between them": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I want a full GRID across many snippets and many tricky inputs, not a single before/after equivalence check": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Across all four of my language ports of this same routine, which one disagrees on a negative or empty input?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I sped up this function \u2014 prove the optimized version still produces the same output AND is measurably quicker": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Confirm my rewritten candidate agrees with the original on every test input and beats it by a real, timed margin": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I'm not asking for a growth curve \u2014 I need a pass/fail verdict that a candidate rewrite is both correct and actually faster than the original": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "My candidate is clearly correct \u2014 now prove it's ACTUALLY meaningfully quicker than the baseline, timed, not just by feel": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Which programming languages can this thing actually run on this machine right now?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Enumerate every runtime you support, along with file extension and whether it's installed here": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I want the roster of programming LANGUAGES available, not the sandbox backends that run them": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Give me the full roster of every runtime you can execute code in, extension and all": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "What sandbox backends are available for running code \u2014 local, gVisor, or something remote?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Tell me which execution BACKENDS exist and whether each is ready and strictly isolated": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I'm asking about the underlying execution engines themselves, not which programming languages they can run": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Run this Python snippet and give me its stdout": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Execute the following program in a sandbox and return what it printed, its exit status, and how long it took": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "I want to wait right here for this program to finish and get the result back in this same call": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Just run this one-liner right now and tell me what it printed and how long it took": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Run this long-running script but show me its output as it goes, not just at the very end": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "I want partial output and progress notifications while a program is still running, not just a final result": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I don't want to poll for this later \u2014 I want to stay connected and watch it progress live": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I need to see this program's output line by line as it happens, live, not all dumped at the end": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Run this same little program written in python and node side by side and tell me which finished faster": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I have equivalent snippets in several languages \u2014 run them all and give me a side-by-side timing table": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I just want a timing/output SIDE-BY-SIDE table across several languages, not a pass/fail equivalence proof": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Is my installed Python or Node runtime out of date compared to the latest release?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Check, without changing anything, whether newer versions exist for my language toolchains and what command would upgrade them": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "just tell me what's outdated and what the upgrade command WOULD be \u2014 don't actually touch my system": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Are there newer versions of my language toolchains available, and can you actually upgrade them for me?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Bring my installed interpreters and compilers up to their latest versions, or at least tell me what that would involve first": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I don't just want to know what's outdated \u2014 actually perform the upgrade this time": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Start a persistent python workspace where variables stick around between calls": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I need a stateful REPL-like workspace I can keep reusing across several requests \u2014 set one up": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I don't want a one-shot run \u2014 open a long-lived workspace I can come back to": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Tear down that persistent workspace I opened earlier and free its resources": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Kill the REPL worker behind that workspace id and wipe its files": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "I want to permanently shut down and delete an entire persistent workspace, not just interrupt one background job inside it": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "What persistent workspaces do I currently have open, and in which languages?": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Show me every live stateful workspace right now and its status": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "I want an inventory of the WORKSPACES themselves, not the files inside any one of them": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "What files exist inside my saved workspace right now?": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Browse the directory listing for everything currently sitting in that persistent workspace, page by page if needed": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "I want EVERYTHING in there, including files I planted myself, not just what my program generated": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Show me a directory listing of my saved workspace, page by page": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Save this CSV data into my workspace so a later script can read it as input": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Drop a new file with this exact content into the persistent workspace, at a given relative path": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I need to PUT data into the workspace, not pull an existing file back out": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "What output files did my program generate in that workspace, ignoring the runner's own internal files?": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Show me only what the code I RAN produced, not the input files I planted myself": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "filter out the runner internals and any input data I seeded \u2014 I only want what my execution actually PRODUCED": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Of everything sitting in my workspace, which parts did my LAST run actually produce, versus what I put there myself?": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Back up everything in my persistent workspace right now so I can come back to this exact state later": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Archive the current contents of my session before I start refactoring, in case I need to go back to it": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I want a restore point for this workspace I can return to if the next few changes go badly": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Bring back the exact files from that workspace backup I made earlier, into a brand new workspace": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Wipe my current workspace and put back exactly what was in that earlier backup, same workspace id": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "What backups have I saved for this workspace, and when was each one made?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Get rid of one of those old workspace backups, I don't need it anymore": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Pull the contents of that output file back out of my workspace so I can look at it": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Fetch a file from the persistent workspace, and if it's a picture, hand it back as something I can actually view": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "I know exactly which single file I want the CONTENTS of \u2014 I don't need a whole listing": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Grab me the actual bytes of one specific output image so I can see it": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I have a main script that imports a helper module already sitting in my workspace \u2014 run the main one so it can find its import": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Execute the entry point of a multi-file program that lives in a persistent workspace, so relative imports resolve correctly": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "This program is spread across SEVERAL files already saved in a workspace, not one self-contained snippet I'm pasting in": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Kick off this long computation in the background and give me an id I can check on later, don't make me wait": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Queue this program for asynchronous execution so my call returns right away instead of blocking on the whole computation": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I don't want to hold this connection open for the entire duration \u2014 hand me a ticket right away instead": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Fire off this slow job and let me come back and check on it whenever \u2014 don't block my current request on it": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Has that background job I kicked off earlier finished yet, and if so what was the result?": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Check on the status of a job running asynchronously, and once it's done, hand me the full output": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "I already started that job \u2014 I'm asking about its CURRENT STATE now, not launching a new one": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Stop that background job I kicked off \u2014 I don't need its result anymore": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Try to abort an asynchronous job that's still in progress before it finishes on its own": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "I'm not asking for its status, I want it actively STOPPED": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Install the requests library into my python session so I can import it": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Fetch and add a third-party package for this language, into my workspace's environment": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I want to add a brand-new LIBRARY dependency, not upgrade the language runtime itself": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Add a fresh dependency for node so my script can `require` it": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Just by reading this code, what's its rough time complexity \u2014 is it quadratic, linear?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Estimate the asymptotic growth of this snippet from its structure alone, without actually running it": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I want a quick READ of the source to guess its growth class, not an empirical timing experiment": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Without running anything, can you eyeball this loop nest and guess whether it's quadratic or worse?": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Actually run this program at a bunch of increasing input sizes and tell me its measured growth curve": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Time this code empirically as N scales up and fit the observed timings to a complexity class": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "don't just read the source \u2014 actually execute it repeatedly at growing sizes and measure the real timing curve": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Feed this program bigger and bigger N and clock how the runtime actually scales": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Pull just this one function, plus whatever it imports, out of my larger file and run it on its own": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Isolate a single named function (with its helpers) from this codebase into a standalone runnable program": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I don't have a clean snippet \u2014 I need you to CARVE one named function out of a bigger file first, then run it": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "How many one-value binary digits does 202 set, and how many trailing zero digits does it end with in base two?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Is 512 a power of two, and what's the very next power of two above 200?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Combine 12 and 10 with a boolean XOR at a byte width of 8, and show me every base.": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Rotate the value 0x1 left by four positions within a 32-wide word, and give me the hex result.": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Which fixed-size signed and unsigned integer containers, from 8 through 64 wide, can hold the number 500?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Tell me every integer size this value fits or overflows, without giving me any hex or octal output.": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Render 4000000000 in hexadecimal, octal and binary, and say whether it fits as a signed 32-wide integer.": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Give me the two's complement view of this integer at a specific word width, with overflow flagged.": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Find the value of y where y squared minus nine equals zero.": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "What input makes this single equation cross zero?": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "I have two equations that both share the same two variables \u2014 solve for both at once.": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Pin down x and y together from a pair of equations that both depend on them.": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Give me this algebraic expression in its simplified, factored and expanded forms.": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Reduce this messy formula down and also multiply it all the way out.": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "As x heads toward infinity, what does this ratio settle on?": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Compute the exact asymptotic value of n over log n as n becomes arbitrarily large.": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Show me exactly which lines of this Python script ran and in what order": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I want to see the value of every variable at each step while this script runs, not just the final printout": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Walk me through why this python program produced that output, step by step": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Which branch of this if/elif actually fired when I ran this input, and which one never did": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Step through this program and show me the call stack and local variables at each point": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Give me a line-by-line record of this Python script with how each variable changed at every step": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I need to debug why my loop never hits the else case \u2014 show me a step-by-step record of what ran": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Just run this python snippet once and tell me what it prints and how long it took": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "What's the Big-O time complexity of this function, just from reading its structure": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Show me that this if/elif arm is dead code for every possible input, not just one I already tested": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "What input satisfies this elif guard, or prove nothing does": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Which of these if/else branches are truly dead code versus actually reachable by some input": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Given this function, tell me exactly which if/elif arms can never execute, proved for every possible input": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "What is the boundary value for this if guard, the point where the comparison flips, as a usable input": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "For every possible input, decide which if/elif arms of this python function are reachable, using a real solver": {
+        "top1_hit": true,
+        "top3_hit": true
+      }
     }
   },
   "dev": {
-    "n": 184,
+    "n": 188,
     "skipped": 50,
-    "top1_hits": 130,
-    "top3_hits": 152,
-    "top1": 0.7065,
-    "top3": 0.8261,
+    "top1_hits": 134,
+    "top3_hits": 155,
+    "top1": 0.7128,
+    "top3": 0.8245,
     "per_tool": {
       "algebraic_equiv": {
         "n": 4,
@@ -334,7 +1293,7 @@
       },
       "evaluate_expression": {
         "n": 6,
-        "top1": 0.8333,
+        "top1": 0.6667,
         "top3": 0.8333
       },
       "execute_code": {
@@ -354,7 +1313,7 @@
       },
       "float_repr": {
         "n": 4,
-        "top1": 0.25,
+        "top1": 0.5,
         "top3": 0.75
       },
       "human_duration": {
@@ -381,6 +1340,11 @@
         "n": 4,
         "top1": 0.5,
         "top3": 0.5
+      },
+      "percent_change": {
+        "n": 4,
+        "top1": 1.0,
+        "top3": 1.0
       },
       "percentage": {
         "n": 4,
@@ -410,7 +1374,7 @@
       "symbolic": {
         "n": 22,
         "top1": 0.2273,
-        "top3": 0.5455
+        "top3": 0.5
       },
       "trace_execution": {
         "n": 7,
@@ -442,15 +1406,769 @@
         "top1": 1.0,
         "top3": 1.0
       }
+    },
+    "per_prompt": {
+      "What does integrating x squared with respect to x come out to?": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Please simplify this symbolic math formula for me: sqrt(144) + 2**10": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I have a formula and I just want its algebraic value worked out, not solved for a variable \u2014 sqrt(2)*sqrt(8)": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "What is the closed-form symbolic answer to integrating this polynomial?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Show me every row of true/false outcomes for 'a and b or not c'": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I need the full combinatorial truth breakdown of the boolean statement 'p xor q'": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "list out every combination of inputs and whether 'a implies b' holds for each": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Enumerate every input combination for 'p implies q' and whether it holds": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Solve this system: x + y = 10 and x - y = 2, for x and y": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I've got two simultaneous equations sharing variables x and y \u2014 find the values that satisfy both": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "find x and y at the same time from a pair of coupled equations": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "I need both unknowns pinned down from two equations that share them": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Given the 2x2 grid [[1,2],[3,4]], what's its determinant?": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Compute the eigenvalues of this square array of numbers": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I tried writing that grid of numbers directly into a symbolic algebra expression using bracket notation and it got refused for security reasons \u2014 how do I invert a square array of numbers structurally instead?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "What are the eigen-decomposition values and the rank of this square grid of numbers?": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "How many kilometers per hour is 60 miles per hour?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Translate 100 degrees Celsius into Fahrenheit": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "turn 1 gigabyte into mebibytes": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "What's 500 grams in ounces?": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "What's the value of the speed of light?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Give me Avogadro's number with its precise figure": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I want the exact numeric value codecalc has stored for gravitational acceleration, not a conversion": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "List every fundamental constant this thing knows, with values": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "What are all the unit spellings and aliases this thing understands for conversions?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Enumerate every alias I can pass as a unit name": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Before I convert anything, show me the whole table of supported unit names": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Every possible unit alias I could pass in \u2014 what are they all?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Is 0.1 plus 0.2 really exactly equal to 0.3, with no floating point rounding?": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "I need an arbitrary-precision rational computation of 2 to the 64th power minus 1": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "give me the exact rational result of this expression before I judge whether it clears a limit": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Does 1/25 exceed 0.05, and by exactly how much either way?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Check precisely whether this fraction is greater than, less than, or equal to that decimal, no rounding": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "I want a verdict on whether A clears B as a cutoff, with the shortfall shown if it doesn't": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Is 3/7 strictly greater than 0.4, exactly, no float error?": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "What percent of 40 is 8?": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Work out the exact share PART represents of TOTAL as a fraction and a percent": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "give me the ratio of these two rational numbers as a share, not a pass/fail check": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Out of a total of 250, what share does 37 represent?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Revenue went from $1.2 million to $900 thousand \u2014 by what percent did it drop?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "The price of a widget moved from $80 to $100 \u2014 as a percentage, how much did it increase?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "A stock was priced at $50 last month and is now $65 \u2014 express the move as an exact percent, not just the dollar difference": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "A company's loss was $100k last quarter and is $50k this quarter \u2014 by what percent did the loss shrink?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Give me the mean, median and standard deviation of these benchmark timings": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I have a list of numbers from repeated runs \u2014 summarize their central tendency and spread, and tell me if the noise is too high to trust them": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "summarize the whole distribution's average and variability, not its ranked cutoffs": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "These five benchmark runs are noisy \u2014 is the spread too large to trust a single number, and what's the average anyway?": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "What's the p95 and p99 latency across these numbers?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Rank this list of measurements and tell me the value at the 90th and 99th cutoff": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I don't want the average \u2014 I want to know what number 99 percent of these samples fall under": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Out of these hundred response times, what's the tail latency most requests stay under \u2014 say the top 5%?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Summarize this batch of latency numbers for me": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "If I hash 1 million items into a 64-bit space, what's the chance two collide?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Estimate the odds of an accidental hash clash given this many items and this many bits of output": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "before I decide whether 8 hex characters is safe as an ID, tell me the birthday-bound odds of a clash at that many bits": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "With a 5-hex-char short ID space, how likely is an accidental clash across 100000 generated ids?": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "How many MiB and MB is 3000000000 bytes, both ways?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Show me this byte count expressed in both binary and decimal units side by side": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I specifically want the KiB/MiB/GiB AND KB/MB/GB breakdown for one integer count of bytes, not a general unit conversion": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "For the number 5000000, show me every byte-unit reading, binary and decimal both": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Turn 93000 seconds into something readable, like days and hours": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Give me a friendly readout of this many seconds, plus how that scales per day and per month": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I have a raw seconds COUNT (a span, not a timestamp) \u2014 make it human-legible": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "What's a friendlier way to say 'seven million two hundred thousand seconds'?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "What date does the Unix stamp 1732000000 correspond to in UTC?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Convert this Unix timestamp, in whatever unit it's in, to an ISO 8601 UTC date": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "This is a POINT in time, a raw numeric stamp \u2014 tell me the calendar date it refers to, not a length of time": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "This raw numeric stamp \u2014 is it seconds, millis, or nanos, and what calendar date does it map to?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Show me 3000000000 in hex, octal and binary, and whether it fits in a signed 32-wide integer": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I need the two's-complement view of this integer at a specific storage width, plus overflow detection": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "does this number fit as a signed 32-wide value, and what does it look like in hex either way": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Show me every base representation of this integer at once \u2014 hex, octal and binary \u2014 plus whether it's a valid signed value at a given width": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Convert 'zz' from base 36 into base 7": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I have a fractional value written in one arbitrary numeral base and need it re-expressed in a different arbitrary base": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "this isn't hex/oct/bin specifically \u2014 I need an arbitrary base-to-base translation, any base from 2 to 36": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Translate the fractional value 0.1 from base 10 into base 2 and tell me if it terminates": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "What does the computer actually store in memory for the number 0.1?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Show me the raw bits, exact stored value, and neighboring representable values for this floating point literal": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I want to know if this decimal literal is EXACTLY representable in double precision, not which integer width holds it": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Is 0.25 stored exactly in double precision, or does it lose precision like 0.1 does?": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Which integer types \u2014 i8 through i64 \u2014 can actually hold the number 300?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Tell me every fixed-width signed and unsigned type that this value fits into, and how it wraps in the ones it doesn't": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I don't need hex or binary output \u2014 just tell me every width class this number fits or overflows": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "If I try to cram 3000000000 into a signed 32-wide slot, what value do I actually get after it overflows?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "How many of its binary digits are set to 1 in the number 202, and what's its binary length?": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Tell me the population count, trailing zero count, and whether this integer is a power of two": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I want facts ABOUT one number's binary pattern, not an operation combining it with another number": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Is 256 a power of two, and how many trailing zeros does its binary form have?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "What's 12 XOR 10 at a width of 8, shown in every base?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Apply a logical shift right by 1 to 0x80 and also show me the arithmetic (sign-propagating) version": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I need the RESULT of combining two integers with a boolean operator, not properties of a single one": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Rotate this 32-wide value left by 4 positions and show me the hex result": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "What value of x makes x squared minus 4 equal zero?": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Find where this single-variable expression crosses zero": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "I only have ONE unknown and one equation \u2014 find the root, not a shared solution across multiple equations": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "For 2*x + 1 = 7, what's x?": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "As n grows without bound, what does n*log(n)/n**2 approach?": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Settle a Big-O argument by computing the actual asymptotic limit of this ratio as the variable heads to infinity": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I don't want a structural code estimate \u2014 I want the exact algebraic limit as the variable grows unbounded": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "As the input size grows huge, does n/log(n) eventually dominate or vanish?": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Give me the factored and expanded forms of this algebraic expression": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Reduce this formula to its simplest form and also show it multiplied out": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I don't want a single algebraic answer \u2014 I want three different equivalent rewritings: simplified, factored, expanded": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Take this messy algebraic formula and give me its cleanest possible form": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Are (a*b)/c and a*(b/c) actually the same expression algebraically?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Prove or disprove that these two symbolic formulas are identical, ignoring float rounding": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I'm not comparing two PROGRAMS in different languages, just two symbolic math formulas \u2014 are they the same?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Do these two rearranged fractions actually reduce to the same thing symbolically?": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Is this SMT-LIB2 formula satisfiable: (declare-const x Int)(assert (> x 5))(check-sat)?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Run an SMT solver over this constraint and tell me sat, unsat, or unknown, with a model if satisfiable": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I need a real constraint solver's verdict on Int/Real constraints, not an enumerated boolean truth table": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Feed this SMT2 constraint set to a real solver and tell me if a satisfying assignment exists": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I rewrote this Python function in Go \u2014 run both and confirm they actually agree on the same inputs": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Prove my port from node to rust behaves identically by executing both and diffing their output": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I have ONE original and ONE new rewrite \u2014 did the rewrite actually preserve behavior, run and checked, not just eyeballed?": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "I converted this one script from ruby to python \u2014 actually run both and check they match, don't just eyeball the diff": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Run my three language implementations of the same function against tricky edge inputs like empty, zero, and negative, and tell me where they disagree": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Feed boundary-case inputs into several language snippets of the same logic and flag any divergence between them": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I want a full GRID across many snippets and many tricky inputs, not a single before/after equivalence check": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Across all four of my language ports of this same routine, which one disagrees on a negative or empty input?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I sped up this function \u2014 prove the optimized version still produces the same output AND is measurably quicker": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Confirm my rewritten candidate agrees with the original on every test input and beats it by a real, timed margin": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I'm not asking for a growth curve \u2014 I need a pass/fail verdict that a candidate rewrite is both correct and actually faster than the original": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "My candidate is clearly correct \u2014 now prove it's ACTUALLY meaningfully quicker than the baseline, timed, not just by feel": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Which programming languages can this thing actually run on this machine right now?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Enumerate every runtime you support, along with file extension and whether it's installed here": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I want the roster of programming LANGUAGES available, not the sandbox backends that run them": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Give me the full roster of every runtime you can execute code in, extension and all": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "What sandbox backends are available for running code \u2014 local, gVisor, or something remote?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Tell me which execution BACKENDS exist and whether each is ready and strictly isolated": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I'm asking about the underlying execution engines themselves, not which programming languages they can run": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Run this Python snippet and give me its stdout": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Execute the following program in a sandbox and return what it printed, its exit status, and how long it took": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "I want to wait right here for this program to finish and get the result back in this same call": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Just run this one-liner right now and tell me what it printed and how long it took": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Run this long-running script but show me its output as it goes, not just at the very end": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "I want partial output and progress notifications while a program is still running, not just a final result": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I don't want to poll for this later \u2014 I want to stay connected and watch it progress live": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I need to see this program's output line by line as it happens, live, not all dumped at the end": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Run this same little program written in python and node side by side and tell me which finished faster": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I have equivalent snippets in several languages \u2014 run them all and give me a side-by-side timing table": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I just want a timing/output SIDE-BY-SIDE table across several languages, not a pass/fail equivalence proof": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Is my installed Python or Node runtime out of date compared to the latest release?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Check, without changing anything, whether newer versions exist for my language toolchains and what command would upgrade them": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "just tell me what's outdated and what the upgrade command WOULD be \u2014 don't actually touch my system": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Bring my installed interpreters and compilers up to their latest versions, or at least tell me what that would involve first": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Just by reading this code, what's its rough time complexity \u2014 is it quadratic, linear?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Estimate the asymptotic growth of this snippet from its structure alone, without actually running it": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I want a quick READ of the source to guess its growth class, not an empirical timing experiment": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Without running anything, can you eyeball this loop nest and guess whether it's quadratic or worse?": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Actually run this program at a bunch of increasing input sizes and tell me its measured growth curve": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Time this code empirically as N scales up and fit the observed timings to a complexity class": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "don't just read the source \u2014 actually execute it repeatedly at growing sizes and measure the real timing curve": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Feed this program bigger and bigger N and clock how the runtime actually scales": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Pull just this one function, plus whatever it imports, out of my larger file and run it on its own": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Isolate a single named function (with its helpers) from this codebase into a standalone runnable program": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I don't have a clean snippet \u2014 I need you to CARVE one named function out of a bigger file first, then run it": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "How many one-value binary digits does 202 set, and how many trailing zero digits does it end with in base two?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Is 512 a power of two, and what's the very next power of two above 200?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Combine 12 and 10 with a boolean XOR at a byte width of 8, and show me every base.": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Rotate the value 0x1 left by four positions within a 32-wide word, and give me the hex result.": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Which fixed-size signed and unsigned integer containers, from 8 through 64 wide, can hold the number 500?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Tell me every integer size this value fits or overflows, without giving me any hex or octal output.": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Render 4000000000 in hexadecimal, octal and binary, and say whether it fits as a signed 32-wide integer.": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Give me the two's complement view of this integer at a specific word width, with overflow flagged.": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Find the value of y where y squared minus nine equals zero.": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "What input makes this single equation cross zero?": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "I have two equations that both share the same two variables \u2014 solve for both at once.": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Pin down x and y together from a pair of equations that both depend on them.": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Give me this algebraic expression in its simplified, factored and expanded forms.": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Reduce this messy formula down and also multiply it all the way out.": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "As x heads toward infinity, what does this ratio settle on?": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Compute the exact asymptotic value of n over log n as n becomes arbitrarily large.": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Show me exactly which lines of this Python script ran and in what order": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I want to see the value of every variable at each step while this script runs, not just the final printout": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Walk me through why this python program produced that output, step by step": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Which branch of this if/elif actually fired when I ran this input, and which one never did": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Step through this program and show me the call stack and local variables at each point": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Give me a line-by-line record of this Python script with how each variable changed at every step": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I need to debug why my loop never hits the else case \u2014 show me a step-by-step record of what ran": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Just run this python snippet once and tell me what it prints and how long it took": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "What's the Big-O time complexity of this function, just from reading its structure": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Show me that this if/elif arm is dead code for every possible input, not just one I already tested": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "What input satisfies this elif guard, or prove nothing does": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Which of these if/else branches are truly dead code versus actually reachable by some input": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Given this function, tell me exactly which if/elif arms can never execute, proved for every possible input": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "What is the boundary value for this if guard, the point where the comparison flips, as a usable input": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "For every possible input, decide which if/elif arms of this python function are reachable, using a real solver": {
+        "top1_hit": true,
+        "top3_hit": true
+      }
     }
   },
   "core": {
-    "n": 116,
+    "n": 120,
     "skipped": 118,
-    "top1_hits": 78,
-    "top3_hits": 99,
-    "top1": 0.6724,
-    "top3": 0.8534,
+    "top1_hits": 82,
+    "top3_hits": 104,
+    "top1": 0.6833,
+    "top3": 0.8667,
     "per_tool": {
       "bits": {
         "n": 24,
@@ -475,7 +2193,7 @@
       "compare_threshold": {
         "n": 4,
         "top1": 0.5,
-        "top3": 0.5
+        "top3": 0.75
       },
       "convert_units": {
         "n": 4,
@@ -517,6 +2235,11 @@
         "top1": 0.5,
         "top3": 0.5
       },
+      "percent_change": {
+        "n": 4,
+        "top1": 1.0,
+        "top3": 1.0
+      },
       "percentage": {
         "n": 4,
         "top1": 0.75,
@@ -547,10 +2270,492 @@
         "top1": 0.75,
         "top3": 1.0
       }
+    },
+    "per_prompt": {
+      "What does integrating x squared with respect to x come out to?": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Please simplify this symbolic math formula for me: sqrt(144) + 2**10": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I have a formula and I just want its algebraic value worked out, not solved for a variable \u2014 sqrt(2)*sqrt(8)": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "What is the closed-form symbolic answer to integrating this polynomial?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Show me every row of true/false outcomes for 'a and b or not c'": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I need the full combinatorial truth breakdown of the boolean statement 'p xor q'": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "list out every combination of inputs and whether 'a implies b' holds for each": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Enumerate every input combination for 'p implies q' and whether it holds": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Solve this system: x + y = 10 and x - y = 2, for x and y": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I've got two simultaneous equations sharing variables x and y \u2014 find the values that satisfy both": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "find x and y at the same time from a pair of coupled equations": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "I need both unknowns pinned down from two equations that share them": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Given the 2x2 grid [[1,2],[3,4]], what's its determinant?": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Compute the eigenvalues of this square array of numbers": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I tried writing that grid of numbers directly into a symbolic algebra expression using bracket notation and it got refused for security reasons \u2014 how do I invert a square array of numbers structurally instead?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "What are the eigen-decomposition values and the rank of this square grid of numbers?": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "How many kilometers per hour is 60 miles per hour?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Translate 100 degrees Celsius into Fahrenheit": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "turn 1 gigabyte into mebibytes": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "What's 500 grams in ounces?": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "What's the value of the speed of light?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Give me Avogadro's number with its precise figure": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I want the exact numeric value codecalc has stored for gravitational acceleration, not a conversion": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "List every fundamental constant this thing knows, with values": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "What are all the unit spellings and aliases this thing understands for conversions?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Enumerate every alias I can pass as a unit name": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Before I convert anything, show me the whole table of supported unit names": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Every possible unit alias I could pass in \u2014 what are they all?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Is 0.1 plus 0.2 really exactly equal to 0.3, with no floating point rounding?": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "I need an arbitrary-precision rational computation of 2 to the 64th power minus 1": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "give me the exact rational result of this expression before I judge whether it clears a limit": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Does 1/25 exceed 0.05, and by exactly how much either way?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Check precisely whether this fraction is greater than, less than, or equal to that decimal, no rounding": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "I want a verdict on whether A clears B as a cutoff, with the shortfall shown if it doesn't": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Is 3/7 strictly greater than 0.4, exactly, no float error?": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "What percent of 40 is 8?": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Work out the exact share PART represents of TOTAL as a fraction and a percent": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "give me the ratio of these two rational numbers as a share, not a pass/fail check": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Out of a total of 250, what share does 37 represent?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Revenue went from $1.2 million to $900 thousand \u2014 by what percent did it drop?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "The price of a widget moved from $80 to $100 \u2014 as a percentage, how much did it increase?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "A stock was priced at $50 last month and is now $65 \u2014 express the move as an exact percent, not just the dollar difference": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "A company's loss was $100k last quarter and is $50k this quarter \u2014 by what percent did the loss shrink?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Give me the mean, median and standard deviation of these benchmark timings": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I have a list of numbers from repeated runs \u2014 summarize their central tendency and spread, and tell me if the noise is too high to trust them": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "summarize the whole distribution's average and variability, not its ranked cutoffs": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "These five benchmark runs are noisy \u2014 is the spread too large to trust a single number, and what's the average anyway?": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "What's the p95 and p99 latency across these numbers?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Rank this list of measurements and tell me the value at the 90th and 99th cutoff": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I don't want the average \u2014 I want to know what number 99 percent of these samples fall under": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Out of these hundred response times, what's the tail latency most requests stay under \u2014 say the top 5%?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Summarize this batch of latency numbers for me": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "If I hash 1 million items into a 64-bit space, what's the chance two collide?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Estimate the odds of an accidental hash clash given this many items and this many bits of output": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "before I decide whether 8 hex characters is safe as an ID, tell me the birthday-bound odds of a clash at that many bits": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "With a 5-hex-char short ID space, how likely is an accidental clash across 100000 generated ids?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "How many MiB and MB is 3000000000 bytes, both ways?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Show me this byte count expressed in both binary and decimal units side by side": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I specifically want the KiB/MiB/GiB AND KB/MB/GB breakdown for one integer count of bytes, not a general unit conversion": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "For the number 5000000, show me every byte-unit reading, binary and decimal both": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Turn 93000 seconds into something readable, like days and hours": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Give me a friendly readout of this many seconds, plus how that scales per day and per month": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I have a raw seconds COUNT (a span, not a timestamp) \u2014 make it human-legible": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "What's a friendlier way to say 'seven million two hundred thousand seconds'?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "What date does the Unix stamp 1732000000 correspond to in UTC?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Convert this Unix timestamp, in whatever unit it's in, to an ISO 8601 UTC date": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "This is a POINT in time, a raw numeric stamp \u2014 tell me the calendar date it refers to, not a length of time": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "This raw numeric stamp \u2014 is it seconds, millis, or nanos, and what calendar date does it map to?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Show me 3000000000 in hex, octal and binary, and whether it fits in a signed 32-wide integer": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I need the two's-complement view of this integer at a specific storage width, plus overflow detection": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "does this number fit as a signed 32-wide value, and what does it look like in hex either way": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Show me every base representation of this integer at once \u2014 hex, octal and binary \u2014 plus whether it's a valid signed value at a given width": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Convert 'zz' from base 36 into base 7": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I have a fractional value written in one arbitrary numeral base and need it re-expressed in a different arbitrary base": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "this isn't hex/oct/bin specifically \u2014 I need an arbitrary base-to-base translation, any base from 2 to 36": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Translate the fractional value 0.1 from base 10 into base 2 and tell me if it terminates": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "What does the computer actually store in memory for the number 0.1?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Show me the raw bits, exact stored value, and neighboring representable values for this floating point literal": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I want to know if this decimal literal is EXACTLY representable in double precision, not which integer width holds it": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Is 0.25 stored exactly in double precision, or does it lose precision like 0.1 does?": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Which integer types \u2014 i8 through i64 \u2014 can actually hold the number 300?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Tell me every fixed-width signed and unsigned type that this value fits into, and how it wraps in the ones it doesn't": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I don't need hex or binary output \u2014 just tell me every width class this number fits or overflows": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "If I try to cram 3000000000 into a signed 32-wide slot, what value do I actually get after it overflows?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "How many of its binary digits are set to 1 in the number 202, and what's its binary length?": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Tell me the population count, trailing zero count, and whether this integer is a power of two": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I want facts ABOUT one number's binary pattern, not an operation combining it with another number": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Is 256 a power of two, and how many trailing zeros does its binary form have?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "What's 12 XOR 10 at a width of 8, shown in every base?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Apply a logical shift right by 1 to 0x80 and also show me the arithmetic (sign-propagating) version": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I need the RESULT of combining two integers with a boolean operator, not properties of a single one": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Rotate this 32-wide value left by 4 positions and show me the hex result": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "What value of x makes x squared minus 4 equal zero?": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Find where this single-variable expression crosses zero": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "I only have ONE unknown and one equation \u2014 find the root, not a shared solution across multiple equations": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "For 2*x + 1 = 7, what's x?": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "As n grows without bound, what does n*log(n)/n**2 approach?": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Settle a Big-O argument by computing the actual asymptotic limit of this ratio as the variable heads to infinity": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I don't want a structural code estimate \u2014 I want the exact algebraic limit as the variable grows unbounded": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "As the input size grows huge, does n/log(n) eventually dominate or vanish?": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Give me the factored and expanded forms of this algebraic expression": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Reduce this formula to its simplest form and also show it multiplied out": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "I don't want a single algebraic answer \u2014 I want three different equivalent rewritings: simplified, factored, expanded": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Take this messy algebraic formula and give me its cleanest possible form": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "How many one-value binary digits does 202 set, and how many trailing zero digits does it end with in base two?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Is 512 a power of two, and what's the very next power of two above 200?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Combine 12 and 10 with a boolean XOR at a byte width of 8, and show me every base.": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Rotate the value 0x1 left by four positions within a 32-wide word, and give me the hex result.": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Which fixed-size signed and unsigned integer containers, from 8 through 64 wide, can hold the number 500?": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Tell me every integer size this value fits or overflows, without giving me any hex or octal output.": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Render 4000000000 in hexadecimal, octal and binary, and say whether it fits as a signed 32-wide integer.": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Give me the two's complement view of this integer at a specific word width, with overflow flagged.": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Find the value of y where y squared minus nine equals zero.": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "What input makes this single equation cross zero?": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "I have two equations that both share the same two variables \u2014 solve for both at once.": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Pin down x and y together from a pair of equations that both depend on them.": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Give me this algebraic expression in its simplified, factored and expanded forms.": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Reduce this messy formula down and also multiply it all the way out.": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "As x heads toward infinity, what does this ratio settle on?": {
+        "top1_hit": false,
+        "top3_hit": false
+      },
+      "Compute the exact asymptotic value of n over log n as n becomes arbitrarily large.": {
+        "top1_hit": false,
+        "top3_hit": false
+      }
     }
   },
-  "codecalc_version": "0.11.0",
-  "generated_at": "2026-09-09T10:27:39.256829+00:00",
-  "prompt_count": 234,
-  "prompt_set_sha256": "fbae4abde1fc3893ad3cbc571c4c4e65d7c5da073aa4fc0decb7a3424343a353"
+  "codecalc_version": "0.12.0",
+  "generated_at": "2026-09-21T07:47:03.165580+00:00",
+  "prompt_count": 238,
+  "prompt_set_sha256": "5fe9fd268e7eb1a20dc43c7ac31a8da691019b2a117d5bd67ec3507c1fc84a46"
 }

@@ -5,7 +5,7 @@ import sys
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
-from codecalc import exact
+from codecalc import exact, logic
 
 FAILS = []
 
@@ -41,6 +41,160 @@ check("pct 3/8", r["ok"] and abs(r["percent"] - 37.5) < 1e-6)
 # EXACT `share` fraction — nothing used to say which of the two was which.
 check("pct discloses percent is rounded, and to how many digits",
       r.get("rounding") == {"percent": 6}, f"-> {r}")
+
+# percent_change (GH #329): before/after change, distinct from percentage's
+# PART/TOTAL share. Exact rational relative to abs(from_value) — see
+# exact.percent_change's own module comment for the sign-convention
+# reasoning (the conventional finance definition, not plain (b-a)/a).
+r = exact.percent_change("100", "150")
+check("percent_change 100->150",
+      r["ok"] and r["percent_exact"] == "50" and r["absolute_change"] == "50"
+      and r["direction"] == "increase" and r["multiplier"] == "3/2", f"-> {r}")
+r = exact.percent_change("150", "100")
+check("percent_change 150->100 (exact fraction, not a rounded float)",
+      r["ok"] and r["percent_exact"] == "-100/3" and r["direction"] == "decrease"
+      and abs(r["percent_decimal"] - (-33.333333)) < 1e-5, f"-> {r}")
+r = exact.percent_change("5", "5")
+check("percent_change 5->5 unchanged",
+      r["ok"] and r["direction"] == "unchanged" and r["percent_exact"] == "0"
+      and r["multiplier"] == "1", f"-> {r}")
+r = exact.percent_change("0", "5")
+check("percent_change refuses from_value=0, coded, with a remedy",
+      r["ok"] is False and r.get("code") == "validation"
+      and "report the absolute change" in r.get("remedy", ""), f"-> {r}")
+# Negative base: relative to abs(from_value), so `direction` follows the
+# ALGEBRAIC sign of the change, not the change in |value| — GH #329 asked
+# this be decided explicitly and documented; `note` is where it is.
+r = exact.percent_change("-100", "-50")
+check("percent_change -100->-50: direction 'increase' (algebraic, -50 > "
+      "-100), documented sign convention in `note`",
+      r["ok"] and r["percent_exact"] == "50" and r["direction"] == "increase"
+      and "note" in r, f"-> {r}")
+r = exact.percent_change("-100", "50")
+check("percent_change -100->50",
+      r["ok"] and r["percent_exact"] == "150" and r["direction"] == "increase"
+      and r["multiplier"] == "-1/2" and "note" in r, f"-> {r}")
+r = exact.percent_change("3/4", "1")
+check("percent_change accepts expression inputs ('3/4' -> '1')",
+      r["ok"] and r["percent_exact"] == "100/3", f"-> {r}")
+r = exact.percent_change("abc", "1")
+check("percent_change refuses a non-numeric from_value",
+      r["ok"] is False and "error" in r, f"-> {r}")
+
+# PR #337 cross-vendor review (Codex): `Fraction`'s own scientific-notation
+# parsing builds the exact integer directly, never through float, so a
+# short string like '1e5000' does not overflow to inf the way a plain
+# float(s) call would — it demands a >4300-digit integer and raised an
+# UNCAUGHT ValueError, and '1e400' (under that ceiling) "succeeded" with a
+# percent_decimal silently overflowing to a non-finite `Infinity` (invalid
+# JSON). Both are now refused/degraded gracefully — see exact.py's
+# _oversized_numeric_literal and the math.isfinite guard on percent_decimal.
+r = exact.percent_change("1", "1e400")
+check("percent_change('1', '1e400'): finite percent_decimal (null, not "
+      "inf/Infinity), exact value still reported",
+      r["ok"] and r["percent_decimal"] is None and r["percent_exact"].startswith("999")
+      and "note" in r, f"-> percent_decimal={r.get('percent_decimal')!r} "
+      f"note={r.get('note')!r}")
+r = exact.percent_change("1", "1e5000")
+check("percent_change('1', '1e5000'): refused BEFORE Fraction() construction, "
+      "not an uncaught ValueError",
+      r["ok"] is False and r.get("code") == "resource_exhausted"
+      and "digits" in r.get("error", ""), f"-> {r}")
+r = exact.percent_change("1", "1" * 5000)
+check("percent_change: a 5000-char plain-digit literal (over "
+      "MAX_NUMERIC_DIGITS on digit count alone) is refused, not a crash",
+      r["ok"] is False and r.get("code") == "resource_exhausted", f"-> {r}")
+r = exact.percent_change("1", "1e3")
+check("percent_change('1', '1e3'): an ordinary scientific-notation input "
+      "still works, finite percent_decimal",
+      r["ok"] and r["percent_decimal"] == 99900.0 and "note" not in r, f"-> {r}")
+# Two inputs each individually under the per-input digit cap can still
+# combine into a computed result over Python's int->str ceiling (opposite-
+# sign exponents near the boundary) — the try/except backstop around the
+# actual computation, not just the upfront per-input check, is what catches
+# this.
+r = exact.percent_change("1e-3999", "1e3999")
+check("percent_change: two individually-in-bounds inputs whose COMBINED "
+      "result overflows str() are still refused, not a crash",
+      r["ok"] is False and r.get("code") == "resource_exhausted", f"-> {r}")
+
+# PR #337 round 2 (Codex): the exponent regex required `\d+` with no `_`,
+# so '1e4_001' (Fraction's own grammar accepts '_' as a digit-group
+# separator, PEP 515) silently read as "no exponent found" and scored 5
+# raw digit characters instead of the true ~4002 the value implies — the
+# cap bypassed by exactly the syntax it claimed to bound. '_' is now
+# refused outright (see exact.py's _oversized_numeric_literal for why not
+# just taught to parse it). Every spelling the review listed:
+r = exact.percent_change("1", "1e4_001")
+check("percent_change: '1e4_001' no longer bypasses the digit cap via "
+      "underscore grouping — refused, not a 4002-digit result",
+      r["ok"] is False and r.get("code") == "resource_exhausted"
+      and "_" in r.get("error", ""), f"-> {r}")
+r = exact.percent_change("1", "1e100_000")
+check("percent_change: '1e100_000' is refused BEFORE Fraction() runs "
+      "(not merely caught after constructing a 100,001-digit integer)",
+      r["ok"] is False and r.get("code") == "resource_exhausted"
+      and "_" in r.get("error", ""), f"-> {r}")
+r = exact.percent_change("1", "1_000")
+check("percent_change: '1_000' (an ordinary small number, just spelled "
+      "with an underscore) is refused cleanly, not silently scored wrong",
+      r["ok"] is False and r.get("code") == "resource_exhausted", f"-> {r}")
+r = exact.percent_change("1", "+1e3")
+check("percent_change: a leading '+' sign still works",
+      r["ok"] and r["to_value"] == "1000", f"-> {r}")
+r = exact.percent_change("1", "1E400")
+check("percent_change: uppercase 'E' scientific notation is recognised "
+      "the same as lowercase 'e' (null percent_decimal, not Infinity)",
+      r["ok"] and r["percent_decimal"] is None, f"-> {r}")
+r = exact.percent_change("1", " 1e3 ")
+check("percent_change: surrounding whitespace (Fraction's own grammar "
+      "accepts it) still works",
+      r["ok"] and r["to_value"] == "1000", f"-> {r}")
+r = exact.percent_change("1", "0.000001e4000")
+check("percent_change: a decimal mantissa with leading zeros then a huge "
+      "exponent is refused (conservative digit-count estimate), not a crash",
+      r["ok"] is False and r.get("code") == "resource_exhausted", f"-> {r}")
+# Exactly at the boundary: 3999 mantissa digits + exponent 1 = 4000, not
+# over MAX_NUMERIC_DIGITS — allowed, and the 4001-character string is well
+# under _MAX_NUMERIC_LITERAL_LEN (unlike the old, unrelated _MAX_EXPR_LEN
+# reuse a round-1 version of this fix had, which would have refused this
+# for string length alone despite being digit-cap-safe).
+r = exact.percent_change("1", "1" * 3999 + "e1")
+check("percent_change: a 3999-digit mantissa with 'e1' sits exactly at "
+      "the MAX_NUMERIC_DIGITS boundary (4000) and is allowed",
+      r["ok"] and len(r["percent_exact"]) in (4001, 4002), f"-> ok={r.get('ok')} "
+      f"len={len(r.get('percent_exact', ''))}")
+r = exact.percent_change("1", "1/1e400")
+check("percent_change: '1/1e400' (Fraction's own grammar rejects mixing "
+      "'/' with exponent notation) fails cleanly, not a crash",
+      r["ok"] is False and "error" in r, f"-> {r}")
+for _bad in ("inf", "nan"):
+    r = exact.percent_change("1", _bad)
+    check(f"percent_change: {_bad!r} is refused cleanly (Fraction itself "
+          "rejects it), not treated as a real value",
+          r["ok"] is False and "error" in r, f"-> {r}")
+
+# evaluate_expression's calculus forms (GH #329): documented in server.py's
+# docstring but previously undiscoverable from the schema — diff/integrate/
+# series worked all along; these prove the doc's own examples still run.
+r = logic.evaluate_expression("diff(sin(x)*x, x)")
+check("evaluate_expression diff(sin(x)*x, x)",
+      r["ok"] and r["expression"] == "x*cos(x) + sin(x)", f"-> {r}")
+r = logic.evaluate_expression("integrate(x**2, (x, 0, 1))")
+check("evaluate_expression integrate(x**2, (x, 0, 1)) definite integral",
+      r["ok"] and r["expression"] == "1/3", f"-> {r}")
+r = logic.evaluate_expression("series(sin(x), x, 0, 6)")
+check("evaluate_expression series(sin(x), x, 0, 6)",
+      r["ok"] and r["expression"] == "x - x**3/6 + x**5/120 + O(x**6)", f"-> {r}")
+
+# symbolic(op="solve_linear")'s documented non-linear example (GH #329) —
+# the name says 'linear', the docstring now says non-linear polynomial
+# systems work too; prove it with the ticket's own example.
+r = logic.solve_linear("x**2 + y**2 = 5; x - y = -1", ["x", "y"])
+check("solve_linear accepts a non-linear polynomial system, as documented",
+      r["ok"] and r["count"] == 2
+      and sorted(r["solutions"]) == sorted(["{x: -2, y: -1}", "{x: 1, y: 2}"]),
+      f"-> {r}")
 
 # stats
 r = exact.stats([1, 2, 3, 4, 5])

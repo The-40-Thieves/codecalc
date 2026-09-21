@@ -2132,13 +2132,19 @@ def run_cancel(run_id: Annotated[str, Field(description="Id of a background run,
 
 
 @mcp.tool(group="calculator")
-def evaluate_expression(expression: Annotated[str, Field(description="Symbolic math expression to evaluate via SymPy, e.g. 'integrate(x**2, x)', 'sqrt(144) + 2**10'")]) -> dict[str, Any]:
+def evaluate_expression(expression: Annotated[str, Field(description="Symbolic math expression to evaluate via SymPy, e.g. 'integrate(x**2, x)', 'diff(sin(x)*x, x)', 'series(sin(x), x, 0, 6)', 'sqrt(144) + 2**10'")]) -> dict[str, Any]:
     """Use evaluate_expression, not calc_exact, for something other than
     plain arithmetic on literal values. Symbolically evaluate to a value or
-    closed form via sympify: 'integrate(x**2, x)', 'sqrt(144) + 2**10'. Not
-    simplification — for simplified/factored/expanded forms, use
-    symbolic(op="simplify"). Returns `value` (if the result is a number) or
-    the evaluated expression, plus `type`."""
+    closed form via sympify: 'sqrt(144) + 2**10'. Not simplification — for
+    simplified/factored/expanded forms, use symbolic(op="simplify").
+
+    Also reaches calculus forms no other tool exposes: `diff(expr, x)`
+    (derivative), `integrate(expr, x)` / `integrate(expr, (x, a, b))`
+    (indefinite/definite), and `series(expr, x, x0, n)` (Taylor expansion) —
+    see this parameter's own examples.
+
+    Returns `value` (if the result is a number) or the evaluated
+    expression, plus `type`."""
     return logic.evaluate_expression(expression)
 
 
@@ -2639,6 +2645,23 @@ def percentage(part: Annotated[str, Field(description="Numerator expression (rat
 
 
 @mcp.tool(group="calculator")
+def percent_change(from_value: Annotated[str, Field(description="Starting value: a number or exact rational (e.g. '3/4', '1e3'), not an expression like '2*3'; no '_' digit separators; must not be zero")],
+                   to_value: Annotated[str, Field(description="Ending value: a number or exact rational (e.g. '3/4', '1e3'), not an expression like '2*3'; no '_' digit separators")]) -> dict[str, Any]:
+    """Exact percent change from FROM_VALUE to TO_VALUE. Use percentage,
+    not this, for PART / TOTAL rather than a before/after change.
+
+    `(to_value - from_value) / abs(from_value) * 100` — the conventional
+    finance definition, relative to the MAGNITUDE of the base so a negative
+    from_value does not flip the sign (see `note` when it applies). Refuses
+    from_value=0 (undefined) rather than returning infinity — report the
+    absolute change instead. Returns `percent_exact` (exact rational),
+    `percent_decimal` (rounded), `absolute_change`, `direction`
+    ("increase"/"decrease"/"unchanged"), and `multiplier` (to_value /
+    from_value, exact)."""
+    return exact.percent_change(from_value, to_value)
+
+
+@mcp.tool(group="calculator")
 def calc_stats(nums: Annotated[list[float], Field(description="Sample of numbers to summarize (mean, median, sample stdev, coefficient of variation)")]) -> dict[str, Any]:
     """Mean, median, sample stdev, and coefficient of variation (CV) for a
     sample of numbers. Pairs with percentiles for distribution shape
@@ -2860,7 +2883,7 @@ def symbolic(op: Annotated[str, Field(description="Which symbolic operation to r
             expr: Annotated[str | None, Field(description="Expression or equation to solve/simplify/take the limit of; required by op='solve'/'simplify'/'limit'")] = None,
             var: Annotated[str | None, Field(description="Variable to solve for or take the limit over; optional, default 'x'; used by op='solve'/'limit'")] = None,
             point: Annotated[str | None, Field(description="Point `var` approaches for op='limit'; optional, default 'oo' (infinity)")] = None,
-            system: Annotated[str | None, Field(description="';'-separated equations for op='solve_linear', e.g. 'x + y = 10; x - y = 2'; required by that op")] = None,
+            system: Annotated[str | None, Field(description="';'-separated equations for op='solve_linear' (non-linear systems work too, e.g. 'x**2 + y**2 = 5; x - y = -1'), e.g. 'x + y = 10; x - y = 2'; required by that op")] = None,
             variables: Annotated[str | None, Field(description="Comma-separated variable names for op='solve_linear', e.g. 'x, y'; required by that op")] = None) -> dict[str, Any]:
     """Symbolic algebra, selected by `op` — replaces the four former
     standalone tools solve_expression, solve_linear, simplify_expression
@@ -2875,8 +2898,10 @@ def symbolic(op: Annotated[str, Field(description="Which symbolic operation to r
     `variable`. Used by this op: `expr` (required), `var` (optional).
 
     op="solve_linear" (was solve_linear) — a system of equations sharing
-    variables. Example: system='x + y = 10; x - y = 2', variables='x, y'.
-    Used by this op: `system`, `variables` (both required).
+    variables; despite the name, non-linear systems work too (e.g.
+    'x**2 + y**2 = 5; x - y = -1'). Example: system='x + y = 10; x - y = 2',
+    variables='x, y'. Used by this op: `system`, `variables` (both
+    required).
 
     op="simplify" (was simplify_expression) — simplify, factor, and expand
     an expression — algebraic forms, not solving (use op="solve") and not a

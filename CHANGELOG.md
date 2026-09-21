@@ -249,6 +249,145 @@ behind it.
   `"event_detail_over_cap"` and `events[]` items gain the optional `detail_dropped: true`
   marker; no shape a `1.17.0` client already validates changes otherwise.
 
+### Added
+
+- **`percent_change(from_value, to_value)`** (calculator group) — exact
+  percent change between two values, `(to - from) / abs(from) * 100`, the
+  conventional finance definition (relative to the MAGNITUDE of the base,
+  so a negative `from_value` does not flip the sign). `percentage`
+  answered PART/TOTAL and had no before/after equivalent, so models were
+  hand-building `(b - a) / a * 100` in `calc_exact` — the exact guessing
+  this package exists to remove, and the easy place to get the base
+  wrong. Returns `percent_exact` (exact rational), `percent_decimal`
+  (rounded), `absolute_change`, `direction`
+  ("increase"/"decrease"/"unchanged"), and `multiplier` (`to_value /
+  from_value`, exact); refuses `from_value=0` (coded `validation`, remedy
+  "report the absolute change instead") rather than returning infinity,
+  and adds a `note` spelling out the sign convention whenever
+  `from_value` is negative. The served surface moves from 49 to **50
+  tools** (GH #329, THE-1094).
+
+### Changed
+
+- **`symbolic(op="solve_linear")` and `evaluate_expression`'s
+  descriptions now say what they already did.** `solve_linear` has always
+  reached sympy's general `solve()`, so non-linear polynomial systems
+  ('x**2 + y**2 = 5; x - y = -1') solve the same way linear ones do — the
+  docstring and the `system` parameter's schema description previously
+  showed only a linear example and read as though the name were a
+  behavioural promise. `evaluate_expression`'s docstring mentioned
+  `integrate` once as an example and never named `diff` or `series` at
+  all, despite all three working today (`diff(expr, x)`,
+  `integrate(expr, x)` / `integrate(expr, (x, a, b))`, `series(expr, x,
+  x0, n)`) — a model reading the schema had no way to discover calculus
+  was reachable at all. No behaviour changed; every example quoted in
+  the new prose was run and its output checked before being written down
+  (GH #329, THE-1094).
+- `symbolic`/`evaluate_expression`'s new prose (above) trimmed shorter
+  after cross-vendor review measured it costing top-1/top-3 hits on
+  `scripts/tool_select_eval.py`'s baseline (BM25 penalises added
+  vocabulary that dilutes a document's existing terms) — the worked
+  `diff`/`integrate`/`series` example values moved out of the docstring
+  into the `expression` parameter's own schema description only, and the
+  `solve_linear` non-linear example dropped its "-> two solutions"/
+  "Ordinary linear example:" framing. `scripts/data/tool_select_baseline.json`
+  regenerated. GH #337 round-2 review: a first pass at this bullet
+  reported approximate numbers from an earlier, pre-trim measurement.
+  Below is a from-scratch recomputation (`origin/main`'s `codecalc/`
+  checked out via `git archive` to a scratch dir, scored against the
+  identical unchanged 234-prompt corpus with the same BM25 evaluator) —
+  net top-1/top-3 deltas, and every prompt whose hit/miss status
+  actually changed (a much larger set of prompts change RANK without
+  changing hit/miss status at all — pure BM25 score noise from adding a
+  50th candidate document; those are not listed):
+
+  | surface | top-1 delta | top-3 delta |
+  |---|---|---|
+  | full | -2 | -1 |
+  | dev | 0 | -1 |
+  | core | 0 | +1 |
+
+  **full** (5 prompts changed hit/miss status):
+  - top-1 LOST, "I have a formula and I just want its algebraic value
+    worked out, not solved for a variable — sqrt(2)*sqrt(8)" (expected
+    `evaluate_expression`): old top1=`evaluate_expression`
+    top3=[`evaluate_expression`,`compare_threshold`,`calc_exact`] ->
+    new top1=`compare_threshold`
+    top3=[`compare_threshold`,`evaluate_expression`,`calc_exact`] (still
+    top-3).
+  - top-3 LOST, "I need both unknowns pinned down from two equations
+    that share them" (expected `symbolic`): old
+    top3=[`percentage`,`symbolic`,`data_sizes`] -> new
+    top3=[`percentage`,`data_sizes`,`bits`] (`symbolic` drops to rank 4).
+  - top-1 LOST, "Take this messy algebraic formula and give me its
+    cleanest possible form" (expected `evaluate_expression`/`symbolic`):
+    old top1=`evaluate_expression`
+    top3=[`evaluate_expression`,`algebraic_equiv`,`symbolic`] -> new
+    top1=`algebraic_equiv`
+    top3=[`algebraic_equiv`,`evaluate_expression`,`symbolic`] (still
+    top-3 on both).
+  - top-3 GAINED, "Fetch a file from the persistent workspace, and if
+    it's a picture, hand it back as something I can actually view"
+    (expected `session_read_file`): old
+    top3=[`session_start`,`evaluate_expression`,`session_write_file`] ->
+    new top3=[`session_start`,`session_write_file`,`session_read_file`].
+  - top-3 LOST, "Compute the exact asymptotic value of n over log n as n
+    becomes arbitrarily large." (expected `symbolic`): old
+    top3=[`percentage`,`calc_exact`,`symbolic`] -> new
+    top3=[`percentage`,`percent_change`,`calc_exact`] (`percent_change`
+    — a 50th candidate document that did not exist in the old corpus at
+    all — takes the slot `symbolic` held; `symbolic` drops to rank 4).
+
+  **dev** (3 prompts changed hit/miss status, net top-1 delta 0 — one
+  lost, one gained):
+  - top-1 LOST, same "sqrt(2)*sqrt(8)" prompt as full, same ranks.
+  - top-1 GAINED, "What does the computer actually store in memory for
+    the number 0.1?" (expected `float_repr`): old
+    top1=`evaluate_expression`
+    top3=[`evaluate_expression`,`float_repr`,`list_languages`] -> new
+    top1=`float_repr`
+    top3=[`float_repr`,`list_languages`,`calc_exact`].
+  - top-3 LOST, same "asymptotic value of n over log n" prompt as full,
+    same ranks (`percent_change` again).
+
+  **core** (1 prompt changed hit/miss status):
+  - top-3 GAINED, "Is 3/7 strictly greater than 0.4, exactly, no float
+    error?" (expected `compare_threshold`): old
+    top3=[`float_repr`,`collision_probability`,`calc_exact`] -> new
+    top3=[`float_repr`,`collision_probability`,`compare_threshold`].
+
+  Correction to the round-1 version of this bullet: `symbolic` does
+  **not** gain top-1 on the "two unknowns" prompt on dev/core — measured
+  directly (both surfaces, both old and new schemas), `symbolic` sits at
+  rank 4 on both, unchanged. Net top-1 vs the pre-PR baseline on the
+  unchanged 234-prompt corpus: full -2, dev 0, core 0 (`percent_change`'s
+  own 4 new prompts, 4/4 top-1 on every surface, are additive on top of
+  this and are why the checked-in baseline's TOTALS still read as a net
+  gain — see GH #337 review discussion; `tests/test_tool_select_eval.py`
+  now also compares per-prompt outcomes against the pre-PR baseline over
+  this same unchanged-prompt intersection whenever the corpus hash has
+  moved, rather than trusting a self-referential "drop_hits=0" against a
+  baseline just regenerated from the current state).
+
+### Fixed
+
+- **`percent_change` on extreme-magnitude inputs.** `'1e400'` returned a
+  non-finite `percent_decimal: Infinity` (invalid JSON — `Fraction`'s
+  scientific-notation parsing builds the exact integer directly, so it
+  never overflows through `float` the way a bare `float(s)` call would);
+  `'1e5000'` raised an UNCAUGHT `ValueError` (Python's int<->str
+  conversion ceiling, 4300 digits) with no coded result at all; and two
+  individually-in-bounds inputs with opposite-sign extreme exponents
+  (e.g. `'1e-3999'` / `'1e3999'`) could still combine into a computed
+  result over that same ceiling. `from_value`/`to_value` are now screened
+  for their implied digit count (mantissa digits + `abs(exponent)`,
+  mirroring `MAX_NUMERIC_DIGITS` — the same ceiling `calc_exact`'s own
+  literal screen enforces) BEFORE `Fraction()` ever runs, and the actual
+  computation is wrapped in a `ValueError` backstop for the residual
+  combined-inputs case; `percent_decimal` is now always finite JSON —
+  `null` with a `note` when the exact value has no finite float
+  representation, never a bare `Infinity` (GH #337 cross-vendor review).
+
 ## [0.12.0] — 2026-09-09
 
 ### Removed
