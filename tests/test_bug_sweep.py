@@ -734,13 +734,27 @@ if _guarded.CAN_FORK:
     # whose two factors were ~7919 apart, which Fermat's method factors
     # instantly — it returned in 0.01s and proved nothing. These two run past
     # 25s unguarded, with the screen raising no objection to either.
-    from sympy import nextprime as _nextprime
-
+    #
+    # The first case USED to be a bare literal (`factorint(<62-digit
+    # product>)`) -- #326 finding 4 (round 7, Codex) gave `factorint` its
+    # own token-level digit-count cap (`_FACTOR_ARG_FUNCTIONS`, 25 digits),
+    # which now correctly refuses that literal outright (a strict
+    # improvement -- tested separately, above). To keep testing what THIS
+    # block exists to test (a shape the screen still has no opinion on),
+    # the factors are now COMPUTED `nextprime(...)` calls in the source
+    # text instead of pre-computed Python literals: neither `10**30` nor
+    # `3*10**31` is a bare NUMBER token (each is a small Pow/Mul of
+    # small-digit tokens), so the digit-count screen -- literal-only by
+    # design, same scope as `_heavy_call_violation` -- has no opinion on
+    # either, even though `nextprime` still evaluates each eagerly, and
+    # `factorint` still evaluates the resulting product eagerly, during
+    # the very first (`evaluate=False`) parse.
     from codecalc.safe_expr import reject_unsafe as _screen
 
-    _p, _q = _nextprime(10**30), _nextprime(3 * 10**31)
     _UNBOUNDED = [
-        (f"factorint({_p * _q})", "a 62-digit semiprime with far-apart factors"),
+        ("factorint(nextprime(10**30)*nextprime(3*10**31))",
+         ("factorint of a COMPUTED 62-digit semiprime with far-apart factors "
+          "-- neither factor is a bare literal token")),
         ("nextprime(10**2000)", "primality testing above a 2000-digit number"),
     ]
     for _expr, _why in _UNBOUNDED:
@@ -857,8 +871,11 @@ for _label, _pub, _priv, _args in _PAIRS:
           f"-> can_fork={_guarded.CAN_FORK} marked={_marked}")
 
 if _guarded.CAN_FORK:
-    _p2, _q2 = _nextprime(10**30), _nextprime(3 * 10**31)
-    _payload = f"factorint({_p2 * _q2})"
+    # A COMPUTED product of two far-apart primes, not a pre-computed bare
+    # literal -- same reasoning as the #78 block above (round 7, #326
+    # finding 4 gave `factorint` a literal-only digit-count screen, which
+    # has no opinion on a computed argument like this one).
+    _payload = "factorint(nextprime(10**30)*nextprime(3*10**31))"
     for _label, _call in (("exact.simplify_expression",
                            lambda: _exact.simplify_expression(_payload)),
                           ("logic.solve_linear",
@@ -1977,6 +1994,232 @@ check(f"  ...within a bounded memory peak ({_bomb_peak / 1e6:.1f} MB, was ~2977 
       _bomb_peak < 50 * 1_000_000, f"-> peak={_bomb_peak / 1e6:.1f} MB")
 check(f"  ...and refuses promptly ({_bomb_elapsed:.3f}s), not after a multi-second/GB burn",
       _bomb_elapsed < 5.0, f"-> {_bomb_elapsed:.3f}s")
+
+# ═══ round 7 of cross-vendor review (grok, on the round-five head; Codex, ══
+# ═══ on the round-six head, in parallel) ════════════════════════════════════
+
+# grok's finding: the round-five/six `Pow` short-circuits stopped the scan
+# from ever descending into an exponent that is itself expensive to
+# CONSTRUCT, as opposed to merely expensive to PRINT. A unit-magnitude base
+# (1, -1, 1/1, 2/2, 1.0) resolves to (0, 0, True) without ever inspecting
+# the exponent; a same-base cancelling exponent (2**(2**N * 2**(-N)))
+# resolves to (0, 0, True) via _factor_multiset's own cancellation. Both
+# leave a genuinely expensive inner Pow(2, N)/Pow(3, -N) unchecked, since
+# SymPy's Mul.flatten still constructs that intermediate regardless of what
+# the surrounding expression later does with the result. N is ~300 digits
+# -- big enough that Pow(2, N) alone measured past guarded_call's ~10-13s
+# CPU backstop before this fix; a hard 300-digit floor, not tuned to any
+# looser cliff.
+_N7 = 10**299 + 7
+_UNIT_BASE_PLUS_EXPENSIVE_EXPONENT = [
+    f"1**(2**{_N7}*3**(-{_N7}))",
+    f"(-1)**(2**{_N7}*3**(-{_N7}))",
+    f"(1/1)**(2**{_N7}*3**(-{_N7}))",
+    f"(2/2)**(2**{_N7}*3**(-{_N7}))",
+    f"1.0**(2**{_N7}*3**(-{_N7}))",
+    f"2**(2**{_N7}*2**(-{_N7}))",  # same-base cancelling exponent, not a unit base
+]
+for _expr in _UNIT_BASE_PLUS_EXPENSIVE_EXPONENT:
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"safe_parse({_expr[:40]!r}...) is refused, not evaluated",
+          _v is None and _e is not None, f"-> value={_v!r} err={_e!r}")
+    check(f"  ...promptly ({_dt:.3f}s), not after Pow(2, N) is actually constructed "
+          "(measured >10s before this fix)",
+          _dt < 2.0, f"-> {_dt:.3f}s")
+
+# The exponent in 2**(2**10000*2**-10000) is legal, not merely lucky: N =
+# 10000 makes Pow(2, 10000) itself only ~3011 digits (under MAX_NUMERIC_
+# DIGITS), so constructing it is cheap regardless of the eventual
+# cancellation -- this is what distinguishes it from the ~300-digit-N cases
+# above, where Pow(2, N)'s OWN print profile (~10**298 digits) is already
+# the hazard, before any cancellation is even considered. This must still
+# evaluate, unmodified by round 7's fix, to pin exactly that distinction.
+_v, _e = _boundary_parse("2**(2**10000*2**-10000)")
+check("safe_parse('2**(2**10000*2**-10000)') still evaluates "
+      "(N=10000 -- Pow(2, N) itself is only ~3011 digits, cheap to construct)",
+      _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+if _e is None:
+    check("  ...to the correct value (2)", str(_v) == "2", f"-> {_v!r}")
+
+# grok's own regression, caught mid-fix: an earlier version of this fix made
+# the scan always push a resolved Pow's children regardless of its own
+# verdict -- which then independently judged the EXPONENT's own print
+# profile as if it mattered, refusing 1**(20 distinct factorial factors) on
+# its ~79,347-digit exponent even though that exponent is cheap to
+# construct (20 already-materialized integers multiplied together) and is
+# never printed at all, since 1**anything is always 1. Print-profile-over-
+# cap and expensive-to-construct are different questions; this pins that
+# the scan answers only the first one, deferring the second to the Pow
+# loop's own construction-cost check instead of trying to answer it here.
+_factorial_factors = "*".join(f"factorial({1463 - k})" for k in range(20))
+_unit_pow_expr = f"1**({_factorial_factors})"
+_t0 = time.time()
+_v, _e = _boundary_parse(_unit_pow_expr)
+_dt = time.time() - _t0
+check("safe_parse('1**(20 distinct factorial factors)') still evaluates to 1 "
+      "(each factor is under cap individually; the ~79,347-digit exponent's "
+      "own print profile is irrelevant to a unit base)",
+      _v is not None and _e is None and str(_v) == "1", f"-> value={_v!r} err={_e!r}")
+check(f"  ...promptly ({_dt:.3f}s)", _dt < 2.0, f"-> {_dt:.3f}s")
+
+# Codex finding 1 (High): the identical class from the Add side --
+# _cancel_additive_inverses marks 2**1000000000 - 2**1000000000
+# resolved-to-zero and never descends into either Pow, but SymPy evaluates
+# each child before cancelling, so the ~301-million-digit
+# Pow(2, 1000000000) still gets constructed. Verified already closed by the
+# same Pow-loop fix above (which is agnostic to whether its ancestor is a
+# Mul or an Add) -- this pins it as a regression test.
+_t0 = time.time()
+_v, _e = _boundary_parse("2**1000000000 - 2**1000000000")
+_dt = time.time() - _t0
+check("safe_parse('2**1000000000 - 2**1000000000') is refused, not evaluated",
+      _v is None and _e is not None, f"-> value={_v!r} err={_e!r}")
+check(f"  ...promptly ({_dt:.3f}s)", _dt < 2.0, f"-> {_dt:.3f}s")
+_v, _e = _boundary_parse("x*x - x*x")
+check("safe_parse('x*x - x*x') (ordinary symbolic cancellation) still evaluates",
+      _v is not None and _e is None and str(_v) == "0", f"-> value={_v!r} err={_e!r}")
+
+# Codex finding 2 (High): a heavy call NESTED inside another heavy call's
+# argument was uncaught -- none of factorint/isprime/.../factorial etc. are
+# SymPy Function subclasses, so an INNER heavy call on a literal argument
+# evaluates eagerly even under evaluate=False, and its numeric RESULT (not
+# its short source text) becomes the OUTER call's argument before any tree
+# exists for reject_explosive to inspect. factorial(fibonacci(100)) never
+# returns; fibonacci(factorial(10)) materializes a ~758,374-digit integer;
+# factorial(factorial(8)) a ~168,187-digit one -- all now refused at the
+# TOKEN level, before parse_expr runs even once.
+_NESTED_HEAVY_CASES = ["factorial(fibonacci(100))", "fibonacci(factorial(10))",
+                       "factorial(factorial(8))"]
+for _expr in _NESTED_HEAVY_CASES:
+    _t0 = time.time()
+    _r = _exact.simplify_expression(_expr)
+    _dt = time.time() - _t0
+    check(f"{_expr!r} (heavy call nested in a heavy call's argument) is refused",
+          _r.get("ok") is False and _r.get("code") == _errors.RESOURCE_EXHAUSTED,
+          f"-> {_r}")
+    check(f"  ...promptly ({_dt:.3f}s), at the token level, before parse_expr runs "
+          "(fibonacci(factorial(10)) alone measured 1.5s materializing the result)",
+          _dt < 1.0, f"-> {_dt:.3f}s")
+# factorial(fibonacci(5)) is cheap (= 120) but is refused anyway: this
+# structural rule is deliberately conservative (any nesting of two heavy
+# calls, regardless of whether the inner result happens to be small), the
+# same fail-closed bar this module's other token-level screens already use.
+_r = _exact.simplify_expression("factorial(fibonacci(5))")
+check("'factorial(fibonacci(5))' (= 120, but structurally nested) is refused, "
+      "not evaluated -- documented as deliberately conservative",
+      _r.get("ok") is False and _r.get("code") == _errors.RESOURCE_EXHAUSTED,
+      f"-> {_r}")
+# Two SEPARATE (not nested) heavy calls must not be caught by this rule.
+_r = _exact.simplify_expression("factorial(1000)+fibonacci(1000)")
+check("'factorial(1000)+fibonacci(1000)' (two SIBLING heavy calls, not nested) still evaluates",
+      _r.get("ok") is True, f"-> {_r}")
+
+# Codex finding 3 (High): _oversized_scientific_literal_violation's regex
+# had no allowance for Python's j/J imaginary suffix, so 1e1000000j never
+# matched at all and reached the real parse unbounded; separately, being an
+# unanchored search, it misread the literal hex digits of 0x1e100000 as a
+# fake "exponent of 100000".
+for _expr in ("1e1000000j", "1e+100000j", "1E100_000j"):
+    _t0 = time.time()
+    _r = _exact.simplify_expression(_expr)
+    _dt = time.time() - _t0
+    check(f"{_expr!r} (imaginary-suffixed scientific literal) is refused",
+          _r.get("ok") is False and _r.get("code") == _errors.RESOURCE_EXHAUSTED,
+          f"-> {_r}")
+    check(f"  ...promptly ({_dt:.3f}s), at the token level", _dt < 1.0, f"-> {_dt:.3f}s")
+for _expr in ("0x1e100000", "0o17", "0b101", "1+2j"):
+    _r = _exact.simplify_expression(_expr)
+    check(f"{_expr!r} (hex/octal/binary literal, or an ordinary complex number) "
+          "still evaluates -- not misread as a scientific-notation exponent",
+          _r.get("ok") is True, f"-> {_r}")
+
+# Codex finding 4 (Medium): an audit of every remaining eager name in
+# safe_global_dict() turned up two more hazard shapes needing their own
+# cap, plus digamma/zeta (_HEAVY_FUNCTIONS-shaped after all) and stirling
+# (not actually exposed by sympy 1.14's namespace, so nothing to bound).
+check("'stirling' is not exposed by sympy's namespace (nothing to bound)",
+      not hasattr(__import__("sympy"), "stirling"), "-> hasattr(sympy, 'stirling')")
+for _name in ("digamma", "zeta"):
+    check(f"{_name!r} is now in _HEAVY_FUNCTIONS", _name in _se5._HEAVY_FUNCTIONS,
+          f"-> {_name in _se5._HEAVY_FUNCTIONS}")
+_r = _exact.simplify_expression("digamma(100000)")
+check("'digamma(100000)' is refused", _r.get("ok") is False
+      and _r.get("code") == _errors.RESOURCE_EXHAUSTED, f"-> {_r}")
+_r = _exact.simplify_expression("zeta(-99999)")
+check("'zeta(-99999)' is refused", _r.get("ok") is False
+      and _r.get("code") == _errors.RESOURCE_EXHAUSTED, f"-> {_r}")
+for _expr in ("digamma(1463)", "zeta(-1463)"):
+    _r = _exact.simplify_expression(_expr)
+    check(f"{_expr!r} (at the existing MAX_HEAVY_ARG cap) still evaluates",
+          _r.get("ok") is True, f"-> {_r}")
+
+# factorint/primefactors/divisors/mobius/nextprime/isprime: the hazard
+# scales with the size of the NUMBER under test (factoring is hard), not a
+# growing OUTPUT for a small "count" argument -- a random ~40-digit
+# semiprime measured 27.8s to factor, and a 100-digit RSA modulus hits the
+# process memory/CPU backstop outright.
+_RSA_100 = ("1522605027922533360535618378132637429718068114961380688657"
+            "908494580122963258952897654000350692006139")
+for _name in ("factorint", "primefactors", "divisors", "mobius"):
+    _expr = f"{_name}({_RSA_100})"
+    _r = _exact.simplify_expression(_expr)
+    check(f"{_name}(<100-digit RSA modulus>) is refused, not factored",
+          _r.get("ok") is False and _r.get("code") == _errors.RESOURCE_EXHAUSTED,
+          f"-> {_r}")
+_lit_1900 = "9" * 1900
+for _name in ("nextprime", "isprime"):
+    _expr = f"{_name}({_lit_1900})"
+    _r = _exact.simplify_expression(_expr)
+    check(f"{_name}(<1900-digit literal>) is refused",
+          _r.get("ok") is False and _r.get("code") == _errors.RESOURCE_EXHAUSTED,
+          f"-> {_r}")
+for _name in ("factorint", "primefactors", "divisors", "mobius", "nextprime", "isprime"):
+    _expr = f"{_name}(360)"
+    # safe_parse, not simplify_expression: factorint/primefactors/divisors
+    # return a plain Python dict/list, not a SymPy Expr, and
+    # simplify_expression's sp.simplify()/sp.factor()/sp.expand() calls
+    # have no method of that name on a dict/list -- a genuine, separate,
+    # pre-existing limitation of simplify_expression's post-processing for
+    # these return types, unrelated to reject_explosive/classify_unsafe
+    # (which safe_parse alone exercises), so it is not this round's
+    # concern to fix.
+    _v, _e = _boundary_parse(_expr)
+    check(f"{_expr!r} (an ordinary small argument) still evaluates",
+          _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+
+# sqrt/root/cbrt: the OPPOSITE shape -- cheap to bound in log space (an
+# n-th root's digit count is always comfortably under MAX_NUMERIC_DIGITS)
+# but not cheap to COMPUTE (SymPy's perfect-power check measured 4.0s at
+# 1900 digits).
+for _name, _expr in (("sqrt", f"sqrt({_lit_1900})"), ("root", f"root({_lit_1900}, 3)"),
+                      ("cbrt", f"cbrt({_lit_1900})")):
+    _r = _exact.simplify_expression(_expr)
+    check(f"{_name}(<1900-digit literal>) is refused",
+          _r.get("ok") is False and _r.get("code") == _errors.RESOURCE_EXHAUSTED,
+          f"-> {_r}")
+for _expr in ("sqrt(360)", "root(360, 3)", "cbrt(360)"):
+    _r = _exact.simplify_expression(_expr)
+    check(f"{_expr!r} (an ordinary small argument) still evaluates",
+          _r.get("ok") is True, f"-> {_r}")
+
+# Codex finding 5 (Medium): _cancel_additive_inverses only recognized an
+# EXACT multiset match with opposite sign, so a small INTEGER COEFFICIENT
+# difference (2*f*f - f*f - f*f, exactly 0) was still refused -- the
+# leading 2 makes the first term's multiset a different key from the other
+# two's.
+_r = _exact.simplify_expression(
+    "2*factorial(1463)*factorial(1463) - factorial(1463)*factorial(1463) "
+    "- factorial(1463)*factorial(1463)")
+check("2*f*f - f*f - f*f evaluates to 0 (coefficients 2, -1, -1 sum to 0)",
+      _r.get("ok") is True and _r.get("simplified") == "0", f"-> {_r}")
+_r = _exact.simplify_expression(
+    "3*factorial(1463)*factorial(1463) - factorial(1463)*factorial(1463) "
+    "- factorial(1463)*factorial(1463)")
+check("...but 3*f*f - f*f - f*f (coefficients sum to +1, not 0) is still refused",
+      _r.get("ok") is False and _r.get("code") == _errors.RESOURCE_EXHAUSTED,
+      f"-> {_r}")
 
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== ALL BUG-SWEEP REGRESSIONS FIXED ===")

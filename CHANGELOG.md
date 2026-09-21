@@ -626,6 +626,94 @@ behind it.
   which also fixed a latent bug in how a bare `-1`/`1` Integer encoded
   its sign in that multiset (a spurious `{1: 1}` entry broke exact
   structural-equality matching between a term and its own negation).
+  A sixth review round (grok, reviewing the round-five head) found the
+  round-five/six `Pow` short-circuits both stopped the scan from ever
+  descending into an exponent that would itself be expensive to
+  CONSTRUCT, as opposed to merely expensive to PRINT: a unit-magnitude
+  base (`1`, `-1`, `1/1`, `2/2`, `1.0`) resolves to `(0, 0, True)` without
+  ever inspecting the exponent at all, and a same-base cancelling
+  exponent (`2**(2**N * 2**(-N))`) resolves to `(0, 0, True)` via
+  `_factor_multiset`'s own cancellation — both cases leave a genuinely
+  expensive inner `Pow(2, N)`/`Pow(3, -N)` (for a ~300-digit `N`, hangs
+  past `guarded_call`'s CPU backstop) completely unchecked, since
+  `Mul.flatten` still constructs that intermediate during real evaluation
+  regardless of what the surrounding expression later does with the
+  result. Closed not in the scan (an attempt to make the scan always push
+  a resolved `Pow`'s children regardless of its own verdict regressed
+  `1**(20 distinct factorial factors)`, previously legal: the scan would
+  then independently judge the EXPONENT's own ~79,347-digit print
+  profile as if it mattered, when it is cheap to construct — 20 already-
+  materialized integers multiplied together — and never printed at all,
+  since `1 ** anything` is always `1`; print-profile-over-cap and
+  expensive-to-construct are different questions, and the scan only ever
+  answered the first one correctly) but in `reject_explosive`'s separate
+  Pow-only loop, which already walks every node via `_walk` — with no
+  "stop descending" optimization at all — regardless of any Mul/Add
+  ancestor's cancellation or unit-base status: it now bounds a numeric-
+  base `Pow` with a bare integer exponent's own construction cost
+  directly, closing the gap the scan's cancellation-aware "stop
+  descending" rule correctly cannot close on its own. A second,
+  independent review (Codex, reviewing the round-six head in parallel)
+  found five more issues, none overlapping: (1) the identical class from
+  the `Add` side — `_cancel_additive_inverses` marks `2**1000000000 -
+  2**1000000000` resolved-to-zero and never descends into either `Pow`,
+  but SymPy evaluates each child before cancelling, so the ~301-million-
+  digit `Pow(2, 1000000000)` still gets constructed — verified already
+  closed by the same Pow-loop fix above, which is agnostic to whether its
+  ancestor is a `Mul` or an `Add`; added as a regression test rather than
+  a code change. (2) a heavy call NESTED inside another heavy call's
+  argument (`factorial(fibonacci(100))`, `fibonacci(factorial(10))`,
+  `factorial(factorial(8))`) was uncaught: SymPy evaluates a heavy call
+  on an integer-literal argument eagerly even under `evaluate=False`, so
+  the INNER call's numeric result (not its short source text) becomes
+  the OUTER call's argument before any tree exists for `reject_explosive`
+  to inspect — no tree-level rule can run early enough; `_heavy_call_
+  violation` now refuses outright, at the token level, any heavy call
+  whose own argument span contains another heavy-function call token,
+  regardless of either call's individual argument size. (3) `_oversized_
+  scientific_literal_violation`'s regex had no allowance for Python's
+  `j`/`J` imaginary suffix, so `1e1000000j` never matched at all and
+  reached the real parse unbounded; separately, being an unanchored
+  search, it misread the literal hex digits of `0x1e100000` as a fake
+  "exponent of 100000". Fixed by allowing an optional trailing `j`/`J`
+  before the anchor and excluding `0x`/`0o`/`0b`-prefixed tokens (which
+  have no exponent syntax in any of those bases) up front. (4) an audit
+  of every remaining eager name in `safe_global_dict()` turned up two
+  more hazard shapes: `factorint`/`primefactors`/`divisors`/`mobius`/
+  `nextprime`/`isprime` are not `_HEAVY_FUNCTIONS`-shaped at all (the
+  hazard scales with the size of the NUMBER under test, not a growing
+  OUTPUT for a small "count" argument — a random ~40-digit semiprime
+  measured 27.8s to factor, and RSA-100 hits the process memory/CPU
+  backstop outright) and now get their own digit-count cap
+  (`_FACTOR_ARG_FUNCTIONS`, 25 digits); `sqrt`/`root`/`cbrt` are the
+  opposite shape (cheap to bound in log space — an n-th root's digit
+  count is always comfortably under `MAX_NUMERIC_DIGITS` — but not cheap
+  to COMPUTE: SymPy's perfect-power check measured 4.0s at 1900 digits)
+  and get a separate, more generous cap (`_ROOT_ARG_FUNCTIONS`, 1,200
+  digits); `digamma`/`zeta` turned out to be `_HEAVY_FUNCTIONS`-shaped
+  after all and were simply added to that set at the existing
+  `MAX_HEAVY_ARG` cap; `stirling`, the audit's one open hypothesis, is
+  not actually exposed by sympy 1.14's namespace at all, so there was
+  nothing there to bound. Both new families are token-level-literal-only,
+  same scope as the pre-existing `_heavy_call_violation` — a COMPUTED
+  argument to any of these nine functions has no tree-level backstop yet
+  (documented in `_oversized_factor_or_root_arg_violation`'s own
+  docstring as a known gap, not an oversight). (5) `_cancel_additive_
+  inverses` only recognized an EXACT multiset match with opposite sign,
+  so `2*factorial(1463)*factorial(1463) - factorial(1463)*factorial(1463)
+  - factorial(1463)*factorial(1463)` (exactly `0`) was still refused —
+  the leading `2` makes the first term's multiset a different key from
+  the other two's. Fixed by splitting each term into a small-integer
+  `coeff` (`_split_coefficient`, folding only a base/exponent pair small
+  enough on both axes to be a real literal multiplier, never a heavy-
+  function result) and a `rest` key used for grouping instead of the raw
+  multiset, then summing signed coefficients per group; a group's
+  coefficients summing to exactly zero drops every term in it, any other
+  net sum leaves every term in that group untouched (never replaced by
+  one combined term), so a genuinely over-cap residual
+  (`3*factorial(1463)*factorial(1463) - factorial(1463)*factorial(1463) -
+  factorial(1463)*factorial(1463)`) still falls through to the
+  unmodified per-term upper bound and is correctly refused.
 
 ## [0.12.0] — 2026-09-09
 

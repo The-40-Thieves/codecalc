@@ -155,7 +155,92 @@ _HEAVY_FUNCTIONS = frozenset({
     #                                      still reachable — kept alongside
     #                                      it, not instead of it)
     "bell", "genocchi", "motzkin", "andre", "partition",
+    # #326 finding 4 (cross-vendor review, round 7, Codex): `digamma`/`zeta`
+    # of an integer belong to the SAME hazard shape as the rest of this
+    # set (a small ARGUMENT growing an expensive OUTPUT, not the "hazard
+    # scales with the size of the argument itself" shape `_FACTOR_ARG_
+    # FUNCTIONS`/`_ROOT_ARG_FUNCTIONS` below cover) — `digamma(1463)` is
+    # 0.055s, `zeta(-1463)` 0.008s (both comfortably under the cap this
+    # module's other members already accept slow-near-the-cap for), but
+    # `digamma(10000)` raises CPython's own int->str conversion limit from
+    # INSIDE the computation itself (not merely while printing the
+    # result), well past anything `guarded_call`'s backstop should have to
+    # catch instead of this cap. `zeta` takes negative arguments in normal
+    # use (`zeta(-1463)` above) — the existing token check already handles
+    # that correctly (a leading `-` in the source is its own `OP` token,
+    # never part of the `NUMBER` token this set's cap compares against, so
+    # sign never evades the cap).
+    "digamma", "zeta",
 })
+
+#: #326 finding 4 (cross-vendor review, round 7, Codex): a full audit of
+#: `safe_global_dict()` (sympy 1.14's namespace) for every remaining eager
+#: number-theoretic/arithmetic name not already in `_HEAVY_FUNCTIONS`
+#: turned up two MORE hazard shapes needing their own cap, plus one name
+#: (`stirling`) that turned out to be a non-issue: `hasattr(sympy,
+#: "stirling")` is `False` — the audit's own hypothesis was that it might
+#: be an omission, but sympy 1.14 does not expose it under that name at
+#: all, so `safe_global_dict()` cannot reach it and there is nothing here
+#: to bound.
+#:
+#: `factorint`, `primefactors`, `divisors`, `mobius`, `nextprime`,
+#: `isprime` are a fundamentally different shape from `_HEAVY_FUNCTIONS`
+#: above: the hazard there is a small COUNT-like argument growing an
+#: expensive OUTPUT (`factorial(1463)` -> a big but bounded integer); the
+#: hazard here is that the argument IS the number under scrutiny, and
+#: testing/factoring an ARBITRARY large number has no bound this module
+#: can derive from the literal's magnitude the way it can for a "count" —
+#: `MAX_HEAVY_ARG` (1463) would be far too tight (legitimate use wants to
+#: factor or primality-test numbers much larger than that), but there is
+#: no value cap that is both generous and safe, because hardness depends
+#: on the number's FACTORS, not its size, and those are exactly what is
+#: unknown without doing the work this cap exists to avoid. A random
+#: ~40-digit semiprime measured 27.8s to factor (a 25-digit one, 0.3s;
+#: growth is unpredictable with digit count, not merely slow) — RSA-100
+#: (100 digits) hits the process memory/CPU backstop outright.
+#: `mobius(n)` needs to know whether `n` is squarefree, which needs `n`'s
+#: factorization, so it shares the family even though it is not framed as
+#: "factor this" on its face. `isprime`/`nextprime` measured cheap at the
+#: sizes tried here (nextprime, the more expensive of the two: 1.25s at
+#: 300 digits, 4.9s at 800), but neither has a hardness bound derivable
+#: from digit count alone either (`nextprime` walks a range of candidate
+#: primes past `n`, and prime gaps are not uniformly bounded), so all six
+#: get ONE shared, conservative cap tuned to the hardest member
+#: (factoring), not the cheapest.
+#:
+#: None of these six are `sympy.Function` subclasses — each is a plain
+#: Python callable sympy exposes in its namespace, so calling one computes
+#: the real answer immediately regardless of `evaluate=False` (confirmed
+#: live: `parse_expr("factorint(360)", evaluate=False)` returns the
+#: already-computed `dict`, not an unevaluated call node) — the ONLY point
+#: in the pipeline early enough to stop the work is the token-level screen
+#: below, before `parse_expr` runs even once. See `_oversized_factor_or_
+#: root_arg_violation`'s own docstring for the (documented, not yet
+#: closed) gap this leaves for a COMPUTED argument.
+_FACTOR_ARG_FUNCTIONS = frozenset({
+    "factorint", "primefactors", "divisors", "mobius", "nextprime", "isprime",
+})
+MAX_FACTOR_ARG_DIGITS = 25
+
+#: `sqrt`/`root`/`cbrt` are the OPPOSITE failure mode from the factoring
+#: family just above: cheap to BOUND in log space (an n-th root has
+#: roughly `digits/n` digits — always comfortably under `MAX_NUMERIC_
+#: DIGITS` for any argument this module would otherwise admit at all) but
+#: not cheap to COMPUTE. SymPy's perfect-power check on a huge integer
+#: measured 0.02s at 500 digits, 0.41s at 1000, 0.80s at 1500, 4.0s at
+#: 1900 — growing faster than linearly in digit count. This is the exact
+#: same CLASS of hazard `_numeric_ceiling_scan`'s own `Pow` handling exists
+#: to catch generally (an intermediate that is expensive to CONSTRUCT
+#: regardless of how small the printed RESULT turns out to be, #326
+#: findings 1-2, round 7) — but these three are eager Python functions
+#: wrapping a `Pow`-shaped computation, not a bare `Pow` node the scan's
+#: own machinery walks, so the token-level screen covers them here
+#: instead, the same way it covers the factoring family above. `root`
+#: takes an optional second (integer index) argument — `root(n, 2)` is
+#: `sqrt(n)` under a different name, so both argument positions are
+#: checked, not just the first.
+_ROOT_ARG_FUNCTIONS = frozenset({"sqrt", "root", "cbrt"})
+MAX_ROOT_ARG_DIGITS = 1_200
 
 #: This started at 50_000, chosen from measured PARSE time:
 #:
@@ -252,6 +337,34 @@ def _heavy_call_violation(tokens: list) -> str | None:
     `Function` node's own argument directly (via `_log10_num_den`, the same
     machinery — see its own call site there), closing the gap this
     docstring used to claim was already closed.
+
+    A HEAVY CALL NESTED INSIDE ANOTHER HEAVY CALL'S argument
+    (`factorial(fibonacci(100))`, `fibonacci(factorial(10))`,
+    `factorial(factorial(8))`) is a THIRD, different hazard from either of
+    the two above, and IS caught here, unconditionally, regardless of what
+    either call's own argument would individually bound to (#326 finding 2,
+    cross-vendor review, round 7, Codex): SymPy's `parse_expr`, even with
+    `evaluate=False`, still evaluates a heavy function whose argument is
+    already a plain integer LITERAL eagerly, bottom-up, while building the
+    tree — that is the entire reason this module's `_HEAVY_FUNCTIONS`
+    comment exists. For a NESTED pair, that means the INNER call's numeric
+    RESULT (not the source text, which stays a short literal like `100`)
+    becomes the OUTER call's argument before `reject_explosive` ever gets a
+    tree to inspect — `fibonacci(factorial(10))` materializes a
+    ~758,374-digit integer, and `factorial(fibonacci(100))` never returns at
+    all, both INSIDE the `evaluate=False` parse itself, which no tree-level
+    rule can run early enough to prevent (there is no tree yet). The only
+    check that can run before that parse is a token-level one, which is why
+    this lives here rather than in `_numeric_ceiling_scan`: any heavy call
+    whose own argument span contains another heavy-function call token
+    (regardless of either call's individual argument size — the INNER
+    result's magnitude is exactly what cannot be known without computing
+    it, the same thing this rule exists to avoid) is refused outright. This
+    is conservative — `factorial(fibonacci(5))` (`= 120`) is also refused,
+    even though it happens to be cheap — but matching this module's
+    existing fail-closed bar (`unknown ≠ safe`, not `unknown ≠ over-cap`)
+    rather than trying to bound an inner call's result magnitude at the
+    token level, which would require evaluating it.
     """
     for i, tok in enumerate(tokens):
         if tok.type != tokenize.NAME or tok.string not in _HEAVY_FUNCTIONS:
@@ -259,13 +372,21 @@ def _heavy_call_violation(tokens: list) -> str | None:
         if i + 1 >= len(tokens) or tokens[i + 1].string != "(":
             continue  # a bare mention like `gamma` as a symbol, not a call
         depth = 0
-        for nxt in tokens[i + 1:]:
+        for j in range(i + 1, len(tokens)):
+            nxt = tokens[j]
             if nxt.type == tokenize.OP and nxt.string == "(":
                 depth += 1
             elif nxt.type == tokenize.OP and nxt.string == ")":
                 depth -= 1
                 if depth == 0:
                     break
+            elif (nxt.type == tokenize.NAME and nxt.string in _HEAVY_FUNCTIONS
+                  and j + 1 < len(tokens) and tokens[j + 1].string == "("):
+                return (f"{nxt.string}() is nested inside an argument to "
+                        f"{tok.string}(): a heavy function's result feeding "
+                        "another heavy function cannot be bounded before it "
+                        "is computed, and computing it may itself be "
+                        "unbounded")
             elif nxt.type == tokenize.NUMBER:
                 try:
                     # base 0, not base 10. `int("0xffffff")` raises ValueError,
@@ -305,13 +426,79 @@ def _heavy_call_violation(tokens: list) -> str | None:
     return None
 
 
+def _oversized_factor_or_root_arg_violation(tokens: list) -> str | None:
+    """A `_FACTOR_ARG_FUNCTIONS`/`_ROOT_ARG_FUNCTIONS` call with an
+    oversized integer LITERAL argument, if any — the digit-COUNT analogue
+    of `_heavy_call_violation`'s digit-VALUE cap, needed because these two
+    families' hazard scales with the size of the NUMBER itself, not with a
+    growing OUTPUT for a small input the way `_HEAVY_FUNCTIONS` does — see
+    both sets' own comments for why each needs its own cap, and why
+    `MAX_HEAVY_ARG` (correct for the other kind of function) would be
+    either far too tight (`sqrt`) or provide no real protection at the
+    same value at all (the factoring family: a 1463-digit semiprime is
+    nowhere near as hard to factor as a 40-digit one built from two large
+    primes — hardness is about the FACTORS, not the digit count).
+
+    Literal-only, same scope and same reasoning as `_heavy_call_violation`:
+    a COMPUTED argument (`factorint(nextprime(10**2000))`) is NOT caught
+    here. Unlike `_HEAVY_FUNCTIONS`, which gets a tree-level backstop in
+    `_numeric_ceiling_scan` for exactly that gap (bounding a `Function`
+    node's own unevaluated argument via `_log10_num_den` against the SAME
+    shared `MAX_HEAVY_ARG`), these two families have no equivalent
+    backstop yet — closing it would need a PER-FUNCTION digit-count cap
+    threaded through that machinery instead of the one shared value cap it
+    already has, which is real future work, not an oversight papered over
+    here. A computed argument to any of these nine functions relies on
+    `guarded_call`'s CPU/wall-clock backstop alone in the meantime, the
+    same as any other hazard this module has not yet named.
+    """
+    for i, tok in enumerate(tokens):
+        if tok.type != tokenize.NAME:
+            continue
+        if tok.string in _FACTOR_ARG_FUNCTIONS:
+            max_digits = MAX_FACTOR_ARG_DIGITS
+        elif tok.string in _ROOT_ARG_FUNCTIONS:
+            max_digits = MAX_ROOT_ARG_DIGITS
+        else:
+            continue
+        if i + 1 >= len(tokens) or tokens[i + 1].string != "(":
+            continue  # a bare mention like `sqrt` as a symbol, not a call
+        depth = 0
+        for nxt in tokens[i + 1:]:
+            if nxt.type == tokenize.OP and nxt.string == "(":
+                depth += 1
+            elif nxt.type == tokenize.OP and nxt.string == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            elif nxt.type == tokenize.NUMBER:
+                try:
+                    # base 0, not base 10 — same hex/octal/binary reasoning
+                    # as `_heavy_call_violation` just above.
+                    value = int(nxt.string, 0)
+                except ValueError:
+                    continue  # a float or complex literal — not this hazard
+                digits = _approx_decimal_digits(value)
+                if digits > max_digits:
+                    return (f"an argument to {tok.string}() has about "
+                            f"{digits} digits, over the limit of "
+                            f"{max_digits}: computing it is not safely "
+                            "bounded")
+    return None
+
+
 #: Matches the exponent of a scientific-notation numeric literal
 #: (`1e100000`, `1.5E4001`, `1e-100000`, `1e1_000` with a PEP-515
-#: underscore) as `tokenize.NUMBER` hands the token back — sign and
-#: underscores included, anchored to the end of the token string so it
-#: cannot match an exponent-shaped substring inside a longer token by
-#: accident.
-_SCI_NOTATION_EXPONENT_RE = re.compile(r"[eE]([+-]?[0-9](?:_?[0-9])*)$")
+#: underscore, `1e100000j`/`1e100000J` with Python's imaginary suffix) as
+#: `tokenize.NUMBER` hands the token back — sign and underscores included,
+#: an optional trailing `j`/`J` allowed after the digits, anchored to the
+#: end of the token string so it cannot match an exponent-shaped substring
+#: inside a longer token by accident. Round-7 finding 3 (cross-vendor
+#: review, Codex): the original pattern had no `[jJ]?` before the `$`, so
+#: `1e1000000j` (a valid Python imaginary literal) never matched at all —
+#: the trailing `j` put the exponent digits one character short of the end
+#: — and reached the real parse unbounded (>1s measured).
+_SCI_NOTATION_EXPONENT_RE = re.compile(r"[eE]([+-]?[0-9](?:_?[0-9])*)[jJ]?$")
 
 
 def _oversized_scientific_literal_violation(tokens: list) -> str | None:
@@ -352,7 +539,20 @@ def _oversized_scientific_literal_violation(tokens: list) -> str | None:
     for tok in tokens:
         if tok.type != tokenize.NUMBER:
             continue
-        match = _SCI_NOTATION_EXPONENT_RE.search(tok.string)
+        text = tok.string
+        # Round-7 finding 3 (cross-vendor review, Codex): a hex/octal/binary
+        # integer literal (`0x1e100000`) can contain a literal `e`/`E` as an
+        # ordinary DIGIT in that base, not a scientific-notation exponent
+        # marker — Python's int-literal grammar has no exponent syntax in
+        # any of those bases, so `0x1e100000` was being misread as `1e100000`
+        # with the leading `0x1` discarded and refused on a fabricated
+        # "exponent of 100000" that the literal does not actually have (its
+        # real value, ~5*10**8, is an ordinary 9-digit integer). Excluded
+        # here rather than tightened in the regex itself, since none of
+        # these prefixes can ever legitimately contain an exponent suffix.
+        if len(text) >= 2 and text[0] == "0" and text[1] in "xXoObB":
+            continue
+        match = _SCI_NOTATION_EXPONENT_RE.search(text)
         if not match:
             continue
         try:
@@ -446,6 +646,13 @@ def classify_unsafe(expression: str) -> tuple[str, str] | None:
     # Last, because reach beats cost: an expression that is both hostile and
     # expensive should be reported as hostile.
     violation = _heavy_call_violation(tokens)
+    if violation:
+        return (CATEGORY_CEILING, violation)
+    # #326 finding 4 (round 7, Codex): the factoring/root families are a
+    # DIFFERENT hazard shape from `_HEAVY_FUNCTIONS` above, checked by a
+    # separate function — see `_oversized_factor_or_root_arg_violation`'s
+    # own docstring for why one shared cap does not fit both.
+    violation = _oversized_factor_or_root_arg_violation(tokens)
     if violation:
         return (CATEGORY_CEILING, violation)
     # #326 finding 3 (round 6): a scientific-notation literal is a
@@ -848,9 +1055,47 @@ def _multiset_log_num_den(terms: dict) -> tuple:
     return log_num, log_den
 
 
+#: #326 finding 5 (cross-vendor review, round 7, Codex): the bound on how
+#: large a base/exponent pair may be before `_split_coefficient` folds it
+#: into a plain Python int "coefficient" rather than leaving it as part of
+#: a term's big/exact identity. `base_key ** exp` for anything within both
+#: bounds (at most `1_000 ** 20`, ~10**60) is instant and never itself the
+#: ~4000-digit hazard this file exists to catch — a REAL coefficient in an
+#: ordinary expression (`2*`, `100*`, `2**10*`) is nowhere near either
+#: bound; a heavy-function RESULT like `factorial(1463)` (~3998 digits) is
+#: is, by a huge margin, on the base axis alone.
+_COEFF_MAX_BASE = 1_000
+_COEFF_MAX_EXP = 20
+
+
+def _split_coefficient(terms: dict) -> tuple:
+    """Split a `_factor_multiset` terms dict into `(coeff, rest)`.
+
+    `coeff` is the product (a real Python `int`, always safe and instant to
+    compute — see `_COEFF_MAX_BASE`/`_COEFF_MAX_EXP` above) of every
+    base/exponent pair small enough on BOTH axes to read as an integer
+    multiplier rather than part of the term's big/exact identity; `rest`
+    is every other pair, unchanged, still an exact `_factor_multiset`-shape
+    dict. Only a POSITIVE exponent on a small base is ever folded in — a
+    negative one (`base_key ** -3`, a fraction) is not an integer
+    coefficient and stays in `rest` instead, matched only by the existing
+    exact-multiset-equality path. `coeff` does NOT carry the term's overall
+    sign; the caller (`_cancel_additive_inverses`) already tracks that
+    separately, from `_factor_multiset`'s own returned `sign`.
+    """
+    coeff = 1
+    rest: dict = {}
+    for base_key, exp in terms.items():
+        if 0 < exp <= _COEFF_MAX_EXP and base_key <= _COEFF_MAX_BASE:
+            coeff *= base_key**exp
+        else:
+            rest[base_key] = exp
+    return coeff, rest
+
+
 def _cancel_additive_inverses(args: tuple, memo_ms: dict) -> tuple:
-    """`args` (an `Add`'s own direct terms) with pairs of EXACT additive
-    inverses removed, or `args` unchanged if none cancel.
+    """`args` (an `Add`'s own direct terms) with groups of terms that sum
+    to EXACTLY zero removed entirely, or `args` unchanged if none do.
 
     #326 finding 4 (cross-vendor review, round 6): `Mul` already cancels a
     repeated base against its own reciprocal structurally
@@ -875,9 +1120,26 @@ def _cancel_additive_inverses(args: tuple, memo_ms: dict) -> tuple:
     (`f - (f - 1)`, say) still are not recognized and stay fail-closed —
     documented, not fixed, the same trade `_log10_num_den`'s own `Add`
     docstring already makes for its upper-bound formula in general.
+
+    #326 finding 5 (cross-vendor review, round 7, Codex): a plain sign
+    (`+1`/`-1`) match was not the whole story either — `2*f*f - f*f - f*f`
+    (exactly `0`) was still refused, because `2*f*f`'s multiset (an extra
+    `{2: 1}` entry) and `f*f`'s are DIFFERENT keys, never compared against
+    each other at all. Grouping now happens on `_split_coefficient`'s
+    `rest` key instead of the raw multiset, with each term's signed
+    `coeff` (`_factor_multiset`'s own `sign`, times `_split_coefficient`'s
+    extracted integer) summed PER GROUP. Cancellation stays ALL-OR-NOTHING,
+    exactly as the docstring above already promises ("this only ever
+    REMOVES terms"): a group whose coefficients sum to exactly zero is
+    dropped in full; any other net sum leaves EVERY term in that group
+    untouched — never replaced by one combined term — so a group that does
+    not fully cancel falls through to the unmodified per-term upper-bound
+    formula exactly as before it existed (`3*f*f - f*f - f*f`, net
+    coefficient `+1`, stays three untouched ~7996-digit terms and is
+    correctly refused on that basis, same as if this function had done
+    nothing to it at all).
     """
-    pos_by_key: dict = {}
-    neg_by_key: dict = {}
+    groups: dict = {}
     kept = []
     for arg in args:
         multiset = _factor_multiset(arg, memo_ms)
@@ -887,18 +1149,13 @@ def _cancel_additive_inverses(args: tuple, memo_ms: dict) -> tuple:
         terms, sign = multiset
         if sign == 0:
             continue  # this term IS exactly zero -- drop unconditionally
-        key = frozenset(terms.items())
-        (pos_by_key if sign > 0 else neg_by_key).setdefault(key, []).append(arg)
-    for key, pos_list in pos_by_key.items():
-        neg_list = neg_by_key.get(key)
-        if not neg_list:
-            continue
-        n = min(len(pos_list), len(neg_list))
-        del pos_list[len(pos_list) - n:]
-        del neg_list[len(neg_list) - n:]
-    for bucket in (pos_by_key, neg_by_key):
-        for remaining in bucket.values():
-            kept.extend(remaining)
+        coeff, rest = _split_coefficient(terms)
+        key = frozenset(rest.items())
+        groups.setdefault(key, []).append((sign * coeff, arg))
+    for group in groups.values():
+        if sum(c for c, _ in group) == 0:
+            continue  # every term in this group cancels -- drop all of them
+        kept.extend(arg for _, arg in group)
     return tuple(kept)
 
 
@@ -1282,22 +1539,55 @@ def _numeric_ceiling_scan(tree, memo: dict) -> str | None:
             if resolved:
                 # Fully accounted for -- see this function's own docstring
                 # for why checking a piece of it independently, below,
-                # would be wrong rather than merely redundant.
+                # would be wrong rather than merely redundant. This
+                # includes a `Pow` whose base is a unit value (`1`, `-1`,
+                # `1/1`, `2/2`, `1.0`) or whose exponent structurally
+                # cancels (`2**(2**N * 2**(-N))`): `_log10_num_den`'s
+                # PRINT-PROFILE verdict of `(0, 0, True)` for either shape
+                # says nothing about whether CONSTRUCTING the exponent is
+                # cheap (#326 findings 1-2, cross-vendor review round 7:
+                # `1 ** (2**N * 3**(-N))` and `2**(2**N * 2**(-N))`, for a
+                # ~300-digit `N`, both hang building the inner `Pow(2,
+                # N)`/`Pow(3, -N)` even though the OUTER result is
+                # trivially safe, or the exponent's OWN print profile
+                # cancels to nothing). Closing that gap is NOT this scan's
+                # job, though: a first attempt at making this scan push
+                # a resolved Pow's children anyway regressed
+                # `1**(20 distinct factorial factors)` -- the scan would
+                # then independently check the EXPONENT Mul's own print
+                # profile (correctly ~79347 digits, since 20 distinct
+                # factorials do not structurally cancel) and refuse, even
+                # though that Mul is cheap to CONSTRUCT (just multiplying
+                # 20 already-materialized integers) and its print profile
+                # is irrelevant -- it is never rendered, only raised to,
+                # and `1 ** anything` is always `1`. Print-profile-over-
+                # cap and expensive-to-construct are different questions;
+                # this scan answers only the first. The construction-cost
+                # hazard is instead closed by `reject_explosive`'s
+                # separate Pow-only loop (see its own comment), which
+                # visits every `Pow(numeric_base, integer_exponent)` node
+                # in the tree via `_walk` -- an unconditional walk with no
+                # "stop descending" optimization at all -- so it reaches
+                # the inner `Pow(2, N)`/`Pow(3, -N)` regardless of what
+                # this scan does with any Mul/Add ancestor's cancellation
+                # or unit-base status.
                 continue
             # Partial: the KNOWN part was just checked above and cleared.
             # Fall through to the generic descent so an unresolved sibling
             # (a Function argument, ...) still gets its own chance to
-            # reveal a hazard `_log10_num_den` could not see from here —
+            # reveal a hazard `_log10_num_den` could not see from here --
             # EXCEPT a `Pow` node, which needs its OWN descent rule, not
             # the generic one below: a `Pow` with a plain Integer exponent
             # whose BASE did not resolve (a symbolic base, most commonly)
             # must push ONLY the base, never the exponent. The exponent
             # there is not a value about to be PRINTED — it is a count
             # `reject_explosive`'s own Pow loop uses for a completely
-            # different ceiling (`MAX_SYMBOLIC_EXPONENT`, a CPU-cost bound
-            # on `sp.expand`, never rendered as a decimal) — and pushing
-            # it onto this stack anyway was a real bug caught writing
-            # this: `(x+1)**20000!!...` (`factorial2(20000)`, an exact
+            # different ceiling (`MAX_SYMBOLIC_EXPONENT` for a symbolic
+            # base, or its own numeric-base construction-cost check, for
+            # exactly the gap this scan leaves to that loop — see that
+            # loop's own comment) — and pushing a bare exponent onto THIS
+            # stack anyway was a real bug caught fixing a different
+            # round: `(x+1)**20000!!...` (`factorial2(20000)`, an exact
             # Integer with thousands of digits, used AS AN EXPONENT on a
             # symbolic base) had its bare exponent independently checked
             # here as if it were a print target and refused on "digits in
@@ -1372,7 +1662,7 @@ def reject_explosive(tree) -> str | None:
     either alone as sufficient. See `tests/test_bug_sweep.py`'s block
     for the assertion that the backstop actually holds for this shape.
     """
-    from sympy import Pow
+    from sympy import Integer, Pow
 
     # #326 (THE-1091): a SEPARATE pass, before the Pow-only walk below,
     # covers a numeric-only Integer/Mul/Add/Pow that the Pow-loop's own
@@ -1444,15 +1734,104 @@ def reject_explosive(tree) -> str | None:
                 continue  # symbolic exponent, e.g. x**n — nothing to expand
 
             if not base.free_symbols:
-                # A NUMERIC base with a NUMERIC exponent — the scan above
-                # already refused this exact Pow node if its PRINTED result
-                # (numerator or denominator) would be over cap, including a
-                # compound/cancelling exponent like `f*f/(f*f)` (the scan
-                # visited it as its own subtree via `_factor_multiset`'s
-                # exact cancellation). Round 4 removed the digit-math that
-                # used to live here entirely: the scan now covers every
-                # numeric-base Pow case it used to, and several it did not
-                # (findings 1-3) — this branch has nothing left to do.
+                if not isinstance(exponent, Integer):
+                    # A COMPOUND exponent on a numeric base: nothing new
+                    # for THIS iteration to do. The scan (above) already
+                    # accounts for the OUTER combined print profile
+                    # (including a cancelling exponent like `f*f/(f*f)`,
+                    # via `_factor_multiset`'s exact cancellation), and
+                    # any dangerous Pow-with-integer-exponent node buried
+                    # INSIDE this compound exponent gets its OWN separate
+                    # iteration in this SAME `_walk`-based loop — see the
+                    # comment just below for why that independence from
+                    # any Mul/Add ancestor's cancellation is exactly the
+                    # point of this branch, not a redundant re-check.
+                    continue
+                # #326 findings 1 and 2 (cross-vendor review, round 7): a
+                # NUMERIC base with a BARE INTEGER exponent is exactly
+                # the shape SymPy's own `Mul.flatten` computes EAGERLY
+                # (`coeff *= Pow(base, exp)`) during REAL evaluate=True
+                # construction — and it does so REGARDLESS of whether an
+                # ENCLOSING Mul/Add later cancels the result away.
+                # `_numeric_ceiling_scan`'s own "stop descending once a
+                # node resolves" rule (needed, correctly, so the
+                # DENOMINATOR of a cancelling fraction like `f*f/(f*f)`
+                # is never independently refused) means a `Pow` buried
+                # inside a STRUCTURALLY-CANCELLING Mul/Add is never
+                # independently visited by the scan at all: `1**(2**N *
+                # 3**(-N))` never even looks past the unit-base
+                # short-circuit (`1 ** anything` resolves to `(0, 0,
+                # True)` before the scan's Pow branch touches the
+                # exponent), and `2**(2**N * 2**(-N))` resolves its
+                # SAME-base exponent to EXACTLY `(0, 0, True)` via
+                # `_factor_multiset`'s own cancellation — both leave the
+                # inner `Pow(2, N)` (or `Pow(3, -N)`) node completely
+                # unchecked by the scan, even though `Mul.flatten` still
+                # computes it as an intermediate, for a ~300-digit `N`
+                # measured to hang past `guarded_call`'s 10s CPU ceiling.
+                #
+                # This loop is where that gets closed: `_walk` visits
+                # EVERY node unconditionally, with no "stop descending"
+                # optimization at all, so it reaches this exact
+                # `Pow(2, N)` node as its OWN iteration regardless of
+                # what any ancestor Mul/Add does with the result.
+                # Bounding it here, via the SAME `_log10_num_den` +
+                # `_safe_log10_pow` machinery the scan itself uses (never
+                # `base ** exponent` directly), closes the gap without
+                # touching the scan's own — still correct, for the
+                # print-PROFILE question — cancellation logic at all.
+                exp_int = int(exponent)
+                abs_exp = abs(exp_int)
+                if abs_exp <= 1:
+                    # `base**0 == 1`, `base**1 == base` (already
+                    # materialized, zero additional work), and `base**-1`
+                    # is a formal reciprocal -- SymPy wraps the ALREADY-
+                    # materialized `base` as a numerator/denominator swap,
+                    # no repeated-squaring-style computation happens at
+                    # any of the three. A regression caught fixing this
+                    # (round 7, Codex review): `factorial(1463)*
+                    # factorial(1463) / (factorial(1463)*factorial(1463))`
+                    # is `Mul(f*f, Pow(f*f, -1))` once parsed -- the
+                    # DENOMINATOR is a `Pow` with a numeric (non-symbolic)
+                    # `Mul` base and exponent `-1`, and without this
+                    # skip, checking that Pow's own print profile here
+                    # (base_num ~7996 digits, scaled by `abs_exp=1` ->
+                    # unchanged) refused it as over-cap in isolation --
+                    # the exact round-2/3 mistake this whole file exists
+                    # to avoid, reintroduced for the ONE exponent
+                    # magnitude (0, 1, -1) that was never actually
+                    # expensive to construct in the first place. The
+                    # print-PROFILE question for a `Pow` like this one
+                    # (is the surrounding combination, cancellation
+                    # included, over cap) is the SCAN's job, not this
+                    # loop's -- this loop exists only for the
+                    # construction-COST question, which does not apply
+                    # here at all.
+                    continue
+                base_num, base_den, base_res = _log10_num_den(base, memo)
+                if not base_res:
+                    continue  # inconclusive -- a Function call, irrational constant, ...
+                # UNSWAPPED regardless of `exponent`'s sign, and always
+                # scaled by `abs_exp`, not `exp_int` directly: the genuine
+                # computational work for `base**exp_int`, POSITIVE or
+                # NEGATIVE, is computing `base**abs_exp` via repeated
+                # squaring -- SymPy inverts the result AFTERWARD for a
+                # negative exponent, an O(1) numerator/denominator swap
+                # with no additional squaring, so checking whether THAT
+                # intermediate (not the final, possibly-swapped, printed
+                # shape) is over cap is what actually answers "is this
+                # expensive to CONSTRUCT" for both signs alike. Swapping
+                # `result_num`/`result_den` for a negative exponent (an
+                # earlier version of this fix did) reconstructs the FINAL
+                # Pow node's own print profile instead — back to checking
+                # a subtree's printability in isolation, the same mistake
+                # `abs_exp <= 1` above exists to avoid, just for a wider
+                # range of exponents.
+                result_num = _safe_log10_pow(base_num, abs_exp)
+                result_den = _safe_log10_pow(base_den, abs_exp)
+                pow_violation = _ceiling_message_num_den(result_num, result_den)
+                if pow_violation:
+                    return pow_violation
                 continue
 
             # A SYMBOLIC base with a NUMERIC exponent is the one case that
