@@ -470,6 +470,14 @@ def run_setup(client: str | None = None, do_write: bool = False, *,
     if detected["client"] is not None:
         origin = "explicit --client" if client else "detected"
         p(f"✓ client: {detected['client']} ({origin}) -> {detected['path']}")
+        others = [c for c in CLIENTS if c != detected["client"]]
+        if others:
+            # NAME here is a placeholder, not a literal accepted value —
+            # `--client=` takes exactly ONE of CLIENTS at a time, so
+            # printing a comma-joined list after `=` would itself be an
+            # unrecognized client (review).
+            p(f"  other clients: re-run with --client=NAME "
+              f"(NAME: {', '.join(others)})")
     elif detected["ambiguous"]:
         p(f"⚠ client: AMBIGUOUS — config files found for "
           f"{', '.join(detected['found'])}")
@@ -499,18 +507,15 @@ def run_setup(client: str | None = None, do_write: bool = False, *,
             p(f"✓ extra: {extra['name']}")
         else:
             p(f"⚠ extra: {extra['name']} MISSING — {extra['remedy']}")
+    # Prefetching itself (the network call) is deliberately NOT triggered
+    # here — see step 6 below, which runs it only after the client config
+    # and skill are already on disk (GH #339, THE-1096).
     gc = rep["grammar_cache"]
     if gc["extra_installed"] and not gc["cached"]:
         p("⚠ grammar cache: COLD — first analyze_complexity call per "
           "language will download a grammar")
         p("  warm it: codecalc-prefetch-grammars  (or, from source: "
           "python scripts/prefetch_grammars.py)")
-        if do_write:
-            from . import prefetch
-            p("  running codecalc-prefetch-grammars (--write)...")
-            code = prefetch.main()
-            p("  ✓ grammar cache warmed" if code == 0
-              else f"  ✗ prefetch exited {code}")
     elif gc["extra_installed"]:
         p(f"✓ grammar cache: {gc['grammars']} cached at {gc['path']}")
 
@@ -547,7 +552,33 @@ def run_setup(client: str | None = None, do_write: bool = False, *,
               "if it supports project/custom instructions, add SKILL.md's "
               "calling rules there by hand")
 
-    # 6. canaries
+    # 6. grammar prefetch — the one step above that is network-dependent and
+    # can fail for reasons that have nothing to do with codecalc (a blip, a
+    # firewall). Run LAST of the --write actions, after the client config and
+    # skill are already safely on disk (steps 4-5): neither depends on the
+    # grammar cache, so a slow or failing prefetch must never be the reason
+    # `setup --write` leaves a fresh install unconfigured (GH #339, THE-1096).
+    if do_write and gc["extra_installed"] and not gc["cached"]:
+        from . import prefetch
+        p("\n  running codecalc-prefetch-grammars (--write)...")
+        try:
+            code = prefetch.main([])
+        except SystemExit as exc:
+            # `main([])` still parses an (empty) argv and can still exit
+            # non-zero on a real prefetch failure (see prefetch.py's exit
+            # codes) — that SystemExit is expected here and must not
+            # propagate and kill `setup` the way the unpatched bug did.
+            code = 0 if exc.code is None else (exc.code if isinstance(exc.code, int) else 1)
+        except Exception as exc:
+            # Anything else prefetch might raise is advisory too: report it
+            # on one line and let the existing failure branch below fire,
+            # rather than letting setup's own verdict die over it.
+            p(f"  ✗ prefetch raised {type(exc).__name__}: {exc}")
+            code = 1
+        p("  ✓ grammar cache warmed" if code == 0
+          else f"  ✗ prefetch exited {code}")
+
+    # 7. canaries
     canaries = run_canaries()
     ec = canaries["execute_code"]
     ee = canaries["evaluate_expression"]
@@ -556,14 +587,14 @@ def run_setup(client: str | None = None, do_write: bool = False, *,
     p(f"{'✓' if ee['ok'] else '✗'} canary: evaluate_expression "
       f"{'passed' if ee['ok'] else 'FAILED — ' + str(ee['result'])}")
 
-    # 7. security level
+    # 8. security level
     p(f"\n  security: default rlimit sandbox is ALWAYS on "
       f"({backend_kind} backend). Strict isolation (gVisor+Docker on Linux, "
       "AppContainer on Windows) is opt-in and currently "
       f"{'available' if rep['strict_runtime']['available'] else 'UNAVAILABLE'} "
       "on this host — see `codecalc doctor` for detail.")
 
-    # 8. tool surface — a non-breaking nudge, not a change to the default
+    # 9. tool surface — a non-breaking nudge, not a change to the default
     # (that stays CODECALC_TOOLS unset = every tool).
     #
     # The literal "CODECALC_TOOLS" below (matching server.TOOLS_ENV's own
