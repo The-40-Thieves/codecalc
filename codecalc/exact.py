@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ast
 import math
+import re
 import statistics
 import struct
 from datetime import UTC, datetime
@@ -20,7 +21,7 @@ from fractions import Fraction
 from . import errors
 from .guarded import guarded_call
 from .optional import require
-from .safe_expr import classify_unsafe, safe_parse
+from .safe_expr import MAX_NUMERIC_DIGITS, classify_unsafe, safe_parse
 
 getcontext().prec = 50
 
@@ -416,8 +417,63 @@ def percentage(part: str, total: str) -> dict:
 #: `direction: "increase"` (-50 > -100 algebraically) even though the
 #: MAGNITUDE of the value fell from 100 to 50 — the `note` field below spells
 #: that out rather than leaving it to be discovered by surprise.
+#: Scientific-notation exponent suffix `Fraction`'s own grammar accepts,
+#: e.g. '1e400', '1.5E-12', '1e-4000'. Matched so a numeric literal's
+#: resulting DIGIT COUNT can be estimated before `Fraction()` ever builds
+#: the value it implies.
+_SCI_EXP_RE = re.compile(r"[eE]([+-]?\d+)\s*$")
+
+
+def _oversized_numeric_literal(s: str) -> str | None:
+    """None if `Fraction(s)` is safe to construct; else a refusal reason.
+
+    Cross-vendor review (Codex, PR #337) on `percent_change`: `Fraction`'s
+    scientific-notation parsing builds the EXACT integer directly, never
+    through `float` — so unlike a bare `float(s)` call, a short string like
+    '1e5000' does not overflow to `inf`, it demands an arbitrary-precision
+    integer with more digits than Python's own int<->str conversion ceiling
+    (4300, CPython >=3.11) tolerates, raising an UNCAUGHT `ValueError` no
+    caller ever gets a coded result for. Below that ceiling it still
+    "succeeds" ('1e400' does), but with a result too large to be a useful
+    answer and a `percent_decimal` that silently overflows to a non-finite
+    float — invalid JSON (see the `math.isfinite` guard in `percent_change`
+    for the other half of that fix).
+
+    `abs(exponent)`, not just a positive one: '1e-4000' is exactly as
+    dangerous as '1e4000' — the digits land in the DENOMINATOR instead of
+    the numerator, and `str()` on either is the same int-conversion call.
+    Digit count is ESTIMATED (mantissa digit characters + |exponent|), not
+    computed by building the value — computing it is the exact cost this
+    exists to avoid — and mirrors `MAX_NUMERIC_DIGITS` (safe_expr.py), the
+    same ceiling calc_exact's own literal screen already enforces.
+
+    Bounding each input alone is necessary but NOT sufficient — two inputs
+    each individually under the cap can still combine (opposite-sign
+    exponents near the boundary) into a computed result over it;
+    `percent_change` below also wraps the actual computation in a
+    `ValueError` backstop for that residual case, the same
+    belt-and-suspenders shape `safe_expr.py`'s own module docstring
+    describes for its length cap + `guarded_call` combination.
+    """
+    if len(s) > _MAX_EXPR_LEN:
+        return f"too long (max {_MAX_EXPR_LEN} chars)"
+    m = _SCI_EXP_RE.search(s)
+    exponent = int(m.group(1)) if m else 0
+    mantissa = s[: m.start()] if m else s
+    digit_count = sum(1 for c in mantissa if c.isdigit()) + abs(exponent)
+    if digit_count > MAX_NUMERIC_DIGITS:
+        return f"would need about {digit_count} digits, over the limit of {MAX_NUMERIC_DIGITS}"
+    return None
+
+
 def percent_change(from_value: str, to_value: str) -> dict:
     """Exact percent change FROM_VALUE -> TO_VALUE: (to - from) / abs(from) * 100."""
+    for label, s in (("from_value", from_value), ("to_value", to_value)):
+        problem = _oversized_numeric_literal(s)
+        if problem is not None:
+            return errors.error_result(
+                errors.RESOURCE_EXHAUSTED, f"{label} {problem}",
+                remedy="use fewer digits or a more moderate exponent")
     try:
         a, b = Fraction(from_value), Fraction(to_value)
     except (ValueError, ZeroDivisionError):
@@ -430,32 +486,59 @@ def percent_change(from_value: str, to_value: str) -> dict:
         return errors.error_result(
             errors.VALIDATION, "from_value is zero; percent change is undefined",
             remedy="report the absolute change instead")
-    change = b - a
-    percent = change / abs(a) * 100
-    d_percent = Decimal(percent.numerator) / Decimal(percent.denominator)
-    multiplier = b / a
+    try:
+        change = b - a
+        percent = change / abs(a) * 100
+        d_percent = Decimal(percent.numerator) / Decimal(percent.denominator)
+        multiplier = b / a
+        # Forces the int->str conversion NOW, inside the try, rather than
+        # letting a still-oversized COMBINED result (two individually
+        # in-bounds inputs whose ratio is not) raise the same uncaught
+        # ValueError the per-input check above exists to prevent.
+        percent_exact_str = str(percent)
+        absolute_change_str = str(change)
+        multiplier_str = str(multiplier)
+    except ValueError as exc:
+        return errors.error_result(
+            errors.RESOURCE_EXHAUSTED,
+            f"the computed result is too large to represent: {exc}",
+            remedy="use inputs with fewer digits or closer in magnitude")
     direction = "increase" if change > 0 else "decrease" if change < 0 else "unchanged"
+    percent_decimal = round(float(d_percent), ROUND_DIGITS)
     out = {"ok": True, "from_value": str(a), "to_value": str(b),
-           "absolute_change": str(change),
+           "absolute_change": absolute_change_str,
            # exact rational (bare integer when the denominator is 1, e.g.
            # "50" not "50/1") alongside the rounded decimal — same
            # exact-then-approximate pairing as calc_exact/eval_exact, not
            # percentage's own always-"n/d" `share` formatting, because the
            # worked examples this tool was specified against ("50", not
            # "50/1") are the bare form.
-           "percent_exact": str(percent),
-           "percent_decimal": round(float(d_percent), ROUND_DIGITS),
+           "percent_exact": percent_exact_str,
+           # GH #337: `float(d_percent)` overflows SILENTLY to `inf` for a
+           # magnitude past binary64's ~1.8e308 range (Decimal does not
+           # raise the way `int` conversion does) — `inf` is not valid
+           # JSON, so a non-finite result is reported as `null` with a
+           # `note` instead of leaking a value no JSON parser can round-trip.
+           "percent_decimal": percent_decimal if math.isfinite(percent_decimal) else None,
            "direction": direction,
-           "multiplier": str(multiplier),
+           "multiplier": multiplier_str,
            "rounding": {"percent_decimal": ROUND_DIGITS}}
+    notes = []
+    if not math.isfinite(percent_decimal):
+        notes.append(
+            "percent_decimal has no finite float representation (the exact "
+            "value's magnitude overflows binary64's range) and is reported "
+            "as null; percent_exact still carries the exact rational value")
     if a < 0:
-        out["note"] = (
+        notes.append(
             "from_value is negative: percent_exact/percent_decimal are relative "
             "to abs(from_value) (the conventional (to - from) / |from| "
             "definition), and `direction` follows the algebraic sign of "
             "(to_value - from_value), not the change in |value| — e.g. "
             "-100 -> -50 reports direction=\"increase\" (-50 > -100) even "
             "though the magnitude fell from 100 to 50")
+    if notes:
+        out["note"] = " ".join(notes)
     return out
 
 

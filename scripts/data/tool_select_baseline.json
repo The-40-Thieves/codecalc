@@ -2,9 +2,9 @@
   "full": {
     "n": 238,
     "skipped": 0,
-    "top1_hits": 153,
+    "top1_hits": 152,
     "top3_hits": 186,
-    "top1": 0.6429,
+    "top1": 0.6387,
     "top3": 0.7815,
     "per_tool": {
       "algebraic_equiv": {
@@ -79,7 +79,7 @@
       },
       "evaluate_expression": {
         "n": 6,
-        "top1": 0.6667,
+        "top1": 0.5,
         "top3": 0.8333
       },
       "execute_code": {
@@ -145,7 +145,7 @@
       "percentiles": {
         "n": 4,
         "top1": 0.75,
-        "top3": 0.75
+        "top3": 1.0
       },
       "physical_constants": {
         "n": 4,
@@ -225,7 +225,7 @@
       "symbolic": {
         "n": 22,
         "top1": 0.2273,
-        "top3": 0.5455
+        "top3": 0.5
       },
       "trace_execution": {
         "n": 7,
@@ -262,15 +262,15 @@
   "dev": {
     "n": 188,
     "skipped": 50,
-    "top1_hits": 133,
-    "top3_hits": 153,
-    "top1": 0.7074,
-    "top3": 0.8138,
+    "top1_hits": 134,
+    "top3_hits": 155,
+    "top1": 0.7128,
+    "top3": 0.8245,
     "per_tool": {
       "algebraic_equiv": {
         "n": 4,
         "top1": 0.75,
-        "top3": 0.75
+        "top3": 1.0
       },
       "analyze_complexity": {
         "n": 5,
@@ -284,7 +284,7 @@
       },
       "bits": {
         "n": 24,
-        "top1": 0.875,
+        "top1": 0.9167,
         "top3": 1.0
       },
       "branch_reachability": {
@@ -400,7 +400,7 @@
       "percentiles": {
         "n": 4,
         "top1": 0.75,
-        "top3": 0.75
+        "top3": 1.0
       },
       "physical_constants": {
         "n": 4,
@@ -458,13 +458,13 @@
     "n": 120,
     "skipped": 118,
     "top1_hits": 82,
-    "top3_hits": 102,
+    "top3_hits": 104,
     "top1": 0.6833,
-    "top3": 0.85,
+    "top3": 0.8667,
     "per_tool": {
       "bits": {
         "n": 24,
-        "top1": 0.9167,
+        "top1": 0.875,
         "top3": 1.0
       },
       "calc_exact": {
@@ -474,7 +474,7 @@
       },
       "calc_stats": {
         "n": 5,
-        "top1": 0.4,
+        "top1": 0.6,
         "top3": 1.0
       },
       "collision_probability": {
@@ -485,7 +485,7 @@
       "compare_threshold": {
         "n": 4,
         "top1": 0.5,
-        "top3": 0.5
+        "top3": 0.75
       },
       "convert_units": {
         "n": 4,
@@ -539,8 +539,8 @@
       },
       "percentiles": {
         "n": 4,
-        "top1": 0.5,
-        "top3": 0.75
+        "top1": 0.75,
+        "top3": 1.0
       },
       "physical_constants": {
         "n": 4,
@@ -554,7 +554,7 @@
       },
       "symbolic": {
         "n": 22,
-        "top1": 0.2727,
+        "top1": 0.2273,
         "top3": 0.6364
       },
       "truth_table": {
@@ -565,7 +565,7 @@
     }
   },
   "codecalc_version": "0.12.0",
-  "generated_at": "2026-09-21T06:49:28.372753+00:00",
+  "generated_at": "2026-09-21T07:14:40.613147+00:00",
   "prompt_count": 238,
   "prompt_set_sha256": "5fe9fd268e7eb1a20dc43c7ac31a8da691019b2a117d5bd67ec3507c1fc84a46"
 }

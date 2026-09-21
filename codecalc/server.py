@@ -2138,13 +2138,10 @@ def evaluate_expression(expression: Annotated[str, Field(description="Symbolic m
     closed form via sympify: 'sqrt(144) + 2**10'. Not simplification — for
     simplified/factored/expanded forms, use symbolic(op="simplify").
 
-    Also the only way to reach calculus forms — none of these have their
-    own tool: `diff(expr, x)` (derivative, e.g. 'diff(sin(x)*x, x)' ->
-    'x*cos(x) + sin(x)'), `integrate(expr, x)` (indefinite) /
-    `integrate(expr, (x, a, b))` (definite, e.g. 'integrate(x**2, (x, 0,
-    1))' -> '1/3'), and `series(expr, x, x0, n)` (Taylor/Laurent expansion
-    to n terms around x0, e.g. 'series(sin(x), x, 0, 6)' -> 'x - x**3/6 +
-    x**5/120 + O(x**6)').
+    Also reaches calculus forms no other tool exposes: `diff(expr, x)`
+    (derivative), `integrate(expr, x)` / `integrate(expr, (x, a, b))`
+    (indefinite/definite), and `series(expr, x, x0, n)` (Taylor expansion) —
+    see this parameter's own examples.
 
     Returns `value` (if the result is a number) or the evaluated
     expression, plus `type`."""
@@ -2886,7 +2883,7 @@ def symbolic(op: Annotated[str, Field(description="Which symbolic operation to r
             expr: Annotated[str | None, Field(description="Expression or equation to solve/simplify/take the limit of; required by op='solve'/'simplify'/'limit'")] = None,
             var: Annotated[str | None, Field(description="Variable to solve for or take the limit over; optional, default 'x'; used by op='solve'/'limit'")] = None,
             point: Annotated[str | None, Field(description="Point `var` approaches for op='limit'; optional, default 'oo' (infinity)")] = None,
-            system: Annotated[str | None, Field(description="';'-separated equations for op='solve_linear' — despite the name, non-linear polynomial systems work too, e.g. 'x + y = 10; x - y = 2' or 'x**2 + y**2 = 5; x - y = -1'; required by that op")] = None,
+            system: Annotated[str | None, Field(description="';'-separated equations for op='solve_linear' (non-linear systems work too, e.g. 'x**2 + y**2 = 5; x - y = -1'), e.g. 'x + y = 10; x - y = 2'; required by that op")] = None,
             variables: Annotated[str | None, Field(description="Comma-separated variable names for op='solve_linear', e.g. 'x, y'; required by that op")] = None) -> dict[str, Any]:
     """Symbolic algebra, selected by `op` — replaces the four former
     standalone tools solve_expression, solve_linear, simplify_expression
@@ -2901,10 +2898,8 @@ def symbolic(op: Annotated[str, Field(description="Which symbolic operation to r
     `variable`. Used by this op: `expr` (required), `var` (optional).
 
     op="solve_linear" (was solve_linear) — a system of equations sharing
-    variables. Despite the name, this is not limited to LINEAR systems:
-    sympy's solver handles non-linear polynomial systems the same way, e.g.
-    system='x**2 + y**2 = 5; x - y = -1', variables='x, y' -> two
-    solutions. Ordinary linear example: system='x + y = 10; x - y = 2',
+    variables; despite the name, non-linear systems work too (e.g.
+    'x**2 + y**2 = 5; x - y = -1'). Example: system='x + y = 10; x - y = 2',
     variables='x, y'. Used by this op: `system`, `variables` (both
     required).
 

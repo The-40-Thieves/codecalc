@@ -283,6 +283,54 @@ behind it.
   was reachable at all. No behaviour changed; every example quoted in
   the new prose was run and its output checked before being written down
   (GH #329, THE-1094).
+- `symbolic`/`evaluate_expression`'s new prose (above) trimmed shorter
+  after cross-vendor review measured it costing top-1/top-3 hits on
+  `scripts/tool_select_eval.py`'s baseline (BM25 penalises added
+  vocabulary that dilutes a document's existing terms) — the worked
+  `diff`/`integrate`/`series` example values moved out of the docstring
+  into the `expression` parameter's own schema description only, and the
+  `solve_linear` non-linear example dropped its "-> two solutions"/
+  "Ordinary linear example:" framing. `scripts/data/tool_select_baseline.json`
+  regenerated; residual prompt-level rank changes against the pre-PR
+  baseline (`origin/main`, measured over the unchanged 234-prompt
+  corpus): `evaluate_expression` loses top-1 on "I have a formula and I
+  just want its algebraic value worked out, not solved for a variable —
+  sqrt(2)*sqrt(8)" (full+dev; still top-3) and top-1 on "Take this messy
+  algebraic formula and give me its cleanest possible form" (full only;
+  still top-3 on both surfaces); `symbolic` loses top-3 on "Compute the
+  exact asymptotic value of n over log n as n becomes arbitrarily large."
+  (full+dev — `percent_change` now occupies that 2nd/3rd rank slot, a
+  side effect of adding ANY 50th candidate document to the BM25 corpus,
+  not of the description text itself) and top-3 on "I need both unknowns
+  pinned down from two equations that share them" (full only). Partial
+  offsetting gains: `symbolic` gains top-1 on the same "two unknowns"
+  prompt on dev/core, `float_repr` gains top-1 on "What does the
+  computer actually store in memory for the number 0.1?" (dev),
+  `session_read_file`/`compare_threshold` gain a top-3 slot each (full,
+  core). Net top-1 vs the pre-PR baseline on the unchanged 234-prompt
+  corpus: full -2, dev -1, core 0 (`percent_change`'s own 4 new prompts,
+  4/4 top-1 on every surface, are additive on top of this and are why
+  the checked-in baseline's TOTALS still read as a net gain — see
+  GH #337 review discussion).
+
+### Fixed
+
+- **`percent_change` on extreme-magnitude inputs.** `'1e400'` returned a
+  non-finite `percent_decimal: Infinity` (invalid JSON — `Fraction`'s
+  scientific-notation parsing builds the exact integer directly, so it
+  never overflows through `float` the way a bare `float(s)` call would);
+  `'1e5000'` raised an UNCAUGHT `ValueError` (Python's int<->str
+  conversion ceiling, 4300 digits) with no coded result at all; and two
+  individually-in-bounds inputs with opposite-sign extreme exponents
+  (e.g. `'1e-3999'` / `'1e3999'`) could still combine into a computed
+  result over that same ceiling. `from_value`/`to_value` are now screened
+  for their implied digit count (mantissa digits + `abs(exponent)`,
+  mirroring `MAX_NUMERIC_DIGITS` — the same ceiling `calc_exact`'s own
+  literal screen enforces) BEFORE `Fraction()` ever runs, and the actual
+  computation is wrapped in a `ValueError` backstop for the residual
+  combined-inputs case; `percent_decimal` is now always finite JSON —
+  `null` with a `note` when the exact value has no finite float
+  representation, never a bare `Infinity` (GH #337 cross-vendor review).
 
 ## [0.12.0] — 2026-09-09
 

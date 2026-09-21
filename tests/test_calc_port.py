@@ -81,6 +81,44 @@ r = exact.percent_change("abc", "1")
 check("percent_change refuses a non-numeric from_value",
       r["ok"] is False and "error" in r, f"-> {r}")
 
+# PR #337 cross-vendor review (Codex): `Fraction`'s own scientific-notation
+# parsing builds the exact integer directly, never through float, so a
+# short string like '1e5000' does not overflow to inf the way a plain
+# float(s) call would — it demands a >4300-digit integer and raised an
+# UNCAUGHT ValueError, and '1e400' (under that ceiling) "succeeded" with a
+# percent_decimal silently overflowing to a non-finite `Infinity` (invalid
+# JSON). Both are now refused/degraded gracefully — see exact.py's
+# _oversized_numeric_literal and the math.isfinite guard on percent_decimal.
+r = exact.percent_change("1", "1e400")
+check("percent_change('1', '1e400'): finite percent_decimal (null, not "
+      "inf/Infinity), exact value still reported",
+      r["ok"] and r["percent_decimal"] is None and r["percent_exact"].startswith("999")
+      and "note" in r, f"-> percent_decimal={r.get('percent_decimal')!r} "
+      f"note={r.get('note')!r}")
+r = exact.percent_change("1", "1e5000")
+check("percent_change('1', '1e5000'): refused BEFORE Fraction() construction, "
+      "not an uncaught ValueError",
+      r["ok"] is False and r.get("code") == "resource_exhausted"
+      and "digits" in r.get("error", ""), f"-> {r}")
+r = exact.percent_change("1", "1" * 3000)
+check("percent_change: a 3000-char literal (over _MAX_EXPR_LEN) is refused, "
+      "not a crash",
+      r["ok"] is False and r.get("code") == "resource_exhausted"
+      and "too long" in r.get("error", ""), f"-> {r}")
+r = exact.percent_change("1", "1e3")
+check("percent_change('1', '1e3'): an ordinary scientific-notation input "
+      "still works, finite percent_decimal",
+      r["ok"] and r["percent_decimal"] == 99900.0 and "note" not in r, f"-> {r}")
+# Two inputs each individually under the per-input digit cap can still
+# combine into a computed result over Python's int->str ceiling (opposite-
+# sign exponents near the boundary) — the try/except backstop around the
+# actual computation, not just the upfront per-input check, is what catches
+# this.
+r = exact.percent_change("1e-3999", "1e3999")
+check("percent_change: two individually-in-bounds inputs whose COMBINED "
+      "result overflows str() are still refused, not a crash",
+      r["ok"] is False and r.get("code") == "resource_exhausted", f"-> {r}")
+
 # evaluate_expression's calculus forms (GH #329): documented in server.py's
 # docstring but previously undiscoverable from the schema — diff/integrate/
 # series worked all along; these prove the doc's own examples still run.
