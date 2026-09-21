@@ -88,9 +88,12 @@ behind it.
   `OK` — the third catches an OLE run, which can otherwise report
   `ok: true, exit_code: 0`) and dropped on a clean run exactly as before,
   so the token saving compact mode exists for is unaffected on the success
-  path. The `compact` parameter's schema description now says so, and
-  `docs/contract/result-v1.schema.json` documents `stderr` on the
-  `compact_result` shape.
+  path. The `compact` parameter's schema description now says so. New field
+  `stderr` on the `compact_result` shape (`docs/contract/README.md`,
+  `CONTRACT_VERSION` `1.16.0` -> `1.17.0`, MINOR — additive, no shape a
+  `1.16.0` client already validates changes on the success path), and
+  `docs/contract/result-v1.schema.json`/`doctor-v1.schema.json` regenerated
+  to match.
 
 ## [0.12.0] — 2026-09-09
 
