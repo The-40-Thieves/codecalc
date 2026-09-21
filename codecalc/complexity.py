@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import re
 
-from . import parsing
+from . import errors, parsing
 
 LOOP_RE = re.compile(
     r"\b(for|while|foreach|until|loop|repeat)\b"
@@ -86,6 +86,21 @@ def analyze(code: str, language: str = "python3") -> dict:
     can tell a parse from a fallback instead of assuming.
     """
     facts = parsing.analyse(code, language)
+    if facts.too_deep:
+        # A pathologically nested source (GH #324, THE-1089: 4000-deep
+        # parens raised an uncaught RecursionError before parsing.analyse
+        # gained a depth cap) is refused rather than handed to the
+        # regex-fallback path below. Every OTHER `parsed=False` reason (no
+        # grammar for the language, a grammar that rejected the input)
+        # still falls through to that fallback unchanged — this one is
+        # different because running `_count_loops`/`_detect_recursion` over
+        # thousands of characters of adversarial nesting would silently
+        # produce a heuristic answer (typically "O(1), no loops") for input
+        # that is not a normal program, which is worse than saying so.
+        # RESOURCE_EXHAUSTED because depth is a ceiling here exactly the way
+        # errors.classify() already treats a bare RecursionError elsewhere:
+        # the remedy is to simplify the input, not to retry as-is.
+        return errors.error_result(errors.RESOURCE_EXHAUSTED, facts.reason)
     if facts.parsed:
         loops, depth = facts.loops, facts.max_loop_depth
         recursive = bool(facts.recursive_functions)
