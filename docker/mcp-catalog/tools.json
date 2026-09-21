@@ -68,7 +68,7 @@
       {
         "name": "compact",
         "type": "boolean",
-        "desc": "Drop diagnostic fields (timings, workdir, platform) from the result; safety disclosures are always kept",
+        "desc": "Drop diagnostic fields (timings, workdir, platform) from the result; safety disclosures are always kept, and stderr is kept whenever the run did not succeed — dropped only on a clean successful run (ok=true, exit_code 0, verdict OK)",
         "optional": true
       },
       {
@@ -166,6 +166,22 @@
         "name": "content",
         "type": "string",
         "desc": "Text content to write to `path`, overwriting any existing file"
+      }
+    ]
+  },
+  {
+    "name": "session_delete_file",
+    "description": "Delete one file (or symlink entry — never the directory or symlink's\ntarget) from a session workspace. This is the recovery path when a\nsession is refused for being over CODECALC_MAX_ARTIFACT_COUNT: neither\nsession_write_file (creates/overwrites, never removes) nor session_run/\nexecute_code (refused by the same cap) can shrink the count, so this is\nthe only in-session way to get back under it short of session_stop\ndiscarding the whole workspace. Refuses runner-internal paths (the same\nones session_artifacts excludes) and directories.",
+    "arguments": [
+      {
+        "name": "session_id",
+        "type": "string",
+        "desc": "Id of the session workspace to delete from"
+      },
+      {
+        "name": "path",
+        "type": "string",
+        "desc": "Relative path inside the workspace to delete; path escapes (e.g. '../') are refused"
       }
     ]
   },
@@ -309,7 +325,7 @@
   },
   {
     "name": "trace_execution",
-    "description": "Debug WHY, line by line, for the ONE input you actually ran it on:\nwhich statements fired, in what order, with what variable values at\neach step, and which if/elif/while/for/try branch was taken versus\nnever taken. Want just the printed output instead? Use execute_code.\n\nReturns `events`: ordered `{step, line, event, func, locals}`, one entry\nper traced line/call/return/exception in YOUR code only (library\ninternals excluded). `locals` on each entry is only the names that\nchanged since the previous step in that same call — not a full dump\nevery line. A `return` entry also carries `return_value`; an\n`exception` entry carries `exception_type`/`exception_message`.\n\nAlso returns `branches` (hit count per if/elif/while/for/try line),\n`lines_executed` / `lines_never_executed` (coverage from a static parse),\nand `truncated`/`truncated_reason` when `max_events` or an internal\nsize ceiling stopped RECORDING early (the underlying stdout/exit code\nare unaffected either way).\n\nTRUST: the trace is produced BY the traced program at its OWN privilege\n— a debugging aid, not an attestation of behaviour, exactly as\ntrustworthy as that program's own stdout. `discarded_events` /\n`events_consistent` are a best-effort tamper/corruption signal (never a\nguarantee) computed independently of the file's own content.\n`unenforced` may additionally note \"only the main thread is traced\"\n(sys.settrace is per-thread) or, fallback backend only, an OLE\n`exit_code` race.\n\nFor a structural Big-O guess with nothing executed, use\nanalyze_complexity.\n",
+    "description": "Debug WHY, line by line, for the ONE input you actually ran it on:\nwhich statements fired, in what order, with what variable values at\neach step, and which if/elif/while/for/try branch was taken versus\nnever taken. Want just the printed output instead? Use execute_code.\n\nReturns `events`: ordered `{step, line, event, func, locals}`, one entry\nper traced line/call/return/exception in YOUR code only (library\ninternals excluded). `locals` on each entry is only the names that\nchanged since the previous step in that same call — not a full dump\nevery line. A `return` entry also carries `return_value`; an\n`exception` entry carries `exception_type`/`exception_message`.\n\nAlso returns `branches` (hit count per if/elif/while/for/try line),\n`lines_executed` / `lines_never_executed` (coverage from a static parse),\nand `truncated`/`truncated_reason` when `max_events` or an internal\nsize ceiling stopped RECORDING early (the underlying stdout/exit code\nare unaffected either way). `truncated_reason` is also\n`\"event_detail_over_cap\"` when one event's OWN detail (e.g. a call with\nmore than 200 changed locals) was too large to admit — that ONE event is\nstill present in `events`, as a bounded stub (`locals: {}`,\n`detail_dropped: true`), so its real `step`/`line`/`func` still count\ntoward `lines_executed`/`branches` exactly like any other event; only\nits own detail, never the rest of the trace, was dropped.\n\nTRUST: the trace is produced BY the traced program at its OWN privilege\n— a debugging aid, not an attestation of behaviour, exactly as\ntrustworthy as that program's own stdout. `discarded_events` /\n`events_consistent` are a best-effort tamper/corruption signal (never a\nguarantee) computed independently of the file's own content —\n`events_consistent` requires `discarded_events == 0` among its\nconditions, since an honest run never produces one.\n`unenforced` may additionally note \"only the main thread is traced\"\n(sys.settrace is per-thread) or, fallback backend only, an OLE\n`exit_code` race.\n\nFor a structural Big-O guess with nothing executed, use\nanalyze_complexity.\n",
     "arguments": [
       {
         "name": "language",
@@ -559,7 +575,7 @@
   },
   {
     "name": "benchmark",
-    "description": "Empirically measure time complexity by running code at increasing input sizes.\n\nContract: the code must read an integer N from stdin (first line) and do work\nsized by N. codecalc runs it at each size in `sizes` and fits the growth\ncurve to estimate Big-O (O(1), O(log n), O(n), O(n log n), O(n^2)...).\nExample python: 'import sys\\nn=int(sys.stdin.readline()); s=0\\nfor i in range(n): s+=i\\nprint(s)'\n",
+    "description": "Empirically measure time complexity by running code at increasing input sizes.\n\nContract: the code must read an integer N from stdin (first line) and do work\nsized by N. codecalc runs it at each size in `sizes` and fits the growth\ncurve to estimate Big-O (O(1), O(log n), O(n), O(n log n), O(n^2)...). 3\nsizes (the accepted minimum) can only return noise-floor O(1) or\n\"inconclusive\" — never a growth class, not even exponential; 4+ sizes are\nneeded to trust the curve fit, 5+ doubling sizes for a robust ratio\nmedian — `estimate_basis` names which estimator decided.\nExample python: 'import sys\\nn=int(sys.stdin.readline()); s=0\\nfor i in range(n): s+=i\\nprint(s)'\n",
     "arguments": [
       {
         "name": "code",
@@ -575,7 +591,7 @@
       {
         "name": "sizes",
         "type": "string",
-        "desc": "Comma-separated input sizes to run at, e.g. '100,1000,10000,100000'",
+        "desc": "Comma-separated input sizes to run at, e.g. '100,1000,10000,100000' (this default: 4 sizes 10x apart, decided via curve-fit). 3 is the accepted minimum but can only return noise-floor O(1) or an inconclusive estimate — never a growth class, not even exponential, which needs 2+ agreeing doubling ratios (so 4+ sizes) and cannot decide on one; 4+ sizes are needed to trust the curve fit; 5+ DOUBLING sizes (n,2n,4n,8n,16n) are needed for a robust ratio median",
         "optional": true
       },
       {

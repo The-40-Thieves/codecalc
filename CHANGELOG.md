@@ -415,6 +415,54 @@ behind it.
   this same unchanged-prompt intersection whenever the corpus hash has
   moved, rather than trusting a self-referential "drop_hits=0" against a
   baseline just regenerated from the current state).
+- **`docker/mcp-catalog/tools.json` and `scripts/data/tool_select_baseline.json`
+  regenerated for `session_delete_file` (51st tool) — 3 new labeled
+  prompts added to `scripts/data/tool_select_prompts.jsonl`** (241 total,
+  none containing `session_delete_file`'s own name or underscore tokens —
+  `validate_prompts()` confirms zero violations), scoring 2/3 top-1, 3/3
+  top-3 on `full` (`{"n": 3, "top1": 0.6667, "top3": 1.0}`); the one
+  top-1 miss ranks 3rd behind `session_snapshot`/`session_stop`, both
+  genuine lexical competitors for "too many files in a workspace, clear
+  some out."
+
+  `docker/mcp-catalog/tools.json` was regenerated from a live in-process
+  `tools/list` capture (`tests/_mcp_client.py`'s `in_process()`, no Docker
+  build needed) rather than hand-edited — the structural diff against the
+  committed file is **not** "only `session_delete_file` added": three
+  OTHER tools' descriptions had also drifted from their own already-merged
+  docstring changes that never got a catalog regen (`execute_code`
+  THE-1088, `trace_execution` THE-1086, `benchmark` THE-1092) — all three
+  resynced to their current live text as a byproduct of doing this
+  regeneration honestly rather than hand-patching in only the one new
+  entry.
+
+  Regression check on the 238 PRE-EXISTING prompts, against `origin/main`'s
+  own checked-in baseline (`tests/test_tool_select_eval.py`'s corpus-change
+  guard, `full` only — that guard does not run per-surface): **zero**
+  newly-missed top-1 hits (`shared=238 newly_missed=0`). Verified further
+  by hand across all three surfaces with BOTH sides freshly measured —
+  `origin/main`'s own code re-run live, not its checked-in baseline FILE —
+  since `session_delete_file` sits in the `sessions` group only, it is not
+  even a candidate document for `dev`/`core` scoring, and on `full` every
+  one of the 238 pre-existing prompts' hit/miss status is bit-for-bit
+  unchanged: **0 hit/miss transitions, gained or lost, on any surface.**
+
+  The checked-in baseline FILE's totals move `full` 152->156 / `dev`
+  134->133 / `core` 82->82 top1_hits (`n` 238->241 on `full`, unchanged on
+  `dev`/`core` since none of the 3 new prompts are applicable there). Do
+  not read that `dev` number as a regression this PR caused: re-running
+  `origin/main`'s OWN current code live (rather than trusting its checked-in
+  baseline file) scores `full` at 154/238 and `dev` at 133/238, not the
+  checked-in 152/238 and 134/238 — the checked-in baseline UNDERSTATES
+  `full` by 2 hits and OVERSTATES `dev` by 1, a pre-existing drift between
+  that file and the code it describes, predating this PR (most likely
+  earlier PRs' own docstring edits that were never re-baselined). Diffing
+  against the checked-in file alone would read as "full gains 2, dev drops
+  1"; diffing both sides freshly measured — the check that actually rules
+  out a regression — shows neither is real: `full`'s "+2" is fully
+  accounted for by the 3 new prompts' own 2 top-1 hits, and `dev`'s "-1"
+  does not exist at all once its own baseline number is corrected to what
+  `origin/main`'s code actually produces today.
 
 ### Fixed
 

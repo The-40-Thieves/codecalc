@@ -162,6 +162,9 @@
 {"prompt": "Save this CSV data into my workspace so a later script can read it as input", "expected": ["session_write_file"]}
 {"prompt": "Drop a new file with this exact content into the persistent workspace, at a given relative path", "expected": ["session_write_file"]}
 {"prompt": "I need to PUT data into the workspace, not pull an existing file back out", "expected": ["session_write_file"]}
+{"prompt": "A single leftover file in my persistent workspace is pushing me over some kind of count limit — remove just that one file, not the entire workspace", "expected": ["session_delete_file"]}
+{"prompt": "Get rid of one specific file sitting in my workspace, leaving every other file and the workspace itself intact", "expected": ["session_delete_file"]}
+{"prompt": "My workspace keeps refusing new runs because it has too many files in it — I need to remove just one of them to get back under whatever cap is in place", "expected": ["session_delete_file"]}
 {"prompt": "What output files did my program generate in that workspace, ignoring the runner's own internal files?", "expected": ["session_artifacts"]}
 {"prompt": "Show me only what the code I RAN produced, not the input files I planted myself", "expected": ["session_artifacts"]}
 {"prompt": "filter out the runner internals and any input data I seeded \u2014 I only want what my execution actually PRODUCED", "expected": ["session_artifacts"]}

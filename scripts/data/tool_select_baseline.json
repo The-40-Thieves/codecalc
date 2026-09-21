@@ -1,11 +1,11 @@
 {
   "full": {
-    "n": 238,
+    "n": 241,
     "skipped": 0,
-    "top1_hits": 152,
-    "top3_hits": 186,
-    "top1": 0.6387,
-    "top3": 0.7815,
+    "top1_hits": 156,
+    "top3_hits": 187,
+    "top1": 0.6473,
+    "top3": 0.7759,
     "per_tool": {
       "algebraic_equiv": {
         "n": 4,
@@ -24,7 +24,7 @@
       },
       "bits": {
         "n": 24,
-        "top1": 0.875,
+        "top1": 0.9167,
         "top3": 1.0
       },
       "branch_reachability": {
@@ -180,7 +180,12 @@
       "session_artifacts": {
         "n": 4,
         "top1": 0.25,
-        "top3": 0.5
+        "top3": 0.25
+      },
+      "session_delete_file": {
+        "n": 3,
+        "top1": 0.6667,
+        "top3": 1.0
       },
       "session_files": {
         "n": 4,
@@ -195,7 +200,7 @@
       "session_read_file": {
         "n": 4,
         "top1": 0.25,
-        "top3": 0.5
+        "top3": 0.25
       },
       "session_run": {
         "n": 3,
@@ -204,7 +209,7 @@
       },
       "session_snapshot": {
         "n": 7,
-        "top1": 0.5714,
+        "top1": 0.7143,
         "top3": 0.7143
       },
       "session_start": {
@@ -592,7 +597,7 @@
         "top3_hit": true
       },
       "If I try to cram 3000000000 into a signed 32-wide slot, what value do I actually get after it overflows?": {
-        "top1_hit": false,
+        "top1_hit": true,
         "top3_hit": true
       },
       "How many of its binary digits are set to 1 in the number 202, and what's its binary length?": {
@@ -915,9 +920,21 @@
         "top1_hit": true,
         "top3_hit": true
       },
-      "What output files did my program generate in that workspace, ignoring the runner's own internal files?": {
+      "A single leftover file in my persistent workspace is pushing me over some kind of count limit \u2014 remove just that one file, not the entire workspace": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Get rid of one specific file sitting in my workspace, leaving every other file and the workspace itself intact": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "My workspace keeps refusing new runs because it has too many files in it \u2014 I need to remove just one of them to get back under whatever cap is in place": {
         "top1_hit": false,
         "top3_hit": true
+      },
+      "What output files did my program generate in that workspace, ignoring the runner's own internal files?": {
+        "top1_hit": false,
+        "top3_hit": false
       },
       "Show me only what the code I RAN produced, not the input files I planted myself": {
         "top1_hit": false,
@@ -940,7 +957,7 @@
         "top3_hit": true
       },
       "I want a restore point for this workspace I can return to if the next few changes go badly": {
-        "top1_hit": false,
+        "top1_hit": true,
         "top3_hit": true
       },
       "Bring back the exact files from that workspace backup I made earlier, into a brand new workspace": {
@@ -965,7 +982,7 @@
       },
       "Fetch a file from the persistent workspace, and if it's a picture, hand it back as something I can actually view": {
         "top1_hit": false,
-        "top3_hit": true
+        "top3_hit": false
       },
       "I know exactly which single file I want the CONTENTS of \u2014 I don't need a whole listing": {
         "top1_hit": false,
@@ -1215,11 +1232,11 @@
   },
   "dev": {
     "n": 188,
-    "skipped": 50,
-    "top1_hits": 134,
-    "top3_hits": 155,
-    "top1": 0.7128,
-    "top3": 0.8245,
+    "skipped": 53,
+    "top1_hits": 133,
+    "top3_hits": 154,
+    "top1": 0.7074,
+    "top3": 0.8191,
     "per_tool": {
       "algebraic_equiv": {
         "n": 4,
@@ -1253,7 +1270,7 @@
       },
       "calc_stats": {
         "n": 5,
-        "top1": 0.6,
+        "top1": 0.4,
         "top3": 0.8
       },
       "collision_probability": {
@@ -1354,7 +1371,7 @@
       "percentiles": {
         "n": 4,
         "top1": 0.75,
-        "top3": 1.0
+        "top3": 0.75
       },
       "physical_constants": {
         "n": 4,
@@ -1585,7 +1602,7 @@
         "top3_hit": true
       },
       "I have a list of numbers from repeated runs \u2014 summarize their central tendency and spread, and tell me if the noise is too high to trust them": {
-        "top1_hit": true,
+        "top1_hit": false,
         "top3_hit": true
       },
       "summarize the whole distribution's average and variability, not its ranked cutoffs": {
@@ -1606,7 +1623,7 @@
       },
       "I don't want the average \u2014 I want to know what number 99 percent of these samples fall under": {
         "top1_hit": false,
-        "top3_hit": true
+        "top3_hit": false
       },
       "Out of these hundred response times, what's the tail latency most requests stay under \u2014 say the top 5%?": {
         "top1_hit": true,
@@ -2164,7 +2181,7 @@
   },
   "core": {
     "n": 120,
-    "skipped": 118,
+    "skipped": 121,
     "top1_hits": 82,
     "top3_hits": 104,
     "top1": 0.6833,
@@ -2755,7 +2772,7 @@
     }
   },
   "codecalc_version": "0.12.0",
-  "generated_at": "2026-09-21T07:47:03.165580+00:00",
-  "prompt_count": 238,
-  "prompt_set_sha256": "5fe9fd268e7eb1a20dc43c7ac31a8da691019b2a117d5bd67ec3507c1fc84a46"
+  "generated_at": "2026-09-21T08:27:42.446192+00:00",
+  "prompt_count": 241,
+  "prompt_set_sha256": "bddf4f17c76904411c7426cc82f45ca239b8da32514566e34a69b167a52308ee"
 }
