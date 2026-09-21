@@ -526,7 +526,7 @@ analysis, binary64 introspection.
 | `run_cancel` | Cancel a background run; idempotent on an already-terminal run, honest about providers that cannot cancel mid-flight |
 | `session_start` | Persistent session; python3/node get a stateful REPL worker (variables/imports persist across calls), other languages a workspace dir |
 | `session_stop` / `session_list` | Session lifecycle |
-| `session_files` / `session_read_file` / `session_write_file` | Workspace file tools, jailed to the session dir; listings support `page_size`/`cursor`, and reads return images inline (`as_image`) |
+| `session_files` / `session_read_file` / `session_write_file` / `session_delete_file` | Workspace file tools, jailed to the session dir; listings support `page_size`/`cursor`, reads return images inline (`as_image`), and delete removes one file/symlink (never a runner-internal path or a directory) — the in-band recovery when a session is refused for being over `CODECALC_MAX_ARTIFACT_COUNT` |
 | `session_run` | **Multi-file programs**: execute an entry file that imports other session files (helper.py, data/...) in the workspace |
 | `session_artifacts` | List files created by executed code (results, images, CSVs) |
 | `session_snapshot` | Archive a session's workspace to a snapshot stored OUTSIDE the jailed workspace (`action="save"`), or restore one into a new session or, with `replace=True`, back into the same session (`action="restore"`); `action="list"`/`"delete"` manage them. Files only — never a stateful session's REPL variables. Snapshots die with `session_stop` unless `keep_snapshots=True` |
@@ -821,7 +821,7 @@ way back into the default.
 
 codecalc's `tools/list` returns 50 definitions. Measured with `o200k_base` as a
 proxy on the served JSON, that is 78,586 bytes / 20,630 tokens of descriptions
-and input schemas (up from 64,643 bytes / 17,277 tokens at the same 49 tools),
+and input schemas (up from 64,643 bytes / 17,277 tokens at the same 50 tools),
 and every client pays it before the first user message. The number
 has grown with the descriptions, not the count: the disambiguation sentences
 and the per-mode text on `bits`/`symbolic` are what a selection-accuracy-first

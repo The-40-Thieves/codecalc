@@ -267,6 +267,26 @@ behind it.
   `from_value` is negative. The served surface moves from 49 to **50
   tools** (GH #329, THE-1094).
 
+- **`session_delete_file(session_id, path)`** (sessions group, 50th MCP
+  tool) — remove one file (or symlink entry, never its target) from a
+  session workspace. Uses a new `_jail_nofollow` (sessions.py), not
+  `_jail`: `_jail` resolves a symlink at the FINAL path component too, so a
+  link whose target lies outside the workspace reads as the call itself
+  "escaping" and is correctly refused for a READ or WRITE — deleting the
+  SAME link is a different question, since the entry being removed sits
+  squarely inside the workspace regardless of what it points to, so
+  `_jail_nofollow` resolves only the entry's PARENT and leaves the final
+  component unresolved; `unlink()` on a symlink already never follows it,
+  which is what makes the target survive a delete. Refuses exactly what
+  `session_artifacts` already excludes (`.codecalc-run/`, `.codecalc-spill/`,
+  the session lock file — `_is_runner_internal`, factored out of
+  `_workspace_scan` so the two definitions cannot drift) and a directory —
+  one file/symlink per call, the same granularity `session_write_file`
+  writes at. Deliberately exempt from BOTH the byte and artifact-count
+  quota gates: a delete can only shrink usage, never grow it, so gating it
+  on a cap it can only relieve would refuse the one call that fixes the
+  refusal (see "Fixed" below).
+
 ### Changed
 
 - **`symbolic(op="solve_linear")` and `evaluate_expression`'s
@@ -387,6 +407,20 @@ behind it.
   combined-inputs case; `percent_decimal` is now always finite JSON —
   `null` with a `note` when the exact value has no finite float
   representation, never a bare `Infinity` (GH #337 cross-vendor review).
+
+- **A session over `CODECALC_MAX_ARTIFACT_COUNT` was permanently
+  unrunnable** (GH #325, THE-1090): `quota_precheck` refuses
+  `execute()`/`session_run` up front once a session's artifact count is
+  over the cap, and `write_file` can only create or overwrite content,
+  never remove it — so nothing inside the session could ever shrink the
+  count back under the cap, short of `session_stop` destroying the whole
+  workspace. The refusal's own remedy ("delete unneeded files ... or raise
+  CODECALC_MAX_ARTIFACT_COUNT") named an action no tool in the package
+  could perform. `session_delete_file` above is the in-band recovery path
+  the byte quota already had (`_write_guard`'s `net_bytes <= 0` early
+  return) and the count cap lacked; both artifact-count refusals'
+  `remedy` strings now name it instead of a `session_files` listing tool
+  that was never able to act on what it showed.
 
 ## [0.12.0] — 2026-09-09
 

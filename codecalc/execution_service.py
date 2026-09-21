@@ -550,6 +550,9 @@ class SessionService:
     def write_file(self, session_id: str, path: str, content: str) -> dict:
         return sessions.write_file(session_id, path, content)
 
+    def delete_file(self, session_id: str, path: str) -> dict:
+        return sessions.delete_file(session_id, path)
+
     def artifacts(self, session_id: str) -> dict:
         return sessions.artifacts(session_id)
 

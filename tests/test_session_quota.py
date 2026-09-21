@@ -57,6 +57,33 @@ still left the DoS achievable):
   shrinking overwrites refused too — `session_stop` (destroying the whole
   session) was the only way out. A net-non-positive write is now ALWAYS
   permitted, even while over quota — the in-band recovery path.
+
+GH #325 / THE-1090: the artifact-COUNT cap never got the in-band recovery
+path FIX 4 above gave the byte quota. `write_file` can only create or
+overwrite content, never remove it, so once a session was over
+`CODECALC_MAX_ARTIFACT_COUNT` — reachable one call at a time via `write_file`
+or, faster, via executed code creating hundreds of tiny files in one
+`execute()` (FIX 2's own scenario) — nothing inside the session could ever
+shrink the count back under the cap short of `session_stop` destroying the
+whole workspace, and the refusal's own remedy named an action ("delete
+unneeded files") no tool in the package could perform. `session_delete_file`
+closes that gap; exercised here:
+
+- the exact repro shape: `execute()` pushes a session over the count cap in
+  one call, the next `execute()` is refused (same as FIX 2), and
+  `session_delete_file` — itself exempt from the cap it exists to relieve —
+  frees enough files that `execute()` succeeds again with no `session_stop`.
+- `session_delete_file` refuses a `../` path escape, an absolute path, a
+  runner-internal path (`.codecalc-run/...`, the session lock file — the
+  same set `session_artifacts` already excludes), and a directory, each
+  with the jail/validation refusal shape every other session tool uses.
+- a missing file is a CODED not-found refusal, not a crash or a silent
+  no-op.
+- a symlink INSIDE the workspace pointing OUTSIDE it is deleted as the link
+  it is — the target survives untouched. This is `_jail_nofollow`'s reason
+  to exist: `_jail`'s ordinary resolve() follows the final path component
+  too, so a link to an outside target reads as the delete itself
+  "escaping" and would be wrongly refused.
 """
 
 from __future__ import annotations
@@ -65,6 +92,7 @@ import os
 import pathlib
 import shutil
 import sys
+import tempfile
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
@@ -560,6 +588,173 @@ def _test_overwrite_net_delta():
 
 
 _test_overwrite_net_delta()
+
+
+# ── GH #325 / THE-1090: session_delete_file, the count cap's in-band
+#    recovery path ──────────────────────────────────────────────────────────
+def _can_symlink() -> bool:
+    """Probe symlink-creation capability rather than assume it — an
+    unprivileged Windows account lacks SeCreateSymbolicLinkPrivilege by
+    default and `symlink_to` raises there. Same reasoning
+    tests/test_session_jail.py's own `_can_symlink` probe uses (a fresh,
+    file-local copy rather than an import across test files, matching how
+    every test file here is a standalone script)."""
+    probe_dir = pathlib.Path(tempfile.mkdtemp(prefix="codecalc-quota-symlink-probe-"))
+    probe = probe_dir / "probe"
+    try:
+        probe.symlink_to(probe_dir)
+        return True
+    except OSError:
+        return False
+    finally:
+        try:
+            probe.unlink()
+        except OSError:
+            pass
+        shutil.rmtree(probe_dir, ignore_errors=True)
+
+
+def _test_delete_file_recovers_over_count_session():
+    """The exact #325 repro: executed code creates more files than the cap
+    in ONE `execute()` call (so `write_file`'s own per-write count check
+    never fires — this is FIX 2's scenario), the NEXT `execute()` is
+    refused pre-run, and — the gap #325 reports — nothing inside the
+    session could shrink the count back under the cap. `session_delete_file`
+    is that path: it is itself NOT refused by the cap it exists to relieve,
+    and deleting enough files lets `execute()` succeed again with no
+    `session_stop`."""
+    sid = _new_session()
+    try:
+        write_many = "\n".join(f"open('f{i}.txt', 'w').write('x')" for i in range(6))
+
+        def _run():
+            return sessions.execute(sid, write_many, language="python3")
+
+        result = _with_env({sessions.MAX_ARTIFACT_COUNT_ENV: "3"}, _run)
+        check("delete recovery: the run itself still succeeded",
+              result.get("ok") is True, f"-> {result}")
+        check("delete recovery: 6 files against a cap of 3 pushes the session over",
+              result.get("artifact_count_exceeded") is True, f"-> {result}")
+
+        blocked = _with_env(
+            {sessions.MAX_ARTIFACT_COUNT_ENV: "3"},
+            lambda: sessions.execute(sid, "1", language="python3"))
+        check("delete recovery: the NEXT execute() is refused over the cap",
+              blocked.get("ok") is False and blocked.get("code") == errors.RESOURCE_EXHAUSTED,
+              f"-> {blocked}")
+        check("delete recovery: the refusal's remedy now names session_delete_file "
+              "(pre-fix it named a tool that could not act on it)",
+              "session_delete_file" in blocked.get("remedy", ""), f"-> {blocked.get('remedy')}")
+
+        for name in ("f3.txt", "f4.txt", "f5.txt"):
+            d = _with_env({sessions.MAX_ARTIFACT_COUNT_ENV: "3"},
+                          lambda name=name: sessions.delete_file(sid, name))
+            check(f"delete recovery: session_delete_file({name!r}) succeeds while "
+                  "the session is OVER the count cap (exempt from the cap it relieves)",
+                  d.get("ok") is True, f"-> {d}")
+
+        recovered = _with_env(
+            {sessions.MAX_ARTIFACT_COUNT_ENV: "3"},
+            lambda: sessions.execute(sid, "1", language="python3"))
+        check("delete recovery: execute() succeeds again once the count is back "
+              "at/under the cap — no session_stop needed",
+              recovered.get("ok") is True, f"-> {recovered}")
+    finally:
+        sessions.stop(sid)
+
+
+_test_delete_file_recovers_over_count_session()
+
+
+def _test_delete_file_refusals():
+    sid = _new_session()
+    try:
+        r_escape = sessions.delete_file(sid, "../x")
+        check("delete: a '../' path escape is refused",
+              r_escape.get("ok") is False and r_escape.get("code") == errors.PERMISSION_DENIED,
+              f"-> {r_escape}")
+
+        abs_path = str((sessions._session_dir(sid).parent / "x").resolve())
+        r_abs = sessions.delete_file(sid, abs_path)
+        check("delete: an absolute path escaping the workspace is refused",
+              r_abs.get("ok") is False, f"-> {r_abs}")
+
+        r_internal = sessions.delete_file(sid, f"{sessions._RUNNER_SCRATCH_DIRNAME}/main.py")
+        check("delete: a runner-internal path (.codecalc-run/...) is refused, "
+              "the same set session_artifacts already excludes",
+              r_internal.get("ok") is False
+              and r_internal.get("code") == errors.PERMISSION_DENIED,
+              f"-> {r_internal}")
+
+        r_lock = sessions.delete_file(sid, sessions._LOCK_FILE_NAME)
+        check("delete: the session lock file is refused",
+              r_lock.get("ok") is False
+              and r_lock.get("code") == errors.PERMISSION_DENIED,
+              f"-> {r_lock}")
+
+        r_missing = sessions.delete_file(sid, "nope.txt")
+        check("delete: a missing file is a CODED not-found refusal, not a crash",
+              r_missing.get("ok") is False and r_missing.get("code") == errors.VALIDATION,
+              f"-> {r_missing}")
+
+        wr = sessions.write_file(sid, "dir/inside.txt", "x")
+        check("delete refusal setup: a nested file writes",
+              wr.get("ok") is True, f"-> {wr}")
+        r_dir = sessions.delete_file(sid, "dir")
+        check("delete: a directory is refused, not silently recursed",
+              r_dir.get("ok") is False and r_dir.get("code") == errors.VALIDATION,
+              f"-> {r_dir}")
+
+        # positive control: the file nested under that same directory still
+        # deletes cleanly — the refusals above are about THOSE paths, not a
+        # blanket failure of nested deletes.
+        r_ok = sessions.delete_file(sid, "dir/inside.txt")
+        check("delete: an ordinary nested file deletes (control)",
+              r_ok.get("ok") is True, f"-> {r_ok}")
+        check("delete: the file is actually gone from disk",
+              not (sessions._session_dir(sid) / "dir" / "inside.txt").exists())
+    finally:
+        sessions.stop(sid)
+
+
+_test_delete_file_refusals()
+
+
+def _test_delete_file_symlink_removes_link_not_target():
+    """#325's own requirement: a symlink INSIDE the workspace pointing
+    OUTSIDE it must be deletable — removing the link, never following it —
+    and the external target must survive untouched. `_jail` alone cannot do
+    this: its resolve() follows the final path component too, so a link
+    pointing outside reads as the call itself "escaping" and `_jail` would
+    refuse the delete outright — correct for a read/write, wrong for a
+    delete. `_jail_nofollow` exists for exactly this case."""
+    if not _can_symlink():
+        print("SKIP delete symlink test (no symlink privilege on this host)")
+        return
+    sid = _new_session()
+    outside_dir = pathlib.Path(tempfile.mkdtemp(prefix="codecalc-quota-symlink-target-"))
+    outside_file = outside_dir / "secret.txt"
+    outside_file.write_text("do not touch")
+    try:
+        link = sessions._session_dir(sid) / "escape-link"
+        link.symlink_to(outside_file)
+
+        r = sessions.delete_file(sid, "escape-link")
+        check("delete symlink: a symlink pointing OUTSIDE the workspace is "
+              "deleted, not refused as an 'escape'",
+              r.get("ok") is True, f"-> {r}")
+        check("delete symlink: result reports it deleted a symlink, not a file",
+              r.get("deleted") == "symlink", f"-> {r}")
+        check("delete symlink: the link entry is gone from the workspace",
+              not link.exists() and not link.is_symlink())
+        check("delete symlink: the OUTSIDE target file SURVIVES, untouched",
+              outside_file.exists() and outside_file.read_text() == "do not touch")
+    finally:
+        sessions.stop(sid)
+        shutil.rmtree(outside_dir, ignore_errors=True)
+
+
+_test_delete_file_symlink_removes_link_not_target()
 
 
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else

@@ -244,6 +244,26 @@ _LOCK_FILE_NAME = ".codecalc-session-lock"
 #: ever creates the scratch directory at all.
 _RUNNER_SCRATCH_DIRNAME = registry.RUN_SCRATCH_DIRNAME
 
+
+def _is_runner_internal(rel_parts: tuple[str, ...]) -> bool:
+    """True if `rel_parts` (a path's `.relative_to(d).parts`, workspace-
+    relative) sits inside one of the runner's own directories, or IS the
+    session lock file — the exact three exclusions `_workspace_scan` applies
+    when deciding what counts as an "artifact" a caller may see or act on.
+
+    Factored out (GH #325) so `session_delete_file` refuses precisely what
+    `session_artifacts`/`_workspace_scan` already hide, rather than a second,
+    independently-drifting copy of the same three rules: a caller told to
+    "delete unneeded files" must never be able to reach past that listing and
+    delete a file it was never shown in the first place.
+    """
+    if not rel_parts:
+        return False
+    if rel_parts[0] in (_SPILL_DIRNAME, _RUNNER_SCRATCH_DIRNAME):
+        return True
+    return len(rel_parts) == 1 and rel_parts[0] == _LOCK_FILE_NAME
+
+
 #: Guards the "measure usage, then write" critical section in every
 #: disk-quota-checked write path (`write_file`, the spill write in
 #: `spill_if_truncated`). Deliberately a SEPARATE lock from the module's
@@ -440,9 +460,7 @@ def _workspace_scan(d: Path) -> tuple[list[tuple[Path, os.stat_result]], int]:
         if "__pycache__" in p.parts or p.name.endswith(".pyc"):
             continue
         rel_parts = p.relative_to(d).parts
-        if rel_parts and rel_parts[0] in (_SPILL_DIRNAME, _RUNNER_SCRATCH_DIRNAME):
-            continue
-        if len(rel_parts) == 1 and p.name == _LOCK_FILE_NAME:
+        if _is_runner_internal(rel_parts):
             continue
         entries.append((p, st))
     return entries, total
@@ -573,8 +591,9 @@ def _artifact_cap_refusal(session_id: str, d: Path, incoming_bytes: int, *,
                 errors.RESOURCE_EXHAUSTED,
                 f"session '{session_id}' already has {count} artifact "
                 f"file(s), at the {max_count}-file cap ({MAX_ARTIFACT_COUNT_ENV})",
-                remedy=("delete unneeded files (session_files to see what's "
-                        f"there), or raise {MAX_ARTIFACT_COUNT_ENV}"),
+                remedy=("delete unneeded files with session_delete_file "
+                        "(session_files to see what's there), or raise "
+                        f"{MAX_ARTIFACT_COUNT_ENV}"),
                 artifact_count=count, max_artifact_count=max_count,
             )
     return None
@@ -716,8 +735,9 @@ def _artifact_count_refusal(session_id: str, *,
             errors.RESOURCE_EXHAUSTED,
             f"session '{session_id}' has {count} artifact file(s), over the "
             f"{max_count}-file cap ({MAX_ARTIFACT_COUNT_ENV})",
-            remedy=("delete unneeded files (session_files to see what's "
-                    f"there), or raise {MAX_ARTIFACT_COUNT_ENV}"),
+            remedy=("delete unneeded files with session_delete_file "
+                    "(session_files to see what's there), or raise "
+                    f"{MAX_ARTIFACT_COUNT_ENV}"),
             artifact_count=count, max_artifact_count=max_count,
         )
     return None
@@ -2706,6 +2726,82 @@ def write_file(session_id: str, path: str, content: str) -> dict:
     return {"ok": True, "path": target.relative_to(d).as_posix()}
 
 
+def delete_file(session_id: str, path: str) -> dict:
+    """Remove one file (or symlink entry) from a session workspace — GH
+    #325's in-band recovery path the artifact-COUNT cap lacked: a session
+    already over `CODECALC_MAX_ARTIFACT_COUNT` has `execute()`/`run_file()`
+    refused by `quota_precheck` before anything runs, `write_file` can only
+    create or overwrite content, never unlink it, and the pre-fix refusal's
+    own remedy ("delete unneeded files") named an action no tool in the
+    package could perform. This is that action.
+
+    Deliberately exempt from BOTH quota gates (`_write_guard`,
+    `_artifact_count_refusal`) — neither is even consulted here. A delete
+    can only shrink usage, never grow it, so gating it on a cap it can only
+    relieve would refuse the one call that fixes the refusal — the same
+    `net_bytes <= 0` reasoning `_write_guard`'s own early return already
+    applies to a shrinking WRITE (see that function's docstring), just with
+    no gate to bypass at all rather than one that lets a non-positive delta
+    through.
+
+    Uses `_jail_nofollow`, not `_jail`: `_jail`'s resolve() follows a
+    symlink at the FINAL path component too, so a link whose target lies
+    outside the workspace reads as the path itself "escaping" and would be
+    refused — correct for READING or WRITING through the link (never
+    disclose or overwrite what it points to), wrong for DELETING it (the
+    link is an in-workspace entry regardless of where it points, and
+    removing it must unlink the entry, never touch the target). See
+    `_jail_nofollow`'s own docstring.
+
+    Refuses a runner-internal path (`.codecalc-run/`, `.codecalc-spill/`,
+    the session lock file — `_is_runner_internal`, the exact set
+    `session_artifacts` already excludes) and a directory: this tool removes
+    one file/symlink at a time, the same granularity `write_file` writes at,
+    never a recursive `rm -r`.
+    """
+    try:
+        d = _session_dir(session_id)
+        if not d.is_dir():
+            return {"ok": False, "error": f"unknown session '{session_id}'"}
+        _reap_then_note(session_id)  # F4: reap an expired worker, never revive it
+        target = _jail_nofollow(d, path)
+    except ValueError as exc:
+        return _guard_error(exc)  # #212, see write_file's comment above
+    rel_parts = target.relative_to(d).parts
+    if _is_runner_internal(rel_parts):
+        return errors.error_result(
+            errors.PERMISSION_DENIED,
+            f"{path!r} is a runner-internal path and cannot be deleted",
+        )
+    # Same critical section shape as write_file's `_disk_lock`, even though
+    # no quota is checked here: a delete mutates the same on-disk state a
+    # concurrent write_file's usage measurement reads, and "check what is
+    # there, then remove it" must be one atomic step for the same reason
+    # `_write_guard`'s "measure usage, then write" is — see `_disk_lock`'s
+    # own docstring.
+    with _disk_lock:
+        try:
+            st = target.lstat()  # never follow — see _jail_nofollow's docstring
+        except OSError:
+            return errors.error_result(errors.VALIDATION, f"no such file: {path}")
+        if stat.S_ISDIR(st.st_mode):
+            return errors.error_result(
+                errors.VALIDATION,
+                f"{path!r} is a directory; session_delete_file removes one "
+                "file (or symlink) at a time, not a directory",
+            )
+        try:
+            target.unlink()
+        except OSError as exc:
+            return errors.error_result(
+                errors.INTERNAL, f"could not delete {path!r}: {exc}")
+    return {
+        "ok": True,
+        "path": target.relative_to(d).as_posix(),
+        "deleted": "symlink" if stat.S_ISLNK(st.st_mode) else "file",
+    }
+
+
 def list_files(session_id: str, path: str = "") -> dict:
     try:
         d = _session_dir(session_id)
@@ -2949,6 +3045,54 @@ def _jail(d: Path, path: str) -> Path:
     if not p.is_relative_to(base):
         raise ValueError("path escapes session workspace")
     return p
+
+
+def _jail_nofollow(d: Path, path: str) -> Path:
+    """`_jail`'s boundary/length/segment checks, but the FINAL path
+    component is never resolved — only its PARENT is, so a symlink AT that
+    final component is treated as the workspace entry it is, never as
+    whatever it points to.
+
+    `_jail` resolves the whole path, final component included, which is the
+    right call for reading or writing: a symlink pointing outside the
+    workspace must never be followed to disclose or overwrite what it
+    targets, so `_jail` correctly reports that as "escapes" and refuses the
+    call outright. Deleting the SAME symlink is a different question —
+    `session_delete_file` (GH #325) removes the in-workspace directory
+    entry, not whatever it references, so a target outside the workspace is
+    not a reason to refuse: the entry being removed is squarely inside it.
+    Using `_jail` here would refuse exactly the case the symlink test in
+    tests/test_session_quota.py exists to prove works.
+
+    An empty/`.`/`./` path resolves its own parent one level ABOVE `base`
+    (`(base / "").parent == base.parent`), which trips the SAME
+    `is_relative_to(base)` boundary check below and raises "escapes" —
+    deliberately not special-cased, since refusing to delete the workspace
+    root belongs under the identical refusal every other out-of-bounds path
+    gets, not a bespoke message.
+
+    Same accepted parent-component TOCTOU residual `_jail`/`_write_nofollow`
+    document (a session's own executed code shares the workspace as its cwd
+    and could swap a PARENT directory between this resolve() and the
+    caller's lstat()/unlink()); closing it needs openat2(RESOLVE_BENEATH),
+    same as every other write path in this module.
+    """
+    if len(path) > _MAX_JAIL_PATH_LEN:
+        raise ValueError(
+            f"path too long ({len(path)} chars, max {_MAX_JAIL_PATH_LEN})")
+    segments = path.count("/") + path.count("\\") + 1
+    if segments > _MAX_JAIL_PATH_SEGMENTS:
+        raise ValueError(
+            f"path has too many segments ({segments}, max {_MAX_JAIL_PATH_SEGMENTS})")
+    base = d.resolve()
+    candidate = base / path
+    parent = candidate.parent.resolve()
+    if not parent.is_relative_to(base):
+        raise ValueError("path escapes session workspace")
+    final = parent / candidate.name
+    if final == base:
+        raise ValueError("path escapes session workspace")
+    return final
 
 
 # ── REPL workers ───────────────────────────────────────────────────────────
