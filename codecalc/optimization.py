@@ -727,7 +727,8 @@ def _testable_positions(before: dict, after: dict,
 
 
 def _infer_speedup(before: dict, after: dict, alpha: float = ALPHA,
-                   min_speedup: float = DEFAULT_MIN_SPEEDUP) -> dict:
+                   min_speedup: float = DEFAULT_MIN_SPEEDUP,
+                   positions: tuple[list[dict], list[dict], int] | None = None) -> dict:
     """Test, per size, whether `after` is stochastically faster than `before`.
 
     `_speedup`'s median ratio says HOW MUCH faster the measured runs were; it
@@ -805,13 +806,29 @@ def _infer_speedup(before: dict, after: dict, alpha: float = ALPHA,
     original `alpha` (which stays the NOMINAL, uncorrected level throughout
     — `effective_alpha` is what a size's OWN p-value is actually compared to
     for `sizes_rejecting`).
+
+    `positions` (optional): the exact `(survivors, excluded, min_n)` tuple
+    `_testable_positions(before, after, alpha)` would itself compute —
+    pass it to skip that computation (and every `stats.mann_whitney_u` call
+    it makes, one per surviving size) when the caller already has it.
+    `verify_optimization` does this: it calls `_testable_positions` ONCE and
+    passes the SAME tuple here and as `_speedup`'s `comparable`, so a
+    Mann-Whitney test is never run twice for one position and `inference`
+    can never see a different filtered pool than `speedup` does. A caller
+    that omits it (every direct call in this module's own tests) gets the
+    exact same result computed fresh — `positions` is a reuse mechanism,
+    not a second code path with different semantics. The caller is
+    responsible for having computed `positions` with this SAME `alpha`;
+    `_infer_speedup` does not re-check that (it would have to recompute to
+    verify it, defeating the point).
     """
-    # (c) and (b) both live in `_testable_positions` now — shared with
-    # `verify_optimization`, which passes its survivors straight into
-    # `_speedup` so the headline ratio can never include a size excluded
-    # here (codecalc #328). `min_n` is only needed below for the
-    # `decision_basis` string.
-    survivors, excluded, min_n = _testable_positions(before, after, alpha)
+    if positions is None:
+        # (c) and (b) both live in `_testable_positions` now — shared with
+        # `verify_optimization`, which passes its survivors straight into
+        # `_speedup` so the headline ratio can never include a size excluded
+        # here (codecalc #328).
+        positions = _testable_positions(before, after, alpha)
+    survivors, excluded, min_n = positions
 
     per_size = []
     for e in survivors:
@@ -1076,15 +1093,18 @@ def verify_optimization(original: str, candidate: str, language: str,
 
     # `speedup.ratio`/`per_size` are built from `_testable_positions`'s
     # survivors, NOT the wider `_comparable_positions` pool `_speedup`
-    # defaults to — otherwise a size `_infer_speedup` excludes as too noisy
-    # to test (below `stats.min_testable_n`, or a tied normal-approximation
-    # comparison with overlapping ranges) could still set the headline
-    # median while `inference.sizes_below_floor` says it was thrown out
-    # (codecalc #328). Computed once and reused for `inference` too, so the
-    # two can never see a different filtered pool.
-    testable_positions, _excluded_positions, _min_n = _testable_positions(before, after)
-    sp = _speedup(before, after, comparable=testable_positions)
-    inference = _infer_speedup(before, after, min_speedup=min_speedup)
+    # defaults to when handed no precomputed positions — otherwise a size
+    # `_infer_speedup` excludes as too noisy to test (below
+    # `stats.min_testable_n`, or a tied normal-approximation comparison with
+    # overlapping ranges) could still set the headline median while
+    # `inference.sizes_below_floor` says it was thrown out (codecalc #328).
+    # Computed ONCE — the same tuple, `stats.mann_whitney_u` calls and all,
+    # is passed to BOTH `_speedup` (as `comparable`) and `_infer_speedup`
+    # (as `positions`), so a size's significance test never runs twice and
+    # `speedup`/`inference` can never see a different filtered pool.
+    positions = _testable_positions(before, after)
+    sp = _speedup(before, after, comparable=positions[0])
+    inference = _infer_speedup(before, after, min_speedup=min_speedup, positions=positions)
     accepted, reason = _accept_decision(sp, min_speedup, inference)
     return {
         "ok": True,

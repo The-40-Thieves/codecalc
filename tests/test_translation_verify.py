@@ -1095,6 +1095,17 @@ check("  ...and the reason string carries THAT number, not the inflated one",
       and "50" not in _328_reason and "60" not in _328_reason,
       f"-> accepted={_328_accepted} {_328_reason!r}")
 
+# THE FIX (review round 2): `_speedup`'s own DEFAULT -- no `comparable=` at
+# all -- must independently land on the exact same tested pool, not just
+# the explicitly-filtered call above. This is the whole point of flipping
+# the default: a caller that forgets the keyword gets the fix anyway.
+_328_sp_default = optimization._speedup(_328_before, _328_after)
+check("  ...and _speedup(before, after) with NO comparable= defaults to the "
+      "SAME tested pool (1.25x, sizes 1000/2000) -- not the wide, buggy one",
+      _328_sp_default["measurable"] and _328_sp_default["ratio"] == 1.25
+      and {row["n"] for row in _328_sp_default["per_size"]} == {1000, 2000},
+      f"-> {_328_sp_default}")
+
 # Control: an all-clean case (every size testable, none excluded) must be
 # UNCHANGED by this fix — the filtered and unfiltered pools are identical
 # when nothing was excluded, so the headline ratio does not move.
@@ -1137,6 +1148,58 @@ check("a case where EVERY size is excluded by the significance test's own "
       _328_all_excluded_survivors == [] and _328_all_excluded_sp["measurable"] is False
       and _328_all_excluded_sp["ratio"] is None,
       f"-> {_328_all_excluded_sp}")
+
+# THE FIX (review round 2), driven end to end through `verify_optimization`
+# itself, not just the module functions directly: `speedup` and `inference`
+# must be built from the SAME pool in the tool's own output, not merely when
+# a test calls `_speedup`/`_infer_speedup` by hand. Same reporter shape
+# (1000/2000 clean, 3000/4000 tied-and-overlapping), but 3000/4000 reuse
+# `_ci843`'s overlapping samples (already proven above to route to the
+# normal approximation and get excluded) instead of `_328_b3000`/`_a3000`'s
+# deliberately extreme lucky-min=1 runs — those dip below
+# `optimization._VISIBILITY_FLOOR_MS` (5ms) and would trigger `_timed`'s own
+# rescale ladder here, which is not what this end-to-end wiring check is
+# about.
+_328e2e_ORIG, _328e2e_CAND = "328 e2e original", "328 e2e candidate"
+_328e2e_samples = {
+    _328e2e_ORIG: {1000: _328_b1000, 2000: _328_b2000, 3000: _ci843_b1, 4000: _ci843_b2},
+    _328e2e_CAND: {1000: _328_a1000, 2000: _328_a2000, 3000: _ci843_a1, 4000: _ci843_a2},
+}
+
+
+def _mock_measure_328e2e(language, code, sizes, timeout, repeats, deadline=None):
+    table = _328e2e_samples[code]
+    return [{"n": n, "ok": True, "duration_ms": min(table[n]), "all_runs_ms": table[n]}
+            for n in sizes], None
+
+
+_orig_verify_translation_328e2e = optimization.verify_translation
+_orig_measure_328e2e = optimization.tools._measure
+# Correctness is not what this check is about — stub it to a pass so the
+# tool proceeds straight to the timing phase this test controls.
+optimization.verify_translation = lambda *a, **kw: {"passed": True, "matched": 1,
+                                                     "mismatched": 0, "inconclusive": 0,
+                                                     "total": 1, "results": []}
+optimization.tools._measure = _mock_measure_328e2e
+try:
+    _328e2e = optimization.verify_optimization(_328e2e_ORIG, _328e2e_CAND, "python3",
+                                               sizes=[1000, 2000, 3000, 4000])
+finally:
+    optimization.verify_translation = _orig_verify_translation_328e2e
+    optimization.tools._measure = _orig_measure_328e2e
+
+check("verify_optimization's own output: speedup.ratio is the tested pool's "
+      "1.25x, not an excluded size's inflated one",
+      _328e2e.get("ok") is True
+      and (_328e2e.get("speedup") or {}).get("ratio") == 1.25,
+      f"-> {_328e2e.get('speedup')}")
+check("  ...and speedup.per_size and inference.per_size name the SAME "
+      "surviving sizes -- the tool wires one pool into both fields, not two",
+      {row["n"] for row in _328e2e["speedup"]["per_size"]}
+      == {row["size"] for row in _328e2e["inference"]["per_size"]}
+      == {1000, 2000},
+      f"-> speedup={_328e2e['speedup']['per_size']} "
+      f"inference={_328e2e['inference']['per_size']}")
 
 
 # ═══ identical before/after code is never accepted (the false-accept rate) ══
