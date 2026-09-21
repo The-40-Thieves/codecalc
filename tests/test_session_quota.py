@@ -57,6 +57,102 @@ still left the DoS achievable):
   shrinking overwrites refused too — `session_stop` (destroying the whole
   session) was the only way out. A net-non-positive write is now ALWAYS
   permitted, even while over quota — the in-band recovery path.
+
+GH #325 / THE-1090: the artifact-COUNT cap never got the in-band recovery
+path FIX 4 above gave the byte quota. `write_file` can only create or
+overwrite content, never remove it, so once a session was over
+`CODECALC_MAX_ARTIFACT_COUNT` — reachable one call at a time via `write_file`
+or, faster, via executed code creating hundreds of tiny files in one
+`execute()` (FIX 2's own scenario) — nothing inside the session could ever
+shrink the count back under the cap short of `session_stop` destroying the
+whole workspace, and the refusal's own remedy named an action ("delete
+unneeded files") no tool in the package could perform. `session_delete_file`
+closes that gap; exercised here:
+
+- the exact repro shape: `execute()` pushes a session over the count cap in
+  one call, the next `execute()` is refused (same as FIX 2), and
+  `session_delete_file` — itself exempt from the cap it exists to relieve —
+  frees enough files that `execute()` succeeds again with no `session_stop`.
+- `session_delete_file` refuses a `../` path escape, an absolute path, a
+  runner-internal path (`.codecalc-run/...`, the session lock file — the
+  same set `session_artifacts` already excludes), and a directory, each
+  with the jail/validation refusal shape every other session tool uses.
+- a missing file is a CODED not-found refusal, not a crash or a silent
+  no-op.
+- a symlink INSIDE the workspace pointing OUTSIDE it is deleted as the link
+  it is — the target survives untouched. This is `_jail_nofollow`'s reason
+  to exist: `_jail`'s ordinary resolve() follows the final path component
+  too, so a link to an outside target reads as the delete itself
+  "escaping" and would be wrongly refused.
+
+FIX ROUND 2 (grok verify-security review of the first commit found the
+delete path itself was a new confused-deputy host-file destructor):
+
+- **HIGH — parent-swap TOCTOU.** `_jail_nofollow` resolved the parent once
+  and `Path.unlink()` re-walked that same path string; a racing SESSION
+  WORKER (the server process is not Landlocked — `_write_nofollow`'s own
+  docstring) could swap a parent component for a symlink pointing outside
+  the workspace between the two, and the server's own `unlink()` would
+  follow it and delete a HOST file. Manually reproduced against the
+  pre-fix commit before writing the fix (a background thread doing
+  `rename/symlink/unlink/rename` on the parent while 4000 `delete_file`
+  calls raced it deleted the outside target on the first commit; zero
+  escapes and the target survives after the fix, asserted below). Fixed by
+  pinning the parent to an `O_DIRECTORY|O_NOFOLLOW` fd and comparing its
+  `(st_dev, st_ino)` against the identity recorded at resolve time, never
+  a fresh `lstat` of the swappable path — see `_jail_nofollow`/
+  `delete_file`'s own comments.
+- **MEDIUM — the idle-expiry marker was deletable.** `_is_runner_internal`
+  refused the lock file but not `_EXPIRED_MARKER_NAME` — deleting it made
+  the next `execute()` miss `_is_expired_on_disk` and silently respawn a
+  worker `_get_worker_or_expired` had already reaped. Added to
+  `_is_runner_internal` alongside the lock file. `__pycache__`/`*.pyc`
+  (LOW, in-workspace only) were hidden from `session_artifacts` by
+  `_workspace_scan` but not refused by `_is_runner_internal` — aligned too.
+- **MEDIUM — case/trailing-dot denylist bypass.** `.CODECALC-SESSION-LOCK`
+  or `.codecalc-session-lock.` pass a plain `==` denylist while naming the
+  SAME file as `.codecalc-session-lock` on a case-insensitive volume
+  (default APFS, NTFS) or after Windows strips a trailing `.`/` ` at the
+  API boundary. `_reserved_root_name` now compares `str.casefold()` of
+  both the raw and dot/space-stripped spelling, checked unconditionally
+  (not gated on this host's own case-sensitivity), so both spellings are
+  provably refused as pure denylist checks even on a case-sensitive Linux
+  CI runner.
+
+FIX ROUND 3 (a second grok verify-security pass on round 2's commit found
+round 2's own fix for the HIGH was still incomplete, plus two smaller gaps):
+
+- **HIGH — round 2's "pin" was still two SEPARATE filesystem walks of the
+  same path string** (`_jail_nofollow`'s `resolve()`, then `delete_file`'s
+  own `parent.stat()` + `os.open(parent, O_NOFOLLOW)`), so a worker racing
+  an INTERMEDIATE path component (not the immediate parent) between the
+  two walks made both land on the attacker's directory and silently
+  agree — `O_NOFOLLOW` on the second walk only refuses a symlink at ITS
+  OWN final component, and for a nested path like `a/b/passwd` with `a`
+  swapped, that final component (`b`) is never itself the symlink.
+  Manually reproduced against round 2's commit (559d3d0) before writing
+  this fix (the nested race deleted an outside file, 1/6000 escapes);
+  zero escapes and the target survives after this fix, asserted below.
+  Fixed by replacing BOTH re-walks with exactly ONE: `_unlink_pinned`
+  opens the workspace root once and `openat`s each remaining path
+  component in turn, `dir_fd=` of the PREVIOUS hop, `O_NOFOLLOW|
+  O_DIRECTORY` on every hop — a symlink anywhere in the chain fails THAT
+  hop's own open with `ELOOP`, so there is no later re-walk left for it to
+  hide from. `_jail_nofollow` no longer resolves anything at all; it is
+  pure string validation now (length, segments, absolute-path/`..`
+  escape) and returns path COMPONENTS, never a `Path`.
+- **MEDIUM — Windows 8.3 short names.** `CODECA~1` names the SAME file as
+  `.codecalc-session-lock` on NTFS with short names enabled, and bears no
+  textual relationship to the long name a casefold/strip comparison could
+  catch. `_reserved_root_name` now refuses anything SHAPED like an 8.3
+  short name (a literal `~` immediately followed by a digit) at the
+  session root outright; `delete_file`'s Windows fallback path
+  additionally resolves the final component to its long form
+  (`_final_component_long_name`, via `os.path.realpath`) before the
+  denylist runs.
+- **LOW — `__pycache__`/`*.pyc` were still a byte-exact match**, unlike
+  the reserved-name check, which already casefolds. `.PYC`/`__PYCACHE__`
+  now get the same `str.casefold()` treatment.
 """
 
 from __future__ import annotations
@@ -65,6 +161,8 @@ import os
 import pathlib
 import shutil
 import sys
+import tempfile
+import threading
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
@@ -560,6 +658,585 @@ def _test_overwrite_net_delta():
 
 
 _test_overwrite_net_delta()
+
+
+# ── GH #325 / THE-1090: session_delete_file, the count cap's in-band
+#    recovery path ──────────────────────────────────────────────────────────
+def _can_symlink() -> bool:
+    """Probe symlink-creation capability rather than assume it — an
+    unprivileged Windows account lacks SeCreateSymbolicLinkPrivilege by
+    default and `symlink_to` raises there. Same reasoning
+    tests/test_session_jail.py's own `_can_symlink` probe uses (a fresh,
+    file-local copy rather than an import across test files, matching how
+    every test file here is a standalone script)."""
+    probe_dir = pathlib.Path(tempfile.mkdtemp(prefix="codecalc-quota-symlink-probe-"))
+    probe = probe_dir / "probe"
+    try:
+        probe.symlink_to(probe_dir)
+        return True
+    except OSError:
+        return False
+    finally:
+        try:
+            probe.unlink()
+        except OSError:
+            pass
+        shutil.rmtree(probe_dir, ignore_errors=True)
+
+
+def _test_delete_file_recovers_over_count_session():
+    """The exact #325 repro: executed code creates more files than the cap
+    in ONE `execute()` call (so `write_file`'s own per-write count check
+    never fires — this is FIX 2's scenario), the NEXT `execute()` is
+    refused pre-run, and — the gap #325 reports — nothing inside the
+    session could shrink the count back under the cap. `session_delete_file`
+    is that path: it is itself NOT refused by the cap it exists to relieve,
+    and deleting enough files lets `execute()` succeed again with no
+    `session_stop`."""
+    sid = _new_session()
+    try:
+        write_many = "\n".join(f"open('f{i}.txt', 'w').write('x')" for i in range(6))
+
+        def _run():
+            return sessions.execute(sid, write_many, language="python3")
+
+        result = _with_env({sessions.MAX_ARTIFACT_COUNT_ENV: "3"}, _run)
+        check("delete recovery: the run itself still succeeded",
+              result.get("ok") is True, f"-> {result}")
+        check("delete recovery: 6 files against a cap of 3 pushes the session over",
+              result.get("artifact_count_exceeded") is True, f"-> {result}")
+
+        blocked = _with_env(
+            {sessions.MAX_ARTIFACT_COUNT_ENV: "3"},
+            lambda: sessions.execute(sid, "1", language="python3"))
+        check("delete recovery: the NEXT execute() is refused over the cap",
+              blocked.get("ok") is False and blocked.get("code") == errors.RESOURCE_EXHAUSTED,
+              f"-> {blocked}")
+        check("delete recovery: the refusal's remedy now names session_delete_file "
+              "(pre-fix it named a tool that could not act on it)",
+              "session_delete_file" in blocked.get("remedy", ""), f"-> {blocked.get('remedy')}")
+
+        for name in ("f3.txt", "f4.txt", "f5.txt"):
+            d = _with_env({sessions.MAX_ARTIFACT_COUNT_ENV: "3"},
+                          lambda name=name: sessions.delete_file(sid, name))
+            check(f"delete recovery: session_delete_file({name!r}) succeeds while "
+                  "the session is OVER the count cap (exempt from the cap it relieves)",
+                  d.get("ok") is True, f"-> {d}")
+
+        recovered = _with_env(
+            {sessions.MAX_ARTIFACT_COUNT_ENV: "3"},
+            lambda: sessions.execute(sid, "1", language="python3"))
+        check("delete recovery: execute() succeeds again once the count is back "
+              "at/under the cap — no session_stop needed",
+              recovered.get("ok") is True, f"-> {recovered}")
+    finally:
+        sessions.stop(sid)
+
+
+_test_delete_file_recovers_over_count_session()
+
+
+def _test_delete_file_refusals():
+    sid = _new_session()
+    try:
+        r_escape = sessions.delete_file(sid, "../x")
+        check("delete: a '../' path escape is refused",
+              r_escape.get("ok") is False and r_escape.get("code") == errors.PERMISSION_DENIED,
+              f"-> {r_escape}")
+
+        abs_path = str((sessions._session_dir(sid).parent / "x").resolve())
+        r_abs = sessions.delete_file(sid, abs_path)
+        check("delete: an absolute path escaping the workspace is refused",
+              r_abs.get("ok") is False, f"-> {r_abs}")
+
+        r_internal = sessions.delete_file(sid, f"{sessions._RUNNER_SCRATCH_DIRNAME}/main.py")
+        check("delete: a runner-internal path (.codecalc-run/...) is refused, "
+              "the same set session_artifacts already excludes",
+              r_internal.get("ok") is False
+              and r_internal.get("code") == errors.PERMISSION_DENIED,
+              f"-> {r_internal}")
+
+        r_lock = sessions.delete_file(sid, sessions._LOCK_FILE_NAME)
+        check("delete: the session lock file is refused",
+              r_lock.get("ok") is False
+              and r_lock.get("code") == errors.PERMISSION_DENIED,
+              f"-> {r_lock}")
+
+        r_missing = sessions.delete_file(sid, "nope.txt")
+        check("delete: a missing file is a CODED not-found refusal, not a crash",
+              r_missing.get("ok") is False and r_missing.get("code") == errors.VALIDATION,
+              f"-> {r_missing}")
+
+        wr = sessions.write_file(sid, "dir/inside.txt", "x")
+        check("delete refusal setup: a nested file writes",
+              wr.get("ok") is True, f"-> {wr}")
+        r_dir = sessions.delete_file(sid, "dir")
+        check("delete: a directory is refused, not silently recursed",
+              r_dir.get("ok") is False and r_dir.get("code") == errors.VALIDATION,
+              f"-> {r_dir}")
+
+        # positive control: the file nested under that same directory still
+        # deletes cleanly — the refusals above are about THOSE paths, not a
+        # blanket failure of nested deletes.
+        r_ok = sessions.delete_file(sid, "dir/inside.txt")
+        check("delete: an ordinary nested file deletes (control)",
+              r_ok.get("ok") is True, f"-> {r_ok}")
+        check("delete: the file is actually gone from disk",
+              not (sessions._session_dir(sid) / "dir" / "inside.txt").exists())
+    finally:
+        sessions.stop(sid)
+
+
+_test_delete_file_refusals()
+
+
+def _test_delete_file_symlink_removes_link_not_target():
+    """#325's own requirement: a symlink INSIDE the workspace pointing
+    OUTSIDE it must be deletable — removing the link, never following it —
+    and the external target must survive untouched. `_jail` alone cannot do
+    this: its resolve() follows the final path component too, so a link
+    pointing outside reads as the call itself "escaping" and `_jail` would
+    refuse the delete outright — correct for a read/write, wrong for a
+    delete. `_jail_nofollow` exists for exactly this case."""
+    if not _can_symlink():
+        print("SKIP delete symlink test (no symlink privilege on this host)")
+        return
+    sid = _new_session()
+    outside_dir = pathlib.Path(tempfile.mkdtemp(prefix="codecalc-quota-symlink-target-"))
+    outside_file = outside_dir / "secret.txt"
+    outside_file.write_text("do not touch")
+    try:
+        link = sessions._session_dir(sid) / "escape-link"
+        link.symlink_to(outside_file)
+
+        r = sessions.delete_file(sid, "escape-link")
+        check("delete symlink: a symlink pointing OUTSIDE the workspace is "
+              "deleted, not refused as an 'escape'",
+              r.get("ok") is True, f"-> {r}")
+        check("delete symlink: result reports it deleted a symlink, not a file",
+              r.get("deleted") == "symlink", f"-> {r}")
+        check("delete symlink: the link entry is gone from the workspace",
+              not link.exists() and not link.is_symlink())
+        check("delete symlink: the OUTSIDE target file SURVIVES, untouched",
+              outside_file.exists() and outside_file.read_text() == "do not touch")
+    finally:
+        sessions.stop(sid)
+        shutil.rmtree(outside_dir, ignore_errors=True)
+
+
+_test_delete_file_symlink_removes_link_not_target()
+
+
+# ── GH #325 fix round 2 (grok verify-security) ──────────────────────────────
+def _test_delete_file_parent_swap_toctou():
+    """HIGH (fix round 2 — the IMMEDIATE-parent case only; see fix round
+    3's nested-parent test right after this one for the case round 2's
+    own fix missed): a racing session WORKER can swap a parent path
+    component for a symlink pointing OUTSIDE the workspace between an
+    earlier resolve/observation and the eventual unlink — the server
+    process is not Landlocked (see `_write_nofollow`'s own docstring), so
+    nothing stops it. Manually confirmed against the round-1 commit
+    (8bb24fa) before round 2's fix: the identical race below, run against
+    that commit's `sessions.py` directly, deleted the OUTSIDE target on
+    its very first escape. Round 2 closed exactly this shape (a symlink
+    swapped in for the file's DIRECT parent) via `_unlink_pinned`'s single
+    `openat`-per-component walk from the workspace root (round 3) — an
+    intermediate symlink at ANY position fails that hop's own open with
+    `ELOOP`, which for a one-component-deep path like `d/passwd` means
+    the very first (and only) hop already refuses it.
+
+    Races directly against `sessions.delete_file` rather than through a
+    real sandboxed `session_run` worker: the vulnerable window is entirely
+    inside sessions.py, so a background thread racing repeated
+    `delete_file` calls exercises the identical window the reviewer's
+    worker-thread sketch does, without the cost of a real subprocess per
+    iteration. `d/passwd` never legitimately exists inside the workspace —
+    only OUTSIDE it — so ANY successful delete of it during the race is
+    proof the swapped parent was followed. Only Unix-relevant
+    (`_DIR_FD_SUPPORTED`): the fix's `dir_fd` fast path is what this test
+    exercises, and Windows keeps the same documented residual `_jail`/
+    `_write_nofollow` already accept there.
+    """
+    if not _can_symlink():
+        print("SKIP TOCTOU parent-swap test (no symlink privilege on this host)")
+        return
+    if not sessions._DIR_FD_SUPPORTED:
+        print("SKIP TOCTOU parent-swap test (no dir_fd support on this platform "
+              "— documented residual, see _jail_nofollow's docstring)")
+        return
+    sid = _new_session()
+    outside_dir = pathlib.Path(tempfile.mkdtemp(prefix="codecalc-quota-toctou-target-"))
+    outside_file = outside_dir / "passwd"
+    outside_file.write_text("do not touch")
+    try:
+        base = sessions._session_dir(sid)
+        d_path = base / "d"
+        d_real = base / "d.real"
+        d_path.mkdir()
+        (d_path / "inside.txt").write_text("inside")  # a real, unrelated file
+
+        stop = threading.Event()
+
+        def _race():
+            while not stop.is_set():
+                try:
+                    d_path.rename(d_real)
+                    d_path.symlink_to(outside_dir)
+                    d_path.unlink()
+                    d_real.rename(d_path)
+                except OSError:
+                    pass  # expected: the two threads step on each other's renames
+
+        racer = threading.Thread(target=_race, daemon=True)
+        racer.start()
+        try:
+            iterations = 4000
+            escaped = 0
+            for _ in range(iterations):
+                r = sessions.delete_file(sid, "d/passwd")
+                if r.get("ok") is True:
+                    escaped += 1
+        finally:
+            stop.set()
+            racer.join(timeout=5)
+
+        check(f"TOCTOU parent-swap: {iterations} racing delete_file calls, "
+              "zero reported deleting the OUTSIDE file",
+              escaped == 0, f"-> {escaped} call(s) reported ok:true")
+        check("TOCTOU parent-swap: the OUTSIDE target survives, untouched",
+              outside_file.exists() and outside_file.read_text() == "do not touch")
+    finally:
+        # 'd' may currently be a dangling symlink mid-race; restore a real
+        # directory first so session_stop's own workspace cleanup does not
+        # itself have to reason about a symlink named 'd'.
+        try:
+            if (base / "d").is_symlink():
+                (base / "d").unlink()
+            if not (base / "d").exists() and (base / "d.real").is_dir():
+                (base / "d.real").rename(base / "d")
+        except OSError:
+            pass
+        sessions.stop(sid)
+        shutil.rmtree(outside_dir, ignore_errors=True)
+
+
+_test_delete_file_parent_swap_toctou()
+
+
+def _test_delete_file_nested_parent_swap_toctou():
+    """HIGH, fix round 3 (grok verify-security): round 2's "pin" was
+    `parent.stat()` followed by a SEPARATE `os.open(parent, O_NOFOLLOW)` —
+    both re-walk the path STRING, and `O_NOFOLLOW` refuses a symlink only
+    at the FINAL component of each of THOSE opens. For a NESTED path
+    (`a/b/passwd`, `a` swapped) the immediate parent (`b`) is never itself
+    a symlink, so both re-walks follow the swapped `a` and land on the
+    SAME attacker directory, agree with each other, and the delete
+    proceeds. Manually confirmed against round 2's commit (559d3d0) before
+    writing this fix: the identical race below, run against that commit's
+    `sessions.py` directly, deleted a file OUTSIDE the workspace (escaped
+    1/6000). Round 3's `_unlink_pinned` walks `openat`-style ONE component
+    at a time from a pinned workspace-root fd — `a` becoming a symlink
+    fails ITS OWN hop's open with `ELOOP`, checked at the exact hop where
+    it matters, so there is no later hop left that could silently follow
+    it.
+
+    Same shape as the immediate-parent test above, one directory deeper:
+    `a/etc/passwd` never legitimately exists inside the workspace (only
+    `outside_dir/etc/passwd` does), so any successful delete during the
+    race is proof `a` was followed through as a symlink.
+    """
+    if not _can_symlink():
+        print("SKIP TOCTOU nested-parent-swap test (no symlink privilege on this host)")
+        return
+    if not sessions._DIR_FD_SUPPORTED:
+        print("SKIP TOCTOU nested-parent-swap test (no dir_fd support on this "
+              "platform — documented residual, see _jail_nofollow's docstring)")
+        return
+    sid = _new_session()
+    outside_dir = pathlib.Path(tempfile.mkdtemp(prefix="codecalc-quota-nested-toctou-target-"))
+    (outside_dir / "etc").mkdir()
+    outside_file = outside_dir / "etc" / "passwd"
+    outside_file.write_text("do not touch")
+    try:
+        base = sessions._session_dir(sid)
+        a_path = base / "a"
+        a_real = base / "a.real"
+        (a_path / "etc").mkdir(parents=True)  # a REAL, unrelated nested dir
+
+        stop = threading.Event()
+
+        def _race():
+            while not stop.is_set():
+                try:
+                    a_path.rename(a_real)
+                    a_path.symlink_to(outside_dir)
+                    a_path.unlink()
+                    a_real.rename(a_path)
+                except OSError:
+                    pass  # expected: the two threads step on each other's renames
+
+        racer = threading.Thread(target=_race, daemon=True)
+        racer.start()
+        try:
+            iterations = 6000
+            escaped = 0
+            for _ in range(iterations):
+                r = sessions.delete_file(sid, "a/etc/passwd")
+                if r.get("ok") is True:
+                    escaped += 1
+        finally:
+            stop.set()
+            racer.join(timeout=5)
+
+        check(f"TOCTOU nested-parent-swap: {iterations} racing delete_file calls "
+              "on a/etc/passwd, zero reported deleting the OUTSIDE file",
+              escaped == 0, f"-> {escaped} call(s) reported ok:true")
+        check("TOCTOU nested-parent-swap: the OUTSIDE target survives, untouched",
+              outside_file.exists() and outside_file.read_text() == "do not touch")
+    finally:
+        try:
+            if (base / "a").is_symlink():
+                (base / "a").unlink()
+            if not (base / "a").exists() and (base / "a.real").is_dir():
+                (base / "a.real").rename(base / "a")
+        except OSError:
+            pass
+        sessions.stop(sid)
+        shutil.rmtree(outside_dir, ignore_errors=True)
+
+
+_test_delete_file_nested_parent_swap_toctou()
+
+
+def _test_delete_file_refuses_expired_marker_and_pycache():
+    """MEDIUM: the idle-expiry marker is a plain regular file
+    `_workspace_scan` already hides from `session_artifacts`, but pre-fix
+    `_is_runner_internal` never refused DELETING it — doing so would make
+    the next `execute()` miss `_is_expired_on_disk` and silently respawn a
+    worker for a session that was already reaped. LOW: `__pycache__`/
+    `*.pyc` get the same treatment, alignment rather than a host-facing
+    risk. LOW, fix round 3 (grok verify-security): that pycache/pyc check
+    was still a byte-exact match, unlike the reserved-name check, which
+    already casefolds (fix round 2) — `.PYC`/`__PYCACHE__` (a real
+    spelling on NTFS, which preserves but does not enforce case) slipped
+    through; the casefolded variants below prove it no longer does."""
+    sid = _new_session()
+    try:
+        marker = sessions._session_dir(sid) / sessions._EXPIRED_MARKER_NAME
+        marker.write_text("expired")
+        r_marker = sessions.delete_file(sid, sessions._EXPIRED_MARKER_NAME)
+        check("delete: the idle-expiry marker is refused as runner-internal",
+              r_marker.get("ok") is False
+              and r_marker.get("code") == errors.PERMISSION_DENIED,
+              f"-> {r_marker}")
+        check("delete: the marker file itself was NOT removed",
+              marker.exists())
+
+        pycache_file = sessions._session_dir(sid) / "__pycache__" / "mod.cpython-312.pyc"
+        pycache_file.parent.mkdir(parents=True, exist_ok=True)
+        pycache_file.write_bytes(b"\x00")
+        r_pycache = sessions.delete_file(sid, "__pycache__/mod.cpython-312.pyc")
+        check("delete: a __pycache__ entry is refused as runner-internal",
+              r_pycache.get("ok") is False
+              and r_pycache.get("code") == errors.PERMISSION_DENIED,
+              f"-> {r_pycache}")
+
+        pyc_at_root = sessions._session_dir(sid) / "mod.pyc"
+        pyc_at_root.write_bytes(b"\x00")
+        r_pyc = sessions.delete_file(sid, "mod.pyc")
+        check("delete: a root-level *.pyc file is refused as runner-internal",
+              r_pyc.get("ok") is False
+              and r_pyc.get("code") == errors.PERMISSION_DENIED,
+              f"-> {r_pyc}")
+
+        upper_pycache = sessions._session_dir(sid) / "__PYCACHE__" / "mod.cpython-312.PYC"
+        upper_pycache.parent.mkdir(parents=True, exist_ok=True)
+        upper_pycache.write_bytes(b"\x00")
+        r_upper_pycache = sessions.delete_file(sid, "__PYCACHE__/mod.cpython-312.PYC")
+        check("delete: an UPPERCASE __PYCACHE__ entry is refused too (casefold)",
+              r_upper_pycache.get("ok") is False
+              and r_upper_pycache.get("code") == errors.PERMISSION_DENIED,
+              f"-> {r_upper_pycache}")
+
+        upper_pyc_at_root = sessions._session_dir(sid) / "MOD.PYC"
+        upper_pyc_at_root.write_bytes(b"\x00")
+        r_upper_pyc = sessions.delete_file(sid, "MOD.PYC")
+        check("delete: an UPPERCASE root-level *.PYC file is refused too (casefold)",
+              r_upper_pyc.get("ok") is False
+              and r_upper_pyc.get("code") == errors.PERMISSION_DENIED,
+              f"-> {r_upper_pyc}")
+    finally:
+        sessions.stop(sid)
+
+
+_test_delete_file_refuses_expired_marker_and_pycache()
+
+
+def _test_prefix_dir_normalized_denylist():
+    """MEDIUM, fix round 4 (grok verify-security, in-workspace only —
+    case-insensitive volumes): the prefix-directory check
+    (`.codecalc-run`/`.codecalc-spill`) used to be a bare `in (...)`
+    exact-string match, while the ROOT-level reserved-file check right
+    next to it (`_reserved_root_name`) already casefolded and stripped a
+    trailing `.`/` `. On a case-insensitive volume, `.CODECALC-RUN` and
+    `.codecalc-run.` name the SAME on-disk directory as `.codecalc-run`
+    but read as different strings to a bare `in` check — reaching the
+    runner scratch directory past what `session_artifacts` shows. Both
+    now go through the shared `_normalized_component_matches` the
+    reserved-file check uses. Pure denylist checks (via
+    `_is_runner_internal` directly, and end to end through
+    `delete_file`), so provable on Linux without a case-insensitive
+    filesystem, the same reasoning the round-2 case/trailing-dot test
+    above uses."""
+    variants = [
+        sessions._RUNNER_SCRATCH_DIRNAME,
+        sessions._RUNNER_SCRATCH_DIRNAME.upper(),
+        sessions._RUNNER_SCRATCH_DIRNAME.swapcase(),
+        sessions._RUNNER_SCRATCH_DIRNAME + ".",
+    ]
+    for v in variants:
+        check(f"_is_runner_internal: {v!r}/main.py is refused (runner scratch prefix)",
+              sessions._is_runner_internal((v, "main.py")), f"-> False for {v!r}")
+
+    spill_variants = [
+        sessions._SPILL_DIRNAME,
+        sessions._SPILL_DIRNAME.upper(),
+        sessions._SPILL_DIRNAME + ".",
+    ]
+    for v in spill_variants:
+        check(f"_is_runner_internal: {v!r}/x is refused (spill dir prefix)",
+              sessions._is_runner_internal((v, "x")), f"-> False for {v!r}")
+
+    check("_is_runner_internal: an ordinary prefix directory is NOT refused",
+          not sessions._is_runner_internal(("mydir", "file.txt")))
+
+    # End to end through delete_file(): the case-mangled/trailing-dot
+    # spelling of the prefix directory must be refused the same way the
+    # exact spelling already is.
+    sid = _new_session()
+    try:
+        r = sessions.delete_file(sid, f"{sessions._RUNNER_SCRATCH_DIRNAME.upper()}/main.py")
+        check("delete: an UPPERCASE .codecalc-run/... path is refused "
+              "end to end through delete_file()",
+              r.get("ok") is False and r.get("code") == errors.PERMISSION_DENIED,
+              f"-> {r}")
+        r2 = sessions.delete_file(sid, f"{sessions._RUNNER_SCRATCH_DIRNAME}./main.py")
+        check("delete: a trailing-dot .codecalc-run./... path is refused "
+              "end to end through delete_file()",
+              r2.get("ok") is False and r2.get("code") == errors.PERMISSION_DENIED,
+              f"-> {r2}")
+    finally:
+        sessions.stop(sid)
+
+
+_test_prefix_dir_normalized_denylist()
+
+
+def _test_reserved_root_name_denylist_bypass():
+    """MEDIUM: a plain `==` denylist lets `.CODECALC-SESSION-LOCK` through
+    on a case-insensitive volume (default APFS, NTFS — the SAME file as
+    `.codecalc-session-lock` there) and `.codecalc-session-lock.` /
+    `.codecalc-session-lock ` through on Windows, which strips a trailing
+    `.`/` ` off a filename at the API boundary. `_reserved_root_name` is
+    checked directly here as a pure denylist function — host-independent by
+    design (see its own docstring), so both spellings are provably caught
+    on Linux CI without needing a case-insensitive filesystem to prove it."""
+    variants = [
+        sessions._LOCK_FILE_NAME,
+        sessions._LOCK_FILE_NAME.upper(),
+        sessions._LOCK_FILE_NAME.swapcase(),
+        sessions._LOCK_FILE_NAME + ".",
+        sessions._LOCK_FILE_NAME + " ",
+        sessions._LOCK_FILE_NAME.upper() + ".",
+    ]
+    for v in variants:
+        check(f"_reserved_root_name: {v!r} matches the lock file",
+              sessions._reserved_root_name(v), f"-> False for {v!r}")
+
+    marker_variants = [
+        sessions._EXPIRED_MARKER_NAME,
+        sessions._EXPIRED_MARKER_NAME.upper(),
+        sessions._EXPIRED_MARKER_NAME + ".",
+    ]
+    for v in marker_variants:
+        check(f"_reserved_root_name: {v!r} matches the expiry marker",
+              sessions._reserved_root_name(v), f"-> False for {v!r}")
+
+    check("_reserved_root_name: an ordinary filename does NOT match",
+          not sessions._reserved_root_name("notes.txt"))
+    check("_reserved_root_name: a filename merely CONTAINING the reserved "
+          "name does NOT match (no accidental substring match)",
+          not sessions._reserved_root_name("prefix." + sessions._LOCK_FILE_NAME))
+
+    # End to end through delete_file(), not just the denylist helper: the
+    # case-mangled spelling must be refused the same way the exact name is.
+    sid = _new_session()
+    try:
+        r = sessions.delete_file(sid, sessions._LOCK_FILE_NAME.upper())
+        check("delete: an UPPERCASE spelling of the lock file is refused "
+              "end to end through delete_file()",
+              r.get("ok") is False and r.get("code") == errors.PERMISSION_DENIED,
+              f"-> {r}")
+        r2 = sessions.delete_file(sid, sessions._LOCK_FILE_NAME + ".")
+        check("delete: a trailing-dot spelling of the lock file is refused "
+              "end to end through delete_file()",
+              r2.get("ok") is False and r2.get("code") == errors.PERMISSION_DENIED,
+              f"-> {r2}")
+    finally:
+        sessions.stop(sid)
+
+
+_test_reserved_root_name_denylist_bypass()
+
+
+def _test_eight_dot_three_shape_denylist():
+    """MEDIUM, fix round 3 (grok verify-security): a Windows 8.3 short name
+    (`CODECA~1` for `.codecalc-session-lock`, `LOCKFI~2.TXT`) is a THIRD
+    on-disk spelling of a reserved file that bears no textual relationship
+    to the long name at all — casefold/trailing-dot-strip cannot enumerate
+    it. `_reserved_root_name` refuses anything shaped like a short name
+    (a literal `~` immediately followed by a digit) at the session root
+    outright, regardless of what it would otherwise resolve to. Pure
+    string-SHAPE check, so provable on Linux without an actual NTFS/FAT
+    short-name filesystem — `delete_file`'s own long-name resolution
+    (`_final_component_long_name`) is the platform-specific half this
+    cannot exercise here (it needs a real Windows short-name alias to do
+    anything at all; see that function's own docstring)."""
+    eight_dot_three_names = [
+        "CODECA~1",
+        "CODECA~1.TXT",
+        "LOCKFI~2",
+        "a~9",
+        "~1",
+    ]
+    for name in eight_dot_three_names:
+        check(f"_reserved_root_name: 8.3-shaped {name!r} is refused at the root",
+              sessions._reserved_root_name(name), f"-> False for {name!r}")
+
+    not_eight_dot_three = [
+        "notes.txt",
+        "backup-1.txt",  # hyphen, not tilde
+        "my~file.txt",   # tilde with no digit immediately after
+        "~",              # tilde alone, no digit
+    ]
+    for name in not_eight_dot_three:
+        check(f"_reserved_root_name: ordinary {name!r} is NOT refused as 8.3-shaped",
+              not sessions._reserved_root_name(name), f"-> True for {name!r}")
+
+    # End to end through delete_file(): an 8.3-shaped root name is refused
+    # even though it is not literally the lock/marker spelling.
+    sid = _new_session()
+    try:
+        r = sessions.delete_file(sid, "CODECA~1")
+        check("delete: an 8.3-shaped root name is refused end to end "
+              "through delete_file()",
+              r.get("ok") is False and r.get("code") == errors.PERMISSION_DENIED,
+              f"-> {r}")
+    finally:
+        sessions.stop(sid)
+
+
+_test_eight_dot_three_shape_denylist()
 
 
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else

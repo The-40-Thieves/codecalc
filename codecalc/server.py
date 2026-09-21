@@ -870,6 +870,17 @@ TOOL_ANNOTATION_OVERRIDES: dict[str, ToolAnnotations] = {
         read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=False),
     "session_write_file": ToolAnnotations(
         read_only_hint=False, destructive_hint=True, idempotent_hint=True, open_world_hint=False),
+    # session_delete_file (GH #325): destroys a file irrecoverably, same
+    # bucket as session_write_file/session_stop/run_cancel above.
+    # idempotent_hint=True for the same ENVIRONMENT-effect reasoning those
+    # two use, not response-identity: the first call removes the file and
+    # every call after it finds nothing left to remove (a coded
+    # not-found refusal, deliberately — see sessions.delete_file's
+    # docstring — not a silent no-op), so the WORKSPACE converges to
+    # "file absent" after one call and stays there, the same "no additional
+    # effect" state run_cancel's already-finished-run refusal reaches.
+    "session_delete_file": ToolAnnotations(
+        read_only_hint=False, destructive_hint=True, idempotent_hint=True, open_world_hint=False),
     "session_run": ToolAnnotations(
         read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True),
     "run_submit": ToolAnnotations(
@@ -1530,6 +1541,28 @@ def session_write_file(session_id: Annotated[str, Field(description="Id of the s
     # that changed, since every other mutating tool here can touch an
     # unbounded set of files a single URI cannot name. See CHANGELOG.md.
     result = _session_service.write_file(session_id, path, content)
+    if result.get("ok"):
+        _notify_resources_changed(ctx)
+        _notify_resource_updated(ctx, f"codecalc://session/{session_id}/files/{path}")
+    return result
+
+
+@mcp.tool(group="sessions")
+def session_delete_file(session_id: Annotated[str, Field(description="Id of the session workspace to delete from")],
+                        path: Annotated[str, Field(description="Relative path inside the workspace to delete; path escapes (e.g. '../') are refused")],
+                        ctx: Context = None) -> dict[str, Any]:
+    """Delete one file (or symlink entry — never the directory or symlink's
+    target) from a session workspace. This is the recovery path when a
+    session is refused for being over CODECALC_MAX_ARTIFACT_COUNT: neither
+    session_write_file (creates/overwrites, never removes) nor session_run/
+    execute_code (refused by the same cap) can shrink the count, so this is
+    the only in-session way to get back under it short of session_stop
+    discarding the whole workspace. Refuses runner-internal paths (the same
+    ones session_artifacts excludes) and directories."""
+    # Same resource-change notification shape as session_write_file above —
+    # a delete changes the resource list AND this specific file's resource,
+    # just in the opposite direction (gone, not written). See CHANGELOG.md.
+    result = _session_service.delete_file(session_id, path)
     if result.get("ok"):
         _notify_resources_changed(ctx)
         _notify_resource_updated(ctx, f"codecalc://session/{session_id}/files/{path}")
@@ -3097,7 +3130,7 @@ _GROUP_ROUTING_TEXT: dict[str, str] = {
         "persistent workspace + background runs: "
         "session_start/session_run/session_stop; "
         "session_files/session_read_file/session_write_file/"
-        "session_artifacts (workspace I/O); "
+        "session_delete_file/session_artifacts (workspace I/O); "
         "run_submit/run_inspect/run_cancel (async execution)."
     ),
     "analysis": (

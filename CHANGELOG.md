@@ -267,6 +267,53 @@ behind it.
   `from_value` is negative. The served surface moves from 49 to **50
   tools** (GH #329, THE-1094).
 
+- **`session_delete_file(session_id, path)`** (sessions group, 50th MCP
+  tool) — remove one file (or symlink entry, never its target) from a
+  session workspace. `_jail_nofollow` (sessions.py) is pure STRING
+  validation — length, segments, absolute-path/`..` escape — and never
+  touches the filesystem; it returns the path as workspace-relative
+  COMPONENTS, not a resolved `Path`, specifically so nothing here ever
+  resolves a symlink at (or through) the final component the way `_jail`
+  does for a read/write (which is right for THOSE — never disclose or
+  overwrite what an outside-pointing link targets — and wrong for a
+  delete, which removes the in-workspace entry regardless of where it
+  points, so `unlink()` on a symlink already never following it is what
+  makes the target survive). The actual delete (`_unlink_pinned`) walks
+  the real filesystem exactly ONCE: an `openat`-style directory-fd hop per
+  path component from the workspace root, `O_NOFOLLOW|O_DIRECTORY` on
+  every hop, `lstat`/`unlink` on the final name relative to the last hop's
+  fd — the portable equivalent of `openat2(RESOLVE_BENEATH|
+  RESOLVE_NO_SYMLINKS)`, needing no identity/inode comparison because
+  there is no second walk of the same path left for a racing session
+  worker (`rename`/`symlink` a component mid-delete — the server process
+  is not Landlocked) to win against (found and closed across four rounds
+  of review before this ever shipped; `_DIR_FD_SUPPORTED` gates the
+  platforms where this applies — requiring `O_NOFOLLOW` explicitly, not
+  just `O_DIRECTORY`/`dir_fd` support, so a hypothetical host with the
+  latter but not the former takes the documented Windows-style fallback
+  instead of silently following symlinks per hop — with a documented
+  residual on Windows). The workspace-root open itself is guarded the
+  same way every per-component hop already is, so a failure there is a
+  coded refusal, never an uncaught `OSError`. Refuses exactly what
+  `session_artifacts` already excludes (`.codecalc-run/`, `.codecalc-spill/`,
+  the session lock file, the idle-expiry marker, `__pycache__`/`*.pyc` —
+  `_is_runner_internal`, factored out of `_workspace_scan` so the two
+  definitions cannot drift) and a directory — one file/symlink per call,
+  the same granularity `session_write_file` writes at. Every one of those
+  checks — the two root-level reserved files AND the two runner-directory
+  PREFIXES — now goes through one shared `_normalized_component_matches`
+  (casefold, trailing-`.`/` ` strip, Windows 8.3-short-name shape refused
+  outright at the session root), so `.CODECALC-RUN/main.py` or
+  `.codecalc-run./main.py` are refused the same way `.CODECALC-SESSION-
+  LOCK` already was, instead of the prefix check being a separate, less
+  strict, bare `==`. The Windows fallback path additionally resolves the
+  final component to its long form before that check runs, for an 8.3
+  alias a casefold/strip comparison alone cannot enumerate. Deliberately
+  exempt from BOTH the byte and artifact-count quota gates: a delete can
+  only shrink usage, never grow it, so gating it on a cap it can only
+  relieve would refuse the one call that fixes the refusal (see "Fixed"
+  below).
+
 ### Changed
 
 - **`symbolic(op="solve_linear")` and `evaluate_expression`'s
@@ -368,6 +415,54 @@ behind it.
   this same unchanged-prompt intersection whenever the corpus hash has
   moved, rather than trusting a self-referential "drop_hits=0" against a
   baseline just regenerated from the current state).
+- **`docker/mcp-catalog/tools.json` and `scripts/data/tool_select_baseline.json`
+  regenerated for `session_delete_file` (51st tool) — 3 new labeled
+  prompts added to `scripts/data/tool_select_prompts.jsonl`** (241 total,
+  none containing `session_delete_file`'s own name or underscore tokens —
+  `validate_prompts()` confirms zero violations), scoring 2/3 top-1, 3/3
+  top-3 on `full` (`{"n": 3, "top1": 0.6667, "top3": 1.0}`); the one
+  top-1 miss ranks 3rd behind `session_snapshot`/`session_stop`, both
+  genuine lexical competitors for "too many files in a workspace, clear
+  some out."
+
+  `docker/mcp-catalog/tools.json` was regenerated from a live in-process
+  `tools/list` capture (`tests/_mcp_client.py`'s `in_process()`, no Docker
+  build needed) rather than hand-edited — the structural diff against the
+  committed file is **not** "only `session_delete_file` added": three
+  OTHER tools' descriptions had also drifted from their own already-merged
+  docstring changes that never got a catalog regen (`execute_code`
+  THE-1088, `trace_execution` THE-1086, `benchmark` THE-1092) — all three
+  resynced to their current live text as a byproduct of doing this
+  regeneration honestly rather than hand-patching in only the one new
+  entry.
+
+  Regression check on the 238 PRE-EXISTING prompts, against `origin/main`'s
+  own checked-in baseline (`tests/test_tool_select_eval.py`'s corpus-change
+  guard, `full` only — that guard does not run per-surface): **zero**
+  newly-missed top-1 hits (`shared=238 newly_missed=0`). Verified further
+  by hand across all three surfaces with BOTH sides freshly measured —
+  `origin/main`'s own code re-run live, not its checked-in baseline FILE —
+  since `session_delete_file` sits in the `sessions` group only, it is not
+  even a candidate document for `dev`/`core` scoring, and on `full` every
+  one of the 238 pre-existing prompts' hit/miss status is bit-for-bit
+  unchanged: **0 hit/miss transitions, gained or lost, on any surface.**
+
+  The checked-in baseline FILE's totals move `full` 152->156 / `dev`
+  134->133 / `core` 82->82 top1_hits (`n` 238->241 on `full`, unchanged on
+  `dev`/`core` since none of the 3 new prompts are applicable there). Do
+  not read that `dev` number as a regression this PR caused: re-running
+  `origin/main`'s OWN current code live (rather than trusting its checked-in
+  baseline file) scores `full` at 154/238 and `dev` at 133/238, not the
+  checked-in 152/238 and 134/238 — the checked-in baseline UNDERSTATES
+  `full` by 2 hits and OVERSTATES `dev` by 1, a pre-existing drift between
+  that file and the code it describes, predating this PR (most likely
+  earlier PRs' own docstring edits that were never re-baselined). Diffing
+  against the checked-in file alone would read as "full gains 2, dev drops
+  1"; diffing both sides freshly measured — the check that actually rules
+  out a regression — shows neither is real: `full`'s "+2" is fully
+  accounted for by the 3 new prompts' own 2 top-1 hits, and `dev`'s "-1"
+  does not exist at all once its own baseline number is corrected to what
+  `origin/main`'s code actually produces today.
 
 ### Fixed
 
@@ -387,6 +482,20 @@ behind it.
   combined-inputs case; `percent_decimal` is now always finite JSON —
   `null` with a `note` when the exact value has no finite float
   representation, never a bare `Infinity` (GH #337 cross-vendor review).
+
+- **A session over `CODECALC_MAX_ARTIFACT_COUNT` was permanently
+  unrunnable** (GH #325, THE-1090): `quota_precheck` refuses
+  `execute()`/`session_run` up front once a session's artifact count is
+  over the cap, and `write_file` can only create or overwrite content,
+  never remove it — so nothing inside the session could ever shrink the
+  count back under the cap, short of `session_stop` destroying the whole
+  workspace. The refusal's own remedy ("delete unneeded files ... or raise
+  CODECALC_MAX_ARTIFACT_COUNT") named an action no tool in the package
+  could perform. `session_delete_file` above is the in-band recovery path
+  the byte quota already had (`_write_guard`'s `net_bytes <= 0` early
+  return) and the count cap lacked; both artifact-count refusals'
+  `remedy` strings now name it instead of a `session_files` listing tool
+  that was never able to act on what it showed.
 
 ## [0.12.0] — 2026-09-09
 

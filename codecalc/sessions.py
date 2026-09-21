@@ -41,7 +41,7 @@ import threading
 import time
 import uuid
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePath
 
 from . import errors, executor, landlock, registry
 
@@ -244,6 +244,158 @@ _LOCK_FILE_NAME = ".codecalc-session-lock"
 #: ever creates the scratch directory at all.
 _RUNNER_SCRATCH_DIRNAME = registry.RUN_SCRATCH_DIRNAME
 
+
+#: A Windows 8.3 "short name" always carries a literal `~` immediately
+#: followed by a digit (`CODECA~1`, `LOCKFI~2.TXT`) — the generated
+#: disambiguator NTFS/FAT inserts when a long name needs shortening. No
+#: ordinary long filename contains this shape by construction, so #325 fix
+#: round 3 (grok verify-security, MEDIUM) refuses it OUTRIGHT at the session
+#: root rather than trying to enumerate every possible short-name alias of
+#: every reserved name — see `_reserved_root_name`'s docstring for why this
+#: is checked unconditionally, not only on Windows.
+_EIGHT_DOT_THREE_RE = re.compile(r"~\d")
+
+
+def _normalized_component_matches(name: str, *targets: str) -> bool:
+    """True if `name` — once casefolded and with a trailing `.`/` `
+    stripped — equals any of `targets` (also casefolded), OR `name` is
+    shaped like a Windows 8.3 short name (`_EIGHT_DOT_THREE_RE`) —
+    refused unconditionally there too, regardless of `targets`, since a
+    short name bears no stable textual relationship to whatever it
+    aliases (see `_reserved_root_name`'s docstring, the first caller this
+    was extracted from, for the full reasoning).
+
+    #325 fix round 4 (grok verify-security, MEDIUM): `_is_runner_internal`'s
+    prefix-directory check (`.codecalc-run`/`.codecalc-spill`) used to
+    compare `rel_parts[0]` with a bare `in (...)` — exact-match only —
+    while `_reserved_root_name` (the root-level FILE check right below,
+    this function's other caller) already normalized this way. On a
+    case-insensitive volume, `.CODECALC-RUN/main.py` or
+    `.codecalc-run./main.py` named the SAME on-disk directory as
+    `.codecalc-run` but read as a DIFFERENT string to the exact-match
+    check, so a caller could reach past `session_artifacts`' listing by
+    spelling the prefix directory differently — the same class of gap
+    round 2/3 closed for the two reserved ROOT files, now shared by both
+    call sites instead of drifting into two normalization rules that only
+    happened to agree by coincidence.
+
+    Deliberately `str.casefold()`, NOT `os.path.normcase()`: `normcase`
+    only folds case on Windows (`ntpath.normcase`) — on POSIX it is a
+    documented no-op (`posixpath.normcase` returns its argument
+    unchanged), so a version of this function built on it would silently
+    never catch a mangled spelling on Linux/macOS at all, which is exactly
+    the gap this exists to close and the one a Linux CI run needs to be
+    able to prove is closed. Checked UNCONDITIONALLY, not gated on this
+    host's own case-sensitivity: the rule this enforces is "never act on
+    anything that READS AS a reserved name", not "only when this specific
+    filesystem would alias them" — over-refusing an oddly-cased or
+    trailing-dot name that genuinely is not one of `targets` is a mild
+    inconvenience through this one tool; under-refusing the real one is
+    the CVE.
+    """
+    if _EIGHT_DOT_THREE_RE.search(name):
+        return True
+    stripped = name.rstrip(". ") or name  # never let stripping empty the name
+    normalized_targets = {t.casefold() for t in targets}
+    return any(candidate.casefold() in normalized_targets
+               for candidate in (name, stripped))
+
+
+def _reserved_root_name(name: str) -> bool:
+    """True if `name` IS — or, once normalized, resolves to the SAME on-disk
+    entry as — one of this module's own root-level reserved filenames: the
+    session lock file (`_LOCK_FILE_NAME`) or the idle-expiry marker
+    (`_EXPIRED_MARKER_NAME`, defined further down this file — referenced by
+    name here, not value, since Python resolves a function body's globals at
+    CALL time, and nothing calls this before module load completes). ALSO
+    true for anything shaped like a Windows 8.3 short name at the root —
+    see `_EIGHT_DOT_THREE_RE`.
+
+    #325 fix round 2 (grok verify-security, MEDIUM): a plain `==` denylist
+    lets `.CODECALC-SESSION-LOCK` through on a case-insensitive volume
+    (default APFS, NTFS — `.CODECALC-SESSION-LOCK` and `.codecalc-session-
+    lock` name the SAME file there) and lets `.codecalc-session-lock.` /
+    `.codecalc-session-lock ` through on Windows, which strips a trailing
+    `.`/` ` off a filename at the API boundary before ever reaching the
+    filesystem.
+
+    #325 fix round 3 (grok verify-security, MEDIUM): case/trailing-dot
+    folding still compares against the CALLER-SUPPLIED spelling, which is
+    never itself resolved (`_jail_nofollow`/`delete_file` deliberately never
+    resolve the final path component — see their own docstrings). On NTFS
+    with 8.3 names enabled, `CODECA~1` is a THIRD on-disk spelling of the
+    lock file that casefold/strip alone cannot enumerate, since it bears no
+    textual relationship to the long name at all. `delete_file` additionally
+    resolves the final component to its long form before this check runs
+    (see `_final_component_long_name`) when it cannot pin the parent by
+    `dir_fd`; the blanket 8.3-SHAPE refusal here is the second, host-
+    independent layer — belt and suspenders, and the only one a Linux CI
+    run can prove on its own (the long-name resolution needs an actual
+    Windows short-name filesystem to exercise for real).
+
+    #325 fix round 4: the casefold/strip/8.3 logic itself moved into
+    `_normalized_component_matches`, shared with `_is_runner_internal`'s
+    prefix-directory check — this function is now a thin call into it with
+    the two reserved root filenames as `targets`.
+    """
+    return _normalized_component_matches(name, _LOCK_FILE_NAME, _EXPIRED_MARKER_NAME)
+
+
+def _is_runner_internal(rel_parts: tuple[str, ...]) -> bool:
+    """True if `rel_parts` (a path's `.relative_to(d).parts`, workspace-
+    relative) sits inside one of the runner's own directories, under a
+    `__pycache__` at any depth or named `*.pyc`, or IS one of this module's
+    root-level reserved files (the session lock, the idle-expiry marker) —
+    every exclusion `_workspace_scan` applies when deciding what counts as
+    an "artifact" a caller may see or act on.
+
+    Factored out (GH #325) so `session_delete_file` refuses precisely what
+    `session_artifacts`/`_workspace_scan` already hide, rather than a second,
+    independently-drifting copy of the same rules: a caller told to "delete
+    unneeded files" must never be able to reach past that listing and
+    delete a file it was never shown in the first place.
+
+    #325 fix round 2 (grok verify-security, MEDIUM): the idle-expiry marker
+    used to be a plain regular file `_workspace_scan` never excluded — a
+    caller could `session_delete_file` it, and the NEXT `execute()` would
+    then miss `_is_expired_on_disk` and silently respawn a worker for a
+    session `_get_worker_or_expired` had already reaped. `__pycache__`/
+    `*.pyc` were excluded here too (LOW, in-workspace only, no host
+    exposure): `_workspace_scan` already hid them from `session_artifacts`,
+    so this closes the same "delete reaches past the listing" drift for
+    them, not a security boundary the way the reserved root files are.
+
+    #325 fix round 3 (grok verify-security, LOW): the `__pycache__`/`*.pyc`
+    check above was still a byte-exact match, unlike the reserved-name
+    check `_reserved_root_name` already casefolds — `.PYC`/`__PYCACHE__`
+    (a real spelling on NTFS, which preserves but does not enforce case)
+    slipped through. `.casefold()` on both sides brings this in line with
+    the reserved-name check for the same reason: in-workspace-only, so not
+    a host-escape risk, but a caller told "this is hidden the same way
+    session_artifacts hides it" should not find a byte-case loophole.
+
+    #325 fix round 4 (grok verify-security, MEDIUM): the prefix-directory
+    check right below was STILL a bare `in (...)` exact match, unlike
+    `_reserved_root_name`'s casefold/trailing-dot/8.3 normalization one
+    call below it — `.CODECALC-RUN/main.py` or `.codecalc-run./main.py`
+    name the SAME on-disk directory as `.codecalc-run` on a case-
+    insensitive volume but read as a different STRING to a bare `in`
+    check, reaching the runner scratch directory past what
+    `session_artifacts` shows. Now goes through the same
+    `_normalized_component_matches` the reserved-name check uses, so both
+    prefix dirs and both reserved files are normalized identically instead
+    of by two rules that only happened to agree by coincidence.
+    """
+    if not rel_parts:
+        return False
+    if _normalized_component_matches(rel_parts[0], _SPILL_DIRNAME, _RUNNER_SCRATCH_DIRNAME):
+        return True
+    if (any(part.casefold() == "__pycache__" for part in rel_parts)
+            or rel_parts[-1].casefold().endswith(".pyc")):
+        return True
+    return len(rel_parts) == 1 and _reserved_root_name(rel_parts[0])
+
+
 #: Guards the "measure usage, then write" critical section in every
 #: disk-quota-checked write path (`write_file`, the spill write in
 #: `spill_if_truncated`). Deliberately a SEPARATE lock from the module's
@@ -424,8 +576,12 @@ def _workspace_scan(d: Path) -> tuple[list[tuple[Path, os.stat_result]], int]:
       `session_read_file`, so also listing it here would double-report the
       same bytes as a fresh "artifact" every time a run's output spills.
 
-    The session lock file (`_LOCK_FILE_NAME`) is excluded too, by exact name
-    at the session root — it lives there, not under the scratch directory.
+    The session lock file (`_LOCK_FILE_NAME`) and the idle-expiry marker
+    (`_EXPIRED_MARKER_NAME`) are excluded too, by (normalized) exact name at
+    the session root, along with any `__pycache__` subtree and `*.pyc` file
+    at any depth — see `_is_runner_internal`, which every one of these
+    exclusions now goes through in one place rather than being reimplemented
+    inline here.
     """
     entries: list[tuple[Path, os.stat_result]] = []
     total = 0
@@ -437,12 +593,8 @@ def _workspace_scan(d: Path) -> tuple[list[tuple[Path, os.stat_result]], int]:
         if not stat.S_ISREG(st.st_mode):
             continue
         total += st.st_size
-        if "__pycache__" in p.parts or p.name.endswith(".pyc"):
-            continue
         rel_parts = p.relative_to(d).parts
-        if rel_parts and rel_parts[0] in (_SPILL_DIRNAME, _RUNNER_SCRATCH_DIRNAME):
-            continue
-        if len(rel_parts) == 1 and p.name == _LOCK_FILE_NAME:
+        if _is_runner_internal(rel_parts):
             continue
         entries.append((p, st))
     return entries, total
@@ -573,8 +725,9 @@ def _artifact_cap_refusal(session_id: str, d: Path, incoming_bytes: int, *,
                 errors.RESOURCE_EXHAUSTED,
                 f"session '{session_id}' already has {count} artifact "
                 f"file(s), at the {max_count}-file cap ({MAX_ARTIFACT_COUNT_ENV})",
-                remedy=("delete unneeded files (session_files to see what's "
-                        f"there), or raise {MAX_ARTIFACT_COUNT_ENV}"),
+                remedy=("delete unneeded files with session_delete_file "
+                        "(session_files to see what's there), or raise "
+                        f"{MAX_ARTIFACT_COUNT_ENV}"),
                 artifact_count=count, max_artifact_count=max_count,
             )
     return None
@@ -716,8 +869,9 @@ def _artifact_count_refusal(session_id: str, *,
             errors.RESOURCE_EXHAUSTED,
             f"session '{session_id}' has {count} artifact file(s), over the "
             f"{max_count}-file cap ({MAX_ARTIFACT_COUNT_ENV})",
-            remedy=("delete unneeded files (session_files to see what's "
-                    f"there), or raise {MAX_ARTIFACT_COUNT_ENV}"),
+            remedy=("delete unneeded files with session_delete_file "
+                    "(session_files to see what's there), or raise "
+                    f"{MAX_ARTIFACT_COUNT_ENV}"),
             artifact_count=count, max_artifact_count=max_count,
         )
     return None
@@ -2706,6 +2860,123 @@ def write_file(session_id: str, path: str, content: str) -> dict:
     return {"ok": True, "path": target.relative_to(d).as_posix()}
 
 
+def delete_file(session_id: str, path: str) -> dict:
+    """Remove one file (or symlink entry) from a session workspace — GH
+    #325's in-band recovery path the artifact-COUNT cap lacked: a session
+    already over `CODECALC_MAX_ARTIFACT_COUNT` has `execute()`/`run_file()`
+    refused by `quota_precheck` before anything runs, `write_file` can only
+    create or overwrite content, never unlink it, and the pre-fix refusal's
+    own remedy ("delete unneeded files") named an action no tool in the
+    package could perform. This is that action.
+
+    Deliberately exempt from BOTH quota gates (`_write_guard`,
+    `_artifact_count_refusal`) — neither is even consulted here. A delete
+    can only shrink usage, never grow it, so gating it on a cap it can only
+    relieve would refuse the one call that fixes the refusal — the same
+    `net_bytes <= 0` reasoning `_write_guard`'s own early return already
+    applies to a shrinking WRITE (see that function's docstring), just with
+    no gate to bypass at all rather than one that lets a non-positive delta
+    through.
+
+    Uses `_jail_nofollow`, not `_jail`: `_jail` resolves the whole path,
+    final component included, which is right for READING or WRITING (a
+    symlink pointing outside the workspace must never be followed to
+    disclose or overwrite what it targets, so `_jail` correctly refuses
+    that as "escapes") and wrong for DELETING the SAME symlink — the entry
+    being removed sits squarely inside the workspace regardless of what it
+    points to. `_jail_nofollow` never resolves anything at all (see its own
+    docstring); `_unlink_pinned` below is what actually walks the
+    filesystem, exactly once, per path component.
+
+    Refuses a runner-internal path (`.codecalc-run/`, `.codecalc-spill/`,
+    the session lock file, the idle-expiry marker, an 8.3-shaped root name
+    — `_is_runner_internal`/`_reserved_root_name`, the set
+    `session_artifacts` already excludes plus the Windows-alias refusals
+    fix round 3 added) and a directory: this tool removes one file/symlink
+    at a time, the same granularity `write_file` writes at, never a
+    recursive `rm -r`.
+
+    #325 fix round 3 (grok verify-security, HIGH): round 2's "pin the
+    parent by `(st_dev, st_ino)`" was STILL two separate filesystem walks
+    of the same path string (`_jail_nofollow`'s `resolve()`, then this
+    function's own `parent.stat()`/`os.open`) — a worker racing an
+    INTERMEDIATE component between them made both walks agree on the
+    attacker's directory. `_unlink_pinned` replaces both with ONE walk:
+    `openat`-style directory-fd hops from the workspace root, one per
+    component, `O_NOFOLLOW` on every hop — see that function's own
+    docstring for why this needs no identity comparison at all. Falls back
+    to a plain lstat+unlink (`_DIR_FD_SUPPORTED` False, i.e. Windows) with
+    the same documented parent-component TOCTOU residual `_jail`/
+    `_write_nofollow` already accept there.
+    """
+    try:
+        d = _session_dir(session_id)
+        if not d.is_dir():
+            return {"ok": False, "error": f"unknown session '{session_id}'"}
+        _reap_then_note(session_id)  # F4: reap an expired worker, never revive it
+        parts = _jail_nofollow(path)
+    except ValueError as exc:
+        return _guard_error(exc)  # #212, see write_file's comment above
+    # The runner-internal/reserved-name check runs on the CALLER'S OWN
+    # components, straight from `_jail_nofollow` — no filesystem trust
+    # needed, so this always runs before any syscall touches disk. On the
+    # `not _DIR_FD_SUPPORTED` fallback (Windows) only, the FINAL component
+    # is additionally canonicalized to its long form first (#325 fix round
+    # 3, MEDIUM): an 8.3 short name (`CODECA~1`) spells the SAME on-disk
+    # file as the reserved long name there, and a bare string compare
+    # would miss it. The `dir_fd`-pinned walk below needs no equivalent —
+    # see `_final_component_long_name`'s own docstring.
+    check_parts = parts
+    if not _DIR_FD_SUPPORTED:
+        check_parts = [*parts[:-1], _final_component_long_name(d, parts)]
+    if _is_runner_internal(tuple(check_parts)):
+        return errors.error_result(
+            errors.PERMISSION_DENIED,
+            f"{path!r} is a runner-internal path and cannot be deleted",
+        )
+    display_path = "/".join(parts)  # caller-facing identity; matches write_file's as_posix() shape
+    # Same critical section shape as write_file's `_disk_lock`, even though
+    # no quota is checked here: a delete mutates the same on-disk state a
+    # concurrent write_file's usage measurement reads, and "check what is
+    # there, then remove it" must be one atomic step for the same reason
+    # `_write_guard`'s "measure usage, then write" is — see `_disk_lock`'s
+    # own docstring.
+    with _disk_lock:
+        if _DIR_FD_SUPPORTED:
+            st, refusal = _unlink_pinned(d, parts, display_path)
+            if refusal is not None:
+                return refusal
+        else:
+            # Windows: no dir_fd-addressed unlink/lstat (`_DIR_FD_SUPPORTED`
+            # is False there). Falls back to a plain lstat+unlink, with the
+            # SAME accepted parent-component TOCTOU residual `_jail`/
+            # `_write_nofollow` already document for every other write path
+            # in this module — closing it fully needs a platform-specific
+            # primitive (NtOpenFile with FILE_OPEN_REPARSE_POINT) this
+            # module does not implement.
+            target = d.joinpath(*parts)
+            try:
+                st = target.lstat()  # never follow — see _jail_nofollow's docstring
+            except OSError:
+                return errors.error_result(errors.VALIDATION, f"no such file: {path}")
+            if stat.S_ISDIR(st.st_mode):
+                return errors.error_result(
+                    errors.VALIDATION,
+                    f"{path!r} is a directory; session_delete_file removes one "
+                    "file (or symlink) at a time, not a directory",
+                )
+            try:
+                target.unlink()
+            except OSError as exc:
+                return errors.error_result(
+                    errors.INTERNAL, f"could not delete {path!r}: {exc}")
+    return {
+        "ok": True,
+        "path": display_path,
+        "deleted": "symlink" if stat.S_ISLNK(st.st_mode) else "file",
+    }
+
+
 def list_files(session_id: str, path: str = "") -> dict:
     try:
         d = _session_dir(session_id)
@@ -2803,6 +3074,174 @@ def _list(d: Path) -> list[dict]:
 #: O_NOFOLLOW does not exist on Windows, where the value 0 makes the flag a
 #: no-op. That is not silently equivalent: see `_write_nofollow`.
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+
+#: Ditto for O_CLOEXEC/O_DIRECTORY — both POSIX-only, both a no-op-as-0 on a
+#: platform without them, used by `delete_file`'s `dir_fd` fast path below.
+_O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+_O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+
+#: True only where the platform supports opening a directory as an fd
+#: (`os.O_DIRECTORY`, absent on Windows), addressing `open`/`unlink`/
+#: `lstat` relative to that fd (`dir_fd=`, `os.supports_dir_fd` — checked
+#: live, never assumed from the OS name, the same reasoning
+#: `os.supports_dir_fd` itself exists for), AND refusing a symlink at the
+#: component being opened (`os.O_NOFOLLOW`). `_unlink_pinned` (#325 fix
+#: round 3, grok verify-security HIGH) needs all four to walk the
+#: workspace tree one `openat`-style hop per path component from a pinned
+#: root fd, never re-walking a path STRING a racing worker could swap a
+#: component of between two separate looks — see `_unlink_pinned`'s own
+#: docstring. Where this is False (Windows), `delete_file` falls back to a
+#: plain lstat+unlink and documents the same parent-component TOCTOU
+#: residual `_jail`/`_write_nofollow` already accept there.
+#:
+#: #325 fix round 4 (grok verify-security, LOW): `_O_NOFOLLOW != 0` was
+#: missing from this list. Every platform this module currently ships on
+#: that has `os.O_DIRECTORY`/`dir_fd` support also has `O_NOFOLLOW`, so
+#: this was not reachable in practice — but the whole POINT of
+#: `_unlink_pinned`'s walk is "a symlink at any hop fails that hop's own
+#: open", and that guarantee comes entirely from `O_NOFOLLOW` being a REAL
+#: flag in the `os.open(..., _O_NOFOLLOW | ...)` calls below. A
+#: hypothetical host with `dir_fd` support but no `O_NOFOLLOW` would have
+#: silently made `_O_NOFOLLOW` a no-op `0` (the same degrade-to-0 pattern
+#: `_O_NOFOLLOW`'s own definition uses for Windows) and every hop would
+#: FOLLOW a symlink instead of refusing it — the exact class of bug this
+#: module's several TOCTOU fixes exist to close, reintroduced by a missing
+#: guard on the guard. Asserted here, not discovered by a symlink quietly
+#: being followed on such a host.
+_DIR_FD_SUPPORTED = (
+    _O_DIRECTORY != 0
+    and _O_NOFOLLOW != 0
+    and os.open in os.supports_dir_fd
+    and os.unlink in os.supports_dir_fd
+    and os.lstat in os.supports_dir_fd
+)
+
+
+def _unlink_pinned(d: Path, parts: list[str], display_path: str) -> tuple[os.stat_result | None, dict | None]:
+    """Delete the file/symlink named by `parts[-1]`, walking from the
+    session workspace root ONE `openat`-style directory-fd hop per
+    component in `parts[:-1]` — `dir_fd=` of the PREVIOUS hop's fd every
+    time, `O_DIRECTORY|O_NOFOLLOW` on every hop — then `lstat`/`unlink`
+    the final name relative to the LAST hop's fd. Returns `(final_lstat,
+    None)` on success, or `(None, refusal)` with `refusal` an
+    `errors.error_result(...)` dict ready to return verbatim.
+
+    #325 fix round 3 (grok verify-security, HIGH): this is the fix for the
+    nested-parent variant round 2's `parent.stat()` + `os.open(parent,
+    O_NOFOLLOW)` pair missed — see `_jail_nofollow`'s docstring for why
+    two separate walks of the same path string can never be made to agree
+    safely under a race. There is exactly ONE walk here: each `openat`
+    call either lands on the real, in-workspace directory the previous hop
+    already proved reachable, or fails outright —
+    - a symlink at hop N fails that hop's own `open()` with `ELOOP`
+      (`O_NOFOLLOW` governs the LAST component of THAT specific open,
+      which is exactly the name being opened at this hop — never an
+      earlier or later one, so there is no "intermediate component" left
+      for a symlink to hide in);
+    - a missing/non-directory component fails with `ENOENT`/`ENOTDIR`;
+    - a hop that races AFTER it already succeeded cannot un-happen: the fd
+      it returned stays open and stays pinned to whatever directory it
+      opened, regardless of what the NAME "a" (say) is renamed to,
+      replaced with, or deleted immediately afterward — a `dir_fd` denotes
+      the open file description, never the path used to obtain it.
+
+    This is the component-wise portable equivalent of
+    `openat2(RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS)` (Linux 5.6+, not used
+    directly since this module supports older kernels and non-Linux POSIX)
+    and needs NO inode/identity comparison at all — there is nothing to
+    compare against an earlier observation, because every check here is
+    made against the fd currently in hand, not a path re-resolved a second
+    time.
+
+    Every intermediate fd this opens is closed once it is no longer
+    needed (the root fd and the final directory fd both close in the
+    `finally`); no fd outlives this call.
+
+    #325 fix round 4 (grok verify-security, LOW): the workspace-root open
+    itself used to sit OUTSIDE any `try`/`except` here — every per-hop
+    open below it is guarded (`ELOOP`/`ENOENT`/`ENOTDIR` all become the
+    ordinary "no such file" refusal), but a failure on THIS one (the
+    session directory itself gone, or — pathologically — replaced by
+    something `O_DIRECTORY|O_NOFOLLOW` refuses) propagated as a raw,
+    uncaught `OSError` instead, which no caller of `delete_file` expects
+    from a tool result. Guarded the same way every hop after it already
+    is, for the same reason.
+    """
+    try:
+        root_fd = os.open(d, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW | _O_CLOEXEC)
+    except OSError:
+        return None, errors.error_result(
+            errors.VALIDATION, f"no such file: {display_path}")
+    cur_fd = root_fd
+    try:
+        for component in parts[:-1]:
+            try:
+                next_fd = os.open(
+                    component, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW | _O_CLOEXEC,
+                    dir_fd=cur_fd)
+            except OSError:
+                # ELOOP (a symlink at this hop), ENOENT, ENOTDIR — all "no
+                # such path inside the workspace", the same refusal a
+                # missing FILE gets; none worth distinguishing to the
+                # caller, who already treats this as "not found".
+                return None, errors.error_result(
+                    errors.VALIDATION, f"no such file: {display_path}")
+            if cur_fd != root_fd:
+                os.close(cur_fd)
+            cur_fd = next_fd
+        name = parts[-1]
+        try:
+            st = os.lstat(name, dir_fd=cur_fd)  # never follows — see module docstring
+        except OSError:
+            return None, errors.error_result(
+                errors.VALIDATION, f"no such file: {display_path}")
+        if stat.S_ISDIR(st.st_mode):
+            return None, errors.error_result(
+                errors.VALIDATION,
+                f"{display_path!r} is a directory; session_delete_file removes "
+                "one file (or symlink) at a time, not a directory",
+            )
+        try:
+            os.unlink(name, dir_fd=cur_fd)
+        except OSError as exc:
+            return None, errors.error_result(
+                errors.INTERNAL, f"could not delete {display_path!r}: {exc}")
+        return st, None
+    finally:
+        if cur_fd != root_fd:
+            os.close(cur_fd)
+        os.close(root_fd)
+
+
+def _final_component_long_name(d: Path, parts: list[str]) -> str:
+    """The literal last element of `parts`, unless the platform can alias
+    it to a DIFFERENT on-disk spelling of the SAME entry — Windows 8.3
+    short names (`CODECA~1` for `.codecalc-session-lock`) are the case this
+    exists for (#325 fix round 3, MEDIUM). `os.path.realpath` resolves a
+    short name to its long form via the platform's own
+    `_getfinalpathname`/`GetFinalPathNameByHandle` there; on every other
+    platform this is a same-string round trip (POSIX has no such
+    aliasing), so calling it unconditionally — rather than gating on
+    `os.name == "nt"` — costs nothing and needs no platform branch of its
+    own.
+
+    Used ONLY on `delete_file`'s `not _DIR_FD_SUPPORTED` fallback path: the
+    `dir_fd`-pinned walk (`_unlink_pinned`) needs no equivalent, since a
+    short name reaching THAT walk is just another spelling `openat`
+    resolves the same as any other, and that walk never trusts a
+    caller-supplied final name for anything but the single `lstat`/
+    `unlink` call it makes relative to an fd it already proved is the real,
+    in-workspace directory.
+
+    A target that does not exist on disk has nothing a short name could
+    alias to, so any error here silently falls back to the literal name —
+    the `lstat`/`unlink` that follows reports "no such file" either way.
+    """
+    try:
+        real = os.path.realpath(d.joinpath(*parts))
+    except OSError:
+        return parts[-1]
+    return Path(real).name or parts[-1]
 
 
 def _write_nofollow(target: Path, content: str) -> None:
@@ -2949,6 +3388,69 @@ def _jail(d: Path, path: str) -> Path:
     if not p.is_relative_to(base):
         raise ValueError("path escapes session workspace")
     return p
+
+
+def _jail_nofollow(path: str) -> list[str]:
+    """String-level validation ONLY — length, segment count, absolute-path
+    and `..`-escape refusal, the same checks `_jail` applies — with NO
+    filesystem `resolve()` anywhere in this function. Returns `path` split
+    into workspace-relative COMPONENTS (`.`/empty segments dropped), never
+    a `Path`.
+
+    #325 fix round 3 (grok verify-security, HIGH): round 2 still called
+    this to RESOLVE the path (`parent = candidate.parent.resolve()`,
+    itself a filesystem walk), then had `delete_file` walk the SAME path a
+    SECOND time (`parent.stat()`, then `os.open(parent, O_NOFOLLOW)`) to
+    capture and re-check identity. `O_NOFOLLOW` on that second open only
+    refuses a symlink at the FINAL component of THAT open — an
+    INTERMEDIATE component swapped for a symlink BETWEEN the two walks
+    (`a/b/file`, `a` swapped to a symlink after `resolve()` sees the real
+    `a/b` but before `parent.stat()`/`os.open` run) makes both walks land
+    on the attacker's directory and agree with each other, which is
+    exactly the round-2 reviewer sketch demonstrated working against
+    559d3d0. Two SEPARATE filesystem walks of a caller-controlled path
+    cannot be made to agree safely under a live race — the only fix is to
+    never take a second walk at all. This function accordingly resolves
+    NOTHING and touches no filesystem; `delete_file` walks the real
+    filesystem exactly ONCE, one `openat`-style directory-fd hop per
+    component this returns, refusing the instant any hop meets a symlink
+    (`O_NOFOLLOW` on THAT hop's own open, so it is checked at the exact
+    moment it matters, never compared against an earlier observation a
+    race could have invalidated) — see `_unlink_pinned`'s own docstring
+    for the walk.
+
+    Absolute-path detection is done on the STRING
+    (`PurePath(path).is_absolute()`, plus an explicit Windows drive-letter
+    check — POSIX's `PurePath` flavor does not recognise `C:\\foo` as
+    absolute, so a caller on this server can hand either path shape
+    regardless of host OS, same reasoning `_jail`'s own segment count
+    applies), never by joining onto a base and letting `Path`'s own
+    division silently let an absolute operand override it. A literal `..`
+    component is refused outright for the same "no second interpretation"
+    reason: `_unlink_pinned`'s walk never interprets `..`, it only ever
+    `openat`s a name handed to it verbatim, so an unrefused `..` would
+    silently become a literal (almost certainly nonexistent) filename
+    rather than moving up a directory — catching it here is what makes "no
+    `..` traversal" a validation-time guarantee instead of an accident of
+    the walk not finding a file named `..`. An empty path (nothing left
+    after dropping `.`/empty segments — includes `""`, `"."`, `"/"`) is
+    refused the same way: there is no root to hand `_unlink_pinned`, and
+    deleting the workspace root belongs under the identical refusal every
+    other out-of-bounds path gets, not a bespoke message.
+    """
+    if len(path) > _MAX_JAIL_PATH_LEN:
+        raise ValueError(
+            f"path too long ({len(path)} chars, max {_MAX_JAIL_PATH_LEN})")
+    segments = path.count("/") + path.count("\\") + 1
+    if segments > _MAX_JAIL_PATH_SEGMENTS:
+        raise ValueError(
+            f"path has too many segments ({segments}, max {_MAX_JAIL_PATH_SEGMENTS})")
+    if PurePath(path).is_absolute() or (len(path) >= 2 and path[1] == ":"):
+        raise ValueError("path escapes session workspace")
+    parts = [p for p in re.split(r"[/\\]", path) if p not in ("", ".")]
+    if not parts or any(p == ".." for p in parts):
+        raise ValueError("path escapes session workspace")
+    return parts
 
 
 # ── REPL workers ───────────────────────────────────────────────────────────
