@@ -67,11 +67,19 @@ def cache_dir() -> str | None:
         return None
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    """`argv=None` (the default) parses `sys.argv`, exactly like the
+    `codecalc-prefetch-grammars` console script always has. Pass an explicit
+    list — `[]` in particular — when calling this IN-PROCESS from another
+    entry point (`setup.py` does, during `setup --write`): without it,
+    `parse_args()` falls back to `sys.argv[1:]`, which is that OTHER entry
+    point's own arguments (e.g. `['setup', '--write']`), not this one's, and
+    argparse rejects them and raises `SystemExit(2)` (GH #339, THE-1096).
+    """
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--print-cache-dir", action="store_true",
                     help="print the grammar cache directory and exit")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     if args.print_cache_dir:
         d = cache_dir()

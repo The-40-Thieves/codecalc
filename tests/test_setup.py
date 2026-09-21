@@ -26,7 +26,7 @@ import tempfile
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from codecalc import executor, server, setup
+from codecalc import doctor, executor, prefetch, server, setup
 
 FAILS: list[str] = []
 
@@ -594,6 +594,156 @@ verdict, reasons = setup.compute_verdict(
     client=ok_client, canaries=ok_canaries, backend_kind="rust",
     workspace_writable=False)
 check("unwritable workspace -> NOT-READY", verdict == "not-ready", f"-> {verdict}")
+
+
+# ── prefetch.main(argv): an explicit vector, never a stale sys.argv ────────
+# The bug this closes (GH #339, THE-1096): `setup --write` calls
+# `prefetch.main()` in-process. `main()` used to fall back to `sys.argv[1:]`
+# for its OWN argparse call — which, from inside `setup`, is `setup`'s own
+# arguments (`['setup', '--write']`), not prefetch's — so argparse rejected
+# them and raised `SystemExit(2)` before setup ever reached the config
+# write. `main(argv)` must take an explicit vector so the two entrypoints'
+# arguments can never be confused, while the console-script entry point
+# (`codecalc-prefetch-grammars`, called with no argument) keeps parsing the
+# real `sys.argv` exactly as before.
+_saved_argv = sys.argv
+sys.argv = ["codecalc", "setup", "--write"]
+try:
+    _raised: BaseException | None = None
+    _returned = None
+    try:
+        _returned = prefetch.main([])
+    except BaseException as exc:  # proving NO exception escapes, of any kind
+        _raised = exc
+    check("prefetch.main([]) ignores setup's sys.argv "
+          "(['setup', '--write']) and does not raise",
+          _raised is None, f"-> raised {_raised!r}")
+    check("...and returns an int exit code",
+          isinstance(_returned, int), f"-> {_returned!r}")
+finally:
+    sys.argv = _saved_argv
+
+_saved_argv = sys.argv
+sys.argv = ["codecalc-prefetch-grammars", "--print-cache-dir"]
+_saved_stdout = sys.stdout
+sys.stdout = io.StringIO()
+try:
+    _cache_code = prefetch.main()
+    _cache_out = sys.stdout.getvalue()
+finally:
+    sys.stdout = _saved_stdout
+    sys.argv = _saved_argv
+check("prefetch.main() with no argument still parses sys.argv "
+      "(the console-script entry point's behavior is unchanged) and "
+      "prints the cache dir",
+      _cache_code == 0 and _cache_out.strip() != "",
+      f"-> code={_cache_code} out={_cache_out!r}")
+
+
+# ── setup --write on a COLD cache still writes config + skill (GH #339) ────
+# `doctor._grammar_cache` is the exact seam `doctor.report()` (which
+# `run_setup` calls at its top) reads the grammar-cache status through, so
+# forcing it "cold" here exercises the real code path rather than a
+# reimplementation of it. `prefetch.main` is monkeypatched to fail WITHOUT
+# touching the network — this test proves the ORDERING (config/skill land
+# no matter what prefetch does), not whether a real download succeeds.
+def _cold_grammar_cache() -> dict:
+    return {"extra_installed": True, "cached": False, "path": "/nonexistent",
+            "grammars": 0, "detail": "forced cold for test"}
+
+
+def _with_cold_cache_and_failing_prefetch(prefetch_main, *, client="claude-code"):
+    """Run `setup --write` against a fresh temp home/cwd with a forced-cold
+    grammar cache and `prefetch.main` swapped for `prefetch_main`.
+
+    Returns (exit_code, output, config_written, skill_written) — computed
+    INSIDE the `TemporaryDirectory` block, before it is cleaned up on exit
+    (a `return` of the `Path`s themselves would point at already-deleted
+    files by the time the caller inspects them)."""
+    saved_grammar_cache = doctor._grammar_cache
+    saved_prefetch_main = prefetch.main
+    doctor._grammar_cache = _cold_grammar_cache
+    prefetch.main = prefetch_main
+    try:
+        with tempfile.TemporaryDirectory(prefix="codecalc-setup-test-") as d:
+            home = pathlib.Path(d) / "home"
+            cwd = pathlib.Path(d) / "cwd"
+            home.mkdir()
+            cwd.mkdir()
+            buf = io.StringIO()
+            code = setup.run_setup(client=client, do_write=True, out=buf,
+                                   home=home, cwd=cwd, platform="linux")
+            cfg_path = cwd / ".mcp.json"
+            skill_path = cwd / ".claude" / "skills" / "codecalc" / "SKILL.md"
+            config_written = (cfg_path.is_file() and "codecalc" in
+                              json.loads(cfg_path.read_text(encoding="utf-8"))
+                              .get("mcpServers", {}))
+            skill_written = skill_path.is_file()
+            return code, buf.getvalue(), config_written, skill_written
+    finally:
+        doctor._grammar_cache = saved_grammar_cache
+        prefetch.main = saved_prefetch_main
+
+
+def _raise_systemexit_2(argv=None):
+    raise SystemExit(2)
+
+
+_code, _out, _cfg_written, _skill_written = _with_cold_cache_and_failing_prefetch(_raise_systemexit_2)
+check("cold cache + prefetch raising SystemExit(2): setup does NOT crash "
+      "(exits 0 or 1, a real verdict)",
+      _code in (0, 1), f"-> exit {_code}")
+check("...the client config was STILL written",
+      _cfg_written, f"-> {_out}")
+check("...the skill was STILL copied",
+      _skill_written, f"-> {_out}")
+check("...the existing failure branch reports the mapped exit code",
+      "✗ prefetch exited 2" in _out, f"-> {_out}")
+check("...setup still reaches and prints its final verdict",
+      "verdict:" in _out, f"-> {_out}")
+
+
+def _raise_runtime_error(argv=None):
+    raise RuntimeError("simulated network failure")
+
+
+_code2, _out2, _cfg_written2, _skill_written2 = _with_cold_cache_and_failing_prefetch(_raise_runtime_error)
+check("cold cache + prefetch raising a plain Exception: setup does NOT crash",
+      _code2 in (0, 1), f"-> exit {_code2}")
+check("...the exception is reported on one line",
+      "✗ prefetch raised RuntimeError: simulated network failure" in _out2,
+      f"-> {_out2}")
+check("...and the existing failure branch STILL fires (mapped to exit 1)",
+      "✗ prefetch exited 1" in _out2, f"-> {_out2}")
+check("...the client config was STILL written",
+      _cfg_written2, f"-> {_out2}")
+check("...the skill was STILL copied",
+      _skill_written2, f"-> {_out2}")
+check("...setup still reaches and prints its final verdict",
+      "verdict:" in _out2, f"-> {_out2}")
+
+
+# ── the --client hint: named right after the detected-client line ──────────
+# GH #339 observation 3: a machine with more than one client installed only
+# ever heard about the one auto-detected; `--client=NAME` was in `--help`
+# but not in the human-facing output.
+with tempfile.TemporaryDirectory(prefix="codecalc-setup-test-") as d:
+    home = pathlib.Path(d) / "home"
+    cwd = pathlib.Path(d) / "cwd"
+    home.mkdir()
+    cwd.mkdir()
+    buf = io.StringIO()
+    setup.run_setup(client="claude-code", do_write=False, out=buf,
+                    home=home, cwd=cwd, platform="linux")
+    out = buf.getvalue()
+    check("detected-client output names the OTHER clients to re-run with",
+          "other clients: re-run with --client=" in out, f"-> {out[:400]}")
+    _others_expected = [c for c in setup.CLIENTS if c != "claude-code"]
+    check("...listing every other client this command supports, from the "
+          "real CLIENTS table (not a hardcoded second copy)",
+          all(c in out for c in _others_expected), f"-> {out[:400]}")
+    check("...and NOT the detected client itself",
+          f"--client={','.join(setup.CLIENTS)}" not in out)
 
 
 # ── the CLI surface: `codecalc setup --help` lists it, subprocess round-trip ─

@@ -35,6 +35,32 @@ behind it.
 
 ### Fixed
 
+- **`codecalc setup --write` died before writing anything, on a cold grammar
+  cache — which is every fresh install** (GH #339, THE-1096). `setup` calls
+  `prefetch.main()` in-process to warm the cache; `prefetch.main` took no
+  argument and parsed `sys.argv` itself, so inside `setup --write` it saw
+  `setup`'s own argv (`['setup', '--write']`), argparse rejected both
+  tokens, and the resulting `SystemExit(2)` was never caught — it propagated
+  out of `setup` and killed the process before the MCP client config was
+  written or the skill copied. `prefetch.main` now takes an explicit
+  `argv: list[str] | None = None` (still `sys.argv`-parsing by default, so
+  the `codecalc-prefetch-grammars` console script is unchanged) and `setup`
+  calls `prefetch.main([])`; a `SystemExit` or any other exception from that
+  call is now caught, mapped to an exit code, and reported through the
+  `✗ prefetch exited N` branch that already existed to handle exactly this
+  but could never be reached. This is issue #204's class recurring — a
+  README headline command nothing verified — and is now covered by an
+  end-to-end test in `tests/test_setup.py` that forces a cold cache and a
+  failing prefetch and asserts the config and skill still land. Changed
+  alongside the fix: the grammar-cache prefetch — the one `--write` action
+  that makes a network call and can fail for reasons unrelated to codecalc
+  — now runs *after* the client config and skill are written, not before
+  (neither of those two writes depends on it), which renumbers `setup`'s
+  printed sections (now 1-9, was 1-8); `setup` also now prints an `other
+  clients: re-run with --client=...` line right after the detected-client
+  line, naming every other client it knows how to configure (previously
+  that hint was in `--help` only).
+
 - **`branch_reachability` on `for i in range(a, b, 0)` raised an uncaught
   `ValueError` instead of the documented refusal** (GH #322, THE-1087).
   `_first_unsupported`'s up-front scan accepted a `for` loop as statically
