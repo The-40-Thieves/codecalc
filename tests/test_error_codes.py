@@ -362,7 +362,7 @@ check("...and still carries error/remedy (the ENTIRE content of this shape)",
 
 # classify(): a CPython digit-limit ValueError (int->str conversion past
 # sys.set_int_max_str_digits, default 4300) is a ceiling, not a defect and
-# not a plain validation mistake — exact.py's catch-alls used to skip
+# not a plain validation mistake — exact.py's catch-all clauses used to skip
 # classify() entirely and return it as `internal` (GH #326, THE-1091). The
 # message text is CPython's own, reproduced exactly rather than paraphrased,
 # since the classifier matches on it.

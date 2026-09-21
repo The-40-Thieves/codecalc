@@ -1381,7 +1381,7 @@ for _expr in _pow_cases:
     check(f"{_expr!r} is still refused",
           _got is not None and "digits" in _got, f"-> {_got!r}")
 
-# exact.py's catch-alls now route through errors.classify() instead of a bare
+# exact.py's catch-all clauses now route through errors.classify() instead of a bare
 # str(exc) -- a CPython digit-limit ValueError must classify to the ceiling
 # code, not internal (the classify()-level half of this fix; see
 # test_error_codes.py for the direct unit-level assertion).
@@ -1575,7 +1575,7 @@ for _pow_expr, _want_value in _POW_CANCELLATION_CASES:
     check("  ...promptly, not after a multi-second burn",
           _pow_elapsed < 5.0, f"-> {_pow_elapsed:.3f}s")
 
-# ═══ round 4 of cross-vendor review (grok, on 2ba7ef2) — three more High ═══
+# ═══ round 4 of cross-vendor review (grok, on the round-three head) — three more High ═══
 # ═══ findings, all traced to the SAME root cause and fixed by the SAME ════
 # ═══ redesign, not three separate patches ══════════════════════════════════
 #

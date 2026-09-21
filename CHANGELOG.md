@@ -524,7 +524,7 @@ behind it.
   depth (an alternating Add/Mul chain of depth 250 measured 0.311s in
   `reject_explosive` alone, now under 20ms). Separately, `exact.py`'s
   `except Exception`/`except ValueError` catches that returned a bare
-  `{"ok": False, "error": ...}` (the four generic catch-alls in
+  `{"ok": False, "error": ...}` (the four generic catch-all clauses in
   `eval_exact`, `solve_expression`, `limit_expression`,
   `simplify_expression`, plus `eval_exact`'s own Fraction-formatting catch
   and `radix_convert`'s digit-parsing catch) now route through
