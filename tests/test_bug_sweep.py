@@ -1280,6 +1280,103 @@ for _expr, _label in _FACE1_UNDER_CAP:
     check(f"safe_parse({_expr!r}) ({_label}, under cap) still evaluates",
           _value is not None and _err is None, f"-> value={_value!r} err={_err!r}")
 
+# ═══ reject_explosive only inspected Pow, so a PRODUCT of individually ═════
+# ═══ legal heavy calls bypassed MAX_NUMERIC_DIGITS entirely (GH #326, ═════
+# ═══ THE-1091) ══════════════════════════════════════════════════════════════
+# The gap above (Mul/Rational-shaped exponents and bases) is still INSIDE a
+# Pow node — the walk finds it because it is looking at a Pow at all. This
+# one is a different shape: `"*".join(["factorial(1463)"] * 117)` (1871
+# chars, under the 2000-char cap) has no Pow anywhere. Each `factorial(1463)`
+# is individually legal (MAX_HEAVY_ARG admits 1463; the result is 3998
+# digits, under MAX_NUMERIC_DIGITS) and materializes to a plain Integer
+# during PARSING itself (a function call on a literal argument evaluates at
+# parse time regardless of `evaluate=False` — see the _HEAVY_FUNCTIONS
+# comment in safe_expr.py). `Mul(Integer, Integer, ..., 117 of them)` walked
+# straight past the old Pow-only loop, and CPython's own int->str ceiling
+# (4300 digits by default) raised from deep inside SymPy's printer as an
+# uncaught ValueError -- coded "internal" (a codecalc defect) rather than
+# "resource_exhausted" (a ceiling the caller can act on by shrinking the
+# input). Confirmed live on main before this fix: exactly that.
+from codecalc import errors as _errors
+
+_PRODUCT_BOMB = "*".join(["factorial(1463)"] * 117)
+check(f"the 117-factorial product is {len(_PRODUCT_BOMB)} chars, under the 2000-char cap",
+      len(_PRODUCT_BOMB) < 2000, f"-> {len(_PRODUCT_BOMB)}")
+
+_t0 = time.time()
+_product_result = _exact.simplify_expression(_PRODUCT_BOMB)
+_product_elapsed = time.time() - _t0
+check("a product of 117 legal factorial(1463) calls is refused, not computed",
+      _product_result.get("ok") is False, f"-> {_product_result}")
+check(f"  ...promptly ({_product_elapsed:.3f}s), before the ~467,766-digit "
+      "product is ever printed",
+      _product_elapsed < 1.0, f"-> {_product_elapsed:.3f}s")
+check("  ...with the ceiling code, not 'internal'",
+      _product_result.get("code") == _errors.RESOURCE_EXHAUSTED,
+      f"-> {_product_result.get('code')}")
+check("  ...and a remedy addressed to the caller (shrink the input), "
+      "not CPython's own sys.set_int_max_str_digits() advice",
+      "sys.set_int_max_str_digits" not in (_product_result.get("error") or ""),
+      f"-> {_product_result.get('error')!r}")
+check("  ...and the remedy names reducing the work",
+      bool(_product_result.get("remedy")), f"-> {_product_result.get('remedy')!r}")
+
+# A single legal call, unmultiplied, must still work -- this is a refusal of
+# the PRODUCT, not a tightening of MAX_HEAVY_ARG itself.
+_single_result = _exact.simplify_expression("factorial(1463)")
+check("a single factorial(1463) is still ok",
+      _single_result.get("ok") is True, f"-> ok={_single_result.get('ok')!r}")
+
+# The Add branch, not just Mul: reject_explosive's walk visits every
+# numeric-only Mul/Add node, not only ones nested inside a Pow. A pure SUM of
+# legal factorial(1463) calls cannot itself cross MAX_NUMERIC_DIGITS within
+# the 2000-char cap (117 copies -- as many as the char budget allows -- sums
+# to exactly 4000 digits, AT the cap, not over it: digit count from adding N
+# equal-magnitude terms grows by log10(N), not by N like a product does), so
+# this exercises the Add branch with a product already over cap as one of
+# its terms instead -- a shape with no Pow anywhere, so the old code walked
+# past this one too.
+_sum_bomb = "factorial(1463)*factorial(1463)+1"
+_sum_tree = _pe(_sum_bomb, transformations=_T, evaluate=False)
+_sum_refusal = _rx(_sum_tree)
+check(f"a sum ({_sum_bomb!r}) wrapping an over-cap product is refused",
+      _sum_refusal is not None and "digits" in _sum_refusal, f"-> {_sum_refusal!r}")
+
+# A purely symbolic product must be untouched -- the new check only fires on
+# a Mul/Add with NO free symbols.
+_symbolic_tree = _pe("x*y*z", transformations=_T, evaluate=False)
+check("a symbolic product (x*y*z) is not refused",
+      _rx(_symbolic_tree) is None, f"-> {_rx(_symbolic_tree)!r}")
+
+# The two existing Pow-only refusals must be byte-for-byte unchanged: the new
+# Mul/Add check only fires on Mul/Add nodes, and neither of these is one at
+# the top level.
+_pow_cases = [
+    ("2**100000", ("the result would have about 30103 digits, over the limit "
+                   "of 4000: it cannot be rendered as a decimal string")),
+    ("9**9**9**9", ("a power tower (an exponent that is itself a power) is not "
+                    "evaluated: the result grows faster than any useful bound")),
+]
+for _expr, _want_msg in _pow_cases:
+    _tree = _pe(_expr, transformations=_T, evaluate=False)
+    _got = _rx(_tree)
+    check(f"{_expr!r} is still refused exactly as before",
+          _got == _want_msg, f"-> {_got!r}")
+
+# exact.py's catch-alls now route through errors.classify() instead of a bare
+# str(exc) -- a CPython digit-limit ValueError must classify to the ceiling
+# code, not internal (the classify()-level half of this fix; see
+# test_error_codes.py for the direct unit-level assertion).
+_synthetic_digit_limit_exc = ValueError(
+    "Exceeds the limit (4300 digits) for integer string conversion; use "
+    "sys.set_int_max_str_digits() to increase the limit")
+check("errors.classify() maps a CPython digit-limit ValueError to resource_exhausted",
+      _errors.classify(_synthetic_digit_limit_exc) == _errors.RESOURCE_EXHAUSTED,
+      f"-> {_errors.classify(_synthetic_digit_limit_exc)}")
+check("  ...while an ordinary ValueError is still validation, unaffected",
+      _errors.classify(ValueError("bad expression")) == _errors.VALIDATION,
+      f"-> {_errors.classify(ValueError('bad expression'))}")
+
 # ═══ the fail-closed choice above was ITSELF too broad — cross-vendor ══════
 # ═══ differential probe (main vs. this branch) found 5 benign expressions ══
 # ═══ that main evaluates fine but an earlier version of this fix refused ═══

@@ -360,6 +360,34 @@ check("...and still carries error/remedy (the ENTIRE content of this shape)",
       bool(_compact_reject.get("error")) and bool(_compact_reject.get("remedy")),
       f"-> {_compact_reject}")
 
+# classify(): a CPython digit-limit ValueError (int->str conversion past
+# sys.set_int_max_str_digits, default 4300) is a ceiling, not a defect and
+# not a plain validation mistake — exact.py's catch-alls used to skip
+# classify() entirely and return it as `internal` (GH #326, THE-1091). The
+# message text is CPython's own, reproduced exactly rather than paraphrased,
+# since the classifier matches on it.
+_digit_limit_exc = ValueError(
+    "Exceeds the limit (4300 digits) for integer string conversion; use "
+    "sys.set_int_max_str_digits() to increase the limit")
+check("classify(digit-limit ValueError) -> resource_exhausted, not internal",
+      errors.classify(_digit_limit_exc) == errors.RESOURCE_EXHAUSTED,
+      f"-> {errors.classify(_digit_limit_exc)}")
+check("...while an ordinary ValueError is untouched by that special case",
+      errors.classify(ValueError("not a number")) == errors.VALIDATION,
+      f"-> {errors.classify(ValueError('not a number'))}")
+
+# End-to-end: a product of legal heavy calls with no Pow anywhere in its tree
+# (`reject_explosive` used to inspect only Pow nodes) must reach the caller
+# as resource_exhausted, not internal, through the real MCP surface.
+_product_bomb = "*".join(["factorial(1463)"] * 117)
+_product_result = server.symbolic(op="simplify", expr=_product_bomb)
+check("symbolic(simplify, 117x factorial(1463) product) -> resource_exhausted",
+      _product_result.get("code") == errors.RESOURCE_EXHAUSTED,
+      f"-> code={_product_result.get('code')} err={str(_product_result.get('error'))[:80]!r}")
+check("...with no raw CPython advice in the message",
+      "sys.set_int_max_str_digits" not in str(_product_result.get("error")),
+      f"-> {_product_result.get('error')!r}")
+
 print(f"\n=== {len(FAILS)} FAILURES ===" if FAILS else
       "\n=== ALL ERROR-CODE TESTS PASS ===")
 sys.exit(1 if FAILS else 0)

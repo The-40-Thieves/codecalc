@@ -718,6 +718,73 @@ def safe_parse(expression: str, *, evaluate: bool = True, local_dict: dict | Non
     return value, None
 
 
+def _numeric_subtree_ceiling_violation(node) -> str | None:
+    """Reason a numeric-only (no free symbols) subtree already exceeds
+    `MAX_NUMERIC_DIGITS`, or None. Used by `reject_explosive` on every
+    `Integer`/`Mul`/`Add` node it walks, not only ones nested inside a `Pow`.
+
+    #326 (THE-1091): the walk below used to inspect only `Pow` nodes, on the
+    assumption that unbounded growth enters exclusively through
+    exponentiation. `"*".join(["factorial(1463)"] * 117)` disproved that.
+    Each `factorial(1463)` is individually legal — `MAX_HEAVY_ARG` admits an
+    argument of 1463, and the result is 3998 digits, under
+    `MAX_NUMERIC_DIGITS` — and it materializes to a plain `Integer` during
+    PARSING itself (see the `_HEAVY_FUNCTIONS` comment above: a function
+    call on a literal argument evaluates at parse time regardless of
+    `evaluate=False`). `Mul(Integer, Integer, ..., 117 of them)` contains no
+    `Pow` at all, so the old loop walked straight past a 467,766-digit
+    product and let CPython's own int->str ceiling (4300 digits by default)
+    raise from deep inside SymPy's printer — an uncaught `ValueError`, not a
+    refusal.
+
+    Delegates the actual resolution to `_bounded_numeric_value` — the same
+    bit-budget machinery the `Pow` branch below already trusts for a base or
+    exponent `evaluate=False` left un-folded (`Mul(3, Pow(2, -1))` for
+    `3/2`) — rather than re-deriving a size bound by hand: it already knows
+    how to reduce a `Mul`/`Add` chain to an exact `Rational` (GCD-reduced at
+    every step, so a product that happens to cancel is not falsely flagged)
+    or prove it exceeds its own `_SUBTREE_BIT_BUDGET` (20,000 bits, ~6,021
+    decimal digits — deliberately looser than `MAX_NUMERIC_DIGITS` so an
+    ordinary over-the-cap result still resolves to an EXACT value here
+    instead of a blind refusal with no digit count to report). A bare
+    `Integer` atom goes through the identical call: `_bounded_numeric_value`
+    handles `Integer` as its own base case, so this closes the same hole for
+    a materialized value that never got wrapped in a `Mul`/`Add` at all,
+    with no separate code path to keep in sync.
+
+    `_NumericTooLarge` (proved to exceed even that generous budget) is an
+    immediate refusal, same wording as the `Pow` branch's own numeric-base
+    case. `None` or a `float` is not evidence of anything — inconclusive
+    (a `Function` call, an irrational constant, float-mode precision loss)
+    or fixed double precision, neither a digit-count hazard — and falls
+    through exactly as `_bounded_numeric_value`'s own docstring specifies.
+    An exact `Rational`/`Integer` result gets its OWN digit count measured
+    (via `_log10_of_int`, never `str()` — the very conversion this guard
+    exists to keep off the hot path) because resolving at all is not proof
+    of being under `MAX_NUMERIC_DIGITS`: `_SUBTREE_BIT_BUDGET` is looser
+    than the digit cap on purpose.
+    """
+    resolved = _bounded_numeric_value(node)
+    if resolved is None or isinstance(resolved, float):
+        return None
+    if isinstance(resolved, _NumericTooLarge):
+        return (f"the result is a numeric expression whose magnitude already "
+                f"exceeds the limit of {MAX_NUMERIC_DIGITS} digits: it cannot "
+                "be evaluated safely")
+    if resolved.q == 1:
+        log10_magnitude = _log10_of_int(int(resolved))
+    else:
+        log10_magnitude = _log10_of_int(resolved.p) - _log10_of_int(resolved.q)
+    if log10_magnitude <= 0:  # magnitude <= 1 -- at most one digit, never over cap
+        return None
+    digit_count = int(log10_magnitude) + 1
+    if digit_count > MAX_NUMERIC_DIGITS:
+        return (f"the result would have about {digit_count} digits, over the "
+                f"limit of {MAX_NUMERIC_DIGITS}: it cannot be rendered as a "
+                "decimal string")
+    return None
+
+
 def reject_explosive(tree) -> str | None:
     """Reason this PARSED expression must not be evaluated, or None.
 
@@ -769,9 +836,21 @@ def reject_explosive(tree) -> str | None:
     either alone as sufficient. See `tests/test_bug_sweep.py`'s block
     for the assertion that the backstop actually holds for this shape.
     """
-    from sympy import Float, Integer, Pow
+    from sympy import Add, Float, Integer, Mul, Pow
 
     for node in _walk(tree):
+        # #326 (THE-1091): a numeric-only Mul/Add (or a bare materialized
+        # Integer) is exactly as capable of an over-cap result as a Pow is —
+        # see `_numeric_subtree_ceiling_violation`'s docstring for the
+        # `factorial(1463)` product that walked past this loop when it only
+        # looked at Pow nodes. Checked before the Pow-only logic below so a
+        # Pow NESTED inside a numeric Mul/Add (`2**100000 * 3`) is caught
+        # here first rather than falling through to it — same refusal
+        # either way, since both ultimately trust `_bounded_numeric_value`.
+        if isinstance(node, (Integer, Mul, Add)) and not node.free_symbols:
+            violation = _numeric_subtree_ceiling_violation(node)
+            if violation:
+                return violation
         if not isinstance(node, Pow):
             continue
         base, exponent = node.base, node.exp

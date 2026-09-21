@@ -497,6 +497,29 @@ behind it.
   `remedy` strings now name it instead of a `session_files` listing tool
   that was never able to act on what it showed.
 
+- **`reject_explosive` only inspected `Pow` nodes, so a product (or sum) of
+  individually legal heavy calls bypassed `MAX_NUMERIC_DIGITS` and reached
+  CPython's own int->str ceiling instead** (GH #326, THE-1091).
+  `symbolic(op="simplify", expr="*".join(["factorial(1463)"] * 117))` —
+  1871 chars, under the 2000-char cap, every `factorial(1463)` individually
+  legal at 3998 digits — materializes to `Mul(Integer, Integer, ..., 117 of
+  them)` during PARSING itself (a function call on a literal argument
+  evaluates at parse time regardless of `evaluate=False`), a shape with no
+  `Pow` anywhere for the old Pow-only walk to catch. It returned
+  `"code": "internal"` with a raw CPython message ("...use
+  sys.set_int_max_str_digits()...") addressed to nobody the caller can act
+  on. `reject_explosive` now runs the same `_bounded_numeric_value`
+  bit-budget check the `Pow` branch already trusted for un-folded exponents
+  and bases over every numeric-only `Mul`/`Add` subtree it walks (and bare
+  `Integer` atoms), refusing the product BEFORE evaluation with
+  `"resource_exhausted"` and a remedy addressed to the caller. Separately,
+  `exact.py`'s four bare `except Exception: return {"ok": False, "error":
+  str(exc)}` catch-alls (`eval_exact`, `solve_expression`,
+  `limit_expression`, `simplify_expression`) now route through
+  `errors.classify`, which special-cases a CPython digit-limit `ValueError`
+  to `resource_exhausted` instead of falling through to the generic
+  `ValueError` -> `validation` mapping or, previously, `internal`.
+
 ## [0.12.0] — 2026-09-09
 
 ### Removed

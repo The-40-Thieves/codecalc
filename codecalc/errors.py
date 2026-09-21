@@ -104,6 +104,17 @@ def classify(exc: BaseException) -> str:
         return RUNTIME_UNAVAILABLE
     if isinstance(exc, ImportError):
         return DEPENDENCY_MISSING
+    if isinstance(exc, ValueError) and "int_max_str_digits" in str(exc):
+        # CPython's OWN printer ceiling (`sys.set_int_max_str_digits`,
+        # default 4300 digits) on an int->str conversion — a materialized
+        # integer that grew too many digits to render, not a malformed
+        # request. A plain ValueError is VALIDATION below (the caller typo'd
+        # something), but this one is the same bucket as safe_expr's
+        # MAX_NUMERIC_DIGITS: a ceiling, whose remedy is to shrink the
+        # operands, never "report a bug" (GH #326, THE-1091). Checked before
+        # the blanket ValueError branch, same as MissingExtra before
+        # ImportError above.
+        return RESOURCE_EXHAUSTED
     if isinstance(exc, (ValueError, TypeError, KeyError, IndexError, ArithmeticError)):
         return VALIDATION
     if isinstance(exc, OSError):
