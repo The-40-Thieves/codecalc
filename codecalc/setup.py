@@ -472,7 +472,12 @@ def run_setup(client: str | None = None, do_write: bool = False, *,
         p(f"✓ client: {detected['client']} ({origin}) -> {detected['path']}")
         others = [c for c in CLIENTS if c != detected["client"]]
         if others:
-            p(f"  other clients: re-run with --client={','.join(others)}")
+            # NAME here is a placeholder, not a literal accepted value —
+            # `--client=` takes exactly ONE of CLIENTS at a time, so
+            # printing a comma-joined list after `=` would itself be an
+            # unrecognized client (review).
+            p(f"  other clients: re-run with --client=NAME "
+              f"(NAME: {', '.join(others)})")
     elif detected["ambiguous"]:
         p(f"⚠ client: AMBIGUOUS — config files found for "
           f"{', '.join(detected['found'])}")
