@@ -277,15 +277,25 @@ behind it.
   squarely inside the workspace regardless of what it points to, so
   `_jail_nofollow` resolves only the entry's PARENT and leaves the final
   component unresolved; `unlink()` on a symlink already never follows it,
-  which is what makes the target survive a delete. Refuses exactly what
-  `session_artifacts` already excludes (`.codecalc-run/`, `.codecalc-spill/`,
-  the session lock file — `_is_runner_internal`, factored out of
-  `_workspace_scan` so the two definitions cannot drift) and a directory —
-  one file/symlink per call, the same granularity `session_write_file`
-  writes at. Deliberately exempt from BOTH the byte and artifact-count
-  quota gates: a delete can only shrink usage, never grow it, so gating it
-  on a cap it can only relieve would refuse the one call that fixes the
-  refusal (see "Fixed" below).
+  which is what makes the target survive a delete. The unlink itself is
+  PINNED to the resolved parent directory by `(st_dev, st_ino)` and an
+  `O_DIRECTORY|O_NOFOLLOW` fd opened just before the delete, not re-walked
+  from the path string, so a session worker racing a parent-directory swap
+  (`rename`/`symlink` a path component while the delete is in flight — the
+  server process is not Landlocked) cannot make the server unlink a HOST
+  file outside the workspace (found in review before this ever shipped;
+  `_DIR_FD_SUPPORTED` gates the platforms where this applies, with a
+  documented residual on Windows). Refuses exactly what `session_artifacts`
+  already excludes (`.codecalc-run/`, `.codecalc-spill/`, the session lock
+  file, the idle-expiry marker, `__pycache__`/`*.pyc` — `_is_runner_internal`,
+  factored out of `_workspace_scan` so the two definitions cannot drift;
+  the lock file and expiry-marker check is case/trailing-dot-safe via
+  `_reserved_root_name`, not a bare `==`) and a directory — one
+  file/symlink per call, the same granularity `session_write_file` writes
+  at. Deliberately exempt from BOTH the byte and artifact-count quota
+  gates: a delete can only shrink usage, never grow it, so gating it on a
+  cap it can only relieve would refuse the one call that fixes the refusal
+  (see "Fixed" below).
 
 ### Changed
 
