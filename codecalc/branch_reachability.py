@@ -352,6 +352,7 @@ def _first_unsupported(tree: ast.AST) -> tuple[str, int] | None:
                 add(node, "data-dependent loop bounds (only for x in range(<literal ints>) "
                           "is supported)")
             else:
+                all_static = True
                 for a in it.args:
                     static = isinstance(a, ast.Constant) and isinstance(a.value, int) and not isinstance(a.value, bool)
                     static = static or (
@@ -362,7 +363,23 @@ def _first_unsupported(tree: ast.AST) -> tuple[str, int] | None:
                     if not static:
                         add(node, "data-dependent loop bounds (only for x in "
                                   "range(<literal ints>) is supported)")
+                        all_static = False
                         break
+                # GH #322 / THE-1087: a literal step of 0 passed every check
+                # above (it IS a literal int) and reached `_static_range_bounds`
+                # -> `len(range(start, stop, step))` in `_walk_loop`, which
+                # raises CPython's own `ValueError: range() arg 3 must not be
+                # zero` — an uncaught exception escaping `analyze()` instead of
+                # the documented refusal every other unsupported construct
+                # gets. Caught HERE, before a single z3 call, with the same
+                # construct-naming refusal shape.
+                if all_static and len(it.args) == 3:
+                    step = it.args[2]
+                    step_val = (
+                        -step.operand.value if isinstance(step, ast.UnaryOp) else step.value
+                    )
+                    if step_val == 0:
+                        add(node, "range() with a step of 0")
 
     if not hits:
         return None
@@ -1504,6 +1521,27 @@ def analyze(language: str, code: str, inputs: dict[str, str] | None = None,
         _walk_block(body, env, ctx, z3.BoolVal(True))
     except _TranslateError as exc:
         return _refusal(f"unsupported construct: {exc}")
+    except z3.Z3Exception:
+        # A genuine z3-side failure (solver, model, or expression-building
+        # error) is NOT a "this construct is unsupported" refusal — it is
+        # left to propagate rather than silently reported as one.
+        raise
+    except Exception as exc:
+        # Belt and braces (GH #322, THE-1087): `_first_unsupported`'s
+        # up-front scan and this walk's own bounds/translation logic have
+        # drifted apart before — a literal `range()` step of 0 passed the
+        # scan's static-bounds check and reached a bare `len(range(...))`
+        # in `_walk_loop`, raising CPython's `ValueError` straight out of
+        # `analyze()` instead of the documented refusal (now fixed in the
+        # scan itself, above). Any OTHER unexpected exception surfacing
+        # from the translation/bounds-computation path this try wraps gets
+        # the same refusal treatment, so the module docstring's "REFUSAL IS
+        # THE RESULT ... never a raised exception" contract holds even if
+        # the scan and the walker disagree again on some future construct.
+        # `z3.Z3Exception` is excluded above: that is a solver-side
+        # failure, not an unsupported-construct refusal, and is never
+        # swallowed here.
+        return _refusal(f"unsupported construct: unexpected {type(exc).__name__}: {exc}")
 
     dead = sum(1 for b in ctx.branches if b["verdict"] == "dead")
     reachable = sum(1 for b in ctx.branches if b["verdict"] == "reachable")
