@@ -1698,8 +1698,8 @@ check("reject_explosive's Pow loop is ALSO wrapped in its own RecursionError gua
 _UNRESOLVED_EXPONENT_CASES = [
     ("2**(14999+1)", "Add exponent, same value as the already-refused 2**(30000/2)"),
     ("2**-(14999+1)", "same, negated -- the denominator side of the same bug class"),
-    ("(10**3000)**(3/2)", "non-integral rational exponent, but 10**3000 is a perfect "
-                           "square-ish base -- result is 10**4500, a real huge integer"),
+    ("(10**3000)**(3/2)", ("non-integral rational exponent, but 10**3000 is a perfect "
+                           "square-ish base -- result is 10**4500, a real huge integer")),
     ("2**(factorial(1463)+1)", "Add exponent wrapping an already-legal heavy-call result"),
 ]
 for _expr, _why in _UNRESOLVED_EXPONENT_CASES:
