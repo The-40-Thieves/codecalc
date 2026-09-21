@@ -104,7 +104,8 @@ def classify(exc: BaseException) -> str:
         return RUNTIME_UNAVAILABLE
     if isinstance(exc, ImportError):
         return DEPENDENCY_MISSING
-    if isinstance(exc, ValueError) and "int_max_str_digits" in str(exc):
+    if isinstance(exc, ValueError):
+        _msg = str(exc)
         # CPython's OWN printer ceiling (`sys.set_int_max_str_digits`,
         # default 4300 digits) on an int->str conversion — a materialized
         # integer that grew too many digits to render, not a malformed
@@ -113,8 +114,15 @@ def classify(exc: BaseException) -> str:
         # MAX_NUMERIC_DIGITS: a ceiling, whose remedy is to shrink the
         # operands, never "report a bug" (GH #326, THE-1091). Checked before
         # the blanket ValueError branch, same as MissingExtra before
-        # ImportError above.
-        return RESOURCE_EXHAUSTED
+        # ImportError above. BOTH fragments of CPython's actual message are
+        # required, not just "int_max_str_digits" alone (cross-vendor
+        # review, finding 4 of the same round) — that single word is a
+        # plausible substring of ordinary caller prose in a way the full
+        # phrase "integer string conversion" is not, and a false match here
+        # tells a genuine validation failure it is a resource ceiling
+        # instead, which is the wrong remedy in the wrong direction.
+        if "integer string conversion" in _msg and "int_max_str_digits" in _msg:
+            return RESOURCE_EXHAUSTED
     if isinstance(exc, (ValueError, TypeError, KeyError, IndexError, ArithmeticError)):
         return VALIDATION
     if isinstance(exc, OSError):

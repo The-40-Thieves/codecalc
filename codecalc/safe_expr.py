@@ -718,13 +718,173 @@ def safe_parse(expression: str, *, evaluate: bool = True, local_dict: dict | Non
     return value, None
 
 
-def _numeric_subtree_ceiling_violation(node) -> str | None:
-    """Reason a numeric-only (no free symbols) subtree already exceeds
-    `MAX_NUMERIC_DIGITS`, or None. Used by `reject_explosive` on every
-    `Integer`/`Mul`/`Add` node it walks, not only ones nested inside a `Pow`.
+def _safe_log10_pow(base_mag: float, exp_int: int) -> float:
+    """`base_mag * exp_int` without ever converting a HUGE `exp_int` to
+    float directly.
 
-    #326 (THE-1091): the walk below used to inspect only `Pow` nodes, on the
-    assumption that unbounded growth enters exclusively through
+    `float * int` coerces the int to float first, and CPython's own
+    `int.__float__` raises `OverflowError` past roughly 1.8e308 — the exact
+    crash class `reject_explosive` was already fixed for once (see
+    `tests/test_bug_sweep.py`'s `_EXPLOSIVE_CRASH_INPUTS`:
+    `"2**100000!!ubrNembeubrNember"` parses to `Pow(2, factorial2(100000))`,
+    an exact Integer EXPONENT with thousands of digits — `!!` is postfix
+    operator syntax, invisible to `_heavy_call_violation`'s pre-parse
+    literal-argument scan, which looks for a `NAME(` call it can see in the
+    token stream). Reproduced here: this function is exactly where that
+    exponent's magnitude gets multiplied in, so it inherits the same risk.
+
+    Bit length, not the value, decides: past ~1000 bits (~1.07e301, still
+    safely under a double's ~1.8e308 range but already far larger than
+    `MAX_NUMERIC_DIGITS` could ever need) the result is astronomically over
+    any real digit cap for any nonzero `base_mag`, so the multiplication is
+    skipped entirely in favour of a signed `inf` — never touching
+    `float(exp_int)`. Same cutoff `reject_explosive`'s own numeric-base Pow
+    branch already uses for the identical reason.
+    """
+    if base_mag == 0:
+        return 0.0
+    if abs(exp_int).bit_length() > 1000:
+        huge = float("inf")
+        return huge if (base_mag > 0) == (exp_int > 0) else -huge
+    return base_mag * exp_int
+
+
+def _log10_magnitude(node, memo: dict) -> float | None:
+    """log10(|value|) of a numeric-only subtree, or None if inconclusive
+    (free symbols, a `Function` call, an irrational `NumberSymbol`, or
+    float-mode overflow — NOT evidence of anything, same convention as
+    `_bounded_numeric_value`). Memoized per node (keyed by `id`, not
+    structural equality — cheap and correct for a tree that is never
+    mutated during one `reject_explosive` call) so a node shared by
+    several ancestors is resolved once, not once per ancestor.
+
+    Two bugs, found by cross-vendor review of the first version of this
+    fix (#326/THE-1091), both traced to the SAME root cause: the first
+    version delegated to `_bounded_numeric_value`, which accumulates an
+    EXACT Rational product/sum step by step and checks the INTERMEDIATE
+    accumulator's bit length against a budget after every step.
+
+      1. ORDER-DEPENDENT false refusal. `factorial(1463) * factorial(1463)
+         / (factorial(1463) * factorial(1463))` is exactly 1 — the two
+         factors cancel — but `evaluate=False` parses it as `Mul(f, f,
+         Pow(Mul(f, f), -1))`: the accumulator multiplies the first two `f`
+         factors together (~8000 digits) and exceeds `_SUBTREE_BIT_BUDGET`
+         BEFORE the reciprocal third factor is ever multiplied in and
+         cancels it back down to 1. Refused as `resource_exhausted`, wrong.
+      2. SUPERLINEAR walk. `reject_explosive`'s loop calls the ceiling
+         check on every `Integer`/`Mul`/`Add` node `_walk` visits, and the
+         old check re-resolved its ENTIRE subtree from scratch every time —
+         so a node at depth d got re-resolved once for itself and again for
+         every numeric ancestor above it. An alternating Add/Mul chain of
+         depth 250 measured 0.311s in `reject_explosive` alone (vs ~0.0002s
+         on main), and the growth was clearly superlinear (0.009s at depth
+         50, not ~5x that at depth 250).
+
+    This function fixes both by construction, not by tuning the old one's
+    budget. Logarithms turn a product into a SUM and a reciprocal into a
+    SUBTRACTION: `f * f / (f * f)` becomes `log(f) + log(f) - log(f) -
+    log(f)`, which is exactly `0.0` in IEEE float — not an approximation,
+    because it is the identical float value added then subtracted twice, so
+    there is no intermediate to blow a budget on in the first place, and no
+    dependence on which order the Mul's args happen to be visited in. And
+    because every node's result is cached by `id(node)` in the caller-owned
+    `memo` dict, an ancestor's magnitude is a handful of dict lookups plus
+    O(number of direct children) float additions, never a re-walk of the
+    whole subtree — the walk becomes bottom-up and single-pass overall,
+    each node resolved exactly once regardless of how many ancestors ask.
+
+    The trade against `_bounded_numeric_value` (still used, UNCHANGED, by
+    the `Pow` branch below for a base/exponent `evaluate=False` left
+    un-folded — that machinery is proven and this function does not touch
+    it): this is magnitude-only, never an exact value, so a refusal message
+    always says "about N digits" (matching the `Pow` branch's own numeric-
+    base wording) rather than sometimes reporting an exact count. Good
+    enough here: nothing downstream of this function's caller needs the
+    exact value, only whether to refuse.
+
+    `Add`'s case is the one place this is a DELIBERATE OVER-approximation
+    rather than exact: log does not distribute over addition, so this uses
+    the safe bound `|sum(x_i)| <= sum(|x_i|) <= max(|x_i|) * len(args)`,
+    i.e. `log10|sum| <= max(log10|x_i|) + log10(len(args))`. That can
+    over-refuse an Add that happens to cancel (`huge - huge + 1`, the
+    Add-shaped analogue of bug 1 above) — never a false NEGATIVE, only a
+    conceivably-too-cautious refusal — and is not reachable from a
+    legitimate input in the first place: summing bounded-size heavy-call
+    results grows the digit count by at most `log10(term count)`, and the
+    2000-char expression cap admits at most roughly 125 heavy-call terms,
+    nowhere near enough addition alone to cross `MAX_NUMERIC_DIGITS` from
+    UNDER the cap — see `reject_explosive`'s own test coverage for the
+    measured numbers. A future caller relying on Add being exact here
+    should not assume it.
+    """
+    key = id(node)
+    if key in memo:
+        return memo[key]
+    from sympy import Add, Float, Integer, Mul, Pow, Rational
+
+    result: float | None
+    if isinstance(node, Integer):
+        n = int(node)
+        result = _log10_of_int(n) if n else float("-inf")
+    elif isinstance(node, Rational):  # Integer is also a Rational; caught above
+        result = (_log10_of_int(node.p) - _log10_of_int(node.q)) if node.p else float("-inf")
+    elif isinstance(node, Float):
+        try:
+            v = abs(float(node))
+        except (OverflowError, ValueError):
+            result = None
+        else:
+            result = math.log10(v) if v else float("-inf")
+    elif isinstance(node, Mul):
+        parts = [_log10_magnitude(arg, memo) for arg in node.args]
+        if any(p is None for p in parts):
+            result = None
+        else:
+            total = math.fsum(parts)
+            # `inf + (-inf)` is `nan` in IEEE float -- reachable if this Mul
+            # combines two DIFFERENT astronomically-extreme Pow factors (see
+            # the Pow branch's own `_safe_log10_pow` for where +-inf comes
+            # from at all). `nan > 0` is always False, so an unguarded nan
+            # would silently read as "not over cap" -- the wrong direction
+            # for two colliding extreme magnitudes we have no real evidence
+            # about. Treat it as the maximally cautious answer instead.
+            result = float("inf") if math.isnan(total) else total
+    elif isinstance(node, Add):
+        parts = [_log10_magnitude(arg, memo) for arg in node.args]
+        if any(p is None for p in parts):
+            result = None
+        else:
+            finite = [p for p in parts if p != float("-inf")]
+            result = (max(finite) + math.log10(len(node.args))) if finite else float("-inf")
+    elif isinstance(node, Pow) and isinstance(node.exp, Integer):
+        # Only a plain Integer exponent -- a Mul/Rational-shaped one
+        # (`evaluate=False`'s `Pow(base, Mul(30000, Pow(2,-1)))` for a
+        # fractional exponent that happens to reduce to an integer) is left
+        # to the `Pow` branch below, which already resolves that case via
+        # `_bounded_numeric_value`; this function returning None for it is
+        # inconclusive, not a regression -- the outer Mul/Add this Pow sits
+        # in simply does not get refused by THIS check, and the existing
+        # Pow-only logic still inspects the Pow node directly regardless.
+        exp_int = int(node.exp)
+        if exp_int == 0:
+            result = 0.0
+        else:
+            base_mag = _log10_magnitude(node.base, memo)
+            result = None if base_mag is None else _safe_log10_pow(base_mag, exp_int)
+    else:
+        result = None
+    memo[key] = result
+    return result
+
+
+def _numeric_ceiling_scan(tree, memo: dict) -> str | None:
+    """Reason some numeric-only (no free symbols) `Integer`/`Mul`/`Add`
+    subtree of `tree` already exceeds `MAX_NUMERIC_DIGITS`, or None. A
+    SEPARATE pass from `reject_explosive`'s own `Pow`-focused `_walk` loop
+    below — see that function for why the two are not merged into one.
+
+    #326 (THE-1091): `reject_explosive` used to inspect only `Pow` nodes, on
+    the assumption that unbounded growth enters exclusively through
     exponentiation. `"*".join(["factorial(1463)"] * 117)` disproved that.
     Each `factorial(1463)` is individually legal — `MAX_HEAVY_ARG` admits an
     argument of 1463, and the result is 3998 digits, under
@@ -737,51 +897,128 @@ def _numeric_subtree_ceiling_violation(node) -> str | None:
     raise from deep inside SymPy's printer — an uncaught `ValueError`, not a
     refusal.
 
-    Delegates the actual resolution to `_bounded_numeric_value` — the same
-    bit-budget machinery the `Pow` branch below already trusts for a base or
-    exponent `evaluate=False` left un-folded (`Mul(3, Pow(2, -1))` for
-    `3/2`) — rather than re-deriving a size bound by hand: it already knows
-    how to reduce a `Mul`/`Add` chain to an exact `Rational` (GCD-reduced at
-    every step, so a product that happens to cancel is not falsely flagged)
-    or prove it exceeds its own `_SUBTREE_BIT_BUDGET` (20,000 bits, ~6,021
-    decimal digits — deliberately looser than `MAX_NUMERIC_DIGITS` so an
-    ordinary over-the-cap result still resolves to an EXACT value here
-    instead of a blind refusal with no digit count to report). A bare
-    `Integer` atom goes through the identical call: `_bounded_numeric_value`
-    handles `Integer` as its own base case, so this closes the same hole for
-    a materialized value that never got wrapped in a `Mul`/`Add` at all,
-    with no separate code path to keep in sync.
+    TWO FOLLOW-ON BUGS, both found by cross-vendor review of the first
+    version of this fix, drove this shape specifically:
 
-    `_NumericTooLarge` (proved to exceed even that generous budget) is an
-    immediate refusal, same wording as the `Pow` branch's own numeric-base
-    case. `None` or a `float` is not evidence of anything — inconclusive
-    (a `Function` call, an irrational constant, float-mode precision loss)
-    or fixed double precision, neither a digit-count hazard — and falls
-    through exactly as `_bounded_numeric_value`'s own docstring specifies.
-    An exact `Rational`/`Integer` result gets its OWN digit count measured
-    (via `_log10_of_int`, never `str()` — the very conversion this guard
-    exists to keep off the hot path) because resolving at all is not proof
-    of being under `MAX_NUMERIC_DIGITS`: `_SUBTREE_BIT_BUDGET` is looser
-    than the digit cap on purpose.
+      1. Checking every Mul/Add node the walk happened to visit,
+         independently, is WRONG once a node can be part of a larger
+         numeric combination: `factorial(1463) * factorial(1463) /
+         (factorial(1463) * factorial(1463))` is exactly 1 (the ORIGINAL
+         report, via `_bounded_numeric_value`'s order-dependent
+         accumulation — see `_log10_magnitude`'s docstring), but even
+         after fixing the magnitude computation to be order-independent,
+         the OLD per-node walk still separately visited the DENOMINATOR's
+         own `Mul(f, f)` (the base of the `Pow(..., -1)` reciprocal) and
+         refused IT on its own ~7996-digit magnitude — correct if that
+         `Mul` were going to be printed standalone (a lone `1/(f*f)`, with
+         nothing to cancel it, genuinely cannot be rendered: `str()` on
+         an 8000-digit DENOMINATOR hits the exact same CPython ceiling),
+         but wrong here, where an ENCLOSING `Mul` already accounts for it
+         and reduces to 1.
+      2. The same per-node-independent design is where the superlinear
+         walk (finding 3 below `reject_explosive`) came from: every
+         numeric ancestor of a node re-triggered a check of that node.
+
+    The fix for both: once a node's OWN magnitude is known (not `None` —
+    i.e. it is fully numeric, `_log10_magnitude` did not bottom out on a
+    free symbol, a `Function` call, or float-mode overflow anywhere inside
+    it), that ONE number is the complete, correctly-cancelled answer for
+    the ENTIRE subtree rooted there — `_log10_magnitude` already resolved
+    every descendant to get it. So this scan does NOT descend into a
+    node's children once its magnitude resolves: whatever is inside has
+    already been accounted for, and looking at a piece of it in isolation
+    (the denominator bug above) is exactly the mistake to avoid. Only when
+    a node's magnitude is `None` (mixed with a free symbol, or otherwise
+    inconclusive) does the scan need to look inside FOR A SMALLER numeric
+    island that might still be dangerous on its own (`x +
+    "*".join(["factorial(1463)"] * 117)`, say).
+
+    Iterative (a stack, like `_walk`), not recursive: a Python recursive
+    descent here would reintroduce the exact `RecursionError` risk
+    `_walk`'s own docstring already rules out for deep trees. Cheap by
+    construction rather than by tuning: a fully-numeric tree (the common
+    dangerous case) resolves in ONE `_log10_magnitude` call at the ROOT and
+    the scan's own stack never grows past that; a symbolic tree with no
+    numeric island anywhere pushes every node once and finds nothing,
+    matching the old loop's own baseline cost.
     """
-    resolved = _bounded_numeric_value(node)
-    if resolved is None or isinstance(resolved, float):
-        return None
-    if isinstance(resolved, _NumericTooLarge):
-        return (f"the result is a numeric expression whose magnitude already "
-                f"exceeds the limit of {MAX_NUMERIC_DIGITS} digits: it cannot "
-                "be evaluated safely")
-    if resolved.q == 1:
-        log10_magnitude = _log10_of_int(int(resolved))
-    else:
-        log10_magnitude = _log10_of_int(resolved.p) - _log10_of_int(resolved.q)
-    if log10_magnitude <= 0:  # magnitude <= 1 -- at most one digit, never over cap
-        return None
-    digit_count = int(log10_magnitude) + 1
-    if digit_count > MAX_NUMERIC_DIGITS:
-        return (f"the result would have about {digit_count} digits, over the "
-                f"limit of {MAX_NUMERIC_DIGITS}: it cannot be rendered as a "
-                "decimal string")
+    from sympy import Add, Integer, Mul, Pow
+
+    stack = [tree]
+    seen = 0
+    while stack:
+        node = stack.pop()
+        seen += 1
+        # Same pathological-tree guard as _walk's own -- the length cap
+        # upstream keeps an ordinary input far below this.
+        if seen > 20_000:
+            return None
+        if isinstance(node, tuple):
+            # See `_walk`'s own comment on this exact shape: a trailing
+            # comma (`"2**1000000^6c6/Me,"`) parses to a bare Python
+            # `tuple`, not a SymPy node, and a bare tuple has no `.args` of
+            # its own -- `getattr` below would silently stop at its
+            # surface and this scan would walk past whatever it wraps.
+            stack.extend(node)
+            continue
+        if isinstance(node, Pow):
+            # Entirely the Pow-focused loop's domain (below — it visits
+            # every node in the tree via `_walk` regardless of what this
+            # scan chooses to skip, so nothing is lost by deferring). This
+            # scan's job is the coverage gap where NO Pow node exists at
+            # all; reaching into a Pow's own base/exponent here duplicates
+            # that loop's job with DIFFERENT, less specific wording, and
+            # for a SYMBOLIC-base Pow with a huge numeric exponent, this
+            # scan would treat the bare exponent Integer as if it were a
+            # value about to be PRINTED (refusing it on `MAX_NUMERIC_
+            # DIGITS` grounds) when the loop below already has a dedicated,
+            # more accurate reason for that exact shape (`MAX_SYMBOLIC_
+            # EXPONENT` — expanding a symbolic power is superlinear in the
+            # exponent, a cost bound, not a print-ceiling one). Confirmed
+            # by `tests/test_bug_sweep.py`'s `_EXPLOSIVE_CRASH_INPUTS[1]`
+            # (`(x+1)**20000!!...`), which this scan used to intercept
+            # with the wrong reason before this fix.
+            #
+            # `_log10_magnitude` (used above and below by an ENCLOSING
+            # Mul/Add) still resolves straight through a Pow when it needs
+            # to — e.g. `factorial(1463) * factorial(1463) * 2**50`'s
+            # combined magnitude correctly includes the `2**50` factor.
+            # This skip only affects where THIS scan independently
+            # descends and checks IN ISOLATION, not what a parent's own
+            # magnitude computation is allowed to look through.
+            continue
+        if isinstance(node, (Integer, Mul, Add)):
+            magnitude = _log10_magnitude(node, memo)
+            if magnitude is not None:
+                # Fully numeric: already the complete, cancellation-correct
+                # answer for this whole subtree. Do not push its children —
+                # checking a piece of an already-resolved combination
+                # independently is finding 1 above.
+                if magnitude > 0:  # magnitude <= 1 is at most one digit, never over cap
+                    if not math.isfinite(magnitude):
+                        # `_safe_log10_pow`'s own +-inf shortcut for an
+                        # astronomically huge exponent, or (rarer) two such
+                        # Pow factors colliding into `nan` inside a Mul --
+                        # `int(magnitude)` below would raise OverflowError
+                        # on the former and give a wrong answer on the
+                        # latter (nan compares False to everything, but it
+                        # is caught upstream by `_log10_magnitude`'s own
+                        # nan-to-inf fallback before it ever reaches here).
+                        return ("the result would have an unbounded number of "
+                                f"digits, over the limit of {MAX_NUMERIC_DIGITS}: "
+                                "it cannot be rendered as a decimal string")
+                    digit_count = int(magnitude) + 1
+                    if digit_count > MAX_NUMERIC_DIGITS:
+                        return (f"the result would have about {digit_count} "
+                                f"digits, over the limit of {MAX_NUMERIC_DIGITS}: "
+                                "it cannot be rendered as a decimal string")
+                continue
+            # magnitude is None: mixed with a free symbol, or otherwise
+            # inconclusive -- fall through to look inside for a smaller
+            # numeric island (handled by the generic descent below).
+        args = getattr(node, "args", ())
+        if isinstance(args, tuple):
+            stack.extend(args)
     return None
 
 
@@ -836,21 +1073,23 @@ def reject_explosive(tree) -> str | None:
     either alone as sufficient. See `tests/test_bug_sweep.py`'s block
     for the assertion that the backstop actually holds for this shape.
     """
-    from sympy import Add, Float, Integer, Mul, Pow
+    from sympy import Float, Integer, Pow
+
+    # #326 (THE-1091): a SEPARATE pass, before the Pow-only walk below,
+    # covers a numeric-only Mul/Add/Integer that the Pow-only loop cannot
+    # see at all — see `_numeric_ceiling_scan`'s own docstring for the
+    # `factorial(1463)` product this closes, and for why it is a genuinely
+    # separate pass rather than folded into the loop below: that loop's
+    # `_walk` visits every node unconditionally (needed for Pow, which can
+    # appear anywhere), while the scan must NOT independently re-examine a
+    # node once an ancestor has already resolved it — the two have
+    # different, incompatible descent rules, not just different node-type
+    # filters.
+    _ceiling_violation = _numeric_ceiling_scan(tree, {})
+    if _ceiling_violation:
+        return _ceiling_violation
 
     for node in _walk(tree):
-        # #326 (THE-1091): a numeric-only Mul/Add (or a bare materialized
-        # Integer) is exactly as capable of an over-cap result as a Pow is —
-        # see `_numeric_subtree_ceiling_violation`'s docstring for the
-        # `factorial(1463)` product that walked past this loop when it only
-        # looked at Pow nodes. Checked before the Pow-only logic below so a
-        # Pow NESTED inside a numeric Mul/Add (`2**100000 * 3`) is caught
-        # here first rather than falling through to it — same refusal
-        # either way, since both ultimately trust `_bounded_numeric_value`.
-        if isinstance(node, (Integer, Mul, Add)) and not node.free_symbols:
-            violation = _numeric_subtree_ceiling_violation(node)
-            if violation:
-                return violation
         if not isinstance(node, Pow):
             continue
         base, exponent = node.base, node.exp

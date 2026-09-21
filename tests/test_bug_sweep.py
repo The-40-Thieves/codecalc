@@ -1377,6 +1377,102 @@ check("  ...while an ordinary ValueError is still validation, unaffected",
       _errors.classify(ValueError("bad expression")) == _errors.VALIDATION,
       f"-> {_errors.classify(ValueError('bad expression'))}")
 
+# ═══ four findings from cross-vendor review of the first version of this ══
+# ═══ fix (commit 0f276a9), all reproduced and fixed here ══════════════════
+
+# Finding 1 (High): exact.py's Fraction-formatting catch (a SEPARATE
+# `except ValueError` from the generic catch-all fixed above, inside
+# `_eval_exact` itself -- the pow guard bounds the CPU cost of
+# exponentiation but not the FORMATTING cost of str()'ing a cheap-to-compute
+# result) still returned a bare, uncoded dict. `calc_exact("10**5000")`
+# reported `code: "internal"` plus CPython's own raw advice even after the
+# generic catch-all was fixed, because this is a DIFFERENT except block.
+_calc_exact_result = _exact.eval_exact("10**5000")
+check("calc_exact('10**5000'): cheap to compute, too big to format -- ceiling, not internal",
+      _calc_exact_result.get("code") == _errors.RESOURCE_EXHAUSTED,
+      f"-> code={_calc_exact_result.get('code')} err={str(_calc_exact_result.get('error'))[:70]!r}")
+check("  ...with no raw CPython advice in the message",
+      "sys.set_int_max_str_digits" not in str(_calc_exact_result.get("error")),
+      f"-> {_calc_exact_result.get('error')!r}")
+
+# Finding 2 (High): `_bounded_numeric_value`'s ordered accumulator made the
+# refusal decision depend on operand order -- `f*f/(f*f)` is EXACTLY 1 (the
+# two factors cancel), but `evaluate=False` parses it as `Mul(f, f,
+# Pow(Mul(f, f), -1))`: the accumulator multiplied the first two `f` factors
+# together (~8000 digits) and blew the intermediate bit budget BEFORE the
+# cancelling reciprocal factor was ever multiplied in. Refused as
+# resource_exhausted, wrong -- the true value is a one-character integer.
+# Several groupings of the identical cancellation, all of which must
+# compute to exactly 1, not refuse.
+_CANCELLATION_CASES = [
+    "factorial(1463)*factorial(1463)/(factorial(1463)*factorial(1463))",
+    "(factorial(1463)*factorial(1463))/(factorial(1463)*factorial(1463))",
+    "factorial(1463)/factorial(1463)*factorial(1463)/factorial(1463)",
+    ("factorial(1463)*factorial(1463)*factorial(1463)*factorial(1463)"
+     "/(factorial(1463)*factorial(1463)*factorial(1463)*factorial(1463))"),
+]
+for _expr in _CANCELLATION_CASES:
+    _t0 = time.time()
+    _r = _exact.simplify_expression(_expr)
+    _elapsed = time.time() - _t0
+    check(f"{_expr[:55]!r}... cancels to 1, not refused",
+          _r.get("ok") is True and _r.get("simplified") == "1",
+          f"-> ok={_r.get('ok')} code={_r.get('code')} simplified={_r.get('simplified')!r}")
+    check("  ...promptly, not after a multi-second burn",
+          _elapsed < 5.0, f"-> {_elapsed:.3f}s")
+# ...and the ORIGINAL 117-factorial product (no cancellation at all) must
+# still be refused -- the fix for order-independence must not turn into a
+# blanket "never refuse a division" either.
+_confirm_product_result = _exact.simplify_expression(_PRODUCT_BOMB)
+check("  ...while the original 117-factorial product (no cancellation) is still refused",
+      _confirm_product_result.get("ok") is False
+      and _confirm_product_result.get("code") == _errors.RESOURCE_EXHAUSTED,
+      f"-> {_confirm_product_result}")
+
+# Finding 3 (Medium): the walk re-resolved every numeric subtree from
+# scratch at every numeric ancestor -- superlinear in tree depth. An
+# alternating Add/Mul tree (`((...((2+1)*2+1)*2...)`) of depth 250 measured
+# 0.311s in reject_explosive ALONE before the fix (vs ~0.0002s on main);
+# 50/100/150/200/250 were 0.009/0.033/0.073/0.139/0.311s, clearly
+# superlinear rather than a flat per-node cost. Built directly with SymPy's
+# own Add/Mul constructors (not string parsing) for a precisely-controlled,
+# genuinely nested (not auto-flattened) shape.
+from sympy import Add as _Add
+from sympy import Integer as _Integer
+from sympy import Mul as _Mul
+
+
+def _alternating_tree(depth):
+    node = _Integer(2)
+    for i in range(depth):
+        node = (_Add(node, _Integer(1), evaluate=False) if i % 2 == 0
+                else _Mul(node, _Integer(2), evaluate=False))
+    return node
+
+
+_depth_timings = {}
+for _depth in (50, 100, 150, 200, 250):
+    _tree = _alternating_tree(_depth)
+    _t0 = time.time()
+    _rx(_tree)
+    _depth_timings[_depth] = time.time() - _t0
+check(f"an alternating Add/Mul tree of depth 250 stays under 20ms in reject_explosive "
+      f"(was 0.311s before the fix) -> {_depth_timings}",
+      _depth_timings[250] < 0.020, f"-> {_depth_timings[250]:.4f}s")
+check("  ...and depth 250 is not many times slower than depth 50 (no superlinear blowup)",
+      _depth_timings[250] < _depth_timings[50] * 20,
+      f"-> depth50={_depth_timings[50]:.4f}s depth250={_depth_timings[250]:.4f}s")
+
+# Finding 4 (Low): errors.classify()'s digit-limit special case matched on
+# "int_max_str_digits" alone -- a plausible substring of ordinary caller
+# prose in a way the full CPython phrase is not. Requires BOTH fragments now.
+check("classify() requires BOTH CPython message fragments, not 'int_max_str_digits' alone",
+      _errors.classify(ValueError("this mentions int_max_str_digits but nothing else")) == _errors.VALIDATION,
+      f"-> {_errors.classify(ValueError('this mentions int_max_str_digits but nothing else'))}")
+check("  ...and the real CPython message (both fragments) still classifies correctly",
+      _errors.classify(_synthetic_digit_limit_exc) == _errors.RESOURCE_EXHAUSTED,
+      f"-> {_errors.classify(_synthetic_digit_limit_exc)}")
+
 # ═══ the fail-closed choice above was ITSELF too broad — cross-vendor ══════
 # ═══ differential probe (main vs. this branch) found 5 benign expressions ══
 # ═══ that main evaluates fine but an earlier version of this fix refused ═══

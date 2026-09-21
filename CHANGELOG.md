@@ -508,16 +508,29 @@ behind it.
   `Pow` anywhere for the old Pow-only walk to catch. It returned
   `"code": "internal"` with a raw CPython message ("...use
   sys.set_int_max_str_digits()...") addressed to nobody the caller can act
-  on. `reject_explosive` now runs the same `_bounded_numeric_value`
-  bit-budget check the `Pow` branch already trusted for un-folded exponents
-  and bases over every numeric-only `Mul`/`Add` subtree it walks (and bare
-  `Integer` atoms), refusing the product BEFORE evaluation with
-  `"resource_exhausted"` and a remedy addressed to the caller. Separately,
-  `exact.py`'s four bare `except Exception: return {"ok": False, "error":
-  str(exc)}` catch-alls (`eval_exact`, `solve_expression`,
-  `limit_expression`, `simplify_expression`) now route through
-  `errors.classify`, which special-cases a CPython digit-limit `ValueError`
-  to `resource_exhausted` instead of falling through to the generic
+  on. `reject_explosive` now runs a SEPARATE pass — an order-independent,
+  memoized, single-visit-per-node log-magnitude scan (`_numeric_ceiling_
+  scan`/`_log10_magnitude`) — over every numeric-only `Mul`/`Add`/`Integer`
+  subtree, refusing an over-cap product or sum BEFORE evaluation with
+  `"resource_exhausted"` and a remedy addressed to the caller, without
+  touching the pre-existing `Pow`-only loop at all. Two follow-on bugs, both
+  caught by cross-vendor review before release: the first version delegated
+  to the exact-accumulation bit-budget check the `Pow` branch already used,
+  which is ORDER-DEPENDENT — `factorial(1463)*factorial(1463)/
+  (factorial(1463)*factorial(1463))` is exactly 1, but was refused as
+  over-cap because the numerator's intermediate product blew the budget
+  before the cancelling denominator was multiplied in — and re-resolved
+  every numeric subtree at every numeric ancestor, superlinear in tree
+  depth (an alternating Add/Mul chain of depth 250 measured 0.311s in
+  `reject_explosive` alone, now under 20ms). Separately, `exact.py`'s
+  `except Exception`/`except ValueError` catches that returned a bare
+  `{"ok": False, "error": ...}` (the four generic catch-alls in
+  `eval_exact`, `solve_expression`, `limit_expression`,
+  `simplify_expression`, plus `eval_exact`'s own Fraction-formatting catch
+  and `radix_convert`'s digit-parsing catch) now route through
+  `errors.classify`, which requires BOTH fragments of CPython's digit-limit
+  message (not a single overly-broad substring) to map a `ValueError` to
+  `resource_exhausted` instead of falling through to the generic
   `ValueError` -> `validation` mapping or, previously, `internal`.
 
 ## [0.12.0] — 2026-09-09
