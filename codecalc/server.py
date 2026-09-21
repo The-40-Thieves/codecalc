@@ -1359,7 +1359,7 @@ def execute_code(
     max_output_kb: Annotated[int, Field(description="Stdout/stderr capture cap in KiB per stream; 0 uses the 64 KiB default, hard-clamped to 240")] = 0,
     max_cpu: Annotated[int, Field(description="Per-call CPU-time ceiling in seconds; 0 means no explicit limit is set")] = 0,
     no_net: Annotated[bool, Field(description="Block outbound network access for this run; best-effort on platforms without seccomp")] = False,
-    compact: Annotated[bool, Field(description="Drop diagnostic fields (timings, workdir, platform) from the result; safety disclosures are always kept, and stderr is kept whenever the run did not succeed (dropped only on ok=true)")] = False,
+    compact: Annotated[bool, Field(description="Drop diagnostic fields (timings, workdir, platform) from the result; safety disclosures are always kept, and stderr is kept whenever the run did not succeed — dropped only on a clean successful run (ok=true, exit_code 0, verdict OK)")] = False,
     provider: Annotated[str | None, Field(description="Execution backend id to use (see list_execution_providers); default picks automatically")] = None,
     dependencies: Annotated[list[str] | None, Field(description="Packages to install before running, e.g. ['requests==2.31.0']; merged with any PEP 723 block")] = None,
     ctx: Context = None,

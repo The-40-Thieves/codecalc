@@ -688,6 +688,73 @@ def test_piston_applies_the_requested_output_cap_to_remote_results() -> None:
           "max_output_kb_enforced_after_provider_response" in result["unenforced"])
 
 
+def test_piston_bounds_stderr_to_the_default_cap_when_max_output_kb_is_0() -> None:
+    """#333 (F-review on GH #323 / THE-1088): the cap above only fired when a
+    caller passed an EXPLICIT `max_output_kb`. Left at its documented default
+    (0), Piston's response came back completely uncapped — reproduced by the
+    review with a simulated 1,000,000-byte stderr, which crossed the wire
+    whole in both the full envelope and, worse, a `compact=True` result,
+    whose entire reason for existing is bounded size. `executor.
+    MAX_OUTPUT_BYTES` (64 KiB) is the same default the native and fallback
+    executors already apply at `max_output_kb == 0`; the fix makes Piston
+    apply it too. Checked at both the provider boundary AND through
+    `server.compact_result` — the second is the actual path a compact
+    `execute_code` caller hits, and bounding upstream at the provider is
+    only worth anything if it survives that far."""
+    huge_stderr = "e" * 1_000_000
+
+    def transport(method: str, path: str, headers: dict[str, str],
+                  payload: dict | None, timeout: int) -> object:
+        del method, path, headers, payload, timeout
+        return {
+            "language": "python",
+            "version": "3.12.0",
+            "run": {
+                "stdout": "",
+                "stderr": huge_stderr,
+                "output": huge_stderr,
+                "code": 1,
+                "signal": None,
+                "message": None,
+                "status": None,
+                "cpu_time": 1,
+                "wall_time": 2,
+                "memory": 1024,
+            },
+        }
+
+    result = providers.PistonExecutionProvider(
+        base_url="http://piston.test", transport=transport
+    ).execute(providers.ComputationSpec(
+        language="python3", code="raise SystemExit(1)"
+        # max_output_kb left unset — this is the documented 0/default case.
+    ))
+
+    from codecalc import executor
+
+    check("Piston bounds stderr to the executor default (64 KiB) when "
+          "max_output_kb is left at 0",
+          len(result["stderr"].encode()) <= executor.MAX_OUTPUT_BYTES)
+    check("...the true pre-cap size is still disclosed via stderr_bytes",
+          result["stderr_bytes"] == len(huge_stderr.encode()))
+    check("...classified OLE, not a silent pass-through of 1,000,000 bytes",
+          result["verdict"] == "OLE" and result["output_truncated"] is True)
+    check("...and discloses the post-response enforcement that bounded it",
+          "max_output_kb_enforced_after_provider_response" in result["unenforced"])
+
+    from codecalc import server
+
+    compact = server.compact_result(result)
+    check("compact_result keeps the now-bounded stderr (the run did not succeed)",
+          "stderr" in compact
+          and len(compact["stderr"].encode()) <= executor.MAX_OUTPUT_BYTES)
+    check("...NOT the raw 1,000,000-byte stderr — bounding survives compaction",
+          len(compact.get("stderr", "").encode()) < len(huge_stderr.encode()))
+    check("...and keeps the disclosure that explains why it is not the full stream",
+          "max_output_kb_enforced_after_provider_response"
+          in compact.get("unenforced", []))
+
+
 def test_configured_registry_enables_piston_without_disclosing_credentials() -> None:
     authorization_value = "Bearer " + "registry-provider-value"
     environment: Mapping[str, str] = {
@@ -1205,6 +1272,7 @@ if __name__ == "__main__":
     test_piston_execution_redacts_credentials_echoed_by_the_provider()
     test_piston_provider_passes_the_shared_execution_conformance_suite()
     test_piston_applies_the_requested_output_cap_to_remote_results()
+    test_piston_bounds_stderr_to_the_default_cap_when_max_output_kb_is_0()
     test_configured_registry_enables_piston_without_disclosing_credentials()
     test_piston_health_reports_redacted_transport_failure()
     test_piston_execution_returns_a_redacted_transport_error_contract()
