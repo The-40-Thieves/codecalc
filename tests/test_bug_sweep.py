@@ -1473,6 +1473,90 @@ check("  ...and the real CPython message (both fragments) still classifies corre
       _errors.classify(_synthetic_digit_limit_exc) == _errors.RESOURCE_EXHAUSTED,
       f"-> {_errors.classify(_synthetic_digit_limit_exc)}")
 
+# ═══ round 3 of cross-vendor review (grok, on 14e0258) — three more ════════
+# ═══ findings, all fixed here ══════════════════════════════════════════════
+
+# Finding 1 (High): SymPy flattens a chain of the same operator into ONE
+# n-ary node, so `_log10_magnitude` returning `None` the moment ANY child is
+# inconclusive left no nested numeric island for the scan's fallback descent
+# to find -- `x * factorial(1463) * ... * factorial(1463)` (117 of them) is
+# one flat `Mul` with 118 args, not a `Mul` wrapping a smaller all-numeric
+# one. Prefixing the original bomb with any of five different inconclusive
+# leading factors (a free symbol, a Function call, two irrational
+# NumberSymbols, a non-integer-exponent Pow) all bypassed refusal entirely.
+_BYPASS_PREFIXES = ["x*", "cos(0)*", "pi*", "E*", "2**(1/2)*"]
+for _prefix in _BYPASS_PREFIXES:
+    _bypass_expr = _prefix + _PRODUCT_BOMB
+    check(f"{_bypass_expr[:20]!r}... ({len(_bypass_expr)} chars) stays under the 2000-char cap",
+          len(_bypass_expr) < 2000, f"-> {len(_bypass_expr)}")
+    _t0 = time.time()
+    _bypass_result = _exact.simplify_expression(_bypass_expr)
+    _bypass_elapsed = time.time() - _t0
+    check(f"{_prefix!r} + 117-factorial product is refused, not silently allowed through",
+          _bypass_result.get("ok") is False
+          and _bypass_result.get("code") == _errors.RESOURCE_EXHAUSTED,
+          f"-> ok={_bypass_result.get('ok')} code={_bypass_result.get('code')}")
+    check("  ...promptly, not after materializing the ~467,766-digit product",
+          _bypass_elapsed < 2.0, f"-> {_bypass_elapsed:.3f}s")
+# Ordering must not matter either -- the inconclusive sibling in the middle
+# of the flat Mul, not just leading it. Two copies of factorial(1463)
+# (~7996 digits combined) is already over cap on its own, no need for 117.
+for _ordering_expr in ("factorial(1463)*x*factorial(1463)", "x*factorial(1463)*factorial(1463)"):
+    _ordering_result = _exact.simplify_expression(_ordering_expr)
+    check(f"{_ordering_expr!r} is refused regardless of where x sits in the Mul",
+          _ordering_result.get("ok") is False
+          and _ordering_result.get("code") == _errors.RESOURCE_EXHAUSTED,
+          f"-> {_ordering_result}")
+# ...and the fix must not turn into "any Mul with a symbolic factor is
+# refused" -- a SINGLE under-cap factorial alongside x must still evaluate.
+_single_with_symbol = _exact.simplify_expression("x*factorial(1463)")
+check("'x*factorial(1463)' (single under-cap factorial) still evaluates",
+      _single_with_symbol.get("ok") is True, f"-> ok={_single_with_symbol.get('ok')!r}")
+
+# Finding 2 (Medium): `_numeric_ceiling_scan` is iterative specifically to
+# avoid RecursionError on a deep tree, but `_log10_magnitude` (which it
+# calls) is a genuine Python recursive descent over the same tree, and sits
+# outside `safe_parse`'s own `try/except` (that only wraps the PARSE step).
+# The reviewer's own example: 998 levels of redundant parens around `2*2`,
+# 1999 chars, under the cap. Must never raise -- either a value or a
+# refusal, matching the "classify_unsafe/safe_parse never raise" contract
+# every _EXPLOSIVE_CRASH_INPUTS-style regression above already pins.
+_DEEP_NESTING_EXPR = "(" * 998 + "2*2" + ")" * 998
+check(f"the depth-998 nesting shape is {len(_DEEP_NESTING_EXPR)} chars, under the 2000-char cap",
+      len(_DEEP_NESTING_EXPR) < 2000, f"-> {len(_DEEP_NESTING_EXPR)}")
+try:
+    _deep_value, _deep_err = _boundary_parse(_DEEP_NESTING_EXPR)
+    _deep_raised = None
+except Exception as _exc:
+    _deep_value, _deep_err, _deep_raised = None, None, _exc
+check("safe_parse does not raise (RecursionError or otherwise) on the depth-998 nesting shape",
+      _deep_raised is None, f"-> raised {_deep_raised!r}" if _deep_raised else "")
+if _deep_raised is None:
+    check("  ...and returns either a value or a refusal, never both None and no exception",
+          _deep_value is not None or _deep_err is not None,
+          f"-> value={_deep_value!r} err={_deep_err!r}")
+
+# Finding 3 (Medium): the Pow branch's base/exponent resolution still called
+# `_bounded_numeric_value` directly, inheriting its order-dependent
+# accumulator bug for a cancelling Mul used as a Pow's base OR exponent --
+# unlike the top-level Mul/Add scan (round 2), which does not touch this
+# code path at all. `2**(f*f/(f*f))` (exponent cancels to 1) and
+# `(f*f/(f*f))**2` (base cancels to 1) must evaluate, not false-refuse.
+_POW_CANCELLATION_CASES = [
+    ("2**(factorial(1463)*factorial(1463)/(factorial(1463)*factorial(1463)))", "2"),
+    ("(factorial(1463)*factorial(1463)/(factorial(1463)*factorial(1463)))**2", "1"),
+]
+for _pow_expr, _want_value in _POW_CANCELLATION_CASES:
+    _t0 = time.time()
+    _pow_result = _exact.simplify_expression(_pow_expr)
+    _pow_elapsed = time.time() - _t0
+    check(f"{_pow_expr[:55]!r}... evaluates to {_want_value}, not refused",
+          _pow_result.get("ok") is True and _pow_result.get("simplified") == _want_value,
+          f"-> ok={_pow_result.get('ok')} code={_pow_result.get('code')} "
+          f"simplified={_pow_result.get('simplified')!r}")
+    check("  ...promptly, not after a multi-second burn",
+          _pow_elapsed < 5.0, f"-> {_pow_elapsed:.3f}s")
+
 # ═══ the fail-closed choice above was ITSELF too broad — cross-vendor ══════
 # ═══ differential probe (main vs. this branch) found 5 benign expressions ══
 # ═══ that main evaluates fine but an earlier version of this fix refused ═══

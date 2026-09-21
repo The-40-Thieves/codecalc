@@ -531,7 +531,31 @@ behind it.
   `errors.classify`, which requires BOTH fragments of CPython's digit-limit
   message (not a single overly-broad substring) to map a `ValueError` to
   `resource_exhausted` instead of falling through to the generic
-  `ValueError` -> `validation` mapping or, previously, `internal`.
+  `ValueError` -> `validation` mapping or, previously, `internal`. A third
+  cross-vendor review round found three more gaps in the round-two design:
+  (1) `_log10_magnitude` on a `Mul`/`Add` returned `None` — inconclusive,
+  fall through — the moment ANY child was inconclusive, but SymPy flattens
+  a chain of the same operator into one n-ary node, so `x *
+  factorial(1463) * ... * factorial(1463)` (117 of them; also reproduced
+  with a `cos(0)*`, `pi*`, `E*`, or `2**(1/2)*` prefix) kept every
+  `factorial(1463)` sibling individually under the digit cap and bypassed
+  refusal entirely, still materializing the ~467,766-digit product. Fixed
+  by refusing on the RESOLVABLE part of a Mul/Add alone once the whole
+  node is inconclusive — a symbolic or unresolvable sibling cannot make an
+  already-over-cap numeric part smaller in any way the printer would
+  rescue. (2) `_log10_magnitude`'s recursive descent sat outside
+  `safe_parse`'s own `try/except` (which only wraps the parse step), a
+  latent `RecursionError` risk on a sufficiently deep tree; now guarded at
+  the `reject_explosive` call site, refusing with the same "too deeply
+  nested" wording `logic.py`'s parser already uses for the identical
+  shape. (3) `reject_explosive`'s `Pow` branch still resolved a
+  Mul/Rational-shaped base or exponent via the order-DEPENDENT
+  `_bounded_numeric_value` directly, so a cancelling Mul used as a Pow's
+  base or exponent (`2**(f*f/(f*f))`, `(f*f/(f*f))**2`) still
+  false-refused even though the identical cancellation at the top level
+  was already fixed; both now resolve through `_log10_magnitude` first
+  (`_resolve_numeric_exactly`), falling back to an exact reconstruction
+  only once that confirms it is safe (cheap) to.
 
 ## [0.12.0] — 2026-09-09
 
