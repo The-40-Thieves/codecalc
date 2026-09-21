@@ -5,7 +5,7 @@ import sys
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
-from codecalc import exact
+from codecalc import exact, logic
 
 FAILS = []
 
@@ -41,6 +41,67 @@ check("pct 3/8", r["ok"] and abs(r["percent"] - 37.5) < 1e-6)
 # EXACT `share` fraction — nothing used to say which of the two was which.
 check("pct discloses percent is rounded, and to how many digits",
       r.get("rounding") == {"percent": 6}, f"-> {r}")
+
+# percent_change (GH #329): before/after change, distinct from percentage's
+# PART/TOTAL share. Exact rational relative to abs(from_value) — see
+# exact.percent_change's own module comment for the sign-convention
+# reasoning (the conventional finance definition, not plain (b-a)/a).
+r = exact.percent_change("100", "150")
+check("percent_change 100->150",
+      r["ok"] and r["percent_exact"] == "50" and r["absolute_change"] == "50"
+      and r["direction"] == "increase" and r["multiplier"] == "3/2", f"-> {r}")
+r = exact.percent_change("150", "100")
+check("percent_change 150->100 (exact fraction, not a rounded float)",
+      r["ok"] and r["percent_exact"] == "-100/3" and r["direction"] == "decrease"
+      and abs(r["percent_decimal"] - (-33.333333)) < 1e-5, f"-> {r}")
+r = exact.percent_change("5", "5")
+check("percent_change 5->5 unchanged",
+      r["ok"] and r["direction"] == "unchanged" and r["percent_exact"] == "0"
+      and r["multiplier"] == "1", f"-> {r}")
+r = exact.percent_change("0", "5")
+check("percent_change refuses from_value=0, coded, with a remedy",
+      r["ok"] is False and r.get("code") == "validation"
+      and "report the absolute change" in r.get("remedy", ""), f"-> {r}")
+# Negative base: relative to abs(from_value), so `direction` follows the
+# ALGEBRAIC sign of the change, not the change in |value| — GH #329 asked
+# this be decided explicitly and documented; `note` is where it is.
+r = exact.percent_change("-100", "-50")
+check("percent_change -100->-50: direction 'increase' (algebraic, -50 > "
+      "-100), documented sign convention in `note`",
+      r["ok"] and r["percent_exact"] == "50" and r["direction"] == "increase"
+      and "note" in r, f"-> {r}")
+r = exact.percent_change("-100", "50")
+check("percent_change -100->50",
+      r["ok"] and r["percent_exact"] == "150" and r["direction"] == "increase"
+      and r["multiplier"] == "-1/2" and "note" in r, f"-> {r}")
+r = exact.percent_change("3/4", "1")
+check("percent_change accepts expression inputs ('3/4' -> '1')",
+      r["ok"] and r["percent_exact"] == "100/3", f"-> {r}")
+r = exact.percent_change("abc", "1")
+check("percent_change refuses a non-numeric from_value",
+      r["ok"] is False and "error" in r, f"-> {r}")
+
+# evaluate_expression's calculus forms (GH #329): documented in server.py's
+# docstring but previously undiscoverable from the schema — diff/integrate/
+# series worked all along; these prove the doc's own examples still run.
+r = logic.evaluate_expression("diff(sin(x)*x, x)")
+check("evaluate_expression diff(sin(x)*x, x)",
+      r["ok"] and r["expression"] == "x*cos(x) + sin(x)", f"-> {r}")
+r = logic.evaluate_expression("integrate(x**2, (x, 0, 1))")
+check("evaluate_expression integrate(x**2, (x, 0, 1)) definite integral",
+      r["ok"] and r["expression"] == "1/3", f"-> {r}")
+r = logic.evaluate_expression("series(sin(x), x, 0, 6)")
+check("evaluate_expression series(sin(x), x, 0, 6)",
+      r["ok"] and r["expression"] == "x - x**3/6 + x**5/120 + O(x**6)", f"-> {r}")
+
+# symbolic(op="solve_linear")'s documented non-linear example (GH #329) —
+# the name says 'linear', the docstring now says non-linear polynomial
+# systems work too; prove it with the ticket's own example.
+r = logic.solve_linear("x**2 + y**2 = 5; x - y = -1", ["x", "y"])
+check("solve_linear accepts a non-linear polynomial system, as documented",
+      r["ok"] and r["count"] == 2
+      and sorted(r["solutions"]) == sorted(["{x: -2, y: -1}", "{x: 1, y: 2}"]),
+      f"-> {r}")
 
 # stats
 r = exact.stats([1, 2, 3, 4, 5])

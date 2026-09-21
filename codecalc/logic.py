@@ -555,7 +555,12 @@ def _solve_linear(system: str, variables: str | list[str]) -> dict:
 
 
 def solve_linear(system: str, variables: str | list[str]) -> dict:
-    """Solve a system of linear equations for the named variables.
+    """Solve a system of equations for the named variables.
+
+    Despite the name (kept for compatibility — see server.py's `symbolic`
+    docstring, GH #329), this reaches sympy's general `solve()`, so
+    non-linear polynomial systems ('x**2 + y**2 = 5; x - y = -1') work the
+    same way as linear ones ('x + y = 10; x - y = 2').
 
     Guarded (#84): the body is unchanged, it just runs somewhere the parent can
     kill it. Warmed through the same set evaluate_expression uses, because both

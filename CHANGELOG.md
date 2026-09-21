@@ -249,6 +249,41 @@ behind it.
   `"event_detail_over_cap"` and `events[]` items gain the optional `detail_dropped: true`
   marker; no shape a `1.17.0` client already validates changes otherwise.
 
+### Added
+
+- **`percent_change(from_value, to_value)`** (calculator group) — exact
+  percent change between two values, `(to - from) / abs(from) * 100`, the
+  conventional finance definition (relative to the MAGNITUDE of the base,
+  so a negative `from_value` does not flip the sign). `percentage`
+  answered PART/TOTAL and had no before/after equivalent, so models were
+  hand-building `(b - a) / a * 100` in `calc_exact` — the exact guessing
+  this package exists to remove, and the easy place to get the base
+  wrong. Returns `percent_exact` (exact rational), `percent_decimal`
+  (rounded), `absolute_change`, `direction`
+  ("increase"/"decrease"/"unchanged"), and `multiplier` (`to_value /
+  from_value`, exact); refuses `from_value=0` (coded `validation`, remedy
+  "report the absolute change instead") rather than returning infinity,
+  and adds a `note` spelling out the sign convention whenever
+  `from_value` is negative. The served surface moves from 49 to **50
+  tools** (GH #329, THE-1094).
+
+### Changed
+
+- **`symbolic(op="solve_linear")` and `evaluate_expression`'s
+  descriptions now say what they already did.** `solve_linear` has always
+  reached sympy's general `solve()`, so non-linear polynomial systems
+  ('x**2 + y**2 = 5; x - y = -1') solve the same way linear ones do — the
+  docstring and the `system` parameter's schema description previously
+  showed only a linear example and read as though the name were a
+  behavioural promise. `evaluate_expression`'s docstring mentioned
+  `integrate` once as an example and never named `diff` or `series` at
+  all, despite all three working today (`diff(expr, x)`,
+  `integrate(expr, x)` / `integrate(expr, (x, a, b))`, `series(expr, x,
+  x0, n)`) — a model reading the schema had no way to discover calculus
+  was reachable at all. No behaviour changed; every example quoted in
+  the new prose was run and its output checked before being written down
+  (GH #329, THE-1094).
+
 ## [0.12.0] — 2026-09-09
 
 ### Removed

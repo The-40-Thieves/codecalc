@@ -400,6 +400,65 @@ def percentage(part: str, total: str) -> dict:
             "rounding": {"percent": ROUND_DIGITS}}
 
 
+#: GH #329: `percentage` answers PART/TOTAL, never "what changed between two
+#: values" — models were hand-building `(b - a) / a * 100` in calc_exact,
+#: exactly the guessing this package exists to remove, and the easy place to
+#: get the base wrong (whole-value `a` vs `abs(a)`; `(b-a)/a` vs `(a-b)/a`).
+#:
+#: Sign convention, decided explicitly rather than left to whichever way a
+#: caller happens to write it: `(to - from) / abs(from) * 100`, the
+#: conventional finance definition. Dividing by the MAGNITUDE (not the
+#: signed value) of `from_value` means a negative base does not flip the
+#: sign of the result the way plain `(b - a) / a` would — `direction`
+#: always agrees with the sign of `percent_exact` (both driven by
+#: `to - from`, since `abs(from_value)` is always positive here). That can
+#: read as counter-intuitive when `from_value` is negative: -100 -> -50 is
+#: `direction: "increase"` (-50 > -100 algebraically) even though the
+#: MAGNITUDE of the value fell from 100 to 50 — the `note` field below spells
+#: that out rather than leaving it to be discovered by surprise.
+def percent_change(from_value: str, to_value: str) -> dict:
+    """Exact percent change FROM_VALUE -> TO_VALUE: (to - from) / abs(from) * 100."""
+    try:
+        a, b = Fraction(from_value), Fraction(to_value)
+    except (ValueError, ZeroDivisionError):
+        return {"ok": False, "error": "from_value and to_value must be numbers"}
+    if a == 0:
+        # Not "division by zero" (exact.py's own generic wording elsewhere) —
+        # a caller who passed 0 as a base has a real, answerable question
+        # (calc_exact/compare_threshold cover it), so the remedy names it
+        # instead of just rejecting.
+        return errors.error_result(
+            errors.VALIDATION, "from_value is zero; percent change is undefined",
+            remedy="report the absolute change instead")
+    change = b - a
+    percent = change / abs(a) * 100
+    d_percent = Decimal(percent.numerator) / Decimal(percent.denominator)
+    multiplier = b / a
+    direction = "increase" if change > 0 else "decrease" if change < 0 else "unchanged"
+    out = {"ok": True, "from_value": str(a), "to_value": str(b),
+           "absolute_change": str(change),
+           # exact rational (bare integer when the denominator is 1, e.g.
+           # "50" not "50/1") alongside the rounded decimal — same
+           # exact-then-approximate pairing as calc_exact/eval_exact, not
+           # percentage's own always-"n/d" `share` formatting, because the
+           # worked examples this tool was specified against ("50", not
+           # "50/1") are the bare form.
+           "percent_exact": str(percent),
+           "percent_decimal": round(float(d_percent), ROUND_DIGITS),
+           "direction": direction,
+           "multiplier": str(multiplier),
+           "rounding": {"percent_decimal": ROUND_DIGITS}}
+    if a < 0:
+        out["note"] = (
+            "from_value is negative: percent_exact/percent_decimal are relative "
+            "to abs(from_value) (the conventional (to - from) / |from| "
+            "definition), and `direction` follows the algebraic sign of "
+            "(to_value - from_value), not the change in |value| — e.g. "
+            "-100 -> -50 reports direction=\"increase\" (-50 > -100) even "
+            "though the magnitude fell from 100 to 50")
+    return out
+
+
 # ─────────────────────────────── stats / pctl ──────────────────────────────
 
 def _first_non_finite(nums: list[float]) -> int | None:
