@@ -597,7 +597,35 @@ behind it.
   ~10**5-digit `Fraction`). `_safe_multiset_rational` — along with
   `_bounded_numeric_value`, `_NumericTooLarge`, `_SUBTREE_BIT_BUDGET`,
   and `_SAFE_RECONSTRUCT_DIGITS`, all dead code by this point — is
-  deleted rather than patched.
+  deleted rather than patched. A second, independent review family
+  (Codex) found four more findings in parallel, none overlapping: (1) a
+  COMPUTED heavy-function argument (`factorial(1463+1)`,
+  `fibonacci(1463*1000)`) bypassed the token-level `_heavy_call_
+  violation` entirely — every token is individually under
+  `MAX_HEAVY_ARG`, and the resulting `Function` node stayed opaque to the
+  numeric scan; fixed by bounding a heavy function's own argument at the
+  TREE level too, via the same `_log10_num_den` machinery, with the
+  token check kept as the cheap first pass. (2) `bell`, `genocchi`,
+  `motzkin`, `andre`, and `partition` are admitted by the parser's
+  namespace but were missing from `_HEAVY_FUNCTIONS` — `bell(1500)` took
+  5.48s and produced a 3,107-digit `Integer` DURING PARSING, before any
+  guard ran; added at the same `MAX_HEAVY_ARG` cap after auditing every
+  eager combinatorial/number-theoretic name sympy 1.14 actually exposes.
+  (3) a scientific-notation `Float` literal (`1e100000`, nine
+  characters) is a parse-time CPU bomb — `1e1000000` ran past 30s just
+  constructing the `evaluate=False` shape, before `reject_explosive` (or
+  even `reject_unsafe`'s existing SECURITY screen) ever got a chance —
+  now refused at the TOKEN level, before `parse_expr` runs at all, for
+  any literal whose scientific-notation exponent magnitude exceeds
+  `MAX_NUMERIC_DIGITS`. (4) `Add`'s upper bound recognized no
+  cancellation at all, so two terms that are EXACT additive inverses of
+  each other (`factorial(1463)*factorial(1463) -
+  factorial(1463)*factorial(1463)`, printable, cheap, truly `0`) were
+  refused on their own uncancelled magnitude — `Add` now gets the same
+  structural cancellation `Mul` already has via `_factor_multiset`,
+  which also fixed a latent bug in how a bare `-1`/`1` Integer encoded
+  its sign in that multiset (a spurious `{1: 1}` entry broke exact
+  structural-equality matching between a term and its own negation).
 
 ## [0.12.0] — 2026-09-09
 

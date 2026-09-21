@@ -1778,6 +1778,99 @@ for _dead_name in ("_safe_multiset_rational", "_bounded_numeric_value",
     check(f"{_dead_name} was deleted, not merely left unused",
           not hasattr(_se5, _dead_name), f"-> hasattr={hasattr(_se5, _dead_name)}")
 
+# ═══ round 6 of cross-vendor review (Codex, second reviewer family, on ════
+# ═══ 795c49a, in parallel with grok's round 5) — four findings, none ══════
+# ═══ overlapping grok's ════════════════════════════════════════════════════
+
+# Finding 1 (High): a COMPUTED heavy-function argument bypassed the
+# token-level `_heavy_call_violation` entirely -- `factorial(1463+1)`'s
+# tokens are `1463` and `1`, each individually under MAX_HEAVY_ARG, and the
+# unevaluated tree keeps an opaque `Function` node the numeric scan could
+# not bound. `_heavy_call_violation`'s own docstring used to claim this was
+# "caught later by the tree rules" -- it was not, until now.
+_COMPUTED_HEAVY_ARG_CASES = [
+    ("factorial(1463+1)", "factorial, Add argument, same value as the round-1 literal cap"),
+    ("subfactorial(1463+1)", "subfactorial, identical shape"),
+    ("fibonacci(1463*1000)", "fibonacci, Mul argument -- a ~305,749-digit result"),
+]
+for _expr, _why in _COMPUTED_HEAVY_ARG_CASES:
+    _t0 = time.time()
+    _r = _exact.simplify_expression(_expr)
+    _elapsed = time.time() - _t0
+    check(f"{_expr!r} ({_why}) is refused",
+          _r.get("ok") is False and _r.get("code") == _errors.RESOURCE_EXHAUSTED,
+          f"-> {_r}")
+    check("  ...promptly, not after evaluate=True actually computes it",
+          _elapsed < 2.0, f"-> {_elapsed:.3f}s")
+# ...and a LITERAL argument at/under the cap must still evaluate -- the tree
+# check is a backstop alongside the token check, not a replacement that
+# somehow tightens the existing cap.
+for _expr in ("factorial(1463)", "factorial(10+5)"):
+    _r = _exact.simplify_expression(_expr)
+    check(f"{_expr!r} still evaluates", _r.get("ok") is True, f"-> {_r}")
+
+# Finding 2 (High): `bell` (and four siblings) are admitted by the parser's
+# namespace but were absent from `_HEAVY_FUNCTIONS`, so `evaluate=False`
+# parsing itself -- BEFORE any guard runs -- eagerly materialized a growing
+# `Integer`. `bell(1500)` measured 5.48s just to PARSE in the reviewer's
+# own reproduction.
+_NEWLY_HEAVY_FUNCTIONS = [
+    ("bell", 1464, 5),
+    ("genocchi", 1464, 6),
+    ("motzkin", 1464, 7),
+    ("andre", 1464, 5),
+    ("partition", 1464, 5),
+]
+for _name, _over_cap_arg, _small_arg in _NEWLY_HEAVY_FUNCTIONS:
+    check(f"{_name!r} is now in _HEAVY_FUNCTIONS",
+          _name in _se5._HEAVY_FUNCTIONS, f"-> {_name in _se5._HEAVY_FUNCTIONS}")
+    _over_expr = f"{_name}({_over_cap_arg})"
+    _r_over = _exact.simplify_expression(_over_expr)
+    check(f"{_over_expr!r} (one over MAX_HEAVY_ARG) is refused",
+          _r_over.get("ok") is False and _r_over.get("code") == _errors.RESOURCE_EXHAUSTED,
+          f"-> {_r_over}")
+    _small_expr = f"{_name}({_small_arg})"
+    _r_small = _exact.simplify_expression(_small_expr)
+    check(f"{_small_expr!r} (a small, ordinary argument) still evaluates",
+          _r_small.get("ok") is True, f"-> {_r_small}")
+
+# Finding 3 (High): a scientific-notation Float literal is a parse-time CPU
+# bomb -- `1e100000` costs real time to construct the evaluate=False shape,
+# and every Float is unconditionally declared safe once parsed. Fixed at
+# the TOKEN level, before parse_expr ever runs.
+_OVERSIZED_FLOAT_LITERALS = ["1e100000", "1e1000000", "1.5E4001"]
+for _expr in _OVERSIZED_FLOAT_LITERALS:
+    _t0 = time.time()
+    _r = _exact.simplify_expression(_expr)
+    _elapsed = time.time() - _t0
+    check(f"{_expr!r} is refused",
+          _r.get("ok") is False and _r.get("code") == _errors.RESOURCE_EXHAUSTED,
+          f"-> {_r}")
+    check("  ...promptly, at the TOKEN level, before parse_expr ever runs "
+          "(1e1000000 alone measured >30s post-parse in the reviewer's own repro)",
+          _elapsed < 1.0, f"-> {_elapsed:.3f}s")
+for _expr in ("1e300", "1e-300", "2.5e3"):
+    _r = _exact.simplify_expression(_expr)
+    check(f"{_expr!r} (an ordinary scientific-notation literal) still evaluates",
+          _r.get("ok") is True, f"-> {_r}")
+
+# Finding 4 (Medium): Add's bound (max-term + log10(n)) recognized no
+# cancellation at all, so two terms that are EXACT additive inverses of
+# each other -- printable, cheap, the true sum is 0 -- were refused on
+# their own uncancelled magnitude. Give Add the same structural
+# cancellation Mul already has via _factor_multiset.
+_r_cancels = _exact.simplify_expression(
+    "factorial(1463)*factorial(1463) - factorial(1463)*factorial(1463)")
+check("factorial(1463)*factorial(1463) - factorial(1463)*factorial(1463) evaluates to 0",
+      _r_cancels.get("ok") is True and _r_cancels.get("simplified") == "0",
+      f"-> {_r_cancels}")
+_r_still_refused = _exact.simplify_expression(
+    "factorial(1463)*factorial(1463) - factorial(1463)*factorial(1463) + factorial(1463)*factorial(1463)")
+check("...but f*f - f*f + f*f (one term survives cancellation) is still refused",
+      _r_still_refused.get("ok") is False
+      and _r_still_refused.get("code") == _errors.RESOURCE_EXHAUSTED,
+      f"-> {_r_still_refused}")
+
 # ═══ the fail-closed choice above was ITSELF too broad — cross-vendor ══════
 # ═══ differential probe (main vs. this branch) found 5 benign expressions ══
 # ═══ that main evaluates fine but an earlier version of this fix refused ═══

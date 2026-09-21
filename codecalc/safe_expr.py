@@ -72,6 +72,7 @@ from __future__ import annotations
 
 import io
 import math
+import re
 import tokenize
 
 #: Keywords that would reintroduce evaluation or control flow. `and`, `or`,
@@ -125,6 +126,35 @@ _HEAVY_FUNCTIONS = frozenset({
     "lucas", "tribonacci", "catalan", "bernoulli", "euler", "harmonic",
     "primorial", "prime", "primepi", "gamma", "loggamma", "rf", "ff",
     "npartitions", "totient", "divisor_sigma",
+    # #326 finding 2 (cross-vendor review, round 6, Codex): audited every
+    # eager combinatorial/number-theoretic name `safe_global_dict()`
+    # actually exposes (sympy 1.14's `functions.combinatorial.numbers`,
+    # plus the top-level namespace) for one that materializes a growing
+    # `Integer`/`Rational` DURING PARSING for a literal argument — the
+    # exact hazard the rest of this set already exists to cap, just
+    # missing these five names. Measured at the SAME `MAX_HEAVY_ARG`
+    # (1463) cap the rest of this set uses (all comfortably under
+    # `MAX_NUMERIC_DIGITS`, and — like every other member — some
+    # individual calls near the cap are still slow, bounded only by
+    # `guarded_call`'s CPU backstop, same as `binomial(200_000, 100_000)`
+    # already was before this fix):
+    #
+    #     bell(1463)       3_018 digits   (bell(1463) itself ~5s to PARSE --
+    #                                      slow but bounded, not unbounded)
+    #     genocchi(1462)   3_269 digits   (genocchi(1463) is a degenerate
+    #                                      1-digit odd-index value; 1462,
+    #                                      the nearest even index, is the
+    #                                      real worst case near the cap --
+    #                                      same odd/even-index asymmetry as
+    #                                      the ALREADY-capped `euler`)
+    #     motzkin(1463)      693 digits
+    #     andre(1463)      3_711 digits
+    #     partition(1463)     39 digits   (the sympy>=1.13 replacement
+    #                                      name for the already-capped
+    #                                      `npartitions`, deprecated but
+    #                                      still reachable — kept alongside
+    #                                      it, not instead of it)
+    "bell", "genocchi", "motzkin", "andre", "partition",
 })
 
 #: This started at 50_000, chosen from measured PARSE time:
@@ -204,11 +234,24 @@ def _approx_decimal_digits(n: int) -> int:
 def _heavy_call_violation(tokens: list) -> str | None:
     """A heavy function applied to an oversized integer LITERAL, if any.
 
-    Only literals are checked, because only literals are what the parser can
-    consume before anything else bounds them. A computed argument
-    (`factorial(10**6)`) survives this and is caught later by the tree rules,
-    which is the right division: this function exists to stop work that would
-    otherwise happen DURING parsing.
+    Only literals are checked here, because only literals are what THIS
+    (token-level, pre-parse) pass can see before anything else bounds them —
+    this function exists to stop work that would otherwise happen DURING
+    parsing, cheaply, without building a tree first.
+
+    A COMPUTED argument (`factorial(1463+1)`) is NOT caught here — every
+    token (`1463`, `1`) is individually under `MAX_HEAVY_ARG`, and this
+    function has no notion of `+`. That claim used to be "caught later by
+    the tree rules" without qualification, which was FALSE (#326 finding 1,
+    cross-vendor review, round 6): `evaluate=False` parsing leaves
+    `factorial(1463+1)` as a `Function` wrapping an unevaluated
+    `Add(1463, 1)` — nothing in the numeric scan's `Integer`/`Mul`/`Add`/
+    `Pow` trigger set matches a `Function` node, so it stayed opaque and the
+    SECOND (real, `evaluate=True`) parse computed the actual 4001-digit
+    result unrefused. `_numeric_ceiling_scan` now ALSO bounds a heavy
+    `Function` node's own argument directly (via `_log10_num_den`, the same
+    machinery — see its own call site there), closing the gap this
+    docstring used to claim was already closed.
     """
     for i, tok in enumerate(tokens):
         if tok.type != tokenize.NAME or tok.string not in _HEAVY_FUNCTIONS:
@@ -259,6 +302,67 @@ def _heavy_call_violation(tokens: list) -> str | None:
                     return (f"argument {value_desc} to {tok.string}() exceeds the limit "
                             f"of {MAX_HEAVY_ARG}: computing it would take an "
                             "unbounded amount of time and memory")
+    return None
+
+
+#: Matches the exponent of a scientific-notation numeric literal
+#: (`1e100000`, `1.5E4001`, `1e-100000`, `1e1_000` with a PEP-515
+#: underscore) as `tokenize.NUMBER` hands the token back — sign and
+#: underscores included, anchored to the end of the token string so it
+#: cannot match an exponent-shaped substring inside a longer token by
+#: accident.
+_SCI_NOTATION_EXPONENT_RE = re.compile(r"[eE]([+-]?[0-9](?:_?[0-9])*)$")
+
+
+def _oversized_scientific_literal_violation(tokens: list) -> str | None:
+    """A scientific-notation numeric literal whose EXPONENT magnitude alone
+    already exceeds `MAX_NUMERIC_DIGITS`, if any.
+
+    #326 finding 3 (cross-vendor review, round 6): a `Float` is declared
+    unconditionally safe once parsed (`_log10_num_den`'s own Float branch —
+    SymPy prints one at fixed precision regardless of magnitude, so it never
+    routes through CPython's int->str ceiling) — true of the RESULT, but
+    said nothing about the COST of PARSING one. `1e100000` (nine characters)
+    measured ~725ms just to construct the `evaluate=False` shape; `1e1000000`
+    ran past 30s. Every other numeric literal this module screens is
+    length-bounded by the 2000-char expression cap doing double duty as a
+    magnitude cap — a 1990-digit bare integer literal cannot itself exceed
+    ~1990 digits — but scientific notation is EXACTLY the escape from that:
+    a short token can name an arbitrarily large exponent, decoupling text
+    length from magnitude the same way this module's other screens
+    (`_heavy_call_violation`'s own hex/octal/binary literal comment,
+    `_bounded_numeric_value`'s bit-length checks elsewhere) already exist to
+    prevent for other shapes.
+
+    Checked at the TOKEN level, before `parse_expr` ever runs — the
+    exponent's magnitude is read directly off the token text via regex, not
+    by asking SymPy (or even Python's own `float()`, which is fast here —
+    the cost is inside SymPy's own arbitrary-precision `Float` construction,
+    not CPython's). `abs(exponent) > MAX_NUMERIC_DIGITS` is the same
+    threshold every other ceiling in this module uses, deliberately: not
+    tuned to the exact measured performance cliff (`1.5E4001`, only one over
+    the cap, parses in ~1ms — fast today, but this is a hard boundary, not
+    a moving one that would need re-measuring if SymPy's Float construction
+    cost profile ever changes), and NEGATIVE exponents are bounded the same
+    as positive ones (`1e-100000` measured ~130ms — smaller than the
+    positive case but still well outside "cheap token check" territory, and
+    there is no principled reason an astronomically small Float would be
+    cheaper to construct than an astronomically large one).
+    """
+    for tok in tokens:
+        if tok.type != tokenize.NUMBER:
+            continue
+        match = _SCI_NOTATION_EXPONENT_RE.search(tok.string)
+        if not match:
+            continue
+        try:
+            exponent = int(match.group(1).replace("_", ""))
+        except ValueError:
+            continue  # unreachable for a token tokenize.NUMBER already validated
+        if abs(exponent) > MAX_NUMERIC_DIGITS:
+            return (f"the exponent of {tok.string!r} has a magnitude of "
+                    f"{abs(exponent)}, over the limit of {MAX_NUMERIC_DIGITS}: "
+                    "constructing it is not safely bounded")
     return None
 
 
@@ -342,6 +446,15 @@ def classify_unsafe(expression: str) -> tuple[str, str] | None:
     # Last, because reach beats cost: an expression that is both hostile and
     # expensive should be reported as hostile.
     violation = _heavy_call_violation(tokens)
+    if violation:
+        return (CATEGORY_CEILING, violation)
+    # #326 finding 3 (round 6): a scientific-notation literal is a
+    # parse-time cost bomb this module's other length-bounds-magnitude
+    # assumption does not cover — see `_oversized_scientific_literal_
+    # violation`'s own docstring. Checked here, at the token level, for
+    # the same reason `_heavy_call_violation` is: before `parse_expr`
+    # ever runs.
+    violation = _oversized_scientific_literal_violation(tokens)
     if violation:
         return (CATEGORY_CEILING, violation)
     return None
@@ -656,7 +769,17 @@ def _factor_multiset(node, memo_ms: dict):
     result = None
     if isinstance(node, Integer):
         n = int(node)
-        result = ({}, 0) if n == 0 else ({abs(n): 1}, 1 if n > 0 else -1)
+        # `abs(n) == 1` (n is 1 or -1) gets an EMPTY terms dict, not
+        # `{1: 1}`: `1 ** anything` is always `1`, a magnitude-neutral
+        # element that contributes nothing to `_multiset_log_num_den`
+        # either way (`log10(1) == 0`) -- but a spurious `{1: 1}` entry
+        # DOES change the RESULT of comparing two multisets for equality
+        # (`_cancel_additive_inverses`'s `frozenset(terms.items())` key),
+        # which is exactly what broke doing that: `f*f` resolves to
+        # `{f: 2}` but `-1*f*f` resolved to `{1: 1, f: 2}` -- two
+        # structurally-cancelling terms that no longer compared equal
+        # because of this one spurious key from encoding the sign.
+        result = ({}, 0) if n == 0 else ({} if abs(n) == 1 else {abs(n): 1}, 1 if n > 0 else -1)
     elif isinstance(node, Mul):
         terms: dict = {}
         sign = 1
@@ -723,6 +846,60 @@ def _multiset_log_num_den(terms: dict) -> tuple:
     if math.isnan(log_den):
         log_den = float("inf")
     return log_num, log_den
+
+
+def _cancel_additive_inverses(args: tuple, memo_ms: dict) -> tuple:
+    """`args` (an `Add`'s own direct terms) with pairs of EXACT additive
+    inverses removed, or `args` unchanged if none cancel.
+
+    #326 finding 4 (cross-vendor review, round 6): `Mul` already cancels a
+    repeated base against its own reciprocal structurally
+    (`_factor_multiset`'s whole reason to exist), but `Add`'s bound
+    (`_log10_num_den`'s own `Add` branch) never recognized that two terms
+    could be additive inverses of each other at all — `factorial(1463)*
+    factorial(1463) - factorial(1463)*factorial(1463)` is exactly `0`
+    (cheap, trivially printable), but the old bound saw two ~7996-digit
+    terms and refused on that basis alone, the Add-shaped analogue of the
+    exact bug `_factor_multiset` was built to fix for `Mul`.
+
+    Two terms are "the same up to sign" here when `_factor_multiset`
+    resolves BOTH to the identical factor multiset with OPPOSITE sign —
+    the SAME exact-match bar `_factor_multiset`'s own cancellation already
+    holds a `Mul` to (matching by VALUE, via a hashable
+    `frozenset(terms.items())` key, never by float comparison). A term
+    `_factor_multiset` cannot resolve at all (a free symbol, a `Function`,
+    ...) is left untouched, in its original position, exactly as before —
+    this only ever REMOVES terms, so a caller that could already fall back
+    safely on the unmodified `args` can do the identical thing here.
+    Genuinely NON-identical terms that happen to sum to something small
+    (`f - (f - 1)`, say) still are not recognized and stay fail-closed —
+    documented, not fixed, the same trade `_log10_num_den`'s own `Add`
+    docstring already makes for its upper-bound formula in general.
+    """
+    pos_by_key: dict = {}
+    neg_by_key: dict = {}
+    kept = []
+    for arg in args:
+        multiset = _factor_multiset(arg, memo_ms)
+        if multiset is None:
+            kept.append(arg)
+            continue
+        terms, sign = multiset
+        if sign == 0:
+            continue  # this term IS exactly zero -- drop unconditionally
+        key = frozenset(terms.items())
+        (pos_by_key if sign > 0 else neg_by_key).setdefault(key, []).append(arg)
+    for key, pos_list in pos_by_key.items():
+        neg_list = neg_by_key.get(key)
+        if not neg_list:
+            continue
+        n = min(len(pos_list), len(neg_list))
+        del pos_list[len(pos_list) - n:]
+        del neg_list[len(neg_list) - n:]
+    for bucket in (pos_by_key, neg_by_key):
+        for remaining in bucket.values():
+            kept.extend(remaining)
+    return tuple(kept)
 
 
 def _log10_num_den(node, memo: dict) -> tuple:
@@ -829,11 +1006,22 @@ def _log10_num_den(node, memo: dict) -> tuple:
         # factorial(1463))` -- an ~7996-digit NUMERATOR -- and a formula
         # that only looked at each term's OWN numerator (1 and 1, both
         # tiny) would have reported `log_num=0`, missing it entirely.
-        parts = [_log10_num_den(arg, memo) for arg in node.args]
-        log_den = math.fsum(p[1] for p in parts)
-        log_num = ((max(p[0] for p in parts) + log_den + math.log10(len(parts)))
-                   if parts else 0.0)
-        result = (log_num, log_den, all(p[2] for p in parts))
+        #
+        # BEFORE any of that: cancel exact additive inverses among the
+        # direct terms (#326 finding 4, round 6 — see
+        # `_cancel_additive_inverses`'s own docstring). `factorial(1463)*
+        # factorial(1463) - factorial(1463)*factorial(1463)` is exactly 0,
+        # but the bound below, applied to the UNcancelled two ~7996-digit
+        # terms, refused it — the Add-shaped analogue of the exact
+        # cancellation `Mul` already gets via `_factor_multiset`.
+        surviving_args = _cancel_additive_inverses(node.args, memo.setdefault("__multiset__", {}))
+        if not surviving_args:
+            result = (0.0, 0.0, True)  # every term cancelled -- the sum is exactly 0
+        else:
+            parts = [_log10_num_den(arg, memo) for arg in surviving_args]
+            log_den = math.fsum(p[1] for p in parts)
+            log_num = max(p[0] for p in parts) + log_den + math.log10(len(parts))
+            result = (log_num, log_den, all(p[2] for p in parts))
     elif isinstance(node, Pow) and isinstance(node.exp, Integer):
         exp_int = int(node.exp)
         if exp_int == 0:
@@ -1034,8 +1222,9 @@ def _numeric_ceiling_scan(tree, memo: dict) -> str | None:
     `reject_explosive`'s call site, and again around the `Pow` loop below,
     which now also calls into this same recursive machinery.
     """
-    from sympy import Add, Integer, Mul, Pow
+    from sympy import Add, Function, Integer, Mul, Pow
 
+    _log10_max_heavy_arg = math.log10(MAX_HEAVY_ARG)
     stack = [tree]
     seen = 0
     while stack:
@@ -1053,6 +1242,38 @@ def _numeric_ceiling_scan(tree, memo: dict) -> str | None:
             # surface and this scan would walk past whatever it wraps.
             stack.extend(node)
             continue
+        if isinstance(node, Function) and type(node).__name__ in _HEAVY_FUNCTIONS:
+            # #326 finding 1 (cross-vendor review, round 6): a COMPUTED
+            # argument (`factorial(1463+1)`) stays an opaque `Function`
+            # node through the whole `evaluate=False` parse -- nothing in
+            # the trigger set below matches it, and even if its argument
+            # (an unevaluated `Add(1463, 1)`) got pushed via the generic
+            # descent at the bottom of this loop, the generic per-node
+            # check there compares against `MAX_NUMERIC_DIGITS` (4000),
+            # not `MAX_HEAVY_ARG` (1463) -- 1464 is a perfectly printable
+            # 4-digit number, so that check would never fire even though
+            # `factorial(1464)` is exactly the unbounded-work hazard
+            # `_heavy_call_violation`'s own TOKEN-level check exists to
+            # stop for a LITERAL argument. `_heavy_call_violation`'s
+            # docstring used to claim a computed argument was "caught
+            # later by the tree rules" -- false until this branch existed
+            # (see its own docstring for the full history). Kept as a
+            # backstop alongside the cheap token-level first pass, not a
+            # replacement for it.
+            for arg in node.args:
+                if arg.free_symbols:
+                    continue  # symbolic argument -- left alone, same scope as the token check
+                arg_log_num, arg_log_den, arg_resolved = _log10_num_den(arg, memo)
+                if not arg_resolved:
+                    continue  # inconclusive -- an irrational constant, a nested Function, ...
+                if (arg_log_num - arg_log_den) > _log10_max_heavy_arg:
+                    return (f"an argument to {type(node).__name__}() exceeds the "
+                            f"limit of {MAX_HEAVY_ARG}: computing it would take an "
+                            "unbounded amount of time and memory")
+            # Fall through to the generic descent below regardless: an
+            # argument that IS a free symbol, or one this bound could not
+            # resolve, might still hide a SEPARATE numeric hazard nested
+            # inside it (`factorial(x*f*f)`, say).
         if isinstance(node, (Integer, Mul, Add, Pow)):
             log_num, log_den, resolved = _log10_num_den(node, memo)
             violation = _ceiling_message_num_den(log_num, log_den)
