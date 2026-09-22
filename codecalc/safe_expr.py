@@ -1699,11 +1699,18 @@ def _unprotected_operator_violation(expression: str) -> str | None:
     except (tokenize.TokenError, SyntaxError, IndentationError,
             UnicodeEncodeError, UnicodeDecodeError):
         return None  # not this check's job -- classify_unsafe already ran
-    has_unprotected_op = any(
-        tok.type == tokenize.OP and tok.string in _UNPROTECTED_OPERATORS
-        for tok in tokens
-    )
-    if not has_unprotected_op:
+    # THE-1095 round 3 follow-up (coordinator review of 832816a): the
+    # refusal message must name the EAGER operator that actually makes
+    # this dangerous (`%`/`//`/`<<`/`>>`), not the `**`/`^` token this loop
+    # happens to be keyed off of — the first version interpolated `tok.
+    # string` (always `'**'` or `'^'`), reading as nonsense ("'**' combined
+    # with exponentiation") and naming no real operator at all.
+    unprotected_op = None
+    for tok in tokens:
+        if tok.type == tokenize.OP and tok.string in _UNPROTECTED_OPERATORS:
+            unprotected_op = tok.string
+            break
+    if unprotected_op is None:
         return None
     for i, tok in enumerate(tokens):
         if not (tok.type == tokenize.OP and tok.string in ("**", "^")):
@@ -1722,12 +1729,13 @@ def _unprotected_operator_violation(expression: str) -> str | None:
             if exp_value is not None and abs(exp_value) <= MAX_UNPROTECTED_OPERATOR_EXPONENT:
                 provably_small = True
         if not provably_small:
-            return (f"'{tok.string}' combined with exponentiation is not "
-                    "protected against unbounded evaluation by SymPy's own "
-                    "parser (evaluate=False does not reach a %/,//,<<,>>-"
-                    "wrapped exponent) — rewrite without combining them in "
-                    "one expression, or use a literal exponent at or under "
-                    f"{MAX_UNPROTECTED_OPERATOR_EXPONENT}")
+            return (f"'{unprotected_op}' applied to a power whose exponent "
+                    "is computed or above "
+                    f"{MAX_UNPROTECTED_OPERATOR_EXPONENT} is not protected: "
+                    "SymPy evaluates %, //, << and >> eagerly before any "
+                    "ceiling check — use a literal exponent of at most "
+                    f"{MAX_UNPROTECTED_OPERATOR_EXPONENT}, or split the "
+                    "expression")
     return None
 
 

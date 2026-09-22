@@ -2955,6 +2955,23 @@ for _expr, _expected in (("7 % 3", "1"), ("10 // 3", "3"), ("Mod(7,3)", "1"),
     _v, _e = _boundary_parse(_expr)
     check(f"THE-1095 round 3 item 6: {_expr!r} == {_expected!r}, unaffected",
           _v is not None and str(_v) == _expected and _e is None, f"-> value={_v!r} err={_e!r}")
+
+# Coordinator review of 832816a: the refusal message used to interpolate
+# the `**`/`^` TOKEN (always literally `'**'`), not the eager operator
+# that actually makes this dangerous -- "'**' combined with exponentiation"
+# names no real operator at all, and the parenthetical ("%/,//,<<,>>-
+# wrapped") was a malformed list. Each of the four operators must now name
+# ITSELF in its own refusal message, never the `**`/`^` token.
+for _op in ("%", "//", "<<", ">>"):
+    _expr = f"2**{_N78} {_op} 11"
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 3 item 6 (message fix): {_expr[:20]!r}... names "
+          f"its own triggering operator {_op!r}",
+          _v is None and _e is not None and _e[0] == "ceiling"
+          and f"'{_op}'" in _e[1], f"-> {_e}")
+    check("  ...and does NOT say \"'**' combined\" (the old, nonsensical "
+          "wording)",
+          _e is not None and "'**' combined" not in _e[1], f"-> {_e}")
 _v, _e = _boundary_parse("x**2 % 3")
 check("THE-1095 round 3 item 6: 'x**2 % 3' (symbolic, small exponent) "
       "still evaluates to the unevaluated Mod, like main",
