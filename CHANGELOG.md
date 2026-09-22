@@ -1120,6 +1120,186 @@ behind it.
   now evaluates); `2 * 1464!` is 4001 digits (over cap, `andre(1464)`
   still correctly refuses). Pinned both.
 
+- **The orthogonal-polynomial family's own new cap (above) bounded only
+  the ORDER position — `_GROWTH_BOUNDS` for all ten was bare `n!`, a
+  bound on the STANDARD polynomial's own leading coefficient, never on
+  `|P_n(x)|` for a numeric `x` nor on a coefficient inflated by an extra
+  numeric parameter, and `_table_function_growth_violation` returned
+  immediately whenever the node carried ANY free symbol — so the
+  coefficient bound never ran on `hermite(n, x)` at all, the ordinary,
+  intended usage** (THE-1095, follow-up to GH #326; grok review of
+  562a026, `verify-1095-r13-grok.log`): `hermite(700, 10**50)` (`n!`
+  alone claims ~1747 digits; `(2x)**n` — the true dominant term — is
+  ~35,000); `gegenbauer(850, 10**20, x)` (`alpha` enters the recurrence
+  directly, `~alpha**n`-scale coefficients, ~8500 digits, `x` free so
+  the growth check never even ran) all passed every existing screen.
+  Fixed with a real, position-complete growth formula
+  (`_growth_orthogonal_poly`): `n!` (the coefficient-count envelope) +
+  `n * log10(|alpha/a/b| + n)` for each extra numeric parameter
+  (`gegenbauer`'s `a`, `assoc_legendre`'s `m`, `jacobi`'s `a`/`b`,
+  `assoc_laguerre`'s `alpha`) + `n * log10(2|x| + 1)` for a NUMERIC `x`
+  (the coordinator's own supplied envelope, `|P_n(x)| <= n! * (2|x| +
+  1)**n`) — each term added only when that position resolved to a
+  concrete magnitude, so a symbolic `x` (the ordinary case) still gets
+  the coefficient-only bound instead of being skipped. That required
+  fixing `_table_function_growth_violation`'s own free-symbol check too:
+  narrowed from "the WHOLE node carries a free symbol anywhere" to "the
+  ORDER position specifically" — every other position's own magnitude
+  is now used when resolved, matching the per-position pattern `_table_
+  function_bound` (called right after it) already used internally; a
+  symbolic order (the one case where every growth formula in this table
+  genuinely needs a value) still declines exactly as before. `x`/
+  `alpha`/`a`/`b`/`m` also gained their own per-position cap
+  (`MAX_HEAVY_ARG`, catching an OBVIOUSLY oversized single value
+  immediately and cheaply; the growth formula is what catches an
+  individually-under-cap COMBINATION that is still too large together —
+  the same two-layer shape `bell`/`zeta`/`harmonic` already use).
+  Pinned all six of grok's own repros refusing in well under a second,
+  and `hermite(50, x)`/`legendre(5, 1/2)`/`chebyshevt(10, 3)`/
+  `gegenbauer(5, 2, x)`/`jacobi(4, 1, 2, x)`/`assoc_laguerre(3, 1, x)`
+  all matching main exactly.
+
+- **`safe_global_dict()` re-exports every public SymPy name — 929,
+  874 callable — and only the ones this module had explicitly tabled
+  ever got a deferred stand-in; every OTHER callable ran EAGERLY, for
+  real, the instant the deferred (supposedly `evaluate=False`) parse
+  merely SCANNED a call to it, because SymPy's own AST transform
+  (`EvaluateFalseTransformer.visit_Call`) appends an `evaluate=False`
+  keyword ONLY for its own 34-name elementary list** (THE-1095, follow-
+  up to GH #326; Codex issue A, "THE ROOT CAUSE", `verify-1095-r13.log`):
+  measured live — `interpolating_poly(100, x)` (5.0s, accepted);
+  `multinomial_coefficients(5, 100)` (timeout, 383MB); `ones(5000,
+  5000)`/`randMatrix(5000, 5000)`/`N(ones(5000,5000), 20)` (timeout);
+  `divisor_count`/`primenu`/`reduced_totient` on an RSA-scale literal
+  (timeout); `expand((x+1)**10000)`/`series(exp(x), x, 0, 100000)`/
+  `chebyshevt_poly(10000, x)`/`swinnerton_dyer_poly(6, x)` (timeout) —
+  none of these names had ever been tabled or reasoned about by this
+  module at all. Fixed as a DEFAULT-DENY posture for this whole surface:
+  every callable NOT already bounded, and NOT one of the 34 elementary
+  names (genuinely protected by the AST transform itself), now gets a
+  GENERIC inert stand-in too, refused outright by a new scan-time check
+  (`_unbounded_generic_call_violation`) the instant it carries so much
+  as ONE non-symbolic argument — `unknown != safe` applied to an
+  unrecognized CALLABLE the same way it already applies to an
+  unrecognized VALUE shape everywhere else in this module. A call whose
+  arguments are ALL symbolic stays unaffected (`expand(x+1)`/
+  `simplify(sin(x)**2+cos(x)**2)` keep working). `_MEASURED_SAFE_
+  CALLABLES` names the ONLY callables exempted from the generic stand-in
+  — restricted, after a same-round self-review caught a real regression
+  (see below), to TRUE, argument-content-independent constructors and
+  predicates (`Add`/`Mul`/`Pow`/`Number`/`Rational`/`Integer`/`Float`/
+  `Symbol`/`symbols`/`var`/`Eq`/`Ne`/`Lt`/`Le`/`Gt`/`Ge`/`And`/`Or`/
+  `Not`/`Xor`/`Implies`), each measured directly at well under 100ms
+  regardless of a numeric argument's own magnitude. A general RESULT-
+  SIZE ceiling was added too, independent of the scan-time check: a
+  `Matrix`'s own `.shape`, a container's own `len()`, or a symbolic
+  expression's own `count_ops` (never rendering the result to check it —
+  that could itself be the dangerous operation) is refused past a
+  generous but finite limit, so a container or polynomial can never be
+  returned past this module's own size ceiling even if some other bound
+  turns out to be wrong.
+
+  Two more fixes surfaced building this: `series(expr, x, x0, n, dir)`'s
+  own `n` (the order — a plain callable, correctly needing SOME cap, but
+  the blanket generic refusal was too broad, wrongly refusing
+  `series(sin(x), x, 0, 6)` too) got its own dedicated position-3 cap
+  (100, measured — `series(exp(x), x, 0, n)` reaches ~1s around
+  `n=150-200`), the same `N`-shaped "no meaningful position-0 cap, no
+  growth formula" treatment `_n_precision_violation` already uses.
+  `RisingFactorial`/`FallingFactorial` — the REAL class names `rf`/`ff`
+  are aliases FOR (confirmed live, `type(node).__name__` for a parsed
+  `rf(5, 3)` call is `RisingFactorial`, never `"rf"`) — needed their own
+  entries in every table `rf`/`ff` already had one in: `jacobi(21, 1, 1,
+  x)`'s own `a == b` branch constructs a `RisingFactorial` node directly
+  during evaluation, and the new generic check refused it as an
+  "unbounded callable" before this fix, a false regression for an
+  entirely ordinary, comfortably in-cap call.
+
+  A same-round self-review (before this round's own commit) also caught
+  the first version of `_MEASURED_SAFE_CALLABLES` reopening exactly the
+  hole it was meant to help close: `expand`/`factor`/`together`/
+  `cancel`/`collect`/`diff`/`degree`/`primitive`/`fraction`/`prod` (and
+  `gcd`/`lcm`/`igcd`/`ilcm`, `erf`/`erfi`/`Ei`) were exempted from the
+  stand-in on the strength of a SIMPLE test argument's own speed — but
+  these are ALGORITHMS whose cost scales with their argument's
+  STRUCTURE, not merely its magnitude, and `expand((x+1)**10000)` (a
+  free-symbol argument, so the new generic refusal's own numeric-
+  argument trigger never applied to it either way) still hung, because
+  exempting `expand` from the stand-in ALSO exempted it from ever being
+  made inert during the scan. Removed; they get the generic stand-in
+  like everything else not in the (now much narrower) allowlist, which
+  is what lets the EXISTING, unconditional `MAX_SYMBOLIC_EXPONENT`
+  `Pow`-loop reach and refuse the same `Pow(Add(x,1),10000)` node —
+  nested inside an inert stand-in instead of a real, eagerly-executing
+  call.
+
+- **`binomial`'s own second argument (`k`) is deliberately unbounded —
+  `binomial.eval()` resolves `k > n` to `0` in O(1) — but that
+  short-circuit is an INTEGER-`n`-only code path, and the exemption
+  applied unconditionally regardless of `n`'s own type** (THE-1095,
+  follow-up to GH #326; Codex issue B): `binomial(1/2, 1000000)` hangs;
+  `binomial(1/2, 10000)` builds a 6,013-digit numerator before any
+  backstop gets a chance to refuse it. Fixed: `k` is capped
+  (`MAX_HEAVY_ARG`, confirmed live — `binomial(1/2, 1463)`/
+  `binomial(-3/2, 1463)` both stay comfortably under `MAX_NUMERIC_
+  DIGITS`, ~15ms) whenever `n` does not resolve to a confirmed non-
+  negative integer; the existing unconditional exemption is otherwise
+  unaffected (`binomial(5, 10**9)` still the instant `k > n` `0`).
+
+- **"Position-complete" used to mean "every position `_bounded_
+  positions` iterates has a row" — a position OUTSIDE that iteration (no
+  cap, no `_UNBOUNDED_POSITIONS` entry either) was silently
+  indistinguishable from an audited-safe one** (THE-1095, follow-up to
+  GH #326; Codex issue C): `primorial`/`npartitions`/`factorint`/
+  `primefactors`/`divisors`/`root`/`sqrt`/`cbrt`'s own remaining
+  positions (every flag and optional parameter `inspect.signature`
+  reveals, sympy 1.14) had never been individually audited. Each
+  measured directly against an adversarial value — none is a numeric-
+  magnitude hazard (`primorial(100, 10**9)`, `factorint(1234567891,
+  10**9)`, `root(8, 3, 10**9)` all instant) — and recorded explicitly in
+  `_UNBOUNDED_POSITIONS`, closing the class rather than the eight named
+  instances: `tests/test_bug_sweep.py` now audits EVERY position of
+  EVERY `_FUNCTION_ARG_CAPS` name against its own real arity and fails
+  if any lacks either a cap row or an explicit unbounded entry.
+
+- **Two main-parity mismatches from Codex's own 738-expression corpus**
+  (THE-1095, follow-up to GH #326; Codex issue D): the pole at `s == 1`
+  is its own special case in SymPy's own `zeta.eval()` for either arity
+  — `zeta(1)`/`zeta(1, a)` both return `zoo` INSTANTLY regardless of
+  `a`'s own magnitude (confirmed live up to a 300-digit literal), never
+  the Bernoulli-polynomial-scale construction this module's own domain
+  checks otherwise guard — but both checks refused it anyway, treating
+  the pole the same as a genuinely expensive small integer order. Fixed:
+  `s == 1` is exempted, in both the two-argument domain check and the
+  nested single/two-argument magnitude resolver, before the general
+  refusal that would otherwise still catch it. `factorint(2+3)` ->
+  `{5: 1}` was already correct (pinned as the intended, documented
+  outcome, not a regression).
+
+  Two further divergences Codex's own corpus surfaced are documented,
+  not fixed, this round (see `tests/test_differential_corpus.py`'s own
+  `_KNOWN_DIVERGENCES`): the eager-factor family (`divisors`/
+  `factorint`/`primefactors`) nested under an operator this module
+  cannot bound (`Abs(divisors(1))`) refuses with a `CATEGORY_CEILING`
+  message where `origin/main` itself raises a plain `TypeError` (a
+  `CATEGORY_VALIDATION`-shaped error) — a category mismatch predating
+  this round, left for a future one; and `rf`/`ff` called by their alias
+  spelling produce an arity-error TEXT using that alias
+  (`"rf takes..."`) where `origin/main` always uses the underlying real
+  class name (`"RisingFactorial takes..."`, since `rf is RisingFactorial`
+  — confirmed live) regardless of which name was used to reach it — a
+  narrow, cosmetic (text-only) gap, also left documented rather than
+  guessed at under this round's own time budget.
+
+- **A branch-vs-main differential corpus, committed as a test fixture**
+  (Codex's own request): `tests/test_differential_corpus.py`, 544
+  assertions across every table/elementary/measured-safe name at a
+  systematic grid of small, in-cap argument shapes, each compared
+  against a bare `parse_expr` (no screen) call — plus a refusal-side
+  batch (over-cap shapes, never run against bare SymPy, which would
+  itself be the dangerous operation) and the two documented divergences
+  above, checked explicitly rather than silently skipped.
+
 ## [0.13.0] — 2026-09-21
 
 ### Fixed

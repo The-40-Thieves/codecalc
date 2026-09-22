@@ -2338,6 +2338,7 @@ _TOKEN_ONLY_ROOT_FAMILY = {"root"}
 # to this), a small one so it never itself approaches any cap.
 _EXTRA_CALL_ARGS = {"root": ", 2", "rf": ", 2", "ff": ", 2", "binomial": ", 5",
                      "polygamma": ", 2",
+                     "RisingFactorial": ", 2", "FallingFactorial": ", 2",
                      # THE-1095 round 13 follow-up (grok issue 2): the
                      # orthogonal-polynomial family's own required
                      # trailing arguments -- `n` (position 0, the
@@ -2865,12 +2866,28 @@ check("  ...and root(21, 3) (an ordinary computed-free value) still evaluates",
 # value at that position in milliseconds (both `cap+1` and a `10**k`-
 # shaped form), and every EXPLICITLY unbounded position (`_UNBOUNDED_
 # POSITIONS`) does NOT refuse a huge value there as a ceiling.
+#
+# THE-1095 round 13 follow-up (grok, review of 562a026): the orthogonal-
+# polynomial family's own extra-parameter positions (`gegenbauer`'s `a` /
+# `assoc_legendre`'s `m` / `assoc_laguerre`'s own `alpha`, all at
+# position 1; `jacobi`'s own `a`/`b` at positions 1 and 2) are NOT the
+# last argument in their own signature -- `x` still needs to follow, or
+# this loop's own `[_first_arg] * _pos + [_over]` construction builds an
+# ARITY-short call (`gegenbauer(5, <over>)`, missing `x`) that raises a
+# validation arity error instead of exercising the cap this block means
+# to test at all.
+_TRAILING_ARGS_AFTER_TESTED_POSITION = {
+    ("gegenbauer", 1): ", 1", ("assoc_legendre", 1): ", 1",
+    ("assoc_laguerre", 1): ", 1",
+    ("jacobi", 1): ", 1, 1", ("jacobi", 2): ", 1",
+}
 for _fn_name, _extra_positions in _se5._EXTRA_BOUNDED_POSITIONS.items():
     _first_arg = "5"  # comfortably under every position-0 cap in the table
     for _pos, (_kind, _cap) in _extra_positions.items():
+        _trailing = _TRAILING_ARGS_AFTER_TESTED_POSITION.get((_fn_name, _pos), "")
         for _over in (f"{_cap}+1", f"10**{_cap // 2 or 1}+{_cap}"):
             _args = [_first_arg] * _pos + [_over]
-            _expr = f"{_fn_name}({', '.join(_args)})"
+            _expr = f"{_fn_name}({', '.join(_args)}{_trailing})"
             _t0 = time.time()
             _v, _e = _boundary_parse(_expr)
             _dt = time.time() - _t0
@@ -4779,6 +4796,123 @@ check("THE-1095 round 13 follow-up (grok issue 3): 'andre(1463)' "
 _v, _e = _boundary_parse("andre(1464)")
 check("THE-1095 round 13 follow-up (grok issue 3): 'andre(1464)' "
       "still refuses",
+      _v is None and _e is not None and _e[0] == "ceiling",
+      f"-> value={_v!r} err={_e!r}")
+
+# ═══ THE-1095 round 13 follow-up (Codex FAILED 562a026, verify-1095- ═══════
+# ═══ r13.log). Issues B, C, D below, same round as grok's polynomial ═══════
+# ═══ items above. ═══════════════════════════════════════════════════════
+
+# Issue C: "position-complete" used to mean "every position `_bounded_
+# positions` iterates has a row" -- a position OUTSIDE that iteration (no
+# cap, no `_UNBOUNDED_POSITIONS` entry either) read back as `None` from
+# `_position_spec` exactly the same way a genuinely-audited-safe one did,
+# indistinguishable from "nobody has looked at this yet." This audits
+# EVERY name in `_FUNCTION_ARG_CAPS` against its own REAL arity
+# (`inspect.signature`, sympy 1.14) and fails if ANY position in
+# `[0, max_arity)` has neither a cap row nor an explicit `_UNBOUNDED_
+# POSITIONS` entry -- the self-check Codex's own review asked for,
+# verbatim: "must fail on any position ... without a row or an explicit
+# refuse entry."
+import inspect as _inspect5
+
+_position_complete_gaps = []
+for _fn_name in sorted(_se5._FUNCTION_ARG_CAPS):
+    _real_obj = _se5.safe_global_dict().get(_fn_name)
+    if _real_obj is None:
+        continue
+    try:
+        _sig = _inspect5.signature(_real_obj)
+    except (TypeError, ValueError):
+        continue  # no introspectable signature -- nothing this audit can check
+    _max_arity = 0
+    _has_var_positional = False
+    for _param in _sig.parameters.values():
+        if _param.kind == _inspect5.Parameter.VAR_POSITIONAL:
+            _has_var_positional = True
+            break
+        if _param.kind in (_inspect5.Parameter.POSITIONAL_ONLY,
+                            _inspect5.Parameter.POSITIONAL_OR_KEYWORD):
+            _max_arity += 1
+    if _has_var_positional:
+        continue  # a variadic signature (*args) has no fixed arity to audit
+    for _pos in range(_max_arity):
+        if _se5._position_spec(_fn_name, _pos) is not None:
+            continue
+        if _pos in _se5._UNBOUNDED_POSITIONS.get(_fn_name, ()):
+            continue
+        _position_complete_gaps.append((_fn_name, _pos))
+check("THE-1095 round 13 follow-up (Codex issue C): every position of "
+      "every `_FUNCTION_ARG_CAPS` name has EITHER a cap row or an "
+      "explicit `_UNBOUNDED_POSITIONS` audit entry -- no silent gap",
+      not _position_complete_gaps, f"-> gaps={_position_complete_gaps!r}")
+
+# Issue D (main-parity pins from Codex's own 738-expression corpus):
+_v, _e = _boundary_parse("factorint(2+3)")
+check("THE-1095 round 13 follow-up (Codex issue D): 'factorint(2+3)' "
+      "matches main ({5: 1} -- an intended, documented outcome, not a "
+      "regression)",
+      _e is None and str(_v) == "{5: 1}", f"-> value={_v!r} err={_e!r}")
+
+_v, _e = _boundary_parse("zeta(1, 2)")
+check("THE-1095 round 13 follow-up (Codex issue D): 'zeta(1, 2)' (the "
+      "pole at s=1, TOP level -- cheap on main) matches main (zoo)",
+      _e is None and str(_v) == "zoo", f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("Abs(zeta(1))")
+check("THE-1095 round 13 follow-up (Codex issue D): 'Abs(zeta(1))' "
+      "matches main (oo)",
+      _e is None and str(_v) == "oo", f"-> value={_v!r} err={_e!r}")
+
+# Issue B (binomial, non-integer n's unbounded k):
+for _expr in ("binomial(1/2, 1000000)", "binomial(1/2, 10000)"):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 13 follow-up (Codex issue B): {_expr!r} "
+          f"(non-integer n, huge k) refuses -- binomial's own k-exemption "
+          f"is sound only for a non-negative-integer n",
+          _v is None and _e is not None and _e[0] == "ceiling",
+          f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("binomial(1/2, 1463)")
+check("THE-1095 round 13 follow-up (Codex issue B): 'binomial(1/2, "
+      "1463)' (non-integer n, k AT the cap) still evaluates",
+      _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("binomial(5, 10**9)")
+check("THE-1095 round 13 follow-up (Codex issue B): 'binomial(5, "
+      "10**9)' (integer n, k > n) is UNAFFECTED -- still the O(1) "
+      "k > n shortcut, 0",
+      _v is not None and str(_v) == "0" and _e is None,
+      f"-> value={_v!r} err={_e!r}")
+
+# Issue A(i): the six repros Codex's own review measured accepted/hung.
+for _expr in (
+    "interpolating_poly(100, x)",
+    "multinomial_coefficients(5, 100)",
+    "ones(5000,5000)",
+    "randMatrix(5000,5000)",
+    "divisor_count(152260502792253336053561837813263742971806)",
+    "chebyshevt_poly(10000, x)",
+):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round 13 follow-up (Codex issue A): {_expr!r} "
+          f"(an unbounded SymPy callable, previously invisible to this "
+          f"module's own tables) refuses in well under a second",
+          _v is None and _e is not None and _e[0] == "ceiling" and _dt < 3.0,
+          f"-> value={_v!r} err={_e!r} elapsed={_dt:.4f}s")
+# ...and ordinary, all-symbolic usage of an unbounded name keeps working.
+for _expr, _want_free in (("expand(x+1)", True), ("factor(x**2-1)", True)):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 13 follow-up (Codex issue A): {_expr!r} "
+          f"(all-symbolic argument) still evaluates, matching main",
+          _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("series(sin(x), x, 0, 6)")
+check("THE-1095 round 13 follow-up (Codex issue A): 'series(sin(x), x, "
+      "0, 6)' (a small, ordinary order) still evaluates, matching main",
+      _v is not None and _e is None and "O(x**6)" in str(_v),
+      f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("series(exp(x), x, 0, 100000)")
+check("THE-1095 round 13 follow-up (Codex issue A): 'series(exp(x), x, "
+      "0, 100000)' (Codex's own named repro) refuses",
       _v is None and _e is not None and _e[0] == "ceiling",
       f"-> value={_v!r} err={_e!r}")
 

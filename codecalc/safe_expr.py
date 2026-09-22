@@ -125,6 +125,24 @@ _HEAVY_FUNCTIONS = frozenset({
     "factorial", "factorial2", "subfactorial", "binomial", "fibonacci",
     "lucas", "tribonacci", "catalan", "bernoulli", "euler", "harmonic",
     "primorial", "prime", "primepi", "gamma", "loggamma", "rf", "ff",
+    # THE-1095 round 13 follow-up (Codex issue D / self-review regression
+    # while building issue A): `RisingFactorial`/`FallingFactorial` are
+    # the REAL sympy class names `rf`/`ff` are aliases FOR — confirmed
+    # live, `type(node).__name__` for a parsed `rf(5, 3)` call is
+    # `RisingFactorial`, never `"rf"` — so every check in this module
+    # keyed on the string `"rf"` (this table included) never matched a
+    # node the user's own call produced, only a name they never wrote.
+    # This was invisible until the new GENERIC unbounded-callable check
+    # (`_unbounded_generic_call_violation`) started refusing an
+    # INTERNALLY-constructed `RisingFactorial` node — `jacobi(21, 1, 1,
+    # x)`'s own `a == b` branch (sympy 1.14's `jacobi.eval`) builds one
+    # directly (`RisingFactorial(a+1, n) / RisingFactorial(2*a+1, n) *
+    # gegenbauer(...)`) — surfacing the gap as a false refusal for an
+    # entirely legitimate, comfortably in-cap call. Added under BOTH
+    # names so a call written either way (`rf(5,3)` or `RisingFactorial(
+    # 5,3)`, and any node either name's own `eval()` constructs
+    # internally) gets the identical cap/growth-bound protection.
+    "RisingFactorial", "FallingFactorial",
     "npartitions", "totient", "divisor_sigma",
     # #326 finding 2 (cross-vendor review, round 6, Codex): audited every
     # eager combinatorial/number-theoretic name `safe_global_dict()`
@@ -511,6 +529,8 @@ MAX_ITH_PRIME_SKIP = 1_000
 _EXTRA_BOUNDED_POSITIONS: dict = {
     "rf": {1: ("value", MAX_HEAVY_ARG)},
     "ff": {1: ("value", MAX_HEAVY_ARG)},
+    "RisingFactorial": {1: ("value", MAX_HEAVY_ARG)},
+    "FallingFactorial": {1: ("value", MAX_HEAVY_ARG)},
     "polygamma": {1: ("value", MAX_HEAVY_ARG)},
     "divisor_sigma": {1: ("value", MAX_HEAVY_ARG)},
     "nextprime": {1: ("value", MAX_ITH_PRIME_SKIP)},
@@ -538,6 +558,47 @@ _EXTRA_BOUNDED_POSITIONS: dict = {
     # Float-`_prec` branch, still catches for the fully-constructed
     # result either way).
     "N": {1: ("value", MAX_NUMERIC_DIGITS)},
+    # THE-1095 round 13 follow-up (Codex issue A's own named repro,
+    # `series(exp(x), x, 0, 100000)`, timeout): `series(expr, x, x0, n,
+    # dir)`'s own position 3, the number of terms to expand -- the SAME
+    # "position 0 is the expression, not a magnitude, so this belongs
+    # in `_EXTRA_BOUNDED_POSITIONS` alone, not `_FUNCTION_ARG_CAPS`"
+    # shape `N`'s own comment (just above) already documents, and the
+    # SAME dedicated-check shape `_n_precision_violation` already uses
+    # for `N`'s identical "no meaningful position-0 cap, no growth
+    # formula" reasoning (see `_series_order_violation`'s own docstring).
+    # Measured directly (2026-09-22, this box): `series(exp(x), x, 0,
+    # n)` reaches ~1s around `n=150-200`; 100 keeps it comfortably
+    # sub-second with margin while still admitting the tiny orders
+    # (`series(sin(x), x, 0, 6)`) this repo's own test suite already
+    # exercises.
+    "series": {3: ("value", 100)},
+    # THE-1095 round 13 follow-up (grok, review of 562a026): the
+    # orthogonal-polynomial family's own remaining positions — `x` (the
+    # evaluation point, always last) and, for the four names with an
+    # extra numeric parameter that enters the recurrence directly
+    # (confirmed against `polynomials.py`/`orthopolys.py`, sympy 1.14:
+    # `gegenbauer_poly`'s own `a`, `jacobi_poly`'s own `a`/`b`,
+    # `laguerre_poly`'s own `alpha` for `assoc_laguerre`, and `assoc_
+    # legendre`'s own `m`), that parameter too. A GENEROUS per-position
+    # cap (`MAX_HEAVY_ARG`, the same figure this module already uses
+    # for every other "a small numeric argument, big numeric output"
+    # position) catches an OBVIOUSLY unreasonable single value
+    # immediately and cheaply (grok's own repros — `10**50`, `10**20`,
+    # `10**400` — are all astronomically past it); the COMBINED case
+    # (every position individually under its own cap, but the product
+    # still over `MAX_NUMERIC_DIGITS`) is what `_GROWTH_BOUNDS`'s own
+    # per-family entry (`_growth_orthogonal_poly`, below) exists to
+    # catch instead — the same two-layer shape `bell`/`zeta`/`harmonic`
+    # already use for their own second position, above.
+    **{_name: {1: ("value", MAX_HEAVY_ARG)} for _name in
+       ("hermite", "hermite_prob", "chebyshevt", "chebyshevu", "legendre",
+        "laguerre")},
+    "gegenbauer": {1: ("value", MAX_HEAVY_ARG), 2: ("value", MAX_HEAVY_ARG)},
+    "assoc_legendre": {1: ("value", MAX_HEAVY_ARG), 2: ("value", MAX_HEAVY_ARG)},
+    "jacobi": {1: ("value", MAX_HEAVY_ARG), 2: ("value", MAX_HEAVY_ARG),
+               3: ("value", MAX_HEAVY_ARG)},
+    "assoc_laguerre": {1: ("value", MAX_HEAVY_ARG), 2: ("value", MAX_HEAVY_ARG)},
 }
 #: name -> frozenset of positions that are members of `_HEAVY_FUNCTIONS`'
 #: usual "value"-kind position-0 table by construction, but this specific
@@ -557,6 +618,48 @@ _EXTRA_BOUNDED_POSITIONS: dict = {
 _UNBOUNDED_POSITIONS: dict = {
     "binomial": frozenset({1}),
     "bell": frozenset({2}),
+    # THE-1095 round 13 follow-up (Codex issue C): "position-complete"
+    # used to mean "every position `_bounded_positions` iterates has a
+    # row" — but a position OUTSIDE that iteration (no cap, and no
+    # explicit entry here either) reads back from `_position_spec` as
+    # `None` exactly the same way a genuinely-audited-safe one does,
+    # indistinguishable from "nobody has looked at this yet." Every
+    # remaining position for these eight names, `inspect.signature`'s
+    # own full arity (sympy 1.14): audited here for the first time,
+    # each measured directly against an adversarial value (a huge
+    # magnitude where the parameter's own type allows one at all) —
+    # confirmed live, none is a numeric-magnitude hazard:
+    #   `primorial(n, nth=True)` -- `nth` is a bool flag, read only for
+    #     truthiness (`primorial(100, 10**9)`: instant, unaffected).
+    #   `npartitions(n, verbose=False)` -- `verbose` a bool flag, no
+    #     computation depends on its value.
+    #   `factorint(n, limit=None, use_trial=True, use_rho=True,
+    #     use_pm1=True, use_ecm=True, verbose=False, visual=None,
+    #     multiple=False)` -- `limit` bounds trial division RANGE (a
+    #     smaller search, never a larger one, for a bigger value) and
+    #     every other position is a bool/algorithm-selection flag
+    #     (`factorint(1234567891, 10**9)`: instant).
+    #   `primefactors(n, limit=None, verbose=False)` -- same `limit`
+    #     shape as `factorint` (`primefactors(1234567891, 10**9)`:
+    #     instant).
+    #   `divisors(n, generator=False, proper=False)` -- both bool flags.
+    #   `root(arg, n, k=0, evaluate=None)` -- `k` selects WHICH of the
+    #     `n` complex roots to return (`exp(2*pi*I*k/n)`-shaped), no
+    #     magnitude-dependent cost (`root(8, 3, 10**9)`: instant);
+    #     `evaluate` a flag.
+    #   `sqrt(arg, evaluate=None)` / `cbrt(arg, evaluate=None)` --
+    #     `evaluate` a flag.
+    "primorial": frozenset({1}),
+    "npartitions": frozenset({1}),
+    "factorint": frozenset({1, 2, 3, 4, 5, 6, 7, 8}),
+    "primefactors": frozenset({1, 2}),
+    "divisors": frozenset({1, 2}),
+    # `n` (position 1, the root INDEX -- `root(8, 10**9)` measured
+    # instant, `2**(3/1000000000)`) is audited here too now; `k`/
+    # `evaluate` (positions 2/3) already were.
+    "root": frozenset({1, 2, 3}),
+    "sqrt": frozenset({1}),
+    "cbrt": frozenset({1}),
 }
 
 
@@ -1073,6 +1176,94 @@ def _growth_poly_second_arg(base_growth, degree_scale: float = 1.0):
     return growth
 
 
+def _growth_orthogonal_poly(x_position: int, param_positions: tuple[int, ...] = ()):
+    """Builds a `bounds -> log10(upper bound)` growth function for the
+    orthogonal-polynomial family — `hermite`/`hermite_prob`/`chebyshevt`/
+    `chebyshevu`/`gegenbauer`/`legendre`/`assoc_legendre`/`jacobi`/
+    `laguerre`/`assoc_laguerre` — the position-complete replacement for
+    the bare `_growth_stirling_factorial` this table used before (#326
+    finding, grok review of 562a026, `verify-1095-r13-grok.log`): that
+    bare formula only ever bounded the STANDARD polynomial's own leading
+    coefficient (a bound on `n` alone) — never `|P_n(x)|` for a numeric
+    `x`, and never a coefficient inflated by an extra numeric parameter
+    (`alpha`/`a`/`b`/`m`) — and (a SEPARATE bug, fixed at this function's
+    own CALLER, `_table_function_growth_violation`) never even RAN when
+    `x` was a free symbol at all, the ordinary case for these names.
+    `gegenbauer(850, 10**20, x)` (`x` free, `alpha` a concrete but
+    UNBOUNDED `10**20`) is exactly what both gaps, together, let
+    through: the coefficient bound is genuinely `~alpha**n`-scale
+    (~8500 digits for `n=850`), and neither the old bare formula nor
+    the free-symbol skip ever computed anything close to that.
+
+    `x_position` is the position of the evaluation point (always the
+    LAST argument, across all ten names); `param_positions` is every
+    OTHER numeric parameter besides the order (`n`, position 0) and `x`
+    — `()` for the six names with no extra parameter, `(1,)` for
+    `gegenbauer`'s own `a` / `assoc_legendre`'s own `m` / `assoc_
+    laguerre`'s own `alpha`, `(1, 2)` for `jacobi`'s own `a` and `b`.
+
+    Three terms, combined additively (log-space, so this is a PRODUCT
+    of the three underlying bounds):
+
+    1. `n!` (`_growth_stirling_factorial`, unwrapped) — the coefficient-
+       COUNT/factorial-scale envelope every family's own STANDARD
+       (no extra parameter, unit-scale `x`) polynomial coefficients are
+       bounded by: confirmed against sympy 1.14's own closed forms,
+       every one of these ten families' true leading-coefficient
+       magnitude (Hermite `2**n`; Chebyshev T `2**(n-1)`; Legendre
+       `~4**n / sqrt(n)`; ...) is far SMALLER than `n!` for any `n`
+       this table's own position-0 caps admit (`hermite(700, x)`'s
+       leading coefficient is `2**700`, ~211 digits, against `700!`'s
+       own ~1747) — reused directly rather than ten separate tight
+       formulas, the SAME "one cap that is right for the worst grower"
+       trade this file's own established caps already make.
+    2. For each `param_positions` entry that resolved to a concrete
+       magnitude: `n * log10(max(1, |param| + n))` — each of the
+       four extra-parameter families' own recurrence
+       (`dup_gegenbauer`/`dup_jacobi`/`dup_laguerre` in sympy's
+       `orthopolys.py`, confirmed against 1.14's own source, cited by
+       the coordinator's own review) multiplies by a term of THIS
+       rough size (`|param|` or a small combination of `param` and the
+       current recurrence step, itself `<= n`) at each of its `n`
+       steps — `(|param| + n)**n` is a safe, generous product bound on
+       that whole chain, never claiming tighter. A symbolic (or
+       absent) parameter contributes NOTHING — the same "no numeric
+       explosion without a concrete number to explode" reasoning
+       `_growth_poly_second_arg`'s own missing-`x` branch already uses.
+    3. If `x_position` resolved to a concrete magnitude: `n *
+       log10(2*|x| + 1)` — the coordinator's own supplied envelope,
+       `|P_n(x)| <= n! * (2|x| + 1)**n`, a standard (if loose) bound for
+       a degree-`n` polynomial whose OWN coefficient sum is already
+       captured by terms 1-2 above (worst case: every coefficient's
+       magnitude landing on the SAME highest-degree term, `|x|**n`,
+       doubled for the alternating-sign case any of these families can
+       exhibit). A symbolic `x` contributes NOTHING — the RESULT is the
+       polynomial itself, whose coefficient bound (terms 1-2) is already
+       the complete answer; no evaluation-at-a-point term applies.
+    """
+    def growth(bounds: dict) -> float:
+        n = _safe_pow10(bounds.get(0))
+        if n is None:
+            return math.inf
+        total = _growth_stirling_factorial(bounds)
+        for pos in param_positions:
+            p_log = bounds.get(pos)
+            if p_log is None:
+                continue  # symbolic or absent -- no contribution
+            p_val = _safe_pow10(p_log)
+            if p_val is None:
+                return math.inf
+            total += n * math.log10(max(1.0, p_val + n))
+        x_log = bounds.get(x_position)
+        if x_log is not None:
+            x_val = _safe_pow10(x_log)
+            if x_val is None:
+                return math.inf
+            total += n * math.log10(2.0 * x_val + 1.0)
+        return total
+    return growth
+
+
 def _growth_2_factorial(bounds: dict) -> float:
     """`|x(n)| <= 2 * n!` — the standard asymptotic envelope for Euler,
     Bernoulli, and Genocchi numbers (`|E_n|, |B_n|, |G_n| = O(n! /
@@ -1362,6 +1553,7 @@ _growth_genocchi = _growth_poly_second_arg(_growth_2_factorial, 1.0)
 _GROWTH_BOUNDS: dict = {
     "binomial": _growth_2n,
     "rf": _growth_rf_ff, "ff": _growth_rf_ff,
+    "RisingFactorial": _growth_rf_ff, "FallingFactorial": _growth_rf_ff,
     "primorial": _growth_primorial,
     "prime": _growth_prime,
     "nextprime": _growth_nextprime,
@@ -1419,32 +1611,29 @@ _GROWTH_BOUNDS: dict = {
     # RIGHT reason.
     "andre": _growth_2_factorial,
     # THE-1095 round 13 follow-up (grok issue 2): the orthogonal-
-    # polynomial family's own OUTPUT ceiling — see `MAX_HERMITE_ORDER`'s
-    # own comment for the full account of the hazard this closes. Every
-    # one of these ten families' own leading-coefficient magnitude is
-    # `O(2**n)`-to-`O(4**n)`-ish (Hermite: exactly `2**n`; Chebyshev T:
-    # `2**(n-1)`; Legendre: `~4**n / sqrt(n)`; ...) — always far SMALLER
-    # than `n!` for any `n` this module's own position-0 caps admit
-    # (confirmed: `hermite(700, x)`'s leading coefficient is `2**700`,
-    # ~211 digits, against `700!`'s own ~1747) — so the SAME bare `n!`
-    # envelope `_growth_stirling_factorial` already gives `factorial`/
-    # `factorial2`/`subfactorial` is reused directly, rather than ten
-    # new per-family formulas: a safe (if generous) UPPER bound on the
-    # largest coefficient's own digit count, applied by `_table_
-    # function_growth_violation`'s own unconditional walk (nested OR
-    # top-level) the identical way it already applies to every other
-    # name in this table — this is what makes a NESTED orthogonal-
-    # polynomial call (`chebyshevt(hermite(600, y), x)`, say) get the
-    # SAME growth-bound treatment its own ARGUMENT cap alone would
-    # never see (the argument here is `hermite(600, y)`'s own RESULT, a
-    # polynomial in `y`, not a literal number `_resolve_arg_magnitude`
-    # could read off directly).
+    # polynomial family's own OUTPUT ceiling — POSITION-COMPLETE (#326
+    # finding, grok review of 562a026): a bare `_growth_stirling_
+    # factorial` (order `n` alone) was NOT a valid upper bound on
+    # `|P_n(x)|` for a numeric `x`, nor on a coefficient inflated by an
+    # extra numeric parameter (`alpha`/`a`/`b`/`m`) — see `_growth_
+    # orthogonal_poly`'s own docstring for the full account, the
+    # confirmed sympy 1.14 recurrences it is built from, and why each of
+    # its three terms is a safe (if generous) upper bound. `x_position`
+    # is always the LAST argument; `param_positions` names every OTHER
+    # numeric parameter besides the order — `()` for the six names with
+    # none, `gegenbauer`'s own `a` / `assoc_legendre`'s own `m` /
+    # `assoc_laguerre`'s own `alpha` at position 1, `jacobi`'s own `a`
+    # and `b` at positions 1 and 2 (matching `_EXTRA_BOUNDED_
+    # POSITIONS`'s own per-name spec for these same positions, above).
     **dict.fromkeys(
-        ("hermite", "hermite_prob", "chebyshevt", "chebyshevu",
-         "gegenbauer", "legendre", "assoc_legendre", "jacobi",
-         "laguerre", "assoc_laguerre"),
-        _growth_stirling_factorial,
+        ("hermite", "hermite_prob", "chebyshevt", "chebyshevu", "legendre",
+         "laguerre"),
+        _growth_orthogonal_poly(1),
     ),
+    "gegenbauer": _growth_orthogonal_poly(2, (1,)),
+    "assoc_legendre": _growth_orthogonal_poly(2, (1,)),
+    "jacobi": _growth_orthogonal_poly(3, (1, 2)),
+    "assoc_laguerre": _growth_orthogonal_poly(2, (1,)),
 }
 
 #: THE-1095, follow-up to #326/THE-1091 (GH #326, PR #334): every fix above
@@ -1615,6 +1804,82 @@ _DEFERRED_STANDIN_NAMES = (
 #: `MAX_ROOT_ARG_DIGITS` (1200) — comfortably fast at that size per
 #: `MAX_ROOT_ARG_DIGITS`'s own measurements (<=0.8s at 1500 digits),
 #: regardless of which of the two shapes that construction happens to take.
+
+
+#: THE-1095 round 13 follow-up (Codex issue A, `verify-1095-r13.log`,
+#: "THE ROOT CAUSE"): `safe_global_dict()` re-exports every PUBLIC name
+#: in `sympy.__dict__` — 929 names, 874 callable, measured live — and
+#: `_deferred_global_dict` (below) used to stand in only the ones this
+#: module had explicitly bounded (`_DEFERRED_STANDIN_NAMES`). SymPy's own
+#: `EvaluateFalseTransformer.visit_Call` (confirmed against its 1.14.0
+#: source) appends an `evaluate=False` keyword ONLY for the 34-name
+#: elementary list (`EvaluateFalseTransformer.functions`, imported
+#: below) — EVERY other callable, bounded or not, gets NO such kwarg at
+#: all, so it runs EAGERLY, for real, the instant the DEFERRED parse
+#: merely scans a call to it: `interpolating_poly(100, x)` (5.0s),
+#: `multinomial_coefficients(5, 100)` (timeout, 383MB), `ones(5000,
+#: 5000)`/`randMatrix(5000, 5000)` (timeout), `divisor_count`/an
+#: RSA-100 literal (timeout) all measured live, accepted or hung, via
+#: THIS surface — not any name this module had ever tabled or reasoned
+#: about at all.
+#:
+#: The fix (`_deferred_global_dict`'s own new generic-fallback loop) is
+#: a DEFAULT-DENY posture for this surface: every callable NOT already
+#: bounded (`_DEFERRED_STANDIN_NAMES`), NOT one of the 34 elementary
+#: names (genuinely protected by the AST transform itself, no stand-in
+#: needed), and NOT in THIS frozenset gets a GENERIC inert stand-in too
+#: — refused outright by the new scan-time check (`_unbounded_generic_
+#: call_violation`, below) the instant it is called with so much as ONE
+#: non-symbolic argument, regardless of what its own `eval()` would
+#: have done.
+#:
+#: Restricted to TRUE, argument-content-INDEPENDENT constructors and
+#: predicates — ones whose own body does no algorithmic WORK on its
+#: argument's structure at all, only builds a node from it (`Add`/`Mul`/
+#: `Pow`/`Number`/`Rational`/`Integer`/`Float`/`Symbol`/`symbols`/`var`;
+#: the relational/boolean constructors `Eq`/`Ne`/`Lt`/`Le`/`Gt`/`Ge`/
+#: `And`/`Or`/`Not`/`Xor`/`Implies`) — each measured directly (2026-09-
+#: 22, this box, sympy 1.14.0) at well under 100ms regardless of a
+#: numeric argument's own magnitude.
+#:
+#: THE-1095 round 13 follow-up, SAME round (own self-review before this
+#: round's own commit): the first version of this set ALSO included
+#: `gcd`/`lcm`/`igcd`/`ilcm`, `erf`/`erfi`/`Ei`, and the general single-
+#: expression manipulation family (`expand`/`factor`/`together`/
+#: `cancel`/`collect`/`diff`/`degree`/`primitive`/`fraction`/`prod`) —
+#: each individually measured fast against a SIMPLE representative
+#: argument, but that measurement answered the wrong question:
+#: `expand((x+1)**10000)` (a free-symbol argument — `x` — so the new
+#: generic refusal's OWN "at least one non-symbolic argument" trigger
+#: never applies to it either way) still hung, because exempting
+#: `expand` from the stand-in treatment ALSO exempted it from ever
+#: being made inert during the deferred scan — the REAL `expand()`
+#: still ran EAGERLY on the still-unevaluated `Pow(Add(x, 1), 10000)`
+#: argument, the exact ordering hazard this whole fix exists to close,
+#: just reopened for exactly the ten names this round's own first draft
+#: had exempted. These ten are ALGORITHMS whose own cost scales with
+#: their ARGUMENT's structural complexity, not merely its magnitude —
+#: "fast on a simple test input" says nothing about an ADVERSARIAL one
+#: — so none of them belong in an argument-content-independent
+#: allowlist at all. Removed; they now get the GENERIC stand-in like
+#: everything else NOT in this set, which is what lets the EXISTING,
+#: UNCONDITIONAL `MAX_SYMBOLIC_EXPONENT` `Pow`-loop (`reject_explosive`'s
+#: own walk, over EVERY `Pow` node in the tree regardless of which
+#: `Function` wraps it) reach and refuse the SAME `Pow(Add(x,1),10000)`
+#: node — now nested inside an inert `expand` stand-in instead of a
+#: real, eagerly-executing call — the way it already does for a bare
+#: `(x+1)**10000` with no wrapping call at all. `gcd`/`lcm`/`igcd`/
+#: `ilcm`/`erf`/`erfi`/`Ei` are pure NUMBER-theoretic/special functions,
+#: not argument-content algorithms in the same sense, but are removed
+#: here too out of the same caution — none of their own measured-fast
+#: cases were tested against an adversarial SYMBOLIC argument, only a
+#: numeric one, and this module's own "unknown != safe" bar means an
+#: unmeasured case defaults to refused, not assumed fine.
+_MEASURED_SAFE_CALLABLES = frozenset({
+    "Add", "Mul", "Pow", "Number",
+    "Rational", "Integer", "Float", "Symbol", "symbols", "var",
+    "Eq", "Ne", "Lt", "Le", "Gt", "Ge", "And", "Or", "Not", "Xor", "Implies",
+})
 
 
 def _log10_of_int(n: int) -> float:
@@ -2581,6 +2846,69 @@ def _arity_checked_new(real_obj):
     return __new__
 
 
+def _build_deferred_standin(name: str, real_obj):
+    """One inert deferred stand-in `Function` subclass for `name`, whose
+    real implementation is `real_obj` — the per-name construction
+    `_deferred_global_dict` (below) used to inline in its own loop,
+    extracted so the SAME logic builds a stand-in for BOTH a table name
+    (a KNOWN hazard, this module's own `_FUNCTION_ARG_CAPS`/`_EXTRA_
+    BOUNDED_POSITIONS`) and — THE-1095 round 13 follow-up (Codex issue
+    A, `verify-1095-r13.log`) — the GENERIC fallback below, for every
+    OTHER callable in `safe_global_dict()` this module has not
+    individually bounded at all. See `_deferred_global_dict`'s own
+    docstring for why a stand-in is needed in the first place (a real
+    `sympy.Function` subclass or plain callable NOT in `EvaluateFalse
+    Transformer.functions` gets NO `evaluate=False` kwarg from the AST
+    transform at all — confirmed against sympy 1.14's own `visit_Call`
+    source, which appends that kwarg ONLY for the 34-name elementary
+    list — so it runs EAGERLY, for real, the instant the deferred parse
+    merely SCANS a call to it).
+    """
+    import inspect
+
+    from sympy import Function
+    from sympy.sets.sets import FiniteSet
+
+    # THE-1095 round 13 follow-up (own self-review, before this round's
+    # commit): the table-name-only loop this was extracted from only
+    # ever handed `real_obj` a name ALREADY confirmed (by the module's
+    # own long-running empirical audit, `_DEFERRED_STANDIN_NAMES`'s own
+    # comment) to expose a real, FINITE `nargs`. Once the GENERIC
+    # fallback loop started calling this for EVERY remaining callable,
+    # that assumption broke two different ways: `Lambda`/`FunctionClass`
+    # (base/meta classes exported at module level, not concrete Function
+    # subclasses) expose `nargs` as an unbound `property` OBJECT
+    # (`tuple(real_nargs)` raised `TypeError: 'property' object is not
+    # iterable`, crashing `_deferred_global_dict()` outright — every
+    # SUBSEQUENT `_parse_deferred` call then failed too, silently
+    # swallowed by `safe_parse`'s own exception handling, which is what
+    # let every one of Codex's own repros through UNPROTECTED even
+    # though this fix's own mechanism looked complete); `And`/`Or`/`Xor`/
+    # `Max`/`Min`/`Piecewise`/`meijerg`/... (genuinely variadic real
+    # Function classes) expose `nargs` as `Naturals0` (or an equivalent
+    # INFINITE SymPy `Set`) — `tuple(Naturals0)` does not raise, it
+    # HANGS, attempting to enumerate an infinite set (confirmed live:
+    # `And.nargs` itself resolves in ~50 microseconds; `tuple(And.
+    # nargs)` never returns). `isinstance(real_nargs, FiniteSet)` is the
+    # one check that closes BOTH: `False` for a bare `property` (not a
+    # `Set` at all) exactly as it is for an infinite one, so either
+    # shape now falls through to the SAME `inspect.signature`-derived
+    # arity path every plain-callable stand-in already uses instead of
+    # ever calling `tuple()` on something that cannot safely be one.
+    real_nargs = getattr(real_obj, "nargs", None)
+    if isinstance(real_nargs, FiniteSet):
+        attrs = {"nargs": tuple(real_nargs), "_eval_evalf": _standin_refuses_evalf}
+    else:
+        attrs = {"_eval_evalf": _standin_refuses_evalf}
+        try:
+            sig = inspect.signature(real_obj)
+        except (TypeError, ValueError):
+            sig = None
+        if sig is not None:
+            attrs["__new__"] = _arity_checked_new(real_obj)
+    return type(name, (Function,), attrs)
+
+
 def _deferred_global_dict() -> dict:
     """`safe_global_dict()`, with every name in `_DEFERRED_STANDIN_NAMES`
     (== `_FUNCTION_ARG_CAPS` minus the `sqrt`/`cbrt` family — see that
@@ -2659,46 +2987,21 @@ def _deferred_global_dict() -> dict:
     """
     global _DEFERRED_STANDINS
     if _DEFERRED_STANDINS is None:
-        import inspect
-
         from sympy import Function
 
         real = safe_global_dict()
         _DEFERRED_STANDINS = {}
+        # #326 finding (round-3-follow-up #3, coordinator review of
+        # 5e2a961, grok item 5): a plain-callable stand-in needs its own
+        # `nargs`/`__new__`, so a WRONG argument count raises the REAL
+        # callable's OWN native `TypeError` (`isprime(10**26, 1)` on
+        # `origin/main` raises Python's own native "isprime() takes 1
+        # positional argument but 2 were given", not `Function.__new__`'s
+        # generic "X takes exactly N arguments") — see `_build_deferred_
+        # standin`'s own docstring for the mechanism, extracted from this
+        # loop so it is shared with the GENERIC fallback loop below.
         for name in _DEFERRED_STANDIN_NAMES:
-            real_obj = real.get(name)
-            real_nargs = getattr(real_obj, "nargs", None)
-            if real_nargs is not None:
-                attrs = {"nargs": tuple(real_nargs), "_eval_evalf": _standin_refuses_evalf}
-            else:
-                attrs = {"_eval_evalf": _standin_refuses_evalf}
-                try:
-                    sig = inspect.signature(real_obj)
-                except (TypeError, ValueError):
-                    sig = None
-                if sig is not None:
-                    # THE-1095 round-3-follow-up #3 (coordinator review
-                    # of 5e2a961, grok item 5): a plain-callable stand-in
-                    # used to set `nargs` too, giving `Function.__new__`'s
-                    # OWN generic arity check ("X takes exactly N
-                    # arguments (M given)") — SymPy's own wording, not
-                    # the REAL callable's: `isprime(10**26, 1)` on
-                    # `origin/main` raises Python's own native "isprime()
-                    # takes 1 positional argument but 2 were given" (a
-                    # plain function, not a `Function.__new__`-checked
-                    # class). `_arity_checked_new`'s own `__new__` tries
-                    # `inspect.signature(real_obj).bind(*args, **kwargs)`
-                    # first (cheap, `sig` here only gates WHETHER this
-                    # path applies at all — the real check happens fresh,
-                    # against `real_obj`, on every call), falling through
-                    # to a REAL call to `real_obj` only on a `bind()`
-                    # failure — Python's own call-binding machinery is
-                    # what then raises the byte-identical `TypeError`,
-                    # since it is the SAME mechanism a real call to
-                    # `isprime` would hit, before any of `isprime`'s own
-                    # body ever runs.
-                    attrs["__new__"] = _arity_checked_new(real_obj)
-            _DEFERRED_STANDINS[name] = type(name, (Function,), attrs)
+            _DEFERRED_STANDINS[name] = _build_deferred_standin(name, real.get(name))
         # THE-1095 round 3, item 6: `Mod` is directly callable BY NAME
         # (`Mod(x**N, 11)`, not just via the `%` operator
         # `_parse_deferred`'s own transform screens) and its own `eval()`
@@ -2750,6 +3053,34 @@ def _deferred_global_dict() -> dict:
             _DEFERRED_STANDINS[_name] = type(_name, (Function,), {"nargs": (1,), "_eval_evalf": _standin_refuses_evalf})
         for _name in ("Max", "Min"):
             _DEFERRED_STANDINS[_name] = type(_name, (Function,), {"_eval_evalf": _standin_refuses_evalf})
+        # THE-1095 round 13 follow-up (Codex issue A): the GENERIC
+        # fallback — every OTHER callable `safe_global_dict()` exports,
+        # not already given a stand-in above, and not one of the 34
+        # names `EvaluateFalseTransformer.functions` itself protects
+        # (genuinely inert under `evaluate=False`, confirmed against
+        # sympy 1.14's own `visit_Call` source — no stand-in needed),
+        # gets the SAME kind of inert stand-in `_build_deferred_standin`
+        # already builds for a table name — just for a name this module
+        # has NOT bounded at all, rather than one it has. See `_MEASURED_
+        # SAFE_CALLABLES`'s own comment for the measured, repo-grepped
+        # exemption list (plain constructors and expression-manipulation
+        # entries confirmed cheap regardless of a numeric argument's own
+        # magnitude) and `_unbounded_generic_call_violation` (used by
+        # both `_numeric_ceiling_scan` and `reject_explosive`'s own
+        # unconditional walk) for what happens to one of these NEW
+        # stand-ins' own nodes once the scan reaches it: refused outright
+        # the instant it carries even ONE non-symbolic argument — this
+        # module has no growth bound, no cap, and no other evidence AT
+        # ALL that calling the real function would be safe, so `unknown
+        # != safe` applies here exactly as it already does everywhere
+        # else in this file.
+        from sympy.parsing.sympy_parser import EvaluateFalseTransformer as _EFT5
+        _elementary = frozenset(_EFT5.functions)
+        for _name, _real_obj in real.items():
+            if (_name in _DEFERRED_STANDINS or _name in _elementary
+                    or _name in _MEASURED_SAFE_CALLABLES or not callable(_real_obj)):
+                continue
+            _DEFERRED_STANDINS[_name] = _build_deferred_standin(_name, _real_obj)
     g = safe_global_dict()
     g.update(_DEFERRED_STANDINS)
     # THE-1095 round-3-follow-up #3: the marker classes `_parse_deferred`'s
@@ -3245,6 +3576,26 @@ def safe_parse(expression: str, *, evaluate: bool = True, local_dict: dict | Non
         output_violation = _ceiling_message_num_den(result_log_num, result_log_den)
         if output_violation:
             return None, (CATEGORY_CEILING, output_violation)
+        return value, None
+    # THE-1095 round 13 follow-up (Codex issue A(ii)): `_log10_num_den`
+    # only ever resolves a NUMERIC value (`Integer`/`Mul`/`Add`/`Pow`/
+    # `Rational`/`Float`) — `result_resolved` is `False` for EVERY other
+    # shape (a polynomial in a free symbol, a `Matrix`, a plain Python
+    # `list`/`dict` from an eager combinatorial callable, `Piecewise`,
+    # ...), and the check above simply falls through with NO backstop at
+    # all for any of them. `_unbounded_generic_call_violation` (the SCAN-
+    # time check, above `_deferred_global_dict`'s own docstring) already
+    # closes most of this at the source — but it is a BOUND, not a
+    # guarantee: this is the generic, TYPE-SHAPE-appropriate ceiling on
+    # the actual constructed RESULT, so a container or symbolic result
+    # can never be returned past this module's own size ceiling even if
+    # some other bound turns out to be wrong — "so a container or
+    # polynomial can never be returned past the ceiling even if a bound
+    # is wrong," Codex's own framing for why this exists independently
+    # of the scan-time check, not merely to duplicate it.
+    generic_violation = _generic_result_size_violation(value)
+    if generic_violation:
+        return None, (CATEGORY_CEILING, generic_violation)
     return value, None
 
 
@@ -4121,6 +4472,72 @@ def _ceiling_message_num_den(log_num: float, log_den: float) -> str | None:
     return None
 
 
+#: Ceilings for `_generic_result_size_violation` (below) — deliberately
+#: generous (this is a LAST-RESORT backstop, not the primary bound;
+#: `_unbounded_generic_call_violation`'s own scan-time refusal is what
+#: actually keeps most dangerous non-numeric results from ever being
+#: constructed at all) but still finite: a `Matrix`/list/dict past
+#: 10,000 entries, or a symbolic expression past 100,000 structural
+#: operations (`sympy.count_ops`, a cheap STRUCTURAL count that never
+#: renders the expression — safe to compute even on something whose
+#: PRINTED form would itself be dangerous), is refused rather than ever
+#: handed back.
+_MAX_RESULT_CONTAINER_ELEMENTS = 10_000
+_MAX_RESULT_OPS = 100_000
+
+
+def _generic_result_size_violation(value) -> str | None:
+    """Reason the final, ALREADY-CONSTRUCTED `value` (anything `_log10_
+    num_den` could not resolve — a `Matrix`, a plain Python `list`/
+    `dict`/`tuple`/`set` from an eager combinatorial callable, a
+    polynomial in a free symbol, `Piecewise`, ...) is too large to
+    safely hand back, or `None` if it is a shape this function does not
+    recognize (left alone — the SCAN-time check, `_unbounded_generic_
+    call_violation`, is what actually bears most of this weight) or is
+    within these generous ceilings.
+
+    THE-1095 round 13 follow-up (Codex issue A(ii)): a size check on the
+    CONSTRUCTED result, independent of whatever bound decided it was
+    safe to construct in the first place — "a container or polynomial
+    can never be returned past the ceiling even if a bound is wrong"
+    (Codex's own framing). Never calls `str()`/`repr()` on `value`
+    itself (which could be exactly the dangerous, slow-to-render
+    operation this module exists to avoid) — a `Matrix`'s own `.shape`,
+    a container's own `len()`, and `count_ops`'s own structural walk are
+    all cheap regardless of how large the eventual PRINTED form would
+    be.
+    """
+    shape = getattr(value, "shape", None)
+    if shape is not None and len(shape) == 2:
+        try:
+            rows, cols = int(shape[0]), int(shape[1])
+        except (TypeError, ValueError):
+            return None
+        total = rows * cols
+        if total > _MAX_RESULT_CONTAINER_ELEMENTS:
+            return (f"the result is a {rows}x{cols} matrix ({total} entries), "
+                    f"over the limit of {_MAX_RESULT_CONTAINER_ELEMENTS}: it "
+                    "cannot be safely rendered")
+        return None
+    if isinstance(value, (list, tuple, dict, set, frozenset)):
+        count = len(value)
+        if count > _MAX_RESULT_CONTAINER_ELEMENTS:
+            return (f"the result has {count} elements, over the limit of "
+                    f"{_MAX_RESULT_CONTAINER_ELEMENTS}: it cannot be safely "
+                    "rendered")
+        return None
+    from sympy import Basic, count_ops
+    if isinstance(value, Basic):
+        try:
+            ops = int(count_ops(value))
+        except Exception:
+            return None
+        if ops > _MAX_RESULT_OPS:
+            return (f"the result has about {ops} operations, over the limit "
+                    f"of {_MAX_RESULT_OPS}: it cannot be safely rendered")
+    return None
+
+
 def _table_function_growth_violation(node, memo: dict) -> str | None:
     """Reason the OUTPUT of a `Function` node named in `_GROWTH_BOUNDS`
     would itself print over `MAX_NUMERIC_DIGITS`, checked REGARDLESS of
@@ -4157,26 +4574,42 @@ def _table_function_growth_violation(node, memo: dict) -> str | None:
 
     if not (isinstance(node, Function) and type(node).__name__ in _GROWTH_BOUNDS):
         return None
-    if node.free_symbols:
-        # A genuinely SYMBOLIC bounded position (`bell(x) % 7`,
-        # `factorial(cos(y)) - factorial(cos(y))`) is skipped by `_table_
-        # function_bound`'s own per-position loop (`if arg.free_symbols:
-        # continue`) the same way `_function_arg_cap_violation`'s twin
-        # loop already does — correctly: a symbolic argument never
-        # materializes, matching `origin/main`, which leaves it symbolic
-        # too. But a SKIPPED position never reaches `bounds` at all, so
-        # `growth(bounds)` below can end up called with `bounds` missing
-        # EVERY position it needed — `_safe_pow10(None)` reads back as
-        # `math.inf` from an empty dict, and this check would then refuse
-        # a call this module was never in danger from, purely because
-        # nothing could be measured (not because anything WAS measured
-        # and found large). Declining outright whenever the WHOLE node
-        # still carries a free symbol anywhere avoids threading a
-        # separate "was every bounded position genuinely supplied and
-        # non-symbolic" signal out of `_table_function_bound` — the
-        # existing per-position cap check (`_function_arg_cap_
-        # violation`) already covers any position that DOES resolve to a
-        # concrete, over-cap value even in a partially-symbolic call.
+    if not node.args or node.args[0].free_symbols:
+        # THE-1095 round 13 follow-up (grok, review of 562a026): this USED
+        # to be `if node.free_symbols: return None` — declining outright
+        # whenever the WHOLE node carried a free symbol ANYWHERE, not only
+        # in its ORDER position (position 0). That was too coarse: a
+        # genuinely symbolic position 0 (`factorial(x)`, `bell(x) % 7`) is
+        # correctly a full decline (EVERY growth formula in `_GROWTH_
+        # BOUNDS` treats a missing position 0 as `math.inf` via `_safe_
+        # pow10(None)`, so calling one with an empty `bounds` dict would
+        # manufacture a spurious refusal for a call this module was never
+        # in danger from) — but a symbolic position OTHER than 0, with
+        # position 0 itself concrete, is a different case entirely: the
+        # orthogonal-polynomial family's own `x` (grok's own finding,
+        # `verify-1095-r13-grok.log`) is a free symbol in the COMMON,
+        # intended usage (`hermite(n, x)` — the polynomial itself, not a
+        # number), and blanket-declining there meant the coefficient
+        # bound this module's own `_GROWTH_BOUNDS` entry for these ten
+        # names is supposed to compute NEVER RAN AT ALL — `gegenbauer(
+        # 850, 10**20, x)` (a free `x`, an UNBOUNDED numeric `alpha`)
+        # passed this check with no growth-bound scrutiny whatsoever,
+        # even though `alpha` alone (position 1, concrete) already drives
+        # the coefficient magnitude to ~8500 digits regardless of `x`.
+        # `_table_function_bound` (called below) ALREADY does the
+        # correct, per-POSITION skip (`if arg.free_symbols: continue`,
+        # confirmed in its own loop) — this gate only needs to protect
+        # against the ONE case that machinery cannot: position 0 itself
+        # missing or symbolic, which every growth formula treats as an
+        # automatic `math.inf`. Narrowed to test ONLY that position,
+        # `bernoulli`/`euler`/`genocchi`/`fibonacci`/`tribonacci`/`bell`
+        # (every OTHER `_growth_poly_second_arg`-wrapped or multi-
+        # position name already in this table) are UNCHANGED for their
+        # own common "symbolic evaluation point" usage — `_growth_poly_
+        # second_arg`'s own `x_log is None: return base` branch already
+        # anticipated exactly this, computing the coefficient-only bound
+        # instead of skipping the check outright — this fix is what lets
+        # that branch actually run.
         return None
     name = type(node).__name__
     if name in _POLE_SENSITIVE_GROWTH_TOP_LEVEL_NAMES:
@@ -4437,6 +4870,16 @@ def _zeta_two_arg_domain_violation(node) -> str | None:
     s, a = node.args[0], node.args[1]
     if s.free_symbols or a.free_symbols:
         return None
+    # THE-1095 round 13 follow-up (Codex issue D): the POLE at `s == 1`
+    # is its own special case in SymPy's own `zeta.eval()` — confirmed
+    # live, `zeta(1, a)` returns `zoo` INSTANTLY for any `a` at all
+    # (`a = 2`, `1000`, a 300-digit literal all measured sub-millisecond)
+    # — never the Bernoulli-polynomial construction this domain check
+    # exists to bound. Exempted before the general `s < 2` refusal below,
+    # which would otherwise catch it too (`s.is_integer` is `True` for
+    # `s == 1`, and `1 >= 2` is `False`).
+    if s == 1:
+        return None
     if s.is_integer and not bool(s >= 2):
         return ("the first argument to zeta() with a second argument supplied "
                 "must be >= 2 (a smaller integer order computes a Bernoulli "
@@ -4491,6 +4934,173 @@ def _n_precision_violation(node, memo: dict) -> str | None:
     if over_cap:
         return (f"the precision argument to N() exceeds the limit of {cap}: "
                 "computing it would take an unbounded amount of time and memory")
+    return None
+
+
+def _series_order_violation(node, memo: dict) -> str | None:
+    """Reason `series(expr, x, x0, n, dir)`'s own ORDER argument
+    (position 3, the number of terms to expand) exceeds this module's
+    own cap, or `None` if `node` is not a `series` call, or its order
+    argument is absent (the default, `n=6`, always safe), genuinely
+    symbolic, or in range.
+
+    THE-1095 round 13 follow-up (Codex issue A's own named repro):
+    `series` — like `N` just above, whose identical shape this function
+    copies — has no meaningful position-0 cap (position 0 is the
+    EXPRESSION to expand, not a magnitude) and no growth formula (its
+    own output is a symbolic series expansion, not a pure number), so
+    it is capped here via `_EXTRA_BOUNDED_POSITIONS` alone and walked
+    UNCONDITIONALLY (the same two call sites `_n_precision_violation`
+    already is) rather than through the generic `_function_arg_cap_
+    violation`/`_table_function_bound` machinery, which assumes both.
+    Without this, `series` fell to the new GENERIC unbounded-callable
+    refusal (`_unbounded_generic_call_violation`) for ANY numeric
+    argument at all — correctly closing `series(exp(x), x, 0, 100000)`,
+    but ALSO wrongly refusing `series(sin(x), x, 0, 6)`, an ordinary,
+    cheap, already-tested call this repo's own test suite exercises.
+    """
+    if type(node).__name__ != "series" or len(node.args) < 4:
+        return None
+    spec = _position_spec("series", 3)
+    if spec is None:
+        return None
+    _kind, cap = spec
+    arg = node.args[3]
+    if arg.free_symbols:
+        return None
+    arg_log_num, arg_log_den, arg_resolved, arg_violation = _resolve_arg_magnitude(arg, memo)
+    if arg_violation:
+        return arg_violation
+    if not arg_resolved:
+        return ("the order argument to series() cannot be safely bounded: "
+                "computing it would take an unbounded amount of time and memory")
+    over_cap = (arg_log_num - arg_log_den) > math.log10(cap)
+    if over_cap:
+        return (f"the order argument to series() exceeds the limit of {cap}: "
+                "computing it would take an unbounded amount of time and memory")
+    return None
+
+
+def _binomial_k_violation(node, memo: dict) -> str | None:
+    """Reason `binomial(n, k)`'s own SECOND argument (`k`, deliberately
+    left UNBOUNDED for the ordinary case — see `_UNBOUNDED_POSITIONS`'s
+    own comment) needs a cap after all, or `None` if `node` is not a
+    `binomial` call, or `k` is safe to leave alone.
+
+    THE-1095 round 13 follow-up (Codex issue B): `_UNBOUNDED_POSITIONS`'s
+    own exemption for `k` is sound ONLY when `n` is a confirmed non-
+    negative INTEGER — `binomial.eval()`'s own `k > n` short-circuit to
+    `0` (the reason `k` needed no cap at all) is an INTEGER-`n`-only
+    code path (confirmed against sympy 1.14's own `eval()` source, the
+    same one `_UNBOUNDED_POSITIONS`'s own comment already cites). For a
+    non-integer OR negative `n`, that short-circuit never fires at all,
+    and `binomial(n, k)` genuinely computes a `RisingFactorial(n - k + 1,
+    k) / k!`-scale product for large `k` — confirmed live:
+    `binomial(1/2, 1000000)` hangs; `binomial(1/2, 10000)` builds a
+    6_013-digit numerator before this module's own OUTPUT backstop even
+    gets a chance to refuse it. Capped here at `MAX_HEAVY_ARG` — the SAME
+    cap this module's other "small arg, growing output" positions use,
+    confirmed live to keep `binomial(1/2, 1463)`/`binomial(-3/2, 1463)`
+    both comfortably under `MAX_NUMERIC_DIGITS` (1754/1762 digits) and
+    fast (~15ms) — whenever `n` is not confirmed to be a non-negative
+    integer; the existing unconditional exemption still applies exactly
+    as before when it is.
+    """
+    if type(node).__name__ != "binomial" or len(node.args) < 2:
+        return None
+    n_arg = node.args[0]
+    if not n_arg.free_symbols:
+        n_val = _resolve_exact_rational(n_arg, memo)
+        if n_val is not None and n_val.q == 1 and n_val >= 0:
+            return None  # binomial.eval()'s own O(1) k > n shortcut applies
+    k_arg = node.args[1]
+    if k_arg.free_symbols:
+        return None
+    k_log_num, k_log_den, k_resolved, k_violation = _resolve_arg_magnitude(k_arg, memo)
+    if k_violation:
+        return k_violation
+    if not k_resolved:
+        return ("the second argument to binomial() cannot be safely bounded "
+                "for a non-integer or negative first argument: computing it "
+                "would take an unbounded amount of time and memory")
+    if (k_log_num - k_log_den) > math.log10(MAX_HEAVY_ARG):
+        return (f"the second argument to binomial() exceeds the limit of "
+                f"{MAX_HEAVY_ARG} for a non-integer or negative first "
+                "argument: computing it would take an unbounded amount of "
+                "time and memory")
+    return None
+
+
+#: THE-1095 round 13 follow-up (Codex issue A): every NAME this module
+#: already recognizes as safe to leave alone — a table name, a marker,
+#: `N`/`Mod`/`Max`/`Min`/`floor`/`ceiling`/`frac`, a pole-sensitive name,
+#: the measured-safe allowlist, and the 34-name elementary list SymPy's
+#: own `EvaluateFalseTransformer` protects structurally. Built ONCE
+#: (lazily, module-global cache — the same shape `_deferred_global_dict`
+#: itself already uses for `_DEFERRED_STANDINS`) rather than recomputed
+#: per node: `_unbounded_generic_call_violation` (below) is walked for
+#: EVERY `Function` node in a tree, so this needs to be a single `in`
+#: against one frozenset, not several.
+_RECOGNIZED_FUNCTION_NAMES: frozenset | None = None
+
+
+def _recognized_function_names() -> frozenset:
+    global _RECOGNIZED_FUNCTION_NAMES
+    if _RECOGNIZED_FUNCTION_NAMES is None:
+        from sympy.parsing.sympy_parser import EvaluateFalseTransformer
+        _RECOGNIZED_FUNCTION_NAMES = (
+            frozenset(_FUNCTION_ARG_CAPS) | _EVALF_COERCION_NAMES
+            | frozenset(_POLE_SENSITIVE_NAMES) | _MEASURED_SAFE_CALLABLES
+            | frozenset(_DEFERRED_BINOP_OPS)
+            | frozenset({"N", "Mod", "Max", "Min", "floor", "ceiling", "frac", "series"})
+            | frozenset(EvaluateFalseTransformer.functions)
+        )
+    return _RECOGNIZED_FUNCTION_NAMES
+
+
+def _unbounded_generic_call_violation(node) -> str | None:
+    """Reason `node` (a `Function`) names a callable this module has NOT
+    bounded, capped, or otherwise reasoned about AT ALL — not in any
+    table, not the 34-name elementary list, not the measured-safe
+    allowlist — and carries at least one NUMERIC (non-symbolic)
+    argument, or `None` if `node`'s name is recognized, or every one of
+    its arguments is symbolic.
+
+    THE-1095 round 13 follow-up (Codex issue A, "THE ROOT CAUSE",
+    `verify-1095-r13.log`): `safe_global_dict()` re-exports every public
+    SymPy name (929, 874 callable, measured live) — this module's own
+    `_FUNCTION_ARG_CAPS`/`_EVALF_COERCION_NAMES`/`_POLE_SENSITIVE_NAMES`
+    tables only ever reasoned about a SMALL, deliberately curated subset
+    of that surface. Every OTHER callable — `interpolating_poly`,
+    `swinnerton_dyer_poly`, `multinomial_coefficients`, `ones`,
+    `randMatrix`, `divisor_count`, `chebyshevt_poly`, hundreds more —
+    used to reach the REAL `evaluate=True` construction with NO scan-
+    time check at all once `_deferred_global_dict`'s own new generic
+    stand-in (see that function's own comment) made it inert during the
+    scan: an inert node with no violation raised for it is
+    INDISTINGUISHABLE, to every OTHER check in this file, from a node
+    this module has actually PROVEN safe. This is the check that closes
+    that gap: `unknown != safe` applies to an unrecognized CALLABLE
+    exactly the same way it already applies to an unrecognized VALUE
+    shape everywhere else in this module — a numeric argument to a name
+    with no growth bound, no cap, and no measured-safe exemption is
+    refused outright, before real construction ever has a chance to run.
+
+    A call whose arguments are ALL symbolic is left alone — the result
+    STAYS symbolic (no numeric construction happens, matching `origin/
+    main`), and `expand(x+1)`/`simplify(sin(x)**2+cos(x)**2)` keep
+    working exactly as before this round.
+    """
+    from sympy import Function
+
+    if not isinstance(node, Function):
+        return None
+    name = type(node).__name__
+    if name in _recognized_function_names():
+        return None
+    if any(not arg.free_symbols for arg in node.args):
+        return (f"{name}() is not in the bounded function set: computing it "
+                "with a numeric argument is not safely bounded")
     return None
 
 
@@ -5110,6 +5720,16 @@ def _pole_sensitive_magnitude(node, memo: dict) -> tuple[float, float, bool, str
         if handled:
             return s_result
         s = s_result
+        # THE-1095 round 13 follow-up (Codex issue D): the POLE at
+        # `s == 1` is its own special case in SymPy's own `zeta.eval()`
+        # for EITHER arity — confirmed live, `zeta(1)`/`zeta(1, a)` both
+        # return `zoo` instantly regardless of `a`'s own magnitude, never
+        # the constructions this branch otherwise bounds. `(0.0, 0.0,
+        # False, None)` — "unresolved, no violation" — the SAME shape a
+        # genuinely symbolic argument gets, so the real parse is free to
+        # evaluate the (cheap, instant) pole itself.
+        if s == 1:
+            return 0.0, 0.0, False, None
         if len(node.args) >= 2:
             handled_a, a_result = _unresolved_or_violation(node.args[1])
             if handled_a:
@@ -5972,6 +6592,15 @@ def _numeric_ceiling_scan(tree, memo: dict) -> str | None:
         n_violation = _n_precision_violation(node, memo)
         if n_violation:
             return n_violation
+        series_violation = _series_order_violation(node, memo)
+        if series_violation:
+            return series_violation
+        binomial_k_violation = _binomial_k_violation(node, memo)
+        if binomial_k_violation:
+            return binomial_k_violation
+        generic_violation = _unbounded_generic_call_violation(node)
+        if generic_violation:
+            return generic_violation
         if isinstance(node, (Integer, Mul, Add, Pow)):
             log_num, log_den, resolved = _log10_num_den(node, memo)
             violation = _ceiling_message_num_den(log_num, log_den)
@@ -6270,6 +6899,18 @@ def reject_explosive(tree) -> str | None:
                 n_violation = _n_precision_violation(node, memo)
                 if n_violation:
                     return n_violation
+            if isinstance(node, Function) and type(node).__name__ == "series":
+                series_violation = _series_order_violation(node, memo)
+                if series_violation:
+                    return series_violation
+            if isinstance(node, Function) and type(node).__name__ == "binomial":
+                binomial_k_violation = _binomial_k_violation(node, memo)
+                if binomial_k_violation:
+                    return binomial_k_violation
+            if isinstance(node, Function):
+                generic_violation = _unbounded_generic_call_violation(node)
+                if generic_violation:
+                    return generic_violation
             if not isinstance(node, Pow):
                 continue
             base, exponent = node.base, node.exp
