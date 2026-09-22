@@ -320,6 +320,67 @@ MAX_ROOT_ARG_DIGITS = 1_200
 #: right for the worst grower beats twenty per-function caps that drift.
 MAX_HEAVY_ARG = 1_463
 
+#: THE-1095 round 13 follow-up (grok issue 2 review of 923f9f7): the
+#: orthogonal-polynomial family — `hermite`/`hermite_prob`/`chebyshevt`/
+#: `chebyshevu`/`gegenbauer`/`legendre`/`assoc_legendre`/`jacobi`/
+#: `laguerre`/`assoc_laguerre` — is a set of plain `sympy.Function`
+#: subclasses whose `eval()` MATERIALIZES a degree-`n` polynomial the
+#: instant `n` (position 0, the "order") is a concrete `Number`,
+#: regardless of `evaluate=False` — none of them are in `EvaluateFalse
+#: Transformer.functions` (SymPy's own whitelist of names left
+#: genuinely unevaluated under `evaluate=False`), so a bare token
+#: string (`hermite(2000, x)`) builds `H_2000` — a degree-2000
+#: polynomial, coefficients up to `~2**2000` — during the FIRST
+#: (deferred, supposedly `evaluate=False`) parse, before this module's
+#: own scan ever gets a tree to inspect. Worse: the result is a
+#: polynomial IN `x`, so it carries a free symbol, and `_log10_num_den`
+#: (this module's own generic "digit count of the final evaluated
+#: value" backstop) returns `resolved=False` for anything symbolic,
+#: silently skipping the output-ceiling check entirely for exactly this
+#: shape.
+#:
+#: Each cap below is MEASURED, not guessed: the largest `n` at which
+#: `<family>(n, <other required args>, x)` (`x` a free `Symbol`, the
+#: worst case — no numeric cancellation) reaches ~1 SECOND of real
+#: construction time on this box, HALVED — this module's own established
+#: convention (`MAX_HEAVY_ARG`'s own derivation, above, is the identical
+#: "measure the actual cost, do not estimate it" move). Measured via
+#: `sympy==1.14.0` directly (`time.time()` around a bare call), Python
+#: 3.14, this box:
+#:
+#:     hermite(1300, x)         0.90s   hermite(1400, x)         0.99s
+#:     chebyshevt(1600, x)      0.90s   chebyshevt(1700, x)      1.13s
+#:     chebyshevu(1800, x)      0.99s   chebyshevu(1900, x)      1.06s
+#:     gegenbauer(1700, 1, x)   1.00s   gegenbauer(1800, 1, x)   1.04s
+#:     hermite_prob(1600, x)    1.08s   hermite_prob(1700, x)    1.77s
+#:     legendre(600, x)         0.88s   legendre(650, x)         1.05s
+#:     jacobi(600, 1, 1, x)     0.83s   jacobi(650, 1, 1, x)     1.11s
+#:     assoc_legendre(600,1,x)  0.94s   assoc_legendre(650,1,x)  1.03s
+#:     laguerre(250, x)         0.54s   laguerre(300, x)         0.99s
+#:     assoc_laguerre(250,1,x)  0.50s   assoc_laguerre(300,1,x)  0.94s
+#:
+#: `laguerre`/`assoc_laguerre` (Laguerre's own recurrence is markedly
+#: more expensive per step than the others') reach ~1s two orders of
+#: magnitude earlier than `hermite`/`chebyshevt`/`chebyshevu`/
+#: `gegenbauer`/`hermite_prob` — a SHARED cap across the whole family
+#: would either be dangerously loose for the slow half or needlessly
+#: tight for the fast half, so each family keeps its OWN measured cap,
+#: the same "one cap that is right for the worst grower" trade `MAX_
+#: HEAVY_ARG`'s own comment makes, applied per family instead of once
+#: globally (a single global cap here would have to be the SLOWEST
+#: family's own, needlessly refusing the fast ones' otherwise-safe
+#: range).
+MAX_HERMITE_ORDER = 700
+MAX_HERMITE_PROB_ORDER = 750
+MAX_CHEBYSHEV_T_ORDER = 800
+MAX_CHEBYSHEV_U_ORDER = 900
+MAX_GEGENBAUER_ORDER = 850
+MAX_LEGENDRE_ORDER = 300
+MAX_ASSOC_LEGENDRE_ORDER = 300
+MAX_JACOBI_ORDER = 300
+MAX_LAGUERRE_ORDER = 140
+MAX_ASSOC_LAGUERRE_ORDER = 140
+
 #: Ceiling on the DIGIT COUNT of a purely numeric power's result. A numeric
 #: power is cheap to compute and ruinous to print — Python refuses to render an
 #: integer over 4300 digits at all (sys.set_int_max_str_digits), which is how
@@ -363,6 +424,21 @@ _FUNCTION_ARG_CAPS: dict = {
     **dict.fromkeys(_HEAVY_FUNCTIONS, ("value", MAX_HEAVY_ARG)),
     **dict.fromkeys(("factorint", "primefactors", "divisors", "mobius", "nextprime", "isprime"), ("digits", MAX_FACTOR_ARG_DIGITS)),
     **dict.fromkeys(("sqrt", "root", "cbrt"), ("digits", MAX_ROOT_ARG_DIGITS)),
+    # THE-1095 round 13 follow-up (grok issue 2): the orthogonal-
+    # polynomial family's own `n` (the "order", always position 0 —
+    # confirmed live via `inspect.signature(real.eval)` for all ten) —
+    # see `MAX_HERMITE_ORDER`'s own comment, above, for the per-family
+    # measured caps and why they are not one shared value.
+    "hermite": ("value", MAX_HERMITE_ORDER),
+    "hermite_prob": ("value", MAX_HERMITE_PROB_ORDER),
+    "chebyshevt": ("value", MAX_CHEBYSHEV_T_ORDER),
+    "chebyshevu": ("value", MAX_CHEBYSHEV_U_ORDER),
+    "gegenbauer": ("value", MAX_GEGENBAUER_ORDER),
+    "legendre": ("value", MAX_LEGENDRE_ORDER),
+    "assoc_legendre": ("value", MAX_ASSOC_LEGENDRE_ORDER),
+    "jacobi": ("value", MAX_JACOBI_ORDER),
+    "laguerre": ("value", MAX_LAGUERRE_ORDER),
+    "assoc_laguerre": ("value", MAX_ASSOC_LAGUERRE_ORDER),
 }
 
 #: THE-1095 round 3 (verify-1095-r2, both reviewers, the recurring meta-
@@ -1321,7 +1397,54 @@ _GROWTH_BOUNDS: dict = {
     # pole-correct formula — see `_growth_gamma`'s own docstring.
     "gamma": _growth_gamma,
     "loggamma": _growth_gamma,
-    "andre": _growth_nn_loose,
+    # THE-1095 round 13 follow-up (grok issue 3, review of 923f9f7):
+    # `andre` used to share `_growth_nn_loose` (`n**(2n)`) with the
+    # generic catch-all — NOT tight enough for its own documented
+    # at-cap value: `2 * 1463 * log10(1463) ~= 9261 > MAX_NUMERIC_
+    # DIGITS`, so `andre(1463)` (this module's OWN table already
+    # documents it at 3711 true digits, comfortably under the 4000
+    # cap) was refused at the TOP level, unpinned and wrong — the
+    # exact "loose bound applied where a tight one exists" class round
+    # 9 already fixed for `bell`/`factorial2`/`motzkin`/`subfactorial`.
+    # Andre numbers are `|E_n|` (the Euler zigzag numbers) on even
+    # indices — the SAME `2 * n!` envelope `euler`/`bernoulli`/
+    # `genocchi` already share (`_growth_2_factorial`'s own docstring)
+    # applies directly; `andre` has no optional second (polynomial)
+    # argument (`nargs == {1}`, confirmed live, unlike `euler`'s `{1,
+    # 2}`), so the bare formula is used, not `_growth_poly_second_arg`'s
+    # wrapped one. Confirmed live: `2 * 1463!` is 3998 digits (under
+    # cap, `andre(1463)` now evaluates); `2 * 1464!` is 4001 digits
+    # (over cap, `andre(1464)` still refuses) — the SAME pinned
+    # boundary this module's own tests already assert on, now for the
+    # RIGHT reason.
+    "andre": _growth_2_factorial,
+    # THE-1095 round 13 follow-up (grok issue 2): the orthogonal-
+    # polynomial family's own OUTPUT ceiling — see `MAX_HERMITE_ORDER`'s
+    # own comment for the full account of the hazard this closes. Every
+    # one of these ten families' own leading-coefficient magnitude is
+    # `O(2**n)`-to-`O(4**n)`-ish (Hermite: exactly `2**n`; Chebyshev T:
+    # `2**(n-1)`; Legendre: `~4**n / sqrt(n)`; ...) — always far SMALLER
+    # than `n!` for any `n` this module's own position-0 caps admit
+    # (confirmed: `hermite(700, x)`'s leading coefficient is `2**700`,
+    # ~211 digits, against `700!`'s own ~1747) — so the SAME bare `n!`
+    # envelope `_growth_stirling_factorial` already gives `factorial`/
+    # `factorial2`/`subfactorial` is reused directly, rather than ten
+    # new per-family formulas: a safe (if generous) UPPER bound on the
+    # largest coefficient's own digit count, applied by `_table_
+    # function_growth_violation`'s own unconditional walk (nested OR
+    # top-level) the identical way it already applies to every other
+    # name in this table — this is what makes a NESTED orthogonal-
+    # polynomial call (`chebyshevt(hermite(600, y), x)`, say) get the
+    # SAME growth-bound treatment its own ARGUMENT cap alone would
+    # never see (the argument here is `hermite(600, y)`'s own RESULT, a
+    # polynomial in `y`, not a literal number `_resolve_arg_magnitude`
+    # could read off directly).
+    **dict.fromkeys(
+        ("hermite", "hermite_prob", "chebyshevt", "chebyshevu",
+         "gegenbauer", "legendre", "assoc_legendre", "jacobi",
+         "laguerre", "assoc_laguerre"),
+        _growth_stirling_factorial,
+    ),
 }
 
 #: THE-1095, follow-up to #326/THE-1091 (GH #326, PR #334): every fix above
@@ -2007,6 +2130,68 @@ CATEGORY_VALIDATION = "validation"
 CATEGORY_SECURITY = "security"
 CATEGORY_CEILING = "ceiling"
 
+#: C0 control characters Python's OWN source grammar allows as
+#: whitespace, confirmed live on 3.11/3.12/3.14: tab, LF, form feed, CR.
+#: Every OTHER C0 control character (and DEL, `\x7f`) is a tokenizer
+#: hazard `_control_character_violation` (below) pre-screens for.
+_CONTROL_CHAR_ALLOWED = frozenset("\t\n\x0c\r")
+
+
+def _control_character_violation(expression: str) -> tuple[str, str] | None:
+    """`(CATEGORY_VALIDATION, message)` for the FIRST C0 control
+    character (or DEL, `\\x7f`) in `expression` that Python's own
+    source grammar does not allow as whitespace, or `None` if none is
+    present.
+
+    THE-1095 round 13 follow-up (CI red on the three py3.11 jobs):
+    root-caused here, BEFORE any tokenizer runs, rather than patched
+    per-Python-version after the fact. `classify_unsafe`'s own
+    tokenizer guard (and `_expression_touches_table_or_unprotected_
+    operator`'s identical one) used to depend entirely on the RUNNING
+    interpreter's own tokenizer to catch one of these — and every
+    Python version disagrees about HOW: CPython 3.12/3.14's C
+    tokenizer raises `tokenize.TokenError` for every one of them
+    (`'source code cannot contain null bytes'` for `\\x00`
+    specifically — its own dedicated case — `'invalid non-printable
+    character U+XXXX'` for the rest); 3.12 additionally raises a bare,
+    leaky `SystemError` for one narrow `\\x00` shape (confirmed live:
+    `'   *AAA\\n/\\x00\\x00'`, ClusterFuzzLite-found); CPython 3.11's
+    OLD PURE-PYTHON tokenizer does not check for ANY of these AT ALL —
+    `\\x00` and friends tokenize cleanly there, fall all the way
+    through `classify_unsafe`, and only fail LATER, at `compile()`
+    (inside `_parse_deferred`/the real `parse_expr`), as a
+    `SyntaxError` with YET ANOTHER wording (`'source code string
+    cannot contain null bytes'`, note the extra "string" — confirmed
+    live) — caught by `safe_parse`'s own exception-relay sites instead
+    of `classify_unsafe`'s, so a caller saw `'parse error: ...'` on
+    3.11 and `'expression could not be tokenised: ...'` on 3.12/3.14
+    for the IDENTICAL input. Pre-screening here, character by
+    character, before any tokenizer OR `compile()` call ever runs,
+    means every Python version now takes the SAME branch and reports
+    the SAME text — the version dependence is gone at the source, not
+    patched per-version after the fact.
+
+    Wording matches what `tokenize` ITSELF already says on the newer
+    (3.12/3.14) C tokenizer, picked as the canonical text (documented
+    in `CHANGELOG.md`) rather than inventing new wording: `"source
+    code cannot contain null bytes"` for `\\x00` (its own dedicated
+    tokenizer case); `"invalid non-printable character U+XXXX"` for
+    every other one.
+    """
+    for ch in expression:
+        if ord(ch) >= 0x20 and ch != "\x7f":
+            continue
+        if ch in _CONTROL_CHAR_ALLOWED:
+            continue
+        if ch == "\x00":
+            message = ("expression could not be tokenised: source code "
+                       "cannot contain null bytes")
+            return (CATEGORY_VALIDATION, message)
+        message = ("expression could not be tokenised: invalid "
+                   f"non-printable character U+{ord(ch):04X}")
+        return (CATEGORY_VALIDATION, message)
+    return None
+
 
 def classify_unsafe(expression: str) -> tuple[str, str] | None:
     """(category, reason) this string must not reach SymPy, or None if it may.
@@ -2019,6 +2204,16 @@ def classify_unsafe(expression: str) -> tuple[str, str] | None:
     if not isinstance(expression, str):
         return (CATEGORY_VALIDATION,
                 f"expression must be a string, got {type(expression).__name__}")
+    # THE-1095 round 13 follow-up (CI red on py3.11; grok's own follow-up
+    # review of 923f9f7): checked BEFORE the tokenizer ever runs — see
+    # `_control_character_violation`'s own docstring for why a NUL byte
+    # (or any other non-whitespace C0 control character) cannot safely be
+    # left to whichever Python version's tokenizer happens to be running;
+    # this closes the WHOLE class at the source, on every Python version
+    # at once, rather than reacting to one more version's own wording.
+    control_violation = _control_character_violation(expression)
+    if control_violation:
+        return control_violation
     try:
         tokens = list(tokenize.generate_tokens(io.StringIO(expression).readline))
     except (tokenize.TokenError, SyntaxError, IndentationError,
@@ -2042,33 +2237,29 @@ def classify_unsafe(expression: str) -> tuple[str, str] | None:
         # already caught here, and get the same validation verdict — never passed
         # on to SymPy as safe.
         #
-        # THE-1095 round 13 follow-up (60s atheris pass against fad081f/
-        # 72e951b): `SystemError` is a FOURTH escaping shape, found the
-        # same way as the two `Unicode*` ones above — CPython 3.12's C
-        # tokenizer (`_generate_tokens_from_c_tokenizer`) raises a bare
-        # `SystemError: <built-in method __new__ of type object at
-        # 0x...> returned a result with an exception set` for one
-        # narrow embedded-NUL-byte shape (`'   *AAA\n/\x00\x00'`) —
-        # confirmed this is CPython's own tokenizer implementation
-        # leaking an internal C-level failure, not this module's own
-        # bug, and confirmed it is Python-VERSION specific (3.14's
-        # tokenizer converts the identical input to a clean
-        # `TokenError` instead). `str(SystemError(...))` is a raw
-        # memory address with no information about the INPUT at all —
-        # must never reach a caller verbatim, the same "never leak
-        # implementation detail" bar this file's own parse-exception
-        # handling already holds elsewhere (see `safe_parse`'s own
-        # exception-relay sites). `origin/main`'s own text for the
-        # underlying condition — a NUL byte in the source, which every
-        # OTHER Python version's tokenizer (and even 3.12's, for a
-        # DIFFERENT NUL-byte shape — confirmed live: `'\x00'` and
-        # `'2+\x002'` both raise a clean `TokenError` even on 3.12)
-        # reports as `TokenError: ('source code cannot contain null
-        # bytes', ...)` — is substituted here, so every tokenizer
-        # failure, on every Python version, reports the identical
-        # wording for the identical underlying condition.
+        # THE-1095 round 13 follow-up (grok issue 4, review of 923f9f7):
+        # `SystemError` stays in this tuple as a pure SAFETY NET, not the
+        # primary fix — `_control_character_violation` above now rejects
+        # every C0 control character (and `\x7f`) BEFORE the tokenizer
+        # ever runs, so the ONE known NUL-byte shape that used to reach
+        # `SystemError` here (CPython 3.12's `_generate_tokens_from_c_
+        # tokenizer`, a bare leaked `SystemError: <built-in method
+        # __new__ of type object at 0x...> returned a result with an
+        # exception set`) can no longer reach this line at all —
+        # confirmed live, the three original repros are all caught by
+        # the pre-screen now. A `SystemError` that STILL reaches here is
+        # something this module has neither seen nor characterized —
+        # OUR OWN contract violation (`classify_unsafe`/`safe_parse` are
+        # documented to never raise), not a user syntax mistake, so it
+        # fails closed as the SAME internal-unknown ceiling refusal
+        # `safe_parse`'s own `_reject_explosive_safely` guard already
+        # uses for an analogous "we do not know what this is" case —
+        # never guessed to ALSO be a NUL-byte shape and mislabeled
+        # `validation` (grok's own point: blanket-mapping every
+        # `SystemError` to the NUL wording was broader than the one
+        # confirmed repro).
         if isinstance(exc, SystemError):
-            exc = "source code cannot contain null bytes"
+            return (CATEGORY_CEILING, _INTERNAL_SCAN_FAILURE_MESSAGE)
         return (CATEGORY_VALIDATION, f"expression could not be tokenised: {exc}")
 
     for tok in tokens:
@@ -4018,36 +4209,54 @@ def _table_function_growth_violation(node, memo: dict) -> str | None:
         order_v = _resolve_exact_rational(node.args[0], memo)
         if order_v == 0:
             return None
-        if order_v == -1 and len(node.args) >= 2:
-            # #326 finding (grok, round 13 review of fad081f): `polygamma(
-            # -1, z)` rewrites, at REAL construction, to `loggamma(z) -
-            # log(2*pi)/2` — for a POSITIVE INTEGER `z`, SymPy further
-            # rewrites `loggamma` to `log(factorial(z-1))`, MATERIALIZING
-            # an exact `factorial(z-1)` integer eagerly, even bare
-            # (unwrapped) at the top level (confirmed live:
-            # `polygamma(-1, 1463)` alone prints a 4000+-digit literal).
-            # For a NON-integer `z`, the identical call evaluates to a
-            # compact numeric expression (a `Float`/symbolic radical --
-            # `polygamma(-1, 700.5)` -> one ~15-digit `Float`) regardless
-            # of `z`'s own magnitude — confirmed live, no hazard, the
-            # SAME "no genuine top-level hazard" exemption
-            # `_POLE_SENSITIVE_GROWTH_TOP_LEVEL_NAMES` already gives
-            # `gamma`/`loggamma`/`digamma`. So a POSITIVE INTEGER `z`
-            # needs the SAME cap `factorial`'s own position-0 cap
-            # already uses (`MAX_HEAVY_ARG`, calibrated as "the largest
-            # n under MAX_NUMERIC_DIGITS" for `factorial(n)` — here,
-            # `factorial(z - 1)`, so `z <= MAX_HEAVY_ARG + 1`); anything
-            # else (a `z` that is not a positive integer, or does not
-            # resolve at all) falls through to `_pole_sensitive_
-            # magnitude`'s own general domain check below, which refuses
-            # this exact shape unconditionally — correct there, since
-            # THAT function answers a different question ("give a safe
-            # BOUND for an arbitrary NESTED argument," never proven for
-            # negative order at all) than this one ("is `origin/main`'s
-            # own bare top-level call itself safe").
-            z_v = _resolve_exact_rational(node.args[1], memo)
-            if z_v is not None and z_v.q == 1 and 1 <= z_v <= MAX_HEAVY_ARG + 1:
-                return None
+        # THE-1095 round 13 follow-up (grok issue 1, review of 923f9f7):
+        # the PREVIOUS version of this branch exempted order `-1` only
+        # for a positive-integer `z` — narrower than `origin/main`
+        # itself. SymPy 1.14's `polygamma.eval` rewrites EVERY `order ==
+        # -1` to `loggamma(z) - log(2*pi)/2`, unconditionally, regardless
+        # of `z`'s own type — for a POSITIVE INTEGER `z`, `loggamma`
+        # further rewrites to `log(factorial(z - 1))`, MATERIALIZING an
+        # exact integer eagerly (confirmed live: `polygamma(-1, 1463)`
+        # alone prints a 4000+-digit literal); for ANY non-integer `z`
+        # (`1/2`, `700.5`, ...) the identical rewrite stays a compact
+        # `Float`/symbolic radical REGARDLESS of `z`'s own magnitude
+        # (confirmed live: `polygamma(-1, 700.5)` is one ~15-digit
+        # `Float`) — no hazard, the SAME "no genuine top-level hazard"
+        # exemption `_POLE_SENSITIVE_GROWTH_TOP_LEVEL_NAMES` already
+        # gives `gamma`/`loggamma`/`digamma`. And for ANY order `<= -2`
+        # (`-2`, `-3`, `-5`, ...), SymPy's `eval()` has NO rewrite rule
+        # at all — confirmed live across a range of orders and `z`
+        # magnitudes (`polygamma(-2, 5)`, `polygamma(-2, 700)`,
+        # `polygamma(-5, 1463)`, ...) — it stays symbolic/unevaluated,
+        # unconditionally, instantly, regardless of `z`. So the TOP-
+        # LEVEL rule is: order `-1` with a NON-integer (or unresolved,
+        # e.g. still-symbolic) `z` is safe (main's own cheap rewrite);
+        # order `-1` with a POSITIVE INTEGER `z` needs the SAME cap
+        # `factorial`'s own position-0 cap already uses (`MAX_HEAVY_
+        # ARG`, calibrated as "the largest n under MAX_NUMERIC_DIGITS"
+        # for `factorial(n)` — here, `factorial(z - 1)`, so `z <= MAX_
+        # HEAVY_ARG + 1`) — anything outside that range falls through
+        # to `_pole_sensitive_magnitude`'s own refusal below; ANY order
+        # `<= -2` is unconditionally safe at top level, full stop —
+        # `origin/main` never evaluates it into anything at all. NESTED
+        # `polygamma(-N, z)` (any negative order) still refuses exactly
+        # as before: `_pole_sensitive_magnitude`'s own contract answers
+        # a different question — "give a safe BOUND for an arbitrary
+        # NESTED argument" — never derived for a negative order at all,
+        # unaffected by this branch, which only ever runs at the TOP
+        # level (see this whole function's own docstring).
+        if order_v is not None and order_v < 0:
+            if order_v == -1:
+                z_v = (_resolve_exact_rational(node.args[1], memo)
+                       if len(node.args) >= 2 else None)
+                if z_v is None or z_v.q != 1:
+                    return None  # non-integer or unresolved z: cheap on main
+                if 1 <= z_v <= MAX_HEAVY_ARG + 1:
+                    return None  # positive-integer z, under the factorial cap
+                # z_v resolved but out of the safe range (or <= 0):
+                # falls through to `_pole_sensitive_magnitude` below.
+            else:
+                return None  # order <= -2: main never evaluates this at all
         pole_result = _pole_sensitive_magnitude(node, memo)
         if pole_result is None:
             return None

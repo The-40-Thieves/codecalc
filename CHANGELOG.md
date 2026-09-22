@@ -997,6 +997,129 @@ behind it.
   60s atheris pass with the exact crashing input seeded into the corpus
   — clean, no crash.
 
+- **The NUL-byte fix above still depended on the RUNNING interpreter's
+  own tokenizer, so CI stayed red on the three py3.11 jobs** (THE-1095,
+  follow-up to GH #326; grok review of 923f9f7): CPython 3.11's tokenizer
+  (the old pure-Python implementation) does not check for a NUL byte —
+  or any other non-whitespace C0 control character — AT ALL; the input
+  tokenizes cleanly, falls all the way through `classify_unsafe`, and
+  only fails LATER, at `compile()` (inside `_parse_deferred`/the real
+  `parse_expr`), as a `SyntaxError` with YET ANOTHER wording
+  (`'source code string cannot contain null bytes'`, note the extra
+  "string") — caught by `safe_parse`'s own exception-relay sites
+  instead, so a caller saw `'parse error: ...'` on 3.11 and
+  `'expression could not be tokenised: ...'` on 3.12/3.14 for the
+  IDENTICAL input. Root-caused, not patched with a third per-version
+  branch: `_control_character_violation`, a new pre-screen `classify_
+  unsafe` runs BEFORE any tokenizer or `compile()` call, character by
+  character, rejecting `\x00` (and any other C0 control character —
+  `\x01`-`\x1f` minus tab/LF/form-feed/CR, plus DEL `\x7f` — Python's
+  own grammar does not allow as whitespace) with ONE deterministic
+  message, synthesized once rather than relayed from whichever
+  exception the running tokenizer happened to raise: `"source code
+  cannot contain null bytes"` for `\x00` (picked as the canonical
+  wording — `tokenize`'s own dedicated case on the newer C tokenizer,
+  documented here as the chosen unified text) and `"invalid
+  non-printable character U+XXXX"` for every other one (already
+  version-INDEPENDENT text, confirmed live — CPython's own `compile()`
+  uses the identical wording on every version tested). Confirmed live
+  across Python 3.11/3.12/3.14: all three original NUL-byte repros, and
+  a fourth (a non-NUL control character), now return byte-identical
+  `(category, message)` tuples on every version. The tokenizer guards'
+  own `SystemError` catch is narrowed to match (grok's own point): with
+  the pre-screen in place, the ONE known NUL-byte `SystemError` shape
+  can no longer reach it at all, so any `SystemError` that still does
+  is characterized as this module's OWN contract violation — the
+  internal-unknown ceiling refusal, never guessed to also be a
+  NUL-byte shape and mislabeled `validation`.
+
+- **The orthogonal-polynomial family — `hermite`/`hermite_prob`/
+  `chebyshevt`/`chebyshevu`/`gegenbauer`/`legendre`/`assoc_legendre`/
+  `jacobi`/`laguerre`/`assoc_laguerre` — could materialize a
+  degree-thousands polynomial during the supposedly `evaluate=False`
+  deferred parse, and a free-symbol result skipped the output digit
+  ceiling entirely** (THE-1095, follow-up to GH #326; grok issue 2,
+  review of 923f9f7): none of these ten names are in `EvaluateFalse
+  Transformer.functions` (SymPy's own whitelist of names left
+  genuinely unevaluated under `evaluate=False`), and every one of
+  their `eval()` methods materializes the polynomial the instant the
+  order (`n`, always position 0) is a concrete `Number` — `hermite(
+  2000, x)`, a 14-character token string, built a degree-2000
+  polynomial (coefficients up to `~2**2000`) during the FIRST parse,
+  before this module's own scan ever had a tree to inspect, and the
+  RESULT (a polynomial in `x`, carrying a free symbol) made `_log10_
+  num_den`'s generic "digit count of the final value" backstop report
+  `resolved=False` and skip the check entirely. Fixed by adding all
+  ten names to the table this module already uses for every other
+  eager-`eval()` callable: a per-family, MEASURED position-0 cap on
+  the order (the largest `n` at which construction reaches ~1 second
+  on this box, halved — see `MAX_HERMITE_ORDER`'s own comment for the
+  full measurement table; caps range from 140 (`laguerre`/`assoc_
+  laguerre`, markedly the most expensive per step) to 900 (
+  `chebyshevu`) — one shared cap would have been dangerously loose for
+  the slow half or needlessly tight for the fast half), which also
+  gets every one of them the SAME deferred stand-in treatment (an
+  inert `Function` subclass, no `eval()`) the rest of this module's
+  table already gets. The output ceiling now applies to a polynomial
+  RESULT too: each name's own `_GROWTH_BOUNDS` entry reuses the bare
+  `n!` envelope (`_growth_stirling_factorial`, already used for
+  `factorial`/`factorial2`/`subfactorial`) as a safe, generous upper
+  bound on the largest coefficient's own magnitude — every family's
+  true leading-coefficient growth (`O(2**n)`-to-`O(4**n)`-ish) is far
+  smaller than `n!` for any `n` these caps admit, so this never
+  false-refuses anything the argument cap alone would already accept,
+  while closing the NESTED case (`chebyshevt(hermite(600, y), x)`,
+  say) an argument cap alone cannot see. Pinned: `hermite(50, x)` and
+  `legendre(5, 1/2)` match main exactly; `hermite(2000, x)` and
+  `chebyshevt(2000, x)` refuse in well under a second.
+
+- **Top-level `polygamma(-1, z)`'s own exemption was narrower than
+  `origin/main`, refusing two shapes `origin/main` evaluates for free —
+  and any OTHER negative order was refused unconditionally, when
+  `origin/main` never evaluates one into anything at all** (THE-1095,
+  follow-up to GH #326; grok issue 1, review of 923f9f7): the PREVIOUS
+  fix only exempted order `-1` for a POSITIVE-INTEGER `z` (the
+  `factorial(z - 1)`-materializing case) — but SymPy 1.14's `polygamma.
+  eval` rewrites EVERY order `-1` call to `loggamma(z) - log(2*pi)/2`
+  unconditionally, and for any NON-integer `z` (`1/2`, `700.5`, ...)
+  that stays a compact `Float`/symbolic radical REGARDLESS of `z`'s own
+  magnitude — no hazard, confirmed live — so `polygamma(-1, 1/2)` and
+  `polygamma(-1, 700.5)` were wrongly refused, unpinned. And ANY order
+  `<= -2` (`-2`, `-3`, `-5`, ...) has NO rewrite rule at all in SymPy
+  1.14 — confirmed live across a range of orders and `z` magnitudes —
+  it stays symbolic/unevaluated, unconditionally, instantly, so
+  `polygamma(-2, 5)` was ALSO wrongly refused. Fixed with the precise
+  top-level rule `origin/main`'s own behavior actually has: order `-1`
+  with a non-integer (or unresolved) `z` is safe; order `-1` with a
+  positive-integer `z` still needs the factorial-style cap; any other
+  negative order is unconditionally safe at top level. The NESTED case
+  (any negative order, any `z`) is unaffected — `_pole_sensitive_
+  magnitude`'s own contract answers a different question ("give a safe
+  bound for an arbitrary NESTED argument," never derived for a
+  negative order at all) and still refuses exactly as before. Pinned
+  all three repros matching main.
+
+- **`andre`'s growth bound (`n**(2n)`) was too loose to admit the
+  module's own documented at-cap value, refusing `andre(1463)` even
+  though this module's own table already documents it at 3711 true
+  digits — comfortably under the 4000 cap** (THE-1095, follow-up to GH
+  #326; grok issue 3, review of 923f9f7): `_table_function_growth_
+  violation` applies `_GROWTH_BOUNDS["andre"]` at the TOP level, not
+  only when nested, and the shared `n**(2n)` catch-all claims `andre(
+  1463)`'s own output would need `2 * 1463 * log10(1463) ~= 9261`
+  digits — an order of magnitude over the true value, and over the
+  cap, so a value this module's own comment already documented as safe
+  was refused. Andre numbers are `|E_n|` (the Euler zigzag numbers) on
+  even indices — the SAME `2 * n!` envelope `euler`/`bernoulli`/
+  `genocchi` already share (`andre` has no optional second
+  (polynomial) argument, `nargs == {1}`, so the bare formula applies
+  directly, not the `euler`-style wrapped one) — replaces the loose
+  catch-all, the same "a tight bound exists, stop using the loose one"
+  fix already applied to `bell`/`factorial2`/`motzkin`/`subfactorial`.
+  Confirmed live: `2 * 1463!` is 3998 digits (under cap, `andre(1463)`
+  now evaluates); `2 * 1464!` is 4001 digits (over cap, `andre(1464)`
+  still correctly refuses). Pinned both.
+
 ## [0.13.0] — 2026-09-21
 
 ### Fixed

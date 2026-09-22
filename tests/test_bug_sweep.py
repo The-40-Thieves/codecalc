@@ -2337,7 +2337,21 @@ _TOKEN_ONLY_ROOT_FAMILY = {"root"}
 # token-level checks above never call anything, so they were never sensitive
 # to this), a small one so it never itself approaches any cap.
 _EXTRA_CALL_ARGS = {"root": ", 2", "rf": ", 2", "ff": ", 2", "binomial": ", 5",
-                     "polygamma": ", 2"}
+                     "polygamma": ", 2",
+                     # THE-1095 round 13 follow-up (grok issue 2): the
+                     # orthogonal-polynomial family's own required
+                     # trailing arguments -- `n` (position 0, the
+                     # capped "order") always comes FIRST, so these are
+                     # everything AFTER it: `x` for the six two-argument
+                     # names, `alpha, x`/`m, x` for the three-argument
+                     # ones, `a, b, x` for `jacobi` (four total).
+                     **dict.fromkeys(
+                         ("hermite", "hermite_prob", "chebyshevt",
+                          "chebyshevu", "legendre", "laguerre"), ", x"),
+                     **dict.fromkeys(
+                         ("gegenbauer", "assoc_legendre", "assoc_laguerre"),
+                         ", 1, x"),
+                     "jacobi": ", 1, 1, x"}
 # THE-1095: every name below EXCEPT `root` (structural, see above) is now
 # exercised by BOTH layers for a genuinely COMPUTED argument. Before this
 # round, the "value"-kind branch (`_HEAVY_FUNCTIONS`) only ever got the
@@ -4637,10 +4651,16 @@ check("THE-1095 round 13 follow-up (grok): 'polygamma(-1, 5)' at the "
 #
 # Pinned with the exact repro plus the two the coordinator asked for
 # (`'2+\x002'`, a NUL byte MID-expression; `'\x00'`, a bare NUL byte alone)
-# -- none of the three is expected to raise on EITHER Python version this
-# module runs on, and each must come back a clean, 2-tuple, `validation`
-# refusal whose text carries no raw memory address or `SystemError`/
-# `<built-in method` substring.
+# -- none of the three is expected to raise on ANY Python version this
+# module runs on (3.11/3.12/3.14, all measured live), and each must come
+# back the IDENTICAL, deterministic `validation` 2-tuple -- not merely "no
+# internal detail," but the EXACT fixed text `_control_character_
+# violation` now synthesizes (grok issue 4/CI red on py3.11's own
+# follow-up: version-INDEPENDENT text is the actual fix, not just "no
+# crash").
+_nul_msg = ("expression could not be tokenised: source code cannot "
+            "contain null bytes")
+_NUL_BYTE_MESSAGE = ("validation", _nul_msg)
 for _expr in ("   *AAA\n/\x00\x00", "2+\x002", "\x00"):
     try:
         _cls = _se5.classify_unsafe(_expr)
@@ -4648,17 +4668,119 @@ for _expr in ("   *AAA\n/\x00\x00", "2+\x002", "\x00"):
         _raised = False
     except Exception as _exc:  # this IS the crash this test pins against
         _cls, _v, _e, _raised = None, None, None, _exc
-    _ok = (not _raised and _cls is not None and _cls[0] == "validation"
-           and "index" not in _cls[1].lower()
-           and "systemerror" not in _cls[1].lower()
-           and "built-in method" not in _cls[1].lower()
-           and _v is None and _e == _cls)
-    check(f"THE-1095 round 13 follow-up (atheris NUL-byte finding): "
-          f"{_expr!r} never raises (classify_unsafe/safe_parse's own "
-          f"contract), returns a clean validation 2-tuple, no internal "
-          f"CPython detail in the message",
+    _ok = (not _raised and _cls == _NUL_BYTE_MESSAGE
+           and _v is None and _e == _NUL_BYTE_MESSAGE)
+    check(f"THE-1095 round 13 follow-up (grok issue 4, py3.11 CI): "
+          f"{_expr!r} never raises and returns the FIXED, "
+          f"Python-version-independent validation text, on THIS "
+          f"interpreter",
           _ok, f"-> classify_unsafe={_cls!r} safe_parse=({_v!r}, {_e!r}) "
-               f"raised={_raised!r}")
+               f"raised={_raised!r} want={_NUL_BYTE_MESSAGE!r}")
+
+# A non-NUL C0 control character (or DEL) is pre-screened the same way,
+# with `tokenize`'s own "invalid non-printable character" wording --
+# confirmed live to already be IDENTICAL text across 3.11/3.12/3.14 (no
+# version-dependence bug for this half of the class, but pre-screening it
+# here too closes the class fully rather than leaving a second,
+# not-yet-broken tokenizer dependency in place).
+_v, _e = _boundary_parse("2+\x011")
+_control_char_msg = ("expression could not be tokenised: invalid "
+                     "non-printable character U+0001")
+check("THE-1095 round 13 follow-up: a non-NUL C0 control character "
+      "('2+\\x011') is pre-screened with tokenize's own wording",
+      _v is None and _e == ("validation", _control_char_msg),
+      f"-> value={_v!r} err={_e!r}")
+
+# A `SystemError` that reaches the tokenizer guard for a reason OTHER
+# than the pre-screened NUL-byte shape (grok issue 4's own narrowing
+# request) is now this module's OWN internal-unknown ceiling refusal,
+# never guessed to be NUL-byte-related and mislabeled `validation`.
+_orig_tokenize = _se5.tokenize.generate_tokens
+
+
+def _boom_tokenize(*_a, **_kw):
+    raise SystemError("some unrelated internal tokenizer failure")
+
+
+_se5.tokenize.generate_tokens = _boom_tokenize
+try:
+    _cls = _se5.classify_unsafe("2+2")
+finally:
+    _se5.tokenize.generate_tokens = _orig_tokenize
+check("THE-1095 round 13 follow-up (grok issue 4): a SystemError NOT "
+      "caused by a pre-screened control character (monkeypatched) "
+      "becomes the internal-unknown ceiling refusal, never guessed to "
+      "be the NUL-byte case",
+      _cls is not None and _cls[0] == "ceiling" and "internal" in _cls[1].lower(),
+      f"-> {_cls!r}")
+
+# ═══ THE-1095 round 13 follow-up (grok FAILED 923f9f7, verify-1095-r12- ═══
+# grok.log). Four more issues, all fixed in the same commit as the NUL
+# tests above.
+
+# Issue 2: the orthogonal-polynomial family (`hermite`/`hermite_prob`/
+# `chebyshevt`/`chebyshevu`/`gegenbauer`/`legendre`/`assoc_legendre`/
+# `jacobi`/`laguerre`/`assoc_laguerre`) is real callables whose `eval()`
+# ALWAYS materializes a degree-`n` polynomial for a numeric order, during
+# the DEFERRED (supposedly evaluate=False) parse, before this module's own
+# scan ever runs -- none of them are in `EvaluateFalseTransformer.
+# functions`. Now stood in and capped like every other table name (see
+# `MAX_HERMITE_ORDER`'s own comment for the ten measured, per-family
+# caps and why they differ).
+from sympy import Rational as _Rational5
+from sympy import hermite as _hermite5
+from sympy import legendre as _legendre5
+from sympy import symbols as _symbols5
+
+_x5 = _symbols5("x")
+_v, _e = _boundary_parse("hermite(50, x)")
+check("THE-1095 round 13 follow-up (grok issue 2): 'hermite(50, x)' "
+      "matches main",
+      _e is None and _v == _hermite5(50, _x5),
+      f"-> value={_v!r} err={_e!r}")
+for _expr, _fname, _cap in (("hermite(2000, x)", "hermite", _se5.MAX_HERMITE_ORDER),
+                              ("chebyshevt(2000, x)", "chebyshevt", _se5.MAX_CHEBYSHEV_T_ORDER)):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round 13 follow-up (grok issue 2): {_expr!r} "
+          f"refuses well under a second (never materializes the "
+          f"degree-2000 polynomial)",
+          _v is None and _e is not None and _e[0] == "ceiling" and _dt < 2.0,
+          f"-> value={_v!r} err={_e!r} elapsed={_dt:.4f}s")
+_v, _e = _boundary_parse("legendre(5, 1/2)")
+check("THE-1095 round 13 follow-up (grok issue 2): 'legendre(5, 1/2)' "
+      "matches main",
+      _e is None and _v == _legendre5(5, _Rational5(1, 2)),
+      f"-> value={_v!r} err={_e!r}")
+
+# Issue 1: top-level polygamma(-1, z) for a NON-integer z, and ANY order
+# <= -2, are both cheap/unevaluated on main and must not refuse.
+for _expr in ("polygamma(-1, 1/2)", "polygamma(-1, 700.5)", "polygamma(-2, 5)"):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 13 follow-up (grok issue 1): {_expr!r} "
+          f"matches main -- evaluates, never refused",
+          _v is not None and _e is None,
+          f"-> value={_v!r} err={_e!r}")
+
+# Issue 3: `andre` needed a TIGHT growth bound (`2*n!`, like `euler`), not
+# the loose `n**(2n)` catch-all -- `andre(1463)` (this module's own table
+# already documents it at 3711 true digits) now evaluates; `andre(1464)`
+# still refuses.
+_t0 = time.time()
+_v, _e = _boundary_parse("andre(1463)")
+_dt = time.time() - _t0
+check("THE-1095 round 13 follow-up (grok issue 3): 'andre(1463)' "
+      "evaluates (the module's own table already documents it at 3711 "
+      "true digits, under the 4000 cap)",
+      _v is not None and _e is None and len(str(_v)) == 3711,
+      f"-> value has {len(str(_v)) if _v is not None else None!r} digits "
+      f"err={_e!r} elapsed={_dt:.4f}s")
+_v, _e = _boundary_parse("andre(1464)")
+check("THE-1095 round 13 follow-up (grok issue 3): 'andre(1464)' "
+      "still refuses",
+      _v is None and _e is not None and _e[0] == "ceiling",
+      f"-> value={_v!r} err={_e!r}")
 
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== ALL BUG-SWEEP REGRESSIONS FIXED ===")
