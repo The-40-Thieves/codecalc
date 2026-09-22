@@ -4614,6 +4614,52 @@ check("THE-1095 round 13 follow-up (grok): 'polygamma(-1, 5)' at the "
       _v is not None and _e is None and str(_v) == "-log(2*pi)/2 + log(24)",
       f"-> value={_v!r} err={_e!r}")
 
+# ═══ THE-1095 round 13 follow-up (60s atheris pass against 72e951b found ═══
+# a NUL-byte finding, ClusterFuzzLite-discovered): `classify_unsafe`'s own
+# tokenizer guard (and `_expression_touches_table_or_unprotected_operator`'s
+# identical one) caught `tokenize.TokenError`/`SyntaxError`/
+# `IndentationError`/`UnicodeEncodeError`/`UnicodeDecodeError` but not
+# `SystemError` -- and CPython 3.12's C tokenizer
+# (`_generate_tokens_from_c_tokenizer`) raises a BARE `SystemError` (a raw
+# memory address, "<built-in method __new__ of type object at 0x...>
+# returned a result with an exception set" -- no information about the
+# INPUT at all) for one narrow embedded-NUL-byte shape:
+# `'   *AAA\n/\x00\x00'`. The atheris harness's own contract is
+# "classify_unsafe/safe_parse never raise" (see fuzz/safe_expr_fuzzer.py's
+# own module docstring) -- this escaped it, uncaught, straight out of
+# `classify_unsafe`. Fixed by adding `SystemError` to BOTH tokenizer
+# guards' except tuples, and substituting a clean message for it
+# specifically (`origin/main`'s own text for the underlying condition --
+# confirmed live: every OTHER NUL-byte shape, and this SAME shape on
+# Python 3.14, all raise a clean `TokenError: ('source code cannot
+# contain null bytes', ...)`) rather than ever relaying `str(SystemError(
+# ...))` verbatim.
+#
+# Pinned with the exact repro plus the two the coordinator asked for
+# (`'2+\x002'`, a NUL byte MID-expression; `'\x00'`, a bare NUL byte alone)
+# -- none of the three is expected to raise on EITHER Python version this
+# module runs on, and each must come back a clean, 2-tuple, `validation`
+# refusal whose text carries no raw memory address or `SystemError`/
+# `<built-in method` substring.
+for _expr in ("   *AAA\n/\x00\x00", "2+\x002", "\x00"):
+    try:
+        _cls = _se5.classify_unsafe(_expr)
+        _v, _e = _boundary_parse(_expr)
+        _raised = False
+    except Exception as _exc:  # this IS the crash this test pins against
+        _cls, _v, _e, _raised = None, None, None, _exc
+    _ok = (not _raised and _cls is not None and _cls[0] == "validation"
+           and "index" not in _cls[1].lower()
+           and "systemerror" not in _cls[1].lower()
+           and "built-in method" not in _cls[1].lower()
+           and _v is None and _e == _cls)
+    check(f"THE-1095 round 13 follow-up (atheris NUL-byte finding): "
+          f"{_expr!r} never raises (classify_unsafe/safe_parse's own "
+          f"contract), returns a clean validation 2-tuple, no internal "
+          f"CPython detail in the message",
+          _ok, f"-> classify_unsafe={_cls!r} safe_parse=({_v!r}, {_e!r}) "
+               f"raised={_raised!r}")
+
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== ALL BUG-SWEEP REGRESSIONS FIXED ===")
 sys.exit(1 if FAILS else 0)

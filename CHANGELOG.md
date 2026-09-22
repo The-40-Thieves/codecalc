@@ -974,6 +974,29 @@ behind it.
   reach and relay for that string) — the pin is "identical to what
   main says on THIS Python," never a captured literal.
 
+- **`classify_unsafe`'s own tokenizer guard did not catch `SystemError`,
+  so a bare CPython internal-implementation-detail message could escape
+  it uncaught — breaking the ONE promise the atheris/ClusterFuzzLite
+  harness holds `classify_unsafe`/`safe_parse` to** (THE-1095, follow-up
+  to GH #326; found by this project's own 60s atheris pass): Python
+  3.12's C tokenizer (`_generate_tokens_from_c_tokenizer`) raises
+  `SystemError: <built-in method __new__ of type object at 0x...>
+  returned a result with an exception set` — a raw memory address, no
+  information about the input at all — for one narrow embedded-NUL-byte
+  shape (`'   *AAA\n/\x00\x00'`); every OTHER NUL-byte shape, and this
+  SAME shape on Python 3.14, already raised a clean, already-caught
+  `TokenError: ('source code cannot contain null bytes', ...)`. Fixed
+  by adding `SystemError` to both of this module's tokenizer-guard
+  `except` tuples (`classify_unsafe`'s own, and `_expression_touches_
+  table_or_unprotected_operator`'s identical one), and substituting
+  `origin/main`'s own text for the underlying condition — never
+  `str(SystemError(...))` verbatim — so every tokenizer failure, on
+  every Python version, reports the identical `validation` "could not
+  be tokenised" wording. Pinned the exact repro plus `'2+\x002'` (a NUL
+  byte mid-expression) and `'\x00'` (a bare NUL byte alone); reran the
+  60s atheris pass with the exact crashing input seeded into the corpus
+  — clean, no crash.
+
 ## [0.13.0] — 2026-09-21
 
 ### Fixed

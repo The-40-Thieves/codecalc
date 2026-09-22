@@ -2022,7 +2022,7 @@ def classify_unsafe(expression: str) -> tuple[str, str] | None:
     try:
         tokens = list(tokenize.generate_tokens(io.StringIO(expression).readline))
     except (tokenize.TokenError, SyntaxError, IndentationError,
-            UnicodeEncodeError, UnicodeDecodeError) as exc:
+            UnicodeEncodeError, UnicodeDecodeError, SystemError) as exc:
         # Unparsable at the token level is not automatically hostile — SymPy
         # accepts things Python does not — so say what happened and let the
         # caller's own parse error be the verdict, rather than claiming this
@@ -2041,6 +2041,34 @@ def classify_unsafe(expression: str) -> tuple[str, str] | None:
         # Both are as "unparsable, not hostile" as the three parser exceptions
         # already caught here, and get the same validation verdict — never passed
         # on to SymPy as safe.
+        #
+        # THE-1095 round 13 follow-up (60s atheris pass against fad081f/
+        # 72e951b): `SystemError` is a FOURTH escaping shape, found the
+        # same way as the two `Unicode*` ones above — CPython 3.12's C
+        # tokenizer (`_generate_tokens_from_c_tokenizer`) raises a bare
+        # `SystemError: <built-in method __new__ of type object at
+        # 0x...> returned a result with an exception set` for one
+        # narrow embedded-NUL-byte shape (`'   *AAA\n/\x00\x00'`) —
+        # confirmed this is CPython's own tokenizer implementation
+        # leaking an internal C-level failure, not this module's own
+        # bug, and confirmed it is Python-VERSION specific (3.14's
+        # tokenizer converts the identical input to a clean
+        # `TokenError` instead). `str(SystemError(...))` is a raw
+        # memory address with no information about the INPUT at all —
+        # must never reach a caller verbatim, the same "never leak
+        # implementation detail" bar this file's own parse-exception
+        # handling already holds elsewhere (see `safe_parse`'s own
+        # exception-relay sites). `origin/main`'s own text for the
+        # underlying condition — a NUL byte in the source, which every
+        # OTHER Python version's tokenizer (and even 3.12's, for a
+        # DIFFERENT NUL-byte shape — confirmed live: `'\x00'` and
+        # `'2+\x002'` both raise a clean `TokenError` even on 3.12)
+        # reports as `TokenError: ('source code cannot contain null
+        # bytes', ...)` — is substituted here, so every tokenizer
+        # failure, on every Python version, reports the identical
+        # wording for the identical underlying condition.
+        if isinstance(exc, SystemError):
+            exc = "source code cannot contain null bytes"
         return (CATEGORY_VALIDATION, f"expression could not be tokenised: {exc}")
 
     for tok in tokens:
@@ -2587,7 +2615,11 @@ def _expression_touches_table_or_unprotected_operator(expression: str) -> bool:
     try:
         tokens = list(tokenize.generate_tokens(io.StringIO(expression).readline))
     except (tokenize.TokenError, SyntaxError, IndentationError,
-            UnicodeEncodeError, UnicodeDecodeError):
+            UnicodeEncodeError, UnicodeDecodeError, SystemError):
+        # `SystemError` added alongside the others for the SAME reason
+        # `classify_unsafe`'s own identical tokenizer guard added it —
+        # see that function's own comment for the full account (CPython
+        # 3.12's C tokenizer, one narrow embedded-NUL-byte shape).
         return False  # not this check's job -- classify_unsafe already ran
     for tok in tokens:
         if tok.type == tokenize.NAME and tok.string in _FUNCTION_ARG_CAPS:
