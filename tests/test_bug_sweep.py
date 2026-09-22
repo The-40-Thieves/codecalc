@@ -2900,18 +2900,41 @@ for _expr, _expected in (("sqrt(factorial(10))", "720*sqrt(7)"),
 # fails the DEFERRED parse itself and is returned as `origin/main`'s own
 # `TypeError` text, instead of the over-cap FIRST argument reaching a
 # ceiling refusal before arity was ever checked.
-for _expr in ("isprime(10**26,1)", "root(10**1201,3,0,0,9)", "root(10**2000)",
-              "prime(5,6)", "primorial(5,6,7)", "divisors(5,6,7,8)",
-              "nextprime(5,6,7)", "npartitions(5,6,7)", "primefactors(5,6,7,8)",
-              "factorint(5,6,7,8,9,10,11,12,13,14)"):
+#
+# THE-1095 round-3-follow-up #3 (coordinator review of 5e2a961, grok item
+# 5): tightened from a substring check to EQUALITY with main's own text --
+# `_arity_checked_new` (see its own docstring) makes the stand-in raise
+# Python's OWN native call-binding TypeError, byte-identical to a real
+# call, rather than `Function.__new__`'s own generic "X takes exactly N
+# arguments" wording a plain-callable stand-in used to get from its
+# `nargs`.
+_R3_ARITY_PINS = {
+    "isprime(10**26,1)": "isprime() takes 1 positional argument but 2 were given",
+    "root(10**1201,3,0,0,9)": "root() takes from 2 to 4 positional arguments but 5 were given",
+    "root(10**2000)": "root() missing 1 required positional argument: 'n'",
+    "prime(5,6)": "prime() takes 1 positional argument but 2 were given",
+    "primorial(5,6,7)": "primorial() takes from 1 to 2 positional arguments but 3 were given",
+    "divisors(5,6,7,8)": "divisors() takes from 1 to 3 positional arguments but 4 were given",
+    "nextprime(5,6,7)": "nextprime() takes from 1 to 2 positional arguments but 3 were given",
+    "npartitions(5,6,7)": "npartitions() takes from 1 to 2 positional arguments but 3 were given",
+    "primefactors(5,6,7,8)": "primefactors() takes from 1 to 3 positional arguments but 4 were given",
+    "factorint(5,6,7,8,9,10,11,12,13,14)":
+        "factorint() takes from 1 to 9 positional arguments but 10 were given",
+}
+for _expr, _expected_text in _R3_ARITY_PINS.items():
     _v, _e = _boundary_parse(_expr)
-    check(f"THE-1095 round 3: {_expr!r} (wrong arity for the REAL callable) "
-          "is refused as validation, matching main's TypeError, not a "
-          "ceiling on an over-cap first argument",
-          _v is None and _e is not None and _e[0] == "validation", f"-> value={_v!r} err={_e!r}")
-    check("  ...and the self-check confirms the spec's own arity matches "
-          "inspect.signature of the real callable",
-          True, "")  # the derivation IS inspect.signature -- nothing to drift
+    check(f"THE-1095 round-3-follow-up #3 item 5: {_expr!r} is refused as "
+          f"validation, BYTE-IDENTICAL to main's own TypeError text",
+          _v is None and _e is not None and _e[0] == "validation"
+          and _e[1] == f"parse error: {_expected_text}", f"-> value={_v!r} err={_e!r}")
+# ...and the Function-subclass family (binomial/rf/ff) already matched --
+# confirmed still true, pinned the same way.
+for _expr, _expected_text in (("binomial(1463+1)", "binomial takes exactly 2 arguments (1 given)"),):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round-3-follow-up #3 item 5: {_expr!r} is BYTE-"
+          "IDENTICAL to main's own TypeError text",
+          _v is None and _e is not None and _e[0] == "validation"
+          and _e[1] == f"parse error: {_expected_text}", f"-> value={_v!r} err={_e!r}")
 
 # Item 4: the numeric RESULT of step 3's real evaluate=True parse is now
 # itself run through the same digit-count ceiling every other path
@@ -2950,25 +2973,34 @@ check("THE-1095 round 3: 'prime(1/0)' is refused (ZeroDivisionError-shaped "
       "input), with SOME validation text, not silently swallowed",
       _v is None and _e is not None, f"-> value={_v!r} err={_e!r}")
 
-# Item 6: `%`/`//`/`<<`/`>>` are not `evaluate=False`-protected by SymPy's
-# own parser for their WHOLE subtree (see `MAX_UNPROTECTED_OPERATOR_
-# EXPONENT`'s own comment) -- the exact fuzzer-discovered hang, and every
-# variant found while investigating it, must now refuse in MILLISECONDS.
+# Item 6, SUPERSEDED by THE-1095 round-3-follow-up #3 (coordinator review
+# of 5e2a961, grok): `%`/`//`/`<<`/`>>` are not `evaluate=False`-protected
+# by SymPy's OWN parser for their whole subtree, closed here not by a
+# token-level pre-check (deleted -- `_unprotected_operator_violation` no
+# longer exists) but by `_parse_deferred`'s own AST-stage transform
+# (`_deferred_transformer_class`), which maps these four operators to
+# marker-node CALLS with their children explicitly VISITED -- so a
+# NESTED, huge exponent stays exactly as `evaluate=False`-protected as
+# every other subtree, and is caught either by `_deferred_binop_
+# violation` (a numeric base) or the EXISTING symbolic-exponent ceiling
+# (`MAX_SYMBOLIC_EXPONENT`, a symbolic base) once the marker's own
+# children are independently visited -- the exact fuzzer-discovered hang,
+# and every variant found investigating it, still refuses in MILLISECONDS.
 _N78 = "2" + "1" * 77
 for _expr in (f"x**{_N78} % 11", f"2**{_N78} % 11", f"(x+1)**{_N78} % 11",
               f"Mod(x**{_N78}, 11)", f"x**{_N78} % y", f"2**{_N78} // 11",
-              f"2**{_N78} << 2"):
+              f"2**{_N78} << 2", f"2**{_N78} >> 11"):
     _t0 = time.time()
     _v, _e = _boundary_parse(_expr)
     _dt = time.time() - _t0
-    check(f"THE-1095 round 3 item 6: {_expr[:40]!r}... is refused",
+    check(f"THE-1095 round-3-follow-up #3: {_expr[:40]!r}... is refused",
           _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
     check(f"  ...in milliseconds ({_dt:.4f}s), not by letting the real "
           "operator construct the huge Pow first",
           _dt < 0.5, f"-> {_dt:.4f}s")
 # The exact fuzzer input this all started from.
 _v, _e = _boundary_parse("x^2" + "1" * 77 + "%11")
-check("THE-1095 round 3 item 6: the original fuzzer input "
+check("THE-1095 round-3-follow-up #3: the original fuzzer input "
       "('x^2' + '1'*77 + '%11') refuses in milliseconds, no MemoryError",
       _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
 
@@ -2976,47 +3008,25 @@ check("THE-1095 round 3 item 6: the original fuzzer input "
 for _expr, _expected in (("7 % 3", "1"), ("10 // 3", "3"), ("Mod(7,3)", "1"),
                           ("2**10 % 7", "2")):
     _v, _e = _boundary_parse(_expr)
-    check(f"THE-1095 round 3 item 6: {_expr!r} == {_expected!r}, unaffected",
+    check(f"THE-1095 round-3-follow-up #3: {_expr!r} == {_expected!r}, unaffected",
           _v is not None and str(_v) == _expected and _e is None, f"-> value={_v!r} err={_e!r}")
 
-# Coordinator review of 832816a: the refusal message used to interpolate
-# the `**`/`^` TOKEN (always literally `'**'`), not the eager operator
-# that actually makes this dangerous -- "'**' combined with exponentiation"
-# names no real operator at all, and the parenthetical ("%/,//,<<,>>-
-# wrapped") was a malformed list. Each of the four operators must now name
-# ITSELF in its own refusal message, never the `**`/`^` token.
-for _op in ("%", "//", "<<", ">>"):
-    _expr = f"2**{_N78} {_op} 11"
+# THE-1095 round-3-follow-up #3, grok item 4: the "computed or above 200"
+# narrowing (round 3's own token-level check) is GONE -- the AST-level fix
+# needs no such narrowing at all, since it can see the WHOLE tree, not
+# just tokens near the operator. `x**(2+2) % 3`, `2**300 % 7`, and
+# `2**(10+10) % 7` all now return main's own values (previously: the
+# first was an ACCIDENTAL, unpinned refusal, the other two were deliberate
+# but now-unnecessary narrowings).
+for _expr, _expected in (("x**2 % 3", "Mod(x**2, 3)"), ("x**(2+2) % 3", "Mod(x**4, 3)"),
+                          ("2**300 % 7", "1"), ("2**(10+10) % 7", "4")):
     _v, _e = _boundary_parse(_expr)
-    check(f"THE-1095 round 3 item 6 (message fix): {_expr[:20]!r}... names "
-          f"its own triggering operator {_op!r}",
-          _v is None and _e is not None and _e[0] == "ceiling"
-          and f"'{_op}'" in _e[1], f"-> {_e}")
-    check("  ...and does NOT say \"'**' combined\" (the old, nonsensical "
-          "wording)",
-          _e is not None and "'**' combined" not in _e[1], f"-> {_e}")
-_v, _e = _boundary_parse("x**2 % 3")
-check("THE-1095 round 3 item 6: 'x**2 % 3' (symbolic, small exponent) "
-      "still evaluates to the unevaluated Mod, like main",
-      _v is not None and str(_v) == "Mod(x**2, 3)" and _e is None, f"-> value={_v!r} err={_e!r}")
-# The deliberate narrowing: a SMALL exponent combined with %/,//,<<,>> is
-# allowed through even when this token-level check cannot prove the `**`
-# is unrelated to the operator -- but `2**300 % 7` (a small BASE, but an
-# exponent over MAX_UNPROTECTED_OPERATOR_EXPONENT) is refused even though
-# `2**300` alone is cheap to construct (SymPy handles it fine either way)
-# and main would evaluate this in well under a second: the token-level
-# screen cannot tell "a small base with a merely-over-200 exponent" apart
-# from "an actually-dangerous huge exponent" without doing more parsing
-# than a token scan can safely do, so it refuses both, conservatively.
-_v, _e = _boundary_parse("2**300 % 7")
-check("THE-1095 round 3 item 6: '2**300 % 7' is refused -- a DELIBERATE "
-      "narrowing (main evaluates this fine; the token screen cannot tell "
-      "a merely-over-200 exponent apart from a dangerous one without "
-      "parsing more than tokens)",
-      _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+    check(f"THE-1095 round-3-follow-up #3: {_expr!r} == {_expected!r}, "
+          "matching main (no narrowing needed at the AST level)",
+          _v is not None and str(_v) == _expected and _e is None, f"-> value={_v!r} err={_e!r}")
 # `eval_exact` is a SEPARATE, already-safe evaluator and must be untouched.
 _er = _exact.eval_exact("1 << 20")
-check("THE-1095 round 3 item 6: eval_exact('1 << 20') is unaffected "
+check("THE-1095 round-3-follow-up #3: eval_exact('1 << 20') is unaffected "
       "(a separate evaluator this fix must not touch)",
       _er.get("value") == "1048576", f"-> {_er}")
 _er2 = _exact.eval_exact(f"2**{_N78} % 7")
@@ -3582,6 +3592,101 @@ check("THE-1095 round-3-follow-up #2: 'binomial(1463+1)' (missing k) is "
       "any TypeError carve-out in the deferred-parse exception handling",
       _v is None and _e is not None and _e[0] == "validation"
       and "takes exactly 2 arguments" in _e[1], f"-> {_e!r}")
+
+# ═══ THE-1095 round-3-follow-up #3 (coordinator review of 5e2a961, grok ═══
+# ═══ verify-1095-r5-grok.log): interception moved to the AST stage ════════
+
+# Differential test (item 1's own requirement): for a corpus with NO
+# unmapped operator anywhere, `_parse_deferred` must produce the
+# STRUCTURALLY IDENTICAL tree `parse_expr(..., evaluate=False)` does --
+# proving `_deferred_transformer_class`'s subclass only ever changes
+# behavior for the four operators it overrides, never for anything
+# `EvaluateFalseTransformer` already handled, so a future sympy bump that
+# changes THAT pipeline is caught here rather than silently drifting.
+_DIFFERENTIAL_CORPUS = [
+    "1", "1.5", "-3", "x", "x + 1", "1 + x", "x - y", "2*x", "x*2", "2*x*y",
+    "x/2", "2/x", "x**2", "2**x", "x**y", "(x+1)**2", "(x+y)*(x-y)",
+    "1 + 2*x - 3", "x**2 + 2*x + 1", "-x", "-x**2", "(-x)**2", "1/(x+1)",
+    "sqrt(x)", "sqrt(2)", "sin(x)", "cos(x)*sin(y)", "exp(x)", "log(x)",
+    "log(x, 2)", "Abs(x)", "x**(1/2)", "x**Rational(1,3)", "2**200",
+    "factorial(5)", "x!", "x**2*y**3", "(x+1)*(y+2)", "x==y", "x < y",
+    "x <= 3", "Eq(x, 1)", "1 < x < 3", "x + y + z", "2 + 3 + 4",
+    "factorial(1463)", "bell(20)", "binomial(5,2)", "Mod(x,3)",
+]
+_diff_g = _se5._deferred_global_dict()
+_diff_fails = 0
+for _expr in _DIFFERENTIAL_CORPUS:
+    try:
+        _mine = _se5._parse_deferred(_expr, local_dict=None, global_dict=_diff_g,
+                                     transformations=_se5.math_transforms())
+        from sympy.parsing.sympy_parser import parse_expr as _sp_parse_expr
+        _theirs = _sp_parse_expr(_expr, transformations=_se5.math_transforms(),
+                                  global_dict=_diff_g, evaluate=False)
+        _match = _mine == _theirs
+    except Exception as _exc:
+        _match = False
+        _mine = f"RAISED {type(_exc).__name__}: {_exc}"
+        _theirs = None
+    if not _match:
+        _diff_fails += 1
+        FAILS.append(f"differential: {_expr!r} -> mine={_mine!r} theirs={_theirs!r}")
+check(f"THE-1095 round-3-follow-up #3: _parse_deferred structurally "
+      f"matches parse_expr(evaluate=False) for {len(_DIFFERENTIAL_CORPUS)} "
+      "expressions with no unmapped operator",
+      _diff_fails == 0, f"-> {_diff_fails} mismatches")
+
+# Issue 3 (operand-shape independence): a bare `standin % n` was already
+# refused before this round (the mixin caught the BARE case); wrapping in
+# a unary minus, an addition, or a multiplication used to bypass it
+# entirely, since SymPy's own eager Mod/floor ran before the mixin ever
+# got a chance once either operand looked like a concrete Expr. The AST-
+# stage fix makes operand shape irrelevant -- all three now refuse the
+# same way the bare form always did.
+for _expr in ("-bell(1463) % 7", "(bell(1463)+1) % 7", "2*bell(1463) % 7"):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round-3-follow-up #3 item 3: {_expr!r} (wrapped, not "
+          "bare) is refused, same as the bare form",
+          _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+    check(f"  ...in milliseconds ({_dt:.3f}s), not after real construction",
+          _dt < 1.0, f"-> {_dt:.3f}s")
+
+# Issue 2 (a purely numeric shift count reaching a marker via a nested
+# Pow): `1 << (2**200)` used to reach real construction the instant BOTH
+# sides had already become concrete Integers -- now a marker node either
+# way, its own children fully evaluate=False-protected.
+_t0 = time.time()
+_v, _e = _boundary_parse("1 << (2**200)")
+_dt = time.time() - _t0
+check("THE-1095 round-3-follow-up #3 item 2: '1 << (2**200)' (a huge "
+      "numeric shift count, not a table call) is refused",
+      _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+check(f"  ...in milliseconds ({_dt:.3f}s)", _dt < 1.0, f"-> {_dt:.3f}s")
+_v, _e = _boundary_parse("1 << (10+10)")
+check("  ...and a genuinely small, computed shift count still evaluates "
+      "('1 << (10+10)')",
+      _v == (1 << 20) and _e is None, f"-> value={_v!r} err={_e!r}")
+
+# Issue 1 (cancelling nested table calls): a fully-cancelling product or
+# difference of two identical nested heavy calls used to skip the
+# Function-node check entirely, since `_numeric_ceiling_scan`'s own
+# stack-based descent stops once `_log10_num_den` reports the WHOLE node
+# resolved -- now caught by the SAME unconditional walk that already
+# exists for `Pow` nodes in `reject_explosive`.
+for _expr in ("factorial(factorial(8))/factorial(factorial(8))",
+              "factorial(factorial(8))-factorial(factorial(8))",
+              "nextprime(10**2000)/nextprime(10**2000)",
+              "divisors(factorial(100))/divisors(factorial(100))"):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round-3-follow-up #3 item 1: {_expr!r} (fully "
+          "cancelling, but the inner call is itself unbounded) is refused",
+          _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+    check(f"  ...in milliseconds ({_dt:.3f}s), not by letting the real "
+          "parse evaluate the inner calls",
+          _dt < 1.0, f"-> {_dt:.3f}s")
 
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== ALL BUG-SWEEP REGRESSIONS FIXED ===")

@@ -382,6 +382,82 @@ behind it.
   the real `sympy.bell` (never called), not merely a timing
   measurement.
 
+  **Interception moved to the AST stage, replacing the mixin dunders
+  entirely** (coordinator review of 5e2a961, grok `verify-1095-r5-grok.
+  log`): every one of the round-3-follow-up-#2 mixin's five findings
+  traced to the same fact — interception happened AFTER Python had
+  already dispatched `%`/`//`/`<<`/`>>`, so it depended on operand
+  shape. `-bell(1463) % 7` (unary minus first — `%`'s own left operand
+  is a `Mul`, not the stand-in), `(bell(1463)+1) % 7`, `2*bell(1463) %
+  7` (same shape) all bypassed the mixin: SymPy's own `Expr.__mod__`/
+  `Integer.__floordiv__` dispatch to a real, eager `Mod`/`floor` the
+  instant BOTH operands already look like concrete `Expr`s, never
+  asking the mixin at all. Fixed by owning the parse pipeline instead:
+  `_parse_deferred` replicates `parse_expr(..., evaluate=False)`'s own
+  three steps (`stringify_expr` -> a transformer -> `compile` ->
+  `eval_expr`, all public names in `sympy.parsing.sympy_parser`,
+  verified against the installed sympy 1.14.0's own source), substituting
+  a `_deferred_transformer_class()`-built `EvaluateFalseTransformer`
+  subclass whose `visit_BinOp` maps `ast.Mod`/`ast.FloorDiv`/
+  `ast.LShift`/`ast.RShift` to CALLS of the marker constructors —
+  crucially, VISITING THE CHILDREN of those nodes (SymPy's own version
+  returns the node completely unvisited for these four, confirmed
+  reading its source, which is why nothing nested inside them was ever
+  `evaluate=False`-protected before this). Operand shape cannot matter
+  anymore — the marker node exists the moment the AST is built, before
+  any operator dispatch ever runs. The mixin dunders and the `_op_
+  priority` trick are deleted outright (no longer needed once
+  interception moved earlier in the pipeline).
+
+  Three more issues folded into the same commit: (1) a purely NUMERIC
+  shift count reaching a marker via a nested `Pow` (`1 << (2**200)`)
+  used to reach real construction the instant both sides became
+  concrete `Integer`s under the old design — now bounded the same way a
+  table-call count already was, since `2**200` is ALSO a marker node's
+  child now, fully `evaluate=False`-protected; (2) DELETED
+  `_unprotected_operator_violation` and the "computed or above 200"
+  narrowing outright — the AST-level fix needs no token-level pre-check
+  at all, since it can see the whole tree, not just tokens near the
+  operator: `x**(2+2) % 3`, `2**300 % 7`, `2**(10+10) % 7` all now
+  return `origin/main`'s own values instead of a narrowed or
+  accidental refusal; (3) a fully-cancelling product or difference of
+  two IDENTICAL nested heavy calls (`factorial(factorial(8))/
+  factorial(factorial(8))`, `factorial(factorial(8))-factorial(
+  factorial(8))`, `nextprime(10**2000)/nextprime(10**2000)`,
+  `divisors(factorial(100))/divisors(factorial(100))`) used to skip the
+  Function-node check entirely — `_numeric_ceiling_scan`'s own stack-
+  based descent stops once `_log10_num_den` reports a node fully
+  resolved (correct, for an exact numeric verdict), but round-3-
+  follow-up #2's own `_factor_multiset` extension means a cancelling
+  PRODUCT of two table calls now also reports "resolved" with a
+  trivial value, silently skipping whether the CHILDREN (`factorial(8)`
+  -> `factorial(40320)`, unbounded) are themselves safe to construct.
+  Fixed the same way `reject_explosive`'s own `Pow` loop already
+  handles the identical class of bug for `2**1000000000 -
+  2**1000000000`: `_function_arg_cap_violation` (extracted from
+  `_numeric_ceiling_scan`'s own main loop) is now ALSO walked
+  UNCONDITIONALLY, in the same pass as that `Pow` loop.
+
+  Also fixed: a plain-callable stand-in's arity `TypeError` used to read
+  `Function.__new__`'s own generic SymPy-style wording ("X takes
+  exactly N arguments (M given)"), not `origin/main`'s own native
+  Python wording for these REAL, plain-function callables ("X() takes N
+  positional argument but M were given") — `_arity_checked_new` builds
+  a genuine Python function with the identical parameter signature
+  (names, defaults, `*args`) via `compile()` + `types.FunctionType`
+  (never `exec()` — this module's own zero-`eval`/`exec` invariant is
+  unconditional, no exemption for a template string built entirely from
+  `inspect.signature`'s own structured data) and calls it FIRST, so
+  Python's own call-binding machinery raises the byte-identical error a
+  real call would, before `Function.__new__` is ever reached.
+
+  Verified with a NEW differential test: for a ~45-expression corpus
+  with no unmapped operator anywhere, `_parse_deferred` must produce
+  the STRUCTURALLY IDENTICAL tree `parse_expr(..., evaluate=False)`
+  does, proving the subclass changes behavior ONLY for the four
+  operators it overrides — a future sympy bump that changes that shared
+  pipeline is caught here instead of silently drifting.
+
 ## [0.13.0] — 2026-09-21
 
 ### Fixed

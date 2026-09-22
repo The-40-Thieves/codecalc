@@ -1590,107 +1590,123 @@ def safe_global_dict() -> dict:
     g["__builtins__"] = {}
     return g
 
-
-#: THE-1095 round-3-follow-up (coordinator review of 949aac9, grok
-#: `verify-1095-r4-grok.log`): the CENTRAL finding, the same door left open
-#: through rounds 3 and 4 — a deferred stand-in has no `__lshift__`/
-#: `__mod__`/`__floordiv__`/`__rshift__` of its own, so `standin << x`
-#: (or any of the other three) raised `TypeError` from Python's own
-#: operator dispatch DURING the deferred, `evaluate=False` pre-parse,
-#: which round 3's own crash fix then had to carve an exception INTO
-#: ("a deferred-parse TypeError is safe to fall through") to avoid
-#: refusing every ordinary `heavy_func(...) % n`-shaped call — and round
-#: 4's own token-level `_shift_digit_ceiling_violation` could then only
-#: ever recognise the ONE shape sitting directly next to the operator
-#: (`NAME(NUMBER)`), because a token screen has no way to see PAST a `)`,
-#: a nested call, or a second argument. `1 << (factorial(20))`,
-#: `1 << factorial(12+1)`, `1 << binomial(40, 20)`, `1 << rf(30, 20)`,
-#: `(bell(1463)) << 100000` — parenthesised, computed, two-arg, nested —
-#: all reached real, unbounded construction regardless, because none of
-#: them is a bare `NAME(NUMBER)` token pair.
+#: THE-1095 round-3-follow-up #3 (coordinator review of 5e2a961, grok
+#: `verify-1095-r5-grok.log`): rounds 3 and 4 both intercepted `%`/`//`/
+#: `<<`/`>>` AFTER Python had already dispatched them — round 3's mixin
+#: dunders, round 4's `_op_priority` trick — so interception depended on
+#: which operand shape happened to reach which method. `-bell(1463) % 7`
+#: (unary minus first, so `%`'s left operand is a `Mul`, not the
+#: stand-in), `(bell(1463)+1) % 7`, `2*bell(1463) % 7` (same shape) all
+#: bypassed the mixin: SymPy's own `Expr.__mod__`/`Integer.__floordiv__`
+#: dispatch to a REAL, eager `Mod`/`floor` the instant BOTH operands are
+#: already concrete SymPy objects, never asking the mixin at all.
 #:
-#: Closed at the ROOT instead: every deferred stand-in (and every marker
-#: node these methods themselves produce, so a CHAINED unprotected
-#: expression — `(1 << factorial(20)) << 3` — stays inert all the way
-#: through rather than raising on the SECOND `<<`) now implements all
-#: eight operator-protocol dunders for the four unprotected operators,
-#: returning an INERT MARKER node (`_DeferredLShift`/`_DeferredRShift`/
-#: `_DeferredOpMod`/`_DeferredOpFloorDiv` — each a plain `Function`
-#: subclass with no `eval()`, exactly like every other deferred stand-in)
-#: instead of ever raising. The deferred parse therefore NEVER TypeErrors
-#: on these four operators again, and the deferred TREE now carries every
-#: one of them, at whatever depth and shape the caller wrote — token
-#: adjacency no longer matters at all, because `_numeric_ceiling_scan`
-#: (not a token screen) is what bounds them, the same way it already
-#: bounds every other hazard shape this module knows about. See that
-#: scan's own marker-node branch for the bound itself, and `safe_parse`'s
-#: own docstring for why the TypeError carve-out this closes could
-#: finally be deleted outright rather than narrowed further.
-class _DeferredOperatorMixin:
-    """Mixed into every deferred stand-in AND every `_DeferredBinOp` marker
-    class below, so Python's own operator dispatch for `<<`/`>>`/`%`/`//`
-    never falls through to `TypeError: unsupported operand type(s)` —
-    see the module-level comment just above for the full account of why
-    this exists. Each pair (`__lshift__`/`__rlshift__`, ...) covers both
-    argument orders: `standin << x` calls `standin.__lshift__(x)`
-    directly (Python's own left-operand-first dispatch — no special
-    handling needed there); `x << standin` (`x` a plain `Integer`, the
-    REFLECTED order) is the one that took real investigation — SymPy's
-    OWN binary special methods (`Number.__mod__` and friends) are NOT
-    Python's plain-`NotImplemented` protocol at all: `Integer(3) % f5`
-    (`f5` a stand-in) measured returning `3` outright, not `TypeError`
-    and not a call to `f5.__rmod__` — because `Number.__mod__` is
-    decorated with `@sympy.core.decorators.call_highest_priority
-    ('__rmod__')`, SymPy's OWN priority-based dispatch: it calls `other.
-    __rmod__(self)` ONLY if `other._op_priority > self._op_priority`
-    (STRICTLY greater — confirmed reading `call_highest_priority`'s own
-    source), and a bare `Function` subclass inherits `Expr._op_priority
-    = 10.0`, IDENTICAL to `Integer`'s own — so the deferral check never
-    fires and `Number.__mod__` falls through to `Mod(self, other)`
-    directly instead. `_op_priority` below (just above SymPy's own
-    default) is what makes SymPy's OWN dispatch defer to THESE methods
-    for the reflected order too — Python's native dispatch protocol
-    would have been enough for a plain Python `int`, but never would
-    have been reached for `Integer`, the type every literal in a parsed
-    expression's source actually becomes.
+#: Moved to the AST stage instead, where operand SHAPE cannot matter:
+#: `_deferred_transformer_class()` lazily builds an `EvaluateFalseTransformer`
+#: subclass whose `visit_BinOp` maps `ast.Mod`/`ast.FloorDiv`/`ast.LShift`/
+#: `ast.RShift` to CALLS of the marker constructors below — SymPy's own
+#: `visit_BinOp` (confirmed reading its 1.14.0 source) does not even have
+#: those four in its `operators` dict, so it returns the node COMPLETELY
+#: UNVISITED, meaning it never even visits the node's own CHILDREN either
+#: (`ast.NodeTransformer.generic_visit` is what would normally do that,
+#: and SymPy's own implementation short-circuits before ever calling it
+#: for these four). This subclass visits both children explicitly, so a
+#: **nested** unmapped operator, or a heavy call anywhere inside either
+#: side, gets the exact same `evaluate=False` treatment `Add`/`Mul`/`Pow`
+#: already have. `_parse_deferred` (below) runs the same three-step
+#: pipeline `parse_expr(..., evaluate=False)` itself uses internally
+#: (`stringify_expr` -> a transformer -> `compile` -> `eval_expr`, all
+#: public names in `sympy.parsing.sympy_parser`, verified against the
+#: installed sympy 1.14.0's own source before writing this), substituting
+#: this subclass for the one it hardcodes. Built LAZILY, like every other
+#: sympy-touching class in this module (`_DEFERRED_STANDINS`, ...) — this
+#: module imports no part of sympy at module load time.
+_DEFERRED_TRANSFORMER_CLASS = None
+
+
+def _deferred_transformer_class():
+    global _DEFERRED_TRANSFORMER_CLASS
+    if _DEFERRED_TRANSFORMER_CLASS is None:
+        import ast
+
+        from sympy.parsing.sympy_parser import EvaluateFalseTransformer
+
+        marker_ops = {
+            ast.Mod: "_DeferredMod",
+            ast.FloorDiv: "_DeferredFloorDiv",
+            ast.LShift: "_DeferredLShift",
+            ast.RShift: "_DeferredRShift",
+        }
+
+        def visit_BinOp(self, node):
+            marker_name = marker_ops.get(node.op.__class__)
+            if marker_name is None:
+                return EvaluateFalseTransformer.visit_BinOp(self, node)
+            # VISIT THE CHILDREN — the one line SymPy's own version skips
+            # for these four operators, since it returns `node` before
+            # ever reaching `generic_visit`. Recursing here is what makes
+            # a NESTED unmapped operator (`x**N % 11`'s own `x**N`) and a
+            # heavy call on either side both come out `evaluate=False`-
+            # protected, same as every other operator already gets.
+            left = self.visit(node.left)
+            right = self.visit(node.right)
+            return ast.Call(
+                func=ast.Name(id=marker_name, ctx=ast.Load()),
+                args=[left, right],
+                keywords=[],
+            )
+
+        _DEFERRED_TRANSFORMER_CLASS = type(
+            "_DeferredEvaluateFalseTransformer", (EvaluateFalseTransformer,),
+            {"visit_BinOp": visit_BinOp},
+        )
+    return _DEFERRED_TRANSFORMER_CLASS
+
+
+def _parse_deferred(expression: str, *, local_dict: dict | None, global_dict: dict,
+                     transformations: tuple):
+    """`parse_expr(expression, local_dict=local_dict, global_dict=global_dict,
+    transformations=transformations, evaluate=False)`'s own THREE steps
+    (`stringify_expr` -> a transformer -> `compile` -> `eval_expr`),
+    replicated here ONLY to substitute `_deferred_transformer_class()` for
+    the transformer SymPy's own `evaluateFalse()` hardcodes — every other
+    line matches `parse_expr`'s own source (sympy 1.14.0) exactly,
+    including the `null`-marked `local_dict` restoration on both the
+    success and exception paths, so a differential test can compare this
+    function's own output against `parse_expr(..., evaluate=False)`
+    directly for any expression with none of the four operators this
+    function treats specially (see `tests/test_bug_sweep.py`'s own
+    corpus for that comparison).
     """
+    import ast
 
-    _op_priority = 10.1
+    from sympy.parsing.sympy_parser import eval_expr, null, stringify_expr
 
-    def __lshift__(self, other):
-        return _deferred_binop_classes()["<<"](self, other)
-
-    def __rlshift__(self, other):
-        return _deferred_binop_classes()["<<"](other, self)
-
-    def __rshift__(self, other):
-        return _deferred_binop_classes()[">>"](self, other)
-
-    def __rrshift__(self, other):
-        return _deferred_binop_classes()[">>"](other, self)
-
-    def __mod__(self, other):
-        return _deferred_binop_classes()["%"](self, other)
-
-    def __rmod__(self, other):
-        return _deferred_binop_classes()["%"](other, self)
-
-    def __floordiv__(self, other):
-        return _deferred_binop_classes()["//"](self, other)
-
-    def __rfloordiv__(self, other):
-        return _deferred_binop_classes()["//"](other, self)
+    if local_dict is None:
+        local_dict = {}
+    code_str = stringify_expr(expression, local_dict, global_dict, transformations)
+    tree = ast.parse(code_str)
+    transformed = _deferred_transformer_class()().visit(tree)
+    transformed_expr = ast.Expression(transformed.body[0].value)
+    ast.fix_missing_locations(transformed_expr)
+    code = compile(transformed_expr, "<string>", "eval")
+    try:
+        rv = eval_expr(code, local_dict, global_dict)
+        for i in local_dict.pop(null, ()):
+            local_dict[i] = null
+        return rv
+    except Exception as exc:
+        for i in local_dict.pop(null, ()):
+            local_dict[i] = null
+        raise exc from ValueError(f"Error from _parse_deferred with transformed code: {code!r}")
 
 
-#: name -> the marker `Function` subclass `_DeferredOperatorMixin`'s own
-#: methods construct for that operator; `None` until first built (same
-#: lazy, build-once pattern as `_DEFERRED_STANDINS` below — needs `sympy.
-#: Function`, which this module never imports at module level). Built by
-#: `_deferred_binop_classes()`, not `_deferred_global_dict()` itself: the
-#: mixin's own methods call it directly (a marker node can be constructed
-#: from Python's operator protocol at ANY point during a deferred parse,
-#: not only from inside `_deferred_global_dict()`), so it needs to be
-#: idempotent and safe to call on its own.
+#: name -> the marker `Function` subclass `_parse_deferred`'s own AST
+#: transform constructs a CALL to (`_deferred_transformer_class()`'s own
+#: `marker_ops` maps an operator to this same NAME) — a plain `Function`
+#: subclass with no `eval()`, exactly like every other deferred stand-in,
+#: so it is always left exactly as constructed. `None` until first built
+#: (same lazy pattern as `_DEFERRED_STANDINS` below).
 _DEFERRED_BINOP_CLASSES: dict | None = None
 
 
@@ -1700,15 +1716,12 @@ def _deferred_binop_classes() -> dict:
         from sympy import Function
 
         _DEFERRED_BINOP_CLASSES = {
-            op: type(class_name, (_DeferredOperatorMixin, Function), {"nargs": (2,)})
-            for op, class_name in (
-                ("<<", "_DeferredLShift"),
-                (">>", "_DeferredRShift"),
-                ("%", "_DeferredOpMod"),
-                ("//", "_DeferredOpFloorDiv"),
-            )
+            class_name: type(class_name, (Function,), {"nargs": (2,)})
+            for class_name in ("_DeferredLShift", "_DeferredRShift",
+                                "_DeferredMod", "_DeferredFloorDiv")
         }
     return _DEFERRED_BINOP_CLASSES
+
 
 
 #: Built once (like `_MATH_TRANSFORMS`), not once per parse: the classes
@@ -1719,6 +1732,78 @@ def _deferred_binop_classes() -> dict:
 #: the classes populating it, would be the hazard, same reasoning as
 #: `safe_global_dict()`'s own fresh-dict-per-call shape).
 _DEFERRED_STANDINS: dict | None = None
+
+
+def _arity_checked_new(name: str, sig):
+    """`__new__` for a plain-callable deferred stand-in that raises the
+    REAL callable's OWN native Python `TypeError` for a wrong argument
+    count — see `_deferred_global_dict`'s own comment for why this
+    exists (byte-identical arity-error text vs `origin/main`, not
+    `Function.__new__`'s own generic "X takes exactly N arguments"
+    wording).
+
+    Builds a genuine Python function with the IDENTICAL parameter
+    signature (names, defaults, `*args`/`**kwargs`) and name as `sig`
+    describes, purely so Python's own call-binding machinery raises the
+    exact error a real call would — never executes anything from `sig`'s
+    own body, since the built function's body is just `pass`. This
+    module's own zero-`eval`/`exec` invariant (`scripts/check_no_eval.py`,
+    `tests/test_security.py`) is unconditional for this file — no
+    exemption for a template string built entirely from `inspect.
+    signature`'s own structured data, never caller text — so this is
+    built via `compile()` (produces a code object; runs nothing) plus
+    `types.FunctionType` (constructs a callable directly from a code
+    object; also runs nothing) instead of `exec()`. Two wrinkles found
+    getting this to actually work: (1) `compile(src, ..., "exec")`
+    compiles the WHOLE `def _stub(...): pass` STATEMENT, whose own
+    execution (never performed here) is what would normally bind the
+    inner function's code object to a name — the inner code object
+    itself is reachable directly from the outer one's `co_consts`,
+    without ever running the outer one; (2) a parameter's default VALUE
+    is attached by the (skipped) `MAKE_FUNCTION` bytecode, not stored on
+    the code object, so a plain `types.FunctionType(inner_code, {})`
+    would make every parameter look REQUIRED regardless of `sig`'s own
+    defaults — passed explicitly instead, as an `argdefs` tuple sized to
+    the count of defaulted positional parameters (every one of them
+    literally `None`, since only the PRESENCE of a default, never its
+    real value, is what makes an argument count valid or not). And
+    Python's own arity-`TypeError` text names the function via `co_
+    qualname` (confirmed live, Python 3.11+), not the `Function.__name__`
+    a plain assignment would set — `code.replace(co_qualname=name, ...)`
+    is what actually changes the printed name.
+    """
+    import types
+
+    params = []
+    num_defaults = 0
+    for param in sig.parameters.values():
+        if param.kind in (param.POSITIONAL_ONLY, param.POSITIONAL_OR_KEYWORD):
+            if param.default is param.empty:
+                params.append(param.name)
+            else:
+                params.append(f"{param.name}=None")
+                num_defaults += 1
+        elif param.kind == param.VAR_POSITIONAL:
+            params.append(f"*{param.name}")
+        elif param.kind == param.VAR_KEYWORD:
+            params.append(f"**{param.name}")
+        # KEYWORD_ONLY: none of this module's own deferred-stand-in names
+        # use one (verified against every real callable in `_FUNCTION_
+        # ARG_CAPS`), so there is nothing to build for that kind here.
+    src = f"def _stub({', '.join(params)}): pass"
+    outer_code = compile(src, "<string>", "exec")
+    inner_code = next(c for c in outer_code.co_consts if isinstance(c, types.CodeType))
+    inner_code = inner_code.replace(co_name=name, co_qualname=name)
+    argdefs = (None,) * num_defaults if num_defaults else None
+    stub = types.FunctionType(inner_code, {}, name, argdefs)
+
+    def __new__(cls, *args, **kwargs):
+        stub(*args, **kwargs)  # raises Python's own native arity TypeError
+        from sympy import Function
+
+        return Function.__new__(cls, *args, **kwargs)
+
+    return __new__
 
 
 def _deferred_global_dict() -> dict:
@@ -1817,30 +1902,33 @@ def _deferred_global_dict() -> dict:
                 except (TypeError, ValueError):
                     sig = None
                 if sig is not None:
-                    required = maximum = 0
-                    var_positional = False
-                    for param in sig.parameters.values():
-                        if param.kind in (param.POSITIONAL_ONLY, param.POSITIONAL_OR_KEYWORD):
-                            maximum += 1
-                            if param.default is param.empty:
-                                required += 1
-                        elif param.kind == param.VAR_POSITIONAL:
-                            var_positional = True
-                    if not var_positional and maximum >= required:
-                        attrs["nargs"] = tuple(range(required, maximum + 1))
-            # THE-1095 round-3-follow-up: `_DeferredOperatorMixin` closes
-            # the operator-protocol gap (`standin << x` used to raise
-            # `TypeError`) — see that class's own, and the module-level
-            # comment above it, for the full account.
-            _DEFERRED_STANDINS[name] = type(name, (_DeferredOperatorMixin, Function), attrs)
+                    # THE-1095 round-3-follow-up #3 (coordinator review
+                    # of 5e2a961, grok item 5): a plain-callable stand-in
+                    # used to set `nargs` too, giving `Function.__new__`'s
+                    # OWN generic arity check ("X takes exactly N
+                    # arguments (M given)") — SymPy's own wording, not
+                    # the REAL callable's: `isprime(10**26, 1)` on
+                    # `origin/main` raises Python's own native "isprime()
+                    # takes 1 positional argument but 2 were given" (a
+                    # plain function, not a `Function.__new__`-checked
+                    # class). `_arity_stub` below is a REAL Python
+                    # function, built via `exec` to have the identical
+                    # parameter signature (names, defaults, `*args`) and
+                    # `__name__` as the real callable, called with the
+                    # caller's own `*args` before ever touching `Function.
+                    # __new__` — Python's own call-binding machinery is
+                    # what raises the byte-identical `TypeError`, since it
+                    # is the SAME mechanism a real call to `isprime` would
+                    # hit, just never running the real body.
+                    attrs["__new__"] = _arity_checked_new(name, sig)
+            _DEFERRED_STANDINS[name] = type(name, (Function,), attrs)
         # THE-1095 round 3, item 6: `Mod` is directly callable BY NAME
         # (`Mod(x**N, 11)`, not just via the `%` operator
-        # `_unprotected_operator_violation` screens) and its own `eval()`
+        # `_parse_deferred`'s own transform screens) and its own `eval()`
         # is the exact `gcd()`-based hazard that check exists for — a
         # bare literal `%` rewrite could not fix this even if this module
-        # attempted one (see `MAX_UNPROTECTED_OPERATOR_EXPONENT`'s own
-        # comment on why a rewrite to `Mod(...)` does not help: `Mod`
-        # itself is eager, not just its arguments). Not part of
+        # attempted one (`Mod` itself is eager, not just its arguments).
+        # Not part of
         # `_FUNCTION_ARG_CAPS` (its hazard is a CONSTRUCTION-cost one, not
         # an argument-magnitude one — there is no "over-cap argument" to
         # name), so it is added directly here instead: inert is all it
@@ -1851,9 +1939,16 @@ def _deferred_global_dict() -> dict:
         # scan`'s own generic descent (pushing every `Function` node's
         # `.args`) finds and correctly bounds moments later in the same
         # scan.
-        _DEFERRED_STANDINS["Mod"] = type("Mod", (_DeferredOperatorMixin, Function), {"nargs": (2,)})
+        _DEFERRED_STANDINS["Mod"] = type("Mod", (Function,), {"nargs": (2,)})
     g = safe_global_dict()
     g.update(_DEFERRED_STANDINS)
+    # THE-1095 round-3-follow-up #3: the marker classes `_parse_deferred`'s
+    # own AST transform constructs CALLS to (`_DeferredLShift`, ...) must
+    # be resolvable names in the `global_dict` that same call is `eval`'d
+    # against — see `_deferred_transformer_class`'s own module-level
+    # comment for why these are built at the AST stage now, not via
+    # operator dunders on the stand-ins above.
+    g.update(_deferred_binop_classes())
     return g
 
 
@@ -1869,110 +1964,17 @@ def _deferred_global_dict() -> dict:
 #: answering. 200 keeps it comfortably sub-second.
 MAX_SYMBOLIC_EXPONENT = 200
 
-#: THE-1095 round 3, item 6 (`verify-1095-r2` round 2, this session's own
-#: bounded investigation): `sympy.parsing.sympy_parser.EvaluateFalseTransformer.
-#: visit_BinOp` (sympy 1.14.0) only special-cases `Add`/`Mult`/`Pow`/`Sub`/
-#: `Div`/`BitOr`/`BitAnd`/`BitXor` — for ANY OTHER `ast.BinOp` operator
-#: (`Mod` `%`, `FloorDiv` `//`, `LShift` `<<`, `RShift` `>>`) it returns the
-#: node COMPLETELY UNCHANGED, without ever calling `self.visit()` on
-#: `node.left`/`node.right` — confirmed live against the installed
-#: `EvaluateFalseTransformer.operators`. `ast.NodeTransformer`'s traversal
-#: only reaches children through those calls, so the ENTIRE subtree under
-#: one of these four operators loses `evaluate=False` protection, silently,
-#: reverting to SymPy's normal eager construction — reopening the exact
-#: `9**9**9**9`-class hazard this module exists to bound, through a door
-#: neither `classify_unsafe`'s token screen (no NAME token involved) nor
-#: `_deferred_global_dict()`'s substitution (`%`/`//`/`<<`/`>>` dispatch
-#: through Python's OPERATOR protocol — `Expr.__mod__` etc. — which never
-#: consults `global_dict` at all, so no stand-in can intercept it) can
-#: reach. Live stack sample (`faulthandler`, sympy 1.14.0): `x**N % 11`
-#: (`N` a 78-digit literal) hangs inside `sympy.core.mod.Mod.eval` calling
-#: `sympy.polys.polytools.gcd()`, building a degree-`N` polynomial
-#: representation — genuinely unbounded (measured RSS climbing past 500MB
-#: in 5s with no sign of leveling off), not merely slow. `2**N % 11` /
-#: `2**N // 11` / `2**N << 2` hang the same way for a different reason: the
-#: NUMERIC-base `Pow` itself, stripped of its own `evaluate=False`
-#: protection by the SAME transformer bug, tries to materialize a literal
-#: integer with ~10**77 digits during construction.
-#:
-#: The fix (`_unprotected_operator_violation`, below) is a TOKEN-level
-#: pre-check, run ONLY from `safe_parse` (never from the shared
-#: `classify_unsafe`/`_DENIED_OPS`, which `eval_exact` also calls through
-#: its OWN, unrelated, already-independently-bounded native-Python
-#: evaluator — `eval_exact("1 << 20")` is an existing, tested feature,
-#: `tests/test_calc_port.py`, that this fix must not touch): refuse only
-#: when the expression contains one of the four operators AND an exponent
-#: (`**`/`^`) that is not PROVABLY small (a bare literal at or under this
-#: cap) — `7 % 3`, `10 // 3`, `2**10 % 7` all keep evaluating exactly as
-#: before; a COMPUTED or over-cap exponent anywhere in the same expression
-#: refuses, conservative (a `**` that turns out to be unrelated to the
-#: operator gets refused too — deliberately, matching this module's own
-#: established "unknown != safe" bar rather than hand-rolling a real
-#: infix-precedence sub-expression isolator at the token level). Reuses
-#: this SAME threshold (not a new one) since 200 is already established as
-#: safe for a symbolic base regardless of which base it turns out to be —
-#: `2**200` is a trivial 61-digit number, comfortably fine for a NUMERIC
-#: base too.
-MAX_UNPROTECTED_OPERATOR_EXPONENT = MAX_SYMBOLIC_EXPONENT
+#: THE-1095 round-3-follow-up #3 (coordinator review of 5e2a961, grok):
+#: the token-level pre-check that used to live here (`_unprotected_
+#: operator_violation`) is GONE -- `_parse_deferred` (above) now
+#: intercepts `%`/`//`/`<<`/`>>` at the AST stage, before SymPy's own
+#: eager dispatch ever runs, so no token-level guess at "is the nearby
+#: exponent related to this operator" is needed anymore -- see that
+#: function's own docstring, and `_deferred_transformer_class`'s
+#: module-level comment, for the replacement. Still used by
+#: `_expression_touches_table_or_unprotected_operator` below, to decide
+#: whether a deferred-parse exception is safe to treat as inconclusive.
 _UNPROTECTED_OPERATORS = frozenset({"%", "//", "<<", ">>"})
-
-
-def _unprotected_operator_violation(expression: str) -> str | None:
-    """A refusal reason if `expression` combines one of `_UNPROTECTED_
-    OPERATORS` with a `**`/`^` whose exponent is not provably small, or
-    `None` if it does not — see `MAX_UNPROTECTED_OPERATOR_EXPONENT`'s own
-    comment for the full root-cause account. Tokenizes independently
-    rather than sharing `classify_unsafe`'s own token list — cheap
-    (bounded by `_MAX_EXPR_LEN`, the same "re-tokenizing costs nothing
-    real" trade this module already makes elsewhere, e.g.
-    `_exact_decimal_digit_count`'s own docstring) — and deliberately NOT
-    part of `classify_unsafe` itself: see this constant's own comment for
-    why `eval_exact` (a different caller of that shared function) must
-    never see this check at all.
-    """
-    try:
-        tokens = list(tokenize.generate_tokens(io.StringIO(expression).readline))
-    except (tokenize.TokenError, SyntaxError, IndentationError,
-            UnicodeEncodeError, UnicodeDecodeError):
-        return None  # not this check's job -- classify_unsafe already ran
-    # THE-1095 round 3 follow-up (coordinator review of 832816a): the
-    # refusal message must name the EAGER operator that actually makes
-    # this dangerous (`%`/`//`/`<<`/`>>`), not the `**`/`^` token this loop
-    # happens to be keyed off of — the first version interpolated `tok.
-    # string` (always `'**'` or `'^'`), reading as nonsense ("'**' combined
-    # with exponentiation") and naming no real operator at all.
-    unprotected_op = None
-    for tok in tokens:
-        if tok.type == tokenize.OP and tok.string in _UNPROTECTED_OPERATORS:
-            unprotected_op = tok.string
-            break
-    if unprotected_op is None:
-        return None
-    for i, tok in enumerate(tokens):
-        if not (tok.type == tokenize.OP and tok.string in ("**", "^")):
-            continue
-        # The exponent: the single token right after `**`/`^`, optionally
-        # preceded by a unary `+`/`-` (`x**-5` is valid syntax here).
-        j = i + 1
-        if j < len(tokens) and tokens[j].type == tokenize.OP and tokens[j].string in ("+", "-"):
-            j += 1
-        provably_small = False
-        if j < len(tokens) and tokens[j].type == tokenize.NUMBER:
-            try:
-                exp_value = int(tokens[j].string, 0)
-            except ValueError:
-                exp_value = None  # a float/complex literal -- not provably an int at all
-            if exp_value is not None and abs(exp_value) <= MAX_UNPROTECTED_OPERATOR_EXPONENT:
-                provably_small = True
-        if not provably_small:
-            return (f"'{unprotected_op}' applied to a power whose exponent "
-                    "is computed or above "
-                    f"{MAX_UNPROTECTED_OPERATOR_EXPONENT} is not protected: "
-                    "SymPy evaluates %, //, << and >> eagerly before any "
-                    "ceiling check — use a literal exponent of at most "
-                    f"{MAX_UNPROTECTED_OPERATOR_EXPONENT}, or split the "
-                    "expression")
-    return None
 
 
 def _expression_touches_table_or_unprotected_operator(expression: str) -> bool:
@@ -2136,24 +2138,25 @@ def safe_parse(expression: str, *, evaluate: bool = True, local_dict: dict | Non
     cls = classify_unsafe(expression)
     if cls:
         return None, cls
-    # THE-1095 round 3, item 6: MUST run before EITHER pre-parse below —
-    # `%`/`//`/`<<`/`>>` are not `evaluate=False`-protected by SymPy's own
-    # parser for their WHOLE subtree (see `MAX_UNPROTECTED_OPERATOR_
-    # EXPONENT`'s own comment), so even `scan_shape`'s deferred stand-ins
-    # cannot help: the hazard is in the raw `**`/`^` construction itself,
-    # which happens before any name lookup, deferred or not.
-    op_violation = _unprotected_operator_violation(expression)
-    if op_violation:
-        return None, (CATEGORY_CEILING, op_violation)
     from sympy.parsing.sympy_parser import parse_expr
 
     # THE-1095 round 2: this MUST be the only parse that runs before a
     # ceiling violation can refuse — see this function's own docstring,
     # step 2, for the measured cost of getting the order wrong.
+    #
+    # THE-1095 round-3-follow-up #3 (coordinator review of 5e2a961, grok):
+    # `_parse_deferred`, not `parse_expr` — see that function's own
+    # docstring, and `_deferred_transformer_class`'s module-level comment,
+    # for why `%`/`//`/`<<`/`>>` need their OWN transformer rather than a
+    # token-level pre-check (the deleted `_unprotected_operator_
+    # violation`): a token screen can only ever see operand shapes that
+    # happen to sit next to the operator in the SOURCE TEXT, and SymPy's
+    # own eager dispatch for these four operators does not care about
+    # source position at all.
     try:
-        scan_shape = parse_expr(expression, transformations=math_transforms(),
-                                local_dict=local_dict, global_dict=_deferred_global_dict(),
-                                evaluate=False)
+        scan_shape = _parse_deferred(expression, local_dict=local_dict,
+                                     global_dict=_deferred_global_dict(),
+                                     transformations=math_transforms())
     except Exception as exc:
         # THE-1095 round-3-follow-up (grok item C(ii), then grok's OWN
         # follow-up review of 949aac9 — `verify-1095-r4-grok.log` — found
@@ -3327,17 +3330,18 @@ def _resolved_table_aware_magnitude(node, memo: dict) -> tuple[float, float, boo
 _DEFERRED_BINOP_OPS = {
     "_DeferredLShift": "<<",
     "_DeferredRShift": ">>",
-    "_DeferredOpMod": "%",
-    "_DeferredOpFloorDiv": "//",
+    "_DeferredMod": "%",
+    "_DeferredFloorDiv": "//",
 }
 
 
 def _deferred_binop_violation(node, memo: dict) -> str | None:
-    """Reason a `_DeferredLShift`/`_DeferredRShift`/`_DeferredOpMod`/
-    `_DeferredOpFloorDiv` marker node (`_DeferredOperatorMixin`'s own
-    methods — see that class's own docstring for why these exist at all)
-    would produce a result over `MAX_NUMERIC_DIGITS`, or `None` if `node`
-    is not one of these four marker types, or is and stays safely under.
+    """Reason a `_DeferredLShift`/`_DeferredRShift`/`_DeferredMod`/
+    `_DeferredFloorDiv` marker node (`_deferred_transformer_class`'s own
+    AST transform — see its module-level comment for why these exist at
+    all) would produce a result over `MAX_NUMERIC_DIGITS`, or `None` if
+    `node` is not one of these four marker types, or is and stays safely
+    under.
 
     THE-1095 round-3-follow-up (coordinator review of 949aac9, grok):
     replaces the deleted TOKEN-level `_shift_digit_ceiling_violation` —
@@ -3346,7 +3350,17 @@ def _deferred_binop_violation(node, memo: dict) -> str | None:
     `1 << binomial(40, 20)`, `1 << rf(30, 20)`, `(bell(1463)) <<
     100000` all reach this branch now, at whatever depth or shape the
     caller wrote them, because the DEFERRED TREE carries a marker node
-    for every one of them (see `_DeferredOperatorMixin`'s own docstring).
+    for every one of them, at every depth, since round-3-follow-up #3's
+    AST-level fix (`_deferred_transformer_class`'s own module-level
+    comment) closed the operand-shape dependency the mixin-based
+    round-3-follow-up #2 version still had (`-bell(1463) % 7`,
+    `(bell(1463)+1) % 7`, `2*bell(1463) % 7` all bypassed IT, since
+    SymPy's own eager `Mod`/`floor` ran before the mixin ever got a
+    chance once either operand was already a concrete-looking `Expr`).
+    Also now correctly bounds a purely NUMERIC right operand
+    (`1 << (2**200)`) the same way, since `2**200` reaching this branch
+    is ALSO a marker-node child now, evaluate=False-protected the same
+    as every other subtree, resolved via `_log10_num_den` below.
 
     `<<` (the only one of the four that can GROW its operand): `digits(
     left) + count * log10(2)` against `MAX_NUMERIC_DIGITS`, where `count`
@@ -3473,6 +3487,147 @@ def _pow_table_base_violation(node, memo: dict) -> str | None:
                                 " in its denominator")
 
 
+def _function_arg_cap_violation(node, memo: dict) -> str | None:
+    """Reason a `Function` node whose class name is a key of
+    `_FUNCTION_ARG_CAPS` has an over-cap argument at one of its own
+    bounded positions, or `None` if `node` is not such a call, or is and
+    every bounded position stays under cap.
+
+    THE-1095 round-3-follow-up #3 (coordinator review of 5e2a961, grok
+    item 1): extracted from `_numeric_ceiling_scan`'s own main loop so it
+    can ALSO be walked unconditionally, the same way `reject_explosive`'s
+    own Pow loop already walks every `Pow` node via `_walk` regardless of
+    whether an ancestor resolved cheaply — `_numeric_ceiling_scan`'s own
+    stack-based descent STOPS at a node `_log10_num_den` reports fully
+    resolved (correctly, for an exact numeric verdict — see that scan's
+    own docstring), but round-3-follow-up #2's own `_factor_multiset`
+    extension (keying a table-function call for EXACT cancellation) means
+    a fully-CANCELLING product of two table calls now also reports
+    `resolved=True` with a trivial value (`factorial(factorial(8))/
+    factorial(factorial(8)) == 1`) — correct about the OUTER value, but
+    silent about whether the CHILDREN (`factorial(8)` -> `factorial(
+    40320)`, a real, unbounded construction) are themselves safe to
+    build, exactly the same class of bug the Pow loop's own unconditional
+    walk already exists to close for `2**1000000000 - 2**1000000000`.
+    See `_numeric_ceiling_scan`'s own call site, and the NEW unconditional
+    walk in `reject_explosive`, for where this now runs twice — once from
+    the stack-based descent (cheap, most of the time all that is needed),
+    once unconditionally (closing the cancellation gap specifically).
+    """
+    from sympy import Function
+
+    if not (isinstance(node, Function) and type(node).__name__ in _FUNCTION_ARG_CAPS):
+        return None
+    # #326 finding 1 (cross-vendor review, round 6): a COMPUTED
+    # argument (`factorial(1463+1)`) stays an opaque `Function`
+    # node through the whole `evaluate=False` parse -- nothing in
+    # the trigger set below matches it, and even if its argument
+    # (an unevaluated `Add(1463, 1)`) got pushed via the generic
+    # descent at the bottom of this loop, the generic per-node
+    # check there compares against `MAX_NUMERIC_DIGITS` (4000),
+    # not `MAX_HEAVY_ARG` (1463) -- 1464 is a perfectly printable
+    # 4-digit number, so that check would never fire even though
+    # `factorial(1464)` is exactly the unbounded-work hazard
+    # `_heavy_call_violation`'s own TOKEN-level check exists to
+    # stop for a LITERAL argument. `_heavy_call_violation`'s
+    # docstring used to claim a computed argument was "caught
+    # later by the tree rules" -- false until this branch existed
+    # (see its own docstring for the full history). Kept as a
+    # backstop alongside the cheap token-level first pass, not a
+    # replacement for it.
+    #
+    # #326 finding 1 (round 8, Codex): reads `_FUNCTION_ARG_CAPS`
+    # generally now, not just `_HEAVY_FUNCTIONS` -- "value" kind
+    # unchanged from the round-6 logic above; a "digits"-kind name
+    # (the factoring family) is included here for the SAME
+    # structural reason the table drives every enforcement site.
+    # Round 8 noted that none of the nine "digits"-kind names could
+    # actually reach this branch THEN: the factoring family
+    # (`factorint` and its five siblings) are plain Python callables
+    # (or, `mobius` excepted, ones that never leave an unevaluated
+    # `Function` node behind for a computed argument -- see
+    # `MAX_FACTOR_ARG_DIGITS`'s own comment), and `sqrt`/`root`/
+    # `cbrt` compile to a `Pow`, never a `Function` named after
+    # themselves (see `MAX_ROOT_ARG_DIGITS`'s own comment).
+    # THE-1095 changed the first half of that: `node` here is always
+    # built from `_deferred_global_dict()` (`safe_parse`'s own
+    # pre-parse step, the only caller that ever hands a tree to this
+    # scan), which replaces every "digits"-kind name EXCEPT `sqrt`/
+    # `cbrt` with an inert stand-in `Function` subclass named
+    # after itself (see `_DEFERRED_STANDIN_NAMES`'s own comment for
+    # why those two stay excluded) -- so `factorint`,
+    # `primefactors`, `divisors`, `mobius`, `nextprime`, `isprime`,
+    # and (round 2, `verify-1095`) `root` all genuinely reach this
+    # branch now, for the exact reason `sqrt`/`cbrt`'s own backstop
+    # stays the Pow loop's unit-fraction-exponent branch instead
+    # (they are never deferred, so a `Function` node named
+    # `sqrt`/`cbrt` still never occurs). A future name added to the
+    # table with this family's shape is covered here automatically,
+    # without a second copy of this branch to remember to add, as
+    # long as it is not added to the `sqrt`/`cbrt` exclusion set for
+    # the same structural reason those two are.
+    #
+    # THE-1095 round 2 bounded ONLY `node.args[:1]` (position 0) --
+    # measurably wrong for `binomial(n, k)`'s own `k` (`eval()`
+    # resolves `k > n` to `0` in O(1), so capping it only
+    # manufactured a false refusal), but it also left `rf`/`ff`'s
+    # own `k` (a genuine, uncapped iteration count) and several
+    # OTHER names' non-first positions unbounded. THE-1095 round 3
+    # (`verify-1095-r2`, both reviewers): `_bounded_positions`
+    # below is the per-name, per-POSITION spec (`_FUNCTION_ARG_
+    # CAPS` + `_EXTRA_BOUNDED_POSITIONS`, minus `_UNBOUNDED_
+    # POSITIONS` -- see their own comments) that replaces the flat
+    # `args[:1]` this round: every position that actually drives
+    # cost is bounded, `binomial`'s `k` stays deliberately exempt,
+    # and a position with no spec at all (most of a call's
+    # arguments, for most names) is skipped exactly as before.
+    #
+    # `_resolve_arg_magnitude`, not `_log10_num_den` directly, is
+    # what actually resolves each bounded argument now: a NESTED
+    # table-name call (`divisors(factorial(100))`) used to be
+    # unconditionally "unresolved" here (`_log10_num_den` only
+    # understands `Integer`/`Mul`/`Add`/`Pow`/`Rational`/`Float`,
+    # never a `Function`) and fall through to the generic descent
+    # below, silently untested for THIS node's own cap — see
+    # `_resolve_arg_magnitude`'s own docstring for how it closes
+    # that by recursing into the nested name's own GROWTH bound.
+    for pos, kind, cap in _bounded_positions(type(node).__name__):
+        if pos >= len(node.args):
+            continue  # this call did not supply that many arguments
+        arg = node.args[pos]
+        if arg.free_symbols:
+            continue  # symbolic argument -- left alone, same scope as the token check
+        arg_log_num, arg_log_den, arg_resolved, arg_violation = _resolve_arg_magnitude(arg, memo)
+        if arg_violation:
+            return arg_violation
+        if not arg_resolved:
+            continue  # inconclusive -- an irrational constant, a free-standing non-table Function, ...
+        if kind == "value":
+            # #326 finding 2 (cross-vendor review, round 9, grok):
+            # read from THIS name's own row (`cap`, already looked
+            # up above), not a module-level `MAX_HEAVY_ARG`
+            # constant precomputed once outside the loop -- every
+            # "value"-kind row happens to share that same cap
+            # today, but computing `log10(cap)` HERE, per node,
+            # means a future per-name override in the table is
+            # honoured automatically rather than silently ignored
+            # by a stale precomputed log10.
+            over_cap = (arg_log_num - arg_log_den) > math.log10(cap)
+        else:
+            over_cap = _digit_count_over_cap_for_node(arg, "num", arg_log_num, cap)
+        if over_cap:
+            return (f"an argument to {type(node).__name__}() exceeds the "
+                    f"limit of {cap}: computing it would take an "
+                    "unbounded amount of time and memory")
+    # An argument that IS a free symbol, or one this bound could not
+    # resolve, might still hide a SEPARATE numeric hazard nested
+    # inside it (`factorial(x*f*f)`, say) -- this function only
+    # answers for THIS node's own bounded positions; a caller's own
+    # descent (generic, or the new unconditional walk) is what finds
+    # that separate hazard, not a repeated call here.
+    return None
+
+
 def _numeric_ceiling_scan(tree, memo: dict) -> str | None:
     """Reason some numeric-only subtree of `tree` would print a numerator
     or denominator over `MAX_NUMERIC_DIGITS`, or None. A SEPARATE pass from
@@ -3565,112 +3720,9 @@ def _numeric_ceiling_scan(tree, memo: dict) -> str | None:
         pow_base_violation = _pow_table_base_violation(node, memo)
         if pow_base_violation:
             return pow_base_violation
-        if isinstance(node, Function) and type(node).__name__ in _FUNCTION_ARG_CAPS:
-            # #326 finding 1 (cross-vendor review, round 6): a COMPUTED
-            # argument (`factorial(1463+1)`) stays an opaque `Function`
-            # node through the whole `evaluate=False` parse -- nothing in
-            # the trigger set below matches it, and even if its argument
-            # (an unevaluated `Add(1463, 1)`) got pushed via the generic
-            # descent at the bottom of this loop, the generic per-node
-            # check there compares against `MAX_NUMERIC_DIGITS` (4000),
-            # not `MAX_HEAVY_ARG` (1463) -- 1464 is a perfectly printable
-            # 4-digit number, so that check would never fire even though
-            # `factorial(1464)` is exactly the unbounded-work hazard
-            # `_heavy_call_violation`'s own TOKEN-level check exists to
-            # stop for a LITERAL argument. `_heavy_call_violation`'s
-            # docstring used to claim a computed argument was "caught
-            # later by the tree rules" -- false until this branch existed
-            # (see its own docstring for the full history). Kept as a
-            # backstop alongside the cheap token-level first pass, not a
-            # replacement for it.
-            #
-            # #326 finding 1 (round 8, Codex): reads `_FUNCTION_ARG_CAPS`
-            # generally now, not just `_HEAVY_FUNCTIONS` -- "value" kind
-            # unchanged from the round-6 logic above; a "digits"-kind name
-            # (the factoring family) is included here for the SAME
-            # structural reason the table drives every enforcement site.
-            # Round 8 noted that none of the nine "digits"-kind names could
-            # actually reach this branch THEN: the factoring family
-            # (`factorint` and its five siblings) are plain Python callables
-            # (or, `mobius` excepted, ones that never leave an unevaluated
-            # `Function` node behind for a computed argument -- see
-            # `MAX_FACTOR_ARG_DIGITS`'s own comment), and `sqrt`/`root`/
-            # `cbrt` compile to a `Pow`, never a `Function` named after
-            # themselves (see `MAX_ROOT_ARG_DIGITS`'s own comment).
-            # THE-1095 changed the first half of that: `node` here is always
-            # built from `_deferred_global_dict()` (`safe_parse`'s own
-            # pre-parse step, the only caller that ever hands a tree to this
-            # scan), which replaces every "digits"-kind name EXCEPT `sqrt`/
-            # `cbrt` with an inert stand-in `Function` subclass named
-            # after itself (see `_DEFERRED_STANDIN_NAMES`'s own comment for
-            # why those two stay excluded) -- so `factorint`,
-            # `primefactors`, `divisors`, `mobius`, `nextprime`, `isprime`,
-            # and (round 2, `verify-1095`) `root` all genuinely reach this
-            # branch now, for the exact reason `sqrt`/`cbrt`'s own backstop
-            # stays the Pow loop's unit-fraction-exponent branch instead
-            # (they are never deferred, so a `Function` node named
-            # `sqrt`/`cbrt` still never occurs). A future name added to the
-            # table with this family's shape is covered here automatically,
-            # without a second copy of this branch to remember to add, as
-            # long as it is not added to the `sqrt`/`cbrt` exclusion set for
-            # the same structural reason those two are.
-            #
-            # THE-1095 round 2 bounded ONLY `node.args[:1]` (position 0) --
-            # measurably wrong for `binomial(n, k)`'s own `k` (`eval()`
-            # resolves `k > n` to `0` in O(1), so capping it only
-            # manufactured a false refusal), but it also left `rf`/`ff`'s
-            # own `k` (a genuine, uncapped iteration count) and several
-            # OTHER names' non-first positions unbounded. THE-1095 round 3
-            # (`verify-1095-r2`, both reviewers): `_bounded_positions`
-            # below is the per-name, per-POSITION spec (`_FUNCTION_ARG_
-            # CAPS` + `_EXTRA_BOUNDED_POSITIONS`, minus `_UNBOUNDED_
-            # POSITIONS` -- see their own comments) that replaces the flat
-            # `args[:1]` this round: every position that actually drives
-            # cost is bounded, `binomial`'s `k` stays deliberately exempt,
-            # and a position with no spec at all (most of a call's
-            # arguments, for most names) is skipped exactly as before.
-            #
-            # `_resolve_arg_magnitude`, not `_log10_num_den` directly, is
-            # what actually resolves each bounded argument now: a NESTED
-            # table-name call (`divisors(factorial(100))`) used to be
-            # unconditionally "unresolved" here (`_log10_num_den` only
-            # understands `Integer`/`Mul`/`Add`/`Pow`/`Rational`/`Float`,
-            # never a `Function`) and fall through to the generic descent
-            # below, silently untested for THIS node's own cap — see
-            # `_resolve_arg_magnitude`'s own docstring for how it closes
-            # that by recursing into the nested name's own GROWTH bound.
-            for pos, kind, cap in _bounded_positions(type(node).__name__):
-                if pos >= len(node.args):
-                    continue  # this call did not supply that many arguments
-                arg = node.args[pos]
-                if arg.free_symbols:
-                    continue  # symbolic argument -- left alone, same scope as the token check
-                arg_log_num, arg_log_den, arg_resolved, arg_violation = _resolve_arg_magnitude(arg, memo)
-                if arg_violation:
-                    return arg_violation
-                if not arg_resolved:
-                    continue  # inconclusive -- an irrational constant, a free-standing non-table Function, ...
-                if kind == "value":
-                    # #326 finding 2 (cross-vendor review, round 9, grok):
-                    # read from THIS name's own row (`cap`, already looked
-                    # up above), not a module-level `MAX_HEAVY_ARG`
-                    # constant precomputed once outside the loop -- every
-                    # "value"-kind row happens to share that same cap
-                    # today, but computing `log10(cap)` HERE, per node,
-                    # means a future per-name override in the table is
-                    # honoured automatically rather than silently ignored
-                    # by a stale precomputed log10.
-                    over_cap = (arg_log_num - arg_log_den) > math.log10(cap)
-                else:
-                    over_cap = _digit_count_over_cap_for_node(arg, "num", arg_log_num, cap)
-                if over_cap:
-                    return (f"an argument to {type(node).__name__}() exceeds the "
-                            f"limit of {cap}: computing it would take an "
-                            "unbounded amount of time and memory")
-            # Fall through to the generic descent below regardless: an
-            # argument that IS a free symbol, or one this bound could not
-            # resolve, might still hide a SEPARATE numeric hazard nested
-            # inside it (`factorial(x*f*f)`, say).
+        function_cap_violation = _function_arg_cap_violation(node, memo)
+        if function_cap_violation:
+            return function_cap_violation
         if isinstance(node, (Integer, Mul, Add, Pow)):
             log_num, log_den, resolved = _log10_num_den(node, memo)
             violation = _ceiling_message_num_den(log_num, log_den)
@@ -3885,7 +3937,7 @@ def reject_explosive(tree) -> str | None:
     either alone as sufficient. See `tests/test_bug_sweep.py`'s block
     for the assertion that the backstop actually holds for this shape.
     """
-    from sympy import Integer, Pow, Rational
+    from sympy import Function, Integer, Pow, Rational
 
     # #326 (THE-1091): a SEPARATE pass, before the Pow-only walk below,
     # covers a numeric-only Integer/Mul/Add/Pow that the Pow-loop's own
@@ -3939,6 +3991,25 @@ def reject_explosive(tree) -> str | None:
 
     try:
         for node in _walk(tree):
+            # THE-1095 round-3-follow-up #3 (coordinator review of
+            # 5e2a961, grok item 1): `_function_arg_cap_violation`
+            # walked UNCONDITIONALLY here, the same shape as the `Pow`
+            # loop right below it (which exists for the EXACT same
+            # reason: `2**1000000000 - 2**1000000000` cancels to 0 at
+            # the `_numeric_ceiling_scan` level, but its own inner `Pow`
+            # nodes are still a construction-cost hazard on their own,
+            # so that scan's own "stop descending once resolved"
+            # shortcut cannot be the only check). A fully-cancelling
+            # product of two table calls (`factorial(factorial(8))/
+            # factorial(factorial(8))`) has the identical shape: cheap
+            # to bound as a WHOLE (net value 1), but silent about
+            # whether either `factorial(8)` -> `factorial(40320)` child
+            # is itself safe to construct — see `_function_arg_cap_
+            # violation`'s own docstring for the full account.
+            if isinstance(node, Function) and type(node).__name__ in _FUNCTION_ARG_CAPS:
+                function_cap_violation = _function_arg_cap_violation(node, memo)
+                if function_cap_violation:
+                    return function_cap_violation
             if not isinstance(node, Pow):
                 continue
             base, exponent = node.base, node.exp
