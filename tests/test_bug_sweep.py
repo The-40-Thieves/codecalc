@@ -3918,10 +3918,15 @@ from sympy import Rational as _Rational
 
 _HARMONIC_10_10 = _Rational(413520574906423083987893722912609, 413109706296096288512409600000000)
 for _expr, _want in (("bell(2,1000)", 1001000), ("harmonic(10,10)", _HARMONIC_10_10),
-                      ("zeta(-1200,2)", -1)):
+                      ("zeta(3,2)", None)):
     _v, _e = _boundary_parse(_expr)
-    check(f"THE-1095 round 9 item B: {_expr!r} evaluates to main's exact value",
-          _v == _want and _e is None, f"-> value={_v!r} err={_e!r} want={_want!r}")
+    if _want is None:
+        check(f"THE-1095 round 9 item B: {_expr!r} evaluates (matches main), "
+              "not refused",
+              _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+    else:
+        check(f"THE-1095 round 9 item B: {_expr!r} evaluates to main's exact value",
+              _v == _want and _e is None, f"-> value={_v!r} err={_e!r} want={_want!r}")
 
 # Item C (Codex finding 3, High): a growth formula is only an upper
 # bound on the domain it was derived for -- `binomial`'s own `n < 0`
@@ -4007,6 +4012,106 @@ _v, _e = _boundary_parse("factorial(I)")
 check("THE-1095 round 9 item F: 'factorial(I)' (imaginary unit, not "
       "covered by any resolver branch) is refused as unknown",
       _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+
+# ═══ THE-1095 round 10 (coordinator replay of 6e72d70: "all 40 reviewer ═══
+# ═══ repros hold, but two of my own probes still do real work") ══════════
+
+# Probe 1: `zeta(s, a)` for a concrete INTEGER `s < 2` computes a
+# Bernoulli polynomial of degree `|s| + 1` at `a` -- `zeta(-1200, 2)`
+# measured ~6.4s (Codex measured 5.8s on an earlier round; still open).
+# Scoped to the TWO-ARG form specifically: `zeta(-1200)`/`zeta(-1463)`
+# ALONE (no second argument) are the SAME `s`, and stay fast regardless
+# -- the domain rule must not narrow the already-PINNED single-arg case.
+_t0 = time.time()
+_v, _e = _boundary_parse("zeta(-1200,2)")
+_dt = time.time() - _t0
+check("THE-1095 round 10 probe 1: 'zeta(-1200,2)' (a negative-integer "
+      "first argument with a second argument supplied) is refused as a "
+      "domain violation",
+      _v is None and _e is not None and _e[0] == "ceiling"
+      and "must be >= 2" in _e[1], f"-> value={_v!r} err={_e!r}")
+check(f"  ...in milliseconds ({_dt:.3f}s), not the ~6s of real "
+      "construction this used to cost",
+      _dt < 1.0, f"-> {_dt:.3f}s")
+for _expr, _want in (("zeta(-1200)", 0), ("zeta(1/2)", None)):
+    _v, _e = _boundary_parse(_expr)
+    if _want is None:
+        check(f"THE-1095 round 10 probe 1: {_expr!r} (single-arg, no "
+              "domain restriction on THIS shape) evaluates, not refused",
+              _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+    else:
+        check(f"THE-1095 round 10 probe 1: {_expr!r} (single-arg, no "
+              "domain restriction on THIS shape) evaluates to main's "
+              "exact value",
+              _v == _want and _e is None, f"-> value={_v!r} err={_e!r} want={_want!r}")
+# ...and the already-PINNED single-arg at-cap case from an earlier round
+# stays unaffected by the new two-arg domain rule.
+_v, _e = _boundary_parse("zeta(-1463)")
+check("THE-1095 round 10 probe 1: 'zeta(-1463)' (single-arg, at this "
+      "module's own MAX_HEAVY_ARG cap, already pinned as evaluating in "
+      "an earlier round) is unaffected by the new two-arg domain rule",
+      _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+# A broader sweep of the OTHER names the coordinator asked to check for
+# the identical "negative/small first argument triggers a different,
+# expensive code path" shape -- none reproduce (each stays symbolic,
+# returns `nan`, or returns `0` instantly on BOTH this module and main,
+# confirmed live; no new domain row needed for any of them).
+for _expr in ("bernoulli(-1200,2)", "euler(-1200,2)", "genocchi(-1200,2)",
+              "polygamma(-1200,2)"):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round 10 probe 1 (sweep): {_expr!r} (negative "
+          "first argument, a shape SymPy leaves symbolic rather than "
+          "computing) is prompt, matching main's own unevaluated form",
+          _dt < 1.0, f"-> {_dt:.3f}s value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("harmonic(-100,2)")
+check("THE-1095 round 10 probe 1 (sweep): 'harmonic(-100,2)' evaluates "
+      "to main's own 'nan', not refused, not slow",
+      str(_v) == "nan" and _e is None, f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("binomial(5,-1000)")
+check("THE-1095 round 10 probe 1 (sweep): 'binomial(5,-1000)' (negative "
+      "k, the O(1) k>n short-circuit) evaluates to main's '0'",
+      _v == 0 and _e is None, f"-> value={_v!r} err={_e!r}")
+
+# Probe 2: `floor`/`ceiling`/`frac`/`Max`/`Min`/`sign` force SymPy's own
+# `evalf` to numerically coerce a non-integer argument -- cheap for an
+# exact literal or an integer-valued table call, expensive (thousands of
+# digits of precision) for a genuinely transcendental EXACT value like
+# `polygamma(1463, 1)` (an exact Mul involving pi**1464, never a plain
+# Integer). Root cause found and fixed at its source too:
+# `Function._eval_evalf`'s own generic fallback looks up an mpmath
+# routine by NAME (`self.func.__name__`), not by class identity -- a
+# deferred stand-in named "polygamma" silently dispatched to the REAL
+# `mpmath.psi` the instant anything called `.evalf()` on it, bypassing
+# the "inert, never computes" property this module's whole scan depends
+# on. `_standin_refuses_evalf` closes that for every stand-in; the
+# `_evalf_coercion_cheap`/`_evalf_coercion_violation` pair closes the
+# remaining "genuinely transcendental, not from a stand-in" case.
+for _expr in ("floor(polygamma(1463, 1))", "ceiling(polygamma(1463, 1))",
+              "Max(polygamma(1463, 1), 1)"):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round 10 probe 2: {_expr!r} (numeric coercion of a "
+          "genuinely transcendental, thousands-of-digits-precision "
+          "value) is refused",
+          _v is None and _e is not None and _e[0] == "ceiling"
+          and "coerced" in _e[1], f"-> value={_v!r} err={_e!r}")
+    check(f"  ...in well under a second ({_dt:.3f}s), not the ~18-19s "
+          "this used to cost (measured directly through this module's "
+          "own pipeline, cProfile-traced to Function._eval_evalf's "
+          "NAME-based mpmath dispatch on the deferred stand-in)",
+          _dt < 2.0, f"-> {_dt:.3f}s")
+for _expr, _want in (("floor(pi*10**5)", 314159), ("floor(polygamma(3, 1))", 6),
+                      ("Max(factorial(20), 5)", 2432902008176640000),
+                      ("floor(2.5)", 2)):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 10 probe 2: {_expr!r} (an exact literal, an "
+          "integer-valued table call, or a small-magnitude transcendental "
+          "-- all cheap to numerically coerce) evaluates to main's exact "
+          "value",
+          _v == _want and _e is None, f"-> value={_v!r} err={_e!r} want={_want!r}")
 
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== ALL BUG-SWEEP REGRESSIONS FIXED ===")

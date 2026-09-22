@@ -2111,6 +2111,54 @@ def _deferred_binop_classes() -> dict:
 _DEFERRED_STANDINS: dict | None = None
 
 
+def _standin_refuses_evalf(self, prec):
+    """`_eval_evalf` for EVERY deferred stand-in class — always refuses
+    (`None`, SymPy's own "I don't know how" signal), never delegating to
+    `Function`'s own generic implementation.
+
+    #326 finding (coordinator round 10 replay of 6e72d70, probe 2):
+    `Function._eval_evalf`'s generic fallback (`sympy/core/function.py`)
+    looks up an mpmath routine by NAME (`getattr(mpmath, self.func.
+    __name__)`, via `MPMATH_TRANSLATIONS` for a few), not by CLASS
+    IDENTITY — so a stand-in named `"polygamma"` (this module builds
+    each stand-in class with the SAME NAME as the real SymPy class it
+    stands in for, deliberately, so error text and this scan's own
+    `type(node).__name__` lookups stay correct) resolves to the REAL
+    `mpmath.psi`/`mpmath.polygamma` the INSTANT anything calls `.evalf()`
+    on it — completely bypassing the "inert, never computes" property
+    every OTHER part of this module relies on. `floor(polygamma(1463,
+    1))` measured ~18-19s THIS WAY, not from `floor`'s own construction
+    cost (bare `sympy.floor(sympy.polygamma(1463, 1))`, already
+    constructed, is ~0.15-0.2s) but because `floor.eval()`'s own
+    `get_integer_part()` needs a numeric approximation to decide the
+    integer boundary, calls `.evalf()` on its (stand-in) argument DURING
+    THE DEFERRED SCAN ITSELF (`floor` is not in `EvaluateFalseTransformer
+    .functions`'s whitelist — confirmed live against sympy 1.14's own
+    parser source — so it is NOT `evaluate=False`-protected the way
+    `Abs`/`sign` are, and constructs eagerly exactly like every other
+    un-whitelisted function this module has already had to special-case),
+    landing on the REAL, expensive `mpmath.psi` at ~1464 digits of
+    precision purely because of a NAME COLLISION with the real class.
+
+    This affects EVERY stand-in, not just `polygamma` — `floor(zeta(
+    1464))`, `ceiling(gamma(1463))`, `Max(digamma(1463), 1)`, any
+    numeric-coercing wrapper around any `_FUNCTION_ARG_CAPS` name, all
+    share the identical bypass. Fixed ONCE, here, for every stand-in this
+    module ever builds, rather than gating each CONSUMER (`floor`/
+    `ceiling`/`Max`/`Min`/`sign`) against it individually — the
+    consumer-side "cheap argument" gate (see `_evalf_coercion_cheap`)
+    still exists as a SEPARATE, independent layer for arguments that
+    were never a stand-in to begin with (a bare `NumberSymbol` `Pow`,
+    say), but this closes the STAND-IN half of the hazard at its root:
+    with `.evalf()` refused, `floor.eval()`'s own `get_integer_part()`
+    gets `None` back and gives up gracefully, leaving `floor(...)`
+    correctly UNEVALUATED during the scan — no different from any other
+    inert stand-in argument this module already relies on staying
+    symbolic.
+    """
+    return None
+
+
 def _arity_checked_new(real_obj):
     """`__new__` for a plain-callable deferred stand-in that raises the
     REAL callable's OWN native Python `TypeError` for a wrong argument
@@ -2240,9 +2288,9 @@ def _deferred_global_dict() -> dict:
             real_obj = real.get(name)
             real_nargs = getattr(real_obj, "nargs", None)
             if real_nargs is not None:
-                attrs = {"nargs": tuple(real_nargs)}
+                attrs = {"nargs": tuple(real_nargs), "_eval_evalf": _standin_refuses_evalf}
             else:
-                attrs = {}
+                attrs = {"_eval_evalf": _standin_refuses_evalf}
                 try:
                     sig = inspect.signature(real_obj)
                 except (TypeError, ValueError):
@@ -2287,7 +2335,40 @@ def _deferred_global_dict() -> dict:
         # scan`'s own generic descent (pushing every `Function` node's
         # `.args`) finds and correctly bounds moments later in the same
         # scan.
-        _DEFERRED_STANDINS["Mod"] = type("Mod", (Function,), {"nargs": (2,)})
+        _DEFERRED_STANDINS["Mod"] = type("Mod", (Function,), {"nargs": (2,), "_eval_evalf": _standin_refuses_evalf})
+        # #326 finding (coordinator round 10 replay of 6e72d70, probe
+        # 2): `floor`/`ceiling`/`frac`/`Max`/`Min` are the SAME shape as
+        # `Mod` above — none are in `EvaluateFalseTransformer.functions`'
+        # whitelist (`Abs`/`sign` ARE, confirmed live against sympy
+        # 1.14's own parser source, so those two stay genuinely inert
+        # under the ordinary `evaluate=False` protection and need no
+        # stand-in of their own), so each evaluates EAGERLY during the
+        # deferred parse regardless of `evaluate=False`, and each one's
+        # own `eval()` needs a concrete NUMERIC comparison to do its job
+        # (an integer boundary for floor/ceiling/frac, an ordering for
+        # Max/Min) — attempted against whatever ELSE this scan already
+        # deferred (typically a table-call stand-in), which is neither a
+        # real number nor comparable to one, throwing DURING the scan's
+        # own construction (`safe_parse` then surfaces a spurious
+        # "parse error", refusing an entirely legitimate expression like
+        # `Max(factorial(20), 5)`). Deferred here for the identical
+        # reason `Mod` already is: inert is all a SCAN-ONLY construction
+        # needs — `_resolve_arg_magnitude`'s own floor/ceiling/Abs/frac
+        # branch and `_elementary_function_magnitude`'s own Max/Min/sign
+        # handling (see each one's own docstring) do the REAL bound-
+        # checking work on this now-inert node afterward, and the
+        # `_evalf_coercion_violation` walk (below) catches a BARE,
+        # top-level use the same way `_table_function_growth_violation`
+        # already does for a bare table call. `Max`/`Min` are real
+        # `sympy.Function` subclasses whose own `nargs` is `Naturals0`
+        # (variadic — confirmed live), not a finite set `tuple()` could
+        # consume, so they are left WITHOUT an explicit `nargs`, exactly
+        # like every other name this loop could not characterise a
+        # finite arity for.
+        for _name in ("floor", "ceiling", "frac"):
+            _DEFERRED_STANDINS[_name] = type(_name, (Function,), {"nargs": (1,), "_eval_evalf": _standin_refuses_evalf})
+        for _name in ("Max", "Min"):
+            _DEFERRED_STANDINS[_name] = type(_name, (Function,), {"_eval_evalf": _standin_refuses_evalf})
     g = safe_global_dict()
     g.update(_DEFERRED_STANDINS)
     # THE-1095 round-3-follow-up #3: the marker classes `_parse_deferred`'s
@@ -3614,6 +3695,47 @@ def _table_function_growth_violation(node, memo: dict) -> str | None:
     return _digit_ceiling_text(bound, f"the result of {type(node).__name__}(...)")
 
 
+#: `floor`/`ceiling`/`Abs`/`frac`/`sign`/`Max`/`Min` — the names
+#: `_evalf_coercion_cheap` (and `_elementary_function_magnitude`'s own
+#: `sign`/`Max`/`Min` handling) gate. Used by `_evalf_coercion_violation`
+#: (below) to walk every occurrence UNCONDITIONALLY, the same shape as
+#: `_table_function_growth_violation`'s own walk.
+_EVALF_COERCION_NAMES = frozenset({"floor", "ceiling", "Abs", "frac", "sign", "Max", "Min"})
+
+
+def _evalf_coercion_violation(node, memo: dict) -> str | None:
+    """Reason a `floor`/`ceiling`/`Abs`/`frac`/`sign`/`Max`/`Min` node's
+    own argument(s) are not cheap enough to numerically coerce, or
+    `None` if `node` is not such a call, or its argument(s) pass.
+
+    #326 finding (coordinator round 10 replay of 6e72d70, probe 2):
+    `_resolve_arg_magnitude`'s own floor/ceiling/Abs/frac branch (and
+    `_elementary_function_magnitude`'s own sign/Max/Min handling) only
+    ever run when something ELSE calls `_resolve_arg_magnitude` on this
+    node while resolving ITS OWN magnitude (a table call's own argument,
+    a `Mul`/`Add` factor, ...) — a BARE, TOP-LEVEL `floor(polygamma(
+    1463, 1))`, standing alone as the WHOLE parsed expression, is never
+    such a callee. Walked unconditionally here instead, the identical
+    shape `_table_function_growth_violation` already uses for the same
+    "a bare top-level use is not automatically covered" gap.
+    """
+    from sympy import Function
+
+    name = type(node).__name__
+    if not (isinstance(node, Function) and name in _EVALF_COERCION_NAMES):
+        return None
+    if node.free_symbols:
+        # Genuinely symbolic -- never materializes, matches `origin/
+        # main`, the same scope every other check in this module already
+        # gives a free symbol (see `_table_function_growth_violation`'s
+        # own identical guard for the full account of why this matters:
+        # an empty/partial resolution must not be misread as "measured
+        # and found large").
+        return None
+    _log_num, _log_den, _resolved, violation = _resolve_arg_magnitude(node, memo)
+    return violation
+
+
 def _table_function_bound(node, memo: dict) -> tuple[float | None, str | None]:
     """`(log10_upper_bound, None)` for `node` — a `Function` node whose
     class name is a key of `_FUNCTION_ARG_CAPS` — or `(None, message)` on a
@@ -3695,11 +3817,53 @@ def _table_function_bound(node, memo: dict) -> tuple[float | None, str | None]:
                            "computing it would take an unbounded amount of time "
                            "and memory")
         bounds[pos] = arg_log_num - arg_log_den
+    zeta_violation = _zeta_two_arg_domain_violation(node)
+    if zeta_violation:
+        return None, zeta_violation
     growth = _GROWTH_BOUNDS.get(name)
     if growth is None:
         return None, (f"{name}() cannot be safely bounded as a nested argument: "
                        "no growth estimate is defined for it")
     return growth(bounds), None
+
+
+def _zeta_two_arg_domain_violation(node) -> str | None:
+    """Reason a TWO-ARGUMENT `zeta(s, a)` call falls outside a domain
+    this module has a safe bound for, or `None` if `node` is not such a
+    call, or is and its domain is fine.
+
+    #326 finding (coordinator round 10 replay of 6e72d70, probe 1):
+    `zeta(s, a)` for a concrete INTEGER `s < 2` computes a Bernoulli
+    POLYNOMIAL of degree `|s| + 1` evaluated at `a` — measured up to
+    ~6.4s near this module's own `MAX_HEAVY_ARG` cap (`zeta(-1200, 2)`;
+    Codex measured 5.8s on an earlier round, still open at the time of
+    this replay) — a cost the SAME `s`, alone (no `a` supplied), never
+    pays: `zeta(-1200)` alone is instant (`0`, a trivial zero for an
+    even negative integer), and `zeta(-1463)` alone (odd, the module's
+    own already-PINNED at-cap single-arg test from an earlier round)
+    measures ~0.3s. Scoped to the TWO-ARG form specifically, not a
+    blanket restriction on position 0, so that existing single-arg pin
+    stays unaffected — confirmed live that the cost genuinely needs BOTH
+    a negative/small integer `s` AND a concrete `a` present; `zeta(s)`
+    alone at any `s` this module's own `MAX_HEAVY_ARG` cap admits stays
+    fast regardless of sign.
+
+    A non-integer `s` (`zeta(1/2, 2)`, `zeta(-1463.5, 2)`) stays
+    unevaluated on `origin/main` regardless of value — confirmed live,
+    no hazard, not refused — matching this module's own general "a
+    computation main itself never performs needs no cap" stance.
+    """
+    if type(node).__name__ != "zeta" or len(node.args) < 2:
+        return None
+    s, a = node.args[0], node.args[1]
+    if s.free_symbols or a.free_symbols:
+        return None
+    if s.is_integer and not bool(s >= 2):
+        return ("the first argument to zeta() with a second argument supplied "
+                "must be >= 2 (a smaller integer order computes a Bernoulli "
+                "polynomial of the corresponding degree): this module has not "
+                "derived a safe bound for that domain")
+    return None
 
 
 def _float_value_log10(node) -> float:
@@ -3791,6 +3955,24 @@ def _elementary_function_magnitude(node, memo: dict) -> tuple[float, bool, str |
     """
     rule = _ELEMENTARY_BOUND_RULES[type(node).__name__]
     if rule == "bounded1":
+        if type(node).__name__ != "sign" or len(node.args) != 1:
+            return 0.0, True, None
+        # #326 finding (coordinator round 10 replay of 6e72d70, probe
+        # 2): unlike `sin`/`cos`/`tanh`/`erf` (confirmed, via a live
+        # check against SymPy 1.14, to stay symbolic rather than
+        # numerically evaluate a transcendental argument at all), `sign`
+        # DOES attempt to determine positivity/negativity for a concrete
+        # argument, which can fall back to the SAME expensive `evalf`
+        # floor/ceiling's own gate exists to avoid — gated identically.
+        a_log_num, a_log_den, a_resolved, a_violation = _resolve_arg_magnitude(node.args[0], memo)
+        if a_violation:
+            return 0.0, False, a_violation
+        if not a_resolved:
+            return None
+        if not _evalf_coercion_cheap(node.args[0], a_log_num, a_log_den):
+            return 0.0, False, ("the argument to sign() cannot be safely coerced "
+                                 "to a number: computing it would take an "
+                                 "unbounded amount of time and memory")
         return 0.0, True, None
     if rule == "passthrough":
         if not node.args:
@@ -3802,6 +3984,16 @@ def _elementary_function_magnitude(node, memo: dict) -> tuple[float, bool, str |
                 return 0.0, False, a_violation
             if not a_resolved:
                 return None
+            # #326 finding (coordinator round 10 replay of 6e72d70,
+            # probe 2): `Max`/`Min` compare their arguments NUMERICALLY
+            # (an evalf-based comparison for anything not structurally
+            # orderable) — the SAME cheap-argument gate floor/ceiling
+            # use, applied per argument, same reasoning as `sign` above.
+            if not _evalf_coercion_cheap(arg, a_log_num, a_log_den):
+                return 0.0, False, (f"an argument to {type(node).__name__}() cannot "
+                                     "be safely coerced to a number: computing it "
+                                     "would take an unbounded amount of time and "
+                                     "memory")
             magnitudes.append(a_log_num - a_log_den)
         return max(magnitudes), True, None
     # "log" and "exp" both take exactly one argument in `safe_global_dict()`
@@ -3830,6 +4022,66 @@ def _elementary_function_magnitude(node, memo: dict) -> tuple[float, bool, str |
         return 0.0, False, ("the argument to exp() cannot be safely bounded: computing it "
                              "would take an unbounded amount of time and memory")
     return arg_value * math.log10(math.e), True, None
+
+
+#: #326 finding (coordinator round 10 replay of 6e72d70, probe 2): the
+#: digit-magnitude ceiling under which `floor`/`ceiling`/`frac`/`Max`/
+#: `Min`/`sign`'s own numeric coercion (an `evalf`, or an evalf-based
+#: comparison) is cheap regardless of what it is approximating — reuses
+#: `MAX_SYMBOLIC_EXPONENT` (200), an existing, already-vetted "this
+#: module trusts an evalf/expansion at this scale to stay fast" ceiling
+#: (see its own docstring), rather than inventing a second one.
+_MAX_EVALF_ARG_DIGITS = MAX_SYMBOLIC_EXPONENT
+
+
+def _evalf_coercion_cheap(arg, arg_log_num: float, arg_log_den: float) -> bool:
+    """Whether `arg` — already known non-symbolic, already resolved to
+    `(arg_log_num, arg_log_den)` via `_resolve_arg_magnitude` — is CHEAP
+    for `floor`/`ceiling`/`frac`/`Max`/`Min`/`sign` to numerically
+    coerce, i.e. whether real construction can determine the answer
+    WITHOUT an expensive high-precision `evalf`.
+
+    #326 finding (coordinator round 10 replay of 6e72d70, probe 2):
+    `_resolve_arg_magnitude`'s own floor/ceiling/Abs branch (and the
+    `Max`/`Min`/`sign` entries in `_ELEMENTARY_BOUND_RULES`) treated ANY
+    resolvable argument as safe to wrap, on the theory that "off by at
+    most 1" bounds the RESULT's own digit count. True for the printed
+    digit count, false for the CONSTRUCTION cost: `floor(polygamma(1463,
+    1))` — an EXACT but genuinely TRANSCENDENTAL `Mul` (`-factorial(
+    1463) * zeta(1464)`, `zeta(1464)` itself an exact multiple of
+    `pi**1464` — never a plain `Integer`) — forces SymPy's own `evalf`
+    at thousands of digits of precision to determine the integer
+    boundary, measured ~18-19s through this module's own pipeline even
+    after `_standin_refuses_evalf` closes the STAND-IN half of that cost
+    (its own name-collision bypass — see that function's own docstring):
+    the REAL `origin/main`-shaped construction in this module's own
+    step-3 parse still pays this cost for real, since `floor`/`ceiling`
+    are not in `EvaluateFalseTransformer.functions`'s whitelist and so
+    are never `evaluate=False`-protected regardless of stand-ins.
+
+    CHEAP (`True`) in exactly two shapes: an exact `Integer`/`Rational`/
+    `Float` LITERAL (any magnitude — reading off the integer part of an
+    exact rational, or of a fixed-precision `Float`, is O(1), never an
+    approximation), or a nested call to a table function PROVEN to
+    always return a plain `Integer` (`_INTEGER_VALUED_TABLE_NAMES` — the
+    SAME set `//`'s own divisor-lower-bound check already trusts;
+    floor/ceiling/frac of an ALREADY-integer value is a no-op, no
+    rounding decision to make). Anything else — a bare irrational
+    `NumberSymbol`, a `Mul`/`Add`/`Pow` combining one, a non-integer-
+    valued table call (`digamma`/`zeta`/`gamma`/`loggamma`/`polygamma`)
+    — is cheap ONLY if its own resolved MAGNITUDE stays under `_MAX_
+    EVALF_ARG_DIGITS` digits: below that, an `evalf` is fast regardless
+    of what it is approximating (`floor(pi*10**5)`, `floor(polygamma(3,
+    1))` both stay comfortably under it); above it, this module has no
+    basis to assume it stays fast.
+    """
+    from sympy import Float, Function, Integer, Rational
+
+    if isinstance(arg, (Integer, Rational, Float)):
+        return True
+    if isinstance(arg, Function) and type(arg).__name__ in _INTEGER_VALUED_TABLE_NAMES:
+        return True
+    return not _digit_count_over_cap(arg_log_num - arg_log_den, _MAX_EVALF_ARG_DIGITS)
 
 
 def _resolve_arg_magnitude(node, memo: dict) -> tuple[float, float, bool, str | None]:
@@ -3941,11 +4193,28 @@ def _resolve_arg_magnitude(node, memo: dict) -> tuple[float, float, bool, str | 
             return 0.0, 0.0, False, violation
         if bound is not None:
             return bound, 0.0, True, None
-    if isinstance(node, Function) and type_name in ("floor", "ceiling", "Abs") and len(node.args) == 1:
+    if isinstance(node, Function) and type_name in ("floor", "ceiling", "Abs", "frac") and len(node.args) == 1:
         a_log_num, a_log_den, a_resolved, a_violation = _resolve_arg_magnitude(node.args[0], memo)
         if a_violation:
             return 0.0, 0.0, False, a_violation
         if a_resolved:
+            # #326 finding (coordinator round 10 replay of 6e72d70,
+            # probe 2): "off by at most 1" bounds the RESULT's own
+            # digit count, but says nothing about the CONSTRUCTION cost
+            # -- floor/ceiling/frac of a genuinely transcendental exact
+            # value (`polygamma(1463, 1)`, an exact `Mul` involving
+            # `pi**1464`, never a plain `Integer`) forces an expensive
+            # high-precision `evalf` to determine the integer boundary.
+            # See `_evalf_coercion_cheap`'s own docstring for the full
+            # account and the two shapes that stay genuinely cheap
+            # regardless of magnitude.
+            if not _evalf_coercion_cheap(node.args[0], a_log_num, a_log_den):
+                return 0.0, 0.0, False, (
+                    f"the argument to {type_name}() cannot be safely coerced "
+                    "to a number: computing it would take an unbounded "
+                    "amount of time and memory")
+            if type_name == "frac":
+                return 0.0, 0.0, True, None  # frac(x) is always in [0, 1)
             if type_name == "Abs":
                 return a_log_num, a_log_den, True, None
             return a_log_num - a_log_den, 0.0, True, None  # floor/ceiling: always an integer
@@ -4506,6 +4775,9 @@ def _function_arg_cap_violation(node, memo: dict) -> str | None:
             return (f"an argument to {type(node).__name__}() exceeds the "
                     f"limit of {cap}: computing it would take an "
                     "unbounded amount of time and memory")
+    zeta_violation = _zeta_two_arg_domain_violation(node)
+    if zeta_violation:
+        return zeta_violation
     # An argument that IS a free symbol, or one this bound could not
     # resolve, might still hide a SEPARATE numeric hazard nested
     # inside it (`factorial(x*f*f)`, say) -- this function only
@@ -4613,6 +4885,9 @@ def _numeric_ceiling_scan(tree, memo: dict) -> str | None:
         growth_violation = _table_function_growth_violation(node, memo)
         if growth_violation:
             return growth_violation
+        evalf_violation = _evalf_coercion_violation(node, memo)
+        if evalf_violation:
+            return evalf_violation
         if isinstance(node, (Integer, Mul, Add, Pow)):
             log_num, log_den, resolved = _log10_num_den(node, memo)
             violation = _ceiling_message_num_den(log_num, log_den)
@@ -4903,6 +5178,10 @@ def reject_explosive(tree) -> str | None:
                 growth_violation = _table_function_growth_violation(node, memo)
                 if growth_violation:
                     return growth_violation
+            if isinstance(node, Function) and type(node).__name__ in _EVALF_COERCION_NAMES:
+                evalf_violation = _evalf_coercion_violation(node, memo)
+                if evalf_violation:
+                    return evalf_violation
             if not isinstance(node, Pow):
                 continue
             base, exponent = node.base, node.exp

@@ -668,6 +668,63 @@ behind it.
   symbol, the same "genuinely symbolic never materializes" scope every
   other check in this module already gives one.
 
+  **Round 10 (coordinator replay of 6e72d70: "all 40 reviewer repros
+  hold, but two of my probes still do real work"), two more fixes.**
+
+  Probe 1: `zeta(-1200, 2)` still took ~6.4s. A concrete INTEGER first
+  argument `s < 2` with a SECOND argument supplied makes SymPy compute
+  a Bernoulli polynomial of degree `|s| + 1` at `a` — a cost the SAME
+  `s`, alone (no second argument), never pays (`zeta(-1200)` alone: a
+  trivial zero, instant; the already-pinned `zeta(-1463)` alone: ~0.3s).
+  New domain rule, scoped to the TWO-ARG form specifically so the
+  existing single-arg pin is unaffected: a concrete integer `s < 2`
+  with a second argument present refuses (`origin/main` itself stays
+  symbolic for a non-integer `s` at any value, confirmed live — no
+  hazard, not refused). Swept the other names for the same "negative/
+  small first argument triggers a different, expensive code path"
+  shape (`bernoulli`/`euler`/`genocchi`/`harmonic`/`polygamma` with a
+  negative order, `binomial` with a negative `k`) — none reproduce;
+  each stays symbolic, returns `nan`, or returns `0` instantly, on both
+  this module and main.
+
+  Probe 2: `floor(polygamma(1463, 1))` — `polygamma(1463, 1)` itself is
+  ~13ms and a ~3299-digit exact expression well under the 4000-digit
+  ceiling — took ~18-19s. Root cause, found via `cProfile`: SymPy's own
+  `Function._eval_evalf` generic fallback looks up an mpmath routine by
+  NAME (`self.func.__name__`), not by class identity — a deferred
+  stand-in named `"polygamma"` (this module deliberately names every
+  stand-in class after the real one it replaces) silently dispatches to
+  the REAL `mpmath.psi` the instant anything calls `.evalf()` on it,
+  bypassing the "inert, never computes" property this module's whole
+  scan depends on — `floor.eval()`'s own `get_integer_part()` does
+  exactly that to determine an integer boundary. Fixed at the root for
+  EVERY stand-in this module builds (`_standin_refuses_evalf`, a shared
+  `_eval_evalf` returning `None`), not gated per consumer. A second,
+  independent layer for arguments that were never a stand-in to begin
+  with (a bare `NumberSymbol` `Pow`, or the REAL, non-deferred
+  `polygamma(1463, 1)` once the scan has already proven it safe):
+  `floor`/`ceiling`/`frac`/`Max`/`Min`/`sign` now accept an argument
+  only when it resolves to an exact `Integer`/`Rational`/`Float`
+  literal (any magnitude — reading an integer part off an exact number
+  is O(1)) or a nested call to a table function PROVEN to always return
+  a plain integer (`_INTEGER_VALUED_TABLE_NAMES`, the same set `//`'s
+  own divisor-lower-bound check already trusts); anything else refuses
+  once its own resolved magnitude exceeds `MAX_SYMBOLIC_EXPONENT` (200)
+  digits. `floor`/`ceiling`/`frac`/`Max`/`Min` also gained a deferred
+  stand-in of their own (`Abs`/`sign` already stay `evaluate=False`-
+  protected via SymPy's own parser whitelist and did not need one) —
+  without it, `Max(factorial(20), 5)` (a completely benign call)
+  regressed to a spurious parse error, since `Max.eval()` tried to
+  numerically compare the now-inert `factorial` stand-in against `5`
+  during the scan's own construction and failed outright; deferring
+  `Max`/`Min` themselves closes that. Pinned: `floor(polygamma(1463,
+  1))`, `ceiling(polygamma(1463, 1))`, `Max(polygamma(1463, 1), 1)`
+  refuse in well under a second (measured, not merely asserted fast);
+  `floor(pi*10**5)`, `floor(polygamma(3, 1))`, `Max(factorial(20), 5)`,
+  `floor(2.5)` evaluate to main's exact values. `round` is not reachable
+  through this module's own `safe_global_dict()` at all (checked, not
+  assumed) — no coverage needed for it.
+
 ## [0.13.0] — 2026-09-21
 
 ### Fixed
