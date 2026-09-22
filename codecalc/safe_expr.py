@@ -2014,14 +2014,11 @@ def _shift_digit_ceiling_violation(expression: str) -> str | None:
         # count regardless of the left operand.
         count = _safe_pow10(right_log)
         if count is None or count < 0:
-            return (f"'<<' by a shift count this large cannot be bounded "
-                    "before construction: the result would have an "
-                    f"unbounded number of digits, over the limit of "
-                    f"{MAX_NUMERIC_DIGITS}")
+            return _digit_ceiling_text(math.inf, "the result of '<<'")
         total_log = left_log + count * math.log10(2)
-        violation = _ceiling_message_num_den(total_log, 0.0)
+        violation = _digit_ceiling_text(total_log, "the result of '<<'")
         if violation:
-            return f"'<<' shift result {violation}"
+            return violation
     return None
 
 
@@ -2252,6 +2249,16 @@ def safe_parse(expression: str, *, evaluate: bool = True, local_dict: dict | Non
                 _expression_touches_table_or_unprotected_operator(expression):
             return None, (CATEGORY_VALIDATION, f"parse error: {exc}")
     else:
+        # THE-1095 round-3-follow-up (coordinator review of d3c65c7): a
+        # bare class reference is a malformed EXPRESSION (validation), not
+        # an oversized one (ceiling) — checked separately from, and before,
+        # `reject_explosive`'s own numeric-ceiling scan; see `_bare_class_
+        # violation`'s own docstring for why this lives outside that
+        # function rather than bending its "always a ceiling finding"
+        # contract.
+        bare_class = _bare_class_violation(scan_shape)
+        if bare_class:
+            return None, (CATEGORY_VALIDATION, bare_class)
         explosive = reject_explosive(scan_shape)
         if explosive:
             return None, (CATEGORY_CEILING, explosive)
@@ -2275,6 +2282,9 @@ def safe_parse(expression: str, *, evaluate: bool = True, local_dict: dict | Non
         shape = None
         real_exc = exc
     else:
+        bare_class = _bare_class_violation(shape)
+        if bare_class:
+            return None, (CATEGORY_VALIDATION, bare_class)
         explosive = reject_explosive(shape)
         if explosive:
             return None, (CATEGORY_CEILING, explosive)
@@ -3083,6 +3093,46 @@ def _digit_count_over_cap_for_node(node, side: str, magnitude: float, cap: int) 
     return _digit_count_over_cap(magnitude, cap)
 
 
+def _digit_ceiling_text(magnitude: float, subject: str, location: str = "") -> str | None:
+    """Refusal text if `magnitude` (a log10 value) is over `MAX_NUMERIC_
+    DIGITS`, phrased as "`subject` would have about N digits`location`,
+    over the limit of `MAX_NUMERIC_DIGITS`: it cannot be rendered as a
+    decimal string" (or the "unbounded number of digits" variant for a
+    magnitude too astronomically large to spell out as a plain count), or
+    `None` if it is not over. `location` is an optional " in its
+    numerator"/" in its denominator" suffix for a `Rational`'s two
+    independently-checked sides (see `_ceiling_message_num_den`); empty
+    for a plain integer result with no such distinction (see
+    `_shift_digit_ceiling_violation`). THE-1095 round-3-follow-up
+    (coordinator review of d3c65c7): extracted so the wording is built in
+    exactly ONE place — the shift check used to build its own text by
+    string-prefixing `_ceiling_message_num_den`'s OWN "numerator"-phrased
+    output ("'<<' shift result the result would have about N digits in
+    its numerator, ..."), which read as a doubled "result" with a
+    numerator/denominator distinction that makes no sense for a plain
+    integer shift.
+    """
+    if magnitude <= 0:  # at most one digit, never over cap
+        return None
+    # `magnitude` itself can be finite yet astronomically large (`2**
+    # (1000000**6)`'s numerator has log10 ~ 3e35 -- a REAL, exact answer,
+    # not an overflow), so `digit_count` would need dozens of its own
+    # digits to spell out. Past this line, describing "how many digits"
+    # is no longer useful information, so this reports the same
+    # "unbounded" wording `not math.isfinite` uses below rather than
+    # interpolating an unreadable number.
+    if not math.isfinite(magnitude) or magnitude > 1e15:
+        return (f"{subject} would have an unbounded number of digits"
+                f"{location}, over the limit of {MAX_NUMERIC_DIGITS}: it "
+                "cannot be rendered as a decimal string")
+    digit_count = int(magnitude) + 1
+    if digit_count > MAX_NUMERIC_DIGITS:
+        return (f"{subject} would have about {digit_count} digits{location}, "
+                f"over the limit of {MAX_NUMERIC_DIGITS}: it cannot be "
+                "rendered as a decimal string")
+    return None
+
+
 def _ceiling_message_num_den(log_num: float, log_den: float) -> str | None:
     """Refusal text if EITHER side of a `(log_num, log_den)` pair already
     exceeds `MAX_NUMERIC_DIGITS`, or None. The printer renders a Rational's
@@ -3094,24 +3144,9 @@ def _ceiling_message_num_den(log_num: float, log_den: float) -> str | None:
     printed VALUE is).
     """
     for magnitude, side in ((log_num, "numerator"), (log_den, "denominator")):
-        if magnitude <= 0:  # at most one digit on this side, never over cap
-            continue
-        # `magnitude` itself can be finite yet astronomically large (`2**
-        # (1000000**6)`'s numerator has log10 ~ 3e35 -- a REAL, exact
-        # answer, not an overflow), so `digit_count` would need dozens of
-        # its own digits to spell out. Past this line, describing "how
-        # many digits" is no longer useful information, so this reports
-        # the same "unbounded" wording `not math.isfinite` uses below
-        # rather than interpolating an unreadable number.
-        if not math.isfinite(magnitude) or magnitude > 1e15:
-            return (f"the result would have an unbounded number of digits in "
-                    f"its {side}, over the limit of {MAX_NUMERIC_DIGITS}: it "
-                    "cannot be rendered as a decimal string")
-        digit_count = int(magnitude) + 1
-        if digit_count > MAX_NUMERIC_DIGITS:
-            return (f"the result would have about {digit_count} digits in its "
-                    f"{side}, over the limit of {MAX_NUMERIC_DIGITS}: it cannot "
-                    "be rendered as a decimal string")
+        text = _digit_ceiling_text(magnitude, "the result", f" in its {side}")
+        if text:
+            return text
     return None
 
 
@@ -3503,6 +3538,80 @@ def _numeric_ceiling_scan(tree, memo: dict) -> str | None:
     return None
 
 
+def _bare_class_violation(tree) -> str | None:
+    """Reason `tree` (or something nested inside it) is a bare reference to
+    a Python class this module exposes, rather than a genuine expression
+    node — or `None`. THE-1095 round-3-follow-up (ClusterFuzzLite crash on
+    44c83b1, sympy 1.14.0): a bare reference to a class in `safe_global_
+    dict()` (`binomial`, `Pow`, `Mul`, ... — every name this module's own
+    namespace exposes without calling it) used to be caught only at the
+    TOP of a tree (`_walk`'s own `isinstance(args, tuple)` guard, its own
+    comment) — but `parse_expr` can ALSO embed that same bare CLASS one
+    level DEEPER, as an ELEMENT of some OTHER node's `.args` (a `Mul`/`Add`
+    built around it, confirmed live against the crash input), where
+    `_walk`'s per-NODE guard never got a chance to run before `reject_
+    explosive`'s own code called `.free_symbols` (or any other property)
+    directly on that compound node — SymPy's `Basic.free_symbols` property
+    getter (`core/basic.py`) blindly iterates `self.args` assuming every
+    element is a well-formed `Basic` instance, and `SomeClass.free_symbols`
+    (accessed on the CLASS, not an instance) returns the unbound `property`
+    object, which `empty.union(*(...))` cannot iterate — `TypeError:
+    'property' object is not iterable`, uncaught, crashing `safe_parse`
+    instead of refusing.
+
+    Checked ONCE, here, for the WHOLE tree, separately from — and before —
+    `reject_explosive`'s own numeric-ceiling scan, so neither pass in that
+    function ever calls a property on a node it did not itself construct.
+    A bare class reference is a malformed EXPRESSION, not an oversized
+    one — `safe_parse`'s own call sites report this as `CATEGORY_
+    VALIDATION`, never `CATEGORY_CEILING` (moved out of `reject_explosive`
+    itself, whose OWN contract is "a message string is always a ceiling
+    finding", precisely so this one distinct category does not have to
+    bend that contract).
+
+    Every node `_walk` yields must NOT be a bare Python `type` (a class
+    object itself, referenced rather than called or constructed) — a
+    `sympy.Basic` instance, the bare `tuple` `_walk` already special-cases,
+    or any other ordinary already-computed leaf value a table function's
+    own eager `eval()` can legitimately hand back (`bool`/`dict`/`list`/
+    plain `int` — see the loop's own comment below for why the check is
+    `isinstance(_node, type)` and specifically NOT `not isinstance(_node,
+    Basic)`) all pass through unexamined here. A bare `type` is `unknown
+    != safe`, fail-closed here exactly as every other finding in this
+    module is.
+    """
+    for _node in _walk(tree):
+        if isinstance(_node, tuple):
+            continue  # `_walk`'s own documented exception, not a hazard
+        # NOT `not isinstance(_node, Basic)` — tried that first, and it
+        # rejected every ALREADY-EAGERLY-EVALUATED plain-Python result a
+        # heavy function's own `eval()` can hand back as `tree` ITSELF
+        # (see this module's own long docstring on `Function.__new__`'s
+        # default-`evaluate=True` fallback): `isprime(21)` is a plain
+        # `bool`, `factorint(21)` a plain `dict`, `divisors`/`primefactors`
+        # a plain `list`, `prime(21)`/`primorial(21)` a plain Python `int`
+        # — none of those is a `sympy.Basic` instance, and all four are
+        # ordinary, SAFE, already-fully-computed leaves this module's own
+        # tables intentionally return. The actual hazard is narrower: a
+        # bare CLASS reference (`type` instance — `Pow`, `binomial`, any
+        # name `safe_global_dict()`/`_deferred_global_dict()` expose,
+        # referenced without being called) is what carries the broken
+        # `property`-descriptor `.args`/`.free_symbols` that crashed
+        # `reject_explosive`. Every real, legitimate leaf value this
+        # module's own functions can produce is an ordinary Python
+        # instance, never a class itself.
+        if isinstance(_node, type):
+            # THE-1095 round-3-follow-up (coordinator review of d3c65c7):
+            # the ORIGINAL wording here leaked the Python repr of the
+            # class (`<class 'sympy.core.power.Pow'>`) — an internal
+            # implementation detail, not something a caller wrote — use
+            # the plain name as it would be written in an expression
+            # instead (`_node.__name__`, e.g. `'Pow'`).
+            return (f"{_node.__name__!r} is a bare reference to a SymPy "
+                    "class, not a value — call it or use a number/symbol")
+    return None
+
+
 def reject_explosive(tree) -> str | None:
     """Reason this PARSED expression must not be evaluated, or None.
 
@@ -3595,67 +3704,6 @@ def reject_explosive(tree) -> str | None:
     # `resource_exhausted` — though `reject_explosive`'s own refusals get
     # there via `CATEGORY_CEILING` regardless of message text).
     #
-    # THE-1095 round 3 follow-up (ClusterFuzzLite crash on 44c83b1, sympy
-    # 1.14.0): a bare reference to a class in `safe_global_dict()`
-    # (`binomial`, `Pow`, `Mul`, ... — every name this module's OWN
-    # namespace exposes without calling it) used to be caught only at the
-    # TOP of a tree (`_walk`'s own `isinstance(args, tuple)` guard, its own
-    # comment above) — but `parse_expr` can ALSO embed that same bare
-    # CLASS one level DEEPER, as an ELEMENT of some OTHER node's `.args`
-    # (a `Mul`/`Add` built around it, confirmed live against the crash
-    # input: `exponent` in the Pow loop below resolved to a real `Basic`
-    # whose OWN `.args` contained the bare `Pow` class), where `_walk`'s
-    # per-NODE guard never gets a chance to run before THIS function's own
-    # code calls `.free_symbols` (or any other property) directly on that
-    # compound node — SymPy's `Basic.free_symbols` property getter
-    # (`core/basic.py`) blindly iterates `self.args` assuming every element
-    # is a well-formed `Basic` instance, and `SomeClass.free_symbols`
-    # (accessed on the CLASS, not an instance) returns the unbound
-    # `property` object, which `empty.union(*(...))` cannot iterate —
-    # `TypeError: 'property' object is not iterable`, uncaught, crashing
-    # `safe_parse` instead of refusing.
-    #
-    # Closed once, here, for the WHOLE tree, before either pass below ever
-    # calls a property on a node it did not itself construct: every node
-    # `_walk` yields must NOT be a bare Python `type` (a class object
-    # itself, referenced rather than called or constructed) — a `sympy.
-    # Basic` instance, the bare `tuple` `_walk` already special-cases, or
-    # any other ordinary already-computed leaf value a table function's
-    # own eager `eval()` can legitimately hand back (`bool`/`dict`/`list`/
-    # plain `int` — see the loop's own comment below for why the check is
-    # `isinstance(_node, type)` and specifically NOT `not isinstance(
-    # _node, Basic)`) all pass through unexamined here. A bare `type` is
-    # `unknown != safe`, fail-closed here the same way every other
-    # `reject_explosive` finding is — `CATEGORY_CEILING` at `safe_parse`'s
-    # own call site, regardless of message text (see this function's own
-    # docstring: "reject_explosive's own refusals get there via
-    # CATEGORY_CEILING regardless of message text").
-    for _node in _walk(tree):
-        if isinstance(_node, tuple):
-            continue  # `_walk`'s own documented exception, not a hazard
-        # NOT `not isinstance(_node, Basic)` — tried that first, and it
-        # rejected every ALREADY-EAGERLY-EVALUATED plain-Python result a
-        # heavy function's own `eval()` can hand back as `tree` ITSELF
-        # (see this module's own long docstring on `Function.__new__`'s
-        # default-`evaluate=True` fallback): `isprime(21)` is a plain
-        # `bool`, `factorint(21)` a plain `dict`, `divisors`/`primefactors`
-        # a plain `list`, `prime(21)`/`primorial(21)` a plain Python `int`
-        # — none of those is a `sympy.Basic` instance, and all four are
-        # ordinary, SAFE, already-fully-computed leaves this module's own
-        # tables intentionally return. The actual hazard is narrower: a
-        # bare CLASS reference (`type` instance — `Pow`, `binomial`, any
-        # name `safe_global_dict()`/`_deferred_global_dict()` expose,
-        # referenced without being called) is what carries the broken
-        # `property`-descriptor `.args`/`.free_symbols` that crashed this
-        # function (see the long comment above). Every real, legitimate
-        # leaf value this module's own functions can produce is an
-        # ordinary Python instance, never a class itself.
-        if isinstance(_node, type):
-            return (f"{_node!r} is not a valid expression node "
-                    "(a bare reference to a name this module exposes, "
-                    "used as a value rather than called) and cannot be "
-                    "evaluated safely")
-
     # One `memo` dict for BOTH passes below: `_log10_num_den` memoizes by
     # `id(node)`, so a node either pass visits (or the Pow loop's own
     # exponent resolution visits again) is resolved once total.

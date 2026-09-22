@@ -253,6 +253,24 @@ behind it.
   formula bugs during this round's own development, not a hand-picked
   repro list.
 
+  **Two text defects in the above, fixed in the same round**: (1) the
+  `<<` shift-digit-ceiling message read "'<<' shift result the result
+  would have about N digits in its numerator, ..." — a doubled "result"
+  and a numerator/denominator distinction that makes no sense for a
+  plain integer shift (never a `Rational`); the shared digit-ceiling
+  wording is now built in one place (`_digit_ceiling_text`, extracted
+  from `_ceiling_message_num_den`) and reads "the result of '<<' would
+  have about N digits, over the limit of 4000: ...". (2) a bare class
+  reference (`safe_parse("Pow")`) returned a `ceiling` code with a
+  message leaking the Python repr (`<class 'sympy.core.power.Pow'>`) —
+  a malformed expression is a `validation` finding, not an oversized
+  one, so the check moved out of `reject_explosive` (whose own contract
+  is "a message string is always a ceiling finding") into its own
+  `_bare_class_violation`, called separately by `safe_parse` and
+  reported as `validation`, naming the class as written ("'Pow' is a
+  bare reference to a SymPy class, not a value — call it or use a
+  number/symbol").
+
 ## [0.13.0] — 2026-09-21
 
 ### Fixed

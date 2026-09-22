@@ -3072,6 +3072,48 @@ check("  ...and returns the ordinary (value, error) 2-tuple contract, a "
       not _crash_raised and (_crash_v is None) != (_crash_e is None),
       f"-> value={_crash_v!r} err={_crash_e!r}")
 
+# Coordinator review of d3c65c7, two text defects fixed in the same round:
+#
+# 1. A bare class reference is a malformed EXPRESSION (validation), not an
+#    oversized one (ceiling) -- and must not leak the Python repr of the
+#    class (`<class 'sympy.core.power.Pow'>`).
+for _bare_expr, _bare_name in (("Pow", "Pow"), ("Mul", "Mul"), ("binomial", "binomial")):
+    _v, _e = _boundary_parse(_bare_expr)
+    check(f"THE-1095 round-3-follow-up: {_bare_expr!r} (a bare class "
+          "reference) is refused as VALIDATION, not ceiling",
+          _v is None and _e is not None and _e[0] == "validation", f"-> {_v!r} {_e!r}")
+    check(f"  ...names {_bare_name!r} as written, not the Python repr "
+          "(\"<class '...'>\") or the old 'is not a valid expression node' "
+          "wording",
+          _e is not None and f"'{_bare_name}'" in _e[1] and "<class" not in _e[1]
+          and "is not a valid expression node" not in _e[1], f"-> {_e!r}")
+# ...and a class used in a genuine (if malformed) expression shape keeps
+# its EXISTING validation code -- unaffected by this fix either way.
+for _malformed_expr in ("x^Pow", "Pow*2"):
+    _v, _e = _boundary_parse(_malformed_expr)
+    check(f"THE-1095 round-3-follow-up: {_malformed_expr!r} still refuses "
+          "as validation (unaffected -- this shape was already validation "
+          "before the wording fix)",
+          _v is None and _e is not None and _e[0] == "validation", f"-> {_v!r} {_e!r}")
+
+# 2. The `<<` shift-digit-ceiling message used to read "'<<' shift result
+#    the result would have about N digits in its numerator, ..." -- a
+#    doubled "result" and a numerator/denominator distinction that makes
+#    no sense for a plain integer shift (never a Rational).
+_v, _e = _boundary_parse("bell(1463) << 100000")
+check("THE-1095 round-3-follow-up: the '<<' shift-ceiling message names "
+      "'the result of' once, with no 'numerator' wording",
+      _e is not None and _e[0] == "ceiling"
+      and "the result of '<<' would have about" in _e[1]
+      and "numerator" not in _e[1] and "shift result the result" not in _e[1],
+      f"-> {_e!r}")
+_v, _e = _boundary_parse("1 << factorial(20)")
+check("  ...and the 'unbounded number of digits' variant matches the same "
+      "shape",
+      _e is not None and _e[0] == "ceiling"
+      and "the result of '<<' would have an unbounded number of digits" in _e[1]
+      and "numerator" not in _e[1], f"-> {_e!r}")
+
 # Never-raises sweep: every bare-operand name this module exposes --
 # `Pow`/`Mul`/`Add`/`Symbol` (SymPy's own core classes) and every
 # `_FUNCTION_ARG_CAPS` table name -- used bare (uncalled) in four shapes
