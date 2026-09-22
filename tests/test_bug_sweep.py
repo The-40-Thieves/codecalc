@@ -2277,13 +2277,14 @@ check("sqrt(10**1000) still evaluates", _v is not None and _e is None,
 # (`_numeric_ceiling_scan`); the root family gets the NEW tree-level Pow
 # unit-fraction-exponent backstop (a nested heavy call as the argument, so
 # no literal token names the true magnitude at all). The eager factor
-# family (factorint and its five siblings) genuinely has NO tree-level
-# backstop possible -- none of the six are sympy.Function subclasses, and
-# each coerces its argument to a concrete int internally regardless of
-# evaluate=False, so the danger is baked into the very act of PARSING
-# (documented in MAX_FACTOR_ARG_DIGITS's own comment) -- so those six are
-# exercised via the token-level COMBINED-literal-product check instead,
-# the one protection that family can structurally have.
+# family (factorint and its five siblings) ALSO gets a tree-level backstop
+# now (THE-1095, see below) -- none of the six respects `evaluate=False` on
+# its own, so the danger used to be baked into the very act of PARSING
+# (documented in MAX_FACTOR_ARG_DIGITS's own comment) -- but they still
+# ALSO keep their existing token-level COMBINED-literal-product check,
+# since that layer is unaffected and still the only protection for a
+# NESTED-call-shaped argument (`factorint(nextprime(x))`-style — see
+# `_oversized_call_arg_violation`'s own updated docstring).
 _EAGER_FACTOR_FAMILY = {"factorint", "primefactors", "divisors", "mobius", "nextprime", "isprime"}
 # `sqrt`/`cbrt` both stay a genuinely unevaluated `Pow(base, Rational(1,
 # n))` for a CONCRETE (already-materialized) base under `evaluate=False`,
@@ -2294,29 +2295,35 @@ _EAGER_FACTOR_FAMILY = {"factorint", "primefactors", "divisors", "mobius", "next
 # construction time, a different code path from bare `sqrt`/`cbrt`) -- so
 # `root` is checked via the token-level combined-literal path instead,
 # below, alongside the factor family, rather than asserting a tree shape
-# that does not actually occur for it.
+# that does not actually occur for it. Structural, still true after
+# THE-1095 (`_DEFERRED_STANDIN_NAMES` excludes the whole `sqrt`/`root`/
+# `cbrt` family for exactly this reason — see its own comment) — the only
+# name in `_FUNCTION_ARG_CAPS` that stays genuinely single-layer by design.
 _TREE_ONLY_ROOT_FAMILY = {"sqrt", "cbrt"}
 _TOKEN_ONLY_ROOT_FAMILY = {"root"}
-_EXTRA_CALL_ARGS = {"root": ", 2"}
-# Self-check scope, and why: this round's OWN work is the "digits"-kind
-# entries (the factor and root families) and their two enforcement layers
-# -- that is what gets a genuine COMPUTED-argument check below, at
-# whichever layer actually applies to each. The PRE-EXISTING "value"-kind
-# entries (`_HEAVY_FUNCTIONS`) already had a computed-argument tree-level
-# backstop from round 6 -- but probing every member for THIS self-check
-# surfaced that it is not uniform across all 27 names, none of which
-# round 6 (or this round) ever claimed: `rf`/`ff`'s actual SymPy class
-# names are `RisingFactorial`/`FallingFactorial`, not `rf`/`ff`, so the
-# `type(node).__name__ in _FUNCTION_ARG_CAPS` lookup never matches them;
-# `digamma` gets REWRITTEN to `polygamma` at construction (a different
-# name again); `primepi` and `binomial` with certain small second
-# arguments evaluate their own argument eagerly regardless of
-# `evaluate=False`; `primorial`/`prime`/`motzkin` reject a non-integer
-# argument outright with a `ValueError` (safe, just a different failure
-# mode). None of that is this round's regression to fix -- it predates
-# it -- so the "value"-kind branch below checks only what round 6 already
-# established and this round did not touch: the TOKEN-level bare-literal
-# cap, unconditionally reliable regardless of any of the above.
+# `rf`/`ff`/`binomial` are two-argument value-kind names -- the tree-level
+# I1/I2 checks below need a valid SECOND argument to actually call them (the
+# token-level checks above never call anything, so they were never sensitive
+# to this), a small one so it never itself approaches any cap.
+_EXTRA_CALL_ARGS = {"root": ", 2", "rf": ", 2", "ff": ", 2", "binomial": ", 5"}
+# THE-1095: every name below EXCEPT `root` (structural, see above) is now
+# exercised by BOTH layers for a genuinely COMPUTED argument. Before this
+# round, the "value"-kind branch (`_HEAVY_FUNCTIONS`) only ever got the
+# token-level bare-literal check here, with a long-documented list of
+# exceptions this self-check's own comment used to carry: `rf`/`ff` parse
+# to `RisingFactorial`/`FallingFactorial`, not `rf`/`ff`, so the old
+# `type(node).__name__ in _FUNCTION_ARG_CAPS` lookup never matched them;
+# `digamma` gets REWRITTEN to `polygamma` at construction; `primepi` and
+# `binomial` evaluated their own argument eagerly regardless of
+# `evaluate=False`; `primorial`/`prime`/`motzkin` (value-kind) and
+# `factorint`/`primefactors`/`divisors`/`nextprime`/`isprime` (digits-kind)
+# either raised `ValueError` outright on a merely computed argument or
+# silently evaluated for real, bypassing the cap. `safe_parse`'s pre-parse
+# now runs through `_deferred_global_dict()` (THE-1095), which replaces
+# every one of these names uniformly with an inert stand-in, so NONE of
+# that is "documented out of scope" any longer — the loop below checks the
+# tree-level computed-argument backstop for every name it applies to,
+# with no bucket left over for "predates this round, not fixed yet".
 _checked_names = set()
 for _fn_name, (_kind, _cap) in _se5._FUNCTION_ARG_CAPS.items():
     _checked_names.add(_fn_name)
@@ -2338,13 +2345,38 @@ for _fn_name, (_kind, _cap) in _se5._FUNCTION_ARG_CAPS.items():
         check(f"  ...promptly ({_dt:.3f}s)", _dt < 2.0, f"-> {_dt:.3f}s")
     else:
         # value-kind (_HEAVY_FUNCTIONS): the token-level bare-literal cap
-        # -- round 1's own protection, unconditionally reliable, and the
-        # one property every member of this set actually shares (see the
-        # comment above for why the tree-level backstop is NOT that).
+        # -- round 1's own protection, unconditionally reliable.
         _r = _se5.classify_unsafe(f"{_fn_name}({_cap + 1})")
         check(f"self-check: {_fn_name}({_cap + 1}) (one over cap, a bare "
               "literal) is refused at the token level",
               _r is not None, f"-> {_r}")
+    if _fn_name not in _TOKEN_ONLY_ROOT_FAMILY | _TREE_ONLY_ROOT_FAMILY:
+        # THE-1095: the tree-level, deferred-pre-parse backstop, for a
+        # COMPUTED (not bare-literal) argument -- the layer this round adds,
+        # now exercised for every remaining name in the table, "value" and
+        # "digits" kind alike. "value" kind over-caps by argument MAGNITUDE
+        # (`cap + 1`); "digits" kind over-caps by DIGIT COUNT (a value with
+        # `cap + 1` digits, `10**cap + 1` -- `cap` itself is a small count
+        # like 25, so `cap + 1` alone would be a two-digit number, nowhere
+        # near a 25-digit cap).
+        _over = f"{_cap}+1" if _kind == "value" else f"10**{_cap}+1"
+        _t0 = time.time()
+        _v, _e = _boundary_parse(f"{_fn_name}({_over}{_extra})")
+        _dt = time.time() - _t0
+        check(f"self-check: {_fn_name}({_over}{_extra}) (a computed, "
+              "over-cap argument) is refused at the tree level",
+              _v is None and _e is not None and _e[0] == "ceiling",
+              f"-> value={_v!r} err={_e!r}")
+        check(f"  ...promptly ({_dt:.3f}s)", _dt < 2.0, f"-> {_dt:.3f}s")
+        # ...and a comfortably-under-cap computed argument still evaluates,
+        # identically to its literal form -- I2 of THE-1095's own ledger.
+        _under_lit, _under_computed = f"21{_extra}", f"10+11{_extra}"
+        _lv, _le = _boundary_parse(f"{_fn_name}({_under_lit})")
+        _cv, _ce = _boundary_parse(f"{_fn_name}({_under_computed})")
+        check(f"self-check: {_fn_name}({_under_computed}) == "
+              f"{_fn_name}({_under_lit}) (under cap, computed == literal)",
+              _le is None and _ce is None and _lv == _cv,
+              f"-> literal={_lv!r}/{_le!r} computed={_cv!r}/{_ce!r}")
 check(f"self-check covered every name in _FUNCTION_ARG_CAPS "
       f"({len(_checked_names)} names)",
       _checked_names == set(_se5._FUNCTION_ARG_CAPS),
@@ -2372,6 +2404,20 @@ try:
     _v, _e = _boundary_parse("factorial(2+1)")  # 3, clearly under a cap of 10
     check("  ...and factorial(2+1) (under the patched cap) still evaluates",
           _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+    # THE-1095: isolate the TREE-level (deferred-pre-parse) layer
+    # specifically -- 5 and 6 are each individually under the patched cap
+    # of 10, so the TOKEN screen has no opinion on either one; only their
+    # RESOLVED sum (11) is over it, which only `_numeric_ceiling_scan`'s
+    # `Function`-node branch, fed by `_deferred_global_dict()`, can see.
+    _v, _e = _boundary_parse("factorial(5+6)")
+    check("self-check: a monkeypatched 'factorial' row is honoured at the "
+          "TREE level alone -- factorial(5+6) (11, over cap 10, no single "
+          "token over cap) is refused",
+          _v is None and _e is not None and _e[0] == "ceiling",
+          f"-> value={_v!r} err={_e!r}")
+    check("  ...and the token screen alone has no opinion on either literal",
+          _se5.classify_unsafe("factorial(5+6)") is None,
+          f"-> {_se5.classify_unsafe('factorial(5+6)')!r}")
 finally:
     _se5._FUNCTION_ARG_CAPS["factorial"] = _orig_factorial_cap
 
@@ -2480,6 +2526,103 @@ check("sqrt(<1200-digit literal, exactly at MAX_ROOT_ARG_DIGITS>) "
 check("sqrt(<1201-digit literal, one over the cap>) is refused",
       _se5.classify_unsafe(f"sqrt({_lit1201})") is not None,
       f"-> {_se5.classify_unsafe(f'sqrt({_lit1201})')!r}")
+
+# ═══ THE-1095, follow-up to #326/THE-1091 (GH #326, PR #334) ══════════════
+# The value-kind and digits-kind tree-level backstops (`_numeric_ceiling_
+# scan`'s `Function`-node branch) only ever saw a real `sympy.Function` node
+# named after its own `_FUNCTION_ARG_CAPS` entry for a MINORITY of the
+# table -- see `_DEFERRED_STANDIN_NAMES`'s own comment in safe_expr.py for
+# the full empirical audit. Two symptom shapes, both through
+# `exact.simplify_expression` (the ordinary, `evaluate=True` public path):
+#
+# Group A -- a computed argument BYPASSES the cap outright, because the
+# real function either evaluates for real regardless of `evaluate=False`
+# (`rf`/`ff`/`primepi`/`binomial`) or gets rewritten to a differently-named,
+# differently-shaped node before the scan ever runs (`digamma` ->
+# `polygamma`). Control: `factorial(1463+1)` -- same shape, already fixed
+# in round 6 -- still refuses, proving this is specific to these five names.
+for _expr in ("rf(1463+1, 2)", "ff(1463+1, 2)", "digamma(1463+1)",
+              "primepi(1463*1000)", "binomial(1463+1, 700)"):
+    _r = _exact.simplify_expression(_expr)
+    check(f"THE-1095 group A: {_expr!r} (computed, over-cap argument) is "
+          "refused with the ceiling code, not silently evaluated",
+          _r.get("ok") is False and _r.get("code") == _errors.RESOURCE_EXHAUSTED,
+          f"-> {_r}")
+_r = _exact.simplify_expression("factorial(1463+1)")
+check("THE-1095 group A control: 'factorial(1463+1)' (already-fixed round-6 "
+      "shape) still refuses",
+      _r.get("ok") is False and _r.get("code") == _errors.RESOURCE_EXHAUSTED,
+      f"-> {_r}")
+
+# Group B -- a computed argument is WRONGLY refused, with the wrong error
+# CODE, even nowhere near the cap: the real function's own eager `int()`/
+# `as_int()`-style coercion raises `ValueError` on an unevaluated `Add`/
+# `Pow` regardless of the VALUE it represents, inside `safe_parse`'s own
+# `evaluate=False` pre-parse -- surfacing as a `validation` parse error
+# instead of ever reaching evaluation. `isprime` didn't raise, but its
+# eager evaluation on an unevaluated `Pow` disagreed with the identical
+# literal, which is the same underlying bug from the other side.
+for _expr in ("primorial(1463+1)", "prime(1463+1)", "motzkin(1463+1)"):
+    _r = _exact.simplify_expression(_expr)
+    check(f"THE-1095 group B: {_expr!r} is refused with the CEILING code "
+          "(it is one over MAX_HEAVY_ARG), not a 'not an integer' "
+          "validation error",
+          _r.get("ok") is False and _r.get("code") == _errors.RESOURCE_EXHAUSTED,
+          f"-> {_r}")
+_r_computed = _exact.simplify_expression("isprime(10**24+7)")
+_r_literal = _exact.simplify_expression("isprime(1000000000000000000000007)")
+check("THE-1095 group B: 'isprime(10**24+7)' (computed) agrees with "
+      "'isprime(1000000000000000000000007)' (the same value, as a literal)",
+      _r_computed.get("ok") is True and _r_literal.get("ok") is True
+      and _r_computed.get("simplified") == _r_literal.get("simplified") == "True",
+      f"-> computed={_r_computed} literal={_r_literal}")
+# ...and nowhere near the cap, a computed argument is not refused at all
+# (round-6's control shape for group B: was this a length coincidence with
+# the 1463+1 examples above, or does a TINY computed argument fail too?
+# it does, universally, pre-fix -- this is the wrong-refusal shape, not a
+# ceiling one).
+for _expr in ("primorial(2+3)", "prime(2+3)", "motzkin(2+3)", "isprime(2+3)"):
+    _r = _exact.simplify_expression(_expr)
+    check(f"THE-1095 group B: {_expr!r} (tiny, nowhere near any cap) "
+          "evaluates instead of raising a spurious 'not an integer' error",
+          _r.get("ok") is True, f"-> {_r}")
+
+# I5: the table is the single source of truth, and every row is exercised
+# by BOTH layers for a genuinely computed argument -- the loop above
+# (`_checked_names`) already proves this structurally; these are the
+# specific named repros from the ticket, exercised end to end through
+# `exact.simplify_expression` rather than through `safe_parse` directly.
+
+# Negative test: a deferred stand-in (safe_expr._deferred_global_dict) must
+# never be visible in a refusal message or a result -- the class is named
+# identically to the real function for exactly this reason (see
+# `_deferred_global_dict`'s own docstring), so the failure mode this guards
+# against is an internal marker (a dunder-prefixed helper name, "Deferred",
+# "Standin", or the WRONG sympy class this round fixed, "polygamma" for a
+# `digamma()` call) leaking into what a caller sees.
+_leak_probes = [
+    ("digamma(1463+1)", "polygamma"),
+    ("rf(1463+1, 2)", "RisingFactorial"),
+    ("ff(1463+1, 2)", "FallingFactorial"),
+]
+for _expr, _wrong_class in _leak_probes:
+    _v, _e = _boundary_parse(_expr)
+    _text = repr(_e)
+    check(f"THE-1095: {_expr!r}'s refusal names the CALLER's own function, "
+          f"not the real SymPy class {_wrong_class!r} it rewrites to",
+          _v is None and _e is not None and _wrong_class not in _text,
+          f"-> {_text}")
+for _fn_name in _se5._DEFERRED_STANDIN_NAMES:
+    _cap_kind, _cap_val = _se5._FUNCTION_ARG_CAPS[_fn_name]
+    _extra = _EXTRA_CALL_ARGS.get(_fn_name, "")
+    _over = f"{_cap_val}+1" if _cap_kind == "value" else f"10**{_cap_val}+1"
+    _v, _e = _boundary_parse(f"{_fn_name}({_over}{_extra})")
+    _text = repr(_e)
+    check(f"THE-1095: {_fn_name}()'s refusal never leaks an internal "
+          "deferred-stand-in marker",
+          _v is None and _e is not None
+          and "deferred" not in _text.lower() and "standin" not in _text.lower(),
+          f"-> {_text}")
 
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== ALL BUG-SWEEP REGRESSIONS FIXED ===")

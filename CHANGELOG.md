@@ -33,6 +33,34 @@ behind it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The heavy-call ceiling matched a `Function` node by name, and several
+  names never leave a matching one behind** (THE-1095; follow-up to GH
+  #326): `rf(1463+1, 2)`, `ff(1463+1, 2)`, `primepi(1463*1000)`, and
+  `binomial(1463+1, 700)` evaluated for real regardless of `evaluate=False`
+  (their own `eval()` does its own Python arithmetic on the argument,
+  un-gated by the parser's `evaluate=False` rewrite, which only reaches
+  `Add`/`Mul`/`Pow`/`Sub`/`Div` and a fixed trig/log/`sqrt`/`cbrt`
+  whitelist), so the cap never saw a computed argument to bound — a
+  bypass. `digamma(1463+1)` gets REWRITTEN to `polygamma(0, ...)` at
+  construction, a different class at a different argument position, so
+  the by-name lookup never matched it either. In the other direction,
+  `primorial`, `prime`, `motzkin`, `isprime`, and `factorint` raised
+  `ValueError` ("... is not an integer") on ANY computed argument, even
+  one nowhere near the cap (`primorial(2+3)`) — a wrong refusal, since
+  each coerces its argument to a concrete `int` during `safe_parse`'s own
+  `evaluate=False` pre-parse regardless of the value it represents.
+  `safe_parse` now also runs that pre-parse through a second,
+  `_deferred_global_dict()`-backed shape — an inert stand-in for every
+  name in `_FUNCTION_ARG_CAPS` (`sqrt`/`root`/`cbrt` excepted, unaffected
+  and already covered elsewhere), named and positioned exactly as the
+  caller wrote it, that never evaluates and never raises — feeding
+  `_numeric_ceiling_scan` a real tree to bound in both directions, while
+  the original real-function shape keeps every existing check (including
+  `sqrt`/`cbrt`'s construction-cost backstop, which depends on a literal
+  heavy-function argument evaluating for real) untouched.
+
 ## [0.13.0] — 2026-09-21
 
 ### Fixed

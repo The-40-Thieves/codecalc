@@ -208,8 +208,8 @@ _HEAVY_FUNCTIONS = frozenset({
 #: get ONE shared, conservative cap tuned to the hardest member
 #: (factoring), not the cheapest.
 #:
-#: None of these six are `sympy.Function` subclasses — each is a plain
-#: Python callable sympy exposes in its namespace, and each coerces its
+#: Five of these six (`mobius` excepted — see below) are plain Python
+#: callables, not `sympy.Function` subclasses, and each coerces its
 #: argument to a concrete int internally (`int()`/`sympify()`) regardless
 #: of `evaluate=False` — confirmed live: `parse_expr("factorint(1000*2)",
 #: evaluate=False)` still returns the already-computed factorization
@@ -217,13 +217,34 @@ _HEAVY_FUNCTIONS = frozenset({
 #: symbolic, unevaluated `Mul` (`factorial`, a real `sympy.Function`
 #: subclass, respects `evaluate=False` on the identical shape:
 #: `factorial(1000*2)` stays `factorial(1000*2)`, unevaluated). So a
-#: COMPUTED argument forces the SAME eager evaluation a bare literal
-#: does — the danger is baked into the very act of PARSING, before
-#: `reject_explosive` is ever invoked, and no tree-level rule can run
-#: early enough to prevent it (there is no tree yet). See
-#: `_oversized_call_arg_violation`'s own docstring for how the token-level
-#: screen accounts for a computed (not just literal) argument to this
-#: family specifically.
+#: COMPUTED argument forced the SAME eager evaluation a bare literal
+#: does — for `factorint`/`primefactors`/`divisors`/`nextprime`/`isprime`
+#: this either silently completed the real, unbounded work (a cap bypass)
+#: or raised on a merely computed, not oversized, argument (THE-1095's
+#: group-B wrong refusal — `factorint(2+3)` failed with "2 + 3 is not an
+#: integer" even though 5 is nowhere near this cap). `mobius`, re-audited
+#: for THE-1095, turns out to be the one member of this six that IS a real
+#: `sympy.Function` subclass on sympy 1.14.0 (`isinstance(safe_global_
+#: dict()["mobius"], type) and issubclass(..., sympy.Function)` is `True`)
+#: and already respects `evaluate=False` correctly like `factorial` does —
+#: the "none of these six" claim above was accurate when written (an
+#: earlier sympy version, or a misreading at the time) but is stale for
+#: 1.14.0; left uncorrected in the surrounding prose and noted here
+#: instead, since THE-1095's fix (below) treats it the same as the other
+#: five regardless — see `_DEFERRED_STANDIN_NAMES`'s own comment for the
+#: full empirical audit of every name in the table, not just this family.
+#: THE-1095: the danger used to be baked into the very act of PARSING,
+#: before `reject_explosive` was ever invoked, with no tree-level rule able
+#: to run early enough to prevent it (there was no tree yet) — `safe_parse`
+#: now runs its `evaluate=False` pre-parse through `_deferred_global_dict()`
+#: instead of `safe_global_dict()` specifically to give this family (and
+#: every other eager name in `_FUNCTION_ARG_CAPS`) an inert stand-in for
+#: that one parse, so a tree — and the tree-level backstop in
+#: `_numeric_ceiling_scan`'s `Function`-node branch — now exists before any
+#: real work runs. See `_oversized_call_arg_violation`'s own docstring for
+#: the (unchanged, still literal-only) token-level layer's account of a
+#: computed argument to this family, and `_deferred_global_dict`'s for the
+#: tree-level one.
 MAX_FACTOR_ARG_DIGITS = 25
 
 #: `sqrt`/`root`/`cbrt` are the OPPOSITE failure mode from the factoring
@@ -307,6 +328,133 @@ _FUNCTION_ARG_CAPS: dict = {
     **dict.fromkeys(("factorint", "primefactors", "divisors", "mobius", "nextprime", "isprime"), ("digits", MAX_FACTOR_ARG_DIGITS)),
     **dict.fromkeys(("sqrt", "root", "cbrt"), ("digits", MAX_ROOT_ARG_DIGITS)),
 }
+
+#: THE-1095, follow-up to #326/THE-1091 (GH #326, PR #334): every fix above
+#: this point bounds a LITERAL argument at the token level, or a real
+#: `sympy.Function` node's argument at the tree level in `_numeric_ceiling_
+#: scan` below, by looking up `type(node).__name__` in `_FUNCTION_ARG_CAPS`.
+#: Both assume a COMPUTED argument (`factorial(1463+1)`) either (a) stays an
+#: unevaluated `Function` node named after its own table entry through the
+#: `evaluate=False` pre-parse, so the tree-level check can see and bound it,
+#: or (b) simply parses without incident. Audited empirically (sympy 1.14.0,
+#: `parse_expr(..., evaluate=False)` through this module's own
+#: `safe_global_dict()`/`math_transforms()`) against every name in the table
+#: above, and both assumptions are false for a working minority of it — not
+#: because `evaluate=False` fails to suppress `Add`/`Mul`/`Pow`/`Sub`/`Div`
+#: (it does, correctly), but because of WHAT `evaluate=False` actually is:
+#: `sympy.parsing.sympy_parser.EvaluateFalseTransformer` (the AST pass
+#: `parse_expr` runs when `evaluate=False`) appends an explicit
+#: `evaluate=False` keyword ONLY to `Add`/`Mul`/`Pow`/`Sub`/`Div` BinOp nodes
+#: and to a fixed whitelist of trig/log/`sqrt`/`cbrt` names
+#: (`EvaluateFalseTransformer.functions`) — every OTHER function call in the
+#: source, `NAME(...)` for any `NAME` this module screens, is compiled with
+#: NO `evaluate` keyword at all, so `Function.__new__` falls back to its own
+#: ambient default, `global_parameters.evaluate`, which is `True` unless a
+#: `with sympy.evaluate(False):` context manager is active — and `parse_expr`
+#: never opens one; it only rewrites those specific AST nodes. So a heavy
+#: function's OWN `eval()` classmethod runs exactly as if `evaluate=False`
+#: had never been passed at all, and whether that produces the (correct, and
+#: relied upon) unevaluated `Function` node this module's tree-level checks
+#: expect depends entirely on what that classmethod does with a non-`Integer`
+#: (`Add(1463, 1, evaluate=False)`-shaped) argument — a per-function accident
+#: of implementation, not something this module or `evaluate=False` controls:
+#:
+#:   `factorial`, `mobius`, `totient`, `bell`, `harmonic`, `npartitions`
+#:   (deprecated alias for `partition`), and every other `_HEAVY_FUNCTIONS`
+#:   member not named below: `eval()` checks `is_Integer` (concrete-type-
+#:   only) on its argument, which an unevaluated `Add`/`Pow` is not, so it
+#:   declines to evaluate and the existing tree-level check already worked —
+#:   `mobius` in particular is a genuine `sympy.Function` subclass on 1.14.0
+#:   (`isinstance(safe_global_dict()["mobius"], type) and issubclass(...,
+#:   sympy.Function)` is `True`), contradicting this file's own older
+#:   comment above (`MAX_FACTOR_ARG_DIGITS`'s docstring) that groups it with
+#:   the eager plain-callable family below — stale for this sympy version,
+#:   left uncorrected there and noted here instead since deferring it
+#:   (below) makes the distinction moot either way.
+#:
+#:   `rf`/`ff` (parse to classes `RisingFactorial`/`FallingFactorial`,
+#:   confirmed via `type(parse_expr("rf(x,y)", evaluate=False)).__name__`)
+#:   and `binomial`/`primepi`: their `eval()` classmethods, for an
+#:   integer-valued second argument (`k` for `rf`/`ff`/`binomial`; always for
+#:   `primepi`), build the result via a Python `reduce`/loop doing ordinary
+#:   `+`/`*` on the (unevaluated) argument — and THAT arithmetic, being
+#:   plain Python operator calls with no `evaluate=False` keyword anywhere
+#:   near it, runs under the ambient default and evaluates for real. Measured
+#:   live: `rf(1463+1, 2)` parses straight to `Integer(2144760)` — no
+#:   `Function` node ever exists for the tree-level check to inspect, and
+#:   `_heavy_call_violation`'s token screen has no notion of `+` either (its
+#:   own docstring already says this precisely for the "literal, computed"
+#:   distinction) — this is the group-A cap BYPASS.
+#:
+#:   `digamma` is the SAME bypass shape wearing a rename: its `eval()`
+#:   unconditionally REWRITES to `polygamma(0, x)` at construction — verified
+#:   live, `type(parse_expr("digamma(x)", evaluate=False)).__name__ ==
+#:   "polygamma"` even for a plain symbol `x`, so this is not evaluate-
+#:   dependent at all. `type(node).__name__` is `"polygamma"`, never
+#:   `"digamma"`, so the table lookup never matches regardless of what the
+#:   argument is, and the argument that WOULD carry the bound has also moved
+#:   from position 0 (`digamma`'s own single argument) to position 1
+#:   (`polygamma`'s second argument, `nu` being the order, fixed at 0 by the
+#:   rewrite) — a second, independent reason the old lookup could never work
+#:   for this name even if it matched by class.
+#:
+#:   `primorial`, `prime`, `motzkin`, `isprime`, `factorint` (a `_HEAVY_
+#:   FUNCTIONS` trio plus two of the "digits"-kind family): none of these
+#:   five is a `sympy.Function` subclass at all (`primorial`/`prime` are
+#:   plain module-level callables despite living in `_HEAVY_FUNCTIONS`, and
+#:   `motzkin`/`isprime`/`factorint` likewise) — each coerces its argument
+#:   with something equivalent to `sympy.core.numbers.igcd`/`as_int`, which
+#:   raises `ValueError` outright on an unevaluated `Add`/`Pow` REGARDLESS OF
+#:   MAGNITUDE: `primorial(2+3)` (a trivially small, nowhere-near-the-cap
+#:   computed argument) fails identically to `primorial(1463+1)` — this is
+#:   the group-B WRONG REFUSAL, and it happens inside `safe_parse`'s OWN
+#:   `evaluate=False` pre-parse (the call meant only to build a shape for
+#:   `reject_explosive` to inspect before anything real runs), so it surfaces
+#:   as a `validation` parse error rather than ever reaching evaluation.
+#:
+#:   `nextprime`, `divisors`, `primefactors` (the remaining "digits"-kind
+#:   trio): plain callables like the five above, but each happens to accept
+#:   an unevaluated numeric `Add`/`Pow` without raising and returns the REAL
+#:   answer directly (`divisors(1463+1)` -> the actual factor list of 1464,
+#:   `nextprime(1463+1)` -> the actual `int` 1471) — the group-A bypass shape
+#:   again, just silent instead of loud, and for the "digits" cap
+#:   (`MAX_FACTOR_ARG_DIGITS`) rather than "value": `nextprime(10**2000)`
+#:   (an unevaluated `Pow`, its computed VALUE ~2001 digits, both digit-sum
+#:   tokens in the CALL individually tiny) already hangs past a 20s timeout
+#:   in this same pre-parse on an unpatched tree — bounded only by
+#:   `guarded_call`'s backstop today, closed as a side effect below.
+#:
+#: The fix (see `_deferred_global_dict`, used by `safe_parse`'s pre-parse
+#: step in place of `safe_global_dict`) does not chase these five different
+#: root causes individually or hand-maintain a class-name/argument-position
+#: table to compensate for the ones that rename or reshuffle position
+#: (`digamma`) — a future name added to `_HEAVY_FUNCTIONS`/`_FUNCTION_ARG_
+#: CAPS` might have any of these accidents or a new one entirely, and this
+#: module has no way to audit sympy's internals for it automatically. It
+#: replaces EVERY name in `_FUNCTION_ARG_CAPS`, uniformly, with an inert
+#: stand-in for the ONE parse this module uses to decide safety, so the
+#: table lookup by name and the argument POSITIONS the caller actually wrote
+#: are always what the scan sees, regardless of what the real function's
+#: `eval()` would have done — sidestepping the rename (`digamma`), the
+#: reduce-based eager arithmetic (`rf`/`ff`/`binomial`/`primepi`), and the
+#: `as_int`-raises-on-symbolic-input family (`primorial`/`prime`/`motzkin`/
+#: `isprime`/`factorint`) all with the same mechanism, rather than three.
+_DEFERRED_STANDIN_NAMES = frozenset(_FUNCTION_ARG_CAPS) - {"sqrt", "root", "cbrt"}
+#: `sqrt`/`cbrt` are excluded because they ALREADY respect `evaluate=False`
+#: correctly (their own module-level function is written to hand back an
+#: unevaluated `Pow(base, Rational(1, n), evaluate=False)` for exactly this
+#: reason — see `MAX_ROOT_ARG_DIGITS`'s own comment) and already have a
+#: working tree-level backstop for a computed argument, `reject_explosive`'s
+#: unit-fraction-exponent `Pow` branch — replacing them with a `Function`
+#: stand-in would swap that working `Pow` shape for an inert `Function` node
+#: and break it, not fix anything. `root` is excluded for the same
+#: as-designed reason it already stays off the tree-level layer entirely
+#: (see its own comment on `_oversized_call_arg_violation`): it does not
+#: reliably produce EITHER shape (`Pow` or a name of its own) for every call,
+#: so a stand-in named `root` would not be exercised on the path that
+#: actually matters (`root(x, 2)` parses to a `Mul`, not a call to
+#: whatever `root` is bound to) and would risk masking that Mul-shaped
+#: hazard behind an unrelated Function node instead.
 
 
 def _log10_of_int(n: int) -> float:
@@ -618,15 +766,28 @@ def _oversized_call_arg_violation(tokens: list) -> str | None:
     a call-shaped COMPUTED argument (`factorint(nextprime(10**2000))`,
     `sqrt(nextprime(10**2000))`) is still NOT caught here — no token-level
     screen can evaluate a nested function call without becoming the
-    parser. For the factoring family specifically (`factorint` and its
-    five siblings), NEITHER layer can ever close that particular gap: none
-    of the six are `sympy.Function` subclasses, and each coerces its
-    argument to a concrete int internally regardless of `evaluate=False`
-    (see `MAX_FACTOR_ARG_DIGITS`'s own comment) — the danger is baked into
-    the very act of PARSING, before any tree exists for `_numeric_ceiling_
-    scan` to inspect, so a computed argument to this family relies on
-    `guarded_call`'s CPU/wall-clock backstop alone, same as any other
-    hazard this module has not yet named. `sqrt`/`cbrt` are different:
+    parser. For a SIMPLE computed argument (`factorint(1463+1)`,
+    `factorint(<25-digit literal>+<25-digit literal>)`, no nested call), the
+    factoring family (`factorint` and its five siblings) now has a
+    tree-level backstop THE-1095 added alongside this token-level one: none
+    of the six respects `evaluate=False` on its own (each coerces its
+    argument to a concrete int internally regardless — see
+    `MAX_FACTOR_ARG_DIGITS`'s own comment, updated for THE-1095), so
+    `safe_parse`'s pre-parse now runs through `_deferred_global_dict()`
+    instead, which gives all six an inert stand-in for exactly that one
+    parse — see that function's docstring and `_numeric_ceiling_scan`'s
+    `Function`-node branch, which now genuinely reaches these six names
+    for a resolvable numeric argument. The NESTED-call shape named at the
+    top of this paragraph is different and NOT closed by that fix: the
+    inner call (`nextprime(10**2000)`) is ALSO a deferred stand-in inside
+    the SAME pre-parse, so it stays an unresolved symbolic `Function`
+    node — `_numeric_ceiling_scan`'s own per-argument resolution check
+    (`arg_resolved`) treats an unresolved argument as inconclusive, not a
+    violation, and moves on — so this shape still relies on `guarded_call`'s
+    CPU/wall-clock backstop alone once the REAL (non-deferred) step-3 parse
+    runs, same as before THE-1095, just one parse step later than it did
+    previously (the deferred pre-parse no longer hangs on it; the real
+    evaluated parse still can). `sqrt`/`cbrt` are different:
     they DO respect `evaluate=False` (stay an unevaluated `Pow`), so
     THEIR computed-argument gap is closed at the tree level instead, in
     `reject_explosive`'s Pow loop — see its own comment on the unit-
@@ -892,6 +1053,53 @@ def safe_global_dict() -> dict:
     return g
 
 
+#: Built once (like `_MATH_TRANSFORMS`), not once per parse: the classes
+#: themselves are stateless and immutable, only the returned `dict` in
+#: `_deferred_global_dict()` below is fresh per call (parse_expr's own
+#: `local_dict`/`global_dict` contract mutates it — see `null` handling in
+#: `parse_expr`'s source — so sharing the dict ITSELF across calls, not just
+#: the classes populating it, would be the hazard, same reasoning as
+#: `safe_global_dict()`'s own fresh-dict-per-call shape).
+_DEFERRED_STANDINS: dict | None = None
+
+
+def _deferred_global_dict() -> dict:
+    """`safe_global_dict()`, with every name in `_DEFERRED_STANDIN_NAMES`
+    (== `_FUNCTION_ARG_CAPS` minus the `sqrt`/`root`/`cbrt` family — see that
+    constant's own comment for which names and why) replaced by an inert
+    stand-in: a `sympy.Function` subclass named after the table entry, with
+    no `eval()` classmethod, so `Function.__new__` has nothing to call and
+    the node it builds is ALWAYS left as-is — a `Function` node whose class
+    name is exactly the caller's own spelling and whose `.args` are exactly
+    the arguments the caller wrote, at the POSITIONS the caller wrote them,
+    regardless of what the real function's own `eval()` would have done with
+    them (see `_DEFERRED_STANDIN_NAMES`'s own comment for the five different
+    ways the real functions fail to give `_numeric_ceiling_scan` that shape
+    on their own).
+
+    Used ONLY for `safe_parse`'s pre-parse step (the `evaluate=False` parse
+    that exists purely to build a shape for `reject_explosive` to inspect
+    before anything real runs) — never for the actual evaluated result: once
+    that scan passes, `safe_parse` reparses through the REAL `safe_global_
+    dict()` to compute (or return the genuinely unevaluated shape of) the
+    caller's expression, so a deferred stand-in never reaches a caller's
+    result or an error message. `classify_unsafe`'s deny-listed FUNCTION
+    node type never surfaces to a user for the same reason `sqrt`/`root`/
+    `cbrt` are excluded from this substitution at all: nothing downstream of
+    the scan ever sees one.
+    """
+    global _DEFERRED_STANDINS
+    if _DEFERRED_STANDINS is None:
+        from sympy import Function
+
+        _DEFERRED_STANDINS = {
+            name: type(name, (Function,), {}) for name in _DEFERRED_STANDIN_NAMES
+        }
+    g = safe_global_dict()
+    g.update(_DEFERRED_STANDINS)
+    return g
+
+
 #: Ceiling on a SYMBOLIC power's exponent, i.e. one whose base contains a free
 #: symbol. Measured cost of evaluating `(x+1)**n`:
 #:
@@ -949,13 +1157,38 @@ def safe_parse(expression: str, *, evaluate: bool = True, local_dict: dict | Non
 
       1. `classify_unsafe` — the syntax denylist above (attribute access,
          string literals, leading underscores, ...).
-      2. `parse_expr(..., evaluate=False)` through `safe_global_dict()`, then
-         `reject_explosive` on the UNEVALUATED shape. Cheap (1ms on a power
-         tower) and, crucially, has not done the arithmetic yet — `9**9**9**9`
-         is refused in milliseconds instead of burning real CPU seconds.
-      3. A second, real parse — still through `safe_global_dict()`, never
-         SymPy's default builtins-populated dict — only if step 2 passed and
-         the caller wants the evaluated value.
+      2. TWO `evaluate=False` pre-parses, both fed to `reject_explosive`
+         (THE-1095): one through `safe_global_dict()` (`shape`, the REAL
+         functions — unchanged since round 6, and what a literal heavy-
+         function argument's own eager evaluation, and every check that
+         depends on seeing a concrete number where one occurs, already
+         correctly relies on: `sqrt(factorial(1463))`'s inner `factorial`
+         call, `factorial(1463)*x`'s own coefficient, ...) and one through
+         `_deferred_global_dict()` (`scan_shape`, inert stand-ins — see
+         that function's own docstring and `_DEFERRED_STANDIN_NAMES`'s).
+         Refused if EITHER shape's scan finds a violation. Neither alone
+         is enough: `shape`'s own PARSE can itself raise on a merely
+         computed (not oversized) argument to a handful of names
+         (`primorial`/`prime`/.../`isprime`/`factorint`), and can silently
+         let a computed argument past the cap for others that evaluate for
+         real regardless of `evaluate=False`, or get rewritten to a
+         different class entirely (`rf`/`ff`/`digamma`/`primepi`/
+         `binomial`) — `scan_shape` never does either, uniformly, but
+         swapping to it ENTIRELY would lose the existing, working
+         mechanism above that depends on a literal heavy-function argument
+         evaluating for real DURING this parse. `shape`'s own parse
+         EXCEPTION is treated as "inconclusive from this shape", not an
+         immediate validation error — `scan_shape` is still authoritative
+         for safety in that case (see below), and whichever real,
+         evaluated parse actually computes the caller's answer (step 3, or
+         the `evaluate=False` branch below) is what determines whether the
+         expression was genuinely invalid.
+      3. A second, real parse — through `safe_global_dict()`, never SymPy's
+         default builtins-populated dict AND never `_deferred_global_dict()`'s
+         stand-ins either — only if step 2 passed and the caller wants the
+         evaluated value (or, for a `evaluate=False` caller, the genuinely
+         unevaluated real shape — see below; often just `shape` above,
+         reused rather than reparsed).
 
       `safe_global_dict()` is what step 3 buys beyond step 1: a screened,
       non-denylisted NAME can still be a live Python builtin.
@@ -982,26 +1215,68 @@ def safe_parse(expression: str, *, evaluate: bool = True, local_dict: dict | Non
     `CATEGORY_CEILING` respectively — the same two categories a caller
     already maps for classify_unsafe's own findings.
 
-    `evaluate=False` returns the unevaluated shape from step 2 instead of
-    doing step 3 — the caller wants the tree, not a value (matches the
-    original `sp.sympify(raw, evaluate=False)` no-`=` path in
-    `logic._solve_linear`).
+    `evaluate=False` returns the unevaluated `shape` from step 2 (the REAL
+    one, reused rather than reparsed when it parsed cleanly) — the caller
+    wants the tree, not a value (matches the original `sp.sympify(raw,
+    evaluate=False)` no-`=` path in `logic._solve_linear`, which feeds this
+    straight into `sp.solve` — it needs the REAL `factorial`/`rf`/...
+    semantics, never THE-1095's inert scanning stand-ins). If `shape`
+    itself failed to parse (the group-B shape — see step 2 above), it is
+    reparsed here, now that `scan_shape`'s scan has already established
+    the expression is safe.
     """
     cls = classify_unsafe(expression)
     if cls:
         return None, cls
     from sympy.parsing.sympy_parser import parse_expr
 
+    # THE-1095: see this function's own docstring, step 2, for why BOTH of
+    # these are needed. `shape` (real functions) is unchanged from before
+    # this round; its own parse can raise for a "group B" name on a merely
+    # computed argument, which is NOT treated as a validation error here —
+    # `scan_shape`'s scan is what actually decides that below.
     try:
         shape = parse_expr(expression, transformations=math_transforms(),
                            local_dict=local_dict, global_dict=safe_global_dict(),
                            evaluate=False)
+    except Exception:
+        shape = None
+    if shape is not None:
+        explosive = reject_explosive(shape)
+        if explosive:
+            return None, (CATEGORY_CEILING, explosive)
+
+    # `scan_shape` (inert stand-ins — see `_deferred_global_dict`'s own
+    # docstring) is what actually catches a "group A" bypass `shape` above
+    # missed (a computed argument that evaluated for real, or was rewritten
+    # to a different class, regardless of `evaluate=False`) and is what
+    # makes a "group B" name's `shape`-parse exception above harmless
+    # rather than a spurious validation error: this parse never raises for
+    # any of those names, on any argument shape.
+    try:
+        scan_shape = parse_expr(expression, transformations=math_transforms(),
+                                local_dict=local_dict, global_dict=_deferred_global_dict(),
+                                evaluate=False)
     except Exception as exc:
+        # BOTH parses failed: a genuine parse error the denylist did not
+        # catch some other way, not a group-B artifact of `shape` alone.
         return None, (CATEGORY_VALIDATION, f"parse error: {exc}")
-    explosive = reject_explosive(shape)
+    explosive = reject_explosive(scan_shape)
     if explosive:
         return None, (CATEGORY_CEILING, explosive)
+
     if not evaluate:
+        if shape is not None:
+            return shape, None
+        # `shape` raised above (a group-B name, now proven safe by
+        # `scan_shape`'s clean scan) — reparse for the real, evaluate=False
+        # shape a caller like `_solve_linear` actually needs.
+        try:
+            shape = parse_expr(expression, transformations=math_transforms(),
+                               local_dict=local_dict, global_dict=safe_global_dict(),
+                               evaluate=False)
+        except Exception as exc:
+            return None, (CATEGORY_VALIDATION, f"parse error: {exc}")
         return shape, None
     try:
         value = parse_expr(expression, transformations=math_transforms(),
@@ -1758,6 +2033,19 @@ def _numeric_ceiling_scan(tree, memo: dict) -> str | None:
     SAME flat `Mul`; and `Pow` itself, entirely unvisited by this scan
     until this round, hiding the same dangers one level down).
 
+    THE-1095, one cross-vendor review round later: this scan's `Function`-
+    node branch (below) is only ever handed the tree from `safe_parse`'s
+    pre-parse step, which — since THE-1095 — is built through
+    `_deferred_global_dict()`, not `safe_global_dict()`, precisely so that
+    branch has a real `Function` node to inspect, correctly named and
+    positioned, for every entry in `_FUNCTION_ARG_CAPS` except `sqrt`/
+    `root`/`cbrt` (see that dict's own docstring for the empirical audit of
+    why the REAL functions could not be trusted to leave one behind on
+    their own — a rename, an eager evaluation regardless of `evaluate=
+    False`, or an outright exception on a merely computed argument, was
+    each already a live gap this scan could not have closed just by
+    matching harder on the node it happened to be handed).
+
     THE INVARIANT: no numeric subtree whose printed numerator or
     denominator would exceed `MAX_NUMERIC_DIGITS` is ever evaluated. Every
     `Integer`/`Mul`/`Add`/`Pow` node is checked via `_log10_num_den`, which
@@ -1825,22 +2113,34 @@ def _numeric_ceiling_scan(tree, memo: dict) -> str | None:
             # #326 finding 1 (round 8, Codex): reads `_FUNCTION_ARG_CAPS`
             # generally now, not just `_HEAVY_FUNCTIONS` -- "value" kind
             # unchanged from the round-6 logic above; a "digits"-kind name
-            # (the factoring/root families) is included here for the SAME
-            # structural reason the table drives every enforcement site,
-            # even though NONE of those nine names can actually reach this
-            # branch today: the factoring family are plain Python
-            # callables that never leave an unevaluated `Function` node in
-            # the tree at all (see `MAX_FACTOR_ARG_DIGITS`'s own comment),
-            # and `sqrt`/`root`/`cbrt` compile to a `Pow`, never a
-            # `Function` named after themselves (see `MAX_ROOT_ARG_
-            # DIGITS`'s own comment) — `sqrt`/`cbrt`'s actual backstop is
-            # the Pow loop's unit-fraction-exponent branch; `root` does
-            # not share that path for every call shape and stays on the
-            # token-level layer alone instead (same comment).
-            # A future name added to the table with this family's shape --
-            # a real `sympy.Function` subclass whose hazard is digit-count
-            # rather than value -- is covered here without a second copy
-            # of this branch to remember to add.
+            # (the factoring family) is included here for the SAME
+            # structural reason the table drives every enforcement site.
+            # Round 8 noted that none of the nine "digits"-kind names could
+            # actually reach this branch THEN: the factoring family
+            # (`factorint` and its five siblings) are plain Python callables
+            # (or, `mobius` excepted, ones that never leave an unevaluated
+            # `Function` node behind for a computed argument -- see
+            # `MAX_FACTOR_ARG_DIGITS`'s own comment), and `sqrt`/`root`/
+            # `cbrt` compile to a `Pow`, never a `Function` named after
+            # themselves (see `MAX_ROOT_ARG_DIGITS`'s own comment).
+            # THE-1095 changed the first half of that: `node` here is always
+            # built from `_deferred_global_dict()` (`safe_parse`'s own
+            # pre-parse step, the only caller that ever hands a tree to this
+            # scan), which replaces every "digits"-kind name EXCEPT `sqrt`/
+            # `root`/`cbrt` with an inert stand-in `Function` subclass named
+            # after itself (see `_DEFERRED_STANDIN_NAMES`'s own comment for
+            # why those three stay excluded) -- so `factorint`,
+            # `primefactors`, `divisors`, `mobius`, `nextprime` and
+            # `isprime` all genuinely reach this branch now, for the exact
+            # reason `sqrt`/`cbrt`'s own backstop stays the Pow loop's
+            # unit-fraction-exponent branch instead (they are never
+            # deferred, so a `Function` node named `sqrt`/`cbrt` still never
+            # occurs) and `root` stays on the token-level layer alone (same
+            # reasoning, also never deferred). A future name added to the
+            # table with this family's shape is covered here automatically,
+            # without a second copy of this branch to remember to add, as
+            # long as it is not added to the `sqrt`/`root`/`cbrt` exclusion
+            # set for the same structural reason those three are.
             kind, cap = _FUNCTION_ARG_CAPS[type(node).__name__]
             for arg in node.args:
                 if arg.free_symbols:
