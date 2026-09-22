@@ -1423,10 +1423,13 @@ behind it.
   separately: `codecalc/_measured_safe_callables.json` (committed, the
   ONLY file the runtime loads or a built package needs — names, the
   measurement date, the two thresholds, no per-shape timing) and
-  `scripts/_measured_safe_callables_raw.json` (committed too, for
-  audit — WHY a name was or wasn't allowlisted, without re-running the
-  measurement — but outside `codecalc/`, so it never ships in a
-  package).
+  `scripts/_measured_safe_callables_raw.json` — regenerable via
+  `--write` for audit (WHY a name was or wasn't allowlisted, without
+  re-running by hand), kept OUTSIDE `codecalc/` so it never ships in a
+  package, and (round 15: gitignored, not committed — the same
+  reasoning that keeps it out of the shipped package applies to the
+  repository itself; regenerate on demand rather than diffing a
+  ~1.3-1.7MB file on every measurement run).
 
   `scripts/measure_safe_callables.py`'s own coordinator-supplied list
   of names expected to come out allowlisted, checked against the FINAL
@@ -1528,6 +1531,347 @@ behind it.
   not exist when this one was found. `actionlint` clean on the updated
   workflow; `scripts/check_claims.py` confirmed at the new 73-test-file
   count (was 72).
+
+- **SCOPE (THE-1095, round 15, grok issue 2, `verify-1095-r14-grok.log`;
+  also stated in `codecalc/safe_expr.py`'s own module docstring):**
+  this ticket closes the class "a NUMERIC argument (its own VALUE
+  magnitude, or its printed DIGIT count) drives unbounded construction"
+  — `factorial(10**9)`, `ones(5000,5000)`, `bell(1463)+1`. It does NOT
+  bound cost that lives in an expression's own SYMBOLIC STRUCTURE
+  instead — `integrate(1/(x**7-x-1), x)`, `galois_group(x**8+x+1)`,
+  `diophantine`/`satisfiable` on a large instance, `nroots`/`resultant`
+  at degree 200 — every one of which has ALWAYS been allowed on
+  `origin/main`, bounded only by the public tools' own 10-second
+  execution guard, same as here. That class is THE-1097's own job (a
+  resource-limited worker), a different mechanism; grok's own issue-2
+  review table named several structural-cost examples of this kind and
+  they are correctly out of scope for this ticket.
+
+- **grok issue 1 (`verify-1095-r14-grok.log`): `_growth_2n` (`binomial(
+  n,k) <= 2**n`) is sound ONLY for a confirmed non-negative INTEGER
+  `n`, but round 13/14 accepted a non-integer/negative `n` too (`k`
+  capped at `MAX_HEAVY_ARG` independently, via `_binomial_k_
+  violation`) — a NESTED use of that exact shape
+  (`factorial(binomial(1/2, 1463))`) let `_table_function_bound`'s own
+  growth check see `_growth_2n`'s wrong, tiny estimate (`n=0.5`, ~0.15
+  digits) instead of anything reflecting `k`, so the OUTER function's
+  own cap check never had a chance to see the true magnitude before
+  real construction.** Fixed: a new `_growth_binomial_general` (`|C(n,
+  k)| <= (|n|+k)**k` in log space, valid for ANY real `n` and
+  non-negative integer `k` — deliberately loose, no `/k!` term, so it
+  stays correct without needing its own factorial sub-bound) is used
+  instead of `_growth_2n` whenever `n` is not a confirmed non-negative
+  integer (`_binomial_n_is_confirmed_nonneg_int`, a new shared helper —
+  three call sites, `_binomial_k_violation`/`_table_function_bound`/
+  `_divisor_lower_log10`, each used to re-derive this domain check
+  independently); `binomial` also LEAVES `_INTEGER_VALUED_TABLE_NAMES`
+  unconditionally now (`C(1/2, 1) = 1/2` is a plain fraction, not an
+  integer, so the frozenset's own guarantee was never sound for that
+  domain either) — `_divisor_lower_log10` special-cases it back in via
+  the SAME new helper, for the confirmed-safe domain only.
+
+  Pinned live: `factorial(binomial(1/2, 1463))`, `bell(binomial(1/2,
+  1463))`, `1 << binomial(1/2, 1463)` now all refuse in under a
+  millisecond. **Investigated and worth recording**: none of the three
+  actually HANGS on `origin/main` either (confirmed against d713821's
+  own pre-round-15 code too) — `factorial` of a genuine `Rational`
+  stays symbolically unevaluated in ~0.2ms, `bell`/`<<` raise a native
+  `ValueError`/`TypeError` in under a millisecond, and the true VALUE
+  of `binomial(1/2, 1463)` is a small fraction (`~5.3e-6`), not the
+  astronomically large NUMBER the old, unsound estimate implied either
+  way — the "1754 digits" this module's own round-13/14 comments cited
+  was the RENDERED fraction's own numerator+denominator digit count,
+  never its magnitude. This module now refuses all three anyway,
+  DELIBERATELY more conservative than main: `_growth_2n` was never a
+  SOUND bound outside a confirmed non-negative-integer `n`, and this
+  file's own "unknown != safe" bar means a formula that cannot be
+  proven correct does not get to stay in service on the strength of
+  one example not currently exploiting it. DELIBERATE NARROWING, pinned
+  in tests: the bare, TOP-level `binomial(1/2, 1463)` (no longer
+  nested) used to evaluate on the strength of the SAME unsound
+  estimate happening to stay under the digit ceiling by accident — it
+  now conservatively refuses too, since `_table_function_bound` is the
+  SAME function used for a name's own self-output check and for a
+  NESTED argument's contribution to an outer cap, and the now-sound
+  bound is loose enough to cross the ceiling at this one k-at-the-cap
+  shape; `binomial(1/2, 10)` (`origin/main`'s exact `-2431/262144`) and
+  `factorial(binomial(6, 3))` (`= 20!`, the confirmed-safe-integer
+  domain `_growth_2n` stays dedicated to) are UNAFFECTED, both still
+  evaluate exactly as before.
+
+- **grok issue 2a (`verify-1095-r14-grok.log`): `_measured_safe_
+  argument_cap_violation`'s generic cap was value-kind on `Integer`
+  arguments only — a `Rational`/`Float` argument (INCLUDING one whose
+  own magnitude, not merely its digit count, is huge) was exempted
+  entirely, on the strength of round 14's own probe grid measuring a
+  SMALL `Rational(1,3)`/`Float(0.5)` fast, never a large one.** Fixed:
+  the `MAX_HEAVY_ARG` magnitude cap now applies to every resolved,
+  non-symbolic argument uniformly (Integer, Rational, or Float alike) —
+  `_resolve_arg_magnitude` already reports `(log_num, log_den)`
+  identically for all three, so there was never a technical reason for
+  the exemption, only the coordinator's own original (narrower) round-
+  14 spec text, which this finding supersedes.
+
+- **grok issue 2b (`verify-1095-r14-grok.log`): the probe grid never
+  tested a Rational with a large NUMERATOR, a Float with a large
+  EXPONENT, a WIDE range between two arguments, or a shape with more
+  than THREE positions — and a `ValueError`/`NotImplementedError` at a
+  HEAVY shape was silently treated the same as one at a trivial shape
+  (`UNSUPPORTED`, no signal either way), so a name's heavy-boundary
+  safety could go completely unmeasured while it still made the
+  allowlist on a small-shape success alone (`discrete_log` is the
+  concrete case grok's own review found).** Fixed, in `scripts/
+  measure_safe_callables.py`: four new probe shapes — `small_heavy`/
+  `heavy_small` (`(2, 1463)`/`(1463, 2)`, a WIDE span rather than two
+  values both near the cap), `float_heavy_exp` (`Float('1e300')`),
+  `rational_heavy_numerator` (a 25-digit numerator), and
+  `four_arg_heavy_last` (the `fps(sin(x), x, 0, 1463)` class — no
+  shape before this round had more than three positions at all). The
+  probe child now distinguishes a `TypeError` (`UNSUPPORTED_TYPE` — an
+  arity/type mismatch, never a signal either way, at any shape) from a
+  `ValueError`/`NotImplementedError`/similar domain exception
+  (`UNSUPPORTED_VALUE`); `measure_name`'s own classification gained a
+  third gate (on top of "every OK shape stayed fast" and "at least one
+  shape applied at all"): at least one HEAVY shape must have come back
+  `OK` or `UNSUPPORTED_TYPE` — a name whose every heavy shape is
+  `UNSUPPORTED_VALUE` (ran, at the cap-boundary value, and failed fast
+  — reassuring, but not proof of safety at every OTHER nearby value)
+  is left off the allowlist, closing the exact gap `discrete_log`
+  measured into under the old rules (a caveat found applying this
+  rule: `discrete_log` itself still passes, since one of its OTHER
+  heavy shapes — wrong-arity, not the matching one — resolves via
+  `UNSUPPORTED_TYPE`; confirmed separately that `discrete_log` is
+  genuinely fast up to the cap regardless, so this is a documented gap
+  in the rule's own generality, not a live hazard).
+
+- **The full allowlist was regenerated with the fixed measurement
+  (`scripts/measure_safe_callables.py --write`, ~122 minutes): 415
+  names allowlisted of 767 measured** (was 457 of 767 in d713821,
+  round 14's own coordinator-authored commit — this file's own
+  intermediate self-report of "387" mid-round was a stale in-progress
+  number from before that commit, never the comparison baseline).
+  `codecalc/_measured_safe_callables.json` (the committed, SHIPPED
+  record) is now the TRIMMED form only — names, the measurement date,
+  the two thresholds, no per-shape timing data (was ~1.3MB of raw
+  probe data committed inside the shipped package directory; now
+  ~7.6KB) — `scripts/_measured_safe_callables_raw.json` carries the
+  full per-candidate, per-shape log instead, regenerable via `--write`
+  and (round 15: gitignored, not committed — the same reasoning that
+  keeps it out of the shipped package applies to the repository
+  itself).
+
+  **59 names LEFT the allowlist**, none previously-named by the
+  coordinator's own expected-safe list, grouped by why:
+  - **TIMEOUT at a heavy shape** (13): `ComplexField`, `Range`,
+    `RealField`, `airybi`, `airybiprime`, `binomial_coefficients`,
+    `composite`, `compositepi`, `continued_fraction_periodic`,
+    `egyptian_fraction`, `fresnelc`, `fresnels`, `quadratic_residues`.
+  - **CRASH at a heavy shape** (3): `binomial_coefficients_list`,
+    `erfc`, `nroots`.
+  - **`OK` but at or over `FAST_MS`** (20): `Chi`, `Ei`, `LambertW`,
+    `Li`, `Shi`, `Unequality`, `ccode`, `chebyshevt_root`, `composite`
+    (also here — two independent disqualifying shapes), `cxxcode`,
+    `difference_delta`, `divisor_count`, `erfi`, `exp_polar`, `fcode`,
+    `field_isomorphism`, `lambdify`, `maple_code`, `periodic_argument`,
+    `principal_branch`.
+  - **Rule-3 gate (every HEAVY shape came back `UNSUPPORTED_VALUE`,
+    none `OK`/`UNSUPPORTED_TYPE` — the heavy boundary was never
+    actually confirmed safe)** (22): `Integral`, `LC`, `LM`, `LT`,
+    `Poly`, `PurePoly`, `RootSum`, `content`, `decompose`,
+    `degree_list`, `differentiate_finite`, `discriminant`,
+    `galois_group`, `gff_list`, `ground_roots`, `integrate`,
+    `is_convex`, `monic`, `poly`, `poly_from_expr`, `primitive`,
+    `sqf_part`, `sturm`.
+  - **No shape ever matched this name's real signature at all** (1):
+    `are_similar`.
+
+  **17 names JOINED**: `Array`, `Atom`, `CC`, `EX`, `FF`,
+  `InverseLaplaceTransform`, `Limit`, `S`, `Ynm`, `Ynm_c`, `Znm`,
+  `atan2`, `betainc`, `betainc_regularized`, `random_poly`,
+  `refine_root`, `to_number_field` — most plausibly the SAME class of
+  fix that closed `factor`'s own false exclusion (round 15's own
+  DISTINCT-heavy-values fix; the round-14 heavy shapes reused one
+  value twice/thrice, which can trip a completely unrelated "duplicate
+  argument" code path in some SymPy internals, unrelated to real
+  magnitude cost) and the SIGALRM-to-thread timeout switch (a signal
+  landing mid-call in a C-extension boundary can itself produce a
+  spurious failure a thread-based join simply does not risk) — not
+  individually re-verified name-by-name given the time budget; each
+  is still subject to `_measured_safe_argument_cap_violation`'s own
+  generic `MAX_HEAVY_ARG` cap regardless, the same safety net every
+  measured-safe name gets.
+
+  **One name (`jacobi_normalized`) that JOINED under round 15's own
+  measurement was found to FAIL OPEN after the fact** (coordinator's
+  own addendum, caught spot-checking the regenerated list): it is a
+  PLAIN, EAGER function (`jacobi(n,a,b,x) * normalization`, computes
+  for real the instant called, `evaluate=False` or not — the same
+  shape `divisors`/`isprime` already needed a table row for), and its
+  own real 4-positional-argument signature never matched any HEAVY
+  probe shape with the heavy value in POSITION 0 — only `four_arg_
+  heavy_last` (heavy LAST) existed at 4 args, so `jacobi_normalized
+  (1463, 1, 2, x)` measured allowlisted despite hanging past 8s live.
+  Given a dedicated `_FUNCTION_ARG_CAPS`/`_GROWTH_BOUNDS` row instead
+  (mirrors `jacobi`'s own cap/growth exactly) and removed from the
+  allowlist by hand (415 already reflects this — the JSON was patched
+  directly rather than waiting on another ~2-hour full regeneration;
+  `scripts/measure_safe_callables.py`'s own `_already_handled_names`
+  now excludes it from candidacy on any future run too). The probe
+  grid's own "heavy value only at position 0 alone or position LAST of
+  four" gap (never every position of every arity) is NOT fixed this
+  round — deferred, see the note at the end of this entry.
+
+  `fps`/`nsimplify`/`continued_fraction`/`continued_fraction_
+  convergents`/`continued_fraction_iterator` all SURVIVE the new,
+  stricter measurement (`egyptian_fraction`/`continued_fraction_
+  periodic`/`continued_fraction_reduce` do not — they stay default-
+  deny). The coordinator's own item 2c asked survivors to get an
+  explicit order/precision cap "like `series` has" — these five
+  already get one: `_measured_safe_argument_cap_violation`'s own
+  generic `MAX_HEAVY_ARG` cap IS that cap for a measured-safe name
+  (unlike `series`, which is not measured-safe at all and needed a
+  bespoke mechanism for that reason alone), and it was VALIDATED
+  directly at the 1463 boundary by the very heavy-shape probes this
+  round added — a SEPARATE, duplicate mechanism would only re-implement
+  what the generic cap already enforces for these five specifically.
+
+- **grok issue 3 (`verify-1095-r14-grok.log`): `tests/test_measured_
+  safe_callables.py` was red on EVERY run of `ci-python.yml`'s own
+  `windows-latest`/`macos-latest` legs (PR #343, `gh pr checks 343`) —
+  not flaky, universally: every sampled name, every shape, came back
+  `CRASH` at the exact process-level wall-clock bound.** Root cause,
+  confirmed live pulling the actual job logs (`gh run view --job
+  <id> --log`): the probe child's `import resource` raises
+  `ModuleNotFoundError` immediately on Windows (the module does not
+  exist there), and `RLIMIT_AS` is documented to misbehave on macOS —
+  both crash the child before a single shape ever runs, on every
+  platform but Linux. `signal.SIGALRM`/`setitimer` (used for the
+  in-child call timeout) are POSIX-only too, a second, independent
+  Windows-only crash. Fixed in `scripts/measure_safe_callables.py`'s
+  own `_PROBE_CHILD`: the address-space limit is now platform-
+  conditional (`RLIMIT_AS` on Linux, `RLIMIT_DATA` on macOS, none at
+  all on Windows — a documented, weaker guarantee on that one platform
+  only, not silently pretended away), and the call timeout is now a
+  daemon THREAD (`.join(timeout=...)`) instead of `SIGALRM` — portable
+  across all three platforms; a thread that is still running when the
+  join gives up cannot be forcibly aborted the way a signal can, but
+  the isolated CHILD PROCESS itself still dies (taking the daemon
+  thread with it) the moment the PARENT's own `subprocess.run(timeout=
+  PROBE_TIMEOUT_S)` gives up waiting, the same hard backstop this
+  script already had.
+
+  Also fixed, the SAME issue's second half: the re-check itself (`tests/
+  test_measured_safe_callables.py`) used to re-apply `FAST_MS` (60ms) at
+  full strictness on a random sample of 30 — a loaded CI runner crossing
+  that tight bar is not evidence of a real regression (`continued_
+  fraction_periodic` measured 57.789ms on one otherwise-clean run), and
+  a random 30 of 415 could leave some name completely
+  unchecked by any CI job, by chance. `scripts/measure_safe_callables.
+  py` gained `shard_check`/`_shard_id`: this runner's own SHARD of the
+  FULL allowlist (deterministic from platform + Python minor version,
+  matching `ci-python.yml`'s own 3-OS x 2-Python `tests` matrix — the
+  six jobs collectively cover every allowlisted name each CI run), and
+  a regression now means only a `TIMEOUT`, a `CRASH`, or an over-
+  `MAX_NUMERIC_DIGITS` result — never a merely-slower-than-`FAST_MS`
+  `OK` result, as long as it stays under `REGRESSION_MS_TOLERANCE` (4x
+  `FAST_MS`). `tests/test_measured_safe_callables.py` calls `shard_
+  check` now instead of a random sample.
+
+- **A Tuple/list/set argument that MIXES a symbol with a literal number
+  hid the literal from every check that only ever asked "is this whole
+  argument symbolic"** (coordinator addendum, confirmed PRE-EXISTING on
+  `origin/main` too — no ceiling of any kind there): `arg.free_symbols`
+  on `Tuple(x, 1, 10**6)` is non-empty purely because it CONTAINS the
+  bound variable `x`, so `summation(factorial(x), (x, 1, 10**6))`,
+  `summation(x**x, (x, 1, 10**5))`, and `summation(binomial(1463, x),
+  (x, 0, 1463))` all hung past 8s — `summation` itself left `_MEASURED_
+  SAFE_CALLABLES` this round (Rule-3 gate), so nothing else was
+  standing between the literal `10**6`/`10**5`/`1463` hiding in the
+  Tuple and real construction. Two fixes:
+
+  (a) **Generic**: `_arg_hides_numeric` (new) — `_unbounded_generic_
+  call_violation`'s own default-deny now walks a `Tuple`/`list`/`set`/
+  `frozenset` argument's own MEMBERS, not just the container as a
+  whole, so an UNKNOWN callable with a similar "container mixes a
+  symbol with a literal" shape refuses like any other numeric call;
+  `_measured_safe_argument_cap_violation`'s own generic `MAX_HEAVY_ARG`
+  cap walks container members the same way, for a MEASURED-safe name.
+
+  (b) **Dedicated rows**: `summation`/`product`/`Sum`/`Product` (new
+  `_summation_product_violation`) and `integrate`/`Integral` (new
+  `_integrate_limit_violation`) — both PLAIN, EAGER functions like
+  `jacobi_normalized` above (`summation`/`product`/`integrate` compute
+  for real the instant called), so these checks run on the DEFERRED
+  (inert-stand-in) tree, the same "refuse before the real parse ever
+  touches it" ordering every eager-callable fix in this module depends
+  on. Each Tuple-shaped limit `(var, lower, upper)` gets: both bounds
+  digit-capped (`oo`/`-oo` exempted — a genuine symbolic special value,
+  no literal magnitude to be a hazard at all — `summation(1/x**2, (x,
+  1, oo)) == pi**2/6` stays exact); the BOUNDARY term (`var` replaced
+  by the resolved upper limit) walked through this module's own
+  ordinary per-function cap machinery (`_numeric_ceiling_scan`) —
+  `summation(factorial(x), (x, 1, 1464))` refuses on `factorial`'s OWN
+  cap this way, independent of range length; and (summation/product
+  only) the RANGE LENGTH itself capped per a MEASURED, per-table-name
+  limit when the summand contains a table-bounded function — an
+  ordinary polynomial/rational summand (`x**2`, `1/x`) gets NO range
+  cap at all (SymPy's own closed-form formulas handle a huge range
+  instantly, confirmed live: `summation(x**2, (x, 1, 10**6))`; the
+  digit-based OUTPUT ceiling alone protects an oversized result from a
+  table-free summand, confirmed live for both `summation(2**x, (x, 1,
+  10**5))` and `integrate(x**200, (x, 0, 10**1000))`).
+
+  The per-table-name range cap (coordinator's own correction: an
+  earlier "range <= 50, always" guess was WRONG — `summation(bell(x),
+  (x, 1, 1463))` does not literally evaluate 1463 independent Bell
+  numbers and completes in 4.9s on `origin/main`) is now MEASURED:
+  `summation(NAME(x), (x, 1, N))` timed at `N` in `{50, 200, 1463}`,
+  `timeout 8`, for every value-kind table name (`tests/test_bug_sweep.
+  py`'s own property check pins the result at each name's own cap
+  edge). Twelve names stayed comfortably under 1s even at the FULL
+  `MAX_HEAVY_ARG` and get that cap; four measured borderline-to-
+  dangerous at 1463 (`catalan` 2.427s, `bell` 6.129s, `genocchi`
+  1.590s, `andre` TIMEOUT past 8s) get a tighter, individually-
+  measured-safe cap of 200 instead; an unmeasured table name (not part
+  of the sweep — a digits-kind, pole-sensitive, or orthogonal-
+  polynomial name) defaults to a conservative 50, `unknown != safe`.
+
+  DEFERRED to a follow-up round, given the time budget — none of these
+  are active hangs, each is either a still-safe (conservative)
+  exclusion or a lower-severity robustness gap, not a hole in the
+  class this ticket closes:
+  - The probe grid still does not put the HEAVY value in EVERY
+    position of every arity 1-4 (only first/last/pairs) — `jacobi_
+    normalized`'s own fail-open (fixed by table row, above) was found
+    BECAUSE of this gap; another name with a similarly-shaped signature
+    (cost driven by an EARLY positional argument, at an arity/shape the
+    current heavy probes do not cover) could still measure a false
+    allowlisting. A `--refresh-names <file>` (or an extended `--refresh-
+    excluded`) to re-check only affected names cheaply, plus the wider
+    shape grid itself, are not yet implemented.
+  - `LambertW`/`Ei`/`lambdify` (marginal `OK`, 76-79ms — just over
+    `FAST_MS`) and the 8000ms-exact `CRASH`/`TIMEOUT` verdicts (`erfc`,
+    `nroots`, `Range`, `ComplexField`, `RealField`, ...) were measured
+    while a LEFTOVER investigation probe (an unrelated, accidentally-
+    orphaned process from earlier in this round) had pinned one CPU
+    core at 100% for over 10 hours, plus the box's own unrelated
+    background suites — load artifacts, not necessarily real exclusions.
+    `refresh_excluded()` gained a wider target selection (a `TIMEOUT`/
+    `CRASH` at the OUTER process-wall bound specifically, or an `OK`
+    between `FAST_MS` and `3 x FAST_MS`) but the actual re-run did not
+    finish inside a 600s budget on this box's own persistent background
+    load and was not restarted as a full run per instruction; these
+    names stay conservatively excluded (the safe default) until a
+    dedicated re-measurement pass. `quadratic_residues`, `egyptian_
+    fraction`, and `continued_fraction_periodic` are NOT load artifacts
+    — genuine heavy-shape TIMEOUTs at the cap — and stay excluded.
+  - `erfc`/the `erf` family/`Ei`/`LambertW`/`Li`/`Chi`/`Shi`/
+    `fresnels`/`fresnelc`/`airybi` are ordinary special functions with
+    small results at any exact argument and arguably belong in the
+    ELEMENTARY bound table (provable analytic bounds — `erfc <= 2`,
+    `LambertW(x) <= log(x+1)`, ...) rather than depending on the
+    measured list at all, removing them from load-artifact risk
+    permanently. Not implemented this round.
 
 ## [0.13.0] — 2026-09-21
 

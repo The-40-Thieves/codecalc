@@ -4,3 +4,9 @@
 # repo is still spelled to a genuine zero (see ci-quality.yml).
 [files]
 extend-exclude = ["codecalc/_measured_safe_callables.json"]
+
+# `Unequality` is a real SymPy class name (confirmed live: `sympy.Unequality`), not a typo for
+# "Inequality" — needed here too since CHANGELOG.md (prose, not excluded above) names it directly
+# as one of the round-15 allowlist departures.
+[default.extend-words]
+Unequality = "Unequality"

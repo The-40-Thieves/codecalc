@@ -415,12 +415,16 @@ jobs:
       - name: branch-vs-main differential corpus
         shell: bash
         run: uv run --no-sync python tests/test_differential_corpus.py
-      # THE-1095 round 14 item 1: re-measures a sample of the committed
-      # measured-safe-callables allowlist on THIS runner, so a name that
-      # drifted slower (a SymPy bump, a slower CI machine) is caught
-      # rather than silently trusted forever. Added its own step for the
-      # SAME reason the differential corpus needed one, immediately
-      # above: a test file with no step never runs in CI at all.
+      # THE-1095 round 14 item 1 (round 15, grok issue 3: made portable
+      # across this job's own OS matrix, and switched from a random
+      # sample of 30 to a deterministic SHARD so all six (os, python)
+      # legs collectively re-measure the WHOLE allowlist): re-measures
+      # this runner's own shard of the committed measured-safe-
+      # callables allowlist, so a name that drifted slower (a SymPy
+      # bump, a slower CI machine) is caught rather than silently
+      # trusted forever. Added its own step for the SAME reason the
+      # differential corpus needed one, immediately above: a test file
+      # with no step never runs in CI at all.
       - name: measured-safe-callables allowlist sample
         shell: bash
         run: uv run --no-sync python tests/test_measured_safe_callables.py

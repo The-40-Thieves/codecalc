@@ -130,7 +130,8 @@ def _already_handled_names() -> frozenset[str]:
         frozenset(se._FUNCTION_ARG_CAPS)
         | frozenset(EvaluateFalseTransformer.functions)
         | frozenset(se._DEFERRED_BINOP_OPS)
-        | frozenset({"Mod", "Max", "Min", "floor", "ceiling", "frac", "N", "series"})
+        | frozenset({"Mod", "Max", "Min", "floor", "ceiling", "frac", "N", "series",
+                     "summation", "product", "Sum", "Product", "integrate", "Integral"})
         # AST-transform-RESERVED classes: `Add`/`Mul`/`Pow`/`Or`/`And`/
         # `Not`/`Eq`/`Ne`/`Lt`/`Le`/`Gt`/`Ge` (what `visit_BinOp`/
         # `visit_Compare` construct for EVERY `+`/`*`/`**`/comparison),
@@ -179,10 +180,34 @@ def _already_handled_names() -> frozenset[str]:
 #: `two_ints_heavy` is included (each times out past `PROBE_TIMEOUT_S`)
 #: — rather than trusting a small-value probe to stand in for the
 #: cap's own actual boundary.
+#: THE-1095 round 15 (grok issue 2b, `verify-1095-r14-grok.log`): four
+#: more shapes, found needed by grok's own concrete counter-examples --
+#: `(2, HEAVY)`/`(HEAVY, 2)` (a WIDE, range-like span between two
+#: arguments — `1463 - 2` — rather than two values both individually
+#: near the cap, which is a DIFFERENT cost shape for a name whose real
+#: cost scales with the DISTANCE between two arguments, e.g. a range
+#: or interval); a `Float` with a huge EXPONENT (`1e300` — large in
+#: MAGNITUDE while carrying only a handful of significant digits,
+#: unlike `float_heavy`'s plain large mantissa); a `Rational` with a
+#: 25-digit numerator (a big INTEGER inside an otherwise-plain
+#: fraction, the shape `nsimplify`'s own review finding named); and a
+#: four-positional-argument shape with the heavy value LAST (the
+#: `fps(sin(x), x, 0, 1463)` class grok's own issue 2 table names —
+#: `PROBE_SHAPES` had no shape with more than 3 positions at all before
+#: this round, so a name whose cost hides behind its 4th argument was
+#: never probed there regardless of magnitude).
+_HEAVY_SHAPES = frozenset({
+    "one_int_heavy", "two_ints_heavy", "three_ints_heavy", "symbol_int_heavy",
+    "small_heavy", "heavy_small", "float_heavy_exp", "rational_heavy_numerator",
+    "four_arg_heavy_last",
+})
+
 PROBE_SHAPES: tuple[str, ...] = (
     "one_int", "two_ints", "three_ints", "rational", "float",
     "symbol", "symbol_int", "symbol_symbol",
     "one_int_heavy", "two_ints_heavy", "three_ints_heavy", "symbol_int_heavy",
+    "small_heavy", "heavy_small", "float_heavy_exp", "rational_heavy_numerator",
+    "four_arg_heavy_last",
 )
 
 #: The probe CHILD process — run standalone (`python -c PROBE_SCRIPT`)
@@ -195,8 +220,26 @@ PROBE_SHAPES: tuple[str, ...] = (
 #: (this module's file included in the scan) holds this script to the
 #: identical bar `codecalc/safe_expr.py` itself already is.
 _PROBE_CHILD = textwrap.dedent("""
-    import resource, sys, time
-    resource.setrlimit(resource.RLIMIT_AS, ({mem_kb} * 1024, {mem_kb} * 1024))
+    import sys, time
+    # THE-1095 round 15 (grok issue 3, `verify-1095-r14-grok.log`): the
+    # FIRST version of this child called `resource.setrlimit(RLIMIT_AS,
+    # ...)` unconditionally -- `resource` does not exist on Windows at
+    # all (`import resource` itself crashes the child, before a single
+    # shape ever runs) and `RLIMIT_AS` is documented to MISBEHAVE on
+    # macOS (confirmed live on PR #343's own CI: every sampled name,
+    # every shape, came back CRASH on both `windows-latest` and
+    # `macos-latest`, at the exact outer wall-clock bound -- the child
+    # was dying before printing anything recognizable, on EVERY
+    # platform but Linux). `RLIMIT_DATA` (heap size, not the WHOLE
+    # address space) is the standard macOS workaround; Windows has no
+    # equivalent rlimit at all, so it gets NONE -- a documented, weaker
+    # guarantee on that one platform only, not silently pretended away.
+    if sys.platform.startswith("linux"):
+        import resource
+        resource.setrlimit(resource.RLIMIT_AS, ({mem_kb} * 1024, {mem_kb} * 1024))
+    elif sys.platform == "darwin":
+        import resource
+        resource.setrlimit(resource.RLIMIT_DATA, ({mem_kb} * 1024, {mem_kb} * 1024))
     import sympy as sp
     from sympy import Rational, Symbol, Float
     _x, _y = Symbol('x'), Symbol('y')
@@ -220,44 +263,112 @@ _PROBE_CHILD = textwrap.dedent("""
         # the heavy shapes exist for, without this artifact.
         "one_int_heavy": (_H,), "two_ints_heavy": (_H, _H - 1),
         "three_ints_heavy": (_H, _H - 1, _H - 2), "symbol_int_heavy": (_x, _H),
+        # THE-1095 round 15 (grok issue 2b): a WIDE range between two
+        # arguments (rather than both individually near the cap) --
+        # `1463 - 2`, not `1463 - 1462` -- probes a DIFFERENT cost
+        # shape (an interval/range-scaling algorithm, not a per-
+        # argument-magnitude one).
+        "small_heavy": (2, _H), "heavy_small": (_H, 2),
+        # A `Float` whose EXPONENT is huge (`1e300`) while its own
+        # MANTISSA carries only a handful of significant digits --
+        # unlike `float_heavy`'s large-but-ordinary-precision value,
+        # this probes whether a callable's cost scales with a Float's
+        # own MAGNITUDE, not merely its digit count.
+        "float_heavy_exp": (Float("1e300"),),
+        # A `Rational` whose NUMERATOR alone is a 25-digit integer --
+        # the shape grok's own review named for `nsimplify`/
+        # `egyptian_fraction`/`continued_fraction*`.
+        "rational_heavy_numerator": (Rational(1234567890123456789012345, 3),),
+        # A FOUR-positional-argument shape with the heavy value LAST --
+        # `fps(sin(x), x, 0, 1463)`-class calls (`series`'s own already-
+        # dedicated order cap is the model for what such a name would
+        # need if it survives measurement here; see `main()`'s own
+        # `--write` docstring for how a survivor is expected to be
+        # handled). No shape before this round had more than THREE
+        # positions at all, so a name whose real cost hides behind a
+        # 4th argument was never probed here regardless of magnitude.
+        "four_arg_heavy_last": (_x, 0, 0, _H),
     }}
     fn = getattr(sp, {name!r})
     args = _SHAPE_BUILDERS[{shape_name!r}]
-    import signal
 
-    def _on_alarm(signum, frame):
-        raise _ProbeTimeout()
+    # THE-1095 round 15 (grok issue 3): a daemon THREAD, not `signal.
+    # SIGALRM`/`setitimer` (POSIX-only, confirmed the direct cause of
+    # the CI crash above) -- works identically on Linux, macOS, and
+    # Windows. It cannot forcibly ABORT a CPU-bound call the way a
+    # signal can (a thread that is still running when the join below
+    # times out just keeps running) -- but the ISOLATED CHILD PROCESS
+    # itself still dies, taking the daemon thread with it, the moment
+    # the PARENT's own `subprocess.run(timeout=PROBE_TIMEOUT_S)` gives
+    # up waiting -- the SAME hard backstop this script already had.
+    import threading
 
-    class _ProbeTimeout(Exception):
-        pass
+    class _ProbeSlot:
+        result = None
+        error = None
+        done = False
 
-    signal.signal(signal.SIGALRM, _on_alarm)
-    signal.setitimer(signal.ITIMER_REAL, {call_timeout})
+    def _target():
+        try:
+            _ProbeSlot.result = fn(*args)
+        except BaseException as exc:  # noqa: BLE001 -- classified below
+            _ProbeSlot.error = exc
+        _ProbeSlot.done = True
+
     t0 = time.perf_counter()
-    try:
-        result = fn(*args)
-    except _ProbeTimeout:
+    _thread = threading.Thread(target=_target, daemon=True)
+    _thread.start()
+    _thread.join({call_timeout})
+    if not _ProbeSlot.done:
         # The CALL exceeded its own budget; interpreter start-up and the
-        # sympy import are deliberately outside this timer, so a loaded
-        # box cannot turn a trivial call into a false TIMEOUT.
+        # sympy import are deliberately outside this timer (the thread
+        # starts only after both), so a loaded box cannot turn a
+        # trivial call into a false TIMEOUT.
         print("TIMEOUT")
         sys.exit(0)
-    except (TypeError, AttributeError, ValueError, NotImplementedError,
-            sp.polys.polyerrors.BasePolynomialError,
-            ZeroDivisionError, KeyError, IndexError) as exc:
-        # "This shape does not apply to this callable" -- the SAME
-        # signal a `TypeError` from argument-binding gives, just from a
-        # callable whose own body validates its arguments (or fails on
-        # an unexpected TYPE, e.g. gcd(5, 3, 2) probing `2` as a third
-        # positional GENERATOR argument, which sympy's own gcd() reads
-        # as a Poly option and chokes on with an AttributeError, not a
-        # TypeError) rather than `inspect.signature`'s own binding.
-        # Never a verdict on whether a shape this callable DOES accept
-        # is itself slow or dangerous -- that is what the surviving
-        # "OK" shapes below still answer.
-        print("UNSUPPORTED", str(exc))
+    _exc = _ProbeSlot.error
+    if isinstance(_exc, TypeError):
+        # "This shape does not apply to this callable" -- an arity/
+        # TYPE mismatch at `inspect.signature`'s own binding level
+        # (never a verdict on whether a shape this callable DOES
+        # accept is itself slow or dangerous -- that is what "OK",
+        # below, still answers). THE-1095 round 15 (grok issue 2b):
+        # tagged distinctly from the "value/domain" exceptions below --
+        # `measure_name`'s own Rule-3 gate treats a TypeError at a
+        # HEAVY shape as definitive evidence "this whole shape category
+        # does not apply here," unlike a same-shape ValueError.
+        print("UNSUPPORTED_TYPE", str(_exc))
         sys.exit(0)
-    signal.setitimer(signal.ITIMER_REAL, 0)
+    if isinstance(_exc, (AttributeError, ValueError, NotImplementedError,
+                          sp.polys.polyerrors.BasePolynomialError,
+                          ZeroDivisionError, KeyError, IndexError)):
+        # The shape's ARGUMENTS bind fine (a real `Function.__call__`
+        # ran), but the VALUES are outside this callable's own accepted
+        # domain (e.g. gcd(5, 3, 2) probing `2` as a third positional
+        # GENERATOR argument, which sympy's own gcd() reads as a Poly
+        # option and chokes on with an AttributeError). THE-1095 round
+        # 15 (grok issue 2b, `verify-1095-r14-grok.log`): at a NON-heavy
+        # shape this stays the same "does not apply, no signal either
+        # way" verdict round 13/14 already gave it -- but a HEAVY-shape
+        # exception of this kind is now DISTINCT evidence: the call
+        # bound and RAN, at the actual cap-boundary VALUE, and failed
+        # fast rather than hanging -- reassuring, but (per `measure_
+        # name`'s own Rule-3 gate) not BY ITSELF proof this name is
+        # safe at every other value near the cap the way an actual
+        # heavy-shape "OK" completion, or a heavy-shape TypeError
+        # (proving the whole shape category is irrelevant here), would
+        # be -- `discrete_log(5, 3, 2)` measuring 0.04ms while its own
+        # HEAVY shape raised this exact kind of exception, with NO
+        # heavy shape ever confirmed cheap OR confirmed inapplicable,
+        # was allowlisted under the OLD rules on the strength of the
+        # small shape alone; this tag is what lets `measure_name` catch
+        # that gap instead of silently treating it as if the heavy
+        # boundary had been checked at all.
+        print("UNSUPPORTED_VALUE", str(_exc))
+        sys.exit(0)
+    if _exc is not None:
+        raise _exc  # anything else genuinely unexpected -> CRASH, parent-side
+    result = _ProbeSlot.result
     dt_ms = (time.perf_counter() - t0) * 1000.0
     digits = 0
     try:
@@ -282,11 +393,17 @@ _PROBE_CHILD = textwrap.dedent("""
 
 def _probe_shape(name: str, shape_name: str) -> tuple[str, float, int]:
     """`(verdict, elapsed_ms, digits)` for ONE (name, shape) pair,
-    `verdict` one of `"OK"`, `"UNSUPPORTED"` (a `TypeError` binding this
-    shape — not a failure, just not applicable), `"TIMEOUT"`, or
-    `"CRASH"`. Spawns a fresh, `ulimit -v`-capped child process per call
-    — see this module's own docstring for why isolation is per (name,
-    shape), not merely per name.
+    `verdict` one of `"OK"`, `"UNSUPPORTED_TYPE"` (an arity/type
+    mismatch binding this shape — not a failure, just not applicable,
+    regardless of whether the shape is heavy), `"UNSUPPORTED_VALUE"`
+    (the shape's arguments bound fine but the VALUES were outside this
+    callable's own accepted domain — THE-1095 round 15, grok issue 2b:
+    kept distinct from `UNSUPPORTED_TYPE` because `measure_name`'s own
+    Rule-3 gate treats the two very differently at a HEAVY shape — see
+    `_PROBE_CHILD`'s own comment for the full reasoning), `"TIMEOUT"`,
+    or `"CRASH"`. Spawns a fresh, `ulimit -v`-capped child process per
+    call — see this module's own docstring for why isolation is per
+    (name, shape), not merely per name.
     """
     from codecalc.safe_expr import MAX_HEAVY_ARG
     child_src = _PROBE_CHILD.format(mem_kb=PROBE_MEMORY_KB, name=name,
@@ -303,8 +420,10 @@ def _probe_shape(name: str, shape_name: str) -> tuple[str, float, int]:
     if out.startswith("OK "):
         _, dt_ms, digits = out.split(maxsplit=2)
         return "OK", float(dt_ms), int(digits)
-    if out.startswith("UNSUPPORTED"):
-        return "UNSUPPORTED", 0.0, 0
+    if out.startswith("UNSUPPORTED_TYPE"):
+        return "UNSUPPORTED_TYPE", 0.0, 0
+    if out.startswith("UNSUPPORTED_VALUE"):
+        return "UNSUPPORTED_VALUE", 0.0, 0
     if out.startswith("TIMEOUT"):
         return "TIMEOUT", PROBE_CALL_TIMEOUT_S * 1000.0, -1
     return "CRASH", PROBE_TIMEOUT_S * 1000.0, -1
@@ -313,27 +432,47 @@ def _probe_shape(name: str, shape_name: str) -> tuple[str, float, int]:
 def measure_name(name: str) -> dict:
     """Every probed shape's own verdict for `name`, plus the overall
     classification (`allowlisted`: bool) — a name is allowlisted only
-    when every `"OK"` shape stayed under `FAST_MS` and
-    `MAX_RESULT_DIGITS`, and at least one shape was applicable at all
-    (a name every probe shape rejects as `UNSUPPORTED` — an unusual
-    signature this grid does not happen to match — is left OFF the
-    allowlist: `unknown != safe`, no exception for "never measured
-    accepting anything").
+    when: every `"OK"` shape stayed under `FAST_MS` and `MAX_RESULT_
+    DIGITS`; at least one shape was applicable at all (a name every
+    probe shape rejects as unsupported — an unusual signature this grid
+    does not happen to match — is left OFF the allowlist: `unknown !=
+    safe`, no exception for "never measured accepting anything"); no
+    shape TIMED OUT or CRASHED; and (THE-1095 round 15, grok issue 2b —
+    the Rule-3 gate) at least one HEAVY shape (`_HEAVY_SHAPES`) came
+    back `"OK"` or `"UNSUPPORTED_TYPE"` — a name whose EVERY heavy
+    shape came back `"UNSUPPORTED_VALUE"` (the call ran, at the actual
+    cap-boundary value, and failed fast — reassuring, but not proof of
+    safety at every OTHER value near the cap the way an actual `"OK"`
+    completion, or a `"UNSUPPORTED_TYPE"` proving the whole shape
+    category is irrelevant here, would be) is left OFF the allowlist
+    too: the heavy boundary was never actually CONFIRMED safe for it,
+    only never caught failing slow — `discrete_log` is the concrete
+    case grok's own review found this gap in.
     """
     shapes = []
     applicable = 0
     allowlisted = True
+    heavy_confirmed = False
     for shape_src in PROBE_SHAPES:
         verdict, dt_ms, digits = _probe_shape(name, shape_src)
         shapes.append({"shape": shape_src, "verdict": verdict,
                         "ms": round(dt_ms, 3), "digits": digits})
+        is_heavy = shape_src in _HEAVY_SHAPES
         if verdict == "OK":
             applicable += 1
+            if is_heavy:
+                heavy_confirmed = True
             if dt_ms >= FAST_MS or (digits >= 0 and digits > MAX_RESULT_DIGITS):
                 allowlisted = False
-        elif verdict != "UNSUPPORTED":
+        elif verdict == "UNSUPPORTED_TYPE":
+            if is_heavy:
+                heavy_confirmed = True
+        elif verdict == "UNSUPPORTED_VALUE":
+            pass  # no signal either way -- see this function's own docstring
+        else:  # TIMEOUT or CRASH
             allowlisted = False
-    return {"name": name, "allowlisted": bool(allowlisted and applicable > 0),
+    return {"name": name,
+            "allowlisted": bool(allowlisted and applicable > 0 and heavy_confirmed),
             "shapes": shapes}
 
 
@@ -378,26 +517,48 @@ def measure_all() -> tuple[dict, dict]:
     return data, results
 
 
-_HEAVY_SHAPES = frozenset({"one_int_heavy", "two_ints_heavy",
-                           "three_ints_heavy", "symbol_int_heavy"})
-
-
 def refresh_excluded() -> tuple[dict, dict, list[str]]:
     """Re-measure ONLY the names the committed raw report left off the
-    allowlist on a `CRASH` verdict or a `TIMEOUT` on a non-heavy shape.
-    A heavy-shape TIMEOUT is the measurement doing its job (the call
-    itself is slow at the cap); a non-heavy one, or a CRASH, was most
-    often the old process-wall timer counting interpreter start-up on
-    a loaded box (the timer now bounds the call alone, in-child). The
-    rest of the report is kept as measured; `candidates_measured`,
+    allowlist on a verdict that MAY be a load artifact rather than a
+    real exclusion. A heavy-shape TIMEOUT at the in-child `PROBE_CALL_
+    TIMEOUT_S` bound is the measurement doing its job (the call itself
+    is slow at the cap) — kept as-is. Four load-artifact-prone shapes,
+    all re-measured here:
+
+    - a `CRASH` (any shape) — most often the old process-wall timer
+      counting interpreter start-up on a loaded box (the timer now
+      bounds the call alone, in-child, but a `CRASH` can still mean
+      the child died before printing anything recognizable at all);
+    - a `TIMEOUT` on a NON-heavy shape (never expected to be slow);
+    - THE-1095 round 15 (coordinator addendum): a `TIMEOUT`/`CRASH`
+      whose own `ms` sits AT the OUTER process-wall bound (`PROBE_
+      TIMEOUT_S * 1000`, not the in-child `PROBE_CALL_TIMEOUT_S * 1000`
+      one) — a signal the PARENT's own `subprocess.run(timeout=...)`
+      gave up, not that the CALL itself was measured slow, which can
+      happen from box-wide contention (another process saturating the
+      CPU) regardless of which shape it hit;
+    - a MARGINAL `OK` (`FAST_MS <= ms < 3 * FAST_MS`) — comfortably
+      over the tight `FAST_MS` bar this module measures against, but
+      well under a magnitude that would suggest a real, structural
+      slowness rather than a loaded runner (confirmed live: `LambertW`/
+      `Ei`/`lambdify` all measured 76-79ms on a box independently
+      confirmed to have a stray process pinning one CPU core at 100%
+      for over 10 hours during that exact run).
+
+    The rest of the report is kept as measured; `candidates_measured`,
     thresholds and the allowlist are recomputed from the merged log.
     """
+    process_wall_ms = PROBE_TIMEOUT_S * 1000.0
+    marginal_floor_ms = FAST_MS
+    marginal_ceiling_ms = FAST_MS * 3.0
     raw_results = json.loads(RAW_REPORT_PATH.read_text())
     targets = sorted(
         name for name, rec in raw_results.items()
         if not rec["allowlisted"] and any(
             p["verdict"] == "CRASH"
             or (p["verdict"] == "TIMEOUT" and p["shape"] not in _HEAVY_SHAPES)
+            or (p["verdict"] in ("TIMEOUT", "CRASH") and p["ms"] >= process_wall_ms)
+            or (p["verdict"] == "OK" and marginal_floor_ms <= p["ms"] < marginal_ceiling_ms)
             for p in rec["shapes"])
     )
     for i, name in enumerate(targets):
@@ -419,8 +580,12 @@ def resample_check(sample_size: int) -> bool:
     """Re-probes a random SAMPLE of already-allowlisted names on the
     RUNNING box; returns `True` iff every one still measures under
     `FAST_MS` at every shape it accepted when the committed list was
-    generated. Used both by this script's own `--sample` CLI path and
-    by `tests/test_measured_safe_callables.py`.
+    generated. A developer-facing spot check (this script's own
+    `--sample` CLI path) — `tests/test_measured_safe_callables.py`
+    itself uses `shard_check`, below, which covers every allowlisted
+    name across the CI matrix instead of a fixed random 30, and tolerates
+    a loaded runner instead of re-applying `FAST_MS` at full strictness
+    (see that function's own docstring for why).
     """
     data = json.loads(DATA_PATH.read_text())
     names = data["allowlist"]
@@ -435,12 +600,112 @@ def resample_check(sample_size: int) -> bool:
     return ok
 
 
+#: THE-1095 round 15 (grok issue 3, `verify-1095-r14-grok.log`): matches
+#: `ci-python.yml`'s own `tests` job matrix (3 OS x 2 Python versions) --
+#: if that matrix ever grows or shrinks, this should follow it, so every
+#: shard still gets covered by SOME CI job. A mismatch is not silently
+#: wrong either way: `_shard_id` falls back to a hash-based shard for
+#: any `(platform, python-minor)` pair not in this table, so a NEW CI
+#: leg (or a local run on a python version not in the matrix) still
+#: gets SOME shard, just not guaranteed to line up 1:1 with a specific
+#: CI job the way the six explicit entries do.
+_SHARD_KEYS: list[tuple[str, int]] = [
+    ("linux", 11), ("linux", 14),
+    ("darwin", 11), ("darwin", 14),
+    ("win32", 11), ("win32", 14),
+]
+NUM_SHARDS = len(_SHARD_KEYS)
+#: Deliberately well above `FAST_MS` (60ms) -- a LOADED CI runner
+#: crossing the original, tightly-measured threshold is not evidence
+#: this NAME regressed, only that the MACHINE is slower right now (grok
+#: issue 3's own finding: `continued_fraction_periodic`'s own `three_
+#: ints_heavy` shape measured 57.789ms on ONE run, uncomfortably close
+#: to `FAST_MS` already without any real regression). 4x leaves ample
+#: margin for that noise while still catching a GENUINE order-of-
+#: magnitude regression (a name that used to be a few ms and is now
+#: hundreds).
+REGRESSION_MS_TOLERANCE = FAST_MS * 4.0
+
+
+def _shard_id(num_shards: int = NUM_SHARDS) -> int:
+    """This process's own shard index, `0 <= id < num_shards` —
+    deterministic from `(platform, python minor version)` so the SAME
+    CI job always re-measures the SAME shard of the allowlist, and the
+    six jobs in `ci-python.yml`'s own `tests` matrix collectively cover
+    every allowlisted name across a single CI run instead of each job
+    re-probing an overlapping random 30 (THE-1095 round 15, grok issue
+    3's own request: "sample deterministically but cover all 457 names
+    across the CI matrix ... rather than 30").
+    """
+    plat = "linux" if sys.platform.startswith("linux") else sys.platform
+    key = (plat, sys.version_info.minor)
+    if key in _SHARD_KEYS:
+        return _SHARD_KEYS.index(key) % num_shards
+    return hash(key) % num_shards
+
+
+def shard_check(num_shards: int = NUM_SHARDS) -> list[str]:
+    """Re-probes THIS process's own SHARD of the committed allowlist
+    (`_shard_id`, above) and returns the names that show a GENUINE
+    regression — empty means clean. THE-1095 round 15 (grok issue 3):
+    two changes from `resample_check`'s own all-or-nothing `FAST_MS`
+    re-check, both needed to run this on the FULL CI matrix (`ci-
+    python.yml`'s `windows-latest`/`macos-latest` legs, not just
+    `ubuntu-latest`) rather than being red every run there regardless
+    of any real regression:
+
+    (1) Only a `TIMEOUT`, a `CRASH`, or an over-`MAX_RESULT_DIGITS`
+    result counts as a regression — a merely-SLOWER-than-`FAST_MS` `OK`
+    result does not, as long as it stays under `REGRESSION_MS_
+    TOLERANCE` (4x `FAST_MS`, above): the ORIGINAL measurement's own
+    `FAST_MS` bar was already "deliberately well under the
+    coordinator's own 100ms bar, to leave margin against machine-to-
+    machine variance" (this module's own docstring) — re-applying that
+    SAME tight bar on a re-check, on a runner that may be more loaded
+    than the one the list was measured on, conflates "this box is busy
+    right now" with "this name got slower," exactly the false-positive
+    `continued_fraction_periodic` already measured crossing 60ms on one
+    run with no real regression at all.
+
+    (2) Every allowlisted name is covered, split into `num_shards`
+    disjoint shards by SORTED index — this process only re-measures its
+    OWN shard (`_shard_id`), not a random subset every job re-picks
+    independently (which could let SOME allowlisted name go unchecked
+    by any CI job at all, purely by bad luck in the random draw).
+    """
+    data = json.loads(DATA_PATH.read_text())
+    names = sorted(data["allowlist"])
+    shard_id = _shard_id(num_shards)
+    my_shard = [n for i, n in enumerate(names) if i % num_shards == shard_id]
+    regressions = []
+    for name in my_shard:
+        result = measure_name(name)
+        bad_shapes = [
+            s for s in result["shapes"]
+            if s["verdict"] == "TIMEOUT"
+            or s["verdict"] == "CRASH"
+            or (s["verdict"] == "OK"
+                and (s["ms"] >= REGRESSION_MS_TOLERANCE
+                     or (s["digits"] >= 0 and s["digits"] > MAX_RESULT_DIGITS)))
+        ]
+        if bad_shapes:
+            print(f"REGRESSION: {name!r} -> {bad_shapes}")
+            regressions.append(name)
+    return regressions
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--write", action="store_true",
                          help=f"write the measurement to {DATA_PATH}")
     parser.add_argument("--sample", type=int, default=0,
                          help="re-probe N already-allowlisted names on this box")
+    parser.add_argument("--shard-check", action="store_true",
+                         help="re-probe THIS process's own shard of the "
+                              "allowlist (by platform + python minor version, "
+                              "see _shard_id) and fail only on a genuine "
+                              "TIMEOUT/CRASH/over-digit regression; what "
+                              "tests/test_measured_safe_callables.py itself runs")
     parser.add_argument("--refresh-excluded", action="store_true",
                          help="re-measure only the names the committed raw "
                               "report excluded on a CRASH or a non-heavy "
@@ -466,6 +731,11 @@ def main() -> int:
         ok = resample_check(args.sample)
         print("OK" if ok else "FAIL")
         return 0 if ok else 1
+
+    if args.shard_check:
+        regressions = shard_check()
+        print("OK" if not regressions else f"FAIL: {regressions}")
+        return 0 if not regressions else 1
 
     data, raw_results = measure_all()
     text = json.dumps(data, indent=2, sort_keys=True) + "\n"

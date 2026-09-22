@@ -66,6 +66,24 @@ boundary. Do not let its passing be mistaken for the input being safe.
 Also verified against the pinned version rather than assumed: sympy 1.14.0's
 sympify takes (a, locals, convert_xor, strict, rational, evaluate). There is
 no `safe=` to pass — code written against that PR raises TypeError.
+
+SCOPE OF THE CEILING/GROWTH-BOUND MACHINERY BELOW (THE-1095, round 15,
+grok issue 2, `verify-1095-r14-grok.log`): the tables, growth bounds,
+and `_measured_safe_argument_cap_violation` this file builds on top of
+the screen above close ONE class of denial-of-service — a NUMERIC
+argument (its VALUE's own magnitude, or its printed DIGIT count)
+driving unbounded construction (`factorial(10**9)`, `ones(5000,
+5000)`, `bell(1463)+1`, ...). It does NOT attempt to bound cost that
+lives in an expression's own SYMBOLIC STRUCTURE instead of a numeric
+argument's magnitude — `integrate(1/(x**7 - x - 1), x)`,
+`galois_group(x**8 + x + 1)`, `diophantine`/`satisfiable` on a large
+instance, `nroots`/`resultant` at degree 200 — every one of which has
+ALWAYS been allowed on `origin/main` and is bounded ONLY by the public
+tools' own 10-second execution guard, same as it is here. Bounding
+THAT class is THE-1097's own job (a resource-limited worker), a
+DIFFERENT mechanism from anything in this file — grok's own issue-2
+review table named several structural-cost examples of this kind; they
+are correctly out of scope for THIS ticket and are not addressed here.
 """
 
 from __future__ import annotations
@@ -455,6 +473,23 @@ _FUNCTION_ARG_CAPS: dict = {
     "legendre": ("value", MAX_LEGENDRE_ORDER),
     "assoc_legendre": ("value", MAX_ASSOC_LEGENDRE_ORDER),
     "jacobi": ("value", MAX_JACOBI_ORDER),
+    # THE-1095 round 15 (coordinator addendum, fail-open on the round-15
+    # regenerated allowlist): `jacobi_normalized(n, a, b, x)` is a PLAIN,
+    # EAGER Python function (`jacobi(n,a,b,x) * normalization`, not a
+    # lazy `Function` subclass like `jacobi` itself) — it computes for
+    # REAL the instant it is called, `evaluate=False` or not, exactly
+    # the "eager, plain callable" shape `divisors`/`factorint`/`isprime`
+    # already needed a table row for. It measured allowlisted anyway:
+    # its own real 4-positional-argument signature (n, a, b, x) never
+    # matched any HEAVY probe shape with the heavy value in POSITION 0
+    # (only `four_arg_heavy_last`, heavy LAST, existed at 4 args) —
+    # `jacobi_normalized(1463, 1, 2, x)` hangs past 8s live. Mirrors
+    # `jacobi`'s own cap/growth exactly (same underlying polynomial,
+    # plus a normalization factor assumed not to dominate it) and is
+    # removed from `_MEASURED_SAFE_CALLABLES` candidacy going forward
+    # (`scripts/measure_safe_callables.py`'s own `_already_handled_
+    # names`) now that it has a dedicated row.
+    "jacobi_normalized": ("value", MAX_JACOBI_ORDER),
     "laguerre": ("value", MAX_LAGUERRE_ORDER),
     "assoc_laguerre": ("value", MAX_ASSOC_LAGUERRE_ORDER),
 }
@@ -598,6 +633,8 @@ _EXTRA_BOUNDED_POSITIONS: dict = {
     "assoc_legendre": {1: ("value", MAX_HEAVY_ARG), 2: ("value", MAX_HEAVY_ARG)},
     "jacobi": {1: ("value", MAX_HEAVY_ARG), 2: ("value", MAX_HEAVY_ARG),
                3: ("value", MAX_HEAVY_ARG)},
+    "jacobi_normalized": {1: ("value", MAX_HEAVY_ARG), 2: ("value", MAX_HEAVY_ARG),
+                           3: ("value", MAX_HEAVY_ARG)},
     "assoc_laguerre": {1: ("value", MAX_HEAVY_ARG), 2: ("value", MAX_HEAVY_ARG)},
 }
 #: name -> frozenset of positions that are members of `_HEAVY_FUNCTIONS`'
@@ -902,11 +939,60 @@ def _growth_stirling_factorial(bounds: dict) -> float:
 
 def _growth_2n(bounds: dict) -> float:
     """`binomial(n, k) <= 2**n` (position 0 only — `k`, position 1, is
-    deliberately unbounded; see `_UNBOUNDED_POSITIONS`'s own comment)."""
+    deliberately unbounded; see `_UNBOUNDED_POSITIONS`'s own comment).
+
+    THE-1095 round 15 (grok issue 1): sound ONLY for a confirmed non-
+    negative INTEGER `n` (`sum_k C(n,k) = 2**n`, so every individual
+    term is `<= 2**n` too, for ANY `k` including one this module never
+    even resolves) — `_table_function_bound`'s own binomial special-
+    case is what gates this function to ONLY that domain now
+    (`_binomial_n_is_confirmed_nonneg_int`); a non-integer or negative
+    `n` uses `_growth_binomial_general`, below, instead — see that
+    function's own docstring for why THIS one is unsound there.
+    """
     n = _safe_pow10(bounds.get(0))
     if n is None:
         return math.inf
     return n * math.log10(2)
+
+
+def _growth_binomial_general(n_log: float | None, k_log: float | None) -> float:
+    """`|binomial(n, k)| <= (|n| + k) ** k` in log space, for ANY real
+    `n` (any sign, integer or not) and any non-negative integer `k` —
+    each of the `k` factors in `binomial(n, k) = n(n-1)...(n-k+1) / k!`
+    has `|n - i| <= |n| + i <= |n| + k` for `i` in `0..k-1`, so their
+    product (and a fortiori the product divided by `k!`, which only
+    shrinks it) is bounded by `(|n|+k)**k`.
+
+    THE-1095 round 15 (grok issue 1, `verify-1095-r14-grok.log`):
+    `_growth_2n` (`<= 2**n`) is unsound outside a confirmed non-
+    negative-integer `n` — it does not even read `k` — and round 14's
+    own `binomial(1/2, 1463)` exemption (a documented, deliberate,
+    TOP-LEVEL allowance, still correct on its own) meant a NESTED use
+    of that exact shape (`factorial(binomial(1/2, 1463))`) sailed past
+    `_table_function_bound`'s own growth check with an estimated ~0.15
+    digits (`_growth_2n`'s own `n * log10(2)` for `n=0.5`) while the
+    REAL value is a 1754-digit rational — `factorial()`'s own outer cap
+    (1463) never had a chance to see the true magnitude before real
+    construction. This formula is deliberately LOOSE (no `/ k!` term:
+    dropping a division that only ever shrinks the true value keeps
+    the bound valid, without needing its own `log10(k!)` sub-bound) —
+    correct for EVERY `(n, k)` this module ever calls it for, at the
+    cost of being a much worse estimate than `_growth_2n` for the
+    confirmed-safe-integer domain that function stays dedicated to.
+    """
+    if n_log is None or k_log is None:
+        return math.inf
+    n = _safe_pow10(n_log)
+    k = _safe_pow10(k_log)
+    if n is None or k is None:
+        return math.inf
+    if k <= 0:
+        return 0.0
+    base = abs(n) + k
+    if base <= 1:
+        return 0.0
+    return k * math.log10(base)
 
 
 def _growth_rf_ff(bounds: dict) -> float:
@@ -1649,6 +1735,7 @@ _GROWTH_BOUNDS: dict = {
     "gegenbauer": _growth_orthogonal_poly(2, (1,)),
     "assoc_legendre": _growth_orthogonal_poly(2, (1,)),
     "jacobi": _growth_orthogonal_poly(3, (1, 2)),
+    "jacobi_normalized": _growth_orthogonal_poly(3, (1, 2)),
     "assoc_laguerre": _growth_orthogonal_poly(2, (1,)),
 }
 
@@ -4997,6 +5084,33 @@ def _table_function_bound(node, memo: dict) -> tuple[float | None, str | None]:
             return None, None
         return None, (f"{name}() cannot be safely bounded as a nested argument: "
                        "no growth estimate is defined for it")
+    if name == "binomial" and not _binomial_n_is_confirmed_nonneg_int(node, memo):
+        # THE-1095 round 15 (grok issue 1): `_growth_2n` (the `_GROWTH_
+        # BOUNDS["binomial"]` entry `growth` resolved to, above) is only
+        # sound for a confirmed non-negative integer `n` — see its own
+        # docstring. Outside that domain, resolve `k` (position 1,
+        # ordinarily UNBOUNDED here — see `_UNBOUNDED_POSITIONS`'s own
+        # comment, unchanged — so it was never added to `bounds` by the
+        # position loop above) directly, the SAME way `_binomial_k_
+        # violation` already does for the top-level case, and use
+        # `_growth_binomial_general` instead, which needs `k` to be
+        # sound at all. An unresolved/symbolic `k` here means NO growth
+        # bound can be claimed at all -- `(None, None)`, the same
+        # "unresolved, not a violation" shape a genuinely symbolic
+        # argument already gets elsewhere in this function, which the
+        # CALLER (checking the outer table function's own argument cap)
+        # then correctly treats as an unresolved, non-symbolic argument
+        # and refuses -- `unknown != safe`, not "assume the tight bound
+        # still applies."
+        k_log = None
+        if len(node.args) >= 2 and not node.args[1].free_symbols:
+            k_log_num, k_log_den, k_resolved, k_violation = _resolve_arg_magnitude(
+                node.args[1], memo)
+            if k_violation:
+                return None, k_violation
+            if k_resolved:
+                k_log = k_log_num - k_log_den
+        return _growth_binomial_general(bounds.get(0), k_log), None
     return growth(bounds), None
 
 
@@ -5098,6 +5212,221 @@ def _n_precision_violation(node, memo: dict) -> str | None:
     return None
 
 
+#: THE-1095 round 15 (coordinator addendum, correction round): measured
+#: `summation(NAME(x), (x, 1, N))` for every VALUE-kind table name, at
+#: `N` in `{50, 200, 1463}`, `timeout 8` (dev box, sympy 1.14.0) — see
+#: `tests/test_bug_sweep.py`'s own property check for the full table
+#: this was derived from. A name absent here either raises on a bare
+#: SYMBOLIC argument at all (`rf`/`ff`/`nextprime`/`isprime`/`prime`/
+#: `primorial`/`motzkin` — `NAME(x)` itself fails to construct, so
+#: `summation` never even reaches a per-term cost question for it) or
+#: is not a value-kind table name in the first place — for either,
+#: `_SUMMATION_SUMMAND_DEFAULT_TABLE_NAME_CAP` (below) applies instead,
+#: conservative because it was never measured. Four names measured
+#: BORDERLINE-to-dangerous at the full `MAX_HEAVY_ARG`: `catalan`
+#: (2.427s), `bell` (6.129s), `genocchi` (1.590s), `andre` (TIMEOUT
+#: past 8s) — each comfortably under 1s at `N=200` instead, which is
+#: what they get capped to; every other measured name stayed under 1s
+#: even at the FULL `MAX_HEAVY_ARG`, so gets that cap.
+_SUMMATION_SUMMAND_TABLE_NAME_RANGE_CAP: dict[str, int] = {
+    "factorial": MAX_HEAVY_ARG, "factorial2": MAX_HEAVY_ARG,
+    "subfactorial": MAX_HEAVY_ARG, "fibonacci": MAX_HEAVY_ARG,
+    "lucas": MAX_HEAVY_ARG, "tribonacci": MAX_HEAVY_ARG,
+    "primepi": MAX_HEAVY_ARG, "npartitions": MAX_HEAVY_ARG,
+    "totient": MAX_HEAVY_ARG, "divisor_sigma": MAX_HEAVY_ARG,
+    "partition": MAX_HEAVY_ARG, "mobius": MAX_HEAVY_ARG,
+    "catalan": 200, "bell": 200, "genocchi": 200, "andre": 200,
+}
+#: Conservative fallback for a table name this module bounds but that
+#: was not part of the timing sweep above (a digit-kind name like
+#: `divisors`/`factorint`, a pole-sensitive one, or an orthogonal
+#: polynomial) — `unknown != safe`, never assumed as cheap as the
+#: measured majority.
+_SUMMATION_SUMMAND_DEFAULT_TABLE_NAME_CAP = 50
+
+
+def _summand_table_name_range_cap(summand) -> int | None:
+    """The tightest per-name range-length cap among every TABLE-BOUNDED
+    name `summand`'s own tree contains, or `None` if it contains none
+    at all — an ordinary polynomial/rational summand (`x**2`, `1/x`)
+    has NO range-length restriction here: SymPy's own closed-form
+    summation formulas (Faulhaber, geometric series, ...) handle a
+    huge range instantly regardless of magnitude, confirmed live
+    (`summation(x**2, (x, 1, 10**6))`, comfortably fast) — the digit-
+    based OUTPUT ceiling is what still protects an oversized RESULT
+    from a table-free summand (`summation(2**x, (x, 1, 10**5))`).
+    A table-bounded summand is different: SymPy has no closed form for
+    (say) a sum of `factorial` values, so a huge range risks literal
+    term-by-term construction — `bell(x)` summed for `x` in `1..1463`
+    measured 6.1s despite every INDIVIDUAL `bell(k)` being comfortably
+    within `bell`'s own cap; this is an AGGREGATE cost, independent of
+    `_summation_product_violation`'s own per-term boundary check,
+    below.
+    """
+    from sympy import Function, preorder_traversal
+    caps = []
+    for sub in preorder_traversal(summand):
+        if isinstance(sub, Function):
+            sub_name = type(sub).__name__
+            if sub_name in _SUMMATION_SUMMAND_TABLE_NAME_RANGE_CAP:
+                caps.append(_SUMMATION_SUMMAND_TABLE_NAME_RANGE_CAP[sub_name])
+            elif sub_name in _recognized_function_names() and sub_name not in (
+                    "summation", "product", "Sum", "Product"):
+                caps.append(_SUMMATION_SUMMAND_DEFAULT_TABLE_NAME_CAP)
+    return min(caps) if caps else None
+
+
+def _summation_product_violation(node, memo: dict) -> str | None:
+    """Reason a `summation`/`product`/`Sum`/`Product` call is unsafe, or
+    `None` if `node` is not one of these, or every limit it carries is
+    safe.
+
+    THE-1095 round 15 (coordinator addendum): `_unbounded_generic_call_
+    violation`'s own "at least one non-symbolic argument" trigger never
+    fires for `summation(factorial(x), (x, 1, 10**6))` — the LIMITS
+    argument is a `Tuple(x, 1, 10**6)`, and `.free_symbols` on that
+    Tuple is non-empty (it CONTAINS the bound variable `x`), so the
+    whole argument reads as "symbolic enough," letting an otherwise-
+    UNMEASURED name (`summation` left `_MEASURED_SAFE_CALLABLES` this
+    round) evaluate for real regardless of the LITERAL bounds hiding
+    inside that same Tuple — confirmed live, and PRE-EXISTING on
+    `origin/main` too (no ceiling of any kind there at all): `summation
+    (factorial(x), (x, 1, 10**6))`, `summation(x**x, (x, 1, 10**5))`,
+    and `summation(binomial(1463, x), (x, 0, 1463))` all exceed 8s.
+
+    Two checks per Tuple-shaped limit `(var, lower, upper)`: (1) EACH
+    bound resolved and digit-capped (an absurdly large literal LIMIT is
+    refused regardless of what it is a limit of); (2) the BOUNDARY term
+    itself (the summand with `var` replaced by the resolved upper
+    limit) walked through THIS module's own ordinary per-function cap
+    machinery (`_numeric_ceiling_scan`) — `summation(factorial(x), (x,
+    1, 1464))` refuses on `factorial`'s OWN cap this way, independent
+    of range length; (3) the RANGE LENGTH itself capped per `_summand_
+    table_name_range_cap` — a MEASURED, per-name limit for a summand
+    containing a table-bounded function, since even every INDIVIDUAL
+    term staying in-cap does not bound the AGGREGATE cost of computing
+    many of them (`bell(x)` for `x` in `1..1463`: 6.1s, despite
+    `bell(1463)` alone being fine).
+
+    `summation`/`product` are themselves PLAIN, EAGER Python functions
+    (like `jacobi_normalized` — see that name's own table-row comment)
+    — they compute for REAL the instant called, `evaluate=False` or
+    not — so this check MUST run on the DEFERRED (inert-stand-in) tree,
+    the SAME "refuse before the real parse ever touches it" ordering
+    every other eager-callable fix in this module already depends on;
+    `Sum`/`Product` (lazy `Function` subclasses) get the identical
+    check for free, since it runs by NAME regardless of laziness.
+    """
+    name = type(node).__name__
+    if name not in ("summation", "product", "Sum", "Product"):
+        return None
+    if len(node.args) < 2:
+        return None
+    from sympy import Integer, sympify
+
+    summand = node.args[0]
+    range_cap = _summand_table_name_range_cap(summand)
+    for limit_arg in node.args[1:]:
+        if type(limit_arg).__name__ != "Tuple" or len(limit_arg.args) != 3:
+            continue  # a bare Symbol limit (unbounded) -- not this check's concern
+        var, lo, hi = limit_arg.args
+        for bound_arg, label in ((lo, "lower"), (hi, "upper")):
+            if bound_arg.free_symbols:
+                continue
+            if bound_arg.is_infinite:
+                # THE-1095 round 15 (coordinator correction): `oo`/`-oo`
+                # is a genuine, symbolic SPECIAL VALUE this module never
+                # needs to digit-cap or magnitude-resolve -- SymPy's own
+                # closed-form summation/integration (`summation(1/x**2,
+                # (x, 1, oo)) == pi**2/6`) handles it directly, and there
+                # is no literal MAGNITUDE here to be a hazard at all.
+                continue
+            b_log_num, _b_log_den, b_resolved, b_violation = _resolve_arg_magnitude(bound_arg, memo)
+            if b_violation:
+                return b_violation
+            if not b_resolved:
+                return (f"the {label} limit of {name}() cannot be safely bounded: "
+                        "computing it would take an unbounded amount of time and memory")
+            if _digit_count_over_cap_for_node(bound_arg, "num", b_log_num, MAX_NUMERIC_DIGITS):
+                return (f"the {label} limit of {name}() exceeds the digit limit of "
+                        f"{MAX_NUMERIC_DIGITS}: it cannot be rendered as a decimal string")
+        if lo.free_symbols or hi.free_symbols:
+            continue
+        lo_val = _resolve_exact_rational(lo, memo)
+        hi_val = _resolve_exact_rational(hi, memo)
+        if lo_val is None or hi_val is None:
+            continue
+        if var in summand.free_symbols:
+            boundary_term = summand.xreplace({var: sympify(Integer(hi_val))
+                                               if hi_val.q == 1 else sympify(hi_val)})
+            term_violation = _numeric_ceiling_scan(boundary_term, memo)
+            if term_violation:
+                return (f"the boundary term of {name}() (at {var}={hi_val}) is unsafe: "
+                        f"{term_violation}")
+        # THE-1095 round 15: INCLUSIVE term count (`hi - lo + 1`), matching
+        # the sweep this cap table was measured against (`summation(NAME
+        # (x), (x, 1, N))`, lo always 1 -- `N` terms, not `N - 1`).
+        term_count = hi_val - lo_val + 1
+        if range_cap is not None and term_count > range_cap:
+            return (f"the range of {name}() ({term_count} terms) exceeds the "
+                    f"limit of {range_cap} for a summand containing a bounded table "
+                    "function: computing it would take an unbounded amount of time "
+                    "and memory")
+    return None
+
+
+def _integrate_limit_violation(node, memo: dict) -> str | None:
+    """Reason an `integrate`/`Integral` call's own numeric LIMITS are
+    unsafe, or `None` if `node` is not one of these, or every limit is
+    safe.
+
+    THE-1095 round 15 (coordinator addendum): `_arg_hides_numeric`'s own
+    new Tuple-awareness (see that function's own docstring) means
+    `integrate`'s `(x, 0, 1)`-shaped limit argument — like `summation`'s
+    — now reads as "hides a numeric," which would otherwise route
+    `integrate` into `_unbounded_generic_call_violation`'s flat refusal
+    (default-deny; `integrate` left `_MEASURED_SAFE_CALLABLES` this
+    round, grok issue 2's own finding) and break `integrate(x**2, (x,
+    0, 1))` — ordinary, safe, `origin/main`-matching calculator input.
+
+    UNLIKE `summation`/`product`, `integrate` needs neither a range-
+    length cap nor a boundary-term walk: SymPy's own closed-form
+    integration of a polynomial/rational integrand is fast regardless
+    of a literal bound's magnitude (confirmed live — the DANGER here
+    is only an unrenderable OUTPUT, not aggregate per-term cost), and
+    the existing post-evaluation digit ceiling already catches that
+    promptly (`integrate(x**200, (x, 0, 10**1000))` measured well
+    under a second to refuse, before this round's own changes and
+    after). Only the limits' own digit count is capped here, so a
+    caller cannot force this module to even ATTEMPT rendering an
+    absurdly large literal bound as part of an error message or a
+    later resolution step.
+    """
+    name = type(node).__name__
+    if name not in ("integrate", "Integral"):
+        return None
+    for limit_arg in node.args[1:]:
+        if type(limit_arg).__name__ != "Tuple" or len(limit_arg.args) != 3:
+            continue
+        _var, lo, hi = limit_arg.args
+        for bound_arg, label in ((lo, "lower"), (hi, "upper")):
+            if bound_arg.free_symbols:
+                continue
+            if bound_arg.is_infinite:
+                continue  # see _summation_product_violation's own comment on oo/-oo
+            b_log_num, _b_log_den, b_resolved, b_violation = _resolve_arg_magnitude(
+                bound_arg, memo)
+            if b_violation:
+                return b_violation
+            if not b_resolved:
+                return (f"the {label} limit of {name}() cannot be safely bounded: "
+                        "computing it would take an unbounded amount of time and memory")
+            if _digit_count_over_cap_for_node(bound_arg, "num", b_log_num, MAX_NUMERIC_DIGITS):
+                return (f"the {label} limit of {name}() exceeds the digit limit of "
+                        f"{MAX_NUMERIC_DIGITS}: it cannot be rendered as a decimal string")
+    return None
+
+
 def _series_order_violation(node, memo: dict) -> str | None:
     """Reason `series(expr, x, x0, n, dir)`'s own ORDER argument
     (position 3, the number of terms to expand) exceeds this module's
@@ -5142,6 +5471,35 @@ def _series_order_violation(node, memo: dict) -> str | None:
     return None
 
 
+def _binomial_n_is_confirmed_nonneg_int(node, memo: dict) -> bool:
+    """`True` iff `node` is a `binomial(n, k)` call whose own FIRST
+    argument (`n`) resolves to a confirmed non-negative INTEGER — the
+    ONE domain where `binomial.eval()`'s own `k > n` short-circuit to
+    `0` applies in O(1) (so `k` genuinely needs no cap at all), the
+    `_growth_2n` bound (`<= 2**n`) is sound, and the result is
+    guaranteed to be a plain `Integer`, never a fraction.
+
+    THE-1095 round 15 (grok issue 1, `verify-1095-r14-grok.log`): THREE
+    call sites each independently re-derived this exact same domain
+    check (`_binomial_k_violation`, below; `_table_function_bound`'s own
+    binomial growth special-case; `_INTEGER_VALUED_TABLE_NAMES`'s own
+    two consumers, `_divisor_lower_log10`/`_evalf_coercion_cheap`) —
+    factored out once here so the domain definition cannot drift between
+    them the way it already had (see `_table_function_bound`'s own
+    comment for the growth-bound bug this exact drift caused: `binomial`
+    sat in `_INTEGER_VALUED_TABLE_NAMES` UNCONDITIONALLY even though
+    `C(1/2, 1) = 1/2` is a plain fraction, not an integer, for the same
+    non-integer-`n` domain this function excludes).
+    """
+    if type(node).__name__ != "binomial" or len(node.args) < 1:
+        return False
+    n_arg = node.args[0]
+    if n_arg.free_symbols:
+        return False
+    n_val = _resolve_exact_rational(n_arg, memo)
+    return n_val is not None and n_val.q == 1 and n_val >= 0
+
+
 def _binomial_k_violation(node, memo: dict) -> str | None:
     """Reason `binomial(n, k)`'s own SECOND argument (`k`, deliberately
     left UNBOUNDED for the ordinary case — see `_UNBOUNDED_POSITIONS`'s
@@ -5169,11 +5527,8 @@ def _binomial_k_violation(node, memo: dict) -> str | None:
     """
     if type(node).__name__ != "binomial" or len(node.args) < 2:
         return None
-    n_arg = node.args[0]
-    if not n_arg.free_symbols:
-        n_val = _resolve_exact_rational(n_arg, memo)
-        if n_val is not None and n_val.q == 1 and n_val >= 0:
-            return None  # binomial.eval()'s own O(1) k > n shortcut applies
+    if _binomial_n_is_confirmed_nonneg_int(node, memo):
+        return None  # binomial.eval()'s own O(1) k > n shortcut applies
     k_arg = node.args[1]
     if k_arg.free_symbols:
         return None
@@ -5213,7 +5568,9 @@ def _recognized_function_names() -> frozenset:
             frozenset(_FUNCTION_ARG_CAPS) | _EVALF_COERCION_NAMES
             | frozenset(_POLE_SENSITIVE_NAMES) | _MEASURED_SAFE_CALLABLES
             | frozenset(_DEFERRED_BINOP_OPS)
-            | frozenset({"N", "Mod", "Max", "Min", "floor", "ceiling", "frac", "series"})
+            | frozenset({"N", "Mod", "Max", "Min", "floor", "ceiling", "frac", "series",
+                         "summation", "product", "Sum", "Product",
+                         "integrate", "Integral"})
             | frozenset(EvaluateFalseTransformer.functions)
         )
     return _RECOGNIZED_FUNCTION_NAMES
@@ -5259,10 +5616,39 @@ def _unbounded_generic_call_violation(node) -> str | None:
     name = type(node).__name__
     if name in _recognized_function_names():
         return None
-    if any(not arg.free_symbols for arg in node.args):
+    if any(_arg_hides_numeric(arg) for arg in node.args):
         return (f"{name}() is not in the bounded function set: computing it "
                 "with a numeric argument is not safely bounded")
     return None
+
+
+def _arg_hides_numeric(arg) -> bool:
+    """`True` if `arg` is itself non-symbolic (the original, pre-round-
+    15 check), OR is a `Tuple`/`list`/`set`/`frozenset` container whose
+    own MEMBERS include at least one non-symbolic element.
+
+    THE-1095 round 15 (coordinator addendum, fix a): `arg.free_symbols`
+    on a CONTAINER argument is non-empty as soon as ANY element
+    contains a symbol anywhere in it — hiding a purely-numeric SIBLING
+    element from every check that only ever asks "is this whole
+    argument symbolic," the exact shape `summation(factorial(x), (x,
+    1, 10**6))`'s own `Tuple(x, 1, 10**6)` has: the bound variable `x`
+    alone makes the WHOLE tuple read as "symbolic enough," even though
+    the literal `10**6` sits right next to it, completely unexamined.
+    `summation`/`product`/`Sum`/`Product` themselves now have their own
+    dedicated check (`_summation_product_violation`) and are excluded
+    from this one entirely (`_recognized_function_names()`) — this
+    widening exists for every OTHER, currently unknown or future
+    callable with a similar "container argument mixing a symbol with a
+    literal" shape, so the class stays closed generically rather than
+    name-by-name.
+    """
+    if not arg.free_symbols:
+        return True
+    from sympy import Tuple
+    if isinstance(arg, (Tuple, list, tuple, set, frozenset)):
+        return any(not member.free_symbols for member in arg)
+    return False
 
 
 def _measured_safe_argument_cap_violation(node, memo: dict) -> str | None:
@@ -5276,21 +5662,22 @@ def _measured_safe_argument_cap_violation(node, memo: dict) -> str | None:
     THE-1095 round 14 (coordinator review of 7630e87): the measurement
     only confirms a SMALL, representative argument grid stays fast
     (`scripts/measure_safe_callables.py`'s own `PROBE_SHAPES` — small
-    integers, a small `Rational`/`Float`, a `Symbol`) — it says NOTHING
-    about a caller-supplied LARGE value, which was never probed at all.
+    integers, a small `Rational`/`Float`, a `Symbol`, and — round 15,
+    grok issue 2b — a HUGE `Rational`/`Float` too now) — it says
+    NOTHING about a caller-supplied LARGE value the grid never probed.
     `_deferred_global_dict`'s own generic fallback now gives a measured-
     safe name the SAME inert stand-in every unbounded name gets (round
     13's own first draft exempted it from the stand-in too, which would
     have let `randMatrix(5000, 5000)` — a large-value shape genuinely
     NEVER measured — execute eagerly during the scan regardless of
     anything this function does). Capped generically at `MAX_HEAVY_ARG`
-    for any INTEGER argument (the coordinator's own spec: "value-kind
-    1463 on integer args"); a `Rational`/`Float` or a genuinely symbolic
-    argument is left alone (the coordinator's own spec: "Float/Rational
-    allowed, symbolic allowed") — the measurement grid already probed
-    representative ones of each and found them fast regardless of an
-    INTEGER'S OWN magnitude being the one axis that scales a plain
-    constructor/algorithm's own cost for this class of callable.
+    for ANY resolved, non-symbolic argument — Integer, Rational, or
+    Float alike (round 15, grok issue 2a: round 14's own text exempted
+    Rational/Float from this cap entirely, which grok's own review
+    found concrete allowlisted names — `nsimplify`, `egyptian_fraction`,
+    `continued_fraction*` — that DO scale with a Rational's/Float's own
+    magnitude, not only an Integer's); only a genuinely SYMBOLIC
+    argument is left alone.
     """
     from sympy import Function
 
@@ -5314,7 +5701,20 @@ def _measured_safe_argument_cap_violation(node, memo: dict) -> str | None:
     name = type(node).__name__
     if name not in _MEASURED_SAFE_CALLABLES:
         return None
+    # THE-1095 round 15 (coordinator addendum, fix a): a `Tuple`/`list`/
+    # `set` argument is walked MEMBER-by-member — the same "a container
+    # can mix a symbol with a hidden literal" gap `_arg_hides_numeric`
+    # closes for the default-deny path, applied here to the generic
+    # per-argument cap instead: each numeric member gets the SAME
+    # `MAX_HEAVY_ARG` cap an ordinary top-level argument would.
+    from sympy import Tuple as _Tuple5
+    values_to_check = []
     for arg in node.args:
+        if isinstance(arg, (_Tuple5, list, tuple, set, frozenset)):
+            values_to_check.extend(arg)
+        else:
+            values_to_check.append(arg)
+    for arg in values_to_check:
         if arg.free_symbols:
             continue
         arg_log_num, arg_log_den, arg_resolved, arg_violation = _resolve_arg_magnitude(arg, memo)
@@ -5327,13 +5727,32 @@ def _measured_safe_argument_cap_violation(node, memo: dict) -> str | None:
         # `is_integer` (structural, sympy's own), not `isinstance(arg,
         # Integer)` -- a COMPUTED integer-valued argument (`1000+463`,
         # still an `Add` node under `evaluate=False`) is exactly as much
-        # a magnitude hazard as a literal one; only a genuine `Rational`/
-        # `Float` (`arg.is_integer` is `False`/`None` for either) is
-        # exempt, per the measurement's own scope.
-        if not arg.is_integer:
-            continue  # Rational/Float -- allowed, per the measurement's own scope
+        # a magnitude hazard as a literal one.
+        #
+        # THE-1095 round 15 (grok issue 2a, `verify-1095-r14-grok.log`):
+        # round 14's own exemption for a non-integer `arg` (`Rational`/
+        # `Float`, INCLUDING an integer-VALUED nested table result whose
+        # own node type merely isn't a plain `Integer` -- `factorial(6)`
+        # `is_integer` is actually `True` so that specific shape was
+        # already covered, but `nsimplify`/`Float`-precision-style
+        # arguments were not) matched the coordinator's ORIGINAL round-
+        # 14 spec text ("Float/Rational allowed") but grok's own review
+        # found concrete allowlisted names whose cost DOES scale with a
+        # Rational's/Float's own magnitude, not merely an Integer's
+        # (`nsimplify`/`egyptian_fraction`/`continued_fraction*` on a
+        # long decimal or high-precision `Float`) -- exempting them
+        # let a caller-supplied huge `Rational`/`Float` slip past this
+        # cap entirely for ANY measured-safe callable, not just the
+        # three grok actually measured. The magnitude check now applies
+        # UNCONDITIONALLY to every resolved, non-symbolic argument
+        # (Integer, Rational, or Float alike) -- `_resolve_arg_
+        # magnitude` already reports `(log_num, log_den)` uniformly for
+        # all three, so there was never a technical reason to special-
+        # case Integer here, only the coordinator's own original
+        # (narrower) spec text, which this round's own finding
+        # supersedes.
         if (arg_log_num - arg_log_den) > math.log10(MAX_HEAVY_ARG):
-            return (f"an integer argument to {name}() exceeds the limit of "
+            return (f"an argument to {name}() exceeds the limit of "
                     f"{MAX_HEAVY_ARG} for a callable this module has only "
                     "measured at small magnitudes: computing it would take "
                     "an unbounded amount of time and memory")
@@ -6275,8 +6694,22 @@ def _exact_literal_log10(node) -> float | None:
 #: `zeta`, `gamma`, `loggamma`, `polygamma`) — none of those three
 #: shapes can serve as a `//` divisor's lower bound (see
 #: `_divisor_lower_log10`'s own docstring).
+#:
+#: THE-1095 round 15 (grok issue 1): `binomial` is deliberately ALSO
+#: excluded here now — it is integer-valued ONLY for a confirmed non-
+#: negative integer `n` (`C(1/2, 1) = 1/2`, a plain fraction, is the
+#: counter-example), a condition this flat, node-independent frozenset
+#: cannot express. `_divisor_lower_log10` (below) special-cases
+#: `binomial` explicitly instead, via `_binomial_n_is_confirmed_nonneg_
+#: int` (which — unlike this frozenset — has the `node`/`memo` a real
+#: per-call domain check needs); `_evalf_coercion_cheap` does not
+#: (its own signature has no `memo` to check with) and simply falls
+#: through to its OWN resolved-magnitude check for every `binomial`
+#: call now — safe either way (a slightly more conservative "not
+#: proven a no-op integer coercion" instead of an unconditional `True`
+#: that was never sound for the whole domain to begin with).
 _INTEGER_VALUED_TABLE_NAMES = frozenset({
-    "factorial", "factorial2", "subfactorial", "binomial", "fibonacci",
+    "factorial", "factorial2", "subfactorial", "fibonacci",
     "lucas", "tribonacci", "catalan", "primorial", "prime", "primepi",
     "rf", "ff", "npartitions", "totient", "divisor_sigma", "bell",
     "genocchi", "motzkin", "andre", "partition", "nextprime", "mobius",
@@ -6311,6 +6744,17 @@ def _divisor_lower_log10(node, memo: dict) -> float | None:
     from sympy import Function
 
     name = type(node).__name__
+    # THE-1095 round 15 (grok issue 1): `binomial` is not in
+    # `_INTEGER_VALUED_TABLE_NAMES` at all any more (see that
+    # frozenset's own comment) — checked here explicitly instead, via
+    # the SAME confirmed-non-negative-integer-`n` domain check
+    # `_binomial_k_violation`/`_table_function_bound` already use, since
+    # THIS function has the `memo` a real per-call check needs.
+    if (isinstance(node, Function) and type(node).__name__ == "binomial"
+            and _binomial_n_is_confirmed_nonneg_int(node, memo)):
+        _bound, violation = _table_function_bound(node, memo)
+        if violation is None:
+            return 0.0
     if isinstance(node, Function) and name in _INTEGER_VALUED_TABLE_NAMES:
         _bound, violation = _table_function_bound(node, memo)
         if violation is None:
@@ -6847,6 +7291,12 @@ def _numeric_ceiling_scan(tree, memo: dict) -> str | None:
         series_violation = _series_order_violation(node, memo)
         if series_violation:
             return series_violation
+        summation_violation = _summation_product_violation(node, memo)
+        if summation_violation:
+            return summation_violation
+        integrate_violation = _integrate_limit_violation(node, memo)
+        if integrate_violation:
+            return integrate_violation
         binomial_k_violation = _binomial_k_violation(node, memo)
         if binomial_k_violation:
             return binomial_k_violation
@@ -7158,6 +7608,15 @@ def reject_explosive(tree) -> str | None:
                 series_violation = _series_order_violation(node, memo)
                 if series_violation:
                     return series_violation
+            if isinstance(node, Function) and type(node).__name__ in (
+                    "summation", "product", "Sum", "Product"):
+                summation_violation = _summation_product_violation(node, memo)
+                if summation_violation:
+                    return summation_violation
+            if isinstance(node, Function) and type(node).__name__ in ("integrate", "Integral"):
+                integrate_violation = _integrate_limit_violation(node, memo)
+                if integrate_violation:
+                    return integrate_violation
             if isinstance(node, Function) and type(node).__name__ == "binomial":
                 binomial_k_violation = _binomial_k_violation(node, memo)
                 if binomial_k_violation:

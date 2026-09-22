@@ -2352,7 +2352,12 @@ _EXTRA_CALL_ARGS = {"root": ", 2", "rf": ", 2", "ff": ", 2", "binomial": ", 5",
                      **dict.fromkeys(
                          ("gegenbauer", "assoc_legendre", "assoc_laguerre"),
                          ", 1, x"),
-                     "jacobi": ", 1, 1, x"}
+                     "jacobi": ", 1, 1, x",
+                     # THE-1095 round 15 (coordinator addendum): `jacobi_
+                     # normalized(n, a, b, x)` mirrors `jacobi`'s own
+                     # shape exactly -- see its own `_FUNCTION_ARG_CAPS`
+                     # entry's comment for why it needed one at all.
+                     "jacobi_normalized": ", 1, 1, x"}
 # THE-1095: every name below EXCEPT `root` (structural, see above) is now
 # exercised by BOTH layers for a genuinely COMPUTED argument. Before this
 # round, the "value"-kind branch (`_HEAVY_FUNCTIONS`) only ever got the
@@ -2880,6 +2885,7 @@ _TRAILING_ARGS_AFTER_TESTED_POSITION = {
     ("gegenbauer", 1): ", 1", ("assoc_legendre", 1): ", 1",
     ("assoc_laguerre", 1): ", 1",
     ("jacobi", 1): ", 1, 1", ("jacobi", 2): ", 1",
+    ("jacobi_normalized", 1): ", 1, 1", ("jacobi_normalized", 2): ", 1",
 }
 for _fn_name, _extra_positions in _se5._EXTRA_BOUNDED_POSITIONS.items():
     _first_arg = "5"  # comfortably under every position-0 cap in the table
@@ -4871,16 +4877,79 @@ for _expr in ("binomial(1/2, 1000000)", "binomial(1/2, 10000)"):
           f"is sound only for a non-negative-integer n",
           _v is None and _e is not None and _e[0] == "ceiling",
           f"-> value={_v!r} err={_e!r}")
+# THE-1095 round 15 (grok issue 1, `verify-1095-r14-grok.log`):
+# `binomial(1/2, 1463)` used to "still evaluate" here on the strength
+# of `_growth_2n`'s own UNSOUND estimate for a non-integer `n` (~0.15,
+# reading only `n`, never `k`) staying under the digit ceiling by
+# ACCIDENT -- the same unsoundness that let `factorial(binomial(1/2,
+# 1463))` sail through `factorial`'s own cap check with the identical
+# wrong-but-small number (see `_growth_binomial_general`'s own
+# docstring for the fix and why it is deliberately LOOSE rather than
+# exactly tight). The now-SOUND bound is loose enough that the AT-the-
+# k-cap case is conservatively refused instead -- a DELIBERATE
+# narrowing, the same "closing a real unsoundness is worth a false
+# refusal on this one narrow shape" trade this file already makes
+# elsewhere (`binomial(1463+1, 0)`, `rf`/`ff`'s own `k` cap, ...) --
+# `binomial(1/2, 10)`, below, confirms ordinary small-`k` fractional-`n`
+# use is untouched.
 _v, _e = _boundary_parse("binomial(1/2, 1463)")
-check("THE-1095 round 13 follow-up (Codex issue B): 'binomial(1/2, "
-      "1463)' (non-integer n, k AT the cap) still evaluates",
-      _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+check("THE-1095 round 15 (grok issue 1): 'binomial(1/2, 1463)' "
+      "(non-integer n, k AT the cap) now conservatively refuses -- the "
+      "growth bound that used to let this through was unsound (see "
+      "_growth_binomial_general)",
+      _v is None and _e is not None and _e[0] == "ceiling",
+      f"-> value={_v!r} err={_e!r}")
 _v, _e = _boundary_parse("binomial(5, 10**9)")
 check("THE-1095 round 13 follow-up (Codex issue B): 'binomial(5, "
       "10**9)' (integer n, k > n) is UNAFFECTED -- still the O(1) "
       "k > n shortcut, 0",
       _v is not None and str(_v) == "0" and _e is None,
       f"-> value={_v!r} err={_e!r}")
+
+# THE-1095 round 15 (grok issue 1, coordinator's own named pins): a
+# NESTED `binomial(1/2, 1463)` (non-integer n, k at the cap) now
+# refuses PROMPTLY through every one of these three consumers, instead
+# of `_growth_2n`'s own unsound (n-only, k-blind) estimate letting the
+# outer function's cap check see a wrong, tiny magnitude. Confirmed
+# live (bare `sp.factorial`/`sp.bell`/`<<` of this exact Rational, and
+# this module's OWN pre-round-15 code, checked out from d713821):
+# NONE of the three actually hangs on `origin/main` either (`factorial`
+# stays symbolically unevaluated in ~0.2ms, `bell`/`<<` raise a native
+# `ValueError`/`TypeError` in under a millisecond) -- the true VALUE of
+# `binomial(1/2, 1463)` is a small fraction (`~5.3e-6`), not the huge
+# NUMBER `_growth_2n`'s own wrong estimate implied either way. This
+# module refuses them anyway, deliberately more conservative than
+# main: `_growth_2n` was never a SOUND bound outside a confirmed non-
+# negative integer `n` regardless of whether THIS specific (n, k) pair
+# happens to be benign, and "unknown != safe" means a formula this
+# file cannot prove correct does not get to stay in service on the
+# strength of one example not currently exploiting it.
+for _expr, _outer in (
+    ("factorial(binomial(1/2, 1463))", "factorial"),
+    ("bell(binomial(1/2, 1463))", "bell"),
+    ("1 << binomial(1/2, 1463)", "<<"),
+):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round 15 (grok issue 1): {_expr!r} ({_outer} of a "
+          f"nested non-integer-n binomial at the k cap) refuses "
+          f"promptly -- the growth bound now correctly accounts for k",
+          _v is None and _e is not None and _e[0] == "ceiling" and _dt < 1.0,
+          f"-> value={_v!r} err={_e!r} elapsed={_dt:.3f}s")
+
+_v, _e = _boundary_parse("binomial(1/2, 10)")
+check("THE-1095 round 15 (grok issue 1, coordinator's own pin): "
+      "'binomial(1/2, 10)' (non-integer n, small k) is UNAFFECTED -- "
+      "still evaluates to the exact rational main gives",
+      _e is None and str(_v) == "-2431/262144", f"-> value={_v!r} err={_e!r}")
+
+_v, _e = _boundary_parse("factorial(binomial(6, 3))")
+check("THE-1095 round 15 (grok issue 1, coordinator's own pin): "
+      "'factorial(binomial(6, 3))' (integer n, the confirmed-safe "
+      "domain _growth_2n stays dedicated to) is UNAFFECTED -- still "
+      "evaluates to 20!",
+      _e is None and str(_v) == "2432902008176640000", f"-> value={_v!r} err={_e!r}")
 
 # Issue A(i): the six repros Codex's own review measured accepted/hung.
 for _expr in (
@@ -4915,6 +4984,98 @@ check("THE-1095 round 13 follow-up (Codex issue A): 'series(exp(x), x, "
       "0, 100000)' (Codex's own named repro) refuses",
       _v is None and _e is not None and _e[0] == "ceiling",
       f"-> value={_v!r} err={_e!r}")
+
+# THE-1095 round 15 (coordinator addendum + correction, on top of the
+# regenerated measured-safe allowlist): `jacobi_normalized` (a PLAIN,
+# EAGER function like `divisors`/`isprime` -- see its own `_FUNCTION_
+# ARG_CAPS` entry) measured allowlisted despite hanging past 8s at
+# `n=1463` -- no heavy probe shape ever put the HEAVY value in POSITION
+# 0 of a 4-argument call. Given a dedicated table row instead (mirrors
+# `jacobi`'s own cap/growth exactly) and removed from the allowlist.
+_v, _e = _boundary_parse("jacobi_normalized(1463, 1, 2, x)")
+check("THE-1095 round 15: 'jacobi_normalized(1463, 1, 2, x)' (the "
+      "fail-open the regenerated allowlist measured into) now refuses "
+      "promptly instead of hanging",
+      _v is None and _e is not None and _e[0] == "ceiling",
+      f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("jacobi_normalized(3, 1, 2, x)")
+check("  ...and jacobi_normalized(3, 1, 2, x) (an ordinary small case) "
+      "still evaluates",
+      _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+
+# `summation`/`product`/`Sum`/`Product`'s own limits are `Tuple(var, lo,
+# hi)` -- `.free_symbols` on that Tuple is non-empty purely because it
+# CONTAINS the bound variable, hiding a literal numeric bound from
+# `_unbounded_generic_call_violation`'s own "any non-symbolic argument"
+# check entirely. Confirmed PRE-EXISTING on `origin/main` too (no
+# ceiling there at all): all three hang past 8s on bare SymPy.
+for _expr in (
+    "summation(factorial(x), (x, 1, 10**6))",
+    "summation(x**x, (x, 1, 10**5))",
+    "summation(binomial(1463, x), (x, 0, 1463))",
+):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round 15 (Tuple-hidden-limit fail-open, pre-"
+          f"existing on main too): {_expr!r} refuses promptly instead "
+          f"of hanging",
+          _v is None and _e is not None and _e[0] == "ceiling" and _dt < 2.0,
+          f"-> value={_v!r} err={_e!r} elapsed={_dt:.3f}s")
+
+# ...and ordinary numeric-limit usage keeps working, matching main --
+# `integrate` needed the identical Tuple-limit fix (`_integrate_limit_
+# violation`), since `_arg_hides_numeric`'s own new Tuple-awareness
+# would otherwise ALSO route it into the generic default-deny refusal.
+_SUMMATION_STILL_WORKS = (
+    ("integrate(x**2, (x, 0, 1))", "1/3"),
+    ("summation(x, (x, 1, 10))", "55"),
+    ("summation(x**2, (x, 1, 10**6))", "333333833333500000"),
+    ("summation(1/x**2, (x, 1, oo))", "pi**2/6"),
+    ("product(x, (x, 1, 20))", "2432902008176640000"),
+)
+for _expr, _want in _SUMMATION_STILL_WORKS:
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 15: {_expr!r} still evaluates, matching main",
+          _e is None and str(_v) == _want, f"-> value={_v!r} err={_e!r}")
+
+# The digit-based output ceiling (unaffected by this round's own fix)
+# still catches an oversized RESULT for both `summation` and
+# `integrate`, and the boundary-term walk catches a term that would
+# itself exceed its own table function's cap, independent of range
+# length.
+_SUMMATION_STILL_REFUSES = (
+    "summation(2**x, (x,1,10**5))",
+    "summation(1/x, (x, 1, 10**6))",
+    "integrate(x**200, (x, 0, 10**1000))",
+    "summation(factorial(x), (x, 1, 1464))",
+)
+for _expr in _SUMMATION_STILL_REFUSES:
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 15: {_expr!r} still refuses, matching this "
+          f"module's own pre-existing ceiling behavior",
+          _v is None and _e is not None and _e[0] == "ceiling",
+          f"-> value={_v!r} err={_e!r}")
+
+# Property check (coordinator's own correction round): the per-table-
+# name summand range-length cap, at its own measured edge -- AT the
+# cap evaluates, one OVER refuses. Table built from `timeout 8`
+# measurements of `summation(NAME(x), (x, 1, N))` at N in
+# {50, 200, 1463} (dev box, sympy 1.14.0); see `_SUMMATION_SUMMAND_
+# TABLE_NAME_RANGE_CAP`'s own comment for the full data and why four
+# names (catalan/bell/genocchi/andre) get a tighter cap than the rest.
+for _name, _cap in _se5._SUMMATION_SUMMAND_TABLE_NAME_RANGE_CAP.items():
+    _at_expr = f"summation({_name}(x), (x, 1, {_cap}))"
+    _over_expr = f"summation({_name}(x), (x, 1, {_cap + 1}))"
+    _v, _e = _boundary_parse(_at_expr)
+    check(f"THE-1095 round 15 (range-cap property, AT the edge): "
+          f"{_at_expr!r} evaluates ({_name} capped at {_cap})",
+          _e is None, f"-> value={str(_v)[:40]!r} err={_e!r}")
+    _v, _e = _boundary_parse(_over_expr)
+    check(f"THE-1095 round 15 (range-cap property, ONE OVER the edge): "
+          f"{_over_expr!r} refuses",
+          _v is None and _e is not None and _e[0] == "ceiling",
+          f"-> value={_v!r} err={_e!r}")
 
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== ALL BUG-SWEEP REGRESSIONS FIXED ===")
