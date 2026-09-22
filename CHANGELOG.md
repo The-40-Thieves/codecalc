@@ -806,6 +806,87 @@ behind it.
   (across both signs) and `gamma` (its own `z >= 1` domain, integers and
   rationals spanning the dip).
 
+  **Round 12 (grok FAILED 4d94871, `verify-1095-r10-grok.log`): "every
+  one of these is a magnitude-only bound fed to a sign/pole-dependent
+  formula" — the round-10/11 structural mandate, now implemented in
+  full.**
+
+  New repros: `gamma(-1-10**-6)` (magnitude ~1.000001 >= 1, right next
+  to the pole at `z = -1` — the round-11 `|z| >= 1` domain row only
+  ever checked MAGNITUDE, never sign), `zeta(2, 1/1000)` (`a < 1` drops
+  the `a**-s` term instead of refusing — its true value is `~10**6`,
+  not `< zeta(2)`), `zeta(1 + 10**-6)` (the pole at `s = 1`, which the
+  round-11 sign-safe envelope formula never excluded), `erf(7*I)`
+  (`erfi(7) ~= 1.6*10**20`, vastly exceeding the round-11 `e**|k|`
+  complex-trig bound's own `e**7 ~= 1096` — that bound is simply the
+  WRONG growth rate for `erf`/`tanh`), `sin(I)` refused (a bare `I` is
+  not a `Mul`, so the round-11 modulus check never even tried), and
+  `gamma(1/2)`/`digamma(1/2)`/`loggamma(1/2)` refused at the TOP level
+  vs `sqrt(pi)`/etc. on main (round 11's domain rows were too broad —
+  they restricted position 0 there too, where no hazard exists).
+
+  Structural fix, not patched name by name: `_resolve_exact_rational`
+  (new) returns the EXACT `Rational` value of a subtree — an `Integer`/
+  `Rational`/`Float` literal directly, or a `Mul`/`Add`/`Pow`(integer
+  exponent)/marker of exactly-resolvable pieces, composed for real with
+  a digit-count guard checked after every step — or `None` if the value
+  is not exactly rational at all (a `NumberSymbol`, an irrational `Pow`,
+  a transcendental table result, a bare `I`). `gamma`/`loggamma`/
+  `digamma`/`polygamma`/`zeta`(both arities)/`sin`/`cos`/`tanh`/`erf`/
+  `exp` — `_pole_sensitive_magnitude`, new — now REQUIRE this exact
+  value for their own argument(s) whenever NESTED (inside another
+  bounded position, or under `floor`/`ceiling`/`Abs`/`Max`/`Min`/a
+  marker that itself feeds one), checking a real domain directly on it
+  (`z >= 1` for the gamma family; exact integer `s <= 0` or exact
+  `s >= 2` for single-arg zeta; exact integer `s >= 2` AND exact `a >=
+  1` for two-arg zeta — `a >= 1` only ever SHRINKS the sum from its own
+  `a = 1` value, so no separate `a` term is needed once both are
+  in-domain, unlike round 11's own silently-clamped `max(1.0, a)`; an
+  exact real rational for `sin`/`cos`/`tanh`/`erf` — `|value| <= 1`
+  always, for ANY real argument, sidestepping `tan`'s own poles and
+  `erfi`'s own `e**(x**2)` growth entirely rather than trying to bound
+  either — and for `exp`, whose SIGNED exact value drives `e**x`
+  directly, fixing `exp(-10)`'s own false refusal: the round-11 formula
+  read `-10` back as magnitude `10`, i.e. as if it were `+10`) — never
+  merely a magnitude. The round-11 `e**|k|` complex-trig bound is
+  DELETED, not patched a second time.
+
+  Top-level domain rows for `gamma`/`loggamma`/`digamma` removed
+  entirely (`_MAGNITUDE_AT_LEAST_ONE_DOMAIN_POSITIONS` now empty) —
+  confirmed live that `origin/main` never performs a genuinely unbounded
+  computation for a bare call to any of these three at an arbitrary
+  exact rational (always stays symbolic instantly, or computes a small
+  closed form) — so `gamma(1/2)`, `digamma(1/2)`, `loggamma(1/2)`,
+  `gamma(-1.5)` (away from any pole), and `zeta(1 + 10**-6)` (single-
+  arg, already unrestricted) evaluate exactly as main does again.
+  `digamma`'s own real-construction rewrite to `polygamma(0, z)` (a
+  long-documented quirk) meant `polygamma`'s OWN top-level `z` row had
+  to move too — but polygamma genuinely has a top-level hazard for a
+  NONZERO order (`polygamma(1463, 1)` alone: ~3997 true digits), so its
+  own walk now resolves `order` EXACTLY (not via magnitude — this
+  module's own "exact zero maps to magnitude 0.0" print-profile
+  convention, established for an unrelated purpose, made `order = 0`
+  and `order = 1` indistinguishable through a magnitude alone) and
+  skips the check entirely when `order` is confirmed exactly `0`
+  (`digamma` in disguise), applying the exact-domain `z >= 1` gate only
+  when it is genuinely nonzero.
+
+  Pinned: all seven grok repros refuse in well under a second;
+  `factorial(floor(gamma(5)))` = 24!, `factorial(ceiling(Abs(sin(5))))`
+  = 1, `factorial(floor(exp(-10)))` = 1 (`exp(-10)` shrinks toward 0,
+  no longer false-refused), `factorial(floor(zeta(2)*10))` = 16!
+  (`zeta(2)` itself is irrational — not exactly rational — but the
+  CONSUMER here is `floor`, whose own cheap-coercion gate only needs a
+  small resolved magnitude, and `zeta(2)`'s own `s = 2 >= 2` domain
+  still resolves that magnitude safely), `factorial(ceiling(Abs(sin(
+  I))))` refuses (main: `2` — a deliberate, documented complex
+  narrowing, the same "unknown != safe" bar already applied elsewhere).
+  A focused property sweep (`tests/test_bug_sweep.py`) exercises
+  negatives, `(0, 1)` rationals, half-integers, `s` near `1`, `a` in
+  `(0, 1)`, and imaginary arguments as OUTSIDE-domain points (all
+  refuse when nested) alongside a small inside-domain point per name
+  (all evaluate).
+
 ## [0.13.0] — 2026-09-21
 
 ### Fixed

@@ -563,50 +563,42 @@ def _bounded_positions(name: str):
 _NONNEGATIVE_DOMAIN_POSITIONS: dict = {
     "binomial": frozenset({0}),
     "harmonic": frozenset({1}),
-    # #326 finding (grok, round 11 addendum): the Hurwitz-zeta identity
-    # `_growth_polygamma` relies on assumes a POSITIVE `z`, not merely
-    # `|z| >= 1` (see `_MAGNITUDE_AT_LEAST_ONE_DOMAIN_POSITIONS`'s own
-    # entry, below, for the magnitude half of this same position) —
-    # `polygamma(2, -1.5)` stays symbolic on `origin/main` (no closed
-    # numeric form main itself computes, confirmed live) despite `|z| =
-    # 1.5 >= 1`, so the magnitude-only domain line alone under-restricts
-    # this one position. Both rules apply together: `z` must be a real
-    # number that is BOTH non-negative AND magnitude >= 1.
-    "polygamma": frozenset({1}),
 }
 
-#: #326 finding C, continued: `polygamma(order, z)` near `z`'s own pole
-#: (`z <= 0`, and — this module's chosen, simpler domain line, per the
-#: coordinator's own "require |z| >= 1 or refuse" — any `|z| < 1` at
-#: all) blows up in a way `_growth_polygamma`'s own order-aware formula
-#: (below) does not attempt to bound: `polygamma(1463, 1)` alone (order
-#: dominates, `z` comfortably >= 1) already has a true log10 magnitude
-#: of ~3997.36 — close to `MAX_NUMERIC_DIGITS` on its OWN, well-behaved
-#: domain — and the near-pole regime only gets worse from there. `z`'s
-#: own MAGNITUDE (not its type) is what this domain rule reads, via the
-#: SAME `_resolve_arg_magnitude` result the ordinary cap check already
-#: computed — no separate resolution needed.
-#:
-#: #326 finding (grok, round 11 addendum to coordinator replay of
-#: 9fe4f6a): `digamma`/`gamma`/`loggamma` share the identical near-zero
-#: pole shape (`psi(z) ~ -1/z`, `Gamma(z) ~ 1/z` as `z -> 0`) that
-#: `_growth_digamma`'s own OLD "z <= 1 -> tiny constant" branch and
-#: `gamma`/`loggamma`'s shared `_growth_nn_loose` catch-all (which reads
-#: `n <= 1 -> 0.0`, the SAME wrong assumption) both got backwards —
-#: `digamma(1e-6)`/`gamma(1e-6)` both have magnitude ~6 (not ~0):
-#: `factorial(floor(Abs(digamma(1e-6))))` and `factorial(floor(gamma(
-#: 1e-6)))` both construct a real, unbounded-for-this-module's-purposes
-#: result. Domain-restricted the SAME way `polygamma`'s own `z` already
-#: is: `|z| >= 1` or refuse.
+#: #326 finding (grok, round 12 review of 4d94871, `verify-1095-r10-
+#: grok.log`): `digamma`/`gamma`/`loggamma`/`polygamma` used to share
+#: THIS table (rounds 9 and 11's own fix), restricting `z`'s TOP-LEVEL
+#: magnitude to `>= 1`. Two problems: it only checked MAGNITUDE, never
+#: SIGN (`gamma(-1 - 10**-6)`, magnitude ~1.000001 >= 1, PASSED right
+#: next to the pole at `z = -1`) — the identical bug class already named
+#: for `_growth_zeta`; and separately, `origin/main` itself essentially
+#: NEVER performs a genuinely unbounded computation for a bare,
+#: TOP-LEVEL call to any of these four at an arbitrary exact rational —
+#: confirmed live: `gamma(-1-10**-6)`, `zeta(1+10**-6)`, `gamma(1/2)`,
+#: `digamma(1/2)` (which REWRITES to `polygamma(0, 1/2)` at real
+#: construction — the module's own long-documented rename quirk) all
+#: either stay symbolic instantly or compute a small, fast, exact
+#: closed form; even `polygamma(1463, z)` at a large ORDER only
+#: computes for a `z` SymPy already has a closed form for (an integer,
+#: or a handful of special rationals like `1/2`), and every such case
+#: measured is bounded, fast, and well under `MAX_NUMERIC_DIGITS` (its
+#: own position-0 "value" cap on the ORDER, unaffected by anything
+#: here, is what actually keeps that bounded — `_HEAVY_FUNCTIONS`'
+#: existing `MAX_HEAVY_ARG` entry). There never was a genuine TOP-LEVEL
+#: `z`-driven hazard for any of these four to guard against — the REAL
+#: hazard is entirely in a WRAPPER (`floor`/`ceiling`/`factorial`'s own
+#: argument position) that forces a numeric coercion on the result,
+#: handled instead by `_pole_sensitive_magnitude`'s own EXACT-value-
+#: gated domain checks, which apply uniformly to the NESTED case
+#: regardless of which wrapper does the coercing. Removed here (top
+#: level) entirely for all four — `gamma(1/2) == sqrt(pi)`,
+#: `digamma(1/2)`, `loggamma(1/2)`, `gamma(-1.5)` (away from any pole),
+#: and `polygamma(2, -1.5)` (stays symbolic on main) all evaluate
+#: exactly as main does again.
 #:
 #: name -> frozenset of positions that must resolve to a value with
 #: magnitude >= 1 (`log10(|value|) >= 0`) or the call is refused.
-_MAGNITUDE_AT_LEAST_ONE_DOMAIN_POSITIONS: dict = {
-    "polygamma": frozenset({1}),
-    "digamma": frozenset({0}),
-    "gamma": frozenset({0}),
-    "loggamma": frozenset({0}),
-}
+_MAGNITUDE_AT_LEAST_ONE_DOMAIN_POSITIONS: dict = {}
 
 
 def _domain_violation(name: str, position: int, arg, arg_log_num: float, arg_log_den: float) -> str | None:
@@ -910,29 +902,62 @@ def _growth_harmonic(bounds: dict) -> float:
 
 def _growth_polygamma(bounds: dict) -> float:
     """`polygamma(order, z)` at order 0 (`digamma`) is `harmonic(z-1) -
-    EulerGamma`, itself tiny (logarithmic in `z`). For `order >= 1`,
-    `polygamma(order, z) = (-1)**(order+1) * order! * zeta(order+1, z)`
-    exactly, and `zeta(s, z) <= zeta(2) < 2` for any `z >= 1`, `s >= 2`
-    (#326 finding B, Codex round 9: the OLD formula ignored `order`
-    entirely, reading `z` alone — `polygamma(1463, 1)`'s true log10
-    magnitude is ~3997.36, the OLD formula claimed ~1). `z`'s own domain
-    (`|z| >= 1`, enforced separately — see `_MAGNITUDE_AT_LEAST_ONE_
-    DOMAIN_POSITIONS`) is what keeps `zeta(order+1, z) < 2` provable at
-    all; this formula is never reached with `z < 1` for THIS name's own
-    direct call (the domain check refuses first), but stays a safe
-    fallback for a NESTED, still-unresolved `z` position too."""
+    EulerGamma`, itself tiny (logarithmic in `z`) for `z >= 1`, and
+    `~ -1/z` near the pole at `z = 0` for ANY `z` — bounded either way
+    by `max(log10(log(z)+2), log10(1/z))`. For `order >= 1`, `polygamma(
+    order, z) = (-1)**(order+1) * order! * zeta(order+1, z)` exactly,
+    and `zeta(s, z) <= zeta(2) < 2` for any `z >= 1`, `s >= 2` (#326
+    finding B, Codex round 9: the OLD formula ignored `order` entirely,
+    reading `z` alone — `polygamma(1463, 1)`'s true log10 magnitude is
+    ~3997.36, the OLD formula claimed ~1) — but that identity needs
+    `z >= 1` to hold, so `order >= 1` with `z < 1` refuses (`inf`) as a
+    domain this module has not derived a safe bound for, the same "an
+    unknown, not merely a magnitude, is what a pole-sensitive formula
+    needs" bar `_pole_sensitive_magnitude` already holds `gamma`/
+    `digamma`/`loggamma` to.
+
+    #326 finding (grok, round 12 review of 4d94871): `order = 0` (a bare
+    `digamma` call, which REWRITES to `polygamma(0, z)` at real
+    construction regardless of `evaluate=False` — the module's own long-
+    documented rename quirk) used to ALSO refuse outright for `z < 1`
+    (`math.inf`, unconditionally) — wrong: `digamma(1/2)` (main:
+    `-2*log(2) - EulerGamma`, tiny) hit this via the TOP-LEVEL
+    `_table_function_growth_violation` walk, which reads THIS formula
+    directly (not `_pole_sensitive_magnitude`'s own, now-EXACT-value-
+    gated `digamma` branch — that branch is only reached when `digamma`
+    is NESTED, before the real-construction rewrite happens). Order 0
+    (or an unresolved/absent order — the same "no evidence of a large
+    order" default `digamma_term` already covers) now gets the SAME
+    logarithmic-or-near-pole bound regardless of `z`'s own side of 1,
+    since `digamma` genuinely has no factorial-scale blowup at ANY
+    finite `z` — only order >= 1's own Bernoulli-zeta identity does,
+    and ONLY once `z >= 1` is confirmed.
+    """
     z = _safe_pow10(bounds.get(1))
     if z is None:
         return math.inf
-    if z < 1:
-        return math.inf
-    digamma_term = math.log10(math.log(z) + 2) if z > 1 else 1.0
+    digamma_term = (math.log10(math.log(z) + 2) if z > 1
+                     else max(-math.log10(z), 0.0) + 0.5 if z > 0
+                     else math.inf)
+    if bounds.get("order_exact_zero"):
+        # #326 finding (grok, round 12 review of 4d94871): a caller that
+        # resolved `order` EXACTLY (`_pole_sensitive_magnitude`'s own
+        # `polygamma` branch) and found it genuinely `0` sets this flag
+        # — `_safe_pow10(bounds.get(0))` cannot itself distinguish
+        # `order = 0` from `order = 1` (both round-trip through this
+        # module's own "exact zero maps to magnitude 0.0" convention to
+        # `1.0`), so a caller that already knows the TRUE value bypasses
+        # that ambiguity here directly rather than feeding it back
+        # through the lossy magnitude round-trip.
+        return digamma_term
     order_log = bounds.get(0)
     if order_log is None:
         return digamma_term
     order = _safe_pow10(order_log)
     if order is None or order < 1:
         return digamma_term
+    if z < 1:
+        return math.inf  # order >= 1's own Bernoulli-zeta identity needs z >= 1
     # `order! * zeta(order+1, z)`, `zeta(...) < 2` for `z >= 1` -- a
     # `log10(2)` safety margin on top of the factorial term covers it.
     factorial_term = _growth_stirling_factorial({0: order_log}) + math.log10(2)
@@ -3863,12 +3888,52 @@ def _table_function_growth_violation(node, memo: dict) -> str | None:
         # violation`) already covers any position that DOES resolve to a
         # concrete, over-cap value even in a partially-symbolic call.
         return None
+    name = type(node).__name__
+    if name in _POLE_SENSITIVE_GROWTH_TOP_LEVEL_NAMES:
+        # #326 finding (grok, round 12 review of 4d94871): `gamma`/
+        # `loggamma`/`digamma`/single-arg `zeta` have NO genuine
+        # TOP-LEVEL hazard at all (confirmed live: `origin/main` never
+        # performs a genuinely unbounded computation for a bare call to
+        # any of these four at an arbitrary exact rational — see
+        # `_MAGNITUDE_AT_LEAST_ONE_DOMAIN_POSITIONS`'s own comment for
+        # the full account) — this walk SKIPS them entirely (`return
+        # None`) rather than reuse their own (nested-only) `_pole_
+        # sensitive_magnitude` domain check, which would otherwise
+        # incorrectly narrow `gamma(1/2)`, `digamma(1/2)`, `zeta(1 +
+        # 10**-6)`, etc. at the TOP level too.
+        return None
+    if name == "polygamma":
+        # `polygamma`, unlike the four above, DOES have a genuine
+        # TOP-LEVEL hazard — but only for a NONZERO order (`polygamma(
+        # 1463, 1)` alone has a true log10 magnitude of ~3997.36); order
+        # 0 is exactly `digamma` (either written directly, or reached
+        # via `digamma`'s own real-construction rewrite to `polygamma(0,
+        # z)` — the module's own long-documented rename quirk) and
+        # shares digamma's OWN "no genuine top-level hazard" exemption.
+        # Resolved EXACTLY (not via magnitude) specifically to tell
+        # order 0 apart from order 1 — see `_pole_sensitive_magnitude`'s
+        # own `polygamma` branch for the full account of why a magnitude
+        # alone cannot make that distinction at all.
+        if not node.args:
+            return None
+        order_v = _resolve_exact_rational(node.args[0], memo)
+        if order_v == 0:
+            return None
+        pole_result = _pole_sensitive_magnitude(node, memo)
+        if pole_result is None:
+            return None
+        pole_log_num, pole_log_den, pole_resolved, pole_violation = pole_result
+        if pole_violation:
+            return pole_violation
+        if not pole_resolved:
+            return None
+        return _digit_ceiling_text(pole_log_num - pole_log_den, f"the result of {name}(...)")
     bound, violation = _table_function_bound(node, memo)
     if violation:
         return violation
     if bound is None:
         return None
-    return _digit_ceiling_text(bound, f"the result of {type(node).__name__}(...)")
+    return _digit_ceiling_text(bound, f"the result of {name}(...)")
 
 
 #: `floor`/`ceiling`/`Abs`/`frac`/`sign`/`Max`/`Min` — the names
@@ -4147,27 +4212,30 @@ def _float_value_log10(node) -> float:
 #:
 #: name -> rule kind:
 #:   "bounded1"    — output magnitude is ALWAYS <= 1 regardless of the
-#:                    argument (`sign` in {-1,0,1}; `sin`/`cos`/`tanh`/
-#:                    `erf` bounded in [-1,1] for any real input).
+#:                    argument (`sign` in {-1,0,1}).
 #:   "passthrough" — output never exceeds the LARGEST argument's own
 #:                    magnitude (`Max`/`Min`, any arity).
 #:   "log"         — output grows far slower than the argument (`log`'s
 #:                    own magnitude is `~log10(log(argument's value))`,
 #:                    negligible next to any cap this module compares
 #:                    against).
-#:   "exp"         — the OPPOSITE direction: `exp(x)`'s own magnitude
-#:                    scales with `x`'s VALUE, not `x`'s digit count, so
-#:                    the argument itself must first be capped at `MAX_
-#:                    HEAVY_ARG` (the same "small argument, growing
-#:                    output" shape `_HEAVY_FUNCTIONS` already uses) —
-#:                    `exp(10**2000)` never reaches the point of
-#:                    computing a magnitude for THIS rule at all.
+#:
+#: #326 finding (grok, round 12 review of 4d94871): `sin`/`cos`/`tanh`/
+#: `erf`/`exp` used to live here too (`"bounded1"` for the first four,
+#: `"exp"` for the last) — moved OUT entirely, to `_pole_sensitive_
+#: magnitude`, which requires an EXACT value and checks a REAL domain
+#: on it (see that function's own docstring). The round-11 fix that
+#: lived here — bounding a non-real `sin`/`cos`/`tanh`/`erf` argument by
+#: `e**|k|` for an exactly-resolvable MODULUS — was itself WRONG:
+#: `erf(7*I)` (`erfi(7) ~= 1.6*10**20`) vastly exceeds `e**7 ~= 1096`,
+#: and `tanh`'s own poles (on the imaginary axis) are not a MAGNITUDE
+#: question at all — `tanh(I*15707/10000)` (`i*tan(15707/10000)`, `y`
+#: within a hair of `pi/2`) has no bounded-by-`e**|k|` growth rate to
+#: speak of. Deleted rather than patched a second time.
 _ELEMENTARY_BOUND_RULES: dict = {
-    "sign": "bounded1", "sin": "bounded1", "cos": "bounded1",
-    "tanh": "bounded1", "erf": "bounded1",
+    "sign": "bounded1",
     "Max": "passthrough", "Min": "passthrough",
     "log": "log",
-    "exp": "exp",
 }
 
 
@@ -4180,65 +4248,26 @@ def _elementary_function_magnitude(node, memo: dict) -> tuple[float, bool, str |
     """
     rule = _ELEMENTARY_BOUND_RULES[type(node).__name__]
     if rule == "bounded1":
-        name = type(node).__name__
-        if name == "sign":
-            if len(node.args) != 1:
-                return 0.0, True, None
-            # #326 finding (coordinator round 10 replay of 6e72d70,
-            # probe 2): `sign` DOES attempt to determine positivity/
-            # negativity for a concrete argument, which can fall back
-            # to the SAME expensive `evalf` floor/ceiling's own gate
-            # exists to avoid — gated identically.
-            a_log_num, a_log_den, a_resolved, a_violation = _resolve_arg_magnitude(node.args[0], memo)
-            if a_violation:
-                return 0.0, False, a_violation
-            if not a_resolved:
-                return None
-            if not _evalf_coercion_cheap(node.args[0], a_log_num, a_log_den):
-                return 0.0, False, ("the argument to sign() cannot be safely coerced "
-                                     "to a number: computing it would take an "
-                                     "unbounded amount of time and memory")
-            return 0.0, True, None
-        # #326 finding (grok, round 11 addendum to coordinator replay
-        # of 9fe4f6a): `sin`/`cos`/`tanh`/`erf` are bounded by 1 ONLY
-        # for a REAL argument — confirmed via SymPy 1.14, all four stay
-        # symbolic (never numerically evaluate) for a real transcendental
-        # argument regardless of its size, so `bounded1` is sound there.
-        # For a COMPLEX argument this is FALSE: `sin(20*I) == I*sinh(20)`,
-        # magnitude `sinh(20) ~= 2.4e8` — `bounded1` ignored the argument
-        # entirely, so `factorial(ceiling(Abs(sin(500*I))))` (`sinh(500)
-        # ~= 10**217`) passed every screen and did real, unbounded work.
-        # Standard bound for a complex argument: `|sin(z)|, |cos(z)|,
-        # |tanh(z)|, |erf(z)| <= e**|z|` — computed ONLY when `z`'s own
-        # MODULUS is exactly resolvable (a bare `I`, or `I` times an
-        # otherwise-resolvable real factor: `|I * k| == |k|`), refused
-        # otherwise rather than guessed at (this module has not derived
-        # a general complex-modulus resolver, and does not need one for
-        # any shape actually reachable through its own grammar).
+        # Only "sign" reaches this rule now (see `_ELEMENTARY_BOUND_
+        # RULES`'s own comment for why `sin`/`cos`/`tanh`/`erf` moved
+        # out).
         if len(node.args) != 1:
             return 0.0, True, None
-        arg = node.args[0]
-        if arg.is_real:
-            return 0.0, True, None
-        from sympy import I as _ImagUnit
-        from sympy import Integer as _Integer
-        from sympy import Mul as _Mul
-
-        if isinstance(arg, _Mul) and arg.args.count(_ImagUnit) == 1:
-            rest_factors = [f for f in arg.args if f is not _ImagUnit]
-            rest = _Mul(*rest_factors) if rest_factors else _Integer(1)
-            r_log_num, r_log_den, r_resolved, r_violation = _resolve_arg_magnitude(rest, memo)
-            if r_violation:
-                return 0.0, False, r_violation
-            if r_resolved:
-                r_log = r_log_num - r_log_den
-                r_value = _safe_pow10(r_log)
-                if r_value is not None:
-                    return r_value * math.log10(math.e), True, None
-        return 0.0, False, (f"the argument to {name}() is not provably real "
-                             "and cannot be safely bounded: computing it "
-                             "would take an unbounded amount of time and "
-                             "memory")
+        # #326 finding (coordinator round 10 replay of 6e72d70,
+        # probe 2): `sign` DOES attempt to determine positivity/
+        # negativity for a concrete argument, which can fall back
+        # to the SAME expensive `evalf` floor/ceiling's own gate
+        # exists to avoid — gated identically.
+        a_log_num, a_log_den, a_resolved, a_violation = _resolve_arg_magnitude(node.args[0], memo)
+        if a_violation:
+            return 0.0, False, a_violation
+        if not a_resolved:
+            return None
+        if not _evalf_coercion_cheap(node.args[0], a_log_num, a_log_den):
+            return 0.0, False, ("the argument to sign() cannot be safely coerced "
+                                 "to a number: computing it would take an "
+                                 "unbounded amount of time and memory")
+        return 0.0, True, None
     if rule == "passthrough":
         if not node.args:
             return 0.0, True, None
@@ -4261,9 +4290,9 @@ def _elementary_function_magnitude(node, memo: dict) -> tuple[float, bool, str |
                                      "memory")
             magnitudes.append(a_log_num - a_log_den)
         return max(magnitudes), True, None
-    # "log" and "exp" both take exactly one argument in `safe_global_dict()`
-    # (the multi-base `log(x, base)` two-arg form is not in this table at
-    # all — left unrecognised, same as before this rule table existed).
+    # rule == "log" -- the only remaining single-argument rule (`exp`
+    # moved to `_pole_sensitive_magnitude` — see `_ELEMENTARY_BOUND_
+    # RULES`'s own comment).
     if len(node.args) != 1:
         return None
     a_log_num, a_log_den, a_resolved, a_violation = _resolve_arg_magnitude(node.args[0], memo)
@@ -4272,40 +4301,26 @@ def _elementary_function_magnitude(node, memo: dict) -> tuple[float, bool, str |
     if not a_resolved:
         return None
     arg_log = a_log_num - a_log_den
-    if rule == "log":
-        # #326 finding (coordinator round 11 replay of 9fe4f6a, Codex
-        # round 9 probe 1): `log` in this module's namespace is the
-        # NATURAL log (`ln`), not `log10` — the OLD formula (`log10(
-        # abs(arg_log) + 10.0)`) treated `arg_log` (already `log10(
-        # |x|)`) as if it were roughly `|ln(x)|` itself, under-
-        # estimating by a factor of `ln(10) ≈ 2.303`: `log(10**1000)`'s
-        # true magnitude is `log10(|ln(10**1000)|) = log10(1000*ln(10))
-        # ≈ 3.362` (`|ln(x)| ≈ 2302.6`); the OLD formula claimed
-        # `log10(1010) ≈ 3.004` (`≈ 1009`), comfortably UNDER `bell`'s
-        # own `MAX_HEAVY_ARG` (1463) cap when the TRUE value (2302) is
-        # well OVER it — `bell(floor(log(10**1000)))` passed every
-        # screen and hung. `|ln(x)| = |arg_log| * ln(10)` exactly
-        # (`arg_log = log10(|x|)`, a base change), so `log10(|ln(x)|) =
-        # log10(|arg_log|) + log10(ln(10))` — verified against SymPy
-        # across a grid (`log(10**k)`, `log(2)`, `log(Rational(1,
-        # 10**k))`) to within float precision.
-        abs_arg_log = abs(arg_log)
-        if abs_arg_log < 1e-15:
-            return 0.0, True, None  # x ~= 1 -- ln(x) ~= 0, trivially tiny
-        return math.log10(abs_arg_log) + math.log10(math.log(10)), True, None
-    # rule == "exp": the argument's own VALUE (not its digit count) drives
-    # the result's magnitude -- capped at MAX_HEAVY_ARG first, the same
-    # "small argument, growing output" shape `_HEAVY_FUNCTIONS` already
-    # uses, so `_safe_pow10` below is never asked for an astronomical
-    # value.
-    if arg_log > math.log10(MAX_HEAVY_ARG):
-        return 0.0, False, (f"the argument to exp() exceeds the limit of {MAX_HEAVY_ARG}: "
-                             "computing it would take an unbounded amount of time and memory")
-    arg_value = _safe_pow10(arg_log)
-    if arg_value is None:
-        return 0.0, False, ("the argument to exp() cannot be safely bounded: computing it "
-                             "would take an unbounded amount of time and memory")
-    return arg_value * math.log10(math.e), True, None
+    # #326 finding (coordinator round 11 replay of 9fe4f6a, Codex
+    # round 9 probe 1): `log` in this module's namespace is the
+    # NATURAL log (`ln`), not `log10` — the OLD formula (`log10(
+    # abs(arg_log) + 10.0)`) treated `arg_log` (already `log10(
+    # |x|)`) as if it were roughly `|ln(x)|` itself, under-
+    # estimating by a factor of `ln(10) ≈ 2.303`: `log(10**1000)`'s
+    # true magnitude is `log10(|ln(10**1000)|) = log10(1000*ln(10))
+    # ≈ 3.362` (`|ln(x)| ≈ 2302.6`); the OLD formula claimed
+    # `log10(1010) ≈ 3.004` (`≈ 1009`), comfortably UNDER `bell`'s
+    # own `MAX_HEAVY_ARG` (1463) cap when the TRUE value (2302) is
+    # well OVER it — `bell(floor(log(10**1000)))` passed every
+    # screen and hung. `|ln(x)| = |arg_log| * ln(10)` exactly
+    # (`arg_log = log10(|x|)`, a base change), so `log10(|ln(x)|) =
+    # log10(|arg_log|) + log10(ln(10))` — verified against SymPy
+    # across a grid (`log(10**k)`, `log(2)`, `log(Rational(1,
+    # 10**k))`) to within float precision.
+    abs_arg_log = abs(arg_log)
+    if abs_arg_log < 1e-15:
+        return 0.0, True, None  # x ~= 1 -- ln(x) ~= 0, trivially tiny
+    return math.log10(abs_arg_log) + math.log10(math.log(10)), True, None
 
 
 #: #326 finding (coordinator round 10 replay of 6e72d70, probe 2): the
@@ -4366,6 +4381,387 @@ def _evalf_coercion_cheap(arg, arg_log_num: float, arg_log_den: float) -> bool:
     if isinstance(arg, Function) and type(arg).__name__ in _INTEGER_VALUED_TABLE_NAMES:
         return True
     return not _digit_count_over_cap(arg_log_num - arg_log_den, _MAX_EVALF_ARG_DIGITS)
+
+
+#: #326 finding (grok, round 12 review of 4d94871): the structural
+#: defect named across rounds 11 and 12 is the SAME each time — a
+#: MAGNITUDE-only value (this module's own `bounds`/`_resolve_arg_
+#: magnitude` convention, sign and small-value detail both discarded)
+#: fed to a formula whose correctness genuinely depends on the SIGN or
+#: the EXACT value, not merely an upper bound on `|value|`:
+#: `_growth_zeta` treating `|s| >= 2` as `s >= 2` (round 11), `gamma`/
+#: `digamma`'s own `|z| >= 1` domain row never checking SIGN at all
+#: (round 12 — `gamma(-1-10**-6)`, next to the pole at `z = -1`, has
+#: magnitude `~1.000001 >= 1` and passed), `_growth_zeta`'s own two-arg
+#: `a` term silently clamped to `max(1.0, a)` rather than REFUSING
+#: `a < 1` (`zeta(2, 1/1000)`'s true `a**-s` term is `10**6`, not
+#: bounded by `zeta(2) < 2`), and the `e**|k|` complex-trig bound
+#: (round 11) being flatly WRONG for `erf`/`tanh` (`erfi(7) ~= 10**20`,
+#: far past `e**7 ~= 1096`; `tan` has its OWN poles a magnitude bound on
+#: the coefficient alone cannot see at all).
+#:
+#: The fix, per the coordinator's own round-12 mandate: `gamma`/
+#: `loggamma`/`digamma`/`zeta`(both arities)/`sin`/`cos`/`tanh`/`erf`/
+#: `exp` may NEVER be bounded from a magnitude-only input again — each
+#: one, wherever it is NESTED (a table/elementary call inside another
+#: bounded position, or under `floor`/`ceiling`/`Abs`/`Max`/`Min`/a
+#: marker that itself feeds one), requires its OWN argument(s) to
+#: resolve to an EXACT `Rational` value first (`_resolve_exact_rational`,
+#: below), then checks ITS OWN domain directly ON that exact value
+#: (never a derived magnitude) before computing anything — refusing
+#: with the "cannot be safely bounded" message for ANY value outside
+#: that domain, OR for an argument that resolves (no free symbols) but
+#: is NOT exactly rational at all (a `NumberSymbol`, an irrational
+#: `Pow`, a transcendental table result like `zeta(2)` itself — genuinely
+#: unresolvable exactly, not merely large). `_growth_stirling_
+#: factorial`-family formulas for MONOTONE names (`factorial`/`bell`/
+#: `binomial`/`rf`/`ff`/`primorial`/`prime`/`nextprime`/`fibonacci`/...)
+#: are UNAFFECTED — those are sound from a magnitude (an UPPER bound on
+#: a known-non-negative-integer value) precisely because they are
+#: monotone increasing in that magnitude; none of the nine names here
+#: are (each has a pole, a sign-dependent branch, or both), so a
+#: magnitude alone is never enough for them.
+_POLE_SENSITIVE_NAMES = frozenset({
+    "gamma", "loggamma", "digamma", "polygamma", "zeta",
+    "sin", "cos", "tanh", "erf", "exp",
+})
+
+#: Of the ten `_POLE_SENSITIVE_NAMES`, ONLY these four are also members
+#: of `_GROWTH_BOUNDS` (so `_table_function_growth_violation`'s own
+#: unconditional walk — a DIFFERENT check from `_resolve_arg_magnitude`'s
+#: own pole-sensitive interception, used for the NESTED case — would
+#: otherwise reach them for a BARE, TOP-LEVEL call too). `_table_
+#: function_growth_violation` skips all four entirely there — see its
+#: own comment for why none of them has a genuine top-level hazard.
+#: `polygamma` (also in `_GROWTH_BOUNDS`) is handled by its OWN
+#: dedicated branch in that same function instead, since ITS top-level
+#: exemption depends on whether `order` is exactly `0` (`digamma` in
+#: disguise) or not. `sin`/`cos`/`tanh`/`erf`/`exp` were never
+#: `_GROWTH_BOUNDS` members at all, so `_table_function_growth_
+#: violation`'s own gate already excludes them before this even matters.
+_POLE_SENSITIVE_GROWTH_TOP_LEVEL_NAMES = frozenset({"gamma", "loggamma", "digamma", "zeta"})
+
+#: log10(cap) for the "value"-kind arg-cap entries these nine names
+#: already carry via `_FUNCTION_ARG_CAPS`/`_HEAVY_FUNCTIONS` (all
+#: `MAX_HEAVY_ARG`) — reused so `_pole_sensitive_magnitude`'s own
+#: growing branches (zeta's Bernoulli envelope, exp's `e**x`) stay
+#: capped consistently with the ordinary per-position check that ALSO
+#: still runs for these names' position 0, rather than a second,
+#: independently-drifting threshold.
+_POLE_SENSITIVE_GROWTH_CAP_LOG10 = math.log10(MAX_HEAVY_ARG)
+
+
+def _exact_rational_too_big(value) -> bool:
+    """Whether an exact `Rational`'s own numerator or denominator has
+    grown past a small digit guard — checked after EVERY compose step
+    in `_resolve_exact_rational` (never only at the end), so composing
+    a chain of exact values can never itself become the unbounded
+    operation this module exists to prevent. `_MAX_EVALF_ARG_DIGITS`
+    (200, `MAX_SYMBOLIC_EXPONENT`) is reused rather than a fourth guard
+    constant with the same intent."""
+    return (value.p.bit_length() > 700 or value.q.bit_length() > 700)
+
+
+def _resolve_exact_rational(node, memo: dict):
+    """The EXACT `sympy.Rational` value of `node`, if — and only if —
+    it is computable from small literals without ever approximating or
+    guessing: an `Integer`/`Rational` literal directly; a `Float`
+    literal via its own EXACT binary-to-rational conversion (a `Float`
+    always represents one finite binary fraction exactly, never an
+    approximation, unlike converting it through `log`/`pow`); a `Mul`/
+    `Add`/`Pow`(integer exponent)/marker (`<<`/`>>`/`%`/`//`) of
+    exactly-resolvable pieces, composed for real (never estimated) with
+    `_exact_rational_too_big` checked after every step so an
+    adversarial chain cannot blow up the composition itself. `None` for
+    anything else — a free symbol, a `NumberSymbol` (`pi`/`E`/...,
+    genuinely irrational, no exact rational value exists), an
+    irrational `Pow` (non-integer exponent), a transcendental table
+    result (`zeta(2)`, `gamma(5.5)`, ...), or a chain that grew past the
+    size guard — `unknown/irrational != safe`, the same bar this
+    module already holds every other unresolvable shape to.
+
+    Used ONLY by `_pole_sensitive_magnitude` (below) — every OTHER
+    consumer in this module keeps using `_resolve_arg_magnitude`'s own
+    magnitude-only contract, which is sufficient (and cheaper) for a
+    monotone, non-negative-integer-valued name.
+    """
+
+    if node.free_symbols:
+        return None
+    key = id(node)
+    cache = memo.setdefault("__exact_rational__", {})
+    if key in cache:
+        return cache[key]
+    result = _resolve_exact_rational_uncached(node, memo)
+    cache[key] = result
+    return result
+
+
+def _resolve_exact_rational_uncached(node, memo: dict):
+    from sympy import Add, Float, Integer, Mul, Pow, Rational
+
+    if isinstance(node, Integer):
+        return Rational(int(node))
+    if isinstance(node, Rational):
+        return node
+    if isinstance(node, Float):
+        try:
+            value = Rational(node)
+        except (TypeError, ValueError):
+            return None
+        return None if _exact_rational_too_big(value) else value
+    if isinstance(node, Mul):
+        total = Rational(1)
+        for factor in node.args:
+            fv = _resolve_exact_rational(factor, memo)
+            if fv is None:
+                return None
+            total *= fv
+            if _exact_rational_too_big(total):
+                return None
+        return total
+    if isinstance(node, Add):
+        total = Rational(0)
+        for term in node.args:
+            tv = _resolve_exact_rational(term, memo)
+            if tv is None:
+                return None
+            total += tv
+            if _exact_rational_too_big(total):
+                return None
+        return total
+    if isinstance(node, Pow):
+        base, exp = node.args
+        if not isinstance(exp, Integer):
+            return None  # non-integer exponent: not generally exactly rational
+        exp_int = int(exp)
+        if abs(exp_int) > 2000:
+            return None
+        base_v = _resolve_exact_rational(base, memo)
+        if base_v is None:
+            return None
+        if base_v == 0 and exp_int < 0:
+            return None
+        result = base_v ** exp_int
+        return None if _exact_rational_too_big(result) else result
+    type_name = type(node).__name__
+    if type_name in _DEFERRED_BINOP_OPS:
+        left_v = _resolve_exact_rational(node.args[0], memo)
+        right_v = _resolve_exact_rational(node.args[1], memo)
+        if left_v is None or right_v is None:
+            return None
+        op = _DEFERRED_BINOP_OPS[type_name]
+        if op == "<<":
+            if not (right_v == int(right_v) and right_v >= 0 and right_v <= 2000):
+                return None
+            result = left_v * (2 ** int(right_v))
+        elif op == ">>":
+            if not (left_v == int(left_v) and right_v == int(right_v) and right_v >= 0):
+                return None
+            result = Rational(int(left_v) >> int(right_v))
+        elif op == "%":
+            if right_v == 0 or not (left_v == int(left_v) and right_v == int(right_v)):
+                return None
+            result = Rational(int(left_v) % int(right_v))
+        elif op == "//":
+            if right_v == 0:
+                return None
+            result = Rational((left_v.p * right_v.q) // (left_v.q * right_v.p))
+        else:
+            return None
+        return None if _exact_rational_too_big(result) else result
+    return None
+
+
+def _pole_sensitive_magnitude(node, memo: dict) -> tuple[float, float, bool, str | None] | None:
+    """`_resolve_arg_magnitude`'s own `(log_num, log_den, resolved,
+    violation)` contract, for a `gamma`/`loggamma`/`digamma`/`zeta`/
+    `sin`/`cos`/`tanh`/`erf`/`exp` node — or `None` if `node`'s own name
+    is not one of these nine (the caller falls through to whatever it
+    would otherwise have done, unaffected). See `_POLE_SENSITIVE_NAMES`'s
+    own comment for the full rationale.
+
+    Domain, per name (checked on the EXACT value, never a magnitude):
+      - `gamma`/`loggamma`/`digamma` (position 0): exact `z >= 1`.
+        `Gamma(z) <= ceil(z)!` (`_growth_gamma`'s own Stirling envelope,
+        reused directly); `loggamma` shares it (looser than needed, but
+        sound — `ln(Gamma(z))` is far smaller than `Gamma(z)` itself);
+        `digamma` uses its own existing logarithmic formula.
+      - `zeta` (position 0 only, single-arg): exact INTEGER `s <= 0` ->
+        the Bernoulli envelope on `|s|` (`_growth_zeta`'s own formula,
+        now always sound for a KNOWN sign); exact `s >= 2` (integer or
+        not) -> `zeta(s) < 2` (`log10(2)`); anything else (the pole at
+        `s = 1`, `s` in `(0, 2)` non-`>= 2`, ...) refuses.
+      - `zeta` (positions 0 AND 1, two-arg): exact integer `s >= 2` AND
+        exact `a >= 1` -> `zeta(s, a) <= zeta(s) < 2` (`a >= 1` only
+        ever SHRINKS the sum from its `a = 1` value, so no separate `a`
+        term is needed once both are in-domain); anything else refuses
+        — this closes `zeta(2, 1/1000)` (`a < 1` inflates the `a**-s`
+        term to `~10**6`, silently clamped to `max(1.0, a)` by the
+        round-11 formula instead of being refused).
+      - `sin`/`cos`: exact REAL rational `x` (an exact `Rational` IS a
+        real number by construction — no separate realness check
+        needed) -> `|sin(x)|, |cos(x)| <= 1` always, for ANY real `x`.
+      - `tanh`: exact real rational `x` -> `|tanh(x)| < 1` always for
+        REAL `x` (`tanh`'s only poles are on the imaginary axis,
+        `i*(pi/2 + k*pi)` — a non-real argument is refused outright,
+        sidestepping the pole entirely rather than trying to bound
+        `tan`'s own value near it).
+      - `erf`: exact real rational `x` -> `|erf(x)| < 1` always for real
+        `x` (`erfi`, `erf`'s own imaginary-axis restriction, grows like
+        `e**(x**2)` — `erf(7*I)` `~= 1.6*10**20` — refused the same way,
+        never estimated by an `e**|k|` bound, which the round-11 fix
+        used and grok showed is simply the WRONG growth rate for this
+        family).
+      - `exp`: exact real rational `x`, capped at `MAX_HEAVY_ARG` for
+        `x >= 0` (the ordinary "small argument, growing output" shape;
+        `x < 0` shrinks toward 0, always safe regardless of magnitude)
+        -> `exp(x) ~ 10**(x*log10(e))`, computed from the SIGNED exact
+        `x`, never a sign-discarded magnitude (`exp(-10)`'s true value
+        is tiny — `~4.5*10**-5` — but the round-11 formula read `-10`
+        back as magnitude `10`, i.e. as if it were `+10`, claiming an
+        astronomically large bound and false-refusing `factorial(floor(
+        exp(-10)))`).
+
+    A node whose relevant argument(s) are NOT exactly resolvable (not a
+    free symbol, but not exactly rational either — a bare `I`,
+    `zeta(2)` itself, `pi`, ...) refuses with the standard "cannot be
+    safely bounded" message — `unknown != safe`, never silently passed
+    through. A genuinely SYMBOLIC argument (has free symbols) is left
+    unresolved with no violation, matching this module's established
+    scope for a value that never materializes at all.
+    """
+    name = type(node).__name__
+    if name not in _POLE_SENSITIVE_NAMES:
+        return None
+
+    def _unresolved_or_violation(arg):
+        """`(handled, result)` — `handled=True` means the caller should
+        `return result` immediately (either "genuinely symbolic, leave
+        unresolved" or "cannot be safely bounded"); `handled=False`
+        means `arg` resolved to an exact Rational, available via the
+        SECOND call below."""
+        if arg.free_symbols:
+            return True, (0.0, 0.0, False, None)
+        value = _resolve_exact_rational(arg, memo)
+        if value is None:
+            message = (f"an argument to {name}() cannot be safely bounded: "
+                       "computing it would take an unbounded amount of time "
+                       "and memory")
+            return True, (0.0, 0.0, False, message)
+        return False, value
+
+    if name in ("gamma", "loggamma", "digamma"):
+        if not node.args:
+            return None
+        handled, result = _unresolved_or_violation(node.args[0])
+        if handled:
+            return result
+        z = result
+        if z < 1:
+            message = (f"an argument to {name}() cannot be safely bounded: computing "
+                       "it would take an unbounded amount of time and memory")
+            return 0.0, 0.0, False, message
+        if name == "digamma":
+            return _growth_digamma({0: math.log10(z)}), 0.0, True, None
+        return _growth_gamma({0: math.log10(z)}), 0.0, True, None
+
+    if name == "polygamma":
+        # `z` (position 1) needs the exact-value gate for the SAME pole
+        # reason as `gamma`/`digamma`/`loggamma` (`polygamma(order, z)
+        # ~ -order! / z**(order+1)` as `z -> 0`). `order` (position 0)
+        # ALSO needs an exact value here — not for a pole/sign reason
+        # (its own dependence really is monotone, an upper-bound
+        # magnitude would normally suffice), but because this module's
+        # own "exact zero maps to magnitude 0.0" convention (`_log10_
+        # num_den`'s own `Integer` handling, established for the print-
+        # profile question, long before this round) makes `order = 0`
+        # (a bare `digamma` call — see `_table_function_growth_
+        # violation`'s own comment on the rewrite) INDISTINGUISHABLE
+        # from `order = 1` through a magnitude alone: both round-trip
+        # to `_safe_pow10(0.0) == 1.0`. `digamma(1/2)` (`order` truly 0,
+        # genuinely safe) was wrongly treated as `order = 1` (needing
+        # `z >= 1`, which `1/2` fails) by exactly this ambiguity before
+        # `order` was resolved exactly here.
+        if len(node.args) < 2:
+            return None
+        order_v = _resolve_exact_rational(node.args[0], memo)
+        if order_v is None and node.args[0].free_symbols:
+            order_v = None  # genuinely symbolic order -- treated as absent below
+        elif order_v is None:
+            message = ("an argument to polygamma() cannot be safely bounded: "
+                       "computing it would take an unbounded amount of time and "
+                       "memory")
+            return 0.0, 0.0, False, message
+        handled, z_result = _unresolved_or_violation(node.args[1])
+        if handled:
+            return z_result
+        z = z_result
+        if z < 1:
+            message = ("an argument to polygamma() cannot be safely bounded: "
+                       "computing it would take an unbounded amount of time and "
+                       "memory")
+            return 0.0, 0.0, False, message
+        bounds = {1: math.log10(z)}
+        if order_v is not None:
+            bounds[0] = math.log10(abs(order_v)) if order_v != 0 else 0.0
+            # order == 0 stored as an EXACT flag, not the ambiguous
+            # magnitude-0.0 convention -- `_growth_polygamma` reads
+            # `_safe_pow10(bounds[0])` back as 1.0 for order 0 too, so
+            # pass the TRUE order value forward via a dedicated key
+            # instead of relying on that round-trip for this one case.
+            bounds["order_exact_zero"] = (order_v == 0)
+        return _growth_polygamma(bounds), 0.0, True, None
+
+    if name == "zeta":
+        if not node.args:
+            return None
+        handled, s_result = _unresolved_or_violation(node.args[0])
+        if handled:
+            return s_result
+        s = s_result
+        if len(node.args) >= 2:
+            handled_a, a_result = _unresolved_or_violation(node.args[1])
+            if handled_a:
+                return a_result
+            a = a_result
+            if s.is_integer and s >= 2 and a >= 1:
+                return math.log10(2), 0.0, True, None
+            message = ("an argument to zeta() cannot be safely bounded: computing "
+                       "it would take an unbounded amount of time and memory")
+            return 0.0, 0.0, False, message
+        if s.is_integer and s <= 0:
+            n1 = abs(int(s)) + 1
+            if n1 < 2:
+                return 1.0, 0.0, True, None
+            base = (_growth_stirling_factorial({0: math.log10(n1)})
+                     - n1 * math.log10(2 * math.pi) + math.log10(4))
+            return max(base, 0.0), 0.0, True, None
+        if s >= 2:
+            return math.log10(2), 0.0, True, None
+        message = ("an argument to zeta() cannot be safely bounded: computing it "
+                   "would take an unbounded amount of time and memory")
+        return 0.0, 0.0, False, message
+
+    # sin / cos / tanh / erf / exp -- all single-argument.
+    if len(node.args) != 1:
+        return None
+    handled, result = _unresolved_or_violation(node.args[0])
+    if handled:
+        return result
+    x = result
+    if name in ("sin", "cos", "tanh", "erf"):
+        return 0.0, 0.0, True, None  # |value| <= 1 for any exact real x
+    # name == "exp": the SIGNED exact value drives the bound directly --
+    # never a magnitude (see this function's own docstring for the
+    # `exp(-10)` false-refusal this replaces).
+    if x >= 0:
+        if x > MAX_HEAVY_ARG:
+            message = (f"the argument to exp() exceeds the limit of {MAX_HEAVY_ARG}: "
+                       "computing it would take an unbounded amount of time and memory")
+            return 0.0, 0.0, False, message
+        return float(x) * math.log10(math.e), 0.0, True, None
+    return 0.0, 0.0, True, None  # x < 0: exp(x) shrinks toward 0, always safe
 
 
 def _resolve_arg_magnitude(node, memo: dict) -> tuple[float, float, bool, str | None]:
@@ -4471,6 +4867,17 @@ def _resolve_arg_magnitude(node, memo: dict) -> tuple[float, float, bool, str | 
         # 10 in absolute value) — a generous, safe, constant bound, not a
         # growth formula, since none of them scale with anything.
         return math.log10(10), 0.0, True, None
+    if isinstance(node, Function) and type_name in _POLE_SENSITIVE_NAMES:
+        # #326 finding (grok, round 12 review of 4d94871): checked BEFORE
+        # both the generic `_FUNCTION_ARG_CAPS` table-growth path AND the
+        # `_ELEMENTARY_BOUND_RULES` path below — this REPLACES both for
+        # these nine names specifically, never falls through to either
+        # (a magnitude-only bound is never sound for a pole/sign-
+        # dependent formula — see `_pole_sensitive_magnitude`'s own
+        # docstring for the full account).
+        pole_result = _pole_sensitive_magnitude(node, memo)
+        if pole_result is not None:
+            return pole_result
     if isinstance(node, Function) and type_name in _FUNCTION_ARG_CAPS:
         bound, violation = _table_function_bound(node, memo)
         if violation:

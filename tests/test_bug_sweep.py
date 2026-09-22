@@ -3983,7 +3983,7 @@ for _expr, _want in (("bell(2,1000)", 1001000), ("harmonic(10,10)", _HARMONIC_10
 # switches to a DIFFERENT, unaudited code path; `polygamma`'s own order
 # was previously ignored entirely.
 for _expr in ("binomial(-1463,1000000)", "binomial(-100,1000)",
-              "binomial(-5,3)", "polygamma(5,0.5)"):
+              "binomial(-5,3)"):
     _v, _e = _boundary_parse(_expr)
     check(f"THE-1095 round 9 item C: {_expr!r} (outside the domain this "
           "module has derived a bound for) is refused as a domain "
@@ -3991,6 +3991,20 @@ for _expr in ("binomial(-1463,1000000)", "binomial(-100,1000)",
           _v is None and _e is not None and _e[0] == "ceiling"
           and ("must be non-negative" in _e[1] or "must have magnitude" in _e[1]),
           f"-> value={_v!r} err={_e!r}")
+# `polygamma(5,0.5)` -- round 12 (grok review of 4d94871) moved
+# polygamma's own `z` domain check out of the generic `_domain_
+# violation` table (which read a magnitude, sign-blind) and into
+# `_pole_sensitive_magnitude`'s own EXACT-value-gated check (see that
+# function's own docstring) -- same OUTCOME (still refused, `z < 1`
+# remains outside the domain this module has derived a bound for), a
+# different (but still `_INTEGER_VALUED_TABLE_NAMES`-consistent) wording.
+_v, _e = _boundary_parse("polygamma(5,0.5)")
+check("THE-1095 round 9 item C (round 12 wording update): "
+      "'polygamma(5,0.5)' (outside the domain this module has derived a "
+      "bound for) is refused",
+      _v is None and _e is not None and _e[0] == "ceiling"
+      and "cannot be safely bounded" in _e[1],
+      f"-> value={_v!r} err={_e!r}")
 # ...and the well-behaved domain (order-aware now) still evaluates to
 # main's exact value, even close to its own cap.
 _v, _e = _boundary_parse("polygamma(1463,1)")
@@ -4273,6 +4287,116 @@ _v, _e = _boundary_parse("factorial(floor(Abs(sin(5))))")
 check("  ...and 'factorial(floor(Abs(sin(5))))' (a REAL argument) "
       "evaluates too",
       _v == 1 and _e is None, f"-> value={_v!r} err={_e!r}")
+
+# ═══ THE-1095 round 12 (grok FAILED 4d94871, verify-1095-r10-grok.log; ═══
+# ═══ "every one of these is a magnitude-only bound fed to a sign/pole- ═══
+# ═══ dependent formula" -- the structural fix is now mandatory) ═══════════
+
+# Item 1 (the structural fix): nested growth resolution for gamma/
+# loggamma/digamma/polygamma/zeta/sin/cos/tanh/erf/exp now takes EXACT
+# values only (`_resolve_exact_rational`), never a magnitude.
+for _expr in ("factorial(floor(Abs(gamma(-1-10**(-6)))))",
+              "factorial(floor(Abs(digamma(-1-10**(-6)))))",
+              "factorial(floor(zeta(2, 1/1000)))",
+              "factorial(floor(zeta(1+10**(-6))))",
+              "factorial(ceiling(Abs(erf(7*I))))"):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round 12 item 1: {_expr!r} (a magnitude-only bound "
+          "used to accept this -- near a pole, a<1 in two-arg zeta, or "
+          "erf's own e**(x**2) growth) is refused",
+          _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+    check(f"  ...in well under a second ({_dt:.3f}s)", _dt < 1.0, f"-> {_dt:.3f}s")
+
+# Item 2: top-level domain rows removed for gamma/loggamma/digamma (and
+# single-arg zeta already had none) -- `origin/main` never performs a
+# genuinely unbounded computation for a bare call to any of these four,
+# confirmed live; their nesting hazard is item 1's job now.
+for _expr, _want in (("gamma(1/2)", "sqrt(pi)"), ("digamma(1/2)", "-2*log(2) - EulerGamma"),
+                      ("loggamma(1/2)", "log(sqrt(pi))"), ("gamma(-1.5)", None),
+                      ("zeta(1+10**(-6))", "zeta(1000001/1000000)")):
+    _v, _e = _boundary_parse(_expr)
+    if _want is None:
+        check(f"THE-1095 round 12 item 2: {_expr!r} evaluates (matches "
+              "main), not refused",
+              _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+    else:
+        check(f"THE-1095 round 12 item 2: {_expr!r} evaluates to main's "
+              "exact value",
+              _v is not None and str(_v) == _want and _e is None,
+              f"-> value={_v!r} err={_e!r} want={_want!r}")
+
+# Item 3: the full named pin list, refusing in ms or evaluating exactly.
+for _expr in ("tanh(I*15707/10000)", "sin(I)", "factorial(floor(gamma(5)))",
+              "factorial(ceiling(Abs(sin(5))))", "factorial(floor(exp(-10)))",
+              "factorial(floor(zeta(2)*10))"):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 12 item 3: {_expr!r} evaluates, not refused",
+          _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+check("  ...'tanh(I*15707/10000)' matches main's own tan-near-pole form",
+      str(_boundary_parse("tanh(I*15707/10000)")[0]) == "I*tan(15707/10000)",
+      f"-> {_boundary_parse('tanh(I*15707/10000)')[0]!r}")
+check("  ...'sin(I)' matches main's own value",
+      str(_boundary_parse("sin(I)")[0]) == "I*sinh(1)",
+      f"-> {_boundary_parse('sin(I)')[0]!r}")
+check("  ...'factorial(floor(gamma(5)))' == 24! (Gamma(5) == 4!)",
+      _boundary_parse("factorial(floor(gamma(5)))")[0] == math.factorial(24),
+      f"-> {_boundary_parse('factorial(floor(gamma(5)))')[0]!r}")
+check("  ...'factorial(ceiling(Abs(sin(5))))' == 1",
+      _boundary_parse("factorial(ceiling(Abs(sin(5))))")[0] == 1,
+      f"-> {_boundary_parse('factorial(ceiling(Abs(sin(5))))')[0]!r}")
+check("  ...'factorial(floor(exp(-10)))' == 1 (exp(-10) ~= 4.5e-5, floor "
+      "== 0)",
+      _boundary_parse("factorial(floor(exp(-10)))")[0] == 1,
+      f"-> {_boundary_parse('factorial(floor(exp(-10)))')[0]!r}")
+check("  ...'factorial(floor(zeta(2)*10))' == 16! (floor(10*pi**2/6) == "
+      "16, matching main -- zeta(2) itself is irrational, not exactly "
+      "rational, but the CONSUMER here is `floor`, whose own cheap-"
+      "coercion gate only needs a small resolved MAGNITUDE, not an "
+      "exact value; zeta(2)'s own s=2 >= 2 domain still resolves it "
+      "safely via the ordinary pole-sensitive path)",
+      _boundary_parse("factorial(floor(zeta(2)*10))")[0] == math.factorial(16),
+      f"-> {_boundary_parse('factorial(floor(zeta(2)*10))')[0]!r}")
+_v, _e = _boundary_parse("factorial(ceiling(Abs(sin(I))))")
+check("THE-1095 round 12 item 3: 'factorial(ceiling(Abs(sin(I))))' (= 2 "
+      "on main; refused here and documented as the deliberate complex "
+      "narrowing -- a bare, non-Mul I is exactly as unresolvable-exactly "
+      "as any other non-real value)",
+      _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+
+# Item 4 (property sweep): every grid point OUTSIDE a pole-sensitive
+# name's own exact-domain class refuses when NESTED; every point INSIDE
+# it evaluates. Negatives, (0, 1) rationals, half-integers, s near 1, a
+# in (0, 1), and imaginary args all appear as OUTSIDE points.
+_OUTSIDE_DOMAIN_NESTED = [
+    "factorial(floor(Abs(gamma(-5))))", "factorial(floor(Abs(gamma(1/3))))",
+    "factorial(floor(Abs(gamma(1/2))))",
+    "factorial(floor(Abs(digamma(-5))))", "factorial(floor(Abs(digamma(1/4))))",
+    "factorial(floor(Abs(loggamma(-2))))", "factorial(floor(Abs(loggamma(1/5))))",
+    "factorial(floor(zeta(3/2)))", "factorial(floor(zeta(1+10**(-6))))",
+    "factorial(ceiling(Abs(cos(3*I))))", "factorial(ceiling(Abs(tanh(2*I))))",
+    "factorial(ceiling(Abs(erf(I))))",
+]
+for _expr in _OUTSIDE_DOMAIN_NESTED:
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 12 item 4 (property sweep, outside-domain): "
+          f"{_expr!r} is refused",
+          _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+# (a small, exactly-checkable inside-domain point for each name is
+# asserted below -- the earlier gamma(5)/sin(5)/exp(-10) pins already
+# cover the corresponding "genuinely inside the domain" case for those
+# three, so they are not repeated here.)
+_v, _e = _boundary_parse("factorial(floor(Abs(gamma(2))))")
+check("THE-1095 round 12 item 4 (property sweep, inside-domain): "
+      "'factorial(floor(Abs(gamma(2))))' (Gamma(2) == 1) evaluates",
+      _v == 1 and _e is None, f"-> value={_v!r} err={_e!r}")
+for _expr, _want in (("factorial(floor(zeta(3)))", 1), ("factorial(ceiling(Abs(cos(2))))", 1),
+                      ("factorial(ceiling(Abs(tanh(1))))", 1), ("factorial(ceiling(Abs(erf(1))))", 1)):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 12 item 4 (property sweep, inside-domain): "
+          f"{_expr!r} evaluates to main's exact value",
+          _v == _want and _e is None, f"-> value={_v!r} err={_e!r} want={_want!r}")
 
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== ALL BUG-SWEEP REGRESSIONS FIXED ===")
