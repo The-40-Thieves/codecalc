@@ -3273,7 +3273,28 @@ def _table_function_bound(node, memo: dict) -> tuple[float | None, str | None]:
         if arg_violation:
             return None, arg_violation
         if not arg_resolved:
-            continue
+            # THE-1095 round-3-follow-up #5 (coordinator review of
+            # 5119c9d, grok items 3 and 4): a NUMERIC (non-symbolic)
+            # argument the resolver still cannot bound used to fall
+            # through this loop SILENTLY (`continue`, never added to
+            # `bounds`) — `growth(bounds)` below then read the missing
+            # position back out as `None` via `bounds.get(pos)`, and
+            # every growth formula's own `_safe_pow10(None)` check
+            # happens to return `math.inf` for a MISSING position 0 —
+            # working by ACCIDENT for the common case, not by design
+            # (grok's own note: a formula reading a DIFFERENT position,
+            # like `_growth_nextprime`'s own `ith` at position 1,
+            # silently DEFAULTS instead — a real unresolved value there
+            # would have been misread as "ith=1", not refused). Refusing
+            # explicitly here, the same way `_function_arg_cap_
+            # violation`'s own identical loop now does, means `growth`
+            # below is NEVER called with a position missing for any
+            # reason other than "not supplied" or "genuinely symbolic" —
+            # the ONLY two cases a growth formula's own default is
+            # actually meant to cover.
+            return None, (f"an argument to {name}() cannot be safely bounded: "
+                           "computing it would take an unbounded amount of time "
+                           "and memory")
         if kind == "value":
             over_cap = (arg_log_num - arg_log_den) > math.log10(cap)
         else:
@@ -3321,18 +3342,81 @@ def _resolve_arg_magnitude(node, memo: dict) -> tuple[float, float, bool, str | 
     by `log10(number of terms)` — the SAME safe-upper-bound formula
     `_log10_num_den`'s own `Add` branch already uses for a purely
     numeric sum, reused here rather than a second, parallel formula.
+
+    THE-1095 round-3-follow-up #5 (coordinator review of 5119c9d, grok
+    `verify-1095-r6-grok.log`, issue 1 — the CENTRAL finding): this
+    function did not understand a `_DeferredLShift`/`_DeferredRShift`/
+    `_DeferredMod`/`_DeferredFloorDiv` marker node AT ALL — its class
+    name is not a key of `_FUNCTION_ARG_CAPS`, not `Mul`, not `Add` — so
+    `bell(1 << 11)` (a table call whose ARGUMENT is a marker) left this
+    function reporting "unresolved" for that argument, and `_function_
+    arg_cap_violation`'s own per-position loop (see its own comment)
+    used to treat an unresolved, NON-symbolic argument as "skip, nothing
+    to check" instead of "unknown, refuse" — the token screen sees two
+    small literals (`1`, `11`), the deferred scan sees an opaque marker
+    it shrugs off, and step 3's REAL parse (stock `EvaluateFalseTransformer`,
+    which leaves `<<` unvisited) evaluates `1 << 11` for real and calls
+    `bell(2048)`. `_resolve_marker_magnitude` (below) closes this by
+    making THIS function — the ONE resolver every consumer already
+    shares (table-argument caps, a `Pow`'s base, `Mul`/`Add`
+    composition, and now `_deferred_binop_violation` itself, reduced to
+    a thin caller of this same function) — understand markers too,
+    recursively, with the identical `<<`/`>>`/`%`/`//` rules
+    `_deferred_binop_violation` already had. This is also what fixes
+    CHAINED markers (`1 << 2 << 3`, `7 % 3 % 2`) — the inner marker is
+    now just another node this function resolves before the outer one
+    needs its magnitude.
+
+    Also handles `floor`/`ceiling`/`Abs` of a single, otherwise-
+    resolvable argument (grok item 3): none of the three can make a
+    result's magnitude EXCEED its argument's own (`Abs` is exactly equal;
+    `floor`/`ceiling` round toward an adjacent integer, off by at most
+    1 — negligible at the digit scale this module bounds), so
+    `factorial(floor(2.5))` (`== factorial(2)`, main evaluates it) is not
+    left unresolved just because its argument is wrapped.
     """
-    from sympy import Add, Function, Mul
+    from sympy import Add, Function, Mul, NumberSymbol
 
     log_num, log_den, resolved = _log10_num_den(node, memo)
     if resolved:
         return log_num, log_den, True, None
-    if isinstance(node, Function) and type(node).__name__ in _FUNCTION_ARG_CAPS:
+    type_name = type(node).__name__
+    if type_name in _DEFERRED_BINOP_OPS:
+        return _resolve_marker_magnitude(node, memo)
+    if isinstance(node, NumberSymbol):
+        # THE-1095 round-3-follow-up #5 (coordinator review of 5119c9d,
+        # grok item 3's own false-refusal side effect): an irrational
+        # constant (`pi`/`E`/`EulerGamma`/`GoldenRatio`/`Catalan`/...) is
+        # `Basic.free_symbols`-EMPTY (a constant, not a variable) but was
+        # never handled by `_log10_num_den` (only `Integer`/`Mul`/`Add`/
+        # `Pow`/`Rational`/`Float`) — "unresolved, no free symbols" is
+        # EXACTLY the shape item 3's new refusal targets, so `factorial(
+        # digamma(1463))` (whose real, eager `digamma.eval()` produces an
+        # exact `hugely-precise-rational - EulerGamma`, itself an `Add`
+        # this function's own composition then tries and fails to resolve
+        # because of the bare `EulerGamma` term) newly REFUSED instead of
+        # correctly staying symbolic (`factorial()` of a provably non-
+        # Integer argument never materializes anything, regardless of how
+        # large that argument's own EXACT form happens to be — there is
+        # no real hazard here at all). Every built-in irrational
+        # `NumberSymbol` SymPy ships is a small, O(1) constant (all under
+        # 10 in absolute value) — a generous, safe, constant bound, not a
+        # growth formula, since none of them scale with anything.
+        return math.log10(10), 0.0, True, None
+    if isinstance(node, Function) and type_name in _FUNCTION_ARG_CAPS:
         bound, violation = _table_function_bound(node, memo)
         if violation:
             return 0.0, 0.0, False, violation
         if bound is not None:
             return bound, 0.0, True, None
+    if isinstance(node, Function) and type_name in ("floor", "ceiling", "Abs") and len(node.args) == 1:
+        a_log_num, a_log_den, a_resolved, a_violation = _resolve_arg_magnitude(node.args[0], memo)
+        if a_violation:
+            return 0.0, 0.0, False, a_violation
+        if a_resolved:
+            if type_name == "Abs":
+                return a_log_num, a_log_den, True, None
+            return a_log_num - a_log_den, 0.0, True, None  # floor/ceiling: always an integer
     if isinstance(node, Mul):
         total = 0.0
         for factor in node.args:
@@ -3356,6 +3440,57 @@ def _resolve_arg_magnitude(node, memo: dict) -> tuple[float, float, bool, str | 
             return log_num, log_den, False, None
         return max(magnitudes) + math.log10(len(magnitudes)), 0.0, True, None
     return log_num, log_den, False, None
+
+
+def _resolve_marker_magnitude(node, memo: dict) -> tuple[float, float, bool, str | None]:
+    """`_resolve_arg_magnitude`'s own contract, for a `_DeferredLShift`/
+    `_DeferredRShift`/`_DeferredMod`/`_DeferredFloorDiv` marker node —
+    the SAME rules `_deferred_binop_violation` used to apply directly
+    (`<<` -> `left_log + count*log10(2)`; `>>`/`%`/`//` -> the left
+    operand's own magnitude alone, since the result never exceeds it),
+    now shared by EVERY consumer of `_resolve_arg_magnitude` instead of
+    living only in `_deferred_binop_violation`'s own body — see that
+    function's own docstring, and `_resolve_arg_magnitude`'s own round-
+    3-follow-up #5 paragraph, for why this had to move here: a marker
+    node can appear ANYWHERE a number can (a table call's own argument,
+    a `Pow`'s base, one factor of a `Mul`, ...), not only as the direct
+    target `_deferred_binop_violation` itself is checking.
+
+    Recurses through `_resolve_arg_magnitude` for both operands, so a
+    CHAINED marker (`1 << 2 << 3` == `_DeferredLShift(_DeferredLShift(1,
+    2), 3)`) resolves the inner one first, the same way a nested `Mul`/
+    `Add`/table call already does. An operand with a free symbol is left
+    "unresolved, no violation" (`return ..., False, None`) — genuinely
+    symbolic, never materializes, matching `_table_function_bound`'s own
+    per-position `if arg.free_symbols: continue`; the CALLER decides
+    whether "unresolved AND not symbolic" is a refusal (item 3's own
+    fix, in `_function_arg_cap_violation` and `_deferred_binop_
+    violation`), not this function.
+    """
+    op = _DEFERRED_BINOP_OPS[type(node).__name__]
+    left, right = node.args[0], node.args[1]
+    if left.free_symbols:
+        return 0.0, 0.0, False, None
+    left_log_num, left_log_den, left_resolved, left_violation = _resolve_arg_magnitude(left, memo)
+    if left_violation:
+        return 0.0, 0.0, False, left_violation
+    if not left_resolved:
+        return 0.0, 0.0, False, None
+    left_log = left_log_num - left_log_den
+    if op != "<<":
+        return left_log, 0.0, True, None
+    if right.free_symbols:
+        return 0.0, 0.0, False, None
+    right_log_num, right_log_den, right_resolved, right_violation = _resolve_arg_magnitude(right, memo)
+    if right_violation:
+        return 0.0, 0.0, False, right_violation
+    if not right_resolved:
+        return 0.0, 0.0, False, None
+    right_log = right_log_num - right_log_den
+    count = _safe_pow10(right_log)
+    if count is None or count < 0:
+        return math.inf, 0.0, True, None
+    return left_log + count * math.log10(2), 0.0, True, None
 
 
 def _resolved_table_aware_magnitude(node, memo: dict) -> tuple[float, float, bool]:
@@ -3412,88 +3547,36 @@ def _deferred_binop_violation(node, memo: dict) -> str | None:
     `node` is not one of these four marker types, or is and stays safely
     under.
 
-    THE-1095 round-3-follow-up (coordinator review of 949aac9, grok):
-    replaces the deleted TOKEN-level `_shift_digit_ceiling_violation` —
-    this is the SAME bound, moved to the TREE, so token adjacency no
-    longer matters: `1 << (factorial(20))`, `1 << factorial(12+1)`,
-    `1 << binomial(40, 20)`, `1 << rf(30, 20)`, `(bell(1463)) <<
-    100000` all reach this branch now, at whatever depth or shape the
-    caller wrote them, because the DEFERRED TREE carries a marker node
-    for every one of them, at every depth, since round-3-follow-up #3's
-    AST-level fix (`_deferred_transformer_class`'s own module-level
-    comment) closed the operand-shape dependency the mixin-based
-    round-3-follow-up #2 version still had (`-bell(1463) % 7`,
-    `(bell(1463)+1) % 7`, `2*bell(1463) % 7` all bypassed IT, since
-    SymPy's own eager `Mod`/`floor` ran before the mixin ever got a
-    chance once either operand was already a concrete-looking `Expr`).
-    Also now correctly bounds a purely NUMERIC right operand
-    (`1 << (2**200)`) the same way, since `2**200` reaching this branch
-    is ALSO a marker-node child now, evaluate=False-protected the same
-    as every other subtree, resolved via `_log10_num_den` below.
-
-    `<<` (the only one of the four that can GROW its operand): `digits(
-    left) + count * log10(2)` against `MAX_NUMERIC_DIGITS`, where `count`
-    is the RIGHT operand's own VALUE (via `_safe_pow10`, converting its
-    resolved log10 bound back to a plain float) — NEVER a blanket
-    Stirling-of-factorial approximation (grok's own finding: `1 <<
-    prime(10)` was bounded as `1 << 10!` and refused, though `prime(10)
-    == 29` and `origin/main` returns `536870912` cleanly — Stirling is
-    only ever a valid digit bound for a factorial-SCALE operand, and
-    `prime`/`totient`/`fibonacci`/`harmonic`/`primepi` all grow far
-    slower; `_resolve_arg_magnitude` below already resolves each NAME
-    through its own `_GROWTH_BOUNDS` entry, exactly the "one spec drives
-    everything" bound every other check in this module already uses —
-    no second, parallel approximation needed here).
-
-    `>>`/`%`/`//`: the result's own magnitude never EXCEEDS the LEFT
-    operand's own magnitude (`a >> n <= a`, `a % b <= a`, `a // b <= a`
-    for the positive integers this module's own hazards are about) — so
-    only the left operand needs bounding; the right operand (if it is
-    ALSO a table call) gets its own, independent check from this same
-    scan's generic descent moments later, unrelated to this node's own
-    verdict.
-
-    An operand that resolves with a free symbol anywhere in it is left
-    alone (`return None` for THIS node — the generic descent below still
-    reaches inside it for any OTHER hazard): a genuinely symbolic operand
-    never gets materialized into a concrete value, so there is no digit
-    count to bound here at all — matching `_table_function_bound`'s own
-    per-position `if arg.free_symbols: continue`. Anything else that does
-    not resolve (an irrational constant, a non-table function this module
-    does not know how to bound, ...) fails CLOSED instead — `unknown !=
-    safe`, the same bar every other finding in this module already holds
-    to.
+    THE-1095 round-3-follow-up #5 (coordinator review of 5119c9d, grok
+    `verify-1095-r6-grok.log`): a THIN caller of `_resolve_arg_magnitude`
+    now — the actual `<<`/`>>`/`%`/`//` bound RULES moved to that
+    function's own `_resolve_marker_magnitude` helper, so every consumer
+    of `_resolve_arg_magnitude` (a table call's own argument, a `Pow`'s
+    base, a `Mul`/`Add` composition) understands a marker node too, not
+    only this ONE call site. `bell(1 << 11)` used to sail past every
+    screen this module has: the token screen sees two small literals
+    (`1`, `11`), the deferred tree has `_DeferredLShift(1, 11)` as
+    `bell`'s own argument, and `_resolve_arg_magnitude` — before this
+    round — had never heard of a marker node, so `_function_arg_cap_
+    violation`'s own per-position loop read that as "unresolved, skip",
+    and step 3's real parse then evaluated `1 << 11` for real and called
+    `bell(2048)`. See `_resolve_arg_magnitude`'s own docstring for the
+    full account of the fix, and `_function_arg_cap_violation`'s own for
+    the matching "unresolved-but-not-symbolic is now a refusal, never a
+    skip" half of it.
     """
     op = _DEFERRED_BINOP_OPS.get(type(node).__name__)
     if op is None:
         return None
-    left, right = node.args[0], node.args[1]
-    if left.free_symbols:
-        return None
-    left_log_num, left_log_den, left_resolved, left_violation = _resolve_arg_magnitude(left, memo)
-    if left_violation:
-        return left_violation
-    if not left_resolved:
-        return (f"the left operand of '{op}' cannot be safely bounded: "
-                "computing it would take an unbounded amount of time and memory")
-    left_log = left_log_num - left_log_den
-    if op != "<<":
-        # result <= left operand's own magnitude for >>, %, //
-        return _digit_ceiling_text(left_log, f"the result of '{op}'")
-    if right.free_symbols:
-        return None
-    right_log_num, right_log_den, right_resolved, right_violation = _resolve_arg_magnitude(right, memo)
-    if right_violation:
-        return right_violation
-    if not right_resolved:
-        return (f"the right operand of '{op}' cannot be safely bounded: "
-                "computing it would take an unbounded amount of time and memory")
-    right_log = right_log_num - right_log_den
-    count = _safe_pow10(right_log)
-    if count is None or count < 0:
-        return _digit_ceiling_text(math.inf, "the result of '<<'")
-    total_log = left_log + count * math.log10(2)
-    return _digit_ceiling_text(total_log, "the result of '<<'")
+    log_num, log_den, resolved, violation = _resolve_arg_magnitude(node, memo)
+    if violation:
+        return violation
+    if not resolved:
+        if node.free_symbols:
+            return None  # genuinely symbolic -- left to the real parse
+        return (f"the result of '{op}' cannot be safely bounded: computing it "
+                "would take an unbounded amount of time and memory")
+    return _digit_ceiling_text(log_num - log_den, f"the result of '{op}'")
 
 
 def _pow_table_base_violation(node, memo: dict) -> str | None:
@@ -3670,7 +3753,26 @@ def _function_arg_cap_violation(node, memo: dict) -> str | None:
         if arg_violation:
             return arg_violation
         if not arg_resolved:
-            continue  # inconclusive -- an irrational constant, a free-standing non-table Function, ...
+            # THE-1095 round-3-follow-up #5 (coordinator review of
+            # 5119c9d, grok item 3): a NUMERIC (no free symbols already
+            # ruled that out, above) argument the resolver STILL cannot
+            # bound (an irrational constant, a non-table function this
+            # module has no growth formula for, ...) is `unknown != safe`
+            # here, the same bar every other finding in this module
+            # already holds to — refusing, never silently skipping, is
+            # what closes the structural half of grok's own finding: a
+            # marker node used to be exactly this "unresolved, skip"
+            # shape (before `_resolve_arg_magnitude` learned to resolve
+            # one), so `bell(1 << 11)` passed this loop with NOTHING
+            # bounded, and step 3's real parse evaluated `1 << 11` and
+            # called `bell(2048)` for real. Resolving markers (this
+            # round's own main fix) closes THAT specific gap already;
+            # this refusal is what keeps the NEXT unrecognised numeric
+            # shape from reopening the identical door instead of a
+            # symbolic argument, which stays a legitimate skip.
+            return (f"an argument to {type(node).__name__}() cannot be safely "
+                    "bounded: computing it would take an unbounded amount of "
+                    "time and memory")
         if kind == "value":
             # #326 finding 2 (cross-vendor review, round 9, grok):
             # read from THIS name's own row (`cap`, already looked

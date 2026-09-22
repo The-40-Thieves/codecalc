@@ -506,6 +506,60 @@ behind it.
   unresolvable (symbolic) table argument — `bell(x) % 7` — still matches
   whatever `origin/main` itself returns, unaffected either way.
 
+  **One more fix, coordinator review of 5119c9d — two findings, one
+  cause**: `_resolve_arg_magnitude` did not understand a deferred
+  shift/mod marker node (`_DeferredLShift`/`_DeferredRShift`/
+  `_DeferredMod`/`_DeferredFloorDiv`) at all, and `_function_arg_cap_
+  violation`/`_table_function_bound` both treated an argument the
+  resolver could not bound as a silent SKIP rather than a refusal. (1)
+  A marker used as a TABLE-CALL argument failed OPEN: `bell(1 << 11)`,
+  `factorial(1 << 20)`, `rf(5, 1 << 16)`, `factorial(1 << (2+9))`,
+  `factorial(2*(1 << 10))` — the token screen sees two small literals,
+  the deferred tree holds `_DeferredLShift(1, 11)` as the argument, the
+  old resolver returned "unresolved", the per-position loop's `continue`
+  read that as "nothing to check", and the real (`evaluate=True`) parse
+  then ran `1 << 11` for real and constructed the actual heavy call. (2)
+  Chained markers (`1 << 2 << 3`, `7 % 3 % 2`, `1 << (2 << 3)`,
+  `(1 << 4) % 5`) failed CLOSED where `origin/main` evaluates them — the
+  old `_deferred_binop_violation` hand-extracted its left/right operands
+  rather than recursing back through the shared resolver, so a marker
+  nested as another marker's own operand was never resolved.
+
+  Fixed at the root, per the coordinator's own framing: ONE magnitude
+  resolver for every consumer. `_resolve_arg_magnitude` gained a branch
+  for marker nodes (delegating to a new `_resolve_marker_magnitude`,
+  which implements the `<<`/`>>`/`%`/`//` bound rules — `<<`:
+  `left_log + shift_count * log10(2)`; the other three: bounded by the
+  left operand alone — recursing back through `_resolve_arg_magnitude`
+  for both operands, so a nested marker resolves automatically, fixing
+  the chained case "for free"), a branch for `floor`/`ceiling`/`Abs` of
+  a resolvable argument (so `factorial(floor(2.5))`, `bell(ceiling(3.7))`,
+  `factorial(Abs(-5))`, `rf(5, floor(3.9))` keep evaluating, matching
+  main), and a branch for a `NumberSymbol` (`pi`, `E`, `EulerGamma`,
+  `GoldenRatio`, ...; every one of SymPy's built-in irrational constants
+  is O(1) in absolute value, so a small constant bound is always safe —
+  needed because the REAL, eagerly-evaluated `digamma(1463)` reduces to
+  `harmonic(1462) - EulerGamma`, and without this branch the new
+  Mul/Add composition could not resolve the bare `EulerGamma` term,
+  regressing a previously-pinned test). `_deferred_binop_violation`
+  itself shrank to a thin caller of the shared resolver. Then the
+  structural backstop: in `_function_arg_cap_violation` and its
+  `_table_function_bound` twin, an argument with NO free symbols that
+  the resolver still cannot bound is now a REFUSAL ("cannot be safely
+  bounded", the unknown-not-over-cap message this module already uses
+  elsewhere) rather than a skip — the one rule that would have caught
+  the marker-as-argument bypass regardless of which node shape caused
+  it, present or future. (This is also what makes `_table_function_
+  bound`'s own use of `_safe_pow10(None)` an intentional refusal for a
+  genuinely missing bound, rather than an accidental `inf` the position
+  simply never got written to.) A non-table, non-collapsing `Function`
+  this module cannot bound (`factorial(Ei(1463))`, the exponential
+  integral) now refuses too — a deliberate divergence from `origin/main`
+  (which leaves it symbolic, since `Ei(1463)` isn't provably a
+  non-negative integer) for an opaque shape nothing here can prove safe,
+  the same fail-closed stance already applied to a free symbol or an
+  over-cap table call.
+
 ## [0.13.0] — 2026-09-21
 
 ### Fixed

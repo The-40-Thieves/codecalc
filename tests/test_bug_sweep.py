@@ -3755,6 +3755,114 @@ for _expr in ("factorial(factorial(8))/factorial(factorial(8))",
           "parse evaluate the inner calls",
           _dt < 1.0, f"-> {_dt:.3f}s")
 
+# THE-1095 round-3-follow-up #6 (coordinator review of 5119c9d,
+# grok `verify-1095-r6-grok.log`, issues 1, 2, 3, 4 -- "one cause":
+# `_resolve_arg_magnitude` did not understand the marker nodes
+# (`_DeferredLShift`/`_DeferredRShift`/`_DeferredMod`/`_DeferredFloorDiv`)
+# AT ALL, and `_function_arg_cap_violation`/`_table_function_bound` both
+# treated an unresolved (non-symbolic) argument as a silent SKIP rather
+# than a refusal.
+#
+# Issue 1 (marker as a table argument fails OPEN): the token screen sees
+# two small literals either side of `<<`, the deferred tree holds a
+# `_DeferredLShift(1, 11)` node as the ARGUMENT to a table call, the old
+# resolver returned "unresolved" for that node (no branch understood
+# markers at all), the old per-position loop's `continue` treated that as
+# "nothing to check here", and step 3's stock (evaluate=True) parse then
+# ran `1 << 11` for real -- a genuine Python/SymPy int -- and constructed
+# real `bell(2048)`. `_resolve_marker_magnitude` (this round's new
+# function, reached through `_resolve_arg_magnitude`'s new `_DEFERRED_
+# BINOP_OPS` branch) now bounds every marker node the SAME way `_deferred_
+# binop_violation` itself already bounds a marker used as a top-level
+# operator, so these all refuse in milliseconds, at the SAME cap
+# `bell(1463+1)`/`factorial(1464)` etc. already refuse at elsewhere in
+# this file -- never by letting real construction run.
+for _expr in ("bell(1 << 11)", "factorial(1 << 20)", "rf(5, 1 << 16)",
+              "factorial((1 << 11))", "factorial(1 << (2+9))",
+              "factorial(2*(1 << 10))",
+              "factorial(1 << 20)/factorial(1 << 20)"):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round-3-follow-up #6 item 1: {_expr!r} (a deferred "
+          "shift/mod marker used as a TABLE-CALL argument) is refused",
+          _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+    check(f"  ...in milliseconds ({_dt:.3f}s), not by letting the real "
+          "parse evaluate '1 << N' and construct the real table call",
+          _dt < 1.0, f"-> {_dt:.3f}s")
+# ...and a marker argument that resolves comfortably under the cap still
+# evaluates to the SAME value `math.factorial` gives -- the fix bounds
+# markers, it does not blanket-refuse every marker-shaped argument.
+_v, _e = _boundary_parse("factorial(1 << 10)")
+check("  ...and a genuinely small marker argument still evaluates "
+      "('factorial(1 << 10)', i.e. factorial(1024))",
+      _v == math.factorial(1024) and _e is None, f"-> value={_v!r} err={_e!r}")
+
+# Issue 2 (chained markers fail CLOSED where main evaluates): `1 << 2 <<
+# 3` is `_DeferredLShift(_DeferredLShift(1, 2), 3)` -- an INNER marker as
+# the LEFT operand of an OUTER one. The old `_deferred_binop_violation`
+# read `left`'s magnitude via a hand-rolled extraction that never
+# recursed back into marker-handling for a nested marker `left`, so these
+# refused even though main evaluates every one of them. Now that
+# `_resolve_marker_magnitude` resolves `left`/`right` through the SAME
+# `_resolve_arg_magnitude` dispatcher it is itself one branch of, a
+# nested marker resolves the inner marker first automatically -- no
+# special-casing needed for the chain, "for free" once issue 1's fix is
+# in place.
+for _expr, _want in (("1 << 2 << 3", 1 << 2 << 3),
+                      ("7 % 3 % 2", 7 % 3 % 2),
+                      ("1 << (2 << 3)", 1 << (2 << 3)),
+                      ("(1 << 4) % 5", (1 << 4) % 5),
+                      ("1 << 2 << 3 << 4", 1 << 2 << 3 << 4)):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round-3-follow-up #6 item 2: {_expr!r} (a CHAIN of "
+          "deferred shift/mod markers) evaluates, matching main",
+          _v == _want and _e is None, f"-> value={_v!r} err={_e!r} want={_want!r}")
+
+# Issue 3 (the structural backstop): in `_function_arg_cap_violation` (and
+# its `_table_function_bound` twin), an argument with NO free symbols
+# that the resolver still cannot bound is now a REFUSAL, never a silent
+# skip -- this is what actually closed issue 1 at the root (a marker node
+# is just ONE shape of "resolver doesn't understand this node yet"; the
+# structural rule catches every OTHER such shape too, present or future).
+#
+# `floor`/`ceiling`/`Abs` of an otherwise-resolvable argument are NOT
+# such a shape -- main evaluates all four of these, and `_resolve_arg_
+# magnitude`'s new dedicated branch for the three of them (recursing into
+# the single argument, collapsing to an integer for floor/ceiling)
+# resolves them too, so the structural backstop never even sees them as
+# unresolved.
+for _expr, _want in (("factorial(floor(2.5))", 2),
+                      ("bell(ceiling(3.7))", 15),
+                      ("factorial(Abs(-5))", 120),
+                      ("rf(5, floor(3.9))", 210)):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round-3-follow-up #6 item 3: {_expr!r} (floor/"
+          "ceiling/Abs of a resolvable argument to a table call) "
+          "evaluates, matching main",
+          _v == _want and _e is None, f"-> value={_v!r} err={_e!r} want={_want!r}")
+# ...while a genuinely unresolvable, NON-symbolic argument -- a Function
+# outside every table this module knows how to bound (`Ei`, the
+# exponential integral, is not in `_FUNCTION_ARG_CAPS` or `_GROWTH_
+# BOUNDS`, and does not collapse to a plain number the way `Max`/`Min`/
+# `sign` of numeric literals would) -- now hits the structural backstop
+# and refuses, even though main itself would just leave it symbolic
+# (`factorial(Ei(1463))` has no proof its argument is a non-negative
+# integer, so main never actually computes anything unsafe for THIS
+# specific shape). This is a deliberate, documented divergence from main
+# for an opaque shape the resolver cannot prove safe -- the module's own
+# fail-closed philosophy (an "unknown" verdict is refused, not silently
+# passed through) applied to a NEW opaque-Function shape, the same way it
+# already applies to a free symbol appearing where a symbol is not
+# expected, or to a table call already over its own cap.
+_v, _e = _boundary_parse("factorial(Ei(1463))")
+check("THE-1095 round-3-follow-up #6 item 3: 'factorial(Ei(1463))' (a "
+      "non-table, non-collapsing Function this module cannot bound) is "
+      "refused as unknown, not silently let through",
+      _v is None and _e is not None and _e[0] == "ceiling"
+      and "cannot be safely bounded" in _e[1],
+      f"-> value={_v!r} err={_e!r}")
+
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== ALL BUG-SWEEP REGRESSIONS FIXED ===")
 sys.exit(1 if FAILS else 0)
