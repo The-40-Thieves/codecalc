@@ -59,3 +59,4 @@ opengrep.json
 # scripts/tool_select_llm_eval.py's resumable per-(model, group, prompt) cache —
 # machine-local, and a rerun regenerates it from nothing.
 scripts/data/.llm_eval_cache/
+scripts/_measured_safe_callables_raw.json

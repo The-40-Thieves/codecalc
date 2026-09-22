@@ -1550,6 +1550,22 @@ _growth_bernoulli = _growth_poly_second_arg(_growth_2_factorial, 1.0)
 _growth_euler = _growth_poly_second_arg(_growth_2_factorial, 1.0)
 _growth_genocchi = _growth_poly_second_arg(_growth_2_factorial, 1.0)
 
+#: THE-1095 round 14 (coordinator review of 7630e87, item D): the THREE
+#: `_FUNCTION_ARG_CAPS` names whose own REAL return type is a `list`/
+#: `dict`, never a number — `divisors`/`factorint`/`primefactors` — so
+#: "what growth bound applies to this call's own magnitude" is not a
+#: missing ANSWER, it is not a QUESTION that applies at all. Read by
+#: `_table_function_bound` (its own comment has the full account) to
+#: fall through to the real parse, rather than refuse outright, for a
+#: NESTED use (`Abs(divisors(1))`, `divisors(1) % 7`) — deliberately NOT
+#: `mobius`/`nextprime`/`isprime` (also in `_FUNCTION_ARG_CAPS`, but
+#: each genuinely returns a NUMBER main itself CAN combine with `Abs`/
+#: an operator, so the "cannot be safely bounded... no growth estimate"
+#: refusal is still the right, `unknown != safe` answer for THOSE three
+#: — this set is deliberately narrow, not "every name with no growth
+#: formula").
+_CONTAINER_VALUED_TABLE_NAMES = frozenset({"divisors", "factorint", "primefactors"})
+
 _GROWTH_BOUNDS: dict = {
     "binomial": _growth_2n,
     "rf": _growth_rf_ff, "ff": _growth_rf_ff,
@@ -1827,59 +1843,60 @@ _DEFERRED_STANDIN_NAMES = (
 #: a DEFAULT-DENY posture for this surface: every callable NOT already
 #: bounded (`_DEFERRED_STANDIN_NAMES`), NOT one of the 34 elementary
 #: names (genuinely protected by the AST transform itself, no stand-in
-#: needed), and NOT in THIS frozenset gets a GENERIC inert stand-in too
-#: — refused outright by the new scan-time check (`_unbounded_generic_
-#: call_violation`, below) the instant it is called with so much as ONE
-#: non-symbolic argument, regardless of what its own `eval()` would
-#: have done.
+#: needed), gets a GENERIC inert stand-in — refused outright by the
+#: scan-time check `_unbounded_generic_call_violation` (below) the
+#: instant it is called with so much as ONE non-symbolic argument,
+#: regardless of what its own `eval()` would have done — UNLESS it is
+#: in THIS set, in which case `_measured_safe_argument_cap_violation`
+#: (below) applies a GENERIC per-argument cap (an integer argument
+#: capped at `MAX_HEAVY_ARG`; `Rational`/`Float`/symbolic arguments
+#: unrestricted) instead of an outright refusal — still through the
+#: SAME stand-in (a measured-safe name is never exempted from ever
+#: getting one at all: see this loop's own comment on why that would
+#: reopen the eager-execution hole for a caller-supplied LARGE
+#: argument the measurement never probed).
 #:
-#: Restricted to TRUE, argument-content-INDEPENDENT constructors and
-#: predicates — ones whose own body does no algorithmic WORK on its
-#: argument's structure at all, only builds a node from it (`Add`/`Mul`/
-#: `Pow`/`Number`/`Rational`/`Integer`/`Float`/`Symbol`/`symbols`/`var`;
-#: the relational/boolean constructors `Eq`/`Ne`/`Lt`/`Le`/`Gt`/`Ge`/
-#: `And`/`Or`/`Not`/`Xor`/`Implies`) — each measured directly (2026-09-
-#: 22, this box, sympy 1.14.0) at well under 100ms regardless of a
-#: numeric argument's own magnitude.
-#:
-#: THE-1095 round 13 follow-up, SAME round (own self-review before this
-#: round's own commit): the first version of this set ALSO included
-#: `gcd`/`lcm`/`igcd`/`ilcm`, `erf`/`erfi`/`Ei`, and the general single-
-#: expression manipulation family (`expand`/`factor`/`together`/
-#: `cancel`/`collect`/`diff`/`degree`/`primitive`/`fraction`/`prod`) —
-#: each individually measured fast against a SIMPLE representative
-#: argument, but that measurement answered the wrong question:
-#: `expand((x+1)**10000)` (a free-symbol argument — `x` — so the new
-#: generic refusal's OWN "at least one non-symbolic argument" trigger
-#: never applies to it either way) still hung, because exempting
-#: `expand` from the stand-in treatment ALSO exempted it from ever
-#: being made inert during the deferred scan — the REAL `expand()`
-#: still ran EAGERLY on the still-unevaluated `Pow(Add(x, 1), 10000)`
-#: argument, the exact ordering hazard this whole fix exists to close,
-#: just reopened for exactly the ten names this round's own first draft
-#: had exempted. These ten are ALGORITHMS whose own cost scales with
-#: their ARGUMENT's structural complexity, not merely its magnitude —
-#: "fast on a simple test input" says nothing about an ADVERSARIAL one
-#: — so none of them belong in an argument-content-independent
-#: allowlist at all. Removed; they now get the GENERIC stand-in like
-#: everything else NOT in this set, which is what lets the EXISTING,
-#: UNCONDITIONAL `MAX_SYMBOLIC_EXPONENT` `Pow`-loop (`reject_explosive`'s
-#: own walk, over EVERY `Pow` node in the tree regardless of which
-#: `Function` wraps it) reach and refuse the SAME `Pow(Add(x,1),10000)`
-#: node — now nested inside an inert `expand` stand-in instead of a
-#: real, eagerly-executing call — the way it already does for a bare
-#: `(x+1)**10000` with no wrapping call at all. `gcd`/`lcm`/`igcd`/
-#: `ilcm`/`erf`/`erfi`/`Ei` are pure NUMBER-theoretic/special functions,
-#: not argument-content algorithms in the same sense, but are removed
-#: here too out of the same caution — none of their own measured-fast
-#: cases were tested against an adversarial SYMBOLIC argument, only a
-#: numeric one, and this module's own "unknown != safe" bar means an
-#: unmeasured case defaults to refused, not assumed fine.
-_MEASURED_SAFE_CALLABLES = frozenset({
-    "Add", "Mul", "Pow", "Number",
-    "Rational", "Integer", "Float", "Symbol", "symbols", "var",
-    "Eq", "Ne", "Lt", "Le", "Gt", "Ge", "And", "Or", "Not", "Xor", "Implies",
-})
+#: THE-1095 round 14 (coordinator review of 7630e87): round 13's own
+#: hand-picked version of this set under-covered ordinary calculator
+#: input (`gcd(12, 18)`, `lcm(4, 6)`, `limit(sin(x)/x, x, 0)`,
+#: `nsimplify(0.5)` all refused where `origin/main` evaluates them) —
+#: "which names occurred to a human reviewer" is not a measurement.
+#: Replaced with a MEASURED list: `scripts/measure_safe_callables.py`
+#: (committed, regenerable) probes every candidate callable — every
+#: name in `safe_global_dict()` not already tabled, elementary, or
+#: AST-transform-reserved (see `_deferred_global_dict`'s own comment on
+#: THAT exclusion, a separate concern from measurement) — against a
+#: fixed grid of small-argument shapes, each ISOLATED in its own
+#: `ulimit -v`-capped, `timeout 1`-bounded subprocess, and allowlists a
+#: name only when EVERY shape it accepts finishes comfortably under
+#: 100ms with a result under this module's own digit ceiling. The
+#: generated result — `codecalc/_measured_safe_callables.json`,
+#: committed alongside this file, carrying the measurement date — is
+#: what this set is actually loaded from, below; see that script's own
+#: docstring for the full method and `tests/test_measured_safe_
+#: callables.py` for the re-measurement self-check that catches this
+#: list going stale on a slower box.
+def _load_measured_safe_callables() -> frozenset[str]:
+    import json as _json5
+    import pathlib as _pathlib5
+
+    path = _pathlib5.Path(__file__).resolve().parent / "_measured_safe_callables.json"
+    try:
+        data = _json5.loads(path.read_text())
+    except (OSError, ValueError):
+        # THE-1095 round 14: missing or unreadable data file — fail
+        # CLOSED (an empty allowlist, not a hand-picked fallback): every
+        # candidate name still gets a stand-in either way
+        # (`_deferred_global_dict`'s own generic fallback is
+        # unconditional), so the worst case here is the flat "any
+        # numeric argument" refusal `_unbounded_generic_call_violation`
+        # already gives an unmeasured name — `unknown != safe`, never a
+        # guess standing in for a real measurement.
+        return frozenset()
+    return frozenset(data.get("allowlist", ()))
+
+
+_MEASURED_SAFE_CALLABLES = _load_measured_safe_callables()
 
 
 def _log10_of_int(n: int) -> float:
@@ -2897,7 +2914,34 @@ def _build_deferred_standin(name: str, real_obj):
     # ever calling `tuple()` on something that cannot safely be one.
     real_nargs = getattr(real_obj, "nargs", None)
     if isinstance(real_nargs, FiniteSet):
-        attrs = {"nargs": tuple(real_nargs), "_eval_evalf": _standin_refuses_evalf}
+        # THE-1095 round 14 (coordinator review of 7630e87, item D):
+        # `nargs` ALONE used to be enough here — `Function.__new__`'s
+        # own generic arity check, on a mismatch, reports `cls.__name__`
+        # (the stand-in's OWN name, the CALLER's spelling — "rf", not
+        # "RisingFactorial"). But `rf`/`ff` are ALIASES (`rf is
+        # RisingFactorial`, confirmed live, the identical object) and
+        # `origin/main` ALWAYS reports the REAL class's own name in its
+        # native arity error regardless of which alias spelling reached
+        # it (`rf(5)` and `RisingFactorial(5)` both raise the byte-
+        # identical `"RisingFactorial takes exactly 2 arguments (1
+        # given)"` — confirmed live). `_arity_checked_new` (below) is
+        # what ALREADY gets this right for a plain callable — it calls
+        # the REAL object directly on a bind failure, so Python's own
+        # native error text (with the REAL class's own name baked in by
+        # `TypeError` itself, not this module) is what a caller sees,
+        # never a look-alike. Reused here too, for the SAME reason,
+        # rather than adding a SECOND, separate mechanism that tries to
+        # replicate `Function.__new__`'s own wording by hand — this is
+        # NOT a rename of the stand-in class itself (that would ALSO
+        # change every one of THIS module's OWN ceiling/growth messages,
+        # which correctly keep the CALLER's own spelling — an earlier
+        # version of this fix did rename the class and broke exactly
+        # that, an existing pinned regression test in `tests/test_bug_
+        # sweep.py` caught it). `inspect.signature(RisingFactorial)`
+        # (confirmed live) gives a real signature, so this path applies
+        # cleanly to every finite-`nargs` name, aliased or not.
+        attrs = {"nargs": tuple(real_nargs), "_eval_evalf": _standin_refuses_evalf,
+                 "__new__": _arity_checked_new(real_obj)}
     else:
         attrs = {"_eval_evalf": _standin_refuses_evalf}
         try:
@@ -3074,11 +3118,81 @@ def _deferred_global_dict() -> dict:
         # ALL that calling the real function would be safe, so `unknown
         # != safe` applies here exactly as it already does everywhere
         # else in this file.
+        # THE-1095 round 14 (coordinator review of 7630e87): a name in
+        # `_MEASURED_SAFE_CALLABLES` is NOT exempt from a stand-in
+        # either, unlike round 13's own first draft — the MEASUREMENT
+        # only confirms SMALL representative arguments stay fast
+        # (`scripts/measure_safe_callables.py`'s own probe grid); a
+        # caller-supplied LARGE one was never measured, and exempting
+        # the name from the stand-in entirely would let it execute
+        # EAGERLY during the deferred scan regardless (`randMatrix(5,
+        # 3)` measures instant, but `randMatrix(5000, 5000)` — one of
+        # Codex's own named repros — is not the shape that was
+        # measured). Every measured-safe name gets the SAME inert
+        # stand-in every other unbounded name does; `_measured_safe_
+        # argument_cap_violation` (below) is the generic per-argument
+        # cap that then makes SMALL calls (the ones actually measured)
+        # proceed and a large one refuse, instead of the flat "any
+        # numeric argument at all" refusal `_unbounded_generic_call_
+        # violation` gives an UNMEASURED name.
         from sympy.parsing.sympy_parser import EvaluateFalseTransformer as _EFT5
         _elementary = frozenset(_EFT5.functions)
+        # THE-1095 round 14 (own self-review, caught testing the fix
+        # above before this round's own commit): `Add`/`Mul`/`Pow`/`Or`/
+        # `And`/`Not` (`EvaluateFalseTransformer.operators`'s own VALUES
+        # — what `visit_BinOp` rewrites `+`/`*`/`**`/`-`/`/`/`|`/`&`/`^`
+        # INTO) and `Eq`/`Ne`/`Lt`/`Le`/`Gt`/`Ge`
+        # (`.relational_operators`'s own values — what `visit_Compare`
+        # rewrites `==`/`!=`/`<`/`<=`/`>`/`>=` into) are NOT ordinary
+        # "a caller might type this NAME" callables at all — they are
+        # the classes SymPy's OWN AST transform constructs INTERNALLY
+        # for EVERY occurrence of the corresponding OPERATOR, anywhere
+        # in ANY parsed expression, `evaluate=False` or not. Giving
+        # ANY of them a stand-in (as the earlier version of this loop
+        # started doing once `_MEASURED_SAFE_CALLABLES` names stopped
+        # being exempted, above) corrupts the parse tree for every
+        # expression using that operator at all — confirmed live:
+        # `expand(x+1)` (an ordinary `+`, nothing to do with `Add`
+        # called by name) started failing with "an argument to Add()
+        # cannot be safely bounded" the instant `Add` had a stand-in in
+        # the global_dict, since `x+1` itself compiles to
+        # `Add(x, 1, evaluate=False)` via the AST transform regardless
+        # of what a caller actually typed. These twelve names are
+        # EXCLUDED from ever getting a stand-in, unconditionally — never
+        # subject to `_MEASURED_SAFE_CALLABLES`'s own per-argument cap
+        # either, since a stand-in never reaches them in the first
+        # place; `_measured_safe_argument_cap_violation`'s own
+        # membership check is therefore effectively unreachable for
+        # these twelve specifically, which is correct — an ordinary `+`/
+        # `*`/`**`/comparison already has its OWN, separate protection
+        # throughout this file (the Pow loop, `_log10_num_den`, ...),
+        # not this new generic mechanism.
+        #
+        # `Integer`/`Float` (`auto_number`, one of `standard_
+        # transformations`, itself always in `math_transforms()`)
+        # rewrites EVERY plain numeric literal token — `10000`, not just
+        # an explicit `Integer(10000)` call — into `Integer(10000)`/
+        # `Float(...)` at the TOKEN level, before this module's own
+        # parse ever runs; `Symbol` (`auto_symbol`, likewise always
+        # applied) does the identical rewrite for EVERY undefined NAME
+        # token (`x`, `y`, ...) into `Symbol('x')`. Confirmed live: with
+        # `Integer` NOT excluded, `expand((x+1)**10000)`'s own literal
+        # `10000` — nothing to do with anyone writing `Integer(10000)`
+        # by name — tripped `_measured_safe_argument_cap_violation`'s
+        # own generic 1463 cap (since `Integer` is also a name in
+        # `_MEASURED_SAFE_CALLABLES`), which would refuse ANY expression
+        # containing a plain literal number over 1463 ANYWHERE, an
+        # enormous false-refusal surface. The SAME "constructed for
+        # every occurrence of a TOKEN, not a NAME a caller chose to
+        # call" reasoning as the twelve operator/relational names above.
+        _ast_transform_reserved = (
+            frozenset(_EFT5.operators.values())
+            | frozenset(_EFT5.relational_operators.values())
+            | frozenset({"Integer", "Float", "Symbol", "Function"})
+        )
         for _name, _real_obj in real.items():
             if (_name in _DEFERRED_STANDINS or _name in _elementary
-                    or _name in _MEASURED_SAFE_CALLABLES or not callable(_real_obj)):
+                    or _name in _ast_transform_reserved or not callable(_real_obj)):
                 continue
             _DEFERRED_STANDINS[_name] = _build_deferred_standin(_name, _real_obj)
     g = safe_global_dict()
@@ -4736,7 +4850,26 @@ def _evalf_coercion_violation(node, memo: dict) -> str | None:
     name = type(node).__name__
     if not (isinstance(node, Function) and name in _EVALF_COERCION_NAMES):
         return None
-    if node.free_symbols:
+    # THE-1095 round 14 (coordinator review of 7630e87, item D): a
+    # `divisors`/`factorint`/`primefactors` argument that reached the
+    # REAL-dict `evaluate=False` parse (step 3's own `shape` -- these
+    # three are eager, plain callables that do not respect `evaluate=
+    # False` at all, and this parse deliberately uses the REAL dict, not
+    # a stand-in one) is a genuine Python `list`/`dict`, not a sympy
+    # object -- `Abs(divisors(1))`'s own `.args[0]` is the literal `[1]`.
+    # `.free_symbols` (a `Basic` method) raises `AttributeError`
+    # recursing into a non-`Basic` argument like that; caught here as
+    # "cannot determine, not a violation" rather than left to `reject_
+    # explosive`'s own broad safety net (`_reject_explosive_safely`),
+    # which would otherwise report a CEILING refusal instead of letting
+    # this fall through to the real `evaluate=True` parse, where the
+    # native `TypeError` `origin/main` itself raises for the identical
+    # shape (`Abs()`/an operator on a `list`) surfaces normally.
+    try:
+        has_free_symbols = bool(node.free_symbols)
+    except AttributeError:
+        return None
+    if has_free_symbols:
         # Genuinely symbolic -- never materializes, matches `origin/
         # main`, the same scope every other check in this module already
         # gives a free symbol (see `_table_function_growth_violation`'s
@@ -4834,6 +4967,34 @@ def _table_function_bound(node, memo: dict) -> tuple[float | None, str | None]:
         return None, zeta_violation
     growth = _GROWTH_BOUNDS.get(name)
     if growth is None:
+        if name in _CONTAINER_VALUED_TABLE_NAMES:
+            # THE-1095 round 14 (coordinator review of 7630e87, item D):
+            # `divisors`/`factorint`/`primefactors` return a `list`/
+            # `dict`, never a NUMBER — there is no "growth estimate" to
+            # be missing here, the whole QUESTION ("how big could this
+            # call's own numeric magnitude be") does not apply. The old
+            # behavior treated that as an unknown-refusal CEILING
+            # ("cannot be safely bounded... no growth estimate") for
+            # `Abs(divisors(1))`/`divisors(1) % 7`/the four markers —
+            # but `origin/main` itself raises a plain `TypeError` for
+            # ALL of these (`bad operand type for abs(): 'list'`,
+            # `unsupported operand type(s) for %: 'list' and 'int'`,
+            # confirmed live), a VALIDATION-shaped refusal, not a
+            # resource ceiling. `(None, None)` here — "unresolved, no
+            # violation," the SAME shape a genuinely symbolic argument
+            # already gets — lets the CALLER (`_evalf_coercion_
+            # violation` for `Abs`/`floor`/`ceiling`, `_deferred_binop_
+            # violation` for `%`/`//`/`<<`/`>>`) fall through to the
+            # REAL parse instead of refusing outright: `divisors(n)`'s
+            # OWN argument cap (`_function_arg_cap_violation`, checked
+            # UNCONDITIONALLY and INDEPENDENTLY of this function) still
+            # applies first, so a genuinely oversized `n` is still
+            # refused before real construction — only a SAFE, in-cap
+            # `divisors(n)` reaches real evaluation, where SymPy's own
+            # native `TypeError` surfaces and `safe_parse`'s own
+            # exception-relay reports it as `CATEGORY_VALIDATION`,
+            # matching main byte-for-byte.
+            return None, None
         return None, (f"{name}() cannot be safely bounded as a nested argument: "
                        "no growth estimate is defined for it")
     return growth(bounds), None
@@ -5101,6 +5262,81 @@ def _unbounded_generic_call_violation(node) -> str | None:
     if any(not arg.free_symbols for arg in node.args):
         return (f"{name}() is not in the bounded function set: computing it "
                 "with a numeric argument is not safely bounded")
+    return None
+
+
+def _measured_safe_argument_cap_violation(node, memo: dict) -> str | None:
+    """Reason `node` names a callable `_MEASURED_SAFE_CALLABLES` (via
+    `scripts/measure_safe_callables.py`'s own measurement) exempted from
+    `_unbounded_generic_call_violation`'s flat refusal, but carries an
+    INTEGER argument past this module's own generic per-argument cap for
+    the whole class, or `None` if `node`'s name is not measured-safe, or
+    every argument stays within it.
+
+    THE-1095 round 14 (coordinator review of 7630e87): the measurement
+    only confirms a SMALL, representative argument grid stays fast
+    (`scripts/measure_safe_callables.py`'s own `PROBE_SHAPES` — small
+    integers, a small `Rational`/`Float`, a `Symbol`) — it says NOTHING
+    about a caller-supplied LARGE value, which was never probed at all.
+    `_deferred_global_dict`'s own generic fallback now gives a measured-
+    safe name the SAME inert stand-in every unbounded name gets (round
+    13's own first draft exempted it from the stand-in too, which would
+    have let `randMatrix(5000, 5000)` — a large-value shape genuinely
+    NEVER measured — execute eagerly during the scan regardless of
+    anything this function does). Capped generically at `MAX_HEAVY_ARG`
+    for any INTEGER argument (the coordinator's own spec: "value-kind
+    1463 on integer args"); a `Rational`/`Float` or a genuinely symbolic
+    argument is left alone (the coordinator's own spec: "Float/Rational
+    allowed, symbolic allowed") — the measurement grid already probed
+    representative ones of each and found them fast regardless of an
+    INTEGER'S OWN magnitude being the one axis that scales a plain
+    constructor/algorithm's own cost for this class of callable.
+    """
+    from sympy import Function
+
+    # THE-1095 round 14 (own self-review, before this round's own
+    # commit): missing this gate meant `type(node).__name__ in
+    # _MEASURED_SAFE_CALLABLES` matched a GENUINE `Add`/`Mul`/`Pow`
+    # EXPRESSION node too — `2+2` itself (an ordinary `Add`, nothing to
+    # do with a "callable this module measured"), not merely a call
+    # NAMED `Add`/`Mul`/`Pow` — refusing plain arithmetic outright the
+    # instant those three names were in this set at all. The `_ast_
+    # transform_reserved` exclusion in `_deferred_global_dict` (see its
+    # own comment) already keeps them from ever getting a stand-in in
+    # the first place, which makes this gate technically redundant for
+    # THOSE three specifically today — kept anyway, unconditionally, as
+    # the same defensive shape `_unbounded_generic_call_violation`
+    # already uses: this function must never fire on anything but an
+    # actual CALL node, regardless of what future contents `_MEASURED_
+    # SAFE_CALLABLES` gains.
+    if not isinstance(node, Function):
+        return None
+    name = type(node).__name__
+    if name not in _MEASURED_SAFE_CALLABLES:
+        return None
+    for arg in node.args:
+        if arg.free_symbols:
+            continue
+        arg_log_num, arg_log_den, arg_resolved, arg_violation = _resolve_arg_magnitude(arg, memo)
+        if arg_violation:
+            return arg_violation
+        if not arg_resolved:
+            return (f"an argument to {name}() cannot be safely bounded: "
+                    "computing it would take an unbounded amount of time "
+                    "and memory")
+        # `is_integer` (structural, sympy's own), not `isinstance(arg,
+        # Integer)` -- a COMPUTED integer-valued argument (`1000+463`,
+        # still an `Add` node under `evaluate=False`) is exactly as much
+        # a magnitude hazard as a literal one; only a genuine `Rational`/
+        # `Float` (`arg.is_integer` is `False`/`None` for either) is
+        # exempt, per the measurement's own scope.
+        if not arg.is_integer:
+            continue  # Rational/Float -- allowed, per the measurement's own scope
+        if (arg_log_num - arg_log_den) > math.log10(MAX_HEAVY_ARG):
+            return (f"an integer argument to {name}() exceeds the limit of "
+                    f"{MAX_HEAVY_ARG} for a callable this module has only "
+                    "measured at small magnitudes: computing it would take "
+                    "an unbounded amount of time and memory")
     return None
 
 
@@ -6251,6 +6487,22 @@ def _deferred_binop_violation(node, memo: dict) -> str | None:
     op = _DEFERRED_BINOP_OPS.get(type(node).__name__)
     if op is None:
         return None
+    # THE-1095 round 14 (coordinator review of 7630e87, item D): a
+    # `divisors`/`factorint`/`primefactors` operand (`factorint(1) //
+    # 2`) is a container-valued call `_table_function_bound` now
+    # deliberately leaves unresolved-without-a-violation for (see its
+    # own comment) — but this function's OWN "unresolved and not
+    # symbolic -> the flat ceiling refusal" fallback, below, would
+    # still catch it, the SAME mismatch `_evalf_coercion_violation` had
+    # for `Abs`/`floor`/`ceiling`. Checked directly, on EITHER operand,
+    # before this function's own resolution even runs: `origin/main`
+    # itself raises a plain `TypeError` for a container operand to any
+    # of `%`/`//`/`<<`/`>>` — falling through here lets that surface
+    # normally instead of a misleading ceiling refusal.
+    if len(node.args) >= 1 and type(node.args[0]).__name__ in _CONTAINER_VALUED_TABLE_NAMES:
+        return None
+    if len(node.args) >= 2 and type(node.args[1]).__name__ in _CONTAINER_VALUED_TABLE_NAMES:
+        return None
     log_num, log_den, resolved, violation = _resolve_arg_magnitude(node, memo)
     if violation:
         return violation
@@ -6601,6 +6853,9 @@ def _numeric_ceiling_scan(tree, memo: dict) -> str | None:
         generic_violation = _unbounded_generic_call_violation(node)
         if generic_violation:
             return generic_violation
+        measured_safe_violation = _measured_safe_argument_cap_violation(node, memo)
+        if measured_safe_violation:
+            return measured_safe_violation
         if isinstance(node, (Integer, Mul, Add, Pow)):
             log_num, log_den, resolved = _log10_num_den(node, memo)
             violation = _ceiling_message_num_den(log_num, log_den)
@@ -6911,6 +7166,9 @@ def reject_explosive(tree) -> str | None:
                 generic_violation = _unbounded_generic_call_violation(node)
                 if generic_violation:
                     return generic_violation
+                measured_safe_violation = _measured_safe_argument_cap_violation(node, memo)
+                if measured_safe_violation:
+                    return measured_safe_violation
             if not isinstance(node, Pow):
                 continue
             base, exponent = node.base, node.exp

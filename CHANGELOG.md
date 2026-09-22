@@ -1300,6 +1300,235 @@ behind it.
   itself be the dangerous operation) and the two documented divergences
   above, checked explicitly rather than silently skipped.
 
+- **The round-13 hand-picked `_MEASURED_SAFE_CALLABLES` allowlist
+  under-covered ordinary calculator input** (THE-1095, follow-up to GH
+  #326; coordinator review of 7630e87): `gcd(12, 18)`, `lcm(4, 6)`,
+  `limit(sin(x)/x, x, 0)`, and `nsimplify(0.5)` all refused as "not in
+  the bounded function set" where `origin/main` evaluates them — "which
+  names occurred to a human reviewer" was never a measurement. Replaced
+  with `scripts/measure_safe_callables.py` (new, committed, regenerable):
+  probes every candidate callable (every name in `safe_global_dict()`
+  not already tabled, elementary, or AST-transform-reserved — see
+  below) against a fixed grid of argument shapes — small values AND,
+  found needed mid-round (see bug (3), below), a "heavy" variant at the
+  actual enforced cap boundary — each ISOLATED
+  in its own `ulimit -v`-capped subprocess whose CALL is bounded by an
+  in-child 1 s timer (interpreter start-up and the sympy import are
+  outside the timer — the first version used a 1 s process wall clock,
+  which on a loaded box turned trivial calls into false TIMEOUT
+  verdicts and made the re-measure test flaky; the script's new
+  `--refresh-excluded` mode re-measures only the names a CRASH or a
+  non-heavy TIMEOUT had excluded and merges them into the committed raw
+  report, `scripts/_measured_safe_callables_raw.json`, which is
+  gitignored: 1.2 MB of per-shape timings that only matter for
+  auditing why a name did or did not make the list), and
+  allowlists a name only when every shape it accepts finishes
+  comfortably under 100ms with a result under this module's own digit
+  ceiling. The generated result — `codecalc/_measured_safe_callables.json`,
+  committed alongside the measurement date — is what `_MEASURED_SAFE_
+  CALLABLES` now actually loads from (an unreadable/missing file fails
+  CLOSED to an empty set, never a hand-picked fallback).
+
+  A measured-safe name is no longer EXEMPT from the deferred-scan
+  stand-in either (round 13's own design): the measurement only
+  confirms SMALL representative arguments stay fast — a caller-supplied
+  LARGE one (`randMatrix(5000, 5000)`, one of Codex's own named repros)
+  was never probed at all, and exempting the name from the stand-in
+  entirely would let it execute EAGERLY during the scan regardless.
+  Every measured-safe name now gets the SAME inert stand-in every
+  unbounded name does; a new `_measured_safe_argument_cap_violation`
+  applies a GENERIC per-argument cap instead of an outright refusal — an
+  INTEGER argument capped at `MAX_HEAVY_ARG`, a `Rational`/`Float`/
+  symbolic one left alone (the coordinator's own spec) — so a small,
+  measured call proceeds and a large, unmeasured one still refuses.
+
+  FOUR critical bugs surfaced building this, all caught and fixed in
+  the SAME round, before any commit: (1) `Add`/`Mul`/`Pow`/`Or`/`And`/
+  `Not`/`Eq`/`Ne`/`Lt`/`Le`/`Gt`/`Ge` (what `EvaluateFalseTransformer`'s
+  own AST transform constructs INTERNALLY for EVERY `+`/`*`/`**`/
+  comparison in ANY parsed expression) and `Integer`/`Float`/`Symbol`
+  (what `auto_number`/`auto_symbol` — both always applied — construct
+  for EVERY plain numeric literal or undefined name) are not ordinary
+  "a caller chose to call this NAME" callables at all; giving ANY of
+  them a stand-in (as an early draft of the fix above briefly did)
+  corrupted the parse tree for every expression using the corresponding
+  token — `2+2` itself started failing with "an argument to Add()
+  cannot be safely bounded." These twelve names are now UNCONDITIONALLY
+  excluded from ever getting a stand-in OR being a measurement
+  candidate, regardless of anything else. (2) `_measured_safe_
+  argument_cap_violation` itself initially missed the `isinstance(node,
+  Function)` gate `_unbounded_generic_call_violation` already has, so
+  `type(node).__name__ in _MEASURED_SAFE_CALLABLES` matched a GENUINE
+  `Add`/`Mul`/`Pow` expression node too (not merely a call named that)
+  — `2+2` again, refused as "an argument to Add() cannot be safely
+  bounded" for the identical underlying reason. Fixed with the same
+  gate every other generic check in this module already uses.
+
+  (3) **Found AFTER the allowlist first measured clean**, spot-checking
+  the coordinator's own named repro class against the fresh list:
+  `_measured_safe_argument_cap_violation`'s cap applies PER ARGUMENT,
+  independently, so `ones(1463, 1463)` is exactly as permitted as
+  `ones(5, 3)` — each argument is individually AT, not over,
+  `MAX_HEAVY_ARG`. The FIRST version of `scripts/measure_safe_
+  callables.py` only ever probed a small, friendly value (`5`, `3`,
+  `2`) — it answers "is this callable fast at a TRIVIAL input", never
+  the question the cap's own safety actually depends on: "is this
+  callable still fast at the LARGEST input the cap will ever let
+  through." `sympy.ones(1463, 1463)` (a 1463x1463 = ~2.14M-element
+  matrix of `Integer(1)`) does not return within 3 seconds — the
+  small-shapes-only measurement allowlisted `ones`/`zeros`/
+  `randMatrix`/`eye` anyway (their tiny `(5, 3)` shape finishes in
+  under a millisecond), and `safe_parse('ones(1463, 1463)')` hung past
+  15s as a direct result — reopening the EXACT class of hang
+  (`ones(5000,5000)`, one of Codex's own named round-13 repros) this
+  whole mechanism exists to close, just at a somewhat higher argument
+  value. Fixed: `PROBE_SHAPES` now also probes a "_heavy" variant of
+  every integer-carrying shape AT `MAX_HEAVY_ARG` itself (1463), not a
+  small value — `ones`/`zeros`/`randMatrix`/`eye` now correctly drop
+  off the allowlist (their heavy two-int shape times out past the
+  probe's own 1s cap), staying default-deny, matching `evaluate_
+  expression`'s own existing design (matrix work goes through the
+  dedicated matrix tool, never a bare NAME call here) — `diag` stays
+  allowlisted (its own cost is linear in the DIAGONAL length, not the
+  product of two dimensions, and measures fast even at the heavy
+  shape).
+
+  (4) The heavy shapes' FIRST version reused the SAME value twice/
+  thrice (`(1463, 1463)`, `(1463, 1463, 1463)`) rather than distinct
+  ones — which, for any name whose real signature reads extra
+  positional arguments as sympy "generators" (`factor`, `Poly`, ...),
+  raises `GeneratorsError: duplicated generators` for two EQUAL
+  arguments regardless of their magnitude, a shape-mismatch artifact
+  with nothing to do with whether a large VALUE is itself slow.
+  Confirmed live: `factor(1463, 1463, 1463)` raised that error while
+  `factor(1463, 999, 500)` (identical magnitudes, distinct values) did
+  not — the duplicate-value probe wrongly excluded `factor` from the
+  allowlist over it, and `factor(30)` (ordinary calculator input,
+  trivially safe on `origin/main`) started refusing outright as "not
+  in the bounded function set," the exact under-coverage class this
+  whole round exists to close. Fixed: the heavy multi-argument shapes
+  now use DISTINCT values near `MAX_HEAVY_ARG` (`1463`, `1462`, `1461`)
+  instead of one value repeated, and the probe child's own "this shape
+  does not apply" exception set now also catches sympy's own
+  `BasePolynomialError` (the `GeneratorsError` base), the same
+  defensive broadening `gcd(5, 3, 2)`'s own `AttributeError` already
+  needed for an unrelated reason.
+
+  The measurement script's OWN output is now split in two, found
+  needing a fix for the same reason: the FIRST version wrote one 1.3MB
+  committed file — the ~10KB of names `_MEASURED_SAFE_CALLABLES`
+  actually loads at runtime, packaged with a ~1.3MB per-candidate,
+  per-shape raw timing log next to it, useless at runtime and wasteful
+  to ship. `measure_all()` now returns `(data, raw_results)`
+  separately: `codecalc/_measured_safe_callables.json` (committed, the
+  ONLY file the runtime loads or a built package needs — names, the
+  measurement date, the two thresholds, no per-shape timing) and
+  `scripts/_measured_safe_callables_raw.json` (committed too, for
+  audit — WHY a name was or wasn't allowlisted, without re-running the
+  measurement — but outside `codecalc/`, so it never ships in a
+  package).
+
+  `scripts/measure_safe_callables.py`'s own coordinator-supplied list
+  of names expected to come out allowlisted, checked against the FINAL
+  (post-fix) measurement: `gcd`/`lcm`/`igcd`/`ilcm`, `limit`,
+  `nsimplify`, `Rational`, `diff`, `integrate`/`solve`/`simplify`/
+  `expand`/`factor`/`together`/`apart`/`cancel` (symbolic usage; a
+  numeric-arg call to any of these still gets the generic cap, not a
+  blanket exemption — only symbolic usage is unconditionally safe for
+  an algorithm whose own cost scales with argument STRUCTURE) all
+  measure ALLOWLISTED, confirming the coordinator's own expectation.
+  `Abs`/`sign`/`Max`/`Min`/`floor`/`ceiling`/`re`/`im`/`conjugate`/
+  `sqrt`/`cbrt`/`root`/`series` are excluded from MEASUREMENT entirely
+  — already handled elsewhere (the 34-name `EvaluateFalseTransformer`
+  elementary list, `_FUNCTION_ARG_CAPS`, or the hardcoded `_recognized_
+  function_names()` set — never candidates in the first place, not
+  rejected by a probe). `round` is not even a name `safe_global_dict()`
+  exposes at all (Python's builtin `round` is not injected into this
+  module's parser namespace) — never a candidate for an entirely
+  different reason than the twelve above. `summation`/`Sum`/`Product`
+  are MEASURED and stay OFF the allowlist: their real signature
+  (`Sum(expr, (var, lo, hi))`, a tuple second argument) does not match
+  ANY shape in this script's own plain-positional grid — every probe
+  shape returns `UNSUPPORTED` — so they were never confirmed safe at
+  ANY shape at all, correctly `unknown != safe`, not "measured slow."
+  `ones`/`zeros`/`randMatrix`/`eye` (fast on a small shape, hang on the
+  cap-boundary one — see bug (3), above) and the Matrix-CLASS family
+  (`Matrix`/`BlockMatrix`/`ImmutableMatrix`/`MutableMatrix`/similar —
+  no probe shape in this grid applies to their own constructor
+  signature at all, `UNSUPPORTED` across the board) both correctly stay
+  OFF the allowlist, for two DIFFERENT reasons.
+
+  `tests/test_measured_safe_callables.py` (new) re-measures a random
+  sample of 30 already-allowlisted names on the RUNNING box as part of
+  the regular suite, catching the list going stale on a slower machine
+  or after a SymPy version bump, rather than trusting a one-time
+  measurement forever.
+
+- **`rf`/`ff`'s own arity-error text used the CALLER's own alias
+  spelling (`"rf takes..."`) where `origin/main` always uses the real
+  class name (`"RisingFactorial takes..."`, since `rf is RisingFactorial`
+  — confirmed live, the alias is the identical object)** (THE-1095,
+  follow-up to GH #326; coordinator review of 7630e87, item 3, byte-
+  identical to main as requested): fixed by reusing `_arity_checked_new`
+  — the SAME mechanism that already gets a plain callable's own native
+  arity error right — for the finite-`nargs` case too, rather than
+  relying on `Function.__new__`'s own generic check (which reports the
+  STAND-IN class's own name, the caller's spelling). Deliberately NOT a
+  rename of the stand-in class itself: an earlier draft of this fix did
+  rename it, which broke every one of THIS module's OWN ceiling/growth
+  messages (they correctly keep the caller's own spelling — an existing
+  pinned regression test in `tests/test_bug_sweep.py`, predating this
+  round, caught the break immediately). `rf(5)`/`ff(5)` now raise
+  byte-identical text to `RisingFactorial(5)`/`FallingFactorial(5)`,
+  and this module's own ceiling messages for `rf(1463+1, 2)` still say
+  `rf()`, not `RisingFactorial()`, exactly as before.
+
+- **`divisors`/`factorint`/`primefactors` nested under `Abs`/an
+  operator refused with a `CATEGORY_CEILING` message where `origin/
+  main` raises a plain `TypeError`** (THE-1095, follow-up to GH #326;
+  coordinator review of 7630e87, item 4): these three names' own real
+  return type is a `list`/`dict`, never a number, so "what growth bound
+  applies to this call's own magnitude" was never a missing ANSWER, it
+  was not a QUESTION that applies at all — the old "no growth estimate
+  is defined for it" ceiling refusal answered the wrong question.
+  Fixed: `_table_function_bound` now returns "unresolved, no violation"
+  (the SAME shape a genuinely symbolic argument already gets) for these
+  three specifically, letting `_evalf_coercion_violation` (`Abs`/
+  `floor`/`ceiling`) and `_deferred_binop_violation` (`%`/`//`/`<<`/
+  `>>`) fall through to the real parse instead of refusing outright —
+  their own ARGUMENT cap (`_function_arg_cap_violation`, checked
+  unconditionally and independently) still applies first, so a
+  genuinely oversized argument is still refused before real
+  construction; only a safe, in-cap call reaches real evaluation, where
+  SymPy's own native `TypeError` surfaces and `safe_parse`'s own
+  exception-relay reports it as `CATEGORY_VALIDATION`, matching main.
+  A related crash surfaced fixing this: `Abs(divisors(1))`'s own
+  argument, once let through to the REAL-dict parse (these three are
+  eager, plain callables that do not respect `evaluate=False` at all,
+  and that parse deliberately uses the real dict), is a genuine Python
+  `list`, not a sympy object — `.free_symbols` (a `Basic` method)
+  raised `AttributeError` recursing into it, caught by the existing
+  round-13 `_reject_explosive_safely` safety net but reported as an
+  internal-unknown ceiling instead of letting the shape through; now
+  caught locally and treated as "cannot determine, not a violation"
+  instead, so the real parse's own native `TypeError` surfaces as
+  intended. Both of round 13's own documented divergences (this one and
+  the `rf`/`ff` one above) are now fixed and removed from `tests/
+  test_differential_corpus.py`'s own `_KNOWN_DIVERGENCES`, replaced with
+  pinned "now fixed" assertions.
+
+- **`tests/test_differential_corpus.py` had no CI step at all, so CI
+  never ran it** (THE-1095, follow-up to GH #326; coordinator review of
+  7630e87, item 2): `.github/workflows/ci-python.yml` runs test files as
+  explicit steps; a committed test file with no step for it is invisible
+  to CI regardless of how many assertions it carries. Added, right next
+  to `bug-sweep regressions` (the same matrix, the same shape) — and
+  `tests/test_measured_safe_callables.py` (new this round) got its own
+  step too, to avoid recreating the identical gap for a file that did
+  not exist when this one was found. `actionlint` clean on the updated
+  workflow; `scripts/check_claims.py` confirmed at the new 73-test-file
+  count (was 72).
+
 ## [0.13.0] — 2026-09-21
 
 ### Fixed

@@ -51,6 +51,18 @@ def check(name: str, cond: bool, detail: str = "") -> None:
         FAILS.append(name)
 
 
+def main_error_text(expr: str) -> str:
+    """`str(exc)` of bare SymPy's own exception for `expr` — the exact
+    text `safe_parse` puts after `parse error: ` on main."""
+    from sympy.parsing.sympy_parser import parse_expr
+    try:
+        parse_expr(expr, transformations=se.math_transforms(),
+                   global_dict=se.safe_global_dict())
+    except Exception as exc:
+        return str(exc)
+    return ""
+
+
 def main_value(expr: str):
     """Bare SymPy's own outcome for `expr` — `(True, value)` or
     `(False, exception_repr)` — used as the "what main does" reference
@@ -120,37 +132,16 @@ _MEASURED_SAFE_SHAPES: dict[str, tuple[str, ...]] = {
     "Eq": ("Eq({n}, {n})",), "And": ("And(True, {n} > 0)",),
 }
 
-_KNOWN_DIVERGENCES = """
-THE-1095 round 13 follow-up: documented, deliberate exceptions from this
-differential's own "safe_parse matches main whenever main is cheap"
-sweep -- not silent gaps:
-
-  - `divisors`/`factorint`/`primefactors` (the eager-factor family,
-    dict/list-returning): comfortably safe on their own small-`n` cap,
-    but this module's own EXISTING (pre-round-13) `_resolve_arg_
-    magnitude` machinery refuses a NESTED use (`Abs(divisors(1))`) with
-    a CEILING category ("no growth estimate is defined for it"), where
-    `origin/main` itself raises a plain `TypeError` ("bad operand type
-    for abs(): 'list'") -- a VALIDATION-shaped error on main, CEILING
-    here. A genuine category mismatch, confirmed live, left as a
-    documented residual gap for a future round rather than guessed at
-    under this round's own time budget -- the bare (unwrapped) call
-    itself (`divisors(1)`, `factorint(1)`, `primefactors(1)`) DOES match
-    main exactly and is covered by this corpus's own numeric-table
-    sweep... except these three are containers, not numbers, so they are
-    excluded from the equality sweep too (see `_NUMERIC_TABLE_SHAPES`'s
-    own scope) and checked separately, directly, below instead.
-  - `rf(n, k)`/`ff(n, k)` called by their ALIAS spelling: `origin/main`
-    raises its OWN arity error under the REAL class name
-    (`RisingFactorial`/`FallingFactorial` -- `rf is RisingFactorial`,
-    confirmed live, the alias is the identical object) regardless of
-    which spelling the caller used; this module's own deferred stand-in
-    is named after whichever spelling the caller wrote, so `rf(5)`'s own
-    arity-error TEXT says "rf takes..." where main says "RisingFactorial
-    takes...". A narrow, cosmetic (error-TEXT-only, not a category or
-    safety divergence) gap, not fixed this round for the same reason as
-    the item above -- documented, not guessed at.
-"""
+#: THE-1095 round 14 (coordinator review of 7630e87, item D): BOTH of
+#: round 13's own documented divergences (the eager-factor family's own
+#: category mismatch under `Abs`/an operator; `rf`/`ff`'s own arity-
+#: error text using the alias instead of the real class name) are FIXED
+#: this round -- see `run_known_divergence_checks`'s own pins, below,
+#: for the confirming assertions, and `codecalc/safe_expr.py`'s own
+#: `_CONTAINER_VALUED_TABLE_NAMES`/`_build_deferred_standin` comments
+#: for the fix each one got. No divergence left undocumented as of this
+#: round; a future round finding a new one should add it back here
+#: rather than leave it a silent gap.
 
 
 def run_numeric_table_sweep() -> None:
@@ -197,22 +188,47 @@ def run_refusal_sweep() -> None:
               f"-> value={value!r} err={err!r} elapsed={dt:.3f}s")
 
 
-def run_known_divergence_checks() -> None:
+def run_formerly_divergent_checks() -> None:
+    """THE-1095 round 14 (coordinator review of 7630e87, item D): both of
+    round 13's own documented divergences, now pinned as FIXED, matching
+    main's own category and (for the bare, unwrapped calls) exact value.
+    """
     for expr, main_text in (
         ("divisors(1)", "[1]"), ("factorint(1)", "{}"),
         ("primefactors(1)", "[]"),
     ):
         v, err = se.safe_parse(expr)
-        check(f"differential (documented divergence, container family): "
-              f"{expr!r} bare (unwrapped) matches main",
+        check(f"differential (formerly divergent, now fixed): {expr!r} "
+              f"bare (unwrapped) matches main",
               err is None and str(v) == main_text, f"-> value={v!r} err={err!r}")
-    for expr in ("Abs(divisors(1))", "factorint(1) % 7"):
+    # `Abs`/the four markers on a container-valued result: main raises a
+    # plain `TypeError` (validation); this module used to refuse as an
+    # unknown ceiling instead. Category checked directly against
+    # `main_value`'s own outcome for the identical expression.
+    for expr in ("Abs(divisors(1))", "factorint(1) % 7", "primefactors(1) // 2",
+                 "divisors(1) << 1", "divisors(1) >> 1"):
+        ok_main, main_result = main_value(expr)
         v, err = se.safe_parse(expr)
-        check(f"differential (documented divergence): {expr!r} refuses "
-              f"(category currently ceiling, not validation -- see "
-              f"_KNOWN_DIVERGENCES)",
-              v is None and err is not None,
-              f"-> value={v!r} err={err!r}")
+        check(f"differential (formerly divergent, now fixed): {expr!r} "
+              f"matches main's own category (validation, from main's own "
+              f"TypeError)",
+              not ok_main and v is None and err is not None and err[0] == "validation",
+              f"-> value={v!r} err={err!r} main_raised={main_result!r}")
+    # rf/ff's own arity-error text, called by the ALIAS spelling: must
+    # be byte-identical to main's (the REAL class name, `RisingFactorial`/
+    # `FallingFactorial` -- `rf is RisingFactorial`, confirmed live).
+    for expr in ("rf(5)", "ff(5)"):
+        ok_main, main_result = main_value(expr)
+        v, err = se.safe_parse(expr)
+        # `safe_parse` formats a parse exception with `str(exc)`, not
+        # `repr(exc)` (which `main_value` keeps for its messages), so
+        # the byte-identical target is the str form.
+        want = f"parse error: {main_error_text(expr)}" if not ok_main else None
+        check(f"differential (formerly divergent, now fixed): {expr!r} "
+              f"arity error is byte-identical to main (the real class "
+              f"name, not the alias)",
+              not ok_main and v is None and err == ("validation", want),
+              f"-> value={v!r} err={err!r} want=('validation', {want!r})")
 
 
 x = Symbol("x")
@@ -220,13 +236,12 @@ x = Symbol("x")
 if __name__ == "__main__":
     run_numeric_table_sweep()
     run_refusal_sweep()
-    run_known_divergence_checks()
-    print(_KNOWN_DIVERGENCES)
+    run_formerly_divergent_checks()
     print(f"\n{CHECKED} assertions checked "
           f"({len(_NUMERIC_TABLE_SHAPES) + len(_ELEMENTARY_SHAPES) + len(_MEASURED_SAFE_SHAPES)} "
           f"names x shapes x {len(_NUMERIC_N_VALUES)} n-values, plus "
           f"{len(_REFUSAL_COMPARISON_EXPRESSIONS)} refusal + "
-          f"{5} known-divergence checks)")
+          f"10 formerly-divergent-now-fixed checks)")
     print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
           "\n=== DIFFERENTIAL CORPUS CLEAN ===")
     sys.exit(1 if FAILS else 0)

@@ -6,8 +6,10 @@ name: ci-quality
 # gets muted within a week, which is worse than not having it.
 #
 # Measured before wiring:
-#   typos      0 findings, no config needed. No _typos.toml is committed BECAUSE there is nothing
-#              to except; adding an empty one would imply exceptions exist.
+#   typos      0 findings in prose and source. `_typos.toml` excludes exactly one file, the
+#              machine-generated SymPy identifier list `codecalc/_measured_safe_callables.json`
+#              (`sring`, `numer`, `Unequality` are function names, not typos); nothing else is
+#              excepted, and an exception added anywhere else needs the same justification.
 #   shellcheck 0 findings on the one shell script in the repo — and that script has since been
 #              deleted, so the job is gone too. See below.
 #
