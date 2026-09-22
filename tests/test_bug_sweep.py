@@ -2936,6 +2936,43 @@ for _expr, _expected_text in (("binomial(1463+1)", "binomial takes exactly 2 arg
           _v is None and _e is not None and _e[0] == "validation"
           and _e[1] == f"parse error: {_expected_text}", f"-> value={_v!r} err={_e!r}")
 
+# THE-1095 round-3-follow-up #4 (coordinator review of 06272aa, grok item
+# 1): `_arity_checked_new` used to build a dummy Python function via
+# `compile()` + `types.FunctionType` purely to reuse Python's own call-
+# binding error text -- replaced with `inspect.signature(real).bind(...)`
+# first, falling through to a REAL call to `real` only on a `bind()`
+# failure (which raises the SAME native TypeError before any of `real`'s
+# own body runs, since CPython binds arguments to a callee's frame before
+# executing any of its bytecode). Proven with a spy, not just a timing
+# measurement: the spy's own body must NEVER run on the wrong-arity path.
+_spy_body_calls: list = []
+
+
+def _spy_isprime_like(n, base=None):
+    _spy_body_calls.append((n, base))
+    return True
+
+
+_spy_new = _se5._arity_checked_new(_spy_isprime_like)
+_spy_raised = False
+_spy_text = ""
+try:
+    _spy_new(None, 1, 2, 3)  # 3 positional args -- spy_isprime_like takes at most 2
+except TypeError as _spy_exc:
+    _spy_raised = True
+    _spy_text = str(_spy_exc)
+check("THE-1095 round-3-follow-up #4 item 1: the arity-checked __new__ "
+      "raises TypeError for a wrong-arity call",
+      _spy_raised, "-> did not raise")
+check("  ...WITHOUT ever entering the real callable's own body (spy "
+      "pattern, not just a timing measurement)",
+      len(_spy_body_calls) == 0, f"-> {len(_spy_body_calls)} calls: {_spy_body_calls}")
+check("  ...and the raised text is the SPY's own native arity message "
+      "('spy_isprime_like() takes from 1 to 2 positional arguments but "
+      "3 were given'), not a look-alike",
+      _spy_raised and "spy_isprime_like()" in _spy_text and "3 were given" in _spy_text,
+      f"-> {_spy_text!r}")
+
 # Item 4: the numeric RESULT of step 3's real evaluate=True parse is now
 # itself run through the same digit-count ceiling every other path
 # already has -- no combination of two individually-in-cap POSITIONS can
@@ -3183,10 +3220,21 @@ def _growth_check(name, fn, real_fn, ns, extra_bounds=None):
           not fails, f"-> fails={fails}")
 
 
-_growth_check("factorial (_growth_nn_loose)", _se5._growth_nn_loose,
-              lambda n: _sp5.factorial(n), range(1, 60))
-_growth_check("bell (_growth_nn_loose)", _se5._growth_nn_loose,
-              lambda n: _sp5.bell(n), range(1, 40))
+# THE-1095 round-3-follow-up #4 (coordinator review of 06272aa, grok item
+# 2): factorial and bell now use `_growth_stirling_factorial` (tight,
+# not the shared loose catch-all) -- verified up to and including the
+# exact cap (1463) and one past it (1464), the boundary the coordinator's
+# own named repros (`bell(1463)` evaluates, `bell(1464)` refuses) depend
+# on being correctly ordered.
+_growth_check("factorial (_growth_stirling_factorial)", _se5._growth_stirling_factorial,
+              lambda n: _sp5.factorial(n), list(range(1, 60)) + [1463, 1464, 1500])
+_growth_check("bell (_growth_stirling_factorial, bell(n) <= n!)", _se5._growth_stirling_factorial,
+              lambda n: _sp5.bell(n), list(range(1, 40)) + [1463, 1464, 1500])
+# `_growth_nn_loose` itself is still a real, correct (if now unused by
+# factorial/bell) function -- still checked, on the names that still use
+# it as their own shared catch-all.
+_growth_check("motzkin (_growth_nn_loose, shared catch-all)", _se5._growth_nn_loose,
+              lambda n: _sp5.motzkin(n), range(1, 40))
 _growth_check("binomial (_growth_2n)", _se5._growth_2n,
               lambda n: _sp5.binomial(n, n // 2), range(1, 60))
 _growth_check("primorial (default, nth=True)", _se5._growth_primorial,
@@ -3390,30 +3438,23 @@ check("THE-1095 round-3-follow-up (grok item C, table call as the SHIFT "
       _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
 
 # Codex's own control (round 4): is `bell(1463) << 1` a bypass, or just
-# bell(1463)'s own documented at-cap cost? THE-1095 round-3-follow-up
-# (coordinator review of 949aac9, grok item 2): the marker-node bound now
-# reuses `_GROWTH_BOUNDS` UNIFORMLY for every table name (the "one spec
-# drives everything" design item 2 asked for) rather than a SEPARATE,
-# factorial-specific Stirling approximation (round 4's own fix, which
-# this round's structural rewrite replaced along with the token-level
-# shift check it lived in) -- `bell`'s own entry, `_growth_nn_loose`, is
-# DELIBERATELY loose (shared with several other names, see that
-# function's own docstring), overestimating bell(1463) at ~9258 "digits"
-# against its true 3018 -- already over MAX_NUMERIC_DIGITS (4000) with NO
-# shift at all. DELIBERATE NARROWING, pinned here: `bell(1463) << 1` is
-# now refused (a false refusal on this one name, not a soundness gap --
-# the bound is still a valid, never-under, upper bound, just not tight
-# enough to let this specific case through) -- the same trade this
-# module's own established pattern already makes elsewhere (motzkin's
-# own narrowing, rf/ff's own narrowing, ...) rather than adding ANOTHER
-# per-name special case to the shared bound.
+# bell(1463)'s own documented at-cap cost? THE-1095 round-3-follow-up #4
+# (coordinator review of 06272aa, grok item 2): `bell`'s own growth-bound
+# entry used to be the shared, DELIBERATELY loose `_growth_nn_loose`
+# (`n**(2n)`), overestimating bell(1463) at ~9258 "digits" against its
+# true 3_018 -- already over MAX_NUMERIC_DIGITS with no shift at all, a
+# false refusal main does not share. Replaced with `_growth_stirling_
+# factorial` (`bell(n) <= n!` always -- Bell numbers count PARTITIONS of
+# an n-set, strictly fewer than the n! PERMUTATIONS once n >= 3, a
+# provable fact, not an empirical one), tight enough that `bell(1463) <<
+# 1` now correctly evaluates (matching main) while `bell(1464)`-based
+# shapes still correctly refuse -- no narrowing needed at all once the
+# bound is accurate.
 _v, _e = _boundary_parse("bell(1463) << 1")
-check("THE-1095 round-3-follow-up item 2: 'bell(1463) << 1' is refused -- "
-      "a deliberate narrowing (bell's own _growth_nn_loose bound is "
-      "already over MAX_NUMERIC_DIGITS with no shift at all; the true "
-      "value, 3019 digits, is not, but this module does not compute the "
-      "true value to find that out)",
-      _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+check("THE-1095 round-3-follow-up #4: 'bell(1463) << 1' evaluates to "
+      "main's exact value (no narrowing needed once bell's own bound is "
+      "Stirling-tight)",
+      _v == (_sp5.bell(1463) << 1) and _e is None, f"-> value={_v!r} err={_e!r}")
 _v, _e = _boundary_parse("7 % bell(20)")
 check("THE-1095 round-3-follow-up (Codex): '7 % bell(20)' (a table call "
       "under %, nowhere near any cap) still evaluates -- the operator "
@@ -3640,17 +3681,43 @@ check(f"THE-1095 round-3-follow-up #3: _parse_deferred structurally "
 # a unary minus, an addition, or a multiplication used to bypass it
 # entirely, since SymPy's own eager Mod/floor ran before the mixin ever
 # got a chance once either operand looked like a concrete Expr. The AST-
-# stage fix makes operand shape irrelevant -- all three now refuse the
-# same way the bare form always did.
+# stage fix makes operand shape irrelevant.
+#
+# THE-1095 round-3-follow-up #4 (coordinator review of 06272aa, grok item
+# 2): the AST-stage fix alone still left these THREE refusing with "the
+# left operand of '%' cannot be safely bounded" -- an UNKNOWN verdict
+# (Mul/Add wrapping a table call had no composition rule at all), not an
+# over-cap one -- even though bare `bell(1463) % 7` and bare `bell(1463)`
+# both already evaluated (the documented ~5s at-cap cost) and main
+# evaluates all five shapes. `_resolve_arg_magnitude`'s new Mul/Add
+# composition (this same round's own fix, combined with `bell`'s own
+# now-Stirling-tight bound) closes that: all three now evaluate too.
 for _expr in ("-bell(1463) % 7", "(bell(1463)+1) % 7", "2*bell(1463) % 7"):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round-3-follow-up #4 item 2: {_expr!r} (a Mul/Add "
+          "wrapper around a table call at its own cap) evaluates, "
+          "matching main (the ~5s at-cap allowance already used "
+          "elsewhere in this file)",
+          _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+# ...and the SAME wrapper shapes still refuse promptly when the table
+# call itself is genuinely over cap, or nested and unbounded.
+for _expr in ("-bell(1463+1) % 7", "(factorial(factorial(8))+1) % 7"):
     _t0 = time.time()
     _v, _e = _boundary_parse(_expr)
     _dt = time.time() - _t0
-    check(f"THE-1095 round-3-follow-up #3 item 3: {_expr!r} (wrapped, not "
-          "bare) is refused, same as the bare form",
+    check(f"THE-1095 round-3-follow-up #4 item 2: {_expr!r} (the wrapped "
+          "table call is itself over cap or unbounded) is still refused",
           _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
     check(f"  ...in milliseconds ({_dt:.3f}s), not after real construction",
           _dt < 1.0, f"-> {_dt:.3f}s")
+# ...and a genuinely UNRESOLVABLE (symbolic) table argument still matches
+# whatever main returns -- the "cannot be safely bounded" refusal stays
+# for this shape, since main itself never evaluates it either.
+_v, _e = _boundary_parse("bell(x) % 7")
+check("THE-1095 round-3-follow-up #4 item 2: 'bell(x) % 7' (a symbolic "
+      "table argument, genuinely unresolvable) matches main's own value",
+      _v is not None and str(_v) == "Mod(bell(x), 7)" and _e is None,
+      f"-> value={_v!r} err={_e!r}")
 
 # Issue 2 (a purely numeric shift count reaching a marker via a nested
 # Pow): `1 << (2**200)` used to reach real construction the instant BOTH

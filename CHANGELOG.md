@@ -458,6 +458,54 @@ behind it.
   operators it overrides — a future sympy bump that changes that shared
   pipeline is caught here instead of silently drifting.
 
+  **Two more fixes, coordinator review of 06272aa** (both replayed 34
+  probes clean first): (1) `_arity_checked_new`'s own `compile()` +
+  `types.FunctionType` stub — built purely to reuse Python's own call-
+  binding error text — is GONE: generating code objects at import time
+  to mimic an error message is the wrong tool, one step from the
+  `exec`/`eval` invariant this module exists to guard, even though it
+  never ran anything dynamic. Replaced with `inspect.signature(real).
+  bind(*args, **kwargs)` first; on a `TypeError` from `bind()`, calling
+  `real(*args, **kwargs)` raises the SAME native `TypeError` a real call
+  would, for free — CPython binds arguments to a callee's frame BEFORE
+  executing any of its bytecode, so the real function's own body never
+  runs regardless of what the arguments actually are; on a successful
+  `bind()`, `real` is never touched at all. Proven with a spy, not just
+  reading the code: the real callable's own body is confirmed NEVER
+  entered on the wrong-arity path.
+
+  (2) `-bell(1463) % 7`, `(bell(1463)+1) % 7`, `2*bell(1463) % 7` used
+  to refuse with "the left operand of '%' cannot be safely bounded" — an
+  UNKNOWN verdict, not an over-cap one — even though bare `bell(1463) %
+  7` and bare `bell(1463)` both already evaluated (the documented ~5s
+  at-cap cost) and `origin/main` evaluates all five shapes.
+  `_resolve_arg_magnitude` now composes a `Mul`/`Add` WRAPPING a table
+  call the same way `_log10_num_den` already composes one of ordinary
+  numeric pieces: a `Mul`'s own magnitude is the SUM of its factors' own
+  magnitudes (sign discarded, the same "abs, not signed" treatment a
+  plain `-1` factor already gets); an `Add`'s own magnitude is its
+  LARGEST term's own magnitude scaled up by `log10(number of terms)` —
+  reusing `_log10_num_den`'s own established safe-upper-bound formula
+  rather than a second, parallel one. Composing alone was not enough,
+  though: `bell`'s own growth-bound entry was still the shared,
+  DELIBERATELY loose `_growth_nn_loose` (`n**(2n)`), overestimating
+  `bell(1463)` at ~9258 "digits" against its true 3_018 — already over
+  `MAX_NUMERIC_DIGITS` with nothing else contributing at all. Replaced
+  with `_growth_stirling_factorial` (`bell(n) <= n!` for every `n >= 0`
+  — Bell numbers count PARTITIONS of an n-set, strictly fewer than the
+  n! PERMUTATIONS once n >= 3, a provable fact) — Stirling's own
+  `log10(n!)`, WITH Robbins' own correction term (`+ (1/(12n)) *
+  log10(e)`; the bare approximation is only asymptotically an upper
+  bound, and measurably under-shot the true value for small `n` when
+  first written, caught by this file's own property-style check across
+  its full domain, not by inspection), tight enough that `bell(1463) %
+  7` and every wrapper around it now evaluate while `bell(1464)`-based
+  shapes (one over the cap) still correctly refuse in milliseconds — the
+  same Stirling formula now also used for `factorial`'s own growth-bound
+  entry, tighter than the shared catch-all there too. A genuinely
+  unresolvable (symbolic) table argument — `bell(x) % 7` — still matches
+  whatever `origin/main` itself returns, unaffected either way.
+
 ## [0.13.0] — 2026-09-21
 
 ### Fixed

@@ -488,6 +488,59 @@ _growth_nn_tight = _growth_nn(1.0)
 _growth_nn_loose = _growth_nn(2.0)
 
 
+def _growth_stirling_factorial(bounds: dict) -> float:
+    """`log10(n!)` via Stirling's formula with its standard correction
+    term — a safe (over-, never under-) approximation, verified against
+    SymPy's own real digit counts (`factorial(1_463) = 3_998`,
+    `factorial(1_500) = 4_115`, `factorial(20) = 19`) to within ONE digit
+    at every scale checked.
+
+    THE-1095 round-3-follow-up #4 (coordinator review of 06272aa, grok
+    item 2): `_growth_nn_loose` (`n**(2n)`) is a deliberately LOOSE
+    catch-all, safe for names this module has no tighter formula for, but
+    it overestimates `bell(1463)` at ~9258 "digits" against its true
+    3_018 — already claiming "over `MAX_NUMERIC_DIGITS`" with NOTHING
+    else contributing at all, so `bell(1463) % 7` (and any wrapper
+    around it — `-bell(1463)`, `2*bell(1463)`, `bell(1463)+1`) was
+    refused even though the true value is comfortably under the cap and
+    `origin/main` evaluates it (the documented ~5s at-cap construction
+    cost, already accepted elsewhere in this module for bare
+    `bell(1463)`). `bell(n) <= n!` for every `n >= 0` (Bell numbers count
+    SET PARTITIONS of an n-set, strictly fewer than the n! PERMUTATIONS
+    once n >= 3) — a well-known, provable combinatorial fact, not an
+    empirical observation — so Stirling's own `log10(n!)` is a valid,
+    and now the TIGHTEST available, safe upper bound for `bell` too:
+    `_growth_stirling_factorial(1463)` correctly stays under
+    `MAX_NUMERIC_DIGITS` (`bell(1463)`, safe, evaluates) while
+    `_growth_stirling_factorial(1464)` correctly clears it (`bell(1464)`,
+    genuinely over cap, refuses) — verified against the adjacent-integer
+    boundary this specific pair straddles, not just an order-of-magnitude
+    check.
+
+    The `+ (1/(12n))*log10(e)` term is NOT decorative: the bare Stirling
+    approximation (`sqrt(2*pi*n)*(n/e)**n`, no correction) is only
+    asymptotically an upper bound as `n -> infinity` — Robbins' own,
+    tighter theorem brackets `n!` as `sqrt(2*pi*n)*(n/e)**n*exp(1/(12n+1))
+    < n! < sqrt(2*pi*n)*(n/e)**n*exp(1/(12n))`, and the bare version
+    (equivalent to dropping the `exp(1/(12n))` factor, i.e. using the
+    LOWER bracket's own leading term) measurably UNDER-shot the true
+    value for small `n` when first written — caught by this file's own
+    property-style check, not by inspection: `n=2` through `n=59` all
+    failed by a fraction of a digit (`factorial(2)`: real `log10 ~=
+    0.301`, bare-Stirling bound `~= 0.283`, UNDER). Robbins' own UPPER
+    bracket is what this now computes, sound for every `n >= 1`, not
+    merely for `n` large enough that the omitted correction term
+    stops mattering.
+    """
+    n = _safe_pow10(bounds.get(0))
+    if n is None:
+        return math.inf
+    if n < 2:
+        return 0.0
+    return (n * math.log10(n) - n * math.log10(math.e) + 0.5 * math.log10(2 * math.pi * n)
+            + (1.0 / (12 * n)) * math.log10(math.e))
+
+
 def _growth_2n(bounds: dict) -> float:
     """`binomial(n, k) <= 2**n` (position 0 only — `k`, position 1, is
     deliberately unbounded; see `_UNBOUNDED_POSITIONS`'s own comment)."""
@@ -794,8 +847,9 @@ _GROWTH_BOUNDS: dict = {
     "tribonacci": _growth_tribonacci,
     "catalan": _growth_catalan,
     "totient": _growth_totient,
+    "factorial": _growth_stirling_factorial, "bell": _growth_stirling_factorial,
     **dict.fromkeys(
-        ("factorial", "subfactorial", "gamma", "bell", "factorial2", "loggamma",
+        ("subfactorial", "gamma", "factorial2", "loggamma",
          "zeta", "andre", "genocchi", "motzkin", "bernoulli", "euler"),
         _growth_nn_loose,
     ),
@@ -1734,7 +1788,7 @@ def _deferred_binop_classes() -> dict:
 _DEFERRED_STANDINS: dict | None = None
 
 
-def _arity_checked_new(name: str, sig):
+def _arity_checked_new(real_obj):
     """`__new__` for a plain-callable deferred stand-in that raises the
     REAL callable's OWN native Python `TypeError` for a wrong argument
     count — see `_deferred_global_dict`'s own comment for why this
@@ -1742,63 +1796,32 @@ def _arity_checked_new(name: str, sig):
     `Function.__new__`'s own generic "X takes exactly N arguments"
     wording).
 
-    Builds a genuine Python function with the IDENTICAL parameter
-    signature (names, defaults, `*args`/`**kwargs`) and name as `sig`
-    describes, purely so Python's own call-binding machinery raises the
-    exact error a real call would — never executes anything from `sig`'s
-    own body, since the built function's body is just `pass`. This
-    module's own zero-`eval`/`exec` invariant (`scripts/check_no_eval.py`,
-    `tests/test_security.py`) is unconditional for this file — no
-    exemption for a template string built entirely from `inspect.
-    signature`'s own structured data, never caller text — so this is
-    built via `compile()` (produces a code object; runs nothing) plus
-    `types.FunctionType` (constructs a callable directly from a code
-    object; also runs nothing) instead of `exec()`. Two wrinkles found
-    getting this to actually work: (1) `compile(src, ..., "exec")`
-    compiles the WHOLE `def _stub(...): pass` STATEMENT, whose own
-    execution (never performed here) is what would normally bind the
-    inner function's code object to a name — the inner code object
-    itself is reachable directly from the outer one's `co_consts`,
-    without ever running the outer one; (2) a parameter's default VALUE
-    is attached by the (skipped) `MAKE_FUNCTION` bytecode, not stored on
-    the code object, so a plain `types.FunctionType(inner_code, {})`
-    would make every parameter look REQUIRED regardless of `sig`'s own
-    defaults — passed explicitly instead, as an `argdefs` tuple sized to
-    the count of defaulted positional parameters (every one of them
-    literally `None`, since only the PRESENCE of a default, never its
-    real value, is what makes an argument count valid or not). And
-    Python's own arity-`TypeError` text names the function via `co_
-    qualname` (confirmed live, Python 3.11+), not the `Function.__name__`
-    a plain assignment would set — `code.replace(co_qualname=name, ...)`
-    is what actually changes the printed name.
-    """
-    import types
+    Coordinator review of 06272aa: the PREVIOUS version of this function
+    built a dummy Python function via `compile()` + `types.FunctionType`
+    purely to reuse Python's own call-binding error text — generating
+    code objects at IMPORT TIME to mimic an error message is the wrong
+    tool, and sits one step from the `exec`/`eval` invariant this module
+    exists to guard, even though it never actually ran anything dynamic.
 
-    params = []
-    num_defaults = 0
-    for param in sig.parameters.values():
-        if param.kind in (param.POSITIONAL_ONLY, param.POSITIONAL_OR_KEYWORD):
-            if param.default is param.empty:
-                params.append(param.name)
-            else:
-                params.append(f"{param.name}=None")
-                num_defaults += 1
-        elif param.kind == param.VAR_POSITIONAL:
-            params.append(f"*{param.name}")
-        elif param.kind == param.VAR_KEYWORD:
-            params.append(f"**{param.name}")
-        # KEYWORD_ONLY: none of this module's own deferred-stand-in names
-        # use one (verified against every real callable in `_FUNCTION_
-        # ARG_CAPS`), so there is nothing to build for that kind here.
-    src = f"def _stub({', '.join(params)}): pass"
-    outer_code = compile(src, "<string>", "exec")
-    inner_code = next(c for c in outer_code.co_consts if isinstance(c, types.CodeType))
-    inner_code = inner_code.replace(co_name=name, co_qualname=name)
-    argdefs = (None,) * num_defaults if num_defaults else None
-    stub = types.FunctionType(inner_code, {}, name, argdefs)
+    Simpler, and using the REAL callable itself rather than a look-alike:
+    `inspect.signature(real_obj).bind(*args, **kwargs)` raises the SAME
+    `TypeError` Python's own call protocol would for a wrong argument
+    count. On that failure, calling `real_obj(*args, **kwargs)` raises
+    the exact NATIVE `TypeError` a real call would — byte-identical, not
+    a look-alike — because CPython binds arguments to a callee's frame
+    BEFORE executing any of its bytecode: the real function's own BODY
+    never runs, regardless of what `args`/`kwargs` actually contain (an
+    unevaluated SymPy expression included), since the call never gets
+    that far. On a SUCCESSFUL `bind()` (arity is fine), `real_obj` is
+    never touched at all — this only ever runs on the WRONG-arity path.
+    """
+    import inspect
 
     def __new__(cls, *args, **kwargs):
-        stub(*args, **kwargs)  # raises Python's own native arity TypeError
+        try:
+            inspect.signature(real_obj).bind(*args, **kwargs)
+        except TypeError:
+            real_obj(*args, **kwargs)  # raises the native TypeError; never reached otherwise
         from sympy import Function
 
         return Function.__new__(cls, *args, **kwargs)
@@ -1911,16 +1934,18 @@ def _deferred_global_dict() -> dict:
                     # `origin/main` raises Python's own native "isprime()
                     # takes 1 positional argument but 2 were given" (a
                     # plain function, not a `Function.__new__`-checked
-                    # class). `_arity_stub` below is a REAL Python
-                    # function, built via `exec` to have the identical
-                    # parameter signature (names, defaults, `*args`) and
-                    # `__name__` as the real callable, called with the
-                    # caller's own `*args` before ever touching `Function.
-                    # __new__` — Python's own call-binding machinery is
-                    # what raises the byte-identical `TypeError`, since it
-                    # is the SAME mechanism a real call to `isprime` would
-                    # hit, just never running the real body.
-                    attrs["__new__"] = _arity_checked_new(name, sig)
+                    # class). `_arity_checked_new`'s own `__new__` tries
+                    # `inspect.signature(real_obj).bind(*args, **kwargs)`
+                    # first (cheap, `sig` here only gates WHETHER this
+                    # path applies at all — the real check happens fresh,
+                    # against `real_obj`, on every call), falling through
+                    # to a REAL call to `real_obj` only on a `bind()`
+                    # failure — Python's own call-binding machinery is
+                    # what then raises the byte-identical `TypeError`,
+                    # since it is the SAME mechanism a real call to
+                    # `isprime` would hit, before any of `isprime`'s own
+                    # body ever runs.
+                    attrs["__new__"] = _arity_checked_new(real_obj)
             _DEFERRED_STANDINS[name] = type(name, (Function,), attrs)
         # THE-1095 round 3, item 6: `Mod` is directly callable BY NAME
         # (`Mod(x**N, 11)`, not just via the `%` operator
@@ -3274,8 +3299,30 @@ def _resolve_arg_magnitude(node, memo: dict) -> tuple[float, float, bool, str | 
     a caller checks it FIRST and returns immediately when set, the same
     way `_numeric_ceiling_scan`'s main loop already returns on its own
     direct cap violations.
+
+    THE-1095 round-3-follow-up #4 (coordinator review of 06272aa, grok
+    item 2): a `Mul`/`Add` WRAPPING a table call (`-bell(1463)` ==
+    `Mul(-1, bell(1463))`; `bell(1463)+1`; `2*bell(1463)`) used to stay
+    plain "unresolved" here, even though `bell(1463)` alone — the ONE
+    NESTED piece not already resolvable via `_log10_num_den` — resolves
+    fine via the branch just above. `_deferred_binop_violation`'s own
+    left/right operand resolution reads exactly this "unresolved" result
+    as "cannot be safely bounded" and refuses on an UNKNOWN — not an
+    over-cap verdict — even for `-bell(1463) % 7`, where `bell(1463)`
+    alone is comfortably safe and `origin/main` evaluates it. Composed
+    the same way `_log10_num_den` already composes a `Mul`/`Add` of
+    ordinary numeric pieces, just recursing through THIS function (so a
+    nested table call inside either gets the SAME growth-bound
+    treatment) instead of `_log10_num_den` directly: a `Mul`'s own
+    magnitude is the SUM of its factors' own magnitudes (sign discarded
+    — the SAME "abs, not signed" treatment `_log10_num_den`'s own
+    `Integer` handling already gives a plain `-1` factor); an `Add`'s own
+    magnitude is bounded by its LARGEST term's own magnitude, scaled up
+    by `log10(number of terms)` — the SAME safe-upper-bound formula
+    `_log10_num_den`'s own `Add` branch already uses for a purely
+    numeric sum, reused here rather than a second, parallel formula.
     """
-    from sympy import Function
+    from sympy import Add, Function, Mul
 
     log_num, log_den, resolved = _log10_num_den(node, memo)
     if resolved:
@@ -3286,6 +3333,28 @@ def _resolve_arg_magnitude(node, memo: dict) -> tuple[float, float, bool, str | 
             return 0.0, 0.0, False, violation
         if bound is not None:
             return bound, 0.0, True, None
+    if isinstance(node, Mul):
+        total = 0.0
+        for factor in node.args:
+            f_log_num, f_log_den, f_resolved, f_violation = _resolve_arg_magnitude(factor, memo)
+            if f_violation:
+                return 0.0, 0.0, False, f_violation
+            if not f_resolved:
+                return log_num, log_den, False, None
+            total += f_log_num - f_log_den
+        return total, 0.0, True, None
+    if isinstance(node, Add):
+        magnitudes = []
+        for term in node.args:
+            t_log_num, t_log_den, t_resolved, t_violation = _resolve_arg_magnitude(term, memo)
+            if t_violation:
+                return 0.0, 0.0, False, t_violation
+            if not t_resolved:
+                return log_num, log_den, False, None
+            magnitudes.append(t_log_num - t_log_den)
+        if not magnitudes:
+            return log_num, log_den, False, None
+        return max(magnitudes) + math.log10(len(magnitudes)), 0.0, True, None
     return log_num, log_den, False, None
 
 
