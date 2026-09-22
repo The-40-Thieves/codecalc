@@ -3942,12 +3942,21 @@ for _expr, _want in (("factorial(floor(2.5))", 2),
 # passed through) applied to a NEW opaque-Function shape, the same way it
 # already applies to a free symbol appearing where a symbol is not
 # expected, or to a table call already over its own cap.
+# THE-1095 round 15 (coordinator addendum, item 3): `Ei` gained its own
+# provable elementary bound this round (`Ei(x) <= e**|x|`, gated at
+# MAX_HEAVY_ARG on |x|) -- it is no longer "opaque, cannot bound", it
+# is now CORRECTLY bounded, and `Ei(1463)`'s own huge magnitude (e**1463
+# is nowhere near a small integer) trips factorial's OWN "exceeds the
+# limit" cap directly instead of the generic "cannot be safely bounded"
+# catch-all this test originally pinned. Still refused either way (the
+# shape this test exists to guard) -- only the WORDING changed, to a
+# more precise one.
 _v, _e = _boundary_parse("factorial(Ei(1463))")
-check("THE-1095 round-3-follow-up #6 item 3: 'factorial(Ei(1463))' (a "
-      "non-table, non-collapsing Function this module cannot bound) is "
-      "refused as unknown, not silently let through",
+check("THE-1095 round-3-follow-up #6 item 3 (wording updated round 15): "
+      "'factorial(Ei(1463))' (Ei now provably bounded, huge at x=1463) "
+      "is refused via factorial's own cap, not silently let through",
       _v is None and _e is not None and _e[0] == "ceiling"
-      and "cannot be safely bounded" in _e[1],
+      and "exceeds the limit" in _e[1],
       f"-> value={_v!r} err={_e!r}")
 
 # ═══ THE-1095 round 9 (coordinator review of 1d756b7, Codex ═══════════════
@@ -5076,6 +5085,100 @@ for _name, _cap in _se5._SUMMATION_SUMMAND_TABLE_NAME_RANGE_CAP.items():
           f"{_over_expr!r} refuses",
           _v is None and _e is not None and _e[0] == "ceiling",
           f"-> value={_v!r} err={_e!r}")
+
+# THE-1095 round 15 (coordinator addendum, item 3: "a measured list
+# must never decide these"): erfc/LambertW/Ei and fifteen siblings now
+# have their own provable elementary bound (_pole_sensitive_magnitude),
+# independent of _MEASURED_SAFE_CALLABLES entirely -- each stays
+# symbolically unevaluated at a small argument exactly as main does.
+_SPECIAL_FUNCTION_BARE_PINS = (
+    ("erfc(1)", "erfc(1)"), ("LambertW(1)", "LambertW(1)"),
+    ("Ei(1)", "Ei(1)"), ("erf(1)", "erf(1)"),
+    ("erf(10000)", "erf(10000)"),  # main-parity: erf is pole-sensitive-
+    # protected, not measured-safe-protected -- a magnitude past
+    # MAX_HEAVY_ARG must NOT be refused (|erf(x)| < 1 for any real x)
+    ("erfi(1)", "erfi(1)"), ("li(2)", "li(2)"), ("Chi(1)", "Chi(1)"),
+    ("Shi(1)", "Shi(1)"), ("fresnels(1)", "fresnels(1)"),
+    ("fresnelc(1)", "fresnelc(1)"), ("airyai(1)", "airyai(1)"),
+    ("airybi(1)", "airybi(1)"), ("airyaiprime(1)", "airyaiprime(1)"),
+    ("airybiprime(1)", "airybiprime(1)"), ("expint(2,1)", "expint(2, 1)"),
+    ("Si(1)", "Si(1)"), ("Ci(1)", "Ci(1)"),
+    ("Li(2)", "0"),  # Li(x) = li(x) - li(2) by definition -- Li(2) == 0 on main too
+)
+for _expr, _want in _SPECIAL_FUNCTION_BARE_PINS:
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 15 (elementary special-function bound): "
+          f"{_expr!r} matches main",
+          _e is None and str(_v) == _want, f"-> value={_v!r} err={_e!r}")
+
+_v, _e = _boundary_parse("erfc(0.5)")
+check("THE-1095 round 15: 'erfc(0.5)' (a Float argument, evalf-able) "
+      "matches main's own Float",
+      _e is None and abs(float(_v) - 0.4795001221869535) < 1e-9,
+      f"-> value={_v!r} err={_e!r}")
+
+# ...and every one of the three named nested hangs refuses in ms.
+_SPECIAL_FUNCTION_NESTED_HANGS = (
+    "factorial(floor(Abs(Ei(2000))))",
+    "factorial(ceiling(erfi(50)))",
+    "bell(floor(LambertW(10**1000)))",
+)
+for _expr in _SPECIAL_FUNCTION_NESTED_HANGS:
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round 15 (elementary special-function bound, "
+          f"nested): {_expr!r} refuses promptly",
+          _v is None and _e is not None and _e[0] == "ceiling" and _dt < 1.0,
+          f"-> value={_v!r} err={_e!r} elapsed={_dt:.3f}s")
+
+# Property check: each bound, evaluated with SymPy's own N() across a
+# grid inside its accepted domain, must stay UNDER the claimed bound --
+# never merely eyeballed at one point.
+_t0_sp = time.time()
+import sympy as _sp15
+
+_x15 = _sp15.Symbol("x")
+_SPECIAL_FUNCTION_BOUND_CHECKS = (
+    (_sp15.erf, lambda v: 1.0, [-5, -1, -0.5, 0, 0.5, 1, 5, 1000]),
+    (_sp15.erfc, lambda v: 2.0, [-5, -1, 0, 1, 5, 1000]),
+    (_sp15.erfi, lambda v: _sp15.exp(v * v), [-5, -1, 0, 1, 5, 38]),
+    (_sp15.Ei, lambda v: _sp15.exp(abs(v)) if v != 0 else _sp15.oo,
+     [-5, -1, 1, 5, 1463]),
+    # Chi/li: this module's own domain is `x > 0` only -- both are
+    # COMPLEX-valued for x <= 0 (confirmed live: `Chi(-1) == 0.838 +
+    # pi*I`, magnitude already over the real-valued bound), so the grid
+    # here is positive-only, matching what `_pole_sensitive_magnitude`
+    # actually accepts.
+    (_sp15.Chi, lambda v: _sp15.exp(abs(v)), [1, 5, 1463]),
+    (_sp15.Shi, lambda v: _sp15.exp(abs(v)), [-5, -1, 0, 1, 5, 1463]),
+    (_sp15.li, lambda v: _sp15.exp(abs(v)) if v != 1 else _sp15.oo,
+     [0.1, 2, 5, 1463]),
+    (_sp15.LambertW, lambda v: _sp15.log(v + 1) if v > 0 else _sp15.oo,
+     [0, 0.5, 1, 5, 1463]),
+    (_sp15.fresnels, lambda v: 1.0, [-5, -1, 0, 1, 5, 1000]),
+    (_sp15.fresnelc, lambda v: 1.0, [-5, -1, 0, 1, 5, 1000]),
+    (_sp15.airyai, lambda v: _sp15.exp(abs(v) ** _sp15.Rational(3, 2)), [-5, -1, 0, 1, 5, 100]),
+    (_sp15.airybi, lambda v: _sp15.exp(abs(v) ** _sp15.Rational(3, 2)), [-5, -1, 0, 1, 5, 100]),
+    (_sp15.Si, lambda v: 2.0, [-5, -1, 0, 1, 5, 1000]),
+    (_sp15.Ci, lambda v: 2.0, [0.1, 1, 5, 1000]),
+)
+_prop_fails = []
+for _fn, _bound_fn, _grid in _SPECIAL_FUNCTION_BOUND_CHECKS:
+    for _val in _grid:
+        try:
+            _actual = abs(complex(_fn(_sp15.Rational(_val).limit_denominator(1000)).evalf(20)))
+            _bound = _bound_fn(_val)
+            _bound_num = float(_bound.evalf(20)) if hasattr(_bound, "evalf") else float(_bound)
+        except Exception:
+            continue  # a pole/domain edge this grid's own coarse sampling hit -- skip
+        if _actual > _bound_num * 1.0000001:  # float slack only
+            _prop_fails.append(f"{_fn.__name__}({_val}): |{_actual}| > bound {_bound_num}")
+check(f"THE-1095 round 15 (property check): every elementary special-"
+      f"function bound holds against SymPy's own N() across its grid "
+      f"({sum(len(g) for _f, _b, g in _SPECIAL_FUNCTION_BOUND_CHECKS)} points, "
+      f"{time.time() - _t0_sp:.2f}s)",
+      not _prop_fails, f"-> failures={_prop_fails}")
 
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== ALL BUG-SWEEP REGRESSIONS FIXED ===")

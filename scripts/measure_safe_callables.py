@@ -130,6 +130,16 @@ def _already_handled_names() -> frozenset[str]:
         frozenset(se._FUNCTION_ARG_CAPS)
         | frozenset(EvaluateFalseTransformer.functions)
         | frozenset(se._DEFERRED_BINOP_OPS)
+        # THE-1095 round 15 (coordinator addendum, item 3): every
+        # `_POLE_SENSITIVE_NAMES` member (gamma/erf/the erf-adjacent
+        # special-function family/...) has its own provable analytic
+        # bound already, independent of measurement — `erf` had been
+        # measured-safe-listed ANYWAY before this exclusion existed,
+        # letting the measured list's own `MAX_HEAVY_ARG` argument cap
+        # WRONGLY refuse `erf(10000)` (main evaluates it fine) despite
+        # `_pole_sensitive_magnitude`'s own unconditional `<= 1` bound
+        # never needing an argument cap at all.
+        | frozenset(se._POLE_SENSITIVE_NAMES)
         | frozenset({"Mod", "Max", "Min", "floor", "ceiling", "frac", "N", "series",
                      "summation", "product", "Sum", "Product", "integrate", "Integral"})
         # AST-transform-RESERVED classes: `Add`/`Mul`/`Pow`/`Or`/`And`/

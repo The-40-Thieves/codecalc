@@ -6024,9 +6024,55 @@ def _evalf_coercion_cheap(arg, arg_log_num: float, arg_log_den: float) -> bool:
 #: monotone increasing in that magnitude; none of the nine names here
 #: are (each has a pole, a sign-dependent branch, or both), so a
 #: magnitude alone is never enough for them.
+#: THE-1095 round 15 (coordinator addendum, item 3, `verify-1095-r14-
+#: grok.log` + coordinator's own live spot-check of the previous round-15 commit): a
+#: MEASURED allowlist must never be the only thing standing between an
+#: ORDINARY special function and a refusal — `erfc(1)`/`LambertW(1)`/
+#: `Ei(1)` all refused as "not in the bounded function set" where
+#: `origin/main` evaluates them (stays symbolically unevaluated,
+#: exactly as `erf(1)` already correctly does — `erf` was ALREADY in
+#: this set, from round 12). Each of these seventeen has a PROVABLE,
+#: closed-form analytic bound, independent of any measurement:
+#:   `erfc(x) <= 2`; `Si(x)`/`Ci(x) <= 2` for any real `x` (like `sin`/
+#:     `cos`/`tanh`); `fresnels(x)`/`fresnelc(x) <= 1` likewise.
+#:   `erfi(x) <= e**(x**2)`; `Ei(x)`/`Li(x)`/`li(x)`/`Chi(x)`/`Shi(x)
+#:     <= e**|x|` — gated at `MAX_HEAVY_ARG` on the EXPONENT (`x**2` or
+#:     `|x|`), past which this module has no basis to trust the bound
+#:     stays renderable.
+#:   `LambertW(x) <= log(x+1)` for `x >= 0` (refused for negative `x`,
+#:     the principal branch's own domain).
+#:   `airyai`/`airybi`/`airyaiprime`/`airybiprime(x) <= e**(|x|**1.5)`,
+#:     same `MAX_HEAVY_ARG` exponent gate on `|x|**1.5`.
+#:   `expint(n, x) <= 1` for `x >= 1` (refused otherwise; independent
+#:     of `n`'s own value).
+#: All seventeen reuse `_pole_sensitive_magnitude`'s own established
+#: exact-rational gate (`_unresolved_or_violation`, defined in that
+#: function's own scope) — bound only when the relevant argument
+#: resolves to an exact real `Rational`; a genuinely symbolic argument
+#: is left unresolved (no violation), and anything else (complex,
+#: irrational, an unresolvable nested call) refuses as unknown, the
+#: SAME "unknown != safe" bar this whole mechanism already enforces.
+#: `_already_handled_names` (`scripts/measure_safe_callables.py`) now
+#: excludes every `_POLE_SENSITIVE_NAMES` member from measurement
+#: candidacy too — `erf` had been measured-safe-listed ANYWAY despite
+#: being pole-sensitive-protected already (a gap that let `erf(10000)`
+#: get WRONGLY refused by the measured list's own `MAX_HEAVY_ARG`
+#: argument cap, an unconditional, main-mismatching restriction
+#: `_pole_sensitive_magnitude`'s own bound never needed at all) — fixed
+#: the same way here, and the round-15 allowlist had erf/li/airyai/
+#: airyaiprime/expint/Si/Ci removed by hand for the identical reason.
+_ELEMENTARY_SPECIAL_UNBOUNDED_NAMES: dict[str, float] = {
+    "erfc": 2.0, "Si": 2.0, "Ci": 2.0, "fresnels": 1.0, "fresnelc": 1.0,
+}
+_ELEMENTARY_SPECIAL_EXP_BOUNDED_NAMES = frozenset({
+    "erfi", "Ei", "Li", "li", "Chi", "Shi",
+})
+
 _POLE_SENSITIVE_NAMES = frozenset({
     "gamma", "loggamma", "digamma", "polygamma", "zeta",
     "sin", "cos", "tanh", "erf", "exp",
+    *_ELEMENTARY_SPECIAL_UNBOUNDED_NAMES, *_ELEMENTARY_SPECIAL_EXP_BOUNDED_NAMES,
+    "LambertW", "airyai", "airybi", "airyaiprime", "airybiprime", "expint",
 })
 
 #: Of the ten `_POLE_SENSITIVE_NAMES`, ONLY these four are also members
@@ -6407,6 +6453,113 @@ def _pole_sensitive_magnitude(node, memo: dict) -> tuple[float, float, bool, str
         message = ("an argument to zeta() cannot be safely bounded: computing it "
                    "would take an unbounded amount of time and memory")
         return 0.0, 0.0, False, message
+
+    if name == "expint":
+        # THE-1095 round 15 (coordinator addendum, item 3): `expint(n,
+        # x) <= 1` for `x >= 1` -- only `x` (position 1) needs the
+        # exact-value gate; the bound does not depend on `n`'s own
+        # value at all.
+        if len(node.args) < 2:
+            return None
+        handled, result = _unresolved_or_violation(node.args[1])
+        if handled:
+            return result
+        x = result
+        if x < 1:
+            message = ("the second argument to expint() cannot be safely bounded "
+                       "outside x >= 1: computing it would take an unbounded "
+                       "amount of time and memory")
+            return 0.0, 0.0, False, message
+        return 0.0, 0.0, True, None
+
+    if name in _ELEMENTARY_SPECIAL_UNBOUNDED_NAMES:
+        # THE-1095 round 15 (coordinator addendum, item 3): `erfc`,
+        # `fresnels`/`fresnelc`, `Si`/`Ci` -- each bounded by a FIXED
+        # constant for ANY exact real `x`, the identical "|value| <=
+        # const, no domain restriction" shape `sin`/`cos`/`tanh`/`erf`
+        # already have, just a different constant per name.
+        if len(node.args) != 1:
+            return None
+        handled, result = _unresolved_or_violation(node.args[0])
+        if handled:
+            return result
+        return math.log10(_ELEMENTARY_SPECIAL_UNBOUNDED_NAMES[name]), 0.0, True, None
+
+    if name == "LambertW":
+        # `LambertW(x) <= log(x + 1)` for `x >= 0`; refused for `x < 0`
+        # (the principal branch has its own pole/multivaluedness there
+        # this module does not attempt to reason about).
+        if len(node.args) != 1:
+            return None
+        handled, result = _unresolved_or_violation(node.args[0])
+        if handled:
+            return result
+        x = result
+        if x < 0:
+            message = ("the argument to LambertW() cannot be safely bounded for a "
+                       "negative value: computing it would take an unbounded amount "
+                       "of time and memory")
+            return 0.0, 0.0, False, message
+        log_val = math.log(float(x) + 1.0) if x > 0 else 1.0  # x == 0: LambertW(0) == 0
+        if log_val <= 0:
+            return 0.0, 0.0, True, None  # value in (0, 1] -- log10 <= 0, trivially safe
+        return math.log10(log_val), 0.0, True, None
+
+    if name in _ELEMENTARY_SPECIAL_EXP_BOUNDED_NAMES:
+        # THE-1095 round 15 (coordinator addendum, item 3): `erfi(x) <=
+        # e**(x**2)`; `Ei`/`Li`/`li`/`Chi`/`Shi`(x) <= e**|x|` -- each
+        # gated at `MAX_HEAVY_ARG` on the EXPONENT itself (the
+        # coordinator's own spec: "refuse when x**2 > MAX_HEAVY_ARG"
+        # for `erfi`, the same shape applied to the `|x|` exponent for
+        # the other four).
+        #
+        # THE-1095 round 15 (own property-check self-review, before
+        # this round's own commit): `Chi`/`li` are COMPLEX-valued for
+        # NEGATIVE real `x` (confirmed live: `Chi(-1) == 0.838 + pi*I`,
+        # magnitude `~3.25`, ALREADY over the real-valued `e**1 ~=
+        # 2.72` bound this branch would otherwise claim -- `li` picks
+        # up the SAME imaginary branch for any `x <= 0`). `erfi`/`Ei`/
+        # `Shi` stay REAL for every real `x` (`erfi` is an ODD function,
+        # `x**2` already erases the sign; `Ei`/`Shi` verified real at
+        # negative `x` directly) -- `Chi`/`li` alone are restricted to
+        # `x > 0`, refused otherwise, sidestepping the branch cut
+        # entirely rather than trying to bound a value on it.
+        if len(node.args) != 1:
+            return None
+        handled, result = _unresolved_or_violation(node.args[0])
+        if handled:
+            return result
+        x = result
+        if name in ("Chi", "li") and x <= 0:
+            message = (f"the argument to {name}() cannot be safely bounded for a "
+                       "non-positive value (a complex branch this module does not "
+                       "reason about): computing it would take an unbounded amount "
+                       "of time and memory")
+            return 0.0, 0.0, False, message
+        exponent = x * x if name == "erfi" else abs(x)
+        if exponent > MAX_HEAVY_ARG:
+            message = (f"the argument to {name}() exceeds the limit of "
+                       f"{MAX_HEAVY_ARG}: computing it would take an unbounded "
+                       "amount of time and memory")
+            return 0.0, 0.0, False, message
+        return float(exponent) * math.log10(math.e), 0.0, True, None
+
+    if name in ("airyai", "airybi", "airyaiprime", "airybiprime"):
+        # `airyai`/`airybi`/their derivatives `<= e**(|x|**1.5)` --
+        # same MAX_HEAVY_ARG exponent gate, on `|x|**1.5` this time.
+        if len(node.args) != 1:
+            return None
+        handled, result = _unresolved_or_violation(node.args[0])
+        if handled:
+            return result
+        x = result
+        exponent = abs(float(x)) ** 1.5
+        if exponent > MAX_HEAVY_ARG:
+            message = (f"the argument to {name}() exceeds the limit of "
+                       f"{MAX_HEAVY_ARG}: computing it would take an unbounded "
+                       "amount of time and memory")
+            return 0.0, 0.0, False, message
+        return exponent * math.log10(math.e), 0.0, True, None
 
     # sin / cos / tanh / erf / exp -- all single-argument.
     if len(node.args) != 1:

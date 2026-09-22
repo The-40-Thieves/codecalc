@@ -1865,13 +1865,67 @@ behind it.
     dedicated re-measurement pass. `quadratic_residues`, `egyptian_
     fraction`, and `continued_fraction_periodic` are NOT load artifacts
     — genuine heavy-shape TIMEOUTs at the cap — and stay excluded.
-  - `erfc`/the `erf` family/`Ei`/`LambertW`/`Li`/`Chi`/`Shi`/
-    `fresnels`/`fresnelc`/`airybi` are ordinary special functions with
-    small results at any exact argument and arguably belong in the
-    ELEMENTARY bound table (provable analytic bounds — `erfc <= 2`,
-    `LambertW(x) <= log(x+1)`, ...) rather than depending on the
-    measured list at all, removing them from load-artifact risk
-    permanently. Not implemented this round.
+  (`erfc`/the `erf` family/`Ei`/`LambertW`/`Li`/`Chi`/`Shi`/`fresnels`/
+  `fresnelc`/`airybi` — the "arguably belongs in the elementary bound
+  table" note this bullet originally carried is now DONE, immediately
+  below, same commit.)
+
+- **A MEASURED list must never be the only thing standing between an
+  ORDINARY special function and a refusal** (coordinator's own live
+  spot-check of the previous round-15 commit, item 3 of the original round-15 message):
+  `erfc(1)`, `LambertW(1)`, `Ei(1)` all refused as "not in the bounded
+  function set" where `origin/main` evaluates them (stays symbolically
+  unevaluated, exactly as `erf(1)` — already pole-sensitive-protected
+  since round 12 — already correctly did). Seventeen more names
+  (`erfc`, `erfi`, `Ei`, `Li`, `li`, `Chi`, `Shi`, `LambertW`,
+  `fresnels`, `fresnelc`, `airyai`, `airybi`, `airyaiprime`,
+  `airybiprime`, `expint`, `Si`, `Ci`) join `_POLE_SENSITIVE_NAMES`
+  with a PROVABLE, closed-form analytic bound each — independent of
+  any measurement, the same "exact-rational gate" mechanism (round
+  11/12: bound only when the argument resolves to an exact real
+  `Rational`; symbolic stays unresolved; anything else — complex,
+  irrational, unresolvable — refuses as unknown) `gamma`/`zeta`/`sin`/
+  `cos`/`tanh`/`erf`/`exp` already use:
+  - `erfc(x) <= 2`; `Si(x)`/`Ci(x) <= 2`; `fresnels(x)`/`fresnelc(x)
+    <= 1` — a fixed constant, any real `x`, the identical shape
+    `sin`/`cos`/`tanh`/`erf` already have.
+  - `erfi(x) <= e**(x**2)`; `Ei(x)`/`Shi(x) <= e**|x|` (real for any
+    real `x`) — gated at `MAX_HEAVY_ARG` on the exponent itself.
+  - `Chi(x)`/`li(x) <= e**|x|`, restricted to `x > 0` — found in this
+    round's own property-check self-review BEFORE commit: both are
+    COMPLEX-valued for `x <= 0` (`Chi(-1) == 0.838 + pi*I`, magnitude
+    `~3.25`, already over the real-valued `e**1 ~= 2.72` bound a naive
+    `abs(x)` treatment would have claimed) — refused for `x <= 0`
+    instead of bounding a value on the branch cut.
+  - `LambertW(x) <= log(x+1)` for `x >= 0` (refused negative — the
+    principal branch's own domain).
+  - `airyai`/`airybi`/`airyaiprime`/`airybiprime(x) <= e**(|x|**1.5)`,
+    same `MAX_HEAVY_ARG` exponent gate on `|x|**1.5`.
+  - `expint(n, x) <= 1` for `x >= 1` (refused otherwise; independent
+    of `n`).
+
+  `scripts/measure_safe_callables.py`'s own `_already_handled_names`
+  now excludes every `_POLE_SENSITIVE_NAMES` member from measurement
+  candidacy — closing a gap that predates this round: `erf` had been
+  measured-safe-listed ANYWAY despite already being pole-sensitive-
+  protected, letting the measured list's own unconditional `MAX_HEAVY_
+  ARG` argument cap WRONGLY refuse `erf(10000)` (main evaluates it
+  fine, `|erf(x)| < 1` for every real `x` regardless of magnitude) —
+  found and fixed live spot-checking this round's own new code before
+  commit. Seven names (`erf`, `li`, `airyai`, `airyaiprime`, `expint`,
+  `Si`, `Ci`) were removed from the CURRENT allowlist JSON by hand for
+  the identical reason (408 of 767, was 415 — the other eleven of the
+  eighteen were already excluded from the round-15 measurement for
+  unrelated reasons, load-artifact or genuine).
+
+  Pinned live against `origin/main`, including the coordinator's own
+  three named nested hangs (`factorial(floor(Abs(Ei(2000))))`,
+  `factorial(ceiling(erfi(50)))`, `bell(floor(LambertW(10**1000)))`,
+  all refusing in under a millisecond) and a property check —
+  `tests/test_bug_sweep.py` evaluates SymPy's own `N()` across a grid
+  inside each name's accepted domain and asserts every claimed bound
+  actually holds, not merely eyeballed at one point (this is what
+  caught the `Chi`/`li` complex-branch issue above, before commit).
 
 ## [0.13.0] — 2026-09-21
 
