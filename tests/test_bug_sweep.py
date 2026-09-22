@@ -2402,13 +2402,20 @@ for _fn_name, (_kind, _cap) in _se5._FUNCTION_ARG_CAPS.items():
         check(f"  ...promptly ({_dt:.3f}s)", _dt < 2.0, f"-> {_dt:.3f}s")
         # ...and a comfortably-under-cap computed argument still evaluates,
         # identically to its literal form -- I2 of THE-1095's own ledger.
-        _under_lit, _under_computed = f"21{_extra}", f"10+11{_extra}"
-        _lv, _le = _boundary_parse(f"{_fn_name}({_under_lit})")
-        _cv, _ce = _boundary_parse(f"{_fn_name}({_under_computed})")
-        check(f"self-check: {_fn_name}({_under_computed}) == "
-              f"{_fn_name}({_under_lit}) (under cap, computed == literal)",
-              _le is None and _ce is None and _lv == _cv,
-              f"-> literal={_lv!r}/{_le!r} computed={_cv!r}/{_ce!r}")
+        # `motzkin` is DELIBERATELY excluded (round-3-follow-up, grok item
+        # E): its own `eval()` raises a differently-worded `ValueError`
+        # ("must be a positive integer") on an unevaluated Add, which the
+        # narrowed real-dict catch-all no longer treats as safe to retry
+        # under `evaluate=True` -- see the dedicated pinned regression for
+        # `motzkin(2+3)` (and the CHANGELOG) for the full account.
+        if _fn_name != "motzkin":
+            _under_lit, _under_computed = f"21{_extra}", f"10+11{_extra}"
+            _lv, _le = _boundary_parse(f"{_fn_name}({_under_lit})")
+            _cv, _ce = _boundary_parse(f"{_fn_name}({_under_computed})")
+            check(f"self-check: {_fn_name}({_under_computed}) == "
+                  f"{_fn_name}({_under_lit}) (under cap, computed == literal)",
+                  _le is None and _ce is None and _lv == _cv,
+                  f"-> literal={_lv!r}/{_le!r} computed={_cv!r}/{_ce!r}")
 check(f"self-check covered every name in _FUNCTION_ARG_CAPS "
       f"({len(_checked_names)} names)",
       _checked_names == set(_se5._FUNCTION_ARG_CAPS),
@@ -2612,12 +2619,28 @@ check("THE-1095 group B: 'isprime(10**24+7)' (computed) agrees with "
 # (round-6's control shape for group B: was this a length coincidence with
 # the 1463+1 examples above, or does a TINY computed argument fail too?
 # it does, universally, pre-fix -- this is the wrong-refusal shape, not a
-# ceiling one).
-for _expr in ("primorial(2+3)", "prime(2+3)", "motzkin(2+3)", "isprime(2+3)"):
+# ceiling one). `motzkin` is DELIBERATELY excluded here as of round 3's
+# follow-up (grok, item E, narrowing the real-dict catch-all to ONLY the
+# exact "... is not an integer" ValueError class): `motzkin`'s own eval()
+# raises a DIFFERENTLY-worded ValueError ("The provided number must be a
+# positive integer") on an unevaluated Add/Pow argument, indistinguishable
+# by message text alone from a genuine domain violation -- see the pinned
+# regression just below for the narrowed, now-refused-immediately outcome.
+for _expr in ("primorial(2+3)", "prime(2+3)", "isprime(2+3)"):
     _r = _exact.simplify_expression(_expr)
     check(f"THE-1095 group B: {_expr!r} (tiny, nowhere near any cap) "
           "evaluates instead of raising a spurious 'not an integer' error",
           _r.get("ok") is True, f"-> {_r}")
+_r_motzkin = _exact.simplify_expression("motzkin(2+3)")
+check("THE-1095 round-3-follow-up (grok item E): 'motzkin(2+3)' -- tiny, "
+      "in-range -- is now refused as VALIDATION (narrowed real-dict "
+      "catch-all: motzkin's ValueError does not contain 'is not an "
+      "integer'), a deliberate narrowing of round 1's own group-B fix, "
+      "not a ceiling refusal and not a silent success",
+      _r_motzkin.get("ok") is False
+      and _r_motzkin.get("code") == _errors.VALIDATION
+      and "positive integer" in _r_motzkin.get("error", ""),
+      f"-> {_r_motzkin}")
 
 # I5: the table is the single source of truth, and every row is exercised
 # by BOTH layers for a genuinely computed argument -- the loop above
@@ -2999,6 +3022,330 @@ check("THE-1095 round 3 item 6: eval_exact('1 << 20') is unaffected "
 _er2 = _exact.eval_exact(f"2**{_N78} % 7")
 check("  ...and eval_exact's OWN, unrelated exponent cap still protects it",
       _er2.get("ok") is False, f"-> {_er2}")
+
+# ═══ THE-1095 round-3-follow-up: ClusterFuzzLite crash on 44c83b1, plus ═══
+# ═══ grok items A-E and Codex's shift-digit-bound item, one commit ═══════
+
+# The exact ClusterFuzzLite crash input, decoded from the crash file
+# (fuzz/safe_expr_fuzzer.py's own ConsumeIntInRange-then-
+# ConsumeUnicodeNoSurrogates contract, replayed against the seed corpus).
+# On 44c83b1, `safe_parse` raised `TypeError: 'property' object is not
+# iterable` uncaught from `reject_explosive` -> `Basic.free_symbols`: a
+# bare CLASS reference (the literal `Pow` in this input, resolving through
+# `safe_global_dict()`'s full `sympy.__dict__` exposure to the CLASS
+# itself rather than an instance) ended up nested one level inside another
+# node's OWN `.args` tuple, where `_walk`'s existing per-node guard never
+# got a chance to run before `reject_explosive`'s own code called
+# `.free_symbols` directly on that ancestor. Confirmed LIVE (this
+# session's own atheris 3.12 repro venv) that `origin/main` (6cda9d4)
+# crashes on this SAME decoded string with the SAME exception, at its own
+# `reject_explosive` line 2080 (`if exponent.free_symbols:`) -- this is a
+# LATENT bug that predates THE-1095 entirely, not a regression introduced
+# by any of this ticket's earlier rounds; ClusterFuzzLite happened to find
+# it via a path this ticket's own changes made reachable. There is no
+# "main's error code" to match here -- main does not return one, it
+# crashes -- so this regression test instead pins `safe_parse`'s own
+# contract: always a 2-tuple, never a raised exception, for this exact
+# input.
+_CRASH_343R3_INPUT = ("breakpoint()!!z!al^aZ!al^zaa!az!al^jalZZZZZZZZZZZZZZZZZZZZZZZZ"
+                      "al^aZ!al^zaa!az!al^jala!!z!al^aZ!al^Pow!az!al^jalZZZZZZZZZZZZ"
+                      "ZZZZZZZZZZZZal^aZ!al^zaa!az!al^jalZZZZZl^jaa!az!al^aZ!al^jaa!"
+                      "az!al^jalZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ"
+                      "ZZZZZZZZZZZZZZZZZZZZZZ^jtal^jaa!az!al^aZ!al^jaa!az!exceptal^j"
+                      "al^ZZZZZl^jaa!az!al^aZ!al^jaa!az!at^jalZZZZZZZZZZZZZZZZZZZZZZ"
+                      "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ"
+                      "^jtal^jaa!az!al^aZ!al^jaa!az!exceptal^jal^jt")
+try:
+    _crash_v, _crash_e = _se5.classify_unsafe(_CRASH_343R3_INPUT), None
+    _crash_v, _crash_e = _boundary_parse(_CRASH_343R3_INPUT)
+    _crash_raised = False
+except Exception as _crash_exc:
+    _crash_raised = True
+    _crash_v = _crash_e = None
+check("THE-1095 round-3-follow-up: the exact ClusterFuzzLite crash-343r3 "
+      "input never raises through safe_parse (fixed at its root: "
+      "reject_explosive now refuses a bare `type` reference before ever "
+      "calling a property on it)",
+      not _crash_raised, f"-> raised={_crash_raised}")
+check("  ...and returns the ordinary (value, error) 2-tuple contract, a "
+      "clean refusal rather than a crash",
+      not _crash_raised and (_crash_v is None) != (_crash_e is None),
+      f"-> value={_crash_v!r} err={_crash_e!r}")
+
+# Never-raises sweep: every bare-operand name this module exposes --
+# `Pow`/`Mul`/`Add`/`Symbol` (SymPy's own core classes) and every
+# `_FUNCTION_ARG_CAPS` table name -- used bare (uncalled) in four shapes
+# that could plausibly leak a class reference into a tree
+# `reject_explosive` walks. `safe_parse` must return a 2-tuple in every
+# case, never raise -- this is the general form of the crash-343r3 fix,
+# not a name-by-name guess at what the fuzzer might try next.
+_BARE_OPERAND_NAMES = ["Pow", "Mul", "Add", "Symbol", *_se5._DEFERRED_STANDIN_NAMES,
+                       *_se5._FUNCTION_ARG_CAPS]
+_bare_operand_fails = 0
+for _name in sorted(set(_BARE_OPERAND_NAMES)):
+    for _shape in ("{name}", "x^{name}", "{name}*2", "{name}(", "{name})"):
+        _expr = _shape.format(name=_name)
+        try:
+            _r = _boundary_parse(_expr)
+            _ok = isinstance(_r, tuple) and len(_r) == 2
+        except Exception as _exc:
+            _ok = False
+            _r = f"RAISED {type(_exc).__name__}: {_exc}"
+        if not _ok:
+            _bare_operand_fails += 1
+            FAILS.append(f"never-raises sweep: {_expr!r} -> {_r!r}")
+check(f"THE-1095 round-3-follow-up: never-raises sweep over "
+      f"{len(set(_BARE_OPERAND_NAMES))} bare-operand names x 5 shapes "
+      f"({len(set(_BARE_OPERAND_NAMES)) * 5} probes) -- safe_parse always "
+      "returns a 2-tuple, never raises",
+      _bare_operand_fails == 0, f"-> {_bare_operand_fails} failures")
+
+# Property-style check for EVERY `_GROWTH_BOUNDS` entry: for n across a
+# sample grid over its capped domain (including the cap itself, and
+# ith=1000 for nextprime), the bound must be >= the REAL value SymPy
+# computes, for every n small enough to compute cheaply. A bound found
+# BELOW the true value fails this test -- this is what actually caught
+# the primorial/nextprime/fibonacci/lucas/prime formula bugs (items A, B,
+# D) during this round's own development, before any named repro was
+# even written by hand.
+import sympy as _sp5
+
+
+def _growth_check(name, fn, real_fn, ns, extra_bounds=None):
+    fails = []
+    for n in ns:
+        bounds = {0: math.log10(n) if n > 0 else -math.inf}
+        if extra_bounds:
+            bounds.update(extra_bounds(n))
+        b = fn(bounds)
+        try:
+            real = real_fn(n)
+        except Exception:
+            continue
+        real = abs(int(real)) if real != 0 else 0
+        real_log = math.log10(real) if real > 0 else 0.0
+        if b < real_log - 1e-9:
+            fails.append((n, real_log, b))
+    check(f"THE-1095 round-3-follow-up: growth-bound property check for "
+          f"{name!r} (bound >= real value across its own grid)",
+          not fails, f"-> fails={fails}")
+
+
+_growth_check("factorial (_growth_nn_loose)", _se5._growth_nn_loose,
+              lambda n: _sp5.factorial(n), range(1, 60))
+_growth_check("bell (_growth_nn_loose)", _se5._growth_nn_loose,
+              lambda n: _sp5.bell(n), range(1, 40))
+_growth_check("binomial (_growth_2n)", _se5._growth_2n,
+              lambda n: _sp5.binomial(n, n // 2), range(1, 60))
+_growth_check("primorial (default, nth=True)", _se5._growth_primorial,
+              lambda n: _sp5.primorial(n), range(1, 60))
+_growth_check("primorial (nth=False)", _se5._growth_primorial,
+              lambda n: _sp5.primorial(n, nth=False), range(1, 60))
+_growth_check("prime", _se5._growth_prime, lambda n: _sp5.prime(n), range(1, 60))
+_growth_check("primepi", _se5._growth_primepi, lambda n: _sp5.primepi(n), range(1, 60))
+_growth_check("npartitions", _se5._growth_npartitions,
+              lambda n: _sp5.npartitions(n), range(1, 40))
+_growth_check("harmonic", _se5._growth_harmonic, lambda n: _sp5.harmonic(n), range(1, 60))
+_growth_check("digamma (position 0)", _se5._growth_digamma,
+              lambda n: _sp5.floor(_sp5.Abs(_sp5.digamma(n))) + 1, range(1, 60))
+_growth_check("fibonacci", _se5._growth_fibonacci, lambda n: _sp5.fibonacci(n), range(60))
+_growth_check("lucas", _se5._growth_lucas, lambda n: _sp5.lucas(n), range(60))
+_growth_check("tribonacci", _se5._growth_tribonacci, lambda n: _sp5.tribonacci(n), range(40))
+_growth_check("catalan", _se5._growth_catalan, lambda n: _sp5.catalan(n), range(40))
+_growth_check("totient", _se5._growth_totient, lambda n: _sp5.totient(n), range(1, 60))
+_growth_check("rf", _se5._growth_rf_ff, lambda n: _sp5.rf(n, n), range(1, 40),
+              extra_bounds=lambda n: {1: math.log10(n) if n > 0 else -math.inf})
+_growth_check("ff", _se5._growth_rf_ff, lambda n: _sp5.ff(n, n), range(1, 40),
+              extra_bounds=lambda n: {1: math.log10(n) if n > 0 else -math.inf})
+_growth_check("divisor_sigma (k=1 default)", _se5._growth_divisor_sigma,
+              lambda n: _sp5.divisor_sigma(n), range(1, 60))
+_growth_check("polygamma (order=0)", _se5._growth_polygamma,
+              lambda n: _sp5.floor(_sp5.Abs(_sp5.polygamma(0, n))) + 1, range(1, 60),
+              extra_bounds=lambda n: {0: 0.0, 1: math.log10(n) if n > 0 else -math.inf})
+_growth_check("nextprime (ith=1)", _se5._growth_nextprime,
+              lambda n: _sp5.nextprime(n), [2, 3, 10, 100, 1000, 10**6, 10**10, 10**20],
+              extra_bounds=lambda n: {1: 0.0})
+_growth_check("nextprime (ith=1000, MAX_ITH_PRIME_SKIP)", _se5._growth_nextprime,
+              lambda n: _sp5.nextprime(n, 1000), [2, 3, 10, 100, 1000],
+              extra_bounds=lambda n: {1: math.log10(1000)})
+
+# Item A (grok): primorial's DEFAULT (no second arg, nth=True) is the
+# product of the FIRST n primes, not the product of primes <= n -- the
+# formula used to bound the WRONG one of the two meanings.
+_v, _e = _boundary_parse("primorial(1463+1)")
+check("THE-1095 round-3-follow-up item A: 'primorial(1463+1)' (default "
+      "nth=True form, one over MAX_HEAVY_ARG) is refused as a ceiling, "
+      "same as before -- the fix corrects the FORMULA, not whether this "
+      "specific boundary refuses",
+      _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+# The DANGEROUS direction of item A's bug: `primorial(6)` (default
+# nth=True: product of the FIRST 6 primes) == 30_030, already far over
+# factorial's own MAX_HEAVY_ARG (1463) argument cap -- but the OLD,
+# WRONG formula (nth=False's `e**(1.02n)`) bounded it at only ~455 (log10
+# ~2.66, UNDER 1463), which would have let `factorial(primorial(6))`
+# proceed to REAL construction: `factorial(30_030)` is astronomically
+# unbounded, exactly the hang this module exists to prevent. This is
+# refused, never evaluated (no real value to compare against -- computing
+# `factorial(30_030)` as a test oracle would itself hang, which is
+# precisely the point).
+_v, _e = _boundary_parse("factorial(primorial(6))")
+check("THE-1095 round-3-follow-up item A: 'factorial(primorial(6))' "
+      "(primorial(6) == 30_030, the OLD buggy formula bounded it at only "
+      "~455 -- UNDER cap, wrongly permitting a factorial(30_030) "
+      "construction) is now correctly refused",
+      _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+# ...and a genuinely small, safe nested primorial still evaluates.
+_v, _e = _boundary_parse("factorial(primorial(2))")
+check("THE-1095 round-3-follow-up item A: 'factorial(primorial(2))' "
+      "(primorial(2) == 6, comfortably safe either way) evaluates to "
+      "main's exact value '720'",
+      _v == 720 and _e is None, f"-> value={_v!r} err={_e!r}")
+
+# Item B (grok): nextprime's growth bound ignored `ith` (position 1)
+# entirely -- bounded as if ith were always 1 regardless of its real
+# value, so `nextprime(2, 1000) == 7927` (genuinely over factorial's own
+# 1463 argument cap) was bounded by the OLD formula at just
+# `log10(2*2) ~= 0.6` -- comfortably UNDER cap, wrongly letting a nested
+# `factorial(7927)` construction (tens of thousands of digits) proceed.
+# No real value to compare against here either -- asserting the refusal
+# IS the test; computing `factorial(7927)` as an oracle would itself be
+# the exact hazard this fix closes.
+_v, _e = _boundary_parse("factorial(nextprime(2, 1000))")
+check("THE-1095 round-3-follow-up item B: 'factorial(nextprime(2, 1000))' "
+      "(nextprime(2,1000) == 7927, over factorial's own 1463 cap -- the "
+      "OLD formula ignored ith and wrongly bounded this as ~4, safe) is "
+      "now correctly refused",
+      _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+# ...and a genuinely in-range ith still evaluates: nextprime(2, 50) ==
+# 233, comfortably under the cap (both the TRUE value and this fix's own
+# growth-bound estimate at ith=50 stay well clear of 1463 -- ith=200 was
+# tried first and rejected here: the growth bound's own generous "+10"
+# per-step slack, while still a mathematically safe upper bound (see the
+# property check above), pushes its ESTIMATE for ith=200 just over 1463
+# even though the true value (1229) is not -- a real, if narrow, looseness
+# margin in this specific formula, not a bug in the fix itself).
+_v, _e = _boundary_parse("factorial(nextprime(2, 50))")
+_expected = _sp5.factorial(233)
+check("THE-1095 round-3-follow-up item B: 'factorial(nextprime(2, 50))' "
+      "(nextprime(2,50) == 233, comfortably under cap) evaluates to "
+      "main's exact value",
+      _v == _expected and _e is None, f"-> value={_v!r} err={_e!r}")
+
+# Item D (grok): _growth_fib_like computed (2*phi)**n instead of the
+# intended 2*phi**n -- too loose to accept fibonacci(16)=987 under
+# factorial's 1463 cap even though the true value is comfortably under.
+_v, _e = _boundary_parse("factorial(fibonacci(16))")
+check("THE-1095 round-3-follow-up item D: 'factorial(fibonacci(16))' "
+      "(fibonacci(16) == 987, comfortably under MAX_HEAVY_ARG) evaluates "
+      "to main's exact value '" + str(_sp5.factorial(987)) + "'"[:80] + "...",
+      _v == _sp5.factorial(987) and _e is None, f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("factorial(fibonacci(17))")
+check("THE-1095 round-3-follow-up item D: 'factorial(fibonacci(17))' "
+      "(fibonacci(17) == 1597, one over MAX_HEAVY_ARG) is refused",
+      _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+# digamma sat in the n**(2n) catch-all despite being genuinely
+# logarithmic -- false-refusing a nested call nowhere near dangerous. Uses
+# `digamma(1463)` (AT digamma's own position-0 cap -- the interesting
+# case: the OLD catch-all bound read `1463` itself as if it were a
+# factorial-style parameter, i.e. `2*1463*log10(1463) ~= 9258`, "over
+# cap" with no shift at all -- while the true `digamma(1463)` stays
+# symbolic (`... - EulerGamma`, SymPy never evaluates it to a float
+# without .evalf()) and `factorial()` of a non-integer symbolic
+# expression stays unevaluated too -- no crash, no refusal, just an
+# ordinary symbolic result, exactly like `origin/main` would give.
+_v, _e = _boundary_parse("factorial(digamma(1463))")
+check("THE-1095 round-3-follow-up item D: 'factorial(digamma(1463))' "
+      "(digamma's own bound is logarithmic, not n**(2n): the OLD catch-"
+      "all wrongly read digamma's ARGUMENT, 1463, as if it were a "
+      "factorial-style output magnitude) evaluates instead of a false "
+      "refusal",
+      _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+
+# Item E (grok): the real-dict catch-all narrowed to ONLY a ValueError
+# containing 'is not an integer' -- re-pinned here under the narrowed rule
+# (nextprime(10,2+1) still evaluates; prime(1-1)/prime(1/0) still surface
+# main's own text, now via the SAME code path either way).
+_v, _e = _boundary_parse("nextprime(10,2+1)")
+check("THE-1095 round-3-follow-up item E: 'nextprime(10,2+1)' still "
+      "evaluates to 17 under the narrowed real-dict catch-all",
+      _v == 17 and _e is None, f"-> value={_v!r} err={_e!r}")
+for _expr, _substr in (("prime(1-1)", "positive integer"), ("prime(1/0)", "not an integer")):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round-3-follow-up item E: {_expr!r} is refused as "
+          f"validation, main's own text ({_substr!r}) preserved",
+          _v is None and _e is not None and _e[0] == "validation" and _substr in _e[1],
+          f"-> value={_v!r} err={_e!r}")
+
+# Codex's shift-digit-bound item, designed together with grok's item C:
+# a table-function call as EITHER operand of `<<` can slip under every
+# per-position cap and only become visibly dangerous once the REAL value
+# is constructed -- bound it at the token level instead, before any real
+# construction.
+_t0 = time.time()
+_v, _e = _boundary_parse("bell(1463) << 100000")
+_dt = time.time() - _t0
+check("THE-1095 round-3-follow-up (Codex): 'bell(1463) << 100000' "
+      "(bell(1463) alone is safe; shifted, the result would have "
+      "~34_000+ digits) is refused with the digit-ceiling message",
+      _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+check(f"  ...in milliseconds ({_dt:.3f}s), not after constructing bell(1463) for real",
+      _dt < 1.0, f"-> {_dt:.3f}s")
+
+_t0 = time.time()
+_v, _e = _boundary_parse("factorial(1463) << 1000")
+_dt = time.time() - _t0
+check("THE-1095 round-3-follow-up (Codex): 'factorial(1463) << 1000' "
+      "(factorial(1463) has 3_998 real digits; shifted by 1000 bits, "
+      "~4_298 digits, over MAX_NUMERIC_DIGITS) is refused",
+      _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+check(f"  ...in milliseconds ({_dt:.3f}s)", _dt < 1.0, f"-> {_dt:.3f}s")
+
+_v, _e = _boundary_parse("factorial(20) << 3")
+check("THE-1095 round-3-follow-up (Codex): 'factorial(20) << 3' (well "
+      "under the digit ceiling either way) still evaluates to main's "
+      "exact value",
+      _v == (_sp5.factorial(20) << 3) and _e is None, f"-> value={_v!r} err={_e!r}")
+
+_v, _e = _boundary_parse("1 << factorial(20)")
+check("THE-1095 round-3-follow-up (grok item C, table call as the SHIFT "
+      "COUNT itself): '1 << factorial(20)' (a shift by ~2.4e18 bits) is "
+      "refused, not silently constructed",
+      _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+
+# Codex's own control: bell(1463) is at-cap-expensive on ITS OWN (same on
+# main), not a bypass -- `bell(1463) << 1` must NOT start refusing just
+# because the shift check exists (the loose _growth_nn_loose bound would
+# have falsely refused this; the shift check uses a tighter Stirling-
+# based bound specifically to avoid that).
+_v, _e = _boundary_parse("bell(1463) << 1")
+check("THE-1095 round-3-follow-up (Codex): 'bell(1463) << 1' still "
+      "evaluates (the shift check must not over-refuse an at-cap-but-"
+      "safe left operand just because it is loosely bounded elsewhere)",
+      _v == (_sp5.bell(1463) << 1) and _e is None, f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("7 % bell(20)")
+check("THE-1095 round-3-follow-up (Codex): '7 % bell(20)' (a table call "
+      "under %, nowhere near any cap) still evaluates -- the operator "
+      "screen must not over-refuse ordinary table calls under %,//",
+      _v == 7 and _e is None, f"-> value={_v!r} err={_e!r}")
+
+# Item C(ii): a deferred-parse exception on an expression with NO table
+# name and NO unprotected operator still falls through to main's own
+# parse-error text (an ordinary syntax error is unaffected by this fix).
+_v, _e = _boundary_parse("2 +* 3")
+check("THE-1095 round-3-follow-up item C(ii): '2 +* 3' (an ordinary "
+      "syntax error, no table name, no unprotected operator) still "
+      "surfaces a validation parse error, unaffected by the fail-closed "
+      "narrowing",
+      _v is None and _e is not None and _e[0] == "validation", f"-> value={_v!r} err={_e!r}")
+# The helper itself: true for a table name or an unprotected operator,
+# false for neither.
+check("THE-1095 round-3-follow-up item C(ii): the fail-closed helper "
+      "recognizes a table name",
+      _se5._expression_touches_table_or_unprotected_operator("factorial(5)+1") is True)
+check("  ...and an unprotected operator",
+      _se5._expression_touches_table_or_unprotected_operator("2 % 3") is True)
+check("  ...and neither, for an ordinary expression",
+      _se5._expression_touches_table_or_unprotected_operator("2 + 3 * x") is False)
 
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== ALL BUG-SWEEP REGRESSIONS FIXED ===")

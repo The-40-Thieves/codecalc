@@ -147,6 +147,111 @@ behind it.
   independently-bounded evaluator that also uses `%`/`<<`/`>>`
   natively, `tests/test_calc_port.py`) is untouched — this fix lives
   only in `safe_parse`'s own pipeline, never the shared `classify_unsafe`.
+  Also fixed, the refusal message for the four operators above used to
+  interpolate the `**`/`^` TOKEN it was keyed off (always literally
+  `'**'`), not the eager operator actually responsible — `x**N % 11`
+  read as "'**' combined with exponentiation", naming no real operator
+  at all; each of the four now names ITSELF.
+
+  **A ClusterFuzzLite crash on the commit above** (`TypeError: 'property'
+  object is not iterable`, `reject_explosive` -> `Basic.free_symbols`):
+  a bare CLASS reference (`Pow`, or any other name this module's
+  `safe_global_dict()`/`_deferred_global_dict()` expose, referenced
+  without being called) can end up nested one level inside ANOTHER
+  node's own `.args` tuple, where `_walk`'s existing per-node guard
+  (which already caught a bare class at the TOP of a tree) never got a
+  chance to run before `reject_explosive`'s own code called
+  `.free_symbols` directly on that ancestor — `SomeClass.free_symbols`,
+  accessed on the class rather than an instance, is the unbound
+  `property` descriptor, and SymPy's own `Basic.free_symbols` getter
+  cannot iterate it. Confirmed this is a LATENT bug predating THE-1095
+  entirely: `origin/main` (6cda9d4) crashes identically on the same
+  decoded fuzz input, at its own (differently-numbered) `reject_
+  explosive` line. `reject_explosive` now walks the whole tree once,
+  up front, and fails closed (a `ceiling` refusal, not a crash) on any
+  node that is a bare Python `type` — deliberately NOT the broader
+  "not a `sympy.Basic` instance" (tried first, and found to reject every
+  ALREADY-EAGERLY-EVALUATED plain-Python result a heavy function's own
+  eager `eval()` can legitimately hand back as the whole tree — `bool`
+  from `isprime`, `dict` from `factorint`, `list` from `divisors`/
+  `primefactors`, plain `int` from `prime`/`primorial` — none of which
+  is a `Basic` instance, and all four are ordinary, safe, already-
+  computed leaves this module's own tables intentionally return).
+
+  **Cross-vendor review of the crash fix, folded into the same commit**
+  (grok, `verify-1095-r3-grok.log`; Codex): (A) `_growth_primorial`
+  bounded `primorial(n, nth=False)` (primes `<= n`, `~e**(1.02n)`), not
+  the DEFAULT no-second-arg form (`nth=True`: the product of the FIRST
+  `n` primes, asymptotically `~e**p_n`, `p_n` the n-th prime itself,
+  far bigger) — `factorial(primorial(6))` (`primorial(6) == 30_030` in
+  the default form) used to be bounded at only ~455, UNDER factorial's
+  own 1_463 cap, wrongly letting a `factorial(30_030)` construction
+  proceed. Fixed by reusing `_growth_prime`'s own `p_n` bound; safe for
+  the `nth=False` form too, since "first n primes" always runs to a
+  larger magnitude than "primes <= n" for the same `n`. (B)
+  `_growth_nextprime` ignored `ith` (position 1) entirely, bounding
+  `nextprime(n, ith)` as if `ith` were always 1 (Bertrand's postulate,
+  `< 2n`) — `nextprime(2, 1000) == 7_927`, over factorial's own cap,
+  was bounded at ~4, safe. Fixed by folding `ith` into the bound via the
+  prime number theorem's average gap near `n`, generously slackened.
+  (C) A table-function call as `<<`'s SHIFT COUNT bypassed the operator
+  screen entirely (no `**`/`^` token involved): `1 << factorial(20)`
+  attempts to construct a number with ~2.4e18 bits. Fixed at the root,
+  designed together with the crash fix (same "an exception must never
+  silently mean safe" principle, at the two different places it can
+  occur): (i) a new token-level check, `_shift_digit_ceiling_violation`,
+  bounds a `<<`'s left operand (a literal or a single-literal-argument
+  table call, via a Stirling-accurate `log10(n!)` approximation — NOT
+  the existing, deliberately loose `_growth_nn_loose`/`_growth_nn_tight`
+  nested-argument bounds, which overestimate `factorial`/`bell` at
+  their own cap enough to falsely refuse an unshifted, safe
+  `bell(1463) << 1`) and right operand (the shift count itself, same
+  two shapes) before any real construction; (ii) a deferred-pre-parse
+  exception (`scan_shape` in `safe_parse`) that used to be silently
+  treated as "inconclusive, fall through to the real-dict parse" now
+  fails closed instead — UNLESS the expression contains neither a table
+  name nor an unprotected operator (an ordinary syntax error still
+  falls through to `origin/main`'s own text) — EXCLUDING `TypeError`
+  specifically, since an inert deferred stand-in never becoming a
+  concrete number makes `factorial(20) << 3`-shaped `TypeError:
+  unsupported operand type(s)` an expected, harmless, unconditional
+  consequence of the stand-in design, not a hazard signal; refusing on
+  it would have broken the ENTIRE working combination of a heavy
+  function and `%`/`//`/`<<`/`>>` (found live testing this exact
+  branch). (D) `_growth_fib_like` computed `(2*phi)**n` (multiplying
+  the base by 2 inside the exponentiation) instead of the intended
+  `2*phi**n` — over-conservative enough to falsely refuse
+  `factorial(fibonacci(16))` (`fibonacci(16) == 987`, comfortably under
+  cap). Replaced with an exact Binet-formula bound
+  (`fibonacci(n) = round(phi**n / sqrt(5))`) for `fibonacci`, and a
+  matching but un-divided bound for `lucas`; `digamma` moved out of the
+  `n**(2n)` catch-all bucket into its own logarithmic bound (the same
+  shape `polygamma`'s already had, just read from position 0 instead of
+  1) — the catch-all had been reading digamma's own ARGUMENT as if it
+  were a factorial-style output magnitude, false-refusing
+  `factorial(digamma(1463))`. (E) The real-dict catch-all (any
+  exception besides `TypeError` from the real, `evaluate=False`
+  pre-parse used to fall through to `evaluate=True` unconditionally) is
+  now narrowed to EXACTLY a `ValueError` whose message contains "is not
+  an integer" (group B's own documented eager-coercion class) —
+  everything else, INCLUDING `motzkin`'s differently-worded ValueError
+  ("must be a positive integer"), `ZeroDivisionError`, `RecursionError`,
+  `OverflowError`, now returns `origin/main`'s own text immediately.
+  DELIBERATE NARROWING, pinned in tests: `motzkin(2+3)` — tiny,
+  in-range, previously part of group B's own "evaluates instead of a
+  spurious refusal" fix — is now itself refused as validation, since
+  `motzkin`'s own ValueError is textually indistinguishable from a
+  genuine domain violation without retrying (which risks re-running
+  whatever made it fail in the first place). `nextprime(10,2+1)` (still
+  evaluates to `17`), `prime(1-1)`, and `prime(1/0)` (both still surface
+  `origin/main`'s own text) are re-pinned under the narrowed rule.
+
+  Every `_GROWTH_BOUNDS` formula now has a property-style test: for `n`
+  across a sample grid over its own capped domain (including
+  `MAX_ITH_PRIME_SKIP` for `nextprime`), the bound must be `>=` the REAL
+  value SymPy computes — this is what caught items A, B, and D's
+  formula bugs during this round's own development, not a hand-picked
+  repro list.
 
 ## [0.13.0] — 2026-09-21
 

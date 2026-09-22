@@ -515,13 +515,37 @@ def _growth_rf_ff(bounds: dict) -> float:
 
 
 def _growth_primorial(bounds: dict) -> float:
-    """`primorial(n) <= e ** (1.02 * n)` (the prime-counting-adjacent bound
-    this module's own `MAX_HEAVY_ARG` derivation already relies on being
-    finite, just never previously expressed as a reusable formula)."""
+    """`primorial(n, nth=True)` — the DEFAULT, no-second-arg form — is the
+    product of the FIRST `n` primes, NOT the product of primes `<= n`
+    (that second meaning, `nth=False`, is `n#` in the traditional
+    number-theory sense, and is what `e ** (1.02 * n)` actually bounds;
+    grok's round-3-follow-up review caught this call site using the wrong
+    one of the two). By Rosser's theorem `log(product of first n primes)
+    ~ p_n` (the n-th prime itself), so this reuses `_growth_prime`'s own
+    `p_n <= n*(ln n + ln ln n)` bound and applies the SAME `e**(1.02*x)`
+    safety factor the old formula already used, just against `p_n`
+    instead of `n` directly.
+
+    `nth` (position 1) is a boolean flag, not a magnitude — this bound
+    does not read it — but it is still SAFE for the `nth=False` call too:
+    for the SAME `n`, "primes <= n" is a subset of magnitude up to `n`,
+    while "the first n primes" runs up to roughly `n * ln(n)` (much
+    larger for any `n` where the distinction matters), so the first-n-
+    primes bound computed here is never smaller than the primes-<=-n
+    product for the same `n` — one formula safely covers both meanings.
+    """
     n = _safe_pow10(bounds.get(0))
     if n is None:
         return math.inf
-    return 1.02 * n * math.log10(math.e)
+    if n < 1:
+        return 0.0
+    if n < 6:
+        # `_growth_prime`'s own `p_n` formula needs `ln(ln(n))`, undefined
+        # below `n = e` -- a simple, verified-safe stand-in for this tiny
+        # domain (primorial(1..5) = 2, 6, 30, 210, 2310).
+        return n * math.log10(3 * n)
+    p_n_bound = n * (math.log(n) + math.log(math.log(n)))
+    return 1.02 * p_n_bound * math.log10(math.e)
 
 
 def _growth_prime(bounds: dict) -> float:
@@ -532,19 +556,41 @@ def _growth_prime(bounds: dict) -> float:
     if n is None:
         return math.inf
     if n < 6:
-        return 1.0
+        return 1.1  # prime(1..5) = 2, 3, 5, 7, 11 -- 11 needs > log10(11) ~= 1.04
     value = n * (math.log(n) + math.log(math.log(n)))
     return math.log10(value) if value > 1 else 0.0
 
 
 def _growth_nextprime(bounds: dict) -> float:
-    """`nextprime(n, ith=1) < 2 * n` (Bertrand's postulate, loosely) —
-    `ith` (position 1) scales the search length, not the RESULT's own
-    magnitude, so it does not enter this specific bound."""
+    """`nextprime(n, ith=1)` — the `ith`-th prime after `n`. Bertrand's
+    postulate (`< 2*n`) alone is only a valid bound at `ith=1`; grok's
+    round-3-follow-up review caught this formula ignoring position 1
+    entirely, so `nextprime(n, 1000)` (a real, nested-safe call up to
+    `MAX_ITH_PRIME_SKIP`) was bounded as if `ith` were always 1.
+    Compounding Bertrand `ith` times (`2**ith * n`) is technically a valid
+    bound but explodes long before `ith` approaches `MAX_ITH_PRIME_SKIP`
+    (1000), overestimating a genuinely small result (`nextprime(2, 1000)
+    == 7927`) by hundreds of digits — instead this folds `ith` in via the
+    prime number theorem's own AVERAGE prime gap near `n` (`~ln(n)`),
+    generously slackened (`+10`, `ith` itself added inside the log to
+    track the search drifting upward as it walks forward `ith` times):
+    loose enough to safely dominate real prime-gap irregularities across
+    the domain this table admits (verified against `nextprime(2, 1000)`
+    and larger `n` up to the position-0 digit cap), while staying finite
+    and small enough to actually distinguish a safe nested call from a
+    dangerous one."""
     n = _safe_pow10(bounds.get(0))
     if n is None:
         return math.inf
-    return math.log10(2 * n) if n > 0 else 0.0
+    if n <= 0:
+        n = 2.0
+    ith = _safe_pow10(bounds.get(1))
+    if ith is None:
+        ith = 1.0
+    if ith < 1:
+        ith = 1.0
+    bound = n + ith * (math.log(n + ith + 1) + 10)
+    return math.log10(bound) if bound > 1 else 0.0
 
 
 def _growth_primepi(bounds: dict) -> float:
@@ -636,8 +682,65 @@ def _growth_base_n(log10_base: float):
     return growth
 
 
-_growth_fib_like = _growth_base_n(math.log10(1.6180339887 * 2))  # fibonacci, lucas
-_growth_tribonacci = _growth_base_n(math.log10(2))               # same base as _growth_2n
+_PHI = 1.6180339887498949  # (1 + sqrt(5)) / 2
+
+
+def _growth_fibonacci(bounds: dict) -> float:
+    """`fibonacci(n) = round(phi**n / sqrt(5))` exactly (Binet's formula;
+    the omitted `psi**n` term, `psi = -1/phi`, has magnitude < 0.5 for
+    every `n >= 1` and never changes the rounded result) — so `log10(
+    fibonacci(n)) ~= n*log10(phi) - log10(sqrt(5))`, plus a small additive
+    safety epsilon for the omitted term and float rounding.
+
+    Round-3-follow-up (grok): the PREVIOUS formula here, built through
+    `_growth_base_n(log10(2 * phi))`, computed `n * log10(2*phi)` —
+    `log10((2*phi)**n)`, i.e. `(2*phi)**n`, not the intended `2 *
+    phi**n` (multiplying the base by 2 inside the log instead of adding a
+    constant outside it). That direction of error is CONSERVATIVE
+    (over-large, never unsafe) but verified too loose to accept even
+    `fibonacci(16) = 987` under `factorial`'s `MAX_HEAVY_ARG = 1463` cap
+    (`(2*phi)**16 ~= 4416 > 1463`, though the true value is well under);
+    the exact Binet form fixes that, correctly accepting `fibonacci(16)`
+    and correctly still refusing `fibonacci(17) = 1597` (`> 1463`)."""
+    n = _safe_pow10(bounds.get(0))
+    if n is None:
+        return math.inf
+    if n < 4:
+        return 0.5  # fibonacci(0..3) = 0, 1, 1, 2 -- all comfortably < 10**0.5
+    return n * math.log10(_PHI) - math.log10(5**0.5) + 0.01
+
+
+def _growth_lucas(bounds: dict) -> float:
+    """`lucas(n) = round(phi**n + psi**n) ~= phi**n` (no `sqrt(5)`
+    division, unlike `fibonacci`) — the same exact Binet-style base,
+    minus the `_growth_fibonacci` divisor, still a safe, tight bound
+    (`lucas(n) > fibonacci(n)` always, consistent with the real
+    relationship between the two sequences)."""
+    n = _safe_pow10(bounds.get(0))
+    if n is None:
+        return math.inf
+    if n < 3:
+        return 0.5  # lucas(0..2) = 2, 1, 3 -- all comfortably < 10**0.5
+    return n * math.log10(_PHI) + 0.01
+
+
+def _growth_digamma(bounds: dict) -> float:
+    """`digamma(z) == polygamma(0, z)` exactly (this module's own
+    `math_transforms` already rewrites one to the other) — the SAME tiny,
+    logarithmic bound as `_growth_polygamma`, just read from position 0
+    (digamma's own single argument) instead of position 1 (polygamma's
+    `z`, next to its `order`). Round-3-follow-up (grok): `digamma` sat in
+    the `n**(2n)` catch-all bucket below despite being genuinely
+    logarithmic, false-refusing e.g. `factorial(digamma(10**100))`."""
+    z = _safe_pow10(bounds.get(0))
+    if z is None:
+        return math.inf
+    if z <= 1:
+        return 1.0
+    return math.log10(math.log(z) + 2)
+
+
+_growth_tribonacci = _growth_base_n(math.log10(2))  # same base as _growth_2n
 _growth_catalan = _growth_base_n(math.log10(4))
 
 
@@ -678,13 +781,14 @@ _GROWTH_BOUNDS: dict = {
     "divisor_sigma": _growth_divisor_sigma,
     "harmonic": _growth_harmonic,
     "polygamma": _growth_polygamma,
-    "fibonacci": _growth_fib_like, "lucas": _growth_fib_like,
+    "digamma": _growth_digamma,
+    "fibonacci": _growth_fibonacci, "lucas": _growth_lucas,
     "tribonacci": _growth_tribonacci,
     "catalan": _growth_catalan,
     "totient": _growth_totient,
     **dict.fromkeys(
         ("factorial", "subfactorial", "gamma", "bell", "factorial2", "loggamma",
-         "zeta", "digamma", "andre", "genocchi", "motzkin", "bernoulli", "euler"),
+         "zeta", "andre", "genocchi", "motzkin", "bernoulli", "euler"),
         _growth_nn_loose,
     ),
 }
@@ -1739,6 +1843,217 @@ def _unprotected_operator_violation(expression: str) -> str | None:
     return None
 
 
+def _stirling_log10_factorial(n: float) -> float:
+    """A safe (over-, never under-) approximation of `log10(n!)` via
+    Stirling's formula with its standard correction term — verified
+    against SymPy's own real digit counts (`factorial(1_463) = 3_998`,
+    `factorial(1_500) = 4_115`, `factorial(20) = 19` — the same figures
+    `MAX_HEAVY_ARG`'s own comment documents) to within ONE digit at every
+    scale checked, unlike `_growth_nn_loose`/`_growth_nn_tight` — both
+    deliberately loose bounds built for a DIFFERENT purpose (proving a
+    NESTED call safe against an ancestor's cap, where over-estimating by
+    thousands of digits only means being slightly more conservative about
+    what counts as nested-safe). Reused here, by `_token_call_bound`, for
+    a different purpose — bounding a `<<` LEFT operand that is already
+    safe and UNSHIFTED on its own — where that looseness would falsely
+    refuse e.g. `bell(1463) << 1`: `bell(1463)` has 3_018 real digits,
+    comfortably under the cap, but `_growth_nn_loose` claims log10 ~9_258
+    for it, already "over cap" with no shift at all. `factorial` is this
+    module's own documented WORST grower in the entire `_HEAVY_FUNCTIONS`
+    family at a shared argument cap (`MAX_HEAVY_ARG`'s own comment: bell
+    3_018, genocchi 3_269, andre 3_711, motzkin 693, all under factorial's
+    3_998 at the same n=1463) — so this single, tight, ACCURATE bound
+    safely covers every single-argument value-kind name in that family,
+    not just `factorial` itself.
+    """
+    if n < 2:
+        return 0.0
+    return n * math.log10(n) - n * math.log10(math.e) + 0.5 * math.log10(2 * math.pi * n)
+
+
+def _token_call_bound(tokens: list, name_index: int) -> float | None:
+    """`log10(upper bound)` for `tokens[name_index]` when it is a NAME with
+    a "value"-kind entry in `_FUNCTION_ARG_CAPS` (the whole `_HEAVY_
+    FUNCTIONS` family, all sharing `MAX_HEAVY_ARG`) immediately followed
+    by `( <NUMBER> )` — a single bare-literal argument, nothing else — or
+    `None` if the shape does not match (a different or "digits"-kind
+    name, more than one argument since every 2-argument name in the
+    table — `binomial`/`rf`/`ff`/`divisor_sigma`/`nextprime`/`polygamma` —
+    then simply never matches this single-argument shape at all, a
+    computed argument, ...). Used only by `_shift_digit_ceiling_violation`
+    below to resolve a table-function call sitting directly next to `<<`,
+    without ever constructing the real value — `_stirling_log10_factorial`
+    is a pure function of the LITERAL argument's own magnitude, never
+    touches SymPy."""
+    name_tok = tokens[name_index]
+    if name_tok.type != tokenize.NAME:
+        return None
+    spec = _FUNCTION_ARG_CAPS.get(name_tok.string)
+    if spec is None or spec[0] != "value":
+        return None
+    i = name_index + 1
+    if i >= len(tokens) or not (tokens[i].type == tokenize.OP and tokens[i].string == "("):
+        return None
+    i += 1
+    if i >= len(tokens) or tokens[i].type != tokenize.NUMBER:
+        return None
+    try:
+        arg_value = float(tokens[i].string)
+    except ValueError:
+        return None
+    i += 1
+    if i >= len(tokens) or not (tokens[i].type == tokenize.OP and tokens[i].string == ")"):
+        return None  # more than one argument, or a computed one -- bail
+    return _stirling_log10_factorial(arg_value)
+
+
+def _shift_operand_bound(tokens: list, op_index: int, direction: int) -> tuple[float, int] | None:
+    """`(log10(operand's own magnitude), token_count_consumed)` for the
+    operand of a `<<` sitting on the given `direction` side (`-1` = the
+    operand ending right before `tokens[op_index]`, `+1` = the operand
+    starting right after it) — a bare NUMBER literal, an OPTIONALLY-signed
+    one, or a single-literal-argument table call (`_token_call_bound`
+    above) — or `None` if the operand is any other shape (a name, a
+    nested expression, an unparenthesized sub-expression, ...), in which
+    case `_shift_digit_ceiling_violation` defers this specific `<<` to the
+    module's other backstops rather than guessing.
+    """
+    if direction == 1:
+        i = op_index + 1
+        # The sign itself is never needed past this point -- only the
+        # MAGNITUDE of a `<<` operand matters for a digit-count bound
+        # (`abs(...)` below), and a genuinely negative shift COUNT is
+        # already invalid Python (`x << -1` raises `ValueError` at
+        # evaluate=True regardless of what this check does).
+        if i < len(tokens) and tokens[i].type == tokenize.OP and tokens[i].string in ("+", "-"):
+            i += 1
+        if i < len(tokens) and tokens[i].type == tokenize.NUMBER:
+            try:
+                return (math.log10(abs(float(tokens[i].string))) if float(tokens[i].string) != 0
+                        else -math.inf, i - op_index)
+            except ValueError:
+                return None
+        if i < len(tokens) and tokens[i].type == tokenize.NAME:
+            bound = _token_call_bound(tokens, i)
+            return (bound, 0) if bound is not None else None
+        return None
+    # direction == -1: scan backward from op_index for a NUMBER literal, or
+    # a `)` closing a single-literal-argument table call immediately
+    # before it (bracket-depth matched back to its own `(`, then one more
+    # step back to the NAME).
+    j = op_index - 1
+    if j < 0:
+        return None
+    if tokens[j].type == tokenize.NUMBER:
+        try:
+            return (math.log10(abs(float(tokens[j].string))) if float(tokens[j].string) != 0
+                    else -math.inf, 0)
+        except ValueError:
+            return None
+    if tokens[j].type == tokenize.OP and tokens[j].string == ")":
+        depth = 1
+        k = j - 1
+        while k >= 0 and depth > 0:
+            if tokens[k].type == tokenize.OP and tokens[k].string == ")":
+                depth += 1
+            elif tokens[k].type == tokenize.OP and tokens[k].string == "(":
+                depth -= 1
+            k -= 1
+        if depth != 0 or k < 0:
+            return None
+        bound = _token_call_bound(tokens, k)
+        return (bound, 0) if bound is not None else None
+    return None
+
+
+#: THE-1095 round-3-follow-up (Codex): a table-function call as `<<`'s LEFT
+#: operand can slip under every existing check (its own position-0 cap,
+#: even the real-value output ceiling item 4 above ALSO catches this — just
+#: only AFTER paying for the real construction: `bell(1463) << 100000`
+#: measured 7.8s to build bell(1463) and shift it before that check ever
+#: ran) and still balloon past `MAX_NUMERIC_DIGITS` once shifted. Left as a
+#: real-value check alone, this is a correctness backstop with a
+#: performance cost, not a promptness one — this bounds the SAME shift,
+#: from the SAME pre-parse token pass `_unprotected_operator_violation`
+#: already runs, so a dangerous shift refuses in milliseconds instead of
+#: seconds, without ever constructing the left operand for real. Reuses
+#: `_GROWTH_BOUNDS` (never touches SymPy) and `_ceiling_message_num_den`
+#: (the SAME digit-ceiling arithmetic and message the real-value backstop
+#: already uses) rather than a third, independent formula.
+def _shift_digit_ceiling_violation(expression: str) -> str | None:
+    """A refusal reason if `expression` contains a `<<` whose LEFT operand
+    (a bare literal or a single-literal-argument table call) and RIGHT
+    operand (the shift count, same two shapes) resolve to a result over
+    `MAX_NUMERIC_DIGITS` digits — or `None` if no `<<` resolves that way
+    (including every `<<` whose operand is some other shape entirely:
+    those are left to this module's other backstops, not guessed at
+    here). `>>` never grows its operand and `%`/`//` never exceed their
+    LEFT operand's own bound (Codex's own note), so neither needs this
+    check — only `<<` does.
+    """
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(expression).readline))
+    except (tokenize.TokenError, SyntaxError, IndentationError,
+            UnicodeEncodeError, UnicodeDecodeError):
+        return None
+    for i, tok in enumerate(tokens):
+        if not (tok.type == tokenize.OP and tok.string == "<<"):
+            continue
+        left = _shift_operand_bound(tokens, i, -1)
+        if left is None:
+            continue
+        right = _shift_operand_bound(tokens, i, 1)
+        if right is None:
+            continue
+        left_log, _ = left
+        right_log, _ = right
+        # The shift COUNT is the right operand's own plain VALUE (not a
+        # digit count of it) -- `_safe_pow10` turns its log10 form back
+        # into a float, or signals "too large to even represent as a
+        # float" (> 1e50), which is unconditionally unsafe as a shift
+        # count regardless of the left operand.
+        count = _safe_pow10(right_log)
+        if count is None or count < 0:
+            return (f"'<<' by a shift count this large cannot be bounded "
+                    "before construction: the result would have an "
+                    f"unbounded number of digits, over the limit of "
+                    f"{MAX_NUMERIC_DIGITS}")
+        total_log = left_log + count * math.log10(2)
+        violation = _ceiling_message_num_den(total_log, 0.0)
+        if violation:
+            return f"'<<' shift result {violation}"
+    return None
+
+
+def _expression_touches_table_or_unprotected_operator(expression: str) -> bool:
+    """True if `expression` contains a NAME token that is a key of
+    `_FUNCTION_ARG_CAPS` (a table name this module screens specially) or
+    an OP token in `_UNPROTECTED_OPERATORS` — used ONLY to decide whether
+    a FAILED deferred pre-parse (`scan_shape` in `safe_parse`) may safely
+    treat its own exception as merely "inconclusive" (an ordinary syntax
+    error, unrelated to anything this module bounds, that the real-dict
+    parse will raise identically) or must instead refuse immediately, on
+    its OWN exception text, rather than risk falling through to a real
+    parse THE-1095 round 2 established must never run un-vetted — see
+    that call site's own comment for the full reasoning, designed
+    together with the ClusterFuzzLite crash fix in `reject_explosive`
+    (the two are the same "an unresolved exception must never silently
+    mean 'safe'" principle, applied at the two different places an
+    exception from this module's own scanning can occur).
+    """
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(expression).readline))
+    except (tokenize.TokenError, SyntaxError, IndentationError,
+            UnicodeEncodeError, UnicodeDecodeError):
+        return False  # not this check's job -- classify_unsafe already ran
+    for tok in tokens:
+        if tok.type == tokenize.NAME and tok.string in _FUNCTION_ARG_CAPS:
+            return True
+        if tok.type == tokenize.OP and tok.string in _UNPROTECTED_OPERATORS:
+            return True
+    return False
+
+
 #: Ceiling on the DIGIT COUNT of a purely numeric power's result. A numeric
 #: power is cheap to compute and ruinous to print — Python refuses to render an
 #: integer over 4300 digits at all (sys.set_int_max_str_digits), which is how
@@ -1880,6 +2195,14 @@ def safe_parse(expression: str, *, evaluate: bool = True, local_dict: dict | Non
     op_violation = _unprotected_operator_violation(expression)
     if op_violation:
         return None, (CATEGORY_CEILING, op_violation)
+    # THE-1095 round-3-follow-up (Codex, designed alongside item C(i)):
+    # same reasoning, same "before either pre-parse" placement — a `<<`
+    # whose shift RESULT is provably over `MAX_NUMERIC_DIGITS` from its
+    # tokens alone refuses here in milliseconds, before `bell(1463)` (or
+    # any other left operand) is ever actually constructed.
+    shift_violation = _shift_digit_ceiling_violation(expression)
+    if shift_violation:
+        return None, (CATEGORY_CEILING, shift_violation)
     from sympy.parsing.sympy_parser import parse_expr
 
     # THE-1095 round 2: this MUST be the only parse that runs before a
@@ -1889,8 +2212,45 @@ def safe_parse(expression: str, *, evaluate: bool = True, local_dict: dict | Non
         scan_shape = parse_expr(expression, transformations=math_transforms(),
                                 local_dict=local_dict, global_dict=_deferred_global_dict(),
                                 evaluate=False)
-    except Exception:
+    except Exception as exc:
+        # THE-1095 round-3-follow-up (grok item C(ii), designed together
+        # with the ClusterFuzzLite crash fix in `reject_explosive` — see
+        # `_expression_touches_table_or_unprotected_operator`'s own
+        # docstring): "the deferred parse raised" is safely inconclusive
+        # ONLY when nothing in the expression could have triggered the
+        # hazards this pre-parse exists to catch — an ordinary syntax
+        # error (unbalanced parens, a stray token, ...) with no table name
+        # and no unprotected operator anywhere just falls through, and the
+        # real-dict parse below raises the identical error for the caller
+        # to see. But an expression that DOES touch a table name or an
+        # unprotected operator, and STILL made the ALL-INERT-stand-in
+        # parse itself raise before there was even a tree to hand
+        # `reject_explosive`, is exactly the shape round 2's own ordering
+        # exists to vet FIRST — falling through here would let the
+        # real-dict parse run un-vetted, the exact mistake round 2 already
+        # fixed once. Fail closed instead, on the deferred parse's own
+        # exception text: `unknown != safe`.
+        #
+        # EXCEPT `TypeError` specifically — found live testing this exact
+        # branch: a deferred stand-in is an INERT, symbolic `Function`
+        # subclass (see `_deferred_global_dict`'s own docstring) that
+        # never becomes a concrete number, so `factorial(20) << 3` raises
+        # `TypeError: unsupported operand type(s) for <<: 'factorial' and
+        # 'Integer'` from Python's own operator dispatch DURING this
+        # parse — unconditionally, for ANY argument, dangerous or not,
+        # the moment a table name meets one of the four unprotected
+        # operators directly. Fail-closing on this would refuse the
+        # entire, ALREADY-WORKING combination of "heavy function" and
+        # `%`/`//`/`<<`/`>>` outright (`factorial(5) % 3` included) —
+        # `origin/main`'s own `TypeError` for a genuine arity mismatch
+        # (`binomial(5)`, missing `k`) is the SAME exception class and is
+        # already handled identically, safely, by `shape`'s own parse
+        # moments later (see its own `isinstance(real_exc, TypeError)`
+        # branch below) — so no coverage is lost by excluding it here.
         scan_shape = None
+        if not isinstance(exc, TypeError) and \
+                _expression_touches_table_or_unprotected_operator(expression):
+            return None, (CATEGORY_VALIDATION, f"parse error: {exc}")
     else:
         explosive = reject_explosive(scan_shape)
         if explosive:
@@ -1940,13 +2300,44 @@ def safe_parse(expression: str, *, evaluate: bool = True, local_dict: dict | Non
         # like a `TypeError` from `scan_shape` above would have been, had
         # `scan_shape`'s own stand-in shared that arity.
         if isinstance(real_exc, TypeError):
+            # Kept separate from the `elif` below deliberately: same
+            # RETURN, but two independently-documented conditions (arity
+            # vs. message-text narrowing) -- collapsing them into one
+            # `or` would bury which reasoning applies to which exception
+            # shape.
             return None, (CATEGORY_VALIDATION, f"parse error: {real_exc}")
-        # Any other exception (group B's `ValueError`, or something this
-        # module has not named): `scan_shape` already parsed AND scanned
-        # clean above, so every table-driven argument here is proven safe
-        # regardless of why the REAL function's own eager coercion choked
-        # on it — proceed to `evaluate=True` below, which supplies the
-        # concrete `Integer` that coercion needed and computes correctly.
+        # THE-1095 round-3-follow-up (grok, item E): the class this branch
+        # is meant to fall through for is narrow and specific — group B's
+        # OWN eager `int`-coercion `ValueError`, always phrased "... is not
+        # an integer" (`sympy.core.numbers.Integer.__new__`'s own message
+        # for a non-`Integer` argument that never got the chance to
+        # resolve to a concrete value under `evaluate=False`). Previously
+        # this branch fell through for ANY exception other than
+        # `TypeError`, on the reasoning that `scan_shape` already proved
+        # every table-driven ARGUMENT safe — true, but that says nothing
+        # about exceptions unrelated to argument coercion at all:
+        # `motzkin`'s own `ValueError` is worded differently
+        # ("must be a positive integer") and was never proven to be the
+        # int-coercion class rather than, say, a genuine domain violation;
+        # `isprime`/`factorint` can also raise `ZeroDivisionError` (a
+        # literal `/0` argument) or `RecursionError`/`OverflowError` from
+        # deep in their own algorithms — none of those are "safe to retry
+        # under evaluate=True", they are `origin/main`'s own refusal for a
+        # genuinely bad input and belong right here, immediately, not
+        # silently swallowed into a retry that then raises the SAME error
+        # a second time from inside the `evaluate=True` parse below (or,
+        # worse, a DIFFERENT one). Matching on the message text is the
+        # correct fail-closed default is `unknown != safe`: only the
+        # EXACT, previously-verified class proceeds; everything else
+        # returns `origin/main`'s own text immediately.
+        elif not (isinstance(real_exc, ValueError) and "is not an integer" in str(real_exc)):
+            return None, (CATEGORY_VALIDATION, f"parse error: {real_exc}")
+        # Group B's own eager `int`-coercion `ValueError`: `scan_shape`
+        # already parsed AND scanned clean above, so every table-driven
+        # argument here is proven safe regardless of why the REAL
+        # function's own eager coercion choked on it — proceed to
+        # `evaluate=True` below, which supplies the concrete `Integer`
+        # that coercion needed and computes correctly.
 
     if not evaluate:
         if shape is not None:
@@ -3204,6 +3595,67 @@ def reject_explosive(tree) -> str | None:
     # `resource_exhausted` — though `reject_explosive`'s own refusals get
     # there via `CATEGORY_CEILING` regardless of message text).
     #
+    # THE-1095 round 3 follow-up (ClusterFuzzLite crash on 44c83b1, sympy
+    # 1.14.0): a bare reference to a class in `safe_global_dict()`
+    # (`binomial`, `Pow`, `Mul`, ... — every name this module's OWN
+    # namespace exposes without calling it) used to be caught only at the
+    # TOP of a tree (`_walk`'s own `isinstance(args, tuple)` guard, its own
+    # comment above) — but `parse_expr` can ALSO embed that same bare
+    # CLASS one level DEEPER, as an ELEMENT of some OTHER node's `.args`
+    # (a `Mul`/`Add` built around it, confirmed live against the crash
+    # input: `exponent` in the Pow loop below resolved to a real `Basic`
+    # whose OWN `.args` contained the bare `Pow` class), where `_walk`'s
+    # per-NODE guard never gets a chance to run before THIS function's own
+    # code calls `.free_symbols` (or any other property) directly on that
+    # compound node — SymPy's `Basic.free_symbols` property getter
+    # (`core/basic.py`) blindly iterates `self.args` assuming every element
+    # is a well-formed `Basic` instance, and `SomeClass.free_symbols`
+    # (accessed on the CLASS, not an instance) returns the unbound
+    # `property` object, which `empty.union(*(...))` cannot iterate —
+    # `TypeError: 'property' object is not iterable`, uncaught, crashing
+    # `safe_parse` instead of refusing.
+    #
+    # Closed once, here, for the WHOLE tree, before either pass below ever
+    # calls a property on a node it did not itself construct: every node
+    # `_walk` yields must NOT be a bare Python `type` (a class object
+    # itself, referenced rather than called or constructed) — a `sympy.
+    # Basic` instance, the bare `tuple` `_walk` already special-cases, or
+    # any other ordinary already-computed leaf value a table function's
+    # own eager `eval()` can legitimately hand back (`bool`/`dict`/`list`/
+    # plain `int` — see the loop's own comment below for why the check is
+    # `isinstance(_node, type)` and specifically NOT `not isinstance(
+    # _node, Basic)`) all pass through unexamined here. A bare `type` is
+    # `unknown != safe`, fail-closed here the same way every other
+    # `reject_explosive` finding is — `CATEGORY_CEILING` at `safe_parse`'s
+    # own call site, regardless of message text (see this function's own
+    # docstring: "reject_explosive's own refusals get there via
+    # CATEGORY_CEILING regardless of message text").
+    for _node in _walk(tree):
+        if isinstance(_node, tuple):
+            continue  # `_walk`'s own documented exception, not a hazard
+        # NOT `not isinstance(_node, Basic)` — tried that first, and it
+        # rejected every ALREADY-EAGERLY-EVALUATED plain-Python result a
+        # heavy function's own `eval()` can hand back as `tree` ITSELF
+        # (see this module's own long docstring on `Function.__new__`'s
+        # default-`evaluate=True` fallback): `isprime(21)` is a plain
+        # `bool`, `factorint(21)` a plain `dict`, `divisors`/`primefactors`
+        # a plain `list`, `prime(21)`/`primorial(21)` a plain Python `int`
+        # — none of those is a `sympy.Basic` instance, and all four are
+        # ordinary, SAFE, already-fully-computed leaves this module's own
+        # tables intentionally return. The actual hazard is narrower: a
+        # bare CLASS reference (`type` instance — `Pow`, `binomial`, any
+        # name `safe_global_dict()`/`_deferred_global_dict()` expose,
+        # referenced without being called) is what carries the broken
+        # `property`-descriptor `.args`/`.free_symbols` that crashed this
+        # function (see the long comment above). Every real, legitimate
+        # leaf value this module's own functions can produce is an
+        # ordinary Python instance, never a class itself.
+        if isinstance(_node, type):
+            return (f"{_node!r} is not a valid expression node "
+                    "(a bare reference to a name this module exposes, "
+                    "used as a value rather than called) and cannot be "
+                    "evaluated safely")
+
     # One `memo` dict for BOTH passes below: `_log10_num_den` memoizes by
     # `id(node)`, so a node either pass visits (or the Pow loop's own
     # exponent resolution visits again) is resolved once total.
