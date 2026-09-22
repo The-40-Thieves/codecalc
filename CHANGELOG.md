@@ -725,6 +725,87 @@ behind it.
   through this module's own `safe_global_dict()` at all (checked, not
   assumed) — no coverage needed for it.
 
+  **Round 11 (coordinator replay of 9fe4f6a: Codex `verify-1095-r9.log`,
+  three probes reproduced despite a quota-limited run; grok
+  `verify-1095-r9-grok.log` addendum, naming the shared root cause).**
+
+  Codex item 1: `log` in this module's namespace is the NATURAL log
+  (`ln`), not `log10` — the elementary `log` bound treated `arg_log`
+  (already `log10(|x|)`) as if it were roughly `|ln(x)|` itself,
+  under-estimating by a factor of `ln(10) ≈ 2.303`: `log(10**1000)`'s
+  true magnitude is `log10(1000*ln(10)) ≈ 3.362` (`|ln(x)| ≈ 2302.6`),
+  the old formula claimed `≈ 3.004` (`≈ 1009`) — comfortably under
+  `bell`'s own `MAX_HEAVY_ARG` (1463) cap when the true value (2302) is
+  well over it, so `bell(floor(log(10**1000)))` hung. Fixed (`log10(|ln(
+  x)|) = log10(|arg_log|) + log10(ln(10))`, verified against SymPy
+  across a grid of `log(10**k)`, `log(2)`, `log(Rational(1, 10**k))`);
+  once fixed, `bell`'s own arg-cap check refuses PROMPTLY, the same as
+  `factorial`'s twin case already did (slowly, via the last-resort
+  output check) — no separate "combined-output check" fix was needed
+  once the underlying magnitude was correct.
+
+  Codex item 2: `N(x, n)`'s own PRECISION argument (position 1) was
+  unbounded (`N(pi, 100000)` returns a 100_001-character `Float` in
+  ~1.5s) — capped at `MAX_NUMERIC_DIGITS` via a dedicated stand-in and
+  check (`N` needed its OWN deferred stand-in, being a plain eager
+  callable like `factorint`/`primorial`; `_DEFERRED_STANDIN_NAMES` now
+  folds in any name with an EXTRA bounded position, not just a
+  position-0 one). Separately, the FINAL output check trusted `_log10_
+  num_den`'s `Float` print-profile (always magnitude 0 — correct for a
+  Float LITERAL, wrong for a Float's own rendered length, which tracks
+  its PRECISION, not its magnitude) — now counts a `Float`'s own `_prec`
+  (binary precision bits, `* log10(2)` for the decimal digit count)
+  directly. `N(pi, 50)`/`N(pi)` still evaluate; `10.0**100000` (`_prec`
+  stays the default 53 bits despite its huge magnitude) still evaluates.
+
+  Codex item 3 / grok: `sin`/`cos`/`tanh`/`erf`'s `bounded1` rule
+  (magnitude `<= 1`) holds only for a REAL argument — `sin(z)` for a
+  pure-imaginary `z` grows like `sinh(|Im(z)|)`, exponentially
+  (`factorial(ceiling(Abs(sin(5000*I))))`, `sinh(5000)` astronomically
+  large). Now gated on `arg.is_real`; for a non-real argument with an
+  exactly-resolvable modulus (`I * k` or `k * I`), bounded via `e**|k|`
+  in log space; otherwise refused. `sin(500*I)` alone (unwrapped)
+  evaluates as main does; `factorial(ceiling(Abs(sin(5))))` (real) still
+  evaluates to `1`.
+
+  grok's addendum named the shared root cause across its own findings
+  and Codex item 3: an UNSIGNED magnitude fed to a formula that needs
+  sign or domain information the resolver's own `bounds` dict (log10 of
+  magnitude, sign discarded — a module-wide, deliberate convention) can
+  never carry. `_growth_zeta` tested `_safe_pow10(bounds[0]) >= 2`,
+  actually `|s| >= 2` — `zeta(-1463)` (a real, ~2852-digit value on
+  main, pinned as evaluating at this module's own top-level cap) was
+  silently bounded at `log10(2)` whenever NESTED (`factorial(floor(zeta(
+  -1463)))`, `1 << floor(Abs(zeta(-1463)))`). Fixed by DROPPING the
+  small-bound fast path from the magnitude-only formula entirely — it
+  now always uses the conservative Bernoulli-envelope bound regardless
+  of `s`'s true sign, sound (if looser) for `s >= 2` too; the TOP-LEVEL
+  domain check (`_zeta_two_arg_domain_violation`, added an earlier
+  round) already inspects the real, SIGNED `s` node directly and is
+  unaffected, so `zeta(-1463)` alone still evaluates. `_growth_digamma`
+  returned `1.0` for `z <= 1` while `psi(z) ~ -1/z` near the pole at
+  `z = 0` (`digamma(1e-6)`'s true magnitude is `~6`, not `~0`); `gamma`/
+  `loggamma` shared the same backwards assumption via the generic
+  `n**(2n)` catch-all (`Gamma(z) ~ 1/z`, same pole). All three now
+  reuse the `|z| >= 1` domain-row mechanism `polygamma`'s own `z`
+  already had (added an earlier round), refusing below it rather than
+  trusting a formula whose own derivation assumed the opposite regime;
+  `gamma`/`loggamma` additionally got their OWN tight, domain-aware
+  growth formula (`Gamma(z) <= ceil(z)!`, Stirling's envelope, verified
+  sound across `z` from `1` to `1463` including the `[1, 2]` dip where
+  `Gamma`'s own minimum sits — pulled out of the shared loose catch-all
+  `andre` still uses). `polygamma`'s own Hurwitz-zeta identity
+  additionally assumes a POSITIVE `z`, not merely `|z| >= 1`
+  (`polygamma(2, -1.5)` stays symbolic on main despite `|z| = 1.5 >=
+  1`) — `z` now also joins the non-negative domain table alongside
+  `binomial`'s `n` and `harmonic`'s `m`. The property-style sweep
+  (`_growth_check`, `tests/test_bug_sweep.py`) that already exists for
+  every `_GROWTH_BOUNDS` entry gained support for a negative or
+  fractional grid point (it silently assumed `n > 0` before, hiding
+  exactly this class of bug from itself) and new grids for `zeta`
+  (across both signs) and `gamma` (its own `z >= 1` domain, integers and
+  rationals spanning the dip).
+
 ## [0.13.0] — 2026-09-21
 
 ### Fixed

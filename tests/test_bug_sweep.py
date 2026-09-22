@@ -2668,6 +2668,15 @@ for _expr, _wrong_class in _leak_probes:
           _v is None and _e is not None and _wrong_class not in _text,
           f"-> {_text}")
 for _fn_name in _se5._DEFERRED_STANDIN_NAMES:
+    # THE-1095 round 11 (coordinator replay of 9fe4f6a, Codex probe 2a):
+    # `N` is a deferred stand-in with NO position-0 `_FUNCTION_ARG_CAPS`
+    # entry at all (its own hazard is entirely in its PRECISION argument,
+    # position 1 -- see `_EXTRA_BOUNDED_POSITIONS`'s own comment on
+    # `"N"`) -- this loop's own construction (an over-cap POSITION-0
+    # literal) does not apply to it; covered separately, below, via its
+    # own position-1 leak probe instead.
+    if _fn_name not in _se5._FUNCTION_ARG_CAPS:
+        continue
     _cap_kind, _cap_val = _se5._FUNCTION_ARG_CAPS[_fn_name]
     _extra = _EXTRA_CALL_ARGS.get(_fn_name, "")
     _over = f"{_cap_val}+1" if _cap_kind == "value" else f"10**{_cap_val}+1"
@@ -3200,10 +3209,24 @@ check(f"THE-1095 round-3-follow-up: never-raises sweep over "
 import sympy as _sp5
 
 
-def _growth_check(name, fn, real_fn, ns, extra_bounds=None):
+def _growth_check(name, fn, real_fn, ns, extra_bounds=None, real_is_float=False):
+    # THE-1095 round 11 (grok addendum to coordinator replay of 9fe4f6a):
+    # `n > 0 else -math.inf` used to be the ONLY branch -- silently
+    # WRONG for a negative or fractional `n` (this module's own `bounds`
+    # convention is `log10(|n|)`, sign discarded -- see `_growth_zeta`'s
+    # own docstring for exactly why a caller must never assume a
+    # magnitude-only bound also tells it the sign), and every existing
+    # call site below only ever passed positive integers, so the bug
+    # was invisible until a grid that actually exercises `n < 0` or a
+    # fractional `n` (added this round, see the zeta/gamma grids
+    # further down) is run through it. `real_is_float=True` lets a
+    # `real_fn` return a genuine SymPy `Float`/irrational EXPRESSION
+    # (`gamma`'s own non-integer values) rather than assuming the
+    # result is exactly `int`-representable.
     fails = []
     for n in ns:
-        bounds = {0: math.log10(n) if n > 0 else -math.inf}
+        n_val = float(n)
+        bounds = {0: math.log10(abs(n_val)) if n_val != 0 else -math.inf}
         if extra_bounds:
             bounds.update(extra_bounds(n))
         b = fn(bounds)
@@ -3211,8 +3234,16 @@ def _growth_check(name, fn, real_fn, ns, extra_bounds=None):
             real = real_fn(n)
         except Exception:
             continue
-        real = abs(int(real)) if real != 0 else 0
-        real_log = math.log10(real) if real > 0 else 0.0
+        if real_is_float:
+            # `float(Abs(real))` overflows to `inf` once `real` has more
+            # than ~308 digits (gamma(1463) does) -- resolve the
+            # MAGNITUDE symbolically instead, the same
+            # arbitrary-precision `log` this module's own resolver uses
+            # (`_float_value_log10`), never a raw `float()` cast.
+            real_log = 0.0 if real == 0 else float(_sp5.log(_sp5.Abs(real), 10))
+        else:
+            real = abs(int(real)) if real != 0 else 0
+            real_log = math.log10(real) if real > 0 else 0.0
         if b < real_log - 1e-9:
             fails.append((n, real_log, b))
     check(f"THE-1095 round-3-follow-up: growth-bound property check for "
@@ -3262,6 +3293,25 @@ _growth_check("divisor_sigma (k=1 default)", _se5._growth_divisor_sigma,
 _growth_check("polygamma (order=0)", _se5._growth_polygamma,
               lambda n: _sp5.floor(_sp5.Abs(_sp5.polygamma(0, n))) + 1, range(1, 60),
               extra_bounds=lambda n: {0: 0.0, 1: math.log10(n) if n > 0 else -math.inf})
+# THE-1095 round 11 (grok addendum to coordinator replay of 9fe4f6a):
+# `zeta` was not in this property-sweep list AT ALL (its own OLD
+# formula's sign-blindness bug -- `_safe_pow10(bounds[0]) >= 2` reading
+# as `|s| >= 2`, not `s >= 2` -- would have been caught here immediately
+# had a NEGATIVE `n` ever been swept). Now checked across BOTH signs.
+_growth_check("zeta (now sign-safe -- see _growth_zeta's own docstring)",
+              _se5._growth_zeta, lambda n: _sp5.zeta(n),
+              list(range(2, 40)) + list(range(-40, -1)) + [-1463, -1200, 1463])
+# `gamma`/`loggamma` (`_growth_gamma`): domain-restricted to `z >= 1`
+# elsewhere (`_MAGNITUDE_AT_LEAST_ONE_DOMAIN_POSITIONS`) -- this formula
+# only needs to be sound ON that domain, swept across integers AND
+# rationals (the `[1, 2]` dip where `Gamma`'s own minimum sits), never
+# below `z = 1` (a separate, direct expression pin below covers the
+# domain REFUSAL for `z < 1` instead of asking this formula to bound a
+# regime it is never actually reached for).
+_growth_check("gamma (_growth_gamma, z >= 1 domain)", _se5._growth_gamma,
+              lambda n: _sp5.gamma(n),
+              [1, _sp5.Rational(6, 5), _sp5.Rational(3, 2), _sp5.Rational(7, 4), 2, 3, 5, 10, 20, 50, 100, 1463],
+              real_is_float=True)
 _growth_check("nextprime (ith=1)", _se5._growth_nextprime,
               lambda n: _sp5.nextprime(n), [2, 3, 10, 100, 1000, 10**6, 10**10, 10**20],
               extra_bounds=lambda n: {1: 0.0})
@@ -4112,6 +4162,117 @@ for _expr, _want in (("floor(pi*10**5)", 314159), ("floor(polygamma(3, 1))", 6),
           "-- all cheap to numerically coerce) evaluates to main's exact "
           "value",
           _v == _want and _e is None, f"-> value={_v!r} err={_e!r} want={_want!r}")
+
+# ═══ THE-1095 round 11 (coordinator replay of 9fe4f6a: Codex round 9 ═══════
+# ═══ verify-1095-r9.log, three probes, quota-limited but reproduced; ═══════
+# ═══ grok verify-1095-r9-grok.log addendum, the shared root cause) ═════════
+
+# Codex item 1: `log` in this module's namespace is NATURAL log, not
+# log10 -- `bell(floor(log(10**1000)))` used to hang, since the OLD
+# elementary bound under-estimated `log(10**1000)`'s own magnitude by a
+# factor of `ln(10)`. Fixed at the resolver; `factorial`'s twin case
+# (already caught by the LAST-RESORT output check, just slowly) is
+# fixed the SAME way, and the fix is uniform across every table name
+# reachable this way, not just `factorial`.
+for _expr in ("bell(floor(log(10**1000)))", "factorial(floor(log(10**1000)))"):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round 11, Codex item 1: {_expr!r} (log's own "
+          "magnitude, corrected for the ln(10) base-change factor) is "
+          "refused promptly, not by hanging or by real construction",
+          _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+    check(f"  ...in well under a second ({_dt:.3f}s)", _dt < 1.0, f"-> {_dt:.3f}s")
+for _expr, _want in (("floor(log(10**1000))", 2302), ("floor(log(2))", 0)):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 11, Codex item 1: {_expr!r} evaluates to "
+          "main's exact value",
+          _v == _want and _e is None, f"-> value={_v!r} err={_e!r} want={_want!r}")
+
+# Codex item 2: `N`/`evalf`'s own precision argument was unbounded, and
+# the final OUTPUT check trusted `_log10_num_den`'s Float print-profile
+# (always magnitude 0) instead of counting a Float's own rendered
+# digits via its `_prec`.
+_t0 = time.time()
+_v, _e = _boundary_parse("N(pi, 100000)")
+_dt = time.time() - _t0
+check("THE-1095 round 11, Codex item 2: 'N(pi, 100000)' (a 100_001-"
+      "character Float) is refused",
+      _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+check(f"  ...well under a second ({_dt:.3f}s), not the ~1.5s this used "
+      "to cost",
+      _dt < 1.0, f"-> {_dt:.3f}s")
+_v, _e = _boundary_parse("N(pi, 50)")
+check("THE-1095 round 11, Codex item 2: 'N(pi, 50)' evaluates to main's "
+      "exact value",
+      _v is not None and str(_v) == "3.1415926535897932384626433832795028841971693993751" and _e is None,
+      f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("N(pi)")
+check("  ...and 'N(pi)' (the default 15-digit precision) evaluates too",
+      _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("10.0**100000")
+check("THE-1095 round 11, Codex item 2: '10.0**100000' (a compact "
+      "Float, `_prec` stays the default 53 bits despite its huge "
+      "magnitude) still evaluates -- the output check counts a Float's "
+      "own PRECISION, not its magnitude",
+      _v is not None and _e is None and len(str(_v)) < 30, f"-> value={_v!r} err={_e!r}")
+
+# Codex item 3 / grok: `sin`/`cos`/`tanh`/`erf`'s own `bounded1` rule
+# (magnitude <= 1) only holds for a REAL argument -- `sin(z)` for a
+# pure-imaginary `z` grows like `sinh(|Im(z)|)`, exponentially.
+_t0 = time.time()
+_v, _e = _boundary_parse("factorial(ceiling(Abs(sin(5000*I))))")
+_dt = time.time() - _t0
+check("THE-1095 round 11, Codex item 3: 'factorial(ceiling(Abs(sin("
+      "5000*I))))' (sinh(5000) is astronomically large) is refused",
+      _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+check(f"  ...in milliseconds ({_dt:.3f}s)", _dt < 1.0, f"-> {_dt:.3f}s")
+_v, _e = _boundary_parse("sin(500*I)")
+check("THE-1095 round 11, Codex item 3: 'sin(500*I)' (bare, not wrapped "
+      "in anything that numerically coerces it) evaluates as main does",
+      _v is not None and str(_v) == "I*sinh(500)" and _e is None,
+      f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("factorial(ceiling(Abs(sin(5))))")
+check("THE-1095 round 11, Codex item 3: 'factorial(ceiling(Abs(sin(5))"
+      "))' (a REAL argument, bounded1 correctly applies) evaluates to "
+      "main's value",
+      _v == 1 and _e is None, f"-> value={_v!r} err={_e!r}")
+
+# grok addendum, the shared root cause: an UNSIGNED magnitude fed to a
+# formula that needs sign/domain information.
+for _expr in ("factorial(floor(zeta(-1463)))", "1 << floor(Abs(zeta(-1463)))"):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round 11, grok addendum: {_expr!r} (zeta(-1463), "
+          "~2852 true digits, used to be sign-blindly bounded at "
+          "log10(2) when NESTED) is refused",
+          _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+    check(f"  ...in well under a second ({_dt:.3f}s)", _dt < 1.0, f"-> {_dt:.3f}s")
+_v, _e = _boundary_parse("zeta(-1463)")
+check("THE-1095 round 11, grok addendum: 'zeta(-1463)' alone (the "
+      "already-pinned single-arg case from an earlier round) still "
+      "evaluates -- the sign-safety fix only changes the NESTED-use "
+      "growth formula, not the top-level domain check",
+      _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+for _expr in ("factorial(floor(Abs(digamma(1e-6))))", "factorial(floor(gamma(1e-6)))",
+              "factorial(floor(Abs(sin(I*20))))", "polygamma(2, -1.5)"):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round 11, grok addendum: {_expr!r} (near a pole, "
+          "or a domain this module has not proven safe) is refused",
+          _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+    check(f"  ...in well under a second ({_dt:.3f}s)", _dt < 1.0, f"-> {_dt:.3f}s")
+_v, _e = _boundary_parse("factorial(floor(gamma(5)))")
+check("THE-1095 round 11, grok addendum: 'factorial(floor(gamma(5)))' "
+      "(z >= 1, the well-behaved domain) evaluates to main's exact "
+      "value (24!)",
+      _v == math.factorial(24) and _e is None, f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("factorial(floor(Abs(sin(5))))")
+check("  ...and 'factorial(floor(Abs(sin(5))))' (a REAL argument) "
+      "evaluates too",
+      _v == 1 and _e is None, f"-> value={_v!r} err={_e!r}")
 
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== ALL BUG-SWEEP REGRESSIONS FIXED ===")
