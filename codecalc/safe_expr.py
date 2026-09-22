@@ -2619,71 +2619,63 @@ def math_transforms():
     return _MATH_TRANSFORMS
 
 
-#: Exception TYPES this module has confirmed, by direct empirical testing
-#: and this file's own long documentation trail (see `safe_parse`'s own
-#: docstring, steps 3-4), are SymPy's OWN parse-time or arity/coercion
-#: refusals for a malformed or out-of-domain user expression: a genuine
-#: syntax error (`SyntaxError`/`tokenize.TokenError`/`IndentationError`/
-#: the two `Unicode*` classes, matching `_expression_touches_table_or_
-#: unprotected_operator`'s own identical allowlist for the same reason),
-#: `Function.__new__`'s own arity validation (`TypeError`), and a number
-#: class's own eager-coercion refusal (`ValueError` — "is not an
-#: integer", "invalid input: ...", "must be a positive integer", ... —
-#: and `NameError` for a name `sympify` cannot resolve at all). Used by
-#: `_classify_parse_exception` (below) to decide whether an exception
-#: caught around a raw `parse_expr`/`_parse_deferred` call is safe to
-#: report verbatim as a `CATEGORY_VALIDATION` "parse error" (this
-#: allowlist) or must instead be treated as an UNEXPECTED internal
-#: failure — `CATEGORY_CEILING`, this module's own standard "cannot be
-#: safely bounded" wording, never leaking Python's own internal
-#: exception text (`IndexError: list index out of range`, ...) to a
-#: caller as if it meant something about THEIR expression.
+#: THE-1095 round 13 follow-up (coordinator's own probe had an extra `)`
+#: — `2+2)` is a genuinely unbalanced-parenthesis SYNTAX error, and
+#: `origin/main` itself raises `IndexError: list index out of range` for
+#: it (CPython's own `ast`/`tokenize` machinery, not this module's own
+#: code) — confirmed: `sympify('2+2)')` on bare SymPy 1.14.0 raises the
+#: identical `IndexError` with the identical text. The round-13 fix
+#: above this comment (`_classify_parse_exception`, an exception-TYPE
+#: allowlist applied at every raw `parse_expr`/`_parse_deferred` call
+#: site) was accordingly the WRONG locus, and a real regression: it
+#: reclassified THIS exact, legitimate, `main`-identical `IndexError` as
+#: a `CATEGORY_CEILING` refusal instead of relaying it — `2+2)` must
+#: report `('validation', 'parse error: list index out of range')`,
+#: byte-identical to `main`, never a resource ceiling; a user syntax
+#: error is a validation problem, never a bounding problem, regardless
+#: of which exception TYPE CPython's own parser happens to raise for it.
 #:
-#: THE-1095 round 13 (coordinator review of 9a35eb6): `factorial(floor(
-#: Abs(1/(1-1+10**(-6)))))` — a reciprocal of an exact-zero-plus-epsilon
-#: `Add` — surfaced as `('validation', 'parse error: list index out of
-#: range')`: an internal `IndexError`, from somewhere in this module's
-#: own parsing/scanning machinery (never confirmed to originate in
-#: SymPy's own grammar at all — an `IndexError` is not a class any of
-#: this file's own extensive exception-handling commentary has ever
-#: documented SymPy raising for a user-facing parse issue), reported as
-#: if the CALLER had written invalid syntax. `unknown != safe` already
-#: governs every OTHER unresolved shape in this file; every site that
-#: catches a raw exception around a `parse_expr`/`_parse_deferred` call
-#: and stringifies it into `f"parse error: {exc}"` is the SAME instance
-#: of the identical gap — trusting ANY exception, of ANY type, to mean
-#: "the user's own syntax is bad" — fixed once, here, and reused at
-#: every one of those sites, rather than patched only at the one this
-#: round's own repro happens to reach: fail closed (a ceiling refusal,
-#: never a crash and never a misleading "parse error") for any exception
-#: TYPE this module has not itself confirmed SymPy raises for a genuine
-#: user-facing issue.
-_SYMPY_PARSE_EXCEPTION_TYPES = (
-    SyntaxError, TypeError, ValueError, NameError,
-    tokenize.TokenError, IndentationError,
-    UnicodeEncodeError, UnicodeDecodeError,
+#: Deleted (`_classify_parse_exception`/`_SYMPY_PARSE_EXCEPTION_TYPES`)
+#: entirely — every site below is back to `f"parse error: {exc}"`,
+#: unconditionally, for ANY exception `parse_expr`/`_parse_deferred`
+#: (SymPy's own tokenizer/parser/evaluator) raises, exactly as before
+#: THE-1095 round 13 ever touched this function, and exactly matching
+#: `origin/main`'s own behavior for the identical raw string. The
+#: correct locus for "an exception from OUR OWN code after a parse
+#: already succeeded must never look like a user syntax error" is CALL
+#: SITE, not exception TYPE: `reject_explosive` (on both `scan_shape`
+#: and `shape`) is the one place in this function that calls into this
+#: module's OWN post-parse scanning/resolver code
+#: (`_numeric_ceiling_scan`, `_resolve_arg_magnitude`,
+#: `_resolve_exact_rational`, the marker/binop checks, the output
+#: ceiling) — see its own two call sites, just below, for the guard now
+#: wrapping them.
+_INTERNAL_SCAN_FAILURE_MESSAGE = (
+    "this expression cannot be safely bounded: an unexpected internal "
+    "error occurred while scanning it"
 )
 
 
-def _classify_parse_exception(exc: Exception) -> tuple[str, str]:
-    """`(category, message)` for an exception caught around a raw
-    `parse_expr`/`_parse_deferred` call — `CATEGORY_VALIDATION`, with the
-    exception's own text, for a TYPE `_SYMPY_PARSE_EXCEPTION_TYPES`
-    (above) confirms is SymPy's own parse-time/arity/coercion refusal;
-    `CATEGORY_CEILING`, with this module's own standard "cannot be safely
-    bounded" wording — NEVER the raw exception text, an internal
-    implementation detail no caller should ever see — for anything else
-    (an `IndexError`, `RecursionError`, `AttributeError`, ...: not a
-    class this module has ever confirmed SymPy raises for a genuine
-    user-facing parse issue, so it fails closed as an internal failure
-    rather than being trusted and relayed verbatim).
+def _reject_explosive_safely(tree) -> str | None:
+    """`reject_explosive(tree)`'s own `str | None` contract, except an
+    exception raised by OUR OWN post-parse scanning/resolver code
+    (`_numeric_ceiling_scan`, `_resolve_arg_magnitude`,
+    `_resolve_exact_rational`, the marker/binop checks, the output
+    ceiling, ... — everything `reject_explosive` itself calls into) is
+    now ALSO a ceiling finding — `_INTERNAL_SCAN_FAILURE_MESSAGE` — the
+    unknown-refusal `unknown != safe` already uses for every other
+    unresolvable shape in this module, never propagated uncaught and
+    never confusable with a `parse_expr`/`_parse_deferred` exception
+    (SymPy's own tokenizer/parser/evaluator, which `safe_parse`'s two
+    `try`/`except` blocks around THOSE calls handle separately, and
+    deliberately still relay verbatim — see this function's own
+    module-level comment, just above, for why THAT locus was the wrong
+    place for this same guard).
     """
-    if isinstance(exc, _SYMPY_PARSE_EXCEPTION_TYPES):
-        return CATEGORY_VALIDATION, f"parse error: {exc}"
-    return CATEGORY_CEILING, (
-        "this expression cannot be safely bounded: an unexpected internal "
-        "error occurred while scanning it"
-    )
+    try:
+        return reject_explosive(tree)
+    except Exception:
+        return _INTERNAL_SCAN_FAILURE_MESSAGE
 
 
 def safe_parse(expression: str, *, evaluate: bool = True, local_dict: dict | None = None):
@@ -2840,12 +2832,7 @@ def safe_parse(expression: str, *, evaluate: bool = True, local_dict: dict | Non
         # py`. Fail closed on everything else: `unknown != safe`.
         scan_shape = None
         if _expression_touches_table_or_unprotected_operator(expression):
-            # THE-1095 round 13: `_classify_parse_exception`, not a bare
-            # `f"parse error: {exc}"` — see that helper's own docstring
-            # (and `_SYMPY_PARSE_EXCEPTION_TYPES`'s) for why ANY exception
-            # type used to be trusted here to mean "the user's own syntax
-            # is bad," and the `IndexError` repro that proved it wrong.
-            return None, _classify_parse_exception(exc)
+            return None, (CATEGORY_VALIDATION, f"parse error: {exc}")
     else:
         # THE-1095 round-3-follow-up (coordinator review of d3c65c7): a
         # bare class reference is a malformed EXPRESSION (validation), not
@@ -2857,7 +2844,7 @@ def safe_parse(expression: str, *, evaluate: bool = True, local_dict: dict | Non
         bare_class = _bare_class_violation(scan_shape)
         if bare_class:
             return None, (CATEGORY_VALIDATION, bare_class)
-        explosive = reject_explosive(scan_shape)
+        explosive = _reject_explosive_safely(scan_shape)
         if explosive:
             return None, (CATEGORY_CEILING, explosive)
 
@@ -2883,7 +2870,7 @@ def safe_parse(expression: str, *, evaluate: bool = True, local_dict: dict | Non
         bare_class = _bare_class_violation(shape)
         if bare_class:
             return None, (CATEGORY_VALIDATION, bare_class)
-        explosive = reject_explosive(shape)
+        explosive = _reject_explosive_safely(shape)
         if explosive:
             return None, (CATEGORY_CEILING, explosive)
 
@@ -2891,11 +2878,7 @@ def safe_parse(expression: str, *, evaluate: bool = True, local_dict: dict | Non
         if scan_shape is None:
             # BOTH parses failed: `origin/main`'s own error, verbatim —
             # this is what a caller already saw before THE-1095 existed.
-            # THE-1095 round 13: `_classify_parse_exception`, same reason
-            # as the deferred-scan handler above — `real_exc`'s own TYPE
-            # is unconstrained here, so it is checked the same way before
-            # being trusted and relayed.
-            return None, _classify_parse_exception(real_exc)
+            return None, (CATEGORY_VALIDATION, f"parse error: {real_exc}")
         # THE-1095 round 2 (verify-1095, finding 2): `TypeError` is SymPy's
         # OWN arity/shape validation (`Function.__new__`'s `nargs` check,
         # or a plain Python callable's own argument-count enforcement) —
@@ -2943,12 +2926,7 @@ def safe_parse(expression: str, *, evaluate: bool = True, local_dict: dict | Non
         # EXACT, previously-verified class proceeds; everything else
         # returns `origin/main`'s own text immediately.
         elif not (isinstance(real_exc, ValueError) and "is not an integer" in str(real_exc)):
-            # THE-1095 round 13: `_classify_parse_exception` — this `elif`
-            # covers "everything that is not the TypeError arity case and
-            # not the group-B ValueError case," which is ANY OTHER
-            # exception type, the same unconstrained shape as the other
-            # sites this round fixed.
-            return None, _classify_parse_exception(real_exc)
+            return None, (CATEGORY_VALIDATION, f"parse error: {real_exc}")
         # Group B's own eager `int`-coercion `ValueError`: `scan_shape`
         # already parsed AND scanned clean above, so every table-driven
         # argument here is proven safe regardless of why the REAL
@@ -2967,11 +2945,7 @@ def safe_parse(expression: str, *, evaluate: bool = True, local_dict: dict | Non
         value = parse_expr(expression, transformations=math_transforms(),
                            local_dict=local_dict, global_dict=safe_global_dict())
     except Exception as exc:
-        # THE-1095 round 13: `_classify_parse_exception`, same reason as
-        # every other site this round fixed — the final `evaluate=True`
-        # parse's own exception TYPE is just as unconstrained as the
-        # deferred-scan one.
-        return None, _classify_parse_exception(exc)
+        return None, (CATEGORY_VALIDATION, f"parse error: {exc}")
     # THE-1095 round 3 (verify-1095-r2, finding 4): no combination of two
     # individually-capped POSITIONS can be proven jointly safe without
     # either a real growth bound (which `_table_function_bound` now
@@ -3035,7 +3009,15 @@ def safe_parse(expression: str, *, evaluate: bool = True, local_dict: dict | Non
     # through this function already has, applied to whatever finally
     # comes out, regardless of which table name (or combination) produced
     # it.
-    result_log_num, result_log_den, result_resolved = _log10_num_den(value, {})
+    # THE-1095 round 13 follow-up: `_log10_num_den` is OUR OWN post-parse
+    # code (the "output ceiling" backstop) too — same guard, same reason,
+    # as `_reject_explosive_safely` above: an exception it raises must
+    # become the unknown-refusal ceiling, never an uncaught crash and
+    # never confusable with a `parse_expr`/`_parse_deferred` exception.
+    try:
+        result_log_num, result_log_den, result_resolved = _log10_num_den(value, {})
+    except Exception:
+        return None, (CATEGORY_CEILING, _INTERNAL_SCAN_FAILURE_MESSAGE)
     if result_resolved:
         output_violation = _ceiling_message_num_den(result_log_num, result_log_den)
         if output_violation:
@@ -4573,18 +4555,23 @@ def _resolve_exact_rational(node, memo: dict):
     NEVER raises — `_resolve_exact_rational_uncached`'s own composition
     (`Mul`/`Add`/`Pow`/marker arithmetic on arbitrary-precision Python
     `Fraction`-backed `Rational`s) is exercised on caller-controlled
-    shapes this module has not exhaustively enumerated; THE-1095 round
-    13 (coordinator review of 9a35eb6) found `factorial(floor(Abs(1/(1-
-    1+10**(-6)))))` — a reciprocal of an exact-zero-plus-epsilon `Add` —
-    surfacing as an internal `IndexError` reported to the CALLER as if
-    it were their own syntax mistake (`('validation', 'parse error: list
-    index out of range')`; see `_classify_parse_exception`'s own
-    docstring for the matching fix at `safe_parse`'s own exception
-    sites). This function's own established contract is already `None`
-    for "not exactly resolvable" — catching any exception the
-    composition itself raises and returning `None` for it too, the same
-    outcome as every OTHER unresolvable shape, closes the gap AT THE
-    SOURCE rather than relying solely on a caller's own safety net.
+    shapes this module has not exhaustively enumerated. THE-1095 round
+    13 (coordinator review of 9a35eb6) chased a `factorial(floor(Abs(
+    1/(1-1+10**(-6)))))` repro that turned out, on the coordinator's own
+    later correction, to be an unbalanced parenthesis in the PROBE
+    itself (a genuine `IndexError` from `origin/main`'s own tokenizer,
+    not this module) — but the hardening below is kept regardless: this
+    function's own established contract is already `None` for "not
+    exactly resolvable," and catching any exception the composition
+    itself raises and returning `None` for it too is the same outcome
+    as every OTHER unresolvable shape, for the same "unknown != safe"
+    reason every other branch here already returns `None` rather than
+    guessing. See `safe_parse`'s own two `reject_explosive` call sites
+    for where THIS module's own post-parse code (which calls into this
+    function) is guarded against ever surfacing as a misleading "parse
+    error" — the correct locus turned out to be CALL SITE (only code
+    that runs after a parse has already succeeded), never exception
+    TYPE.
     """
 
     if node.free_symbols:

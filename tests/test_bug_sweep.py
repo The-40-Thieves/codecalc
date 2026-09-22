@@ -4400,25 +4400,74 @@ for _expr, _want in (("factorial(floor(zeta(3)))", 1), ("factorial(ceiling(Abs(c
 
 # ═══ THE-1095 round 13 (coordinator replay of 9a35eb6): a reciprocal of ═══
 # an exact-zero-plus-epsilon `Add` (`1/(1-1+10**(-6))`) surfaced as
-# `('validation', 'parse error: list index out of range')` -- an internal
-# `IndexError`, from somewhere in this module's own parsing/scanning
-# machinery, reported to the caller as if it were THEIR OWN malformed
-# syntax. Fixed two ways: `_classify_parse_exception` (used at every
-# `safe_parse` site that used to trust ANY exception type caught around a
-# raw `parse_expr`/`_parse_deferred` call to mean "genuine parse error")
-# now refuses closed -- a `CATEGORY_CEILING` "cannot be safely bounded"
-# refusal, never the raw exception text -- for any exception type this
-# module has not itself confirmed SymPy raises for a real user-facing
-# parse issue; and `_resolve_exact_rational` (the newest, and the
-# coordinator's own named suspect, "the resolver") now catches any
-# exception its own arithmetic composition raises and returns `None`
-# ("not exactly resolvable") for it, the same outcome as every other
-# unresolvable shape, rather than ever propagating one uncaught.
+# `('validation', 'parse error: list index out of range')`. The
+# coordinator's OWN follow-up correction: their probe had an extra `)` --
+# `2+2)` (unbalanced parens) genuinely makes `origin/main` itself raise
+# `IndexError: list index out of range` (confirmed live: bare
+# `sympy.parsing.sympy_parser.parse_expr('2+2)', evaluate=False,
+# transformations=<this module's own implicit-mult+xor transforms>)`
+# raises the IDENTICAL `IndexError`, inherited from SymPy's own
+# `evaluateFalse()` internals -- `ast.Module.body[0]`, indexed after a
+# transform whose own token handling leaves an empty body for this
+# specific unbalanced-paren shape). The round's own FIRST attempt at a
+# fix (an exception-TYPE allowlist, `_classify_parse_exception`, applied
+# at every raw `parse_expr`/`_parse_deferred` call site) was accordingly
+# the WRONG locus -- a real regression, reclassifying this exact,
+# legitimate, `main`-identical `IndexError` as a ceiling refusal instead
+# of relaying it. Deleted entirely.
+#
+# The correct locus is CALL SITE, not exception TYPE: every exception
+# `parse_expr`/`_parse_deferred` (SymPy's own tokenizer/parser/evaluator)
+# raises is relayed verbatim, unconditionally, exactly as before THE-1095
+# round 13 ever touched this function -- `2+2)` is `('validation',
+# 'parse error: list index out of range')`, byte-identical to `main`,
+# never a resource ceiling. Only an exception raised INSIDE this
+# module's OWN code, AFTER a parse has already succeeded
+# (`reject_explosive` on either shape -- `_numeric_ceiling_scan`,
+# `_resolve_arg_magnitude`/`_resolve_exact_rational`, the marker/binop
+# checks -- and the output-ceiling `_log10_num_den` call on the final
+# evaluated `value`), now becomes the unknown-refusal ceiling
+# (`_reject_explosive_safely`/`_INTERNAL_SCAN_FAILURE_MESSAGE`). Kept:
+# `_resolve_exact_rational`'s own hardening (catching any exception its
+# arithmetic composition raises and returning `None` -- "not exactly
+# resolvable" -- for it, the same outcome as every other shape it cannot
+# certify) -- harmless, and still the right contract for a function whose
+# whole job is "return None, never raise, for anything not safely exact".
+
+# Unbalanced/malformed syntax must NEVER be recategorized as a ceiling
+# refusal, and the text must match what `origin/main` itself raises for
+# the identical raw string -- verified live against bare SymPy (same
+# transformations this module always applies) for the two that reach a
+# real `parse_expr`/`_parse_deferred` call; the other two are caught
+# earlier still, by `classify_unsafe`'s own PRE-EXISTING (untouched by
+# any round of THE-1095) tokenize-error handling, whose wording is
+# `main`'s own stable text for a `TokenError`.
+_TOKENIZE_ERROR_MSG = ("expression could not be tokenised: "
+                       "('unexpected EOF in multi-line statement', (1, 0))")
+_SYNTAX_ERROR_PROBES = (
+    ("2+2)", "parse error: list index out of range"),
+    ("(2+2", _TOKENIZE_ERROR_MSG),
+    ("2 +* 3", "parse error: invalid syntax (<unknown>, line 1)"),
+    ("sin(", _TOKENIZE_ERROR_MSG),
+    ("factorial(floor(Abs(1/(1-1+10**(-6))))))",
+     "parse error: list index out of range"),  # 6 closing parens
+)
+for _expr, _want_msg in _SYNTAX_ERROR_PROBES:
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 13 (coordinator correction): {_expr!r} "
+          f"(unbalanced/malformed syntax) is a VALIDATION error, "
+          f"byte-identical to main, never a ceiling refusal",
+          _v is None and _e == ("validation", _want_msg),
+          f"-> value={_v!r} err={_e!r} want=('validation', {_want_msg!r})")
+
+# The balanced-paren version of the same repro is UNCHANGED by this
+# round's correction -- it never raises at all, and correctly refuses on
+# the pre-existing digit-count backstop (`factorial(1000000)`, ~5.6M
+# digits), never the internal "list index out of range" text.
 _v, _e = _boundary_parse("factorial(floor(Abs(1/(1-1+10**(-6)))))")
 check("THE-1095 round 13: 'factorial(floor(Abs(1/(1-1+10**(-6)))))' "
-      "(1/(1-1+10**(-6)) resolves EXACTLY to 1000000 -- factorial(1000000) "
-      "is a genuine ~5.6M-digit ceiling refusal, never the internal "
-      "'list index out of range' the coordinator's own replay found) "
+      "(balanced parens -- 1/(1-1+10**(-6)) resolves EXACTLY to "
+      "1000000, factorial(1000000) is a genuine ceiling refusal) "
       "refuses with the ceiling category, and the message carries no "
       "internal implementation detail",
       _v is None and _e is not None and _e[0] == "ceiling"
@@ -4453,6 +4502,35 @@ for _expr in _RECIPROCAL_NEAR_ZERO_SWEEP:
           f"2-tuple -- main's own outcome or a ceiling/validation "
           f"refusal, never an internal message",
           _ok, f"-> value={_v!r} err={_e!r}")
+
+# The internal-guard path itself, isolated: `_numeric_ceiling_scan` is
+# called from `reject_explosive`, which is called from BOTH of
+# `safe_parse`'s own `_reject_explosive_safely` sites -- this is OUR OWN
+# code running strictly AFTER a parse has already succeeded, the one
+# case `_INTERNAL_SCAN_FAILURE_MESSAGE` exists for. Monkeypatched to
+# raise, on an otherwise completely ordinary expression that has nothing
+# wrong with its own syntax -- if this guard were missing, the exception
+# would propagate straight out of `safe_parse`, uncaught.
+_orig_scan = _se5._numeric_ceiling_scan
+
+
+def _boom_ceiling_scan(_tree, _memo):
+    raise RuntimeError("THE-1095 round 13 injected internal failure")
+
+
+_se5._numeric_ceiling_scan = _boom_ceiling_scan
+try:
+    _v, _e = _boundary_parse("2+2")
+finally:
+    _se5._numeric_ceiling_scan = _orig_scan
+check("THE-1095 round 13: an exception raised INSIDE this module's own "
+      "post-parse code (_numeric_ceiling_scan, monkeypatched to raise "
+      "RuntimeError) on an otherwise ordinary expression ('2+2') becomes "
+      "the unknown-refusal ceiling, never an uncaught crash and never a "
+      "misleading 'parse error'",
+      _v is None and _e is not None and _e[0] == "ceiling"
+      and "internal" in _e[1].lower(),
+      f"-> value={_v!r} err={_e!r}")
 
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== ALL BUG-SWEEP REGRESSIONS FIXED ===")

@@ -887,37 +887,48 @@ behind it.
   refuse when nested) alongside a small inside-domain point per name
   (all evaluate).
 
-- **An exception from this module's OWN parsing/scanning machinery could
-  be reported to the caller as if it were THEIR OWN malformed syntax**
+- **An exception raised by THIS MODULE'S OWN post-parse scanning code
+  could be reported to the caller as if it were their own malformed
+  syntax — and the first fix attempted for it was itself a regression**
   (THE-1095, follow-up to GH #326): `factorial(floor(Abs(1/(1-1+10**(
   -6)))))` — a reciprocal of an exact-zero-plus-epsilon `Add` — surfaced
-  as `('validation', 'parse error: list index out of range')`, an
-  internal `IndexError` relayed verbatim as if the caller had written
-  invalid syntax. Every `safe_parse` site that caught a raw exception
-  around a `parse_expr`/`_parse_deferred` call used to trust ANY
-  exception type to mean "the user's own syntax is bad" and stringify it
-  straight into a `CATEGORY_VALIDATION` "parse error" message — fixed
-  once, with a shared `_classify_parse_exception` helper (reused at
-  every one of those sites, not just the one this round's own repro
-  happened to reach): an exception TYPE this module has actually
-  confirmed SymPy raises for a genuine user-facing parse issue
-  (`SyntaxError`, `TypeError` — arity — `ValueError`/`NameError` —
-  coercion/undefined-name — `tokenize.TokenError`, ...) still reports
-  its own text; anything else now fails closed as a `CATEGORY_CEILING`
-  "cannot be safely bounded" refusal instead, never leaking Python's own
-  internal exception text to a caller. `_resolve_exact_rational` (the
-  central exact-value resolver introduced two rounds ago) now also
-  catches any exception its own arithmetic composition raises and
-  returns `None` ("not exactly resolvable") for it — the SAME outcome
-  as every other shape it cannot certify — closing the gap at the
-  source, not only at the caller's own safety net. Confirmed the actual
-  expression correctly refuses on the pre-existing digit-count backstop
-  (`factorial(1000000)`, ~5.6M digits) with no "index" anywhere in the
-  message; a fuzz-style sweep over reciprocals of exact-zero and
-  near-zero subtrees (`1/(1-1)`, `1/(2-2+10**(-9))`, `x/(0+0)`,
-  `1/(10**(-6))`, `1/(Rational(1,10**6))`) confirms each still returns
-  either main's own outcome or a clean validation/ceiling refusal, never
-  an internal-looking message.
+  as `('validation', 'parse error: list index out of range')`. The
+  balanced-paren expression itself was never the cause (it resolves
+  exactly, and correctly refuses on the pre-existing ~5.6M-digit
+  ceiling backstop); the coordinator's OWN replay had an extra `)`, and
+  `2+2)` (unbalanced parens) genuinely makes `origin/main` itself raise
+  that identical `IndexError` — inherited from SymPy's own
+  `evaluateFalse()` internals under this module's implicit-
+  multiplication/`^`-as-power transforms, confirmed live against bare
+  SymPy. An exception-TYPE allowlist applied at every raw `parse_expr`/
+  `_parse_deferred` call site (`_classify_parse_exception`, this
+  round's own first attempt) was accordingly the WRONG locus — it
+  reclassified that legitimate, `main`-identical `IndexError` as a
+  ceiling refusal instead of relaying it, a real regression — and was
+  deleted. The correct locus is CALL SITE, not exception type: every
+  exception `parse_expr`/`_parse_deferred` (SymPy's own tokenizer/
+  parser/evaluator) raises is relayed verbatim, unconditionally,
+  exactly as before this round ever touched the function; only an
+  exception raised by THIS module's own code AFTER a parse has already
+  succeeded — `reject_explosive` on either the deferred or the real
+  shape (`_numeric_ceiling_scan`, `_resolve_arg_magnitude`/
+  `_resolve_exact_rational`, the marker/binop checks) and the
+  output-ceiling `_log10_num_den` call on the final evaluated value —
+  now becomes the unknown-refusal ceiling (`_reject_explosive_safely`/
+  `_INTERNAL_SCAN_FAILURE_MESSAGE`). `_resolve_exact_rational`'s own
+  hardening (catching any exception its arithmetic composition raises
+  and returning `None` — "not exactly resolvable" — for it) is kept
+  regardless, the same "unknown != safe" contract every other branch
+  there already holds. Pinned: five syntax-error probes (`2+2)`,
+  `(2+2`, `2 +* 3`, `sin(`, and the original repro with a sixth closing
+  paren) now match `main`'s own category AND text byte-for-byte; a
+  fuzz-style sweep over reciprocals of exact-zero and near-zero
+  subtrees (`1/(1-1)`, `1/(2-2+10**(-9))`, `x/(0+0)`, `1/(10**(-6))`,
+  `1/(Rational(1,10**6))`) confirms each still returns either main's
+  own outcome or a clean validation/ceiling refusal, never an
+  internal-looking message; and `_numeric_ceiling_scan` monkeypatched
+  to raise confirms the internal guard itself fires on an otherwise
+  ordinary expression.
 
 ## [0.13.0] — 2026-09-21
 
