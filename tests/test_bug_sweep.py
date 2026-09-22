@@ -3863,6 +3863,151 @@ check("THE-1095 round-3-follow-up #6 item 3: 'factorial(Ei(1463))' (a "
       and "cannot be safely bounded" in _e[1],
       f"-> value={_v!r} err={_e!r}")
 
+# ═══ THE-1095 round 9 (coordinator review of 1d756b7, Codex ═══════════════
+# ═══ verify-1095-r7.log + grok verify-1095-r7-grok.log, both FAILED, CI ═══
+# ═══ green): "a rule that is an upper bound on the happy path but not ═══
+# ═══ on the accepted domain" -- position-complete, domain-explicit fixes ═══
+
+# Item A (Codex finding 1, High): `%`/`//` used the SAME "bounded by the
+# left operand alone" rule -- true only for `>>`. `%`'s bound is the
+# RIGHT operand's own magnitude (`0 <= |a % b| < |b|` unconditionally);
+# `//` needs a LOWER bound on the divisor (a smaller divisor gives a
+# LARGER quotient), known only for an exact numeric literal or a table
+# call proven to always return an integer.
+for _expr in ("bell(-1 % 10**4)", "bell(1 // 0.0005)",
+              "root(-1 % 10**2000,2)", "factorint(-1 % 10**30)",
+              "nextprime(-1 % 10**30)"):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round 9 item A: {_expr!r} (a negative-modulo or "
+          "fractional-divisor operand that used to fail-open) is refused",
+          _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+    check(f"  ...in milliseconds ({_dt:.3f}s), not by letting the real "
+          "parse construct the real quotient/remainder",
+          _dt < 1.0, f"-> {_dt:.3f}s")
+# ...and ordinary, non-adversarial %/// still evaluate to main's values
+# -- the fix bounds the hazard, it does not blanket-refuse the operators.
+for _expr, _want in (("2 % 3", 2), ("-1 % 7", 6), ("10 // 3", 3),
+                      ("-7 // 2", -4), ("7 // bell(20)", 0)):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 9 item A: {_expr!r} (an ordinary %/// use, "
+          "including a table-call divisor PROVEN integer-valued) still "
+          "evaluates, matching main",
+          _v == _want and _e is None, f"-> value={_v!r} err={_e!r} want={_want!r}")
+
+# Item B (Codex finding 2, High): eight table names' own OPTIONAL second
+# position (`bell`'s `k_sym`, `bernoulli`/`euler`/`genocchi`'s `x`,
+# `fibonacci`/`tribonacci`'s `sym`, `harmonic`'s `m`, `zeta`'s `a`) drive
+# the RESULT's own magnitude and cost, and had no bound at all.
+for _expr in ("bell(1463,factorial(1463))", "harmonic(1463,-factorial(8))",
+              "zeta(-1463,1463)", "bell(1463,1463)", "bernoulli(1463,1463)",
+              "euler(1463,1463)"):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round 9 item B: {_expr!r} (a two-position table "
+          "call whose combined output was never bounded before) is "
+          "refused",
+          _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+    check(f"  ...in milliseconds ({_dt:.3f}s), not by hanging on real "
+          "construction",
+          _dt < 1.0, f"-> {_dt:.3f}s")
+# ...and a genuinely small second-position value still evaluates.
+from sympy import Rational as _Rational
+
+_HARMONIC_10_10 = _Rational(413520574906423083987893722912609, 413109706296096288512409600000000)
+for _expr, _want in (("bell(2,1000)", 1001000), ("harmonic(10,10)", _HARMONIC_10_10),
+                      ("zeta(-1200,2)", -1)):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 9 item B: {_expr!r} evaluates to main's exact value",
+          _v == _want and _e is None, f"-> value={_v!r} err={_e!r} want={_want!r}")
+
+# Item C (Codex finding 3, High): a growth formula is only an upper
+# bound on the domain it was derived for -- `binomial`'s own `n < 0`
+# switches to a DIFFERENT, unaudited code path; `polygamma`'s own order
+# was previously ignored entirely.
+for _expr in ("binomial(-1463,1000000)", "binomial(-100,1000)",
+              "binomial(-5,3)", "polygamma(5,0.5)"):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 9 item C: {_expr!r} (outside the domain this "
+          "module has derived a bound for) is refused as a domain "
+          "violation, a deliberate divergence from main",
+          _v is None and _e is not None and _e[0] == "ceiling"
+          and ("must be non-negative" in _e[1] or "must have magnitude" in _e[1]),
+          f"-> value={_v!r} err={_e!r}")
+# ...and the well-behaved domain (order-aware now) still evaluates to
+# main's exact value, even close to its own cap.
+_v, _e = _boundary_parse("polygamma(1463,1)")
+check("THE-1095 round 9 item C: 'polygamma(1463,1)' (order now folded "
+      "into the bound, still comfortably under MAX_NUMERIC_DIGITS -- "
+      "3299 true digits) evaluates, matching main",
+      _v is not None and _e is None and len(str(_v)) == 3299,
+      f"-> value has {len(str(_v)) if _v is not None else None} digits, err={_e!r}")
+
+# Item D (grok): `_log10_num_den`'s own Float print-profile shortcut
+# (always magnitude 0, correct for PRINTING a bare Float) was inherited
+# as a VALUE bound by markers/Mul/Add/floor/ceiling -- `factorial(floor(
+# 1e4 * bell(1)))` (bell(1) == 1, true value factorial(10000), ~35_660
+# digits) used to sail past every scan and get caught only by the
+# output-ceiling backstop AFTER real construction. Also: no `Pow`
+# composition in the resolver at all -- `factorial((1 << 3)**2)` (64!),
+# `factorial(2**(1 << 3))` (256!), `factorial(fibonacci(5)**2)` (25!)
+# all evaluate on main and used to hit the item-3 structural backstop.
+_t0 = time.time()
+_v, _e = _boundary_parse("factorial(floor(1e4 * bell(1)))")
+_dt = time.time() - _t0
+check("THE-1095 round 9 item D: 'factorial(floor(1e4 * bell(1)))' "
+      "(a Float's real VALUE, not its print-profile, hidden inside a "
+      "Mul feeding floor()) is refused",
+      _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+check(f"  ...in milliseconds ({_dt:.3f}s), not after constructing "
+      "factorial(10000) for real",
+      _dt < 1.0, f"-> {_dt:.3f}s")
+for _expr, _want in (("factorial((1 << 3)**2)", math.factorial(64)),
+                      ("factorial(2**(1 << 3))", math.factorial(256)),
+                      ("factorial(fibonacci(5)**2)", math.factorial(25))):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 9 item D: {_expr!r} (a marker/table call "
+          "inside a Pow, itself inside a table-call argument) evaluates "
+          "to main's exact value, via the resolver's new Pow composition",
+          _v == _want and _e is None, f"-> value={_v!r} err={_e!r}")
+
+# Item E (Codex finding 4, Medium): tight, provable bounds replace the
+# loose `n**(2n)` catch-all for several names, closing false ceilings on
+# an absurd shift count, and adding growth entries for `mobius`/
+# `isprime`/`root` (previously "no growth estimate defined" refusals).
+for _expr, _want in (("1 << factorial2(5)", 32768),
+                      ("1 << subfactorial(5)", 17592186044416),
+                      ("1 << euler(4)", 32),
+                      ("mobius(5) % 3", 2), ("isprime(5) << 1", 2),
+                      ("root(8,3) % 3", 2)):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 9 item E: {_expr!r} (a tight, provable growth "
+          "bound instead of the loose n**(2n) catch-all) evaluates, "
+          "matching main",
+          _v == _want and _e is None, f"-> value={_v!r} err={_e!r} want={_want!r}")
+
+# Item F (grok, "the fail-closed list"): a small, curated elementary-
+# function table (Max/Min/sign/sin/cos/tanh/erf/log/exp) lets a numeric
+# argument wrapped in an ordinary, non-table SymPy function resolve
+# through the shared resolver instead of hitting the item-3 backstop.
+for _expr, _want in (("factorial(log(1))", 1), ("factorial(cos(0))", 1),
+                      ("factorial(Max(3, 5))", 120), ("factorial(Min(3,5))", 6),
+                      ("factorial(sin(0))", 1)):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 9 item F: {_expr!r} (an elementary function "
+          "of a resolvable numeric argument) evaluates, matching main",
+          _v == _want and _e is None, f"-> value={_v!r} err={_e!r} want={_want!r}")
+# ...while the fail-closed list stays curated, not a blanket escape:
+# `factorial(I)` (the imaginary unit, not a NumberSymbol, not in the
+# elementary table) still refuses, alongside the already-pinned
+# `factorial(Ei(1463))`.
+_v, _e = _boundary_parse("factorial(I)")
+check("THE-1095 round 9 item F: 'factorial(I)' (imaginary unit, not "
+      "covered by any resolver branch) is refused as unknown",
+      _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== ALL BUG-SWEEP REGRESSIONS FIXED ===")
 sys.exit(1 if FAILS else 0)

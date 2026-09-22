@@ -395,12 +395,42 @@ MAX_ITH_PRIME_SKIP = 1_000
 #: (1000 steps from the smallest possible start) is comfortably sub-second;
 #: chosen well under `MAX_HEAVY_ARG` (1463) since each step here is itself
 #: a full primality search, unlike `rf`/`ff`'s cheap per-step multiply.
+#: #326 finding B (Codex, round 9 review of 5119c9d, `verify-1095-r7.log`,
+#: finding 2 — High, "position-complete spec"): SymPy 1.14's own optional
+#: SECOND positions on eight more table names each drive the RESULT's own
+#: magnitude and cost exactly the same way `rf`/`ff`'s `k` already does —
+#: audited live via `inspect.signature(real.eval)` for every name in
+#: `_FUNCTION_ARG_CAPS` — `bell(n, k_sym)` (the `n`-th Bell/Touchard
+#: POLYNOMIAL evaluated at `k_sym`), `bernoulli(n, x)`/`euler(n, x)`/
+#: `genocchi(n, x)` (the corresponding POLYNOMIAL at `x`), `fibonacci(n,
+#: sym)`/`tribonacci(n, sym)` (ditto), `harmonic(n, m)` (the GENERALIZED
+#: harmonic number, order `m`), `zeta(s, a)` (the HURWITZ zeta's second
+#: parameter) — none of these had ANY bound on their own second position
+#: before this round: `bell(1463, factorial(1463))`, `harmonic(1463,
+#: -factorial(8))`, `zeta(-1463, 1463)` all hang past several seconds.
+#: Capped at `MAX_HEAVY_ARG`, the SAME flat "value" cap `divisor_sigma`'s
+#: own `k` (position 1) already uses — each of these eight names' own
+#: GROWTH formula (see `_GROWTH_BOUNDS`, below) is ALSO made two-position-
+#: aware so the combined output of a call with BOTH positions individually
+#: under this same flat cap (`bell(1463, 1463)`, still comfortably within
+#: EACH position's own limit) is still proven safe BEFORE real
+#: construction — see `_table_function_growth_violation`'s own docstring
+#: for why a flat per-position cap alone is not, on its own, sufficient
+#: for a two-position name the way it always was for a one-position one.
 _EXTRA_BOUNDED_POSITIONS: dict = {
     "rf": {1: ("value", MAX_HEAVY_ARG)},
     "ff": {1: ("value", MAX_HEAVY_ARG)},
     "polygamma": {1: ("value", MAX_HEAVY_ARG)},
     "divisor_sigma": {1: ("value", MAX_HEAVY_ARG)},
     "nextprime": {1: ("value", MAX_ITH_PRIME_SKIP)},
+    "bell": {1: ("value", MAX_HEAVY_ARG)},
+    "bernoulli": {1: ("value", MAX_HEAVY_ARG)},
+    "euler": {1: ("value", MAX_HEAVY_ARG)},
+    "fibonacci": {1: ("value", MAX_HEAVY_ARG)},
+    "genocchi": {1: ("value", MAX_HEAVY_ARG)},
+    "harmonic": {1: ("value", MAX_HEAVY_ARG)},
+    "tribonacci": {1: ("value", MAX_HEAVY_ARG)},
+    "zeta": {1: ("value", MAX_HEAVY_ARG)},
 }
 #: name -> frozenset of positions that are members of `_HEAVY_FUNCTIONS`'
 #: usual "value"-kind position-0 table by construction, but this specific
@@ -408,8 +438,18 @@ _EXTRA_BOUNDED_POSITIONS: dict = {
 #: (see `binomial`'s own comment above) — read by both the token screen and
 #: the tree scan so neither accidentally reintroduces the false refusal the
 #: OTHER one was fixed to avoid.
+#:
+#: #326 finding B (round 9): also where a POSITION-COMPLETE spec records
+#: "audited, no numeric hazard, deliberately unbounded" for a position
+#: that is neither `binomial`'s own `k` shape (an O(1) short-circuit) nor
+#: a plain skip candidate — `bell`'s own THIRD position (`symbols`) is a
+#: LIST of `Symbol` objects passed to `_bell_incomplete_poly`, never a
+#: magnitude to bound at all (a numeric value there does not match
+#: `bell.eval()`'s own expected shape and stays symbolic on `origin/
+#: main` too — nothing this module's cap machinery needs to touch).
 _UNBOUNDED_POSITIONS: dict = {
     "binomial": frozenset({1}),
+    "bell": frozenset({2}),
 }
 
 
@@ -443,6 +483,98 @@ def _bounded_positions(name: str):
     for pos in sorted(_EXTRA_BOUNDED_POSITIONS.get(name, {})):
         kind, cap = _EXTRA_BOUNDED_POSITIONS[name][pos]
         yield pos, kind, cap
+
+
+#: #326 finding C (Codex, round 9 review of 5119c9d, `verify-1095-r7.log`,
+#: finding 3 — High, "domains"): a growth/cap formula is only a valid
+#: UPPER BOUND on the domain it was derived for. `_growth_2n`'s own
+#: `binomial(n, k) <= 2**n` assumes `n >= 0` — `binomial`'s own `eval()`
+#: switches to a DIFFERENT, unaudited code path for a negative `n` (the
+#: generalized identity `C(n,k) = (-1)**k * C(k-n-1, k)`), whose
+#: magnitude this module has never derived a bound for at all —
+#: `binomial(-100, 1000)`'s true log10 magnitude (~143.11) already
+#: exceeds the OLD formula's own claim (~30.10, computed from `|n|=100`
+#: as if it were non-negative, itself already wrong on its face before
+#: even considering the identity switch), and `binomial(-1463, 1000000)`
+#: passed the deferred screen and hung. `origin/main` itself DOES accept
+#: a negative `n` (`binomial(-5, 3) == -35`, verified live) — refusing
+#: this domain is a deliberate, documented divergence from main for a
+#: shape this module has not (yet) derived a sound bound for, the same
+#: "unknown != safe" bar this module already holds every other
+#: unresolvable-but-numeric shape to, not a claim that main itself
+#: rejects it.
+#:
+#: name -> frozenset of positions that must resolve to a NON-NEGATIVE
+#: value (an exact integer is not required here — `binomial`'s `eval()`
+#: itself only branches on the SIGN of `n`, not its exact type) or the
+#: call is refused as a domain violation.
+#: `harmonic`'s own `m` (position 1) joins this table for a DIFFERENT
+#: reason than `binomial`'s `n`: `_resolve_arg_magnitude`'s entire
+#: `bounds` convention stores a MAGNITUDE (`arg_log_num - arg_log_den`,
+#: sign discarded — the same "abs value" treatment this module already
+#: gives a plain `Integer` throughout), never a signed value, so a
+#: growth formula reading `bounds.get(1)` back via `_safe_pow10` cannot
+#: tell a `m = -1463` from a `m = 1463` — both arrive as the SAME
+#: magnitude. `harmonic(n, m)` for a negative `m` is `sum_{k=1}^n
+#: k**|m| <= n**(|m|+1)`, a GENUINELY different (much larger) growth
+#: shape than the classical `m >= 0` case's own `~ln(n)+1` — silently
+#: reading `bounds.get(1)`'s magnitude as if it were always non-negative
+#: `m` left `harmonic(1463, -1463)` hanging even after `_growth_
+#: harmonic` was made two-position-aware (a sign-blind formula computed
+#: the TINY classical bound for what was actually the LARGE negative-`m`
+#: shape). Refusing the domain outright — the same "unknown != safe"
+#: tradeoff `binomial`'s own negative `n` and `polygamma`'s own `|z| < 1`
+#: already make — sidesteps needing to thread a SIGNED value through a
+#: `bounds` dict this module's whole magnitude-resolution machinery
+#: was built around carrying only a magnitude in. `origin/main` DOES
+#: accept a negative `m` (`harmonic(10, -10) == 14914341925`) — a
+#: deliberate, documented divergence, not a claim that main rejects it.
+_NONNEGATIVE_DOMAIN_POSITIONS: dict = {
+    "binomial": frozenset({0}),
+    "harmonic": frozenset({1}),
+}
+
+#: #326 finding C, continued: `polygamma(order, z)` near `z`'s own pole
+#: (`z <= 0`, and — this module's chosen, simpler domain line, per the
+#: coordinator's own "require |z| >= 1 or refuse" — any `|z| < 1` at
+#: all) blows up in a way `_growth_polygamma`'s own order-aware formula
+#: (below) does not attempt to bound: `polygamma(1463, 1)` alone (order
+#: dominates, `z` comfortably >= 1) already has a true log10 magnitude
+#: of ~3997.36 — close to `MAX_NUMERIC_DIGITS` on its OWN, well-behaved
+#: domain — and the near-pole regime only gets worse from there. `z`'s
+#: own MAGNITUDE (not its type) is what this domain rule reads, via the
+#: SAME `_resolve_arg_magnitude` result the ordinary cap check already
+#: computed — no separate resolution needed.
+#:
+#: name -> frozenset of positions that must resolve to a value with
+#: magnitude >= 1 (`log10(|value|) >= 0`) or the call is refused.
+_MAGNITUDE_AT_LEAST_ONE_DOMAIN_POSITIONS: dict = {
+    "polygamma": frozenset({1}),
+}
+
+
+def _domain_violation(name: str, position: int, arg, arg_log_num: float, arg_log_den: float) -> str | None:
+    """Reason `arg` (already known non-symbolic, already resolved to
+    `(arg_log_num, arg_log_den)` via `_resolve_arg_magnitude`) falls
+    outside `name`'s own declared domain at `position`, or `None` if
+    `position` has no domain rule at all, or `arg` satisfies the one it
+    has. Called from BOTH `_function_arg_cap_violation` and `_table_
+    function_bound`'s own per-position loops, alongside their existing
+    cap check — a domain violation is checked FIRST, since a value the
+    growth formula was never derived for is not safely comparable to a
+    cap at all (see `_NONNEGATIVE_DOMAIN_POSITIONS`'s and `_MAGNITUDE_
+    AT_LEAST_ONE_DOMAIN_POSITIONS`'s own comments for why each exists).
+    """
+    if position in _NONNEGATIVE_DOMAIN_POSITIONS.get(name, ()) and arg.is_negative:
+        return (f"the argument to {name}() at position {position} must be "
+                "non-negative: this module has not derived a safe bound "
+                "for that domain")
+    if (position in _MAGNITUDE_AT_LEAST_ONE_DOMAIN_POSITIONS.get(name, ())
+            and (arg_log_num - arg_log_den) < 0):
+        return (f"the argument to {name}() at position {position} must have "
+                "magnitude >= 1: this module has not derived a safe bound "
+                "for that domain")
+    return None
 
 
 def _safe_pow10(log_value: float | None) -> float | None:
@@ -690,13 +822,31 @@ def _growth_divisor_sigma(bounds: dict) -> float:
 
 
 def _growth_harmonic(bounds: dict) -> float:
-    """`harmonic(n) <= ln(n) + 1` — the harmonic series' own logarithmic
-    growth; always tiny relative to every cap this bounds feed into, kept
-    as an actual formula (not a constant) so it stays correct if
-    `MAX_HEAVY_ARG` itself ever changes."""
+    """`harmonic(n)` (`m` absent, or `m >= 0`) `<= ln(n) + 1` — the
+    ordinary harmonic series' own logarithmic growth, always tiny.
+    `harmonic(n, 0) == n` exactly. A NEGATIVE `m` is refused outright as
+    a domain violation before this formula is ever reached — see
+    `_NONNEGATIVE_DOMAIN_POSITIONS`'s own comment on `"harmonic"` for
+    why (the `bounds` dict this formula reads carries only a MAGNITUDE,
+    never a sign, so `m = -1463` and `m = 1463` are indistinguishable
+    here — `harmonic(n, m)` for `m < 0` is `sum_{k=1}^n k**|m| <=
+    n**(|m|+1)`, a genuinely different, much larger growth shape than
+    this formula's own `m >= 0` case, and could not be told apart from
+    it through this dict even if a formula here tried)."""
     n = _safe_pow10(bounds.get(0))
     if n is None:
         return math.inf
+    m_log = bounds.get(1)
+    if m_log is not None:
+        m = _safe_pow10(m_log)
+        if m is None:
+            return math.inf
+        if m == 0:
+            return math.log10(n) if n > 0 else 0.0
+        # m >= 1 (the domain check upstream already ruled out m < 0):
+        # the classical generalized harmonic number, bounded the SAME
+        # logarithmic way as the ordinary (m absent) case below — H(n,
+        # m) <= H(n, 1) for any m >= 1, n >= 1.
     if n <= 1:
         return 1.0
     return math.log10(math.log(n) + 1) if math.log(n) + 1 > 1 else 0.0
@@ -704,18 +854,78 @@ def _growth_harmonic(bounds: dict) -> float:
 
 def _growth_polygamma(bounds: dict) -> float:
     """`polygamma(order, z)` at order 0 (`digamma`) is `harmonic(z-1) -
-    EulerGamma`, itself tiny (logarithmic in `z`) — bounded from position
-    1 (`z`) alone, since `z` is what the module actually caps (see
-    `_EXTRA_BOUNDED_POSITIONS`'s own comment); a small constant covers
-    every order this table admits (order is capped at `MAX_HEAVY_ARG`
-    through the ordinary position-0 path, but never realistically
-    approaches it — see `_HEAVY_FUNCTIONS`'s own comment)."""
+    EulerGamma`, itself tiny (logarithmic in `z`). For `order >= 1`,
+    `polygamma(order, z) = (-1)**(order+1) * order! * zeta(order+1, z)`
+    exactly, and `zeta(s, z) <= zeta(2) < 2` for any `z >= 1`, `s >= 2`
+    (#326 finding B, Codex round 9: the OLD formula ignored `order`
+    entirely, reading `z` alone — `polygamma(1463, 1)`'s true log10
+    magnitude is ~3997.36, the OLD formula claimed ~1). `z`'s own domain
+    (`|z| >= 1`, enforced separately — see `_MAGNITUDE_AT_LEAST_ONE_
+    DOMAIN_POSITIONS`) is what keeps `zeta(order+1, z) < 2` provable at
+    all; this formula is never reached with `z < 1` for THIS name's own
+    direct call (the domain check refuses first), but stays a safe
+    fallback for a NESTED, still-unresolved `z` position too."""
     z = _safe_pow10(bounds.get(1))
     if z is None:
         return math.inf
-    if z <= 1:
-        return 1.0
-    return math.log10(math.log(z) + 2)
+    if z < 1:
+        return math.inf
+    digamma_term = math.log10(math.log(z) + 2) if z > 1 else 1.0
+    order_log = bounds.get(0)
+    if order_log is None:
+        return digamma_term
+    order = _safe_pow10(order_log)
+    if order is None or order < 1:
+        return digamma_term
+    # `order! * zeta(order+1, z)`, `zeta(...) < 2` for `z >= 1` -- a
+    # `log10(2)` safety margin on top of the factorial term covers it.
+    factorial_term = _growth_stirling_factorial({0: order_log}) + math.log10(2)
+    return max(digamma_term, factorial_term)
+
+
+def _growth_poly_second_arg(base_growth, degree_scale: float = 1.0):
+    """Wraps a single-position growth function for a table name whose
+    OPTIONAL second position evaluates an `n`-degree(ish) polynomial or
+    generating function AT that point (#326 finding B, Codex round 9,
+    "position-complete spec"): `bell`'s `k_sym` (the Bell/Touchard
+    POLYNOMIAL evaluated at `k_sym`), `bernoulli`/`euler`/`genocchi`'s
+    `x` (the corresponding POLYNOMIAL at `x`), `fibonacci`/`tribonacci`'s
+    `sym` (ditto). The polynomial's own COEFFICIENTS are already bounded
+    by `base_growth` (the single-arg sequence itself — Bell/Bernoulli/
+    Euler/Genocchi numbers, or `fibonacci`/`tribonacci` themselves), and
+    evaluating a degree-`~degree_scale*n` polynomial at a point `x`
+    scales that by `|x| ** (degree_scale*n)` in the worst case (every
+    coefficient landing on the single highest-degree term) — deliberately
+    loose (never claims tighter than that), but always a safe upper
+    bound: `log10(coefficient bound) + degree_scale*n*log10(max(1,
+    |x|))`. `bell(2, 1000)`'s true log10 magnitude is ~6.0, this gives
+    `log10(2!) + 1*2*log10(1000) = 0.301 + 6 = 6.301` — safe, and no
+    longer the OLD single-position formula's own claim of ~0.3."""
+    def growth(bounds: dict) -> float:
+        base = base_growth(bounds)
+        x_log = bounds.get(1)
+        if x_log is None:
+            return base  # single-arg call -- unaffected
+        n = _safe_pow10(bounds.get(0))
+        if n is None:
+            return math.inf
+        x = _safe_pow10(x_log)
+        if x is None:
+            return math.inf
+        return base + degree_scale * n * math.log10(max(1.0, x))
+    return growth
+
+
+def _growth_2_factorial(bounds: dict) -> float:
+    """`|x(n)| <= 2 * n!` — the standard asymptotic envelope for Euler,
+    Bernoulli, and Genocchi numbers (`|E_n|, |B_n|, |G_n| = O(n! /
+    (2*pi)**n)`, comfortably under `2*n!` for every practical `n`).
+    #326 finding E (Codex round 9, "tight bounds instead of a loose
+    catch-all"): replaces the far looser `n**(2n)` shared catch-all
+    these three used to fall into — `1 << euler(4)` (`origin/main`: `32`) used
+    to claim an absurd ~19_729-"digit" shift count from that catch-all;
+    this gives a claim close to the true ~1.5 digits instead."""
+    return _growth_stirling_factorial(bounds) + math.log10(2)
 
 
 def _growth_base_n(log10_base: float):
@@ -746,7 +956,7 @@ def _growth_base_n(log10_base: float):
 _PHI = 1.6180339887498949  # (1 + sqrt(5)) / 2
 
 
-def _growth_fibonacci(bounds: dict) -> float:
+def _growth_fibonacci_base(bounds: dict) -> float:
     """`fibonacci(n) = round(phi**n / sqrt(5))` exactly (Binet's formula;
     the omitted `psi**n` term, `psi = -1/phi`, has magnitude < 0.5 for
     every `n >= 1` and never changes the rounded result) — so `log10(
@@ -801,8 +1011,24 @@ def _growth_digamma(bounds: dict) -> float:
     return math.log10(math.log(z) + 2)
 
 
-_growth_tribonacci = _growth_base_n(math.log10(2))  # same base as _growth_2n
+_growth_tribonacci_base = _growth_base_n(math.log10(2))  # same base as _growth_2n
 _growth_catalan = _growth_base_n(math.log10(4))
+#: #326 finding E (Codex round 9, "tight bounds instead of a loose
+#: catch-all"): `motzkin(n) <= 3**n` (the standard envelope — Motzkin numbers grow
+#: strictly slower than the central trinomial coefficient) replaces the
+#: far looser `n**(2n)` shared catch-all `motzkin` used to fall into —
+#: `1 << motzkin(...)`-shaped compositions no longer claim an absurd
+#: shift count for a small, in-range `motzkin` value.
+_growth_motzkin = _growth_base_n(math.log10(3))
+
+#: #326 finding B (Codex round 9, "position-complete spec"): `fibonacci`/
+#: `tribonacci`'s own OPTIONAL second position (`sym`) evaluates the
+#: corresponding POLYNOMIAL at that point — see `_growth_poly_second_
+#: arg`'s own docstring. `tribonacci(n, x)`'s own degree is `~2*(n-1)`
+#: (`tribonacci(5, t) == t**8 + 3*t**5 + 3*t**2`, degree 8 for n=5); `2 *
+#: n` is used as a safe, round overestimate of that.
+_growth_fibonacci = _growth_poly_second_arg(_growth_fibonacci_base, 1.0)
+_growth_tribonacci = _growth_poly_second_arg(_growth_tribonacci_base, 2.0)
 
 
 def _growth_totient(bounds: dict) -> float:
@@ -811,6 +1037,79 @@ def _growth_totient(bounds: dict) -> float:
     if n is None:
         return math.inf
     return math.log10(n) if n > 0 else 0.0
+
+
+def _growth_zeta(bounds: dict) -> float:
+    """`zeta(s)` (`a` absent) `<= zeta(2) < 2` for `s >= 2` — Hurwitz/
+    Riemann zeta is monotonically decreasing toward 1 as `s` grows,
+    maximal at `s = 2` (#326 finding E, Codex round 9: `zeta`'s own
+    entry used to be the shared `n**(2n)` catch-all, wildly loose for
+    this regime). For `s < 2` — particularly a negative integer, where
+    `zeta(-n) = -B_(n+1)/(n+1)` — the magnitude follows the SAME `n! /
+    (2*pi)**n` asymptotic envelope real Bernoulli NUMBERS use, tighter
+    than `_growth_2_factorial`'s own bare `2*n!` (which would wrongly
+    claim `zeta(-1463)` — a PINNED, single-arg, at-cap test — exceeds
+    `MAX_NUMERIC_DIGITS`; true magnitude ~2852 digits, this gives
+    ~2833, still comfortably safe and under cap). `a` (position 1, the
+    Hurwitz zeta's second parameter — #326 finding B) is folded in the
+    same polynomial-at-a-point way `_growth_poly_second_arg` already
+    handles for bell/bernoulli/euler/genocchi: `zeta(s, a) ~ a**(-s)`
+    dominates for `a >= 1`, so `|s| * log10(max(1, a))` is a safe
+    additive term — `zeta(-1200, 2)` (measured 5.77s of real work,
+    unbounded in `a` before this round) now refuses PROMPTLY once `a`
+    itself pushes the combined bound over cap, via `_table_function_
+    growth_violation`."""
+    s = _safe_pow10(bounds.get(0))
+    if s is None:
+        return math.inf
+    if s >= 2:
+        base = math.log10(2)
+    else:
+        n1 = abs(s) + 1
+        if n1 < 2:
+            base = 1.0
+        else:
+            base = (_growth_stirling_factorial({0: math.log10(n1)})
+                     - n1 * math.log10(2 * math.pi) + math.log10(4))
+            base = max(base, 0.0)
+    a_log = bounds.get(1)
+    if a_log is None:
+        return base
+    a = _safe_pow10(a_log)
+    if a is None:
+        return math.inf
+    return base + abs(s) * math.log10(max(1.0, a))
+
+
+def _growth_pass_through_arg0(bounds: dict) -> float:
+    """`f(arg) <= arg` in magnitude — #326 finding E (Codex round 9):
+    `root`'s own OUTPUT never exceeds its RADICAND's own magnitude (an
+    n-th root of `arg`, `n >= 1`, is never larger than `arg` itself for
+    `|arg| >= 1`; for `|arg| < 1` it only shrinks further toward 0) —
+    position 0's own already-resolved bound, unchanged, is a safe upper
+    bound on the OUTPUT too. `sqrt`/`cbrt` never reach `_table_function_
+    bound` at all (they compile to a `Pow`, never a `Function` node named
+    after themselves — see `MAX_ROOT_ARG_DIGITS`'s own comment), so only
+    `root` needs this entry."""
+    v = bounds.get(0)
+    return v if v is not None else math.inf
+
+
+def _growth_tiny_bounded(max_abs: float):
+    """Builds a `bounds -> log10(upper bound)` growth function for a name
+    whose result is ALWAYS a small, FIXED-magnitude value regardless of
+    its argument — #326 finding E (Codex round 9): `mobius(n)` is always
+    in `{-1, 0, 1}`; `isprime(n)` is always `True`/`False` (`0`/`1` under
+    arithmetic). Neither had a `_GROWTH_BOUNDS` entry at all before this
+    round, so `mobius(5) % 3` / `isprime(5) << 1` (both evaluate on
+    `origin/main`, `2` either way) refused with "no growth estimate is
+    defined for it" — position 0's own bound is irrelevant to the OUTPUT
+    here, unlike every other entry in this table."""
+    log_bound = math.log10(max_abs) if max_abs > 0 else 0.0
+
+    def growth(bounds: dict) -> float:
+        return log_bound
+    return growth
 
 
 #: name -> `bounds: dict[position, log10] -> log10(upper bound on the
@@ -831,6 +1130,15 @@ def _growth_totient(bounds: dict) -> float:
 #: above instead, precisely because the loose default is not merely
 #: imprecise for them, it is wrong enough to cause a false refusal on an
 #: ordinary, cheap, in-range nested call.
+#: #326 finding B (Codex round 9): the three POLYNOMIAL-at-a-point
+#: names (`bernoulli`/`euler`/`genocchi`'s own `x`) and `bell`'s own
+#: `k_sym`, wrapped via `_growth_poly_second_arg` so their SECOND
+#: position feeds the bound too, not just their first.
+_growth_bell = _growth_poly_second_arg(_growth_stirling_factorial, 1.0)
+_growth_bernoulli = _growth_poly_second_arg(_growth_2_factorial, 1.0)
+_growth_euler = _growth_poly_second_arg(_growth_2_factorial, 1.0)
+_growth_genocchi = _growth_poly_second_arg(_growth_2_factorial, 1.0)
+
 _GROWTH_BOUNDS: dict = {
     "binomial": _growth_2n,
     "rf": _growth_rf_ff, "ff": _growth_rf_ff,
@@ -847,10 +1155,25 @@ _GROWTH_BOUNDS: dict = {
     "tribonacci": _growth_tribonacci,
     "catalan": _growth_catalan,
     "totient": _growth_totient,
-    "factorial": _growth_stirling_factorial, "bell": _growth_stirling_factorial,
+    "factorial": _growth_stirling_factorial, "bell": _growth_bell,
+    "bernoulli": _growth_bernoulli, "euler": _growth_euler,
+    "genocchi": _growth_genocchi,
+    "zeta": _growth_zeta,
+    "motzkin": _growth_motzkin,
+    # #326 finding E (Codex round 9): `factorial2`/`subfactorial` are
+    # both provably `<= n!` (a double factorial is a strict SUBPRODUCT
+    # of every-other-integer, far smaller than `n!`; a derangement count
+    # is `n! * sum_{k=0}^n (-1)**k/k! < n!` always) -- the shared bare-
+    # `n!` bound (`_growth_stirling_factorial`, unwrapped -- neither
+    # takes a second position) replaces the far looser `n**(2n)` catch-
+    # all these two used to share.
+    "factorial2": _growth_stirling_factorial,
+    "subfactorial": _growth_stirling_factorial,
+    "root": _growth_pass_through_arg0,
+    "mobius": _growth_tiny_bounded(1.0),
+    "isprime": _growth_tiny_bounded(1.0),
     **dict.fromkeys(
-        ("subfactorial", "gamma", "factorial2", "loggamma",
-         "zeta", "andre", "genocchi", "motzkin", "bernoulli", "euler"),
+        ("gamma", "loggamma", "andre"),
         _growth_nn_loose,
     ),
 }
@@ -3226,6 +3549,71 @@ def _ceiling_message_num_den(log_num: float, log_den: float) -> str | None:
     return None
 
 
+def _table_function_growth_violation(node, memo: dict) -> str | None:
+    """Reason the OUTPUT of a `Function` node named in `_GROWTH_BOUNDS`
+    would itself print over `MAX_NUMERIC_DIGITS`, checked REGARDLESS of
+    nesting — walked unconditionally alongside `_function_arg_cap_
+    violation` (same two call sites: `_numeric_ceiling_scan`'s own
+    descent, and `reject_explosive`'s own unconditional walk), or `None`
+    if `node` is not such a call, or its OWN output stays safely under.
+
+    #326 finding B (Codex round 9, "position-complete spec"): a single-
+    position table name's own safety was always a BYPRODUCT of its ONE
+    cap being calibrated so the output stays under `MAX_NUMERIC_DIGITS`
+    (`MAX_HEAVY_ARG`'s own docstring literally derives 1463 as "the
+    largest n under MAX_NUMERIC_DIGITS" for `factorial`) — true only
+    because a SINGLE position drove the whole output. Once a name has a
+    SECOND cost-driving position (`bell(n, k)`, `harmonic(n, m)`,
+    `zeta(s, a)`, ...), the flat per-position caps on EACH position
+    individually no longer guarantee the COMBINED output stays bounded:
+    `bell(1463, 1463)`, `bernoulli(1463, 1463)`, `harmonic(1463,
+    -1463)`, `zeta(-1463, 1463)` each pass EVERY existing per-position
+    cap (each individual argument is, on its own, comfortably within its
+    own limit) and then HANG constructing the real, genuinely unbounded-
+    for-this-module's-purposes result — no promptness backstop existed
+    for this shape at all before this check. `_table_function_bound`
+    already computes a safe UPPER BOUND for any such node's own output
+    (its own per-position caps first, then the growth formula) — this
+    just ALSO checks that bound against `MAX_NUMERIC_DIGITS` directly,
+    the same way an over-cap ARGUMENT already refuses, so a call's OWN
+    combined output size is proven safe BEFORE real construction, not
+    merely each position in isolation. Harmless, redundant work for a
+    single-position name (its own cap already guarantees this check
+    never fires) — cheap enough not to special-case away.
+    """
+    from sympy import Function
+
+    if not (isinstance(node, Function) and type(node).__name__ in _GROWTH_BOUNDS):
+        return None
+    if node.free_symbols:
+        # A genuinely SYMBOLIC bounded position (`bell(x) % 7`,
+        # `factorial(cos(y)) - factorial(cos(y))`) is skipped by `_table_
+        # function_bound`'s own per-position loop (`if arg.free_symbols:
+        # continue`) the same way `_function_arg_cap_violation`'s twin
+        # loop already does — correctly: a symbolic argument never
+        # materializes, matching `origin/main`, which leaves it symbolic
+        # too. But a SKIPPED position never reaches `bounds` at all, so
+        # `growth(bounds)` below can end up called with `bounds` missing
+        # EVERY position it needed — `_safe_pow10(None)` reads back as
+        # `math.inf` from an empty dict, and this check would then refuse
+        # a call this module was never in danger from, purely because
+        # nothing could be measured (not because anything WAS measured
+        # and found large). Declining outright whenever the WHOLE node
+        # still carries a free symbol anywhere avoids threading a
+        # separate "was every bounded position genuinely supplied and
+        # non-symbolic" signal out of `_table_function_bound` — the
+        # existing per-position cap check (`_function_arg_cap_
+        # violation`) already covers any position that DOES resolve to a
+        # concrete, over-cap value even in a partially-symbolic call.
+        return None
+    bound, violation = _table_function_bound(node, memo)
+    if violation:
+        return violation
+    if bound is None:
+        return None
+    return _digit_ceiling_text(bound, f"the result of {type(node).__name__}(...)")
+
+
 def _table_function_bound(node, memo: dict) -> tuple[float | None, str | None]:
     """`(log10_upper_bound, None)` for `node` — a `Function` node whose
     class name is a key of `_FUNCTION_ARG_CAPS` — or `(None, message)` on a
@@ -3295,6 +3683,9 @@ def _table_function_bound(node, memo: dict) -> tuple[float | None, str | None]:
             return None, (f"an argument to {name}() cannot be safely bounded: "
                            "computing it would take an unbounded amount of time "
                            "and memory")
+        domain_violation = _domain_violation(name, pos, arg, arg_log_num, arg_log_den)
+        if domain_violation:
+            return None, domain_violation
         if kind == "value":
             over_cap = (arg_log_num - arg_log_den) > math.log10(cap)
         else:
@@ -3309,6 +3700,136 @@ def _table_function_bound(node, memo: dict) -> tuple[float | None, str | None]:
         return None, (f"{name}() cannot be safely bounded as a nested argument: "
                        "no growth estimate is defined for it")
     return growth(bounds), None
+
+
+def _float_value_log10(node) -> float:
+    """`log10(|value|)` for a sympy `Float` node — the actual numeric
+    VALUE's magnitude, never `_log10_num_den`'s own `(0.0, 0.0, True)`
+    print-profile shortcut for a `Float` (correct for ITS purpose —
+    printing a bare `Float` is always safe, SymPy renders one at a fixed
+    ~15 significant digits regardless of true size — but wrong as a
+    VALUE bound: #326 finding (grok, `verify-1095-r7-grok.log`), `_resolve_
+    arg_magnitude` used to inherit that same print-profile shortcut for a
+    `Float` used as a marker operand, a `Mul`/`Add` factor, or a `floor`/
+    `ceiling` argument, silently reporting "magnitude ~1" for e.g.
+    `1e4`, `1e30`, or `1464.9` regardless of how large the actual VALUE
+    is — `factorial(floor(1e4 * bell(1)))` (bell(1) == 1, so the true
+    value is `factorial(10000)`, ~35_660 digits) sailed past this
+    resolver's own Mul-composition check with a claimed magnitude of 0
+    and only got caught LATE, by the output-ceiling backstop, AFTER
+    `factorial(10000)` was already fully constructed for real).
+
+    Computed via SymPy's own arbitrary-precision `log` (never `float(node)`
+    directly — that raises `OverflowError` past Python's own ~1.8e308
+    ceiling even though a SymPy `Float` has no such limit of its own, e.g.
+    `Float('1e400')` prints and stores fine, no IEEE-754 double involved);
+    `float()` of the resulting `log(...)` expression forces mpmath's own
+    arbitrary-precision numeric evaluation, safe at any exponent this
+    module would ever admit past its own digit caps.
+    """
+    if node.is_zero:
+        # `_log10_of_int`'s own convention for an exact-zero magnitude
+        # elsewhere in this file (`Rational.p == 0`): treat as "one
+        # digit", not `-inf` — no caller here needs to distinguish an
+        # exact zero from a merely tiny value, and `-inf` propagating
+        # through later arithmetic (`Mul`/`Add` composition, a `Pow`
+        # exponent) is more failure surface than this is worth.
+        return 0.0
+    from sympy import Abs as _Abs
+    from sympy import log as _log
+
+    return float(_log(_Abs(node), 10))
+
+
+#: #326 finding F (grok, round 9 review of 5119c9d — "the fail-closed
+#: list"): a small, curated table of ORDINARY (non-table) elementary
+#: functions whose OWN output magnitude is derivable from their
+#: argument's, used by `_elementary_function_magnitude` (below) so a
+#: numeric argument wrapped in one of these — `factorial(log(1))`,
+#: `factorial(cos(0))`, `factorial(Max(3, 5))` (all evaluate, all `=1`
+#: or `120`, on `origin/main`) — resolves through the shared magnitude
+#: resolver instead of hitting the item-3 structural backstop
+#: ("unresolved, no free symbols, refuse") as an unrecognised opaque
+#: shape. Deliberately NOT exhaustive: anything else non-table with
+#: numeric args stays a pinned refusal (`factorial(Ei(1463))`,
+#: `factorial(I)`) — `unknown != safe` is still the default, this table
+#: is the curated, individually-justified exception list, not a general
+#: "assume every SymPy function is safe" escape hatch.
+#:
+#: name -> rule kind:
+#:   "bounded1"    — output magnitude is ALWAYS <= 1 regardless of the
+#:                    argument (`sign` in {-1,0,1}; `sin`/`cos`/`tanh`/
+#:                    `erf` bounded in [-1,1] for any real input).
+#:   "passthrough" — output never exceeds the LARGEST argument's own
+#:                    magnitude (`Max`/`Min`, any arity).
+#:   "log"         — output grows far slower than the argument (`log`'s
+#:                    own magnitude is `~log10(log(argument's value))`,
+#:                    negligible next to any cap this module compares
+#:                    against).
+#:   "exp"         — the OPPOSITE direction: `exp(x)`'s own magnitude
+#:                    scales with `x`'s VALUE, not `x`'s digit count, so
+#:                    the argument itself must first be capped at `MAX_
+#:                    HEAVY_ARG` (the same "small argument, growing
+#:                    output" shape `_HEAVY_FUNCTIONS` already uses) —
+#:                    `exp(10**2000)` never reaches the point of
+#:                    computing a magnitude for THIS rule at all.
+_ELEMENTARY_BOUND_RULES: dict = {
+    "sign": "bounded1", "sin": "bounded1", "cos": "bounded1",
+    "tanh": "bounded1", "erf": "bounded1",
+    "Max": "passthrough", "Min": "passthrough",
+    "log": "log",
+    "exp": "exp",
+}
+
+
+def _elementary_function_magnitude(node, memo: dict) -> tuple[float, bool, str | None] | None:
+    """`(log10_upper_bound, resolved, violation)` for a `Function` node
+    whose class name is a key of `_ELEMENTARY_BOUND_RULES`, or `None` if
+    every argument stayed unresolved (the caller's own "leave unresolved,
+    let something else decide" fallback applies exactly as if this table
+    did not recognise the name at all).
+    """
+    rule = _ELEMENTARY_BOUND_RULES[type(node).__name__]
+    if rule == "bounded1":
+        return 0.0, True, None
+    if rule == "passthrough":
+        if not node.args:
+            return 0.0, True, None
+        magnitudes = []
+        for arg in node.args:
+            a_log_num, a_log_den, a_resolved, a_violation = _resolve_arg_magnitude(arg, memo)
+            if a_violation:
+                return 0.0, False, a_violation
+            if not a_resolved:
+                return None
+            magnitudes.append(a_log_num - a_log_den)
+        return max(magnitudes), True, None
+    # "log" and "exp" both take exactly one argument in `safe_global_dict()`
+    # (the multi-base `log(x, base)` two-arg form is not in this table at
+    # all — left unrecognised, same as before this rule table existed).
+    if len(node.args) != 1:
+        return None
+    a_log_num, a_log_den, a_resolved, a_violation = _resolve_arg_magnitude(node.args[0], memo)
+    if a_violation:
+        return 0.0, False, a_violation
+    if not a_resolved:
+        return None
+    arg_log = a_log_num - a_log_den
+    if rule == "log":
+        return math.log10(abs(arg_log) + 10.0), True, None
+    # rule == "exp": the argument's own VALUE (not its digit count) drives
+    # the result's magnitude -- capped at MAX_HEAVY_ARG first, the same
+    # "small argument, growing output" shape `_HEAVY_FUNCTIONS` already
+    # uses, so `_safe_pow10` below is never asked for an astronomical
+    # value.
+    if arg_log > math.log10(MAX_HEAVY_ARG):
+        return 0.0, False, (f"the argument to exp() exceeds the limit of {MAX_HEAVY_ARG}: "
+                             "computing it would take an unbounded amount of time and memory")
+    arg_value = _safe_pow10(arg_log)
+    if arg_value is None:
+        return 0.0, False, ("the argument to exp() cannot be safely bounded: computing it "
+                             "would take an unbounded amount of time and memory")
+    return arg_value * math.log10(math.e), True, None
 
 
 def _resolve_arg_magnitude(node, memo: dict) -> tuple[float, float, bool, str | None]:
@@ -3375,8 +3896,19 @@ def _resolve_arg_magnitude(node, memo: dict) -> tuple[float, float, bool, str | 
     `factorial(floor(2.5))` (`== factorial(2)`, main evaluates it) is not
     left unresolved just because its argument is wrapped.
     """
-    from sympy import Add, Function, Mul, NumberSymbol
+    from sympy import Add, Float, Function, Mul, NumberSymbol, Pow
 
+    if isinstance(node, Float):
+        # #326 finding (grok, round 9 / verify-1095-r7-grok.log): checked
+        # BEFORE `_log10_num_den`'s own fast path, which reports every
+        # `Float` "fully resolved" at print-profile magnitude 0 — correct
+        # for THAT question (is printing this bare `Float` safe — always
+        # yes), wrong for THIS one (how large is this VALUE, for a
+        # consumer that is about to convert it to an `Integer` via
+        # `floor`/`ceiling`, use it as a `Mul`/`Add` factor, or shift by
+        # it) — see `_float_value_log10`'s own docstring for the full
+        # account and a live repro.
+        return _float_value_log10(node), 0.0, True, None
     log_num, log_den, resolved = _log10_num_den(node, memo)
     if resolved:
         return log_num, log_den, True, None
@@ -3417,6 +3949,59 @@ def _resolve_arg_magnitude(node, memo: dict) -> tuple[float, float, bool, str | 
             if type_name == "Abs":
                 return a_log_num, a_log_den, True, None
             return a_log_num - a_log_den, 0.0, True, None  # floor/ceiling: always an integer
+    if isinstance(node, Function) and type_name in _ELEMENTARY_BOUND_RULES:
+        elem_bound = _elementary_function_magnitude(node, memo)
+        if elem_bound is not None:
+            e_log, e_resolved, e_violation = elem_bound
+            if e_violation:
+                return 0.0, 0.0, False, e_violation
+            if e_resolved:
+                return e_log, 0.0, True, None
+    if isinstance(node, Pow):
+        # #326 finding D (grok, round 9): `_log10_num_den`'s own `Pow`
+        # handling (both its bare-integer-exponent branch and its
+        # compound-exponent branch) resolves a BASE via `_log10_num_den`
+        # directly, or via `_resolved_table_aware_magnitude` for the
+        # EXPONENT only — neither one recurses through THIS function, so
+        # neither understands a marker or an irrational `NumberSymbol` as
+        # a base, and the integer-exponent branch does not even try
+        # `_table_function_bound` for a table-call base at all (only the
+        # SEPARATE, non-`_log10_num_den`-integrated `_pow_table_base_
+        # violation` check does, and only as a REFUSAL-or-nothing
+        # verdict, never a magnitude other callers can compose with).
+        # `factorial((1 << 3)**2)`, `factorial(2**(1 << 3))`, `factorial(
+        # fibonacci(5)**2)` (all plain integers on `origin/main` — 64!,
+        # 256!, 25!) stayed "unresolved" here and hit the item-3
+        # structural backstop instead. Fixed the same way markers/
+        # `NumberSymbol`/table calls already are — as this function's OWN
+        # branch, recursing base and exponent through itself, so ANY
+        # shape either one resolves (marker, table call, `NumberSymbol`,
+        # nested `Pow`, ...) composes correctly. Deliberately narrower
+        # than `_log10_num_den`'s own `Pow` handling: only fires for a
+        # NON-NEGATIVE, resolvable exponent and a base whose own
+        # magnitude is >= 1 (`base_log >= 0`) — a shrinking base (`|base|
+        # < 1`) raised to a growing power does not grow without bound the
+        # way this function needs to guard against, and getting a SAFE
+        # bound for that shape would need the exponent's LOWER bound, not
+        # its upper one (this resolver only ever computes upper bounds);
+        # left unresolved instead, exactly as before this branch existed,
+        # so an existing caller's own fallback keeps deciding that shape.
+        base, exp = node.args
+        if not (base.free_symbols or exp.free_symbols):
+            base_log_num, base_log_den, base_resolved, base_violation = _resolve_arg_magnitude(base, memo)
+            if base_violation:
+                return 0.0, 0.0, False, base_violation
+            if base_resolved:
+                base_log = base_log_num - base_log_den
+                if base_log >= 0:
+                    exp_log_num, exp_log_den, exp_resolved, exp_violation = _resolve_arg_magnitude(exp, memo)
+                    if exp_violation:
+                        return 0.0, 0.0, False, exp_violation
+                    if exp_resolved:
+                        exp_log = exp_log_num - exp_log_den
+                        exp_value = _safe_pow10(exp_log)
+                        if exp_value is not None and exp_value >= 0:
+                            return base_log * exp_value, 0.0, True, None
     if isinstance(node, Mul):
         total = 0.0
         for factor in node.args:
@@ -3442,13 +4027,95 @@ def _resolve_arg_magnitude(node, memo: dict) -> tuple[float, float, bool, str | 
     return log_num, log_den, False, None
 
 
+def _exact_literal_log10(node) -> float | None:
+    """`log10(|value|)` for `node`, ONLY if `node` is an EXACT numeric
+    literal (`Integer`, `Rational`, or `Float`) whose value is fully
+    known without any composition or growth-bound estimation. Used as a
+    LOWER bound on a `//` marker's divisor by `_resolve_marker_magnitude`
+    — an UPPER bound (what `_resolve_arg_magnitude` normally computes) is
+    the WRONG direction for a divisor: a SMALLER divisor gives a LARGER
+    quotient, so bounding `a // b` needs to know `|b|` cannot be
+    SMALLER than some value, not that it cannot be LARGER. An exact
+    literal's own value doubles as its own exact lower bound; nothing
+    else here can (a table call's growth bound, a marker's own bound, a
+    `Mul`/`Add` composition are all upper bounds by construction — see
+    each one's own docstring — never a sound lower bound on anything).
+    `None` for anything else (a table call, a nested marker, a `Mul`/
+    `Add`, a `NumberSymbol`, a free symbol, or an exact zero — `a // 0`
+    raises `ZeroDivisionError` at real construction, not a growth
+    hazard, and `log10(0)` is undefined) — deliberately narrow, not a
+    general resolver.
+    """
+    from sympy import Float, Integer, Rational
+
+    if node.is_zero:
+        return None
+    if isinstance(node, Integer):
+        return _log10_of_int(int(node))
+    if isinstance(node, Rational):
+        den_log = _log10_of_int(node.q) if node.q != 1 else 0.0
+        return _log10_of_int(node.p) - den_log
+    if isinstance(node, Float):
+        return _float_value_log10(node)
+    return None
+
+
+#: Table-function names PROVEN to always return a plain INTEGER (never a
+#: genuine fraction strictly between -1 and 1, excluding 0) for their
+#: whole accepted domain — the standard combinatorial/number-theoretic
+#: sequences this table already bounds. Deliberately EXCLUDES `bernoulli`
+#: (rational, `bernoulli(1) == -1/2`), `harmonic` (rational, can be < 1
+#: for a small `n`), and every irrational/transcendental entry (`digamma`,
+#: `zeta`, `gamma`, `loggamma`, `polygamma`) — none of those three
+#: shapes can serve as a `//` divisor's lower bound (see
+#: `_divisor_lower_log10`'s own docstring).
+_INTEGER_VALUED_TABLE_NAMES = frozenset({
+    "factorial", "factorial2", "subfactorial", "binomial", "fibonacci",
+    "lucas", "tribonacci", "catalan", "primorial", "prime", "primepi",
+    "rf", "ff", "npartitions", "totient", "divisor_sigma", "bell",
+    "genocchi", "motzkin", "andre", "partition", "nextprime", "mobius",
+    "isprime",
+})
+
+
+def _divisor_lower_log10(node, memo: dict) -> float | None:
+    """A sound LOWER bound on `log10(|node|)`, for `_resolve_marker_
+    magnitude`'s own `//` handling — `_exact_literal_log10`'s own
+    docstring explains why an UPPER bound (what `_resolve_arg_magnitude`
+    normally computes) is the wrong direction for a divisor. Two sources:
+    an EXACT numeric literal's own value, or a nested call to a table
+    function PROVEN to always return an INTEGER (`_INTEGER_VALUED_TABLE_
+    NAMES`) — such a function's result is either exactly 0 (safe
+    regardless: `a // 0` raises `ZeroDivisionError` at real construction,
+    not a growth hazard) or a nonzero integer with `|value| >= 1`, so
+    `0.0` (`log10(1)`) is a sound lower bound either way — `7 // bell(20)`
+    (`bell(20)` is comfortably within its own cap, an INTEGER, `origin/
+    main` gives `0` since `bell(20)` dwarfs `7`) is what this closes:
+    without it, item A's own new `//` fix would fail CLOSED on this
+    previously-passing, genuinely safe shape (the table CALL itself was
+    never the danger here — `1 // 0.0005`, a genuine FRACTIONAL literal
+    divisor, is). `None` (no lower bound claimed) for anything else — a
+    `bernoulli`/`harmonic`/`digamma`/`zeta`/`gamma`/`loggamma`/
+    `polygamma` call CAN genuinely return a value strictly between -1 and
+    1 (`bernoulli(1) == -1/2`), so no lower bound holds for those.
+    """
+    literal = _exact_literal_log10(node)
+    if literal is not None:
+        return literal
+    from sympy import Function
+
+    name = type(node).__name__
+    if isinstance(node, Function) and name in _INTEGER_VALUED_TABLE_NAMES:
+        _bound, violation = _table_function_bound(node, memo)
+        if violation is None:
+            return 0.0
+    return None
+
+
 def _resolve_marker_magnitude(node, memo: dict) -> tuple[float, float, bool, str | None]:
     """`_resolve_arg_magnitude`'s own contract, for a `_DeferredLShift`/
-    `_DeferredRShift`/`_DeferredMod`/`_DeferredFloorDiv` marker node —
-    the SAME rules `_deferred_binop_violation` used to apply directly
-    (`<<` -> `left_log + count*log10(2)`; `>>`/`%`/`//` -> the left
-    operand's own magnitude alone, since the result never exceeds it),
-    now shared by EVERY consumer of `_resolve_arg_magnitude` instead of
+    `_DeferredRShift`/`_DeferredMod`/`_DeferredFloorDiv` marker node, now
+    shared by EVERY consumer of `_resolve_arg_magnitude` instead of
     living only in `_deferred_binop_violation`'s own body — see that
     function's own docstring, and `_resolve_arg_magnitude`'s own round-
     3-follow-up #5 paragraph, for why this had to move here: a marker
@@ -3466,31 +4133,77 @@ def _resolve_marker_magnitude(node, memo: dict) -> tuple[float, float, bool, str
     whether "unresolved AND not symbolic" is a refusal (item 3's own
     fix, in `_function_arg_cap_violation` and `_deferred_binop_
     violation`), not this function.
+
+    #326 finding A (Codex, round 9 review of 5119c9d,
+    `verify-1095-r7.log`, finding 1 — High): `%` and `//` both used the
+    IDENTICAL "bounded by the left operand alone" rule this docstring
+    used to claim for all three of `>>`/`%`/`//`. That rule is only true
+    for `>>`. `%`: `0 <= |a % b| < |b|` unconditionally (Python's `%`
+    always returns a result with the SAME SIGN as `b`, strictly smaller
+    in magnitude) — the bound is the RIGHT operand's own magnitude, not
+    the left's: `-1 % 10**4 == 9999`, nowhere near `|-1| == 1`. `//`: `a
+    // b` can EXCEED `|a|` when `|b| < 1` (`1 // 0.0005 == 2000`) — a
+    sound bound needs a LOWER bound on `|b|`, which `_exact_literal_
+    log10` (above) supplies only for an exact numeric literal; anything
+    else for the divisor fails CLOSED (`unknown != safe`, this module's
+    own established bar, not a new one invented for this case). Both
+    operands are still resolved regardless of which one a given
+    operator's OWN formula reads, so a hazard hiding in the operand the
+    formula does not need (an over-cap nested table call, say) still
+    surfaces as a `violation` — `_deferred_binop_violation`'s own caller
+    only ever sees THIS function's return value.
     """
     op = _DEFERRED_BINOP_OPS[type(node).__name__]
     left, right = node.args[0], node.args[1]
-    if left.free_symbols:
-        return 0.0, 0.0, False, None
-    left_log_num, left_log_den, left_resolved, left_violation = _resolve_arg_magnitude(left, memo)
-    if left_violation:
-        return 0.0, 0.0, False, left_violation
-    if not left_resolved:
-        return 0.0, 0.0, False, None
-    left_log = left_log_num - left_log_den
-    if op != "<<":
+
+    left_known = False
+    left_log = 0.0
+    if not left.free_symbols:
+        l_num, l_den, left_resolved, left_violation = _resolve_arg_magnitude(left, memo)
+        if left_violation:
+            return 0.0, 0.0, False, left_violation
+        if left_resolved:
+            left_known = True
+            left_log = l_num - l_den
+
+    right_known = False
+    right_log = 0.0
+    if not right.free_symbols:
+        r_num, r_den, right_resolved, right_violation = _resolve_arg_magnitude(right, memo)
+        if right_violation:
+            return 0.0, 0.0, False, right_violation
+        if right_resolved:
+            right_known = True
+            right_log = r_num - r_den
+
+    if op == "<<":
+        if not (left_known and right_known):
+            return 0.0, 0.0, False, None
+        count = _safe_pow10(right_log)
+        if count is None or count < 0:
+            return math.inf, 0.0, True, None
+        return left_log + count * math.log10(2), 0.0, True, None
+
+    if op == ">>":
+        # `a >> b` for a non-negative shift count `b` never exceeds `a`'s
+        # own magnitude — a NEGATIVE `b` raises `ValueError` at real
+        # construction (Python itself refuses it), not a growth hazard.
+        if not left_known:
+            return 0.0, 0.0, False, None
         return left_log, 0.0, True, None
-    if right.free_symbols:
+
+    if op == "%":
+        if not right_known:
+            return 0.0, 0.0, False, None
+        return right_log, 0.0, True, None
+
+    # op == "//"
+    if not left_known:
         return 0.0, 0.0, False, None
-    right_log_num, right_log_den, right_resolved, right_violation = _resolve_arg_magnitude(right, memo)
-    if right_violation:
-        return 0.0, 0.0, False, right_violation
-    if not right_resolved:
-        return 0.0, 0.0, False, None
-    right_log = right_log_num - right_log_den
-    count = _safe_pow10(right_log)
-    if count is None or count < 0:
-        return math.inf, 0.0, True, None
-    return left_log + count * math.log10(2), 0.0, True, None
+    divisor_lower_log = _divisor_lower_log10(right, memo)
+    if divisor_lower_log is None:
+        return 0.0, 0.0, False, None  # caller decides: refuse if non-symbolic
+    return left_log - divisor_lower_log, 0.0, True, None
 
 
 def _resolved_table_aware_magnitude(node, memo: dict) -> tuple[float, float, bool]:
@@ -3773,6 +4486,9 @@ def _function_arg_cap_violation(node, memo: dict) -> str | None:
             return (f"an argument to {type(node).__name__}() cannot be safely "
                     "bounded: computing it would take an unbounded amount of "
                     "time and memory")
+        domain_violation = _domain_violation(type(node).__name__, pos, arg, arg_log_num, arg_log_den)
+        if domain_violation:
+            return domain_violation
         if kind == "value":
             # #326 finding 2 (cross-vendor review, round 9, grok):
             # read from THIS name's own row (`cap`, already looked
@@ -3894,6 +4610,9 @@ def _numeric_ceiling_scan(tree, memo: dict) -> str | None:
         function_cap_violation = _function_arg_cap_violation(node, memo)
         if function_cap_violation:
             return function_cap_violation
+        growth_violation = _table_function_growth_violation(node, memo)
+        if growth_violation:
+            return growth_violation
         if isinstance(node, (Integer, Mul, Add, Pow)):
             log_num, log_den, resolved = _log10_num_den(node, memo)
             violation = _ceiling_message_num_den(log_num, log_den)
@@ -4181,6 +4900,9 @@ def reject_explosive(tree) -> str | None:
                 function_cap_violation = _function_arg_cap_violation(node, memo)
                 if function_cap_violation:
                     return function_cap_violation
+                growth_violation = _table_function_growth_violation(node, memo)
+                if growth_violation:
+                    return growth_violation
             if not isinstance(node, Pow):
                 continue
             base, exponent = node.base, node.exp

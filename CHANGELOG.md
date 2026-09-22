@@ -560,6 +560,114 @@ behind it.
   the same fail-closed stance already applied to a free symbol or an
   over-cap table call.
 
+  **Round 9 (coordinator review of 1d756b7 — both cross-vendor reviewers
+  FAILED it, Codex `verify-1095-r7.log` and grok `verify-1095-r7-grok.
+  log`): a rule that is an upper bound on the happy path but not on the
+  accepted domain**, closed position-complete and domain-explicit so
+  every accepted shape now has a declared row.
+
+  (A) `%`/`//` used the SAME "bounded by the left operand alone" rule —
+  true only for `>>`. `%`'s bound is now the RIGHT operand's own
+  magnitude (`0 <= |a % b| < |b|` unconditionally — `-1 % 10**4 ==
+  9999`, nowhere near `|-1|`, the old bound). `//` needs a LOWER bound
+  on its divisor (a smaller divisor gives a LARGER quotient — `1 //
+  0.0005 == 2000`), known only for an exact numeric literal or a table
+  call PROVEN to always return an integer (`_INTEGER_VALUED_TABLE_
+  NAMES` — deliberately excludes `bernoulli`/`harmonic`, which can be
+  genuinely fractional, e.g. `bernoulli(1) == -1/2`); anything else
+  fails closed (`7 // bell(20)` still evaluates to main's `0`, since
+  `bell` is integer-valued; `bell(-1 % 10**4)`, `bell(1 // 0.0005)`,
+  `root(-1 % 10**2000, 2)`, `factorint(-1 % 10**30)`, `nextprime(-1 %
+  10**30)` all now refuse in milliseconds instead of hanging or
+  bypassing their own cap).
+
+  (B) Eight table names' own OPTIONAL second position drives the
+  RESULT's magnitude and cost and had no bound at all: `bell`'s
+  `k_sym`, `bernoulli`/`euler`/`genocchi`'s `x` (the corresponding
+  POLYNOMIAL evaluated at that point), `fibonacci`/`tribonacci`'s
+  `sym`, `harmonic`'s `m`, `zeta`'s `a`. Each position is now capped at
+  `MAX_HEAVY_ARG` (the same flat cap `divisor_sigma`'s own `k` already
+  used), and each name's growth formula is two-position-aware (`_growth_
+  poly_second_arg`, a shared wrapper: coefficient bound + `degree *
+  log10(max(1, x))`), closing both a direct hang (`bell(1463,
+  factorial(1463))`, `harmonic(1463, -factorial(8))`) and a COMBINED
+  over-cap output where each position individually passes its own flat
+  cap (`bell(1463, 1463)`, `bernoulli(1463, 1463)`, `zeta(-1463,
+  1463)`) — the latter needed a NEW check, `_table_function_growth_
+  violation`, walked unconditionally (same shape as `_function_arg_cap_
+  violation`'s own walk) since a single-position name's safety used to
+  be a byproduct of its ONE cap being calibrated to keep the output
+  under `MAX_NUMERIC_DIGITS`, an assumption that stops holding once a
+  SECOND position also drives the output.
+
+  (C) A growth formula is only valid on the domain it was derived for.
+  `binomial(n, k) <= 2**n` assumed `n >= 0`; a negative `n` switches
+  `binomial.eval()` to a different, unaudited identity (`binomial(-100,
+  1000)`'s true log10 magnitude is ~143, the old formula's own claim
+  ~30; `binomial(-1463, 1000000)` passed screening and hung) — refused
+  as a domain violation now (`origin/main` itself accepts a negative
+  `n`; this is a deliberate, documented divergence for a domain this
+  module has not derived a bound for). `polygamma`'s own growth formula
+  used to ignore its ORDER entirely, reading only `z` (`polygamma(1463,
+  1)`'s true log10 magnitude is ~3997 vs the old claim of ~1) — now
+  `order! * zeta(order+1, z)`-shaped, valid because `z`'s own domain
+  (`|z| >= 1`) is enforced separately (`|z| < 1`, near the Hurwitz
+  zeta's pole, refuses).
+
+  (D) `_log10_num_den`'s own `Float` print-profile shortcut (always
+  magnitude 0 — correct for PRINTING a bare `Float`, since SymPy always
+  renders one at a fixed ~15 significant digits regardless of true
+  size) was inherited as a VALUE bound by the marker/`Mul`/`Add`/
+  `floor`/`ceiling` resolver, silently reporting "magnitude ~1" for any
+  `Float` literal regardless of its real size (`factorial(floor(1e4 *
+  bell(1)))`, true value `factorial(10000)`, sailed past every scan and
+  was caught only by the LAST-RESORT output-ceiling backstop, after
+  real construction). `_resolve_arg_magnitude` now computes a `Float`'s
+  real VALUE magnitude via SymPy's own arbitrary-precision `log`
+  (`_float_value_log10`), never `float(node)` (which overflows past
+  Python's own ~1.8e308 ceiling even though a SymPy `Float` has none).
+  The resolver also gained `Pow` composition (base and exponent both
+  recursed through the same resolver, so a marker or table call in
+  EITHER position resolves) — `factorial((1 << 3)**2)` (64!),
+  `factorial(2**(1 << 3))` (256!), `factorial(fibonacci(5)**2)` (25!),
+  all plain integers on `origin/main`, no longer hit the item-3
+  structural backstop.
+
+  (E) Several names' growth bound was the deliberately loose `n**(2n)`
+  catch-all, turning into absurd false ceilings once composed into a
+  shift count (`1 << euler(4)` — main: `32` — used to claim ~19_729
+  "digits"). Replaced with provable, tight bounds: `factorial2`/
+  `subfactorial` `<= n!`; `euler`/`bernoulli`/`genocchi` `<= 2*n!`
+  (`_growth_2_factorial`, verified against SymPy across `n` in `0..199`
+  for all three); `motzkin <= 3**n`; `zeta(s) <= 2` for `s >= 2`, an
+  `n!/(2*pi)**n`-scale Bernoulli-asymptotic bound for `s < 2` (tighter
+  than the bare `2*n!` bound, needed to keep the existing pinned
+  `zeta(-1463)` test — true magnitude ~2852 digits — safely under
+  `MAX_NUMERIC_DIGITS`). `mobius`/`isprime` (always `{-1,0,1}`/boolean)
+  and `root` (`<= its own radicand`) gained a `_GROWTH_BOUNDS` entry at
+  all — `mobius(5) % 3`, `isprime(5) << 1`, `root(8,3) % 3` now evaluate
+  to main's values instead of refusing with "no growth estimate is
+  defined for it".
+
+  (F) A small, curated elementary-function table (`Max`/`Min`/`sign`/
+  `sin`/`cos`/`tanh`/`erf`/`log`/`exp`) lets a numeric argument wrapped
+  in an ordinary, non-table SymPy function resolve through the shared
+  resolver instead of hitting the item-3 structural backstop —
+  `factorial(log(1))`, `factorial(cos(0))` (both `= 1` on `origin/
+  main`) now evaluate. Deliberately NOT exhaustive: `factorial(Ei(
+  1463))` (already pinned) and `factorial(I)` (the imaginary unit —
+  newly pinned) stay refused, since neither is in the curated table.
+
+  A `_table_function_growth_violation` false positive surfaced while
+  fixing (B): the new unconditional walk read an EMPTY `bounds` dict
+  (every bounded position skipped for being genuinely symbolic) as
+  `math.inf` via `_safe_pow10(None)`, wrongly refusing `bell(x) % 7`
+  and `factorial(cos(y)) - factorial(cos(y))` (both symbolic, both
+  matching `origin/main` by staying unevaluated) — fixed by declining
+  the check outright whenever the whole node still carries a free
+  symbol, the same "genuinely symbolic never materializes" scope every
+  other check in this module already gives one.
+
 ## [0.13.0] — 2026-09-21
 
 ### Fixed
