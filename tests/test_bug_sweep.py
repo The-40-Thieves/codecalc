@@ -3210,6 +3210,26 @@ _growth_check("nextprime (ith=1)", _se5._growth_nextprime,
 _growth_check("nextprime (ith=1000, MAX_ITH_PRIME_SKIP)", _se5._growth_nextprime,
               lambda n: _sp5.nextprime(n, 1000), [2, 3, 10, 100, 1000],
               extra_bounds=lambda n: {1: math.log10(1000)})
+# Item 3 (grok, coordinator review of 949aac9): the deleted "average gap"
+# formula was NOT a sound bound -- `nextprime(887) == 907` (a real,
+# unremarkable gap of 20) already exceeded it. The replacement (Bertrand's
+# postulate compounded in log space, `log10(n) + ith*log10(2)`) is
+# verified here against adversarial points, not round numbers: known
+# large prime gaps (887 before a gap-20 jump; 1327, gap 34; 31397, gap
+# 72; ~1.7e15, gap 1132 -- OEIS's own record-gap list, sympy's own
+# nextprime is cheap even at this size, BPSW-based, not trial division),
+# a cap-edge digit count (10**25 - 1), and ith in {1, 2, 10, 1000} --
+# MAX_ITH_PRIME_SKIP itself.
+for _np_n in (887, 1327, 31397, 1693182318746371, 10**25 - 1):
+    for _np_ith in (1, 2, 10, 1000):
+        _np_bound = _se5._growth_nextprime({0: math.log10(_np_n), 1: math.log10(_np_ith)})
+        _np_real = _sp5.nextprime(_np_n, _np_ith)
+        _np_real_log = math.log10(int(_np_real))
+        check(f"THE-1095 round-3-follow-up item 3: _growth_nextprime is a "
+              f"SOUND bound at n={_np_n}, ith={_np_ith} (adversarial, not "
+              "a round number)",
+              _np_bound >= _np_real_log - 1e-9,
+              f"-> real_log={_np_real_log} bound={_np_bound}")
 
 # Item A (grok): primorial's DEFAULT (no second arg, nth=True) is the
 # product of the FIRST n primes, not the product of primes <= n -- the
@@ -3258,18 +3278,23 @@ check("THE-1095 round-3-follow-up item B: 'factorial(nextprime(2, 1000))' "
       "OLD formula ignored ith and wrongly bounded this as ~4, safe) is "
       "now correctly refused",
       _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
-# ...and a genuinely in-range ith still evaluates: nextprime(2, 50) ==
-# 233, comfortably under the cap (both the TRUE value and this fix's own
-# growth-bound estimate at ith=50 stay well clear of 1463 -- ith=200 was
-# tried first and rejected here: the growth bound's own generous "+10"
-# per-step slack, while still a mathematically safe upper bound (see the
-# property check above), pushes its ESTIMATE for ith=200 just over 1463
-# even though the true value (1229) is not -- a real, if narrow, looseness
-# margin in this specific formula, not a bug in the fix itself).
-_v, _e = _boundary_parse("factorial(nextprime(2, 50))")
-_expected = _sp5.factorial(233)
-check("THE-1095 round-3-follow-up item B: 'factorial(nextprime(2, 50))' "
-      "(nextprime(2,50) == 233, comfortably under cap) evaluates to "
+# ...and a genuinely in-range n/ith still evaluates: nextprime(500, 1) ==
+# 503, comfortably under the cap. THE-1095 round-3-follow-up (coordinator
+# review of 949aac9, grok item 3): the formula above is now Bertrand's
+# postulate compounded IN LOG SPACE (`log10(n) + ith*log10(2)`, i.e.
+# `n * 2**ith`) instead of an "average gap" estimate -- SOUND for every
+# n/ith (no record-gap edge case can ever beat it), but far LOOSER past
+# ith=1 or 2 than the deleted average-gap formula was: at ith=50 (this
+# test's own PREVIOUS value), the bound is `log10(2) + 50*log10(2) ~=
+# 15.35`, astronomically over factorial's 1463 cap even though the true
+# nextprime(2,50) == 233 is comfortably under it -- soundness, not
+# tightness, is what this formula is FOR, so this test now uses ith=1,
+# where the bound (`log10(500) + log10(2) ~= 3.0`) still clears the cap
+# with room to spare.
+_v, _e = _boundary_parse("factorial(nextprime(500, 1))")
+_expected = _sp5.factorial(503)
+check("THE-1095 round-3-follow-up item B: 'factorial(nextprime(500, 1))' "
+      "(nextprime(500,1) == 503, comfortably under cap) evaluates to "
       "main's exact value",
       _v == _expected and _e is None, f"-> value={_v!r} err={_e!r}")
 
@@ -3354,16 +3379,31 @@ check("THE-1095 round-3-follow-up (grok item C, table call as the SHIFT "
       "refused, not silently constructed",
       _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
 
-# Codex's own control: bell(1463) is at-cap-expensive on ITS OWN (same on
-# main), not a bypass -- `bell(1463) << 1` must NOT start refusing just
-# because the shift check exists (the loose _growth_nn_loose bound would
-# have falsely refused this; the shift check uses a tighter Stirling-
-# based bound specifically to avoid that).
+# Codex's own control (round 4): is `bell(1463) << 1` a bypass, or just
+# bell(1463)'s own documented at-cap cost? THE-1095 round-3-follow-up
+# (coordinator review of 949aac9, grok item 2): the marker-node bound now
+# reuses `_GROWTH_BOUNDS` UNIFORMLY for every table name (the "one spec
+# drives everything" design item 2 asked for) rather than a SEPARATE,
+# factorial-specific Stirling approximation (round 4's own fix, which
+# this round's structural rewrite replaced along with the token-level
+# shift check it lived in) -- `bell`'s own entry, `_growth_nn_loose`, is
+# DELIBERATELY loose (shared with several other names, see that
+# function's own docstring), overestimating bell(1463) at ~9258 "digits"
+# against its true 3018 -- already over MAX_NUMERIC_DIGITS (4000) with NO
+# shift at all. DELIBERATE NARROWING, pinned here: `bell(1463) << 1` is
+# now refused (a false refusal on this one name, not a soundness gap --
+# the bound is still a valid, never-under, upper bound, just not tight
+# enough to let this specific case through) -- the same trade this
+# module's own established pattern already makes elsewhere (motzkin's
+# own narrowing, rf/ff's own narrowing, ...) rather than adding ANOTHER
+# per-name special case to the shared bound.
 _v, _e = _boundary_parse("bell(1463) << 1")
-check("THE-1095 round-3-follow-up (Codex): 'bell(1463) << 1' still "
-      "evaluates (the shift check must not over-refuse an at-cap-but-"
-      "safe left operand just because it is loosely bounded elsewhere)",
-      _v == (_sp5.bell(1463) << 1) and _e is None, f"-> value={_v!r} err={_e!r}")
+check("THE-1095 round-3-follow-up item 2: 'bell(1463) << 1' is refused -- "
+      "a deliberate narrowing (bell's own _growth_nn_loose bound is "
+      "already over MAX_NUMERIC_DIGITS with no shift at all; the true "
+      "value, 3019 digits, is not, but this module does not compute the "
+      "true value to find that out)",
+      _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
 _v, _e = _boundary_parse("7 % bell(20)")
 check("THE-1095 round-3-follow-up (Codex): '7 % bell(20)' (a table call "
       "under %, nowhere near any cap) still evaluates -- the operator "
@@ -3388,6 +3428,160 @@ check("  ...and an unprotected operator",
       _se5._expression_touches_table_or_unprotected_operator("2 % 3") is True)
 check("  ...and neither, for an ordinary expression",
       _se5._expression_touches_table_or_unprotected_operator("2 + 3 * x") is False)
+
+# ═══ THE-1095 round-3-follow-up #2 (coordinator review of 949aac9, grok ═══
+# ═══ verify-1095-r4-grok.log): structural fix -- operator-protocol ═══════
+# ═══ dunders on the deferred stand-ins, replacing the token-level shift ═══
+# ═══ screen and the TypeError carve-out entirely ══════════════════════════
+#
+# The root problem across rounds 3 and 4: a deferred-parse TypeError on
+# `standin << x` was carved out as "fall through to the real parse", and
+# the token-level `<<` screen could only ever recognise `NAME(NUMBER)`
+# sitting directly next to the operator. Closed at the root instead:
+# `_DeferredOperatorMixin` gives every stand-in `__lshift__`/`__rlshift__`/
+# `__rshift__`/`__rrshift__`/`__mod__`/`__rmod__`/`__floordiv__`/
+# `__rfloordiv__`, returning an inert marker node
+# (`_DeferredLShift`/`_DeferredRShift`/`_DeferredOpMod`/
+# `_DeferredOpFloorDiv`) instead of ever raising -- the deferred TREE now
+# carries every one of these operators, at whatever depth or shape the
+# caller wrote it, because a TREE does not care about token adjacency.
+# `_numeric_ceiling_scan`'s new `_deferred_binop_violation` bounds them:
+# `<<` via `digits(left) + count*log10(2)` (count = the RIGHT operand's
+# own VALUE, via `_GROWTH_BOUNDS`, never a blanket Stirling-of-factorial
+# approximation); `>>`/`%`/`//` via the LEFT operand's own bound alone
+# (the result never exceeds it).
+
+_R5_REFUSE_SHAPES = [
+    "1 << (factorial(20))",
+    "1 << factorial(12+1)",
+    "1 << binomial(40, 20)",
+    "1 << rf(30, 20)",
+    "(bell(1463)) << 100000",
+]
+for _expr in _R5_REFUSE_SHAPES:
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round-3-follow-up #2: {_expr!r} (parenthesised, "
+          "computed, two-arg, or nested -- none of these is a bare "
+          "NAME(NUMBER) token pair next to '<<') is refused",
+          _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+    check(f"  ...in milliseconds ({_dt:.3f}s), not after real construction",
+          _dt < 1.0, f"-> {_dt:.3f}s")
+
+# ClusterFuzzLite, found within the first 60s fuzzing this round's own
+# successor commit: `_split_coefficient`'s `base_key <= _COEFF_MAX_BASE`
+# assumed every multiset key is a plain `int` -- item 4's OWN new
+# Function-node key (`factorial(cos(y))`, a table call over a SYMBOLIC
+# argument SymPy cannot resolve to a definite truth value against 1000)
+# raised `TypeError: cannot determine truth value of Relational` instead
+# of being treated as "not an integer coefficient", the already-correct
+# answer for every other not-small-enough shape.
+for _expr in ("factorial(cos(y)) - factorial(cos(y))",
+              "2*factorial(cos(y)) - factorial(cos(y))"):
+    try:
+        _v, _e = _boundary_parse(_expr)
+        _raised = False
+    except Exception as _exc:
+        _raised = True
+        _v = _e = None
+    check(f"THE-1095 round-3-follow-up #2: {_expr!r} (a table call over a "
+          "symbolic, non-numeric argument, combined additively) never "
+          "raises",
+          not _raised, f"-> raised={_raised}")
+check("  ...and 'factorial(cos(y)) - factorial(cos(y))' cancels to 0 "
+      "(exact structural cancellation, symbolic argument and all)",
+      _boundary_parse("factorial(cos(y)) - factorial(cos(y))")[0] == 0)
+
+# Pin vs main -- item 5's own named values.
+_R5_PINS = [
+    ("factorial(10+1) << 1", 79833600),
+    ("1 << prime(10)", 536870912),
+    ("totient(1463) << 10", int(_sp5.totient(1463)) << 10),
+    ("factorial(20) % 7", 0),
+]
+for _expr, _expected in _R5_PINS:
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round-3-follow-up #2: {_expr!r} == {_expected!r}, "
+          "matching main",
+          _v == _expected and _e is None, f"-> value={_v!r} err={_e!r}")
+
+_v, _e = _boundary_parse("1 << fibonacci(20)")
+check("THE-1095 round-3-follow-up #2: '1 << fibonacci(20)' evaluates to "
+      "main's exact value",
+      _v == (1 << int(_sp5.fibonacci(20))) and _e is None, f"-> value={_v!r} err={_e!r}")
+
+_v, _e = _boundary_parse("7 // bell(20)")
+check("THE-1095 round-3-follow-up #2: '7 // bell(20)' evaluates to "
+      "main's exact value (0 -- bell(20) is astronomically larger than "
+      "7; SymPy's own Mod/floor evaluation determines this from bell's "
+      "own registered assumptions, never by computing bell(20) for real)",
+      _v == 0 and _e is None, f"-> value={_v!r} err={_e!r}")
+
+# `bell(1463)**2` -> ceiling BEFORE construction -- item 4, verified with
+# a spy on the real `sympy.bell` so the assertion is "never called", not
+# merely "fast" (a cache or a lucky code path could also be fast).
+_bell_calls: list = []
+_orig_bell = _sp5.bell
+
+
+def _spy_bell(*_a, **_kw):
+    _bell_calls.append(_a)
+    return _orig_bell(*_a, **_kw)
+
+
+_sp5.bell = _spy_bell
+try:
+    _t0 = time.time()
+    _v, _e = _boundary_parse("bell(1463)**2")
+    _dt = time.time() - _t0
+finally:
+    _sp5.bell = _orig_bell
+check("THE-1095 round-3-follow-up item 4: 'bell(1463)**2' is refused as "
+      "a ceiling",
+      _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+check("  ...WITHOUT ever calling the real sympy.bell (spy pattern, not "
+      "just a timing measurement)",
+      len(_bell_calls) == 0, f"-> {len(_bell_calls)} real calls: {_bell_calls}")
+check(f"  ...and promptly ({_dt:.3f}s)", _dt < 1.0, f"-> {_dt:.3f}s")
+
+# The genuinely-cancelling case MUST still evaluate -- the regression this
+# round's own development caught and fixed (see `_factor_multiset`'s own
+# docstring): a table-function call is now also a valid EXACT multiset
+# base (keyed by the node itself, cancelling structurally), but ONLY
+# trusted by `_multiset_log_num_den` when it fully cancels away --
+# otherwise the whole multiset is discarded rather than measured via an
+# inaccurate growth bound (`_table_multiset_trusted`).
+_v, _e = _boundary_parse("factorial(1463)/factorial(1463)*factorial(1463)/factorial(1463)")
+check("THE-1095 round-3-follow-up item 4 (regression guard): "
+      "'factorial(1463)/factorial(1463)*factorial(1463)/factorial(1463)' "
+      "(net exponent 0, exact value 1) still evaluates -- table-function "
+      "cancellation must not be broken by the new Pow-base bound",
+      _v == 1 and _e is None, f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("x*factorial(1463)")
+check("  ...and a single, in-range, non-cancelling factorial term still "
+      "evaluates ('x*factorial(1463)')",
+      _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("factorial(1000)+fibonacci(1000)")
+check("  ...and two independent sibling heavy calls still evaluate "
+      "('factorial(1000)+fibonacci(1000)')",
+      _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("sqrt(factorial(1463))")
+check("  ...and sqrt(factorial(1463))'s own refusal message is unchanged "
+      "('square root', from the dedicated sqrt/cbrt backstop, not the "
+      "generic digit-ceiling text)",
+      _v is None and _e is not None and "square root" in _e[1], f"-> {_e!r}")
+
+# The TypeError carve-out is GONE: an arity TypeError from the deferred
+# stand-in still matches main's own text exactly (no coverage lost by
+# removing the carve-out, since the stand-in shares the real class's own
+# name and nargs).
+_v, _e = _boundary_parse("binomial(1463+1)")
+check("THE-1095 round-3-follow-up #2: 'binomial(1463+1)' (missing k) is "
+      "still refused with main's own arity TypeError text, now WITHOUT "
+      "any TypeError carve-out in the deferred-parse exception handling",
+      _v is None and _e is not None and _e[0] == "validation"
+      and "takes exactly 2 arguments" in _e[1], f"-> {_e!r}")
 
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== ALL BUG-SWEEP REGRESSIONS FIXED ===")

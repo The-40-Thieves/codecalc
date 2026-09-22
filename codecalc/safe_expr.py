@@ -563,22 +563,31 @@ def _growth_prime(bounds: dict) -> float:
 
 def _growth_nextprime(bounds: dict) -> float:
     """`nextprime(n, ith=1)` — the `ith`-th prime after `n`. Bertrand's
-    postulate (`< 2*n`) alone is only a valid bound at `ith=1`; grok's
-    round-3-follow-up review caught this formula ignoring position 1
-    entirely, so `nextprime(n, 1000)` (a real, nested-safe call up to
-    `MAX_ITH_PRIME_SKIP`) was bounded as if `ith` were always 1.
-    Compounding Bertrand `ith` times (`2**ith * n`) is technically a valid
-    bound but explodes long before `ith` approaches `MAX_ITH_PRIME_SKIP`
-    (1000), overestimating a genuinely small result (`nextprime(2, 1000)
-    == 7927`) by hundreds of digits — instead this folds `ith` in via the
-    prime number theorem's own AVERAGE prime gap near `n` (`~ln(n)`),
-    generously slackened (`+10`, `ith` itself added inside the log to
-    track the search drifting upward as it walks forward `ith` times):
-    loose enough to safely dominate real prime-gap irregularities across
-    the domain this table admits (verified against `nextprime(2, 1000)`
-    and larger `n` up to the position-0 digit cap), while staying finite
-    and small enough to actually distinguish a safe nested call from a
-    dangerous one."""
+    postulate (`< 2*n`) alone is only a valid bound at `ith=1`.
+
+    THE-1095 round-3-follow-up (coordinator review of 949aac9, grok item
+    3): the PREVIOUS formula here (an "average prime gap" estimate,
+    `n + ith*(ln(n+ith+1) + 10)`) is an AVERAGE-case approximation, not a
+    proven upper BOUND — grok's own repro: at `n=887, ith=1`, it computes
+    `903.79`, while `nextprime(887) == 907` — the true value EXCEEDS the
+    claimed bound, an actual unsafe under-estimate on a real, unremarkable
+    prime gap (20, nothing close to a record), not merely an edge case.
+    An average-gap formula can always be beaten by SOME gap larger than
+    the local average — a "generous" additive slack constant is not the
+    same claim as "sound for every n".
+
+    Replaced with Bertrand's postulate compounded `ith` times IN LOG
+    SPACE (`nextprime(n, ith) < n * 2**ith`, since each successive prime
+    is less than double the one before it — true for every n >= 1, ith
+    >= 0, no exceptions, no record-gap edge cases to worry about):
+    `log10(n) + ith * log10(2)`. Far looser than the deleted average-gap
+    formula for anything past `ith=1` or `2` (by `MAX_ITH_PRIME_SKIP`,
+    1000, the bound is astronomically larger than any real value could
+    ever be), but SOUND — the only property this bound actually needs to
+    have, verified against the adversarial grid in `tests/test_bug_
+    sweep.py` (887, 1327, 31397, a ~1.7e15 record-gap prime, `10**25 -
+    1`, `ith` in `{1, 2, 10, 1000}`), not just round numbers.
+    """
     n = _safe_pow10(bounds.get(0))
     if n is None:
         return math.inf
@@ -587,10 +596,9 @@ def _growth_nextprime(bounds: dict) -> float:
     ith = _safe_pow10(bounds.get(1))
     if ith is None:
         ith = 1.0
-    if ith < 1:
-        ith = 1.0
-    bound = n + ith * (math.log(n + ith + 1) + 10)
-    return math.log10(bound) if bound > 1 else 0.0
+    if ith < 0:
+        ith = 0.0
+    return math.log10(n) + ith * math.log10(2)
 
 
 def _growth_primepi(bounds: dict) -> float:
@@ -1583,6 +1591,126 @@ def safe_global_dict() -> dict:
     return g
 
 
+#: THE-1095 round-3-follow-up (coordinator review of 949aac9, grok
+#: `verify-1095-r4-grok.log`): the CENTRAL finding, the same door left open
+#: through rounds 3 and 4 — a deferred stand-in has no `__lshift__`/
+#: `__mod__`/`__floordiv__`/`__rshift__` of its own, so `standin << x`
+#: (or any of the other three) raised `TypeError` from Python's own
+#: operator dispatch DURING the deferred, `evaluate=False` pre-parse,
+#: which round 3's own crash fix then had to carve an exception INTO
+#: ("a deferred-parse TypeError is safe to fall through") to avoid
+#: refusing every ordinary `heavy_func(...) % n`-shaped call — and round
+#: 4's own token-level `_shift_digit_ceiling_violation` could then only
+#: ever recognise the ONE shape sitting directly next to the operator
+#: (`NAME(NUMBER)`), because a token screen has no way to see PAST a `)`,
+#: a nested call, or a second argument. `1 << (factorial(20))`,
+#: `1 << factorial(12+1)`, `1 << binomial(40, 20)`, `1 << rf(30, 20)`,
+#: `(bell(1463)) << 100000` — parenthesised, computed, two-arg, nested —
+#: all reached real, unbounded construction regardless, because none of
+#: them is a bare `NAME(NUMBER)` token pair.
+#:
+#: Closed at the ROOT instead: every deferred stand-in (and every marker
+#: node these methods themselves produce, so a CHAINED unprotected
+#: expression — `(1 << factorial(20)) << 3` — stays inert all the way
+#: through rather than raising on the SECOND `<<`) now implements all
+#: eight operator-protocol dunders for the four unprotected operators,
+#: returning an INERT MARKER node (`_DeferredLShift`/`_DeferredRShift`/
+#: `_DeferredOpMod`/`_DeferredOpFloorDiv` — each a plain `Function`
+#: subclass with no `eval()`, exactly like every other deferred stand-in)
+#: instead of ever raising. The deferred parse therefore NEVER TypeErrors
+#: on these four operators again, and the deferred TREE now carries every
+#: one of them, at whatever depth and shape the caller wrote — token
+#: adjacency no longer matters at all, because `_numeric_ceiling_scan`
+#: (not a token screen) is what bounds them, the same way it already
+#: bounds every other hazard shape this module knows about. See that
+#: scan's own marker-node branch for the bound itself, and `safe_parse`'s
+#: own docstring for why the TypeError carve-out this closes could
+#: finally be deleted outright rather than narrowed further.
+class _DeferredOperatorMixin:
+    """Mixed into every deferred stand-in AND every `_DeferredBinOp` marker
+    class below, so Python's own operator dispatch for `<<`/`>>`/`%`/`//`
+    never falls through to `TypeError: unsupported operand type(s)` —
+    see the module-level comment just above for the full account of why
+    this exists. Each pair (`__lshift__`/`__rlshift__`, ...) covers both
+    argument orders: `standin << x` calls `standin.__lshift__(x)`
+    directly (Python's own left-operand-first dispatch — no special
+    handling needed there); `x << standin` (`x` a plain `Integer`, the
+    REFLECTED order) is the one that took real investigation — SymPy's
+    OWN binary special methods (`Number.__mod__` and friends) are NOT
+    Python's plain-`NotImplemented` protocol at all: `Integer(3) % f5`
+    (`f5` a stand-in) measured returning `3` outright, not `TypeError`
+    and not a call to `f5.__rmod__` — because `Number.__mod__` is
+    decorated with `@sympy.core.decorators.call_highest_priority
+    ('__rmod__')`, SymPy's OWN priority-based dispatch: it calls `other.
+    __rmod__(self)` ONLY if `other._op_priority > self._op_priority`
+    (STRICTLY greater — confirmed reading `call_highest_priority`'s own
+    source), and a bare `Function` subclass inherits `Expr._op_priority
+    = 10.0`, IDENTICAL to `Integer`'s own — so the deferral check never
+    fires and `Number.__mod__` falls through to `Mod(self, other)`
+    directly instead. `_op_priority` below (just above SymPy's own
+    default) is what makes SymPy's OWN dispatch defer to THESE methods
+    for the reflected order too — Python's native dispatch protocol
+    would have been enough for a plain Python `int`, but never would
+    have been reached for `Integer`, the type every literal in a parsed
+    expression's source actually becomes.
+    """
+
+    _op_priority = 10.1
+
+    def __lshift__(self, other):
+        return _deferred_binop_classes()["<<"](self, other)
+
+    def __rlshift__(self, other):
+        return _deferred_binop_classes()["<<"](other, self)
+
+    def __rshift__(self, other):
+        return _deferred_binop_classes()[">>"](self, other)
+
+    def __rrshift__(self, other):
+        return _deferred_binop_classes()[">>"](other, self)
+
+    def __mod__(self, other):
+        return _deferred_binop_classes()["%"](self, other)
+
+    def __rmod__(self, other):
+        return _deferred_binop_classes()["%"](other, self)
+
+    def __floordiv__(self, other):
+        return _deferred_binop_classes()["//"](self, other)
+
+    def __rfloordiv__(self, other):
+        return _deferred_binop_classes()["//"](other, self)
+
+
+#: name -> the marker `Function` subclass `_DeferredOperatorMixin`'s own
+#: methods construct for that operator; `None` until first built (same
+#: lazy, build-once pattern as `_DEFERRED_STANDINS` below — needs `sympy.
+#: Function`, which this module never imports at module level). Built by
+#: `_deferred_binop_classes()`, not `_deferred_global_dict()` itself: the
+#: mixin's own methods call it directly (a marker node can be constructed
+#: from Python's operator protocol at ANY point during a deferred parse,
+#: not only from inside `_deferred_global_dict()`), so it needs to be
+#: idempotent and safe to call on its own.
+_DEFERRED_BINOP_CLASSES: dict | None = None
+
+
+def _deferred_binop_classes() -> dict:
+    global _DEFERRED_BINOP_CLASSES
+    if _DEFERRED_BINOP_CLASSES is None:
+        from sympy import Function
+
+        _DEFERRED_BINOP_CLASSES = {
+            op: type(class_name, (_DeferredOperatorMixin, Function), {"nargs": (2,)})
+            for op, class_name in (
+                ("<<", "_DeferredLShift"),
+                (">>", "_DeferredRShift"),
+                ("%", "_DeferredOpMod"),
+                ("//", "_DeferredOpFloorDiv"),
+            )
+        }
+    return _DEFERRED_BINOP_CLASSES
+
+
 #: Built once (like `_MATH_TRANSFORMS`), not once per parse: the classes
 #: themselves are stateless and immutable, only the returned `dict` in
 #: `_deferred_global_dict()` below is fresh per call (parse_expr's own
@@ -1700,7 +1828,11 @@ def _deferred_global_dict() -> dict:
                             var_positional = True
                     if not var_positional and maximum >= required:
                         attrs["nargs"] = tuple(range(required, maximum + 1))
-            _DEFERRED_STANDINS[name] = type(name, (Function,), attrs)
+            # THE-1095 round-3-follow-up: `_DeferredOperatorMixin` closes
+            # the operator-protocol gap (`standin << x` used to raise
+            # `TypeError`) — see that class's own, and the module-level
+            # comment above it, for the full account.
+            _DEFERRED_STANDINS[name] = type(name, (_DeferredOperatorMixin, Function), attrs)
         # THE-1095 round 3, item 6: `Mod` is directly callable BY NAME
         # (`Mod(x**N, 11)`, not just via the `%` operator
         # `_unprotected_operator_violation` screens) and its own `eval()`
@@ -1719,7 +1851,7 @@ def _deferred_global_dict() -> dict:
         # scan`'s own generic descent (pushing every `Function` node's
         # `.args`) finds and correctly bounds moments later in the same
         # scan.
-        _DEFERRED_STANDINS["Mod"] = type("Mod", (Function,), {"nargs": (2,)})
+        _DEFERRED_STANDINS["Mod"] = type("Mod", (_DeferredOperatorMixin, Function), {"nargs": (2,)})
     g = safe_global_dict()
     g.update(_DEFERRED_STANDINS)
     return g
@@ -1840,185 +1972,6 @@ def _unprotected_operator_violation(expression: str) -> str | None:
                     "ceiling check — use a literal exponent of at most "
                     f"{MAX_UNPROTECTED_OPERATOR_EXPONENT}, or split the "
                     "expression")
-    return None
-
-
-def _stirling_log10_factorial(n: float) -> float:
-    """A safe (over-, never under-) approximation of `log10(n!)` via
-    Stirling's formula with its standard correction term — verified
-    against SymPy's own real digit counts (`factorial(1_463) = 3_998`,
-    `factorial(1_500) = 4_115`, `factorial(20) = 19` — the same figures
-    `MAX_HEAVY_ARG`'s own comment documents) to within ONE digit at every
-    scale checked, unlike `_growth_nn_loose`/`_growth_nn_tight` — both
-    deliberately loose bounds built for a DIFFERENT purpose (proving a
-    NESTED call safe against an ancestor's cap, where over-estimating by
-    thousands of digits only means being slightly more conservative about
-    what counts as nested-safe). Reused here, by `_token_call_bound`, for
-    a different purpose — bounding a `<<` LEFT operand that is already
-    safe and UNSHIFTED on its own — where that looseness would falsely
-    refuse e.g. `bell(1463) << 1`: `bell(1463)` has 3_018 real digits,
-    comfortably under the cap, but `_growth_nn_loose` claims log10 ~9_258
-    for it, already "over cap" with no shift at all. `factorial` is this
-    module's own documented WORST grower in the entire `_HEAVY_FUNCTIONS`
-    family at a shared argument cap (`MAX_HEAVY_ARG`'s own comment: bell
-    3_018, genocchi 3_269, andre 3_711, motzkin 693, all under factorial's
-    3_998 at the same n=1463) — so this single, tight, ACCURATE bound
-    safely covers every single-argument value-kind name in that family,
-    not just `factorial` itself.
-    """
-    if n < 2:
-        return 0.0
-    return n * math.log10(n) - n * math.log10(math.e) + 0.5 * math.log10(2 * math.pi * n)
-
-
-def _token_call_bound(tokens: list, name_index: int) -> float | None:
-    """`log10(upper bound)` for `tokens[name_index]` when it is a NAME with
-    a "value"-kind entry in `_FUNCTION_ARG_CAPS` (the whole `_HEAVY_
-    FUNCTIONS` family, all sharing `MAX_HEAVY_ARG`) immediately followed
-    by `( <NUMBER> )` — a single bare-literal argument, nothing else — or
-    `None` if the shape does not match (a different or "digits"-kind
-    name, more than one argument since every 2-argument name in the
-    table — `binomial`/`rf`/`ff`/`divisor_sigma`/`nextprime`/`polygamma` —
-    then simply never matches this single-argument shape at all, a
-    computed argument, ...). Used only by `_shift_digit_ceiling_violation`
-    below to resolve a table-function call sitting directly next to `<<`,
-    without ever constructing the real value — `_stirling_log10_factorial`
-    is a pure function of the LITERAL argument's own magnitude, never
-    touches SymPy."""
-    name_tok = tokens[name_index]
-    if name_tok.type != tokenize.NAME:
-        return None
-    spec = _FUNCTION_ARG_CAPS.get(name_tok.string)
-    if spec is None or spec[0] != "value":
-        return None
-    i = name_index + 1
-    if i >= len(tokens) or not (tokens[i].type == tokenize.OP and tokens[i].string == "("):
-        return None
-    i += 1
-    if i >= len(tokens) or tokens[i].type != tokenize.NUMBER:
-        return None
-    try:
-        arg_value = float(tokens[i].string)
-    except ValueError:
-        return None
-    i += 1
-    if i >= len(tokens) or not (tokens[i].type == tokenize.OP and tokens[i].string == ")"):
-        return None  # more than one argument, or a computed one -- bail
-    return _stirling_log10_factorial(arg_value)
-
-
-def _shift_operand_bound(tokens: list, op_index: int, direction: int) -> tuple[float, int] | None:
-    """`(log10(operand's own magnitude), token_count_consumed)` for the
-    operand of a `<<` sitting on the given `direction` side (`-1` = the
-    operand ending right before `tokens[op_index]`, `+1` = the operand
-    starting right after it) — a bare NUMBER literal, an OPTIONALLY-signed
-    one, or a single-literal-argument table call (`_token_call_bound`
-    above) — or `None` if the operand is any other shape (a name, a
-    nested expression, an unparenthesized sub-expression, ...), in which
-    case `_shift_digit_ceiling_violation` defers this specific `<<` to the
-    module's other backstops rather than guessing.
-    """
-    if direction == 1:
-        i = op_index + 1
-        # The sign itself is never needed past this point -- only the
-        # MAGNITUDE of a `<<` operand matters for a digit-count bound
-        # (`abs(...)` below), and a genuinely negative shift COUNT is
-        # already invalid Python (`x << -1` raises `ValueError` at
-        # evaluate=True regardless of what this check does).
-        if i < len(tokens) and tokens[i].type == tokenize.OP and tokens[i].string in ("+", "-"):
-            i += 1
-        if i < len(tokens) and tokens[i].type == tokenize.NUMBER:
-            try:
-                return (math.log10(abs(float(tokens[i].string))) if float(tokens[i].string) != 0
-                        else -math.inf, i - op_index)
-            except ValueError:
-                return None
-        if i < len(tokens) and tokens[i].type == tokenize.NAME:
-            bound = _token_call_bound(tokens, i)
-            return (bound, 0) if bound is not None else None
-        return None
-    # direction == -1: scan backward from op_index for a NUMBER literal, or
-    # a `)` closing a single-literal-argument table call immediately
-    # before it (bracket-depth matched back to its own `(`, then one more
-    # step back to the NAME).
-    j = op_index - 1
-    if j < 0:
-        return None
-    if tokens[j].type == tokenize.NUMBER:
-        try:
-            return (math.log10(abs(float(tokens[j].string))) if float(tokens[j].string) != 0
-                    else -math.inf, 0)
-        except ValueError:
-            return None
-    if tokens[j].type == tokenize.OP and tokens[j].string == ")":
-        depth = 1
-        k = j - 1
-        while k >= 0 and depth > 0:
-            if tokens[k].type == tokenize.OP and tokens[k].string == ")":
-                depth += 1
-            elif tokens[k].type == tokenize.OP and tokens[k].string == "(":
-                depth -= 1
-            k -= 1
-        if depth != 0 or k < 0:
-            return None
-        bound = _token_call_bound(tokens, k)
-        return (bound, 0) if bound is not None else None
-    return None
-
-
-#: THE-1095 round-3-follow-up (Codex): a table-function call as `<<`'s LEFT
-#: operand can slip under every existing check (its own position-0 cap,
-#: even the real-value output ceiling item 4 above ALSO catches this — just
-#: only AFTER paying for the real construction: `bell(1463) << 100000`
-#: measured 7.8s to build bell(1463) and shift it before that check ever
-#: ran) and still balloon past `MAX_NUMERIC_DIGITS` once shifted. Left as a
-#: real-value check alone, this is a correctness backstop with a
-#: performance cost, not a promptness one — this bounds the SAME shift,
-#: from the SAME pre-parse token pass `_unprotected_operator_violation`
-#: already runs, so a dangerous shift refuses in milliseconds instead of
-#: seconds, without ever constructing the left operand for real. Reuses
-#: `_GROWTH_BOUNDS` (never touches SymPy) and `_ceiling_message_num_den`
-#: (the SAME digit-ceiling arithmetic and message the real-value backstop
-#: already uses) rather than a third, independent formula.
-def _shift_digit_ceiling_violation(expression: str) -> str | None:
-    """A refusal reason if `expression` contains a `<<` whose LEFT operand
-    (a bare literal or a single-literal-argument table call) and RIGHT
-    operand (the shift count, same two shapes) resolve to a result over
-    `MAX_NUMERIC_DIGITS` digits — or `None` if no `<<` resolves that way
-    (including every `<<` whose operand is some other shape entirely:
-    those are left to this module's other backstops, not guessed at
-    here). `>>` never grows its operand and `%`/`//` never exceed their
-    LEFT operand's own bound (Codex's own note), so neither needs this
-    check — only `<<` does.
-    """
-    try:
-        tokens = list(tokenize.generate_tokens(io.StringIO(expression).readline))
-    except (tokenize.TokenError, SyntaxError, IndentationError,
-            UnicodeEncodeError, UnicodeDecodeError):
-        return None
-    for i, tok in enumerate(tokens):
-        if not (tok.type == tokenize.OP and tok.string == "<<"):
-            continue
-        left = _shift_operand_bound(tokens, i, -1)
-        if left is None:
-            continue
-        right = _shift_operand_bound(tokens, i, 1)
-        if right is None:
-            continue
-        left_log, _ = left
-        right_log, _ = right
-        # The shift COUNT is the right operand's own plain VALUE (not a
-        # digit count of it) -- `_safe_pow10` turns its log10 form back
-        # into a float, or signals "too large to even represent as a
-        # float" (> 1e50), which is unconditionally unsafe as a shift
-        # count regardless of the left operand.
-        count = _safe_pow10(right_log)
-        if count is None or count < 0:
-            return _digit_ceiling_text(math.inf, "the result of '<<'")
-        total_log = left_log + count * math.log10(2)
-        violation = _digit_ceiling_text(total_log, "the result of '<<'")
-        if violation:
-            return violation
     return None
 
 
@@ -2192,14 +2145,6 @@ def safe_parse(expression: str, *, evaluate: bool = True, local_dict: dict | Non
     op_violation = _unprotected_operator_violation(expression)
     if op_violation:
         return None, (CATEGORY_CEILING, op_violation)
-    # THE-1095 round-3-follow-up (Codex, designed alongside item C(i)):
-    # same reasoning, same "before either pre-parse" placement — a `<<`
-    # whose shift RESULT is provably over `MAX_NUMERIC_DIGITS` from its
-    # tokens alone refuses here in milliseconds, before `bell(1463)` (or
-    # any other left operand) is ever actually constructed.
-    shift_violation = _shift_digit_ceiling_violation(expression)
-    if shift_violation:
-        return None, (CATEGORY_CEILING, shift_violation)
     from sympy.parsing.sympy_parser import parse_expr
 
     # THE-1095 round 2: this MUST be the only parse that runs before a
@@ -2210,43 +2155,39 @@ def safe_parse(expression: str, *, evaluate: bool = True, local_dict: dict | Non
                                 local_dict=local_dict, global_dict=_deferred_global_dict(),
                                 evaluate=False)
     except Exception as exc:
-        # THE-1095 round-3-follow-up (grok item C(ii), designed together
-        # with the ClusterFuzzLite crash fix in `reject_explosive` — see
-        # `_expression_touches_table_or_unprotected_operator`'s own
-        # docstring): "the deferred parse raised" is safely inconclusive
-        # ONLY when nothing in the expression could have triggered the
-        # hazards this pre-parse exists to catch — an ordinary syntax
-        # error (unbalanced parens, a stray token, ...) with no table name
-        # and no unprotected operator anywhere just falls through, and the
-        # real-dict parse below raises the identical error for the caller
-        # to see. But an expression that DOES touch a table name or an
-        # unprotected operator, and STILL made the ALL-INERT-stand-in
-        # parse itself raise before there was even a tree to hand
-        # `reject_explosive`, is exactly the shape round 2's own ordering
-        # exists to vet FIRST — falling through here would let the
-        # real-dict parse run un-vetted, the exact mistake round 2 already
-        # fixed once. Fail closed instead, on the deferred parse's own
-        # exception text: `unknown != safe`.
-        #
-        # EXCEPT `TypeError` specifically — found live testing this exact
-        # branch: a deferred stand-in is an INERT, symbolic `Function`
-        # subclass (see `_deferred_global_dict`'s own docstring) that
-        # never becomes a concrete number, so `factorial(20) << 3` raises
-        # `TypeError: unsupported operand type(s) for <<: 'factorial' and
-        # 'Integer'` from Python's own operator dispatch DURING this
-        # parse — unconditionally, for ANY argument, dangerous or not,
-        # the moment a table name meets one of the four unprotected
-        # operators directly. Fail-closing on this would refuse the
-        # entire, ALREADY-WORKING combination of "heavy function" and
-        # `%`/`//`/`<<`/`>>` outright (`factorial(5) % 3` included) —
-        # `origin/main`'s own `TypeError` for a genuine arity mismatch
-        # (`binomial(5)`, missing `k`) is the SAME exception class and is
-        # already handled identically, safely, by `shape`'s own parse
-        # moments later (see its own `isinstance(real_exc, TypeError)`
-        # branch below) — so no coverage is lost by excluding it here.
+        # THE-1095 round-3-follow-up (grok item C(ii), then grok's OWN
+        # follow-up review of 949aac9 — `verify-1095-r4-grok.log` — found
+        # the TypeError carve-out this comment used to describe was
+        # ITSELF the recurring structural gap, the same door left open
+        # through rounds 3 and 4): "the deferred parse raised" is safely
+        # inconclusive ONLY when nothing in the expression could have
+        # triggered the hazards this pre-parse exists to catch — an
+        # ordinary syntax error (unbalanced parens, a stray token, ...)
+        # with no table name and no unprotected operator anywhere just
+        # falls through, and the real-dict parse below raises the
+        # identical error for the caller to see. An expression that DOES
+        # touch a table name or an unprotected operator, and STILL made
+        # the ALL-INERT-stand-in parse itself raise before there was even
+        # a tree to hand `reject_explosive`, is now UNCONDITIONALLY a
+        # refusal — no exception, not even `TypeError`. The carve-all for
+        # `TypeError` used to exist because a deferred stand-in had no
+        # `__lshift__`/`__mod__`/`__floordiv__`/`__rshift__` of its own,
+        # so `factorial(20) << 3` raised `TypeError` from Python's own
+        # operator dispatch for ANY argument, dangerous or not — but
+        # every deferred stand-in now implements all eight operator-
+        # protocol dunders (`_DeferredOperatorMixin`, above), returning an
+        # inert marker node instead of ever raising for these four
+        # operators, so that specific `TypeError` simply does not happen
+        # anymore. A genuine arity `TypeError` (`binomial(5)`, missing
+        # `k`) still reaches here exactly as before, and is now refused
+        # HERE, immediately, on the deferred stand-in's own text — which
+        # is IDENTICAL to `origin/main`'s own text for the same malformed
+        # call (the stand-in shares the real class's own name and
+        # `nargs`), so no observable behavior changes for that case
+        # either, confirmed by the arity tests in `tests/test_bug_sweep.
+        # py`. Fail closed on everything else: `unknown != safe`.
         scan_shape = None
-        if not isinstance(exc, TypeError) and \
-                _expression_touches_table_or_unprotected_operator(expression):
+        if _expression_touches_table_or_unprotected_operator(expression):
             return None, (CATEGORY_VALIDATION, f"parse error: {exc}")
     else:
         # THE-1095 round-3-follow-up (coordinator review of d3c65c7): a
@@ -2534,7 +2475,7 @@ def _factor_multiset(node, memo_ms: dict):
     small integer, safe to use as a multiplier?) than the base-position
     multiset this function builds.
     """
-    from sympy import Integer, Mul, Pow
+    from sympy import Function, Integer, Mul, Pow
 
     key = id(node)
     if key in memo_ms:
@@ -2597,8 +2538,71 @@ def _factor_multiset(node, memo_ms: dict):
                     # for a negative exp_int too: -3 % 2 == 1, treated as odd).
                     new_sign = 1 if exp_int % 2 == 0 else sub_sign
                     result = (scaled, new_sign)
+    elif isinstance(node, Function) and type(node).__name__ in _FUNCTION_ARG_CAPS:
+        # THE-1095 round-3-follow-up (coordinator review of 949aac9, grok
+        # item 4's own regression risk): a table-function CALL is a valid
+        # multiset "base" too, keyed by the NODE itself rather than a
+        # computed value — SymPy's own structural equality/hashing on a
+        # `Function` node (its class plus its `.args`) already guarantees
+        # two SEPARATE occurrences of the identical call (`factorial(
+        # 1463)` written twice) compare equal and hash equal (its own
+        # construction cache typically hands back the literal same object
+        # too), so `factorial(1463) / factorial(1463)` cancels EXACTLY to
+        # 1 via this SAME net-zero-exponent mechanism the `Integer` branch
+        # above already uses — WITHOUT this function, or anything it
+        # feeds, ever needing to know `factorial(1463)`'s own numeric
+        # magnitude at all. Only ever used for EXACT cancellation, never
+        # for measuring a SURVIVOR's own magnitude (see the check right
+        # below, before this function returns) — `_multiset_log_num_den`'s
+        # own contract is "exact", and a table-function call's own
+        # digit-count is, at best, a deliberately LOOSE bound (see that
+        # function's own docstring for the regression trying to use one
+        # here caused). This function stays PURELY structural — it does
+        # NOT decide whether a surviving (non-cancelling) table-function
+        # key is trustworthy to measure; that decision belongs to each
+        # CALLER that treats a returned multiset as final (see `_table_
+        # multiset_trusted`, used at both of this function's own top-
+        # level call sites), never to this function itself, which is
+        # RECURSIVE — a sibling factor elsewhere in the SAME `Mul` may
+        # yet cancel a term that looks like a lone survivor from inside
+        # one single recursive call (discarding `result` HERE, before the
+        # `Mul` branch above ever got a chance to try, was tried first and
+        # is exactly why nothing ever cancelled: this branch reaching a
+        # bare `factorial(1463)` in ISOLATION discarded before its
+        # `Mul` parent could ever combine it against a matching `1/
+        # factorial(1463)` sibling).
+        result = ({node: 1}, 1)
     memo_ms[key] = result
     return result
+
+
+def _table_multiset_trusted(multiset) -> bool:
+    """`True` if a `_factor_multiset` result is trustworthy for `_multiset_
+    log_num_den`'s own EXACT-accounting contract — `False` if a table-
+    function key SURVIVED cancellation (a non-zero net exponent; one that
+    fully cancels is deleted from `terms` entirely and never reaches
+    here). Checked ONLY at `_factor_multiset`'s own top-level call sites,
+    never inside that RECURSIVE function itself (tried first, and
+    reverted: discarding a lone survivor from inside one single recursive
+    call — before its `Mul` parent ever got a chance to combine it
+    against a matching inverse elsewhere in the SAME product — is exactly
+    why `factorial(1463)/factorial(1463)*factorial(1463)/factorial(1463)`
+    never cancelled at all under that version). A table-function call's
+    own digit count is, at best, a deliberately LOOSE growth bound — not
+    accurate enough to stand in for this function's own "exact" promise
+    (see `_multiset_log_num_den`'s own docstring for the regression using
+    one here caused) — so a caller sees `False` here as "fall back to
+    whatever this module's other checks already do with an unresolved
+    node" (the generic per-argument bound, `_pow_table_base_violation`
+    for a `Pow` with a table-function base, ...), not as a refusal in
+    its own right.
+    """
+    from sympy import Function
+
+    if multiset is None:
+        return False
+    terms, _sign = multiset
+    return not any(isinstance(base_key, Function) for base_key in terms)
 
 
 def _multiset_log_num_den(terms: dict) -> tuple:
@@ -2607,6 +2611,28 @@ def _multiset_log_num_den(terms: dict) -> tuple:
     itself) — a positive net exponent is a numerator factor, negative is a
     denominator factor, matching how `str()` would actually render the
     reduced fraction.
+
+    Every key here is a plain Python `int` — THE-1095 round-3-follow-up
+    (coordinator review of 949aac9, grok item 4): `_factor_multiset` DOES
+    also key a table-function `Function` node (for EXACT, structural
+    cancellation — see its own comment), but only ever lets that survive
+    into a RETURNED result when it fully cancels to net exponent 0, i.e.
+    is ABSENT from `terms` by the time this runs — a growth-bound
+    APPROXIMATION for a node key that does NOT cancel is not the same
+    claim as this function's own contract ("exact"), and treating it as
+    one regressed two independent, previously-correct cases: `x*factorial
+    (1463)` (single, in-range, no cancellation possible) and `factorial(
+    1000)+fibonacci(1000)` (two independent siblings) — both wrongly
+    refused, because the deliberately LOOSE `_growth_nn_loose` bound for
+    `factorial(1463)` (~9258) is nowhere near its true digit count
+    (3998, under the 4000 cap) when treated as if it WERE the exact
+    value, rather than a safe-but-loose upper bound for a DIFFERENT
+    purpose (deciding whether a NESTED argument is too big to look at
+    further, not "how many digits does this print"). See `_pow_table_
+    base_violation`'s own docstring for where a table-function base's
+    OWN digit-ceiling risk (`bell(1463)**2`) is caught instead — a
+    separate, narrower check that never feeds back into this shared,
+    EXACT-only accounting.
     """
     num_parts = [_safe_log10_pow(_log10_of_int(base_key), exp)
                  for base_key, exp in terms.items() if exp > 0]
@@ -2648,11 +2674,33 @@ def _split_coefficient(terms: dict) -> tuple:
     exact-multiset-equality path. `coeff` does NOT carry the term's overall
     sign; the caller (`_cancel_additive_inverses`) already tracks that
     separately, from `_factor_multiset`'s own returned `sign`.
+
+    THE-1095 round-3-follow-up #2 (ClusterFuzzLite, found within the first
+    60s of a fresh fuzzing run against 949aac9's own successor): `base_key
+    <= _COEFF_MAX_BASE` assumed `base_key` is always a plain Python `int`
+    — true before `_factor_multiset` also started keying a table-function
+    `Function` node (this round's own item 4 fix, for EXACT cancellation).
+    `factorial(cos(y)) <= 1000` (a table call over a SYMBOLIC, non-numeric
+    argument) is not a plain `int` comparison at all — it is a SymPy
+    `Relational` SymPy itself cannot resolve to a definite truth value
+    (`cos(y)`'s own value is unknown), and using it directly in a boolean
+    `and`/`if` context raises `TypeError: cannot determine truth value of
+    Relational` — uncaught, crashing this function instead of just
+    treating the term as "not an integer coefficient" (`rest`, the
+    already-correct answer for every OTHER not-small-enough shape this
+    function handles). `isinstance(base_key, int)` first, matching how
+    `_multiset_log_num_den`'s own docstring already documents every key
+    being a plain `int` — a table-function key can never legitimately
+    reach the small-enough-to-fold-in branch regardless (see `_growth_nn_
+    loose`'s own comment: even `factorial(20)`, tiny by this module's own
+    standard, is already `2.4e18`, nowhere near `_COEFF_MAX_BASE`, 1_000)
+    — so this guard costs nothing on the ordinary numeric path.
     """
     coeff = 1
     rest: dict = {}
     for base_key, exp in terms.items():
-        if 0 < exp <= _COEFF_MAX_EXP and base_key <= _COEFF_MAX_BASE:
+        if (isinstance(base_key, int) and 0 < exp <= _COEFF_MAX_EXP
+                and base_key <= _COEFF_MAX_BASE):
             coeff *= base_key**exp
         else:
             rest[base_key] = exp
@@ -2816,7 +2864,7 @@ def _log10_num_den(node, memo: dict) -> tuple:
         return memo[key]
 
     multiset = _factor_multiset(node, memo.setdefault("__multiset__", {}))
-    if multiset is not None:
+    if _table_multiset_trusted(multiset):
         terms, _sign = multiset
         log_num, log_den = _multiset_log_num_den(terms)
         result = (log_num, log_den, True)
@@ -2942,13 +2990,13 @@ def _log10_num_den(node, memo: dict) -> tuple:
             # to "inconclusive" and the caller (`reject_explosive`'s Pow
             # loop) never got a chance to refuse it before the real-dict
             # parse actually materialized `bell(1463)` for real (measured
-            # ~5s). `_resolved_exponent_magnitude` tries the SAME growth-
+            # ~5s). `_resolved_table_aware_magnitude` tries the SAME growth-
             # bound machinery `_numeric_ceiling_scan`'s own Function-node
             # branch uses, ignoring any violation IT would raise here
             # (deliberately — that same node is independently visited, and
             # correctly refused, by this scan's own generic descent; this
             # call site only needs a MAGNITUDE, not a refusal decision).
-            exp_log_num, exp_log_den, exp_res = _resolved_exponent_magnitude(node.exp, memo)
+            exp_log_num, exp_log_den, exp_res = _resolved_table_aware_magnitude(node.exp, memo)
             if not exp_res or _ceiling_message_num_den(exp_log_num, exp_log_den):
                 # Either inconclusive, OR the EXPONENT's own print-profile
                 # is already over cap. The second case matters even
@@ -3238,21 +3286,28 @@ def _resolve_arg_magnitude(node, memo: dict) -> tuple[float, float, bool, str | 
     return log_num, log_den, False, None
 
 
-def _resolved_exponent_magnitude(node, memo: dict) -> tuple[float, float, bool]:
+def _resolved_table_aware_magnitude(node, memo: dict) -> tuple[float, float, bool]:
     """`(log_num, log_den, resolved)` — `_log10_num_den`'s own three-tuple
-    contract, called FROM `_log10_num_den` itself (its compound-Pow
-    exponent branch) so a NESTED table-function exponent (`(x+1)**bell(
-    1463)`) resolves via `_table_function_bound`'s growth bound instead of
-    staying plain "unresolved" — see that call site's own comment for why
-    this matters (`bell(1463)`'s real ~5s construction used to be the only
-    way anything downstream ever learned its magnitude). Unlike
-    `_resolve_arg_magnitude`, a violation found while resolving is
-    DISCARDED here, deliberately: this helper only ever needs to report
-    the EXPONENT's magnitude to `_log10_num_den`'s own verdict logic, not
-    decide the tree's fate — the same nested node is independently visited
-    (and correctly refused, if it deserves to be) by `_numeric_ceiling_
-    scan`'s own generic descent, which DOES see the violation, moments
-    later in the same scan.
+    contract, called FROM `_log10_num_den` itself for BOTH a compound-Pow
+    EXPONENT and (THE-1095 round-3-follow-up, coordinator review of
+    949aac9, grok item 4) a Pow's own BASE, so a NESTED table-function
+    call in EITHER position (`(x+1)**bell(1463)`, or `bell(1463)**2`)
+    resolves via `_table_function_bound`'s growth bound instead of
+    staying plain "unresolved" — see each call site's own comment for
+    why this matters. Before item 4's fix, `bell(1463)**2` sailed past
+    the deferred scan (its BASE, unlike its exponent, was never routed
+    through this same resolver) and paid `bell(1463)`'s own real ~5s
+    construction cost during the REAL `evaluate=True` parse before the
+    OUTPUT ceiling (the last-resort backstop, not a promptness one) ever
+    caught it — the exact "construct first, refuse after" shape every
+    other fix in this module exists to avoid. Unlike `_resolve_arg_
+    magnitude`, a violation found while resolving is DISCARDED here,
+    deliberately: this helper only ever needs to report the node's
+    magnitude to `_log10_num_den`'s own verdict logic, not decide the
+    tree's fate — the same nested node is independently visited (and
+    correctly refused, if it deserves to be) by `_numeric_ceiling_scan`'s
+    own generic descent, which DOES see the violation, moments later in
+    the same scan.
     """
     log_num, log_den, resolved = _log10_num_den(node, memo)
     if resolved:
@@ -3264,6 +3319,158 @@ def _resolved_exponent_magnitude(node, memo: dict) -> tuple[float, float, bool]:
         if bound is not None:
             return bound, 0.0, True
     return log_num, log_den, False
+
+
+#: marker class name (`_deferred_binop_classes()`'s own keys, by NAME
+#: since this scan only ever sees `type(node).__name__`, never the class
+#: object itself) -> the operator it stands for.
+_DEFERRED_BINOP_OPS = {
+    "_DeferredLShift": "<<",
+    "_DeferredRShift": ">>",
+    "_DeferredOpMod": "%",
+    "_DeferredOpFloorDiv": "//",
+}
+
+
+def _deferred_binop_violation(node, memo: dict) -> str | None:
+    """Reason a `_DeferredLShift`/`_DeferredRShift`/`_DeferredOpMod`/
+    `_DeferredOpFloorDiv` marker node (`_DeferredOperatorMixin`'s own
+    methods — see that class's own docstring for why these exist at all)
+    would produce a result over `MAX_NUMERIC_DIGITS`, or `None` if `node`
+    is not one of these four marker types, or is and stays safely under.
+
+    THE-1095 round-3-follow-up (coordinator review of 949aac9, grok):
+    replaces the deleted TOKEN-level `_shift_digit_ceiling_violation` —
+    this is the SAME bound, moved to the TREE, so token adjacency no
+    longer matters: `1 << (factorial(20))`, `1 << factorial(12+1)`,
+    `1 << binomial(40, 20)`, `1 << rf(30, 20)`, `(bell(1463)) <<
+    100000` all reach this branch now, at whatever depth or shape the
+    caller wrote them, because the DEFERRED TREE carries a marker node
+    for every one of them (see `_DeferredOperatorMixin`'s own docstring).
+
+    `<<` (the only one of the four that can GROW its operand): `digits(
+    left) + count * log10(2)` against `MAX_NUMERIC_DIGITS`, where `count`
+    is the RIGHT operand's own VALUE (via `_safe_pow10`, converting its
+    resolved log10 bound back to a plain float) — NEVER a blanket
+    Stirling-of-factorial approximation (grok's own finding: `1 <<
+    prime(10)` was bounded as `1 << 10!` and refused, though `prime(10)
+    == 29` and `origin/main` returns `536870912` cleanly — Stirling is
+    only ever a valid digit bound for a factorial-SCALE operand, and
+    `prime`/`totient`/`fibonacci`/`harmonic`/`primepi` all grow far
+    slower; `_resolve_arg_magnitude` below already resolves each NAME
+    through its own `_GROWTH_BOUNDS` entry, exactly the "one spec drives
+    everything" bound every other check in this module already uses —
+    no second, parallel approximation needed here).
+
+    `>>`/`%`/`//`: the result's own magnitude never EXCEEDS the LEFT
+    operand's own magnitude (`a >> n <= a`, `a % b <= a`, `a // b <= a`
+    for the positive integers this module's own hazards are about) — so
+    only the left operand needs bounding; the right operand (if it is
+    ALSO a table call) gets its own, independent check from this same
+    scan's generic descent moments later, unrelated to this node's own
+    verdict.
+
+    An operand that resolves with a free symbol anywhere in it is left
+    alone (`return None` for THIS node — the generic descent below still
+    reaches inside it for any OTHER hazard): a genuinely symbolic operand
+    never gets materialized into a concrete value, so there is no digit
+    count to bound here at all — matching `_table_function_bound`'s own
+    per-position `if arg.free_symbols: continue`. Anything else that does
+    not resolve (an irrational constant, a non-table function this module
+    does not know how to bound, ...) fails CLOSED instead — `unknown !=
+    safe`, the same bar every other finding in this module already holds
+    to.
+    """
+    op = _DEFERRED_BINOP_OPS.get(type(node).__name__)
+    if op is None:
+        return None
+    left, right = node.args[0], node.args[1]
+    if left.free_symbols:
+        return None
+    left_log_num, left_log_den, left_resolved, left_violation = _resolve_arg_magnitude(left, memo)
+    if left_violation:
+        return left_violation
+    if not left_resolved:
+        return (f"the left operand of '{op}' cannot be safely bounded: "
+                "computing it would take an unbounded amount of time and memory")
+    left_log = left_log_num - left_log_den
+    if op != "<<":
+        # result <= left operand's own magnitude for >>, %, //
+        return _digit_ceiling_text(left_log, f"the result of '{op}'")
+    if right.free_symbols:
+        return None
+    right_log_num, right_log_den, right_resolved, right_violation = _resolve_arg_magnitude(right, memo)
+    if right_violation:
+        return right_violation
+    if not right_resolved:
+        return (f"the right operand of '{op}' cannot be safely bounded: "
+                "computing it would take an unbounded amount of time and memory")
+    right_log = right_log_num - right_log_den
+    count = _safe_pow10(right_log)
+    if count is None or count < 0:
+        return _digit_ceiling_text(math.inf, "the result of '<<'")
+    total_log = left_log + count * math.log10(2)
+    return _digit_ceiling_text(total_log, "the result of '<<'")
+
+
+def _pow_table_base_violation(node, memo: dict) -> str | None:
+    """Reason a `Pow` node whose BASE is a table-function call would
+    produce a result over `MAX_NUMERIC_DIGITS`, or `None` — or if `node`
+    is not such a `Pow` at all.
+
+    THE-1095 round-3-follow-up (coordinator review of 949aac9, grok item
+    4): `bell(1463)**2` used to sail past the deferred scan (its exponent
+    already resolved a nested table-function call via `_resolved_table_
+    aware_magnitude`, but its BASE never did) and pay `bell(1463)`'s own
+    real ~5s construction cost during the REAL `evaluate=True` parse
+    before the output ceiling — the last-resort backstop, not a
+    promptness one — ever caught it.
+
+    Checked HERE, SEPARATELY from `_log10_num_den`'s own Pow-handling
+    (never feeds into it, never touches `_factor_multiset`'s own Mul-
+    cancellation accounting) — tried routing the base through `_log10_
+    num_den`'s OWN shared base-resolution first (mirroring the exponent's
+    own `_resolved_table_aware_magnitude`) and it REGRESSED a genuinely-
+    cancelling product: `factorial(1463)/factorial(1463)*factorial(1463)
+    /factorial(1463)` (net exponent 0, true value exactly 1) was reported
+    as an ~18_000-digit, uncancelled denominator instead, because giving
+    ONE Pow factor's base a growth-bound APPROXIMATION (rather than
+    leaving it plain "unresolved", its previous behavior) makes `_log10_
+    num_den`'s Mul branch treat it as a real contribution to a
+    conservative, non-cancelling sum — `_factor_multiset`'s own EXACT
+    cancellation only recognizes a repeated base by Python integer
+    equality, never an approximate bound, so it could not use this
+    information at all, and the surrounding fallback math actively
+    misused it. This function answers a NARROWER question instead —
+    "is THIS Pow node's own base large enough, on its own, to make
+    raising it to THIS exponent unsafe" — independent of whatever any
+    enclosing `Mul` is doing with it, so it can never interfere with
+    cancellation the way sharing `_log10_num_den`'s own resolver did.
+    """
+    from sympy import Function, Integer, Pow
+
+    if not (isinstance(node, Pow) and isinstance(node.base, Function)
+            and type(node.base).__name__ in _GROWTH_BOUNDS):
+        return None
+    if node.base.free_symbols or node.exp.free_symbols:
+        return None
+    base_log_num, base_log_den, base_resolved, base_violation = _resolve_arg_magnitude(node.base, memo)
+    if base_violation:
+        return base_violation
+    if not base_resolved:
+        return None  # left to this module's OTHER backstops, not guessed at here
+    base_log = base_log_num - base_log_den
+    if not isinstance(node.exp, Integer):
+        return None  # the compound/symbolic-exponent case has its own machinery
+    exp_int = int(node.exp)
+    if exp_int == 0:
+        return None  # `anything ** 0 == 1`, trivially safe regardless of the base
+    total_log = base_log * abs(exp_int)
+    name = type(node.base).__name__
+    if exp_int > 0:
+        return _digit_ceiling_text(total_log, f"the result of {name}(...)**{exp_int}")
+    return _digit_ceiling_text(total_log, f"the result of {name}(...)**{exp_int}",
+                                " in its denominator")
 
 
 def _numeric_ceiling_scan(tree, memo: dict) -> str | None:
@@ -3343,6 +3550,21 @@ def _numeric_ceiling_scan(tree, memo: dict) -> str | None:
             # surface and this scan would walk past whatever it wraps.
             stack.extend(node)
             continue
+        if isinstance(node, Function) and type(node).__name__ in _DEFERRED_BINOP_OPS:
+            # THE-1095 round-3-follow-up: a marker node produced by
+            # `_DeferredOperatorMixin` (`<<`/`>>`/`%`/`//` touching a
+            # deferred stand-in, anywhere in the tree, any shape) — see
+            # `_deferred_binop_violation`'s own docstring for the bound.
+            binop_violation = _deferred_binop_violation(node, memo)
+            if binop_violation:
+                return binop_violation
+            # Fall through to the generic descent below regardless: each
+            # operand might independently hide its OWN hazard (a nested
+            # table call as either side), which this node's own operator-
+            # specific check above does not replace, only supplements.
+        pow_base_violation = _pow_table_base_violation(node, memo)
+        if pow_base_violation:
+            return pow_base_violation
         if isinstance(node, Function) and type(node).__name__ in _FUNCTION_ARG_CAPS:
             # #326 finding 1 (cross-vendor review, round 6): a COMPUTED
             # argument (`factorial(1463+1)`) stays an opaque `Function`
@@ -3934,7 +4156,7 @@ def reject_explosive(tree) -> str | None:
             # is undetermined, matching this ceiling's own "a false
             # refusal is far cheaper than an unbounded `sp.expand`" trade.
             multiset = _factor_multiset(exponent, memo.setdefault("__multiset__", {}))
-            if multiset is not None:
+            if _table_multiset_trusted(multiset):
                 terms, exp_sign = multiset
                 if exp_sign != 0 and any(v < 0 for v in terms.values()):
                     # Genuinely fractional (a real denominator survives
@@ -3959,7 +4181,7 @@ def reject_explosive(tree) -> str | None:
                 # own GROWTH bound here too, for the identical reason the
                 # OTHER `_log10_num_den` call site in this same loop (the
                 # `sqrt`/`cbrt` base check, above) already switched to it.
-                exp_log_num, exp_log_den, exp_res = _resolved_exponent_magnitude(exponent, memo)
+                exp_log_num, exp_log_den, exp_res = _resolved_table_aware_magnitude(exponent, memo)
                 if not exp_res:
                     continue  # inconclusive -- a Function call, irrational constant, ...
                 exp_magnitude = exp_log_num - exp_log_den

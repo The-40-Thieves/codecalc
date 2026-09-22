@@ -271,6 +271,117 @@ behind it.
   bare reference to a SymPy class, not a value — call it or use a
   number/symbol").
 
+  **A structural fix, replacing the token-level `<<`/`>>`/`%`/`//` screen
+  and its TypeError carve-out entirely** (coordinator review of
+  949aac9, grok `verify-1095-r4-grok.log`): the root problem recurring
+  across rounds 3 and 4 was a deferred-parse `TypeError` on `standin <<
+  x` carved out as "safe to fall through", and a token screen that could
+  only ever recognise a bare `NAME(NUMBER)` sitting directly next to the
+  operator — `1 << (factorial(20))`, `1 << factorial(12+1)`, `1 <<
+  binomial(40, 20)`, `1 << rf(30, 20)`, `(bell(1463)) << 100000` all
+  reached real, unbounded construction regardless, since none of them is
+  that one bare shape. Closed at the root: every deferred stand-in (and
+  the marker nodes these methods themselves produce, so a CHAINED
+  expression — `(1 << factorial(20)) << 3` — stays inert too) now
+  implements `__lshift__`/`__rlshift__`/`__rshift__`/`__rrshift__`/
+  `__mod__`/`__rmod__`/`__floordiv__`/`__rfloordiv__`
+  (`_DeferredOperatorMixin`), returning an inert marker node
+  (`_DeferredLShift`/`_DeferredRShift`/`_DeferredOpMod`/
+  `_DeferredOpFloorDiv`) instead of ever raising — closing the
+  reflected-operand direction (`3 % factorial(5)`) needed discovering
+  that SymPy's OWN binary operators are not Python's plain
+  `NotImplemented` protocol at all, but a PRIORITY-based dispatch
+  (`@call_highest_priority`, deferring to the other operand's method
+  only when its `_op_priority` is STRICTLY greater than the default
+  10.0 every bare `Function` subclass inherits — the mixin sets 10.1).
+  The deferred TREE now carries every one of these operators at
+  whatever depth or shape the caller wrote it, so `_numeric_ceiling_
+  scan`'s new `_deferred_binop_violation` bounds them regardless of
+  token adjacency: `<<` via `digits(left) + count*log10(2)`, `count`
+  the RIGHT operand's own VALUE resolved through `_GROWTH_BOUNDS` (item
+  2, below); `>>`/`%`/`//` via the LEFT operand's own bound alone (the
+  result never exceeds it). The deferred-parse-exception TypeError
+  carve-out is now GONE outright — an expression touching a table name
+  or an unprotected operator that still makes the deferred parse raise
+  is unconditionally a refusal; a genuine arity `TypeError` still
+  reaches the caller with `origin/main`'s own text unchanged, since it
+  no longer depends on that carve-out to do so.
+
+  **Item 2 (grok): the shift/mod/floordiv bound must never use Stirling
+  as a UNIVERSAL digit-count approximation.** `1 << prime(10)` was
+  bounded as `1 << 10!` and refused, though `prime(10) == 29` and
+  `origin/main` returns `536870912` cleanly — Stirling's `log10(n!)` is
+  only ever a valid bound for a factorial-SCALE operand; `prime`/
+  `totient`/`fibonacci`/`harmonic`/`primepi` all grow far slower.
+  `_deferred_binop_violation` resolves each operand through `_GROWTH_
+  BOUNDS` (via `_resolve_arg_magnitude`), the SAME "one spec drives
+  everything" formula every other nested-argument bound in this module
+  already uses — no second, parallel approximation. DELIBERATE
+  NARROWING, pinned in tests: `bell`'s own entry (the shared,
+  deliberately loose `_growth_nn_loose`) overestimates `bell(1463)` at
+  ~9258 "digits" against its true 3018 — already over
+  `MAX_NUMERIC_DIGITS` with no shift at all — so `bell(1463) << 1` is
+  now refused, the same false-refusal trade this module's own
+  established pattern already makes elsewhere (motzkin's own
+  narrowing, rf/ff's own narrowing) rather than adding another
+  per-name special case to a shared bound.
+
+  **Item 3 (grok): `_growth_nextprime` was an average-gap ESTIMATE, not
+  a proven bound.** `n + ith*(ln(n+ith+1) + 10)` gives `903.79` at
+  `n=887, ith=1`, while `nextprime(887) == 907` — an actual, unsafe
+  under-estimate on a real, unremarkable gap (20), not an edge case.
+  Replaced with Bertrand's postulate compounded `ith` times IN LOG
+  SPACE (`log10(n) + ith*log10(2)`, i.e. `n * 2**ith` — sound for every
+  `n`/`ith`, no record-gap exception needed, though far looser past
+  `ith=1` or `2`). Verified against an adversarial grid, not round
+  numbers: 887, 1327 (gap 34), 31397 (gap 72), a ~1.7e15 prime with a
+  1132 record gap, `10**25 - 1`, and `ith` in `{1, 2, 10, 1000}`.
+
+  **Item 4 (grok): a table-function call as a `Pow`'s own BASE was not
+  growth-resolved** — `bell(1463)**2` sailed past the deferred scan
+  (its EXPONENT already resolved a nested table call via `_resolved_
+  table_aware_magnitude`, renamed from `_resolved_exponent_magnitude`
+  now that it serves both positions; its BASE never did) and paid
+  `bell(1463)`'s own real ~5s construction cost before the output
+  ceiling — the last-resort backstop, not a promptness one — ever
+  caught it. Fixed with a NEW, separate check
+  (`_pow_table_base_violation`) rather than routing the base through
+  the SAME shared resolver the exponent uses: tried that first, and it
+  regressed a genuinely-cancelling product — `factorial(1463)/
+  factorial(1463)*factorial(1463)/factorial(1463)` (net exponent 0,
+  exact value 1) was reported as an ~18,000-digit uncancelled
+  denominator, because giving ONE `Pow` factor's base a growth-bound
+  approximation (rather than leaving it "unresolved", as before) fed a
+  resolved/unresolved MISMATCH straight into the surrounding `Mul`'s
+  own non-cancelling fallback math. Landed alongside a SEPARATE,
+  principled fix for that same cancellation gap: `_factor_multiset`
+  now also treats a table-function call as a valid EXACT multiset base
+  (keyed by the node itself — SymPy's own structural equality/hashing
+  on a `Function` node's class-plus-args already guarantees two
+  identical calls compare and hash equal), so `factorial(1463) /
+  factorial(1463)` cancels EXACTLY via the SAME net-zero-exponent
+  mechanism `Integer` bases already use, without needing to know
+  `factorial(1463)`'s own numeric magnitude at all — but a table-
+  function key that does NOT fully cancel is never trusted as "exact"
+  (`_table_multiset_trusted`, checked at `_factor_multiset`'s own two
+  top-level call sites, never inside that recursive function itself —
+  tried inside first, and it discarded a lone survivor before its
+  `Mul` parent ever got the chance to cancel it against a matching
+  inverse elsewhere in the product, which is exactly why nothing
+  cancelled under that version). Regression-tested: `x*factorial(1463)`
+  (single, in-range, non-cancelling) and `factorial(1000)+
+  fibonacci(1000)` (two independent siblings) both still evaluate.
+
+  **Item 5: pinned against `origin/main`** — `factorial(10+1) << 1 ==
+  79_833_600`, `1 << prime(10) == 536_870_912`, `1 << fibonacci(20)`,
+  `totient(1463) << 10`, `7 // bell(20)` (== 0 — SymPy's own `Mod`/
+  `floor` evaluation determines this from `bell`'s own registered
+  assumptions, never by computing `bell(20)` for real), `factorial(20)
+  % 7 == 0`; the five refusal shapes above refuse in milliseconds;
+  `bell(1463)**2` refuses before construction, verified with a spy on
+  the real `sympy.bell` (never called), not merely a timing
+  measurement.
+
 ## [0.13.0] — 2026-09-21
 
 ### Fixed
