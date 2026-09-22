@@ -117,7 +117,11 @@ the registry entry.
 ### Files prepared
 
 `docker/mcp-catalog/` in this repository holds the three files a submission
-PR copies into `servers/codecalc/` in a `docker/mcp-registry` fork:
+PR copies into `servers/codecalc/` in a `docker/mcp-registry` fork. The pin
+is bumped on every release: `source.commit` must be the release tag's commit
+and `tools.json` the catalog regenerated at that commit, and the open
+submission PR (docker/mcp-registry#5025) is updated from these files in the
+same step, so the repo copy and the submitted copy never drift:
 
 - **`server.yaml`** — `image: mcp/codecalc`, `source.project` pointing at
   this repo, `source.commit` pinned to a specific SHA (the registry's
