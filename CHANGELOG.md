@@ -930,6 +930,50 @@ behind it.
   to raise confirms the internal guard itself fires on an otherwise
   ordinary expression.
 
+- **`polygamma`'s pole-sensitive domain check discarded the SIGN of a
+  resolved order, silently treating a negative order as if it were the
+  same positive magnitude** (THE-1095, follow-up to GH #326; grok
+  review of fad081f): `_pole_sensitive_magnitude`'s `polygamma` branch
+  fed `math.log10(abs(order_v))` into `order! * zeta(order+1, z)` —
+  correct only for `order >= 1`, but SymPy 1.14 evaluates
+  `polygamma(-1, z)` as `loggamma(z) - log(2*pi)/2` (`gamma(z)`-scale
+  for a large `z`), so `factorial(floor(polygamma(-1, 700)))`,
+  `bell(floor(Abs(polygamma(-1, 1463))))`, and `rf(5,
+  floor(polygamma(-1, 700)))` all passed this screen with a false
+  ~1-digit bound and then constructed a genuinely huge value for real.
+  Fixed by checking the order's sign and integer-ness BEFORE ever
+  computing a magnitude from it: a resolved order now needs to be
+  exactly `0` (digamma) or a positive integer `>= 1` (with `z >= 1`) to
+  be accepted at all — every other resolved order (negative,
+  non-integer) refuses outright, as unknown, rather than being
+  estimated via `abs()`. `_table_function_growth_violation`'s own
+  TOP-LEVEL walk needed a narrower companion fix: `polygamma(-1, 5)`
+  bare (unwrapped) is genuinely safe on `origin/main` and must still
+  evaluate — a new `order_v == -1` branch there exempts a POSITIVE
+  INTEGER `z` under the same cap `factorial`'s own position-0 argument
+  already uses (`z <= MAX_HEAVY_ARG + 1`, since `polygamma(-1, z)`
+  materializes an exact `factorial(z - 1)` for integer `z`) and
+  otherwise falls through to the same refusal as the nested case.
+  Pinned: the three repros refuse in well under a second; `polygamma(
+  -1, 5)` at the top level matches main.
+
+- **The round-13 parse-error-text pins hardcoded exception text that is
+  PYTHON-VERSION dependent, failing CI on py3.11/macOS/Windows** (grok
+  review of fad081f): `2+2)` raises `IndexError: list index out of
+  range` on Python 3.14 (deep in SymPy's own `evaluateFalse()`/`ast`
+  handling), but on 3.11 the same string never reaches that code at
+  all — CPython's own `tokenize` module raises a `TokenError` for it
+  first, caught earlier by `classify_unsafe`'s own guard instead, with
+  its own (also Python-version-dependent) message text. A literal pin
+  is only ever right for the interpreter it was captured on. Fixed by
+  computing the expected `(category, message)` on the RUNNING
+  interpreter inside the test, via the identical entry points
+  `safe_parse` itself calls (`classify_unsafe`'s tokenizer guard first,
+  then whichever of `_parse_deferred`/the real `parse_expr(...,
+  evaluate=False)` `safe_parse`'s own control flow would actually
+  reach and relay for that string) — the pin is "identical to what
+  main says on THIS Python," never a captured literal.
+
 ## [0.13.0] — 2026-09-21
 
 ### Fixed

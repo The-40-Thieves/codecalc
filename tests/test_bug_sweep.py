@@ -4436,29 +4436,64 @@ for _expr, _want in (("factorial(floor(zeta(3)))", 1), ("factorial(ceiling(Abs(c
 
 # Unbalanced/malformed syntax must NEVER be recategorized as a ceiling
 # refusal, and the text must match what `origin/main` itself raises for
-# the identical raw string -- verified live against bare SymPy (same
-# transformations this module always applies) for the two that reach a
-# real `parse_expr`/`_parse_deferred` call; the other two are caught
-# earlier still, by `classify_unsafe`'s own PRE-EXISTING (untouched by
-# any round of THE-1095) tokenize-error handling, whose wording is
-# `main`'s own stable text for a `TokenError`.
-_TOKENIZE_ERROR_MSG = ("expression could not be tokenised: "
-                       "('unexpected EOF in multi-line statement', (1, 0))")
+# the identical raw string. THE-1095 round 13 follow-up #2 (grok, CI
+# red on py3.11/macOS/windows): the earlier version of this pin
+# hardcoded the exception TEXT as a literal -- but that text is PYTHON-
+# VERSION dependent (on 3.14, `2+2)` raises `IndexError: list index out
+# of range` from deep in SymPy's own `evaluateFalse()`/`ast` handling;
+# on 3.11, the SAME string never reaches that code at all -- CPython's
+# OWN `tokenize` module raises a `TokenError` for it first, caught by
+# `classify_unsafe`'s own earlier guard instead). A literal pin is
+# right for ONE interpreter and wrong for every other -- fixed by
+# computing the expected `(category, message)` on THE RUNNING
+# interpreter, via the identical two entry points `safe_parse` itself
+# calls (`classify_unsafe`'s own tokenizer guard first, then either
+# `_parse_deferred` or the real `parse_expr(..., evaluate=False)` --
+# whichever one `safe_parse`'s own control flow would actually reach
+# and relay for this string), rather than ever hardcoding either
+# outcome: the pin is "identical to what main would say on THIS
+# Python," never a literal captured on one.
+def _reference_syntax_error(expr: str) -> tuple:
+    """`(category, message)` `safe_parse(expr)` SHOULD produce for a
+    genuinely malformed `expr`, computed independently -- on the
+    RUNNING interpreter, never a hardcoded literal -- by calling the
+    same entry points `safe_parse` itself calls, in the same order.
+    """
+    cls = _se5.classify_unsafe(expr)
+    if cls:
+        return cls
+    from sympy.parsing.sympy_parser import parse_expr as _pe5
+    if _se5._expression_touches_table_or_unprotected_operator(expr):
+        try:
+            _se5._parse_deferred(expr, local_dict=None,
+                                  global_dict=_se5._deferred_global_dict(),
+                                  transformations=_se5.math_transforms())
+        except Exception as exc:
+            return ("validation", f"parse error: {exc}")
+    try:
+        _pe5(expr, transformations=_se5.math_transforms(),
+             global_dict=_se5.safe_global_dict(), evaluate=False)
+    except Exception as exc:
+        return ("validation", f"parse error: {exc}")
+    return ("ok", "-- did not actually raise; test probe is not malformed --")
+
+
 _SYNTAX_ERROR_PROBES = (
-    ("2+2)", "parse error: list index out of range"),
-    ("(2+2", _TOKENIZE_ERROR_MSG),
-    ("2 +* 3", "parse error: invalid syntax (<unknown>, line 1)"),
-    ("sin(", _TOKENIZE_ERROR_MSG),
-    ("factorial(floor(Abs(1/(1-1+10**(-6))))))",
-     "parse error: list index out of range"),  # 6 closing parens
+    "2+2)",
+    "(2+2",
+    "2 +* 3",
+    "sin(",
+    "factorial(floor(Abs(1/(1-1+10**(-6))))))",  # 6 closing parens
 )
-for _expr, _want_msg in _SYNTAX_ERROR_PROBES:
+for _expr in _SYNTAX_ERROR_PROBES:
     _v, _e = _boundary_parse(_expr)
+    _want = _reference_syntax_error(_expr)
     check(f"THE-1095 round 13 (coordinator correction): {_expr!r} "
           f"(unbalanced/malformed syntax) is a VALIDATION error, "
-          f"byte-identical to main, never a ceiling refusal",
-          _v is None and _e == ("validation", _want_msg),
-          f"-> value={_v!r} err={_e!r} want=('validation', {_want_msg!r})")
+          f"identical to what main says on THIS interpreter, never a "
+          f"ceiling refusal",
+          _v is None and _e is not None and _e[0] == "validation" and _e == _want,
+          f"-> value={_v!r} err={_e!r} want={_want!r}")
 
 # The balanced-paren version of the same repro is UNCHANGED by this
 # round's correction -- it never raises at all, and correctly refuses on
@@ -4530,6 +4565,53 @@ check("THE-1095 round 13: an exception raised INSIDE this module's own "
       "misleading 'parse error'",
       _v is None and _e is not None and _e[0] == "ceiling"
       and "internal" in _e[1].lower(),
+      f"-> value={_v!r} err={_e!r}")
+
+# ═══ THE-1095 round 13 follow-up (grok FAILED fad081f, verify-1095-r11- ═══
+# grok.log): `_pole_sensitive_magnitude`'s `polygamma` branch discarded
+# the SIGN of a resolved order (`math.log10(abs(order_v))`) before
+# feeding it to `_growth_polygamma`'s `order! * zeta(order+1, z)`
+# identity -- correct ONLY for `order >= 1`, but the sign-discarding
+# meant a NEGATIVE order round-tripped through `abs()` as if it were
+# the SAME positive magnitude, so `polygamma(-1, z)` was bounded as
+# though it were `polygamma(1, z)` (`zeta(2, z) < 2`, a ~1-digit claim)
+# -- while SymPy 1.14 actually evaluates `polygamma(-1, z)` as
+# `loggamma(z) - log(2*pi)/2` (`~ z*log(z)` for a real, `gamma(z)`-scale
+# result once `z` is large). Fixed at the SOURCE (`_pole_sensitive_
+# magnitude`'s own polygamma branch, used for the NESTED case): a
+# resolved order that is neither exactly `0` (digamma) nor a POSITIVE
+# INTEGER now refuses outright, sign and non-integer-ness both checked
+# BEFORE any magnitude is ever computed from it -- "refuse every other
+# resolved order as unknown," never estimate one from `abs()`.
+#
+# `_table_function_growth_violation`'s own TOP-LEVEL walk needed a
+# separate, narrower fix: `polygamma(-1, 5)` bare (unwrapped) is
+# genuinely SAFE on `origin/main` (a small, instantly-evaluated
+# expression) and must still evaluate, not refuse -- see the new
+# `order_v == -1` branch there, which exempts a POSITIVE INTEGER `z`
+# under the SAME cap `factorial`'s own position-0 argument already uses
+# (`z <= MAX_HEAVY_ARG + 1`, since `polygamma(-1, z)` materializes an
+# exact `factorial(z - 1)` for integer `z`) and otherwise falls through
+# to the same refusal as the nested case.
+for _expr in ("factorial(floor(polygamma(-1, 700)))",
+              "bell(floor(Abs(polygamma(-1, 1463))))",
+              "rf(5, floor(polygamma(-1, 700)))"):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _elapsed = time.time() - _t0
+    check(f"THE-1095 round 13 follow-up (grok): {_expr!r} (negative "
+          f"polygamma order, sign previously discarded) refuses in "
+          f"well under a second, never constructs the gamma(z)-scale "
+          f"value",
+          _v is None and _e is not None and _e[0] == "ceiling"
+          and _elapsed < 2.0,
+          f"-> value={_v!r} err={_e!r} elapsed={_elapsed:.4f}s")
+
+_v, _e = _boundary_parse("polygamma(-1, 5)")
+check("THE-1095 round 13 follow-up (grok): 'polygamma(-1, 5)' at the "
+      "TOP LEVEL (bare, unwrapped) matches main -- evaluates, never "
+      "refused",
+      _v is not None and _e is None and str(_v) == "-log(2*pi)/2 + log(24)",
       f"-> value={_v!r} err={_e!r}")
 
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else

@@ -3986,6 +3986,36 @@ def _table_function_growth_violation(node, memo: dict) -> str | None:
         order_v = _resolve_exact_rational(node.args[0], memo)
         if order_v == 0:
             return None
+        if order_v == -1 and len(node.args) >= 2:
+            # #326 finding (grok, round 13 review of fad081f): `polygamma(
+            # -1, z)` rewrites, at REAL construction, to `loggamma(z) -
+            # log(2*pi)/2` — for a POSITIVE INTEGER `z`, SymPy further
+            # rewrites `loggamma` to `log(factorial(z-1))`, MATERIALIZING
+            # an exact `factorial(z-1)` integer eagerly, even bare
+            # (unwrapped) at the top level (confirmed live:
+            # `polygamma(-1, 1463)` alone prints a 4000+-digit literal).
+            # For a NON-integer `z`, the identical call evaluates to a
+            # compact numeric expression (a `Float`/symbolic radical --
+            # `polygamma(-1, 700.5)` -> one ~15-digit `Float`) regardless
+            # of `z`'s own magnitude — confirmed live, no hazard, the
+            # SAME "no genuine top-level hazard" exemption
+            # `_POLE_SENSITIVE_GROWTH_TOP_LEVEL_NAMES` already gives
+            # `gamma`/`loggamma`/`digamma`. So a POSITIVE INTEGER `z`
+            # needs the SAME cap `factorial`'s own position-0 cap
+            # already uses (`MAX_HEAVY_ARG`, calibrated as "the largest
+            # n under MAX_NUMERIC_DIGITS" for `factorial(n)` — here,
+            # `factorial(z - 1)`, so `z <= MAX_HEAVY_ARG + 1`); anything
+            # else (a `z` that is not a positive integer, or does not
+            # resolve at all) falls through to `_pole_sensitive_
+            # magnitude`'s own general domain check below, which refuses
+            # this exact shape unconditionally — correct there, since
+            # THAT function answers a different question ("give a safe
+            # BOUND for an arbitrary NESTED argument," never proven for
+            # negative order at all) than this one ("is `origin/main`'s
+            # own bare top-level call itself safe").
+            z_v = _resolve_exact_rational(node.args[1], memo)
+            if z_v is not None and z_v.q == 1 and 1 <= z_v <= MAX_HEAVY_ARG + 1:
+                return None
         pole_result = _pole_sensitive_magnitude(node, memo)
         if pole_result is None:
             return None
@@ -4784,6 +4814,29 @@ def _pole_sensitive_magnitude(node, memo: dict) -> tuple[float, float, bool, str
                        "computing it would take an unbounded amount of time and "
                        "memory")
             return 0.0, 0.0, False, message
+        elif order_v != 0 and not (order_v.q == 1 and order_v >= 1):
+            # #326 finding (grok, round 13 review of fad081f): a RESOLVED
+            # order that is neither exactly `0` (digamma) nor a positive
+            # INTEGER has no growth formula this module has derived --
+            # most critically, a NEGATIVE order: `_growth_polygamma`'s
+            # own `order! * zeta(order+1, z)` identity is for `order >=
+            # 1` only, but the caller used to feed it `abs(order_v)`,
+            # discarding the sign entirely, so `polygamma(-1, z)`
+            # resolved as if `order` were `+1` -- a ~1-digit bound for a
+            # call SymPy 1.14 actually evaluates as `loggamma(z) -
+            # log(2*pi)/2` (an ANTIDERIVATIVE, `~ z*log(z)`, gamma(z)-
+            # scale for a large `z`): `factorial(floor(polygamma(-1,
+            # 700)))`, `bell(floor(Abs(polygamma(-1, 1463))))`, and
+            # `rf(5, floor(polygamma(-1, 700)))` all passed this
+            # screen's own cap with a claimed ~1-digit bound and then
+            # constructed a gamma(1463)-scale value for real. A
+            # non-integer order (`polygamma(3/2, z)`) is equally
+            # unbounded here -- `order_v.q == 1` rejects it too, not
+            # only a negative `order_v.q == 1 and order_v < 1` integer.
+            message = ("an argument to polygamma() cannot be safely bounded: "
+                       "computing it would take an unbounded amount of time and "
+                       "memory")
+            return 0.0, 0.0, False, message
         handled, z_result = _unresolved_or_violation(node.args[1])
         if handled:
             return z_result
@@ -4793,6 +4846,11 @@ def _pole_sensitive_magnitude(node, memo: dict) -> tuple[float, float, bool, str
                        "computing it would take an unbounded amount of time and "
                        "memory")
             return 0.0, 0.0, False, message
+        # `order_v` reaching here is guaranteed EXACTLY `0` or a positive
+        # INTEGER `>= 1` (the `elif` above refuses everything else) --
+        # `abs()` is a no-op now, kept only because `_growth_polygamma`'s
+        # own magnitude convention (`_safe_pow10`) is always non-negative
+        # regardless.
         bounds = {1: math.log10(z)}
         if order_v is not None:
             bounds[0] = math.log10(abs(order_v)) if order_v != 0 else 0.0
