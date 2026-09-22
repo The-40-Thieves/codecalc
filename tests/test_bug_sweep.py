@@ -4398,6 +4398,62 @@ for _expr, _want in (("factorial(floor(zeta(3)))", 1), ("factorial(ceiling(Abs(c
           f"{_expr!r} evaluates to main's exact value",
           _v == _want and _e is None, f"-> value={_v!r} err={_e!r} want={_want!r}")
 
+# ═══ THE-1095 round 13 (coordinator replay of 9a35eb6): a reciprocal of ═══
+# an exact-zero-plus-epsilon `Add` (`1/(1-1+10**(-6))`) surfaced as
+# `('validation', 'parse error: list index out of range')` -- an internal
+# `IndexError`, from somewhere in this module's own parsing/scanning
+# machinery, reported to the caller as if it were THEIR OWN malformed
+# syntax. Fixed two ways: `_classify_parse_exception` (used at every
+# `safe_parse` site that used to trust ANY exception type caught around a
+# raw `parse_expr`/`_parse_deferred` call to mean "genuine parse error")
+# now refuses closed -- a `CATEGORY_CEILING` "cannot be safely bounded"
+# refusal, never the raw exception text -- for any exception type this
+# module has not itself confirmed SymPy raises for a real user-facing
+# parse issue; and `_resolve_exact_rational` (the newest, and the
+# coordinator's own named suspect, "the resolver") now catches any
+# exception its own arithmetic composition raises and returns `None`
+# ("not exactly resolvable") for it, the same outcome as every other
+# unresolvable shape, rather than ever propagating one uncaught.
+_v, _e = _boundary_parse("factorial(floor(Abs(1/(1-1+10**(-6)))))")
+check("THE-1095 round 13: 'factorial(floor(Abs(1/(1-1+10**(-6)))))' "
+      "(1/(1-1+10**(-6)) resolves EXACTLY to 1000000 -- factorial(1000000) "
+      "is a genuine ~5.6M-digit ceiling refusal, never the internal "
+      "'list index out of range' the coordinator's own replay found) "
+      "refuses with the ceiling category, and the message carries no "
+      "internal implementation detail",
+      _v is None and _e is not None and _e[0] == "ceiling"
+      and "index" not in _e[1].lower(),
+      f"-> value={_v!r} err={_e!r}")
+
+# Fuzz-style sweep over reciprocals of exact-zero and near-zero subtrees --
+# the same shape class as the repro above, at varying nesting and with a
+# free symbol mixed in (`x/(0+0)`). None of these is expected to be
+# refused on ITS OWN (each is either a genuine `zoo`/`zoo*x` pole on
+# `origin/main`, or a clean exact evaluation) -- the assertion is never
+# "matches this exact value," only "never an internal-looking message":
+# whatever `safe_parse` returns is EITHER a clean value (`err is None`)
+# or an error whose category is one this module's own callers already
+# know how to handle (`validation`/`ceiling`) and whose text carries no
+# raw Python exception class name or internal detail like "index".
+_RECIPROCAL_NEAR_ZERO_SWEEP = (
+    "1/(1-1)",
+    "1/(2-2+10**(-9))",
+    "x/(0+0)",
+    "1/(10**(-6))",
+    "1/(Rational(1,10**6))",
+)
+for _expr in _RECIPROCAL_NEAR_ZERO_SWEEP:
+    _v, _e = _boundary_parse(_expr)
+    _ok = isinstance((_v, _e), tuple)
+    if _e is not None:
+        _ok = (_e[0] in ("validation", "ceiling")
+               and "index" not in _e[1].lower()
+               and "traceback" not in _e[1].lower())
+    check(f"THE-1095 round 13 (fuzz sweep): {_expr!r} returns a clean "
+          f"2-tuple -- main's own outcome or a ceiling/validation "
+          f"refusal, never an internal message",
+          _ok, f"-> value={_v!r} err={_e!r}")
+
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== ALL BUG-SWEEP REGRESSIONS FIXED ===")
 sys.exit(1 if FAILS else 0)

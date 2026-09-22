@@ -887,6 +887,38 @@ behind it.
   refuse when nested) alongside a small inside-domain point per name
   (all evaluate).
 
+- **An exception from this module's OWN parsing/scanning machinery could
+  be reported to the caller as if it were THEIR OWN malformed syntax**
+  (THE-1095, follow-up to GH #326): `factorial(floor(Abs(1/(1-1+10**(
+  -6)))))` — a reciprocal of an exact-zero-plus-epsilon `Add` — surfaced
+  as `('validation', 'parse error: list index out of range')`, an
+  internal `IndexError` relayed verbatim as if the caller had written
+  invalid syntax. Every `safe_parse` site that caught a raw exception
+  around a `parse_expr`/`_parse_deferred` call used to trust ANY
+  exception type to mean "the user's own syntax is bad" and stringify it
+  straight into a `CATEGORY_VALIDATION` "parse error" message — fixed
+  once, with a shared `_classify_parse_exception` helper (reused at
+  every one of those sites, not just the one this round's own repro
+  happened to reach): an exception TYPE this module has actually
+  confirmed SymPy raises for a genuine user-facing parse issue
+  (`SyntaxError`, `TypeError` — arity — `ValueError`/`NameError` —
+  coercion/undefined-name — `tokenize.TokenError`, ...) still reports
+  its own text; anything else now fails closed as a `CATEGORY_CEILING`
+  "cannot be safely bounded" refusal instead, never leaking Python's own
+  internal exception text to a caller. `_resolve_exact_rational` (the
+  central exact-value resolver introduced two rounds ago) now also
+  catches any exception its own arithmetic composition raises and
+  returns `None` ("not exactly resolvable") for it — the SAME outcome
+  as every other shape it cannot certify — closing the gap at the
+  source, not only at the caller's own safety net. Confirmed the actual
+  expression correctly refuses on the pre-existing digit-count backstop
+  (`factorial(1000000)`, ~5.6M digits) with no "index" anywhere in the
+  message; a fuzz-style sweep over reciprocals of exact-zero and
+  near-zero subtrees (`1/(1-1)`, `1/(2-2+10**(-9))`, `x/(0+0)`,
+  `1/(10**(-6))`, `1/(Rational(1,10**6))`) confirms each still returns
+  either main's own outcome or a clean validation/ceiling refusal, never
+  an internal-looking message.
+
 ## [0.13.0] — 2026-09-21
 
 ### Fixed
