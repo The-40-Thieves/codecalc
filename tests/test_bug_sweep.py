@@ -1172,12 +1172,34 @@ for _expr in _EXPLOSIVE_CRASH_INPUTS:
 # the fix must not waive an actually-explosive shape through just to avoid
 # crashing on it — each of the three above is refused for a real reason
 # (an astronomically huge digit count / exponent), not just "didn't raise".
-check("  ...2**100000!!... is refused on 'digits' grounds, not silently allowed",
+#
+# THE-1095 round 2 (verify-1095): the first two inputs' own WORDING changed,
+# not their safety. `100000!!` is the `factorial2` double-factorial postfix
+# transform — invisible to the TOKEN-level heavy-call screen (it looks for
+# a `NAME(` call in the source text; `!!` never spells "factorial2("), so
+# these two relied entirely on the TREE-level scan. Pre-round-2 (real-dict
+# parse first), `factorial2(100000)`'s LITERAL argument (100000, itself
+# over MAX_HEAVY_ARG) evaluated for real DURING that first parse -- by the
+# time the scan ran, no `factorial2` Function node was left to check
+# against its own cap at all, only a `Pow` with an already-materialized,
+# thousands-of-digits Integer exponent, caught by the generic digit-count
+# (`2**100000!!...`) / symbolic-exponent (`(x+1)**20000!!...`) Pow
+# machinery instead. Round 2's deferred-first ordering means the deferred
+# scan (which always runs first now) sees the REAL, unevaluated
+# `factorial2(100000)` Function node directly, and refuses it THERE, via
+# its own value-kind cap message, before either downstream mechanism ever
+# gets a chance to run — a MORE direct, more accurate refusal (it now
+# names the actual over-cap argument, not a derived symptom of it), not a
+# weaker one. `"9"*400 + "**12"` is unaffected -- no heavy-function call is
+# involved, so its digit-count message is unchanged.
+check("  ...2**100000!!... is refused on the factorial2() heavy-call cap "
+      "itself now (THE-1095 round 2), not silently allowed",
       _boundary_parse(_EXPLOSIVE_CRASH_INPUTS[0])[1] is not None
-      and "digits" in _boundary_parse(_EXPLOSIVE_CRASH_INPUTS[0])[1][1])
-check("  ...(x+1)**20000!!... is refused on 'exponent' grounds, not silently allowed",
+      and "factorial2" in _boundary_parse(_EXPLOSIVE_CRASH_INPUTS[0])[1][1])
+check("  ...(x+1)**20000!!... is refused on the factorial2() heavy-call cap "
+      "itself now (THE-1095 round 2), not silently allowed",
       _boundary_parse(_EXPLOSIVE_CRASH_INPUTS[1])[1] is not None
-      and "exponent" in _boundary_parse(_EXPLOSIVE_CRASH_INPUTS[1])[1][1])
+      and "factorial2" in _boundary_parse(_EXPLOSIVE_CRASH_INPUTS[1])[1][1])
 check("  ...'9'*400 + '**12' is refused on 'digits' grounds, not silently allowed",
       _boundary_parse(_EXPLOSIVE_CRASH_INPUTS[2])[1] is not None
       and "digits" in _boundary_parse(_EXPLOSIVE_CRASH_INPUTS[2])[1][1])
@@ -2623,6 +2645,131 @@ for _fn_name in _se5._DEFERRED_STANDIN_NAMES:
           _v is None and _e is not None
           and "deferred" not in _text.lower() and "standin" not in _text.lower(),
           f"-> {_text}")
+
+# ═══ THE-1095 round 2 (verify-1095: both cross-vendor reviewers FAILED ═════
+# ═══ 812750e; every finding below is a verified repro) ══════════════════════
+
+# Finding 1 (Medium, both reviewers, the central one) -- ORDER. The real-dict
+# pre-parse used to run BEFORE the deferred one, so an all-under-cap-TOKEN
+# expression still did the expensive real work before the deferred scan got
+# a chance to refuse: `bell(1463)+factorial(1463+1)` measured 6.77s through
+# the real dict alone before its ceiling refusal, 0.0048s through the
+# deferred parse+scan alone -- same refusal, ~1400x faster. Fixed: safe_parse
+# now runs the deferred parse and reject_explosive(scan_shape) FIRST, and
+# refuses on a hit without ever attempting the real-dict pre-parse.
+import sympy as _sympy5
+
+_real_bell = _sympy5.bell
+_bell_was_called = []
+
+
+class _SpyBell(_real_bell):
+    def __new__(cls, *args, **kwargs):
+        _bell_was_called.append(args)
+        return _real_bell.__new__(cls, *args, **kwargs)
+
+
+_sympy5.bell = _SpyBell
+try:
+    _t0 = time.time()
+    _v, _e = _boundary_parse("bell(1463)+factorial(1463+1)")
+    _dt = time.time() - _t0
+    check("THE-1095 round 2: 'bell(1463)+factorial(1463+1)' (every token "
+          "individually under MAX_HEAVY_ARG) is refused",
+          _v is None and _e is not None and _e[0] == "ceiling", f"-> {_e}")
+    check("  ...and the REAL bell() is never constructed on the refused "
+          "path -- the deferred scan alone refuses first",
+          _bell_was_called == [], f"-> called with args={_bell_was_called}")
+    check(f"  ...promptly (well under 6.77s measured pre-fix) ({_dt:.3f}s)",
+          _dt < 1.0, f"-> {_dt:.3f}s")
+finally:
+    _sympy5.bell = _real_bell
+
+# The same ordering bug's OTHER repros: a computed argument whose combined
+# literal TOKENS are cheap (the digit-sum token rule is a no-op for a
+# multi-literal Pow like `10**2000`) but whose real function would eagerly
+# do unbounded work -- all must now refuse in milliseconds, not just
+# eventually.
+for _expr in ("nextprime(10**2000)", "primepi(10**8)", "binomial(10**6, 10**5)"):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round 2: {_expr!r} (token-cheap, real-function-"
+          "expensive) is refused",
+          _v is None and _e is not None and _e[0] == "ceiling", f"-> {_e}")
+    check(f"  ...in milliseconds, not by letting the real function run "
+          f"first ({_dt:.4f}s)",
+          _dt < 0.5, f"-> {_dt:.4f}s")
+
+# Finding 2 (Low Codex / Medium grok) -- arity and per-argument semantics.
+# The stand-ins used to accept any arity and the scan capped EVERY
+# positional argument, so `binomial(1463+1)`/`rf(1463+1)` (missing k) were
+# refused as a CEILING where main correctly refuses them as a VALIDATION
+# (arity) error, and `binomial(5, 1463+1)`/`ff(5, 1463+1)` (k > n) were
+# refused even though main evaluates them to 0 cheaply (binomial.eval()'s
+# own `d.is_negative` shortcut, no loop over k at all). Fixed: deferred
+# stand-ins now share the real class's own `nargs` where SymPy exposes one
+# (identical `TypeError`, structurally, to main's own arity refusal), and
+# `_numeric_ceiling_scan`'s Function-node branch now bounds only the FIRST
+# positional argument, not every one.
+for _expr, _main_code, _main_value in (
+    ("binomial(1463+1)", "validation", None),
+    ("rf(1463+1)", "validation", None),
+    ("binomial(5, 1463+1)", None, "0"),
+    ("ff(5, 1463+1)", None, "0"),
+):
+    _v, _e = _boundary_parse(_expr)
+    if _main_code == "validation":
+        check(f"THE-1095 round 2: {_expr!r} (wrong arity, missing k) is a "
+              "VALIDATION error, matching main, not a ceiling",
+              _v is None and _e is not None and _e[0] == "validation",
+              f"-> value={_v!r} err={_e!r}")
+        check("  ...and the message is SymPy's own arity wording, not "
+              "'exceeds the limit'",
+              _e is not None and "argument" in _e[1] and "given" in _e[1],
+              f"-> {_e}")
+    else:
+        check(f"THE-1095 round 2: {_expr!r} (k > n) evaluates to "
+              f"{_main_value} like main, not refused as a ceiling",
+              _v is not None and str(_v) == _main_value and _e is None,
+              f"-> value={_v!r} err={_e!r}")
+
+# Finding 3 (Low, grok) -- a real-dict parse exception used to be treated as
+# unconditionally inconclusive. Fixed: a `TypeError` (SymPy's own arity/
+# shape validation, unconditional regardless of evaluate=False) is returned
+# immediately as a validation error, matching main; only a non-TypeError
+# exception (the group-B eager int-coercion class) on a call the deferred
+# scan already proved safe proceeds to evaluate=True. `binomial(1463+1)`/
+# `rf(1463+1)` above already cover the single-parse-failure shape (real
+# fails, deferred is clean); this covers the invalid-and-tiny shape too, and
+# the both-parses-fail shape.
+_v, _e = _boundary_parse("binomial(2,3,1463+1)")
+check("THE-1095 round 2: 'binomial(2,3,1463+1)' (too many args, tiny "
+      "values) is refused as validation (arity), not evaluated or refused "
+      "as a ceiling",
+      _v is None and _e is not None and _e[0] == "validation", f"-> {_e}")
+_v, _e = _boundary_parse("binomial(5, 6)")  # k > n, tiny -- must still be 0
+check("THE-1095 round 2: 'binomial(5, 6)' (k > n, both tiny, no ceiling "
+      "involved at all) still evaluates to 0 like main",
+      _v is not None and str(_v) == "0" and _e is None, f"-> value={_v!r} err={_e!r}")
+
+# Finding 4 (Low, grok) -- `root` used to be excluded from the deferred
+# stand-ins entirely, so a computed, digit-heavy VALUE argument
+# (`root(10**2000, 3)`, token-cheap: '10' and '2000' sum to 6 digits, far
+# under MAX_ROOT_ARG_DIGITS) ran root's own real construction on EVERY
+# pre-parse, unbounded by anything until evaluation. Fixed: `root` is now
+# also a deferred stand-in, so its VALUE argument gets the same tree-level
+# digit-count backstop `factorint` and friends already have.
+_t0 = time.time()
+_v, _e = _boundary_parse("root(10**2000+1, 3)")
+_dt = time.time() - _t0
+check("THE-1095 round 2: 'root(10**2000+1, 3)' (computed, digit-heavy, "
+      "token-cheap) is refused at the tree level",
+      _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+check(f"  ...promptly ({_dt:.3f}s)", _dt < 1.0, f"-> {_dt:.3f}s")
+_v, _e = _boundary_parse("root(21, 3)")
+check("  ...and root(21, 3) (an ordinary computed-free value) still evaluates",
+      _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
 
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== ALL BUG-SWEEP REGRESSIONS FIXED ===")

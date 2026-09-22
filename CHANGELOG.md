@@ -53,13 +53,29 @@ behind it.
   `evaluate=False` pre-parse regardless of the value it represents.
   `safe_parse` now also runs that pre-parse through a second,
   `_deferred_global_dict()`-backed shape — an inert stand-in for every
-  name in `_FUNCTION_ARG_CAPS` (`sqrt`/`root`/`cbrt` excepted, unaffected
-  and already covered elsewhere), named and positioned exactly as the
-  caller wrote it, that never evaluates and never raises — feeding
+  name in `_FUNCTION_ARG_CAPS` (`sqrt`/`cbrt` excepted, unaffected and
+  already covered elsewhere), named and positioned exactly as the caller
+  wrote it, that never evaluates and never raises — feeding
   `_numeric_ceiling_scan` a real tree to bound in both directions, while
   the original real-function shape keeps every existing check (including
   `sqrt`/`cbrt`'s construction-cost backstop, which depends on a literal
-  heavy-function argument evaluating for real) untouched.
+  heavy-function argument evaluating for real) untouched. **Revised after
+  cross-vendor review of the first version of this fix** (`verify-1095`,
+  both reviewers FAILED it): the deferred, inert-stand-in parse now runs
+  and refuses FIRST, before the real-function parse ever touches the
+  expression at all — the first version ran the real parse first, so a
+  token-cheap-but-real-function-expensive call (`bell(1463)+
+  factorial(1463+1)`, `nextprime(10**2000)`) still paid the real, un-bounded
+  cost before its eventual refusal (measured 6.77s vs 0.005s). The
+  deferred stand-ins now also carry the real class's own arity (`nargs`,
+  copied from SymPy where it exposes one) so a malformed call
+  (`binomial(1463+1)`, missing `k`) is refused as the SAME validation
+  error `origin/main` gives, not miscategorized as a ceiling; and the
+  tree-level cap now bounds only the FIRST positional argument, not
+  every one, so `binomial(5, 1463+1)`/`ff(5, 1463+1)` (`k > n`, cheap
+  and legitimately `0` on `origin/main`) evaluate instead of being
+  wrongly refused. `root` is now also a deferred stand-in, closing the
+  same real-function-runs-first gap for its own value argument.
 
 ## [0.13.0] — 2026-09-21
 
