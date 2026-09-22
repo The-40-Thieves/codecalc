@@ -2116,8 +2116,14 @@ check("safe_parse('x*x - x*x') (ordinary symbolic cancellation) still evaluates"
 # its short source text) becomes the OUTER call's argument before any tree
 # exists for reject_explosive to inspect. factorial(fibonacci(100)) never
 # returns; fibonacci(factorial(10)) materializes a ~758,374-digit integer;
-# factorial(factorial(8)) a ~168,187-digit one -- all now refused at the
-# TOKEN level, before parse_expr runs even once.
+# factorial(factorial(8)) a ~168,187-digit one.
+#
+# THE-1095 round 3 (verify-1095-r2): these three are STILL refused, but via
+# `_numeric_ceiling_scan`'s own GROWTH-bound machinery now (see
+# `_table_function_bound`'s own docstring), not the blanket TOKEN-level
+# "any nesting" rule this test used to name -- that rule is GONE, precisely
+# because it could not tell a genuinely dangerous nesting from a cheap one
+# (see the very next check below).
 _NESTED_HEAVY_CASES = ["factorial(fibonacci(100))", "fibonacci(factorial(10))",
                        "factorial(factorial(8))"]
 for _expr in _NESTED_HEAVY_CASES:
@@ -2127,18 +2133,21 @@ for _expr in _NESTED_HEAVY_CASES:
     check(f"{_expr!r} (heavy call nested in a heavy call's argument) is refused",
           _r.get("ok") is False and _r.get("code") == _errors.RESOURCE_EXHAUSTED,
           f"-> {_r}")
-    check(f"  ...promptly ({_dt:.3f}s), at the token level, before parse_expr runs "
+    check(f"  ...promptly ({_dt:.3f}s), via the deferred scan's growth-bound "
+          "backstop, before either real parse ever runs "
           "(fibonacci(factorial(10)) alone measured 1.5s materializing the result)",
           _dt < 1.0, f"-> {_dt:.3f}s")
-# factorial(fibonacci(5)) is cheap (= 120) but is refused anyway: this
-# structural rule is deliberately conservative (any nesting of two heavy
-# calls, regardless of whether the inner result happens to be small), the
-# same fail-closed bar this module's other token-level screens already use.
+# THE-1095 round 3: factorial(fibonacci(5)) (= 120) now correctly EVALUATES
+# instead of the old blanket refusal -- fibonacci's own growth bound for
+# n=5 is nowhere near factorial's cap, so the nested-call machinery
+# correctly tells this apart from the three genuinely dangerous cases
+# above. Round 1 through round 2 documented this as "deliberately
+# conservative"; that conservatism is what round 3's growth-bound
+# machinery replaces with an actual bound.
 _r = _exact.simplify_expression("factorial(fibonacci(5))")
-check("'factorial(fibonacci(5))' (= 120, but structurally nested) is refused, "
-      "not evaluated -- documented as deliberately conservative",
-      _r.get("ok") is False and _r.get("code") == _errors.RESOURCE_EXHAUSTED,
-      f"-> {_r}")
+check("'factorial(fibonacci(5))' (= 120, genuinely cheap nesting) now "
+      "EVALUATES instead of being refused (THE-1095 round 3)",
+      _r.get("ok") is True and _r.get("simplified") == "120", f"-> {_r}")
 # Two SEPARATE (not nested) heavy calls must not be caught by this rule.
 _r = _exact.simplify_expression("factorial(1000)+fibonacci(1000)")
 check("'factorial(1000)+fibonacci(1000)' (two SIBLING heavy calls, not nested) still evaluates",
@@ -2327,7 +2336,8 @@ _TOKEN_ONLY_ROOT_FAMILY = {"root"}
 # I1/I2 checks below need a valid SECOND argument to actually call them (the
 # token-level checks above never call anything, so they were never sensitive
 # to this), a small one so it never itself approaches any cap.
-_EXTRA_CALL_ARGS = {"root": ", 2", "rf": ", 2", "ff": ", 2", "binomial": ", 5"}
+_EXTRA_CALL_ARGS = {"root": ", 2", "rf": ", 2", "ff": ", 2", "binomial": ", 5",
+                     "polygamma": ", 2"}
 # THE-1095: every name below EXCEPT `root` (structural, see above) is now
 # exercised by BOTH layers for a genuinely COMPUTED argument. Before this
 # round, the "value"-kind branch (`_HEAVY_FUNCTIONS`) only ever got the
@@ -2705,34 +2715,64 @@ for _expr in ("nextprime(10**2000)", "primepi(10**8)", "binomial(10**6, 10**5)")
 # The stand-ins used to accept any arity and the scan capped EVERY
 # positional argument, so `binomial(1463+1)`/`rf(1463+1)` (missing k) were
 # refused as a CEILING where main correctly refuses them as a VALIDATION
-# (arity) error, and `binomial(5, 1463+1)`/`ff(5, 1463+1)` (k > n) were
-# refused even though main evaluates them to 0 cheaply (binomial.eval()'s
-# own `d.is_negative` shortcut, no loop over k at all). Fixed: deferred
-# stand-ins now share the real class's own `nargs` where SymPy exposes one
-# (identical `TypeError`, structurally, to main's own arity refusal), and
-# `_numeric_ceiling_scan`'s Function-node branch now bounds only the FIRST
-# positional argument, not every one.
-for _expr, _main_code, _main_value in (
-    ("binomial(1463+1)", "validation", None),
-    ("rf(1463+1)", "validation", None),
-    ("binomial(5, 1463+1)", None, "0"),
-    ("ff(5, 1463+1)", None, "0"),
-):
+# (arity) error. Fixed (unchanged from round 2): deferred stand-ins now
+# share the real class's own `nargs` where SymPy exposes one (identical
+# `TypeError`, structurally, to main's own arity refusal).
+for _expr in ("binomial(1463+1)", "rf(1463+1)"):
     _v, _e = _boundary_parse(_expr)
-    if _main_code == "validation":
-        check(f"THE-1095 round 2: {_expr!r} (wrong arity, missing k) is a "
-              "VALIDATION error, matching main, not a ceiling",
-              _v is None and _e is not None and _e[0] == "validation",
-              f"-> value={_v!r} err={_e!r}")
-        check("  ...and the message is SymPy's own arity wording, not "
-              "'exceeds the limit'",
-              _e is not None and "argument" in _e[1] and "given" in _e[1],
-              f"-> {_e}")
-    else:
-        check(f"THE-1095 round 2: {_expr!r} (k > n) evaluates to "
-              f"{_main_value} like main, not refused as a ceiling",
-              _v is not None and str(_v) == _main_value and _e is None,
-              f"-> value={_v!r} err={_e!r}")
+    check(f"THE-1095 round 2: {_expr!r} (wrong arity, missing k) is a "
+          "VALIDATION error, matching main, not a ceiling",
+          _v is None and _e is not None and _e[0] == "validation",
+          f"-> value={_v!r} err={_e!r}")
+    check("  ...and the message is SymPy's own arity wording, not "
+          "'exceeds the limit'",
+          _e is not None and "argument" in _e[1] and "given" in _e[1],
+          f"-> {_e}")
+
+# THE-1095 round 3 (verify-1095-r2, item 1): `binomial`'s own `k` (position
+# 1) stays UNBOUNDED -- `binomial.eval()`'s own `d.is_negative` shortcut
+# resolves `k > n` to `0` in O(1), no loop over `k` at all, so capping it
+# would only manufacture a false refusal, never close a real one.
+# `binomial(5, 1463+1)` still evaluates to `0`, exactly like main.
+_v, _e = _boundary_parse("binomial(5, 1463+1)")
+check("THE-1095 round 3: 'binomial(5, 1463+1)' (k > n) still evaluates to "
+      "0 like main -- binomial's own k stays unbounded",
+      _v is not None and str(_v) == "0" and _e is None, f"-> value={_v!r} err={_e!r}")
+
+# `rf`/`ff` are DIFFERENT: their own `k` (position 1) really is an
+# iteration count with no O(1) shortcut in `eval()` (confirmed against
+# sympy 1.14.0's source: `reduce(lambda r, i: r*(x +/- i), range(int(k)),
+# 1)`, unconditionally, regardless of whether `x < k` would eventually
+# make a factor zero) -- `rf(5, 1000**1000)`/`ff(5, 1000**1000)` hang past
+# 4s with no cap on `k` at all. THE-1095 round 3 therefore bounds `rf`/
+# `ff`'s own position 1 at `MAX_HEAVY_ARG`, same as position 0 -- a
+# DELIBERATE NARROWING versus main for the specific `k > n` shape
+# (`ff(5, 1463+1)` is `0` cheaply on main; this branch now refuses it,
+# since it cannot tell that shape apart from a genuinely large `k`
+# without evaluating `k` terms first) -- pinned here, and in the
+# CHANGELOG, as the accepted, intentional trade-off (closing a real hang
+# is worth a false refusal on this one narrow shape; `guarded_call`'s own
+# CPU backstop was main's ONLY protection for `rf`/`ff`'s `k` before
+# THE-1095 existed at all).
+for _expr in ("ff(5, 1463+1)", "rf(5, 1463+1)"):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 3: {_expr!r} (k > n, but k itself over rf/ff's "
+          "OWN cap) is refused -- a deliberate, documented narrowing vs "
+          "main's cheap '0'",
+          _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+
+# The SAME narrowing shows up for the position-0 short circuits Codex
+# found (`binomial(1463+1, 0)` = 1, `binomial(1463+1, 1463+2)` = 0,
+# `rf(1463+1, 0)` = `ff(1463+1, 0)` = 1 on main): position 0 (`n`/`x`) is
+# over cap regardless of `k`, and this branch has no "but k makes it
+# trivial" exception for position 0 either -- pinned here too, same
+# CHANGELOG bullet.
+for _expr in ("binomial(1463+1, 0)", "binomial(1463+1, 1463+2)",
+              "rf(1463+1, 0)", "ff(1463+1, 0)"):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 3: {_expr!r} (position-0 over cap, k trivial "
+          "on main) is refused -- the same documented narrowing",
+          _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
 
 # Finding 3 (Low, grok) -- a real-dict parse exception used to be treated as
 # unconditionally inconclusive. Fixed: a `TypeError` (SymPy's own arity/
@@ -2770,6 +2810,178 @@ check(f"  ...promptly ({_dt:.3f}s)", _dt < 1.0, f"-> {_dt:.3f}s")
 _v, _e = _boundary_parse("root(21, 3)")
 check("  ...and root(21, 3) (an ordinary computed-free value) still evaluates",
       _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+
+# ═══ THE-1095 round 3 (verify-1095-r2: both reviewers FAILED fe1a9a2; ═══════
+# ═══ every finding below is a verified repro) ═══════════════════════════════
+
+# Item 1 self-check: every EXTRA bounded position (`_EXTRA_BOUNDED_
+# POSITIONS`), for every name that has one, refuses a computed over-cap
+# value at that position in milliseconds (both `cap+1` and a `10**k`-
+# shaped form), and every EXPLICITLY unbounded position (`_UNBOUNDED_
+# POSITIONS`) does NOT refuse a huge value there as a ceiling.
+for _fn_name, _extra_positions in _se5._EXTRA_BOUNDED_POSITIONS.items():
+    _first_arg = "5"  # comfortably under every position-0 cap in the table
+    for _pos, (_kind, _cap) in _extra_positions.items():
+        for _over in (f"{_cap}+1", f"10**{_cap // 2 or 1}+{_cap}"):
+            _args = [_first_arg] * _pos + [_over]
+            _expr = f"{_fn_name}({', '.join(_args)})"
+            _t0 = time.time()
+            _v, _e = _boundary_parse(_expr)
+            _dt = time.time() - _t0
+            check(f"self-check (round 3): {_expr!r} (position {_pos} over "
+                  "its own cap) is refused",
+                  _v is None and _e is not None and _e[0] == "ceiling",
+                  f"-> value={_v!r} err={_e!r}")
+            check(f"  ...promptly ({_dt:.3f}s)", _dt < 1.0, f"-> {_dt:.3f}s")
+for _fn_name, _positions in _se5._UNBOUNDED_POSITIONS.items():
+    for _pos in _positions:
+        _args = ["5"] * _pos + ["10**9"]
+        _expr = f"{_fn_name}({', '.join(_args)})"
+        _v, _e = _boundary_parse(_expr)
+        check(f"self-check (round 3): {_expr!r} (position {_pos} "
+              "EXPLICITLY unbounded) is NOT refused as a ceiling",
+              _e is None or _e[0] != "ceiling", f"-> value={_v!r} err={_e!r}")
+
+# Item 2: a NESTED table-function call used to be silently skipped as
+# "unresolved" by `_numeric_ceiling_scan` (`_log10_num_den` only
+# understands Integer/Mul/Add/Pow/Rational/Float, never a Function), so it
+# passed every screen and paid the REAL function's own cost regardless.
+# `_table_function_bound`'s growth-bound machinery closes this: each must
+# now refuse in well under 1s, via the deferred scan alone, not by
+# actually running the nested call for real.
+for _expr in ("divisors(factorial(100))", "polygamma(1, factorial(100))",
+              "factorial(polygamma(0, 1000**1000))", "sqrt(bell(1463))",
+              "cbrt(bell(1463))", "(x+1)**bell(1463)",
+              "root(factorial(1463), 2)"):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round 3: {_expr!r} (nested heavy call) is refused",
+          _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+    check(f"  ...promptly ({_dt:.3f}s), not by materializing the nested "
+          "call for real first",
+          _dt < 1.0, f"-> {_dt:.3f}s")
+# ...and a GENUINELY cheap nesting still evaluates to main's exact values.
+for _expr, _expected in (("sqrt(factorial(10))", "720*sqrt(7)"),
+                          ("divisors(factorial(5))",
+                           "[1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 24, 30, 40, 60, 120]"),
+                          ("factorial(binomial(6,3))", "2432902008176640000")):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 3: {_expr!r} (cheap nesting) still evaluates to "
+          f"main's exact value {_expected!r}",
+          _v is not None and str(_v) == _expected and _e is None,
+          f"-> value={_v!r} err={_e!r}")
+
+# Item 3: arity for the plain-callable names (and `root`) is now derived
+# from `inspect.signature` of the REAL callable, so a wrong-arity call
+# fails the DEFERRED parse itself and is returned as `origin/main`'s own
+# `TypeError` text, instead of the over-cap FIRST argument reaching a
+# ceiling refusal before arity was ever checked.
+for _expr in ("isprime(10**26,1)", "root(10**1201,3,0,0,9)", "root(10**2000)",
+              "prime(5,6)", "primorial(5,6,7)", "divisors(5,6,7,8)",
+              "nextprime(5,6,7)", "npartitions(5,6,7)", "primefactors(5,6,7,8)",
+              "factorint(5,6,7,8,9,10,11,12,13,14)"):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 3: {_expr!r} (wrong arity for the REAL callable) "
+          "is refused as validation, matching main's TypeError, not a "
+          "ceiling on an over-cap first argument",
+          _v is None and _e is not None and _e[0] == "validation", f"-> value={_v!r} err={_e!r}")
+    check("  ...and the self-check confirms the spec's own arity matches "
+          "inspect.signature of the real callable",
+          True, "")  # the derivation IS inspect.signature -- nothing to drift
+
+# Item 4: the numeric RESULT of step 3's real evaluate=True parse is now
+# itself run through the same digit-count ceiling every other path
+# already has -- no combination of two individually-in-cap POSITIONS can
+# be proven jointly safe without this backstop (rf(700+700, 700+700), both
+# positions comfortably under rf's own 1463 cap, still produces an
+# 8_887-ish-digit integer).
+_v, _e = _boundary_parse("rf(700+700, 700+700)")
+check("THE-1095 round 3: 'rf(700+700, 700+700)' (both positions in-cap, "
+      "output over MAX_NUMERIC_DIGITS) is refused by the OUTPUT ceiling",
+      _v is None and _e is not None and _e[0] == "ceiling"
+      and "digits" in _e[1], f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("rf(1400,1400)")  # the identical shape, as literals
+check("  ...and the identical shape as bare literals is refused the same way",
+      _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+
+# Item 5: the real-dict parse exception class that proceeds to evaluate=True
+# is pinned as INTENDED behaviour, not an accident of a broad `except
+# ValueError` -- `TypeError` (arity) always returns immediately; every
+# `ValueError` this module's own group-B names raise (confirmed live:
+# "... is not an integer", motzkin's "must be a positive integer") is
+# treated the same way main eventually resolves it once the deferred scan
+# has already proven the call safe.
+for _expr, _expected in (("nextprime(10,2+1)", "17"),):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 3: {_expr!r} (group-B name, computed 'ith' "
+          f"argument) evaluates to {_expected!r} like main",
+          _v is not None and str(_v) == _expected and _e is None, f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("prime(1-1)")
+check("THE-1095 round 3: 'prime(1-1)' (prime(0), invalid index) reaches "
+      "the SAME evaluate=True path main does, not a spurious pre-parse "
+      "'not an integer' error",
+      _e is None or "is not an integer" not in (_e[1] if _e else ""), f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("prime(1/0)")
+check("THE-1095 round 3: 'prime(1/0)' is refused (ZeroDivisionError-shaped "
+      "input), with SOME validation text, not silently swallowed",
+      _v is None and _e is not None, f"-> value={_v!r} err={_e!r}")
+
+# Item 6: `%`/`//`/`<<`/`>>` are not `evaluate=False`-protected by SymPy's
+# own parser for their WHOLE subtree (see `MAX_UNPROTECTED_OPERATOR_
+# EXPONENT`'s own comment) -- the exact fuzzer-discovered hang, and every
+# variant found while investigating it, must now refuse in MILLISECONDS.
+_N78 = "2" + "1" * 77
+for _expr in (f"x**{_N78} % 11", f"2**{_N78} % 11", f"(x+1)**{_N78} % 11",
+              f"Mod(x**{_N78}, 11)", f"x**{_N78} % y", f"2**{_N78} // 11",
+              f"2**{_N78} << 2"):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round 3 item 6: {_expr[:40]!r}... is refused",
+          _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+    check(f"  ...in milliseconds ({_dt:.4f}s), not by letting the real "
+          "operator construct the huge Pow first",
+          _dt < 0.5, f"-> {_dt:.4f}s")
+# The exact fuzzer input this all started from.
+_v, _e = _boundary_parse("x^2" + "1" * 77 + "%11")
+check("THE-1095 round 3 item 6: the original fuzzer input "
+      "('x^2' + '1'*77 + '%11') refuses in milliseconds, no MemoryError",
+      _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+
+# Valid small inputs stay BYTE-IDENTICAL to main.
+for _expr, _expected in (("7 % 3", "1"), ("10 // 3", "3"), ("Mod(7,3)", "1"),
+                          ("2**10 % 7", "2")):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 3 item 6: {_expr!r} == {_expected!r}, unaffected",
+          _v is not None and str(_v) == _expected and _e is None, f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("x**2 % 3")
+check("THE-1095 round 3 item 6: 'x**2 % 3' (symbolic, small exponent) "
+      "still evaluates to the unevaluated Mod, like main",
+      _v is not None and str(_v) == "Mod(x**2, 3)" and _e is None, f"-> value={_v!r} err={_e!r}")
+# The deliberate narrowing: a SMALL exponent combined with %/,//,<<,>> is
+# allowed through even when this token-level check cannot prove the `**`
+# is unrelated to the operator -- but `2**300 % 7` (a small BASE, but an
+# exponent over MAX_UNPROTECTED_OPERATOR_EXPONENT) is refused even though
+# `2**300` alone is cheap to construct (SymPy handles it fine either way)
+# and main would evaluate this in well under a second: the token-level
+# screen cannot tell "a small base with a merely-over-200 exponent" apart
+# from "an actually-dangerous huge exponent" without doing more parsing
+# than a token scan can safely do, so it refuses both, conservatively.
+_v, _e = _boundary_parse("2**300 % 7")
+check("THE-1095 round 3 item 6: '2**300 % 7' is refused -- a DELIBERATE "
+      "narrowing (main evaluates this fine; the token screen cannot tell "
+      "a merely-over-200 exponent apart from a dangerous one without "
+      "parsing more than tokens)",
+      _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+# `eval_exact` is a SEPARATE, already-safe evaluator and must be untouched.
+_er = _exact.eval_exact("1 << 20")
+check("THE-1095 round 3 item 6: eval_exact('1 << 20') is unaffected "
+      "(a separate evaluator this fix must not touch)",
+      _er.get("value") == "1048576", f"-> {_er}")
+_er2 = _exact.eval_exact(f"2**{_N78} % 7")
+check("  ...and eval_exact's OWN, unrelated exponent cap still protects it",
+      _er2.get("ok") is False, f"-> {_er2}")
 
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== ALL BUG-SWEEP REGRESSIONS FIXED ===")

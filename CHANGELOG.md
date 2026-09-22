@@ -76,6 +76,77 @@ behind it.
   and legitimately `0` on `origin/main`) evaluate instead of being
   wrongly refused. `root` is now also a deferred stand-in, closing the
   same real-function-runs-first gap for its own value argument.
+  **Revised again after a second cross-vendor review** (`verify-1095-r2`,
+  both reviewers FAILED it, on overlapping findings): the ONE per-name
+  spec (`_FUNCTION_ARG_CAPS` + `_EXTRA_BOUNDED_POSITIONS`, read through
+  `_position_spec`/`_bounded_positions`) now drives the token screen, the
+  tree scan, arity, AND nesting together, closing four more gaps the
+  "bound one position, one layer" pattern kept reopening: (1) `rf`/`ff`'s
+  own `k` (position 1, the iteration count `reduce(..., range(int(k)),
+  1)` actually loops over — no O(1) shortcut the way `binomial`'s `k`
+  has) is now capped too — `rf(5, 1000**1000)`/`ff(5, 1000**1000)` used
+  to hang past 4s; `polygamma` (not just `digamma`, its rewrite target)
+  is now in the table, bounded at its own `z` (position 1); `nextprime`'s
+  `ith` and `divisor_sigma`'s `k` (both position 1) are bounded too.
+  DELIBERATE NARROWING, pinned in tests: `binomial`'s own `k` stays
+  unbounded (`eval()`'s `k > n` shortcut is genuinely O(1)), but `rf`/
+  `ff`'s `k` has no such shortcut, so `ff(5, 1463+1)`/`rf(5, 1463+1)`
+  (`k > n`, `0` cheaply on `origin/main`) — and the position-0 short
+  circuits Codex found (`binomial(1463+1, 0)` = `1`, `binomial(1463+1,
+  1463+2)` = `0`, `rf(1463+1, 0)` = `ff(1463+1, 0)` = `1` on
+  `origin/main`) — are now refused instead: closing a real hang is worth
+  a false refusal on this one narrow shape, and `guarded_call`'s CPU
+  backstop was `origin/main`'s only protection for it regardless.
+  (2) A NESTED table-function argument (`divisors(factorial(100))`,
+  measured 11.9s; `polygamma(1, factorial(100))`; `sqrt(bell(1463))`,
+  ~5s; `root(factorial(1463), 2)`; `(x+1)**bell(1463)`) used to be
+  silently "unresolved" and skipped — `_table_function_bound` now gives
+  each table name a safe, loose-but-finite GROWTH-bound formula (`n**n`
+  for `factorial`/`bell`/..., `2**n` for `binomial`, `(x+k)**k` for
+  `rf`/`ff`, the standard asymptotic bounds for `primorial`/`prime`/
+  `nextprime`/`primepi`/`npartitions`/`harmonic`, exponential-base bounds
+  for `fibonacci`/`lucas`/`tribonacci`/`catalan`, `<= n` for `totient`),
+  so a nested call is bounded from its OWN argument caps without ever
+  materializing it — refusing in milliseconds instead. The blanket
+  TOKEN-level "any nesting of two heavy calls is refused" rule this
+  replaced was ALSO wrong the other way: `factorial(fibonacci(5))` (`=
+  120`) and `factorial(binomial(6, 3))` now correctly EVALUATE instead
+  of a refusal that could not tell a cheap nesting from a dangerous one.
+  A table name with no growth formula (the eager-factor family, `sqrt`/
+  `root`/`cbrt`) still fails closed if nested — `unknown != safe`.
+  (3) The eight plain-callable names (and `root`) now derive their own
+  arity from `inspect.signature` of the real callable, so a wrong-arity
+  call (`isprime(10**26, 1)`) fails the DEFERRED parse itself with
+  `origin/main`'s own `TypeError` text, instead of reaching a ceiling
+  refusal on an over-cap first argument before arity was ever checked.
+  (4) `rf(5, 1463+1463)` (`k = 2926`) evaluates cleanly through every
+  per-position cap yet still produces an 8_887-digit integer
+  (`(5+2926)**2926`) — no combination of two individually-in-cap
+  positions can be proven jointly safe without either a growth bound or
+  a check on the actual result, so `safe_parse`'s own evaluate=True
+  step now runs its numeric RESULT through the same digit-count ceiling
+  every other path already has. Also fixed, found investigating the
+  ClusterFuzzLite OOM this round: `%`/`//`/`<<`/`>>` are not
+  `evaluate=False`-protected by SymPy's own parser for their WHOLE
+  subtree (`EvaluateFalseTransformer.visit_BinOp` only special-cases
+  `Add`/`Mult`/`Pow`/`Sub`/`Div`/`BitOr`/`BitAnd`/`BitXor`, and returns
+  any OTHER operator's node completely unchanged, without visiting its
+  children at all) — `x**<78-digit literal> % 11` hangs inside
+  `sympy.core.mod.Mod.eval`'s own `gcd()` call with genuinely growing
+  memory, and the numeric-base form (`2**<...> % 11` / `// 11` / `<< 2`)
+  hangs materializing the literal integer itself. `safe_parse` now
+  refuses, at the token level, before either pre-parse, when one of
+  these four operators is combined with an exponent (`**`/`^`) that is
+  not provably small (a literal at or under 200) — `7 % 3`, `10 // 3`,
+  `2**10 % 7` stay byte-identical; `Mod` (reachable by NAME, not just the
+  `%` operator, and just as eager) is now also a deferred stand-in.
+  DELIBERATE NARROWING, pinned in tests: `2**300 % 7` is refused even
+  though `origin/main` evaluates it fine — the token screen cannot tell
+  a merely-over-200 exponent apart from a genuinely dangerous one
+  without parsing more than tokens. `eval_exact` (a separate, already-
+  independently-bounded evaluator that also uses `%`/`<<`/`>>`
+  natively, `tests/test_calc_port.py`) is untouched — this fix lives
+  only in `safe_parse`'s own pipeline, never the shared `classify_unsafe`.
 
 ## [0.13.0] — 2026-09-21
 
