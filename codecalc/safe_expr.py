@@ -3332,10 +3332,26 @@ _UNPROTECTED_OPERATORS = frozenset({"%", "//", "<<", ">>"})
 
 def _tokens_touch_table_or_unprotected_operator(source: str) -> bool | None:
     """`True`/`False` if plain Python `tokenize` on `source` finds a NAME
-    token that is a `_FUNCTION_ARG_CAPS` key or an OP token in
-    `_UNPROTECTED_OPERATORS`, or `None` if `source` itself does not even
-    tokenize (a genuine, unrelated syntax problem — not this check's
-    concern either way, its own caller decides what that means)."""
+    token that is a `_FUNCTION_ARG_CAPS` or `_EXTRA_BOUNDED_POSITIONS`
+    key or an OP token in `_UNPROTECTED_OPERATORS`, or `None` if
+    `source` itself does not even tokenize (a genuine, unrelated syntax
+    problem — not this check's concern either way, its own caller
+    decides what that means).
+
+    THE-1095 round 17 (grok issue 2, `verify-1095-r16-grok.log`): this
+    used to check `_FUNCTION_ARG_CAPS` alone — `fps`/`series` (and
+    every other `_EXTRA_BOUNDED_POSITIONS`-only name: `rf`/`ff`/
+    `polygamma`/`bell`/...) are ALSO names this module screens
+    specially, via a dedicated per-position cap rather than
+    `_FUNCTION_ARG_CAPS`'s growth-formula one, but were invisible to
+    this check — a deferred-stand-in `TypeError` on one of them (an
+    `_arity_checked_new` wrong-arity path, say) would have been misread
+    as "inconclusive, safe to fall through to the real parse" the
+    identical way the round-16 `!!`/`!` atheris finding was. Fixed by
+    checking BOTH tables, the same "any name this module bounds via a
+    non-generic path" set `_position_spec`'s own docstring already
+    treats as one group.
+    """
     try:
         tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
     except (tokenize.TokenError, SyntaxError, IndentationError,
@@ -3346,7 +3362,9 @@ def _tokens_touch_table_or_unprotected_operator(source: str) -> bool | None:
         # 3.12's C tokenizer, one narrow embedded-NUL-byte shape).
         return None
     for tok in tokens:
-        if tok.type == tokenize.NAME and tok.string in _FUNCTION_ARG_CAPS:
+        if tok.type == tokenize.NAME and (
+            tok.string in _FUNCTION_ARG_CAPS or tok.string in _EXTRA_BOUNDED_POSITIONS
+        ):
             return True
         if tok.type == tokenize.OP and tok.string in _UNPROTECTED_OPERATORS:
             return True
@@ -5340,6 +5358,50 @@ def _summand_table_name_range_cap(summand) -> int | None:
     return min(caps) if caps else None
 
 
+def _flatten_summation_limits(args):
+    """Flatten SEQUENCE-wrapped `summation`/`product`/`integrate` limit
+    arguments the way SymPy's own `_process_limits` does, returning a
+    flat list where every element that COULD be a `(var, lo, hi)` limit
+    triple is exposed directly, rather than left one level deep inside
+    a wrapping container.
+
+    THE-1095 round 17 (grok issue 4, `verify-1095-r16-grok.log`): the
+    coordinator's own literal repro (`summation(factorial(x), [(x, 1,
+    10**6)])`) does NOT reach this module at all — `[`/`]` are
+    unconditionally denied at the lexical pre-screen
+    (`classify_unsafe`'s own `_DENIED_OPS`; confirmed live, refused as
+    `'matrices can't be written ...'` before any parse runs). But the
+    SAME flattening SymPy applies is reachable WITHOUT list-literal
+    syntax at all, through an explicit `Tuple(...)` call — confirmed
+    live: `summation(bell(x), Tuple((x, 1, 1463)))` measured 5.95s and
+    returned a genuine, uncapped huge value, while the plain `(x, 1,
+    1463)` form refuses in under 2ms on `bell`'s own table-name range
+    cap. The OLD "must be a direct 3-Tuple" check saw a length-ONE
+    outer `Tuple` (not 3) and silently skipped it as an unrecognised
+    shape — this is the general fix: unwrap any container whose own
+    shape is NOT already a single `(Symbol, lo, hi)` triple, recursing
+    into its elements (any nesting depth) until each one either IS such
+    a triple or bottoms out at something this check was already
+    conservative about (a bare Symbol, say — left as-is, matching the
+    existing "not this check's concern" skip).
+    """
+    flat = []
+    for arg in args:
+        type_name = type(arg).__name__
+        if type_name == "Tuple":
+            elements = list(arg.args)
+        elif type_name in ("list", "tuple"):
+            elements = list(arg)
+        else:
+            flat.append(arg)
+            continue
+        if len(elements) == 3 and type(elements[0]).__name__ == "Symbol":
+            flat.append(arg)  # already a direct (var, lo, hi) triple
+            continue
+        flat.extend(_flatten_summation_limits(elements))
+    return flat
+
+
 def _summation_product_violation(node, memo: dict) -> str | None:
     """Reason a `summation`/`product`/`Sum`/`Product` call is unsafe, or
     `None` if `node` is not one of these, or every limit it carries is
@@ -5409,7 +5471,7 @@ def _summation_product_violation(node, memo: dict) -> str | None:
         range_cap = min(table_range_cap, unconditional_cap)
 
     limits = []  # (var, lo_val, hi_val) for every FULLY-resolved Tuple limit
-    for limit_arg in node.args[1:]:
+    for limit_arg in _flatten_summation_limits(node.args[1:]):
         if type(limit_arg).__name__ != "Tuple" or len(limit_arg.args) != 3:
             continue  # a bare Symbol limit (unbounded) -- not this check's concern
         var, lo, hi = limit_arg.args
@@ -5444,6 +5506,17 @@ def _summation_product_violation(node, memo: dict) -> str | None:
     if not limits:
         return None
 
+    # THE-1095 round 17 (grok issue 5, `verify-1095-r16-grok.log`):
+    # moved ahead of the boundary-term check below (round 16's own
+    # order had this AFTER it) so the new a priori PRODUCT-magnitude
+    # bound, just past the boundary-term check, can use it too —
+    # `total_terms` itself does not depend on the boundary term, only
+    # on the limits already resolved above.
+    total_terms = 1
+    for _var, lo_val, hi_val in limits:
+        axis_terms = abs(hi_val - lo_val) + 1
+        total_terms *= axis_terms
+
     # THE-1095 round 16 (grok issue 4): the BOUNDARY-term check now
     # substitutes EVERY resolved variable's own upper limit SIMULTAN-
     # EOUSLY, not one axis at a time -- `summation(bell(x*y), (x, 1,
@@ -5471,34 +5544,46 @@ def _summation_product_violation(node, memo: dict) -> str | None:
         if term_violation:
             at = ", ".join(f"{v}={substitution[v]}" for v in substitution)
             return f"the boundary term of {name}() (at {at}) is unsafe: {term_violation}"
+        # THE-1095 round 17 (grok issue 5, `verify-1095-r16-grok.log`):
+        # the boundary-term check just above only bounds EACH term's OWN
+        # magnitude against its function's own per-argument cap -- it
+        # says nothing about the PRODUCT of `total_terms` such terms.
+        # `product(x**2, (x, 1, 1463))` has 1463 terms, the boundary
+        # term `1463**2` is tiny on its own (no per-function cap
+        # anywhere near it), yet the real product is `(1463!)**2`, ~8000
+        # digits -- past `MAX_NUMERIC_DIGITS` (4000) but never caught
+        # until AFTER the real `(1463!)**2` was actually constructed, on
+        # the post-evaluation output-digit ceiling alone. Bounded here,
+        # A PRIORI, the same way `_table_function_growth_violation`
+        # bounds a table call's own output before construction: `n *
+        # log10(max|term|)` (using the SAME largest-magnitude boundary
+        # term already resolved above as the "max over the range" proxy
+        # -- sound for a monotonic summand, the same assumption the
+        # boundary-term check itself already makes; a non-monotonic
+        # summand only makes this bound MORE conservative, never less).
+        # `summation` is deliberately excluded — an additive aggregate
+        # of `n` terms each of magnitude `10**m` has magnitude at most
+        # `10**m * n`, i.e. `m + log10(n)` in log10 space, not `n * m`
+        # -- `_SUMMATION_SUMMAND_TABLE_NAME_RANGE_CAP`'s own per-name
+        # range cap already bounds that aggregate for a table-containing
+        # summand, and an ordinary polynomial summation has SymPy's own
+        # closed form (Faulhaber's formula), no term-by-term construction
+        # at all.
+        if name in ("product", "Product"):
+            (term_log_num, term_log_den,
+             term_resolved, term_violation2) = _resolve_arg_magnitude(boundary_term, memo)
+            if term_violation2:
+                return term_violation2
+            if term_resolved:
+                product_log10 = total_terms * (term_log_num - term_log_den)
+                if product_log10 > MAX_NUMERIC_DIGITS:
+                    at = ", ".join(f"{v}={substitution[v]}" for v in substitution)
+                    return (f"the result of {name}() ({total_terms} terms, each up to "
+                            f"~10**{term_log_num - term_log_den:.1f} at {at}) would have "
+                            f"about {product_log10:.0f} digits, over the limit of "
+                            f"{MAX_NUMERIC_DIGITS}: it cannot be rendered as a decimal "
+                            "string")
 
-    # THE-1095 round 16 (grok issue 4): the CARTESIAN PRODUCT of every
-    # axis's own term count, not each axis checked independently --
-    # `summation(bell(x*y), (x,1,200), (y,1,200))` is 200 x 200 = 40000
-    # TOTAL terms, not 200 (the single axis figure each `range_cap`
-    # value in `_SUMMATION_SUMMAND_TABLE_NAME_RANGE_CAP` was itself
-    # measured against, a per-axis, not aggregate, quantity — so the
-    # aggregate check below still uses that SAME per-axis-derived cap
-    # as its threshold, deliberately conservative for the multi-axis
-    # case rather than deriving a separate aggregate-safe figure).
-    # THE-1095 round 15: INCLUSIVE term count (`hi - lo + 1`), matching
-    # the sweep this cap table was measured against (`summation(NAME
-    # (x), (x, 1, N))`, lo always 1 -- `N` terms, not `N - 1`).
-    #
-    # THE-1095 round 16 (Codex addendum, `verify-1095-r15.log`): a
-    # REVERSED limit (`lo > hi`, e.g. `summation(x, (x, 10**6, 1))`) is
-    # NOT empty on `origin/main` -- SymPy's own convention computes a
-    # NEGATED sum over the SAME magnitude range (confirmed live:
-    # `summation(x, (x, 5, 1)) == -9`, real work, not a no-op) -- the
-    # round-15 version's own `axis_terms < 0 -> 0` fallback treated a
-    # reversed range as contributing NOTHING to the total, wrongly
-    # letting `summation(bell(x), (x, 1463, 1))` (or `product`'s own
-    # identity-growth shape reversed) straight through uncapped. `abs()`
-    # makes the term count symmetric in both directions.
-    total_terms = 1
-    for _var, lo_val, hi_val in limits:
-        axis_terms = abs(hi_val - lo_val) + 1
-        total_terms *= axis_terms
     if range_cap is not None and total_terms > range_cap:
         reason = ("a summand containing a bounded table function"
                   if table_range_cap is not None else f"{name}()'s own identity growth")
@@ -5539,7 +5624,7 @@ def _integrate_limit_violation(node, memo: dict) -> str | None:
     name = type(node).__name__
     if name not in ("integrate", "Integral"):
         return None
-    for limit_arg in node.args[1:]:
+    for limit_arg in _flatten_summation_limits(node.args[1:]):
         if type(limit_arg).__name__ != "Tuple" or len(limit_arg.args) != 3:
             continue
         _var, lo, hi = limit_arg.args
@@ -5828,13 +5913,42 @@ def _arg_hides_numeric(arg) -> bool:
     callable with a similar "container argument mixing a symbol with a
     literal" shape, so the class stays closed generically rather than
     name-by-name.
+
+    THE-1095 round 17 (grok issue 4, `verify-1095-r16-grok.log`): the
+    round-15 version only checked ONE level of container member
+    (`member.free_symbols`, not a recursive call) — a NESTED container
+    (`Tuple((x, Tuple(1, 10**6)))`, however contrived) had its own
+    inner literal invisible again, the identical class of gap one level
+    down. Recursing (`_arg_hides_numeric(member)` instead of `not
+    member.free_symbols`) closes it at every depth, not just one.
     """
     if not arg.free_symbols:
         return True
     from sympy import Tuple
     if isinstance(arg, (Tuple, list, tuple, set, frozenset)):
-        return any(not member.free_symbols for member in arg)
+        return any(_arg_hides_numeric(member) for member in arg)
     return False
+
+
+def _flatten_container_values(arg):
+    """Yield `arg` itself, or every NON-container leaf inside it if
+    `arg` is a `Tuple`/`list`/`tuple`/`set`/`frozenset` — recursively,
+    at any nesting depth.
+
+    THE-1095 round 17 (grok issue 4, `verify-1095-r16-grok.log`): the
+    round-15 version this replaces (`_measured_safe_argument_cap_
+    violation`'s own inline loop) only extended ONE level
+    (`values_to_check.extend(arg)`) — a nested container's own hidden
+    numeric member (the same class `_arg_hides_numeric`'s docstring,
+    just above, now recurses for) still reached `_resolve_arg_
+    magnitude` unexamined one level down.
+    """
+    from sympy import Tuple
+    if isinstance(arg, (Tuple, list, tuple, set, frozenset)):
+        for member in arg:
+            yield from _flatten_container_values(member)
+    else:
+        yield arg
 
 
 def _measured_safe_argument_cap_violation(node, memo: dict) -> str | None:
@@ -5893,13 +6007,10 @@ def _measured_safe_argument_cap_violation(node, memo: dict) -> str | None:
     # closes for the default-deny path, applied here to the generic
     # per-argument cap instead: each numeric member gets the SAME
     # `MAX_HEAVY_ARG` cap an ordinary top-level argument would.
-    from sympy import Tuple as _Tuple5
-    values_to_check = []
-    for arg in node.args:
-        if isinstance(arg, (_Tuple5, list, tuple, set, frozenset)):
-            values_to_check.extend(arg)
-        else:
-            values_to_check.append(arg)
+    # THE-1095 round 17 (grok issue 4): now RECURSIVE
+    # (`_flatten_container_values`) instead of one level of `.extend`,
+    # so a nested container's own hidden numeric member is walked too.
+    values_to_check = [v for arg in node.args for v in _flatten_container_values(arg)]
     for arg in values_to_check:
         if arg.free_symbols:
             continue
@@ -6811,7 +6922,16 @@ def _pole_sensitive_magnitude(node, memo: dict) -> tuple[float, float, bool, str
         if handled:
             return result
         x = result
-        if name in ("Chi", "li") and x <= 0:
+        # THE-1095 round 17 (own follow-up to grok issue 1,
+        # `verify-1095-r16-grok.log`): `Li(x)` picks up the SAME
+        # complex branch `Chi`/`li` already refuse below for
+        # non-positive `x` -- confirmed live (`Li(-1) == -0.97 +
+        # 3.42*I`, magnitude `~3.56`, already over the real-valued
+        # `e**1 ~= 2.72` bound the old code would have claimed for it)
+        # -- grok's own review did not flag this one; found by
+        # re-checking every name in this branch against its true
+        # domain rather than trusting the ones grok happened to name.
+        if name in ("Chi", "li", "Li") and x <= 0:
             message = (f"the argument to {name}() cannot be safely bounded for a "
                        "non-positive value (a complex branch this module does not "
                        "reason about): computing it would take an unbounded amount "
@@ -6829,6 +6949,35 @@ def _pole_sensitive_magnitude(node, memo: dict) -> tuple[float, float, bool, str
                        "own pole: computing it would take an unbounded amount of "
                        "time and memory")
             return 0.0, 0.0, False, message
+        # THE-1095 round 17 (grok issue 1, `verify-1095-r16-grok.log`):
+        # `Chi`/`Ei`/`li`/`Li` each have the identical `gamma + ln(...)`
+        # logarithmic-singularity shape SymPy's own `error_functions.py`
+        # gives `Ci` (already fixed round 16) -- the flat `e**|x|`
+        # envelope below is UNSOUND on the whole neighbourhood of each
+        # pole, not just at the exact pole point: `Chi(0.1) == -1.73 >
+        # e**0.1 == 1.11`; `Ei(-0.1) == -1.82 > e**0.1 == 1.11` (the
+        # SAME gap on the NEGATIVE side too, since `Ei`'s pole is at
+        # `x == 0` regardless of sign -- grok's own writeup named only
+        # the positive branch `0 < x <= 1`, confirmed live that the
+        # unsoundness is symmetric); `li(1 + 10**-200)` and
+        # `li(1 - 10**-6)` likewise. Bound each by `|ln(distance to the
+        # pole)| + constant` on the accepted neighbourhood, mirroring
+        # `Ci`'s own already-fixed pattern exactly; the flat `e**|x|`
+        # bound stays (confirmed live, sound by inspection: `Ei` decays
+        # to 0 as `x -> -oo` so a growing exponential bound only gets
+        # looser; `li`/`Li ~ x/ln(x)` grows slower than `e**x`) for the
+        # region outside each neighbourhood.
+        euler_gamma = 0.5772156649015329  # the Euler-Mascheroni constant
+        if name == "Chi" and x <= 1:
+            bound = euler_gamma + abs(math.log(float(x))) + 1.0
+            return math.log10(bound), 0.0, True, None
+        if name == "Ei" and abs(x) <= 1:
+            bound = euler_gamma + abs(math.log(abs(float(x)))) + math.e
+            return math.log10(bound), 0.0, True, None
+        if name in ("li", "Li") and x <= math.e:
+            ln_z = math.log(float(x))  # x == 1 already refused above: ln_z != 0
+            bound = abs(math.log(abs(ln_z))) + math.e
+            return math.log10(bound), 0.0, True, None
         exponent = x * x if name == "erfi" else abs(x)
         if exponent > MAX_HEAVY_ARG:
             message = (f"the argument to {name}() exceeds the limit of "

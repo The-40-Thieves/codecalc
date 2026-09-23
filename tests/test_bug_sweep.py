@@ -5139,43 +5139,142 @@ _t0_sp = time.time()
 import sympy as _sp15
 
 _x15 = _sp15.Symbol("x")
+_euler_gamma15 = 0.5772156649015329  # the Euler-Mascheroni constant
+
+# THE-1095 round 17 (grok issue 1, `verify-1095-r16-grok.log`): the
+# round-15 grid used `Rational(_val).limit_denominator(1000)`, which
+# silently MANGLES any point finer than 1/1000 (`1e-6` rounds to `0`,
+# `1 - 1e-200` rounds to `1` exactly) -- exactly the pole-neighbourhood
+# points this round adds. Grid values are now exact SymPy Rationals
+# passed straight through; no denominator-limiting step.
+_POLE15 = _sp15.Rational(1, 10**200)  # the "pole distance" grok's review named
+_EPS15 = _sp15.Rational(1, 10**6)
+_TENTH15 = _sp15.Rational(1, 10)
+
+def _near_zero_grid15(*extra):
+    # THE-1095 round 17: the generic points every row's grid must carry
+    # per grok's own rule -- `0.1, 1e-6, the pole distance 1/10**200` --
+    # plus whatever cap-edge/domain-specific points that row already had.
+    return [_TENTH15, _EPS15, -_EPS15, _POLE15, -_POLE15, *extra]
+
+def _near_one_grid15(*extra):
+    # Same generic points, but framed around a pole at `z == 1` (li/Li)
+    # instead of `x == 0`: `1 +/- 1e-6`, `1 +/- 1/10**200`.
+    return [1 + _EPS15, 1 - _EPS15, 1 + _POLE15, 1 - _POLE15, *extra]
+
+def _ci_bound15(v):
+    # THE-1095 round 16's own fix (`Ci(x) <= |gamma| + |ln x| + 1` for
+    # `0 < x <= 1`, flat `2.0` for `x > 1`) was never carried into THIS
+    # property grid -- it kept asserting the pre-round-16 flat `<= 2`
+    # even though `Ci(0.001) == 6.33`, already over it. Confirmed live
+    # this round before the fix: adding `1e-6` to the old grid+bound
+    # combination fails immediately.
+    fv = float(v)
+    if fv <= 0:
+        raise ValueError("domain")
+    if fv > 1:
+        return 2.0
+    return _euler_gamma15 + abs(math.log(fv)) + 1.0
+
+def _chi_bound15(v):
+    # THE-1095 round 17 (grok issue 1): `Chi` has the IDENTICAL
+    # `gamma + ln(x)` pole SymPy's own `error_functions.py` gives `Ci`
+    # -- round 16 fixed `Ci`, this round gives `Chi` the same treatment
+    # (`Chi(0.1) == -1.73`, already over the old flat `e**0.1 == 1.11`).
+    fv = float(v)
+    if fv <= 0:
+        raise ValueError("domain")  # Chi is COMPLEX for x <= 0
+    if fv <= 1:
+        return _euler_gamma15 + abs(math.log(fv)) + 1.0
+    return math.exp(fv)
+
+def _ei_bound15(v):
+    # THE-1095 round 17 (grok issue 1, plus an independently-found
+    # extension): the SAME log bound applies on BOTH sides of `Ei`'s
+    # pole at `x == 0` -- grok's own writeup named only `0 < x <= 1`,
+    # but `Ei(-0.1) == -1.82`, already over the old flat `e**0.1 ==
+    # 1.11` too (`Ei`'s pole is symmetric in `|x|`, confirmed live).
+    fv = float(v)
+    if fv == 0:
+        raise ValueError("pole")
+    if abs(fv) <= 1:
+        return _euler_gamma15 + abs(math.log(abs(fv))) + math.e
+    return math.exp(abs(fv))
+
+def _li_bound15(v):
+    # THE-1095 round 17 (grok issue 1): `li`/`Li ~ Ei(ln z)` near their
+    # shared pole at `z == 1` -- `|ln|ln z|| + e` bounds BOTH `li` and
+    # `Li` (they differ only by the constant `li(2)`) on `0 < z <= e`;
+    # `li`/`Li ~ z/ln(z)` grows slower than `e**z` beyond that, so the
+    # existing exponential envelope stays sound (confirmed live) for
+    # `z > e`.
+    fv = float(v)
+    if fv <= 0 or fv == 1:
+        raise ValueError("domain/pole")
+    if fv <= math.e:
+        return abs(math.log(abs(math.log(fv)))) + math.e
+    return math.exp(fv)
+
+def _lambertw_bound15(v):
+    fv = float(v)
+    if fv > 0:
+        # A `1e-200`-scale `fv` underflows `log(fv + 1)` to exactly
+        # `0.0` in float64 (`fv + 1.0 == 1.0` at that precision) --
+        # matches the real implementation's own `log_val <= 0` fallback
+        # ("trivially safe, |W| <= 1"), not a bug: `W(x) <= 1` holds
+        # comfortably at this scale, just looser than the true value.
+        log_val = math.log(fv + 1)
+        return log_val if log_val > 0 else 1.0
+    if fv == 0:
+        return 0.0
+    # THE-1095 round 16 (coordinator addendum, item 5): the PRINCIPAL
+    # branch is also real on `[-1/e, 0)`, where `|W(x)| <= 1`.
+    if fv < -1.0 / math.e:
+        raise ValueError("domain")  # W goes complex below -1/e
+    return 1.0
+
 _SPECIAL_FUNCTION_BOUND_CHECKS = (
-    (_sp15.erf, lambda v: 1.0, [-5, -1, -0.5, 0, 0.5, 1, 5, 1000]),
-    (_sp15.erfc, lambda v: 2.0, [-5, -1, 0, 1, 5, 1000]),
-    (_sp15.erfi, lambda v: _sp15.exp(v * v), [-5, -1, 0, 1, 5, 38]),
-    (_sp15.Ei, lambda v: _sp15.exp(abs(v)) if v != 0 else _sp15.oo,
-     [-5, -1, 1, 5, 1463]),
-    # Chi/li: this module's own domain is `x > 0` only -- both are
-    # COMPLEX-valued for x <= 0 (confirmed live: `Chi(-1) == 0.838 +
-    # pi*I`, magnitude already over the real-valued bound), so the grid
-    # here is positive-only, matching what `_pole_sensitive_magnitude`
-    # actually accepts.
-    (_sp15.Chi, lambda v: _sp15.exp(abs(v)), [1, 5, 1463]),
-    (_sp15.Shi, lambda v: _sp15.exp(abs(v)), [-5, -1, 0, 1, 5, 1463]),
-    (_sp15.li, lambda v: _sp15.exp(abs(v)) if v != 1 else _sp15.oo,
-     [0.1, 2, 5, 1463]),
-    (_sp15.LambertW, lambda v: _sp15.log(v + 1) if v > 0 else _sp15.oo,
-     [0, 0.5, 1, 5, 1463]),
-    (_sp15.fresnels, lambda v: 1.0, [-5, -1, 0, 1, 5, 1000]),
-    (_sp15.fresnelc, lambda v: 1.0, [-5, -1, 0, 1, 5, 1000]),
-    (_sp15.airyai, lambda v: _sp15.exp(abs(v) ** _sp15.Rational(3, 2)), [-5, -1, 0, 1, 5, 100]),
-    (_sp15.airybi, lambda v: _sp15.exp(abs(v) ** _sp15.Rational(3, 2)), [-5, -1, 0, 1, 5, 100]),
-    (_sp15.Si, lambda v: 2.0, [-5, -1, 0, 1, 5, 1000]),
-    (_sp15.Ci, lambda v: 2.0, [0.1, 1, 5, 1000]),
+    (_sp15.erf, lambda v: 1.0, _near_zero_grid15(-5, -1, -0.5, 0, 0.5, 1, 5, 1000)),
+    (_sp15.erfc, lambda v: 2.0, _near_zero_grid15(-5, -1, 0, 1, 5, 1000)),
+    (_sp15.erfi, lambda v: _sp15.exp(v * v), _near_zero_grid15(-5, -1, 0, 1, 5, 38)),
+    (_sp15.Ei, _ei_bound15, _near_zero_grid15(-5, -1, 1, 5, 1463)),
+    # Chi/li/Li: this module's own domain is `x > 0` only -- all three
+    # are COMPLEX-valued for `x <= 0` (confirmed live: `Chi(-1) ==
+    # 0.838 + pi*I`; `Li(-1) == -0.97 + 3.42*I`, magnitude ~3.56,
+    # already over its own old `e**1 ~= 2.72` bound -- a round-17
+    # finding beyond grok's own review, fixed alongside it), so the
+    # grid here is positive-only, matching what
+    # `_pole_sensitive_magnitude` actually accepts.
+    (_sp15.Chi, _chi_bound15, _near_zero_grid15(1, 5, 1463)),
+    (_sp15.Shi, lambda v: _sp15.exp(abs(v)), _near_zero_grid15(-5, -1, 0, 1, 5, 1463)),
+    (_sp15.li, _li_bound15, _near_one_grid15(0.1, 2, 5, 1463)),
+    (_sp15.Li, _li_bound15, _near_one_grid15(0.1, 2, 5, 1463)),
+    (_sp15.LambertW, _lambertw_bound15,
+     _near_zero_grid15(0, 0.5, 1, 5, 1463, -0.1, -1.0 / math.e)),
+    (_sp15.fresnels, lambda v: 1.0, _near_zero_grid15(-5, -1, 0, 1, 5, 1000)),
+    (_sp15.fresnelc, lambda v: 1.0, _near_zero_grid15(-5, -1, 0, 1, 5, 1000)),
+    (_sp15.airyai, lambda v: _sp15.exp(abs(v) ** _sp15.Rational(3, 2)),
+     _near_zero_grid15(-5, -1, 0, 1, 5, 100)),
+    (_sp15.airybi, lambda v: _sp15.exp(abs(v) ** _sp15.Rational(3, 2)),
+     _near_zero_grid15(-5, -1, 0, 1, 5, 100)),
+    (_sp15.Si, lambda v: 2.0, _near_zero_grid15(-5, -1, 0, 1, 5, 1000)),
+    (_sp15.Ci, _ci_bound15, _near_zero_grid15(1, 5, 1000)),
 )
 _prop_fails = []
 for _fn, _bound_fn, _grid in _SPECIAL_FUNCTION_BOUND_CHECKS:
     for _val in _grid:
         try:
-            _actual = abs(complex(_fn(_sp15.Rational(_val).limit_denominator(1000)).evalf(20)))
+            _actual = abs(complex(_fn(_val).evalf(250)))
             _bound = _bound_fn(_val)
             _bound_num = float(_bound.evalf(20)) if hasattr(_bound, "evalf") else float(_bound)
         except Exception:
             continue  # a pole/domain edge this grid's own coarse sampling hit -- skip
         if _actual > _bound_num * 1.0000001:  # float slack only
             _prop_fails.append(f"{_fn.__name__}({_val}): |{_actual}| > bound {_bound_num}")
-check(f"THE-1095 round 15 (property check): every elementary special-"
-      f"function bound holds against SymPy's own N() across its grid "
+check(f"THE-1095 round 17 (property check): every elementary special-"
+      f"function bound holds against SymPy's own N() across its widened "
+      f"pole-neighbourhood grid, exact Rationals (no limit_denominator "
+      f"mangling) "
       f"({sum(len(g) for _f, _b, g in _SPECIAL_FUNCTION_BOUND_CHECKS)} points, "
       f"{time.time() - _t0_sp:.2f}s)",
       not _prop_fails, f"-> failures={_prop_fails}")
@@ -5349,6 +5448,76 @@ _v, _e = _boundary_parse("E1")
 check("THE-1095 round 16: 'E1' bare stays the bare-class validation",
       _v is None and _e is not None and _e[0] == "validation",
       f"-> value={_v!r} err={_e!r}")
+
+# THE-1095 round 17 (grok issue 2, `verify-1095-r16-grok.log`): the
+# coordinator's own literal repro for an `fps`/`series` keyword-order
+# smuggle (`fps(sin(x), x, order=1463)`) does NOT reach this module at
+# all -- `=` is unconditionally denied at the lexical pre-screen
+# (`classify_unsafe`'s own `_DENIED_OPS`), confirmed live before this
+# round's own change and unchanged by it: NO Python keyword argument of
+# any kind can reach ANY function through this string-based parser, so
+# the specific smuggle grok named is not reproducible here. Pinned
+# anyway (a `security` refusal, not a `ceiling` one -- the DIFFERENT,
+# earlier gate that actually catches it), alongside the defense-in-
+# depth half of the same finding that IS live: `fps`/`series` (and
+# every other `_EXTRA_BOUNDED_POSITIONS`-only name) are now also
+# `_expression_touches_table_or_unprotected_operator`-recognized, so a
+# deferred stand-in `TypeError` on one of them can no longer be misread
+# as "inconclusive, fall through to the real parse."
+for _expr in ("fps(sin(x), x, order=1463)", "series(exp(x), x, 0, n=100000)"):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 17 (grok issue 2, non-reproducible as literally "
+          f"stated): {_expr!r} refuses at the lexical '=' gate, not a "
+          f"kwarg reaching fps()/series()",
+          _v is None and _e is not None and _e[0] == "security",
+          f"-> value={_v!r} err={_e!r}")
+
+# THE-1095 round 17 (grok issue 4, `verify-1095-r16-grok.log`): the
+# coordinator's own literal repro (`summation(factorial(x), [(x, 1,
+# 10**6)])`) does NOT reach this module either -- `[`/`]` are ALSO
+# unconditionally denied at the same lexical gate. But the identical
+# SEQUENCE-wrapped-limit shape SymPy's own `_process_limits` flattens
+# IS reachable, without any denied token, through an explicit
+# `Tuple(...)` call.
+_v, _e = _boundary_parse("summation(bell(x), Tuple((x, 1, 1463)))")
+check("THE-1095 round 17 (sequence-wrapped limit fail-open): "
+      "'summation(bell(x), Tuple((x, 1, 1463)))' (SAME limit as the "
+      "already-refused '(x, 1, 1463)' form, just wrapped one level) "
+      "refuses on the identical table-name range cap",
+      _v is None and _e is not None and _e[0] == "ceiling"
+      and "200" in _e[1],
+      f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("summation(bell(x), Tuple((x, 1, 200)))")
+check("  ...and Tuple((x, 1, 200)) (comfortably under the 200 cap) "
+      "still evaluates, matching the plain-tuple form",
+      _e is None, f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("summation(bell(x*y), Tuple((x, 1, 200), (y, 1, 200)))")
+check("  ...and a multi-limit BUNDLE (both limits wrapped together in "
+      "one Tuple(...) call) still gets the Cartesian boundary-term "
+      "check, not silently skipped as an unrecognised shape",
+      _v is None and _e is not None and _e[0] == "ceiling"
+      and "bell" in _e[1],
+      f"-> value={_v!r} err={_e!r}")
+
+# THE-1095 round 17 (grok issue 5, `verify-1095-r16-grok.log`): the
+# PRODUCT's own boundary-term check only ever bounded the LAST factor's
+# own magnitude -- `product(x**2, (x, 1, 1463))` has 1463 terms, the
+# boundary term `1463**2` is tiny on its own, and the OLD code
+# constructed the real `(1463!)**2` (~8000 digits) before the post-
+# evaluation output ceiling finally caught it.
+_t0 = time.time()
+_v, _e = _boundary_parse("product(x**2, (x, 1, 1463))")
+_dt = time.time() - _t0
+check("THE-1095 round 17 (product a priori magnitude bound): "
+      "'product(x**2, (x, 1, 1463))' refuses BEFORE real construction, "
+      "on its own claimed digit count, not the post-hoc output ceiling",
+      _v is None and _e is not None and _e[0] == "ceiling"
+      and "digits" in _e[1] and "9262" in _e[1] and _dt < 1.0,
+      f"-> value={_v!r} err={_e!r} elapsed={_dt:.3f}s")
+_v, _e = _boundary_parse("product(x, (x, 1, 100))")
+check("  ...and product(x, (x, 1, 100)) (comfortably under the digit "
+      "cap) still evaluates, matching main",
+      _e is None, f"-> value={_v!r} err={_e!r}")
 
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== ALL BUG-SWEEP REGRESSIONS FIXED ===")

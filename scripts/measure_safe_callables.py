@@ -234,7 +234,7 @@ _HEAVY_SHAPES = frozenset({
     "one_int_heavy", "two_ints_heavy", "three_ints_heavy", "symbol_int_heavy",
     "small_heavy", "heavy_small", "float_heavy_exp", "rational_heavy_numerator",
     "four_arg_heavy_last", "four_arg_heavy_first", "four_arg_heavy_middle",
-    "five_arg_heavy_last",
+    "five_arg_heavy_last", "four_arg_heavy_all_numeric",
 })
 
 PROBE_SHAPES: tuple[str, ...] = (
@@ -243,7 +243,7 @@ PROBE_SHAPES: tuple[str, ...] = (
     "one_int_heavy", "two_ints_heavy", "three_ints_heavy", "symbol_int_heavy",
     "small_heavy", "heavy_small", "float_heavy_exp", "rational_heavy_numerator",
     "four_arg_heavy_last", "four_arg_heavy_first", "four_arg_heavy_middle",
-    "five_arg_heavy_last",
+    "five_arg_heavy_last", "four_arg_heavy_all_numeric",
 )
 
 #: The probe CHILD process — run standalone (`python -c PROBE_SCRIPT`)
@@ -367,6 +367,17 @@ _PROBE_CHILD = textwrap.dedent("""
         # real `order` is position 5 (0-indexed 4th EXTRA arg after
         # `f`), which no shape before this round reached at all.
         "five_arg_heavy_last": (_x, 0, 0, 0, _H),
+        # THE-1095 round 17 (grok issue 3, `verify-1095-r16-grok.log`):
+        # EVERY 4-arg heavy shape above keeps a `Symbol` filler in at
+        # least one position -- a lazy `Function` subclass whose own
+        # `.eval()` only forces real numeric work when ALL of its
+        # arguments are numbers (`betainc`/`betainc_regularized`'s own
+        # shape: `nargs == {{4}}`, `__new__(cls, *args, **options)`)
+        # stays symbolic, and cheap, at every one of those shapes
+        # regardless of magnitude. Four DISTINCT (not repeated -- see
+        # `two_ints_heavy`'s own comment above for why) heavy values,
+        # no symbol anywhere, closes that gap.
+        "four_arg_heavy_all_numeric": (_H, _H - 1, _H - 2, _H - 3),
     }}
     fn = getattr(sp, {name!r})
     args = _SHAPE_BUILDERS[{shape_name!r}]
@@ -687,6 +698,19 @@ def refresh_excluded() -> tuple[dict, dict, list[str]]:
         raw_results[name] = measure_name(name)
         if (i + 1) % 25 == 0:
             print(f"... refreshed {i + 1}/{len(targets)}", file=sys.stderr)
+    # THE-1095 round 17 (grok's own methodology note,
+    # `verify-1095-r16-grok.log`): the FIRST `_prune_handled_names` call
+    # (above, before this loop) only protects names ALREADY in the
+    # report when this function started — a name inside `targets` that
+    # became handled AFTER that prune (its own `_already_handled_names`
+    # entry landed the same round as this refresh) would be written
+    # straight back in by this loop's own `raw_results[name] = measure_
+    # name(name)`, since `targets` is computed from the PRE-prune
+    # report and the loop does not re-check. Pruned again, after the
+    # loop, so the disjointness test in `tests/test_measured_safe_
+    # callables.py` stays a backstop rather than the only thing
+    # catching this.
+    raw_results = _prune_handled_names(raw_results)
     allowlist = sorted(n for n, r in raw_results.items() if r["allowlisted"])
     data = {
         "measured_utc": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -723,6 +747,14 @@ def refresh_names(names: list[str]) -> tuple[dict, dict, list[str]]:
         raw_results[name] = measure_name(name)
         if (i + 1) % 10 == 0:
             print(f"... refreshed {i + 1}/{len(names)}", file=sys.stderr)
+    # THE-1095 round 17 (grok's own methodology note,
+    # `verify-1095-r16-grok.log`): see `refresh_excluded`'s own,
+    # identical, second call for the full reasoning — a HANDLED name
+    # inside `names` itself (hand-written, or the auto-generated
+    # `_names_with_min_positional_args` file) would otherwise be
+    # written straight back into `raw_results` by the loop above,
+    # regardless of the FIRST prune before it.
+    raw_results = _prune_handled_names(raw_results)
     allowlist = sorted(n for n, r in raw_results.items() if r["allowlisted"])
     data = {
         "measured_utc": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -765,8 +797,40 @@ def _names_with_min_positional_args(min_args: int) -> list[str]:
     )
     result = []
     for name in candidates:
+        obj = real[name]
+        # THE-1095 round 17 (grok issue 3, `verify-1095-r16-grok.log`):
+        # a SymPy `Function` subclass (e.g. `betainc`/`betainc_
+        # regularized`, both `nargs == {4}`) has `__new__(cls, *args,
+        # **options)` — `inspect.signature` on it reports ONLY a bare
+        # `VAR_POSITIONAL`, which the `positional` count below
+        # deliberately excludes (this function's own docstring), so its
+        # TRUE runtime arity was invisible to this check entirely and
+        # it never got the round-16 heavy-first/middle re-probe.
+        # `nargs` (a `FiniteSet` of the arities SymPy itself will
+        # accept) is the authoritative source for that family — checked
+        # ALONGSIDE `inspect.signature`, not instead of it, since a
+        # plain function's true arity still only comes from its
+        # signature.
+        nargs = getattr(obj, "nargs", None)
+        nargs_max = 0
+        if nargs is not None:
+            # `nargs` is a SymPy `FiniteSet` for a FIXED-arity name
+            # (`betainc` -> `{4}`) but an INFINITE set for a variadic
+            # one (`Max`/`Min` -> `Naturals0`, every non-negative
+            # integer) -- `max()` over that would iterate forever.
+            # Only a genuinely finite set can be maxed directly; an
+            # infinite one already means "unbounded, re-probe it"
+            # without iterating at all.
+            from sympy import FiniteSet as _FiniteSet
+            if isinstance(nargs, _FiniteSet):
+                try:
+                    nargs_max = max(int(n) for n in nargs)
+                except (TypeError, ValueError):
+                    nargs_max = min_args  # unresolvable shape -- unknown != safe, re-probe it
+            else:
+                nargs_max = min_args  # infinite/unbounded arity -- unknown != safe, re-probe it
         try:
-            sig = inspect.signature(real[name])
+            sig = inspect.signature(obj)
         except (TypeError, ValueError):
             result.append(name)
             continue
@@ -774,7 +838,7 @@ def _names_with_min_positional_args(min_args: int) -> list[str]:
             1 for p in sig.parameters.values()
             if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
         )
-        if positional >= min_args:
+        if max(positional, nargs_max) >= min_args:
             result.append(name)
     return result
 

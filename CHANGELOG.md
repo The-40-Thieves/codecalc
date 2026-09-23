@@ -2141,6 +2141,143 @@ behind it.
   factorial notation plus implicit multiplication) keep main's exact
   values; bare `E1` stays the pre-existing bare-class validation.
 
+- **`Chi`/`Ei`/`li`/`Li`'s own elementary bound used the SAME flat
+  `e**|x|`-style envelope everywhere in their domain, but each has a
+  genuine `gamma + ln(...)` LOGARITHMIC pole (`Ci` — SymPy's own
+  `error_functions.py` — got this fixed round 16; these four did not):
+  `Chi(0.1) == -1.73`, already over `e**0.1 == 1.11`; `Ei(-0.1) ==
+  -1.82`, over the SAME bound from the NEGATIVE side too (`Ei`'s pole
+  at `x == 0` is symmetric — found independently of the cross-vendor
+  review that flagged the positive side, by re-checking every name in
+  the fix rather than only the one direction named); `li`/`Li` share
+  the identical pole at `z == 1`. Each now gets `Ci`'s own pattern:
+  `Chi` — `x <= 0` refuse (pre-existing), `0 < x <= 1` →
+  `|gamma| + |ln x| + 1`, `x > 1` → the old `e**x`; `Ei` — pole at `0`
+  refuse (pre-existing), `0 < |x| <= 1` → `|gamma| + |ln|x|| + e`
+  (BOTH signs), `|x| > 1` → the old `e**|x|` (sound there by
+  inspection: `Ei` decays to 0 as `x -> -oo`, `li`/`Li ~ x/ln(x)` grows
+  slower than `e**x`); `li`/`Li` — pole at `1` refuse (pre-existing),
+  `0 < z <= e` → `|ln|ln z|| + e`, `z > e` → the old `e**z`. Also found
+  in the same self-review, unrelated to grok's own finding: `Li(x)`
+  (unlike `li(x)`, which was already refused there) was NOT refused
+  for `x <= 0` — `Li` is COMPLEX on that branch too (`Li(-1) == -0.97 +
+  3.42*I`, magnitude ~3.56, already over the old real-valued `e**1 ~=
+  2.72` bound) — refused the same way `Chi`/`li` already were.
+  `LambertW`'s principal-branch grid gained its own `[-1/e, 0)` points.
+  The property-check grid for every elementary row now includes `0.1`,
+  `1e-6`, `1 +/- 1e-6`, the pole distance `1/10**200`, and each row's
+  own cap edge (a grid that starts at `1`, the round-15/16 one, cannot
+  validate an `x -> 0+` claim at all) — as EXACT SymPy `Rational`s, not
+  `Rational(_val).limit_denominator(1000)` (the round-15 grid's own
+  mechanism, which silently rounds `1e-6` to `0` and `1 - 10**-200` to
+  `1` exactly, mangling precisely the points this round adds). `Ci`'s
+  own grid/bound, never actually updated when round 16 fixed `Ci`
+  itself, is fixed alongside these four.
+
+- **`fps`/`series`'s own order cap, and the ARITY-detection this
+  module's measured-safe allowlist tooling uses, both had a narrower
+  gap than their cross-vendor finding literally described.** The
+  literal repro for a keyword-argument order smuggle
+  (`fps(sin(x), x, order=1463)`) does not reach this module at all —
+  confirmed live, `=` is unconditionally denied at the lexical
+  pre-screen (`classify_unsafe`'s own `_DENIED_OPS`) before any parse
+  runs, for every function, not just `fps`/`series` — no Python keyword
+  argument can reach anything through this string-based parser.
+  Hardened anyway, as defense in depth: `_tokens_touch_table_or_
+  unprotected_operator` (the "is a failed deferred-parse exception safe
+  to treat as inconclusive" gate the round-16 `!!`/`!` fix built) used
+  to check `_FUNCTION_ARG_CAPS` names only — `fps`/`series` (and every
+  other `_EXTRA_BOUNDED_POSITIONS`-only name: `rf`/`ff`/`polygamma`/
+  `bell`/...) are ALSO names this module screens specially, via a
+  dedicated per-position cap, but were invisible to that check; a
+  deferred stand-in `TypeError` on one of them could have been misread
+  as "inconclusive, fall through to the real parse" the identical way
+  the round-16 finding was. Checked against both tables now.
+
+- **`betainc`/`betainc_regularized` (and every `Function` subclass
+  whose runtime arity comes from `nargs`/`__new__(*args)`) were never
+  re-probed with the round-16 heavy-first/middle/all-numeric shapes** —
+  `scripts/measure_safe_callables.py`'s own `_names_with_min_positional_
+  args` counted only `inspect.signature`'s `POSITIONAL_ONLY`/
+  `POSITIONAL_OR_KEYWORD` parameters, and a SymPy `Function` subclass's
+  `__new__(cls, *args, **options)` reports a bare `VAR_POSITIONAL` —
+  deliberately excluded from that count — regardless of its real arity
+  (`betainc.nargs == {4}`). Fixed by also checking `nargs` (a `FiniteSet`
+  for a fixed-arity name; an INFINITE set like `Max`/`Min`'s own
+  `Naturals0` is detected and treated as "unbounded, re-probe it"
+  without iterating it — iterating an infinite set hung the first
+  version of this fix). Every 4-arg heavy probe shape ALSO kept a
+  `Symbol` filler in at least one position — a lazy `Function` whose own
+  `.eval()` only forces real work when every argument is a number stays
+  symbolic, and cheap, at each one regardless of magnitude — closed with
+  a new `four_arg_heavy_all_numeric` shape (four DISTINCT heavy values,
+  no symbol anywhere). The 23 currently-allowlisted names this fix
+  exposes as newly re-probe-worthy (`betainc`, `betainc_regularized`,
+  `carmichael`, `lerchphi`, `Lambda`, `LeviCivita`, `WildFunction`, and
+  16 transform/logic classes) were re-measured against the new shape;
+  all 23, `betainc`/`betainc_regularized` included, still measure
+  allowlisted — the allowlist is unchanged in size or membership, only
+  the measurement backing it is now sound. `--refresh-names`/
+  `--refresh-excluded` (`scripts/measure_safe_callables.py`) now also
+  call `_prune_handled_names` a SECOND time, after their own
+  re-measurement loop, not only before it — a name inside the refresh
+  target list that became handled (a dedicated table/pole-sensitive row)
+  the SAME round as the refresh would otherwise be written straight back
+  in by the loop itself, even though the FIRST prune (before the loop)
+  already removed it once; `tests/test_measured_safe_callables.py`'s own
+  allowlist-vs-`_already_handled_names()` disjointness check stays a
+  backstop, not the only thing catching this.
+
+- **`summation`/`product`/`integrate`'s own limit-argument check only
+  recognized a DIRECT `(var, lo, hi)` Tuple, missing any SEQUENCE
+  SymPy's own `_process_limits` flattens.** The literal repro
+  (`summation(factorial(x), [(x, 1, 10**6)])`) does not reach this
+  module either — `[`/`]` are ALSO unconditionally denied at the same
+  lexical gate, confirmed live. But the identical shape IS reachable
+  without any denied token, through an explicit `Tuple(...)` call:
+  `summation(bell(x), Tuple((x, 1, 1463)))` — semantically the SAME
+  limit as the already-refused `(x, 1, 1463)` form, just wrapped one
+  level — measured 5.95s and returned a genuine, uncapped huge value,
+  where the plain form refuses in under 2ms on `bell`'s own table-name
+  range cap; the old "must be a direct 3-Tuple" check saw a length-ONE
+  outer `Tuple` (not 3) and silently skipped it as unrecognised. A new
+  `_flatten_summation_limits` unwraps any container whose own shape is
+  not already a single `(Symbol, lo, hi)` triple, recursively, matching
+  both a single wrapped limit and a multi-limit bundle
+  (`Tuple((x, 1, 200), (y, 1, 200))`) — wired into both `_summation_
+  product_violation` and `_integrate_limit_violation`. `_arg_hides_
+  numeric` and `_measured_safe_argument_cap_violation`'s own container
+  walk were both only ONE level deep (`member.free_symbols`/
+  `values_to_check.extend(arg)`) — both now recurse
+  (`_arg_hides_numeric` calls itself; the cap violation uses a new
+  `_flatten_container_values` generator), closing the identical class of
+  gap at any nesting depth, not just one.
+
+- **`product`'s own boundary-term check bounded only the LAST factor's
+  own magnitude, never the PRODUCT of all of them.**
+  `product(x**2, (x, 1, 1463))` has 1463 terms; the boundary term
+  `1463**2` is tiny on its own (nowhere near any per-function cap), so
+  it passed every existing screen and constructed the real
+  `(1463!)**2` — about 8000 digits — before the post-evaluation output
+  ceiling (4000 digits) finally caught it. `_summation_product_
+  violation` now bounds the product A PRIORI for `product`/`Product`:
+  `total_terms * log10(|boundary term|)` (the SAME largest-magnitude
+  boundary term the existing per-term check already resolves, reused as
+  the "worst term over the range" proxy — sound for a monotonic
+  summand, the same assumption the boundary-term check itself already
+  makes) checked against `MAX_NUMERIC_DIGITS` before the real `product`
+  ever runs. `summation` is deliberately excluded — an ADDITIVE
+  aggregate of `n` terms each of magnitude `10**m` has magnitude at
+  most `m + log10(n)` in log10 space, not `n * m`; the existing
+  table-name range cap (or SymPy's own closed form for an ordinary
+  polynomial sum) already bounds that. Pinned:
+  `product(x**2, (x, 1, 1463))` now refuses in well under a second, on
+  its own claimed digit count, not the ~8000-digit construction; the
+  round-16 `product(x, (x, 10**6, 1))` reversed-range pin still refuses
+  (now on this sharper, earlier check instead of the term-count cap);
+  `product(x, (x, 1, 100))` (comfortably under the digit cap) still
+  evaluates, matching main.
+
 ## [0.13.0] — 2026-09-21
 
 ### Fixed
