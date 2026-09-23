@@ -1172,12 +1172,34 @@ for _expr in _EXPLOSIVE_CRASH_INPUTS:
 # the fix must not waive an actually-explosive shape through just to avoid
 # crashing on it — each of the three above is refused for a real reason
 # (an astronomically huge digit count / exponent), not just "didn't raise".
-check("  ...2**100000!!... is refused on 'digits' grounds, not silently allowed",
+#
+# THE-1095 round 2 (verify-1095): the first two inputs' own WORDING changed,
+# not their safety. `100000!!` is the `factorial2` double-factorial postfix
+# transform — invisible to the TOKEN-level heavy-call screen (it looks for
+# a `NAME(` call in the source text; `!!` never spells "factorial2("), so
+# these two relied entirely on the TREE-level scan. Pre-round-2 (real-dict
+# parse first), `factorial2(100000)`'s LITERAL argument (100000, itself
+# over MAX_HEAVY_ARG) evaluated for real DURING that first parse -- by the
+# time the scan ran, no `factorial2` Function node was left to check
+# against its own cap at all, only a `Pow` with an already-materialized,
+# thousands-of-digits Integer exponent, caught by the generic digit-count
+# (`2**100000!!...`) / symbolic-exponent (`(x+1)**20000!!...`) Pow
+# machinery instead. Round 2's deferred-first ordering means the deferred
+# scan (which always runs first now) sees the REAL, unevaluated
+# `factorial2(100000)` Function node directly, and refuses it THERE, via
+# its own value-kind cap message, before either downstream mechanism ever
+# gets a chance to run — a MORE direct, more accurate refusal (it now
+# names the actual over-cap argument, not a derived symptom of it), not a
+# weaker one. `"9"*400 + "**12"` is unaffected -- no heavy-function call is
+# involved, so its digit-count message is unchanged.
+check("  ...2**100000!!... is refused on the factorial2() heavy-call cap "
+      "itself now (THE-1095 round 2), not silently allowed",
       _boundary_parse(_EXPLOSIVE_CRASH_INPUTS[0])[1] is not None
-      and "digits" in _boundary_parse(_EXPLOSIVE_CRASH_INPUTS[0])[1][1])
-check("  ...(x+1)**20000!!... is refused on 'exponent' grounds, not silently allowed",
+      and "factorial2" in _boundary_parse(_EXPLOSIVE_CRASH_INPUTS[0])[1][1])
+check("  ...(x+1)**20000!!... is refused on the factorial2() heavy-call cap "
+      "itself now (THE-1095 round 2), not silently allowed",
       _boundary_parse(_EXPLOSIVE_CRASH_INPUTS[1])[1] is not None
-      and "exponent" in _boundary_parse(_EXPLOSIVE_CRASH_INPUTS[1])[1][1])
+      and "factorial2" in _boundary_parse(_EXPLOSIVE_CRASH_INPUTS[1])[1][1])
 check("  ...'9'*400 + '**12' is refused on 'digits' grounds, not silently allowed",
       _boundary_parse(_EXPLOSIVE_CRASH_INPUTS[2])[1] is not None
       and "digits" in _boundary_parse(_EXPLOSIVE_CRASH_INPUTS[2])[1][1])
@@ -2094,8 +2116,14 @@ check("safe_parse('x*x - x*x') (ordinary symbolic cancellation) still evaluates"
 # its short source text) becomes the OUTER call's argument before any tree
 # exists for reject_explosive to inspect. factorial(fibonacci(100)) never
 # returns; fibonacci(factorial(10)) materializes a ~758,374-digit integer;
-# factorial(factorial(8)) a ~168,187-digit one -- all now refused at the
-# TOKEN level, before parse_expr runs even once.
+# factorial(factorial(8)) a ~168,187-digit one.
+#
+# THE-1095 round 3 (verify-1095-r2): these three are STILL refused, but via
+# `_numeric_ceiling_scan`'s own GROWTH-bound machinery now (see
+# `_table_function_bound`'s own docstring), not the blanket TOKEN-level
+# "any nesting" rule this test used to name -- that rule is GONE, precisely
+# because it could not tell a genuinely dangerous nesting from a cheap one
+# (see the very next check below).
 _NESTED_HEAVY_CASES = ["factorial(fibonacci(100))", "fibonacci(factorial(10))",
                        "factorial(factorial(8))"]
 for _expr in _NESTED_HEAVY_CASES:
@@ -2105,18 +2133,21 @@ for _expr in _NESTED_HEAVY_CASES:
     check(f"{_expr!r} (heavy call nested in a heavy call's argument) is refused",
           _r.get("ok") is False and _r.get("code") == _errors.RESOURCE_EXHAUSTED,
           f"-> {_r}")
-    check(f"  ...promptly ({_dt:.3f}s), at the token level, before parse_expr runs "
+    check(f"  ...promptly ({_dt:.3f}s), via the deferred scan's growth-bound "
+          "backstop, before either real parse ever runs "
           "(fibonacci(factorial(10)) alone measured 1.5s materializing the result)",
           _dt < 1.0, f"-> {_dt:.3f}s")
-# factorial(fibonacci(5)) is cheap (= 120) but is refused anyway: this
-# structural rule is deliberately conservative (any nesting of two heavy
-# calls, regardless of whether the inner result happens to be small), the
-# same fail-closed bar this module's other token-level screens already use.
+# THE-1095 round 3: factorial(fibonacci(5)) (= 120) now correctly EVALUATES
+# instead of the old blanket refusal -- fibonacci's own growth bound for
+# n=5 is nowhere near factorial's cap, so the nested-call machinery
+# correctly tells this apart from the three genuinely dangerous cases
+# above. Round 1 through round 2 documented this as "deliberately
+# conservative"; that conservatism is what round 3's growth-bound
+# machinery replaces with an actual bound.
 _r = _exact.simplify_expression("factorial(fibonacci(5))")
-check("'factorial(fibonacci(5))' (= 120, but structurally nested) is refused, "
-      "not evaluated -- documented as deliberately conservative",
-      _r.get("ok") is False and _r.get("code") == _errors.RESOURCE_EXHAUSTED,
-      f"-> {_r}")
+check("'factorial(fibonacci(5))' (= 120, genuinely cheap nesting) now "
+      "EVALUATES instead of being refused (THE-1095 round 3)",
+      _r.get("ok") is True and _r.get("simplified") == "120", f"-> {_r}")
 # Two SEPARATE (not nested) heavy calls must not be caught by this rule.
 _r = _exact.simplify_expression("factorial(1000)+fibonacci(1000)")
 check("'factorial(1000)+fibonacci(1000)' (two SIBLING heavy calls, not nested) still evaluates",
@@ -2277,13 +2308,14 @@ check("sqrt(10**1000) still evaluates", _v is not None and _e is None,
 # (`_numeric_ceiling_scan`); the root family gets the NEW tree-level Pow
 # unit-fraction-exponent backstop (a nested heavy call as the argument, so
 # no literal token names the true magnitude at all). The eager factor
-# family (factorint and its five siblings) genuinely has NO tree-level
-# backstop possible -- none of the six are sympy.Function subclasses, and
-# each coerces its argument to a concrete int internally regardless of
-# evaluate=False, so the danger is baked into the very act of PARSING
-# (documented in MAX_FACTOR_ARG_DIGITS's own comment) -- so those six are
-# exercised via the token-level COMBINED-literal-product check instead,
-# the one protection that family can structurally have.
+# family (factorint and its five siblings) ALSO gets a tree-level backstop
+# now (THE-1095, see below) -- none of the six respects `evaluate=False` on
+# its own, so the danger used to be baked into the very act of PARSING
+# (documented in MAX_FACTOR_ARG_DIGITS's own comment) -- but they still
+# ALSO keep their existing token-level COMBINED-literal-product check,
+# since that layer is unaffected and still the only protection for a
+# NESTED-call-shaped argument (`factorint(nextprime(x))`-style — see
+# `_oversized_call_arg_violation`'s own updated docstring).
 _EAGER_FACTOR_FAMILY = {"factorint", "primefactors", "divisors", "mobius", "nextprime", "isprime"}
 # `sqrt`/`cbrt` both stay a genuinely unevaluated `Pow(base, Rational(1,
 # n))` for a CONCRETE (already-materialized) base under `evaluate=False`,
@@ -2294,29 +2326,56 @@ _EAGER_FACTOR_FAMILY = {"factorint", "primefactors", "divisors", "mobius", "next
 # construction time, a different code path from bare `sqrt`/`cbrt`) -- so
 # `root` is checked via the token-level combined-literal path instead,
 # below, alongside the factor family, rather than asserting a tree shape
-# that does not actually occur for it.
+# that does not actually occur for it. Structural, still true after
+# THE-1095 (`_DEFERRED_STANDIN_NAMES` excludes the whole `sqrt`/`root`/
+# `cbrt` family for exactly this reason — see its own comment) — the only
+# name in `_FUNCTION_ARG_CAPS` that stays genuinely single-layer by design.
 _TREE_ONLY_ROOT_FAMILY = {"sqrt", "cbrt"}
 _TOKEN_ONLY_ROOT_FAMILY = {"root"}
-_EXTRA_CALL_ARGS = {"root": ", 2"}
-# Self-check scope, and why: this round's OWN work is the "digits"-kind
-# entries (the factor and root families) and their two enforcement layers
-# -- that is what gets a genuine COMPUTED-argument check below, at
-# whichever layer actually applies to each. The PRE-EXISTING "value"-kind
-# entries (`_HEAVY_FUNCTIONS`) already had a computed-argument tree-level
-# backstop from round 6 -- but probing every member for THIS self-check
-# surfaced that it is not uniform across all 27 names, none of which
-# round 6 (or this round) ever claimed: `rf`/`ff`'s actual SymPy class
-# names are `RisingFactorial`/`FallingFactorial`, not `rf`/`ff`, so the
-# `type(node).__name__ in _FUNCTION_ARG_CAPS` lookup never matches them;
-# `digamma` gets REWRITTEN to `polygamma` at construction (a different
-# name again); `primepi` and `binomial` with certain small second
-# arguments evaluate their own argument eagerly regardless of
-# `evaluate=False`; `primorial`/`prime`/`motzkin` reject a non-integer
-# argument outright with a `ValueError` (safe, just a different failure
-# mode). None of that is this round's regression to fix -- it predates
-# it -- so the "value"-kind branch below checks only what round 6 already
-# established and this round did not touch: the TOKEN-level bare-literal
-# cap, unconditionally reliable regardless of any of the above.
+# `rf`/`ff`/`binomial` are two-argument value-kind names -- the tree-level
+# I1/I2 checks below need a valid SECOND argument to actually call them (the
+# token-level checks above never call anything, so they were never sensitive
+# to this), a small one so it never itself approaches any cap.
+_EXTRA_CALL_ARGS = {"root": ", 2", "rf": ", 2", "ff": ", 2", "binomial": ", 5",
+                     "polygamma": ", 2",
+                     "RisingFactorial": ", 2", "FallingFactorial": ", 2",
+                     # THE-1095 round 13 follow-up (grok issue 2): the
+                     # orthogonal-polynomial family's own required
+                     # trailing arguments -- `n` (position 0, the
+                     # capped "order") always comes FIRST, so these are
+                     # everything AFTER it: `x` for the six two-argument
+                     # names, `alpha, x`/`m, x` for the three-argument
+                     # ones, `a, b, x` for `jacobi` (four total).
+                     **dict.fromkeys(
+                         ("hermite", "hermite_prob", "chebyshevt",
+                          "chebyshevu", "legendre", "laguerre"), ", x"),
+                     **dict.fromkeys(
+                         ("gegenbauer", "assoc_legendre", "assoc_laguerre"),
+                         ", 1, x"),
+                     "jacobi": ", 1, 1, x",
+                     # THE-1095 round 15 (coordinator addendum): `jacobi_
+                     # normalized(n, a, b, x)` mirrors `jacobi`'s own
+                     # shape exactly -- see its own `_FUNCTION_ARG_CAPS`
+                     # entry's comment for why it needed one at all.
+                     "jacobi_normalized": ", 1, 1, x"}
+# THE-1095: every name below EXCEPT `root` (structural, see above) is now
+# exercised by BOTH layers for a genuinely COMPUTED argument. Before this
+# round, the "value"-kind branch (`_HEAVY_FUNCTIONS`) only ever got the
+# token-level bare-literal check here, with a long-documented list of
+# exceptions this self-check's own comment used to carry: `rf`/`ff` parse
+# to `RisingFactorial`/`FallingFactorial`, not `rf`/`ff`, so the old
+# `type(node).__name__ in _FUNCTION_ARG_CAPS` lookup never matched them;
+# `digamma` gets REWRITTEN to `polygamma` at construction; `primepi` and
+# `binomial` evaluated their own argument eagerly regardless of
+# `evaluate=False`; `primorial`/`prime`/`motzkin` (value-kind) and
+# `factorint`/`primefactors`/`divisors`/`nextprime`/`isprime` (digits-kind)
+# either raised `ValueError` outright on a merely computed argument or
+# silently evaluated for real, bypassing the cap. `safe_parse`'s pre-parse
+# now runs through `_deferred_global_dict()` (THE-1095), which replaces
+# every one of these names uniformly with an inert stand-in, so NONE of
+# that is "documented out of scope" any longer — the loop below checks the
+# tree-level computed-argument backstop for every name it applies to,
+# with no bucket left over for "predates this round, not fixed yet".
 _checked_names = set()
 for _fn_name, (_kind, _cap) in _se5._FUNCTION_ARG_CAPS.items():
     _checked_names.add(_fn_name)
@@ -2338,13 +2397,45 @@ for _fn_name, (_kind, _cap) in _se5._FUNCTION_ARG_CAPS.items():
         check(f"  ...promptly ({_dt:.3f}s)", _dt < 2.0, f"-> {_dt:.3f}s")
     else:
         # value-kind (_HEAVY_FUNCTIONS): the token-level bare-literal cap
-        # -- round 1's own protection, unconditionally reliable, and the
-        # one property every member of this set actually shares (see the
-        # comment above for why the tree-level backstop is NOT that).
+        # -- round 1's own protection, unconditionally reliable.
         _r = _se5.classify_unsafe(f"{_fn_name}({_cap + 1})")
         check(f"self-check: {_fn_name}({_cap + 1}) (one over cap, a bare "
               "literal) is refused at the token level",
               _r is not None, f"-> {_r}")
+    if _fn_name not in _TOKEN_ONLY_ROOT_FAMILY | _TREE_ONLY_ROOT_FAMILY:
+        # THE-1095: the tree-level, deferred-pre-parse backstop, for a
+        # COMPUTED (not bare-literal) argument -- the layer this round adds,
+        # now exercised for every remaining name in the table, "value" and
+        # "digits" kind alike. "value" kind over-caps by argument MAGNITUDE
+        # (`cap + 1`); "digits" kind over-caps by DIGIT COUNT (a value with
+        # `cap + 1` digits, `10**cap + 1` -- `cap` itself is a small count
+        # like 25, so `cap + 1` alone would be a two-digit number, nowhere
+        # near a 25-digit cap).
+        _over = f"{_cap}+1" if _kind == "value" else f"10**{_cap}+1"
+        _t0 = time.time()
+        _v, _e = _boundary_parse(f"{_fn_name}({_over}{_extra})")
+        _dt = time.time() - _t0
+        check(f"self-check: {_fn_name}({_over}{_extra}) (a computed, "
+              "over-cap argument) is refused at the tree level",
+              _v is None and _e is not None and _e[0] == "ceiling",
+              f"-> value={_v!r} err={_e!r}")
+        check(f"  ...promptly ({_dt:.3f}s)", _dt < 2.0, f"-> {_dt:.3f}s")
+        # ...and a comfortably-under-cap computed argument still evaluates,
+        # identically to its literal form -- I2 of THE-1095's own ledger.
+        # `motzkin` is DELIBERATELY excluded (round-3-follow-up, grok item
+        # E): its own `eval()` raises a differently-worded `ValueError`
+        # ("must be a positive integer") on an unevaluated Add, which the
+        # narrowed real-dict catch-all no longer treats as safe to retry
+        # under `evaluate=True` -- see the dedicated pinned regression for
+        # `motzkin(2+3)` (and the CHANGELOG) for the full account.
+        if _fn_name != "motzkin":
+            _under_lit, _under_computed = f"21{_extra}", f"10+11{_extra}"
+            _lv, _le = _boundary_parse(f"{_fn_name}({_under_lit})")
+            _cv, _ce = _boundary_parse(f"{_fn_name}({_under_computed})")
+            check(f"self-check: {_fn_name}({_under_computed}) == "
+                  f"{_fn_name}({_under_lit}) (under cap, computed == literal)",
+                  _le is None and _ce is None and _lv == _cv,
+                  f"-> literal={_lv!r}/{_le!r} computed={_cv!r}/{_ce!r}")
 check(f"self-check covered every name in _FUNCTION_ARG_CAPS "
       f"({len(_checked_names)} names)",
       _checked_names == set(_se5._FUNCTION_ARG_CAPS),
@@ -2372,6 +2463,20 @@ try:
     _v, _e = _boundary_parse("factorial(2+1)")  # 3, clearly under a cap of 10
     check("  ...and factorial(2+1) (under the patched cap) still evaluates",
           _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+    # THE-1095: isolate the TREE-level (deferred-pre-parse) layer
+    # specifically -- 5 and 6 are each individually under the patched cap
+    # of 10, so the TOKEN screen has no opinion on either one; only their
+    # RESOLVED sum (11) is over it, which only `_numeric_ceiling_scan`'s
+    # `Function`-node branch, fed by `_deferred_global_dict()`, can see.
+    _v, _e = _boundary_parse("factorial(5+6)")
+    check("self-check: a monkeypatched 'factorial' row is honoured at the "
+          "TREE level alone -- factorial(5+6) (11, over cap 10, no single "
+          "token over cap) is refused",
+          _v is None and _e is not None and _e[0] == "ceiling",
+          f"-> value={_v!r} err={_e!r}")
+    check("  ...and the token screen alone has no opinion on either literal",
+          _se5.classify_unsafe("factorial(5+6)") is None,
+          f"-> {_se5.classify_unsafe('factorial(5+6)')!r}")
 finally:
     _se5._FUNCTION_ARG_CAPS["factorial"] = _orig_factorial_cap
 
@@ -2480,6 +2585,3312 @@ check("sqrt(<1200-digit literal, exactly at MAX_ROOT_ARG_DIGITS>) "
 check("sqrt(<1201-digit literal, one over the cap>) is refused",
       _se5.classify_unsafe(f"sqrt({_lit1201})") is not None,
       f"-> {_se5.classify_unsafe(f'sqrt({_lit1201})')!r}")
+
+# ═══ THE-1095, follow-up to #326/THE-1091 (GH #326, PR #334) ══════════════
+# The value-kind and digits-kind tree-level backstops (`_numeric_ceiling_
+# scan`'s `Function`-node branch) only ever saw a real `sympy.Function` node
+# named after its own `_FUNCTION_ARG_CAPS` entry for a MINORITY of the
+# table -- see `_DEFERRED_STANDIN_NAMES`'s own comment in safe_expr.py for
+# the full empirical audit. Two symptom shapes, both through
+# `exact.simplify_expression` (the ordinary, `evaluate=True` public path):
+#
+# Group A -- a computed argument BYPASSES the cap outright, because the
+# real function either evaluates for real regardless of `evaluate=False`
+# (`rf`/`ff`/`primepi`/`binomial`) or gets rewritten to a differently-named,
+# differently-shaped node before the scan ever runs (`digamma` ->
+# `polygamma`). Control: `factorial(1463+1)` -- same shape, already fixed
+# in round 6 -- still refuses, proving this is specific to these five names.
+for _expr in ("rf(1463+1, 2)", "ff(1463+1, 2)", "digamma(1463+1)",
+              "primepi(1463*1000)", "binomial(1463+1, 700)"):
+    _r = _exact.simplify_expression(_expr)
+    check(f"THE-1095 group A: {_expr!r} (computed, over-cap argument) is "
+          "refused with the ceiling code, not silently evaluated",
+          _r.get("ok") is False and _r.get("code") == _errors.RESOURCE_EXHAUSTED,
+          f"-> {_r}")
+_r = _exact.simplify_expression("factorial(1463+1)")
+check("THE-1095 group A control: 'factorial(1463+1)' (already-fixed round-6 "
+      "shape) still refuses",
+      _r.get("ok") is False and _r.get("code") == _errors.RESOURCE_EXHAUSTED,
+      f"-> {_r}")
+
+# Group B -- a computed argument is WRONGLY refused, with the wrong error
+# CODE, even nowhere near the cap: the real function's own eager `int()`/
+# `as_int()`-style coercion raises `ValueError` on an unevaluated `Add`/
+# `Pow` regardless of the VALUE it represents, inside `safe_parse`'s own
+# `evaluate=False` pre-parse -- surfacing as a `validation` parse error
+# instead of ever reaching evaluation. `isprime` didn't raise, but its
+# eager evaluation on an unevaluated `Pow` disagreed with the identical
+# literal, which is the same underlying bug from the other side.
+for _expr in ("primorial(1463+1)", "prime(1463+1)", "motzkin(1463+1)"):
+    _r = _exact.simplify_expression(_expr)
+    check(f"THE-1095 group B: {_expr!r} is refused with the CEILING code "
+          "(it is one over MAX_HEAVY_ARG), not a 'not an integer' "
+          "validation error",
+          _r.get("ok") is False and _r.get("code") == _errors.RESOURCE_EXHAUSTED,
+          f"-> {_r}")
+_r_computed = _exact.simplify_expression("isprime(10**24+7)")
+_r_literal = _exact.simplify_expression("isprime(1000000000000000000000007)")
+check("THE-1095 group B: 'isprime(10**24+7)' (computed) agrees with "
+      "'isprime(1000000000000000000000007)' (the same value, as a literal)",
+      _r_computed.get("ok") is True and _r_literal.get("ok") is True
+      and _r_computed.get("simplified") == _r_literal.get("simplified") == "True",
+      f"-> computed={_r_computed} literal={_r_literal}")
+# ...and nowhere near the cap, a computed argument is not refused at all
+# (round-6's control shape for group B: was this a length coincidence with
+# the 1463+1 examples above, or does a TINY computed argument fail too?
+# it does, universally, pre-fix -- this is the wrong-refusal shape, not a
+# ceiling one). `motzkin` is DELIBERATELY excluded here as of round 3's
+# follow-up (grok, item E, narrowing the real-dict catch-all to ONLY the
+# exact "... is not an integer" ValueError class): `motzkin`'s own eval()
+# raises a DIFFERENTLY-worded ValueError ("The provided number must be a
+# positive integer") on an unevaluated Add/Pow argument, indistinguishable
+# by message text alone from a genuine domain violation -- see the pinned
+# regression just below for the narrowed, now-refused-immediately outcome.
+for _expr in ("primorial(2+3)", "prime(2+3)", "isprime(2+3)"):
+    _r = _exact.simplify_expression(_expr)
+    check(f"THE-1095 group B: {_expr!r} (tiny, nowhere near any cap) "
+          "evaluates instead of raising a spurious 'not an integer' error",
+          _r.get("ok") is True, f"-> {_r}")
+_r_motzkin = _exact.simplify_expression("motzkin(2+3)")
+check("THE-1095 round-3-follow-up (grok item E): 'motzkin(2+3)' -- tiny, "
+      "in-range -- is now refused as VALIDATION (narrowed real-dict "
+      "catch-all: motzkin's ValueError does not contain 'is not an "
+      "integer'), a deliberate narrowing of round 1's own group-B fix, "
+      "not a ceiling refusal and not a silent success",
+      _r_motzkin.get("ok") is False
+      and _r_motzkin.get("code") == _errors.VALIDATION
+      and "positive integer" in _r_motzkin.get("error", ""),
+      f"-> {_r_motzkin}")
+
+# I5: the table is the single source of truth, and every row is exercised
+# by BOTH layers for a genuinely computed argument -- the loop above
+# (`_checked_names`) already proves this structurally; these are the
+# specific named repros from the ticket, exercised end to end through
+# `exact.simplify_expression` rather than through `safe_parse` directly.
+
+# Negative test: a deferred stand-in (safe_expr._deferred_global_dict) must
+# never be visible in a refusal message or a result -- the class is named
+# identically to the real function for exactly this reason (see
+# `_deferred_global_dict`'s own docstring), so the failure mode this guards
+# against is an internal marker (a dunder-prefixed helper name, "Deferred",
+# "Standin", or the WRONG sympy class this round fixed, "polygamma" for a
+# `digamma()` call) leaking into what a caller sees.
+_leak_probes = [
+    ("digamma(1463+1)", "polygamma"),
+    ("rf(1463+1, 2)", "RisingFactorial"),
+    ("ff(1463+1, 2)", "FallingFactorial"),
+]
+for _expr, _wrong_class in _leak_probes:
+    _v, _e = _boundary_parse(_expr)
+    _text = repr(_e)
+    check(f"THE-1095: {_expr!r}'s refusal names the CALLER's own function, "
+          f"not the real SymPy class {_wrong_class!r} it rewrites to",
+          _v is None and _e is not None and _wrong_class not in _text,
+          f"-> {_text}")
+for _fn_name in _se5._DEFERRED_STANDIN_NAMES:
+    # THE-1095 round 11 (coordinator replay of 9fe4f6a, Codex probe 2a):
+    # `N` is a deferred stand-in with NO position-0 `_FUNCTION_ARG_CAPS`
+    # entry at all (its own hazard is entirely in its PRECISION argument,
+    # position 1 -- see `_EXTRA_BOUNDED_POSITIONS`'s own comment on
+    # `"N"`) -- this loop's own construction (an over-cap POSITION-0
+    # literal) does not apply to it; covered separately, below, via its
+    # own position-1 leak probe instead.
+    if _fn_name not in _se5._FUNCTION_ARG_CAPS:
+        continue
+    _cap_kind, _cap_val = _se5._FUNCTION_ARG_CAPS[_fn_name]
+    _extra = _EXTRA_CALL_ARGS.get(_fn_name, "")
+    _over = f"{_cap_val}+1" if _cap_kind == "value" else f"10**{_cap_val}+1"
+    _v, _e = _boundary_parse(f"{_fn_name}({_over}{_extra})")
+    _text = repr(_e)
+    check(f"THE-1095: {_fn_name}()'s refusal never leaks an internal "
+          "deferred-stand-in marker",
+          _v is None and _e is not None
+          and "deferred" not in _text.lower() and "standin" not in _text.lower(),
+          f"-> {_text}")
+
+# ═══ THE-1095 round 2 (verify-1095: both cross-vendor reviewers FAILED ═════
+# ═══ 812750e; every finding below is a verified repro) ══════════════════════
+
+# Finding 1 (Medium, both reviewers, the central one) -- ORDER. The real-dict
+# pre-parse used to run BEFORE the deferred one, so an all-under-cap-TOKEN
+# expression still did the expensive real work before the deferred scan got
+# a chance to refuse: `bell(1463)+factorial(1463+1)` measured 6.77s through
+# the real dict alone before its ceiling refusal, 0.0048s through the
+# deferred parse+scan alone -- same refusal, ~1400x faster. Fixed: safe_parse
+# now runs the deferred parse and reject_explosive(scan_shape) FIRST, and
+# refuses on a hit without ever attempting the real-dict pre-parse.
+import sympy as _sympy5
+
+_real_bell = _sympy5.bell
+_bell_was_called = []
+
+
+class _SpyBell(_real_bell):
+    def __new__(cls, *args, **kwargs):
+        _bell_was_called.append(args)
+        return _real_bell.__new__(cls, *args, **kwargs)
+
+
+_sympy5.bell = _SpyBell
+try:
+    _t0 = time.time()
+    _v, _e = _boundary_parse("bell(1463)+factorial(1463+1)")
+    _dt = time.time() - _t0
+    check("THE-1095 round 2: 'bell(1463)+factorial(1463+1)' (every token "
+          "individually under MAX_HEAVY_ARG) is refused",
+          _v is None and _e is not None and _e[0] == "ceiling", f"-> {_e}")
+    check("  ...and the REAL bell() is never constructed on the refused "
+          "path -- the deferred scan alone refuses first",
+          _bell_was_called == [], f"-> called with args={_bell_was_called}")
+    check(f"  ...promptly (well under 6.77s measured pre-fix) ({_dt:.3f}s)",
+          _dt < 1.0, f"-> {_dt:.3f}s")
+finally:
+    _sympy5.bell = _real_bell
+
+# The same ordering bug's OTHER repros: a computed argument whose combined
+# literal TOKENS are cheap (the digit-sum token rule is a no-op for a
+# multi-literal Pow like `10**2000`) but whose real function would eagerly
+# do unbounded work -- all must now refuse in milliseconds, not just
+# eventually.
+for _expr in ("nextprime(10**2000)", "primepi(10**8)", "binomial(10**6, 10**5)"):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round 2: {_expr!r} (token-cheap, real-function-"
+          "expensive) is refused",
+          _v is None and _e is not None and _e[0] == "ceiling", f"-> {_e}")
+    check(f"  ...in milliseconds, not by letting the real function run "
+          f"first ({_dt:.4f}s)",
+          _dt < 0.5, f"-> {_dt:.4f}s")
+
+# Finding 2 (Low Codex / Medium grok) -- arity and per-argument semantics.
+# The stand-ins used to accept any arity and the scan capped EVERY
+# positional argument, so `binomial(1463+1)`/`rf(1463+1)` (missing k) were
+# refused as a CEILING where main correctly refuses them as a VALIDATION
+# (arity) error. Fixed (unchanged from round 2): deferred stand-ins now
+# share the real class's own `nargs` where SymPy exposes one (identical
+# `TypeError`, structurally, to main's own arity refusal).
+for _expr in ("binomial(1463+1)", "rf(1463+1)"):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 2: {_expr!r} (wrong arity, missing k) is a "
+          "VALIDATION error, matching main, not a ceiling",
+          _v is None and _e is not None and _e[0] == "validation",
+          f"-> value={_v!r} err={_e!r}")
+    check("  ...and the message is SymPy's own arity wording, not "
+          "'exceeds the limit'",
+          _e is not None and "argument" in _e[1] and "given" in _e[1],
+          f"-> {_e}")
+
+# THE-1095 round 3 (verify-1095-r2, item 1): `binomial`'s own `k` (position
+# 1) stays UNBOUNDED -- `binomial.eval()`'s own `d.is_negative` shortcut
+# resolves `k > n` to `0` in O(1), no loop over `k` at all, so capping it
+# would only manufacture a false refusal, never close a real one.
+# `binomial(5, 1463+1)` still evaluates to `0`, exactly like main.
+_v, _e = _boundary_parse("binomial(5, 1463+1)")
+check("THE-1095 round 3: 'binomial(5, 1463+1)' (k > n) still evaluates to "
+      "0 like main -- binomial's own k stays unbounded",
+      _v is not None and str(_v) == "0" and _e is None, f"-> value={_v!r} err={_e!r}")
+
+# `rf`/`ff` are DIFFERENT: their own `k` (position 1) really is an
+# iteration count with no O(1) shortcut in `eval()` (confirmed against
+# sympy 1.14.0's source: `reduce(lambda r, i: r*(x +/- i), range(int(k)),
+# 1)`, unconditionally, regardless of whether `x < k` would eventually
+# make a factor zero) -- `rf(5, 1000**1000)`/`ff(5, 1000**1000)` hang past
+# 4s with no cap on `k` at all. THE-1095 round 3 therefore bounds `rf`/
+# `ff`'s own position 1 at `MAX_HEAVY_ARG`, same as position 0 -- a
+# DELIBERATE NARROWING versus main for the specific `k > n` shape
+# (`ff(5, 1463+1)` is `0` cheaply on main; this branch now refuses it,
+# since it cannot tell that shape apart from a genuinely large `k`
+# without evaluating `k` terms first) -- pinned here, and in the
+# CHANGELOG, as the accepted, intentional trade-off (closing a real hang
+# is worth a false refusal on this one narrow shape; `guarded_call`'s own
+# CPU backstop was main's ONLY protection for `rf`/`ff`'s `k` before
+# THE-1095 existed at all).
+for _expr in ("ff(5, 1463+1)", "rf(5, 1463+1)"):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 3: {_expr!r} (k > n, but k itself over rf/ff's "
+          "OWN cap) is refused -- a deliberate, documented narrowing vs "
+          "main's cheap '0'",
+          _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+
+# The SAME narrowing shows up for the position-0 short circuits Codex
+# found (`binomial(1463+1, 0)` = 1, `binomial(1463+1, 1463+2)` = 0,
+# `rf(1463+1, 0)` = `ff(1463+1, 0)` = 1 on main): position 0 (`n`/`x`) is
+# over cap regardless of `k`, and this branch has no "but k makes it
+# trivial" exception for position 0 either -- pinned here too, same
+# CHANGELOG bullet.
+for _expr in ("binomial(1463+1, 0)", "binomial(1463+1, 1463+2)",
+              "rf(1463+1, 0)", "ff(1463+1, 0)"):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 3: {_expr!r} (position-0 over cap, k trivial "
+          "on main) is refused -- the same documented narrowing",
+          _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+
+# Finding 3 (Low, grok) -- a real-dict parse exception used to be treated as
+# unconditionally inconclusive. Fixed: a `TypeError` (SymPy's own arity/
+# shape validation, unconditional regardless of evaluate=False) is returned
+# immediately as a validation error, matching main; only a non-TypeError
+# exception (the group-B eager int-coercion class) on a call the deferred
+# scan already proved safe proceeds to evaluate=True. `binomial(1463+1)`/
+# `rf(1463+1)` above already cover the single-parse-failure shape (real
+# fails, deferred is clean); this covers the invalid-and-tiny shape too, and
+# the both-parses-fail shape.
+_v, _e = _boundary_parse("binomial(2,3,1463+1)")
+check("THE-1095 round 2: 'binomial(2,3,1463+1)' (too many args, tiny "
+      "values) is refused as validation (arity), not evaluated or refused "
+      "as a ceiling",
+      _v is None and _e is not None and _e[0] == "validation", f"-> {_e}")
+_v, _e = _boundary_parse("binomial(5, 6)")  # k > n, tiny -- must still be 0
+check("THE-1095 round 2: 'binomial(5, 6)' (k > n, both tiny, no ceiling "
+      "involved at all) still evaluates to 0 like main",
+      _v is not None and str(_v) == "0" and _e is None, f"-> value={_v!r} err={_e!r}")
+
+# Finding 4 (Low, grok) -- `root` used to be excluded from the deferred
+# stand-ins entirely, so a computed, digit-heavy VALUE argument
+# (`root(10**2000, 3)`, token-cheap: '10' and '2000' sum to 6 digits, far
+# under MAX_ROOT_ARG_DIGITS) ran root's own real construction on EVERY
+# pre-parse, unbounded by anything until evaluation. Fixed: `root` is now
+# also a deferred stand-in, so its VALUE argument gets the same tree-level
+# digit-count backstop `factorint` and friends already have.
+_t0 = time.time()
+_v, _e = _boundary_parse("root(10**2000+1, 3)")
+_dt = time.time() - _t0
+check("THE-1095 round 2: 'root(10**2000+1, 3)' (computed, digit-heavy, "
+      "token-cheap) is refused at the tree level",
+      _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+check(f"  ...promptly ({_dt:.3f}s)", _dt < 1.0, f"-> {_dt:.3f}s")
+_v, _e = _boundary_parse("root(21, 3)")
+check("  ...and root(21, 3) (an ordinary computed-free value) still evaluates",
+      _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+
+# ═══ THE-1095 round 3 (verify-1095-r2: both reviewers FAILED fe1a9a2; ═══════
+# ═══ every finding below is a verified repro) ═══════════════════════════════
+
+# Item 1 self-check: every EXTRA bounded position (`_EXTRA_BOUNDED_
+# POSITIONS`), for every name that has one, refuses a computed over-cap
+# value at that position in milliseconds (both `cap+1` and a `10**k`-
+# shaped form), and every EXPLICITLY unbounded position (`_UNBOUNDED_
+# POSITIONS`) does NOT refuse a huge value there as a ceiling.
+#
+# THE-1095 round 13 follow-up (grok, review of 562a026): the orthogonal-
+# polynomial family's own extra-parameter positions (`gegenbauer`'s `a` /
+# `assoc_legendre`'s `m` / `assoc_laguerre`'s own `alpha`, all at
+# position 1; `jacobi`'s own `a`/`b` at positions 1 and 2) are NOT the
+# last argument in their own signature -- `x` still needs to follow, or
+# this loop's own `[_first_arg] * _pos + [_over]` construction builds an
+# ARITY-short call (`gegenbauer(5, <over>)`, missing `x`) that raises a
+# validation arity error instead of exercising the cap this block means
+# to test at all.
+_TRAILING_ARGS_AFTER_TESTED_POSITION = {
+    ("gegenbauer", 1): ", 1", ("assoc_legendre", 1): ", 1",
+    ("assoc_laguerre", 1): ", 1",
+    ("jacobi", 1): ", 1, 1", ("jacobi", 2): ", 1",
+    ("jacobi_normalized", 1): ", 1, 1", ("jacobi_normalized", 2): ", 1",
+}
+for _fn_name, _extra_positions in _se5._EXTRA_BOUNDED_POSITIONS.items():
+    _first_arg = "5"  # comfortably under every position-0 cap in the table
+    for _pos, (_kind, _cap) in _extra_positions.items():
+        _trailing = _TRAILING_ARGS_AFTER_TESTED_POSITION.get((_fn_name, _pos), "")
+        for _over in (f"{_cap}+1", f"10**{_cap // 2 or 1}+{_cap}"):
+            _args = [_first_arg] * _pos + [_over]
+            _expr = f"{_fn_name}({', '.join(_args)}{_trailing})"
+            _t0 = time.time()
+            _v, _e = _boundary_parse(_expr)
+            _dt = time.time() - _t0
+            check(f"self-check (round 3): {_expr!r} (position {_pos} over "
+                  "its own cap) is refused",
+                  _v is None and _e is not None and _e[0] == "ceiling",
+                  f"-> value={_v!r} err={_e!r}")
+            check(f"  ...promptly ({_dt:.3f}s)", _dt < 1.0, f"-> {_dt:.3f}s")
+for _fn_name, _positions in _se5._UNBOUNDED_POSITIONS.items():
+    for _pos in _positions:
+        _args = ["5"] * _pos + ["10**9"]
+        _expr = f"{_fn_name}({', '.join(_args)})"
+        _v, _e = _boundary_parse(_expr)
+        check(f"self-check (round 3): {_expr!r} (position {_pos} "
+              "EXPLICITLY unbounded) is NOT refused as a ceiling",
+              _e is None or _e[0] != "ceiling", f"-> value={_v!r} err={_e!r}")
+
+# Item 2: a NESTED table-function call used to be silently skipped as
+# "unresolved" by `_numeric_ceiling_scan` (`_log10_num_den` only
+# understands Integer/Mul/Add/Pow/Rational/Float, never a Function), so it
+# passed every screen and paid the REAL function's own cost regardless.
+# `_table_function_bound`'s growth-bound machinery closes this: each must
+# now refuse in well under 1s, via the deferred scan alone, not by
+# actually running the nested call for real.
+for _expr in ("divisors(factorial(100))", "polygamma(1, factorial(100))",
+              "factorial(polygamma(0, 1000**1000))", "sqrt(bell(1463))",
+              "cbrt(bell(1463))", "(x+1)**bell(1463)",
+              "root(factorial(1463), 2)"):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round 3: {_expr!r} (nested heavy call) is refused",
+          _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+    check(f"  ...promptly ({_dt:.3f}s), not by materializing the nested "
+          "call for real first",
+          _dt < 1.0, f"-> {_dt:.3f}s")
+# ...and a GENUINELY cheap nesting still evaluates to main's exact values.
+for _expr, _expected in (("sqrt(factorial(10))", "720*sqrt(7)"),
+                          ("divisors(factorial(5))",
+                           "[1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 24, 30, 40, 60, 120]"),
+                          ("factorial(binomial(6,3))", "2432902008176640000")):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 3: {_expr!r} (cheap nesting) still evaluates to "
+          f"main's exact value {_expected!r}",
+          _v is not None and str(_v) == _expected and _e is None,
+          f"-> value={_v!r} err={_e!r}")
+
+# Item 3: arity for the plain-callable names (and `root`) is now derived
+# from `inspect.signature` of the REAL callable, so a wrong-arity call
+# fails the DEFERRED parse itself and is returned as `origin/main`'s own
+# `TypeError` text, instead of the over-cap FIRST argument reaching a
+# ceiling refusal before arity was ever checked.
+#
+# THE-1095 round-3-follow-up #3 (coordinator review of 5e2a961, grok item
+# 5): tightened from a substring check to EQUALITY with main's own text --
+# `_arity_checked_new` (see its own docstring) makes the stand-in raise
+# Python's OWN native call-binding TypeError, byte-identical to a real
+# call, rather than `Function.__new__`'s own generic "X takes exactly N
+# arguments" wording a plain-callable stand-in used to get from its
+# `nargs`.
+_R3_ARITY_PINS = {
+    "isprime(10**26,1)": "isprime() takes 1 positional argument but 2 were given",
+    "root(10**1201,3,0,0,9)": "root() takes from 2 to 4 positional arguments but 5 were given",
+    "root(10**2000)": "root() missing 1 required positional argument: 'n'",
+    "prime(5,6)": "prime() takes 1 positional argument but 2 were given",
+    "primorial(5,6,7)": "primorial() takes from 1 to 2 positional arguments but 3 were given",
+    "divisors(5,6,7,8)": "divisors() takes from 1 to 3 positional arguments but 4 were given",
+    "nextprime(5,6,7)": "nextprime() takes from 1 to 2 positional arguments but 3 were given",
+    "npartitions(5,6,7)": "npartitions() takes from 1 to 2 positional arguments but 3 were given",
+    "primefactors(5,6,7,8)": "primefactors() takes from 1 to 3 positional arguments but 4 were given",
+    "factorint(5,6,7,8,9,10,11,12,13,14)":
+        "factorint() takes from 1 to 9 positional arguments but 10 were given",
+}
+for _expr, _expected_text in _R3_ARITY_PINS.items():
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round-3-follow-up #3 item 5: {_expr!r} is refused as "
+          f"validation, BYTE-IDENTICAL to main's own TypeError text",
+          _v is None and _e is not None and _e[0] == "validation"
+          and _e[1] == f"parse error: {_expected_text}", f"-> value={_v!r} err={_e!r}")
+# ...and the Function-subclass family (binomial/rf/ff) already matched --
+# confirmed still true, pinned the same way.
+for _expr, _expected_text in (("binomial(1463+1)", "binomial takes exactly 2 arguments (1 given)"),):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round-3-follow-up #3 item 5: {_expr!r} is BYTE-"
+          "IDENTICAL to main's own TypeError text",
+          _v is None and _e is not None and _e[0] == "validation"
+          and _e[1] == f"parse error: {_expected_text}", f"-> value={_v!r} err={_e!r}")
+
+# THE-1095 round-3-follow-up #4 (coordinator review of 06272aa, grok item
+# 1): `_arity_checked_new` used to build a dummy Python function via
+# `compile()` + `types.FunctionType` purely to reuse Python's own call-
+# binding error text -- replaced with `inspect.signature(real).bind(...)`
+# first, falling through to a REAL call to `real` only on a `bind()`
+# failure (which raises the SAME native TypeError before any of `real`'s
+# own body runs, since CPython binds arguments to a callee's frame before
+# executing any of its bytecode). Proven with a spy, not just a timing
+# measurement: the spy's own body must NEVER run on the wrong-arity path.
+_spy_body_calls: list = []
+
+
+def _spy_isprime_like(n, base=None):
+    _spy_body_calls.append((n, base))
+    return True
+
+
+_spy_new = _se5._arity_checked_new(_spy_isprime_like)
+_spy_raised = False
+_spy_text = ""
+try:
+    _spy_new(None, 1, 2, 3)  # 3 positional args -- spy_isprime_like takes at most 2
+except TypeError as _spy_exc:
+    _spy_raised = True
+    _spy_text = str(_spy_exc)
+check("THE-1095 round-3-follow-up #4 item 1: the arity-checked __new__ "
+      "raises TypeError for a wrong-arity call",
+      _spy_raised, "-> did not raise")
+check("  ...WITHOUT ever entering the real callable's own body (spy "
+      "pattern, not just a timing measurement)",
+      len(_spy_body_calls) == 0, f"-> {len(_spy_body_calls)} calls: {_spy_body_calls}")
+check("  ...and the raised text is the SPY's own native arity message "
+      "('spy_isprime_like() takes from 1 to 2 positional arguments but "
+      "3 were given'), not a look-alike",
+      _spy_raised and "spy_isprime_like()" in _spy_text and "3 were given" in _spy_text,
+      f"-> {_spy_text!r}")
+
+# Item 4: the numeric RESULT of step 3's real evaluate=True parse is now
+# itself run through the same digit-count ceiling every other path
+# already has -- no combination of two individually-in-cap POSITIONS can
+# be proven jointly safe without this backstop (rf(700+700, 700+700), both
+# positions comfortably under rf's own 1463 cap, still produces an
+# 8_887-ish-digit integer).
+_v, _e = _boundary_parse("rf(700+700, 700+700)")
+check("THE-1095 round 3: 'rf(700+700, 700+700)' (both positions in-cap, "
+      "output over MAX_NUMERIC_DIGITS) is refused by the OUTPUT ceiling",
+      _v is None and _e is not None and _e[0] == "ceiling"
+      and "digits" in _e[1], f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("rf(1400,1400)")  # the identical shape, as literals
+check("  ...and the identical shape as bare literals is refused the same way",
+      _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+
+# Item 5: the real-dict parse exception class that proceeds to evaluate=True
+# is pinned as INTENDED behaviour, not an accident of a broad `except
+# ValueError` -- `TypeError` (arity) always returns immediately; every
+# `ValueError` this module's own group-B names raise (confirmed live:
+# "... is not an integer", motzkin's "must be a positive integer") is
+# treated the same way main eventually resolves it once the deferred scan
+# has already proven the call safe.
+for _expr, _expected in (("nextprime(10,2+1)", "17"),):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 3: {_expr!r} (group-B name, computed 'ith' "
+          f"argument) evaluates to {_expected!r} like main",
+          _v is not None and str(_v) == _expected and _e is None, f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("prime(1-1)")
+check("THE-1095 round 3: 'prime(1-1)' (prime(0), invalid index) reaches "
+      "the SAME evaluate=True path main does, not a spurious pre-parse "
+      "'not an integer' error",
+      _e is None or "is not an integer" not in (_e[1] if _e else ""), f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("prime(1/0)")
+check("THE-1095 round 3: 'prime(1/0)' is refused (ZeroDivisionError-shaped "
+      "input), with SOME validation text, not silently swallowed",
+      _v is None and _e is not None, f"-> value={_v!r} err={_e!r}")
+
+# Item 6, SUPERSEDED by THE-1095 round-3-follow-up #3 (coordinator review
+# of 5e2a961, grok): `%`/`//`/`<<`/`>>` are not `evaluate=False`-protected
+# by SymPy's OWN parser for their whole subtree, closed here not by a
+# token-level pre-check (deleted -- `_unprotected_operator_violation` no
+# longer exists) but by `_parse_deferred`'s own AST-stage transform
+# (`_deferred_transformer_class`), which maps these four operators to
+# marker-node CALLS with their children explicitly VISITED -- so a
+# NESTED, huge exponent stays exactly as `evaluate=False`-protected as
+# every other subtree, and is caught either by `_deferred_binop_
+# violation` (a numeric base) or the EXISTING symbolic-exponent ceiling
+# (`MAX_SYMBOLIC_EXPONENT`, a symbolic base) once the marker's own
+# children are independently visited -- the exact fuzzer-discovered hang,
+# and every variant found investigating it, still refuses in MILLISECONDS.
+_N78 = "2" + "1" * 77
+for _expr in (f"x**{_N78} % 11", f"2**{_N78} % 11", f"(x+1)**{_N78} % 11",
+              f"Mod(x**{_N78}, 11)", f"x**{_N78} % y", f"2**{_N78} // 11",
+              f"2**{_N78} << 2", f"2**{_N78} >> 11"):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round-3-follow-up #3: {_expr[:40]!r}... is refused",
+          _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+    check(f"  ...in milliseconds ({_dt:.4f}s), not by letting the real "
+          "operator construct the huge Pow first",
+          _dt < 0.5, f"-> {_dt:.4f}s")
+# The exact fuzzer input this all started from.
+_v, _e = _boundary_parse("x^2" + "1" * 77 + "%11")
+check("THE-1095 round-3-follow-up #3: the original fuzzer input "
+      "('x^2' + '1'*77 + '%11') refuses in milliseconds, no MemoryError",
+      _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+
+# Valid small inputs stay BYTE-IDENTICAL to main.
+for _expr, _expected in (("7 % 3", "1"), ("10 // 3", "3"), ("Mod(7,3)", "1"),
+                          ("2**10 % 7", "2")):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round-3-follow-up #3: {_expr!r} == {_expected!r}, unaffected",
+          _v is not None and str(_v) == _expected and _e is None, f"-> value={_v!r} err={_e!r}")
+
+# THE-1095 round-3-follow-up #3, grok item 4: the "computed or above 200"
+# narrowing (round 3's own token-level check) is GONE -- the AST-level fix
+# needs no such narrowing at all, since it can see the WHOLE tree, not
+# just tokens near the operator. `x**(2+2) % 3`, `2**300 % 7`, and
+# `2**(10+10) % 7` all now return main's own values (previously: the
+# first was an ACCIDENTAL, unpinned refusal, the other two were deliberate
+# but now-unnecessary narrowings).
+for _expr, _expected in (("x**2 % 3", "Mod(x**2, 3)"), ("x**(2+2) % 3", "Mod(x**4, 3)"),
+                          ("2**300 % 7", "1"), ("2**(10+10) % 7", "4")):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round-3-follow-up #3: {_expr!r} == {_expected!r}, "
+          "matching main (no narrowing needed at the AST level)",
+          _v is not None and str(_v) == _expected and _e is None, f"-> value={_v!r} err={_e!r}")
+# `eval_exact` is a SEPARATE, already-safe evaluator and must be untouched.
+_er = _exact.eval_exact("1 << 20")
+check("THE-1095 round-3-follow-up #3: eval_exact('1 << 20') is unaffected "
+      "(a separate evaluator this fix must not touch)",
+      _er.get("value") == "1048576", f"-> {_er}")
+_er2 = _exact.eval_exact(f"2**{_N78} % 7")
+check("  ...and eval_exact's OWN, unrelated exponent cap still protects it",
+      _er2.get("ok") is False, f"-> {_er2}")
+
+# ═══ THE-1095 round-3-follow-up: ClusterFuzzLite crash on 44c83b1, plus ═══
+# ═══ grok items A-E and Codex's shift-digit-bound item, one commit ═══════
+
+# The exact ClusterFuzzLite crash input, decoded from the crash file
+# (fuzz/safe_expr_fuzzer.py's own ConsumeIntInRange-then-
+# ConsumeUnicodeNoSurrogates contract, replayed against the seed corpus).
+# On 44c83b1, `safe_parse` raised `TypeError: 'property' object is not
+# iterable` uncaught from `reject_explosive` -> `Basic.free_symbols`: a
+# bare CLASS reference (the literal `Pow` in this input, resolving through
+# `safe_global_dict()`'s full `sympy.__dict__` exposure to the CLASS
+# itself rather than an instance) ended up nested one level inside another
+# node's OWN `.args` tuple, where `_walk`'s existing per-node guard never
+# got a chance to run before `reject_explosive`'s own code called
+# `.free_symbols` directly on that ancestor. Confirmed LIVE (this
+# session's own atheris 3.12 repro venv) that `origin/main` (6cda9d4)
+# crashes on this SAME decoded string with the SAME exception, at its own
+# `reject_explosive` line 2080 (`if exponent.free_symbols:`) -- this is a
+# LATENT bug that predates THE-1095 entirely, not a regression introduced
+# by any of this ticket's earlier rounds; ClusterFuzzLite happened to find
+# it via a path this ticket's own changes made reachable. There is no
+# "main's error code" to match here -- main does not return one, it
+# crashes -- so this regression test instead pins `safe_parse`'s own
+# contract: always a 2-tuple, never a raised exception, for this exact
+# input.
+_CRASH_343R3_INPUT = ("breakpoint()!!z!al^aZ!al^zaa!az!al^jalZZZZZZZZZZZZZZZZZZZZZZZZ"
+                      "al^aZ!al^zaa!az!al^jala!!z!al^aZ!al^Pow!az!al^jalZZZZZZZZZZZZ"
+                      "ZZZZZZZZZZZZal^aZ!al^zaa!az!al^jalZZZZZl^jaa!az!al^aZ!al^jaa!"
+                      "az!al^jalZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ"
+                      "ZZZZZZZZZZZZZZZZZZZZZZ^jtal^jaa!az!al^aZ!al^jaa!az!exceptal^j"
+                      "al^ZZZZZl^jaa!az!al^aZ!al^jaa!az!at^jalZZZZZZZZZZZZZZZZZZZZZZ"
+                      "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ"
+                      "^jtal^jaa!az!al^aZ!al^jaa!az!exceptal^jal^jt")
+try:
+    _crash_v, _crash_e = _se5.classify_unsafe(_CRASH_343R3_INPUT), None
+    _crash_v, _crash_e = _boundary_parse(_CRASH_343R3_INPUT)
+    _crash_raised = False
+except Exception as _crash_exc:
+    _crash_raised = True
+    _crash_v = _crash_e = None
+check("THE-1095 round-3-follow-up: the exact ClusterFuzzLite crash-343r3 "
+      "input never raises through safe_parse (fixed at its root: "
+      "reject_explosive now refuses a bare `type` reference before ever "
+      "calling a property on it)",
+      not _crash_raised, f"-> raised={_crash_raised}")
+check("  ...and returns the ordinary (value, error) 2-tuple contract, a "
+      "clean refusal rather than a crash",
+      not _crash_raised and (_crash_v is None) != (_crash_e is None),
+      f"-> value={_crash_v!r} err={_crash_e!r}")
+
+# Coordinator review of d3c65c7, two text defects fixed in the same round:
+#
+# 1. A bare class reference is a malformed EXPRESSION (validation), not an
+#    oversized one (ceiling) -- and must not leak the Python repr of the
+#    class (`<class 'sympy.core.power.Pow'>`).
+for _bare_expr, _bare_name in (("Pow", "Pow"), ("Mul", "Mul"), ("binomial", "binomial")):
+    _v, _e = _boundary_parse(_bare_expr)
+    check(f"THE-1095 round-3-follow-up: {_bare_expr!r} (a bare class "
+          "reference) is refused as VALIDATION, not ceiling",
+          _v is None and _e is not None and _e[0] == "validation", f"-> {_v!r} {_e!r}")
+    check(f"  ...names {_bare_name!r} as written, not the Python repr "
+          "(\"<class '...'>\") or the old 'is not a valid expression node' "
+          "wording",
+          _e is not None and f"'{_bare_name}'" in _e[1] and "<class" not in _e[1]
+          and "is not a valid expression node" not in _e[1], f"-> {_e!r}")
+# ...and a class used in a genuine (if malformed) expression shape keeps
+# its EXISTING validation code -- unaffected by this fix either way.
+for _malformed_expr in ("x^Pow", "Pow*2"):
+    _v, _e = _boundary_parse(_malformed_expr)
+    check(f"THE-1095 round-3-follow-up: {_malformed_expr!r} still refuses "
+          "as validation (unaffected -- this shape was already validation "
+          "before the wording fix)",
+          _v is None and _e is not None and _e[0] == "validation", f"-> {_v!r} {_e!r}")
+
+# 2. The `<<` shift-digit-ceiling message used to read "'<<' shift result
+#    the result would have about N digits in its numerator, ..." -- a
+#    doubled "result" and a numerator/denominator distinction that makes
+#    no sense for a plain integer shift (never a Rational).
+_v, _e = _boundary_parse("bell(1463) << 100000")
+check("THE-1095 round-3-follow-up: the '<<' shift-ceiling message names "
+      "'the result of' once, with no 'numerator' wording",
+      _e is not None and _e[0] == "ceiling"
+      and "the result of '<<' would have about" in _e[1]
+      and "numerator" not in _e[1] and "shift result the result" not in _e[1],
+      f"-> {_e!r}")
+_v, _e = _boundary_parse("1 << factorial(20)")
+check("  ...and the 'unbounded number of digits' variant matches the same "
+      "shape",
+      _e is not None and _e[0] == "ceiling"
+      and "the result of '<<' would have an unbounded number of digits" in _e[1]
+      and "numerator" not in _e[1], f"-> {_e!r}")
+
+# Never-raises sweep: every bare-operand name this module exposes --
+# `Pow`/`Mul`/`Add`/`Symbol` (SymPy's own core classes) and every
+# `_FUNCTION_ARG_CAPS` table name -- used bare (uncalled) in four shapes
+# that could plausibly leak a class reference into a tree
+# `reject_explosive` walks. `safe_parse` must return a 2-tuple in every
+# case, never raise -- this is the general form of the crash-343r3 fix,
+# not a name-by-name guess at what the fuzzer might try next.
+_BARE_OPERAND_NAMES = ["Pow", "Mul", "Add", "Symbol", *_se5._DEFERRED_STANDIN_NAMES,
+                       *_se5._FUNCTION_ARG_CAPS]
+_bare_operand_fails = 0
+for _name in sorted(set(_BARE_OPERAND_NAMES)):
+    for _shape in ("{name}", "x^{name}", "{name}*2", "{name}(", "{name})"):
+        _expr = _shape.format(name=_name)
+        try:
+            _r = _boundary_parse(_expr)
+            _ok = isinstance(_r, tuple) and len(_r) == 2
+        except Exception as _exc:
+            _ok = False
+            _r = f"RAISED {type(_exc).__name__}: {_exc}"
+        if not _ok:
+            _bare_operand_fails += 1
+            FAILS.append(f"never-raises sweep: {_expr!r} -> {_r!r}")
+check(f"THE-1095 round-3-follow-up: never-raises sweep over "
+      f"{len(set(_BARE_OPERAND_NAMES))} bare-operand names x 5 shapes "
+      f"({len(set(_BARE_OPERAND_NAMES)) * 5} probes) -- safe_parse always "
+      "returns a 2-tuple, never raises",
+      _bare_operand_fails == 0, f"-> {_bare_operand_fails} failures")
+
+# Property-style check for EVERY `_GROWTH_BOUNDS` entry: for n across a
+# sample grid over its capped domain (including the cap itself, and
+# ith=1000 for nextprime), the bound must be >= the REAL value SymPy
+# computes, for every n small enough to compute cheaply. A bound found
+# BELOW the true value fails this test -- this is what actually caught
+# the primorial/nextprime/fibonacci/lucas/prime formula bugs (items A, B,
+# D) during this round's own development, before any named repro was
+# even written by hand.
+import sympy as _sp5
+
+
+def _growth_check(name, fn, real_fn, ns, extra_bounds=None, real_is_float=False):
+    # THE-1095 round 11 (grok addendum to coordinator replay of 9fe4f6a):
+    # `n > 0 else -math.inf` used to be the ONLY branch -- silently
+    # WRONG for a negative or fractional `n` (this module's own `bounds`
+    # convention is `log10(|n|)`, sign discarded -- see `_growth_zeta`'s
+    # own docstring for exactly why a caller must never assume a
+    # magnitude-only bound also tells it the sign), and every existing
+    # call site below only ever passed positive integers, so the bug
+    # was invisible until a grid that actually exercises `n < 0` or a
+    # fractional `n` (added this round, see the zeta/gamma grids
+    # further down) is run through it. `real_is_float=True` lets a
+    # `real_fn` return a genuine SymPy `Float`/irrational EXPRESSION
+    # (`gamma`'s own non-integer values) rather than assuming the
+    # result is exactly `int`-representable.
+    fails = []
+    for n in ns:
+        n_val = float(n)
+        bounds = {0: math.log10(abs(n_val)) if n_val != 0 else -math.inf}
+        if extra_bounds:
+            bounds.update(extra_bounds(n))
+        b = fn(bounds)
+        try:
+            real = real_fn(n)
+        except Exception:
+            continue
+        if real_is_float:
+            # `float(Abs(real))` overflows to `inf` once `real` has more
+            # than ~308 digits (gamma(1463) does) -- resolve the
+            # MAGNITUDE symbolically instead, the same
+            # arbitrary-precision `log` this module's own resolver uses
+            # (`_float_value_log10`), never a raw `float()` cast.
+            real_log = 0.0 if real == 0 else float(_sp5.log(_sp5.Abs(real), 10))
+        else:
+            real = abs(int(real)) if real != 0 else 0
+            real_log = math.log10(real) if real > 0 else 0.0
+        if b < real_log - 1e-9:
+            fails.append((n, real_log, b))
+    check(f"THE-1095 round-3-follow-up: growth-bound property check for "
+          f"{name!r} (bound >= real value across its own grid)",
+          not fails, f"-> fails={fails}")
+
+
+# THE-1095 round-3-follow-up #4 (coordinator review of 06272aa, grok item
+# 2): factorial and bell now use `_growth_stirling_factorial` (tight,
+# not the shared loose catch-all) -- verified up to and including the
+# exact cap (1463) and one past it (1464), the boundary the coordinator's
+# own named repros (`bell(1463)` evaluates, `bell(1464)` refuses) depend
+# on being correctly ordered.
+_growth_check("factorial (_growth_stirling_factorial)", _se5._growth_stirling_factorial,
+              lambda n: _sp5.factorial(n), list(range(1, 60)) + [1463, 1464, 1500])
+_growth_check("bell (_growth_stirling_factorial, bell(n) <= n!)", _se5._growth_stirling_factorial,
+              lambda n: _sp5.bell(n), list(range(1, 40)) + [1463, 1464, 1500])
+# `_growth_nn_loose` itself is still a real, correct (if now unused by
+# factorial/bell) function -- still checked, on the names that still use
+# it as their own shared catch-all.
+_growth_check("motzkin (_growth_nn_loose, shared catch-all)", _se5._growth_nn_loose,
+              lambda n: _sp5.motzkin(n), range(1, 40))
+_growth_check("binomial (_growth_2n)", _se5._growth_2n,
+              lambda n: _sp5.binomial(n, n // 2), range(1, 60))
+_growth_check("primorial (default, nth=True)", _se5._growth_primorial,
+              lambda n: _sp5.primorial(n), range(1, 60))
+_growth_check("primorial (nth=False)", _se5._growth_primorial,
+              lambda n: _sp5.primorial(n, nth=False), range(1, 60))
+_growth_check("prime", _se5._growth_prime, lambda n: _sp5.prime(n), range(1, 60))
+_growth_check("primepi", _se5._growth_primepi, lambda n: _sp5.primepi(n), range(1, 60))
+_growth_check("npartitions", _se5._growth_npartitions,
+              lambda n: _sp5.npartitions(n), range(1, 40))
+_growth_check("harmonic", _se5._growth_harmonic, lambda n: _sp5.harmonic(n), range(1, 60))
+_growth_check("digamma (position 0)", _se5._growth_digamma,
+              lambda n: _sp5.floor(_sp5.Abs(_sp5.digamma(n))) + 1, range(1, 60))
+_growth_check("fibonacci", _se5._growth_fibonacci, lambda n: _sp5.fibonacci(n), range(60))
+_growth_check("lucas", _se5._growth_lucas, lambda n: _sp5.lucas(n), range(60))
+_growth_check("tribonacci", _se5._growth_tribonacci, lambda n: _sp5.tribonacci(n), range(40))
+_growth_check("catalan", _se5._growth_catalan, lambda n: _sp5.catalan(n), range(40))
+_growth_check("totient", _se5._growth_totient, lambda n: _sp5.totient(n), range(1, 60))
+_growth_check("rf", _se5._growth_rf_ff, lambda n: _sp5.rf(n, n), range(1, 40),
+              extra_bounds=lambda n: {1: math.log10(n) if n > 0 else -math.inf})
+_growth_check("ff", _se5._growth_rf_ff, lambda n: _sp5.ff(n, n), range(1, 40),
+              extra_bounds=lambda n: {1: math.log10(n) if n > 0 else -math.inf})
+_growth_check("divisor_sigma (k=1 default)", _se5._growth_divisor_sigma,
+              lambda n: _sp5.divisor_sigma(n), range(1, 60))
+_growth_check("polygamma (order=0)", _se5._growth_polygamma,
+              lambda n: _sp5.floor(_sp5.Abs(_sp5.polygamma(0, n))) + 1, range(1, 60),
+              extra_bounds=lambda n: {0: 0.0, 1: math.log10(n) if n > 0 else -math.inf})
+# THE-1095 round 11 (grok addendum to coordinator replay of 9fe4f6a):
+# `zeta` was not in this property-sweep list AT ALL (its own OLD
+# formula's sign-blindness bug -- `_safe_pow10(bounds[0]) >= 2` reading
+# as `|s| >= 2`, not `s >= 2` -- would have been caught here immediately
+# had a NEGATIVE `n` ever been swept). Now checked across BOTH signs.
+_growth_check("zeta (now sign-safe -- see _growth_zeta's own docstring)",
+              _se5._growth_zeta, lambda n: _sp5.zeta(n),
+              list(range(2, 40)) + list(range(-40, -1)) + [-1463, -1200, 1463])
+# `gamma`/`loggamma` (`_growth_gamma`): domain-restricted to `z >= 1`
+# elsewhere (`_MAGNITUDE_AT_LEAST_ONE_DOMAIN_POSITIONS`) -- this formula
+# only needs to be sound ON that domain, swept across integers AND
+# rationals (the `[1, 2]` dip where `Gamma`'s own minimum sits), never
+# below `z = 1` (a separate, direct expression pin below covers the
+# domain REFUSAL for `z < 1` instead of asking this formula to bound a
+# regime it is never actually reached for).
+_growth_check("gamma (_growth_gamma, z >= 1 domain)", _se5._growth_gamma,
+              lambda n: _sp5.gamma(n),
+              [1, _sp5.Rational(6, 5), _sp5.Rational(3, 2), _sp5.Rational(7, 4), 2, 3, 5, 10, 20, 50, 100, 1463],
+              real_is_float=True)
+_growth_check("nextprime (ith=1)", _se5._growth_nextprime,
+              lambda n: _sp5.nextprime(n), [2, 3, 10, 100, 1000, 10**6, 10**10, 10**20],
+              extra_bounds=lambda n: {1: 0.0})
+_growth_check("nextprime (ith=1000, MAX_ITH_PRIME_SKIP)", _se5._growth_nextprime,
+              lambda n: _sp5.nextprime(n, 1000), [2, 3, 10, 100, 1000],
+              extra_bounds=lambda n: {1: math.log10(1000)})
+# Item 3 (grok, coordinator review of 949aac9): the deleted "average gap"
+# formula was NOT a sound bound -- `nextprime(887) == 907` (a real,
+# unremarkable gap of 20) already exceeded it. The replacement (Bertrand's
+# postulate compounded in log space, `log10(n) + ith*log10(2)`) is
+# verified here against adversarial points, not round numbers: known
+# large prime gaps (887 before a gap-20 jump; 1327, gap 34; 31397, gap
+# 72; ~1.7e15, gap 1132 -- OEIS's own record-gap list, sympy's own
+# nextprime is cheap even at this size, BPSW-based, not trial division),
+# a cap-edge digit count (10**25 - 1), and ith in {1, 2, 10, 1000} --
+# MAX_ITH_PRIME_SKIP itself.
+for _np_n in (887, 1327, 31397, 1693182318746371, 10**25 - 1):
+    for _np_ith in (1, 2, 10, 1000):
+        _np_bound = _se5._growth_nextprime({0: math.log10(_np_n), 1: math.log10(_np_ith)})
+        _np_real = _sp5.nextprime(_np_n, _np_ith)
+        _np_real_log = math.log10(int(_np_real))
+        check(f"THE-1095 round-3-follow-up item 3: _growth_nextprime is a "
+              f"SOUND bound at n={_np_n}, ith={_np_ith} (adversarial, not "
+              "a round number)",
+              _np_bound >= _np_real_log - 1e-9,
+              f"-> real_log={_np_real_log} bound={_np_bound}")
+
+# Item A (grok): primorial's DEFAULT (no second arg, nth=True) is the
+# product of the FIRST n primes, not the product of primes <= n -- the
+# formula used to bound the WRONG one of the two meanings.
+_v, _e = _boundary_parse("primorial(1463+1)")
+check("THE-1095 round-3-follow-up item A: 'primorial(1463+1)' (default "
+      "nth=True form, one over MAX_HEAVY_ARG) is refused as a ceiling, "
+      "same as before -- the fix corrects the FORMULA, not whether this "
+      "specific boundary refuses",
+      _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+# The DANGEROUS direction of item A's bug: `primorial(6)` (default
+# nth=True: product of the FIRST 6 primes) == 30_030, already far over
+# factorial's own MAX_HEAVY_ARG (1463) argument cap -- but the OLD,
+# WRONG formula (nth=False's `e**(1.02n)`) bounded it at only ~455 (log10
+# ~2.66, UNDER 1463), which would have let `factorial(primorial(6))`
+# proceed to REAL construction: `factorial(30_030)` is astronomically
+# unbounded, exactly the hang this module exists to prevent. This is
+# refused, never evaluated (no real value to compare against -- computing
+# `factorial(30_030)` as a test oracle would itself hang, which is
+# precisely the point).
+_v, _e = _boundary_parse("factorial(primorial(6))")
+check("THE-1095 round-3-follow-up item A: 'factorial(primorial(6))' "
+      "(primorial(6) == 30_030, the OLD buggy formula bounded it at only "
+      "~455 -- UNDER cap, wrongly permitting a factorial(30_030) "
+      "construction) is now correctly refused",
+      _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+# ...and a genuinely small, safe nested primorial still evaluates.
+_v, _e = _boundary_parse("factorial(primorial(2))")
+check("THE-1095 round-3-follow-up item A: 'factorial(primorial(2))' "
+      "(primorial(2) == 6, comfortably safe either way) evaluates to "
+      "main's exact value '720'",
+      _v == 720 and _e is None, f"-> value={_v!r} err={_e!r}")
+
+# Item B (grok): nextprime's growth bound ignored `ith` (position 1)
+# entirely -- bounded as if ith were always 1 regardless of its real
+# value, so `nextprime(2, 1000) == 7927` (genuinely over factorial's own
+# 1463 argument cap) was bounded by the OLD formula at just
+# `log10(2*2) ~= 0.6` -- comfortably UNDER cap, wrongly letting a nested
+# `factorial(7927)` construction (tens of thousands of digits) proceed.
+# No real value to compare against here either -- asserting the refusal
+# IS the test; computing `factorial(7927)` as an oracle would itself be
+# the exact hazard this fix closes.
+_v, _e = _boundary_parse("factorial(nextprime(2, 1000))")
+check("THE-1095 round-3-follow-up item B: 'factorial(nextprime(2, 1000))' "
+      "(nextprime(2,1000) == 7927, over factorial's own 1463 cap -- the "
+      "OLD formula ignored ith and wrongly bounded this as ~4, safe) is "
+      "now correctly refused",
+      _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+# ...and a genuinely in-range n/ith still evaluates: nextprime(500, 1) ==
+# 503, comfortably under the cap. THE-1095 round-3-follow-up (coordinator
+# review of 949aac9, grok item 3): the formula above is now Bertrand's
+# postulate compounded IN LOG SPACE (`log10(n) + ith*log10(2)`, i.e.
+# `n * 2**ith`) instead of an "average gap" estimate -- SOUND for every
+# n/ith (no record-gap edge case can ever beat it), but far LOOSER past
+# ith=1 or 2 than the deleted average-gap formula was: at ith=50 (this
+# test's own PREVIOUS value), the bound is `log10(2) + 50*log10(2) ~=
+# 15.35`, astronomically over factorial's 1463 cap even though the true
+# nextprime(2,50) == 233 is comfortably under it -- soundness, not
+# tightness, is what this formula is FOR, so this test now uses ith=1,
+# where the bound (`log10(500) + log10(2) ~= 3.0`) still clears the cap
+# with room to spare.
+_v, _e = _boundary_parse("factorial(nextprime(500, 1))")
+_expected = _sp5.factorial(503)
+check("THE-1095 round-3-follow-up item B: 'factorial(nextprime(500, 1))' "
+      "(nextprime(500,1) == 503, comfortably under cap) evaluates to "
+      "main's exact value",
+      _v == _expected and _e is None, f"-> value={_v!r} err={_e!r}")
+
+# Item D (grok): _growth_fib_like computed (2*phi)**n instead of the
+# intended 2*phi**n -- too loose to accept fibonacci(16)=987 under
+# factorial's 1463 cap even though the true value is comfortably under.
+_v, _e = _boundary_parse("factorial(fibonacci(16))")
+check("THE-1095 round-3-follow-up item D: 'factorial(fibonacci(16))' "
+      "(fibonacci(16) == 987, comfortably under MAX_HEAVY_ARG) evaluates "
+      "to main's exact value '" + str(_sp5.factorial(987)) + "'"[:80] + "...",
+      _v == _sp5.factorial(987) and _e is None, f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("factorial(fibonacci(17))")
+check("THE-1095 round-3-follow-up item D: 'factorial(fibonacci(17))' "
+      "(fibonacci(17) == 1597, one over MAX_HEAVY_ARG) is refused",
+      _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+# digamma sat in the n**(2n) catch-all despite being genuinely
+# logarithmic -- false-refusing a nested call nowhere near dangerous. Uses
+# `digamma(1463)` (AT digamma's own position-0 cap -- the interesting
+# case: the OLD catch-all bound read `1463` itself as if it were a
+# factorial-style parameter, i.e. `2*1463*log10(1463) ~= 9258`, "over
+# cap" with no shift at all -- while the true `digamma(1463)` stays
+# symbolic (`... - EulerGamma`, SymPy never evaluates it to a float
+# without .evalf()) and `factorial()` of a non-integer symbolic
+# expression stays unevaluated too -- no crash, no refusal, just an
+# ordinary symbolic result, exactly like `origin/main` would give.
+_v, _e = _boundary_parse("factorial(digamma(1463))")
+check("THE-1095 round-3-follow-up item D: 'factorial(digamma(1463))' "
+      "(digamma's own bound is logarithmic, not n**(2n): the OLD catch-"
+      "all wrongly read digamma's ARGUMENT, 1463, as if it were a "
+      "factorial-style output magnitude) evaluates instead of a false "
+      "refusal",
+      _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+
+# Item E (grok): the real-dict catch-all narrowed to ONLY a ValueError
+# containing 'is not an integer' -- re-pinned here under the narrowed rule
+# (nextprime(10,2+1) still evaluates; prime(1-1)/prime(1/0) still surface
+# main's own text, now via the SAME code path either way).
+_v, _e = _boundary_parse("nextprime(10,2+1)")
+check("THE-1095 round-3-follow-up item E: 'nextprime(10,2+1)' still "
+      "evaluates to 17 under the narrowed real-dict catch-all",
+      _v == 17 and _e is None, f"-> value={_v!r} err={_e!r}")
+for _expr, _substr in (("prime(1-1)", "positive integer"), ("prime(1/0)", "not an integer")):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round-3-follow-up item E: {_expr!r} is refused as "
+          f"validation, main's own text ({_substr!r}) preserved",
+          _v is None and _e is not None and _e[0] == "validation" and _substr in _e[1],
+          f"-> value={_v!r} err={_e!r}")
+
+# Codex's shift-digit-bound item, designed together with grok's item C:
+# a table-function call as EITHER operand of `<<` can slip under every
+# per-position cap and only become visibly dangerous once the REAL value
+# is constructed -- bound it at the token level instead, before any real
+# construction.
+_t0 = time.time()
+_v, _e = _boundary_parse("bell(1463) << 100000")
+_dt = time.time() - _t0
+check("THE-1095 round-3-follow-up (Codex): 'bell(1463) << 100000' "
+      "(bell(1463) alone is safe; shifted, the result would have "
+      "~34_000+ digits) is refused with the digit-ceiling message",
+      _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+check(f"  ...in milliseconds ({_dt:.3f}s), not after constructing bell(1463) for real",
+      _dt < 1.0, f"-> {_dt:.3f}s")
+
+_t0 = time.time()
+_v, _e = _boundary_parse("factorial(1463) << 1000")
+_dt = time.time() - _t0
+check("THE-1095 round-3-follow-up (Codex): 'factorial(1463) << 1000' "
+      "(factorial(1463) has 3_998 real digits; shifted by 1000 bits, "
+      "~4_298 digits, over MAX_NUMERIC_DIGITS) is refused",
+      _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+check(f"  ...in milliseconds ({_dt:.3f}s)", _dt < 1.0, f"-> {_dt:.3f}s")
+
+_v, _e = _boundary_parse("factorial(20) << 3")
+check("THE-1095 round-3-follow-up (Codex): 'factorial(20) << 3' (well "
+      "under the digit ceiling either way) still evaluates to main's "
+      "exact value",
+      _v == (_sp5.factorial(20) << 3) and _e is None, f"-> value={_v!r} err={_e!r}")
+
+_v, _e = _boundary_parse("1 << factorial(20)")
+check("THE-1095 round-3-follow-up (grok item C, table call as the SHIFT "
+      "COUNT itself): '1 << factorial(20)' (a shift by ~2.4e18 bits) is "
+      "refused, not silently constructed",
+      _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+
+# Codex's own control (round 4): is `bell(1463) << 1` a bypass, or just
+# bell(1463)'s own documented at-cap cost? THE-1095 round-3-follow-up #4
+# (coordinator review of 06272aa, grok item 2): `bell`'s own growth-bound
+# entry used to be the shared, DELIBERATELY loose `_growth_nn_loose`
+# (`n**(2n)`), overestimating bell(1463) at ~9258 "digits" against its
+# true 3_018 -- already over MAX_NUMERIC_DIGITS with no shift at all, a
+# false refusal main does not share. Replaced with `_growth_stirling_
+# factorial` (`bell(n) <= n!` always -- Bell numbers count PARTITIONS of
+# an n-set, strictly fewer than the n! PERMUTATIONS once n >= 3, a
+# provable fact, not an empirical one), tight enough that `bell(1463) <<
+# 1` now correctly evaluates (matching main) while `bell(1464)`-based
+# shapes still correctly refuse -- no narrowing needed at all once the
+# bound is accurate.
+_v, _e = _boundary_parse("bell(1463) << 1")
+check("THE-1095 round-3-follow-up #4: 'bell(1463) << 1' evaluates to "
+      "main's exact value (no narrowing needed once bell's own bound is "
+      "Stirling-tight)",
+      _v == (_sp5.bell(1463) << 1) and _e is None, f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("7 % bell(20)")
+check("THE-1095 round-3-follow-up (Codex): '7 % bell(20)' (a table call "
+      "under %, nowhere near any cap) still evaluates -- the operator "
+      "screen must not over-refuse ordinary table calls under %,//",
+      _v == 7 and _e is None, f"-> value={_v!r} err={_e!r}")
+
+# Item C(ii): a deferred-parse exception on an expression with NO table
+# name and NO unprotected operator still falls through to main's own
+# parse-error text (an ordinary syntax error is unaffected by this fix).
+_v, _e = _boundary_parse("2 +* 3")
+check("THE-1095 round-3-follow-up item C(ii): '2 +* 3' (an ordinary "
+      "syntax error, no table name, no unprotected operator) still "
+      "surfaces a validation parse error, unaffected by the fail-closed "
+      "narrowing",
+      _v is None and _e is not None and _e[0] == "validation", f"-> value={_v!r} err={_e!r}")
+# The helper itself: true for a table name or an unprotected operator,
+# false for neither.
+check("THE-1095 round-3-follow-up item C(ii): the fail-closed helper "
+      "recognizes a table name",
+      _se5._expression_touches_table_or_unprotected_operator("factorial(5)+1") is True)
+check("  ...and an unprotected operator",
+      _se5._expression_touches_table_or_unprotected_operator("2 % 3") is True)
+check("  ...and neither, for an ordinary expression",
+      _se5._expression_touches_table_or_unprotected_operator("2 + 3 * x") is False)
+
+# ═══ THE-1095 round-3-follow-up #2 (coordinator review of 949aac9, grok ═══
+# ═══ verify-1095-r4-grok.log): structural fix -- operator-protocol ═══════
+# ═══ dunders on the deferred stand-ins, replacing the token-level shift ═══
+# ═══ screen and the TypeError carve-out entirely ══════════════════════════
+#
+# The root problem across rounds 3 and 4: a deferred-parse TypeError on
+# `standin << x` was carved out as "fall through to the real parse", and
+# the token-level `<<` screen could only ever recognise `NAME(NUMBER)`
+# sitting directly next to the operator. Closed at the root instead:
+# `_DeferredOperatorMixin` gives every stand-in `__lshift__`/`__rlshift__`/
+# `__rshift__`/`__rrshift__`/`__mod__`/`__rmod__`/`__floordiv__`/
+# `__rfloordiv__`, returning an inert marker node
+# (`_DeferredLShift`/`_DeferredRShift`/`_DeferredOpMod`/
+# `_DeferredOpFloorDiv`) instead of ever raising -- the deferred TREE now
+# carries every one of these operators, at whatever depth or shape the
+# caller wrote it, because a TREE does not care about token adjacency.
+# `_numeric_ceiling_scan`'s new `_deferred_binop_violation` bounds them:
+# `<<` via `digits(left) + count*log10(2)` (count = the RIGHT operand's
+# own VALUE, via `_GROWTH_BOUNDS`, never a blanket Stirling-of-factorial
+# approximation); `>>`/`%`/`//` via the LEFT operand's own bound alone
+# (the result never exceeds it).
+
+_R5_REFUSE_SHAPES = [
+    "1 << (factorial(20))",
+    "1 << factorial(12+1)",
+    "1 << binomial(40, 20)",
+    "1 << rf(30, 20)",
+    "(bell(1463)) << 100000",
+]
+for _expr in _R5_REFUSE_SHAPES:
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round-3-follow-up #2: {_expr!r} (parenthesised, "
+          "computed, two-arg, or nested -- none of these is a bare "
+          "NAME(NUMBER) token pair next to '<<') is refused",
+          _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+    check(f"  ...in milliseconds ({_dt:.3f}s), not after real construction",
+          _dt < 1.0, f"-> {_dt:.3f}s")
+
+# ClusterFuzzLite, found within the first 60s fuzzing this round's own
+# successor commit: `_split_coefficient`'s `base_key <= _COEFF_MAX_BASE`
+# assumed every multiset key is a plain `int` -- item 4's OWN new
+# Function-node key (`factorial(cos(y))`, a table call over a SYMBOLIC
+# argument SymPy cannot resolve to a definite truth value against 1000)
+# raised `TypeError: cannot determine truth value of Relational` instead
+# of being treated as "not an integer coefficient", the already-correct
+# answer for every other not-small-enough shape.
+for _expr in ("factorial(cos(y)) - factorial(cos(y))",
+              "2*factorial(cos(y)) - factorial(cos(y))"):
+    try:
+        _v, _e = _boundary_parse(_expr)
+        _raised = False
+    except Exception as _exc:
+        _raised = True
+        _v = _e = None
+    check(f"THE-1095 round-3-follow-up #2: {_expr!r} (a table call over a "
+          "symbolic, non-numeric argument, combined additively) never "
+          "raises",
+          not _raised, f"-> raised={_raised}")
+check("  ...and 'factorial(cos(y)) - factorial(cos(y))' cancels to 0 "
+      "(exact structural cancellation, symbolic argument and all)",
+      _boundary_parse("factorial(cos(y)) - factorial(cos(y))")[0] == 0)
+
+# Pin vs main -- item 5's own named values.
+_R5_PINS = [
+    ("factorial(10+1) << 1", 79833600),
+    ("1 << prime(10)", 536870912),
+    ("totient(1463) << 10", int(_sp5.totient(1463)) << 10),
+    ("factorial(20) % 7", 0),
+]
+for _expr, _expected in _R5_PINS:
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round-3-follow-up #2: {_expr!r} == {_expected!r}, "
+          "matching main",
+          _v == _expected and _e is None, f"-> value={_v!r} err={_e!r}")
+
+_v, _e = _boundary_parse("1 << fibonacci(20)")
+check("THE-1095 round-3-follow-up #2: '1 << fibonacci(20)' evaluates to "
+      "main's exact value",
+      _v == (1 << int(_sp5.fibonacci(20))) and _e is None, f"-> value={_v!r} err={_e!r}")
+
+_v, _e = _boundary_parse("7 // bell(20)")
+check("THE-1095 round-3-follow-up #2: '7 // bell(20)' evaluates to "
+      "main's exact value (0 -- bell(20) is astronomically larger than "
+      "7; SymPy's own Mod/floor evaluation determines this from bell's "
+      "own registered assumptions, never by computing bell(20) for real)",
+      _v == 0 and _e is None, f"-> value={_v!r} err={_e!r}")
+
+# `bell(1463)**2` -> ceiling BEFORE construction -- item 4, verified with
+# a spy on the real `sympy.bell` so the assertion is "never called", not
+# merely "fast" (a cache or a lucky code path could also be fast).
+_bell_calls: list = []
+_orig_bell = _sp5.bell
+
+
+def _spy_bell(*_a, **_kw):
+    _bell_calls.append(_a)
+    return _orig_bell(*_a, **_kw)
+
+
+_sp5.bell = _spy_bell
+try:
+    _t0 = time.time()
+    _v, _e = _boundary_parse("bell(1463)**2")
+    _dt = time.time() - _t0
+finally:
+    _sp5.bell = _orig_bell
+check("THE-1095 round-3-follow-up item 4: 'bell(1463)**2' is refused as "
+      "a ceiling",
+      _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+check("  ...WITHOUT ever calling the real sympy.bell (spy pattern, not "
+      "just a timing measurement)",
+      len(_bell_calls) == 0, f"-> {len(_bell_calls)} real calls: {_bell_calls}")
+check(f"  ...and promptly ({_dt:.3f}s)", _dt < 1.0, f"-> {_dt:.3f}s")
+
+# The genuinely-cancelling case MUST still evaluate -- the regression this
+# round's own development caught and fixed (see `_factor_multiset`'s own
+# docstring): a table-function call is now also a valid EXACT multiset
+# base (keyed by the node itself, cancelling structurally), but ONLY
+# trusted by `_multiset_log_num_den` when it fully cancels away --
+# otherwise the whole multiset is discarded rather than measured via an
+# inaccurate growth bound (`_table_multiset_trusted`).
+_v, _e = _boundary_parse("factorial(1463)/factorial(1463)*factorial(1463)/factorial(1463)")
+check("THE-1095 round-3-follow-up item 4 (regression guard): "
+      "'factorial(1463)/factorial(1463)*factorial(1463)/factorial(1463)' "
+      "(net exponent 0, exact value 1) still evaluates -- table-function "
+      "cancellation must not be broken by the new Pow-base bound",
+      _v == 1 and _e is None, f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("x*factorial(1463)")
+check("  ...and a single, in-range, non-cancelling factorial term still "
+      "evaluates ('x*factorial(1463)')",
+      _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("factorial(1000)+fibonacci(1000)")
+check("  ...and two independent sibling heavy calls still evaluate "
+      "('factorial(1000)+fibonacci(1000)')",
+      _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("sqrt(factorial(1463))")
+check("  ...and sqrt(factorial(1463))'s own refusal message is unchanged "
+      "('square root', from the dedicated sqrt/cbrt backstop, not the "
+      "generic digit-ceiling text)",
+      _v is None and _e is not None and "square root" in _e[1], f"-> {_e!r}")
+
+# The TypeError carve-out is GONE: an arity TypeError from the deferred
+# stand-in still matches main's own text exactly (no coverage lost by
+# removing the carve-out, since the stand-in shares the real class's own
+# name and nargs).
+_v, _e = _boundary_parse("binomial(1463+1)")
+check("THE-1095 round-3-follow-up #2: 'binomial(1463+1)' (missing k) is "
+      "still refused with main's own arity TypeError text, now WITHOUT "
+      "any TypeError carve-out in the deferred-parse exception handling",
+      _v is None and _e is not None and _e[0] == "validation"
+      and "takes exactly 2 arguments" in _e[1], f"-> {_e!r}")
+
+# ═══ THE-1095 round-3-follow-up #3 (coordinator review of 5e2a961, grok ═══
+# ═══ verify-1095-r5-grok.log): interception moved to the AST stage ════════
+
+# Differential test (item 1's own requirement): for a corpus with NO
+# unmapped operator anywhere, `_parse_deferred` must produce the
+# STRUCTURALLY IDENTICAL tree `parse_expr(..., evaluate=False)` does --
+# proving `_deferred_transformer_class`'s subclass only ever changes
+# behavior for the four operators it overrides, never for anything
+# `EvaluateFalseTransformer` already handled, so a future sympy bump that
+# changes THAT pipeline is caught here rather than silently drifting.
+_DIFFERENTIAL_CORPUS = [
+    "1", "1.5", "-3", "x", "x + 1", "1 + x", "x - y", "2*x", "x*2", "2*x*y",
+    "x/2", "2/x", "x**2", "2**x", "x**y", "(x+1)**2", "(x+y)*(x-y)",
+    "1 + 2*x - 3", "x**2 + 2*x + 1", "-x", "-x**2", "(-x)**2", "1/(x+1)",
+    "sqrt(x)", "sqrt(2)", "sin(x)", "cos(x)*sin(y)", "exp(x)", "log(x)",
+    "log(x, 2)", "Abs(x)", "x**(1/2)", "x**Rational(1,3)", "2**200",
+    "factorial(5)", "x!", "x**2*y**3", "(x+1)*(y+2)", "x==y", "x < y",
+    "x <= 3", "Eq(x, 1)", "1 < x < 3", "x + y + z", "2 + 3 + 4",
+    "factorial(1463)", "bell(20)", "binomial(5,2)", "Mod(x,3)",
+]
+_diff_g = _se5._deferred_global_dict()
+_diff_fails = 0
+for _expr in _DIFFERENTIAL_CORPUS:
+    try:
+        _mine = _se5._parse_deferred(_expr, local_dict=None, global_dict=_diff_g,
+                                     transformations=_se5.math_transforms())
+        from sympy.parsing.sympy_parser import parse_expr as _sp_parse_expr
+        _theirs = _sp_parse_expr(_expr, transformations=_se5.math_transforms(),
+                                  global_dict=_diff_g, evaluate=False)
+        _match = _mine == _theirs
+    except Exception as _exc:
+        _match = False
+        _mine = f"RAISED {type(_exc).__name__}: {_exc}"
+        _theirs = None
+    if not _match:
+        _diff_fails += 1
+        FAILS.append(f"differential: {_expr!r} -> mine={_mine!r} theirs={_theirs!r}")
+check(f"THE-1095 round-3-follow-up #3: _parse_deferred structurally "
+      f"matches parse_expr(evaluate=False) for {len(_DIFFERENTIAL_CORPUS)} "
+      "expressions with no unmapped operator",
+      _diff_fails == 0, f"-> {_diff_fails} mismatches")
+
+# Issue 3 (operand-shape independence): a bare `standin % n` was already
+# refused before this round (the mixin caught the BARE case); wrapping in
+# a unary minus, an addition, or a multiplication used to bypass it
+# entirely, since SymPy's own eager Mod/floor ran before the mixin ever
+# got a chance once either operand looked like a concrete Expr. The AST-
+# stage fix makes operand shape irrelevant.
+#
+# THE-1095 round-3-follow-up #4 (coordinator review of 06272aa, grok item
+# 2): the AST-stage fix alone still left these THREE refusing with "the
+# left operand of '%' cannot be safely bounded" -- an UNKNOWN verdict
+# (Mul/Add wrapping a table call had no composition rule at all), not an
+# over-cap one -- even though bare `bell(1463) % 7` and bare `bell(1463)`
+# both already evaluated (the documented ~5s at-cap cost) and main
+# evaluates all five shapes. `_resolve_arg_magnitude`'s new Mul/Add
+# composition (this same round's own fix, combined with `bell`'s own
+# now-Stirling-tight bound) closes that: all three now evaluate too.
+for _expr in ("-bell(1463) % 7", "(bell(1463)+1) % 7", "2*bell(1463) % 7"):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round-3-follow-up #4 item 2: {_expr!r} (a Mul/Add "
+          "wrapper around a table call at its own cap) evaluates, "
+          "matching main (the ~5s at-cap allowance already used "
+          "elsewhere in this file)",
+          _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+# ...and the SAME wrapper shapes still refuse promptly when the table
+# call itself is genuinely over cap, or nested and unbounded.
+for _expr in ("-bell(1463+1) % 7", "(factorial(factorial(8))+1) % 7"):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round-3-follow-up #4 item 2: {_expr!r} (the wrapped "
+          "table call is itself over cap or unbounded) is still refused",
+          _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+    check(f"  ...in milliseconds ({_dt:.3f}s), not after real construction",
+          _dt < 1.0, f"-> {_dt:.3f}s")
+# ...and a genuinely UNRESOLVABLE (symbolic) table argument still matches
+# whatever main returns -- the "cannot be safely bounded" refusal stays
+# for this shape, since main itself never evaluates it either.
+_v, _e = _boundary_parse("bell(x) % 7")
+check("THE-1095 round-3-follow-up #4 item 2: 'bell(x) % 7' (a symbolic "
+      "table argument, genuinely unresolvable) matches main's own value",
+      _v is not None and str(_v) == "Mod(bell(x), 7)" and _e is None,
+      f"-> value={_v!r} err={_e!r}")
+
+# Issue 2 (a purely numeric shift count reaching a marker via a nested
+# Pow): `1 << (2**200)` used to reach real construction the instant BOTH
+# sides had already become concrete Integers -- now a marker node either
+# way, its own children fully evaluate=False-protected.
+_t0 = time.time()
+_v, _e = _boundary_parse("1 << (2**200)")
+_dt = time.time() - _t0
+check("THE-1095 round-3-follow-up #3 item 2: '1 << (2**200)' (a huge "
+      "numeric shift count, not a table call) is refused",
+      _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+check(f"  ...in milliseconds ({_dt:.3f}s)", _dt < 1.0, f"-> {_dt:.3f}s")
+_v, _e = _boundary_parse("1 << (10+10)")
+check("  ...and a genuinely small, computed shift count still evaluates "
+      "('1 << (10+10)')",
+      _v == (1 << 20) and _e is None, f"-> value={_v!r} err={_e!r}")
+
+# Issue 1 (cancelling nested table calls): a fully-cancelling product or
+# difference of two identical nested heavy calls used to skip the
+# Function-node check entirely, since `_numeric_ceiling_scan`'s own
+# stack-based descent stops once `_log10_num_den` reports the WHOLE node
+# resolved -- now caught by the SAME unconditional walk that already
+# exists for `Pow` nodes in `reject_explosive`.
+for _expr in ("factorial(factorial(8))/factorial(factorial(8))",
+              "factorial(factorial(8))-factorial(factorial(8))",
+              "nextprime(10**2000)/nextprime(10**2000)",
+              "divisors(factorial(100))/divisors(factorial(100))"):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round-3-follow-up #3 item 1: {_expr!r} (fully "
+          "cancelling, but the inner call is itself unbounded) is refused",
+          _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+    check(f"  ...in milliseconds ({_dt:.3f}s), not by letting the real "
+          "parse evaluate the inner calls",
+          _dt < 1.0, f"-> {_dt:.3f}s")
+
+# THE-1095 round-3-follow-up #6 (coordinator review of 5119c9d,
+# grok `verify-1095-r6-grok.log`, issues 1, 2, 3, 4 -- "one cause":
+# `_resolve_arg_magnitude` did not understand the marker nodes
+# (`_DeferredLShift`/`_DeferredRShift`/`_DeferredMod`/`_DeferredFloorDiv`)
+# AT ALL, and `_function_arg_cap_violation`/`_table_function_bound` both
+# treated an unresolved (non-symbolic) argument as a silent SKIP rather
+# than a refusal.
+#
+# Issue 1 (marker as a table argument fails OPEN): the token screen sees
+# two small literals either side of `<<`, the deferred tree holds a
+# `_DeferredLShift(1, 11)` node as the ARGUMENT to a table call, the old
+# resolver returned "unresolved" for that node (no branch understood
+# markers at all), the old per-position loop's `continue` treated that as
+# "nothing to check here", and step 3's stock (evaluate=True) parse then
+# ran `1 << 11` for real -- a genuine Python/SymPy int -- and constructed
+# real `bell(2048)`. `_resolve_marker_magnitude` (this round's new
+# function, reached through `_resolve_arg_magnitude`'s new `_DEFERRED_
+# BINOP_OPS` branch) now bounds every marker node the SAME way `_deferred_
+# binop_violation` itself already bounds a marker used as a top-level
+# operator, so these all refuse in milliseconds, at the SAME cap
+# `bell(1463+1)`/`factorial(1464)` etc. already refuse at elsewhere in
+# this file -- never by letting real construction run.
+for _expr in ("bell(1 << 11)", "factorial(1 << 20)", "rf(5, 1 << 16)",
+              "factorial((1 << 11))", "factorial(1 << (2+9))",
+              "factorial(2*(1 << 10))",
+              "factorial(1 << 20)/factorial(1 << 20)"):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round-3-follow-up #6 item 1: {_expr!r} (a deferred "
+          "shift/mod marker used as a TABLE-CALL argument) is refused",
+          _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+    check(f"  ...in milliseconds ({_dt:.3f}s), not by letting the real "
+          "parse evaluate '1 << N' and construct the real table call",
+          _dt < 1.0, f"-> {_dt:.3f}s")
+# ...and a marker argument that resolves comfortably under the cap still
+# evaluates to the SAME value `math.factorial` gives -- the fix bounds
+# markers, it does not blanket-refuse every marker-shaped argument.
+_v, _e = _boundary_parse("factorial(1 << 10)")
+check("  ...and a genuinely small marker argument still evaluates "
+      "('factorial(1 << 10)', i.e. factorial(1024))",
+      _v == math.factorial(1024) and _e is None, f"-> value={_v!r} err={_e!r}")
+
+# Issue 2 (chained markers fail CLOSED where main evaluates): `1 << 2 <<
+# 3` is `_DeferredLShift(_DeferredLShift(1, 2), 3)` -- an INNER marker as
+# the LEFT operand of an OUTER one. The old `_deferred_binop_violation`
+# read `left`'s magnitude via a hand-rolled extraction that never
+# recursed back into marker-handling for a nested marker `left`, so these
+# refused even though main evaluates every one of them. Now that
+# `_resolve_marker_magnitude` resolves `left`/`right` through the SAME
+# `_resolve_arg_magnitude` dispatcher it is itself one branch of, a
+# nested marker resolves the inner marker first automatically -- no
+# special-casing needed for the chain, "for free" once issue 1's fix is
+# in place.
+for _expr, _want in (("1 << 2 << 3", 1 << 2 << 3),
+                      ("7 % 3 % 2", 7 % 3 % 2),
+                      ("1 << (2 << 3)", 1 << (2 << 3)),
+                      ("(1 << 4) % 5", (1 << 4) % 5),
+                      ("1 << 2 << 3 << 4", 1 << 2 << 3 << 4)):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round-3-follow-up #6 item 2: {_expr!r} (a CHAIN of "
+          "deferred shift/mod markers) evaluates, matching main",
+          _v == _want and _e is None, f"-> value={_v!r} err={_e!r} want={_want!r}")
+
+# Issue 3 (the structural backstop): in `_function_arg_cap_violation` (and
+# its `_table_function_bound` twin), an argument with NO free symbols
+# that the resolver still cannot bound is now a REFUSAL, never a silent
+# skip -- this is what actually closed issue 1 at the root (a marker node
+# is just ONE shape of "resolver doesn't understand this node yet"; the
+# structural rule catches every OTHER such shape too, present or future).
+#
+# `floor`/`ceiling`/`Abs` of an otherwise-resolvable argument are NOT
+# such a shape -- main evaluates all four of these, and `_resolve_arg_
+# magnitude`'s new dedicated branch for the three of them (recursing into
+# the single argument, collapsing to an integer for floor/ceiling)
+# resolves them too, so the structural backstop never even sees them as
+# unresolved.
+for _expr, _want in (("factorial(floor(2.5))", 2),
+                      ("bell(ceiling(3.7))", 15),
+                      ("factorial(Abs(-5))", 120),
+                      ("rf(5, floor(3.9))", 210)):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round-3-follow-up #6 item 3: {_expr!r} (floor/"
+          "ceiling/Abs of a resolvable argument to a table call) "
+          "evaluates, matching main",
+          _v == _want and _e is None, f"-> value={_v!r} err={_e!r} want={_want!r}")
+# ...while a genuinely unresolvable, NON-symbolic argument -- a Function
+# outside every table this module knows how to bound (`Ei`, the
+# exponential integral, is not in `_FUNCTION_ARG_CAPS` or `_GROWTH_
+# BOUNDS`, and does not collapse to a plain number the way `Max`/`Min`/
+# `sign` of numeric literals would) -- now hits the structural backstop
+# and refuses, even though main itself would just leave it symbolic
+# (`factorial(Ei(1463))` has no proof its argument is a non-negative
+# integer, so main never actually computes anything unsafe for THIS
+# specific shape). This is a deliberate, documented divergence from main
+# for an opaque shape the resolver cannot prove safe -- the module's own
+# fail-closed philosophy (an "unknown" verdict is refused, not silently
+# passed through) applied to a NEW opaque-Function shape, the same way it
+# already applies to a free symbol appearing where a symbol is not
+# expected, or to a table call already over its own cap.
+# THE-1095 round 15 (coordinator addendum, item 3): `Ei` gained its own
+# provable elementary bound this round (`Ei(x) <= e**|x|`, gated at
+# MAX_HEAVY_ARG on |x|) -- it is no longer "opaque, cannot bound", it
+# is now CORRECTLY bounded, and `Ei(1463)`'s own huge magnitude (e**1463
+# is nowhere near a small integer) trips factorial's OWN "exceeds the
+# limit" cap directly instead of the generic "cannot be safely bounded"
+# catch-all this test originally pinned. Still refused either way (the
+# shape this test exists to guard) -- only the WORDING changed, to a
+# more precise one.
+_v, _e = _boundary_parse("factorial(Ei(1463))")
+check("THE-1095 round-3-follow-up #6 item 3 (wording updated round 15): "
+      "'factorial(Ei(1463))' (Ei now provably bounded, huge at x=1463) "
+      "is refused via factorial's own cap, not silently let through",
+      _v is None and _e is not None and _e[0] == "ceiling"
+      and "exceeds the limit" in _e[1],
+      f"-> value={_v!r} err={_e!r}")
+
+# ═══ THE-1095 round 9 (coordinator review of 1d756b7, Codex ═══════════════
+# ═══ verify-1095-r7.log + grok verify-1095-r7-grok.log, both FAILED, CI ═══
+# ═══ green): "a rule that is an upper bound on the happy path but not ═══
+# ═══ on the accepted domain" -- position-complete, domain-explicit fixes ═══
+
+# Item A (Codex finding 1, High): `%`/`//` used the SAME "bounded by the
+# left operand alone" rule -- true only for `>>`. `%`'s bound is the
+# RIGHT operand's own magnitude (`0 <= |a % b| < |b|` unconditionally);
+# `//` needs a LOWER bound on the divisor (a smaller divisor gives a
+# LARGER quotient), known only for an exact numeric literal or a table
+# call proven to always return an integer.
+for _expr in ("bell(-1 % 10**4)", "bell(1 // 0.0005)",
+              "root(-1 % 10**2000,2)", "factorint(-1 % 10**30)",
+              "nextprime(-1 % 10**30)"):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round 9 item A: {_expr!r} (a negative-modulo or "
+          "fractional-divisor operand that used to fail-open) is refused",
+          _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+    check(f"  ...in milliseconds ({_dt:.3f}s), not by letting the real "
+          "parse construct the real quotient/remainder",
+          _dt < 1.0, f"-> {_dt:.3f}s")
+# ...and ordinary, non-adversarial %/// still evaluate to main's values
+# -- the fix bounds the hazard, it does not blanket-refuse the operators.
+for _expr, _want in (("2 % 3", 2), ("-1 % 7", 6), ("10 // 3", 3),
+                      ("-7 // 2", -4), ("7 // bell(20)", 0)):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 9 item A: {_expr!r} (an ordinary %/// use, "
+          "including a table-call divisor PROVEN integer-valued) still "
+          "evaluates, matching main",
+          _v == _want and _e is None, f"-> value={_v!r} err={_e!r} want={_want!r}")
+
+# Item B (Codex finding 2, High): eight table names' own OPTIONAL second
+# position (`bell`'s `k_sym`, `bernoulli`/`euler`/`genocchi`'s `x`,
+# `fibonacci`/`tribonacci`'s `sym`, `harmonic`'s `m`, `zeta`'s `a`) drive
+# the RESULT's own magnitude and cost, and had no bound at all.
+for _expr in ("bell(1463,factorial(1463))", "harmonic(1463,-factorial(8))",
+              "zeta(-1463,1463)", "bell(1463,1463)", "bernoulli(1463,1463)",
+              "euler(1463,1463)"):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round 9 item B: {_expr!r} (a two-position table "
+          "call whose combined output was never bounded before) is "
+          "refused",
+          _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+    check(f"  ...in milliseconds ({_dt:.3f}s), not by hanging on real "
+          "construction",
+          _dt < 1.0, f"-> {_dt:.3f}s")
+# ...and a genuinely small second-position value still evaluates.
+from sympy import Rational as _Rational
+
+_HARMONIC_10_10 = _Rational(413520574906423083987893722912609, 413109706296096288512409600000000)
+for _expr, _want in (("bell(2,1000)", 1001000), ("harmonic(10,10)", _HARMONIC_10_10),
+                      ("zeta(3,2)", None)):
+    _v, _e = _boundary_parse(_expr)
+    if _want is None:
+        check(f"THE-1095 round 9 item B: {_expr!r} evaluates (matches main), "
+              "not refused",
+              _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+    else:
+        check(f"THE-1095 round 9 item B: {_expr!r} evaluates to main's exact value",
+              _v == _want and _e is None, f"-> value={_v!r} err={_e!r} want={_want!r}")
+
+# Item C (Codex finding 3, High): a growth formula is only an upper
+# bound on the domain it was derived for -- `binomial`'s own `n < 0`
+# switches to a DIFFERENT, unaudited code path; `polygamma`'s own order
+# was previously ignored entirely.
+for _expr in ("binomial(-1463,1000000)", "binomial(-100,1000)",
+              "binomial(-5,3)"):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 9 item C: {_expr!r} (outside the domain this "
+          "module has derived a bound for) is refused as a domain "
+          "violation, a deliberate divergence from main",
+          _v is None and _e is not None and _e[0] == "ceiling"
+          and ("must be non-negative" in _e[1] or "must have magnitude" in _e[1]),
+          f"-> value={_v!r} err={_e!r}")
+# `polygamma(5,0.5)` -- round 12 (grok review of 4d94871) moved
+# polygamma's own `z` domain check out of the generic `_domain_
+# violation` table (which read a magnitude, sign-blind) and into
+# `_pole_sensitive_magnitude`'s own EXACT-value-gated check (see that
+# function's own docstring) -- same OUTCOME (still refused, `z < 1`
+# remains outside the domain this module has derived a bound for), a
+# different (but still `_INTEGER_VALUED_TABLE_NAMES`-consistent) wording.
+_v, _e = _boundary_parse("polygamma(5,0.5)")
+check("THE-1095 round 9 item C (round 12 wording update): "
+      "'polygamma(5,0.5)' (outside the domain this module has derived a "
+      "bound for) is refused",
+      _v is None and _e is not None and _e[0] == "ceiling"
+      and "cannot be safely bounded" in _e[1],
+      f"-> value={_v!r} err={_e!r}")
+# ...and the well-behaved domain (order-aware now) still evaluates to
+# main's exact value, even close to its own cap.
+_v, _e = _boundary_parse("polygamma(1463,1)")
+check("THE-1095 round 9 item C: 'polygamma(1463,1)' (order now folded "
+      "into the bound, still comfortably under MAX_NUMERIC_DIGITS -- "
+      "3299 true digits) evaluates, matching main",
+      _v is not None and _e is None and len(str(_v)) == 3299,
+      f"-> value has {len(str(_v)) if _v is not None else None} digits, err={_e!r}")
+
+# Item D (grok): `_log10_num_den`'s own Float print-profile shortcut
+# (always magnitude 0, correct for PRINTING a bare Float) was inherited
+# as a VALUE bound by markers/Mul/Add/floor/ceiling -- `factorial(floor(
+# 1e4 * bell(1)))` (bell(1) == 1, true value factorial(10000), ~35_660
+# digits) used to sail past every scan and get caught only by the
+# output-ceiling backstop AFTER real construction. Also: no `Pow`
+# composition in the resolver at all -- `factorial((1 << 3)**2)` (64!),
+# `factorial(2**(1 << 3))` (256!), `factorial(fibonacci(5)**2)` (25!)
+# all evaluate on main and used to hit the item-3 structural backstop.
+_t0 = time.time()
+_v, _e = _boundary_parse("factorial(floor(1e4 * bell(1)))")
+_dt = time.time() - _t0
+check("THE-1095 round 9 item D: 'factorial(floor(1e4 * bell(1)))' "
+      "(a Float's real VALUE, not its print-profile, hidden inside a "
+      "Mul feeding floor()) is refused",
+      _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+check(f"  ...in milliseconds ({_dt:.3f}s), not after constructing "
+      "factorial(10000) for real",
+      _dt < 1.0, f"-> {_dt:.3f}s")
+for _expr, _want in (("factorial((1 << 3)**2)", math.factorial(64)),
+                      ("factorial(2**(1 << 3))", math.factorial(256)),
+                      ("factorial(fibonacci(5)**2)", math.factorial(25))):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 9 item D: {_expr!r} (a marker/table call "
+          "inside a Pow, itself inside a table-call argument) evaluates "
+          "to main's exact value, via the resolver's new Pow composition",
+          _v == _want and _e is None, f"-> value={_v!r} err={_e!r}")
+
+# Item E (Codex finding 4, Medium): tight, provable bounds replace the
+# loose `n**(2n)` catch-all for several names, closing false ceilings on
+# an absurd shift count, and adding growth entries for `mobius`/
+# `isprime`/`root` (previously "no growth estimate defined" refusals).
+for _expr, _want in (("1 << factorial2(5)", 32768),
+                      ("1 << subfactorial(5)", 17592186044416),
+                      ("1 << euler(4)", 32),
+                      ("mobius(5) % 3", 2), ("isprime(5) << 1", 2),
+                      ("root(8,3) % 3", 2)):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 9 item E: {_expr!r} (a tight, provable growth "
+          "bound instead of the loose n**(2n) catch-all) evaluates, "
+          "matching main",
+          _v == _want and _e is None, f"-> value={_v!r} err={_e!r} want={_want!r}")
+
+# Item F (grok, "the fail-closed list"): a small, curated elementary-
+# function table (Max/Min/sign/sin/cos/tanh/erf/log/exp) lets a numeric
+# argument wrapped in an ordinary, non-table SymPy function resolve
+# through the shared resolver instead of hitting the item-3 backstop.
+for _expr, _want in (("factorial(log(1))", 1), ("factorial(cos(0))", 1),
+                      ("factorial(Max(3, 5))", 120), ("factorial(Min(3,5))", 6),
+                      ("factorial(sin(0))", 1)):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 9 item F: {_expr!r} (an elementary function "
+          "of a resolvable numeric argument) evaluates, matching main",
+          _v == _want and _e is None, f"-> value={_v!r} err={_e!r} want={_want!r}")
+# ...while the fail-closed list stays curated, not a blanket escape:
+# `factorial(I)` (the imaginary unit, not a NumberSymbol, not in the
+# elementary table) still refuses, alongside the already-pinned
+# `factorial(Ei(1463))`.
+_v, _e = _boundary_parse("factorial(I)")
+check("THE-1095 round 9 item F: 'factorial(I)' (imaginary unit, not "
+      "covered by any resolver branch) is refused as unknown",
+      _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+
+# ═══ THE-1095 round 10 (coordinator replay of 6e72d70: "all 40 reviewer ═══
+# ═══ repros hold, but two of my own probes still do real work") ══════════
+
+# Probe 1: `zeta(s, a)` for a concrete INTEGER `s < 2` computes a
+# Bernoulli polynomial of degree `|s| + 1` at `a` -- `zeta(-1200, 2)`
+# measured ~6.4s (Codex measured 5.8s on an earlier round; still open).
+# Scoped to the TWO-ARG form specifically: `zeta(-1200)`/`zeta(-1463)`
+# ALONE (no second argument) are the SAME `s`, and stay fast regardless
+# -- the domain rule must not narrow the already-PINNED single-arg case.
+_t0 = time.time()
+_v, _e = _boundary_parse("zeta(-1200,2)")
+_dt = time.time() - _t0
+check("THE-1095 round 10 probe 1: 'zeta(-1200,2)' (a negative-integer "
+      "first argument with a second argument supplied) is refused as a "
+      "domain violation",
+      _v is None and _e is not None and _e[0] == "ceiling"
+      and "must be >= 2" in _e[1], f"-> value={_v!r} err={_e!r}")
+check(f"  ...in milliseconds ({_dt:.3f}s), not the ~6s of real "
+      "construction this used to cost",
+      _dt < 1.0, f"-> {_dt:.3f}s")
+for _expr, _want in (("zeta(-1200)", 0), ("zeta(1/2)", None)):
+    _v, _e = _boundary_parse(_expr)
+    if _want is None:
+        check(f"THE-1095 round 10 probe 1: {_expr!r} (single-arg, no "
+              "domain restriction on THIS shape) evaluates, not refused",
+              _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+    else:
+        check(f"THE-1095 round 10 probe 1: {_expr!r} (single-arg, no "
+              "domain restriction on THIS shape) evaluates to main's "
+              "exact value",
+              _v == _want and _e is None, f"-> value={_v!r} err={_e!r} want={_want!r}")
+# ...and the already-PINNED single-arg at-cap case from an earlier round
+# stays unaffected by the new two-arg domain rule.
+_v, _e = _boundary_parse("zeta(-1463)")
+check("THE-1095 round 10 probe 1: 'zeta(-1463)' (single-arg, at this "
+      "module's own MAX_HEAVY_ARG cap, already pinned as evaluating in "
+      "an earlier round) is unaffected by the new two-arg domain rule",
+      _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+# A broader sweep of the OTHER names the coordinator asked to check for
+# the identical "negative/small first argument triggers a different,
+# expensive code path" shape -- none reproduce (each stays symbolic,
+# returns `nan`, or returns `0` instantly on BOTH this module and main,
+# confirmed live; no new domain row needed for any of them).
+for _expr in ("bernoulli(-1200,2)", "euler(-1200,2)", "genocchi(-1200,2)",
+              "polygamma(-1200,2)"):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round 10 probe 1 (sweep): {_expr!r} (negative "
+          "first argument, a shape SymPy leaves symbolic rather than "
+          "computing) is prompt, matching main's own unevaluated form",
+          _dt < 1.0, f"-> {_dt:.3f}s value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("harmonic(-100,2)")
+check("THE-1095 round 10 probe 1 (sweep): 'harmonic(-100,2)' evaluates "
+      "to main's own 'nan', not refused, not slow",
+      str(_v) == "nan" and _e is None, f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("binomial(5,-1000)")
+check("THE-1095 round 10 probe 1 (sweep): 'binomial(5,-1000)' (negative "
+      "k, the O(1) k>n short-circuit) evaluates to main's '0'",
+      _v == 0 and _e is None, f"-> value={_v!r} err={_e!r}")
+
+# Probe 2: `floor`/`ceiling`/`frac`/`Max`/`Min`/`sign` force SymPy's own
+# `evalf` to numerically coerce a non-integer argument -- cheap for an
+# exact literal or an integer-valued table call, expensive (thousands of
+# digits of precision) for a genuinely transcendental EXACT value like
+# `polygamma(1463, 1)` (an exact Mul involving pi**1464, never a plain
+# Integer). Root cause found and fixed at its source too:
+# `Function._eval_evalf`'s own generic fallback looks up an mpmath
+# routine by NAME (`self.func.__name__`), not by class identity -- a
+# deferred stand-in named "polygamma" silently dispatched to the REAL
+# `mpmath.psi` the instant anything called `.evalf()` on it, bypassing
+# the "inert, never computes" property this module's whole scan depends
+# on. `_standin_refuses_evalf` closes that for every stand-in; the
+# `_evalf_coercion_cheap`/`_evalf_coercion_violation` pair closes the
+# remaining "genuinely transcendental, not from a stand-in" case.
+for _expr in ("floor(polygamma(1463, 1))", "ceiling(polygamma(1463, 1))",
+              "Max(polygamma(1463, 1), 1)"):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round 10 probe 2: {_expr!r} (numeric coercion of a "
+          "genuinely transcendental, thousands-of-digits-precision "
+          "value) is refused",
+          _v is None and _e is not None and _e[0] == "ceiling"
+          and "coerced" in _e[1], f"-> value={_v!r} err={_e!r}")
+    check(f"  ...in well under a second ({_dt:.3f}s), not the ~18-19s "
+          "this used to cost (measured directly through this module's "
+          "own pipeline, cProfile-traced to Function._eval_evalf's "
+          "NAME-based mpmath dispatch on the deferred stand-in)",
+          _dt < 2.0, f"-> {_dt:.3f}s")
+for _expr, _want in (("floor(pi*10**5)", 314159), ("floor(polygamma(3, 1))", 6),
+                      ("Max(factorial(20), 5)", 2432902008176640000),
+                      ("floor(2.5)", 2)):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 10 probe 2: {_expr!r} (an exact literal, an "
+          "integer-valued table call, or a small-magnitude transcendental "
+          "-- all cheap to numerically coerce) evaluates to main's exact "
+          "value",
+          _v == _want and _e is None, f"-> value={_v!r} err={_e!r} want={_want!r}")
+
+# ═══ THE-1095 round 11 (coordinator replay of 9fe4f6a: Codex round 9 ═══════
+# ═══ verify-1095-r9.log, three probes, quota-limited but reproduced; ═══════
+# ═══ grok verify-1095-r9-grok.log addendum, the shared root cause) ═════════
+
+# Codex item 1: `log` in this module's namespace is NATURAL log, not
+# log10 -- `bell(floor(log(10**1000)))` used to hang, since the OLD
+# elementary bound under-estimated `log(10**1000)`'s own magnitude by a
+# factor of `ln(10)`. Fixed at the resolver; `factorial`'s twin case
+# (already caught by the LAST-RESORT output check, just slowly) is
+# fixed the SAME way, and the fix is uniform across every table name
+# reachable this way, not just `factorial`.
+for _expr in ("bell(floor(log(10**1000)))", "factorial(floor(log(10**1000)))"):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round 11, Codex item 1: {_expr!r} (log's own "
+          "magnitude, corrected for the ln(10) base-change factor) is "
+          "refused promptly, not by hanging or by real construction",
+          _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+    check(f"  ...in well under a second ({_dt:.3f}s)", _dt < 1.0, f"-> {_dt:.3f}s")
+for _expr, _want in (("floor(log(10**1000))", 2302), ("floor(log(2))", 0)):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 11, Codex item 1: {_expr!r} evaluates to "
+          "main's exact value",
+          _v == _want and _e is None, f"-> value={_v!r} err={_e!r} want={_want!r}")
+
+# Codex item 2: `N`/`evalf`'s own precision argument was unbounded, and
+# the final OUTPUT check trusted `_log10_num_den`'s Float print-profile
+# (always magnitude 0) instead of counting a Float's own rendered
+# digits via its `_prec`.
+_t0 = time.time()
+_v, _e = _boundary_parse("N(pi, 100000)")
+_dt = time.time() - _t0
+check("THE-1095 round 11, Codex item 2: 'N(pi, 100000)' (a 100_001-"
+      "character Float) is refused",
+      _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+check(f"  ...well under a second ({_dt:.3f}s), not the ~1.5s this used "
+      "to cost",
+      _dt < 1.0, f"-> {_dt:.3f}s")
+_v, _e = _boundary_parse("N(pi, 50)")
+check("THE-1095 round 11, Codex item 2: 'N(pi, 50)' evaluates to main's "
+      "exact value",
+      _v is not None and str(_v) == "3.1415926535897932384626433832795028841971693993751" and _e is None,
+      f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("N(pi)")
+check("  ...and 'N(pi)' (the default 15-digit precision) evaluates too",
+      _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("10.0**100000")
+check("THE-1095 round 11, Codex item 2: '10.0**100000' (a compact "
+      "Float, `_prec` stays the default 53 bits despite its huge "
+      "magnitude) still evaluates -- the output check counts a Float's "
+      "own PRECISION, not its magnitude",
+      _v is not None and _e is None and len(str(_v)) < 30, f"-> value={_v!r} err={_e!r}")
+
+# Codex item 3 / grok: `sin`/`cos`/`tanh`/`erf`'s own `bounded1` rule
+# (magnitude <= 1) only holds for a REAL argument -- `sin(z)` for a
+# pure-imaginary `z` grows like `sinh(|Im(z)|)`, exponentially.
+_t0 = time.time()
+_v, _e = _boundary_parse("factorial(ceiling(Abs(sin(5000*I))))")
+_dt = time.time() - _t0
+check("THE-1095 round 11, Codex item 3: 'factorial(ceiling(Abs(sin("
+      "5000*I))))' (sinh(5000) is astronomically large) is refused",
+      _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+check(f"  ...in milliseconds ({_dt:.3f}s)", _dt < 1.0, f"-> {_dt:.3f}s")
+_v, _e = _boundary_parse("sin(500*I)")
+check("THE-1095 round 11, Codex item 3: 'sin(500*I)' (bare, not wrapped "
+      "in anything that numerically coerces it) evaluates as main does",
+      _v is not None and str(_v) == "I*sinh(500)" and _e is None,
+      f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("factorial(ceiling(Abs(sin(5))))")
+check("THE-1095 round 11, Codex item 3: 'factorial(ceiling(Abs(sin(5))"
+      "))' (a REAL argument, bounded1 correctly applies) evaluates to "
+      "main's value",
+      _v == 1 and _e is None, f"-> value={_v!r} err={_e!r}")
+
+# grok addendum, the shared root cause: an UNSIGNED magnitude fed to a
+# formula that needs sign/domain information.
+for _expr in ("factorial(floor(zeta(-1463)))", "1 << floor(Abs(zeta(-1463)))"):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round 11, grok addendum: {_expr!r} (zeta(-1463), "
+          "~2852 true digits, used to be sign-blindly bounded at "
+          "log10(2) when NESTED) is refused",
+          _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+    check(f"  ...in well under a second ({_dt:.3f}s)", _dt < 1.0, f"-> {_dt:.3f}s")
+_v, _e = _boundary_parse("zeta(-1463)")
+check("THE-1095 round 11, grok addendum: 'zeta(-1463)' alone (the "
+      "already-pinned single-arg case from an earlier round) still "
+      "evaluates -- the sign-safety fix only changes the NESTED-use "
+      "growth formula, not the top-level domain check",
+      _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+for _expr in ("factorial(floor(Abs(digamma(1e-6))))", "factorial(floor(gamma(1e-6)))",
+              "factorial(floor(Abs(sin(I*20))))", "polygamma(2, -1.5)"):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round 11, grok addendum: {_expr!r} (near a pole, "
+          "or a domain this module has not proven safe) is refused",
+          _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+    check(f"  ...in well under a second ({_dt:.3f}s)", _dt < 1.0, f"-> {_dt:.3f}s")
+_v, _e = _boundary_parse("factorial(floor(gamma(5)))")
+check("THE-1095 round 11, grok addendum: 'factorial(floor(gamma(5)))' "
+      "(z >= 1, the well-behaved domain) evaluates to main's exact "
+      "value (24!)",
+      _v == math.factorial(24) and _e is None, f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("factorial(floor(Abs(sin(5))))")
+check("  ...and 'factorial(floor(Abs(sin(5))))' (a REAL argument) "
+      "evaluates too",
+      _v == 1 and _e is None, f"-> value={_v!r} err={_e!r}")
+
+# ═══ THE-1095 round 12 (grok FAILED 4d94871, verify-1095-r10-grok.log; ═══
+# ═══ "every one of these is a magnitude-only bound fed to a sign/pole- ═══
+# ═══ dependent formula" -- the structural fix is now mandatory) ═══════════
+
+# Item 1 (the structural fix): nested growth resolution for gamma/
+# loggamma/digamma/polygamma/zeta/sin/cos/tanh/erf/exp now takes EXACT
+# values only (`_resolve_exact_rational`), never a magnitude.
+for _expr in ("factorial(floor(Abs(gamma(-1-10**(-6)))))",
+              "factorial(floor(Abs(digamma(-1-10**(-6)))))",
+              "factorial(floor(zeta(2, 1/1000)))",
+              "factorial(floor(zeta(1+10**(-6))))",
+              "factorial(ceiling(Abs(erf(7*I))))"):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round 12 item 1: {_expr!r} (a magnitude-only bound "
+          "used to accept this -- near a pole, a<1 in two-arg zeta, or "
+          "erf's own e**(x**2) growth) is refused",
+          _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+    check(f"  ...in well under a second ({_dt:.3f}s)", _dt < 1.0, f"-> {_dt:.3f}s")
+
+# Item 2: top-level domain rows removed for gamma/loggamma/digamma (and
+# single-arg zeta already had none) -- `origin/main` never performs a
+# genuinely unbounded computation for a bare call to any of these four,
+# confirmed live; their nesting hazard is item 1's job now.
+for _expr, _want in (("gamma(1/2)", "sqrt(pi)"), ("digamma(1/2)", "-2*log(2) - EulerGamma"),
+                      ("loggamma(1/2)", "log(sqrt(pi))"), ("gamma(-1.5)", None),
+                      ("zeta(1+10**(-6))", "zeta(1000001/1000000)")):
+    _v, _e = _boundary_parse(_expr)
+    if _want is None:
+        check(f"THE-1095 round 12 item 2: {_expr!r} evaluates (matches "
+              "main), not refused",
+              _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+    else:
+        check(f"THE-1095 round 12 item 2: {_expr!r} evaluates to main's "
+              "exact value",
+              _v is not None and str(_v) == _want and _e is None,
+              f"-> value={_v!r} err={_e!r} want={_want!r}")
+
+# Item 3: the full named pin list, refusing in ms or evaluating exactly.
+for _expr in ("tanh(I*15707/10000)", "sin(I)", "factorial(floor(gamma(5)))",
+              "factorial(ceiling(Abs(sin(5))))", "factorial(floor(exp(-10)))",
+              "factorial(floor(zeta(2)*10))"):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 12 item 3: {_expr!r} evaluates, not refused",
+          _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+check("  ...'tanh(I*15707/10000)' matches main's own tan-near-pole form",
+      str(_boundary_parse("tanh(I*15707/10000)")[0]) == "I*tan(15707/10000)",
+      f"-> {_boundary_parse('tanh(I*15707/10000)')[0]!r}")
+check("  ...'sin(I)' matches main's own value",
+      str(_boundary_parse("sin(I)")[0]) == "I*sinh(1)",
+      f"-> {_boundary_parse('sin(I)')[0]!r}")
+check("  ...'factorial(floor(gamma(5)))' == 24! (Gamma(5) == 4!)",
+      _boundary_parse("factorial(floor(gamma(5)))")[0] == math.factorial(24),
+      f"-> {_boundary_parse('factorial(floor(gamma(5)))')[0]!r}")
+check("  ...'factorial(ceiling(Abs(sin(5))))' == 1",
+      _boundary_parse("factorial(ceiling(Abs(sin(5))))")[0] == 1,
+      f"-> {_boundary_parse('factorial(ceiling(Abs(sin(5))))')[0]!r}")
+check("  ...'factorial(floor(exp(-10)))' == 1 (exp(-10) ~= 4.5e-5, floor "
+      "== 0)",
+      _boundary_parse("factorial(floor(exp(-10)))")[0] == 1,
+      f"-> {_boundary_parse('factorial(floor(exp(-10)))')[0]!r}")
+check("  ...'factorial(floor(zeta(2)*10))' == 16! (floor(10*pi**2/6) == "
+      "16, matching main -- zeta(2) itself is irrational, not exactly "
+      "rational, but the CONSUMER here is `floor`, whose own cheap-"
+      "coercion gate only needs a small resolved MAGNITUDE, not an "
+      "exact value; zeta(2)'s own s=2 >= 2 domain still resolves it "
+      "safely via the ordinary pole-sensitive path)",
+      _boundary_parse("factorial(floor(zeta(2)*10))")[0] == math.factorial(16),
+      f"-> {_boundary_parse('factorial(floor(zeta(2)*10))')[0]!r}")
+_v, _e = _boundary_parse("factorial(ceiling(Abs(sin(I))))")
+check("THE-1095 round 12 item 3: 'factorial(ceiling(Abs(sin(I))))' (= 2 "
+      "on main; refused here and documented as the deliberate complex "
+      "narrowing -- a bare, non-Mul I is exactly as unresolvable-exactly "
+      "as any other non-real value)",
+      _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+
+# Item 4 (property sweep): every grid point OUTSIDE a pole-sensitive
+# name's own exact-domain class refuses when NESTED; every point INSIDE
+# it evaluates. Negatives, (0, 1) rationals, half-integers, s near 1, a
+# in (0, 1), and imaginary args all appear as OUTSIDE points.
+_OUTSIDE_DOMAIN_NESTED = [
+    "factorial(floor(Abs(gamma(-5))))", "factorial(floor(Abs(gamma(1/3))))",
+    "factorial(floor(Abs(gamma(1/2))))",
+    "factorial(floor(Abs(digamma(-5))))", "factorial(floor(Abs(digamma(1/4))))",
+    "factorial(floor(Abs(loggamma(-2))))", "factorial(floor(Abs(loggamma(1/5))))",
+    "factorial(floor(zeta(3/2)))", "factorial(floor(zeta(1+10**(-6))))",
+    "factorial(ceiling(Abs(cos(3*I))))", "factorial(ceiling(Abs(tanh(2*I))))",
+    "factorial(ceiling(Abs(erf(I))))",
+]
+for _expr in _OUTSIDE_DOMAIN_NESTED:
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 12 item 4 (property sweep, outside-domain): "
+          f"{_expr!r} is refused",
+          _v is None and _e is not None and _e[0] == "ceiling", f"-> value={_v!r} err={_e!r}")
+# (a small, exactly-checkable inside-domain point for each name is
+# asserted below -- the earlier gamma(5)/sin(5)/exp(-10) pins already
+# cover the corresponding "genuinely inside the domain" case for those
+# three, so they are not repeated here.)
+_v, _e = _boundary_parse("factorial(floor(Abs(gamma(2))))")
+check("THE-1095 round 12 item 4 (property sweep, inside-domain): "
+      "'factorial(floor(Abs(gamma(2))))' (Gamma(2) == 1) evaluates",
+      _v == 1 and _e is None, f"-> value={_v!r} err={_e!r}")
+for _expr, _want in (("factorial(floor(zeta(3)))", 1), ("factorial(ceiling(Abs(cos(2))))", 1),
+                      ("factorial(ceiling(Abs(tanh(1))))", 1), ("factorial(ceiling(Abs(erf(1))))", 1)):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 12 item 4 (property sweep, inside-domain): "
+          f"{_expr!r} evaluates to main's exact value",
+          _v == _want and _e is None, f"-> value={_v!r} err={_e!r} want={_want!r}")
+
+# ═══ THE-1095 round 13 (coordinator replay of 9a35eb6): a reciprocal of ═══
+# an exact-zero-plus-epsilon `Add` (`1/(1-1+10**(-6))`) surfaced as
+# `('validation', 'parse error: list index out of range')`. The
+# coordinator's OWN follow-up correction: their probe had an extra `)` --
+# `2+2)` (unbalanced parens) genuinely makes `origin/main` itself raise
+# `IndexError: list index out of range` (confirmed live: bare
+# `sympy.parsing.sympy_parser.parse_expr('2+2)', evaluate=False,
+# transformations=<this module's own implicit-mult+xor transforms>)`
+# raises the IDENTICAL `IndexError`, inherited from SymPy's own
+# `evaluateFalse()` internals -- `ast.Module.body[0]`, indexed after a
+# transform whose own token handling leaves an empty body for this
+# specific unbalanced-paren shape). The round's own FIRST attempt at a
+# fix (an exception-TYPE allowlist, `_classify_parse_exception`, applied
+# at every raw `parse_expr`/`_parse_deferred` call site) was accordingly
+# the WRONG locus -- a real regression, reclassifying this exact,
+# legitimate, `main`-identical `IndexError` as a ceiling refusal instead
+# of relaying it. Deleted entirely.
+#
+# The correct locus is CALL SITE, not exception TYPE: every exception
+# `parse_expr`/`_parse_deferred` (SymPy's own tokenizer/parser/evaluator)
+# raises is relayed verbatim, unconditionally, exactly as before THE-1095
+# round 13 ever touched this function -- `2+2)` is `('validation',
+# 'parse error: list index out of range')`, byte-identical to `main`,
+# never a resource ceiling. Only an exception raised INSIDE this
+# module's OWN code, AFTER a parse has already succeeded
+# (`reject_explosive` on either shape -- `_numeric_ceiling_scan`,
+# `_resolve_arg_magnitude`/`_resolve_exact_rational`, the marker/binop
+# checks -- and the output-ceiling `_log10_num_den` call on the final
+# evaluated `value`), now becomes the unknown-refusal ceiling
+# (`_reject_explosive_safely`/`_INTERNAL_SCAN_FAILURE_MESSAGE`). Kept:
+# `_resolve_exact_rational`'s own hardening (catching any exception its
+# arithmetic composition raises and returning `None` -- "not exactly
+# resolvable" -- for it, the same outcome as every other shape it cannot
+# certify) -- harmless, and still the right contract for a function whose
+# whole job is "return None, never raise, for anything not safely exact".
+
+# Unbalanced/malformed syntax must NEVER be recategorized as a ceiling
+# refusal, and the text must match what `origin/main` itself raises for
+# the identical raw string. THE-1095 round 13 follow-up #2 (grok, CI
+# red on py3.11/macOS/windows): the earlier version of this pin
+# hardcoded the exception TEXT as a literal -- but that text is PYTHON-
+# VERSION dependent (on 3.14, `2+2)` raises `IndexError: list index out
+# of range` from deep in SymPy's own `evaluateFalse()`/`ast` handling;
+# on 3.11, the SAME string never reaches that code at all -- CPython's
+# OWN `tokenize` module raises a `TokenError` for it first, caught by
+# `classify_unsafe`'s own earlier guard instead). A literal pin is
+# right for ONE interpreter and wrong for every other -- fixed by
+# computing the expected `(category, message)` on THE RUNNING
+# interpreter, via the identical two entry points `safe_parse` itself
+# calls (`classify_unsafe`'s own tokenizer guard first, then either
+# `_parse_deferred` or the real `parse_expr(..., evaluate=False)` --
+# whichever one `safe_parse`'s own control flow would actually reach
+# and relay for this string), rather than ever hardcoding either
+# outcome: the pin is "identical to what main would say on THIS
+# Python," never a literal captured on one.
+def _reference_syntax_error(expr: str) -> tuple:
+    """`(category, message)` `safe_parse(expr)` SHOULD produce for a
+    genuinely malformed `expr`, computed independently -- on the
+    RUNNING interpreter, never a hardcoded literal -- by calling the
+    same entry points `safe_parse` itself calls, in the same order.
+    """
+    cls = _se5.classify_unsafe(expr)
+    if cls:
+        return cls
+    from sympy.parsing.sympy_parser import parse_expr as _pe5
+    if _se5._expression_touches_table_or_unprotected_operator(expr):
+        try:
+            _se5._parse_deferred(expr, local_dict=None,
+                                  global_dict=_se5._deferred_global_dict(),
+                                  transformations=_se5.math_transforms())
+        except Exception as exc:
+            return ("validation", f"parse error: {exc}")
+    try:
+        _pe5(expr, transformations=_se5.math_transforms(),
+             global_dict=_se5.safe_global_dict(), evaluate=False)
+    except Exception as exc:
+        return ("validation", f"parse error: {exc}")
+    return ("ok", "-- did not actually raise; test probe is not malformed --")
+
+
+_SYNTAX_ERROR_PROBES = (
+    "2+2)",
+    "(2+2",
+    "2 +* 3",
+    "sin(",
+    "factorial(floor(Abs(1/(1-1+10**(-6))))))",  # 6 closing parens
+)
+for _expr in _SYNTAX_ERROR_PROBES:
+    _v, _e = _boundary_parse(_expr)
+    _want = _reference_syntax_error(_expr)
+    check(f"THE-1095 round 13 (coordinator correction): {_expr!r} "
+          f"(unbalanced/malformed syntax) is a VALIDATION error, "
+          f"identical to what main says on THIS interpreter, never a "
+          f"ceiling refusal",
+          _v is None and _e is not None and _e[0] == "validation" and _e == _want,
+          f"-> value={_v!r} err={_e!r} want={_want!r}")
+
+# The balanced-paren version of the same repro is UNCHANGED by this
+# round's correction -- it never raises at all, and correctly refuses on
+# the pre-existing digit-count backstop (`factorial(1000000)`, ~5.6M
+# digits), never the internal "list index out of range" text.
+_v, _e = _boundary_parse("factorial(floor(Abs(1/(1-1+10**(-6)))))")
+check("THE-1095 round 13: 'factorial(floor(Abs(1/(1-1+10**(-6)))))' "
+      "(balanced parens -- 1/(1-1+10**(-6)) resolves EXACTLY to "
+      "1000000, factorial(1000000) is a genuine ceiling refusal) "
+      "refuses with the ceiling category, and the message carries no "
+      "internal implementation detail",
+      _v is None and _e is not None and _e[0] == "ceiling"
+      and "index" not in _e[1].lower(),
+      f"-> value={_v!r} err={_e!r}")
+
+# Fuzz-style sweep over reciprocals of exact-zero and near-zero subtrees --
+# the same shape class as the repro above, at varying nesting and with a
+# free symbol mixed in (`x/(0+0)`). None of these is expected to be
+# refused on ITS OWN (each is either a genuine `zoo`/`zoo*x` pole on
+# `origin/main`, or a clean exact evaluation) -- the assertion is never
+# "matches this exact value," only "never an internal-looking message":
+# whatever `safe_parse` returns is EITHER a clean value (`err is None`)
+# or an error whose category is one this module's own callers already
+# know how to handle (`validation`/`ceiling`) and whose text carries no
+# raw Python exception class name or internal detail like "index".
+_RECIPROCAL_NEAR_ZERO_SWEEP = (
+    "1/(1-1)",
+    "1/(2-2+10**(-9))",
+    "x/(0+0)",
+    "1/(10**(-6))",
+    "1/(Rational(1,10**6))",
+)
+for _expr in _RECIPROCAL_NEAR_ZERO_SWEEP:
+    _v, _e = _boundary_parse(_expr)
+    _ok = isinstance((_v, _e), tuple)
+    if _e is not None:
+        _ok = (_e[0] in ("validation", "ceiling")
+               and "index" not in _e[1].lower()
+               and "traceback" not in _e[1].lower())
+    check(f"THE-1095 round 13 (fuzz sweep): {_expr!r} returns a clean "
+          f"2-tuple -- main's own outcome or a ceiling/validation "
+          f"refusal, never an internal message",
+          _ok, f"-> value={_v!r} err={_e!r}")
+
+# The internal-guard path itself, isolated: `_numeric_ceiling_scan` is
+# called from `reject_explosive`, which is called from BOTH of
+# `safe_parse`'s own `_reject_explosive_safely` sites -- this is OUR OWN
+# code running strictly AFTER a parse has already succeeded, the one
+# case `_INTERNAL_SCAN_FAILURE_MESSAGE` exists for. Monkeypatched to
+# raise, on an otherwise completely ordinary expression that has nothing
+# wrong with its own syntax -- if this guard were missing, the exception
+# would propagate straight out of `safe_parse`, uncaught.
+_orig_scan = _se5._numeric_ceiling_scan
+
+
+def _boom_ceiling_scan(_tree, _memo):
+    raise RuntimeError("THE-1095 round 13 injected internal failure")
+
+
+_se5._numeric_ceiling_scan = _boom_ceiling_scan
+try:
+    _v, _e = _boundary_parse("2+2")
+finally:
+    _se5._numeric_ceiling_scan = _orig_scan
+check("THE-1095 round 13: an exception raised INSIDE this module's own "
+      "post-parse code (_numeric_ceiling_scan, monkeypatched to raise "
+      "RuntimeError) on an otherwise ordinary expression ('2+2') becomes "
+      "the unknown-refusal ceiling, never an uncaught crash and never a "
+      "misleading 'parse error'",
+      _v is None and _e is not None and _e[0] == "ceiling"
+      and "internal" in _e[1].lower(),
+      f"-> value={_v!r} err={_e!r}")
+
+# ═══ THE-1095 round 13 follow-up (grok FAILED fad081f, verify-1095-r11- ═══
+# grok.log): `_pole_sensitive_magnitude`'s `polygamma` branch discarded
+# the SIGN of a resolved order (`math.log10(abs(order_v))`) before
+# feeding it to `_growth_polygamma`'s `order! * zeta(order+1, z)`
+# identity -- correct ONLY for `order >= 1`, but the sign-discarding
+# meant a NEGATIVE order round-tripped through `abs()` as if it were
+# the SAME positive magnitude, so `polygamma(-1, z)` was bounded as
+# though it were `polygamma(1, z)` (`zeta(2, z) < 2`, a ~1-digit claim)
+# -- while SymPy 1.14 actually evaluates `polygamma(-1, z)` as
+# `loggamma(z) - log(2*pi)/2` (`~ z*log(z)` for a real, `gamma(z)`-scale
+# result once `z` is large). Fixed at the SOURCE (`_pole_sensitive_
+# magnitude`'s own polygamma branch, used for the NESTED case): a
+# resolved order that is neither exactly `0` (digamma) nor a POSITIVE
+# INTEGER now refuses outright, sign and non-integer-ness both checked
+# BEFORE any magnitude is ever computed from it -- "refuse every other
+# resolved order as unknown," never estimate one from `abs()`.
+#
+# `_table_function_growth_violation`'s own TOP-LEVEL walk needed a
+# separate, narrower fix: `polygamma(-1, 5)` bare (unwrapped) is
+# genuinely SAFE on `origin/main` (a small, instantly-evaluated
+# expression) and must still evaluate, not refuse -- see the new
+# `order_v == -1` branch there, which exempts a POSITIVE INTEGER `z`
+# under the SAME cap `factorial`'s own position-0 argument already uses
+# (`z <= MAX_HEAVY_ARG + 1`, since `polygamma(-1, z)` materializes an
+# exact `factorial(z - 1)` for integer `z`) and otherwise falls through
+# to the same refusal as the nested case.
+for _expr in ("factorial(floor(polygamma(-1, 700)))",
+              "bell(floor(Abs(polygamma(-1, 1463))))",
+              "rf(5, floor(polygamma(-1, 700)))"):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _elapsed = time.time() - _t0
+    check(f"THE-1095 round 13 follow-up (grok): {_expr!r} (negative "
+          f"polygamma order, sign previously discarded) refuses in "
+          f"well under a second, never constructs the gamma(z)-scale "
+          f"value",
+          _v is None and _e is not None and _e[0] == "ceiling"
+          and _elapsed < 2.0,
+          f"-> value={_v!r} err={_e!r} elapsed={_elapsed:.4f}s")
+
+_v, _e = _boundary_parse("polygamma(-1, 5)")
+check("THE-1095 round 13 follow-up (grok): 'polygamma(-1, 5)' at the "
+      "TOP LEVEL (bare, unwrapped) matches main -- evaluates, never "
+      "refused",
+      _v is not None and _e is None and str(_v) == "-log(2*pi)/2 + log(24)",
+      f"-> value={_v!r} err={_e!r}")
+
+# ═══ THE-1095 round 13 follow-up (60s atheris pass against 72e951b found ═══
+# a NUL-byte finding, ClusterFuzzLite-discovered): `classify_unsafe`'s own
+# tokenizer guard (and `_expression_touches_table_or_unprotected_operator`'s
+# identical one) caught `tokenize.TokenError`/`SyntaxError`/
+# `IndentationError`/`UnicodeEncodeError`/`UnicodeDecodeError` but not
+# `SystemError` -- and CPython 3.12's C tokenizer
+# (`_generate_tokens_from_c_tokenizer`) raises a BARE `SystemError` (a raw
+# memory address, "<built-in method __new__ of type object at 0x...>
+# returned a result with an exception set" -- no information about the
+# INPUT at all) for one narrow embedded-NUL-byte shape:
+# `'   *AAA\n/\x00\x00'`. The atheris harness's own contract is
+# "classify_unsafe/safe_parse never raise" (see fuzz/safe_expr_fuzzer.py's
+# own module docstring) -- this escaped it, uncaught, straight out of
+# `classify_unsafe`. Fixed by adding `SystemError` to BOTH tokenizer
+# guards' except tuples, and substituting a clean message for it
+# specifically (`origin/main`'s own text for the underlying condition --
+# confirmed live: every OTHER NUL-byte shape, and this SAME shape on
+# Python 3.14, all raise a clean `TokenError: ('source code cannot
+# contain null bytes', ...)`) rather than ever relaying `str(SystemError(
+# ...))` verbatim.
+#
+# Pinned with the exact repro plus the two the coordinator asked for
+# (`'2+\x002'`, a NUL byte MID-expression; `'\x00'`, a bare NUL byte alone)
+# -- none of the three is expected to raise on ANY Python version this
+# module runs on (3.11/3.12/3.14, all measured live), and each must come
+# back the IDENTICAL, deterministic `validation` 2-tuple -- not merely "no
+# internal detail," but the EXACT fixed text `_control_character_
+# violation` now synthesizes (grok issue 4/CI red on py3.11's own
+# follow-up: version-INDEPENDENT text is the actual fix, not just "no
+# crash").
+_nul_msg = ("expression could not be tokenised: source code cannot "
+            "contain null bytes")
+_NUL_BYTE_MESSAGE = ("validation", _nul_msg)
+for _expr in ("   *AAA\n/\x00\x00", "2+\x002", "\x00"):
+    try:
+        _cls = _se5.classify_unsafe(_expr)
+        _v, _e = _boundary_parse(_expr)
+        _raised = False
+    except Exception as _exc:  # this IS the crash this test pins against
+        _cls, _v, _e, _raised = None, None, None, _exc
+    _ok = (not _raised and _cls == _NUL_BYTE_MESSAGE
+           and _v is None and _e == _NUL_BYTE_MESSAGE)
+    check(f"THE-1095 round 13 follow-up (grok issue 4, py3.11 CI): "
+          f"{_expr!r} never raises and returns the FIXED, "
+          f"Python-version-independent validation text, on THIS "
+          f"interpreter",
+          _ok, f"-> classify_unsafe={_cls!r} safe_parse=({_v!r}, {_e!r}) "
+               f"raised={_raised!r} want={_NUL_BYTE_MESSAGE!r}")
+
+# A non-NUL C0 control character (or DEL) is pre-screened the same way,
+# with `tokenize`'s own "invalid non-printable character" wording --
+# confirmed live to already be IDENTICAL text across 3.11/3.12/3.14 (no
+# version-dependence bug for this half of the class, but pre-screening it
+# here too closes the class fully rather than leaving a second,
+# not-yet-broken tokenizer dependency in place).
+_v, _e = _boundary_parse("2+\x011")
+_control_char_msg = ("expression could not be tokenised: invalid "
+                     "non-printable character U+0001")
+check("THE-1095 round 13 follow-up: a non-NUL C0 control character "
+      "('2+\\x011') is pre-screened with tokenize's own wording",
+      _v is None and _e == ("validation", _control_char_msg),
+      f"-> value={_v!r} err={_e!r}")
+
+# A `SystemError` that reaches the tokenizer guard for a reason OTHER
+# than the pre-screened NUL-byte shape (grok issue 4's own narrowing
+# request) is now this module's OWN internal-unknown ceiling refusal,
+# never guessed to be NUL-byte-related and mislabeled `validation`.
+_orig_tokenize = _se5.tokenize.generate_tokens
+
+
+def _boom_tokenize(*_a, **_kw):
+    raise SystemError("some unrelated internal tokenizer failure")
+
+
+_se5.tokenize.generate_tokens = _boom_tokenize
+try:
+    _cls = _se5.classify_unsafe("2+2")
+finally:
+    _se5.tokenize.generate_tokens = _orig_tokenize
+check("THE-1095 round 13 follow-up (grok issue 4): a SystemError NOT "
+      "caused by a pre-screened control character (monkeypatched) "
+      "becomes the internal-unknown ceiling refusal, never guessed to "
+      "be the NUL-byte case",
+      _cls is not None and _cls[0] == "ceiling" and "internal" in _cls[1].lower(),
+      f"-> {_cls!r}")
+
+# ═══ THE-1095 round 13 follow-up (grok FAILED 923f9f7, verify-1095-r12- ═══
+# grok.log). Four more issues, all fixed in the same commit as the NUL
+# tests above.
+
+# Issue 2: the orthogonal-polynomial family (`hermite`/`hermite_prob`/
+# `chebyshevt`/`chebyshevu`/`gegenbauer`/`legendre`/`assoc_legendre`/
+# `jacobi`/`laguerre`/`assoc_laguerre`) is real callables whose `eval()`
+# ALWAYS materializes a degree-`n` polynomial for a numeric order, during
+# the DEFERRED (supposedly evaluate=False) parse, before this module's own
+# scan ever runs -- none of them are in `EvaluateFalseTransformer.
+# functions`. Now stood in and capped like every other table name (see
+# `MAX_HERMITE_ORDER`'s own comment for the ten measured, per-family
+# caps and why they differ).
+from sympy import Rational as _Rational5
+from sympy import hermite as _hermite5
+from sympy import legendre as _legendre5
+from sympy import symbols as _symbols5
+
+_x5 = _symbols5("x")
+_v, _e = _boundary_parse("hermite(50, x)")
+check("THE-1095 round 13 follow-up (grok issue 2): 'hermite(50, x)' "
+      "matches main",
+      _e is None and _v == _hermite5(50, _x5),
+      f"-> value={_v!r} err={_e!r}")
+for _expr, _fname, _cap in (("hermite(2000, x)", "hermite", _se5.MAX_HERMITE_ORDER),
+                              ("chebyshevt(2000, x)", "chebyshevt", _se5.MAX_CHEBYSHEV_T_ORDER)):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round 13 follow-up (grok issue 2): {_expr!r} "
+          f"refuses well under a second (never materializes the "
+          f"degree-2000 polynomial)",
+          _v is None and _e is not None and _e[0] == "ceiling" and _dt < 2.0,
+          f"-> value={_v!r} err={_e!r} elapsed={_dt:.4f}s")
+_v, _e = _boundary_parse("legendre(5, 1/2)")
+check("THE-1095 round 13 follow-up (grok issue 2): 'legendre(5, 1/2)' "
+      "matches main",
+      _e is None and _v == _legendre5(5, _Rational5(1, 2)),
+      f"-> value={_v!r} err={_e!r}")
+
+# Issue 1: top-level polygamma(-1, z) for a NON-integer z, and ANY order
+# <= -2, are both cheap/unevaluated on main and must not refuse.
+for _expr in ("polygamma(-1, 1/2)", "polygamma(-1, 700.5)", "polygamma(-2, 5)"):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 13 follow-up (grok issue 1): {_expr!r} "
+          f"matches main -- evaluates, never refused",
+          _v is not None and _e is None,
+          f"-> value={_v!r} err={_e!r}")
+
+# Issue 3: `andre` needed a TIGHT growth bound (`2*n!`, like `euler`), not
+# the loose `n**(2n)` catch-all -- `andre(1463)` (this module's own table
+# already documents it at 3711 true digits) now evaluates; `andre(1464)`
+# still refuses.
+_t0 = time.time()
+_v, _e = _boundary_parse("andre(1463)")
+_dt = time.time() - _t0
+check("THE-1095 round 13 follow-up (grok issue 3): 'andre(1463)' "
+      "evaluates (the module's own table already documents it at 3711 "
+      "true digits, under the 4000 cap)",
+      _v is not None and _e is None and len(str(_v)) == 3711,
+      f"-> value has {len(str(_v)) if _v is not None else None!r} digits "
+      f"err={_e!r} elapsed={_dt:.4f}s")
+_v, _e = _boundary_parse("andre(1464)")
+check("THE-1095 round 13 follow-up (grok issue 3): 'andre(1464)' "
+      "still refuses",
+      _v is None and _e is not None and _e[0] == "ceiling",
+      f"-> value={_v!r} err={_e!r}")
+
+# ═══ THE-1095 round 13 follow-up (Codex FAILED 562a026, verify-1095- ═══════
+# ═══ r13.log). Issues B, C, D below, same round as grok's polynomial ═══════
+# ═══ items above. ═══════════════════════════════════════════════════════
+
+# Issue C: "position-complete" used to mean "every position `_bounded_
+# positions` iterates has a row" -- a position OUTSIDE that iteration (no
+# cap, no `_UNBOUNDED_POSITIONS` entry either) read back as `None` from
+# `_position_spec` exactly the same way a genuinely-audited-safe one did,
+# indistinguishable from "nobody has looked at this yet." This audits
+# EVERY name in `_FUNCTION_ARG_CAPS` against its own REAL arity
+# (`inspect.signature`, sympy 1.14) and fails if ANY position in
+# `[0, max_arity)` has neither a cap row nor an explicit `_UNBOUNDED_
+# POSITIONS` entry -- the self-check Codex's own review asked for,
+# verbatim: "must fail on any position ... without a row or an explicit
+# refuse entry."
+import inspect as _inspect5
+
+_position_complete_gaps = []
+for _fn_name in sorted(_se5._FUNCTION_ARG_CAPS):
+    _real_obj = _se5.safe_global_dict().get(_fn_name)
+    if _real_obj is None:
+        continue
+    try:
+        _sig = _inspect5.signature(_real_obj)
+    except (TypeError, ValueError):
+        continue  # no introspectable signature -- nothing this audit can check
+    _max_arity = 0
+    _has_var_positional = False
+    for _param in _sig.parameters.values():
+        if _param.kind == _inspect5.Parameter.VAR_POSITIONAL:
+            _has_var_positional = True
+            break
+        if _param.kind in (_inspect5.Parameter.POSITIONAL_ONLY,
+                            _inspect5.Parameter.POSITIONAL_OR_KEYWORD):
+            _max_arity += 1
+    if _has_var_positional:
+        continue  # a variadic signature (*args) has no fixed arity to audit
+    for _pos in range(_max_arity):
+        if _se5._position_spec(_fn_name, _pos) is not None:
+            continue
+        if _pos in _se5._UNBOUNDED_POSITIONS.get(_fn_name, ()):
+            continue
+        _position_complete_gaps.append((_fn_name, _pos))
+check("THE-1095 round 13 follow-up (Codex issue C): every position of "
+      "every `_FUNCTION_ARG_CAPS` name has EITHER a cap row or an "
+      "explicit `_UNBOUNDED_POSITIONS` audit entry -- no silent gap",
+      not _position_complete_gaps, f"-> gaps={_position_complete_gaps!r}")
+
+# Issue D (main-parity pins from Codex's own 738-expression corpus):
+_v, _e = _boundary_parse("factorint(2+3)")
+check("THE-1095 round 13 follow-up (Codex issue D): 'factorint(2+3)' "
+      "matches main ({5: 1} -- an intended, documented outcome, not a "
+      "regression)",
+      _e is None and str(_v) == "{5: 1}", f"-> value={_v!r} err={_e!r}")
+
+_v, _e = _boundary_parse("zeta(1, 2)")
+check("THE-1095 round 13 follow-up (Codex issue D): 'zeta(1, 2)' (the "
+      "pole at s=1, TOP level -- cheap on main) matches main (zoo)",
+      _e is None and str(_v) == "zoo", f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("Abs(zeta(1))")
+check("THE-1095 round 13 follow-up (Codex issue D): 'Abs(zeta(1))' "
+      "matches main (oo)",
+      _e is None and str(_v) == "oo", f"-> value={_v!r} err={_e!r}")
+
+# Issue B (binomial, non-integer n's unbounded k):
+for _expr in ("binomial(1/2, 1000000)", "binomial(1/2, 10000)"):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 13 follow-up (Codex issue B): {_expr!r} "
+          f"(non-integer n, huge k) refuses -- binomial's own k-exemption "
+          f"is sound only for a non-negative-integer n",
+          _v is None and _e is not None and _e[0] == "ceiling",
+          f"-> value={_v!r} err={_e!r}")
+# THE-1095 round 15 (grok issue 1, `verify-1095-r14-grok.log`):
+# `binomial(1/2, 1463)` used to "still evaluate" here on the strength
+# of `_growth_2n`'s own UNSOUND estimate for a non-integer `n` (~0.15,
+# reading only `n`, never `k`) staying under the digit ceiling by
+# ACCIDENT -- the same unsoundness that let `factorial(binomial(1/2,
+# 1463))` sail through `factorial`'s own cap check with the identical
+# wrong-but-small number (see `_growth_binomial_general`'s own
+# docstring for the fix and why it is deliberately LOOSE rather than
+# exactly tight). The now-SOUND bound is loose enough that the AT-the-
+# k-cap case is conservatively refused instead -- a DELIBERATE
+# narrowing, the same "closing a real unsoundness is worth a false
+# refusal on this one narrow shape" trade this file already makes
+# elsewhere (`binomial(1463+1, 0)`, `rf`/`ff`'s own `k` cap, ...) --
+# `binomial(1/2, 10)`, below, confirms ordinary small-`k` fractional-`n`
+# use is untouched.
+_v, _e = _boundary_parse("binomial(1/2, 1463)")
+check("THE-1095 round 15 (grok issue 1): 'binomial(1/2, 1463)' "
+      "(non-integer n, k AT the cap) now conservatively refuses -- the "
+      "growth bound that used to let this through was unsound (see "
+      "_growth_binomial_general)",
+      _v is None and _e is not None and _e[0] == "ceiling",
+      f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("binomial(5, 10**9)")
+check("THE-1095 round 13 follow-up (Codex issue B): 'binomial(5, "
+      "10**9)' (integer n, k > n) is UNAFFECTED -- still the O(1) "
+      "k > n shortcut, 0",
+      _v is not None and str(_v) == "0" and _e is None,
+      f"-> value={_v!r} err={_e!r}")
+
+# THE-1095 round 15 (grok issue 1, coordinator's own named pins): a
+# NESTED `binomial(1/2, 1463)` (non-integer n, k at the cap) now
+# refuses PROMPTLY through every one of these three consumers, instead
+# of `_growth_2n`'s own unsound (n-only, k-blind) estimate letting the
+# outer function's cap check see a wrong, tiny magnitude. Confirmed
+# live (bare `sp.factorial`/`sp.bell`/`<<` of this exact Rational, and
+# this module's OWN pre-round-15 code, checked out from d713821):
+# NONE of the three actually hangs on `origin/main` either (`factorial`
+# stays symbolically unevaluated in ~0.2ms, `bell`/`<<` raise a native
+# `ValueError`/`TypeError` in under a millisecond) -- the true VALUE of
+# `binomial(1/2, 1463)` is a small fraction (`~5.3e-6`), not the huge
+# NUMBER `_growth_2n`'s own wrong estimate implied either way. This
+# module refuses them anyway, deliberately more conservative than
+# main: `_growth_2n` was never a SOUND bound outside a confirmed non-
+# negative integer `n` regardless of whether THIS specific (n, k) pair
+# happens to be benign, and "unknown != safe" means a formula this
+# file cannot prove correct does not get to stay in service on the
+# strength of one example not currently exploiting it.
+for _expr, _outer in (
+    ("factorial(binomial(1/2, 1463))", "factorial"),
+    ("bell(binomial(1/2, 1463))", "bell"),
+    ("1 << binomial(1/2, 1463)", "<<"),
+):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round 15 (grok issue 1): {_expr!r} ({_outer} of a "
+          f"nested non-integer-n binomial at the k cap) refuses "
+          f"promptly -- the growth bound now correctly accounts for k",
+          _v is None and _e is not None and _e[0] == "ceiling" and _dt < 1.0,
+          f"-> value={_v!r} err={_e!r} elapsed={_dt:.3f}s")
+
+_v, _e = _boundary_parse("binomial(1/2, 10)")
+check("THE-1095 round 15 (grok issue 1, coordinator's own pin): "
+      "'binomial(1/2, 10)' (non-integer n, small k) is UNAFFECTED -- "
+      "still evaluates to the exact rational main gives",
+      _e is None and str(_v) == "-2431/262144", f"-> value={_v!r} err={_e!r}")
+
+_v, _e = _boundary_parse("factorial(binomial(6, 3))")
+check("THE-1095 round 15 (grok issue 1, coordinator's own pin): "
+      "'factorial(binomial(6, 3))' (integer n, the confirmed-safe "
+      "domain _growth_2n stays dedicated to) is UNAFFECTED -- still "
+      "evaluates to 20!",
+      _e is None and str(_v) == "2432902008176640000", f"-> value={_v!r} err={_e!r}")
+
+# Issue A(i): the six repros Codex's own review measured accepted/hung.
+for _expr in (
+    "interpolating_poly(100, x)",
+    "multinomial_coefficients(5, 100)",
+    "ones(5000,5000)",
+    "randMatrix(5000,5000)",
+    "divisor_count(152260502792253336053561837813263742971806)",
+    "chebyshevt_poly(10000, x)",
+):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round 13 follow-up (Codex issue A): {_expr!r} "
+          f"(an unbounded SymPy callable, previously invisible to this "
+          f"module's own tables) refuses in well under a second",
+          _v is None and _e is not None and _e[0] == "ceiling" and _dt < 3.0,
+          f"-> value={_v!r} err={_e!r} elapsed={_dt:.4f}s")
+# ...and ordinary, all-symbolic usage of an unbounded name keeps working.
+for _expr, _want_free in (("expand(x+1)", True), ("factor(x**2-1)", True)):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 13 follow-up (Codex issue A): {_expr!r} "
+          f"(all-symbolic argument) still evaluates, matching main",
+          _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("series(sin(x), x, 0, 6)")
+check("THE-1095 round 13 follow-up (Codex issue A): 'series(sin(x), x, "
+      "0, 6)' (a small, ordinary order) still evaluates, matching main",
+      _v is not None and _e is None and "O(x**6)" in str(_v),
+      f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("series(exp(x), x, 0, 100000)")
+check("THE-1095 round 13 follow-up (Codex issue A): 'series(exp(x), x, "
+      "0, 100000)' (Codex's own named repro) refuses",
+      _v is None and _e is not None and _e[0] == "ceiling",
+      f"-> value={_v!r} err={_e!r}")
+
+# THE-1095 round 15 (coordinator addendum + correction, on top of the
+# regenerated measured-safe allowlist): `jacobi_normalized` (a PLAIN,
+# EAGER function like `divisors`/`isprime` -- see its own `_FUNCTION_
+# ARG_CAPS` entry) measured allowlisted despite hanging past 8s at
+# `n=1463` -- no heavy probe shape ever put the HEAVY value in POSITION
+# 0 of a 4-argument call. Given a dedicated table row instead (mirrors
+# `jacobi`'s own cap/growth exactly) and removed from the allowlist.
+_v, _e = _boundary_parse("jacobi_normalized(1463, 1, 2, x)")
+check("THE-1095 round 15: 'jacobi_normalized(1463, 1, 2, x)' (the "
+      "fail-open the regenerated allowlist measured into) now refuses "
+      "promptly instead of hanging",
+      _v is None and _e is not None and _e[0] == "ceiling",
+      f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("jacobi_normalized(3, 1, 2, x)")
+check("  ...and jacobi_normalized(3, 1, 2, x) (an ordinary small case) "
+      "still evaluates",
+      _v is not None and _e is None, f"-> value={_v!r} err={_e!r}")
+
+# `summation`/`product`/`Sum`/`Product`'s own limits are `Tuple(var, lo,
+# hi)` -- `.free_symbols` on that Tuple is non-empty purely because it
+# CONTAINS the bound variable, hiding a literal numeric bound from
+# `_unbounded_generic_call_violation`'s own "any non-symbolic argument"
+# check entirely. Confirmed PRE-EXISTING on `origin/main` too (no
+# ceiling there at all): all three hang past 8s on bare SymPy.
+for _expr in (
+    "summation(factorial(x), (x, 1, 10**6))",
+    "summation(x**x, (x, 1, 10**5))",
+    "summation(binomial(1463, x), (x, 0, 1463))",
+):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round 15 (Tuple-hidden-limit fail-open, pre-"
+          f"existing on main too): {_expr!r} refuses promptly instead "
+          f"of hanging",
+          _v is None and _e is not None and _e[0] == "ceiling" and _dt < 2.0,
+          f"-> value={_v!r} err={_e!r} elapsed={_dt:.3f}s")
+
+# ...and ordinary numeric-limit usage keeps working, matching main --
+# `integrate` needed the identical Tuple-limit fix (`_integrate_limit_
+# violation`), since `_arg_hides_numeric`'s own new Tuple-awareness
+# would otherwise ALSO route it into the generic default-deny refusal.
+_SUMMATION_STILL_WORKS = (
+    ("integrate(x**2, (x, 0, 1))", "1/3"),
+    ("summation(x, (x, 1, 10))", "55"),
+    ("summation(x**2, (x, 1, 10**6))", "333333833333500000"),
+    ("summation(1/x**2, (x, 1, oo))", "pi**2/6"),
+    ("product(x, (x, 1, 20))", "2432902008176640000"),
+)
+for _expr, _want in _SUMMATION_STILL_WORKS:
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 15: {_expr!r} still evaluates, matching main",
+          _e is None and str(_v) == _want, f"-> value={_v!r} err={_e!r}")
+
+# The digit-based output ceiling (unaffected by this round's own fix)
+# still catches an oversized RESULT for both `summation` and
+# `integrate`, and the boundary-term walk catches a term that would
+# itself exceed its own table function's cap, independent of range
+# length.
+_SUMMATION_STILL_REFUSES = (
+    "summation(2**x, (x,1,10**5))",
+    "summation(1/x, (x, 1, 10**6))",
+    "integrate(x**200, (x, 0, 10**1000))",
+    "summation(factorial(x), (x, 1, 1464))",
+)
+for _expr in _SUMMATION_STILL_REFUSES:
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 15: {_expr!r} still refuses, matching this "
+          f"module's own pre-existing ceiling behavior",
+          _v is None and _e is not None and _e[0] == "ceiling",
+          f"-> value={_v!r} err={_e!r}")
+
+# Property check (coordinator's own correction round): the per-table-
+# name summand range-length cap, at its own measured edge -- AT the
+# cap evaluates, one OVER refuses. Table built from `timeout 8`
+# measurements of `summation(NAME(x), (x, 1, N))` at N in
+# {50, 200, 1463} (dev box, sympy 1.14.0); see `_SUMMATION_SUMMAND_
+# TABLE_NAME_RANGE_CAP`'s own comment for the full data and why four
+# names (catalan/bell/genocchi/andre) get a tighter cap than the rest.
+for _name, _cap in _se5._SUMMATION_SUMMAND_TABLE_NAME_RANGE_CAP.items():
+    _at_expr = f"summation({_name}(x), (x, 1, {_cap}))"
+    _over_expr = f"summation({_name}(x), (x, 1, {_cap + 1}))"
+    _v, _e = _boundary_parse(_at_expr)
+    check(f"THE-1095 round 15 (range-cap property, AT the edge): "
+          f"{_at_expr!r} evaluates ({_name} capped at {_cap})",
+          _e is None, f"-> value={str(_v)[:40]!r} err={_e!r}")
+    _v, _e = _boundary_parse(_over_expr)
+    check(f"THE-1095 round 15 (range-cap property, ONE OVER the edge): "
+          f"{_over_expr!r} refuses",
+          _v is None and _e is not None and _e[0] == "ceiling",
+          f"-> value={_v!r} err={_e!r}")
+
+# THE-1095 round 15 (coordinator addendum, item 3: "a measured list
+# must never decide these"): erfc/LambertW/Ei and fifteen siblings now
+# have their own provable elementary bound (_pole_sensitive_magnitude),
+# independent of _MEASURED_SAFE_CALLABLES entirely -- each stays
+# symbolically unevaluated at a small argument exactly as main does.
+_SPECIAL_FUNCTION_BARE_PINS = (
+    ("erfc(1)", "erfc(1)"), ("LambertW(1)", "LambertW(1)"),
+    ("Ei(1)", "Ei(1)"), ("erf(1)", "erf(1)"),
+    ("erf(10000)", "erf(10000)"),  # main-parity: erf is pole-sensitive-
+    # protected, not measured-safe-protected -- a magnitude past
+    # MAX_HEAVY_ARG must NOT be refused (|erf(x)| < 1 for any real x)
+    ("erfi(1)", "erfi(1)"), ("li(2)", "li(2)"), ("Chi(1)", "Chi(1)"),
+    ("Shi(1)", "Shi(1)"), ("fresnels(1)", "fresnels(1)"),
+    ("fresnelc(1)", "fresnelc(1)"), ("airyai(1)", "airyai(1)"),
+    ("airybi(1)", "airybi(1)"), ("airyaiprime(1)", "airyaiprime(1)"),
+    ("airybiprime(1)", "airybiprime(1)"), ("expint(2,1)", "expint(2, 1)"),
+    ("Si(1)", "Si(1)"), ("Ci(1)", "Ci(1)"),
+    ("Li(2)", "0"),  # Li(x) = li(x) - li(2) by definition -- Li(2) == 0 on main too
+)
+for _expr, _want in _SPECIAL_FUNCTION_BARE_PINS:
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 15 (elementary special-function bound): "
+          f"{_expr!r} matches main",
+          _e is None and str(_v) == _want, f"-> value={_v!r} err={_e!r}")
+
+_v, _e = _boundary_parse("erfc(0.5)")
+check("THE-1095 round 15: 'erfc(0.5)' (a Float argument, evalf-able) "
+      "matches main's own Float",
+      _e is None and abs(float(_v) - 0.4795001221869535) < 1e-9,
+      f"-> value={_v!r} err={_e!r}")
+
+# ...and every one of the three named nested hangs refuses in ms.
+_SPECIAL_FUNCTION_NESTED_HANGS = (
+    "factorial(floor(Abs(Ei(2000))))",
+    "factorial(ceiling(erfi(50)))",
+    "bell(floor(LambertW(10**1000)))",
+)
+for _expr in _SPECIAL_FUNCTION_NESTED_HANGS:
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round 15 (elementary special-function bound, "
+          f"nested): {_expr!r} refuses promptly",
+          _v is None and _e is not None and _e[0] == "ceiling" and _dt < 1.0,
+          f"-> value={_v!r} err={_e!r} elapsed={_dt:.3f}s")
+
+# Property check: each bound, evaluated with SymPy's own N() across a
+# grid inside its accepted domain, must stay UNDER the claimed bound --
+# never merely eyeballed at one point.
+_t0_sp = time.time()
+import sympy as _sp15
+
+_x15 = _sp15.Symbol("x")
+_euler_gamma15 = 0.5772156649015329  # the Euler-Mascheroni constant
+
+# THE-1095 round 17 (grok issue 1, `verify-1095-r16-grok.log`): the
+# round-15 grid used `Rational(_val).limit_denominator(1000)`, which
+# silently MANGLES any point finer than 1/1000 (`1e-6` rounds to `0`,
+# `1 - 1e-200` rounds to `1` exactly) -- exactly the pole-neighbourhood
+# points this round adds. Grid values are now exact SymPy Rationals
+# passed straight through; no denominator-limiting step.
+_POLE15 = _sp15.Rational(1, 10**200)  # the "pole distance" grok's review named
+_EPS15 = _sp15.Rational(1, 10**6)
+_TENTH15 = _sp15.Rational(1, 10)
+
+def _near_zero_grid15(*extra):
+    # THE-1095 round 17: the generic points every row's grid must carry
+    # per grok's own rule -- `0.1, 1e-6, the pole distance 1/10**200` --
+    # plus whatever cap-edge/domain-specific points that row already had.
+    return [_TENTH15, _EPS15, -_EPS15, _POLE15, -_POLE15, *extra]
+
+def _near_one_grid15(*extra):
+    # Same generic points, but framed around a pole at `z == 1` (li/Li)
+    # instead of `x == 0`: `1 +/- 1e-6`, `1 +/- 1/10**200`.
+    return [1 + _EPS15, 1 - _EPS15, 1 + _POLE15, 1 - _POLE15, *extra]
+
+def _exact_ln15(v):
+    # THE-1095 round 18 (grok issue 2, `verify-1095-r17-grok.log`): the
+    # SAME `_exact_ln` fix `codecalc/safe_expr.py` itself got, mirrored
+    # here -- `math.log(float(v))` for a `v` within `1/10**200` of a
+    # pole rounds to exactly `1.0` in float64 (only ~16 decimal digits
+    # of precision), so `math.log(float(v)) == 0.0`, silently
+    # discarding the whole perturbation. `evalf(250)` resolves it
+    # exactly at any magnitude this module's own 700-bit rational guard
+    # admits.
+    return float(_sp15.log(v).evalf(250))
+
+def _ci_bound15(v):
+    # THE-1095 round 16's own fix (`Ci(x) <= |gamma| + |ln x| + 1` for
+    # `0 < x <= 1`, flat `2.0` for `x > 1`) was never carried into THIS
+    # property grid -- it kept asserting the pre-round-16 flat `<= 2`
+    # even though `Ci(0.001) == 6.33`, already over it. Confirmed live
+    # this round before the fix: adding `1e-6` to the old grid+bound
+    # combination fails immediately.
+    #
+    # THE-1095 round 18: the domain/pole checks below now compare the
+    # EXACT SymPy value `v` itself (`v <= 0`, `v == 1`), never
+    # `float(v)` -- the same near-pole rounding-to-an-adjacent-integer
+    # trap `_exact_ln15` closes for the LOG call applies just as much
+    # to a bare EQUALITY/ORDERING check on a value that close.
+    if v <= 0:
+        raise ValueError("domain")
+    if v > 1:
+        return 2.0
+    return _euler_gamma15 + abs(_exact_ln15(v)) + 1.0
+
+def _chi_bound15(v):
+    # THE-1095 round 17 (grok issue 1): `Chi` has the IDENTICAL
+    # `gamma + ln(x)` pole SymPy's own `error_functions.py` gives `Ci`
+    # -- round 16 fixed `Ci`, this round gives `Chi` the same treatment
+    # (`Chi(0.1) == -1.73`, already over the old flat `e**0.1 == 1.11`).
+    if v <= 0:
+        raise ValueError("domain")  # Chi is COMPLEX for x <= 0
+    if v <= 1:
+        return _euler_gamma15 + abs(_exact_ln15(v)) + 1.0
+    return math.exp(float(v))
+
+def _ei_bound15(v):
+    # THE-1095 round 17 (grok issue 1, plus an independently-found
+    # extension): the SAME log bound applies on BOTH sides of `Ei`'s
+    # pole at `x == 0` -- grok's own writeup named only `0 < x <= 1`,
+    # but `Ei(-0.1) == -1.82`, already over the old flat `e**0.1 ==
+    # 1.11` too (`Ei`'s pole is symmetric in `|x|`, confirmed live).
+    if v == 0:
+        raise ValueError("pole")
+    if abs(v) <= 1:
+        return _euler_gamma15 + abs(_exact_ln15(abs(v))) + math.e
+    return math.exp(abs(float(v)))
+
+def _li_bound15(v):
+    # THE-1095 round 17 (grok issue 1): `li`/`Li ~ Ei(ln z)` near their
+    # shared pole at `z == 1` -- `|ln|ln z|| + e` bounds BOTH `li` and
+    # `Li` (they differ only by the constant `li(2)`) on `0 < z <= e`;
+    # `li`/`Li ~ z/ln(z)` grows slower than `e**z` beyond that, so the
+    # existing exponential envelope stays sound (confirmed live) for
+    # `z > e`.
+    #
+    # THE-1095 round 18 (grok issue 2, `verify-1095-r17-grok.log`):
+    # THIS is the row grok's own review found actually broken, not just
+    # theoretically fragile -- the OLD `fv = float(v); if fv <= 0 or
+    # fv == 1: raise` treated `1 +/- 1/10**200` as the EXACT pole
+    # (float64 rounds it to `1.0`) and silently SKIPPED every one of
+    # this round's own new near-pole grid points via the property
+    # loop's `except Exception: continue`, so the "the grid now proves
+    # the bound at the pole distance" claim from round 17's own commit
+    # message was never actually checked here. Fixed the same way as
+    # `_exact_ln15` itself: compare `v` (the exact SymPy value), not
+    # `float(v)`.
+    if v <= 0 or v == 1:
+        raise ValueError("domain/pole")
+    if v <= math.e:
+        ln_z = _exact_ln15(v)
+        return abs(math.log(abs(ln_z))) + math.e
+    return math.exp(float(v))
+
+def _lambertw_bound15(v):
+    fv = float(v)
+    if fv > 0:
+        # A `1e-200`-scale `fv` underflows `log(fv + 1)` to exactly
+        # `0.0` in float64 (`fv + 1.0 == 1.0` at that precision) --
+        # matches the real implementation's own `log_val <= 0` fallback
+        # ("trivially safe, |W| <= 1"), not a bug: `W(x) <= 1` holds
+        # comfortably at this scale, just looser than the true value.
+        log_val = math.log(fv + 1)
+        return log_val if log_val > 0 else 1.0
+    if fv == 0:
+        return 0.0
+    # THE-1095 round 16 (coordinator addendum, item 5): the PRINCIPAL
+    # branch is also real on `[-1/e, 0)`, where `|W(x)| <= 1`.
+    if fv < -1.0 / math.e:
+        raise ValueError("domain")  # W goes complex below -1/e
+    return 1.0
+
+_SPECIAL_FUNCTION_BOUND_CHECKS = (
+    (_sp15.erf, lambda v: 1.0, _near_zero_grid15(-5, -1, -0.5, 0, 0.5, 1, 5, 1000)),
+    (_sp15.erfc, lambda v: 2.0, _near_zero_grid15(-5, -1, 0, 1, 5, 1000)),
+    (_sp15.erfi, lambda v: _sp15.exp(v * v), _near_zero_grid15(-5, -1, 0, 1, 5, 38)),
+    (_sp15.Ei, _ei_bound15, _near_zero_grid15(-5, -1, 1, 5, 1463)),
+    # Chi/li/Li: this module's own domain is `x > 0` only -- all three
+    # are COMPLEX-valued for `x <= 0` (confirmed live: `Chi(-1) ==
+    # 0.838 + pi*I`; `Li(-1) == -0.97 + 3.42*I`, magnitude ~3.56,
+    # already over its own old `e**1 ~= 2.72` bound -- a round-17
+    # finding beyond grok's own review, fixed alongside it), so the
+    # grid here is positive-only, matching what
+    # `_pole_sensitive_magnitude` actually accepts.
+    (_sp15.Chi, _chi_bound15, _near_zero_grid15(1, 5, 1463)),
+    (_sp15.Shi, lambda v: _sp15.exp(abs(v)), _near_zero_grid15(-5, -1, 0, 1, 5, 1463)),
+    (_sp15.li, _li_bound15, _near_one_grid15(0.1, 2, 5, 1463)),
+    (_sp15.Li, _li_bound15, _near_one_grid15(0.1, 2, 5, 1463)),
+    (_sp15.LambertW, _lambertw_bound15,
+     _near_zero_grid15(0, 0.5, 1, 5, 1463, -0.1, -1.0 / math.e)),
+    (_sp15.fresnels, lambda v: 1.0, _near_zero_grid15(-5, -1, 0, 1, 5, 1000)),
+    (_sp15.fresnelc, lambda v: 1.0, _near_zero_grid15(-5, -1, 0, 1, 5, 1000)),
+    (_sp15.airyai, lambda v: _sp15.exp(abs(v) ** _sp15.Rational(3, 2)),
+     _near_zero_grid15(-5, -1, 0, 1, 5, 100)),
+    (_sp15.airybi, lambda v: _sp15.exp(abs(v) ** _sp15.Rational(3, 2)),
+     _near_zero_grid15(-5, -1, 0, 1, 5, 100)),
+    (_sp15.Si, lambda v: 2.0, _near_zero_grid15(-5, -1, 0, 1, 5, 1000)),
+    (_sp15.Ci, _ci_bound15, _near_zero_grid15(1, 5, 1000)),
+)
+_prop_fails = []
+for _fn, _bound_fn, _grid in _SPECIAL_FUNCTION_BOUND_CHECKS:
+    for _val in _grid:
+        try:
+            _actual = abs(complex(_fn(_val).evalf(250)))
+            _bound = _bound_fn(_val)
+            _bound_num = float(_bound.evalf(20)) if hasattr(_bound, "evalf") else float(_bound)
+        except Exception:
+            continue  # a pole/domain edge this grid's own coarse sampling hit -- skip
+        if _actual > _bound_num * 1.0000001:  # float slack only
+            _prop_fails.append(f"{_fn.__name__}({_val}): |{_actual}| > bound {_bound_num}")
+check(f"THE-1095 round 17 (property check): every elementary special-"
+      f"function bound holds against SymPy's own N() across its widened "
+      f"pole-neighbourhood grid, exact Rationals (no limit_denominator "
+      f"mangling) "
+      f"({sum(len(g) for _f, _b, g in _SPECIAL_FUNCTION_BOUND_CHECKS)} points, "
+      f"{time.time() - _t0_sp:.2f}s)",
+      not _prop_fails, f"-> failures={_prop_fails}")
+
+# THE-1095 round 16 (grok issue 1, `verify-1095-r15-grok.log`):
+# `expint(n, x) <= 1` was only ever true for INTEGER n >= 1 -- SymPy
+# evaluates a non-positive integer n in CLOSED FORM as ~N!/x**(N+1),
+# so a NEGATIVE order used to pass every screen and then construct a
+# huge factorial-scale value, at the TOP level (not merely nested).
+for _expr in ("expint(-10000,1)", "expint(-50, 1)", "factorial(floor(expint(-50, 1)))"):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round 16 (expint negative-order fail-open): "
+          f"{_expr!r} refuses promptly",
+          _v is None and _e is not None and _e[0] == "ceiling" and _dt < 1.0,
+          f"-> value={_v!r} err={_e!r} elapsed={_dt:.3f}s")
+for _expr, _want in (("expint(5, 1)", "expint(5, 1)"), ("expint(2,1)", "expint(2, 1)")):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 16: {_expr!r} (positive integer order) still "
+          f"evaluates, matching main",
+          _e is None and str(_v) == _want, f"-> value={_v!r} err={_e!r}")
+
+# THE-1095 round 16 (grok issue 2): Ci/li/Li/Ei all have a POLE inside
+# what the round-15 grid treated as their fully-accepted domain --
+# Ci(x) ~ gamma + ln(x) as x -> 0+ (unbounded, and COMPLEX for x <= 0);
+# li(1)/Li(1)/Ei(0) sit on their own poles.
+_v, _e = _boundary_parse("factorial(floor(Abs(Ci(0))))")
+check("THE-1095 round 16: 'factorial(floor(Abs(Ci(0))))' (Ci's own "
+      "pole at 0) refuses, not silently bounded as tiny",
+      _v is None and _e is not None and _e[0] == "ceiling",
+      f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("Ci(1)")
+check("  ...and Ci(1) (ordinary, x > 1) still evaluates, matching main",
+      _e is None and str(_v) == "Ci(1)", f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("Ci(0.001)")
+check("  ...and Ci(0.001) (0 < x <= 1, the new gamma+ln(x) bound) still "
+      "evaluates, matching main's own Float",
+      _e is None and abs(float(_v) - (-6.330539864080594)) < 1e-6,
+      f"-> value={_v!r} err={_e!r}")
+for _expr in ("factorial(floor(Abs(Ei(0))))", "factorial(floor(Abs(li(1))))"):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 16 (Ei/li own pole): {_expr!r} refuses, not "
+          f"silently bounded as tiny",
+          _v is None and _e is not None and _e[0] == "ceiling",
+          f"-> value={_v!r} err={_e!r}")
+
+# THE-1095 round 16 (grok issue 4): `product`'s own IDENTITY growth is
+# factorial-shaped regardless of the summand -- the round-15 range cap
+# only fired when the summand contained a table NAME, missing
+# `product(x, (x, 1, 10**6)) == 10**6!` entirely.
+_v, _e = _boundary_parse("product(x, (x, 1, 10**6))")
+check("THE-1095 round 16 (product identity-growth fail-open): "
+      "'product(x, (x, 1, 10**6))' refuses",
+      _v is None and _e is not None and _e[0] == "ceiling",
+      f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("product(x, (x, 1, 20))")
+check("  ...and product(x, (x, 1, 20)) (comfortably under cap) still "
+      "evaluates, matching main",
+      _e is None and str(_v) == "2432902008176640000", f"-> value={_v!r} err={_e!r}")
+# Multi-limit CARTESIAN product, not each axis checked independently.
+_t0 = time.time()
+_v, _e = _boundary_parse("summation(bell(x*y), (x,1,200), (y,1,200))")
+_dt = time.time() - _t0
+check("THE-1095 round 16 (multi-limit Cartesian fail-open): "
+      "'summation(bell(x*y), (x,1,200), (y,1,200))' (each axis "
+      "individually under bell's own 200 cap, 40000 total terms with "
+      "bell up to 40000) refuses promptly",
+      _v is None and _e is not None and _e[0] == "ceiling" and _dt < 1.0,
+      f"-> value={_v!r} err={_e!r} elapsed={_dt:.3f}s")
+
+# THE-1095 round 16 (coordinator addendum, item 5): `LambertW`'s
+# PRINCIPAL branch is also real on [-1/e, 0), which the round-15
+# version wrongly refused entirely.
+_v, _e = _boundary_parse("LambertW(-0.1)")
+check("THE-1095 round 16: 'LambertW(-0.1)' (principal branch, "
+      "[-1/e, 0)) evaluates, matching main",
+      _e is None and abs(float(_v) - (-0.11183255915896297)) < 1e-9,
+      f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("bell(floor(Abs(LambertW(-0.1))))")
+check("  ...and nested, it stays safely bounded (|W| <= 1 on that "
+      "interval)",
+      _e is None, f"-> value={_v!r} err={_e!r}")
+
+# THE-1095 round 16 (coordinator addendum, item 4; grok issue 3): `fps`
+# gets a dedicated order cap (position 5, not 3 -- the round-15
+# comment named the wrong slot) like `series` already has.
+_v, _e = _boundary_parse("fps(sin(x), x, 0, 1, True, 1463)")
+check("THE-1095 round 16 (fps order fail-open): 'fps(sin(x), x, 0, 1, "
+      "True, 1463)' refuses on the order cap",
+      _v is None and _e is not None and _e[0] == "ceiling"
+      and "fps" in _e[1], f"-> value={_v!r} err={_e!r}")
+
+# THE-1095 round 16 (Codex addendum, `verify-1095-r15.log`, its own
+# 528-expression branch-vs-main corpus): four branch-vs-main
+# differences, all a valid main result turned into a `ceiling` refusal.
+_v, _e = _boundary_parse("Piecewise((x,x>0),(0,True))")
+check("THE-1095 round 16 (Codex corpus): 'Piecewise((x,x>0),(0,True))' "
+      "(an ordinary symbolic Piecewise, its own SECOND branch has no "
+      "free symbols at all) matches main",
+      _e is None and str(_v) == "Piecewise((x, x > 0), (0, True))",
+      f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("factorial(expint(2,1/2))")
+check("THE-1095 round 16 (Codex corpus): 'factorial(expint(2,1/2))' "
+      "(0 < x < 1, the new E_1(x) <= -ln(x)+1 bound) matches main "
+      "(stays symbolic)",
+      _e is None and str(_v) == "factorial(expint(2, 1/2))",
+      f"-> value={_v!r} err={_e!r}")
+# `factorial(Chi(-1))`/`factorial(li(-1))`: Chi/li are COMPLEX for
+# x <= 0 (main leaves `factorial(<complex>)` symbolically unevaluated,
+# genuinely safe either way) -- a DELIBERATE, documented narrowing,
+# the same "closing the branch-cut case is worth a false refusal here"
+# trade this file already makes elsewhere (`tests/test_differential_
+# corpus.py` pins both explicitly).
+for _expr in ("factorial(Chi(-1))", "factorial(li(-1))"):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 16 (Codex corpus, deliberate narrowing): "
+          f"{_expr!r} refuses (main leaves it symbolic; this module "
+          f"cannot prove the complex branch safe)",
+          _v is None and _e is not None and _e[0] == "ceiling",
+          f"-> value={_v!r} err={_e!r}")
+
+# THE-1095 round 16 (Codex addendum): a REVERSED limit (`lo > hi`) is
+# NOT empty on main -- SymPy's own convention negates the sum over the
+# SAME magnitude range, real work, not a no-op.
+_v, _e = _boundary_parse("summation(x, (x, 10**6, 1))")
+check("THE-1095 round 16 (reversed range, table-free summand): "
+      "'summation(x, (x, 10**6, 1))' matches main (no range cap needed "
+      "-- SymPy's own closed form, same as the forward direction)",
+      _e is None, f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("product(x, (x, 10**6, 1))")
+check("THE-1095 round 16 (reversed range, product's own unconditional "
+      "cap): 'product(x, (x, 10**6, 1))' refuses",
+      _v is None and _e is not None and _e[0] == "ceiling",
+      f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("summation(bell(x), (x, 1463, 1))")
+check("THE-1095 round 16 (reversed range, table-summand range cap, "
+      "EXTREME endpoint is lo not hi): 'summation(bell(x), (x, 1463, "
+      "1))' refuses",
+      _v is None and _e is not None and _e[0] == "ceiling",
+      f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("summation(x, (x, 5, 1))")
+check("  ...and summation(x, (x, 5, 1)) (small reversed range) "
+      "evaluates to main's own value",
+      _e is None and str(_v) == "-9", f"-> value={_v!r} err={_e!r}")
+
+# THE-1095 round 16 (atheris finding, ClusterFuzzLite `slow-unit-
+# r16.bin`, seed `(3/2)**300001!!E1`): the deferred-parse-exception
+# "safe to treat as inconclusive" check used to run on the RAW source
+# text, missing a table name that only exists after SymPy's own
+# `factorial_notation` token transformation (`!!`/`!` are punctuation
+# in the raw text, `factorial2`/`factorial` only after transform) --
+# the real (expensive) parse ran instead, measured 22.2s before
+# raising the SAME SympifyError the deferred parse already had.
+for _expr in ("(3/2)**300001!!E1", "(3/2)**300001!E1", "bell(1463)!!E1"):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round 16 (transformed-token table-name miss): "
+          f"{_expr!r} refuses promptly, never a computed Pow",
+          _v is None and _e is not None and _e[0] in ("ceiling", "validation")
+          and _dt < 2.0,
+          f"-> value={_v!r} err={_e!r} elapsed={_dt:.3f}s")
+for _expr, _want in (("5!!x", "15*x"), ("3!x", "6*x")):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 16: {_expr!r} (ordinary factorial notation "
+          f"+ implicit multiplication) still evaluates, matching main",
+          _e is None and str(_v).replace(" ", "") == _want,
+          f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("E1")
+check("THE-1095 round 16: 'E1' bare stays the bare-class validation",
+      _v is None and _e is not None and _e[0] == "validation",
+      f"-> value={_v!r} err={_e!r}")
+
+# THE-1095 round 17 (grok issue 2, `verify-1095-r16-grok.log`): the
+# coordinator's own literal repro for an `fps`/`series` keyword-order
+# smuggle (`fps(sin(x), x, order=1463)`) does NOT reach this module at
+# all -- `=` is unconditionally denied at the lexical pre-screen
+# (`classify_unsafe`'s own `_DENIED_OPS`), confirmed live before this
+# round's own change and unchanged by it: NO Python keyword argument of
+# any kind can reach ANY function through this string-based parser, so
+# the specific smuggle grok named is not reproducible here. Pinned
+# anyway (a `security` refusal, not a `ceiling` one -- the DIFFERENT,
+# earlier gate that actually catches it), alongside the defense-in-
+# depth half of the same finding that IS live: `fps`/`series` (and
+# every other `_EXTRA_BOUNDED_POSITIONS`-only name) are now also
+# `_expression_touches_table_or_unprotected_operator`-recognized, so a
+# deferred stand-in `TypeError` on one of them can no longer be misread
+# as "inconclusive, fall through to the real parse."
+for _expr in ("fps(sin(x), x, order=1463)", "series(exp(x), x, 0, n=100000)"):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 17 (grok issue 2, non-reproducible as literally "
+          f"stated): {_expr!r} refuses at the lexical '=' gate, not a "
+          f"kwarg reaching fps()/series()",
+          _v is None and _e is not None and _e[0] == "security",
+          f"-> value={_v!r} err={_e!r}")
+
+# THE-1095 round 17 (grok issue 4, `verify-1095-r16-grok.log`): the
+# coordinator's own literal repro (`summation(factorial(x), [(x, 1,
+# 10**6)])`) does NOT reach this module either -- `[`/`]` are ALSO
+# unconditionally denied at the same lexical gate. But the identical
+# SEQUENCE-wrapped-limit shape SymPy's own `_process_limits` flattens
+# IS reachable, without any denied token, through an explicit
+# `Tuple(...)` call.
+_v, _e = _boundary_parse("summation(bell(x), Tuple((x, 1, 1463)))")
+check("THE-1095 round 17 (sequence-wrapped limit fail-open): "
+      "'summation(bell(x), Tuple((x, 1, 1463)))' (SAME limit as the "
+      "already-refused '(x, 1, 1463)' form, just wrapped one level) "
+      "refuses on the identical table-name range cap",
+      _v is None and _e is not None and _e[0] == "ceiling"
+      and "200" in _e[1],
+      f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("summation(bell(x), Tuple((x, 1, 200)))")
+check("  ...and Tuple((x, 1, 200)) (comfortably under the 200 cap) "
+      "still evaluates, matching the plain-tuple form",
+      _e is None, f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("summation(bell(x*y), Tuple((x, 1, 200), (y, 1, 200)))")
+# THE-1095 round 18 correction: the round-17 assertion here claimed this
+# multi-limit BUNDLE gets "the Cartesian boundary-term check" -- WRONG
+# mental model, found while fixing grok issue 1 below: real SymPy's own
+# `_process_limits` flattens `Tuple((x,1,200),(y,1,200))` to SIX loose
+# elements (`[x,1,200,y,1,200]`), not two separate 3-element limits, and
+# raises `ValueError: Invalid limits given: ...` for it (confirmed live
+# against bare `sympy.summation`, unwrapped) -- it is NOT valid SymPy
+# syntax for "two limits bundled together" at all. This module now
+# matches that by refusing it as an unrecognized shape (fail-closed,
+# BEFORE SymPy's own real parse would raise its own ValueError) rather
+# than the round-17 version's ACCIDENTALLY-correct-looking (but wrongly
+# reasoned) "two Cartesian limits" refusal.
+check("THE-1095 round 18 (grok issue 1 correction): "
+      "'summation(bell(x*y), Tuple((x, 1, 200), (y, 1, 200)))' (NOT "
+      "valid SymPy syntax -- real summation() raises ValueError for it "
+      "too) refuses as an unrecognized limit shape",
+      _v is None and _e is not None and _e[0] == "ceiling"
+      and "unrecognized shape" in _e[1],
+      f"-> value={_v!r} err={_e!r}")
+
+# THE-1095 round 18 (grok issue 1, `verify-1095-r17-grok.log`, BLOCKING):
+# round 17's own flattener short-circuited on "already looks like a
+# 3-tuple" BEFORE flattening -- a container that does NOT already look
+# like one (`Tuple(x, Tuple(1, 1463))`, 2 elements) got unwrapped into
+# LOOSE elements the caller then skipped one by one, letting the real,
+# unbounded `bell` sum run underneath (confirmed live before this
+# round's fix: 5.46s, a genuine huge value). Copying SymPy's own
+# `_process_limits` order -- flatten completely FIRST, classify SECOND
+# -- closes it; pinned at both of grok's own named shapes plus the
+# `product` identity-growth twin.
+for _expr in (
+    "summation(bell(x), Tuple(x, Tuple(1, 1463)))",
+    "summation(bell(x), Tuple(Tuple(x, 1), 1463))",
+):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round 18 (grok issue 1, BLOCKING -- sequence flatten "
+          f"is not _process_limits): {_expr!r} (SAME limit as the "
+          f"already-refused '(x, 1, 1463)' form, nested a different way) "
+          f"refuses promptly on the identical table-name range cap, "
+          f"never runs the real 5+ second sum",
+          _v is None and _e is not None and _e[0] == "ceiling"
+          and "200" in _e[1] and _dt < 1.0,
+          f"-> value={_v!r} err={_e!r} elapsed={_dt:.3f}s")
+_t0 = time.time()
+_v, _e = _boundary_parse("product(x, Tuple(x, Tuple(1, 10**6)))")
+_dt = time.time() - _t0
+check("THE-1095 round 18 (grok issue 1, product identity-growth twin): "
+      "'product(x, Tuple(x, Tuple(1, 10**6)))' (== 10**6! on main) "
+      "refuses promptly",
+      _v is None and _e is not None and _e[0] == "ceiling" and _dt < 1.0,
+      f"-> value={_v!r} err={_e!r} elapsed={_dt:.3f}s")
+
+# THE-1095 round 18 (grok issue 1's own explicit ask, `verify-1095-r17-
+# grok.log`): property-test `_classify_summation_limits` (the flattener)
+# against SymPy's OWN `_process_limits`, not just a handful of pinned
+# shapes -- for a grid of nested-container limit shapes, the flattened
+# `(var, lo, hi)` this module extracts must equal what a REAL
+# `Sum(expr, *raw_args).limits` (unwrapped, no safe_expr involved at
+# all) actually resolves to, and a shape real SymPy REJECTS (raises
+# for) must be classified "invalid" here too -- never silently
+# skipped, never a false accept.
+import sympy as _sp18
+
+from codecalc.safe_expr import _classify_summation_limits as _classify18
+
+_x18, _y18 = _sp18.Symbol("x"), _sp18.Symbol("y")
+_FLATTEN_GRID = (
+    # (label, raw limit args as SymPy objects, expected outcome)
+    ("plain", (_sp18.Tuple(_x18, 1, 1463),), "ok"),
+    ("one-wrap", (_sp18.Tuple(_sp18.Tuple(_x18, 1, 1463)),), "ok"),
+    ("split-hi", (_sp18.Tuple(_x18, _sp18.Tuple(1, 1463)),), "ok"),
+    ("split-lo", (_sp18.Tuple(_sp18.Tuple(_x18, 1), 1463),), "ok"),
+    ("double-wrap", (_sp18.Tuple(_sp18.Tuple(_sp18.Tuple(_x18, 1, 1463))),), "ok"),
+    ("bare-symbol", (_x18,), "symbol"),
+    ("two-separate-limits", (_sp18.Tuple(_x18, 1, 200), _sp18.Tuple(_y18, 1, 200)), "ok2"),
+    ("bundled-limits", (_sp18.Tuple(_sp18.Tuple(_x18, 1, 200), _sp18.Tuple(_y18, 1, 200)),), "invalid"),
+    ("four-flat", (_sp18.Tuple(_x18, 1, 2, 3),), "invalid"),
+)
+_flatten_fails = []
+for _label, _raw_args, _expected in _FLATTEN_GRID:
+    _classified = _classify18(list(_raw_args))
+    if _expected == "symbol":
+        _ours_ok = _classified == [("symbol", _x18)]
+    elif _expected == "invalid":
+        # This module is DELIBERATELY more conservative than real SymPy
+        # here (a length-4 flattened list is a legitimate `Range`-
+        # derived limit form on main, per `_process_limits`'s own
+        # `lenV == 4` branch, but this module never models it) --
+        # "unknown != safe" means refusing it is correct even where
+        # main would happily compute it, so there is no SymPy-agreement
+        # cross-check for this case, only that OUR OWN classification
+        # refuses it.
+        _ours_ok = any(_k[0] == "invalid" for _k in _classified)
+    elif _expected == "ok2":
+        _ours_ok = (len(_classified) == 2
+                    and all(_k[0] == "triple" for _k in _classified))
+    else:
+        _ours_ok = len(_classified) == 1 and _classified[0][0] == "triple"
+    # Cross-check against REAL, unwrapped SymPy for every shape this
+    # module claims to positively resolve (`ok`/`ok2`/`symbol`) -- `Sum`
+    # itself is used only as the SAME entry point real `summation()`/
+    # `product()` go through (`_process_limits`), never touched by
+    # safe_expr at all.
+    _sympy_ok = True
+    if _expected in ("ok", "ok2"):
+        try:
+            _real_limits = _sp18.Sum(_x18, *_raw_args).limits
+            _want = tuple((_k[1], _sp18.sympify(_k[2]), _sp18.sympify(_k[3]))
+                           for _k in _classified if _k[0] == "triple")
+            _sympy_ok = tuple(_real_limits) == _want
+        except Exception:
+            _sympy_ok = False
+    elif _expected == "bundled-limits" or _label == "bundled-limits":
+        try:
+            _sp18.Sum(_x18, *_raw_args).doit()
+            _sympy_ok = False  # real SymPy accepted it -- our refusal would be a false positive
+        except Exception:
+            _sympy_ok = True  # real SymPy also rejects THIS specific shape (confirmed: ValueError)
+    if not (_ours_ok and _sympy_ok):
+        _flatten_fails.append(f"{_label}: classified={_classified} ours_ok={_ours_ok} sympy_ok={_sympy_ok}")
+check(f"THE-1095 round 18 (flattener property test vs real SymPy "
+      f"_process_limits, {len(_FLATTEN_GRID)} nested shapes)",
+      not _flatten_fails, f"-> failures={_flatten_fails}")
+
+# THE-1095 round 17 (grok issue 5, `verify-1095-r16-grok.log`): the
+# PRODUCT's own boundary-term check only ever bounded the LAST factor's
+# own magnitude -- `product(x**2, (x, 1, 1463))` has 1463 terms, the
+# boundary term `1463**2` is tiny on its own, and the OLD code
+# constructed the real `(1463!)**2` (~8000 digits) before the post-
+# evaluation output ceiling finally caught it.
+_t0 = time.time()
+_v, _e = _boundary_parse("product(x**2, (x, 1, 1463))")
+_dt = time.time() - _t0
+check("THE-1095 round 17 (product a priori magnitude bound): "
+      "'product(x**2, (x, 1, 1463))' refuses BEFORE real construction, "
+      "on its own claimed digit count, not the post-hoc output ceiling",
+      _v is None and _e is not None and _e[0] == "ceiling"
+      and "digits" in _e[1] and "9262" in _e[1] and _dt < 1.0,
+      f"-> value={_v!r} err={_e!r} elapsed={_dt:.3f}s")
+_v, _e = _boundary_parse("product(x, (x, 1, 100))")
+check("  ...and product(x, (x, 1, 100)) (comfortably under the digit "
+      "cap) still evaluates, matching main",
+      _e is None, f"-> value={_v!r} err={_e!r}")
+
+# THE-1095 round 18 (grok issue 3, `verify-1095-r17-grok.log`): round
+# 17's own a-priori PRODUCT bound lived under `if substitution:`, which
+# only builds when a limit variable is free in the summand -- a
+# CONSTANT summand skipped it entirely and fell through to the post-hoc
+# ceiling AFTER building the real value.
+_t0 = time.time()
+_v, _e = _boundary_parse("product(10**4, (x, 1, 1463))")
+_dt = time.time() - _t0
+check("THE-1095 round 18 (product a priori bound, CONSTANT summand): "
+      "'product(10**4, (x, 1, 1463))' (1463 terms, not over the range "
+      "cap; a ~5852-digit result) refuses BEFORE real construction",
+      _v is None and _e is not None and _e[0] == "ceiling"
+      and "digits" in _e[1] and "5852" in _e[1] and _dt < 1.0,
+      f"-> value={_v!r} err={_e!r} elapsed={_dt:.3f}s")
+_v, _e = _boundary_parse("product(2, (x, 1, 1463))")
+check("  ...and product(2, (x, 1, 1463)) (== 2**1463, 441 digits, "
+      "comfortably under the digit cap) still evaluates, matching main",
+      _e is None, f"-> value={_v!r} err={_e!r}")
+
+# THE-1095 round 18 (grok issue 2, `verify-1095-r17-grok.log`): `li`/
+# `Li`'s own near-pole bound computed `math.log(float(x))` -- for `x`
+# within `1/10**20` of the pole at `1`, `float(x) == 1.0` exactly
+# (float64's own ~16-digit precision), so `math.log(1.0) == 0.0` and
+# the SECOND `math.log(abs(ln_z))` raised on `math.log(0.0)`, caught
+# only by the generic internal-scan ceiling -- an UNPINNED narrowing
+# main does not need. Fixed via `_exact_ln` (SymPy's own arbitrary-
+# precision `evalf`, never `float(x)`).
+for _expr in ("factorial(floor(Abs(li(1+1/10**10))))",
+              "factorial(floor(Abs(li(1-1/10**10))))"):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 18 (grok issue 2, li near-pole exact log): "
+          f"{_expr!r} matches main (a real, finite result), not an "
+          f"unpinned internal-scan-ceiling narrowing",
+          _e is None, f"-> value={_v!r} err={_e!r}")
+for _expr in ("li(1 + 1/10**200)", "li(1 - 1/10**200)",
+              "Li(1 + 1/10**200)", "Li(1 - 1/10**200)"):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 18: {_expr!r} (at the pole DISTANCE the "
+          f"property grid below claims to prove the bound at) stays "
+          f"symbolic, matching main, not refused",
+          _e is None, f"-> value={_v!r} err={_e!r}")
+
+# THE-1095 round 18 (atheris finding, `slow-unit-r18.bin`, seed
+# `2.3E1^10!1E!^0%E!20!`, this round's own 60s coverage-guided fuzz
+# pass): a `%` whose LEFT operand is a `Pow`/`Mul`-of-`Pow` with a
+# FLOAT base and a huge exponent (`23.0**factorial(10)`, ~4.9 million
+# decimal digits of TRUE magnitude, but a compact, fast-to-CONSTRUCT
+# Float either way) hung reducing it against a non-rational modulus
+# (`E`) -- `_resolve_marker_magnitude`'s own `%` rule only ever bounded
+# the OUTPUT by the divisor's own magnitude (correct), never checked
+# whether the DIVIDEND was cheap to reduce in the first place.
+for _expr in ("2.3E1^10!1E!^0%E!20!", "2.3E1^10!%E", "2.3E1^10!//E!"):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round 18 (atheris finding, Float-base huge-Pow "
+          f"dividend vs. irrational modulus): {_expr!r} refuses "
+          f"promptly, never hangs computing the reduction",
+          _v is None and _e is not None and _e[0] == "ceiling" and _dt < 1.0,
+          f"-> value={_v!r} err={_e!r} elapsed={_dt:.3f}s")
+# ...and the round-11 pin this fix must not regress: a Float-base Pow
+# with a huge exponent, used OUTSIDE a '%'/'//', still evaluates --
+# constructing/rendering it is genuinely cheap (mpmath never
+# materializes a digit string for a Float), matching main.
+_v, _e = _boundary_parse("10.0^100000")
+check("THE-1095 round 11 pin (not regressed by round 18's own fix): "
+      "'10.0^100000' (a compact Float, huge TRUE magnitude but cheap "
+      "to construct/render) still evaluates, matching main",
+      _e is None, f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("9%E")
+check("  ...and an ordinary '%' against an irrational modulus with a "
+      "SMALL dividend still evaluates, matching main",
+      _e is None and str(_v) == "9 - 3*E", f"-> value={_v!r} err={_e!r}")
+
+# THE-1095 round 18 (coordinator's own live `py-spy dump` on a SECOND
+# atheris hang the same fuzz pass found; `slow-unit-r18b.bin`, seed
+# `1.5 + 2.3E1^10!1E!^0%Ebbbbbbbbbbbbbbbbbbbbbbb!20!`): a SYMBOLIC
+# divisor (`x`, or `E*<many free symbols>`) made `right_known` False in
+# `_resolve_marker_magnitude`'s own `%`/`//` handling, which used to
+# return "unresolved, safe, let the real parse handle it" BEFORE ever
+# checking the dividend's own magnitude -- but SymPy's real `Mod.eval()`
+# GCD-normalizes the numeric LEFT side regardless of whether the
+# divisor turns out symbolic (confirmed via the coordinator's own
+# `py-spy` stack: `Mod.eval` -> `gcd` -> `dup_convert` to `RealField` ->
+# mpmath `from_int` on a multi-million-bit integer).
+for _expr in ("23.0^3628800%x", "23.0^3628800//x",
+              "1.5 + 2.3E1^10!1E!^0%Ebbbbbbbbbbbbbbbbbbbbbbb!20!"):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round 18 (atheris finding, SYMBOLIC divisor vs. "
+          f"Float-base huge-Pow dividend): {_expr!r} refuses promptly, "
+          f"never hangs in SymPy's own Mod.eval()/gcd",
+          _v is None and _e is not None and _e[0] == "ceiling" and _dt < 1.0,
+          f"-> value={_v!r} err={_e!r} elapsed={_dt:.3f}s")
+_v, _e = _boundary_parse("2.3E1^3%x")
+check("  ...and an ordinary '%' against a SYMBOLIC divisor with a "
+      "SMALL dividend still evaluates, matching main",
+      _e is None and str(_v) == "Mod(12167.0, x)", f"-> value={_v!r} err={_e!r}")
+
+# THE-1095 round 18 (coordinator's own live diagnosis, second follow-up
+# to the atheris finding): the identical "Float-base huge-Pow coerced
+# to an exact value" hazard `%`/`//` needed `_true_pow_magnitude` for
+# also applies to `floor`/`ceiling` (`_evalf_coercion_cheap`) and to
+# every OTHER measured-safe callable that coerces its own argument
+# (`_measured_safe_argument_cap_violation`) -- `gcd`/`lcm`/`nsimplify`
+# pinned as the coordinator's own named examples (`gcd` does NOT
+# actually hang on real SymPy, unlike `lcm`/`nsimplify` -- confirmed
+# live -- but is refused here anyway, a deliberate, safe narrowing from
+# closing the whole CLASS at the shared per-argument cap rather than
+# name-by-name).
+for _expr in ("floor(23.0^3628800)", "lcm(23.0^3628800,6)",
+              "nsimplify(23.0^3628800)", "gcd(23.0^3628800, 6)"):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round 18 (Float-base huge-Pow coerced to an exact "
+          f"value): {_expr!r} refuses promptly",
+          _v is None and _e is not None and _e[0] == "ceiling" and _dt < 1.0,
+          f"-> value={_v!r} err={_e!r} elapsed={_dt:.3f}s")
+_v, _e = _boundary_parse("lcm(6,10)")
+check("  ...and lcm(6,10) (ordinary, ungapped) still evaluates, "
+      "matching main", _e is None and str(_v) == "30", f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("nsimplify(0.5)")
+check("  ...and nsimplify(0.5) (ordinary, ungapped) still evaluates, "
+      "matching main", _e is None and str(_v) == "1/2", f"-> value={_v!r} err={_e!r}")
+
+# THE-1095 round 18 (coordinator addendum): '//' against a RATIONAL
+# literal divisor still catches the Float-base huge-Pow dividend --
+# here via the pre-existing post-construction output-digit ceiling
+# (the real floor-division stays fast regardless -- confirmed live,
+# 0.384s -- since a rational divisor never triggers SymPy's own
+# Mod-style gcd-normalization cost the symbolic/irrational cases above
+# needed `_true_pow_magnitude` for), not a NEW hang.
+_t0 = time.time()
+_v, _e = _boundary_parse("23.0^3628800//7")
+_dt = time.time() - _t0
+check("THE-1095 round 18: '23.0^3628800//7' (rational divisor) refuses "
+      "promptly on the output digit ceiling, not a hang",
+      _v is None and _e is not None and _e[0] == "ceiling" and _dt < 1.0,
+      f"-> value={_v!r} err={_e!r} elapsed={_dt:.3f}s")
+
+# THE-1095 round 18 (coordinator's own live cross-check against main
+# 6cda9d4): grok's own "factorial(floor(Abs(li(1+1/10**20)))) ~=
+# factorial(45) on main" claim (round 17's own writeup, unverified at
+# the time) is WRONG -- SymPy's own 53-bit-precision `evalf` makes
+# `li(1+1e-20)` UNDERFLOW to `-oo` at THAT specific magnitude (`li` of
+# something this close to its own pole needs more than default
+# precision to resolve at all -- `N(li(1+1/10**20), 30) == -45.47`,
+# the SAME finite value grok predicted, only reachable at higher
+# precision than `floor`'s own default evalf uses), so `floor(-oo)`
+# raises `cannot convert inf or nan to int` on `origin/main` ITSELF.
+# Pinned as PARITY (main's own text, unchanged), not a narrowing this
+# module introduced.
+for _expr in ("factorial(floor(Abs(li(1+1/10**20))))",
+              "floor(Abs(li(1+1/10**20)))"):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 18 (parity with main, not a narrowing): "
+          f"{_expr!r} matches main's own "
+          f"'cannot convert inf or nan to int' validation error",
+          _e == ("validation", "parse error: cannot convert inf or nan to int"),
+          f"-> value={_v!r} err={_e!r}")
+
+# THE-1095 round 18 (coordinator pins for the Float-coercion generalisation):
+# a Pow with a FLOAT base and a big literal exponent is a compact Float on
+# its own (`23.0**3628800` prints as 9.36e+4941437 on main and here), but
+# every consumer that coerces a Float to an EXACT rational -- `Mod`
+# (`%`), `//`, `floor`/`ceiling`, `gcd`/`lcm`, `nsimplify` -- materialises
+# the 4.7M-bit integer first (`Mod.eval` runs a real-field polynomial gcd
+# on it; `origin/main` hangs on `23.0**3628800 % x` too). The dividend /
+# argument is bounded by VALUE magnitude for those consumers, never by
+# the Float print profile. The bare Float and the small-exponent forms
+# keep main's values.
+import time as _pin_time
+
+for _expr in ("23.0**3628800 % x", "23.0**3628800 // 7", "floor(23.0**3628800)",
+              "ceiling(23.0**3628800)", "gcd(23.0**3628800, 6)",
+              "lcm(23.0**3628800, 6)", "nsimplify(23.0**3628800)"):
+    _t0 = _pin_time.perf_counter()
+    _v, _e = _boundary_parse(_expr)
+    _dt = _pin_time.perf_counter() - _t0
+    check(f"THE-1095 round 18 (Float coerced to an exact rational): {_expr!r} "
+          f"is refused on ceiling grounds in well under a second",
+          _v is None and _e is not None and _e[0] == "ceiling" and _dt < 1.0,
+          f"-> value={_v!r} err={_e!r} dt={_dt:.3f}s")
+# ...and the SYMBOLIC-dividend shapes from the second seeded atheris
+# timeout (`1.5 + 2.3E1^10!1Ek^5%Eb+bbbbbbbbbbbbbbbbbbbbb!20!`, decoded
+# with atheris's own FuzzedDataProvider): a symbolic factor or term
+# around the huge Float Pow made the true-magnitude estimate `None`
+# ("symbolic, safe"), and `Mod.eval` gcd-normalises the numeric
+# coefficient of a symbolic dividend even against a rational modulus.
+for _expr in ("23.0**3628800*k % x", "23.0**3628800*k**5 % (x+1)",
+              "23.0**3628800*k % 7", "(23.0**3628800+k) % x",
+              "2.3E1^10!*E*k^5 % (E*b+1)",
+              "1.5 + 2.3E1^10!1Ek^5%Eb+bbbbbbbbbbbbbbbbbbbbb!20!",
+              # third seeded timeout: an UNRESOLVABLE numeric factor
+              # (`factorial(E)`) next to the Float Pow must not void
+              # the lower-bound estimate
+              "23.0**3628800*factorial(E)*N5 % (b+1)",
+              "1.5 + 2.3E1^10!1E!N5%Eb+bbYbbbbbbbbbbbbbbbb!20!",
+              # fourth seeded timeout: `split_symbols` rewrites `I5` as
+              # `I*Number('5')`, and `Number` was not a reserved real
+              # constructor in the deferred parse, so `Number(5)` became
+              # an OPAQUE stand-in base that dodged every Pow check
+              "I5**3628800 % 7", "2.3I5^10! % E",
+              "1.5 + 2.3I5^10!0!%1E^EKKKKK!1E1!1E1^0%Em"):
+    _t0 = _pin_time.perf_counter()
+    _v, _e = _boundary_parse(_expr)
+    _dt = _pin_time.perf_counter() - _t0
+    check(f"THE-1095 round 18 (symbolic dividend with a huge Float coefficient): "
+          f"{_expr!r} is refused on ceiling grounds in well under a second",
+          _v is None and _e is not None and _e[0] == "ceiling" and _dt < 1.0,
+          f"-> value={_v!r} err={_e!r} dt={_dt:.3f}s")
+for _expr, _want in (("I5", "5*I"), ("2.3I5", "11.5*I"), ("I5**3", "125*I"),
+                     ("2.5*k % x", "Mod(2.5*k, x)"),
+                     ("23.0**3628800*k // x", "floor(9.36139652056582e+4941437*k/x)")):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 18 (cheap symbolic-dividend forms keep main's value): "
+          f"{_expr!r} still evaluates",
+          _e is None and str(_v) == _want, f"-> value={_v!r} err={_e!r}")
+for _expr, _want in (("23.0**3628800", "9.36139652056582e+4941437"),
+                     ("2.5**10 % 7", "2.74316406250000"),
+                     ("2.3E1^3 % x", "Mod(12167.0, x)")):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 18 (Float forms that stay cheap keep main's value): "
+          f"{_expr!r} still evaluates",
+          _e is None and str(_v) == _want, f"-> value={_v!r} err={_e!r}")
 
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== ALL BUG-SWEEP REGRESSIONS FIXED ===")
