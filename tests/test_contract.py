@@ -42,7 +42,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from _mcp_client import data, over_stdio
 from jsonschema import Draft202012Validator
 
-from codecalc import contract, errors, executor
+from codecalc import contract, errors, executor, plan_order
 
 FAILS: list[str] = []
 
@@ -138,6 +138,20 @@ check("CONTROL: the validator REJECTS an envelope missing required fields",
 _bogus_version = {"ok": False, "error": "x", "contract_version": "one point oh"}
 check("CONTROL: the validator REJECTS a malformed contract_version",
       bool(errors_for(_bogus_version)))
+
+# The additive 1.19.0 shape is exercised with a real pure-graph result. This
+# catches a schema that was generated correctly but discriminates the new
+# result into no branch, or into more than one branch of the top-level oneOf.
+_plan = plan_order.plan_order([
+    {"id": "fetch"},
+    {"id": "build", "depends_on": ["fetch"]},
+])
+check("a real plan_order result validates against the published schema",
+      not errors_for(_plan), f"-> {errors_for(_plan)[:2]}")
+check("the plan_order result carries its exact ordered verdict",
+      _plan.get("verdict") == "ordered" and _plan.get("order") == ["fetch", "build"],
+      f"-> verdict={_plan.get('verdict')} order={_plan.get('order')}")
+check_stamped("a plan_order result", _plan)
 
 
 # ── every execution status the product can produce ─────────────────────────

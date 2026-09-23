@@ -240,6 +240,26 @@ async def main():
               sum(1 for row in rows if row.get("result")) == 5,
               f"-> {sum(1 for row in rows if row.get('result'))}")
 
+        # ── plan_order ────────────────────────────────────────────────────
+        r = data(await client.call_tool(
+            "plan_order",
+            {"steps": [
+                {"id": "a"},
+                {"id": "b", "depends_on": ["a"]},
+                {"id": "c", "depends_on": ["a"]},
+                {"id": "d", "depends_on": ["b", "c"]},
+            ]}))
+        check("plan_order: diamond has the exact minimum waves",
+              r.get("waves") == [["a"], ["b", "c"], ["d"]],
+              f"-> {r.get('waves')}")
+        check("plan_order: deterministic linear order flattens those waves",
+              r.get("order") == ["a", "b", "c", "d"], f"-> {r.get('order')}")
+        check("plan_order: pure result is proven minimal and proof-graded",
+              r.get("wave_count") == 3
+              and r.get("wave_count_proven_minimal") is True
+              and r.get("grade") == "solver_proven",
+              f"-> count={r.get('wave_count')} grade={r.get('grade')}")
+
         # ── z3_check ──────────────────────────────────────────────────────
         r = data(await client.call_tool(
             "z3_check",

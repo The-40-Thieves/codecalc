@@ -37,13 +37,17 @@ and had nowhere else to come from. None of them compute a grade inline.
                    independence being certified is of the IMPLEMENTATION,
                    not necessarily the interpreter.
 
-  solver_proven   Z3 returned `unsat` for the given formula within its
-                   timeout — Z3's own refutation, a machine-checked verdict
-                   from a bounded decision procedure. `grade_basis` always
-                   records the engine version and the timeout bound.
+  solver_proven   A complete exact procedure proved the returned claim. For
+                   `z3_check`, Z3 returned `unsat` for the given formula
+                   within its timeout: Z3's own refutation from a bounded
+                   decision procedure. For `plan_order`, Kahn layering or an
+                   explicit cycle completed over the whole graph, or Z3
+                   Optimize closed the minimum wave-count bound and the
+                   input-order Solver pass completed. `grade_basis` names
+                   the mechanism and timeout bound where one applies.
 
-                   ONLY `unsat`. This is deliberately NARROWER than "any
-                   decisive Z3 verdict": an earlier version of this module
+                   For `z3_check`, ONLY `unsat`. This is deliberately NARROWER
+                   than "any decisive Z3 verdict": an earlier version of this module
                    graded `sat` `solver_proven` too, reasoning that a
                    witness model is exactly as checkable by hand as a
                    refutation. That is true in isolation, but it does not
@@ -277,3 +281,17 @@ def grade_z3_check(result: dict) -> dict:
         return _graded(result, UNGRADED, _SAT_BASIS)
     return _graded(result, UNGRADED,
                    f"not graded: z3 returned {verdict!r}, which decides nothing")
+
+
+def grade_plan_order(result: dict, *, proven: bool, basis: str) -> dict:
+    """Grade a ``plan_order`` graph or scheduling result.
+
+    ``solver_proven`` is the project's proof-grade vocabulary.  For this tool
+    it covers either a complete graph-theoretic construction (Kahn layering or
+    an explicit cycle) or a z3 Optimize minimum whose lower and upper bounds
+    closed, followed by a completed input-order Solver pass.  A timeout is never passed here as ``proven``:
+    it is explicitly ``ungraded`` even if z3 produced a best-so-far model.
+    """
+    if proven:
+        return _graded(result, SOLVER_PROVEN, basis)
+    return _graded(result, UNGRADED, f"not graded: {basis}")

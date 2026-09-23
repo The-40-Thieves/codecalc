@@ -6,7 +6,7 @@
 calculator, a code runner, and a logic checker — so it gets a *correct* answer
 instead of a guessed one.** It runs code in **31 languages**, does exact
 symbolic math, solves SMT/logic problems, and measures complexity, all exposed
-as **51 MCP tools**.
+as **52 MCP tools**.
 
 **Fastest path:** `uvx 'codecalc[full]' setup --write` registers codecalc with your MCP client automatically. New to MCP, or want more detail first? See [QUICKSTART.md](QUICKSTART.md), or the Install section below.
 
@@ -23,8 +23,8 @@ Three things nobody else offers together cleanly:
   the default rlimit sandbox, fail-closed and attested.
 - **Verification tools** — `verify_translation` proves a port to another
   language behaves identically, `verify_optimization` proves an optimization
-  preserved behavior, and `z3_check` proves or refutes logic with an SMT
-  solver.
+  preserved behavior, `plan_order` proves a dependency-valid minimum-wave
+  schedule, and `z3_check` proves or refutes logic with an SMT solver.
 
 ## When to use codecalc
 
@@ -475,7 +475,7 @@ Linux kernel with seccomp support enforces it in-kernel either way), and
 [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild)
 for the static cross-builds (zig is used as the linker; no x86_64 GCC needed).
 
-## MCP tools (51) + MCP resources
+## MCP tools (52) + MCP resources
 
 Every session file is also exposed as an MCP resource:
 `codecalc://session/<session_id>/files/<path>` — images render inline for the
@@ -521,6 +521,7 @@ analysis, binary64 introspection.
 | `execute_code_stream` | Provider-selected execution using the same canonical limits as `execute_code`, with progress + partial output when the provider supports streaming |
 | `trace_execution` | **python3 only.** Runs the same sandboxed executor `execute_code` uses, plus a per-line event trace (`events`: line/call/return/exception, changed locals per step) and a static branch/line-coverage report (`branches`, `lines_executed`, `lines_never_executed`) from an AST parse — answers "which lines ran, in what order, and why" rather than just "what did it print" |
 | `branch_reachability` | **python3 only.** Decides, with z3, which if/elif/else arms and while/for(range, static bounds) loops in ONE function can ever be taken for ANY input — `reachable`/`dead`/`unknown` per branch, a `witness` when reachable, and `boundary_inputs` (min/max/equality-edge, via z3 Optimize) shaped for `compare_edge_cases`'s `test_inputs`. Refuses up front, naming the construct and line, for anything outside `+ - * // %`/`and or not`/`== != < <= > >=`/`abs min max len` on int/bool/str |
+| `plan_order` | Proves one deterministic linear order and a minimum parallel-wave schedule for caller-supplied steps/dependencies. Pure Kahn layering handles dependency-only DAGs; `exclusive_with` or `max_parallel` uses z3 Optimize and returns `unknown`, never a best-so-far schedule labelled optimal, on timeout. All-cost inputs also return CPM `critical_path` and per-step `slack`; both are null when any cost is missing |
 | `run_submit` | Submit code for **background execution**; returns a `run_id` immediately instead of holding the call open |
 | `run_inspect` | Poll a background run: status while running, the full `execute_code` result shape once terminal |
 | `run_cancel` | Cancel a background run; idempotent on an already-terminal run, honest about providers that cannot cancel mid-flight |
@@ -571,7 +572,7 @@ them now gets the MCP SDK's own unknown-tool error, not a result:
 
 ## Grade vocabulary
 
-`verify_translation`, `verify_optimization` and `z3_check` return `grade` +
+`verify_translation`, `verify_optimization`, `plan_order` and `z3_check` return `grade` +
 `grade_basis` (+ `grade_rules_version`) on top of their own result. The grade
 names how strong the evidence for a success actually is; it is derived from
 evidence those tools already emit, in `codecalc/grades.py` — the verifiers
@@ -580,9 +581,9 @@ never assign their own grade.
 | Grade | Means | Emitted by |
 |---|---|---|
 | `cross_checked` | Two independently authored programs were both actually run and their outputs agreed. `grade_basis` names the runtime(s) that did the checking. | `verify_translation` (source vs. port), `verify_optimization` (original vs. candidate) |
-| `solver_proven` | Z3 returned `unsat` within its timeout — a machine-checked refutation, not a heuristic. `grade_basis` names the engine version and the timeout bound. **Not** `sat`: see below. | `z3_check` |
+| `solver_proven` | A complete exact procedure proved the result: z3 returned `unsat`, z3 Optimize closed every objective bound, or `plan_order` completed its graph-theoretic Kahn/cycle construction. `grade_basis` names the mechanism and bound where applicable. **Not** a best-so-far model or `z3_check` `sat`: see below. | `z3_check`, `plan_order` |
 | `executed` | Reserved: the claimed computation ran and produced the reported result, with no independent second opinion. Not currently emitted by any tool above — every one of them also clears the `cross_checked`/`solver_proven` bar. | — |
-| `ungraded` | Explicit non-grade for a mismatch, an inconclusive comparison, a rejected optimisation candidate, a measurement failure, a Z3 `unknown` verdict, and — deliberately — a Z3 `sat` verdict. A real value on `grade`, never an absent key. **Never** a softened stand-in for one of the three grades above. | any of the above, on a non-success |
+| `ungraded` | Explicit non-grade for a mismatch, an inconclusive comparison, a rejected optimisation candidate, a measurement failure, a Z3 `unknown`/Optimize timeout verdict, and — deliberately — a `z3_check` `sat` verdict. A real value on `grade`, never an absent key. **Never** a softened stand-in for one of the three grades above. | any of the above, on a non-success |
 
 `z3_check`'s `sat` verdicts are graded `ungraded`, not `solver_proven`, even
 though `sat` is just as decisive a verdict as `unsat`. The ticket's motivating
@@ -819,18 +820,19 @@ way back into the default.
 
 ## Tool-definition token cost
 
-codecalc's `tools/list` returns 51 definitions. Measured with `o200k_base` as a
-proxy on the served JSON, that is 78,586 bytes / 20,630 tokens of descriptions
-and input schemas (up from 64,643 bytes / 17,277 tokens at the same 51 tools),
-and every client pays it before the first user message. The number
-has grown with the descriptions, not the count: the disambiguation sentences
-and the per-mode text on `bits`/`symbolic` are what a selection-accuracy-first
-server spends its tokens on. The latest jump (+13,943 bytes, +3,353 tokens) is
-every one of the 152 tool PARAMETERS gaining its own `description` in the
-input schema (`Annotated[<type>, Field(description=...)]`) — the docstrings
-above did not change, so `scripts/tool_select_eval.py`'s selection-accuracy
-numbers (it scores only name + docstring, never the input schema) are
-unaffected by this change.
+codecalc's `tools/list` returns 52 definitions. Measured with `o200k_base` as a
+proxy on the live Tool objects serialized by `model_dump(by_alias=True,
+mode="json", exclude_none=True)` and ordinary `json.dumps`, that is 83,589
+bytes / 22,129 tokens of descriptions, schemas, annotations and metadata, and
+every non-deferring client pays it before the first user message. The new
+`plan_order` definition accounts for 1,827 bytes / 446 tokens under the same
+method. The number has grown with both descriptions and count: the
+disambiguation sentences and the per-mode text on `bits`/`symbolic` are what a
+selection-accuracy-first server spends its tokens on, while a structured tool
+like `plan_order` also carries parameter descriptions that keep the model from
+having to infer its input contract. `scripts/tool_select_eval.py` scores only
+name + docstring, never the input schema, so schema text affects token cost but
+not that lexical selection measurement.
 
 A follow-up pass then edited the DOCSTRINGS themselves, now that every
 parameter's own syntax/default/range lives in its schema description and no
@@ -873,7 +875,7 @@ number this section exists to track.
 
 codecalc does not hide its tools behind a discovery facade, and that is
 deliberate: the tool surface is where per-operation approval prompts, audit
-names and typed schemas live, and collapsing 51 tools into one dispatcher makes
+names and typed schemas live, and collapsing 52 tools into one dispatcher makes
 `install_package` and `percentage` look like the same permission to a client
 that approves by tool name. The cost is real, but the client is the better place
 to solve it, because the client can defer definitions **without** giving up the
@@ -943,7 +945,7 @@ If you are paying too much for codecalc's definitions:
   https://modelcontextprotocol.io/specification/2026-07-28/server/tools,
   retrieved 2026-09-07). A client without one of the mechanisms above pays the
   full cost regardless of what codecalc does.
-- **Any client** can filter which of the 51 tools it exposes to the model.
+- **Any client** can filter which of the 52 tools it exposes to the model.
   Nothing here requires codecalc to change.
 
 A server-side facade remains under consideration for clients with no such
@@ -953,9 +955,9 @@ Trimming a description to cut this cost is exactly the change
 `scripts/tool_select_eval.py` exists to gate: an offline, labeled eval of
 whether a deterministic lexical (BM25) selector still picks the right tool
 for a plain-language ask, scored against the live `tools/list` text.
-Measured v1 baseline (196 hand-labeled prompts, none containing their own
-target tool's name — see the script's own docstring): **60.71%** top-1 /
-75.51% top-3 accuracy on the `full` surface (62.75% / 63.0% top-1 on `dev` /
+Measured v1 baseline (245 hand-labeled prompts, none containing their own
+target tool's name — see the script's own docstring): **64.49%** top-1 /
+77.55% top-3 accuracy on the `full` surface (70.31% / 68.33% top-1 on `dev` /
 `core` respectively). It is a lexical proxy, not a model — see the script's
 module docstring for exactly what a green run does and does not prove.
 
@@ -1017,7 +1019,7 @@ Every tool belongs to exactly one group:
 | Group | Tools |
 |---|---|
 | `calculator` (20) | `calc_exact`, `compare_threshold`, `percentage`, `percent_change`, `calc_stats`, `percentiles`, `collision_probability`, `data_sizes`, `human_duration`, `epoch_time`, `bits`, `radix_convert`, `float_repr`, `symbolic`, `convert_units`, `physical_constants`, `list_units`, `evaluate_expression`, `truth_table`, `matrix` |
-| `verification` (5) | `verify_translation`, `verify_optimization`, `algebraic_equiv`, `compare_edge_cases`, `z3_check` |
+| `verification` (6) | `verify_translation`, `verify_optimization`, `algebraic_equiv`, `compare_edge_cases`, `plan_order`, `z3_check` |
 | `execution` (8) | `list_languages`, `list_execution_providers`, `execute_code`, `execute_code_stream`, `trace_execution`, `branch_reachability`, `compare_execution`, `runtimes_status` |
 | `sessions` (13) | `session_start`, `session_stop`, `session_list`, `session_files`, `session_write_file`, `session_delete_file`, `session_read_file`, `session_run`, `session_artifacts`, `session_snapshot`, `run_submit`, `run_inspect`, `run_cancel` |
 | `analysis` (3) | `analyze_complexity`, `benchmark`, `extract_function` |
@@ -1036,10 +1038,10 @@ both:
 CODECALC_TOOLS=calculator            # just the calculator (20 tools)
 CODECALC_TOOLS=core                  # same thing, by preset name
 CODECALC_TOOLS=calculator,execution  # two groups, unioned
-CODECALC_TOOLS=dev                   # a coding-assistant slice (36 tools)
+CODECALC_TOOLS=dev                   # a coding-assistant slice (37 tools)
 ```
 
-Unset or empty registers every group — 51 tools, same as today —
+Unset or empty registers every group — 52 tools, same as today —
 so nothing changes for an operator who does not set this. An unknown group or
 preset name is a loud startup failure naming the bad value and every known
 group/preset, never a silent fallback to "everything" or "nothing": either
@@ -1076,7 +1078,7 @@ PYTHONPATH=. .venv/bin/python tests/test_mcp_all.py         # every tool over MC
 PYTHONPATH=. .venv/bin/python tests/test_executor_sweep.py  # sandbox regressions
 ```
 
-71 test files and 19 CI-invoked scripts, **2184 assertions**. "CI-invoked"
+72 test files and 19 CI-invoked scripts, **2219 assertions**. "CI-invoked"
 means referenced by path (`scripts/<name>.py`) from a job in
 `.github/workflows/*.yml` — `scripts/check_claims.py` derives the count that
 way and gates it, so a script wired into a workflow without this sentence

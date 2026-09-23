@@ -8,9 +8,10 @@ codecalc runs untrusted code in 31 languages, does exact symbolic math,
 solves SMT/logic problems, and measures complexity, exposed as 52 MCP tools
 over stdio or Streamable HTTP. Its core opens no sockets, ships no model, no
 API key, and no telemetry; network access is opt-in and scoped to the one
-tool that needs it. `verify_translation`, `verify_optimization`, and
-`z3_check` prove a claim (a port behaves identically, an optimization
-preserved behavior, a formula is satisfiable) instead of asserting it. Two
+tool that needs it. `verify_translation`, `verify_optimization`, `plan_order`,
+and `z3_check` prove a claim (a port behaves identically, an optimization
+preserved behavior, a dependency schedule is minimum, a formula is
+satisfiable) instead of asserting it. Two
 things are versioned separately here — the package (`pyproject.toml`) and
 the result contract (`docs/contract/README.md`, `contract_version` on every
 tool result) — see CONTRIBUTING.md before treating one number as the other.

@@ -1,7 +1,22 @@
 # The codecalc result contract
 
-**Current version: `1.18.0`** · Schema: [`result-v1.schema.json`](result-v1.schema.json) ·
+**Current version: `1.19.0`** · Schema: [`result-v1.schema.json`](result-v1.schema.json) ·
 Source of truth: [`codecalc/contract.py`](../../codecalc/contract.py)
+
+`1.19.0` is a MINOR bump over `1.18.0`. It adds a THIRTEENTH shape,
+`plan_order`, for the new tool of the same name: a deterministic topological
+order, minimum parallel-wave schedule, explicit dependency cycle, and optional
+CPM critical path/slack over caller-supplied step costs. Its own `verdict`
+vocabulary (`ordered`/`cyclic`/`infeasible`/`unknown`) is local to this new
+shape; the existing execution `VERDICTS` enum (`OK`/`TLE`/`OLE`/`MLE`/`RTE`)
+is unchanged. Argument and size-cap refusals remain the existing `rejected`
+shape. Nothing a `1.18.0` client already reads changes shape or meaning, so a
+new result shape is additive and therefore MINOR under the policy below.
+
+`critical_path` and `slack` are required keys but explicitly `null` whenever
+any step omits `cost`, and on non-DAG/no-schedule verdicts. That fixed shape is
+intentional: absence would make a caller distinguish an uncomputed result from
+an old server, while `null` says the computation does not apply to this input.
 
 `1.18.0` is a MINOR bump over `1.17.0`. It closes the rest of GH #321/THE-1086: `trace_execution`'s `events` items and its
 `truncated_reason` enum both gain a value, additively —
@@ -635,7 +650,7 @@ it license to produce — measured on `execute_code`:
 ```
 
 — an object with no fields, no `required`, no enums. This document's schema
-(the twelve shapes, the 21 envelope fields, the verdict/code enumerations) is
+(the thirteen shapes, the 21 envelope fields, the verdict/code enumerations) is
 still the one worth validating against; it is just not the one a client reads
 back from `tools/list`. Getting the SDK to emit *this* schema verbatim would
 need a `TypedDict` (or `BaseModel`) per shape, one of which — `run_lifecycle` vs
@@ -652,10 +667,10 @@ still works exactly as before.
 
 ---
 
-## The twelve shapes
+## The thirteen shapes
 
 Every result carries `ok` and `contract_version`, and a client discriminates
-the twelve shapes in this order:
+the thirteen shapes in this order:
 
 | Shape | Discriminator | What it is |
 |---|---|---|
@@ -671,6 +686,7 @@ the twelve shapes in this order:
 | **comparison_rows** | `count`/`succeeded`/`fastest` present | `compare_execution`'s result: the same code run in N languages side by side, which was fastest, and any cross-language discrepancies noticed. |
 | **session_snapshot_result** | `action` present | `session_snapshot`'s result: archived or restored a session's workspace files. `action` (`save`/`restore`/`list`/`delete`) picks which of the four success shapes applies; see below. |
 | **branch_reachability** | `supported`/`dead_count`/`reachable_count`/`unknown_count` present, no `verdict`/`backend` | `branch_reachability`'s result (added `1.16.0`): every if/elif/else arm and while/for(range) loop in one python3 function, decided reachable/dead/unknown by z3. |
+| **plan_order** | `order`/`waves`/`wave_count_proven_minimal` present, no `backend` | `plan_order`'s result (added `1.19.0`): deterministic dependency order and minimum-wave schedule, an explicit cycle, or a z3 infeasible/timeout verdict. |
 
 The first six are **execution** shapes — their discriminators only ever
 fire for something that ran code (or explicitly refused to). The next three,
@@ -739,6 +755,19 @@ already `rejected`, needing no branch of its own, the same as `compare_
 edge_cases`'s and `verify_optimization`'s own refusals. Only its `ok: true`
 success shape needed one: `supported`/`dead_count`/`reachable_count`/
 `unknown_count` together appear on no other shape here.
+
+**`plan_order`**, added in `1.19.0`, is the new tool's success/result shape.
+`ordered` carries a full `order`, `waves`, and a proven-minimal `wave_count`;
+`cyclic` carries the exact loop in `cycle`; `infeasible` is z3's proof that
+the declared scheduling constraints cannot all hold; and `unknown` is reserved
+for z3 Optimize timing out before every objective bound closes. A timeout never
+returns a best-so-far schedule under an optimal label. `critical_path` and
+`slack` contain the CPM result only when every step has a finite non-negative
+cost, otherwise both are explicitly null. `grade` is `solver_proven` for a
+complete Kahn/cycle construction or closed z3 optimum/infeasibility proof and
+`ungraded` for `unknown`; `grade_basis` names the deciding mechanism. Its
+argument and size-cap failures are ordinary coded `rejected` results and do
+not match this branch.
 
 **The run_lifecycle shape** (added in `1.1.0`) is the reply the background-run
 tools return before a run finishes — `run_submit`'s handle, a poll of a

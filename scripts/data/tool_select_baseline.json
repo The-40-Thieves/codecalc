@@ -1,11 +1,11 @@
 {
   "full": {
-    "n": 241,
+    "n": 245,
     "skipped": 0,
-    "top1_hits": 156,
-    "top3_hits": 187,
-    "top1": 0.6473,
-    "top3": 0.7759,
+    "top1_hits": 158,
+    "top3_hits": 190,
+    "top1": 0.6449,
+    "top3": 0.7755,
     "per_tool": {
       "algebraic_equiv": {
         "n": 4,
@@ -110,7 +110,7 @@
       "install_package": {
         "n": 4,
         "top1": 0.5,
-        "top3": 1.0
+        "top3": 0.75
       },
       "list_execution_providers": {
         "n": 3,
@@ -151,6 +151,11 @@
         "n": 4,
         "top1": 0.75,
         "top3": 0.75
+      },
+      "plan_order": {
+        "n": 4,
+        "top1": 0.5,
+        "top3": 1.0
       },
       "radix_convert": {
         "n": 4,
@@ -1058,7 +1063,7 @@
       },
       "Add a fresh dependency for node so my script can `require` it": {
         "top1_hit": false,
-        "top3_hit": true
+        "top3_hit": false
       },
       "Just by reading this code, what's its rough time complexity \u2014 is it quadratic, linear?": {
         "top1_hit": true,
@@ -1227,16 +1232,32 @@
       "For every possible input, decide which if/elif arms of this python function are reachable, using a real solver": {
         "top1_hit": true,
         "top3_hit": true
+      },
+      "Put these project steps into a valid execution sequence from their dependency list, with independent work grouped together": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "I have tasks, prerequisites, and a two-at-once capacity; prove the fewest parallel rounds and give me one stable schedule": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Find the exact dependency loop in these named steps, or give me a topological sequence if there is no loop": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Which chain sets the duration of this costed dependency graph, and how much slack does each task have?": {
+        "top1_hit": true,
+        "top3_hit": true
       }
     }
   },
   "dev": {
-    "n": 188,
+    "n": 192,
     "skipped": 53,
-    "top1_hits": 133,
-    "top3_hits": 154,
-    "top1": 0.7074,
-    "top3": 0.8191,
+    "top1_hits": 135,
+    "top3_hits": 158,
+    "top1": 0.7031,
+    "top3": 0.8229,
     "per_tool": {
       "algebraic_equiv": {
         "n": 4,
@@ -1377,6 +1398,11 @@
         "n": 4,
         "top1": 0.75,
         "top3": 0.75
+      },
+      "plan_order": {
+        "n": 4,
+        "top1": 0.5,
+        "top3": 1.0
       },
       "radix_convert": {
         "n": 4,
@@ -2176,12 +2202,28 @@
       "For every possible input, decide which if/elif arms of this python function are reachable, using a real solver": {
         "top1_hit": true,
         "top3_hit": true
+      },
+      "Put these project steps into a valid execution sequence from their dependency list, with independent work grouped together": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "I have tasks, prerequisites, and a two-at-once capacity; prove the fewest parallel rounds and give me one stable schedule": {
+        "top1_hit": true,
+        "top3_hit": true
+      },
+      "Find the exact dependency loop in these named steps, or give me a topological sequence if there is no loop": {
+        "top1_hit": false,
+        "top3_hit": true
+      },
+      "Which chain sets the duration of this costed dependency graph, and how much slack does each task have?": {
+        "top1_hit": true,
+        "top3_hit": true
       }
     }
   },
   "core": {
     "n": 120,
-    "skipped": 121,
+    "skipped": 125,
     "top1_hits": 82,
     "top3_hits": 104,
     "top1": 0.6833,
@@ -2771,8 +2813,8 @@
       }
     }
   },
-  "codecalc_version": "0.12.0",
-  "generated_at": "2026-09-21T08:27:42.446192+00:00",
-  "prompt_count": 241,
-  "prompt_set_sha256": "bddf4f17c76904411c7426cc82f45ca239b8da32514566e34a69b167a52308ee"
+  "codecalc_version": "0.13.0",
+  "generated_at": "2026-09-22T22:56:47.787797+00:00",
+  "prompt_count": 245,
+  "prompt_set_sha256": "de7c5bf483074a626b4921fee19a1140c3de0effe6cbfcc52a142d4bb18f9dab"
 }

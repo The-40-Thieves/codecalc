@@ -78,6 +78,10 @@ TOOL_TIMEOUTS: dict[str, float] = {
     # caller who actually asks for the full 120s gets a real answer back
     # instead of this middleware cutting the response off first.
     "branch_reachability": 150,
+    # plan_order uses the same 120s caller-clamped in-process z3 ceiling on
+    # its constrained path.  Keep 30s of response/serialization margin, as
+    # branch_reachability does, so the advertised solver budget is usable.
+    "plan_order": 150,
     # calc_exact and its sympy-backed siblings in exact.py were absent here,
     # so they inherited DEFAULT_TIMEOUT_SECONDS (900s) instead of the 20s
     # deadline their logic.py counterparts (evaluate_expression, symbolic,

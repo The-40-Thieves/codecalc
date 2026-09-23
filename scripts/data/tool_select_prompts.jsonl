@@ -239,3 +239,7 @@
 {"prompt": "Given this function, tell me exactly which if/elif arms can never execute, proved for every possible input", "expected": ["branch_reachability"]}
 {"prompt": "What is the boundary value for this if guard, the point where the comparison flips, as a usable input", "expected": ["branch_reachability"]}
 {"prompt": "For every possible input, decide which if/elif arms of this python function are reachable, using a real solver", "expected": ["branch_reachability"]}
+{"prompt": "Put these project steps into a valid execution sequence from their dependency list, with independent work grouped together", "expected": ["plan_order"]}
+{"prompt": "I have tasks, prerequisites, and a two-at-once capacity; prove the fewest parallel rounds and give me one stable schedule", "expected": ["plan_order"]}
+{"prompt": "Find the exact dependency loop in these named steps, or give me a topological sequence if there is no loop", "expected": ["plan_order"]}
+{"prompt": "Which chain sets the duration of this costed dependency graph, and how much slack does each task have?", "expected": ["plan_order"]}

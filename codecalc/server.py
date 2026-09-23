@@ -81,6 +81,9 @@ from . import (
 from . import (
     dependencies as dependencies_module,
 )
+from . import (
+    plan_order as plan_order_module,
+)
 from .mcp_middleware import redact_validation_errors_middleware, timeout_middleware
 
 #: Bearer token for the Streamable HTTP transport. Unset means the
@@ -2193,6 +2196,32 @@ def truth_table(expression: Annotated[str, Field(description="Boolean logic expr
     each variable name -> bool plus `result`), plus `row_count`,
     `satisfiable` (any row true), and `tautology` (every row true)."""
     return logic.truth_table(expression)
+
+
+@mcp.tool(group="verification")
+def plan_order(
+    steps: Annotated[list[dict[str, Any]], Field(description="Plan steps in input tie-break order; each object has id, optional depends_on ids, optional non-negative finite cost, and optional exclusive_with ids")],
+    max_parallel: Annotated[int | None, Field(description="Maximum steps allowed in one wave; null means no capacity cap")] = None,
+    timeout: Annotated[int, Field(description="Wall-clock seconds for the z3 Optimize path; default 30, clamped to 1..120; unused by the pure Kahn path")] = 30,
+) -> dict[str, Any]:
+    """Prove an ordering and minimum-wave schedule for declared dependencies.
+
+    Choose this for named steps, prerequisite edges, deterministic ordering,
+    and safe parallel grouping.  The proof is relative to the supplied edges;
+    it does not infer missing dependencies.  Use branch_reachability instead
+    for Python control flow.  Use z3_check instead for caller-authored
+    SMT-LIB2 or constraints beyond precedence, pairwise exclusivity, and
+    per-wave capacity.
+
+    Dependency-only inputs use exact input-stable Kahn layering without z3.
+    Constrained inputs use z3 Optimize and return ``verdict: unknown`` with no
+    schedule unless the optimum and tie-break are both closed.  All-cost
+    inputs add CPM ``critical_path`` and per-task ``slack``; both fields are
+    explicitly null when any cost is missing.
+    """
+    return plan_order_module.plan_order(
+        steps, max_parallel=max_parallel, timeout=timeout,
+    )
 
 
 @mcp.tool(group="verification")

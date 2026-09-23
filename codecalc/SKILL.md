@@ -33,6 +33,7 @@ the number.
 | You ported code A → B and are about to call it a port | `verify_translation` |
 | You are about to state that a rewrite is **faster** | `verify_optimization` |
 | You are about to say two languages **behave the same** | `compare_edge_cases` |
+| You are about to state that a multi-step plan's **execution order or parallel waves are valid/minimal** | `plan_order` |
 | You are about to state a **Big-O** | `analyze_complexity` (inferred) or `benchmark` (measured) — and say which |
 | Any **bitwise op, shift, or mask** result you will state | `bits` (`mode="op"`/`"analysis"`) |
 | Any value you will state in **hex, binary, or another base** | `radix_convert`, `bits` (`mode="repr"`) |
@@ -74,6 +75,7 @@ untrue, and each was added after that implication bit someone.
 | `method: "static-estimate"` | Nobody measured this. `benchmark` reports `method: "empirical"` |
 | `output_error` present | `stdout`/`stderr` are **not** what the program produced |
 | `ok: false` | Say what failed. The `error` field is written to be quoted |
+| `wave_count_proven_minimal: false` | Do not call the schedule minimum; read the verdict and reason fields |
 
 **Never drop a field you do not understand. Quote it.**
 

@@ -10,9 +10,9 @@ This project versions **two** things, and they are not the same number.
 | What | Where | Current |
 |---|---|---|
 | The **package** — the tool surface, the CLI, the Python API | `pyproject.toml`, `executor/Cargo.toml`, this file | see `version` in [`pyproject.toml`](pyproject.toml) — this cell is not re-typed on every release |
-| The **result contract** — the shape every tool result comes back in | `docs/contract/README.md`, `contract_version` on every result | `1.14.0` |
+| The **result contract** — the shape every tool result comes back in | `docs/contract/README.md`, `contract_version` on every result | `1.19.0` |
 
-The contract is at `1.14.0` and the package is at `0.x` because those claims are
+The contract is at `1.19.0` and the package is at `0.x` because those claims are
 genuinely different. The result contract has a published JSON Schema, a
 documented MAJOR/MINOR/PATCH policy, a twelve-month deprecation window, and a
 gate that fails if the schema drifts from the code — it is stable and says so.
@@ -32,6 +32,24 @@ behind it.
 ---
 
 ## [Unreleased]
+
+### Added
+
+- **`plan_order`** (`verification` group): takes structured steps with
+  `depends_on`, optional `exclusive_with`, and optional non-negative `cost`,
+  then returns one input-stable topological `order` plus minimum parallel
+  `waves`. Dependency-only DAGs use Kahn layering without calling z3; the
+  layer count equals the graph's longest dependency path and is minimal by
+  construction. A `max_parallel` cap or any exclusivity edge uses z3 Optimize
+  to prove the minimum wave count (its lower and upper bound must close), then
+  a plain Solver pass fixes that minimum and commits the earliest satisfiable
+  wave per step in input order. Either phase hitting the timeout returns
+  `verdict: unknown` with no schedule. Cycles return the exact ordered loop, including the repeated start.
+  When every step supplies a cost, a CPM forward/backward pass also returns
+  `critical_path` and per-step `slack`; both keys are null when any cost is
+  missing. The pure path is capped at 1,000 steps and the z3 path at 100,
+  returning `resource_exhausted` above either bound. New additive result shape
+  `plan_order`; result contract `1.18.0` -> `1.19.0` (MINOR).
 
 ## [0.13.0] — 2026-09-21
 

@@ -51,7 +51,7 @@ from . import errors, grades
 #: each component is allowed to change — the short form is that MAJOR is the
 #: only one that may break a reader, and it carries a twelve-month deprecation
 #: window before anything is removed.
-CONTRACT_VERSION = "1.18.0"
+CONTRACT_VERSION = "1.19.0"
 
 # THE `$schema` AND `$id` URIs ARE NOT HERE ON PURPOSE.
 #
@@ -1175,6 +1175,73 @@ def _branch_reachability_properties() -> dict:
     }
 
 
+def _plan_order_properties() -> dict:
+    """``plan_order``'s additive result shape (1.19.0)."""
+    return {
+        "ok": {"const": True},
+        "verdict": {
+            "type": "string",
+            "enum": ["ordered", "cyclic", "infeasible", "unknown"],
+            "description": (
+                "ordered: an exact schedule is returned. cyclic: cycle names "
+                "the dependency loop. infeasible: z3 proved the additional "
+                "scheduling constraints unsatisfiable. unknown: z3 did not "
+                "close every optimization bound before its timeout."
+            ),
+        },
+        "order": {
+            "type": "array", "items": {"type": "string"},
+            "description": "One dependency-valid linear order, with input-order tie-breaks.",
+        },
+        "waves": {
+            "type": "array",
+            "items": {"type": "array", "items": {"type": "string"}},
+            "description": "Minimum parallel waves when verdict is ordered; otherwise empty.",
+        },
+        "wave_count": {"type": ["integer", "null"], "minimum": 0},
+        "wave_count_proven_minimal": {"type": "boolean"},
+        "critical_path": {
+            "oneOf": [
+                {"type": "null"},
+                {
+                    "type": "object",
+                    "required": ["steps", "total_cost"],
+                    "properties": {
+                        "steps": {"type": "array", "items": {"type": "string"}},
+                        "total_cost": {"type": "number", "minimum": 0},
+                    },
+                },
+            ],
+            "description": (
+                "CPM chain that determines dependency duration when every step "
+                "has a cost; null when any cost is missing or no DAG schedule exists."
+            ),
+        },
+        "slack": {
+            "oneOf": [
+                {"type": "null"},
+                {"type": "object", "additionalProperties": {"type": "number"}},
+            ],
+            "description": (
+                "Step id -> latest-start minus earliest-start when every cost "
+                "is present; null under the same conditions as critical_path."
+            ),
+        },
+        "cycle": {
+            "oneOf": [
+                {"type": "null"},
+                {"type": "array", "items": {"type": "string"}, "minItems": 3},
+            ],
+            "description": "For cyclic only, the ordered loop with its first id repeated at the end.",
+        },
+        "method": {"type": "string", "enum": ["kahn", "z3_optimize", "graph_cycle"]},
+        "reason": {"type": "string"},
+        "grade": {"type": "string", "enum": sorted(grades.GRADES)},
+        "grade_basis": {"type": "string"},
+        "grade_rules_version": {"type": "string"},
+    }
+
+
 #: Mirrors `branch_reachability._TYPE_NAMES` without importing that module
 #: at schema-build time — the same reasoning `build_doctor_schema` states
 #: for its own late imports, applied here to keep this module's own import
@@ -1347,6 +1414,7 @@ def build_schema(dialect: str | None = None, schema_id: str | None = None) -> di
             {"$ref": "#/$defs/comparison_rows"},
             {"$ref": "#/$defs/session_snapshot_result"},
             {"$ref": "#/$defs/branch_reachability"},
+            {"$ref": "#/$defs/plan_order"},
         ],
         "$defs": {
             "execution_envelope": {
@@ -1903,6 +1971,28 @@ def build_schema(dialect: str | None = None, schema_id: str | None = None) -> di
                              "suggested_test_inputs"],
                 "not": {"anyOf": [{"required": ["verdict"]}, {"required": ["backend"]}]},
                 "properties": _branch_reachability_properties(),
+            },
+            "plan_order": {
+                "title": "a plan_order result",
+                "description": (
+                    "The plan_order tool's result (1.19.0): one deterministic "
+                    "dependency-valid order and minimum parallel-wave schedule, "
+                    "or an explicit cycle/infeasible/timeout verdict. A failing "
+                    "argument or size-cap refusal has no plan-specific fields "
+                    "and matches rejected instead. The required `order` and "
+                    "`waves` pair distinguishes this from compact execution "
+                    "results, whose unrelated verdict field uses the execution "
+                    "vocabulary and requires stdout/exit_code."
+                ),
+                "type": "object",
+                "required": [
+                    "ok", "verdict", "order", "waves", "wave_count",
+                    "wave_count_proven_minimal", "critical_path", "slack",
+                    "cycle", "method", "grade", "grade_basis",
+                    "grade_rules_version",
+                ],
+                "not": {"required": ["backend"]},
+                "properties": _plan_order_properties(),
             },
         },
     }
