@@ -5162,6 +5162,17 @@ def _near_one_grid15(*extra):
     # instead of `x == 0`: `1 +/- 1e-6`, `1 +/- 1/10**200`.
     return [1 + _EPS15, 1 - _EPS15, 1 + _POLE15, 1 - _POLE15, *extra]
 
+def _exact_ln15(v):
+    # THE-1095 round 18 (grok issue 2, `verify-1095-r17-grok.log`): the
+    # SAME `_exact_ln` fix `codecalc/safe_expr.py` itself got, mirrored
+    # here -- `math.log(float(v))` for a `v` within `1/10**200` of a
+    # pole rounds to exactly `1.0` in float64 (only ~16 decimal digits
+    # of precision), so `math.log(float(v)) == 0.0`, silently
+    # discarding the whole perturbation. `evalf(250)` resolves it
+    # exactly at any magnitude this module's own 700-bit rational guard
+    # admits.
+    return float(_sp15.log(v).evalf(250))
+
 def _ci_bound15(v):
     # THE-1095 round 16's own fix (`Ci(x) <= |gamma| + |ln x| + 1` for
     # `0 < x <= 1`, flat `2.0` for `x > 1`) was never carried into THIS
@@ -5169,24 +5180,28 @@ def _ci_bound15(v):
     # even though `Ci(0.001) == 6.33`, already over it. Confirmed live
     # this round before the fix: adding `1e-6` to the old grid+bound
     # combination fails immediately.
-    fv = float(v)
-    if fv <= 0:
+    #
+    # THE-1095 round 18: the domain/pole checks below now compare the
+    # EXACT SymPy value `v` itself (`v <= 0`, `v == 1`), never
+    # `float(v)` -- the same near-pole rounding-to-an-adjacent-integer
+    # trap `_exact_ln15` closes for the LOG call applies just as much
+    # to a bare EQUALITY/ORDERING check on a value that close.
+    if v <= 0:
         raise ValueError("domain")
-    if fv > 1:
+    if v > 1:
         return 2.0
-    return _euler_gamma15 + abs(math.log(fv)) + 1.0
+    return _euler_gamma15 + abs(_exact_ln15(v)) + 1.0
 
 def _chi_bound15(v):
     # THE-1095 round 17 (grok issue 1): `Chi` has the IDENTICAL
     # `gamma + ln(x)` pole SymPy's own `error_functions.py` gives `Ci`
     # -- round 16 fixed `Ci`, this round gives `Chi` the same treatment
     # (`Chi(0.1) == -1.73`, already over the old flat `e**0.1 == 1.11`).
-    fv = float(v)
-    if fv <= 0:
+    if v <= 0:
         raise ValueError("domain")  # Chi is COMPLEX for x <= 0
-    if fv <= 1:
-        return _euler_gamma15 + abs(math.log(fv)) + 1.0
-    return math.exp(fv)
+    if v <= 1:
+        return _euler_gamma15 + abs(_exact_ln15(v)) + 1.0
+    return math.exp(float(v))
 
 def _ei_bound15(v):
     # THE-1095 round 17 (grok issue 1, plus an independently-found
@@ -5194,12 +5209,11 @@ def _ei_bound15(v):
     # pole at `x == 0` -- grok's own writeup named only `0 < x <= 1`,
     # but `Ei(-0.1) == -1.82`, already over the old flat `e**0.1 ==
     # 1.11` too (`Ei`'s pole is symmetric in `|x|`, confirmed live).
-    fv = float(v)
-    if fv == 0:
+    if v == 0:
         raise ValueError("pole")
-    if abs(fv) <= 1:
-        return _euler_gamma15 + abs(math.log(abs(fv))) + math.e
-    return math.exp(abs(fv))
+    if abs(v) <= 1:
+        return _euler_gamma15 + abs(_exact_ln15(abs(v))) + math.e
+    return math.exp(abs(float(v)))
 
 def _li_bound15(v):
     # THE-1095 round 17 (grok issue 1): `li`/`Li ~ Ei(ln z)` near their
@@ -5208,12 +5222,24 @@ def _li_bound15(v):
     # `li`/`Li ~ z/ln(z)` grows slower than `e**z` beyond that, so the
     # existing exponential envelope stays sound (confirmed live) for
     # `z > e`.
-    fv = float(v)
-    if fv <= 0 or fv == 1:
+    #
+    # THE-1095 round 18 (grok issue 2, `verify-1095-r17-grok.log`):
+    # THIS is the row grok's own review found actually broken, not just
+    # theoretically fragile -- the OLD `fv = float(v); if fv <= 0 or
+    # fv == 1: raise` treated `1 +/- 1/10**200` as the EXACT pole
+    # (float64 rounds it to `1.0`) and silently SKIPPED every one of
+    # this round's own new near-pole grid points via the property
+    # loop's `except Exception: continue`, so the "the grid now proves
+    # the bound at the pole distance" claim from round 17's own commit
+    # message was never actually checked here. Fixed the same way as
+    # `_exact_ln15` itself: compare `v` (the exact SymPy value), not
+    # `float(v)`.
+    if v <= 0 or v == 1:
         raise ValueError("domain/pole")
-    if fv <= math.e:
-        return abs(math.log(abs(math.log(fv)))) + math.e
-    return math.exp(fv)
+    if v <= math.e:
+        ln_z = _exact_ln15(v)
+        return abs(math.log(abs(ln_z))) + math.e
+    return math.exp(float(v))
 
 def _lambertw_bound15(v):
     fv = float(v)
@@ -5492,12 +5518,131 @@ check("  ...and Tuple((x, 1, 200)) (comfortably under the 200 cap) "
       "still evaluates, matching the plain-tuple form",
       _e is None, f"-> value={_v!r} err={_e!r}")
 _v, _e = _boundary_parse("summation(bell(x*y), Tuple((x, 1, 200), (y, 1, 200)))")
-check("  ...and a multi-limit BUNDLE (both limits wrapped together in "
-      "one Tuple(...) call) still gets the Cartesian boundary-term "
-      "check, not silently skipped as an unrecognised shape",
+# THE-1095 round 18 correction: the round-17 assertion here claimed this
+# multi-limit BUNDLE gets "the Cartesian boundary-term check" -- WRONG
+# mental model, found while fixing grok issue 1 below: real SymPy's own
+# `_process_limits` flattens `Tuple((x,1,200),(y,1,200))` to SIX loose
+# elements (`[x,1,200,y,1,200]`), not two separate 3-element limits, and
+# raises `ValueError: Invalid limits given: ...` for it (confirmed live
+# against bare `sympy.summation`, unwrapped) -- it is NOT valid SymPy
+# syntax for "two limits bundled together" at all. This module now
+# matches that by refusing it as an unrecognized shape (fail-closed,
+# BEFORE SymPy's own real parse would raise its own ValueError) rather
+# than the round-17 version's ACCIDENTALLY-correct-looking (but wrongly
+# reasoned) "two Cartesian limits" refusal.
+check("THE-1095 round 18 (grok issue 1 correction): "
+      "'summation(bell(x*y), Tuple((x, 1, 200), (y, 1, 200)))' (NOT "
+      "valid SymPy syntax -- real summation() raises ValueError for it "
+      "too) refuses as an unrecognized limit shape",
       _v is None and _e is not None and _e[0] == "ceiling"
-      and "bell" in _e[1],
+      and "unrecognized shape" in _e[1],
       f"-> value={_v!r} err={_e!r}")
+
+# THE-1095 round 18 (grok issue 1, `verify-1095-r17-grok.log`, BLOCKING):
+# round 17's own flattener short-circuited on "already looks like a
+# 3-tuple" BEFORE flattening -- a container that does NOT already look
+# like one (`Tuple(x, Tuple(1, 1463))`, 2 elements) got unwrapped into
+# LOOSE elements the caller then skipped one by one, letting the real,
+# unbounded `bell` sum run underneath (confirmed live before this
+# round's fix: 5.46s, a genuine huge value). Copying SymPy's own
+# `_process_limits` order -- flatten completely FIRST, classify SECOND
+# -- closes it; pinned at both of grok's own named shapes plus the
+# `product` identity-growth twin.
+for _expr in (
+    "summation(bell(x), Tuple(x, Tuple(1, 1463)))",
+    "summation(bell(x), Tuple(Tuple(x, 1), 1463))",
+):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round 18 (grok issue 1, BLOCKING -- sequence flatten "
+          f"is not _process_limits): {_expr!r} (SAME limit as the "
+          f"already-refused '(x, 1, 1463)' form, nested a different way) "
+          f"refuses promptly on the identical table-name range cap, "
+          f"never runs the real 5+ second sum",
+          _v is None and _e is not None and _e[0] == "ceiling"
+          and "200" in _e[1] and _dt < 1.0,
+          f"-> value={_v!r} err={_e!r} elapsed={_dt:.3f}s")
+_t0 = time.time()
+_v, _e = _boundary_parse("product(x, Tuple(x, Tuple(1, 10**6)))")
+_dt = time.time() - _t0
+check("THE-1095 round 18 (grok issue 1, product identity-growth twin): "
+      "'product(x, Tuple(x, Tuple(1, 10**6)))' (== 10**6! on main) "
+      "refuses promptly",
+      _v is None and _e is not None and _e[0] == "ceiling" and _dt < 1.0,
+      f"-> value={_v!r} err={_e!r} elapsed={_dt:.3f}s")
+
+# THE-1095 round 18 (grok issue 1's own explicit ask, `verify-1095-r17-
+# grok.log`): property-test `_classify_summation_limits` (the flattener)
+# against SymPy's OWN `_process_limits`, not just a handful of pinned
+# shapes -- for a grid of nested-container limit shapes, the flattened
+# `(var, lo, hi)` this module extracts must equal what a REAL
+# `Sum(expr, *raw_args).limits` (unwrapped, no safe_expr involved at
+# all) actually resolves to, and a shape real SymPy REJECTS (raises
+# for) must be classified "invalid" here too -- never silently
+# skipped, never a false accept.
+import sympy as _sp18
+
+from codecalc.safe_expr import _classify_summation_limits as _classify18
+
+_x18, _y18 = _sp18.Symbol("x"), _sp18.Symbol("y")
+_FLATTEN_GRID = (
+    # (label, raw limit args as SymPy objects, expected outcome)
+    ("plain", (_sp18.Tuple(_x18, 1, 1463),), "ok"),
+    ("one-wrap", (_sp18.Tuple(_sp18.Tuple(_x18, 1, 1463)),), "ok"),
+    ("split-hi", (_sp18.Tuple(_x18, _sp18.Tuple(1, 1463)),), "ok"),
+    ("split-lo", (_sp18.Tuple(_sp18.Tuple(_x18, 1), 1463),), "ok"),
+    ("double-wrap", (_sp18.Tuple(_sp18.Tuple(_sp18.Tuple(_x18, 1, 1463))),), "ok"),
+    ("bare-symbol", (_x18,), "symbol"),
+    ("two-separate-limits", (_sp18.Tuple(_x18, 1, 200), _sp18.Tuple(_y18, 1, 200)), "ok2"),
+    ("bundled-limits", (_sp18.Tuple(_sp18.Tuple(_x18, 1, 200), _sp18.Tuple(_y18, 1, 200)),), "invalid"),
+    ("four-flat", (_sp18.Tuple(_x18, 1, 2, 3),), "invalid"),
+)
+_flatten_fails = []
+for _label, _raw_args, _expected in _FLATTEN_GRID:
+    _classified = _classify18(list(_raw_args))
+    if _expected == "symbol":
+        _ours_ok = _classified == [("symbol", _x18)]
+    elif _expected == "invalid":
+        # This module is DELIBERATELY more conservative than real SymPy
+        # here (a length-4 flattened list is a legitimate `Range`-
+        # derived limit form on main, per `_process_limits`'s own
+        # `lenV == 4` branch, but this module never models it) --
+        # "unknown != safe" means refusing it is correct even where
+        # main would happily compute it, so there is no SymPy-agreement
+        # cross-check for this case, only that OUR OWN classification
+        # refuses it.
+        _ours_ok = any(_k[0] == "invalid" for _k in _classified)
+    elif _expected == "ok2":
+        _ours_ok = (len(_classified) == 2
+                    and all(_k[0] == "triple" for _k in _classified))
+    else:
+        _ours_ok = len(_classified) == 1 and _classified[0][0] == "triple"
+    # Cross-check against REAL, unwrapped SymPy for every shape this
+    # module claims to positively resolve (`ok`/`ok2`/`symbol`) -- `Sum`
+    # itself is used only as the SAME entry point real `summation()`/
+    # `product()` go through (`_process_limits`), never touched by
+    # safe_expr at all.
+    _sympy_ok = True
+    if _expected in ("ok", "ok2"):
+        try:
+            _real_limits = _sp18.Sum(_x18, *_raw_args).limits
+            _want = tuple((_k[1], _sp18.sympify(_k[2]), _sp18.sympify(_k[3]))
+                           for _k in _classified if _k[0] == "triple")
+            _sympy_ok = tuple(_real_limits) == _want
+        except Exception:
+            _sympy_ok = False
+    elif _expected == "bundled-limits" or _label == "bundled-limits":
+        try:
+            _sp18.Sum(_x18, *_raw_args).doit()
+            _sympy_ok = False  # real SymPy accepted it -- our refusal would be a false positive
+        except Exception:
+            _sympy_ok = True  # real SymPy also rejects THIS specific shape (confirmed: ValueError)
+    if not (_ours_ok and _sympy_ok):
+        _flatten_fails.append(f"{_label}: classified={_classified} ours_ok={_ours_ok} sympy_ok={_sympy_ok}")
+check(f"THE-1095 round 18 (flattener property test vs real SymPy "
+      f"_process_limits, {len(_FLATTEN_GRID)} nested shapes)",
+      not _flatten_fails, f"-> failures={_flatten_fails}")
 
 # THE-1095 round 17 (grok issue 5, `verify-1095-r16-grok.log`): the
 # PRODUCT's own boundary-term check only ever bounded the LAST factor's
@@ -5518,6 +5663,234 @@ _v, _e = _boundary_parse("product(x, (x, 1, 100))")
 check("  ...and product(x, (x, 1, 100)) (comfortably under the digit "
       "cap) still evaluates, matching main",
       _e is None, f"-> value={_v!r} err={_e!r}")
+
+# THE-1095 round 18 (grok issue 3, `verify-1095-r17-grok.log`): round
+# 17's own a-priori PRODUCT bound lived under `if substitution:`, which
+# only builds when a limit variable is free in the summand -- a
+# CONSTANT summand skipped it entirely and fell through to the post-hoc
+# ceiling AFTER building the real value.
+_t0 = time.time()
+_v, _e = _boundary_parse("product(10**4, (x, 1, 1463))")
+_dt = time.time() - _t0
+check("THE-1095 round 18 (product a priori bound, CONSTANT summand): "
+      "'product(10**4, (x, 1, 1463))' (1463 terms, not over the range "
+      "cap; a ~5852-digit result) refuses BEFORE real construction",
+      _v is None and _e is not None and _e[0] == "ceiling"
+      and "digits" in _e[1] and "5852" in _e[1] and _dt < 1.0,
+      f"-> value={_v!r} err={_e!r} elapsed={_dt:.3f}s")
+_v, _e = _boundary_parse("product(2, (x, 1, 1463))")
+check("  ...and product(2, (x, 1, 1463)) (== 2**1463, 441 digits, "
+      "comfortably under the digit cap) still evaluates, matching main",
+      _e is None, f"-> value={_v!r} err={_e!r}")
+
+# THE-1095 round 18 (grok issue 2, `verify-1095-r17-grok.log`): `li`/
+# `Li`'s own near-pole bound computed `math.log(float(x))` -- for `x`
+# within `1/10**20` of the pole at `1`, `float(x) == 1.0` exactly
+# (float64's own ~16-digit precision), so `math.log(1.0) == 0.0` and
+# the SECOND `math.log(abs(ln_z))` raised on `math.log(0.0)`, caught
+# only by the generic internal-scan ceiling -- an UNPINNED narrowing
+# main does not need. Fixed via `_exact_ln` (SymPy's own arbitrary-
+# precision `evalf`, never `float(x)`).
+for _expr in ("factorial(floor(Abs(li(1+1/10**10))))",
+              "factorial(floor(Abs(li(1-1/10**10))))"):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 18 (grok issue 2, li near-pole exact log): "
+          f"{_expr!r} matches main (a real, finite result), not an "
+          f"unpinned internal-scan-ceiling narrowing",
+          _e is None, f"-> value={_v!r} err={_e!r}")
+for _expr in ("li(1 + 1/10**200)", "li(1 - 1/10**200)",
+              "Li(1 + 1/10**200)", "Li(1 - 1/10**200)"):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 18: {_expr!r} (at the pole DISTANCE the "
+          f"property grid below claims to prove the bound at) stays "
+          f"symbolic, matching main, not refused",
+          _e is None, f"-> value={_v!r} err={_e!r}")
+
+# THE-1095 round 18 (atheris finding, `slow-unit-r18.bin`, seed
+# `2.3E1^10!1E!^0%E!20!`, this round's own 60s coverage-guided fuzz
+# pass): a `%` whose LEFT operand is a `Pow`/`Mul`-of-`Pow` with a
+# FLOAT base and a huge exponent (`23.0**factorial(10)`, ~4.9 million
+# decimal digits of TRUE magnitude, but a compact, fast-to-CONSTRUCT
+# Float either way) hung reducing it against a non-rational modulus
+# (`E`) -- `_resolve_marker_magnitude`'s own `%` rule only ever bounded
+# the OUTPUT by the divisor's own magnitude (correct), never checked
+# whether the DIVIDEND was cheap to reduce in the first place.
+for _expr in ("2.3E1^10!1E!^0%E!20!", "2.3E1^10!%E", "2.3E1^10!//E!"):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round 18 (atheris finding, Float-base huge-Pow "
+          f"dividend vs. irrational modulus): {_expr!r} refuses "
+          f"promptly, never hangs computing the reduction",
+          _v is None and _e is not None and _e[0] == "ceiling" and _dt < 1.0,
+          f"-> value={_v!r} err={_e!r} elapsed={_dt:.3f}s")
+# ...and the round-11 pin this fix must not regress: a Float-base Pow
+# with a huge exponent, used OUTSIDE a '%'/'//', still evaluates --
+# constructing/rendering it is genuinely cheap (mpmath never
+# materializes a digit string for a Float), matching main.
+_v, _e = _boundary_parse("10.0^100000")
+check("THE-1095 round 11 pin (not regressed by round 18's own fix): "
+      "'10.0^100000' (a compact Float, huge TRUE magnitude but cheap "
+      "to construct/render) still evaluates, matching main",
+      _e is None, f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("9%E")
+check("  ...and an ordinary '%' against an irrational modulus with a "
+      "SMALL dividend still evaluates, matching main",
+      _e is None and str(_v) == "9 - 3*E", f"-> value={_v!r} err={_e!r}")
+
+# THE-1095 round 18 (coordinator's own live `py-spy dump` on a SECOND
+# atheris hang the same fuzz pass found; `slow-unit-r18b.bin`, seed
+# `1.5 + 2.3E1^10!1E!^0%Ebbbbbbbbbbbbbbbbbbbbbbb!20!`): a SYMBOLIC
+# divisor (`x`, or `E*<many free symbols>`) made `right_known` False in
+# `_resolve_marker_magnitude`'s own `%`/`//` handling, which used to
+# return "unresolved, safe, let the real parse handle it" BEFORE ever
+# checking the dividend's own magnitude -- but SymPy's real `Mod.eval()`
+# GCD-normalizes the numeric LEFT side regardless of whether the
+# divisor turns out symbolic (confirmed via the coordinator's own
+# `py-spy` stack: `Mod.eval` -> `gcd` -> `dup_convert` to `RealField` ->
+# mpmath `from_int` on a multi-million-bit integer).
+for _expr in ("23.0^3628800%x", "23.0^3628800//x",
+              "1.5 + 2.3E1^10!1E!^0%Ebbbbbbbbbbbbbbbbbbbbbbb!20!"):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round 18 (atheris finding, SYMBOLIC divisor vs. "
+          f"Float-base huge-Pow dividend): {_expr!r} refuses promptly, "
+          f"never hangs in SymPy's own Mod.eval()/gcd",
+          _v is None and _e is not None and _e[0] == "ceiling" and _dt < 1.0,
+          f"-> value={_v!r} err={_e!r} elapsed={_dt:.3f}s")
+_v, _e = _boundary_parse("2.3E1^3%x")
+check("  ...and an ordinary '%' against a SYMBOLIC divisor with a "
+      "SMALL dividend still evaluates, matching main",
+      _e is None and str(_v) == "Mod(12167.0, x)", f"-> value={_v!r} err={_e!r}")
+
+# THE-1095 round 18 (coordinator's own live diagnosis, second follow-up
+# to the atheris finding): the identical "Float-base huge-Pow coerced
+# to an exact value" hazard `%`/`//` needed `_true_pow_magnitude` for
+# also applies to `floor`/`ceiling` (`_evalf_coercion_cheap`) and to
+# every OTHER measured-safe callable that coerces its own argument
+# (`_measured_safe_argument_cap_violation`) -- `gcd`/`lcm`/`nsimplify`
+# pinned as the coordinator's own named examples (`gcd` does NOT
+# actually hang on real SymPy, unlike `lcm`/`nsimplify` -- confirmed
+# live -- but is refused here anyway, a deliberate, safe narrowing from
+# closing the whole CLASS at the shared per-argument cap rather than
+# name-by-name).
+for _expr in ("floor(23.0^3628800)", "lcm(23.0^3628800,6)",
+              "nsimplify(23.0^3628800)", "gcd(23.0^3628800, 6)"):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round 18 (Float-base huge-Pow coerced to an exact "
+          f"value): {_expr!r} refuses promptly",
+          _v is None and _e is not None and _e[0] == "ceiling" and _dt < 1.0,
+          f"-> value={_v!r} err={_e!r} elapsed={_dt:.3f}s")
+_v, _e = _boundary_parse("lcm(6,10)")
+check("  ...and lcm(6,10) (ordinary, ungapped) still evaluates, "
+      "matching main", _e is None and str(_v) == "30", f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("nsimplify(0.5)")
+check("  ...and nsimplify(0.5) (ordinary, ungapped) still evaluates, "
+      "matching main", _e is None and str(_v) == "1/2", f"-> value={_v!r} err={_e!r}")
+
+# THE-1095 round 18 (coordinator addendum): '//' against a RATIONAL
+# literal divisor still catches the Float-base huge-Pow dividend --
+# here via the pre-existing post-construction output-digit ceiling
+# (the real floor-division stays fast regardless -- confirmed live,
+# 0.384s -- since a rational divisor never triggers SymPy's own
+# Mod-style gcd-normalization cost the symbolic/irrational cases above
+# needed `_true_pow_magnitude` for), not a NEW hang.
+_t0 = time.time()
+_v, _e = _boundary_parse("23.0^3628800//7")
+_dt = time.time() - _t0
+check("THE-1095 round 18: '23.0^3628800//7' (rational divisor) refuses "
+      "promptly on the output digit ceiling, not a hang",
+      _v is None and _e is not None and _e[0] == "ceiling" and _dt < 1.0,
+      f"-> value={_v!r} err={_e!r} elapsed={_dt:.3f}s")
+
+# THE-1095 round 18 (coordinator's own live cross-check against main
+# 6cda9d4): grok's own "factorial(floor(Abs(li(1+1/10**20)))) ~=
+# factorial(45) on main" claim (round 17's own writeup, unverified at
+# the time) is WRONG -- SymPy's own 53-bit-precision `evalf` makes
+# `li(1+1e-20)` UNDERFLOW to `-oo` at THAT specific magnitude (`li` of
+# something this close to its own pole needs more than default
+# precision to resolve at all -- `N(li(1+1/10**20), 30) == -45.47`,
+# the SAME finite value grok predicted, only reachable at higher
+# precision than `floor`'s own default evalf uses), so `floor(-oo)`
+# raises `cannot convert inf or nan to int` on `origin/main` ITSELF.
+# Pinned as PARITY (main's own text, unchanged), not a narrowing this
+# module introduced.
+for _expr in ("factorial(floor(Abs(li(1+1/10**20))))",
+              "floor(Abs(li(1+1/10**20)))"):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 18 (parity with main, not a narrowing): "
+          f"{_expr!r} matches main's own "
+          f"'cannot convert inf or nan to int' validation error",
+          _e == ("validation", "parse error: cannot convert inf or nan to int"),
+          f"-> value={_v!r} err={_e!r}")
+
+# THE-1095 round 18 (coordinator pins for the Float-coercion generalisation):
+# a Pow with a FLOAT base and a big literal exponent is a compact Float on
+# its own (`23.0**3628800` prints as 9.36e+4941437 on main and here), but
+# every consumer that coerces a Float to an EXACT rational -- `Mod`
+# (`%`), `//`, `floor`/`ceiling`, `gcd`/`lcm`, `nsimplify` -- materialises
+# the 4.7M-bit integer first (`Mod.eval` runs a real-field polynomial gcd
+# on it; `origin/main` hangs on `23.0**3628800 % x` too). The dividend /
+# argument is bounded by VALUE magnitude for those consumers, never by
+# the Float print profile. The bare Float and the small-exponent forms
+# keep main's values.
+import time as _pin_time
+
+for _expr in ("23.0**3628800 % x", "23.0**3628800 // 7", "floor(23.0**3628800)",
+              "ceiling(23.0**3628800)", "gcd(23.0**3628800, 6)",
+              "lcm(23.0**3628800, 6)", "nsimplify(23.0**3628800)"):
+    _t0 = _pin_time.perf_counter()
+    _v, _e = _boundary_parse(_expr)
+    _dt = _pin_time.perf_counter() - _t0
+    check(f"THE-1095 round 18 (Float coerced to an exact rational): {_expr!r} "
+          f"is refused on ceiling grounds in well under a second",
+          _v is None and _e is not None and _e[0] == "ceiling" and _dt < 1.0,
+          f"-> value={_v!r} err={_e!r} dt={_dt:.3f}s")
+# ...and the SYMBOLIC-dividend shapes from the second seeded atheris
+# timeout (`1.5 + 2.3E1^10!1Ek^5%Eb+bbbbbbbbbbbbbbbbbbbbb!20!`, decoded
+# with atheris's own FuzzedDataProvider): a symbolic factor or term
+# around the huge Float Pow made the true-magnitude estimate `None`
+# ("symbolic, safe"), and `Mod.eval` gcd-normalises the numeric
+# coefficient of a symbolic dividend even against a rational modulus.
+for _expr in ("23.0**3628800*k % x", "23.0**3628800*k**5 % (x+1)",
+              "23.0**3628800*k % 7", "(23.0**3628800+k) % x",
+              "2.3E1^10!*E*k^5 % (E*b+1)",
+              "1.5 + 2.3E1^10!1Ek^5%Eb+bbbbbbbbbbbbbbbbbbbbb!20!",
+              # third seeded timeout: an UNRESOLVABLE numeric factor
+              # (`factorial(E)`) next to the Float Pow must not void
+              # the lower-bound estimate
+              "23.0**3628800*factorial(E)*N5 % (b+1)",
+              "1.5 + 2.3E1^10!1E!N5%Eb+bbYbbbbbbbbbbbbbbbb!20!",
+              # fourth seeded timeout: `split_symbols` rewrites `I5` as
+              # `I*Number('5')`, and `Number` was not a reserved real
+              # constructor in the deferred parse, so `Number(5)` became
+              # an OPAQUE stand-in base that dodged every Pow check
+              "I5**3628800 % 7", "2.3I5^10! % E",
+              "1.5 + 2.3I5^10!0!%1E^EKKKKK!1E1!1E1^0%Em"):
+    _t0 = _pin_time.perf_counter()
+    _v, _e = _boundary_parse(_expr)
+    _dt = _pin_time.perf_counter() - _t0
+    check(f"THE-1095 round 18 (symbolic dividend with a huge Float coefficient): "
+          f"{_expr!r} is refused on ceiling grounds in well under a second",
+          _v is None and _e is not None and _e[0] == "ceiling" and _dt < 1.0,
+          f"-> value={_v!r} err={_e!r} dt={_dt:.3f}s")
+for _expr, _want in (("I5", "5*I"), ("2.3I5", "11.5*I"), ("I5**3", "125*I"),
+                     ("2.5*k % x", "Mod(2.5*k, x)"),
+                     ("23.0**3628800*k // x", "floor(9.36139652056582e+4941437*k/x)")):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 18 (cheap symbolic-dividend forms keep main's value): "
+          f"{_expr!r} still evaluates",
+          _e is None and str(_v) == _want, f"-> value={_v!r} err={_e!r}")
+for _expr, _want in (("23.0**3628800", "9.36139652056582e+4941437"),
+                     ("2.5**10 % 7", "2.74316406250000"),
+                     ("2.3E1^3 % x", "Mod(12167.0, x)")):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 18 (Float forms that stay cheap keep main's value): "
+          f"{_expr!r} still evaluates",
+          _e is None and str(_v) == _want, f"-> value={_v!r} err={_e!r}")
 
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== ALL BUG-SWEEP REGRESSIONS FIXED ===")

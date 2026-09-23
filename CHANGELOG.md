@@ -35,6 +35,41 @@ behind it.
 
 ### Fixed
 
+- **A symbolic dividend with a huge Float coefficient still hung `%`
+  (THE-1095 round 18, second seeded atheris timeout, decoded with the
+  harness's own `FuzzedDataProvider`: `1.5 + 2.3E1^10!1Ek^5%Eb+bbb…!20!`).**
+  `_true_pow_magnitude` returned `None` for a `Mul`/`Add` that carried a
+  free symbol next to the `23.0**3628800` factor, which read as
+  "symbolic, safe", and the `%` branch skipped the dividend check for an
+  exact rational modulus — but `Mod.eval` gcd-normalises the NUMERIC
+  coefficient of a symbolic dividend regardless of the modulus
+  (`23.0**3628800*k % 7` hung like `23.0**3628800 % x`; `origin/main`
+  hangs on both). A symbolic factor/term now contributes 0 to the true
+  magnitude instead of voiding it, and the dividend check runs whenever
+  the left side has a free symbol. Pinned: `23.0**3628800*k % x`,
+  `… % 7`, `(23.0**3628800+k) % x`, `2.3E1^10!*E*k^5 % (E*b+1)` and the
+  full fuzz input refuse in milliseconds; `2.5*k % x` and
+  `23.0**3628800*k // x` keep main's values.
+  Two more seeded-atheris timeouts closed the same afternoon: an
+  UNRESOLVABLE numeric factor next to the Float Pow (`factorial(E)`,
+  `…1E!N5%…`) used to void the whole magnitude estimate — it is a LOWER
+  bound that exists to refuse, so unresolvable factors now contribute 0
+  and only a product with nothing resolvable stays unknown; and
+  `split_symbols` rewrites `I5` as `I*Number('5')`, and `Number` (like
+  `Rational`) was not a reserved real constructor in the deferred parse,
+  so `Number(5)` became an opaque stand-in base that dodged both the
+  digit ceiling and the symbolic-exponent rule (`I5**3628800 % 7`,
+  `2.3I5^10! % E` — now refused; `I5` = `5*I`, `2.3I5` = `11.5*I`
+  unchanged).
+  Known residual, handed to THE-1097 (the resource-limited worker):
+  `5!^501E // E!K2` (a `floor` over a SYMBOLIC quotient whose exact
+  coefficient has ~1041 digits and whose divisor carries `factorial(E)`)
+  still hangs — `floor.eval` runs `equals` → `simplify` → `gammasimp` →
+  `factor` over that coefficient. `origin/main` hangs on it identically;
+  a fifth seeded-atheris pass found it after four consecutive passes had
+  each found the previous variant, which is the argument for a
+  measurement-based backstop rather than a sixth predictive rule.
+
 - **The heavy-call ceiling matched a `Function` node by name, and several
   names never leave a matching one behind** (THE-1095; follow-up to GH
   #326): `rf(1463+1, 2)`, `ff(1463+1, 2)`, `primepi(1463*1000)`, and
@@ -2277,6 +2312,258 @@ behind it.
   (now on this sharper, earlier check instead of the term-count cap);
   `product(x, (x, 1, 100))` (comfortably under the digit cap) still
   evaluates, matching main.
+
+- **The round-17 sequence-limit flatten was not `_process_limits`,
+  BLOCKING: the same class of hang it claimed to close still ran**
+  (THE-1095 round 18; grok issue 1, `verify-1095-r17-grok.log`). Real
+  SymPy (`sympy/concrete/expr_with_limits.py`) flattens a limit
+  argument COMPLETELY first (`V = sympify(flatten(V))`, recursing
+  through anything `is_sequence` at any depth) and only THEN checks
+  whether the result looks like `(var, lo, hi)`. Round 17's own
+  flattener short-circuited on "does this already look like a 3-tuple
+  starting with a Symbol" BEFORE flattening: `Tuple(x, Tuple(1,
+  1463))` (2 elements — `x`, a nested `Tuple(1, 1463)`) doesn't match
+  that shape, so it recursed into its own elements individually,
+  producing the LOOSE elements `x`, `1`, `1463`; the caller then
+  skipped each one as "not a 3-Tuple," `limits` stayed empty,
+  `summation`/`product` stayed recognized (so default-deny never
+  fired), and the real parse — whose own `_process_limits` flattens
+  the SAME argument to `[x, 1, 1463]` in one step — did the real,
+  unbounded work. Confirmed live: `summation(bell(x), Tuple(Tuple(x,
+  1), 1463))` measured 5.46s and returned a genuine, uncapped huge
+  value; the identical shape applies to `product`'s own identity
+  growth (`product(x, Tuple(x, Tuple(1, 10**6)))` == `10**6!`). Fixed
+  by copying the real order of operations: `_classify_summation_
+  limits` now flattens FIRST (reusing `_flatten_container_values`, the
+  round-17 helper `_measured_safe_argument_cap_violation` already
+  used) and classifies SECOND, and refuses (fail-closed) any flattened
+  shape that is not a plain `(var, lo, hi)` triple, rather than
+  silently skipping it — applied to `summation`/`product`/`Sum`/
+  `Product`/`integrate`/`Integral` alike. Property-tested against real,
+  unwrapped SymPy (`Sum(expr, *limits).limits`) across 9 nested shapes,
+  including that a length-4 flattened list (a legitimate `Range`-
+  derived form on main this module deliberately does not model) is
+  refused here too, and that a genuinely INVALID multi-limit bundle
+  (`Tuple((x,1,200),(y,1,200))`, which real `summation()` itself
+  raises `ValueError` on — confirmed live) is refused rather than
+  misread as two Cartesian limits, correcting the round-17 test's own
+  wrong assumption about that shape.
+
+  While fixing this, found the SAME root cause behind a related latent
+  gap: `_flatten_container_values` and `_arg_hides_numeric` used
+  `isinstance(arg, sympy.Tuple)` to recognize a container — but both
+  run on the DEFERRED, inert-stand-in tree too (where `summation`'s/
+  `product`'s own limit-safety checks MUST run first, before any real
+  parse), and `_deferred_global_dict()`'s own `Tuple` entry is a
+  `Function`-subclass STAND-IN, a different object from `sympy.Tuple`
+  by construction — `isinstance` against the real class silently
+  returned `False` for every stand-in `Tuple` instance, and a stand-in
+  `Tuple` is not even directly iterable (`for x in tup` raises
+  `TypeError: 'Tuple' object is not iterable` — only `.args` works on
+  both). Both functions now recognize a `Tuple` by `type(x).__name__`
+  and walk it via `.args`, exactly like the pattern `_classify_
+  summation_limits` needed to get right for the primary fix above.
+
+- **`li`/`Li`'s own near-pole bound called `math.log(float(x))`, which
+  silently returns `0.0` for any `x` closer than ~16 decimal digits to
+  the pole at `1`** (THE-1095 round 18; grok issue 2, `verify-1095-r17-
+  grok.log`): `1 +/- 1/10**20` (and `1/10**200`) pass the EXACT
+  `x == 1` pole check (a `Rational` comparison) but `float(x) == 1.0`
+  at that precision, so `math.log(float(x)) == 0.0`, and the SECOND
+  `math.log(abs(ln_z))` the round-17 bound needs then raised on
+  `math.log(0.0)` — caught only by the generic internal-scan ceiling,
+  not the advertised `|ln|ln x||` bound, an UNPINNED narrowing main
+  does not need (`factorial(floor(Abs(li(1+1/10**10))))` is a real,
+  finite main result). The round-17 property grid also SKIPPED every
+  point it claimed to test at the pole distance: its own domain check
+  used `float(v) == 1` too, so `1 +/- 1/10**200` read as "the exact
+  pole" and was silently excluded via the loop's own `except Exception:
+  continue` — the grid never actually proved the bound at the distance
+  it named. Fixed with a new `_exact_ln(x)` (SymPy's own arbitrary-
+  precision `evalf` on the symbolic `log(x)`, never `float(x)` first —
+  confirmed live: `evalf(250)` resolves `ln(1 + 1/10**200)` correctly
+  where `evalf(80)` still silently returns `0`), used everywhere this
+  module computes a log near a pole (`li`/`Li`, `Chi`, `Ei`, `Ci`,
+  `expint`'s `E_1(x)` bound — Chi/Ei/Ci's own pole sits at `0`, where
+  `float()` never loses precision this way, but switched for
+  consistency and defense-in-depth per the same audit). The test
+  grid's own domain/pole checks now compare the EXACT SymPy value,
+  never `float(v)`, so the grid's own near-pole points are actually
+  exercised rather than silently skipped.
+
+- **The a-priori PRODUCT-magnitude bound (round 17) never ran for a
+  CONSTANT summand, and its corner choice was unsound for a summand
+  DECREASING in its index** (THE-1095 round 18; grok issue 3,
+  `verify-1095-r17-grok.log`): the round-17 bound lived inside `if
+  substitution:`, which only builds when a limit variable is free in
+  the summand — `product(10**4, (x, 1, 1463))` has no `x` anywhere in
+  the summand, so `substitution` stayed empty and the whole a-priori
+  check was skipped, falling through to the post-hoc output ceiling
+  AFTER building the real ~5852-digit value — the identical "build
+  first, refuse later" shape round 17 claimed to close, just with a
+  constant summand instead of a variable one. Its corner choice also
+  assumed the term with the largest-magnitude INDEX has the largest-
+  magnitude VALUE, false for a DECREASING summand (`product(1/x**2,
+  (x, 1, 1463))` picks `x=1463`, term `~4.67e-7`, missing the true
+  worst term at `x=1`, magnitude `1`). Now runs UNCONDITIONALLY for
+  every `product`/`Product` call and checks BOTH the all-lower-bounds
+  and all-upper-bounds corners, using whichever gives the larger term
+  magnitude — sound for a summand monotonic in either direction, and a
+  constant summand needs no substitution to begin with (`corner_sub`
+  is empty, the corner term is the summand itself). Pinned:
+  `product(10**4, (x, 1, 1463))` refuses a priori on its own claimed
+  digit count (5852, matching); `product(2, (x, 1, 1463))` (==
+  `2**1463`, 441 digits) still evaluates, matching main.
+
+- **CI: `discrete_log`'s own randomized cost broke `tests
+  (macos-latest, py3.14)`** (THE-1095 round 18, coordinator's own live
+  diagnosis of the `711242f` CI run): `discrete_log(1463, 1462, 1461,
+  1460)` measured `OK` (a few ms) on the box that wrote the committed
+  allowlist, then `CRASH` (an 8000ms process-wall timeout the in-child
+  daemon-thread timer cannot interrupt) on macOS py3.14, shard 3/6 —
+  not a platform bug: `discrete_log`'s own cost depends on the
+  NUMBER-THEORETIC STRUCTURE of its arguments (how `n - 1` factors,
+  whether Pollard's Rho's internal random walk hits a short cycle),
+  not their magnitude, so the identical call genuinely IS a few ms on
+  one run and unbounded on another — no amount of measurement can turn
+  a randomized-cost algorithm into a name this module can allowlist by
+  magnitude alone. Confirmed live (reading each one's own source): a
+  new `_NONDETERMINISTIC_COST_NAMES` (`discrete_log`, `sqrt_mod`,
+  `sqrt_mod_iter`, `primitive_root`, `is_primitive_root`, `n_order`,
+  `nthroot_mod`, `quadratic_congruence`, `polynomial_congruence`,
+  `is_nthpow_residue`, `is_quad_residue`, `binomial_mod` — every one
+  calls `factorint` internally, directly or through a sibling;
+  `jacobi_symbol`/`legendre_symbol` (pure reciprocity, no factoring)
+  and `mobius`/`quadratic_residues` are NOT in this set, their own
+  cost genuinely is a function of magnitude) is now excluded from
+  measurement candidacy entirely (`_already_handled_names()`), and the
+  9 of them that were allowlisted are removed from the committed list
+  by hand (404 -> 395; `discrete_log`, `is_nthpow_residue`,
+  `is_primitive_root`, `is_quad_residue`, `n_order`, `nthroot_mod`,
+  `primitive_root`, `sqrt_mod`, `sqrt_mod_iter` — `binomial_mod`/
+  `quadratic_congruence`/`polynomial_congruence` were never
+  allowlisted to begin with). Two general-purpose backstops for any
+  OTHER name with a similar not-yet-identified randomized-cost shape:
+  (1) `measure_name` now probes each shape `repeats=3` times (the
+  writer's own default) and allowlists only when EVERY run is fast —
+  a single probe cannot tell "genuinely fast" from "got lucky this
+  once" apart; `shard_check` (the CI re-verification pass, run on
+  every push) passes `repeats=1` explicitly to keep its own runtime
+  unchanged, relying on (2) instead: a `CRASH`/`TIMEOUT` that hits the
+  PROCESS-WALL bound on a name the committed measurement found `OK` is
+  now reported as a distinct "NONDETERMINISTIC COST" finding (still a
+  failure — `shard_check` still returns it, the calling test still
+  fails) rather than folded into an ordinary "REGRESSION" line, so a
+  human reading CI output does not have to re-derive "was this ever
+  fast at all?" from raw per-shape timing by hand.
+
+- **ClusterFuzzLite found a live hang: `%`/`//` against a non-rational
+  modulus, with a FLOAT-base `Pow` dividend, hung reducing the value**
+  (THE-1095 round 18, this round's own 60s coverage-guided atheris
+  pass; `slow-unit-r18.bin`, seed `2.3E1^10!1E!^0%E!20!`): `_resolve_
+  marker_magnitude`'s own `%`/`//` rules bound the OUTPUT correctly
+  (`|a % b| < |b|`; `a // b <= a` when `|b| >= 1`) regardless of the
+  dividend's own magnitude, but neither ever checked whether COMPUTING
+  that reduction was itself cheap. `23.0**factorial(10)` (`2.3E1^10!`)
+  is a `Pow` with a FLOAT base and a huge exponent — its TRUE magnitude
+  is ~4.9 million decimal digits, but `_log10_num_den` (correctly, for
+  its OWN "is this cheap to render/construct" question — SymPy always
+  prints a Float at fixed precision, so it never routes through the
+  int-to-str ceiling at all, confirmed live and pinned since round 11:
+  `10.0**100000` still evaluates, matching main) reports its magnitude
+  as `0.0`. Reducing that value against a NON-RATIONAL divisor (`E`,
+  or `factorial(E)`) is a different question: it needs the divisor
+  resolved to precision proportional to the DIVIDEND's own true
+  magnitude, and hung computing that. Fixed with a new, narrowly-
+  scoped `_true_pow_magnitude` — a `Pow`'s (or a `Mul`-of-`Pow`'s) TRUE
+  numeric magnitude, kept OUT of `_log10_num_den`'s own contract on
+  purpose (an earlier version of this fix put it there instead,
+  scaling that function's Pow-base handling directly by a Float base's
+  true magnitude — sound for THIS hazard, but it made `_log10_num_den`
+  itself over-conservative for every OTHER caller, regressing the
+  round-11 `10.0**100000` pin before the final version separated the
+  two questions). `_resolve_marker_magnitude`'s `%` AND `//` branches
+  now both refuse when the dividend's true magnitude is over
+  `MAX_NUMERIC_DIGITS` and the divisor is not confirmed rational
+  (`right.is_rational`) — `//`'s own pre-existing `_divisor_lower_
+  log10` check bounds the OUTPUT the same sound way (and, found while
+  fixing this, is looser than its own docstring claims: it treats
+  `factorial(E)` as integer-valued via `_INTEGER_VALUED_TABLE_NAMES`
+  without checking that `E` itself makes the result genuinely
+  irrational, not an integer at all — a separate looseness noted but
+  not otherwise widened this round, since the concrete hazard either
+  way is the one now closed). Pinned: `2.3E1^10!1E!^0%E!20!`,
+  `2.3E1^10!%E`, and `2.3E1^10!//E!` all refuse promptly; `10.0^100000`
+  and `9%E` (ordinary cases, neither a huge Float-Pow dividend nor
+  hazardous) still evaluate, matching main.
+
+- **The Float-base-huge-Pow hang above (previous entry) was narrower
+  than the real hazard in two directions — a SYMBOLIC divisor, and
+  every OTHER consumer that coerces its own argument toward an exact
+  value, not only `%`/`//`** (THE-1095 round 18, same session,
+  coordinator's own live `py-spy dump` on a SECOND live hang this
+  round's own fuzz pass found — `slow-unit-r18b.bin`, seed `1.5 +
+  2.3E1^10!1E!^0%Ebbbbbbbbbbbbbbbbbbbbbbb!20!`, i.e. a `%` whose
+  RIGHT operand is genuinely SYMBOLIC, not merely irrational). The
+  first version of the dividend check lived entirely behind `if
+  right_known:` — a symbolic divisor makes `right_known` False, which
+  used to return "unresolved, safe, let the real parse handle it"
+  BEFORE ever reaching the dividend check, and `_deferred_binop_
+  violation`'s own caller reads that as "genuinely symbolic, fine."
+  But the coordinator's own `py-spy` stack trace showed SymPy's REAL
+  `Mod.eval()` GCD-normalizes the NUMERIC left side regardless of
+  whether the divisor turns out symbolic (`Mod.eval` -> `gcd` ->
+  `dmp_gcd` -> `dup_convert` to `RealField` -> mpmath `from_int` on a
+  ~4.7-million-BIT integer — confirmed pre-existing on `origin/main`
+  itself too, the same "real hang, not a narrowing" class as the
+  earlier `%`-family and `summation` hangs this ticket has already
+  closed). Both `%` and `//` now check the dividend's TRUE magnitude
+  BEFORE the `right_known` gate, for any divisor that is not a
+  CONFIRMED, fully-resolved exact rational (`right_known and right.
+  is_rational`) — a non-rational NUMBER, an unresolved marker/table
+  call, and a genuinely symbolic divisor all now routed through the
+  same check.
+
+  Separately, the coordinator's own broader audit found the identical
+  "Float-base Pow coerces to an exact value" hazard in every OTHER
+  place this module already screens a callable's arguments:
+  `floor`/`ceiling`/`Abs`/`frac`/`sign`/`Max`/`Min` (`_evalf_coercion_
+  cheap`, which used the SAME Float-tolerant print-profile magnitude
+  `%`/`//` did) and every measured-safe callable's own generic per-
+  argument cap (`_measured_safe_argument_cap_violation`) — confirmed
+  live: `floor(23.0**3628800)` (also pre-existing on `origin/main`,
+  6.4s before a validation error there) and `lcm`/`nsimplify` (but NOT
+  `gcd` — SymPy's own `gcd()` special-cases a non-integer argument to
+  `1` without ever coercing it) all hung the identical way. Both
+  functions now ALSO check `_true_pow_magnitude` (round 18's own
+  helper, generalized this round to also cover a bare `Float` operand,
+  for reuse here) against their own established digit caps, in
+  addition to — never instead of — the existing print-profile check;
+  `gcd` is refused too now, a deliberate, sound over-refusal from
+  closing the whole CLASS at the shared per-argument cap rather than
+  auditing each measured-safe name individually for whether it
+  personally hangs. Pinned: `23.0^3628800%x`, `23.0^3628800//x`, the
+  full second atheris repro, `floor(23.0^3628800)`,
+  `lcm(23.0^3628800,6)`, `nsimplify(23.0^3628800)`, and
+  `gcd(23.0^3628800, 6)` all refuse promptly; `2.3E1^3%x`,
+  `lcm(6,10)`, and `nsimplify(0.5)` (ordinary, ungapped cases) still
+  evaluate, matching main. `23.0^3628800//7` (a RATIONAL literal
+  divisor) stays fast and refuses on the pre-existing output-digit
+  ceiling instead — a rational divisor never triggers SymPy's own
+  Mod-style gcd-normalization cost, so this was never a hang, just
+  pinned to document the boundary.
+
+  Also, cross-checked against `origin/main` directly (coordinator's
+  own probe): grok's own round-17 claim that
+  `factorial(floor(Abs(li(1+1/10**20))))` "is a valid main result,
+  about `factorial(45)`" is WRONG — SymPy's own default (53-bit)
+  `evalf` precision makes `li(1 + 1e-20)` underflow to `-oo` at
+  exactly that magnitude (`N(li(1+1/10**20), 30)` resolves the same
+  `-45.47` grok predicted, but only at HIGHER precision than `floor`'s
+  own default `evalf` call uses), so `floor(-oo)` raises `cannot
+  convert inf or nan to int` on `origin/main` ITSELF. Pinned as PARITY
+  with main's own exact error text, not as a narrowing this module
+  introduced.
 
 ## [0.13.0] — 2026-09-21
 

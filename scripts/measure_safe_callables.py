@@ -140,6 +140,13 @@ def _already_handled_names() -> frozenset[str]:
         # `_pole_sensitive_magnitude`'s own unconditional `<= 1` bound
         # never needing an argument cap at all.
         | frozenset(se._POLE_SENSITIVE_NAMES)
+        # THE-1095 round 18 (coordinator item 4): `discrete_log` and its
+        # `factorint`-internal siblings have a cost that depends on
+        # NUMBER-THEORETIC STRUCTURE, not magnitude — no measurement
+        # grid, however wide, can bound them the way this allowlist
+        # bounds everything else. See `_NONDETERMINISTIC_COST_NAMES`'s
+        # own comment in `codecalc/safe_expr.py` for the full account.
+        | frozenset(se._NONDETERMINISTIC_COST_NAMES)
         | frozenset({"Mod", "Max", "Min", "floor", "ceiling", "frac", "N", "series",
                      "summation", "product", "Sum", "Product", "integrate", "Integral",
                      "fps"})
@@ -528,7 +535,61 @@ def _probe_shape(name: str, shape_name: str) -> tuple[str, float, int]:
     return "CRASH", PROBE_TIMEOUT_S * 1000.0, -1
 
 
-def measure_name(name: str) -> dict:
+#: Verdicts a repeated probe treats as "worse" than an `OK`, in the
+#: order `_probe_shape_repeated` (below) prefers when combining
+#: multiple runs of the SAME (name, shape) pair — `CRASH` outranks
+#: `TIMEOUT`, which outranks anything else, so a single bad run among
+#: several good ones still surfaces as the combined verdict.
+_PROBE_VERDICT_SEVERITY = {"CRASH": 3, "TIMEOUT": 2, "OK": 1}
+
+
+def _probe_shape_repeated(name: str, shape_name: str,
+                           repeats: int = 3) -> tuple[str, float, int]:
+    """`_probe_shape`'s own `(verdict, elapsed_ms, digits)`, but run
+    `repeats` times and combined WORST-CASE, not just once.
+
+    THE-1095 round 18 (coordinator item 4, macOS `tests (macos-latest,
+    py3.14)` CI failure on `711242f`): `discrete_log(1463, 1462, 1461,
+    1460)` measured `OK` (a few ms) on the Linux box that wrote the
+    committed allowlist, then `CRASH` (an 8000ms process-wall timeout)
+    on macOS py3.14 — SAME call, SAME allowlist entry, genuinely
+    DIFFERENT outcomes, because `discrete_log`'s own cost depends on
+    number-theoretic structure a random Pollard's-Rho walk can get
+    lucky or unlucky on, not magnitude (see `_NONDETERMINISTIC_COST_
+    NAMES`'s own comment in `codecalc/safe_expr.py` — that whole family
+    is now excluded from measurement candidacy entirely, which is the
+    PRIMARY fix; this is the secondary, general-purpose backstop for
+    any OTHER name with a similar hidden randomized-cost shape this
+    module has not identified yet). A single probe run cannot tell
+    "genuinely fast" from "got lucky this once" apart — `repeats`
+    independent runs (a fresh child process each time, the SAME
+    isolation `_probe_shape` already uses per call) can: allowlisting
+    now requires EVERY run to be `OK` and under `FAST_MS`, not just one
+    of them.
+
+    Combining rule: if ANY run is `CRASH` or `TIMEOUT`, that verdict
+    wins (worse of the two if both occur) with the WORST (largest)
+    elapsed time among the bad runs. Otherwise, if every run is `OK`,
+    the run with the LARGEST `ms`/`digits` wins (the worst of an
+    otherwise-consistent set — still a real measurement, not an
+    artifact). Otherwise (a mix of `OK` and `UNSUPPORTED_TYPE`/
+    `UNSUPPORTED_VALUE`/`SETUP_FAILED`, or all non-`OK`) the FIRST
+    run's verdict is kept — these are DETERMINISTIC outcomes (arity/
+    domain/platform-setup, none of them randomized), so repeats add no
+    information there; costs three subprocess spawns instead of one
+    only where it can actually change the verdict.
+    """
+    results = [_probe_shape(name, shape_name) for _ in range(repeats)]
+    bad = [r for r in results if r[0] in _PROBE_VERDICT_SEVERITY and r[0] != "OK"]
+    if bad:
+        return max(bad, key=lambda r: (_PROBE_VERDICT_SEVERITY[r[0]], r[1]))
+    ok = [r for r in results if r[0] == "OK"]
+    if ok and len(ok) == len(results):
+        return max(ok, key=lambda r: (r[1], r[2]))
+    return results[0]
+
+
+def measure_name(name: str, repeats: int = 3) -> dict:
     """Every probed shape's own verdict for `name`, plus the overall
     classification (`allowlisted`: bool) — a name is allowlisted only
     when: every `"OK"` shape stayed under `FAST_MS` and `MAX_RESULT_
@@ -546,7 +607,19 @@ def measure_name(name: str) -> dict:
     category is irrelevant here, would be) is left OFF the allowlist
     too: the heavy boundary was never actually CONFIRMED safe for it,
     only never caught failing slow — `discrete_log` is the concrete
-    case grok's own review found this gap in.
+
+    THE-1095 round 18 (coordinator item 4): `repeats` (default 3, per
+    the coordinator's own "measure three times, allowlist only if all
+    three are fast" instruction) is passed straight to `_probe_shape_
+    repeated` — see its own docstring for why a SINGLE probe cannot
+    tell "genuinely fast" from "got lucky this once" apart for a
+    randomized-cost name. `shard_check` (below) passes `repeats=1`
+    explicitly: it is a CI re-verification pass run on every push, not
+    the (far rarer) allowlist-WRITING decision this default targets,
+    and relies on its own separate "nondeterministic cost" finding
+    category instead of tripling its own runtime to catch the same
+    class of name (`discrete_log` is the concrete case grok's own
+    review found this gap in — see `_NONDETERMINISTIC_COST_NAMES`).
     """
     shapes = []
     applicable = 0
@@ -554,7 +627,7 @@ def measure_name(name: str) -> dict:
     heavy_confirmed = False
     setup_failed_shapes = []
     for shape_src in PROBE_SHAPES:
-        verdict, dt_ms, digits = _probe_shape(name, shape_src)
+        verdict, dt_ms, digits = _probe_shape_repeated(name, shape_src, repeats)
         shapes.append({"shape": shape_src, "verdict": verdict,
                         "ms": round(dt_ms, 3), "digits": digits})
         is_heavy = shape_src in _HEAVY_SHAPES
@@ -940,21 +1013,52 @@ def shard_check(num_shards: int = NUM_SHARDS) -> list[str]:
     independently (which could let SOME allowlisted name go unchecked
     by any CI job at all, purely by bad luck in the random draw).
     """
+    # THE-1095 round 18 (coordinator item 4, macOS `tests (macos-
+    # latest, py3.14)` CI failure on `711242f`): a `CRASH`/`TIMEOUT`
+    # whose own `ms` sits AT the outer process-wall bound (`PROBE_
+    # TIMEOUT_S * 1000`, the SAME signal `refresh_excluded`'s own
+    # `process_wall_ms` check already uses) is a DIFFERENT finding from
+    # an ordinary regression: it means the CALL ITSELF never returned
+    # within the wall-clock bound at all, on a name whose committed
+    # measurement (and `measure_name`'s own THREE-repeat re-probe,
+    # here) has otherwise shown `OK` — the concrete shape a
+    # NONDETERMINISTIC-cost name (`discrete_log`'s own Pollard's-Rho
+    # walk; see `_NONDETERMINISTIC_COST_NAMES`'s comment in
+    # `codecalc/safe_expr.py`) takes, not a genuine regression in the
+    # callable's own typical cost. Reported as a SEPARATE finding
+    # category (`NONDETERMINISTIC COST` wording) rather than folded
+    # into a plain `REGRESSION` line — still a FAILURE (returned in
+    # `regressions`, still fails the calling test), just labeled so a
+    # human reading CI output does not have to re-derive "was this
+    # ever fast at all?" from the raw shape data by hand.
+    process_wall_ms = PROBE_TIMEOUT_S * 1000.0
     data = json.loads(DATA_PATH.read_text())
     names = sorted(data["allowlist"])
     shard_id = _shard_id(num_shards)
     my_shard = [n for i, n in enumerate(names) if i % num_shards == shard_id]
     regressions = []
     for name in my_shard:
-        result = measure_name(name)
+        result = measure_name(name, repeats=1)  # see measure_name's own docstring
+        nondeterministic_shapes = [
+            s for s in result["shapes"]
+            if s["verdict"] in ("TIMEOUT", "CRASH") and s["ms"] >= process_wall_ms
+        ]
         bad_shapes = [
             s for s in result["shapes"]
-            if s["verdict"] == "TIMEOUT"
-            or s["verdict"] == "CRASH"
-            or (s["verdict"] == "OK"
-                and (s["ms"] >= REGRESSION_MS_TOLERANCE
-                     or (s["digits"] >= 0 and s["digits"] > MAX_RESULT_DIGITS)))
+            if s not in nondeterministic_shapes
+            and (s["verdict"] == "TIMEOUT"
+                 or s["verdict"] == "CRASH"
+                 or (s["verdict"] == "OK"
+                     and (s["ms"] >= REGRESSION_MS_TOLERANCE
+                          or (s["digits"] >= 0 and s["digits"] > MAX_RESULT_DIGITS))))
         ]
+        if nondeterministic_shapes:
+            print(f"NONDETERMINISTIC COST: {name!r} -> {nondeterministic_shapes} "
+                  "(hit the process-wall bound on a re-probe of a name this "
+                  "module's committed measurement found OK -- a randomized-cost "
+                  "shape, not a magnitude regression; consider "
+                  "_NONDETERMINISTIC_COST_NAMES)")
+            regressions.append(f"{name} (nondeterministic cost)")
         if bad_shapes:
             print(f"REGRESSION: {name!r} -> {bad_shapes}")
             regressions.append(name)

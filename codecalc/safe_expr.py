@@ -3286,7 +3286,16 @@ def _deferred_global_dict() -> dict:
         _ast_transform_reserved = (
             frozenset(_EFT5.operators.values())
             | frozenset(_EFT5.relational_operators.values())
-            | frozenset({"Integer", "Float", "Symbol", "Function"})
+            # `Number` and `Rational` are emitted by SymPy's OWN token
+            # transformers too (`split_symbols` writes `Number('5')` for
+            # the digits of `I5`; `auto_number` writes `Rational(...)`),
+            # so they must stay real constructors here for the same
+            # reason as `Integer`/`Float`/`Symbol`: an inert `Number(5)`
+            # stand-in is an opaque Pow base that dodges BOTH the digit
+            # ceiling and the symbolic-exponent rule (THE-1095 round 18,
+            # fourth seeded-atheris timeout: `2.3I5^10!0!%1E^E...`).
+            | frozenset({"Integer", "Float", "Symbol", "Function",
+                         "Number", "Rational"})
         )
         for _name, _real_obj in real.items():
             if (_name in _DEFERRED_STANDINS or _name in _elementary
@@ -4330,6 +4339,130 @@ def _cancel_additive_inverses(args: tuple, memo_ms: dict) -> tuple:
     return tuple(kept)
 
 
+def _true_pow_magnitude(node, memo: dict) -> float | None:
+    """A best-effort TRUE (not print-profile) `log10(|value|)` estimate
+    for `node`, for use ONLY by `_resolve_marker_magnitude`'s own `%`
+    handling — judging whether REDUCING this value against a non-
+    rational modulus is expensive, a DIFFERENT question from whether
+    CONSTRUCTING or RENDERING it is (`_log10_num_den`'s own,
+    deliberately Float-TOLERANT, contract — see round 11's own "a Float
+    always prints compact regardless of magnitude, so it is never a
+    rendering hazard" rule, which stays correct for rendering/
+    construction but not for THIS). Understands a `Pow` (`base ** exp`,
+    the shape that actually hides a huge TRUE magnitude behind a
+    compact Float) and a `Mul` of such factors (summing their own
+    magnitudes, mirroring `_log10_num_den`'s own Mul branch); `None`
+    for anything else, or whose own pieces this module cannot resolve
+    at all.
+
+    THE-1095 round 18 (atheris finding, this round's own 60s coverage-
+    guided fuzz pass): `2.3E1**factorial(10)` (`23.0 ** 3628800`, truly
+    ~4.9 million decimal digits of magnitude, though it stays a
+    COMPACT, fast-to-CONSTRUCT Float either way — mpmath never
+    materializes a digit string, so `_log10_num_den` correctly reports
+    it as cheap to RENDER) hung when then reduced against `E` in a `%`:
+    reducing an astronomically-magnituded value against an IRRATIONAL
+    modulus needs that modulus resolved to precision proportional to
+    the DIVIDEND's own true magnitude, regardless of how compactly the
+    dividend itself prints. The full repro (`2.3E1^10!1E!^0%E!20!`)
+    wraps that `Pow` inside a `Mul` (`23.0**factorial(10) * 1 *
+    factorial(E)**0`) — the `Mul` case here is what that needed. This
+    function answers only the narrower "how big is this REALLY"
+    question — kept OUT of `_log10_num_den` itself (an earlier version
+    of this fix put it there instead, scaling that function's own
+    Pow-base handling by the Float's true magnitude directly) so the
+    established, separately-correct "Float is never a rendering
+    hazard" contract every OTHER caller of `_log10_num_den` depends on
+    stays intact: that earlier version made round 11's own
+    `10.0**100000` pin (matches main, still evaluates) start wrongly
+    refusing instead.
+    """
+    from sympy import Float, Mul, Pow
+
+    if isinstance(node, Mul):
+        # THE-1095 round 18 (second atheris timeout, decoded with the
+        # harness's own provider: `2.3E1^10!1Ek^5%Eb+...!20!` -- the
+        # huge-magnitude Float Pow sits inside an implicit product WITH
+        # SYMBOLS). A purely symbolic factor adds nothing to the numeric
+        # coefficient `Mod.eval` gcd-normalises, so it contributes 0
+        # here instead of making the whole estimate `None` (which read
+        # as "symbolic, safe" and let the real parse pay the gcd).
+        # (Third seeded-atheris timeout, `2.3E1^10!1E!N5%Eb+...`: the
+        # factor `factorial(E)` is numeric but UNRESOLVABLE -- E is
+        # transcendental, so no growth row applies -- and one such
+        # factor used to void the whole estimate. This estimate only
+        # has to be a LOWER bound to justify a refusal, so an
+        # unresolvable factor contributes 0 and only a product with NO
+        # resolvable factor at all stays `None`.)
+        total = 0.0
+        any_known = False
+        for factor in node.args:
+            factor_mag = _true_pow_magnitude(factor, memo)
+            if factor_mag is None:
+                if getattr(factor, "free_symbols", None):
+                    continue
+                f_num, f_den, f_res, f_violation = _resolve_arg_magnitude(factor, memo)
+                if f_violation or not f_res:
+                    continue
+                factor_mag = abs(f_num - f_den)
+            any_known = True
+            total += factor_mag
+        return total if any_known else None
+    from sympy import Add as _Add
+    if isinstance(node, _Add):
+        # `(23.0**3628800 + k) % x`: the numeric term's coefficient is
+        # what gets normalised; the largest term bounds the whole sum.
+        best = 0.0
+        any_known = False
+        for term in node.args:
+            term_mag = _true_pow_magnitude(term, memo)
+            if term_mag is None:
+                if getattr(term, "free_symbols", None):
+                    continue
+                t_num, t_den, t_res, t_violation = _resolve_arg_magnitude(term, memo)
+                if t_violation or not t_res:
+                    continue
+                term_mag = abs(t_num - t_den)
+            any_known = True
+            best = max(best, term_mag)
+        return best if any_known else None
+    if isinstance(node, Float):
+        # THE-1095 round 18 (coordinator's own live diagnosis, second
+        # follow-up): a BARE Float's own TRUE magnitude too, for reuse
+        # by a "does this coerce to an exact rational" consumer
+        # (`_evalf_coercion_cheap`, below) — NOT for `_log10_num_den`
+        # itself, whose own print-profile contract for a bare Float
+        # stays correct and load-bearing (round 11's own `10.0**100000`
+        # pin) for the "is this cheap to RENDER" question a Float alone
+        # answers "yes" to regardless of magnitude.
+        fv = float(node)
+        return None if fv == 0.0 else abs(math.log10(abs(fv)))
+    if not isinstance(node, Pow):
+        return None
+    if node.exp == 0:
+        return 0.0  # anything ** 0 is exactly 1, regardless of the base
+    base = node.base
+    if isinstance(base, Float):
+        fv = float(base)
+        if fv == 0.0:
+            return None
+        base_mag = math.log10(abs(fv))
+    else:
+        b_num, b_den, b_res = _log10_num_den(base, memo)
+        if not b_res:
+            return None
+        base_mag = b_num - b_den
+    if base_mag == 0.0:
+        return 0.0
+    exp_num, exp_den, exp_res, exp_violation = _resolve_arg_magnitude(node.exp, memo)
+    if exp_violation or not exp_res:
+        return None
+    exp_val = _exp_upper_bound_value(exp_num, exp_den)
+    if not math.isfinite(exp_val):
+        return None
+    return abs(base_mag) * exp_val
+
+
 def _log10_num_den(node, memo: dict) -> tuple:
     """`(log_num, log_den, fully_resolved)` for a subtree — log10 of the
     magnitude of the numerator and denominator `str()` would actually
@@ -5358,48 +5491,62 @@ def _summand_table_name_range_cap(summand) -> int | None:
     return min(caps) if caps else None
 
 
-def _flatten_summation_limits(args):
-    """Flatten SEQUENCE-wrapped `summation`/`product`/`integrate` limit
-    arguments the way SymPy's own `_process_limits` does, returning a
-    flat list where every element that COULD be a `(var, lo, hi)` limit
-    triple is exposed directly, rather than left one level deep inside
-    a wrapping container.
+def _classify_summation_limits(args):
+    """Classify each `summation`/`product`/`Sum`/`Product`/`integrate`/
+    `Integral` LIMIT argument (`node.args[1:]`) the way SymPy's own
+    `_process_limits` (`sympy/concrete/expr_with_limits.py`) does: `V =
+    sympify(flatten(V))` — flatten `V` COMPLETELY first, recursing
+    through anything `is_sequence` (`Tuple` included) at ANY depth,
+    regardless of its own shape — and only THEN check whether the
+    flattened result looks like a limit (`len(V) == 3` and `V[0]` a
+    `Symbol`). Returns a list of `("symbol", var)` (an unbounded bare
+    variable, SymPy's own separate branch for a plain `Symbol`
+    argument), `("triple", var, lo, hi)` (a resolved limit), or
+    `("invalid", arg)` (a flattened shape this module does not
+    positively recognize — SymPy's own `Idx`/`Range`/`Set`-based forms
+    included — refused fail-closed by the caller rather than silently
+    skipped).
 
-    THE-1095 round 17 (grok issue 4, `verify-1095-r16-grok.log`): the
-    coordinator's own literal repro (`summation(factorial(x), [(x, 1,
-    10**6)])`) does NOT reach this module at all — `[`/`]` are
-    unconditionally denied at the lexical pre-screen
-    (`classify_unsafe`'s own `_DENIED_OPS`; confirmed live, refused as
-    `'matrices can't be written ...'` before any parse runs). But the
-    SAME flattening SymPy applies is reachable WITHOUT list-literal
-    syntax at all, through an explicit `Tuple(...)` call — confirmed
-    live: `summation(bell(x), Tuple((x, 1, 1463)))` measured 5.95s and
-    returned a genuine, uncapped huge value, while the plain `(x, 1,
-    1463)` form refuses in under 2ms on `bell`'s own table-name range
-    cap. The OLD "must be a direct 3-Tuple" check saw a length-ONE
-    outer `Tuple` (not 3) and silently skipped it as an unrecognised
-    shape — this is the general fix: unwrap any container whose own
-    shape is NOT already a single `(Symbol, lo, hi)` triple, recursing
-    into its elements (any nesting depth) until each one either IS such
-    a triple or bottoms out at something this check was already
-    conservative about (a bare Symbol, say — left as-is, matching the
-    existing "not this check's concern" skip).
+    THE-1095 round 18 (grok issue 1, `verify-1095-r17-grok.log`, the
+    BLOCKING finding): round 17's own `_flatten_summation_limits`
+    short-circuited on "is this ALREADY a 3-Tuple starting with a
+    Symbol" BEFORE flattening — `Tuple(x, Tuple(1, 1463))` (2 elements:
+    `x`, `Tuple(1, 1463)`) does not match that shape, so it recursed
+    into its own elements INDIVIDUALLY, producing the LOOSE, no-longer-
+    grouped elements `x`, `1`, `1463`; the caller then skipped each one
+    as "not a 3-Tuple, not this check's concern" — `limits` stayed
+    empty, `summation`/`product` stayed in `_recognized_function_
+    names()` so the generic default-deny never fired, and the REAL
+    parse (whose own `_process_limits` flattens `V` to `[x, 1, 1463]`
+    in ONE step, before ever checking `len(V) == 3`) did the real,
+    unbounded work. Confirmed live: `summation(bell(x),
+    Tuple(Tuple(x, 1), 1463))` measured 5.46s and returned a genuine,
+    uncapped huge value; the SAME shape applies to `product`'s own
+    identity growth (`product(x, Tuple(x, Tuple(1, 10**6)))` ==
+    `10**6!`).
+
+    Fixed by copying the REAL order of operations — flatten first
+    (reusing `_flatten_container_values`, the identical recursive
+    leaf-walk `_measured_safe_argument_cap_violation` already uses),
+    classify second — and, unlike round 17, refusing (not silently
+    skipping) any flattened shape this module cannot positively verify
+    as a plain numeric `(var, lo, hi)` triple, matching the standing
+    "unknown != safe" rule every other check in this module already
+    applies.
     """
-    flat = []
+    from sympy import Symbol
+
+    results = []
     for arg in args:
-        type_name = type(arg).__name__
-        if type_name == "Tuple":
-            elements = list(arg.args)
-        elif type_name in ("list", "tuple"):
-            elements = list(arg)
+        if isinstance(arg, Symbol):
+            results.append(("symbol", arg))
+            continue
+        flat = list(_flatten_container_values(arg))
+        if len(flat) == 3 and isinstance(flat[0], Symbol):
+            results.append(("triple", flat[0], flat[1], flat[2]))
         else:
-            flat.append(arg)
-            continue
-        if len(elements) == 3 and type(elements[0]).__name__ == "Symbol":
-            flat.append(arg)  # already a direct (var, lo, hi) triple
-            continue
-        flat.extend(_flatten_summation_limits(elements))
-    return flat
+            results.append(("invalid", arg))
+    return results
 
 
 def _summation_product_violation(node, memo: dict) -> str | None:
@@ -5471,10 +5618,21 @@ def _summation_product_violation(node, memo: dict) -> str | None:
         range_cap = min(table_range_cap, unconditional_cap)
 
     limits = []  # (var, lo_val, hi_val) for every FULLY-resolved Tuple limit
-    for limit_arg in _flatten_summation_limits(node.args[1:]):
-        if type(limit_arg).__name__ != "Tuple" or len(limit_arg.args) != 3:
+    for _kind_and_payload in _classify_summation_limits(node.args[1:]):
+        kind = _kind_and_payload[0]
+        if kind == "symbol":
             continue  # a bare Symbol limit (unbounded) -- not this check's concern
-        var, lo, hi = limit_arg.args
+        if kind == "invalid":
+            # THE-1095 round 18 (grok issue 1): a flattened shape this
+            # module cannot positively verify as a plain `(var, lo,
+            # hi)` triple -- refused fail-closed (see
+            # `_classify_summation_limits`'s own docstring) rather than
+            # silently skipped the way round 17's own version did.
+            return (f"a limit argument to {name}() has an unrecognized shape "
+                    "(not a plain variable-and-two-bounds form this module "
+                    "can verify as safe): computing it would take an "
+                    "unbounded amount of time and memory")
+        _kind, var, lo, hi = _kind_and_payload
         for bound_arg, label in ((lo, "lower"), (hi, "upper")):
             if bound_arg.free_symbols:
                 continue
@@ -5544,45 +5702,81 @@ def _summation_product_violation(node, memo: dict) -> str | None:
         if term_violation:
             at = ", ".join(f"{v}={substitution[v]}" for v in substitution)
             return f"the boundary term of {name}() (at {at}) is unsafe: {term_violation}"
-        # THE-1095 round 17 (grok issue 5, `verify-1095-r16-grok.log`):
-        # the boundary-term check just above only bounds EACH term's OWN
-        # magnitude against its function's own per-argument cap -- it
-        # says nothing about the PRODUCT of `total_terms` such terms.
-        # `product(x**2, (x, 1, 1463))` has 1463 terms, the boundary
-        # term `1463**2` is tiny on its own (no per-function cap
-        # anywhere near it), yet the real product is `(1463!)**2`, ~8000
-        # digits -- past `MAX_NUMERIC_DIGITS` (4000) but never caught
-        # until AFTER the real `(1463!)**2` was actually constructed, on
-        # the post-evaluation output-digit ceiling alone. Bounded here,
-        # A PRIORI, the same way `_table_function_growth_violation`
-        # bounds a table call's own output before construction: `n *
-        # log10(max|term|)` (using the SAME largest-magnitude boundary
-        # term already resolved above as the "max over the range" proxy
-        # -- sound for a monotonic summand, the same assumption the
-        # boundary-term check itself already makes; a non-monotonic
-        # summand only makes this bound MORE conservative, never less).
-        # `summation` is deliberately excluded — an additive aggregate
-        # of `n` terms each of magnitude `10**m` has magnitude at most
-        # `10**m * n`, i.e. `m + log10(n)` in log10 space, not `n * m`
-        # -- `_SUMMATION_SUMMAND_TABLE_NAME_RANGE_CAP`'s own per-name
-        # range cap already bounds that aggregate for a table-containing
-        # summand, and an ordinary polynomial summation has SymPy's own
-        # closed form (Faulhaber's formula), no term-by-term construction
-        # at all.
-        if name in ("product", "Product"):
-            (term_log_num, term_log_den,
-             term_resolved, term_violation2) = _resolve_arg_magnitude(boundary_term, memo)
-            if term_violation2:
-                return term_violation2
-            if term_resolved:
-                product_log10 = total_terms * (term_log_num - term_log_den)
-                if product_log10 > MAX_NUMERIC_DIGITS:
-                    at = ", ".join(f"{v}={substitution[v]}" for v in substitution)
-                    return (f"the result of {name}() ({total_terms} terms, each up to "
-                            f"~10**{term_log_num - term_log_den:.1f} at {at}) would have "
-                            f"about {product_log10:.0f} digits, over the limit of "
-                            f"{MAX_NUMERIC_DIGITS}: it cannot be rendered as a decimal "
-                            "string")
+
+    # THE-1095 round 17 (grok issue 5, `verify-1095-r16-grok.log`) /
+    # round 18 (grok issue 3, `verify-1095-r17-grok.log`): the
+    # boundary-term SAFETY check just above only bounds EACH term's own
+    # magnitude against its function's own per-argument cap -- it says
+    # nothing about the PRODUCT of `total_terms` such terms.
+    # `product(x**2, (x, 1, 1463))` has 1463 terms, the boundary term
+    # `1463**2` is tiny on its own (no per-function cap anywhere near
+    # it), yet the real product is `(1463!)**2`, ~8000 digits -- past
+    # `MAX_NUMERIC_DIGITS` (4000) but never caught until AFTER the real
+    # value was actually constructed, on the post-evaluation output-
+    # digit ceiling alone.
+    #
+    # Round 17's own first version of this bound lived INSIDE `if
+    # substitution:` -- built only when at least one limit variable is
+    # free in the summand -- so a CONSTANT summand (`product(10**4,
+    # (x, 1, 1463))`, no `x` anywhere in it, `substitution` stays
+    # empty) skipped this bound entirely, the SAME "build first, refuse
+    # later" shape this fix was supposed to close, just with a constant
+    # instead of a variable summand (confirmed live: builds the real
+    # ~5852-digit value before the post-hoc ceiling catches it).
+    #
+    # Round 17's own corner choice was also unsound in general: it used
+    # the SAME single "extreme INDEX" substitution the boundary-term
+    # SAFETY check above uses (whichever bound has the larger `|value|`
+    # as an INDEX), silently assuming the term with the largest-
+    # magnitude INDEX also has the largest-magnitude VALUE -- false for
+    # a summand that DECREASES as its index grows (`product(1/x**2,
+    # (x, 1, 1463))` picks `x=1463`, term `~4.67e-7`, missing the true
+    # worst term at `x=1`, magnitude `1`).
+    #
+    # Runs UNCONDITIONALLY here (every `product`/`Product` call,
+    # `substitution` or not) and checks BOTH the all-lower-bounds and
+    # all-upper-bounds corners, using whichever gives the LARGER term
+    # magnitude -- sound for a summand monotonic in either direction
+    # (the same "the extremum sits at an endpoint" assumption every
+    # check in this function already makes), and a constant summand
+    # (no free symbols in any limit var at all) needs no substitution
+    # to begin with -- `corner_sub` is simply empty, `corner_term` is
+    # the summand itself.
+    #
+    # `summation` is deliberately excluded from this whole block — an
+    # additive aggregate of `n` terms each of magnitude `10**m` has
+    # magnitude at most `10**m * n`, i.e. `m + log10(n)` in log10
+    # space, not `n * m` -- `_SUMMATION_SUMMAND_TABLE_NAME_RANGE_CAP`'s
+    # own per-name range cap already bounds that aggregate for a
+    # table-containing summand, and an ordinary polynomial summation
+    # has SymPy's own closed form (Faulhaber's formula), no term-by-
+    # term construction at all.
+    if name in ("product", "Product"):
+        term_magnitudes = []
+        for corner_vals in (
+            {v: lo for v, lo, _hi in limits},
+            {v: hi for v, _lo, hi in limits},
+        ):
+            corner_sub = {
+                var: (sympify(Integer(val)) if val.q == 1 else sympify(val))
+                for var, val in corner_vals.items() if var in summand.free_symbols
+            }
+            corner_term = summand.xreplace(corner_sub) if corner_sub else summand
+            (c_log_num, c_log_den,
+             c_resolved, c_violation) = _resolve_arg_magnitude(corner_term, memo)
+            if c_violation:
+                return c_violation
+            if c_resolved:
+                term_magnitudes.append(c_log_num - c_log_den)
+        if term_magnitudes:
+            worst_log10 = max(term_magnitudes)
+            product_log10 = total_terms * worst_log10
+            if product_log10 > MAX_NUMERIC_DIGITS:
+                return (f"the result of {name}() ({total_terms} terms, each up to "
+                        f"~10**{worst_log10:.1f}) would have about "
+                        f"{product_log10:.0f} digits, over the limit of "
+                        f"{MAX_NUMERIC_DIGITS}: it cannot be rendered as a decimal "
+                        "string")
 
     if range_cap is not None and total_terms > range_cap:
         reason = ("a summand containing a bounded table function"
@@ -5624,10 +5818,19 @@ def _integrate_limit_violation(node, memo: dict) -> str | None:
     name = type(node).__name__
     if name not in ("integrate", "Integral"):
         return None
-    for limit_arg in _flatten_summation_limits(node.args[1:]):
-        if type(limit_arg).__name__ != "Tuple" or len(limit_arg.args) != 3:
+    for _kind_and_payload in _classify_summation_limits(node.args[1:]):
+        kind = _kind_and_payload[0]
+        if kind == "symbol":
             continue
-        _var, lo, hi = limit_arg.args
+        if kind == "invalid":
+            # THE-1095 round 18 (grok issue 1): same fail-closed
+            # treatment `_summation_product_violation` gives an
+            # unrecognized flattened shape — see its own docstring.
+            return (f"a limit argument to {name}() has an unrecognized shape "
+                    "(not a plain variable-and-two-bounds form this module "
+                    "can verify as safe): computing it would take an "
+                    "unbounded amount of time and memory")
+        _kind, _var, lo, hi = _kind_and_payload
         for bound_arg, label in ((lo, "lower"), (hi, "upper")):
             if bound_arg.free_symbols:
                 continue
@@ -5921,11 +6124,31 @@ def _arg_hides_numeric(arg) -> bool:
     inner literal invisible again, the identical class of gap one level
     down. Recursing (`_arg_hides_numeric(member)` instead of `not
     member.free_symbols`) closes it at every depth, not just one.
+
+    THE-1095 round 18 (own follow-up to grok issue 1,
+    `verify-1095-r17-grok.log`): the container check now reads `type
+    (arg).__name__`, not `isinstance(arg, (Tuple, ...))` against the
+    REAL `sympy.Tuple` — this function (like `_summation_product_
+    violation`, `_flatten_container_values`, just below) runs on the
+    DEFERRED, inert-stand-in tree too (`_deferred_global_dict()`'s own
+    `Tuple` entry is a STAND-IN class, a different object from `sympy.
+    Tuple` by construction, sharing only its `__name__`), where
+    `isinstance` against the real class silently returns `False` for
+    every stand-in `Tuple` instance — found while fixing the identical
+    root cause in `_flatten_container_values`, below, for round 18's
+    own sequence-limit-flatten fix. A `Tuple`-named object (stand-in or
+    real) is also NOT directly iterable via `for member in arg` the way
+    a plain `list`/`tuple`/`set`/`frozenset` is (confirmed live: a
+    stand-in raises `TypeError: 'Tuple' object is not iterable`) —
+    walked via `.args` instead, exactly like `_flatten_container_
+    values`, below.
     """
     if not arg.free_symbols:
         return True
-    from sympy import Tuple
-    if isinstance(arg, (Tuple, list, tuple, set, frozenset)):
+    type_name = type(arg).__name__
+    if type_name == "Tuple":
+        return any(_arg_hides_numeric(member) for member in arg.args)
+    if isinstance(arg, (list, tuple, set, frozenset)):
         return any(_arg_hides_numeric(member) for member in arg)
     return False
 
@@ -5942,13 +6165,34 @@ def _flatten_container_values(arg):
     numeric member (the same class `_arg_hides_numeric`'s docstring,
     just above, now recurses for) still reached `_resolve_arg_
     magnitude` unexamined one level down.
+
+    THE-1095 round 18 (own follow-up to grok issue 1,
+    `verify-1095-r17-grok.log`): a `Tuple` is recognized by `type(arg).
+    __name__`, NOT `isinstance(arg, sympy.Tuple)` — this function runs
+    on the DEFERRED, inert-stand-in tree too (`_summation_product_
+    violation`'s own `_classify_summation_limits` calls it there), and
+    `_deferred_global_dict()`'s own `Tuple` entry is a Function-subclass
+    STAND-IN, a different object from `sympy.Tuple` (confirmed live:
+    its own MRO has no `Tuple` but itself in it) — `isinstance` against
+    the real class silently returns `False` for every one, exactly the
+    "unrecognized shape" false negative round 18's own sequence-limit
+    fix first surfaced. A `Tuple`-named object (stand-in or real) is
+    NOT directly iterable either way (confirmed live: a stand-in raises
+    `TypeError: 'Tuple' object is not iterable` — only a REAL `sympy.
+    Tuple` supports `for x in tup`) — walked via `.args` instead, which
+    both the stand-in and the real class support identically (ordinary
+    `Basic`/`Function` machinery, never inert).
     """
-    from sympy import Tuple
-    if isinstance(arg, (Tuple, list, tuple, set, frozenset)):
-        for member in arg:
-            yield from _flatten_container_values(member)
+    type_name = type(arg).__name__
+    if type_name == "Tuple":
+        children = arg.args
+    elif isinstance(arg, (list, tuple, set, frozenset)):
+        children = arg
     else:
         yield arg
+        return
+    for member in children:
+        yield from _flatten_container_values(member)
 
 
 def _measured_safe_argument_cap_violation(node, memo: dict) -> str | None:
@@ -6049,6 +6293,27 @@ def _measured_safe_argument_cap_violation(node, memo: dict) -> str | None:
         # (narrower) spec text, which this round's own finding
         # supersedes.
         if (arg_log_num - arg_log_den) > math.log10(MAX_HEAVY_ARG):
+            return (f"an argument to {name}() exceeds the limit of "
+                    f"{MAX_HEAVY_ARG} for a callable this module has only "
+                    "measured at small magnitudes: computing it would take "
+                    "an unbounded amount of time and memory")
+        # THE-1095 round 18 (coordinator's own live diagnosis, third
+        # follow-up to the atheris `%`/`//` finding): `arg_log_num -
+        # arg_log_den` above is `_resolve_arg_magnitude`'s own, Float-
+        # TOLERANT print-profile magnitude (correct for its own
+        # question, "is this cheap to RENDER" — see `_true_pow_
+        # magnitude`'s own docstring) — a `Pow` with a FLOAT base and a
+        # huge exponent (`23.0**3628800`) reports `~0` there even though
+        # its TRUE magnitude is ~4.9 million digits, and several
+        # measured-safe callables (`lcm`, `nsimplify` — confirmed live,
+        # both hang; `gcd` does NOT, SymPy's own `gcd()` special-cases a
+        # non-integer argument to `1` without coercing it) DO coerce
+        # their argument toward an exact value internally, the identical
+        # cost class `%`/`//`/`floor`/`ceiling` already needed `_true_
+        # pow_magnitude` for. Checked in ADDITION to the print-profile
+        # cap above, never instead of it.
+        true_mag = _true_pow_magnitude(arg, memo)
+        if true_mag is not None and true_mag > math.log10(MAX_HEAVY_ARG):
             return (f"an argument to {name}() exceeds the limit of "
                     f"{MAX_HEAVY_ARG} for a callable this module has only "
                     "measured at small magnitudes: computing it would take "
@@ -6163,7 +6428,7 @@ def _elementary_function_magnitude(node, memo: dict) -> tuple[float, bool, str |
             return 0.0, False, a_violation
         if not a_resolved:
             return None
-        if not _evalf_coercion_cheap(node.args[0], a_log_num, a_log_den):
+        if not _evalf_coercion_cheap(node.args[0], a_log_num, a_log_den, memo):
             return 0.0, False, ("the argument to sign() cannot be safely coerced "
                                  "to a number: computing it would take an "
                                  "unbounded amount of time and memory")
@@ -6183,7 +6448,7 @@ def _elementary_function_magnitude(node, memo: dict) -> tuple[float, bool, str |
             # (an evalf-based comparison for anything not structurally
             # orderable) — the SAME cheap-argument gate floor/ceiling
             # use, applied per argument, same reasoning as `sign` above.
-            if not _evalf_coercion_cheap(arg, a_log_num, a_log_den):
+            if not _evalf_coercion_cheap(arg, a_log_num, a_log_den, memo):
                 return 0.0, False, (f"an argument to {type(node).__name__}() cannot "
                                      "be safely coerced to a number: computing it "
                                      "would take an unbounded amount of time and "
@@ -6233,7 +6498,7 @@ def _elementary_function_magnitude(node, memo: dict) -> tuple[float, bool, str |
 _MAX_EVALF_ARG_DIGITS = MAX_SYMBOLIC_EXPONENT
 
 
-def _evalf_coercion_cheap(arg, arg_log_num: float, arg_log_den: float) -> bool:
+def _evalf_coercion_cheap(arg, arg_log_num: float, arg_log_den: float, memo: dict) -> bool:
     """Whether `arg` — already known non-symbolic, already resolved to
     `(arg_log_num, arg_log_den)` via `_resolve_arg_magnitude` — is CHEAP
     for `floor`/`ceiling`/`frac`/`Max`/`Min`/`sign` to numerically
@@ -6280,6 +6545,25 @@ def _evalf_coercion_cheap(arg, arg_log_num: float, arg_log_den: float) -> bool:
         return True
     if isinstance(arg, Function) and type(arg).__name__ in _INTEGER_VALUED_TABLE_NAMES:
         return True
+    # THE-1095 round 18 (coordinator's own live diagnosis, second
+    # follow-up to the atheris `%`/`//` finding): `arg_log_num -
+    # arg_log_den` comes from `_resolve_arg_magnitude`, which is
+    # deliberately Float-TOLERANT (a bare Float's own print profile is
+    # `0.0` regardless of true magnitude — correct for THAT question,
+    # see `_true_pow_magnitude`'s own docstring) — but `floor`/
+    # `ceiling`'s own real `evalf` call coerces its argument to an
+    # EXACT value first, the identical "converts a huge-TRUE-magnitude
+    # Float-base Pow to an exact rational" cost class `%`/`//` already
+    # needed `_true_pow_magnitude` for. Confirmed live: `floor(23.0**
+    # 3628800)` (also pre-existing, hanging the same way, on `origin/
+    # main` itself) is exactly this shape. Checked in ADDITION to the
+    # print-profile magnitude above, never instead of it — a genuinely
+    # cheap argument this function cannot resolve a `_true_pow_
+    # magnitude` for (returns `None`, e.g. a bare `Symbol` or `zeta(3)`)
+    # still falls through to the ordinary digit-cap check unchanged.
+    true_mag = _true_pow_magnitude(arg, memo)
+    if true_mag is not None and _digit_count_over_cap(true_mag, _MAX_EVALF_ARG_DIGITS):
+        return False
     return not _digit_count_over_cap(arg_log_num - arg_log_den, _MAX_EVALF_ARG_DIGITS)
 
 
@@ -6397,6 +6681,45 @@ _POLE_SENSITIVE_NAMES = frozenset({
     "sin", "cos", "tanh", "erf", "exp",
     *_ELEMENTARY_SPECIAL_UNBOUNDED_NAMES, *_ELEMENTARY_SPECIAL_EXP_BOUNDED_NAMES,
     "LambertW", "airyai", "airybi", "airyaiprime", "airybiprime", "expint", "Ci",
+})
+
+#: THE-1095 round 18 (coordinator item 4, macOS `tests (macos-latest,
+#: py3.14)` CI failure on `711242f`): `discrete_log(1463, 1462, 1461,
+#: 1460)` measured `four_arg_heavy_all_numeric` as `OK` on Linux but
+#: `CRASH` (an 8000ms process-wall timeout the in-child daemon-thread
+#: timer cannot interrupt) on macOS py3.14, SAME shard, SAME
+#: committed allowlist entry — not a platform bug: `discrete_log`'s own
+#: cost depends on the NUMBER-THEORETIC STRUCTURE of its arguments (how
+#: `n - 1` factors; whether Pollard's Rho's internal cycle-detection
+#: walk happens to hit a short cycle), not their MAGNITUDE, so the same
+#: call genuinely IS a few ms on one run and unbounded on another — no
+#: measurement, however many trials, can turn a randomized-cost
+#: algorithm into a name this module can allowlist by magnitude alone.
+#: Confirmed live (`inspect.getsource`): `discrete_log`/`sqrt_mod`/
+#: `sqrt_mod_iter`/`n_order`/`nthroot_mod`/`is_primitive_root`/
+#: `is_nthpow_residue`/`binomial_mod` each call `factorint` internally
+#: (factoring cost is NOT a function of digit count — a semiprime near
+#: a magnitude bound is vastly harder to factor than a smooth number of
+#: the identical size); `primitive_root`/`quadratic_congruence`/
+#: `polynomial_congruence` share the same class by depending on one of
+#: the others. `jacobi_symbol`/`legendre_symbol` (pure reciprocity, no
+#: factoring) and `mobius`/`quadratic_residues` (neither uses
+#: `factorint`) are NOT in this set — their own cost genuinely is a
+#: function of magnitude alone.
+#:
+#: Default-denied here rather than given a "small digits-kind cap" (the
+#: coordinator's own named alternative): a magnitude cap cannot bound a
+#: cost that is orthogonal to magnitude in the first place — the
+#: allowlist's whole THEORY (measured-fast-at-a-grid implies fast
+#: elsewhere at that magnitude) does not hold for this family, so
+#: EXCLUDED from measurement candidacy entirely (`_already_handled_
+#: names()`, `scripts/measure_safe_callables.py`) rather than measured
+#: and capped.
+_NONDETERMINISTIC_COST_NAMES = frozenset({
+    "discrete_log", "sqrt_mod", "sqrt_mod_iter", "primitive_root",
+    "is_primitive_root", "n_order", "nthroot_mod", "quadratic_congruence",
+    "polynomial_congruence", "is_nthpow_residue", "is_quad_residue",
+    "binomial_mod",
 })
 
 #: Of the ten `_POLE_SENSITIVE_NAMES`, ONLY these four are also members
@@ -6568,6 +6891,35 @@ def _resolve_exact_rational_uncached(node, memo: dict):
             return None
         return None if _exact_rational_too_big(result) else result
     return None
+
+
+def _exact_ln(x) -> float:
+    """`ln(x)` for an exact SymPy `Rational`/`Integer` `x`, computed via
+    SymPy's own arbitrary-precision `evalf` on the SYMBOLIC `log(x)`
+    expression — NEVER `math.log(float(x))`.
+
+    THE-1095 round 18 (grok issue 2, `verify-1095-r17-grok.log`): `x`
+    can be as close to a pole at `1` as `1 +/- 1/10**200` (accepted by
+    `_exact_rational_too_big`'s own ~700-bit/~211-decimal-digit guard),
+    but `float(x)` rounds any such value to EXACTLY `1.0` (float64's
+    own precision is only ~16 decimal digits) — `math.log(1.0) == 0.0`,
+    silently discarding the entire perturbation, so `li`/`Li`'s own
+    `|ln|ln z||` bound computed `math.log(0.0)`, which RAISES, and the
+    advertised near-pole bound never actually ran; the internal-scan
+    ceiling refused instead, an UNPINNED narrowing main does not need
+    (`factorial(floor(Abs(li(1+1/10**200))))` is a valid, finite main
+    result). `evalf(250)` — comfortably past the ~211-digit guard
+    boundary (confirmed live: `211` digits of requested precision is
+    the exact edge where this starts silently returning `0` instead of
+    the true tiny value; `250` leaves margin) — resolves the distance
+    from the pole EXACTLY, at any magnitude this module ever accepts,
+    then converts to a plain float (safe: the smallest magnitude the
+    700-bit guard can produce, ~`1e-211`, is nowhere near float64's own
+    underflow floor, ~`5e-324`).
+    """
+    from sympy import log as _sp_log
+
+    return float(_sp_log(x).evalf(250))
 
 
 def _pole_sensitive_magnitude(node, memo: dict) -> tuple[float, float, bool, str | None] | None:
@@ -6813,7 +7165,7 @@ def _pole_sensitive_magnitude(node, memo: dict) -> tuple[float, float, bool, str
             # `n >= 1`; `E_1(x) <= -ln(x) + 1` for `0 < x < 1`
             # (confirmed live against SymPy's own `N()` at `x` down to
             # `10**-6`, comfortable margin throughout).
-            bound = -math.log(float(x)) + 1.0
+            bound = -_exact_ln(x) + 1.0
             return math.log10(bound), 0.0, True, None
         message = ("the second argument to expint() cannot be safely bounded "
                    "outside x > 0: computing it would take an unbounded "
@@ -6865,7 +7217,7 @@ def _pole_sensitive_magnitude(node, memo: dict) -> tuple[float, float, bool, str
         if x > 1:
             return math.log10(2.0), 0.0, True, None
         euler_gamma = 0.5772156649015329  # the Euler-Mascheroni constant
-        bound = euler_gamma + abs(math.log(float(x))) + 1.0
+        bound = euler_gamma + abs(_exact_ln(x)) + 1.0
         return math.log10(bound), 0.0, True, None
 
     if name == "LambertW":
@@ -6967,15 +7319,28 @@ def _pole_sensitive_magnitude(node, memo: dict) -> tuple[float, float, bool, str
         # to 0 as `x -> -oo` so a growing exponential bound only gets
         # looser; `li`/`Li ~ x/ln(x)` grows slower than `e**x`) for the
         # region outside each neighbourhood.
+        # THE-1095 round 18 (grok issue 2, `verify-1095-r17-grok.log`):
+        # every `math.log(float(...))` below is now `_exact_ln(...)` --
+        # `li`/`Li`'s own pole sits at `x == 1`, where `float(x)` for an
+        # `x` this close (`1 +/- 1/10**200`) rounds to exactly `1.0`
+        # (float64 only carries ~16 decimal digits), so `math.log(1.0)
+        # == 0.0` and the SECOND `math.log(abs(ln_z))` below raised on
+        # `math.log(0.0)` -- caught only by the generic internal-scan
+        # ceiling, not the advertised bound. See `_exact_ln`'s own
+        # docstring for the full account; applied to Chi/Ei too for the
+        # identical reason even though their own pole (at `0`, not `1`)
+        # never actually triggers the underflow (confirmed live: a
+        # float64 represents `1e-211` — the smallest magnitude the
+        # 700-bit rational guard admits — without any precision loss).
         euler_gamma = 0.5772156649015329  # the Euler-Mascheroni constant
         if name == "Chi" and x <= 1:
-            bound = euler_gamma + abs(math.log(float(x))) + 1.0
+            bound = euler_gamma + abs(_exact_ln(x)) + 1.0
             return math.log10(bound), 0.0, True, None
         if name == "Ei" and abs(x) <= 1:
-            bound = euler_gamma + abs(math.log(abs(float(x)))) + math.e
+            bound = euler_gamma + abs(_exact_ln(abs(x))) + math.e
             return math.log10(bound), 0.0, True, None
         if name in ("li", "Li") and x <= math.e:
-            ln_z = math.log(float(x))  # x == 1 already refused above: ln_z != 0
+            ln_z = _exact_ln(x)  # x == 1 already refused above: ln_z != 0
             bound = abs(math.log(abs(ln_z))) + math.e
             return math.log10(bound), 0.0, True, None
         exponent = x * x if name == "erfi" else abs(x)
@@ -7190,7 +7555,7 @@ def _resolve_arg_magnitude(node, memo: dict) -> tuple[float, float, bool, str | 
             # See `_evalf_coercion_cheap`'s own docstring for the full
             # account and the two shapes that stay genuinely cheap
             # regardless of magnitude.
-            if not _evalf_coercion_cheap(node.args[0], a_log_num, a_log_den):
+            if not _evalf_coercion_cheap(node.args[0], a_log_num, a_log_den, memo):
                 return 0.0, 0.0, False, (
                     f"the argument to {type_name}() cannot be safely coerced "
                     "to a number: computing it would take an unbounded "
@@ -7469,6 +7834,56 @@ def _resolve_marker_magnitude(node, memo: dict) -> tuple[float, float, bool, str
         return left_log, 0.0, True, None
 
     if op == "%":
+        # THE-1095 round 18 (atheris finding, this round's own 60s
+        # coverage-guided fuzz pass; coordinator's own live `py-spy`
+        # read of a SECOND hang the same fuzz pass found): `|a % b| <
+        # |b|` bounds the OUTPUT of `%` regardless of `|a|` (Codex round
+        # 9's own correction, still exactly right about the RESULT) --
+        # but COMPUTING it is not free. The FIRST version of this fix
+        # lived entirely INSIDE `if right_known:` (below), checking the
+        # dividend only when the divisor resolved to a NON-rational
+        # NUMBER (`E`, an inexact `Float`) -- `2.3E1^10!%E` (`23.0 **
+        # factorial(10)`, a dividend ~4.9 million digits' worth of TRUE
+        # magnitude that stays a COMPACT, fast-to-construct `Float` --
+        # `left_log`, above, correctly leaves a Float's own PRINT length
+        # alone for the RENDERING question every other caller of
+        # `_resolve_arg_magnitude` needs, but that hides this same
+        # enormous TRUE magnitude a `%` reduction actually has to pay
+        # for) hung past several minutes computing the reduction. That
+        # missed a SYMBOLIC divisor entirely: the coordinator's own live
+        # `py-spy dump` on `23.0**3628800 % x` (`x` a genuinely free
+        # Symbol) traced the real stall to SymPy's OWN `Mod.eval()` --
+        # even with a SYMBOLIC divisor, it still GCD-normalizes the
+        # NUMERIC left side (`dmp_gcd` -> `dup_convert` to `RealField`
+        # -> mpmath `from_int` on a multi-million-BIT integer) before it
+        # can even determine the divisor is symbolic. A symbolic `right`
+        # makes `right_known` False, which used to return `(0.0, 0.0,
+        # False, None)` immediately here -- BEFORE ever reaching the
+        # dividend check below -- and `_deferred_binop_violation`'s own
+        # caller then read "unresolved + has free symbols" as
+        # "genuinely symbolic, safe, let the real parse handle it," but
+        # the real parse pays the SAME gcd cost regardless of whether
+        # the divisor turns out symbolic. Checked now BEFORE the
+        # `right_known` gate, for ANY divisor that is not a CONFIRMED,
+        # fully-resolved exact rational -- a non-rational NUMBER, an
+        # UNRESOLVED marker/table call, and a genuinely SYMBOLIC divisor
+        # alike. `_true_pow_magnitude` (a SEPARATE estimate, kept out of
+        # the ordinary `_log10_num_den`/`_resolve_arg_magnitude`
+        # contract on purpose — see its own docstring) answers the
+        # narrower "how big is this Pow REALLY" question instead.
+        right_is_safe_divisor = right_known and bool(right.is_rational)
+        # A SYMBOLIC dividend is gcd-normalised by `Mod.eval` even against
+        # an exact rational modulus (`23.0**3628800*k % 7` hung just like
+        # the symbolic-divisor case), so the dividend check also runs
+        # whenever the left side carries a free symbol.
+        left_is_symbolic = bool(getattr(left, "free_symbols", None))
+        if not right_is_safe_divisor or left_is_symbolic:
+            true_left_mag = _true_pow_magnitude(left, memo)
+            if true_left_mag is not None and true_left_mag > MAX_NUMERIC_DIGITS:
+                return (0.0, 0.0, False,
+                        ("the left operand of '%' is too large to reduce against "
+                         "this modulus: computing it would take an unbounded "
+                         "amount of time and memory"))
         if not right_known:
             return 0.0, 0.0, False, None
         return right_log, 0.0, True, None
@@ -7476,6 +7891,32 @@ def _resolve_marker_magnitude(node, memo: dict) -> tuple[float, float, bool, str
     # op == "//"
     if not left_known:
         return 0.0, 0.0, False, None
+    # THE-1095 round 18 (atheris finding, this round's own 60s
+    # coverage-guided fuzz pass; see the identical, more-detailed
+    # comment on `%`'s own branch above for the SYMBOLIC-divisor half
+    # of this): the SAME dividend-magnitude hazard `%`'s own branch
+    # closes — `_divisor_lower_log10` (below) proves a divisor like
+    # `factorial(E)` is `>= 1` in magnitude (sound: a table call this
+    # module KNOWS is integer-VALUED for the domain it actually accepts
+    # would be `>= 1`; here it is not even checking that `E` makes
+    # `factorial(E)` genuinely IRRATIONAL, not integer, at all — a
+    # separate looseness, but the CONCRETE hazard either way is the one
+    # closed here), which is enough for a sound OUTPUT bound (`a // b <=
+    # a` when `|b| >= 1`) but says nothing about the COST of computing
+    # the real floor-division against a divisor that is not an exact
+    # rational — a NON-rational NUMBER, an unresolved marker/table call,
+    # or a genuinely SYMBOLIC divisor alike (`right_is_safe_divisor`
+    # covers all three the same way `%`'s own branch does). Confirmed
+    # live: `2.3E1^10!//E!` and `2.3E1^10!//x` (`x` a free Symbol) both
+    # hung the identical way `2.3E1^10!%E`/`23.0**3628800 % x` did.
+    right_is_safe_divisor = right_known and bool(right.is_rational)
+    if not right_is_safe_divisor:
+        true_left_mag = _true_pow_magnitude(left, memo)
+        if true_left_mag is not None and true_left_mag > MAX_NUMERIC_DIGITS:
+            return (0.0, 0.0, False,
+                    ("the left operand of '//' is too large to reduce against "
+                     "this divisor: computing it would take an unbounded "
+                     "amount of time and memory"))
     divisor_lower_log = _divisor_lower_log10(right, memo)
     if divisor_lower_log is None:
         return 0.0, 0.0, False, None  # caller decides: refuse if non-symbolic
