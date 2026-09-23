@@ -608,6 +608,17 @@ _EXTRA_BOUNDED_POSITIONS: dict = {
     # (`series(sin(x), x, 0, 6)`) this repo's own test suite already
     # exercises.
     "series": {3: ("value", 100)},
+    # THE-1095 round 16 (coordinator addendum, item 4; grok issue 3,
+    # `verify-1095-r15-grok.log`): `fps(f, x=None, x0=0, dir=1,
+    # hyper=True, order=4, ...)` -- `order` is POSITION 5, not 3 (the
+    # round-15 comment naming `fps(sin(x), x, 0, 1463)` as the "4th-arg
+    # cost class" named the WRONG slot -- that call's 4th positional
+    # arg is `dir`, not `order`, so the probe grid's own `four_arg_
+    # heavy_last` shape never actually measured the cost-driving
+    # position at all). Same cap `series` itself uses (100) -- `fps`'s
+    # own cost, like `series`'s, scales with the ORDER, not a plain
+    # magnitude.
+    "fps": {5: ("value", 100)},
     # THE-1095 round 13 follow-up (grok, review of 562a026): the
     # orthogonal-polynomial family's own remaining positions — `x` (the
     # evaluation point, always last) and, for the four names with an
@@ -3319,6 +3330,29 @@ MAX_SYMBOLIC_EXPONENT = 200
 _UNPROTECTED_OPERATORS = frozenset({"%", "//", "<<", ">>"})
 
 
+def _tokens_touch_table_or_unprotected_operator(source: str) -> bool | None:
+    """`True`/`False` if plain Python `tokenize` on `source` finds a NAME
+    token that is a `_FUNCTION_ARG_CAPS` key or an OP token in
+    `_UNPROTECTED_OPERATORS`, or `None` if `source` itself does not even
+    tokenize (a genuine, unrelated syntax problem — not this check's
+    concern either way, its own caller decides what that means)."""
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
+    except (tokenize.TokenError, SyntaxError, IndentationError,
+            UnicodeEncodeError, UnicodeDecodeError, SystemError):
+        # `SystemError` added alongside the others for the SAME reason
+        # `classify_unsafe`'s own identical tokenizer guard added it —
+        # see that function's own comment for the full account (CPython
+        # 3.12's C tokenizer, one narrow embedded-NUL-byte shape).
+        return None
+    for tok in tokens:
+        if tok.type == tokenize.NAME and tok.string in _FUNCTION_ARG_CAPS:
+            return True
+        if tok.type == tokenize.OP and tok.string in _UNPROTECTED_OPERATORS:
+            return True
+    return False
+
+
 def _expression_touches_table_or_unprotected_operator(expression: str) -> bool:
     """True if `expression` contains a NAME token that is a key of
     `_FUNCTION_ARG_CAPS` (a table name this module screens specially) or
@@ -3334,22 +3368,52 @@ def _expression_touches_table_or_unprotected_operator(expression: str) -> bool:
     (the two are the same "an unresolved exception must never silently
     mean 'safe'" principle, applied at the two different places an
     exception from this module's own scanning can occur).
+
+    THE-1095 round 16 (atheris finding, `slow-unit-r16.bin`, seed
+    `(3/2)**300001!!E1`): the RAW-TEXT check alone MISSES a table name
+    that only becomes one after SymPy's own token TRANSFORMATION —
+    `!!`/`!` are not `factorial2`/`factorial` in the source text at all,
+    only after `factorial_notation` (part of `standard_transformations`,
+    always in `math_transforms()`) rewrites the raw `!!`/`!` TOKENS into
+    `factorial2(...)`/`factorial(...)` ones, a step this check never
+    used to run. `(3/2)**300001!!E1`'s own deferred parse raises (`E1`,
+    a bare name resolving to a real SymPy object, used via IMPLICIT
+    MULTIPLICATION, which `SympifyError`s trying to combine it with a
+    number) — but the RAW text contains no `_FUNCTION_ARG_CAPS` key at
+    all (`!!` is punctuation, not the word "factorial2"), so the
+    exception used to be misread as "inconclusive," and the REAL parse
+    ran instead: `(3/2)**300001` (a legitimate, cap-worthy `Pow`) got
+    constructed for real before the SAME `SympifyError` finally
+    surfaced — measured 22.2s, `origin/main` itself measured ~19s on
+    the identical shape (this module's own class of bug, now closed).
+    Fixed: when the RAW text alone does not touch anything, `stringify_
+    expr` (the SAME token-transformation step `parse_expr` itself
+    always applies first, before ever reaching `ast.parse`) is run on
+    the expression, and the RESULT is checked the identical way —
+    `(3/2)**300001!!E1` stringifies to `...**factorial2(...)  * E1`,
+    where `factorial2` is plainly a `_FUNCTION_ARG_CAPS` NAME token.
+    `stringify_expr` raising ITS OWN exception (a `SympifyError` during
+    the transform step) or producing further-untokenizable output is
+    treated as "touches" too — `unknown != safe`, the same bar this
+    whole function already applies to a tokenizer failure on the RAW
+    text (see `_tokens_touch_table_or_unprotected_operator`'s own
+    `None` case, immediately below).
     """
+    raw_result = _tokens_touch_table_or_unprotected_operator(expression)
+    if raw_result:
+        return True
     try:
-        tokens = list(tokenize.generate_tokens(io.StringIO(expression).readline))
-    except (tokenize.TokenError, SyntaxError, IndentationError,
-            UnicodeEncodeError, UnicodeDecodeError, SystemError):
-        # `SystemError` added alongside the others for the SAME reason
-        # `classify_unsafe`'s own identical tokenizer guard added it —
-        # see that function's own comment for the full account (CPython
-        # 3.12's C tokenizer, one narrow embedded-NUL-byte shape).
-        return False  # not this check's job -- classify_unsafe already ran
-    for tok in tokens:
-        if tok.type == tokenize.NAME and tok.string in _FUNCTION_ARG_CAPS:
-            return True
-        if tok.type == tokenize.OP and tok.string in _UNPROTECTED_OPERATORS:
-            return True
-    return False
+        from sympy.parsing.sympy_parser import stringify_expr
+        transformed = stringify_expr(expression, {}, safe_global_dict(), math_transforms())
+    except Exception:
+        return True  # cannot even transform it -- unknown != safe
+    transformed_result = _tokens_touch_table_or_unprotected_operator(transformed)
+    if transformed_result is None:
+        # THE TRANSFORMED text itself doesn't tokenize -- `stringify_
+        # expr` is meant to produce valid Python source, so this would
+        # itself be surprising; fail closed rather than assume safe.
+        return True
+    return bool(transformed_result)
 
 
 #: The `parse_expr` transformations every safe-parse call site enables:
@@ -5325,7 +5389,26 @@ def _summation_product_violation(node, memo: dict) -> str | None:
     from sympy import Integer, sympify
 
     summand = node.args[0]
-    range_cap = _summand_table_name_range_cap(summand)
+    table_range_cap = _summand_table_name_range_cap(summand)
+    # THE-1095 round 16 (grok issue 4, `verify-1095-r15-grok.log`):
+    # `product`'s own IDENTITY operation is a factorial-shaped growth
+    # regardless of what the summand IS -- `product(x, (x, 1, 10**6))
+    # == 10**6!`, no table Function anywhere in the summand, so round
+    # 15's own "only cap the range when the summand contains a table
+    # name" rule let it straight through (7-digit limit, tiny boundary
+    # term `10**6` itself). `product`/`Product` get an UNCONDITIONAL
+    # range cap at `MAX_HEAVY_ARG` on top of whatever `table_range_cap`
+    # (above) already adds for a table-containing summand -- the
+    # TIGHTER of the two applies.
+    unconditional_cap = MAX_HEAVY_ARG if name in ("product", "Product") else None
+    if table_range_cap is None:
+        range_cap = unconditional_cap
+    elif unconditional_cap is None:
+        range_cap = table_range_cap
+    else:
+        range_cap = min(table_range_cap, unconditional_cap)
+
+    limits = []  # (var, lo_val, hi_val) for every FULLY-resolved Tuple limit
     for limit_arg in node.args[1:]:
         if type(limit_arg).__name__ != "Tuple" or len(limit_arg.args) != 3:
             continue  # a bare Symbol limit (unbounded) -- not this check's concern
@@ -5356,22 +5439,73 @@ def _summation_product_violation(node, memo: dict) -> str | None:
         hi_val = _resolve_exact_rational(hi, memo)
         if lo_val is None or hi_val is None:
             continue
+        limits.append((var, lo_val, hi_val))
+
+    if not limits:
+        return None
+
+    # THE-1095 round 16 (grok issue 4): the BOUNDARY-term check now
+    # substitutes EVERY resolved variable's own upper limit SIMULTAN-
+    # EOUSLY, not one axis at a time -- `summation(bell(x*y), (x, 1,
+    # 200), (y, 1, 200))` has EACH axis individually under the 200 cap,
+    # but a summand walked with only `x` (or only `y`) substituted
+    # still has the OTHER variable free, hiding `bell(x*200)`'s own
+    # true worst case (`bell(40000)`, at `x=y=200` together) from
+    # `_numeric_ceiling_scan` entirely.
+    # THE-1095 round 16 (Codex addendum, `verify-1095-r15.log`): for a
+    # REVERSED limit (`lo > hi`), the EXTREME endpoint is `lo`, not
+    # `hi` -- `summation(bell(x), (x, 1463, 1))` computes real work at
+    # `x` up to `1463` (`lo`), which the round-15 version's own
+    # hard-coded "always substitute `hi`" would have completely missed
+    # (substituting `x=1`, `bell(1)`, trivially safe, while the TRUE
+    # boundary term `bell(1463)` was never checked at all). The
+    # LARGER-magnitude endpoint is used regardless of direction.
+    substitution = {}
+    for var, lo_val, hi_val in limits:
         if var in summand.free_symbols:
-            boundary_term = summand.xreplace({var: sympify(Integer(hi_val))
-                                               if hi_val.q == 1 else sympify(hi_val)})
-            term_violation = _numeric_ceiling_scan(boundary_term, memo)
-            if term_violation:
-                return (f"the boundary term of {name}() (at {var}={hi_val}) is unsafe: "
-                        f"{term_violation}")
-        # THE-1095 round 15: INCLUSIVE term count (`hi - lo + 1`), matching
-        # the sweep this cap table was measured against (`summation(NAME
-        # (x), (x, 1, N))`, lo always 1 -- `N` terms, not `N - 1`).
-        term_count = hi_val - lo_val + 1
-        if range_cap is not None and term_count > range_cap:
-            return (f"the range of {name}() ({term_count} terms) exceeds the "
-                    f"limit of {range_cap} for a summand containing a bounded table "
-                    "function: computing it would take an unbounded amount of time "
-                    "and memory")
+            extreme = lo_val if abs(lo_val) > abs(hi_val) else hi_val
+            substitution[var] = sympify(Integer(extreme)) if extreme.q == 1 else sympify(extreme)
+    if substitution:
+        boundary_term = summand.xreplace(substitution)
+        term_violation = _numeric_ceiling_scan(boundary_term, memo)
+        if term_violation:
+            at = ", ".join(f"{v}={substitution[v]}" for v in substitution)
+            return f"the boundary term of {name}() (at {at}) is unsafe: {term_violation}"
+
+    # THE-1095 round 16 (grok issue 4): the CARTESIAN PRODUCT of every
+    # axis's own term count, not each axis checked independently --
+    # `summation(bell(x*y), (x,1,200), (y,1,200))` is 200 x 200 = 40000
+    # TOTAL terms, not 200 (the single axis figure each `range_cap`
+    # value in `_SUMMATION_SUMMAND_TABLE_NAME_RANGE_CAP` was itself
+    # measured against, a per-axis, not aggregate, quantity — so the
+    # aggregate check below still uses that SAME per-axis-derived cap
+    # as its threshold, deliberately conservative for the multi-axis
+    # case rather than deriving a separate aggregate-safe figure).
+    # THE-1095 round 15: INCLUSIVE term count (`hi - lo + 1`), matching
+    # the sweep this cap table was measured against (`summation(NAME
+    # (x), (x, 1, N))`, lo always 1 -- `N` terms, not `N - 1`).
+    #
+    # THE-1095 round 16 (Codex addendum, `verify-1095-r15.log`): a
+    # REVERSED limit (`lo > hi`, e.g. `summation(x, (x, 10**6, 1))`) is
+    # NOT empty on `origin/main` -- SymPy's own convention computes a
+    # NEGATED sum over the SAME magnitude range (confirmed live:
+    # `summation(x, (x, 5, 1)) == -9`, real work, not a no-op) -- the
+    # round-15 version's own `axis_terms < 0 -> 0` fallback treated a
+    # reversed range as contributing NOTHING to the total, wrongly
+    # letting `summation(bell(x), (x, 1463, 1))` (or `product`'s own
+    # identity-growth shape reversed) straight through uncapped. `abs()`
+    # makes the term count symmetric in both directions.
+    total_terms = 1
+    for _var, lo_val, hi_val in limits:
+        axis_terms = abs(hi_val - lo_val) + 1
+        total_terms *= axis_terms
+    if range_cap is not None and total_terms > range_cap:
+        reason = ("a summand containing a bounded table function"
+                  if table_range_cap is not None else f"{name}()'s own identity growth")
+        return (f"the range of {name}() ({total_terms} total terms across "
+                f"{len(limits)} limit(s)) exceeds the limit of {range_cap} for "
+                f"{reason}: computing it would take an unbounded amount of time "
+                "and memory")
     return None
 
 
@@ -5467,6 +5601,38 @@ def _series_order_violation(node, memo: dict) -> str | None:
     over_cap = (arg_log_num - arg_log_den) > math.log10(cap)
     if over_cap:
         return (f"the order argument to series() exceeds the limit of {cap}: "
+                "computing it would take an unbounded amount of time and memory")
+    return None
+
+
+def _fps_order_violation(node, memo: dict) -> str | None:
+    """`_series_order_violation`'s own shape, for `fps(f, x, x0, dir,
+    hyper, order, ...)`'s own ORDER argument (position 5, not 3 — see
+    this name's own `_EXTRA_BOUNDED_POSITIONS` entry for why the
+    round-15 probe grid missed it: `fps(sin(x), x, 0, 1463)`, the
+    shape round 15 named, puts `1463` in `dir`, the WRONG slot).
+    `None` if `node` is not an `fps` call, or its order argument is
+    absent (the default, `order=4`, always safe), genuinely symbolic,
+    or in range.
+    """
+    if type(node).__name__ != "fps" or len(node.args) < 6:
+        return None
+    spec = _position_spec("fps", 5)
+    if spec is None:
+        return None
+    _kind, cap = spec
+    arg = node.args[5]
+    if arg.free_symbols:
+        return None
+    arg_log_num, arg_log_den, arg_resolved, arg_violation = _resolve_arg_magnitude(arg, memo)
+    if arg_violation:
+        return arg_violation
+    if not arg_resolved:
+        return ("the order argument to fps() cannot be safely bounded: "
+                "computing it would take an unbounded amount of time and memory")
+    over_cap = (arg_log_num - arg_log_den) > math.log10(cap)
+    if over_cap:
+        return (f"the order argument to fps() exceeds the limit of {cap}: "
                 "computing it would take an unbounded amount of time and memory")
     return None
 
@@ -5570,7 +5736,27 @@ def _recognized_function_names() -> frozenset:
             | frozenset(_DEFERRED_BINOP_OPS)
             | frozenset({"N", "Mod", "Max", "Min", "floor", "ceiling", "frac", "series",
                          "summation", "product", "Sum", "Product",
-                         "integrate", "Integral"})
+                         "integrate", "Integral", "fps",
+                         # THE-1095 round 16 (Codex addendum, `verify-
+                         # 1095-r15.log`, its own 528-expression branch-
+                         # vs-main corpus): `Piecewise((x, x>0), (0,
+                         # True))` -- an ORDINARY symbolic Piecewise --
+                         # refused, because its own SECOND branch, `(0,
+                         # True)`, has NO free symbols at all (a
+                         # constant default branch), tripping the flat
+                         # "at least one non-symbolic argument" default-
+                         # deny trigger even though `x` (the first
+                         # branch's own condition) makes the WHOLE
+                         # Piecewise genuinely symbolic overall.
+                         # `Piecewise` is a pure symbolic CONSTRUCTOR --
+                         # its own build cost never scales with a
+                         # branch's VALUE -- any actual hazard hiding
+                         # inside one of its branches (a nested
+                         # `factorial(10**9)`, say) is still caught
+                         # independently by THAT call's own check,
+                         # regardless of whether Piecewise itself is
+                         # recognized here.
+                         "Piecewise"})
             | frozenset(EvaluateFalseTransformer.functions)
         )
     return _RECOGNIZED_FUNCTION_NAMES
@@ -6033,18 +6219,45 @@ def _evalf_coercion_cheap(arg, arg_log_num: float, arg_log_den: float) -> bool:
 #: exactly as `erf(1)` already correctly does — `erf` was ALREADY in
 #: this set, from round 12). Each of these seventeen has a PROVABLE,
 #: closed-form analytic bound, independent of any measurement:
-#:   `erfc(x) <= 2`; `Si(x)`/`Ci(x) <= 2` for any real `x` (like `sin`/
-#:     `cos`/`tanh`); `fresnels(x)`/`fresnelc(x) <= 1` likewise.
+#:   `erfc(x) <= 2`; `Si(x) <= 2` for any real `x` (like `sin`/`cos`/
+#:     `tanh`); `fresnels(x)`/`fresnelc(x) <= 1` likewise.
 #:   `erfi(x) <= e**(x**2)`; `Ei(x)`/`Li(x)`/`li(x)`/`Chi(x)`/`Shi(x)
 #:     <= e**|x|` — gated at `MAX_HEAVY_ARG` on the EXPONENT (`x**2` or
 #:     `|x|`), past which this module has no basis to trust the bound
-#:     stays renderable.
-#:   `LambertW(x) <= log(x+1)` for `x >= 0` (refused for negative `x`,
-#:     the principal branch's own domain).
+#:     stays renderable; `Ei` also refuses the POLE at `x == 0`, `Li`/
+#:     `li` refuse the pole at `x == 1` (round 16, grok issue 2 —
+#:     `li(1) == -oo`, and `Li`/`Ei` share the identical shape).
+#:   `LambertW(x) <= log(x+1)` for `x >= 0`; round 16 (coordinator
+#:     addendum, item 5, grok's own "what looks sound" section): the
+#:     PRINCIPAL branch is also real on `[-1/e, 0)` (confirmed live,
+#:     `LambertW(-0.1)` evaluates on `origin/main` — the round-15
+#:     version wrongly refused EVERY negative `x`), bounded there by
+#:     `|W(x)| <= 1` (`W`'s own range on that interval is `[-1, 0)`);
+#:     `x < -1/e` (outside the principal branch's real domain
+#:     entirely) still refuses.
 #:   `airyai`/`airybi`/`airyaiprime`/`airybiprime(x) <= e**(|x|**1.5)`,
 #:     same `MAX_HEAVY_ARG` exponent gate on `|x|**1.5`.
-#:   `expint(n, x) <= 1` for `x >= 1` (refused otherwise; independent
-#:     of `n`'s own value).
+#:   `Ci(x)` — round 16 (grok issue 2): `Ci(x) ~ gamma + ln(x)` as
+#:     `x -> 0+`, UNBOUNDED near the pole at `x = 0` — the round-15
+#:     version's flat `<= 2` was simply wrong there (masked in testing
+#:     only because the exact-rational resolver's own ~700-bit
+#:     precision ceiling happens to keep an ADVERSARIAL tiny literal's
+#:     true bound under this module's digit cap too, LUCK, not a
+#:     bound). Refused for `x <= 0` (COMPLEX for negative `x`, the same
+#:     branch-cut shape `Chi`/`li` already have — confirmed live,
+#:     `Ci(-1) == 0.337 + pi*I`); for `0 < x <= 1`, `|Ci(x)| <=
+#:     |gamma| + |ln(x)| + 1` (the `+1` covers the bounded oscillatory
+#:     remainder term); for `x > 1`, the original `<= 2` constant
+#:     still holds (`Ci`'s own oscillation stays damped there).
+#:   `expint(n, x) <= 1` for INTEGER `n >= 1` AND `x >= 1` — round 16
+#:     (grok issue 1): the round-15 version left `n` (position 0)
+#:     completely unchecked, but SymPy 1.14 evaluates `expint(-N, x)`
+#:     for a non-positive integer `N` in CLOSED FORM as `~ N! / x**
+#:     (N+1)` (confirmed live) — `expint(-10000, 1)` constructs
+#:     `~10000!` at the TOP level, past every screen the round-15
+#:     version had. `n` now needs the SAME exact-rational gate `x`
+#:     already has, refused for any `n` that is not a confirmed
+#:     positive integer.
 #: All seventeen reuse `_pole_sensitive_magnitude`'s own established
 #: exact-rational gate (`_unresolved_or_violation`, defined in that
 #: function's own scope) — bound only when the relevant argument
@@ -6062,7 +6275,7 @@ def _evalf_coercion_cheap(arg, arg_log_num: float, arg_log_den: float) -> bool:
 #: the same way here, and the round-15 allowlist had erf/li/airyai/
 #: airyaiprime/expint/Si/Ci removed by hand for the identical reason.
 _ELEMENTARY_SPECIAL_UNBOUNDED_NAMES: dict[str, float] = {
-    "erfc": 2.0, "Si": 2.0, "Ci": 2.0, "fresnels": 1.0, "fresnelc": 1.0,
+    "erfc": 2.0, "Si": 2.0, "fresnels": 1.0, "fresnelc": 1.0,
 }
 _ELEMENTARY_SPECIAL_EXP_BOUNDED_NAMES = frozenset({
     "erfi", "Ei", "Li", "li", "Chi", "Shi",
@@ -6072,7 +6285,7 @@ _POLE_SENSITIVE_NAMES = frozenset({
     "gamma", "loggamma", "digamma", "polygamma", "zeta",
     "sin", "cos", "tanh", "erf", "exp",
     *_ELEMENTARY_SPECIAL_UNBOUNDED_NAMES, *_ELEMENTARY_SPECIAL_EXP_BOUNDED_NAMES,
-    "LambertW", "airyai", "airybi", "airyaiprime", "airybiprime", "expint",
+    "LambertW", "airyai", "airybi", "airyaiprime", "airybiprime", "expint", "Ci",
 })
 
 #: Of the ten `_POLE_SENSITIVE_NAMES`, ONLY these four are also members
@@ -6455,29 +6668,55 @@ def _pole_sensitive_magnitude(node, memo: dict) -> tuple[float, float, bool, str
         return 0.0, 0.0, False, message
 
     if name == "expint":
-        # THE-1095 round 15 (coordinator addendum, item 3): `expint(n,
-        # x) <= 1` for `x >= 1` -- only `x` (position 1) needs the
-        # exact-value gate; the bound does not depend on `n`'s own
-        # value at all.
+        # THE-1095 round 16 (grok issue 1, `verify-1095-r15-grok.log`):
+        # `expint(n, x) <= 1` holds only for INTEGER `n >= 1` -- SymPy
+        # evaluates a non-positive integer `n` in CLOSED FORM as `~ N!
+        # / x**(N+1)` (confirmed live), so `n` now needs the SAME
+        # exact-rational gate `x` already has, not just a pass-through.
         if len(node.args) < 2:
             return None
+        handled_n, n_result = _unresolved_or_violation(node.args[0])
+        if handled_n:
+            return n_result
+        n = n_result
+        if not (n.q == 1 and n >= 1):
+            message = ("the first argument to expint() cannot be safely bounded "
+                       "outside a positive integer n: computing it would take an "
+                       "unbounded amount of time and memory")
+            return 0.0, 0.0, False, message
         handled, result = _unresolved_or_violation(node.args[1])
         if handled:
             return result
         x = result
-        if x < 1:
-            message = ("the second argument to expint() cannot be safely bounded "
-                       "outside x >= 1: computing it would take an unbounded "
-                       "amount of time and memory")
-            return 0.0, 0.0, False, message
-        return 0.0, 0.0, True, None
+        if x >= 1:
+            return 0.0, 0.0, True, None  # E_n(x) <= 1 for n >= 1, x >= 1
+        if x > 0:
+            # THE-1095 round 16 (Codex addendum, `verify-1095-r15.log`,
+            # its own 528-expression branch-vs-main corpus):
+            # `factorial(expint(2, 1/2))` -- `origin/main` evaluates
+            # `expint(2, 1/2)` fine (a real, finite value for any
+            # `0 < x < 1`), but the round-16-so-far `x >= 1` rule
+            # refused it outright. `E_n(x)` is DECREASING in `n` for
+            # fixed `x > 0` (confirmed live: `E_1(0.5) > E_2(0.5) >
+            # E_3(0.5) > ...`), so `E_1(x)` is the worst case for ANY
+            # `n >= 1`; `E_1(x) <= -ln(x) + 1` for `0 < x < 1`
+            # (confirmed live against SymPy's own `N()` at `x` down to
+            # `10**-6`, comfortable margin throughout).
+            bound = -math.log(float(x)) + 1.0
+            return math.log10(bound), 0.0, True, None
+        message = ("the second argument to expint() cannot be safely bounded "
+                   "outside x > 0: computing it would take an unbounded "
+                   "amount of time and memory")
+        return 0.0, 0.0, False, message
 
     if name in _ELEMENTARY_SPECIAL_UNBOUNDED_NAMES:
         # THE-1095 round 15 (coordinator addendum, item 3): `erfc`,
-        # `fresnels`/`fresnelc`, `Si`/`Ci` -- each bounded by a FIXED
+        # `fresnels`/`fresnelc`, `Si` -- each bounded by a FIXED
         # constant for ANY exact real `x`, the identical "|value| <=
         # const, no domain restriction" shape `sin`/`cos`/`tanh`/`erf`
-        # already have, just a different constant per name.
+        # already have, just a different constant per name. (`Ci` was
+        # HERE too in round 15 -- moved to its own branch, below, round
+        # 16: unlike these four, it has a genuine POLE at `x == 0`.)
         if len(node.args) != 1:
             return None
         handled, result = _unresolved_or_violation(node.args[0])
@@ -6485,10 +6724,50 @@ def _pole_sensitive_magnitude(node, memo: dict) -> tuple[float, float, bool, str
             return result
         return math.log10(_ELEMENTARY_SPECIAL_UNBOUNDED_NAMES[name]), 0.0, True, None
 
+    if name == "Ci":
+        # THE-1095 round 16 (grok issue 2, `verify-1095-r15-grok.log`):
+        # `Ci(x) ~ gamma + ln(x)` as `x -> 0+` -- UNBOUNDED near the
+        # pole at `x = 0`, so round 15's flat `<= 2` was simply wrong
+        # there (masked only by the exact-rational resolver's own
+        # precision ceiling keeping an adversarial tiny literal's true
+        # bound under this module's digit cap too -- luck, not a
+        # bound). Also COMPLEX for `x <= 0` (confirmed live: `Ci(-1) ==
+        # 0.337 + pi*I`), the same branch-cut shape `Chi`/`li` already
+        # have -- refused there entirely. For `0 < x <= 1`: `|Ci(x)| <=
+        # |gamma| + |ln(x)| + 1` (the `+1` covers the bounded
+        # oscillatory remainder term, confirmed live against SymPy's
+        # own `N()` at `x` down to `10**-6`). For `x > 1`: the original
+        # `<= 2` constant still holds (`Ci`'s own oscillation stays
+        # damped there).
+        if len(node.args) != 1:
+            return None
+        handled, result = _unresolved_or_violation(node.args[0])
+        if handled:
+            return result
+        x = result
+        if x <= 0:
+            message = ("the argument to Ci() cannot be safely bounded for a "
+                       "non-positive value (a pole at 0, a complex branch below "
+                       "it): computing it would take an unbounded amount of time "
+                       "and memory")
+            return 0.0, 0.0, False, message
+        if x > 1:
+            return math.log10(2.0), 0.0, True, None
+        euler_gamma = 0.5772156649015329  # the Euler-Mascheroni constant
+        bound = euler_gamma + abs(math.log(float(x))) + 1.0
+        return math.log10(bound), 0.0, True, None
+
     if name == "LambertW":
-        # `LambertW(x) <= log(x + 1)` for `x >= 0`; refused for `x < 0`
-        # (the principal branch has its own pole/multivaluedness there
-        # this module does not attempt to reason about).
+        # `LambertW(x) <= log(x + 1)` for `x >= 0`.
+        #
+        # THE-1095 round 16 (coordinator addendum, item 5; grok's own
+        # "what looks sound" section, `verify-1095-r15-grok.log`): the
+        # round-15 version refused EVERY negative `x` -- but the
+        # PRINCIPAL branch is also real on `[-1/e, 0)` (confirmed live:
+        # `LambertW(-0.1)` evaluates on `origin/main`), where `W`'s own
+        # range is `[-1, 0)` -- `|W(x)| <= 1` there. `x < -1/e` (outside
+        # the principal branch's real domain -- `W` goes complex) still
+        # refuses.
         if len(node.args) != 1:
             return None
         handled, result = _unresolved_or_violation(node.args[0])
@@ -6496,10 +6775,12 @@ def _pole_sensitive_magnitude(node, memo: dict) -> tuple[float, float, bool, str
             return result
         x = result
         if x < 0:
-            message = ("the argument to LambertW() cannot be safely bounded for a "
-                       "negative value: computing it would take an unbounded amount "
-                       "of time and memory")
-            return 0.0, 0.0, False, message
+            if float(x) < -1.0 / math.e:
+                message = ("the argument to LambertW() cannot be safely bounded "
+                           "below -1/e: computing it would take an unbounded amount "
+                           "of time and memory")
+                return 0.0, 0.0, False, message
+            return 0.0, 0.0, True, None  # [-1/e, 0): |W(x)| <= 1, log10 <= 0, safe
         log_val = math.log(float(x) + 1.0) if x > 0 else 1.0  # x == 0: LambertW(0) == 0
         if log_val <= 0:
             return 0.0, 0.0, True, None  # value in (0, 1] -- log10 <= 0, trivially safe
@@ -6535,6 +6816,18 @@ def _pole_sensitive_magnitude(node, memo: dict) -> tuple[float, float, bool, str
                        "non-positive value (a complex branch this module does not "
                        "reason about): computing it would take an unbounded amount "
                        "of time and memory")
+            return 0.0, 0.0, False, message
+        # THE-1095 round 16 (grok issue 2): `Ei(0) == -oo` (a pole) and
+        # `li(1)`/`Li(1)` sit on the SAME pole `li`'s own definition
+        # has at `x == 1` -- none of these are a magnitude the `e**|x|`
+        # envelope below can bound at all (the true value is
+        # UNBOUNDED, not merely large). Refused explicitly rather than
+        # silently producing a `log10(0)`-shaped bound (`abs(x) == 0`
+        # would otherwise read as "bound == 1", the opposite of true).
+        if (name == "Ei" and x == 0) or (name in ("Li", "li") and x == 1):
+            message = (f"the argument to {name}() cannot be safely bounded at its "
+                       "own pole: computing it would take an unbounded amount of "
+                       "time and memory")
             return 0.0, 0.0, False, message
         exponent = x * x if name == "erfi" else abs(x)
         if exponent > MAX_HEAVY_ARG:
@@ -6580,6 +6873,37 @@ def _pole_sensitive_magnitude(node, memo: dict) -> tuple[float, float, bool, str
             return 0.0, 0.0, False, message
         return float(x) * math.log10(math.e), 0.0, True, None
     return 0.0, 0.0, True, None  # x < 0: exp(x) shrinks toward 0, always safe
+
+
+def _expint_top_level_violation(node, memo: dict) -> str | None:
+    """Reason a TOP-LEVEL (not merely nested) `expint(n, x)` call is
+    unsafe, or `None` if `node` is not one, or it is safe.
+
+    THE-1095 round 16 (grok issue 1, `verify-1095-r15-grok.log`):
+    every OTHER `_POLE_SENSITIVE_NAMES` member added in round 15 stays
+    LAZILY unevaluated for ordinary numeric input at the TOP level (no
+    real construction happens at all unless something else forces it —
+    confirmed live: `erfc`/`Ei`/`airyai` at an astronomically large
+    argument all evaluate FAST and hit the output digit ceiling
+    normally, `LambertW`/`Ci`/`Li` at an ordinary argument stay
+    symbolic) — `_pole_sensitive_magnitude`'s own nested-resolution gate
+    (wired through `_resolve_arg_magnitude`) was sufficient protection
+    for all of them. `expint` is DIFFERENT: its own
+    `.eval()` computes a CLOSED FORM immediately for ANY non-positive
+    integer `n`, regardless of nesting — `expint(-10000, 1)` hung past
+    several seconds at the BARE TOP level, never reaching a `factorial`/
+    `bell`/anything-else that would trigger the nested path at all.
+    Reuses `_pole_sensitive_magnitude`'s own domain check directly
+    (identical rule, just also applied unconditionally here) rather
+    than duplicating it.
+    """
+    if type(node).__name__ != "expint":
+        return None
+    result = _pole_sensitive_magnitude(node, memo)
+    if result is None:
+        return None
+    _log_num, _log_den, _resolved, violation = result
+    return violation
 
 
 def _resolve_arg_magnitude(node, memo: dict) -> tuple[float, float, bool, str | None]:
@@ -7450,6 +7774,12 @@ def _numeric_ceiling_scan(tree, memo: dict) -> str | None:
         integrate_violation = _integrate_limit_violation(node, memo)
         if integrate_violation:
             return integrate_violation
+        expint_violation = _expint_top_level_violation(node, memo)
+        if expint_violation:
+            return expint_violation
+        fps_violation = _fps_order_violation(node, memo)
+        if fps_violation:
+            return fps_violation
         binomial_k_violation = _binomial_k_violation(node, memo)
         if binomial_k_violation:
             return binomial_k_violation
@@ -7770,6 +8100,14 @@ def reject_explosive(tree) -> str | None:
                 integrate_violation = _integrate_limit_violation(node, memo)
                 if integrate_violation:
                     return integrate_violation
+            if isinstance(node, Function) and type(node).__name__ == "expint":
+                expint_violation = _expint_top_level_violation(node, memo)
+                if expint_violation:
+                    return expint_violation
+            if isinstance(node, Function) and type(node).__name__ == "fps":
+                fps_violation = _fps_order_violation(node, memo)
+                if fps_violation:
+                    return fps_violation
             if isinstance(node, Function) and type(node).__name__ == "binomial":
                 binomial_k_violation = _binomial_k_violation(node, memo)
                 if binomial_k_violation:

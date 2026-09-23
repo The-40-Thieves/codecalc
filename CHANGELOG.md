@@ -1927,6 +1927,220 @@ behind it.
   actually holds, not merely eyeballed at one point (this is what
   caught the `Chi`/`li` complex-branch issue above, before commit).
 
+- **grok FAILED 73663ea (`verify-1095-r15-grok.log`): the round-15
+  elementary bound table itself introduced the SAME "formula stated as
+  an upper bound on a domain it was not derived for" class this ticket
+  exists to close, now inside the very table meant to fix it.**
+
+  1. **`expint(n, x) <= 1` was only ever true for INTEGER `n >= 1`** —
+     SymPy evaluates a non-positive integer `n` in CLOSED FORM as `~N!
+     / x**(N+1)`; `expint(-10000, 1)` passed the round-15 screen (only
+     `x`, position 1, was gated) and constructed `~10000!` at the TOP
+     level (not merely nested — `expint` is a PLAIN eager function,
+     like `jacobi_normalized`). Fixed: `n` (position 0) now needs the
+     SAME exact-rational gate `x` already has (integer `n >= 1` only),
+     plus a new `_expint_top_level_violation` wired into both walk
+     loops UNCONDITIONALLY — every other round-15 elementary name stays
+     lazily unevaluated for ordinary numeric input at the top level
+     (confirmed live: `erfc`/`Ei`/`airyai` at an astronomically large
+     argument all evaluate FAST and hit the output digit ceiling
+     normally), but `expint`'s own `.eval()` computes eagerly for ANY
+     non-positive integer `n` regardless of nesting, so the nested-only
+     `_pole_sensitive_magnitude` gate alone was not enough.
+
+  2. **Poles inside the round-15 "accepted domain"**: `Ci(x) ~ gamma +
+     ln(x)` as `x -> 0+` — UNBOUNDED near the pole, but round 15's flat
+     `<= 2` accepted ANY exact real `x` (masked only by the exact-
+     rational resolver's own precision ceiling keeping an adversarial
+     tiny literal's true bound under this module's digit cap too —
+     luck, not a bound); `Ci` is also COMPLEX for `x <= 0` (confirmed
+     live, `Ci(-1) == 0.337 + pi*I`), the same branch-cut round 15
+     already knew to refuse for `Chi`/`li` but missed for `Ci`. `li(1)`/
+     `Li(1)`/`Ei(0)` sit on poles the round-15 grid never tested (`[0.1,
+     1, 5, 1000]` — the smallest point was still comfortably inside
+     the pole-free region). Fixed: `Ci` moved to its own branch —
+     refused for `x <= 0`, `|Ci(x)| <= |gamma| + |ln(x)| + 1` for `0 <
+     x <= 1` (the original `<= 2` still holds for `x > 1`, where `Ci`'s
+     oscillation stays damped); `Ei`/`Li`/`li` now explicitly refuse
+     their own pole (`x == 0` for `Ei`, `x == 1` for `Li`/`li`) instead
+     of the `e**|x|` envelope silently reading `abs(0) == 0` as "bound
+     == 1", the opposite of the true (unbounded) value there.
+
+  3. **`product`'s own range cap only fired when the summand contained
+     a table `Function`** — `product(x, (x, 1, 10**6))` is `10**6!`
+     (the identity product IS the factorial, regardless of the
+     summand), and the round-15 rule found no table name in a bare `x`,
+     leaving it completely uncapped. **Related**: multi-limit sums/
+     products checked each `(var, lo, hi)` independently, not their
+     CARTESIAN PRODUCT (`summation(bell(x*y), (x,1,200), (y,1,200))` —
+     each axis individually at `bell`'s own 200-term cap, but 200x200
+     = 40000 total terms, with `bell` evaluated up to `40000`) — and
+     the boundary-term check substituted only ONE variable at a time,
+     never seeing the TRUE worst case with every axis at its own upper
+     limit simultaneously. Fixed: `product`/`Product` get an
+     UNCONDITIONAL range cap at `MAX_HEAVY_ARG` (the tighter of that
+     and any table-summand cap applies); every limit's own axis length
+     is multiplied into ONE aggregate term count checked against the
+     cap; the boundary-term substitution now maps EVERY resolved
+     variable to its own upper limit AT ONCE before the single combined
+     `_numeric_ceiling_scan` walk.
+
+  4. **The probe grid's `four_arg_heavy_last` shape is heavy-LAST-only**
+     — no shape ever put the heavy value in position 0 or 1 of a
+     4-argument call, the exact reason `jacobi_normalized(1463, 1, 2,
+     x)` (heavy FIRST) needed a hand-written table row instead of a
+     grid fix last round. The SAME gap is live for `Ynm`/`Ynm_c`/
+     `Znm`/`betainc`/`betainc_regularized`/`random_poly` (each has its
+     own cost-driving argument in an early position) and `fps` (whose
+     comment named `fps(sin(x), x, 0, 1463)` as the "4th-arg" cost
+     class — but in SymPy 1.14, `fps(f, x=None, x0=0, dir=1, hyper=
+     True, order=4, ...)`, position 3 is `dir`, `order` is position 5;
+     the round-15 shape never reached the actual cost-driving argument
+     at all). Fixed: `four_arg_heavy_first`/`four_arg_heavy_middle`
+     (heavy in position 0 / 1) and `five_arg_heavy_last` (heavy in
+     position 4) added to the probe grid; `fps` given a DEDICATED order
+     cap (position 5, cap 100 — the same mechanism `series` already
+     has) rather than relying on measurement at all; a new `--refresh-
+     names <file>` mode (with `--min-positional-args` to generate the
+     list) re-measures only names whose own signature accepts that many
+     positional arguments, rather than a ~2-hour full re-run to re-
+     check a grid change that cannot affect a 1-3-arg name's verdict.
+     `fps`/`Ynm`/`Ynm_c`/`Znm`/`betainc`/`betainc_regularized`/
+     `random_poly` removed from the current allowlist by hand pending
+     re-measurement under the widened grid (conservative default-deny
+     in the meantime — see the closing summary below for what the
+     targeted re-measurement found).
+
+  5. **`LambertW` refused EVERY negative `x`, but `origin/main` also
+     evaluates the PRINCIPAL branch on `[-1/e, 0)`** (`LambertW(-0.1)`,
+     unpinned by round 15). Fixed: `x` in `[-1/e, 0)` now bounds via
+     `|W(x)| <= 1` (`W`'s own range there); `x < -1/e` (outside the
+     principal branch's real domain) still refuses.
+
+  6. **`ci-python.yml`'s macOS jobs were red — not a load flake, every
+     sampled name and every shape came back `CRASH` at the exact
+     8000ms process-wall bound**, confirmed pulling the actual job
+     logs: round 15's own macOS fallback (`RLIMIT_DATA`) itself raises
+     on at least some macOS/Python combinations, and the child died
+     before printing anything recognizable, indistinguishable from a
+     genuine hang. Fixed: the whole memory-limit setup is now wrapped
+     in `try`/`except` (Linux `RLIMIT_AS` -> macOS `RLIMIT_DATA` -> NO
+     LIMIT AT ALL if both raise — a documented, weaker guarantee, never
+     a silent crash) and the child now ALWAYS prints a verdict line,
+     even on total setup failure (`SETUP_FAILED <reason>`, a NEW
+     verdict `measure_name` treats as "not measurable here" — skipped,
+     never a regression or a disqualification, but surfaced in `shard_
+     check`'s own output so a name never actually re-confirmed on some
+     platform stays visible). Verified live on this box by simulating
+     both failure modes (a `RLIMIT_DATA` raise, and a totally
+     unexpected setup exception) — both now produce a recognized
+     verdict instead of empty stdout; `tests/test_measured_safe_
+     callables.py` gained a unit test asserting the real child, on
+     THIS platform's own real setup path, never exits with empty
+     stdout either.
+
+- **Codex's own addendum** (`verify-1095-r15.log`, a real 528-
+  expression checkout-vs-checkout corpus — `safe_parse` run under a
+  subprocess cap on BOTH `origin/main` and this branch, unlike this
+  file's own `main_value` fixture helper, a bare `parse_expr` shortcut
+  that never runs `safe_parse` at all and so cannot catch a divergence
+  `safe_parse`'s own screens introduce):
+  - **A REVERSED limit (`lo > hi`) is not empty on `origin/main`** —
+    `summation(x, (x, 10**6, 1))`/`product(x, (x, 10**6, 1))`: SymPy's
+    own convention computes a NEGATED sum over the SAME magnitude
+    range (confirmed live, `summation(x, (x, 5, 1)) == -9`, real work),
+    but round 16's own (same-day) range-length fix used `hi - lo + 1`
+    directly — negative for a reversed range — and a stray `< 0 -> 0`
+    fallback read that as "empty, safe," missing `product`'s own
+    unconditional cap AND the table-summand cap entirely for the
+    reversed direction. Fixed: `abs(hi - lo) + 1`, symmetric in both
+    directions; the boundary-term substitution also now picks whichever
+    of `lo`/`hi` has the larger MAGNITUDE (the true extreme for a
+    reversed range is `lo`, not `hi`).
+  - **`Piecewise((x, x>0), (0, True))` — an ORDINARY symbolic Piecewise
+    — refused**: its own SECOND branch, `(0, True)`, has no free
+    symbols at all (a constant default branch), tripping the flat "at
+    least one non-symbolic argument" default-deny trigger even though
+    the FIRST branch's own condition (`x`) makes the whole Piecewise
+    genuinely symbolic overall. Fixed: `Piecewise` is a pure symbolic
+    CONSTRUCTOR whose own build cost never scales with a branch's
+    VALUE — added to the recognized-names set; any actual hazard
+    hiding inside a branch (a nested `factorial(10**9)`, say) is still
+    caught independently by that call's own check.
+  - **`factorial(expint(2, 1/2))` refused where main evaluates it**:
+    round 16's own `x >= 1` domain for `expint` was tighter than
+    necessary — `E_n(x)` is real and finite for any `0 < x < 1` too.
+    Fixed: extended to `x > 0`, using `E_n(x) <= E_1(x) <= -ln(x) + 1`
+    for `0 < x < 1` (`E_n` is DECREASING in `n` for fixed `x`,
+    confirmed live, so `E_1` is the worst case for any `n >= 1`; the
+    bound itself confirmed against SymPy's own `N()` down to `x =
+    10**-6`, comfortable margin throughout).
+  - **`factorial(Chi(-1))`/`factorial(li(-1))` refused where main
+    evaluates them (symbolically)**: `Chi`/`li` are COMPLEX for
+    `x <= 0` (round 16's own domain restriction, added the same day)
+    — main leaves `factorial(<complex>)` unevaluated, genuinely safe,
+    but this module cannot PROVE that safety, only refuse an unresolved
+    nested argument. Left as a DELIBERATE, documented narrowing (pinned
+    as "still refuses," not "now matches main") rather than a fix —
+    the same "closing the branch-cut case is worth a false refusal
+    here" trade this file already makes elsewhere.
+
+  All four added to `tests/test_differential_corpus.py` (`run_codex_
+  r15_corpus_divergences`) and `tests/test_bug_sweep.py`, with a
+  follow-up note on `main_value`'s own bare-`parse_expr` blind spot for
+  the next fixture regeneration.
+
+- **`scripts/measure_safe_callables.py --refresh-names`'s own merge put
+  `erf` (and eight siblings: `li`, `airyai`, `airyaiprime`, `expint`,
+  `Si`, `Ci`, `fps`, `jacobi_normalized`) BACK on the allowlist**
+  (coordinator's own live spot-check of the uncommitted round-16 tree,
+  caught via `test_bug_sweep.py`'s own `erf(10000)` pin going red): the
+  refresh starts from the OLD committed raw report, written before
+  these nine names got their own dedicated table/pole-sensitive/
+  elementary row this round — merging it back in silently
+  reintroduced them, wrongly re-enabling `_measured_safe_argument_cap_
+  violation`'s own generic `MAX_HEAVY_ARG` cap for a name whose
+  dedicated bound never needed one at all. Fixed at the root: a new
+  `_prune_handled_names` drops every `_already_handled_names()` member
+  from BOTH the raw report and the allowlist, in `refresh_excluded`
+  AND `refresh_names` alike, before either is written; `codecalc/
+  _measured_safe_callables.json`/`scripts/_measured_safe_callables_
+  raw.json` re-pruned by hand for this commit rather than re-running
+  the ~2-hour full measurement. `tests/test_measured_safe_callables.py`
+  gained a standing invariant check (allowlist ∩ `_already_handled_
+  names()` = ∅) so a future refresh path that forgets to prune is
+  caught immediately, not by a downstream symptom in a different test
+  file.
+
+- **ClusterFuzzLite found a live 22.2s hang-shaped gap**
+  (`slow-unit-r16.bin`, seed `(3/2)**300001!!E1`; `origin/main` itself
+  measures ~19s on the identical shape, so this is THE class the
+  ticket exists to close, not a false positive): the "a deferred-parse
+  exception is safe to treat as inconclusive only when the expression
+  touches nothing this module bounds" check (round 4) ran on the RAW
+  source TEXT — but `!!`/`!` are punctuation there, not the words
+  `factorial2`/`factorial`; those names only exist after SymPy's own
+  `factorial_notation` token TRANSFORMATION (always applied, part of
+  `standard_transformations`) rewrites the raw tokens into actual
+  `factorial2(...)`/`factorial(...)` calls. `(3/2)**300001!!E1`'s own
+  deferred parse raises (`E1`, a bare name resolving to a real SymPy
+  object, hit via IMPLICIT MULTIPLICATION, `SympifyError`s combining
+  it with a number) — the raw-text check found no table name at all
+  and misread the exception as "inconclusive," letting the REAL parse
+  construct `(3/2)**300001` (a legitimate, cap-worthy `Pow`) for real
+  before hitting the identical `SympifyError`. Fixed: when the raw
+  text alone finds nothing, `stringify_expr` — the SAME token-
+  transformation step `parse_expr` itself always applies before
+  `ast.parse` — now runs first, and the TRANSFORMED result is checked
+  the same way (`factorial2` is plainly a `_FUNCTION_ARG_CAPS` NAME
+  token there); `stringify_expr` itself raising, or its own output not
+  tokenizing, both fail closed (treated as "touches," `unknown !=
+  safe`, the same bar the raw-text tokenizer failure already used).
+  Pinned: `(3/2)**300001!!E1`/`(3/2)**300001!E1`/`bell(1463)!!E1`
+  refuse in well under a second (was 22.2s); `5!!x`/`3!x` (ordinary
+  factorial notation plus implicit multiplication) keep main's exact
+  values; bare `E1` stays the pre-existing bare-class validation.
+
 ## [0.13.0] — 2026-09-21
 
 ### Fixed

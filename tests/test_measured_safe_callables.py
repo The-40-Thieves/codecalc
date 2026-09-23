@@ -68,12 +68,61 @@ if __name__ == "__main__":
               f"-> file has {len(allowlist)}, loaded has "
               f"{len(se._MEASURED_SAFE_CALLABLES)}")
 
+        # THE-1095 round 16 (coordinator's own live spot-check of the
+        # uncommitted round-16 tree): `--refresh-names`'s own merge put
+        # `erf` (and eight siblings — see `_prune_handled_names`'s own
+        # docstring) BACK on the allowlist, from an OLD raw report
+        # written before those names got their own dedicated table/
+        # pole-sensitive/elementary row — silently re-enabling the
+        # generic `MAX_HEAVY_ARG` cap for a name whose dedicated bound
+        # never needed one (`erf(10000)` wrongly refused again). A name
+        # is either MEASURED-safe or ALREADY-handled, never both — this
+        # asserts the invariant directly, independent of how the
+        # allowlist was produced, so a future refresh path that forgets
+        # to prune is caught here rather than by a downstream `test_bug_
+        # sweep.py` symptom.
+        from measure_safe_callables import _already_handled_names
+        overlap = set(allowlist) & _already_handled_names()
+        check("the allowlist and _already_handled_names() (pole-"
+              "sensitive/table/elementary names, each with its OWN "
+              "dedicated bound) are DISJOINT",
+              not overlap, f"-> overlap={sorted(overlap)!r}")
+
         shard = _shard_id()
         shard_size = sum(1 for i, _n in enumerate(sorted(allowlist)) if i % NUM_SHARDS == shard)
         regressions = shard_check()
         check(f"this box's own shard ({shard}/{NUM_SHARDS}) of the allowlist "
               f"({shard_size} names) shows no TIMEOUT/CRASH/over-digit regression",
               not regressions, f"-> regressions={regressions!r}")
+
+    # THE-1095 round 16 (coordinator addendum, item 6): the probe child
+    # must NEVER exit with empty stdout — that is exactly what made a
+    # genuine platform-setup failure (macOS's own RLIMIT_DATA raising)
+    # indistinguishable from a real hang, both reading back as CRASH
+    # with no way to tell them apart from CI output alone. Runs the
+    # REAL child (this platform's own real setup path) for one ordinary
+    # shape and asserts stdout is non-empty and starts with a
+    # RECOGNIZED verdict word.
+    import subprocess
+    import sys as _sys
+
+    from measure_safe_callables import _PROBE_CHILD, PROBE_CALL_TIMEOUT_S, PROBE_MEMORY_KB
+
+    from codecalc.safe_expr import MAX_HEAVY_ARG as _MHA
+    _child_src = _PROBE_CHILD.format(mem_kb=PROBE_MEMORY_KB, name="gcd",
+                                      shape_name="two_ints", heavy=_MHA,
+                                      call_timeout=PROBE_CALL_TIMEOUT_S)
+    _proc = subprocess.run([_sys.executable, "-c", _child_src],
+                           capture_output=True, text=True, timeout=10)
+    _out = _proc.stdout.strip()
+    check("the probe child never exits with EMPTY stdout (the exact "
+          "shape a silent platform-setup failure took before this "
+          "round: every shape read back as an unexplained CRASH)",
+          bool(_out), f"-> stdout={_out!r} stderr={_proc.stderr[-300:]!r}")
+    check("  ...and stdout starts with a RECOGNIZED verdict word",
+          _out.split(maxsplit=1)[0] in
+          ("OK", "UNSUPPORTED_TYPE", "UNSUPPORTED_VALUE", "TIMEOUT", "SETUP_FAILED"),
+          f"-> stdout={_out!r}")
 
     print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
           "\n=== MEASURED-SAFE-CALLABLES SHARD CLEAN ===")

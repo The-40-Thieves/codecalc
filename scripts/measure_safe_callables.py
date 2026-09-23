@@ -141,7 +141,15 @@ def _already_handled_names() -> frozenset[str]:
         # never needing an argument cap at all.
         | frozenset(se._POLE_SENSITIVE_NAMES)
         | frozenset({"Mod", "Max", "Min", "floor", "ceiling", "frac", "N", "series",
-                     "summation", "product", "Sum", "Product", "integrate", "Integral"})
+                     "summation", "product", "Sum", "Product", "integrate", "Integral",
+                     "fps"})
+        # THE-1095 round 16 (coordinator addendum, item 4; grok issue 3):
+        # `fps` gets the SAME dedicated-position-cap treatment `series`
+        # already has (`_EXTRA_BOUNDED_POSITIONS["fps"] = {5: (...)}`,
+        # `_fps_order_violation`) rather than being measured — its own
+        # `order` (position 5, not 3 — the round-15 comment named the
+        # wrong slot) is the cost-driving argument, the identical shape
+        # `series` already needed a bespoke mechanism for.
         # AST-transform-RESERVED classes: `Add`/`Mul`/`Pow`/`Or`/`And`/
         # `Not`/`Eq`/`Ne`/`Lt`/`Le`/`Gt`/`Ge` (what `visit_BinOp`/
         # `visit_Compare` construct for EVERY `+`/`*`/`**`/comparison),
@@ -206,10 +214,27 @@ def _already_handled_names() -> frozenset[str]:
 #: `PROBE_SHAPES` had no shape with more than 3 positions at all before
 #: this round, so a name whose cost hides behind its 4th argument was
 #: never probed there regardless of magnitude).
+#: THE-1095 round 16 (coordinator addendum, item 4; grok issue 3,
+#: `verify-1095-r15-grok.log`): `four_arg_heavy_last` alone is
+#: HEAVY-LAST-ONLY — it never puts the heavy value in position 0 or 1
+#: of a 4-argument call, exactly why `jacobi_normalized(1463, 1, 2, x)`
+#: (heavy FIRST) measured allowlisted and had to be patched with a
+#: table row instead of a grid fix; the SAME gap is still live for
+#: `Ynm`/`Ynm_c`/`Znm`/`betainc`/`betainc_regularized`/`random_poly`
+#: (each has its own cost-driving argument in an EARLY position a
+#: last-only heavy probe never reaches) and `fps` (whose own `order`
+#: is position 5, not even reached by a 4-arg shape at all — see its
+#: own `_FUNCTION_ARG_CAPS` entry, given a dedicated cap instead of
+#: relying on measurement). `four_arg_heavy_first`/`four_arg_heavy_
+#: middle` (heavy in position 0 / position 1, small/symbolic fillers
+#: elsewhere) and `five_arg_heavy_last` (heavy in position 4, for a
+#: name whose own cost hides even further back) close the position
+#: coverage gap.
 _HEAVY_SHAPES = frozenset({
     "one_int_heavy", "two_ints_heavy", "three_ints_heavy", "symbol_int_heavy",
     "small_heavy", "heavy_small", "float_heavy_exp", "rational_heavy_numerator",
-    "four_arg_heavy_last",
+    "four_arg_heavy_last", "four_arg_heavy_first", "four_arg_heavy_middle",
+    "five_arg_heavy_last",
 })
 
 PROBE_SHAPES: tuple[str, ...] = (
@@ -217,7 +242,8 @@ PROBE_SHAPES: tuple[str, ...] = (
     "symbol", "symbol_int", "symbol_symbol",
     "one_int_heavy", "two_ints_heavy", "three_ints_heavy", "symbol_int_heavy",
     "small_heavy", "heavy_small", "float_heavy_exp", "rational_heavy_numerator",
-    "four_arg_heavy_last",
+    "four_arg_heavy_last", "four_arg_heavy_first", "four_arg_heavy_middle",
+    "five_arg_heavy_last",
 )
 
 #: The probe CHILD process — run standalone (`python -c PROBE_SCRIPT`)
@@ -240,16 +266,48 @@ _PROBE_CHILD = textwrap.dedent("""
     # every shape, came back CRASH on both `windows-latest` and
     # `macos-latest`, at the exact outer wall-clock bound -- the child
     # was dying before printing anything recognizable, on EVERY
-    # platform but Linux). `RLIMIT_DATA` (heap size, not the WHOLE
-    # address space) is the standard macOS workaround; Windows has no
-    # equivalent rlimit at all, so it gets NONE -- a documented, weaker
-    # guarantee on that one platform only, not silently pretended away.
-    if sys.platform.startswith("linux"):
-        import resource
-        resource.setrlimit(resource.RLIMIT_AS, ({mem_kb} * 1024, {mem_kb} * 1024))
-    elif sys.platform == "darwin":
-        import resource
-        resource.setrlimit(resource.RLIMIT_DATA, ({mem_kb} * 1024, {mem_kb} * 1024))
+    # platform but Linux).
+    #
+    # THE-1095 round 16 (coordinator addendum, item 6): the round-15
+    # fix (try `RLIMIT_DATA` on macOS) was STILL not enough -- confirmed
+    # live on PR #343's own macOS py3.14 job, EVERY sampled name, EVERY
+    # shape, STILL came back CRASH at the exact 8000ms process-wall
+    # bound, meaning `RLIMIT_DATA` itself raises there too on at least
+    # some macOS/Python combinations (it is not universally supported
+    # either). Two independent fixes: (1) the WHOLE setup block is now
+    # wrapped in `try`/`except`, falling through Linux `RLIMIT_AS` ->
+    # macOS `RLIMIT_DATA` -> NO LIMIT AT ALL if both raise -- a
+    # documented, weaker guarantee rather than a silent crash; (2) the
+    # child now ALWAYS prints a verdict line, even when every limit
+    # attempt failed (`SETUP_FAILED <reason>` if some genuinely
+    # unexpected error occurs during setup itself, distinct from
+    # `OK`/`UNSUPPORTED_TYPE`/`UNSUPPORTED_VALUE`/`TIMEOUT`) -- the
+    # PARENT (`_probe_shape`, below) now tells "the child died before
+    # printing anything at all" (a real `CRASH`, worth investigating)
+    # apart from "the child ran and told us setup failed on this
+    # platform" (a `SETUP_FAILED` verdict, `measure_name`'s own
+    # classification treats as NOT MEASURABLE here -- skipped, never a
+    # regression signal, and surfaced in test output so a genuine new
+    # platform gap is still visible rather than silently invisible the
+    # way an unconditional CRASH used to make every shape look
+    # identical to a hang).
+    _mem_limit_note = "none"
+    try:
+        if sys.platform.startswith("linux"):
+            import resource
+            resource.setrlimit(resource.RLIMIT_AS, ({mem_kb} * 1024, {mem_kb} * 1024))
+            _mem_limit_note = "RLIMIT_AS"
+        elif sys.platform == "darwin":
+            import resource
+            try:
+                resource.setrlimit(resource.RLIMIT_DATA, ({mem_kb} * 1024, {mem_kb} * 1024))
+                _mem_limit_note = "RLIMIT_DATA"
+            except (ValueError, OSError):
+                _mem_limit_note = "none (RLIMIT_DATA unavailable on this macOS/Python)"
+        # Windows: no rlimit equivalent at all -- stays "none".
+    except Exception as _setup_exc:
+        print("SETUP_FAILED", type(_setup_exc).__name__, str(_setup_exc))
+        sys.exit(0)
     import sympy as sp
     from sympy import Rational, Symbol, Float
     _x, _y = Symbol('x'), Symbol('y')
@@ -298,6 +356,17 @@ _PROBE_CHILD = textwrap.dedent("""
         # positions at all, so a name whose real cost hides behind a
         # 4th argument was never probed here regardless of magnitude.
         "four_arg_heavy_last": (_x, 0, 0, _H),
+        # THE-1095 round 16 (coordinator addendum, item 4): heavy in
+        # position 0 and position 1 of a 4-arg call -- `jacobi_
+        # normalized(1463, 1, 2, x)`-class (heavy FIRST) and a
+        # `random_poly(x, 1463, 0, 0)`-class (heavy at position 1,
+        # `random_poly(x, degree, ...)`'s own actual cost driver).
+        "four_arg_heavy_first": (_H, 1, 2, _x),
+        "four_arg_heavy_middle": (_x, _H, 0, 0),
+        # A FIVE-positional-argument shape, heavy LAST -- `fps`'s own
+        # real `order` is position 5 (0-indexed 4th EXTRA arg after
+        # `f`), which no shape before this round reached at all.
+        "five_arg_heavy_last": (_x, 0, 0, 0, _H),
     }}
     fn = getattr(sp, {name!r})
     args = _SHAPE_BUILDERS[{shape_name!r}]
@@ -411,7 +480,14 @@ def _probe_shape(name: str, shape_name: str) -> tuple[str, float, int]:
     kept distinct from `UNSUPPORTED_TYPE` because `measure_name`'s own
     Rule-3 gate treats the two very differently at a HEAVY shape — see
     `_PROBE_CHILD`'s own comment for the full reasoning), `"TIMEOUT"`,
-    or `"CRASH"`. Spawns a fresh, `ulimit -v`-capped child process per
+    `"SETUP_FAILED"` (THE-1095 round 16, coordinator addendum item 6:
+    the child's own memory-limit setup raised — a platform gap this
+    script cannot measure past, NOT a verdict on the callable at all —
+    `measure_name` treats it as "not measurable here", skipped, never
+    a regression), or `"CRASH"` (the child died WITHOUT printing any
+    recognized verdict line at all — genuinely worth investigating,
+    now that `SETUP_FAILED` exists to catch the platform-gap case
+    separately). Spawns a fresh, `ulimit -v`-capped child process per
     call — see this module's own docstring for why isolation is per
     (name, shape), not merely per name.
     """
@@ -436,6 +512,8 @@ def _probe_shape(name: str, shape_name: str) -> tuple[str, float, int]:
         return "UNSUPPORTED_VALUE", 0.0, 0
     if out.startswith("TIMEOUT"):
         return "TIMEOUT", PROBE_CALL_TIMEOUT_S * 1000.0, -1
+    if out.startswith("SETUP_FAILED"):
+        return "SETUP_FAILED", 0.0, 0
     return "CRASH", PROBE_TIMEOUT_S * 1000.0, -1
 
 
@@ -463,6 +541,7 @@ def measure_name(name: str) -> dict:
     applicable = 0
     allowlisted = True
     heavy_confirmed = False
+    setup_failed_shapes = []
     for shape_src in PROBE_SHAPES:
         verdict, dt_ms, digits = _probe_shape(name, shape_src)
         shapes.append({"shape": shape_src, "verdict": verdict,
@@ -479,11 +558,20 @@ def measure_name(name: str) -> dict:
                 heavy_confirmed = True
         elif verdict == "UNSUPPORTED_VALUE":
             pass  # no signal either way -- see this function's own docstring
+        elif verdict == "SETUP_FAILED":
+            # THE-1095 round 16 (coordinator addendum, item 6): a
+            # PLATFORM gap (the child's own memory-limit setup raised),
+            # not a verdict on the callable at all -- "not measurable
+            # HERE", never counted toward allowlisting OR disqualifying
+            # it, but tracked separately so it stays VISIBLE (a name
+            # allowlisted with every shape SETUP_FAILED on some platform
+            # was never actually confirmed safe there at all).
+            setup_failed_shapes.append(shape_src)
         else:  # TIMEOUT or CRASH
             allowlisted = False
     return {"name": name,
             "allowlisted": bool(allowlisted and applicable > 0 and heavy_confirmed),
-            "shapes": shapes}
+            "shapes": shapes, "setup_failed_shapes": setup_failed_shapes}
 
 
 def measure_all() -> tuple[dict, dict]:
@@ -527,6 +615,30 @@ def measure_all() -> tuple[dict, dict]:
     return data, results
 
 
+def _prune_handled_names(raw_results: dict) -> dict:
+    """`raw_results` with every key `_already_handled_names()` NOW
+    excludes dropped — a name that used to be a genuine measurement
+    candidate but has SINCE been given a dedicated table/pole-sensitive/
+    elementary row (round 16 addendum: `erf`, `li`, `airyai`,
+    `airyaiprime`, `expint`, `Si`, `Ci`, `fps`, `Piecewise`, `summation`,
+    `product`, ...) stays in an OLD committed raw report (`refresh_
+    excluded`/`refresh_names` both start from it) even after `measure_
+    all`'s own candidate list stops including it — its OWN dedicated
+    mechanism should be the ONLY thing deciding it, never the measured
+    list. THE-1095 round 16 (coordinator's own live spot-check of the
+    uncommitted round-16 tree): `--refresh-names`'s own merge put `erf`
+    (and six siblings) BACK on the allowlist this exact way, wrongly
+    re-enabling `_measured_safe_argument_cap_violation`'s own generic
+    `MAX_HEAVY_ARG` cap for a name whose dedicated bound never needed
+    one at all (`erf(10000)` wrongly refused again). Called by every
+    write path that starts from an EXISTING raw report — `measure_all`
+    never needs it, its own candidate list is already filtered up
+    front.
+    """
+    handled = _already_handled_names()
+    return {name: rec for name, rec in raw_results.items() if name not in handled}
+
+
 def refresh_excluded() -> tuple[dict, dict, list[str]]:
     """Re-measure ONLY the names the committed raw report left off the
     allowlist on a verdict that MAY be a load artifact rather than a
@@ -561,7 +673,7 @@ def refresh_excluded() -> tuple[dict, dict, list[str]]:
     process_wall_ms = PROBE_TIMEOUT_S * 1000.0
     marginal_floor_ms = FAST_MS
     marginal_ceiling_ms = FAST_MS * 3.0
-    raw_results = json.loads(RAW_REPORT_PATH.read_text())
+    raw_results = _prune_handled_names(json.loads(RAW_REPORT_PATH.read_text()))
     targets = sorted(
         name for name, rec in raw_results.items()
         if not rec["allowlisted"] and any(
@@ -584,6 +696,87 @@ def refresh_excluded() -> tuple[dict, dict, list[str]]:
         "allowlist": allowlist,
     }
     return data, raw_results, targets
+
+
+def refresh_names(names: list[str]) -> tuple[dict, dict, list[str]]:
+    """Re-measure an EXPLICIT list of names (any that exist in the
+    committed raw report; a name not there yet is measured fresh and
+    added), merge into the raw report, and recompute the allowlist.
+
+    THE-1095 round 16 (coordinator addendum, item 4; grok issue 3,
+    `verify-1095-r15-grok.log`): a full `--write` run takes ~2 hours;
+    the probe-grid widening this round added (heavy value in position
+    0/1/4, not only 3) only matters for names whose own real signature
+    accepts 4+ positional arguments — re-measuring the WHOLE 767-name
+    surface to re-check a widened grid that cannot change the verdict
+    for a 1-3-arg name at all wastes ~2 hours to re-confirm ~750
+    unaffected verdicts. `--refresh-names <file>` (one name per line,
+    `#`-prefixed lines and blank lines ignored) targets exactly the
+    names that COULD be affected instead — the CLI path computes that
+    list itself (every candidate `inspect.signature` reports 4+
+    accepted positional parameters for), so a caller does not have to
+    hand-enumerate it.
+    """
+    raw_results = (_prune_handled_names(json.loads(RAW_REPORT_PATH.read_text()))
+                   if RAW_REPORT_PATH.exists() else {})
+    for i, name in enumerate(names):
+        raw_results[name] = measure_name(name)
+        if (i + 1) % 10 == 0:
+            print(f"... refreshed {i + 1}/{len(names)}", file=sys.stderr)
+    allowlist = sorted(n for n, r in raw_results.items() if r["allowlisted"])
+    data = {
+        "measured_utc": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "fast_ms_threshold": FAST_MS,
+        "max_result_digits": MAX_RESULT_DIGITS,
+        "candidates_measured": len(raw_results),
+        "allowlist": allowlist,
+    }
+    return data, raw_results, names
+
+
+def _names_with_min_positional_args(min_args: int) -> list[str]:
+    """Every candidate name (per `measure_all`'s own `_already_handled_
+    names` exclusion) whose real callable's own `inspect.signature`
+    reports at least `min_args` EXPLICIT (fixed) positional parameters
+    — the set a wider heavy-probe-position grid could actually change
+    the verdict for. A name `inspect.signature` cannot introspect (a
+    C-implemented callable, `TypeError` on `signature()`) is included
+    defensively — `unknown != safe`, better to re-measure a name that
+    turns out unaffected than skip one that was.
+
+    Deliberately EXCLUDES a bare `*args` (`VAR_POSITIONAL`) alone from
+    counting toward `min_args` — a name like `sympify(*args, **kwargs)`
+    is technically "4+ positional capable" but is not the concrete
+    "fixed slot N has the real cost" shape this round's own probe-grid
+    widening targets (`jacobi_normalized`/`fps`/`random_poly`/`Ynm` all
+    have ORDINARY, fixed signatures) — including every `*args` name
+    would balloon this list from ~95 to ~300+ without adding coverage
+    for the actual class of concern.
+    """
+    import inspect
+
+    from codecalc import safe_expr as se
+
+    real = se.safe_global_dict()
+    handled = _already_handled_names()
+    candidates = sorted(
+        n for n, obj in real.items()
+        if callable(obj) and n not in handled and not n.startswith("_")
+    )
+    result = []
+    for name in candidates:
+        try:
+            sig = inspect.signature(real[name])
+        except (TypeError, ValueError):
+            result.append(name)
+            continue
+        positional = sum(
+            1 for p in sig.parameters.values()
+            if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+        )
+        if positional >= min_args:
+            result.append(name)
+    return result
 
 
 def resample_check(sample_size: int) -> bool:
@@ -701,6 +894,14 @@ def shard_check(num_shards: int = NUM_SHARDS) -> list[str]:
         if bad_shapes:
             print(f"REGRESSION: {name!r} -> {bad_shapes}")
             regressions.append(name)
+        if result.get("setup_failed_shapes"):
+            # THE-1095 round 16 (coordinator addendum, item 6): never a
+            # regression by itself (a platform gap, not the callable's
+            # own fault) but surfaced anyway -- a name every one of
+            # whose shapes hits SETUP_FAILED on this platform was never
+            # actually re-CONFIRMED safe here at all, worth knowing.
+            print(f"SETUP_FAILED (not a regression): {name!r} -> "
+                  f"{result['setup_failed_shapes']}")
     return regressions
 
 
@@ -724,7 +925,44 @@ def main() -> int:
                               "merge them into the raw report, and rewrite "
                               "both files with a fresh measurement date; "
                               "implies --write")
+    parser.add_argument("--refresh-names", metavar="FILE",
+                         help="re-measure only the names listed in FILE (one "
+                              "per line; # comments and blank lines ignored), "
+                              "merge into the raw report, and rewrite both "
+                              "files; implies --write. Combine with "
+                              "--min-positional-args to generate the list "
+                              "instead of hand-writing it")
+    parser.add_argument("--min-positional-args", type=int, default=0,
+                         help="with --refresh-names, if FILE does not exist, "
+                              "write it first as every candidate name whose "
+                              "own signature accepts at least this many "
+                              "positional arguments (see "
+                              "_names_with_min_positional_args), then use it")
     args = parser.parse_args()
+
+    if args.refresh_names:
+        target_file = pathlib.Path(args.refresh_names)
+        if not target_file.exists():
+            if not args.min_positional_args:
+                print(f"{target_file} does not exist and --min-positional-args "
+                      "was not given -- nothing to generate it from", file=sys.stderr)
+                return 1
+            names = _names_with_min_positional_args(args.min_positional_args)
+            target_file.write_text("\n".join(names) + "\n")
+            print(f"wrote {target_file} -- {len(names)} names with >= "
+                  f"{args.min_positional_args} positional args", file=sys.stderr)
+        else:
+            names = [line.strip() for line in target_file.read_text().splitlines()
+                      if line.strip() and not line.strip().startswith("#")]
+        data, raw_results, refreshed = refresh_names(names)
+        DATA_PATH.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+        RAW_REPORT_PATH.write_text(json.dumps(raw_results, indent=2, sort_keys=True) + "\n")
+        newly = sorted(n for n in refreshed if raw_results[n]["allowlisted"])
+        print(f"refreshed {len(refreshed)} named targets; {len(newly)} "
+              f"allowlisted: {newly}", file=sys.stderr)
+        print(f"wrote {DATA_PATH} -- {len(data['allowlist'])} names allowlisted "
+              f"of {data['candidates_measured']} measured", file=sys.stderr)
+        return 0
 
     if args.refresh_excluded:
         data, raw_results, refreshed = refresh_excluded()

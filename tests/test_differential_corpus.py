@@ -231,12 +231,63 @@ def run_formerly_divergent_checks() -> None:
               f"-> value={v!r} err={err!r} want=('validation', {want!r})")
 
 
+def run_codex_r15_corpus_divergences() -> None:
+    """THE-1095 round 16 (Codex addendum, `verify-1095-r15.log`): Codex's
+    own real 528-expression checkout-vs-checkout corpus (subprocess-
+    capped, running an ACTUAL `safe_parse` on both `origin/main` and
+    this branch — unlike this fixture's own `main_value`, a bare
+    `parse_expr` shortcut that never runs `safe_parse` at all, and so
+    never caught any of these four) found exactly four branch-vs-main
+    differences, all a valid main result turned into a branch `ceiling`
+    refusal, none pinned here before this round:
+
+    FOLLOW-UP NOTE (not implemented this round, time budget): `main_
+    value`, above, could shell out to an `origin/main` checkout's own
+    `safe_parse` under `timeout 6` for the NEXT regeneration of this
+    fixture, instead of the bare `parse_expr` shortcut — that is
+    precisely the gap that let these four go uncaught: a name FULLY
+    RECOGNIZED by `safe_global_dict()`/`math_transforms()` (so `main_
+    value`'s own shortcut sees no divergence at all) can still diverge
+    once `safe_parse`'s OWN screens run on it, which only a REAL
+    `safe_parse`-vs-`safe_parse` comparison across two checkouts would
+    catch.
+    """
+    v, err = se.safe_parse("Piecewise((x,x>0),(0,True))")
+    check("differential (Codex r15 corpus, now fixed): "
+          "'Piecewise((x,x>0),(0,True))' (an ordinary symbolic "
+          "Piecewise) matches main",
+          err is None and str(v) == "Piecewise((x, x > 0), (0, True))",
+          f"-> value={v!r} err={err!r}")
+    v, err = se.safe_parse("factorial(expint(2,1/2))")
+    check("differential (Codex r15 corpus, now fixed): "
+          "'factorial(expint(2,1/2))' (0 < x < 1, the new E_1(x) <= "
+          "-ln(x)+1 bound) matches main (stays symbolic)",
+          err is None and str(v) == "factorial(expint(2, 1/2))",
+          f"-> value={v!r} err={err!r}")
+    # `factorial(Chi(-1))`/`factorial(li(-1))`: Chi/li are COMPLEX for
+    # x <= 0 -- main leaves `factorial(<complex>)` symbolically
+    # unevaluated (genuinely safe, just unprovable to THIS module). A
+    # DELIBERATE, documented narrowing rather than a fix -- pinned as
+    # "still refuses", not "now matches main", the same trade this
+    # file's own `_REFUSAL_COMPARISON_EXPRESSIONS` already documents
+    # for other names.
+    for expr in ("factorial(Chi(-1))", "factorial(li(-1))"):
+        v, err = se.safe_parse(expr)
+        check(f"differential (Codex r15 corpus, deliberate narrowing, "
+              f"not a fix): {expr!r} refuses -- main leaves it "
+              f"symbolic (a complex branch), but this module cannot "
+              f"prove that safe",
+              v is None and err is not None and err[0] == "ceiling",
+              f"-> value={v!r} err={err!r}")
+
+
 x = Symbol("x")
 
 if __name__ == "__main__":
     run_numeric_table_sweep()
     run_refusal_sweep()
     run_formerly_divergent_checks()
+    run_codex_r15_corpus_divergences()
     print(f"\n{CHECKED} assertions checked "
           f"({len(_NUMERIC_TABLE_SHAPES) + len(_ELEMENTARY_SHAPES) + len(_MEASURED_SAFE_SHAPES)} "
           f"names x shapes x {len(_NUMERIC_N_VALUES)} n-values, plus "

@@ -5180,6 +5180,176 @@ check(f"THE-1095 round 15 (property check): every elementary special-"
       f"{time.time() - _t0_sp:.2f}s)",
       not _prop_fails, f"-> failures={_prop_fails}")
 
+# THE-1095 round 16 (grok issue 1, `verify-1095-r15-grok.log`):
+# `expint(n, x) <= 1` was only ever true for INTEGER n >= 1 -- SymPy
+# evaluates a non-positive integer n in CLOSED FORM as ~N!/x**(N+1),
+# so a NEGATIVE order used to pass every screen and then construct a
+# huge factorial-scale value, at the TOP level (not merely nested).
+for _expr in ("expint(-10000,1)", "expint(-50, 1)", "factorial(floor(expint(-50, 1)))"):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round 16 (expint negative-order fail-open): "
+          f"{_expr!r} refuses promptly",
+          _v is None and _e is not None and _e[0] == "ceiling" and _dt < 1.0,
+          f"-> value={_v!r} err={_e!r} elapsed={_dt:.3f}s")
+for _expr, _want in (("expint(5, 1)", "expint(5, 1)"), ("expint(2,1)", "expint(2, 1)")):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 16: {_expr!r} (positive integer order) still "
+          f"evaluates, matching main",
+          _e is None and str(_v) == _want, f"-> value={_v!r} err={_e!r}")
+
+# THE-1095 round 16 (grok issue 2): Ci/li/Li/Ei all have a POLE inside
+# what the round-15 grid treated as their fully-accepted domain --
+# Ci(x) ~ gamma + ln(x) as x -> 0+ (unbounded, and COMPLEX for x <= 0);
+# li(1)/Li(1)/Ei(0) sit on their own poles.
+_v, _e = _boundary_parse("factorial(floor(Abs(Ci(0))))")
+check("THE-1095 round 16: 'factorial(floor(Abs(Ci(0))))' (Ci's own "
+      "pole at 0) refuses, not silently bounded as tiny",
+      _v is None and _e is not None and _e[0] == "ceiling",
+      f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("Ci(1)")
+check("  ...and Ci(1) (ordinary, x > 1) still evaluates, matching main",
+      _e is None and str(_v) == "Ci(1)", f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("Ci(0.001)")
+check("  ...and Ci(0.001) (0 < x <= 1, the new gamma+ln(x) bound) still "
+      "evaluates, matching main's own Float",
+      _e is None and abs(float(_v) - (-6.330539864080594)) < 1e-6,
+      f"-> value={_v!r} err={_e!r}")
+for _expr in ("factorial(floor(Abs(Ei(0))))", "factorial(floor(Abs(li(1))))"):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 16 (Ei/li own pole): {_expr!r} refuses, not "
+          f"silently bounded as tiny",
+          _v is None and _e is not None and _e[0] == "ceiling",
+          f"-> value={_v!r} err={_e!r}")
+
+# THE-1095 round 16 (grok issue 4): `product`'s own IDENTITY growth is
+# factorial-shaped regardless of the summand -- the round-15 range cap
+# only fired when the summand contained a table NAME, missing
+# `product(x, (x, 1, 10**6)) == 10**6!` entirely.
+_v, _e = _boundary_parse("product(x, (x, 1, 10**6))")
+check("THE-1095 round 16 (product identity-growth fail-open): "
+      "'product(x, (x, 1, 10**6))' refuses",
+      _v is None and _e is not None and _e[0] == "ceiling",
+      f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("product(x, (x, 1, 20))")
+check("  ...and product(x, (x, 1, 20)) (comfortably under cap) still "
+      "evaluates, matching main",
+      _e is None and str(_v) == "2432902008176640000", f"-> value={_v!r} err={_e!r}")
+# Multi-limit CARTESIAN product, not each axis checked independently.
+_t0 = time.time()
+_v, _e = _boundary_parse("summation(bell(x*y), (x,1,200), (y,1,200))")
+_dt = time.time() - _t0
+check("THE-1095 round 16 (multi-limit Cartesian fail-open): "
+      "'summation(bell(x*y), (x,1,200), (y,1,200))' (each axis "
+      "individually under bell's own 200 cap, 40000 total terms with "
+      "bell up to 40000) refuses promptly",
+      _v is None and _e is not None and _e[0] == "ceiling" and _dt < 1.0,
+      f"-> value={_v!r} err={_e!r} elapsed={_dt:.3f}s")
+
+# THE-1095 round 16 (coordinator addendum, item 5): `LambertW`'s
+# PRINCIPAL branch is also real on [-1/e, 0), which the round-15
+# version wrongly refused entirely.
+_v, _e = _boundary_parse("LambertW(-0.1)")
+check("THE-1095 round 16: 'LambertW(-0.1)' (principal branch, "
+      "[-1/e, 0)) evaluates, matching main",
+      _e is None and abs(float(_v) - (-0.11183255915896297)) < 1e-9,
+      f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("bell(floor(Abs(LambertW(-0.1))))")
+check("  ...and nested, it stays safely bounded (|W| <= 1 on that "
+      "interval)",
+      _e is None, f"-> value={_v!r} err={_e!r}")
+
+# THE-1095 round 16 (coordinator addendum, item 4; grok issue 3): `fps`
+# gets a dedicated order cap (position 5, not 3 -- the round-15
+# comment named the wrong slot) like `series` already has.
+_v, _e = _boundary_parse("fps(sin(x), x, 0, 1, True, 1463)")
+check("THE-1095 round 16 (fps order fail-open): 'fps(sin(x), x, 0, 1, "
+      "True, 1463)' refuses on the order cap",
+      _v is None and _e is not None and _e[0] == "ceiling"
+      and "fps" in _e[1], f"-> value={_v!r} err={_e!r}")
+
+# THE-1095 round 16 (Codex addendum, `verify-1095-r15.log`, its own
+# 528-expression branch-vs-main corpus): four branch-vs-main
+# differences, all a valid main result turned into a `ceiling` refusal.
+_v, _e = _boundary_parse("Piecewise((x,x>0),(0,True))")
+check("THE-1095 round 16 (Codex corpus): 'Piecewise((x,x>0),(0,True))' "
+      "(an ordinary symbolic Piecewise, its own SECOND branch has no "
+      "free symbols at all) matches main",
+      _e is None and str(_v) == "Piecewise((x, x > 0), (0, True))",
+      f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("factorial(expint(2,1/2))")
+check("THE-1095 round 16 (Codex corpus): 'factorial(expint(2,1/2))' "
+      "(0 < x < 1, the new E_1(x) <= -ln(x)+1 bound) matches main "
+      "(stays symbolic)",
+      _e is None and str(_v) == "factorial(expint(2, 1/2))",
+      f"-> value={_v!r} err={_e!r}")
+# `factorial(Chi(-1))`/`factorial(li(-1))`: Chi/li are COMPLEX for
+# x <= 0 (main leaves `factorial(<complex>)` symbolically unevaluated,
+# genuinely safe either way) -- a DELIBERATE, documented narrowing,
+# the same "closing the branch-cut case is worth a false refusal here"
+# trade this file already makes elsewhere (`tests/test_differential_
+# corpus.py` pins both explicitly).
+for _expr in ("factorial(Chi(-1))", "factorial(li(-1))"):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 16 (Codex corpus, deliberate narrowing): "
+          f"{_expr!r} refuses (main leaves it symbolic; this module "
+          f"cannot prove the complex branch safe)",
+          _v is None and _e is not None and _e[0] == "ceiling",
+          f"-> value={_v!r} err={_e!r}")
+
+# THE-1095 round 16 (Codex addendum): a REVERSED limit (`lo > hi`) is
+# NOT empty on main -- SymPy's own convention negates the sum over the
+# SAME magnitude range, real work, not a no-op.
+_v, _e = _boundary_parse("summation(x, (x, 10**6, 1))")
+check("THE-1095 round 16 (reversed range, table-free summand): "
+      "'summation(x, (x, 10**6, 1))' matches main (no range cap needed "
+      "-- SymPy's own closed form, same as the forward direction)",
+      _e is None, f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("product(x, (x, 10**6, 1))")
+check("THE-1095 round 16 (reversed range, product's own unconditional "
+      "cap): 'product(x, (x, 10**6, 1))' refuses",
+      _v is None and _e is not None and _e[0] == "ceiling",
+      f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("summation(bell(x), (x, 1463, 1))")
+check("THE-1095 round 16 (reversed range, table-summand range cap, "
+      "EXTREME endpoint is lo not hi): 'summation(bell(x), (x, 1463, "
+      "1))' refuses",
+      _v is None and _e is not None and _e[0] == "ceiling",
+      f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("summation(x, (x, 5, 1))")
+check("  ...and summation(x, (x, 5, 1)) (small reversed range) "
+      "evaluates to main's own value",
+      _e is None and str(_v) == "-9", f"-> value={_v!r} err={_e!r}")
+
+# THE-1095 round 16 (atheris finding, ClusterFuzzLite `slow-unit-
+# r16.bin`, seed `(3/2)**300001!!E1`): the deferred-parse-exception
+# "safe to treat as inconclusive" check used to run on the RAW source
+# text, missing a table name that only exists after SymPy's own
+# `factorial_notation` token transformation (`!!`/`!` are punctuation
+# in the raw text, `factorial2`/`factorial` only after transform) --
+# the real (expensive) parse ran instead, measured 22.2s before
+# raising the SAME SympifyError the deferred parse already had.
+for _expr in ("(3/2)**300001!!E1", "(3/2)**300001!E1", "bell(1463)!!E1"):
+    _t0 = time.time()
+    _v, _e = _boundary_parse(_expr)
+    _dt = time.time() - _t0
+    check(f"THE-1095 round 16 (transformed-token table-name miss): "
+          f"{_expr!r} refuses promptly, never a computed Pow",
+          _v is None and _e is not None and _e[0] in ("ceiling", "validation")
+          and _dt < 2.0,
+          f"-> value={_v!r} err={_e!r} elapsed={_dt:.3f}s")
+for _expr, _want in (("5!!x", "15*x"), ("3!x", "6*x")):
+    _v, _e = _boundary_parse(_expr)
+    check(f"THE-1095 round 16: {_expr!r} (ordinary factorial notation "
+          f"+ implicit multiplication) still evaluates, matching main",
+          _e is None and str(_v).replace(" ", "") == _want,
+          f"-> value={_v!r} err={_e!r}")
+_v, _e = _boundary_parse("E1")
+check("THE-1095 round 16: 'E1' bare stays the bare-class validation",
+      _v is None and _e is not None and _e[0] == "validation",
+      f"-> value={_v!r} err={_e!r}")
+
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== ALL BUG-SWEEP REGRESSIONS FIXED ===")
 sys.exit(1 if FAILS else 0)
