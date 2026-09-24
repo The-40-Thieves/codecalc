@@ -62,7 +62,7 @@ with tempfile.TemporaryDirectory(prefix="codecalc-fuzz-smoke-") as tmp:
     base.mkdir(parents=True, exist_ok=True)
     fuzz._plant_symlink_trap(base)
     crashes, n = fuzz.fuzz_jail(rng, ITERATIONS_SESSIONS, TIMEOUT, base)
-    check(f"sessions._jail: {n} inputs, 0 crashes", len(crashes) == 0,
+    check(f"sessions._jail + _jail_nofollow: {n} inputs, 0 crashes", len(crashes) == 0,
           f"-> {crashes[:3]}" if crashes else "")
 
     root = Path(tmp) / "session-root"

@@ -500,29 +500,85 @@ def _plant_symlink_trap(base: Path) -> None:
         pass
 
 
+#: THE-1103 round 2 (grok verify-security): `fuzz_jail` also drives
+#: `_jail_nofollow` on the SAME mutated input as `_jail`, rather than a
+#: separate target — this is what lets `tests/test_fuzz_smoke.py` (a plain,
+#: CI-affordable, deterministic run, no atheris/ClusterFuzzLite needed)
+#: exercise `_jail_nofollow` too. A real, open dir_fd under the fuzzed
+#: workspace lets `_check_nofollow_parts` hand each returned component to
+#: the ACTUAL syscall `_unlink_pinned` makes with it (`os.lstat(...,
+#: dir_fd=...)`) — see `fuzz/sessions_path_fuzzer.py`'s `_check_jail_nofollow`
+#: for why re-stating the implementation's own predicates (round 1's
+#: mistake) is not a strong enough oracle: it can only catch a check being
+#: DROPPED, never one being WRONG for a platform whose default
+#: filesystem-encoding error mode differs from POSIX's.
+def _check_nofollow_parts(mutated: str, dir_fd: int | None) -> str | None:
+    """Run `_jail_nofollow(mutated)` and return a crash detail string, or
+    `None` if the outcome was safe. A `ValueError` (the documented refusal)
+    is safe; a successful return with an empty/`.`/`..` component is not;
+    and if `dir_fd` is available (POSIX), every returned component must
+    also survive an actual `os.lstat(component, dir_fd=dir_fd)` — `OSError`
+    (no such entry, `ELOOP`, `ENOTDIR`) is the ordinary safe outcome,
+    anything else is THE-1103's own class of bug.
+    """
+    try:
+        parts = sessions._jail_nofollow(mutated)
+    except ValueError:
+        return None  # a refusal — the documented, safe outcome
+    except Exception as exc:
+        return f"{type(exc).__name__}: {exc}"
+    if not parts or any(p in ("", ".", "..") for p in parts):
+        return f"invalid parts: {parts!r}"
+    if dir_fd is None:
+        return None  # no dir_fd support on this platform (Windows) — nothing more to check
+    for part in parts:
+        try:
+            os.lstat(part, dir_fd=dir_fd)
+        except OSError:
+            pass  # no such entry (or ELOOP/ENOTDIR) — the ordinary, safe outcome
+        except Exception as exc:
+            return f"component {part!r} not safe for a real lstat: {type(exc).__name__}: {exc}"
+    return None
+
+
 def fuzz_jail(rng: random.Random, iterations: int, timeout: float, base: Path):
     crashes = []
     base_resolved = base.resolve()
-    for _ in range(iterations):
-        mutated = _mutate(rng, rng.choice(SEED_CORPUS_PATH))
+    nofollow_dir_fd = (
+        os.open(base, os.O_RDONLY | sessions._O_DIRECTORY | sessions._O_NOFOLLOW | sessions._O_CLOEXEC)
+        if sessions._DIR_FD_SUPPORTED else None
+    )
+    try:
+        for _ in range(iterations):
+            mutated = _mutate(rng, rng.choice(SEED_CORPUS_PATH))
 
-        with _no_stdin():
-            result, exc, hung = _call_timeboxed(sessions._jail, (base, mutated), timeout)
-        if hung:
-            crashes.append(("_jail", mutated, "TIMEOUT (possible hang / blocking call)"))
-            continue
-        if exc is not None:
-            if isinstance(exc, ValueError):
-                continue  # a refusal — the documented, safe outcome
-            crashes.append(("_jail", mutated, f"{type(exc).__name__}: {exc}"))
-            continue
-        try:
-            escaped = not result.resolve().is_relative_to(base_resolved)
-        except Exception as post_exc:  # the post-check itself must not explode
-            crashes.append(("_jail", mutated, f"post-check raised: {post_exc!r}"))
-            continue
-        if escaped:
-            crashes.append(("_jail", mutated, f"ESCAPED WORKSPACE: resolved to {result}"))
+            with _no_stdin():
+                result, exc, hung = _call_timeboxed(sessions._jail, (base, mutated), timeout)
+            if hung:
+                crashes.append(("_jail", mutated, "TIMEOUT (possible hang / blocking call)"))
+            elif exc is not None:
+                if not isinstance(exc, ValueError):  # a ValueError is the documented, safe refusal
+                    crashes.append(("_jail", mutated, f"{type(exc).__name__}: {exc}"))
+            else:
+                try:
+                    escaped = not result.resolve().is_relative_to(base_resolved)
+                except Exception as post_exc:  # the post-check itself must not explode
+                    crashes.append(("_jail", mutated, f"post-check raised: {post_exc!r}"))
+                else:
+                    if escaped:
+                        crashes.append(("_jail", mutated, f"ESCAPED WORKSPACE: resolved to {result}"))
+
+            with _no_stdin():
+                detail, nf_exc, nf_hung = _call_timeboxed(_check_nofollow_parts, (mutated, nofollow_dir_fd), timeout)
+            if nf_hung:
+                crashes.append(("_jail_nofollow", mutated, "TIMEOUT (possible hang / blocking call)"))
+            elif nf_exc is not None:  # _check_nofollow_parts itself must not explode
+                crashes.append(("_jail_nofollow", mutated, f"checker raised: {type(nf_exc).__name__}: {nf_exc}"))
+            elif detail is not None:
+                crashes.append(("_jail_nofollow", mutated, detail))
+    finally:
+        if nofollow_dir_fd is not None:
+            os.close(nofollow_dir_fd)
     return crashes, iterations
 
 
@@ -595,7 +651,7 @@ def main(argv: list[str] | None = None) -> int:
             found, n = fuzz_jail(rng, args.iterations, args.timeout, base)
             crashes += found
             total += n
-            print(f"sessions._jail: {n} inputs, {len(found)} crashes")
+            print(f"sessions._jail + _jail_nofollow: {n} inputs, {len(found)} crashes")
 
             root = Path(tmp) / "session-root"
             root.mkdir(parents=True, exist_ok=True)

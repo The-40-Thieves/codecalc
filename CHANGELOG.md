@@ -48,15 +48,58 @@ behind it.
   already refused the identical input correctly, by accident: `_jail`'s own
   `resolve()` happens to raise the same `ValueError` for both cases, and
   every `_jail` caller already catches it. `_jail_nofollow` now refuses a
-  NUL byte and any component `os.fsencode` cannot encode (a lone surrogate;
-  a legitimately surrogateescape'd byte still round-trips and is accepted)
-  at the same string-only validation stage as every other refusal in that
-  function, so `delete_file` gets the identical `PERMISSION_DENIED` refusal
-  `write_file` does. `resource_read` (the other `_jail`-based read path) was
-  already safe: its own caller (`ExecutionService.read_file`) already wraps
-  it in the same guarded `try`. Fuzzed: `_jail_nofollow` is now a target in
-  `fuzz/sessions_path_fuzzer.py` alongside `_jail`/`_session_dir`, and
-  `scripts/fuzz.py`'s shared path corpus gained a lone-surrogate seed.
+  NUL byte (an explicit substring check) and any component containing a
+  UTF-16 surrogate code point (U+D800-U+DFFF) outside the narrow
+  `surrogateescape` range (U+DC80-U+DCFF) Python's own codec uses to
+  represent a real byte that failed to decode as UTF-8, at the same
+  string-only validation stage as every other refusal in that function, so
+  `delete_file` gets the identical `PERMISSION_DENIED` refusal `write_file`
+  does. `resource_read` (the other `_jail`-based read path) was already
+  safe: its own callers, `execution_service.SessionService.read_file` and
+  `.run_file`, already wrap it in the same guarded `try`.
+
+  Round 2 (both an in-pool reviewer and grok's security lane caught the
+  same defect on the first fix): the surrogate check originally asked
+  `os.fsencode(name)` whether it raised — which depends on
+  `sys.getfilesystemencoding()`/`getfilesystemencodeerrors()`, and those are
+  NOT the same on every platform this module ships on. POSIX pins
+  `surrogateescape`, so `os.fsencode` raised for any surrogate outside the
+  range it itself produces; Windows (PEP 529) uses `surrogatepass` (or
+  `mbcs`/`replace`), under which `os.fsencode("foo\ud800bar")` succeeds —
+  the surrogate would have passed `_jail_nofollow` unrefused and reached
+  `_final_component_long_name`'s `os.path.realpath` on the documented
+  Windows fallback branch, reopening the escape on exactly the platform
+  that branch exists for (reproduced by monkeypatching `os.fsencode` to
+  `surrogatepass` semantics). The check no longer asks the encoder
+  anything: it compares code points directly against the fixed
+  `surrogateescape` range, which means the same thing on every platform
+  regardless of that platform's own default filesystem encoding — so the
+  same input string is now refused (or accepted) identically everywhere,
+  not just on POSIX.
+
+  Tests: the NUL/surrogate test in `tests/test_session_quota.py` is now
+  three tests — NUL rows still assert `delete_file`'s code matches
+  `write_file`'s (a real invariant, since both hit the same NUL check);
+  the surrogate row instead asserts `_jail_nofollow` itself raises and
+  `delete_file` returns a coded `PERMISSION_DENIED` refusal directly,
+  without comparing to `write_file` (that comparison was a POSIX accident
+  of `_jail`'s `resolve()`, not a portable one, and this suite's Windows CI
+  legs run this file too); a new positive-control row confirms a
+  legitimate `surrogateescape`'d name (U+DC80) is accepted; and a new test
+  forces `delete_file`'s `not _DIR_FD_SUPPORTED` (Windows) fallback branch
+  via monkeypatch and confirms the same NUL/surrogate names are refused
+  as a coded result there too, never a raise.
+
+  Fuzzing: `fuzz/sessions_path_fuzzer.py`'s new `_jail_nofollow` target now
+  hands every returned component to the same real syscall `_unlink_pinned`
+  uses (`os.lstat(component, dir_fd=...)`) rather than re-stating
+  `_jail_nofollow`'s own predicates (which could only ever catch a check
+  being dropped, never one being wrong — exactly how round 1's surrogate
+  check passed its own fuzz target while still being broken on Windows).
+  `scripts/fuzz.py`'s `fuzz_jail` now runs `_jail_nofollow` through the
+  same real-syscall oracle next to `_jail` on every mutated input, so
+  `tests/test_fuzz_smoke.py` (the plain, CI-affordable, no-atheris gate)
+  exercises it on every PR.
 
 - **A symbolic dividend with a huge Float coefficient still hung `%`
   (THE-1095 round 18, second seeded atheris timeout, decoded with the
