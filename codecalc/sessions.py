@@ -3355,6 +3355,91 @@ def _read_nofollow(target: Path, max_bytes: int) -> bytes | None:
         return None if len(data) > max_bytes else data
 
 
+#: The `surrogateescape` range Python's own codec uses to represent a raw
+#: byte that failed to decode as UTF-8 (0x80-0xFF -> U+DC80-U+DCFF) — see
+#: `_has_unescaped_surrogate`'s docstring for why this exact range, and
+#: nothing wider, is what stays deletable/writable.
+_SURROGATEESCAPE_LOW = 0xDC80
+_SURROGATEESCAPE_HIGH = 0xDCFF
+
+
+def _has_unescaped_surrogate(name: str) -> bool:
+    """True if `name` contains a UTF-16 surrogate code point (U+D800-
+    U+DFFF) that is NOT a `surrogateescape`'d byte (U+DC80-U+DCFF) — i.e. a
+    component that cannot exist as a real, real-byte filename and would
+    raise (`UnicodeEncodeError`/`ValueError`, from whatever filesystem call
+    it eventually reaches) if it were ever handed to one. A direct
+    code-point check, not `os.fsencode(name)` raising: the same string must
+    be refused identically on every platform, and the ENCODER's behaviour
+    on a bare surrogate is platform-dependent in exactly the way this check
+    is not (POSIX `surrogateescape` raises past this range, Windows
+    `surrogatepass`/`mbcs` does not raise at all — see
+    `_refuse_unrepresentable_component`'s docstring for the full history).
+    """
+    return any(ord(ch) < _SURROGATEESCAPE_LOW or ord(ch) > _SURROGATEESCAPE_HIGH
+               for ch in name if 0xD800 <= ord(ch) <= 0xDFFF)
+
+
+def _refuse_unrepresentable_component(name: str) -> None:
+    """Raise `ValueError` if `name` — ONE path component, never a resolved
+    path — is a NUL byte or contains an unescaped UTF-16 surrogate (see
+    `_has_unescaped_surrogate`). Shared by BOTH jails in this module —
+    `_jail` calls this on every component BEFORE `resolve()` runs, and
+    `_jail_nofollow` calls it on every component it returns — so
+    `write_file`/`list_files`/`resource_read` (via `_jail`) and
+    `delete_file` (via `_jail_nofollow`) all refuse the identical
+    NUL/surrogate input identically, on every platform, at validation
+    time, never by leaning on a platform filesystem call to happen to
+    reject it.
+
+    THE-1103, three rounds, each found by a different reviewer/gate:
+
+    Round 1 (this ticket): `delete_file` uses `_jail_nofollow`, which never
+    calls `resolve()` at all (by design — see its own docstring), so a NUL
+    byte or a lone surrogate reached a REAL filesystem call unrefused
+    (`_unlink_pinned`'s `os.lstat`/`os.open`, or `_final_component_long_name`'s
+    `os.path.realpath` on the Windows fallback) and raised straight past
+    `delete_file`'s own guarded `try`. Assumed at the time that `write_file`/
+    `list_files`/`resource_read` (all via `_jail`) were already safe: `_jail`'s
+    `(base / path).resolve()` raises `ValueError` for a NUL or an unencodable
+    name on POSIX, and every `_jail` caller already wraps that call in
+    `except ValueError: return _guard_error(exc)`.
+
+    Round 2 (grok verify-security + an in-pool reviewer, both independently):
+    the surrogate check added to `_jail_nofollow` asked `os.fsencode(name)`
+    whether it raised — which depends on `sys.getfilesystemencoding()`/
+    `getfilesystemencodeerrors()`, NOT the same on every platform. POSIX pins
+    `surrogateescape`, so `os.fsencode` raised for a surrogate outside the
+    range it itself produces; Windows (PEP 529) uses `surrogatepass` (or
+    `mbcs`/`replace`), under which `os.fsencode("foo\\ud800bar")` SUCCEEDS —
+    the surrogate would pass `_jail_nofollow` unrefused there. Fixed by
+    checking code points directly against the fixed `surrogateescape` range
+    (`_has_unescaped_surrogate`), which means the same thing everywhere
+    regardless of the platform's own default filesystem encoding.
+
+    Round 3 (CI, windows-latest/py3.14, PR #345): round 1's assumption that
+    `_jail`'s own `resolve()` already caught a NUL for free was ALSO
+    platform-dependent, and this time the NUL check itself, not the
+    surrogate one. `(base / path).resolve()` on POSIX raises `ValueError`
+    ("embedded null character in path") for a NUL — but on Windows,
+    `ntpath.realpath(..., strict=False)` SWALLOWS that `ValueError` instead
+    of propagating it (a documented CPython behaviour, gh-106242), so the
+    NUL survives `_jail` unrefused there too, and `write_file`'s
+    `_write_nofollow` raised `os.open`'s own `ValueError` straight past
+    `write_file`'s guarded `try` — the identical class of escape THE-1103
+    closed for `_jail_nofollow`, just on the OTHER jail, caught by CI
+    instead of a reviewer this time. Fixed by moving both checks into this
+    one shared helper and calling it from both jails BEFORE either one asks
+    a platform resolver anything, so the answer no longer depends on what
+    that resolver happens to do with a NUL or a surrogate on a given
+    platform.
+    """
+    if "\x00" in name:
+        raise ValueError("path escapes session workspace")
+    if _has_unescaped_surrogate(name):
+        raise ValueError("path escapes session workspace")
+
+
 def _jail(d: Path, path: str) -> Path:
     """Resolve `path` under the session dir; refuse anything outside it.
 
@@ -3375,6 +3460,17 @@ def _jail(d: Path, path: str) -> Path:
     of host OS) rather than via `Path(path).parts`, so the cost of refusing
     stays a cheap `str.count()` and never constructs the object this is trying
     to avoid resolving.
+
+    THE-1103 round 3: every raw, `/`-or-`\\`-split component is also checked
+    with `_refuse_unrepresentable_component` BEFORE `.resolve()` runs. This
+    used to be implicit — `resolve()` itself raises `ValueError` for a NUL
+    or an unencodable name on POSIX, and every caller of this function
+    already catches that — but CI on windows-latest found that implicit
+    guarantee was POSIX-only: `ntpath.realpath(..., strict=False)` swallows
+    the `ValueError` a NUL would otherwise raise (gh-106242) rather than
+    propagating it, so relying on `resolve()` to reject it was never
+    portable. See `_refuse_unrepresentable_component`'s own docstring for
+    the full history (three rounds, one per jail, one per reviewer/gate).
     """
     if len(path) > _MAX_JAIL_PATH_LEN:
         raise ValueError(
@@ -3383,6 +3479,8 @@ def _jail(d: Path, path: str) -> Path:
     if segments > _MAX_JAIL_PATH_SEGMENTS:
         raise ValueError(
             f"path has too many segments ({segments}, max {_MAX_JAIL_PATH_SEGMENTS})")
+    for component in re.split(r"[/\\]", path):
+        _refuse_unrepresentable_component(component)
     base = d.resolve()
     p = (base / path).resolve()
     if not p.is_relative_to(base):
@@ -3438,63 +3536,20 @@ def _jail_nofollow(path: str) -> list[str]:
     deleting the workspace root belongs under the identical refusal every
     other out-of-bounds path gets, not a bespoke message.
 
-    THE-1103: a NUL byte or a lone UTF-16 surrogate in a component used to
-    reach a real filesystem call unrefused. `_jail`'s own `resolve()` raises
-    `ValueError` on either (a NUL by the platform's own path-encoding rules;
-    a lone surrogate because it cannot be encoded), and every `_jail` caller
-    is already wrapped in the same `except ValueError: return _guard_error`
-    block `write_file` documents — so `_jail`'s callers were always safe by
-    accident of what `resolve()` happens to reject. `_jail_nofollow`
-    resolves nothing (that is the entire point of this function, see above),
-    so nothing upstream of `delete_file`'s guarded block ever performed that
-    check, and the raise came from whatever filesystem call ran first
-    instead — `_unlink_pinned`'s `os.lstat`/`os.open` on POSIX, or
-    `_final_component_long_name`'s `os.path.realpath` on the Windows
-    fallback — as a bare, uncaught `ValueError`/`UnicodeEncodeError`, past
-    `delete_file`'s own `try` (that block only wraps the call to this
-    function; it has already returned by the time either filesystem call
-    runs). Checked here, at the same string-only stage as every other
-    refusal in this function, closes it for every caller of `_jail_nofollow`
-    at once, on every platform, not just `delete_file` on POSIX.
-
-    NUL is checked explicitly with a plain substring test, never via
-    encoding: `os.fsencode` happily encodes a NUL byte on POSIX
-    (`b"a\\x00b"` is well-formed on the Python side; it is the OS-level
-    open/lstat call that rejects it, which is exactly the call this
-    function exists to never make), so an encode-and-catch check would miss
-    it entirely.
-
-    #325-THE-1103 fix round 2 (grok verify-security + Opus review, HIGH):
-    round 1 caught the surrogate the same encode-and-catch way, via
-    `os.fsencode` raising `UnicodeEncodeError` — which made the refusal
-    depend on `sys.getfilesystemencoding()`/`getfilesystemencodeerrors()`,
-    and those are NOT the same on every platform this module ships on.
-    POSIX pins `surrogateescape`, under which `os.fsencode` raises for any
-    surrogate outside the narrow range it itself produces — but Windows
-    (PEP 529) uses `surrogatepass` (or, pre-3.6-shaped configurations,
-    `mbcs`/`replace`), under which `os.fsencode("foo\\ud800bar")` SUCCEEDS:
-    the lone surrogate passes this check unrefused, reaches
-    `_final_component_long_name`'s `os.path.realpath` on the documented
-    Windows fallback branch, and the escape reopens on exactly the platform
-    the fallback exists for. Reproduced by monkeypatching `os.fsencode` to
-    `surrogatepass` semantics on a POSIX box, which is what caught it.
-
-    The fix does not ask the platform encoder anything: it checks the code
-    points directly, against a range that means the same thing everywhere
-    Python runs, regardless of `sys.getfilesystemencoding()`. A surrogate
-    (U+D800-U+DFFF) can only ever be legitimate here as PYTHON's own
-    `surrogateescape` representation of a raw byte that failed to decode as
-    UTF-8 — and `surrogateescape` always maps exactly the high half of a
-    byte (0x80-0xFF) to U+DC80-U+DCFF, never anywhere else in the surrogate
-    range, on every platform, independent of what THAT platform's own
-    default filesystem encoding/errors happen to be. So the policy is: a
-    name that does not round-trip through UTF-8 is refused everywhere,
-    EXCEPT a name that is exactly UTF-8 plus `surrogateescape` for its
-    non-UTF-8 bytes, which must stay deletable (it can genuinely exist on
-    disk). Concretely: any surrogate outside U+DC80-U+DCFF is refused
-    unconditionally; a surrogate inside that range is accepted. This gives
-    the identical accept/refuse answer on POSIX and Windows for the same
-    input string, which "does `os.fsencode` raise" never did.
+    THE-1103: a NUL byte or an unescaped UTF-16 surrogate in a component
+    used to reach a real filesystem call unrefused (`_unlink_pinned`'s
+    `os.lstat`/`os.open`, or `_final_component_long_name`'s
+    `os.path.realpath` on the Windows fallback), raising a bare,
+    uncaught `ValueError`/`UnicodeEncodeError` past `delete_file`'s own
+    guarded `try` — since this function never resolves anything (that is
+    the entire point, see above), nothing upstream of that `try` ever
+    checked for either. Refused via `_refuse_unrepresentable_component`,
+    the SAME helper `_jail` now calls on every component before its own
+    `resolve()` — see that helper's own docstring for the full three-round
+    history (this function's fix, the platform-dependent surrogate check
+    that replaced it, and the sibling gap on `_jail` CI found afterward).
+    Checked here, at the same string-only stage as every other refusal in
+    this function.
     """
     if len(path) > _MAX_JAIL_PATH_LEN:
         raise ValueError(
@@ -3509,36 +3564,8 @@ def _jail_nofollow(path: str) -> list[str]:
     if not parts or any(p == ".." for p in parts):
         raise ValueError("path escapes session workspace")
     for p in parts:
-        if "\x00" in p:
-            raise ValueError("path escapes session workspace")
-        if _has_unescaped_surrogate(p):
-            raise ValueError("path escapes session workspace")
+        _refuse_unrepresentable_component(p)
     return parts
-
-
-#: The `surrogateescape` range Python's own codec uses to represent a raw
-#: byte that failed to decode as UTF-8 (0x80-0xFF -> U+DC80-U+DCFF) — see
-#: `_has_unescaped_surrogate`'s docstring for why this exact range, and
-#: nothing wider, is what stays deletable.
-_SURROGATEESCAPE_LOW = 0xDC80
-_SURROGATEESCAPE_HIGH = 0xDCFF
-
-
-def _has_unescaped_surrogate(name: str) -> bool:
-    """True if `name` contains a UTF-16 surrogate code point (U+D800-
-    U+DFFF) that is NOT a `surrogateescape`'d byte (U+DC80-U+DCFF) —
-    i.e. a component that cannot exist as a real, real-byte filename and
-    would raise (`UnicodeEncodeError`, or `_unlink_pinned`/
-    `_final_component_long_name`'s own filesystem calls) if it ever reached
-    one. See `_jail_nofollow`'s docstring for why this is a direct code-
-    point check rather than `os.fsencode(name)` raising: the same string
-    must be refused identically on every platform, and the ENCODER's
-    behaviour on a bare surrogate is platform-dependent in exactly the way
-    this check is not (POSIX `surrogateescape` raises past this range,
-    Windows `surrogatepass`/`mbcs` does not raise at all).
-    """
-    return any(ord(ch) < _SURROGATEESCAPE_LOW or ord(ch) > _SURROGATEESCAPE_HIGH
-               for ch in name if 0xD800 <= ord(ch) <= 0xDFFF)
 
 
 # ── REPL workers ───────────────────────────────────────────────────────────

@@ -567,6 +567,26 @@ def fuzz_jail(rng: random.Random, iterations: int, timeout: float, base: Path):
                 else:
                     if escaped:
                         crashes.append(("_jail", mutated, f"ESCAPED WORKSPACE: resolved to {result}"))
+                    else:
+                        # THE-1103 round 3 (CI, windows-latest/py3.14, PR #345):
+                        # a successful `_jail` return must also be SAFE to hand
+                        # to a real filesystem call, not just "inside the
+                        # workspace" — round 1 assumed `(base / path).resolve()`
+                        # already raised for a NUL on every platform; CI found
+                        # `ntpath.realpath(..., strict=False)` on Windows
+                        # swallows that raise instead (gh-106242), so a NUL
+                        # survived `_jail` there. This is the same real-syscall
+                        # oracle `_check_nofollow_parts` already applies to
+                        # `_jail_nofollow`'s returned components, applied here
+                        # to `_jail`'s returned `Path`.
+                        try:
+                            os.lstat(result)
+                        except OSError:
+                            pass  # no such entry — the ordinary, safe outcome
+                        except Exception as lstat_exc:
+                            detail = (f"result not safe for a real lstat: "
+                                      f"{type(lstat_exc).__name__}: {lstat_exc}")
+                            crashes.append(("_jail", mutated, detail))
 
             with _no_stdin():
                 detail, nf_exc, nf_hung = _call_timeboxed(_check_nofollow_parts, (mutated, nofollow_dir_fd), timeout)
