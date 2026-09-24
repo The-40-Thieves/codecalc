@@ -167,7 +167,7 @@ import threading
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from codecalc import doctor, errors, packages, sessions
+from codecalc import doctor, errors, execution_service, packages, sessions
 
 FAILS: list[str] = []
 
@@ -788,6 +788,229 @@ def _test_delete_file_refusals():
 
 
 _test_delete_file_refusals()
+
+
+def _test_delete_file_refuses_nul_names():
+    """THE-1103: a NUL byte in the path used to reach a real filesystem call
+    (`_unlink_pinned`'s `os.lstat`/`os.open`) unrefused, raising a bare
+    `ValueError` straight past `delete_file`'s own guarded `try` — over MCP,
+    a bare `ToolError` instead of the `{"ok": False, "code": ..., ...}`
+    shape #212 requires every public session function to return.
+    `write_file` already refused the identical input (`_jail`'s `resolve()`
+    raises the same `ValueError`, and every `_jail` caller already catches
+    it) — the fix makes `_jail_nofollow` raise it too, at the same
+    string-only validation stage, so `delete_file` gets exactly the same
+    PERMISSION_DENIED refusal `write_file` does.
+
+    NUL rows only assert that parity: both hit the identical explicit
+    `"\\x00" in p` check, so the same code on both sides is a real
+    invariant, not a coincidence — unlike the surrogate case, where
+    `write_file`'s refusal is a POSIX accident of `_jail`'s `resolve()`
+    (see `_test_delete_file_refuses_surrogate_names`, which does not make
+    that comparison).
+    """
+    sid = _new_session()
+    try:
+        # setup: a real nested file, so an over-eager component match on the
+        # NUL-containing sibling name below would be visible as data loss,
+        # not just a wrong return value.
+        setup = sessions.write_file(sid, "sub/real.txt", "keep me")
+        check("nul setup: a real nested file writes",
+              setup.get("ok") is True, f"-> {setup}")
+
+        bad_names = ["a\x00b", "sub/a\x00b", "\x00"]
+        for name in bad_names:
+            wr = sessions.write_file(sid, name, "x")
+            check(f"nul {name!r}: write_file refuses with PERMISSION_DENIED "
+                  "(the sibling this must match)",
+                  wr.get("ok") is False and wr.get("code") == errors.PERMISSION_DENIED,
+                  f"-> {wr}")
+
+            dr = sessions.delete_file(sid, name)
+            check(f"nul {name!r}: delete_file returns a result dict, never raises",
+                  isinstance(dr, dict), f"-> {dr!r}")
+            check(f"nul {name!r}: delete_file refuses",
+                  dr.get("ok") is False, f"-> {dr}")
+            check(f"nul {name!r}: delete_file's code matches write_file's",
+                  dr.get("code") == wr.get("code") == errors.PERMISSION_DENIED,
+                  f"-> delete={dr.get('code')} write={wr.get('code')}")
+
+        check("nul: the real nested file was never touched",
+              (sessions._session_dir(sid) / "sub" / "real.txt").read_text() == "keep me")
+    finally:
+        sessions.stop(sid)
+
+
+_test_delete_file_refuses_nul_names()
+
+
+def _test_delete_file_refuses_surrogate_names():
+    """THE-1103 round 2 (grok verify-security + Opus review, HIGH): the
+    surrogate refusal must not depend on `os.fsencode` raising — that
+    depends on the platform's own filesystem-encoding error mode
+    (`surrogateescape` on POSIX, `surrogatepass`/`mbcs` on Windows), which
+    do NOT agree on a bare surrogate. See `_jail_nofollow`'s / round 2's own
+    docstring for the reproduction (`os.fsencode` monkeypatched to
+    `surrogatepass` semantics let the pre-round-2 check through).
+
+    This asserts the CONTRACT directly — `_jail_nofollow` raises for an
+    unescaped surrogate, and `delete_file` returns a coded refusal — rather
+    than through `write_file`'s parity, which round 1 asserted here and
+    which is a POSIX accident of `_jail`'s `resolve()`, not a portable
+    invariant: this suite's Windows CI legs run this file too, and
+    `write_file`'s refusal there is not guaranteed to carry the same code
+    (or refuse at all, pre-fix) for the identical string.
+
+    Also the round-2 positive control: a LEGITIMATE `surrogateescape`'d
+    byte (U+DC80, the low end of the range `surrogateescape` actually
+    produces for a real undecodable byte) is not a lone surrogate this
+    function should refuse — `_unlink_pinned` must still be able to delete
+    a file genuinely named that way.
+    """
+    sid = _new_session()
+    try:
+        setup = sessions.write_file(sid, "sub/real.txt", "keep me")
+        check("surrogate setup: a real nested file writes",
+              setup.get("ok") is True, f"-> {setup}")
+
+        bad_name = "foo" + chr(0xd800)  # lone high surrogate: never a legitimate surrogateescape byte
+        try:
+            sessions._jail_nofollow(bad_name)
+        except ValueError as exc:
+            check(f"surrogate {bad_name!r}: _jail_nofollow raises ValueError",
+                  True, f"-> {exc}")
+        else:
+            check(f"surrogate {bad_name!r}: _jail_nofollow raises ValueError",
+                  False, "-> did not raise")
+
+        dr = sessions.delete_file(sid, bad_name)
+        check(f"surrogate {bad_name!r}: delete_file returns a result dict, never raises",
+              isinstance(dr, dict), f"-> {dr!r}")
+        check(f"surrogate {bad_name!r}: delete_file refuses with PERMISSION_DENIED",
+              dr.get("ok") is False and dr.get("code") == errors.PERMISSION_DENIED,
+              f"-> {dr}")
+
+        # positive control (round 2): the surrogateescape range itself must
+        # stay usable.
+        escaped_name = "foo" + chr(0xdc80)
+        parts = sessions._jail_nofollow(escaped_name)
+        check(f"surrogateescape {escaped_name!r}: _jail_nofollow accepts it "
+              "(a real byte's own representation, not a lone surrogate)",
+              parts == ["foo\udc80"], f"-> {parts}")
+
+        dr2 = sessions.delete_file(sid, escaped_name)
+        check(f"surrogateescape {escaped_name!r}: delete_file returns a result dict, "
+              "never raises",
+              isinstance(dr2, dict), f"-> {dr2!r}")
+        check(f"surrogateescape {escaped_name!r}: delete_file does NOT refuse as "
+              "PERMISSION_DENIED (a missing-file VALIDATION refusal is fine — the "
+              "name is well-formed, the file just does not exist)",
+              dr2.get("code") != errors.PERMISSION_DENIED, f"-> {dr2}")
+
+        check("surrogate: the real nested file was never touched",
+              (sessions._session_dir(sid) / "sub" / "real.txt").read_text() == "keep me")
+    finally:
+        sessions.stop(sid)
+
+
+_test_delete_file_refuses_surrogate_names()
+
+
+def _test_delete_file_windows_fallback_refuses_nul_and_surrogate():
+    """THE-1103 round 2: the refusal must hold on the `not
+    _DIR_FD_SUPPORTED` (Windows) fallback branch too, not only the
+    `_unlink_pinned` `dir_fd` path this suite otherwise exercises on Linux.
+    `_jail_nofollow` runs inside `delete_file`'s OWN guarded `try`, before
+    `_DIR_FD_SUPPORTED` is ever consulted, so the refusal must fire
+    identically regardless of which branch runs after it — this
+    monkeypatches the platform flag to force `delete_file` onto the
+    fallback code (`_final_component_long_name`'s `os.path.realpath`,
+    `target.lstat()`/`target.unlink()`) and proves the bad name never even
+    reaches it, rather than assuming module-level symmetry untested.
+    """
+    sid = _new_session()
+    orig = sessions._DIR_FD_SUPPORTED
+    sessions._DIR_FD_SUPPORTED = False
+    try:
+        setup = sessions.write_file(sid, "sub/real.txt", "keep me")
+        check("windows-fallback setup: a real nested file writes",
+              setup.get("ok") is True, f"-> {setup}")
+
+        for name in ("a\x00b", "foo" + chr(0xd800)):
+            dr = sessions.delete_file(sid, name)
+            check(f"windows-fallback {name!r}: delete_file returns a result dict, "
+                  "never raises",
+                  isinstance(dr, dict), f"-> {dr!r}")
+            check(f"windows-fallback {name!r}: delete_file refuses with PERMISSION_DENIED",
+                  dr.get("ok") is False and dr.get("code") == errors.PERMISSION_DENIED,
+                  f"-> {dr}")
+
+        check("windows-fallback: the real nested file was never touched",
+              (sessions._session_dir(sid) / "sub" / "real.txt").read_text() == "keep me")
+    finally:
+        sessions._DIR_FD_SUPPORTED = orig
+        sessions.stop(sid)
+
+
+_test_delete_file_windows_fallback_refuses_nul_and_surrogate()
+
+
+def _test_jail_based_functions_refuse_nul_and_surrogate_names():
+    """THE-1103 round 3 (CI, windows-latest/py3.14, PR #345): the earlier
+    rounds fixed `_jail_nofollow` (`delete_file`'s guard) and assumed
+    `_jail` (`write_file`/`list_files`/`resource_read`'s guard) was already
+    safe because its own `(base / path).resolve()` raises `ValueError` for
+    a NUL on POSIX. CI found that assumption was POSIX-only:
+    `ntpath.realpath(..., strict=False)` on Windows swallows that
+    `ValueError` instead of propagating it (gh-106242), so
+    `write_file(sid, "a\\x00b", "x")` raised `os.open`'s own bare
+    `ValueError` past `write_file`'s guarded `try` on windows-latest/py3.14
+    — the same escape THE-1103 closed for `_jail_nofollow`, just on the
+    other jail. `_jail` now calls the shared
+    `_refuse_unrepresentable_component` on every component BEFORE
+    `resolve()` ever runs (see that helper's docstring), so this exercises
+    every `_jail`-based public function directly, not only through
+    `delete_file`'s parity assertion (which only ever calls `write_file` as
+    a comparison, not as its own assertion target).
+    """
+    sid = _new_session()
+    read_file = execution_service.SessionService().read_file
+    try:
+        setup = sessions.write_file(sid, "sub/real.txt", "keep me")
+        check("jail setup: a real nested file writes",
+              setup.get("ok") is True, f"-> {setup}")
+
+        bad_names = ["a\x00b", "sub/a\x00b", "\x00", "foo" + chr(0xd800)]
+        for name in bad_names:
+            wr = sessions.write_file(sid, name, "x")
+            check(f"jail {name!r}: write_file returns a result dict, never raises",
+                  isinstance(wr, dict), f"-> {wr!r}")
+            check(f"jail {name!r}: write_file refuses with PERMISSION_DENIED",
+                  wr.get("ok") is False and wr.get("code") == errors.PERMISSION_DENIED,
+                  f"-> {wr}")
+
+            lr = sessions.list_files(sid, name)
+            check(f"jail {name!r}: list_files returns a result dict, never raises",
+                  isinstance(lr, dict), f"-> {lr!r}")
+            check(f"jail {name!r}: list_files refuses with PERMISSION_DENIED",
+                  lr.get("ok") is False and lr.get("code") == errors.PERMISSION_DENIED,
+                  f"-> {lr}")
+
+            rr = read_file(sid, name)
+            check(f"jail {name!r}: SessionService.read_file returns a result dict, "
+                  "never raises",
+                  isinstance(rr, dict), f"-> {rr!r}")
+            check(f"jail {name!r}: SessionService.read_file refuses with PERMISSION_DENIED",
+                  rr.get("ok") is False and rr.get("code") == errors.PERMISSION_DENIED,
+                  f"-> {rr}")
+
+        check("jail: the real nested file was never touched",
+              (sessions._session_dir(sid) / "sub" / "real.txt").read_text() == "keep me")
+    finally:
+        sessions.stop(sid)
+
+
+_test_jail_based_functions_refuse_nul_and_surrogate_names()
 
 
 def _test_delete_file_symlink_removes_link_not_target():

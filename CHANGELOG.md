@@ -35,6 +35,125 @@ behind it.
 
 ### Fixed
 
+- **`session_delete_file` raised a bare `ValueError`/`UnicodeEncodeError`
+  instead of the documented `{"ok": False, ...}` refusal for a NUL byte or a
+  lone UTF-16 surrogate in the path (THE-1103).** `_jail_nofollow` — the
+  string-only validation `delete_file` uses instead of `_jail` (it never
+  resolves anything, see its own docstring) — never checked for either, so
+  the raise came from whatever real filesystem call ran first
+  (`_unlink_pinned`'s `os.lstat`/`os.open` on POSIX, or
+  `_final_component_long_name`'s `os.path.realpath` on the Windows
+  fallback) and escaped `delete_file`'s own guarded `try` uncaught — over
+  MCP, a bare `ToolError` instead of the `#212` result contract. `write_file`
+  already refused the identical input correctly, by accident: `_jail`'s own
+  `resolve()` happens to raise the same `ValueError` for both cases, and
+  every `_jail` caller already catches it. `_jail_nofollow` now refuses a
+  NUL byte (an explicit substring check) and any component containing a
+  UTF-16 surrogate code point (U+D800-U+DFFF) outside the narrow
+  `surrogateescape` range (U+DC80-U+DCFF) Python's own codec uses to
+  represent a real byte that failed to decode as UTF-8, at the same
+  string-only validation stage as every other refusal in that function, so
+  `delete_file` gets the identical `PERMISSION_DENIED` refusal `write_file`
+  does. `resource_read` (the other `_jail`-based read path) was already
+  safe: its own callers, `execution_service.SessionService.read_file` and
+  `.run_file`, already wrap it in the same guarded `try`.
+
+  Round 2 (both an in-pool reviewer and grok's security lane caught the
+  same defect on the first fix): the surrogate check originally asked
+  `os.fsencode(name)` whether it raised — which depends on
+  `sys.getfilesystemencoding()`/`getfilesystemencodeerrors()`, and those are
+  NOT the same on every platform this module ships on. POSIX pins
+  `surrogateescape`, so `os.fsencode` raised for any surrogate outside the
+  range it itself produces; Windows (PEP 529) uses `surrogatepass` (or
+  `mbcs`/`replace`), under which `os.fsencode("foo\ud800bar")` succeeds —
+  the surrogate would have passed `_jail_nofollow` unrefused and reached
+  `_final_component_long_name`'s `os.path.realpath` on the documented
+  Windows fallback branch, reopening the escape on exactly the platform
+  that branch exists for (reproduced by monkeypatching `os.fsencode` to
+  `surrogatepass` semantics). The check no longer asks the encoder
+  anything: it compares code points directly against the fixed
+  `surrogateescape` range, which means the same thing on every platform
+  regardless of that platform's own default filesystem encoding — so the
+  same input string is now refused (or accepted) identically everywhere,
+  not just on POSIX.
+
+  Tests: the NUL/surrogate test in `tests/test_session_quota.py` is now
+  three tests — NUL rows still assert `delete_file`'s code matches
+  `write_file`'s (a real invariant, since both hit the same NUL check);
+  the surrogate row instead asserts `_jail_nofollow` itself raises and
+  `delete_file` returns a coded `PERMISSION_DENIED` refusal directly,
+  without comparing to `write_file` (that comparison was a POSIX accident
+  of `_jail`'s `resolve()`, not a portable one, and this suite's Windows CI
+  legs run this file too); a new positive-control row confirms a
+  legitimate `surrogateescape`'d name (U+DC80) is accepted; and a new test
+  forces `delete_file`'s `not _DIR_FD_SUPPORTED` (Windows) fallback branch
+  via monkeypatch and confirms the same NUL/surrogate names are refused
+  as a coded result there too, never a raise.
+
+  Fuzzing: `fuzz/sessions_path_fuzzer.py`'s new `_jail_nofollow` target now
+  hands every returned component to the same real syscall `_unlink_pinned`
+  uses (`os.lstat(component, dir_fd=...)`) rather than re-stating
+  `_jail_nofollow`'s own predicates (which could only ever catch a check
+  being dropped, never one being wrong — exactly how round 1's surrogate
+  check passed its own fuzz target while still being broken on Windows).
+  `scripts/fuzz.py`'s `fuzz_jail` now runs `_jail_nofollow` through the
+  same real-syscall oracle next to `_jail` on every mutated input, so
+  `tests/test_fuzz_smoke.py` (the plain, CI-affordable, no-atheris gate)
+  exercises it on every PR.
+
+  Round 3 (CI, `windows-latest`/`py3.14`, PR #345): round 1's claim that
+  `write_file`/`list_files`/`resource_read` (all via `_jail`, not
+  `_jail_nofollow`) "were always safe by accident of what `resolve()`
+  happens to reject" was ALSO platform-dependent, and this time for the
+  NUL check specifically, not the surrogate one. `_jail`'s
+  `(base / path).resolve()` raises `ValueError` ("embedded null character
+  in path") for a NUL on POSIX — but on Windows, `ntpath.realpath(...,
+  strict=False)` swallows that `ValueError` instead of propagating it (a
+  documented CPython behaviour, [gh-106242](https://github.com/python/cpython/issues/106242)),
+  so the NUL survives `_jail` unrefused there too, and CI caught
+  `write_file(sid, "a\x00b", "x")` raising `_write_nofollow`'s own
+  `os.open` `ValueError` straight past `write_file`'s guarded `try` on
+  `windows-latest`/`py3.14` — the identical class of escape THE-1103
+  closed for `_jail_nofollow`, just on the OTHER jail, this time found by
+  CI rather than a reviewer.
+
+  Fixed by extracting the NUL/surrogate refusal into one shared helper,
+  `_refuse_unrepresentable_component`, and calling it from BOTH jails:
+  `_jail` now runs it on every `/`-or-`\`-split component BEFORE
+  `.resolve()` ever runs, and `_jail_nofollow` calls the same helper it
+  always did (unchanged in effect, just no longer duplicated). Neither
+  jail leans on a platform resolver to happen to reject a NUL or a
+  surrogate any more — `write_file`, `list_files`, `resource_read` and
+  `delete_file` now all refuse the identical input identically, at
+  validation time, on every platform, by construction rather than
+  accident. Confirmed every other caller-controlled name reaching a real
+  filesystem call in this module sits behind one of the two jails or is
+  otherwise already safe: `_session_dir`'s `session_id` never reaches
+  `resolve()` with a NUL/surrogate at all (`_SAFE_NAME`'s
+  `^[a-zA-Z0-9_-]{1,64}$` allowlist rejects both by construction, before
+  any resolve());  `_write_nofollow`/`_read_nofollow` are only ever called
+  with a `target` already produced by `_jail` (`write_file`, `resource_read`)
+  or a fixed constant (`_LOCK_FILE_NAME`); `_unlink_pinned`/
+  `_final_component_long_name` only ever see `parts` already returned by
+  `_jail_nofollow`; and the snapshot-restore tar-extraction path
+  (`_plan_tar_extraction`/`_extract_planned_tar`) is a separate, third
+  validation gate that already refuses an embedded NUL explicitly
+  (`"\x00" in name`) and cannot receive an unescaped surrogate at all —
+  `tarfile`'s member-name decoding uses `errors="surrogateescape"`, which
+  by construction only ever produces surrogates in the same
+  U+DC80-U+DCFF range this fix already treats as legitimate.
+
+  Tests: `tests/test_session_quota.py` gains
+  `_test_jail_based_functions_refuse_nul_and_surrogate_names`, running the
+  same NUL and surrogate names directly through `write_file`, `list_files`,
+  and `execution_service.SessionService.read_file`, asserting each returns
+  a result dict (never raises) with `PERMISSION_DENIED`. `scripts/fuzz.py`'s
+  `fuzz_jail` now also hands `_jail`'s successful return to a real
+  `os.lstat` inside `try/except OSError`, the same real-syscall oracle
+  already applied to `_jail_nofollow`'s returned components — so a NUL or
+  surrogate that survives `_jail` on ANY platform is now a fuzz finding,
+  not only a `_jail_nofollow` one.
+
 - **A symbolic dividend with a huge Float coefficient still hung `%`
   (THE-1095 round 18, second seeded atheris timeout, decoded with the
   harness's own `FuzzedDataProvider`: `1.5 + 2.3E1^10!1Ek^5%Eb+bbb…!20!`).**
