@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """ClusterFuzzLite/atheris coverage-guided harness for
-`codecalc.sessions._jail` / `_session_dir` — the traversal guards between a
-caller-supplied relative path (or session id) and a filesystem write under a
-session workspace (see codecalc/sessions.py's own docstrings, in particular
-`_jail`'s record of the confirmed `str.startswith` bypass fixed).
+`codecalc.sessions._jail` / `_jail_nofollow` / `_session_dir` — the traversal
+guards between a caller-supplied relative path (or session id) and a
+filesystem write under a session workspace (see codecalc/sessions.py's own
+docstrings, in particular `_jail`'s record of the confirmed `str.startswith`
+bypass fixed).
 
 COMPLEMENTS scripts/fuzz.py, does not replace it — see fuzz/README.md and
 fuzz/safe_expr_fuzzer.py's module docstring for the deterministic-gate vs.
@@ -20,8 +21,21 @@ the finding, and is what actually matters here: an escaped path is the
 security bug this guard exists to prevent, not merely an unexpected
 exception, so success paths are checked explicitly rather than only
 watching for a crash.
+
+`_jail_nofollow` (THE-1103) gets its own check, `_check_jail_nofollow`,
+rather than being folded into `_check_jail`: it returns workspace-relative
+COMPONENTS, never a resolved `Path` (see its own docstring for why it must
+never call `resolve()`), so there is no filesystem path to re-resolve and
+compare against a base — the contract this checks instead is "every
+returned component is a real, single, `..`-free, NUL-free, filesystem-
+encodable name" — the exact set of properties `delete_file`'s `_unlink_pinned`
+walk trusts each component to already have. NUL and lone-surrogate seeds
+live in `fuzz_corpus.SEED_CORPUS_PATH` (shared with `_check_jail`, since a
+NUL byte or an unencodable component is refused the same way by both `_jail`
+and `_jail_nofollow`) rather than a separate corpus here.
 """
 
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -75,23 +89,55 @@ def _check_session_dir(session_id: str) -> None:
         raise AssertionError(f"sessions._session_dir escaped root: {result!r} for id={session_id!r}")
 
 
+def _check_jail_nofollow(path: str) -> None:
+    try:
+        parts = sessions._jail_nofollow(path)
+    except ValueError:
+        return  # the documented, safe refusal
+    if not parts or any(p in ("", ".", "..") for p in parts):
+        raise AssertionError(f"sessions._jail_nofollow returned invalid parts: {parts!r} for path={path!r}")
+    for part in parts:
+        # THE-1103: a NUL byte or an unencodable (lone-surrogate) component
+        # must never survive to here — `_unlink_pinned` trusts every
+        # component this returns to reach a real `openat`/`lstat`/`unlink`
+        # call unrefused, and either one raises there instead
+        # (`ValueError`/`UnicodeEncodeError`) rather than the documented
+        # `{"ok": False, ...}` refusal.
+        if "\x00" in part:
+            raise AssertionError(f"sessions._jail_nofollow returned a NUL-containing part: {parts!r} for path={path!r}")
+        try:
+            os.fsencode(part)
+        except UnicodeEncodeError as exc:
+            raise AssertionError(
+                f"sessions._jail_nofollow returned an unencodable part: {parts!r} for path={path!r}") from exc
+
+
 def TestOneInput(data: bytes) -> None:
     fdp = atheris.FuzzedDataProvider(data)
-    # One boolean picks which of the two guards this input exercises;
-    # libFuzzer's coverage feedback explores both sides of that branch on
+    # A 3-way pick chooses which of the three guards this input exercises;
+    # libFuzzer's coverage feedback explores every side of that branch on
     # its own, same as it does for every other branch in the target code.
-    if fdp.ConsumeBool():
+    choice = fdp.ConsumeIntInRange(0, 2)
+    if choice == 0:
         corpus = fuzz_corpus.SEED_CORPUS_PATH
-        choice = fdp.ConsumeIntInRange(0, len(corpus))
-        seed = corpus[choice] if choice < len(corpus) else ""
+        idx = fdp.ConsumeIntInRange(0, len(corpus))
+        seed = corpus[idx] if idx < len(corpus) else ""
         tail = fdp.ConsumeUnicodeNoSurrogates(fdp.remaining_bytes())
         _check_jail(seed + tail)
-    else:
+    elif choice == 1:
         corpus = fuzz_corpus.SEED_CORPUS_SESSION_ID
-        choice = fdp.ConsumeIntInRange(0, len(corpus))
-        seed = corpus[choice] if choice < len(corpus) else ""
+        idx = fdp.ConsumeIntInRange(0, len(corpus))
+        seed = corpus[idx] if idx < len(corpus) else ""
         tail = fdp.ConsumeUnicodeNoSurrogates(fdp.remaining_bytes())
         _check_session_dir(seed + tail)
+    else:
+        # same corpus as `_check_jail` (choice 0) — see module docstring
+        # for why NUL/surrogate seeds are shared rather than duplicated.
+        corpus = fuzz_corpus.SEED_CORPUS_PATH
+        idx = fdp.ConsumeIntInRange(0, len(corpus))
+        seed = corpus[idx] if idx < len(corpus) else ""
+        tail = fdp.ConsumeUnicodeNoSurrogates(fdp.remaining_bytes())
+        _check_jail_nofollow(seed + tail)
 
 
 if __name__ == "__main__":

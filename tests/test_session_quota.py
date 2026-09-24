@@ -790,6 +790,60 @@ def _test_delete_file_refusals():
 _test_delete_file_refusals()
 
 
+def _test_delete_file_refuses_nul_and_surrogate_names():
+    """THE-1103: a NUL byte or a lone UTF-16 surrogate in the path used to
+    reach a real filesystem call (`_unlink_pinned`'s `os.lstat`/`os.open`)
+    unrefused, raising `ValueError`/`UnicodeEncodeError` straight past
+    `delete_file`'s own guarded `try` — over MCP, a bare `ToolError` instead
+    of the `{"ok": False, "code": ..., ...}` shape #212 requires every public
+    session function to return. `write_file` already handled the identical
+    input correctly (`_jail`'s `resolve()` happens to raise the same
+    `ValueError` `_jail`'s OWN callers already catch) — the fix makes
+    `_jail_nofollow` raise it too, at the same string-only validation stage,
+    so `delete_file` gets exactly the same refusal `write_file` does, not by
+    accident of a filesystem call rejecting it three layers deeper.
+    """
+    sid = _new_session()
+    try:
+        # setup: a real nested file, so an over-eager component match on the
+        # NUL-containing sibling name below would be visible as data loss,
+        # not just a wrong return value.
+        setup = sessions.write_file(sid, "sub/real.txt", "keep me")
+        check("nul/surrogate setup: a real nested file writes",
+              setup.get("ok") is True, f"-> {setup}")
+
+        bad_names = [
+            "a\x00b",
+            "sub/a\x00b",
+            "\x00",
+            "foo" + chr(0xd800),  # lone UTF-16 surrogate, unencodable as UTF-8
+        ]
+        for name in bad_names:
+            wr = sessions.write_file(sid, name, "x")
+            check(f"nul/surrogate {name!r}: write_file refuses with PERMISSION_DENIED "
+                  "(the sibling this must match)",
+                  wr.get("ok") is False and wr.get("code") == errors.PERMISSION_DENIED,
+                  f"-> {wr}")
+
+            dr = sessions.delete_file(sid, name)
+            check(f"nul/surrogate {name!r}: delete_file returns a result dict, "
+                  "never raises",
+                  isinstance(dr, dict), f"-> {dr!r}")
+            check(f"nul/surrogate {name!r}: delete_file refuses",
+                  dr.get("ok") is False, f"-> {dr}")
+            check(f"nul/surrogate {name!r}: delete_file's code matches write_file's",
+                  dr.get("code") == wr.get("code") == errors.PERMISSION_DENIED,
+                  f"-> delete={dr.get('code')} write={wr.get('code')}")
+
+        check("nul/surrogate: the real nested file was never touched",
+              (sessions._session_dir(sid) / "sub" / "real.txt").read_text() == "keep me")
+    finally:
+        sessions.stop(sid)
+
+
+_test_delete_file_refuses_nul_and_surrogate_names()
+
+
 def _test_delete_file_symlink_removes_link_not_target():
     """#325's own requirement: a symlink INSIDE the workspace pointing
     OUTSIDE it must be deletable — removing the link, never following it —

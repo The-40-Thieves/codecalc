@@ -225,6 +225,12 @@ SEED_CORPUS_PATH = [
     "..%2f..%2fetc%2fpasswd",
     "a\x00.txt",
     "a\x00../../etc/passwd",
+    # THE-1103: a lone UTF-16 surrogate (not producible by valid UTF-8, so
+    # never a surrogateescape'd byte) fails `os.fsencode` the same way a NUL
+    # byte fails the platform's own path-open call — see
+    # `sessions._jail_nofollow`'s docstring for why both are checked at the
+    # same string-only stage `_jail`'s `resolve()` used to catch by accident.
+    "foo\ud800bar",
     "C:\\Windows\\System32\\drivers\\etc\\hosts",
     "\\\\server\\share\\file",
     "a" * 5000,

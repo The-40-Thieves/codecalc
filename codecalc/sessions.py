@@ -3437,6 +3437,35 @@ def _jail_nofollow(path: str) -> list[str]:
     refused the same way: there is no root to hand `_unlink_pinned`, and
     deleting the workspace root belongs under the identical refusal every
     other out-of-bounds path gets, not a bespoke message.
+
+    THE-1103: a NUL byte or a lone UTF-16 surrogate in a component used to
+    reach a real filesystem call unrefused. `_jail`'s own `resolve()` raises
+    `ValueError` on either (a NUL by the platform's own path-encoding rules;
+    a lone surrogate because it cannot be encoded), and every `_jail` caller
+    is already wrapped in the same `except ValueError: return _guard_error`
+    block `write_file` documents — so `_jail`'s callers were always safe by
+    accident of what `resolve()` happens to reject. `_jail_nofollow`
+    resolves nothing (that is the entire point of this function, see above),
+    so nothing upstream of `delete_file`'s guarded block ever performed that
+    check, and the raise came from whatever filesystem call ran first
+    instead — `_unlink_pinned`'s `os.lstat`/`os.open` on POSIX, or
+    `_final_component_long_name`'s `os.path.realpath` on the Windows
+    fallback — as a bare, uncaught `ValueError`/`UnicodeEncodeError`, past
+    `delete_file`'s own `try` (that block only wraps the call to this
+    function; it has already returned by the time either filesystem call
+    runs). Checked here, at the same string-only stage as every other
+    refusal in this function, closes it for every current and future caller
+    of `_jail_nofollow` at once, not just `delete_file`.
+
+    NUL is checked explicitly (`os.fsencode` happily encodes a NUL byte —
+    `b"a\\x00b"` is well-formed on the Python side; it is the OS-level
+    open/lstat call that rejects it, which is exactly the call this
+    function exists to never make). The encodability check catches a lone
+    surrogate (`os.fsencode`, matching `sys.getfilesystemencoding()` +
+    `surrogateescape`, raises `UnicodeEncodeError` on one) without rejecting
+    a legitimate surrogateescape'd name — a byte that failed to decode as
+    UTF-8 becomes a low surrogate (`\\udc80`-`\\udcff`) that `os.fsencode`
+    round-trips back to its original byte and accepts.
     """
     if len(path) > _MAX_JAIL_PATH_LEN:
         raise ValueError(
@@ -3450,6 +3479,13 @@ def _jail_nofollow(path: str) -> list[str]:
     parts = [p for p in re.split(r"[/\\]", path) if p not in ("", ".")]
     if not parts or any(p == ".." for p in parts):
         raise ValueError("path escapes session workspace")
+    for p in parts:
+        if "\x00" in p:
+            raise ValueError("path escapes session workspace")
+        try:
+            os.fsencode(p)
+        except UnicodeEncodeError:
+            raise ValueError("path escapes session workspace") from None
     return parts
 
 

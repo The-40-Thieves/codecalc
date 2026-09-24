@@ -35,6 +35,29 @@ behind it.
 
 ### Fixed
 
+- **`session_delete_file` raised a bare `ValueError`/`UnicodeEncodeError`
+  instead of the documented `{"ok": False, ...}` refusal for a NUL byte or a
+  lone UTF-16 surrogate in the path (THE-1103).** `_jail_nofollow` — the
+  string-only validation `delete_file` uses instead of `_jail` (it never
+  resolves anything, see its own docstring) — never checked for either, so
+  the raise came from whatever real filesystem call ran first
+  (`_unlink_pinned`'s `os.lstat`/`os.open` on POSIX, or
+  `_final_component_long_name`'s `os.path.realpath` on the Windows
+  fallback) and escaped `delete_file`'s own guarded `try` uncaught — over
+  MCP, a bare `ToolError` instead of the `#212` result contract. `write_file`
+  already refused the identical input correctly, by accident: `_jail`'s own
+  `resolve()` happens to raise the same `ValueError` for both cases, and
+  every `_jail` caller already catches it. `_jail_nofollow` now refuses a
+  NUL byte and any component `os.fsencode` cannot encode (a lone surrogate;
+  a legitimately surrogateescape'd byte still round-trips and is accepted)
+  at the same string-only validation stage as every other refusal in that
+  function, so `delete_file` gets the identical `PERMISSION_DENIED` refusal
+  `write_file` does. `resource_read` (the other `_jail`-based read path) was
+  already safe: its own caller (`ExecutionService.read_file`) already wraps
+  it in the same guarded `try`. Fuzzed: `_jail_nofollow` is now a target in
+  `fuzz/sessions_path_fuzzer.py` alongside `_jail`/`_session_dir`, and
+  `scripts/fuzz.py`'s shared path corpus gained a lone-surrogate seed.
+
 - **A symbolic dividend with a huge Float coefficient still hung `%`
   (THE-1095 round 18, second seeded atheris timeout, decoded with the
   harness's own `FuzzedDataProvider`: `1.5 + 2.3E1^10!1Ek^5%Eb+bbb…!20!`).**
