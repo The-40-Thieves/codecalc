@@ -158,6 +158,8 @@ def _static_token_auth() -> dict:
             issuer_url=AnyHttpUrl(base),
             resource_server_url=AnyHttpUrl(base.rstrip("/") + "/mcp"),
             required_scopes=["codecalc"],
+            # The static AccessToken carries no resource indicator to check.
+            validate_token_resource=False,
         ),
     }
 
@@ -261,6 +263,9 @@ def _http_auth(*, oauth_issuer: str | None = None, oauth_audience: str | None = 
             issuer_url=AnyHttpUrl(oauth_issuer),
             resource_server_url=AnyHttpUrl(oauth_audience),
             required_scopes=required_scopes,
+            # JWTTokenVerifier checks `aud` against this exact audience and
+            # returns it as the token's resource.
+            validate_token_resource=True,
         ),
     }
 
