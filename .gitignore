@@ -22,6 +22,8 @@ sessions/
 
 # Tooling
 .ruff_cache/
+# mutmut's copy of the tree (mutation workflow; see [tool.mutmut] in pyproject.toml)
+mutants/
 .mypy_cache/
 .pytest_cache/
 
