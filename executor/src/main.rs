@@ -20,6 +20,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
+use codecalc_exec::bounds::{cap_output, remaining_run_timeout_secs};
 use serde_json::json;
 
 mod platform;
@@ -1264,11 +1265,7 @@ fn read_capped(path: &Path, max_output_kb: u64) -> (String, bool, Option<String>
             error = Some(format!("open {} failed: {e}", path.display()));
         }
     }
-    let truncated = buf.len() as u64 > cap;
-    if truncated {
-        buf.truncate(cap as usize);
-        buf.extend_from_slice(b"\n...[truncated]");
-    }
+    let truncated = cap_output(&mut buf, cap);
     (
         String::from_utf8_lossy(&buf).into_owned(),
         truncated,
@@ -1325,29 +1322,6 @@ fn exit_code_json(sr: &StepResult) -> serde_json::Value {
     } else {
         serde_json::Value::from(sr.exit_code)
     }
-}
-
-/// How many whole seconds remain in the wall-clock budget for the run step,
-/// given how long compiling already took. `elapsed_ms` is `started.elapsed()`
-/// captured right after the compile step returns, at millisecond precision —
-/// not a floored `compile_ms / 1000`, which is what let a 9,900ms compile get
-/// charged as spending only 9 whole seconds. Returns None when nothing is
-/// left — compiling alone met or exceeded the budget — meaning the run must
-/// not be attempted at all: the old code's unconditional `.max(1)` handed the
-/// run step a guaranteed extra second regardless of the deficit, so
-/// `--timeout 10` could take up to ~11.5s end to end.
-fn remaining_run_timeout_secs(budget_secs: u64, elapsed_ms: u64) -> Option<u64> {
-    let budget_ms = budget_secs.saturating_mul(1000);
-    if elapsed_ms >= budget_ms {
-        return None;
-    }
-    // spawn_and_wait's kill timer only understands whole seconds
-    // (Duration::from_secs in platform::spawn_and_wait), so any genuinely
-    // positive remainder is rounded UP to the smallest unit it supports
-    // rather than floored to zero — a compile that "just barely" fits inside
-    // the budget still gets to attempt the run. The guard above is what
-    // confines that rounding-up to cases where time truly remains.
-    Some((budget_ms - elapsed_ms).div_ceil(1000))
 }
 
 fn execute(
