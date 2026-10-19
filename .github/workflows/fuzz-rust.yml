@@ -56,7 +56,16 @@ jobs:
       # libFuzzer exits non-zero on a crash, so this step is the finding. -max_total_time bounds it.
       - name: fuzz ${{ matrix.target }} for 300 seconds
         working-directory: executor
-        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=300
+        # --target is NOT optional here: cargo-fuzz defaults to the triple it was itself built for,
+        # and install-action ships a musl build, so the first CI run compiled for
+        # x86_64-unknown-linux-musl and died with "sanitizer is incompatible with statically linked
+        # libc". The runner's own host triple is what ASan needs.
+        env:
+          FUZZ_TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          host=$(rustc +nightly -vV | sed -n 's/^host: //p')
+          cargo +nightly fuzz run --target "$host" "$FUZZ_TARGET" -- -max_total_time=300
       - name: upload crash artifacts
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
