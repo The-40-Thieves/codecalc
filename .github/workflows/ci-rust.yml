@@ -326,3 +326,22 @@ jobs:
             UNIX_OK*) echo "ok: ${{ matrix.lib }} blocked the network and left AF_UNIX alone" ;;
             *) echo "::error::${{ matrix.lib }} blocked AF_UNIX; --no-net must block the NETWORK, not every socket (got: $out)"; exit 1 ;;
           esac
+
+  cargo-machete:
+    # Unused dependencies in executor/Cargo.toml. Nothing else catches a crate that is declared but
+    # never referenced: cargo-deny checks licences and sources, and clippy only sees code that
+    # exists. An unused crate still lands in the distributed binary's build graph for no reason.
+    # cargo-machete is a text heuristic, so a dependency reached only through a macro, a build
+    # script or a feature can be flagged falsely; those go under [package.metadata.cargo-machete]
+    # `ignored` in executor/Cargo.toml with the reason beside them.
+    name: cargo-machete (unused dependencies)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-rust
+      - uses: taiki-e/install-action@ed67fa35ac944f3a9b33f12c4dd43b6f31a47e20 # v2
+        with:
+          tool: cargo-machete@0.9.2
+      - name: cargo machete
+        working-directory: executor
+        run: cargo machete
