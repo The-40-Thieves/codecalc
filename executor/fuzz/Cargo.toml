@@ -1,0 +1,31 @@
+[package]
+name = "codecalc-exec-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.codecalc-exec]
+path = ".."
+
+[[bin]]
+name = "output_cap"
+path = "fuzz_targets/output_cap.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "timeout_remaining"
+path = "fuzz_targets/timeout_remaining.rs"
+test = false
+doc = false
+bench = false
+
+# Standalone crate: not a member of executor/'s package graph.
+[workspace]

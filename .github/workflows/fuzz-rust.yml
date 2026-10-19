@@ -1,0 +1,75 @@
+name: fuzz-rust
+
+# cargo-fuzz (libFuzzer) targets over the executor's pure bounding helpers, executor/fuzz/.
+# They cover the output cap and the run-timeout remainder in executor/src/bounds.rs: the two
+# pieces of the executor's input handling that have no process or platform state to reach.
+#
+# NON-GATING. Neither job is listed as a required check, so a red run is a finding to triage and
+# never a merge blocker. A finding leaves its input in executor/fuzz/artifacts/, uploaded on failure.
+#
+# Runs: on pull requests that touch executor/ (each target 300 seconds), and weekly on a schedule
+# so a quiet PR history still gets fuzzed. ClusterFuzzLite (cflite_*.yml) is Python-only and does
+# not cover this crate; this is the Rust counterpart.
+#
+# Measured locally before wiring (`cargo +nightly fuzz run <t> -- -max_total_time=120`, no crash):
+#   output_cap        40,492,405 runs in 121 s, 334,647 exec/s, cov 38, corp 5
+#   timeout_remaining 56,025,269 runs in 121 s, 463,018 exec/s, cov 29, corp 4
+
+on:
+  pull_request:
+    paths:
+      - 'executor/**'
+      - '.github/workflows/fuzz-rust.yml'
+  schedule:
+    - cron: '0 7 * * 1' # weekly, Monday 07:00 UTC (after ci-security's 06:00 advisory sweep)
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fuzz:
+    name: cargo-fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [output_cap, timeout_remaining]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # cargo-fuzz needs nightly (-Zsanitizer). The SHA pins the action; `toolchain` picks nightly.
+      # rust-toolchain.toml in executor/ still pins stable for everything else, and `cargo +nightly`
+      # overrides it for these steps only.
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable (pinned by SHA)
+        with:
+          toolchain: nightly
+      - uses: taiki-e/install-action@ed67fa35ac944f3a9b33f12c4dd43b6f31a47e20 # v2
+        with:
+          tool: cargo-fuzz@0.13.2 # same pin as Cave's mise config
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: executor/fuzz
+      # libFuzzer exits non-zero on a crash, so this step is the finding. -max_total_time bounds it.
+      - name: fuzz ${{ matrix.target }} for 300 seconds
+        working-directory: executor
+        # --target is NOT optional here: cargo-fuzz defaults to the triple it was itself built for,
+        # and install-action ships a musl build, so the first CI run compiled for
+        # x86_64-unknown-linux-musl and died with "sanitizer is incompatible with statically linked
+        # libc". The runner's own host triple is what ASan needs.
+        env:
+          FUZZ_TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          host=$(rustc +nightly -vV | sed -n 's/^host: //p')
+          cargo +nightly fuzz run --target "$host" "$FUZZ_TARGET" -- -max_total_time=300
+      - name: upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: executor/fuzz/artifacts/
+          if-no-files-found: ignore
