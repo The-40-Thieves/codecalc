@@ -345,3 +345,38 @@ jobs:
       - name: cargo machete
         working-directory: executor
         run: cargo machete
+
+  coverage:
+    # Line/region coverage of the Rust unit tests, uploaded as lcov + a summary. REPORT ONLY: there is
+    # no threshold, and none should be added from this number alone. Measured 2026-10-19 with
+    # cargo-llvm-cov 0.9.1 on Cave: 28.75% lines, 29.64% regions overall; platform/unix.rs (where the
+    # `unsafe` rlimit/seccomp/spawn code lives) 22.90% lines; main.rs 14.15%. That is low because most
+    # executor behaviour is exercised from OUTSIDE, by the contract job and the Python suite driving the
+    # built binary, and this job instruments neither. What it is for: seeing which `unsafe` paths no
+    # unit test reaches, and whether a change moves that. Taking the binary-level suites into account
+    # needs `cargo llvm-cov show-env` around them, which is a separate change.
+    name: coverage (cargo-llvm-cov, report only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: llvm-tools
+      - uses: taiki-e/install-action@ed67fa35ac944f3a9b33f12c4dd43b6f31a47e20 # v2
+        with:
+          tool: cargo-llvm-cov@0.9.1
+      - name: cargo llvm-cov
+        working-directory: executor
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo llvm-cov --lcov --output-path lcov.info
+          cargo llvm-cov report --summary-only | tee coverage-summary.txt
+          { echo '```'; cat coverage-summary.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: executor-coverage
+          path: |
+            executor/lcov.info
+            executor/coverage-summary.txt
