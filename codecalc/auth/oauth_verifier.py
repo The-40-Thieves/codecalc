@@ -10,9 +10,11 @@ issuer-specific (which keys, which claims) in a way a general-purpose SDK
 cannot pre-bake. This module is that piece.
 
 Signature verification, key fetch-and-cache (including "unknown kid ->
-refetch the JWKS once -> retry"), is `jwt.PyJWKClient` — not hand-rolled here.
-It already does exactly what an issuer key ROTATION needs: a `kid` absent
-from the cached JWK Set forces one synchronous refetch before giving up. The
+refetch the JWKS -> retry"), is `jwt.PyJWKClient` — not hand-rolled here.
+It already does what an issuer key ROTATION needs: a `kid` absent from the
+cached JWK Set forces one synchronous refetch before giving up, but no more
+often than a cooldown allows (anti-DoS; see `JWTTokenVerifier`), so a rotated
+key is picked up at most that many seconds late. The
 one piece PyJWT does not do is turn an issuer URL into a JWKS URL; that is
 OpenID Connect Discovery (`/.well-known/openid-configuration`'s `jwks_uri`),
 plain enough to not need a library either.
@@ -115,8 +117,9 @@ class JWTTokenVerifier(TokenVerifier):
 
     Checks, all via `jwt.decode`'s own options (nothing here re-implements
     them): signature (against a key `jwt.PyJWKClient` resolves by the
-    token's `kid`, refreshing its cache once on a `kid` it has not seen —
-    the key-rotation path), `iss`, `aud`, `exp`, and `nbf`/`iat` if present.
+    token's `kid`, refreshing its cache on a `kid` it has not seen — the
+    key-rotation path — but at most once per `jwks_refresh_cooldown_s`),
+    `iss`, `aud`, `exp`, and `nbf`/`iat` if present.
     Required-SCOPE enforcement is deliberately NOT here: `AuthSettings`'s
     `required_scopes` plus the SDK's `RequireAuthMiddleware` already do that,
     against the `scopes` this returns, so duplicating the check here would
@@ -135,7 +138,10 @@ class JWTTokenVerifier(TokenVerifier):
     reach one).
     """
 
-    def __init__(self, *, issuer: str, audience: str, jwks_url: str) -> None:
+    def __init__(
+        self, *, issuer: str, audience: str, jwks_url: str,
+        jwks_refresh_cooldown_s: float = 30.0,
+    ) -> None:
         # Validated here too, not only for the issuer at discovery time: an
         # explicit `--oauth-jwks-url` never goes through `discover_jwks_uri`
         # at all, and a discovered `jwks_uri` could in principle name a
@@ -145,7 +151,17 @@ class JWTTokenVerifier(TokenVerifier):
         self._audience = audience
         # cache_jwk_set=True (5 minute TTL) is PyJWKClient's own default; kept
         # explicit here because it is the setting this whole class leans on.
-        self._jwks_client = jwt.PyJWKClient(jwks_url, cache_jwk_set=True, lifespan=300)
+        # cooldown_duration is the same kind of case (pyjwt >= 2.14; 30 s is its
+        # default too). An unknown kid forces a JWKS refetch only once this many
+        # seconds have passed since the last successful fetch. That bound is
+        # the point: without it, a client minting random kids would make this
+        # server fetch the issuer's JWKS on every request. The price is that a
+        # genuine rotation is picked up up to this late. Production keeps the
+        # default; a test may pass 0 to exercise the refetch without waiting.
+        self._jwks_client = jwt.PyJWKClient(
+            jwks_url, cache_jwk_set=True, lifespan=300,
+            cooldown_duration=jwks_refresh_cooldown_s,
+        )
 
     async def verify_token(self, token: str) -> AccessToken | None:
         # PyJWKClient is synchronous (stdlib `urllib.request` under the hood,

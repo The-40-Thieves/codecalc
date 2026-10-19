@@ -60,6 +60,7 @@ class _FakeIssuer(http.server.BaseHTTPRequestHandler):
         if self.path == "/.well-known/openid-configuration":
             body = json.dumps({"issuer": base, "jwks_uri": f"{base}/jwks.json"}).encode()
         elif self.path == "/jwks.json":
+            self.server.jwks_hits += 1
             body = json.dumps(self.server.keys).encode()
         else:
             self.send_response(404)
@@ -74,6 +75,7 @@ class _FakeIssuer(http.server.BaseHTTPRequestHandler):
 def _start_fake_issuer(initial_keys: dict) -> http.server.HTTPServer:
     srv = http.server.HTTPServer(("127.0.0.1", 0), _FakeIssuer)
     srv.keys = initial_keys
+    srv.jwks_hits = 0  # every /jwks.json fetch, so a test can count refetches
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
 
@@ -228,21 +230,15 @@ else:
           f"-> {headers.get('WWW-Authenticate')!r}")
 
     # Key rotation: rsa-2 is not in the JWKS the client already cached, so
-    # the FIRST attempt must fail; PyJWKClient's own "unknown kid -> refetch
-    # once -> retry" is what makes the SECOND attempt, after the fake issuer
-    # publishes the new key, succeed with no server restart.
+    # the attempt must fail. PyJWKClient refetches on an unknown kid only once
+    # its cooldown has passed (pyjwt >= 2.14, 30 s by default); section 8
+    # below proves the rotation pickup in-process with cooldown 0 and the
+    # cooldown hold with the default.
     rsa_key_2 = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     rotated_token = _mint(issuer=ISSUER, audience=AUDIENCE, key=rsa_key_2, kid="rsa-2")
 
     status, _, _ = _post(CODECALC_PORT, token=rotated_token)
     check("token signed by a kid not yet in the JWKS -> 401", status == 401, f"-> {status}")
-
-    issuer_srv.keys["keys"].append(
-        _to_jwk(jwt.algorithms.RSAAlgorithm, rsa_key_2.public_key(), kid="rsa-2", alg="RS256"))
-    status, _, body = _post(CODECALC_PORT, token=rotated_token)
-    check("...the SAME token succeeds once the issuer rotates the JWKS "
-          "(refresh-on-unknown-kid, no restart)",
-          status == 200 and b'"tools"' in body, f"-> {status}")
 
     # RFC 9728 protected resource metadata: unauthenticated, its own route.
     req = urllib.request.Request(f"http://127.0.0.1:{CODECALC_PORT}/.well-known/oauth-protected-resource/mcp")
@@ -585,6 +581,54 @@ def _check_https_required_off_loopback() -> None:
 
 
 _check_https_required_off_loopback()
+
+
+# ═══ 8. JWKS refresh on an unknown kid: the cooldown, in-process ═══════════
+# Driven through JWTTokenVerifier directly, not a spawned server: the rotation
+# pickup needs cooldown 0, which only the constructor can set, and the JWKS
+# fetch count is only visible from this process's fake issuer. pyjwt >= 2.14
+# refetches for an unknown kid only once `cooldown_duration` seconds have
+# passed since the last successful fetch (anti-DoS); the verifier passes it
+# explicitly, default 30.
+from codecalc.auth.oauth_verifier import JWTTokenVerifier
+
+
+def _accepts(verifier: JWTTokenVerifier, token: str) -> bool:
+    return asyncio.run(verifier.verify_token(token)) is not None
+
+
+def _fresh_issuer() -> tuple[http.server.HTTPServer, str]:
+    srv = _start_fake_issuer({"keys": [RSA_JWK]})
+    return srv, f"http://127.0.0.1:{srv.server_port}"
+
+
+rsa_key_3 = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+rsa_jwk_3 = _to_jwk(jwt.algorithms.RSAAlgorithm, rsa_key_3.public_key(), kid="rsa-3", alg="RS256")
+
+zero_srv, zero_iss = _fresh_issuer()
+zero = JWTTokenVerifier(
+    issuer=zero_iss, audience=AUDIENCE, jwks_url=f"{zero_iss}/jwks.json",
+    jwks_refresh_cooldown_s=0,
+)
+zero_token = _mint(issuer=zero_iss, audience=AUDIENCE, key=rsa_key_3, kid="rsa-3")
+check("cooldown 0: a kid the issuer does not publish yet -> refused",
+      not _accepts(zero, zero_token))
+zero_srv.keys["keys"].append(rsa_jwk_3)
+check("cooldown 0: the SAME token verifies as soon as the issuer rotates (refetch, no wait)",
+      _accepts(zero, zero_token))
+
+dflt_srv, dflt_iss = _fresh_issuer()
+dflt = JWTTokenVerifier(issuer=dflt_iss, audience=AUDIENCE, jwks_url=f"{dflt_iss}/jwks.json")
+check("default cooldown: a token from the initial JWKS verifies",
+      _accepts(dflt, _mint(issuer=dflt_iss, audience=AUDIENCE)))
+dflt_srv.keys["keys"].append(rsa_jwk_3)
+dflt_token = _mint(issuer=dflt_iss, audience=AUDIENCE, key=rsa_key_3, kid="rsa-3")
+fetches_before = dflt_srv.jwks_hits
+check("default cooldown: a kid published within 30 s of the last fetch is refused",
+      not _accepts(dflt, dflt_token))
+check("...and that refusal does NOT refetch the JWKS (the anti-DoS bound holds)",
+      dflt_srv.jwks_hits == fetches_before,
+      f"-> {dflt_srv.jwks_hits - fetches_before} extra fetch(es)")
 
 
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else

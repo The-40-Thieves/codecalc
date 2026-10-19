@@ -55,7 +55,7 @@ dependencies = [
     # manifest saying otherwise. No `codecalc[oauth]` extra was added: an
     # extra exists to make an ABSENT library optional, and this one is never
     # absent — `mcp>=2.0,<3` forces it in unconditionally.
-    "pyjwt[crypto]>=2.10,<3",
+    "pyjwt[crypto]>=2.15.1,<3",
 ]
 
 # The heavy half, measured: sympy 40.4 MB + z3-solver 43.1 MB +

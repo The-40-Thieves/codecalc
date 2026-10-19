@@ -33,6 +33,14 @@ behind it.
 
 ## [Unreleased]
 
+### Security
+
+- **`pyjwt` is now `>=2.15.1` and `mcp` is `2.3.0`, clearing the open advisories
+  in `uv.lock` (`osv-scanner`: 15 → 0).** The `--oauth-issuer` JWT verifier
+  now passes pyjwt's `cooldown_duration` explicitly (30 s, the library default):
+  an unknown `kid` refetches the issuer's JWKS at most once per 30 s, so a
+  rotated signing key is accepted up to 30 s after the issuer publishes it.
+
 ### Fixed
 
 - **`session_delete_file` raised a bare `ValueError`/`UnicodeEncodeError`
