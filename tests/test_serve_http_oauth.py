@@ -631,6 +631,47 @@ check("...and that refusal does NOT refetch the JWKS (the anti-DoS bound holds)"
       f"-> {dflt_srv.jwks_hits - fetches_before} extra fetch(es)")
 
 
+# The JWK's own `alg` is binding: PyJWT 2.15 enforces it only when `decode`
+# is handed the PyJWK, not the raw key. A key the issuer publishes as RS512
+# must not verify an RS256 token, even though RS256 is in the allowlist.
+rsa512_jwk = _to_jwk(jwt.algorithms.RSAAlgorithm, RSA_KEY.public_key(), kid="rsa-512", alg="RS512")
+alg_srv = _start_fake_issuer({"keys": [rsa512_jwk]})
+alg_iss = f"http://127.0.0.1:{alg_srv.server_port}"
+alg = JWTTokenVerifier(issuer=alg_iss, audience=AUDIENCE, jwks_url=f"{alg_iss}/jwks.json")
+check("JWK alg=RS512 + RS256 token signed by that key -> refused (JWK alg binds)",
+      not _accepts(alg, _mint(issuer=alg_iss, audience=AUDIENCE, kid="rsa-512", algorithm="RS256")))
+
+
+# The production default (30 s) with a controllable clock, no real sleep:
+# PyJWKClient reads time.monotonic() from its own module, so that one name is
+# swapped for the duration of this block and restored afterwards.
+class _FakeClock:
+    now = 1000.0
+
+    @staticmethod
+    def monotonic() -> float:
+        return _FakeClock.now
+
+
+_real_jwks_time = jwt.jwks_client.time
+jwt.jwks_client.time = _FakeClock
+try:
+    roll_srv, roll_iss = _fresh_issuer()
+    roll = JWTTokenVerifier(issuer=roll_iss, audience=AUDIENCE, jwks_url=f"{roll_iss}/jwks.json")
+    check("default cooldown (clock): initial JWKS fetch at t=1000 verifies",
+          _accepts(roll, _mint(issuer=roll_iss, audience=AUDIENCE)))
+    roll_srv.keys["keys"].append(rsa_jwk_3)
+    roll_token = _mint(issuer=roll_iss, audience=AUDIENCE, key=rsa_key_3, kid="rsa-3")
+    _FakeClock.now = 1029.0
+    check("default cooldown (clock): rotated kid at t+29 s is still refused",
+          not _accepts(roll, roll_token))
+    _FakeClock.now = 1031.0
+    check("default cooldown (clock): rotated kid at t+31 s is refetched and accepted",
+          _accepts(roll, roll_token))
+finally:
+    jwt.jwks_client.time = _real_jwks_time
+
+
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else
       "\n=== serve-http --oauth-issuer: all scenarios pass ===")
 sys.exit(1 if FAILS else 0)

@@ -38,8 +38,16 @@ behind it.
 - **`pyjwt` is now `>=2.15.1` and `mcp` is `2.3.0`, clearing the open advisories
   in `uv.lock` (`osv-scanner`: 15 → 0).** The `--oauth-issuer` JWT verifier
   now passes pyjwt's `cooldown_duration` explicitly (30 s, the library default):
-  an unknown `kid` refetches the issuer's JWKS at most once per 30 s, so a
-  rotated signing key is accepted up to 30 s after the issuer publishes it.
+  an unknown `kid` refetches the issuer's JWKS only once 30 s have passed since
+  the last successful fetch (a failed fetch does not restart that clock, so
+  while the issuer is down each unknown-`kid` request retries the fetch; no
+  circuit breaker yet). A rotated signing key is accepted once that refetch
+  succeeds.
+- The `mcp` floor is now `>=2.3.0` (the advisory is fixed in 2.2.0; `2.3.0` is
+  the tested baseline), so package consumers no longer resolve to 2.0.0–2.1.1.
+- The JWT verifier passes the `PyJWK` to `jwt.decode` instead of the raw key, so
+  a JWKS entry's declared `alg` is enforced: a key published as `RS512` no
+  longer verifies an `RS256` token. `ALLOWED_ALGORITHMS` still gates the set.
 
 ### Fixed
 
