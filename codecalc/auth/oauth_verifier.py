@@ -10,9 +10,12 @@ issuer-specific (which keys, which claims) in a way a general-purpose SDK
 cannot pre-bake. This module is that piece.
 
 Signature verification, key fetch-and-cache (including "unknown kid ->
-refetch the JWKS once -> retry"), is `jwt.PyJWKClient` — not hand-rolled here.
-It already does exactly what an issuer key ROTATION needs: a `kid` absent
-from the cached JWK Set forces one synchronous refetch before giving up. The
+refetch the JWKS -> retry"), is `jwt.PyJWKClient` — not hand-rolled here.
+It already does what an issuer key ROTATION needs: a `kid` absent from the
+cached JWK Set forces one synchronous refetch before giving up, but no more
+often than a cooldown allows (anti-DoS; see `JWTTokenVerifier`), so a rotated
+key is not picked up before that many seconds have passed since the last
+successful fetch. The
 one piece PyJWT does not do is turn an issuer URL into a JWKS URL; that is
 OpenID Connect Discovery (`/.well-known/openid-configuration`'s `jwks_uri`),
 plain enough to not need a library either.
@@ -115,8 +118,10 @@ class JWTTokenVerifier(TokenVerifier):
 
     Checks, all via `jwt.decode`'s own options (nothing here re-implements
     them): signature (against a key `jwt.PyJWKClient` resolves by the
-    token's `kid`, refreshing its cache once on a `kid` it has not seen —
-    the key-rotation path), `iss`, `aud`, `exp`, and `nbf`/`iat` if present.
+    token's `kid`, refreshing its cache on a `kid` it has not seen — the
+    key-rotation path — but not again until `jwks_refresh_cooldown_s` has
+    passed since the last SUCCESSFUL fetch),
+    `iss`, `aud`, `exp`, and `nbf`/`iat` if present.
     Required-SCOPE enforcement is deliberately NOT here: `AuthSettings`'s
     `required_scopes` plus the SDK's `RequireAuthMiddleware` already do that,
     against the `scopes` this returns, so duplicating the check here would
@@ -135,7 +140,10 @@ class JWTTokenVerifier(TokenVerifier):
     reach one).
     """
 
-    def __init__(self, *, issuer: str, audience: str, jwks_url: str) -> None:
+    def __init__(
+        self, *, issuer: str, audience: str, jwks_url: str,
+        jwks_refresh_cooldown_s: float = 30.0,
+    ) -> None:
         # Validated here too, not only for the issuer at discovery time: an
         # explicit `--oauth-jwks-url` never goes through `discover_jwks_uri`
         # at all, and a discovered `jwks_uri` could in principle name a
@@ -145,7 +153,20 @@ class JWTTokenVerifier(TokenVerifier):
         self._audience = audience
         # cache_jwk_set=True (5 minute TTL) is PyJWKClient's own default; kept
         # explicit here because it is the setting this whole class leans on.
-        self._jwks_client = jwt.PyJWKClient(jwks_url, cache_jwk_set=True, lifespan=300)
+        # cooldown_duration is the same kind of case (pyjwt >= 2.14; 30 s is its
+        # default too). The cooldown is measured from the last SUCCESSFUL fetch:
+        # a failed fetch (issuer down, timeout) does not start it. So an unknown
+        # kid refetches the JWKS once the cooldown has passed, and a refetch that
+        # fails leaves the next unknown-kid request free to retry the outbound
+        # fetch immediately; PyJWKClient's lock serialises those attempts. This
+        # is NOT a hard one-fetch-per-30 s bound while the issuer is down. There
+        # is no circuit breaker here (a follow-up). A genuine rotation is picked
+        # up up to the cooldown late. Production keeps the default; a test may
+        # pass 0 to exercise the refetch without waiting.
+        self._jwks_client = jwt.PyJWKClient(
+            jwks_url, cache_jwk_set=True, lifespan=300,
+            cooldown_duration=jwks_refresh_cooldown_s,
+        )
 
     async def verify_token(self, token: str) -> AccessToken | None:
         # PyJWKClient is synchronous (stdlib `urllib.request` under the hood,
@@ -155,9 +176,11 @@ class JWTTokenVerifier(TokenVerifier):
             signing_key = await asyncio.to_thread(
                 self._jwks_client.get_signing_key_from_jwt, token,
             )
+            # The PyJWK, not `signing_key.key`: only a PyJWK lets decode enforce
+            # the JWK's own `alg` (a key published as RS512 must not verify RS256).
             claims = jwt.decode(
                 token,
-                signing_key.key,
+                signing_key,
                 algorithms=list(ALLOWED_ALGORITHMS),
                 audience=self._audience,
                 issuer=self._issuer,
