@@ -54,6 +54,7 @@ SCRIPTS = [
     "test_differential_corpus.py",
     "test_error_codes.py",
     "test_security.py",
+    "test_magnitude_boundaries.py",
 ]
 
 
