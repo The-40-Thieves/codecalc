@@ -17,7 +17,10 @@ from __future__ import annotations
 
 import math
 import pathlib
+import random
 import sys
+import time
+from fractions import Fraction
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
@@ -465,6 +468,59 @@ check(
     says(summation("product(x, (x, 1, 10**6))"), "would have about 6000000 digits"),
 )
 
+# ---------------------------------------------------------------- exponent cancellation
+
+# `_factor_multiset` keys bases by VALUE, so `10**5/2**5` is `{10: 5, 2: -5}`:
+# a negative entry whose value is the integer 3125. The symbolic-power cap must
+# judge integrality on the coprime refinement, not on the raw negative entry.
+check(
+    "exponent cancel: (x+1)**(10**5/2**5) refused, 3125 > 200 (PR #363 report)",
+    says(explode("(x+1)**(10**5/2**5)"), f"exceeds the limit of {se.MAX_SYMBOLIC_EXPONENT}"),
+)
+check(
+    "exponent cancel: (x+1)**(6**300/3**300) refused (= 2**300; the print-digit guard fires first)",
+    explode("(x+1)**(6**300/3**300)") is not None,
+)
+# Same shape at a size the print-digit guard does not reach first: the cap is the reason.
+check(
+    "exponent cancel: (x+1)**(6**8/3**8) refused by the cap (= 2**8 = 256)",
+    says(explode("(x+1)**(6**8/3**8)"), f"exceeds the limit of {se.MAX_SYMBOLIC_EXPONENT}"),
+)
+check("exponent cancel: (x+1)**(10**3/4) refused (= 250)", explode("(x+1)**(10**3/4)") is not None)
+check("exponent cancel: (x+1)**(10**3/5) accepted at the cap (= 200)", explode("(x+1)**(10**3/5)") is None)
+check("exponent cancel: (x+1)**(12**2/(2**4*3**2)) accepted (= 1)", explode("(x+1)**(12**2/(2**4*3**2))") is None)
+
+# Genuinely fractional exponents stay out of the symbolic-power cap: a real
+# denominator survives. (The first two are refused by the print-digit ceiling,
+# "over the limit of 4000", a different guard; the cap must not be their reason.)
+check(
+    "exponent cancel: (x+1)**(10**5/3) not refused by the exponent cap (fractional)",
+    not says(explode("(x+1)**(10**5/3)"), f"exceeds the limit of {se.MAX_SYMBOLIC_EXPONENT}"),
+)
+check(
+    "exponent cancel: (x+1)**(999999999999/2) not refused by the exponent cap (fractional)",
+    not says(explode("(x+1)**(999999999999/2)"), f"exceeds the limit of {se.MAX_SYMBOLIC_EXPONENT}"),
+)
+check("exponent cancel: (x+1)**(10**5/2**6) accepted (= 1562.5, fractional)", explode("(x+1)**(10**5/2**6)") is None)
+
+# The helper itself: integrality is decided on the coprime refinement.
+check(
+    "coprime refine: {10: 5, 2: -5} -> {5: 5} (value 3125)",
+    se._coprime_refine_multiset({10: 5, 2: -5}) == {5: 5},
+)
+check(
+    "coprime refine: {6: 300, 3: -300} -> {2: 300} (value 2**300)",
+    se._coprime_refine_multiset({6: 300, 3: -300}) == {2: 300},
+)
+check(
+    "coprime refine: {12: 2, 2: -4, 3: -2} -> {} (value 1)",
+    se._coprime_refine_multiset({12: 2, 2: -4, 3: -2}) == {},
+)
+check(
+    "coprime refine: {10: 5, 3: -1} unchanged (coprime, real denominator)",
+    se._coprime_refine_multiset({10: 5, 3: -1}) == {10: 5, 3: -1},
+)
+
 # ---------------------------------------------------------------- round 2: _pole_sensitive_magnitude
 
 # Free-symbol and non-rational arguments: the unresolved-argument return and its reason.
@@ -873,6 +929,132 @@ check(
 )
 check("reject2: (x+1)**(-bell(7)) accepted: the sign is negative", explode("(x+1)**(-bell(7))") is None)
 check("reject2: (x+1)**(bell(7)*I) skipped: an inconclusive exponent", explode("(x+1)**(bell(7)*I)") is None)
+
+# ---------------------------------------------------------------- coprime refinement: cost, property, rounds
+
+
+def _crafted_exponent():
+    """The 1996-char input from the review: 2**4472 over the odd primes below 1000."""
+    from sympy import primerange
+
+    pad = "*".join(map(str, primerange(3, 1000)))
+    return f"x**({2**4471}*2/({pad}))"
+
+
+def _multiset_value(terms):
+    value = Fraction(1)
+    for base, exp in terms.items():
+        value *= Fraction(base) ** exp
+    return value
+
+
+# Cost: the worklist version settles this in milliseconds; the restart-from-0 scan took ~6 s.
+_started = time.perf_counter()
+_crafted_verdict = explode(_crafted_exponent())
+_crafted_secs = time.perf_counter() - _started
+check(
+    f"coprime cost: reject_explosive on the crafted 1996-char exponent < 0.5 s ({_crafted_secs:.3f} s)",
+    _crafted_verdict is None and _crafted_secs < 0.5,
+    f"verdict={_crafted_verdict!r}",
+)
+
+# Property: seeded random multisets. Value kept (exact Fraction), keys pairwise coprime and > 1,
+# no zero exponent, and the input dict itself is never mutated.
+_rng = random.Random(0)  # noqa: S311 — seeded test input, not cryptography; determinism is the point
+_property_bad = []
+for _trial in range(300):
+    _terms = {}
+    for _ in range(_rng.randint(0, 6)):
+        _base = _rng.choice(
+            [
+                _rng.randint(2, 60),
+                _rng.randint(2, 5000),
+                2 ** _rng.randint(1, 40),
+                math.prod(_rng.sample([2, 3, 5, 7, 11, 13], 3)),
+            ]
+        )
+        _terms[_base] = _terms.get(_base, 0) + _rng.choice([-3, -2, -1, 1, 2, 3, 7, -7])
+        if _terms[_base] == 0:
+            del _terms[_base]
+    _snapshot = dict(_terms)
+    _out = se._coprime_refine_multiset(_terms)
+    _keys = list(_out)
+    if not (
+        _terms == _snapshot
+        and _out is not _terms
+        and _multiset_value(_out) == _multiset_value(_terms)
+        and all(k > 1 for k in _keys)
+        and all(v != 0 for v in _out.values())
+        and all(math.gcd(a, b) == 1 for i, a in enumerate(_keys) for b in _keys[i + 1 :])
+    ):
+        _property_bad.append(_snapshot)
+check(
+    "coprime property: 300 seeded random multisets keep value, pairwise-coprime keys > 1, no zero exponent, input unmodified",
+    not _property_bad,
+    f"({len(_property_bad)} failures)",
+)
+
+# Rounds: 12**2*15/10 = 216 needs more than one pass of gcd splitting. A one-pass helper leaves
+# {15: 1, 2: 1, 6: 2, 5: -1}, reads the negative 5 as a real denominator, and accepts the exponent.
+check(
+    "coprime rounds: {12: 2, 10: -1, 15: 1} -> {2: 3, 3: 3} (value 216, needs two rounds)",
+    se._coprime_refine_multiset({12: 2, 10: -1, 15: 1}) == {2: 3, 3: 3},
+)
+check(
+    "coprime rounds: (x+1)**(12**2*15/10) refused by the cap (216 > 200)",
+    says(explode("(x+1)**(12**2*15/10)"), f"exceeds the limit of {se.MAX_SYMBOLIC_EXPONENT}"),
+)
+
+# ---------------------------------------------------------------- table-function exponents, through the bound
+
+# A Mul/Pow/Add exponent CONTAINING a table call (not a bare call) is bounded too.
+# Three of these are refused by the print-digit guard in `_numeric_ceiling_scan`,
+# which runs before the symbolic-power loop, so the cap text is not their reason;
+# they are pinned as refusals. The bound itself is pinned directly, below.
+CAP_TEXT = f"exceeds the limit of {se.MAX_SYMBOLIC_EXPONENT}"
+for _expr in (
+    "(x+1)**(factorial(7)/factorial(3))",  # 840
+    "(x+1)**(factorial(6)/2)",  # 360
+    "(x+1)**(factorial(7)/factorial(4))",  # 210
+    "(x+1)**(-10**5/-2**5)",  # 3125, trusted path
+):
+    check(f"table exponent: {_expr} refused by the cap", says(explode(_expr), CAP_TEXT))
+for _expr in (
+    "(x+1)**(factorial(5)**2/factorial(3))",  # 2400
+    "(x+1)**(bell(10)/2)",  # 57987.5
+    "(x+1)**(factorial(100)/factorial(98))",  # 9900
+):
+    check(f"table exponent: {_expr} refused (print-digit guard fires first)", explode(_expr) is not None)
+for _expr in (
+    "(x+1)**(factorial(5)/factorial(3))",  # 20
+    "(x+1)**factorial(4)",  # 24
+    "(x+1)**(1/factorial(7))",  # 1/5040, a small exponent
+):
+    check(f"table exponent: {_expr} accepted", explode(_expr) is None)
+
+# The bound itself: resolved, an UPPER bound on log10 of the true exponent (numerator only for a
+# table reciprocal, so `factorial(7)/factorial(3)` is bounded by log10(5040) >= log10(840)).
+for _expr, _true in (
+    ("factorial(7)/factorial(3)", 840),
+    ("factorial(5)**2/factorial(3)", 2400),
+    ("factorial(6)/2", 360),
+    ("bell(10)/2", 57987.5),
+    ("factorial(7)/factorial(4)", 210),
+):
+    _got = se._resolved_table_aware_magnitude(tree(_expr), {})
+    check(
+        f"table exponent bound: {_expr} resolved, log10 upper bound >= log10({_true})",
+        _got[2] is True and _got[1] == 0.0 and _got[0] >= math.log10(_true) - 1e-9,
+        f"(got {_got[0]:.4f})",
+    )
+check(
+    "table exponent bound: 1/factorial(7) bounded by 0 (a reciprocal, magnitude <= 1)",
+    close(se._resolved_table_aware_magnitude(tree("1/factorial(7)"), {})[0], 0.0),
+)
+check(
+    "table sign: -bell(7) reads as negative, bell(7) does not",
+    se._table_product_is_negative(tree("-bell(7)")) and not se._table_product_is_negative(tree("bell(7)")),
+)
 
 # ---------------------------------------------------------------- output and timing
 

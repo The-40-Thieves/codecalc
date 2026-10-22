@@ -4142,6 +4142,75 @@ def _factor_multiset(node, memo_ms: dict):
     return result
 
 
+def _coprime_refine_multiset(terms: dict) -> dict:
+    """Refine a `_factor_multiset` terms dict until no two bases share a
+    factor, returning a NEW dict with the same value.
+
+    `_factor_multiset` keys bases by their integer VALUE and never factors
+    them (deliberately; see its docstring), so `10**5/2**5` comes back as
+    `{10: 5, 2: -5}`: a negative entry, yet the value is the integer 3125.
+    Reading "some net exponent is negative" as "a real denominator survives"
+    then let `(x+1)**(10**5/2**5)` past the `MAX_SYMBOLIC_EXPONENT` cap while
+    `(x+1)**3125` is refused. Here, while two distinct bases `a`, `b` share
+    `g = gcd(a, b) > 1`, `a**ea * b**eb` is rewritten as
+    `g**(ea*ma + eb*mb) * a'**ea * b'**eb`, where `ma`, `mb` are the full
+    multiplicities of `g` in `a` and `b` and `a'`, `b'` are what remains
+    after stripping them. Bases equal to 1 are dropped, equal bases merged,
+    zero net exponents deleted. Once no pair shares a factor, the value is an
+    integer iff every net exponent is >= 0, because a base `b > 1` left with a
+    negative exponent shares no prime with any other base, so nothing can
+    cancel it. Entries with a base <= 1 or a zero exponent on input carry no
+    value and are dropped on entry.
+
+    Worklist, not a restart: a key is compared against the others only when
+    it is inserted or re-inserted, so a prefix that is already pairwise
+    coprime is never rescanned.
+
+    COST (what the termination argument must also bound): only BASE integers
+    are touched, each a divisor of an input base, and exponents are only
+    added, so exponent magnitudes never enter the cost. Let `P` be the sum of
+    `Omega(base)` over the keys (prime factors with multiplicity). A merge of
+    `a` and `b` removes `Omega(a) + Omega(b)` and adds `Omega(g)`, `Omega(a')`,
+    `Omega(b')`; since `a = g**ma * a'` with `ma >= 1`, the net drop is
+    `(ma + mb - 1) * Omega(g) >= 1`, so there are at most `P_0` merges. Each
+    stripping loop runs at most `log2(base)` times, and each queue pop scans at
+    most the current key count with one `gcd` per key, which is at most the
+    input key count plus `P_0`. The whole call is therefore polynomial in the
+    number of input keys and their bit lengths, independent of every exponent.
+    """
+    refined = {base: exp for base, exp in terms.items() if base > 1 and exp}
+    work = list(refined)  # keys not yet checked against every other key
+    while work:
+        a = work.pop()
+        if a not in refined:
+            continue  # merged away after it was queued
+        for b in refined:
+            if b != a and math.gcd(a, b) > 1:
+                break
+        else:
+            continue  # coprime with every other key: settled until something new arrives
+        g = math.gcd(a, b)
+        ea, eb = refined.pop(a), refined.pop(b)
+        ma = mb = 0
+        while a % g == 0:
+            a //= g
+            ma += 1
+        while b % g == 0:
+            b //= g
+            mb += 1
+        for base, exp in ((g, ea * ma + eb * mb), (a, ea), (b, eb)):
+            if base == 1:
+                continue
+            if base not in refined:
+                work.append(base)
+            net = refined.get(base, 0) + exp
+            if net:
+                refined[base] = net
+            else:
+                refined.pop(base, None)
+    return refined
+
+
 def _table_multiset_trusted(multiset) -> bool:
     """`True` if a `_factor_multiset` result is trustworthy for `_multiset_
     log_num_den`'s own EXACT-accounting contract — `False` if a table-
@@ -7949,13 +8018,82 @@ def _resolved_table_aware_magnitude(node, memo: dict) -> tuple[float, float, boo
     log_num, log_den, resolved = _log10_num_den(node, memo)
     if resolved:
         return log_num, log_den, True
-    from sympy import Function
+    from sympy import Add, Function, Mul, Pow
 
     if isinstance(node, Function) and type(node).__name__ in _GROWTH_BOUNDS:
         bound, _violation = _table_function_bound(node, memo)
         if bound is not None:
             return bound, 0.0, True
+    # Review of 6fb3b8c, finding 2 (untrusted path): a COMPOUND exponent
+    # that CONTAINS a table call -- `factorial(7)/factorial(3)` (840),
+    # `factorial(5)**2/factorial(3)` (2400) -- used to stay plain "unresolved"
+    # here, so the exponent cap never saw its value. `_resolve_arg_magnitude`
+    # already composes `Mul`/`Add`/`Pow` over nested table calls, but its `Mul`
+    # branch gives a reciprocal `1/T` no bound of its own. A table reciprocal
+    # has magnitude <= 1 (`_is_table_reciprocal`), so it is dropped, and only
+    # the numerator is bounded. That is fail-closed: `factorial(100)/factorial(98)`
+    # is refused at its numerator's 158 digits, though its value (9900) is over
+    # the cap anyway. A reciprocal of anything else stays unresolved here.
+    if isinstance(node, Mul):
+        numerator = Mul(*(factor for factor in node.args if not _is_table_reciprocal(factor)), evaluate=False)
+        n_log_num, n_log_den, n_resolved, n_violation = _resolve_arg_magnitude(numerator, memo)
+        if n_resolved and n_violation is None:
+            return n_log_num, n_log_den, True
+    elif isinstance(node, Add) or (isinstance(node, Pow) and node.exp.is_nonnegative):
+        a_log_num, a_log_den, a_resolved, a_violation = _resolve_arg_magnitude(node, memo)
+        if a_resolved and a_violation is None:
+            return a_log_num, a_log_den, True
     return log_num, log_den, False
+
+
+def _is_positive_table_integer(node) -> bool:
+    """`True` for a `factorial`/`bell` call of a NON-NEGATIVE Integer argument:
+    an integer >= 1 (`n!` and the Bell numbers are, for n >= 0). Deliberately
+    narrow: `fibonacci(0)` is 0, and a table call of a non-integer argument can
+    be below 1, so neither is ever treated as one of these.
+    """
+    from sympy import Function, Integer
+
+    return (
+        isinstance(node, Function)
+        and type(node).__name__ in ("factorial", "bell")
+        and len(node.args) == 1
+        and isinstance(node.args[0], Integer)
+        and node.args[0] >= 0
+    )
+
+
+def _is_table_reciprocal(factor) -> bool:
+    """`True` for `T**-k` (k a positive Integer) with `T` a positive table integer
+    (`_is_positive_table_integer`): `|T**-k| <= 1`, because `T >= 1`."""
+    from sympy import Integer, Pow
+
+    return (
+        isinstance(factor, Pow)
+        and isinstance(factor.exp, Integer)
+        and factor.exp.is_negative
+        and _is_positive_table_integer(factor.base)
+    )
+
+
+def _table_product_is_negative(node) -> bool:
+    """`True` if `node` is a `Mul` whose factors are all Integers, positive table
+    integers or table reciprocals, with an odd number of negative Integer factors.
+    SymPy reports no sign for `-bell(7)` (`is_negative` is `None`), so the
+    exponent cap would otherwise read it as positive. Any other shape gives
+    `False`, which leaves the sign to `is_negative` as before.
+    """
+    from sympy import Integer, Mul
+
+    if not isinstance(node, Mul):
+        return False
+    negatives = 0
+    for factor in node.args:
+        if isinstance(factor, Integer) and factor != 0:
+            negatives += 1 if factor.is_negative else 0
+        elif not (_is_positive_table_integer(factor) or _is_table_reciprocal(factor)):
+            return False
+    return negatives % 2 == 1
 
 
 #: marker class name (`_deferred_binop_classes()`'s own keys, by NAME
@@ -8928,6 +9066,9 @@ def reject_explosive(tree) -> str | None:
             multiset = _factor_multiset(exponent, memo.setdefault("__multiset__", {}))
             if _table_multiset_trusted(multiset):
                 terms, exp_sign = multiset
+                # Decide integrality on the coprime refinement: `10**5/2**5`
+                # keeps a negative `2: -5` entry but is the integer 3125.
+                terms = _coprime_refine_multiset(terms)
                 if exp_sign != 0 and any(v < 0 for v in terms.values()):
                     # Genuinely fractional (a real denominator survives
                     # cancellation) — `sp.expand`/`sp.factor` do not
@@ -8955,7 +9096,7 @@ def reject_explosive(tree) -> str | None:
                 if not exp_res:
                     continue  # inconclusive -- a Function call, irrational constant, ...
                 exp_magnitude = exp_log_num - exp_log_den
-                exp_sign = -1 if exponent.is_negative else 1
+                exp_sign = -1 if exponent.is_negative or _table_product_is_negative(exponent) else 1
 
             # abs(), because the danger is the MAGNITUDE — a large negative
             # exponent on a symbolic base is not expanded the same way a

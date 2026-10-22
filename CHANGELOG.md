@@ -35,6 +35,14 @@ behind it.
 
 ### Security
 
+- **A symbolic power whose exponent cancels to an integer over 200 is now
+  refused.** `(x+1)**(10**5/2**5)`, which is `(x+1)**3125`, used to get past the
+  200 symbolic exponent cap and run `evaluate_expression` to its 10 s CPU limit;
+  it is now refused in under 0.2 s with the usual "exceeds the limit of 200"
+  error. The same goes for exponents built from `factorial`/`bell`, such as
+  `(x+1)**(factorial(7)/factorial(3))` (= 840). A few small exponents of that
+  kind are now refused too (for example `(x+1)**(factorial(5)+factorial(4))`,
+  144), because their size is overestimated.
 - **`pyjwt` is now `>=2.15.1` and `mcp` is `2.3.0`, clearing the open advisories
   in `uv.lock` (`osv-scanner`: 15 → 0).** The `--oauth-issuer` JWT verifier
   now passes pyjwt's `cooldown_duration` explicitly (30 s, the library default):
