@@ -92,6 +92,11 @@ def says(text, substring):
     return text is not None and substring in text
 
 
+def resolved_ok(got):
+    """Resolved with no reason; the magnitude itself is not pinned."""
+    return got is not None and got[2] is True and got[3] is None
+
+
 def unresolved_quiet(got):
     """Not resolved and no reason: the caller decides, nothing is refused here."""
     return got is not None and got[2] is False and got[3] is None
@@ -148,15 +153,19 @@ check("zeta(-1, 2) refused: two-arg with s < 2", refused(pole("zeta(-1,2)"), "ze
 
 # gamma / loggamma / digamma: z >= 1 is the safe side.
 check("gamma(1) resolved at the z = 1 lower edge", value_is(pole("gamma(1)"), 0.0, 0.0, True))
-check("gamma is strictly increasing above the edge", pole("gamma(3)")[0] > pole("gamma(2)")[0] > pole("gamma(1)")[0])
+_gammas = [pole(f"gamma({z})") for z in (1, 2, 3)]
+check(
+    "gamma is strictly increasing above the edge",
+    all(resolved_ok(g) for g in _gammas) and _gammas[2][0] > _gammas[1][0] > _gammas[0][0],
+)
 check("gamma(999/1000) refused just below z = 1", refused(pole("gamma(999/1000)"), "gamma()"))
 check("gamma(1/2) refused below z = 1", refused(pole("gamma(1/2)"), "gamma()"))
-check("digamma(1) resolved", pole("digamma(1)") is not None and pole("digamma(1)")[2] is True)
+check("digamma(1) resolved", resolved_ok(pole("digamma(1)")))
 check("digamma(1/2) refused below z = 1", refused(pole("digamma(1/2)"), "digamma()"))
 
 # polygamma(n, z): n is 0 or a positive integer; z >= 1.
-check("polygamma(0, 1) resolved at the edge", pole("polygamma(0,1)")[2] is True)
-check("polygamma(1, 1) resolved at the edge", pole("polygamma(1,1)")[2] is True)
+check("polygamma(0, 1) resolved at the edge", resolved_ok(pole("polygamma(0,1)")))
+check("polygamma(1, 1) resolved at the edge", resolved_ok(pole("polygamma(1,1)")))
 check("polygamma(1, 1/2) refused: z below 1", refused(pole("polygamma(1,1/2)"), "polygamma()"))
 check("polygamma(1/2, 2) refused: non-integer order", refused(pole("polygamma(1/2,2)"), "polygamma()"))
 
