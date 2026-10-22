@@ -210,3 +210,23 @@ ignore = [
 # progress, and import after a sys.path insert.
 "tests/*" = ["S101", "T201", "F841", "E402"]
 "scripts/*" = ["T201"]
+"mutation/*" = ["S101"]
+
+# ── mutmut (mutation lane) ──────────────────────────────────────────────────
+# mutmut 3.8.0 mutates codecalc/safe_expr.py and runs the pytest harness in
+# mutation/ against each mutant. pytest is NOT a dependency: the weekly
+# mutation workflow adds it ad hoc (`uv run --with pytest==…`), so neither
+# pyproject.toml nor uv.lock names it. The harness runs a subset of the
+# tests/*.py scripts, one subprocess each. See mutation/test_safe_expr_scripts.py.
+[tool.mutmut]
+# source_paths is the whole package, not just safe_expr.py: mutmut copies only source_paths into
+# mutants/, and with one file there mutants/codecalc/ had no __init__.py, so `import codecalc`
+# fell through to the editable install of the UNMUTATED package and no mutant was ever exercised.
+# only_mutate keeps the mutation scope to safe_expr.py.
+source_paths = ["codecalc/"]
+only_mutate = ["codecalc/safe_expr.py"]
+pytest_add_cli_args_test_selection = ["mutation/test_safe_expr_scripts.py"]
+# mutmut copies only the source and tests/ into mutants/. The harness lives in mutation/, and
+# test_fuzz_smoke.py imports scripts/fuzz.py. also_copy takes directories (copytree) more reliably
+# than single files (no parent dir is created for a file), and scripts/ is ~0.8 MB.
+also_copy = ["mutation/", "scripts/"]

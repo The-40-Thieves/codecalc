@@ -201,16 +201,23 @@ else:
 # same threat model as the Rust executor, never in the server process.
 import ast
 
-bad = []
-for p in (REPO_ROOT / "codecalc").rglob("*.py"):
-    if p.name == "_worker_bootstrap.py":
-        continue  # documented: exec in the isolated worker subprocess only
-    tree = ast.parse(p.read_text(encoding="utf-8"))
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
-                and node.func.id in ("eval", "exec"):
-            bad.append(f"{p.name}:{node.lineno}")
-check("zero eval/exec/shell=True in codebase", not bad, f"-> {bad}")
+# Skipped under mutmut: this scans the source tree, so it says nothing about one mutant, and in
+# mutmut's mutants/ copy codecalc/safe_expr.py holds every mutant (~46 MB) — ast.parse of it
+# takes minutes per run and stalled the mutation lane's stats collection past its 300 s timeout.
+# Presence, not truthiness: mutmut's clean-test run sets MUTANT_UNDER_TEST="" (mutmut 3.8.0).
+if "MUTANT_UNDER_TEST" in os.environ:
+    print("SKIP eval/exec source scan — running under mutmut (mutants/ tree, see mutation/)")
+else:
+    bad = []
+    for p in (REPO_ROOT / "codecalc").rglob("*.py"):
+        if p.name == "_worker_bootstrap.py":
+            continue  # documented: exec in the isolated worker subprocess only
+        tree = ast.parse(p.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                    and node.func.id in ("eval", "exec"):
+                bad.append(f"{p.name}:{node.lineno}")
+    check("zero eval/exec/shell=True in codebase", not bad, f"-> {bad}")
 
 # 9. benchmark fit still works (no eval regression). Empirical timing is
 # noisy at small sizes — the security-relevant property is that it detects

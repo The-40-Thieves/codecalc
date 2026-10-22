@@ -1,0 +1,163 @@
+name: mutation
+
+# Mutation testing for codecalc/safe_expr.py, split across GitHub-hosted runners.
+#
+# Measured on Cave (ARM64, 4 cores): a full serial `mutmut run` over safe_expr.py takes 4.6 to 11 h,
+# which is over the 6 h cap of a hosted job. This repo is public, so the standard hosted runners
+# (4 vCPU / 16 GB) are free, and the Free plan runs 20 jobs at once. The mutants are dealt across
+# N shards (default 8, 1 to 16), each shard runs `mutmut run --max-children 4` on its own runner,
+# and a report job merges the shard results.
+#
+# Measured for this workflow on Cave, before wiring:
+#   mutant generation  4456 mutants, 350-640 s (every shard repeats it; no generate-only command)
+#   first import of the mutated safe_expr.py (~46 MB)  406 s and 1.2 GB to compile, then 0.36 s;
+#     the harness pays it once per shard in a session fixture, outside the per-script timeout
+#   5-mutant smoke after generation  5.5 min (stats + clean run + mutants): 4 killed, 1 survived
+#   mutmut 3.8.0 always drives pytest, so the lane runs mutation/test_safe_expr_scripts.py
+#   (five tests/*.py scripts, one subprocess each). pytest is not a project dependency: the lane
+#   adds it ad hoc, pinned, as the [tool.mutmut] comment in pyproject.toml says. The harness feeds
+#   the children's coverage back to mutmut and points them at the mutated tree; see its header.
+#
+# Gating: a shard never fails because a mutant survived. A plan that finds no mutants, a shard that
+# is missing or checked zero mutants, and shards that do not cover the planned mutants all FAIL the
+# report job, because a green report that checked nothing is the failure this lane exists to catch.
+# Survivors are advisory: the report lists them in the step summary and in mutation-report.
+#
+# Not on pull_request or push: a 6 h matrix does not belong on every PR. Run it with
+# `gh workflow run mutation.yml -f shards=8`, or let the weekly schedule run it.
+
+on:
+  workflow_dispatch:
+    inputs:
+      shards:
+        description: 'number of shards, an integer from 1 to 16 (default 8)'
+        required: false
+        type: number
+        default: 8
+  schedule:
+    - cron: '23 5 * * 0'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: plan (generate mutants, deal them into shards)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: '0.12.1'
+      - name: install the project (the mutated tests import codecalc)
+        run: uv sync --locked --all-extras
+      # `mutmut run` generates every mutant before it filters by name. A name that matches nothing
+      # then fails its assertion, and nothing is tested. The exit status is ignored on purpose:
+      # the plan step's existence floor (shard.py plan refuses zero mutants) is the real check.
+      - name: generate mutants
+        env:
+          MUTMUT_PIN: '3.8.0'
+          PYTEST_PIN: '9.1.1'
+        run: |
+          set -uo pipefail
+          uv run --no-sync --with "mutmut==${MUTMUT_PIN}" --with "pytest==${PYTEST_PIN}" \
+            mutmut run --max-children 4 'no-such-mutant-*' || true
+          uv run --no-sync --with "mutmut==${MUTMUT_PIN}" mutmut results --all true > names.txt
+      - name: plan the shards
+        id: plan
+        env:
+          SHARDS: ${{ inputs.shards || 8 }}
+        run: |
+          set -euo pipefail
+          case "$SHARDS" in
+            ''|*[!0-9]*) echo "shards must be an integer from 1 to 16, got '$SHARDS'" >&2; exit 1 ;;
+          esac
+          if [ "$SHARDS" -lt 1 ] || [ "$SHARDS" -gt 16 ]; then
+            echo "shards must be an integer from 1 to 16, got '$SHARDS'" >&2
+            exit 1
+          fi
+          echo "matrix=$(python3 mutation/shard.py plan --results names.txt --shards "$SHARDS" --out shards)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutation-plan
+          path: shards/
+          if-no-files-found: error
+
+  shard:
+    name: shard ${{ matrix.shard }}
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: '0.12.1'
+      - name: install the project (the mutated tests import codecalc)
+        run: uv sync --locked --all-extras
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: mutation-plan
+          path: shards/
+      - name: run this shard's mutants
+        env:
+          SHARD: ${{ matrix.shard }}
+          MUTMUT_PIN: '3.8.0'
+          PYTEST_PIN: '9.1.1'
+        run: |
+          set -euo pipefail
+          mapfile -t names < "shards/shard-${SHARD}.txt"
+          uv run --no-sync --with "mutmut==${MUTMUT_PIN}" --with "pytest==${PYTEST_PIN}" \
+            mutmut run --max-children 4 "${names[@]}"
+      - name: summarize this shard
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          uv run --no-sync --with "mutmut==3.8.0" mutmut results --all true > results.txt
+          mkdir -p "shard-result/shard-${SHARD}"
+          python3 mutation/shard.py summarize --shard "$SHARD" --names "shards/shard-${SHARD}.txt" \
+            --results results.txt --out "shard-result/shard-${SHARD}/summary-${SHARD}.json"
+          # mutmut's own per-file results (the *.meta files) travel with the summary.
+          (cd mutants && find . -name '*.meta' -print0 | xargs -0 -r cp --parents -t "../shard-result/shard-${SHARD}/")
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutation-shard-${{ matrix.shard }}
+          path: shard-result/
+          if-no-files-found: error
+
+  report:
+    name: report (merge shards, fail on a missing or empty shard)
+    needs: [plan, shard]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: mutation-plan
+          path: plan/
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: mutation-shard-*
+          path: shards/
+      - name: merge the shard results
+        run: python3 mutation/shard.py report --plan plan --summaries shards --markdown "$GITHUB_STEP_SUMMARY" --merged mutation-merged.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: mutation-report
+          path: mutation-merged.json
+          if-no-files-found: warn
