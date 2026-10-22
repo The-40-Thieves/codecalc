@@ -201,7 +201,7 @@ def _cmd_report(args):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(prog="shard.py", description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(prog="shard.py", description=(__doc__ or "").splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
 
     plan = sub.add_parser("plan", help="split the listed mutants into shard files")

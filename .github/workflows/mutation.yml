@@ -9,10 +9,14 @@ name: mutation
 # and a report job merges the shard results.
 #
 # Measured for this workflow on Cave, before wiring:
-#   mutant generation  one file, 350 s (every shard repeats it; mutmut has no generate-only command)
+#   mutant generation  4456 mutants, 350-640 s (every shard repeats it; no generate-only command)
+#   first import of the mutated safe_expr.py (~46 MB)  406 s and 1.2 GB to compile, then 0.36 s;
+#     the harness pays it once per shard in a session fixture, outside the per-script timeout
+#   5-mutant smoke after generation  5.5 min (stats + clean run + mutants): 4 killed, 1 survived
 #   mutmut 3.8.0 always drives pytest, so the lane runs mutation/test_safe_expr_scripts.py
 #   (five tests/*.py scripts, one subprocess each). pytest is not a project dependency: the lane
-#   adds it ad hoc, pinned, as the [tool.mutmut] comment in pyproject.toml says.
+#   adds it ad hoc, pinned, as the [tool.mutmut] comment in pyproject.toml says. The harness feeds
+#   the children's coverage back to mutmut and points them at the mutated tree; see its header.
 #
 # Gating: a shard never fails because a mutant survived. A plan that finds no mutants, a shard that
 # is missing or checked zero mutants, and shards that do not cover the planned mutants all FAIL the
