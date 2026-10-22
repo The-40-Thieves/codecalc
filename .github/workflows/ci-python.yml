@@ -329,6 +329,11 @@ jobs:
       - name: expression length cap (every sympy entry point, before parse)
         shell: bash
         run: uv run --no-sync python tests/test_expr_length_cap.py
+      # Boundary and exact-value checks for the five top mutation-survivor
+      # guards in safe_expr.py: thresholds inclusive, magnitudes exact, reasons pinned.
+      - name: magnitude boundaries (safe_expr guards, at and past each threshold)
+        shell: bash
+        run: uv run --no-sync python tests/test_magnitude_boundaries.py
       # The run-lifecycle state machine: identity, cancel,
       # cleanup and crash-recovery journalling, all against fake providers —
       # no sandbox, no native executor, so it belongs on the full matrix
