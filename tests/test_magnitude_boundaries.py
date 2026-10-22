@@ -422,6 +422,59 @@ check(
     says(summation("product(x, (x, 1, 10**6))"), "would have about 6000000 digits"),
 )
 
+# ---------------------------------------------------------------- exponent cancellation
+
+# `_factor_multiset` keys bases by VALUE, so `10**5/2**5` is `{10: 5, 2: -5}`:
+# a negative entry whose value is the integer 3125. The symbolic-power cap must
+# judge integrality on the coprime refinement, not on the raw negative entry.
+check(
+    "exponent cancel: (x+1)**(10**5/2**5) refused, 3125 > 200 (PR #363 report)",
+    says(explode("(x+1)**(10**5/2**5)"), f"exceeds the limit of {se.MAX_SYMBOLIC_EXPONENT}"),
+)
+check(
+    "exponent cancel: (x+1)**(6**300/3**300) refused (= 2**300; the print-digit guard fires first)",
+    explode("(x+1)**(6**300/3**300)") is not None,
+)
+# Same shape at a size the print-digit guard does not reach first: the cap is the reason.
+check(
+    "exponent cancel: (x+1)**(6**8/3**8) refused by the cap (= 2**8 = 256)",
+    says(explode("(x+1)**(6**8/3**8)"), f"exceeds the limit of {se.MAX_SYMBOLIC_EXPONENT}"),
+)
+check("exponent cancel: (x+1)**(10**3/4) refused (= 250)", explode("(x+1)**(10**3/4)") is not None)
+check("exponent cancel: (x+1)**(10**3/5) accepted at the cap (= 200)", explode("(x+1)**(10**3/5)") is None)
+check("exponent cancel: (x+1)**(12**2/(2**4*3**2)) accepted (= 1)", explode("(x+1)**(12**2/(2**4*3**2))") is None)
+
+# Genuinely fractional exponents stay out of the symbolic-power cap: a real
+# denominator survives. (The first two are refused by the print-digit ceiling,
+# "over the limit of 4000", a different guard; the cap must not be their reason.)
+check(
+    "exponent cancel: (x+1)**(10**5/3) not refused by the exponent cap (fractional)",
+    not says(explode("(x+1)**(10**5/3)"), f"exceeds the limit of {se.MAX_SYMBOLIC_EXPONENT}"),
+)
+check(
+    "exponent cancel: (x+1)**(999999999999/2) not refused by the exponent cap (fractional)",
+    not says(explode("(x+1)**(999999999999/2)"), f"exceeds the limit of {se.MAX_SYMBOLIC_EXPONENT}"),
+)
+check("exponent cancel: (x+1)**(10**5/2**6) accepted (= 1562.5, fractional)", explode("(x+1)**(10**5/2**6)") is None)
+
+# The helper itself: integrality is decided on the coprime refinement.
+check(
+    "coprime refine: {10: 5, 2: -5} -> {5: 5} (value 3125)",
+    se._coprime_refine_multiset({10: 5, 2: -5}) == {5: 5},
+)
+check(
+    "coprime refine: {6: 300, 3: -300} -> {2: 300} (value 2**300)",
+    se._coprime_refine_multiset({6: 300, 3: -300}) == {2: 300},
+)
+check(
+    "coprime refine: {12: 2, 2: -4, 3: -2} -> {} (value 1)",
+    se._coprime_refine_multiset({12: 2, 2: -4, 3: -2}) == {},
+)
+check(
+    "coprime refine: {10: 5, 3: -1} unchanged (coprime, real denominator)",
+    se._coprime_refine_multiset({10: 5, 3: -1}) == {10: 5, 3: -1},
+)
+
 # ---------------------------------------------------------------- output and timing
 
 # The module's own refusals name the exact count; spot-check that the shape of

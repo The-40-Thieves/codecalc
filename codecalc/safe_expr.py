@@ -4142,6 +4142,55 @@ def _factor_multiset(node, memo_ms: dict):
     return result
 
 
+def _coprime_refine_multiset(terms: dict) -> dict:
+    """Refine a `_factor_multiset` terms dict until no two bases share a
+    factor, returning a NEW dict with the same value.
+
+    `_factor_multiset` keys bases by their integer VALUE and never factors
+    them (deliberately; see its docstring), so `10**5/2**5` comes back as
+    `{10: 5, 2: -5}`: a negative entry, yet the value is the integer 3125.
+    Reading "some net exponent is negative" as "a real denominator survives"
+    then let `(x+1)**(10**5/2**5)` past the `MAX_SYMBOLIC_EXPONENT` cap while
+    `(x+1)**3125` is refused. Here, while two distinct bases `a`, `b` share
+    `g = gcd(a, b) > 1`, `a**ea * b**eb` is rewritten as
+    `g**(ea+eb) * (a//g)**ea * (b//g)**eb`: bases equal to 1 are dropped,
+    equal bases merged, zero net exponents deleted. Once no pair shares a
+    factor, the value is an integer iff every net exponent is >= 0, because a
+    base `b > 1` left with a negative exponent shares no prime with any other
+    base, so nothing can cancel it.
+
+    Only the BASE integers are touched (each is a divisor of an input base,
+    so bounded by `_MAX_EXPR_LEN` as those are), never `base**exp`; exponents
+    are only added, so they may be arbitrarily large. Each rewrite lowers the
+    total number of prime factors (with multiplicity) across the keys, so the
+    loop terminates.
+    """
+    refined = dict(terms)
+    merged = True
+    while merged:
+        merged = False
+        bases = list(refined)
+        for i, a in enumerate(bases):
+            for b in bases[i + 1 :]:
+                g = math.gcd(a, b)
+                if g == 1:
+                    continue
+                ea, eb = refined.pop(a), refined.pop(b)
+                for base, exp in ((g, ea + eb), (a // g, ea), (b // g, eb)):
+                    if base == 1:
+                        continue
+                    net = refined.get(base, 0) + exp
+                    if net:
+                        refined[base] = net
+                    else:
+                        refined.pop(base, None)
+                merged = True
+                break
+            if merged:
+                break
+    return refined
+
+
 def _table_multiset_trusted(multiset) -> bool:
     """`True` if a `_factor_multiset` result is trustworthy for `_multiset_
     log_num_den`'s own EXACT-accounting contract — `False` if a table-
@@ -8928,6 +8977,9 @@ def reject_explosive(tree) -> str | None:
             multiset = _factor_multiset(exponent, memo.setdefault("__multiset__", {}))
             if _table_multiset_trusted(multiset):
                 terms, exp_sign = multiset
+                # Decide integrality on the coprime refinement: `10**5/2**5`
+                # keeps a negative `2: -5` entry but is the integer 3125.
+                terms = _coprime_refine_multiset(terms)
                 if exp_sign != 0 and any(v < 0 for v in terms.values()):
                     # Genuinely fractional (a real denominator survives
                     # cancellation) — `sp.expand`/`sp.factor` do not
