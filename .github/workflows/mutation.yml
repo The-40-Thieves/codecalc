@@ -5,7 +5,7 @@ name: mutation
 # Measured on Cave (ARM64, 4 cores): a full serial `mutmut run` over safe_expr.py takes 4.6 to 11 h,
 # which is over the 6 h cap of a hosted job. This repo is public, so the standard hosted runners
 # (4 vCPU / 16 GB) are free, and the Free plan runs 20 jobs at once. The mutants are dealt across
-# N shards (default 8, 1 to 16), each shard runs `mutmut run --max-children 4` on its own runner,
+# N shards (default 8, 1 to 16), each shard runs `mutmut run --max-children 3` on its own runner (in a 13 GiB cgroup),
 # and a report job merges the shard results.
 #
 # Measured for this workflow on Cave, before wiring:
@@ -115,11 +115,24 @@ jobs:
           SHARD: ${{ matrix.shard }}
           MUTMUT_PIN: '3.8.0'
           PYTEST_PIN: '9.1.1'
+        # Run 39733746346 lost 6 of 8 runners mid-shard (no failed step, empty logs, exit 143): a
+        # mutant exhausted the 16 GB runner and took the runner agent down with it. The whole
+        # mutmut tree now runs in a cgroup scope capped at 13 GiB, leaving ~3 GiB for the runner.
+        # OOMPolicy=continue makes the kernel kill only the runaway process (mutmut records that
+        # mutant as killed by a signal) instead of systemd stopping the whole scope, which is what
+        # a scope does by default. A per-process RLIMIT_AS was tried first and rejected: it is
+        # inherited, and broke test_security.py's fork-bomb probe on unmutated code.
+        # free -m every 30 s goes to the job log so the next memory event has a timeline.
         run: |
           set -euo pipefail
           mapfile -t names < "shards/shard-${SHARD}.txt"
-          uv run --no-sync --with "mutmut==${MUTMUT_PIN}" --with "pytest==${PYTEST_PIN}" \
-            mutmut run --max-children 4 "${names[@]}"
+          ( while sleep 30; do echo "mem $(date -u +%T) $(free -m | awk '/^Mem:/ {print "used=" $3 "M avail=" $7 "M"}')"; done ) &
+          sudo systemd-run --scope --quiet --collect \
+            -p MemoryMax=13G -p MemorySwapMax=0 -p OOMPolicy=continue \
+            --uid="$(id -u)" --gid="$(id -g)" \
+            env "PATH=${PATH}" "HOME=${HOME}" \
+            uv run --no-sync --with "mutmut==${MUTMUT_PIN}" --with "pytest==${PYTEST_PIN}" \
+            mutmut run --max-children 3 "${names[@]}"
       - name: summarize this shard
         env:
           SHARD: ${{ matrix.shard }}
