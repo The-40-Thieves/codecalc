@@ -75,6 +75,10 @@ def explode(expr):
     return se.reject_explosive(tree(expr))
 
 
+def explode_tree(node):
+    return se.reject_explosive(node)
+
+
 def value_is(got, log_num, log_den, resolved):
     """All four slots of a magnitude tuple, the violation slot being None."""
     return (
@@ -100,6 +104,45 @@ def resolved_ok(got):
 def unresolved_quiet(got):
     """Not resolved and no reason: the caller decides, nothing is refused here."""
     return got is not None and got[2] is False and got[3] is None
+
+
+def refused_exact(got, reason):
+    """A refusal with the COMPLETE reason text, and both magnitude slots zero: every
+    refusal the guards return is `(0.0, 0.0, False, reason)`, so a slot-swapped or
+    None-valued mutant fails here where `refused()` (substring, slots 2-3 only) passes."""
+    return got is not None and got[0] == 0.0 and got[1] == 0.0 and got[2] is False and got[3] == reason
+
+
+def unresolved_zero(got):
+    """Not resolved, no reason, both magnitude slots zero (the symbolic-argument return)."""
+    return got is not None and got[0] == 0.0 and got[1] == 0.0 and got[2] is False and got[3] is None
+
+
+def about(got, log_num, tol):
+    """Resolved, no reason, log10 numerator within `tol` of `log_num` (for values the
+    module derives through a Stirling envelope, whose correction term is not exact)."""
+    return got is not None and abs(got[0] - log_num) <= tol and got[1] == 0.0 and got[2] is True and got[3] is None
+
+
+def gen_reason(name):
+    """The `_unresolved_or_violation` / polygamma / zeta reason for a bare `name()` call."""
+    return (
+        f"an argument to {name}() cannot be safely bounded: computing it would take an "
+        "unbounded amount of time and memory"
+    )
+
+
+UNBOUNDED = "computing it would take an unbounded amount of time and memory"
+
+
+def deep_add(depth):
+    """A right-nested `Add` chain of `depth` levels, built without evaluation."""
+    from sympy import Add, Integer
+
+    node = Integer(1)
+    for _ in range(depth):
+        node = Add(node, Integer(1), evaluate=False)
+    return node
 
 
 # ---------------------------------------------------------------- _pole_sensitive_magnitude
@@ -474,6 +517,415 @@ check(
     "coprime refine: {10: 5, 3: -1} unchanged (coprime, real denominator)",
     se._coprime_refine_multiset({10: 5, 3: -1}) == {10: 5, 3: -1},
 )
+
+# ---------------------------------------------------------------- round 2: _pole_sensitive_magnitude
+
+# Free-symbol and non-rational arguments: the unresolved-argument return and its reason.
+check("pole2: gamma(x) with a free symbol: unresolved, both slots zero", unresolved_zero(pole("gamma(x)")))
+for _name in ("gamma", "loggamma", "digamma"):
+    check(
+        f"pole2: {_name}(pi) refused with the exact unresolved-argument reason",
+        refused_exact(pole(f"{_name}(pi)"), gen_reason(_name)),
+    )
+# Below the z = 1 edge: the exact reason, with the name spelled in the text.
+for _name in ("gamma", "loggamma", "digamma"):
+    check(
+        f"pole2: {_name}(1/2) refused below z = 1 with the exact reason",
+        refused_exact(pole(f"{_name}(1/2)"), gen_reason(_name)),
+    )
+# digamma's own formula, on the z > 1 side: log10(log(z) + 2).
+check(
+    "pole2: digamma(10) = log10(ln 10 + 2) (digamma's own formula)",
+    value_is(pole("digamma(10)"), math.log10(math.log(10) + 2), 0.0, True),
+)
+
+# polygamma: the order and z gates, each refusal exact.
+check(
+    "pole2: polygamma(pi, 2) refused exactly (non-rational order)",
+    refused_exact(pole("polygamma(pi,2)"), gen_reason("polygamma")),
+)
+check(
+    "pole2: polygamma(-1, 2) refused exactly (negative order)",
+    refused_exact(pole("polygamma(-1,2)"), gen_reason("polygamma")),
+)
+check(
+    "pole2: polygamma(1/2, 2) refused exactly (non-integer order)",
+    refused_exact(pole("polygamma(1/2,2)"), gen_reason("polygamma")),
+)
+check(
+    "pole2: polygamma(1, 1/2) refused exactly (z below 1)",
+    refused_exact(pole("polygamma(1,1/2)"), gen_reason("polygamma")),
+)
+# A symbolic order is treated as absent: the digamma-term bound alone.
+check(
+    "pole2: polygamma(x, 2) with a symbolic order: digamma-term bound log10(ln 2 + 2)",
+    value_is(pole("polygamma(x,2)"), math.log10(math.log(2) + 2), 0.0, True),
+)
+# order 2 at z = 2 or 3: the factorial envelope log10(2!) + log10(2) beats the digamma term.
+check(
+    "pole2: polygamma(2, 2) ~ log10(2!) + log10(2), Stirling-tolerant", about(pole("polygamma(2,2)"), 2 * LOG10_2, 1e-3)
+)
+check("pole2: polygamma(2, 3) ~ the same factorial envelope", about(pole("polygamma(2,3)"), 2 * LOG10_2, 1e-3))
+# order 0 (digamma) at z just above 1 takes the exact-zero flag path: the digamma term alone.
+check(
+    "pole2: polygamma(0, 1001/1000) = digamma term log10(ln(1.001) + 2)",
+    value_is(pole("polygamma(0,1001/1000)"), math.log10(math.log(1.001) + 2), 0.0, True),
+)
+
+# zeta: the pole, the non-integer and two-argument refusals, and the Bernoulli envelope.
+check("pole2: zeta(1) unresolved, both slots zero", unresolved_zero(pole("zeta(1)")))
+check("pole2: zeta(-1) = 0.0 (the Bernoulli envelope, clamped at 0)", value_is(pole("zeta(-1)"), 0.0, 0.0, True))
+check(
+    "pole2: zeta(-20) = Bernoulli envelope log10(21!) - 21*log10(2*pi) + log10(4)",
+    about(pole("zeta(-20)"), math.lgamma(22) / math.log(10) - 21 * math.log10(2 * math.pi) + math.log10(4), 1e-6),
+)
+check("pole2: zeta(2, 1/2) refused exactly (a < 1)", refused_exact(pole("zeta(2,1/2)"), gen_reason("zeta")))
+check(
+    "pole2: zeta(199/100) refused exactly (non-integer below 2)",
+    refused_exact(pole("zeta(199/100)"), gen_reason("zeta")),
+)
+
+# expint: the order and the second-argument refusals, exact; the x >= 1 edge.
+check(
+    "pole2: expint(1/2, 2) refused exactly (first argument outside a positive integer)",
+    refused_exact(
+        pole("expint(1/2,2)"),
+        "the first argument to expint() cannot be safely bounded outside a positive integer n: " + UNBOUNDED,
+    ),
+)
+check(
+    "pole2: expint(1, 0) refused exactly (second argument outside x > 0)",
+    refused_exact(
+        pole("expint(1,0)"),
+        "the second argument to expint() cannot be safely bounded outside x > 0: " + UNBOUNDED,
+    ),
+)
+check(
+    "pole2: expint(1, 3/2) = 0.0 (x >= 1 bound holds up to 2, not only at 1)",
+    value_is(pole("expint(1,3/2)"), 0.0, 0.0, True),
+)
+
+# Ci: the non-positive refusal, exact.
+check(
+    "pole2: Ci(0) refused exactly (non-positive argument)",
+    refused_exact(
+        pole("Ci(0)"),
+        "the argument to Ci() cannot be safely bounded for a non-positive value (a pole at 0, a complex "
+        "branch below it): " + UNBOUNDED,
+    ),
+)
+
+# LambertW: the -1/e edge is inclusive on the float side; the tiny-argument log is 0.
+check(
+    "pole2: LambertW(-1/2) refused exactly (below -1/e)",
+    refused_exact(
+        pole("LambertW(-1/2)"),
+        "the argument to LambertW() cannot be safely bounded below -1/e: " + UNBOUNDED,
+    ),
+)
+check(
+    "pole2: LambertW(-f) with f the float -1/e: resolved (inside [-1/e, 0), not below)",
+    resolved_ok(pole("LambertW(-36787944117144233/10**17)")),
+)
+check(
+    "pole2: LambertW(1/2) = log10(ln 1.5) (the x > 0 log bound)",
+    value_is(pole("LambertW(1/2)"), math.log10(math.log(1.5)), 0.0, True),
+)
+check(
+    "pole2: LambertW(1/10**20): log(1 + x) is 0.0 in floats, log10 gives 0.0",
+    value_is(pole("LambertW(1/10**20)"), 0.0, 0.0, True),
+)
+
+# Chi / li / Li: the non-positive refusal names the function, exact.
+for _name in ("Chi", "li", "Li"):
+    check(
+        f"pole2: {_name}(0) refused exactly (non-positive)",
+        refused_exact(
+            pole(f"{_name}(0)"),
+            f"the argument to {_name}() cannot be safely bounded for a non-positive value (a complex branch "
+            "this module does not reason about): " + UNBOUNDED,
+        ),
+    )
+check(
+    "pole2: li(1) refused exactly at its own pole",
+    refused_exact(pole("li(1)"), f"the argument to li() cannot be safely bounded at its own pole: {UNBOUNDED}"),
+)
+check(
+    "pole2: Li(1) refused exactly at its own pole",
+    refused_exact(pole("Li(1)"), f"the argument to Li() cannot be safely bounded at its own pole: {UNBOUNDED}"),
+)
+check(
+    "pole2: Ei(0) refused exactly at its own pole",
+    refused_exact(pole("Ei(0)"), f"the argument to Ei() cannot be safely bounded at its own pole: {UNBOUNDED}"),
+)
+check(
+    "pole2: Chi(1) = log10(gamma + 1) (Chi's x <= 1 branch, at the edge)",
+    value_is(pole("Chi(1)"), math.log10(EULER_GAMMA + 1.0), 0.0, True),
+)
+check(
+    "pole2: Chi(1/1000) = log10(gamma + |ln x| + 1)",
+    value_is(pole("Chi(1/1000)"), math.log10(EULER_GAMMA + abs(math.log(1 / 1000)) + 1.0), 0.0, True),
+)
+check(
+    "pole2: Ei(1) = log10(gamma + e) (Ei's |x| <= 1 branch)",
+    value_is(pole("Ei(1)"), math.log10(EULER_GAMMA + math.e), 0.0, True),
+)
+check(
+    "pole2: Ei(1/2) = log10(gamma + |ln(1/2)| + e)",
+    value_is(pole("Ei(1/2)"), math.log10(EULER_GAMMA + abs(math.log(0.5)) + math.e), 0.0, True),
+)
+check(
+    "pole2: Ei(-1/2) uses |x|: log10(gamma + |ln(1/2)| + e)",
+    value_is(pole("Ei(-1/2)"), math.log10(EULER_GAMMA + abs(math.log(0.5)) + math.e), 0.0, True),
+)
+check(
+    "pole2: li(2) = log10(|ln|ln 2|| + e) (li's x <= e branch)",
+    value_is(pole("li(2)"), math.log10(abs(math.log(abs(math.log(2)))) + math.e), 0.0, True),
+)
+check(
+    "pole2: Li(2) = log10(|ln|ln 2|| + e) (Li shares li's branch)",
+    value_is(pole("Li(2)"), math.log10(abs(math.log(abs(math.log(2)))) + math.e), 0.0, True),
+)
+
+# The exp-bounded family's cap: exact refusal text one past it, exact value at it.
+check(
+    "pole2: Ei(MAX_HEAVY_ARG+1) refused exactly",
+    refused_exact(
+        pole(f"Ei({MAX_HEAVY + 1})"),
+        f"the argument to Ei() exceeds the limit of {MAX_HEAVY}: {UNBOUNDED}",
+    ),
+)
+check(
+    "pole2: exp(1/2) = 0.5 * log10(e) (exp's x >= 0 bound, above the 0 edge)",
+    value_is(pole("exp(1/2)"), 0.5 * LOG10E, 0.0, True),
+)
+check(
+    "pole2: exp(MAX_HEAVY_ARG+1) refused exactly",
+    refused_exact(
+        pole(f"exp({MAX_HEAVY + 1})"), f"the argument to exp() exceeds the limit of {MAX_HEAVY}: {UNBOUNDED}"
+    ),
+)
+check(
+    "pole2: airyai(x) with x**1.5 exactly the cap (a float witness) accepted at the cap",
+    value_is(pole("airyai(2267162728564753/17592186044416)"), MAX_HEAVY * LOG10E, 0.0, True),
+)
+check(
+    "pole2: airyai(129) refused exactly",
+    refused_exact(pole("airyai(129)"), f"the argument to airyai() exceeds the limit of {MAX_HEAVY}: {UNBOUNDED}"),
+)
+check(
+    "pole2: airybi(4) = 4**1.5 * log10(e) (airy names are all in the |x|**1.5 family)",
+    value_is(pole("airybi(4)"), 8 * LOG10E, 0.0, True),
+)
+check("pole2: airyaiprime(4) = 4**1.5 * log10(e)", value_is(pole("airyaiprime(4)"), 8 * LOG10E, 0.0, True))
+check(
+    "pole2: Chi(2) = 2*log10(e) (Chi above its x <= 1 branch: the |x| bound)",
+    value_is(pole("Chi(2)"), 2 * LOG10E, 0.0, True),
+)
+check(
+    "pole2: Ei(2) = 2*log10(e) (Ei above its |x| <= 1 branch: the |x| bound)",
+    value_is(pole("Ei(2)"), 2 * LOG10E, 0.0, True),
+)
+check("pole2: airybiprime(4) = 4**1.5 * log10(e)", value_is(pole("airybiprime(4)"), 8 * LOG10E, 0.0, True))
+check("pole2: erfc(2) = log10(2) (the unbounded-table constant)", value_is(pole("erfc(2)"), LOG10_2, 0.0, True))
+check("pole2: Si(2) = log10(2)", value_is(pole("Si(2)"), LOG10_2, 0.0, True))
+check("pole2: fresnelc(1/2) = 0.0 (constant 1.0)", value_is(pole("fresnelc(1/2)"), 0.0, 0.0, True))
+
+# ---------------------------------------------------------------- round 2: reject_explosive, exact reasons
+
+# Recursion inside the scan or the walk: the exact reason, and a shallow tree that is fine.
+check(
+    "reject2: a 5000-deep Add chain: the RecursionError reason, exact",
+    explode_tree(deep_add(5000)) == "expression too deeply nested to evaluate safely",
+)
+check("reject2: a 10-deep Add chain is accepted", explode_tree(deep_add(10)) is None)
+
+# Callables with an argument cap, dispatched by name: exact reasons, one per dispatch.
+check(
+    "reject2: factorint(10**25): 26 digits over the 25-digit cap, exact",
+    explode("factorint(10**25)") == "an argument to factorint() exceeds the limit of 25: " + UNBOUNDED,
+)
+check("reject2: factorint(10**24): 25 digits, accepted at the cap", explode("factorint(10**24)") is None)
+check(
+    "reject2: root(10**1201, 4): exact root-cap reason via the Function dispatch",
+    explode("root(10**1201, 4)")
+    == f"an argument to root() exceeds the limit of {se.MAX_ROOT_ARG_DIGITS}: " + UNBOUNDED,
+)
+check(
+    "reject2: N(x, 10**4): precision one past MAX_NUMERIC_DIGITS, exact",
+    explode("N(x, 10**4)") == f"the precision argument to N() exceeds the limit of {MAX_DIGITS}: " + UNBOUNDED,
+)
+check("reject2: N(x, 10**3) accepted", explode("N(x, 10**3)") is None)
+check(
+    "reject2: N(x, I): the unresolved precision reason, exact",
+    explode("N(x, I)") == "the precision argument to N() cannot be safely bounded: " + UNBOUNDED,
+)
+check(
+    "reject2: series(x, x, 0, 10**3): order past 100, exact",
+    explode("series(x, x, 0, 10**3)") == "the order argument to series() exceeds the limit of 100: " + UNBOUNDED,
+)
+check("reject2: series(x, x, 0, 100) accepted at the cap", explode("series(x, x, 0, 100)") is None)
+check(
+    "reject2: series(x, x, 0, I): the unresolved order reason, exact",
+    explode("series(x, x, 0, I)") == "the order argument to series() cannot be safely bounded: " + UNBOUNDED,
+)
+check(
+    "reject2: fps(x, x, 0, 1, 1, 10**3): order past 100, exact",
+    explode("fps(x, x, 0, 1, 1, 10**3)") == "the order argument to fps() exceeds the limit of 100: " + UNBOUNDED,
+)
+check(
+    "reject2: fps(x, x, 0, 1, 1, I): the unresolved order reason, exact",
+    explode("fps(x, x, 0, 1, 1, I)") == "the order argument to fps() cannot be safely bounded: " + UNBOUNDED,
+)
+check(
+    "reject2: integrate upper limit 10**4000 (4001 digits): exact digit-limit reason",
+    explode("integrate(x, (x, 0, 10**4000))")
+    == f"the upper limit of integrate() exceeds the digit limit of {MAX_DIGITS}: it cannot be rendered as a decimal string",
+)
+check(
+    "reject2: integrate lower limit 10**4000: exact digit-limit reason",
+    explode("integrate(x, (x, 10**4000, 1))")
+    == f"the lower limit of integrate() exceeds the digit limit of {MAX_DIGITS}: it cannot be rendered as a decimal string",
+)
+check(
+    "reject2: integrate upper limit 10**3999 (4000 digits) accepted", explode("integrate(x, (x, 0, 10**3999))") is None
+)
+check(
+    "reject2: integrate with an unbounded upper limit I: the unresolved-limit reason, exact",
+    explode("integrate(x, (x, 0, I))") == "the upper limit of integrate() cannot be safely bounded: " + UNBOUNDED,
+)
+check(
+    "reject2: integrate with a two-element limit: the unrecognized-shape reason, exact",
+    explode("integrate(x, (x, 0))")
+    == "a limit argument to integrate() has an unrecognized shape (not a plain variable-and-two-bounds form "
+    "this module can verify as safe): " + UNBOUNDED,
+)
+check(
+    "reject2: expint(1, 0): the second-argument reason, exact, through the top-level dispatch",
+    explode("expint(1, 0)") == "the second argument to expint() cannot be safely bounded outside x > 0: " + UNBOUNDED,
+)
+check(
+    "reject2: binomial(x, 10**1464): the second-argument cap reason, exact",
+    explode("binomial(x, 10**1464)")
+    == f"the second argument to binomial() exceeds the limit of {MAX_HEAVY} for a non-integer or negative first "
+    "argument: " + UNBOUNDED,
+)
+check(
+    "reject2: binomial(5, 10**1464) accepted: a confirmed non-negative integer first argument",
+    explode("binomial(5, 10**1464)") is None,
+)
+check(
+    "reject2: binomial(1/2, 10**1464): the growth reason for the result, exact",
+    explode("binomial(1/2, 10**1464)")
+    == "the result of binomial(...) would have an unbounded number of digits, over the limit of "
+    f"{MAX_DIGITS}: it cannot be rendered as a decimal string",
+)
+check(
+    "reject2: hyper(1, 2, 3): the unbounded-generic reason, exact",
+    explode("hyper(1, 2, 3)")
+    == "hyper() is not in the bounded function set: computing it with a numeric argument is not safely bounded",
+)
+
+# Integer powers: the walk's power-tower and symbolic-exponent branches, and the root branch.
+check(
+    "reject2: 1 + x**(x**2): the power-tower reason, exact, after a non-Pow parent",
+    explode("1 + x**(x**2)")
+    == "a power tower (an exponent that is itself a power) is not evaluated: the result grows faster than any useful bound",
+)
+check(
+    "reject2: x**n + x**(x**2): the power tower after a symbolic-exponent power is still reached",
+    explode("x**n + x**(x**2)")
+    == "a power tower (an exponent that is itself a power) is not evaluated: the result grows faster than any useful bound",
+)
+check("reject2: 2**pi: a non-rational constant exponent is accepted, not a crash", explode("2**pi") is None)
+check(
+    "reject2: (1+10**1201)**Rational(1,4): the 4-th root base reason, exact",
+    explode("(10**1201+1)**Rational(1,4)")
+    == f"the base of a 4-th root has more digits than the limit of {se.MAX_ROOT_ARG_DIGITS}: computing the root is not safely bounded",
+)
+check(
+    "reject2: (1+10**1201)**Rational(1,3): the cube root base reason, exact",
+    explode("(10**1201+1)**Rational(1,3)")
+    == f"the base of a cube root has more digits than the limit of {se.MAX_ROOT_ARG_DIGITS}: computing the root is not safely bounded",
+)
+check(
+    "reject2: sqrt(1/10**1201): the denominator side of a square-root base, exact",
+    explode("sqrt(1/10**1201)")
+    == f"the base of a square root has more digits than the limit of {se.MAX_ROOT_ARG_DIGITS}: computing the root is not safely bounded",
+)
+check(
+    "reject2: (1+10**1201)**Rational(3,2): a non-root rational exponent is not a root refusal",
+    explode("(10**1201+1)**Rational(3,2)") is None,
+)
+# An integer base is counted in exact digits: 10**1200 - 1 has 1200 digits (its log10
+# rounds to 1200.0, which a magnitude-only count would read as 1201) and is accepted.
+check(
+    "reject2: sqrt(10**1200 - 1) accepted: exactly 1200 digits, counted exactly",
+    explode(f"sqrt({10**1200 - 1})") is None,
+)
+check(
+    "reject2: sqrt(Rational(10**1201, 3)): the NUMERATOR side of a rational base, exact",
+    explode(f"sqrt(Rational({10**1201}, 3))")
+    == f"the base of a square root has more digits than the limit of {se.MAX_ROOT_ARG_DIGITS}: computing the root is not safely bounded",
+)
+check(
+    "reject2: sqrt(Rational(1, 10**1201)): the DENOMINATOR side of a rational base, exact",
+    explode(f"sqrt(Rational(1, {10**1201}))")
+    == f"the base of a square root has more digits than the limit of {se.MAX_ROOT_ARG_DIGITS}: computing the root is not safely bounded",
+)
+check(
+    "reject2: (10**2001+1)**2: the integer-power ceiling reason, exact",
+    explode("(10**2001+1)**2")
+    == "the result would have about 4003 digits in its numerator, over the limit of 4000: it cannot be rendered as a decimal string",
+)
+check("reject2: (10**1999+1)**2 accepted (3999 digits)", explode("(10**1999+1)**2") is None)
+check(
+    "reject2: (x+1)**201: the symbolic-power reason, exact",
+    explode("(x+1)**201")
+    == f"a symbolic power with an exponent of about 3 digits exceeds the limit of {se.MAX_SYMBOLIC_EXPONENT}: "
+    "expanding it is superlinear in the exponent",
+)
+check("reject2: (x+1)**(-201) accepted: a negative exponent is not expanded", explode("(x+1)**(-201)") is None)
+
+
+# A benign node visited before the symbolic power must not end the walk: each of
+# these takes a `continue` path in the walk, and the symbolic power after it is
+# still refused. Trees are built directly so the argument order is the one tested.
+def _add(*terms):
+    from sympy import Add
+
+    return Add(*terms, evaluate=False)
+
+
+_SYMBOLIC_REASON = (
+    f"a symbolic power with an exponent of about 3 digits exceeds the limit of {se.MAX_SYMBOLIC_EXPONENT}: "
+    "expanding it is superlinear in the exponent"
+)
+_symbolic_power = tree("(x+1)**201")
+_benign = {
+    "x**n": "x**n",
+    "2**pi": "2**pi",
+    "(2+pi)**3": "(2+pi)**3",
+    "2**3": "2**3",
+    "2**1": "2**1",
+    "(x+1)**(1/10**300)": "(x+1)**(1/10**300)",
+    "(x+1)**(-1)": "(x+1)**(-1)",
+    "(x+1)**(bell(3)*I)": "(x+1)**(bell(3)*I)",
+}
+for _label, _expr in _benign.items():
+    check(
+        f"reject2: {_label} before a symbolic power: the walk still reaches the power",
+        explode_tree(_add(_symbolic_power, tree(_expr))) == _SYMBOLIC_REASON,
+    )
+
+# Exponent carrying a table function: the untrusted path. bell is a growing table
+# function, so its positive power refuses and its negative power does not.
+check(
+    "reject2: (x+1)**bell(7) refused on the untrusted-multiset path",
+    says(explode("(x+1)**bell(7)"), "a symbolic power with an exponent of about"),
+)
+check("reject2: (x+1)**(-bell(7)) accepted: the sign is negative", explode("(x+1)**(-bell(7))") is None)
+check("reject2: (x+1)**(bell(7)*I) skipped: an inconclusive exponent", explode("(x+1)**(bell(7)*I)") is None)
 
 # ---------------------------------------------------------------- output and timing
 
