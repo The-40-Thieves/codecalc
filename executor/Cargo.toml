@@ -2,7 +2,7 @@
 name = "codecalc-exec"
 version = "0.13.0"
 edition = "2024"
-# Declared, not merely implied. rust-toolchain.toml pins 1.97.1 for anyone
+# Declared, not merely implied. rust-toolchain.toml pins a toolchain for anyone
 # building IN this repo, but it is not Cargo metadata and does not reach a
 # crate that depends on this one — that needs `rust-version`, which was absent.
 # A crates.io consumer on an older toolchain therefore got no MSRV signal at
