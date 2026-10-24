@@ -1437,7 +1437,7 @@ fn execute(
     //
     // Recreating from empty every time removes the attack surface at its
     // root: `fs::remove_dir_all` on a modern Rust toolchain (1.58.1+; this
-    // one pins 1.97.1) walks by directory file descriptor on platforms that
+    // repo pins a far newer one) walks by directory file descriptor on platforms that
     // support it and never opens through a nested symlink, only unlinks it
     // — so wiping cannot be redirected outside `work` either. `.codecalc-
     // run` existing as a symlink (or any other non-directory) is still

@@ -8,8 +8,9 @@
 # directories: cargo resolves one, the cross-compilation targets were installed
 # on the other, and every musl build fails with `can't find crate for std`.
 #
-# The version matches what the README requires (Rust 1.97+) and what the
-# committed Cargo.lock was resolved against.
+# The README's "Rust 1.97+" and Cargo.toml's `rust-version` are the FLOOR;
+# this pin is the toolchain the repo builds and gates with, kept on a current
+# stable patch rather than on the floor.
 [toolchain]
-channel = "1.97.1"
+channel = "1.99.1"
 components = ["rustfmt", "clippy"]
