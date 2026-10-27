@@ -27,6 +27,11 @@ from _mcp_client import data, over_stdio
 
 FAILS: list[str] = []
 
+# The swiftly fixtures carry swiftly's own U+27F6 arrow verbatim. On Windows the
+# console code page cannot encode it, so printing a check's detail raised
+# UnicodeEncodeError and aborted the whole suite (windows-latest, PR #368).
+sys.stdout.reconfigure(errors="backslashreplace")
+
 #: A version, as opposed to a status string like "apt-managed" or "up to date".
 _VERSION = re.compile(r"^v?\d+(\.\d+)*")
 
