@@ -414,7 +414,6 @@ def _with_swiftly_only(host, body):
         runtimes._CHECKERS.clear()
         runtimes._CHECKERS["swiftly"] = runtimes._check_swiftly
         runtimes._run = host.run
-        runtimes.UPDATE_COMMANDS["swiftly"] = ["swiftly", "update"]
         body(host)
     finally:
         runtimes._CHECKERS.clear()
@@ -449,6 +448,24 @@ def _swift_update_reselect_failure_is_not_ok(host):
 
 _with_swiftly_only(_SwiftlyHost(), _swift_update_reselects)
 _with_swiftly_only(_SwiftlyHost(), _swift_update_reselect_failure_is_not_ok)
+
+
+# Bug 4: bare `swiftly update` only moves to the latest patch of the in-use
+# minor. `latest` takes the newest stable (here a minor jump, 6.3.2 -> 6.4.1),
+# and --assume-yes keeps a headless run from blocking on a prompt.
+def _swift_update_reaches_latest(host):
+    upd = runtimes.status("swift")["languages"].get("swift", {}).get("update_command")
+    check("swiftly dry run: update_command is 'swiftly update latest --assume-yes'",
+          upd == "swiftly update latest --assume-yes", f"-> {upd!r}")
+    runtimes.update("swift", apply=True)
+    argv = next((c for c in host.calls if c[:2] == ["swiftly", "update"]), None)
+    check("swiftly update: the executed argv contains 'latest' and '--assume-yes'",
+          argv is not None and "latest" in argv and "--assume-yes" in argv, f"-> {host.calls}")
+    check("swiftly update: the executed argv is exactly swiftly update latest --assume-yes",
+          argv == ["swiftly", "update", "latest", "--assume-yes"], f"-> {argv}")
+
+
+_with_swiftly_only(_SwiftlyHost(), _swift_update_reaches_latest)
 
 
 # Bug 2: an apt language with no installed package and no executable on PATH is

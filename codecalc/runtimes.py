@@ -366,7 +366,10 @@ def elevated_apply_allowed() -> bool:
 UPDATE_COMMANDS: dict[str, list[str]] = {
     "mise": ["mise", "up"],
     "rustup": ["rustup", "update"],
-    "swiftly": ["swiftly", "update"],
+    # Bare `swiftly update` only moves to the latest patch of the in-use minor,
+    # but _check_swiftly reports the newest stable as latest (possibly a minor
+    # jump). `latest` matches that; --assume-yes keeps a headless run off a prompt.
+    "swiftly": ["swiftly", "update", "latest", "--assume-yes"],
     "apt": ["sudo", "-n", "apt-get", "install", "--only-upgrade", "-y", "<PKGS>"],
     "npm": ["npm", "update", "-g"],
     "uv": ["uv", "tool", "upgrade", "mojo"],

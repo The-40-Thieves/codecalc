@@ -66,6 +66,12 @@ behind it.
   every swift run failed with "No installed swift toolchain is selected", and
   `runtimes_status` reported swift's current version as `?`. If that re-select
   fails, the update is reported as `ok: false`.
+- **`update_runtimes` now updates swift to the newest stable release, not just the
+  next patch.** Bare `swiftly update` only moves to the latest patch of the in-use
+  minor, while `runtimes_status` reports the newest stable as latest, so a minor
+  jump (6.3.2 → 6.4.1) was reported ok and never applied. The command is now
+  `swiftly update latest --assume-yes`; `--assume-yes` stops swiftly from prompting
+  in the headless MCP subprocess.
 - **A language that is not installed is no longer reported "up to date".** An
   apt-managed language with no installed package and no executable on PATH
   (php, csharp/mcs on a host without them) is now `installed: false`,

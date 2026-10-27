@@ -611,7 +611,7 @@ runtimes:
 |---|---|---|
 | mise | python3, node, bun, deno, ruby, go, erlang, elixir, gleam, zig, java, kotlin, sqlite, duckdb, gradle | `mise up` |
 | rustup | rust (stable/nightly toolchains) | `rustup update` |
-| swiftly | swift | `swiftly update` |
+| swiftly | swift | `swiftly update latest --assume-yes` |
 | apt | c, c++, fortran, csharp, php, perl, lua, tcl, r, jq, bash, zsh | `apt-get install --only-upgrade` (language packages only) |
 | npm | typescript/tsc | `npm update -g` |
 | uv | mojo | `uv tool upgrade mojo` |

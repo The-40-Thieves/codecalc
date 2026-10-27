@@ -2342,7 +2342,7 @@ async def update_runtimes(languages: Annotated[str, Field(description="Comma-sep
     """Update language runtimes. SAFE BY DEFAULT: with apply=False this is a
     dry run — it returns the update commands that WOULD run without changing
     anything. Pass apply=True to actually execute them (mise up, rustup update,
-    swiftly update, apt-get upgrade of language packages, npm -g update, uv tool
+    swiftly update latest --assume-yes, apt-get upgrade of language packages, npm -g update, uv tool
     upgrade).
 
     apply=True asks the caller to confirm first (a protocol-level gate, not
