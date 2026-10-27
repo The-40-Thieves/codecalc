@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ast
 import math
+import operator
 import re
 import statistics
 import struct
@@ -75,6 +76,10 @@ _CMP = {
 }
 
 
+_INT_OPS = {"<<": operator.lshift, ">>": operator.rshift,
+            "&": operator.and_, "|": operator.or_, "^": operator.xor}
+
+
 def _int_op(a: Fraction, b: Fraction, op: str) -> Fraction:
     """Bitwise on exact rationals: legal only when both sides are integers."""
     for side, v in (("left", a), ("right", b)):
@@ -83,8 +88,9 @@ def _int_op(a: Fraction, b: Fraction, op: str) -> Fraction:
     ai, bi = int(a), int(b)
     if op in ("<<", ">>") and bi < 0:
         raise ValueError(f"negative shift count {bi}")
-    return Fraction({"<<": ai << bi, ">>": ai >> bi,
-                     "&": ai & bi, "|": ai | bi, "^": ai ^ bi}[op])
+    # Look up the one operator and call it once. A dict literal of results
+    # here evaluated all five, so `^` also built `ai << bi` (PR #370).
+    return Fraction(_INT_OPS[op](ai, bi))
 
 
 #: Exponent magnitude and predicted-result-size guards for `**`. Both are
