@@ -59,6 +59,24 @@ behind it.
 
 ### Fixed
 
+- **`update_runtimes` no longer leaves swift without a selected toolchain.**
+  `swiftly update` uninstalls the in-use toolchain and installs its successor,
+  without making the successor the global default. After a successful update,
+  the new version is now selected with `swiftly use --global-default`. Before,
+  every swift run failed with "No installed swift toolchain is selected", and
+  `runtimes_status` reported swift's current version as `?`. If that re-select
+  fails, the update is reported as `ok: false`.
+- **A language that is not installed is no longer reported "up to date".** An
+  apt-managed language with no installed package and no executable on PATH
+  (php, csharp/mcs on a host without them) is now `installed: false`,
+  `current: null`, `latest: null`, with no update command. It is counted in
+  `summary.not_installed`. The `installed` key is new on apt entries.
+- **An apt entry's `latest` is labelled with its scope.** Each apt entry carries
+  `latest_scope: "apt-sources"`: the newest version in this machine's configured
+  apt sources, not upstream's release (gcc 13.3 and R 4.3.3 on Ubuntu 24.04 read
+  "up to date" for those sources). The `runtimes_status` tool description
+  documents it. No upstream lookup was added.
+
 - **`session_delete_file` raised a bare `ValueError`/`UnicodeEncodeError`
   instead of the documented `{"ok": False, ...}` refusal for a NUL byte or a
   lone UTF-16 surrogate in the path (THE-1103).** `_jail_nofollow` — the
