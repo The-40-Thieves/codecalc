@@ -2,6 +2,8 @@
 
 <!-- mcp-name: io.github.The-40-Thieves/codecalc -->
 
+[![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://app.codspeed.io/The-40-Thieves/codecalc?utm_source=badge)
+
 **codecalc is an offline, self-hosted MCP server that gives an AI agent a
 calculator, a code runner, and a logic checker — so it gets a *correct* answer
 instead of a guessed one.** It runs code in **31 languages**, does exact
@@ -1115,6 +1117,20 @@ Two rules the suite holds itself to, learned from breaking both:
   and their timing is not. `runtimes_status` is checked against itself — the
   summary must agree with the data it summarises — so it holds on any machine
   rather than describing this one.
+
+### Benchmarks
+
+`benchmarks/` is a separate, real pytest suite measured by
+[CodSpeed](https://codspeed.io) on every pull request
+(`.github/workflows/codspeed.yml`, CPU simulation instrument). It covers exact
+arithmetic, the SymPy/z3 tool bodies, the expression screen, spec hashing and
+the tree-sitter complexity analyser. pytest stays out of the manifests; it is
+added ad hoc, as in the mutation lane:
+
+```bash
+uv sync --locked --all-extras
+uv run --no-sync --with pytest-codspeed pytest benchmarks/ --codspeed
+```
 
 ## Platform support
 

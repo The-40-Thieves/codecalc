@@ -211,6 +211,7 @@ ignore = [
 "tests/*" = ["S101", "T201", "F841", "E402"]
 "scripts/*" = ["T201"]
 "mutation/*" = ["S101"]
+"benchmarks/*" = ["S101"]
 
 # ── mutmut (mutation lane) ──────────────────────────────────────────────────
 # mutmut 3.8.0 mutates codecalc/safe_expr.py and runs the pytest harness in
