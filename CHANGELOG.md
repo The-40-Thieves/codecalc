@@ -59,6 +59,12 @@ behind it.
 
 ### Fixed
 
+- **`^`, `&`, `|` and `>>` no longer compute a left shift as well.** `exact`'s
+  bitwise helper built all five results before choosing one, so
+  `0xdeadbeef ^ 0xcafebabe` allocated a ~3.4-billion-bit integer (~425 MB) and
+  took ~0.4 s. Only the requested operation is computed now; results and error
+  messages are unchanged.
+
 - **`update_runtimes` no longer leaves swift without a selected toolchain.**
   `swiftly update` uninstalls the in-use toolchain and installs its successor,
   without making the successor the global default. After a successful update,

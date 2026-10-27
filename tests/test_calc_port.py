@@ -28,6 +28,24 @@ check("bitwise inline", r["value"] == "15")
 r = exact.eval_exact("1 << 20")
 check("shift inline", r["value"] == "1048576")
 
+# _int_op must compute only the requested op (PR #370). It used to build all
+# five results in one dict literal before indexing, so every `^`/`&`/`|`/`>>`
+# also computed `ai << bi`: `0xdeadbeef ^ 0xcafebabe` allocated a ~3.4-billion-
+# bit integer (~425 MB) and took ~0.4 s. Peak allocation is the measured proof.
+import tracemalloc
+
+for _expr, _want in (("0xdeadbeef ^ 0xcafebabe", 0xDEADBEEF ^ 0xCAFEBABE),
+                     ("0xff & 0xcafebabe", 0xFF & 0xCAFEBABE)):
+    tracemalloc.start()
+    try:
+        r = exact._eval_exact(_expr)
+        _peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    check(f"bitwise {_expr!r} value", r.get("ok") and r["value"] == str(_want), f"-> {r}")
+    check(f"bitwise {_expr!r} peak allocation under 8 MB",
+          _peak < 8 * 1_000_000, f"-> peak={_peak / 1e6:.2f} MB")
+
 # threshold
 r = exact.compare_threshold("1/25", ">", "0.05")
 check("cmp 1/25 > 0.05 false", r["ok"] and r["holds"] is False and r["shortfall"] == "1/100")
