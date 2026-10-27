@@ -334,6 +334,11 @@ jobs:
       - name: magnitude boundaries (safe_expr guards, at and past each threshold)
         shell: bash
         run: uv run --no-sync python tests/test_magnitude_boundaries.py
+      # convert_units on same-scale temperature pairs (issue #350): every alias
+      # pair within one scale is an identity; cross-scale anchors still hold.
+      - name: temperature identity conversions (same-scale pairs, anchors, mixing)
+        shell: bash
+        run: uv run --no-sync python tests/test_units_temperature_identity.py
       # The run-lifecycle state machine: identity, cancel,
       # cleanup and crash-recovery journalling, all against fake providers —
       # no sandbox, no native executor, so it belongs on the full matrix

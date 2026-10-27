@@ -188,6 +188,8 @@ _CONSTANTS: dict[str, tuple[str, str, str, float | None]] = {
 
 #: temperature conversions (sympy treats Celsius as an offset — handle manually)
 def _temp_convert(value: float, src: str, dst: str) -> float:
+    if src == dst:
+        return value
     if src == "kelvin" and dst == "celsius":
         return value - 273.15
     if src == "celsius" and dst == "kelvin":
