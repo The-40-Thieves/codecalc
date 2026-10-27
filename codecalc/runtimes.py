@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 from dataclasses import dataclass
 
@@ -54,6 +55,16 @@ APT_GLOBS: dict[str, list[str]] = {
     "php": ["php8.5-*"], "perl": ["perl"], "lua": ["lua5.4", "lua5.1", "luajit"],
     "tcl": ["tcl8.6"], "r": ["r-base*"], "jq": ["jq"], "bash": ["bash"],
     "zsh": ["zsh"],
+}
+
+#: executables that prove an apt-managed language is installed even when no
+#: package in APT_GLOBS is. The globs pin a version (php8.5-*), so a PHP 8.3
+#: install matches none of them; the binary on PATH is what it actually is.
+APT_EXECUTABLES: dict[str, list[str]] = {
+    "c": ["gcc"], "cpp": ["g++"], "c++": ["g++"], "fortran": ["gfortran"],
+    "csharp": ["dotnet", "mcs"], "php": ["php"], "perl": ["perl"],
+    "lua": ["lua", "lua5.4"], "tcl": ["tclsh"], "r": ["R", "Rscript"],
+    "jq": ["jq"], "bash": ["bash"], "zsh": ["zsh"],
 }
 
 #: mise tool name -> registry language name
@@ -207,28 +218,52 @@ def _check_swiftly() -> dict[str, dict]:
     }}
 
 
+def _apt_names(output: str) -> set[str]:
+    """Package names from `apt list` output (its installed or upgradable lines)."""
+    names = set()
+    for line in output.splitlines():
+        m = re.match(r"(\S+?)/(\S+)\s+(\S+)\s", line)
+        if m:
+            names.add(m.group(1).split(":")[0])
+    return names
+
+
+def _on_path(exe: str) -> bool:
+    return shutil.which(exe) is not None
+
+
 def _check_apt() -> dict[str, dict]:
     r = _run(["apt", "list", "--upgradable"], timeout=60)
     if not r.spawned:
         return _error("apt", r.error)
-    upgradable = set()
-    for line in r.output.splitlines():
-        m = re.match(r"(\S+?)/(\S+)\s+(\S+)\s", line)
-        if m:
-            upgradable.add(m.group(1).split(":")[0])
+    upgradable = _apt_names(r.output)
+    # "No upgradable package" means current OR absent. Only the installed list
+    # tells those apart, so a missing language is no longer reported as current.
+    installed_r = _run(["apt", "list", "--installed"], timeout=60)
+    if not installed_r.spawned:
+        return _error("apt", installed_r.error)
+    installed = _apt_names(installed_r.output)
     found: dict[str, dict] = {}
     for lang, globs in APT_GLOBS.items():
-        matched = []
-        for g in globs:
-            pat = re.compile("^" + g.replace("*", ".*") + "$")
-            matched += [p for p in upgradable if pat.match(p)]
-        found[lang] = {
-            "manager": "apt", "tool": lang,
-            "current": "apt-managed",
-            "latest": ", ".join(dict.fromkeys(matched)) or "up to date",
-            "updatable": bool(matched),
-            "packages": list(dict.fromkeys(matched)),
-        }
+        pats = [re.compile("^" + g.replace("*", ".*") + "$") for g in globs]
+        matched = [p for pat in pats for p in upgradable if pat.match(p)]
+        present = (any(pat.match(p) for pat in pats for p in installed)
+                   or any(_on_path(exe) for exe in APT_EXECUTABLES.get(lang, [])))
+        # `latest` for apt is the newest version in THIS machine's configured
+        # apt sources, not upstream's release. The scope is named on every entry
+        # so "up to date" cannot be read as "newest anywhere".
+        entry = {"manager": "apt", "tool": lang, "installed": present,
+                 "latest_scope": "apt-sources"}
+        if present:
+            entry.update(
+                current="apt-managed",
+                latest=", ".join(dict.fromkeys(matched)) or "up to date",
+                updatable=bool(matched),
+                packages=list(dict.fromkeys(matched)),
+            )
+        else:
+            entry.update(current=None, latest=None, updatable=False, packages=[])
+        found[lang] = entry
     return found
 
 
@@ -331,7 +366,10 @@ def elevated_apply_allowed() -> bool:
 UPDATE_COMMANDS: dict[str, list[str]] = {
     "mise": ["mise", "up"],
     "rustup": ["rustup", "update"],
-    "swiftly": ["swiftly", "update"],
+    # Bare `swiftly update` only moves to the latest patch of the in-use minor,
+    # but _check_swiftly reports the newest stable as latest (possibly a minor
+    # jump). `latest` matches that; --assume-yes keeps a headless run off a prompt.
+    "swiftly": ["swiftly", "update", "latest", "--assume-yes"],
     "apt": ["sudo", "-n", "apt-get", "install", "--only-upgrade", "-y", "<PKGS>"],
     "npm": ["npm", "update", "-g"],
     "uv": ["uv", "tool", "upgrade", "mojo"],
@@ -391,7 +429,9 @@ def status(languages: str | list[str] | None = None) -> dict:
             pkgs = info["packages"]
             cmd = [("<PKGS>" if part == "<PKGS>" else part) for part in cmd]
             cmd = [p for p in cmd if p != "<PKGS>"] + pkgs
-        info["update_command"] = " ".join(cmd) if cmd else None
+        # A language that is not installed has nothing to update, so offering the
+        # command would invite an upgrade that cannot succeed.
+        info["update_command"] = " ".join(cmd) if cmd and info.get("installed") is not False else None
         # The command string has always CONTAINED "sudo" for apt, so this is
         # not new information — it is the same fact as a field instead of a
         # substring, so a caller can act on it without parsing a shell line.
@@ -416,6 +456,7 @@ def status(languages: str | list[str] | None = None) -> dict:
         "summary": {
             "updatable": sum(1 for r in results.values() if r.get("updatable")),
             "total": len(results),
+            "not_installed": sum(1 for r in results.values() if r.get("installed") is False),
         },
     }
     if manager_errors:
@@ -445,6 +486,25 @@ def status(languages: str | list[str] | None = None) -> dict:
                 notes.append(f"could not check (manager unavailable): {', '.join(check_failed)}")
             out["note"] = "; ".join(notes)
     return out
+
+
+def _reselect_swift_default(update_output: str) -> dict:
+    """`swiftly update` uninstalls the in-use toolchain and installs its successor,
+    and the successor is not made the global default. Until one is selected,
+    every swift run fails with "No installed swift toolchain is selected" and
+    status cannot read a version. Re-select the version the update reported."""
+    m = re.search(r"Successfully updated .*Swift (\S+)", update_output)
+    if not m:
+        return {"command": None, "ok": False,
+                "output_tail": "could not read the new swift version from swiftly's output; "
+                               "no global default was selected"}
+    cmd = ["swiftly", "use", "--global-default", m.group(1)]
+    r = _run(cmd, timeout=60)
+    return {
+        "command": " ".join(cmd),
+        "ok": r.spawned and r.exit_code == 0,
+        "output_tail": r.output[-500:] if r.spawned else (r.error or "command did not run"),
+    }
 
 
 def update(languages: str | list[str] | None = None, apply: bool = False,
@@ -512,7 +572,7 @@ def update(languages: str | list[str] | None = None, apply: bool = False,
             continue
 
         run = _run(cmd, timeout=timeout)
-        executed.append({
+        entry = {
             "manager": mgr, "languages": langs, "command": " ".join(cmd),
             "elevated": _is_elevated(cmd),
             "exit_code": run.exit_code,
@@ -523,7 +583,13 @@ def update(languages: str | list[str] | None = None, apply: bool = False,
             # no way to learn the update it just "successfully" ran did not
             # happen at all.
             "ok": run.spawned and run.exit_code == 0,
-        })
+        }
+        if mgr == "swiftly" and entry["ok"]:
+            # An update that leaves no toolchain selected has not left the
+            # host usable, so a failed re-select is a failed update.
+            entry["default"] = _reselect_swift_default(run.output)
+            entry["ok"] = entry["default"]["ok"]
+        executed.append(entry)
 
     if executed:
         succeeded = sum(1 for e in executed if e["ok"])

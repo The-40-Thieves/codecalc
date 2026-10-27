@@ -27,6 +27,11 @@ from _mcp_client import data, over_stdio
 
 FAILS: list[str] = []
 
+# The swiftly fixtures carry swiftly's own U+27F6 arrow verbatim. On Windows the
+# console code page cannot encode it, so printing a check's detail raised
+# UnicodeEncodeError and aborted the whole suite (windows-latest, PR #368).
+sys.stdout.reconfigure(errors="backslashreplace")
+
 #: A version, as opposed to a status string like "apt-managed" or "up to date".
 _VERSION = re.compile(r"^v?\d+(\.\d+)*")
 
@@ -47,6 +52,11 @@ async def main():
         print(f"tools ({len(names)}): {names}")
         for required in ("runtimes_status", "update_runtimes"):
             check(f"tool {required!r} is served", required in names)
+        described = {t.name: t.description or "" for t in (await client.list_tools()).tools}
+        check("runtimes_status documents latest_scope 'apt-sources'",
+              "apt-sources" in described.get("runtimes_status", ""))
+        check("runtimes_status documents the not-installed apt verdict",
+              "installed" in described.get("runtimes_status", ""))
 
         st = data(await client.call_tool("runtimes_status", {}))
         check("runtimes_status succeeds", st.get("ok") is not False, f"-> {str(st)[:80]}")
@@ -353,6 +363,193 @@ if apt_langs:
           "-> a user-owned manager was marked elevated")
 else:
     print("SKIP apt elevation check — no apt-managed language on this host")
+
+# ── 2026-10-27 truthfulness regressions ─────────────────────────────────────
+# Each block reproduces an incident with its VERBATIM output as the fixture and
+# drives runtimes.py through a fake `_run` that models the host, so the code's
+# reading of that output is what gets tested. No real package manager runs.
+
+SWIFTLY_UPDATE_OUT = (
+    "Uninstalling Swift 6.3.2...\n"
+    "done\n"
+    "Successfully updated Swift 6.3.2 ⟶ Swift 6.4.1\n"
+)
+SWIFT_NO_DEFAULT_ERR = (
+    "No installed swift toolchain is selected from either from a .swift-version file,\n"
+    "or the default. You can try using one that's already installed with `swiftly use\n"
+    "<toolchain version>` or install a new toolchain to use with `swiftly install\n"
+    "--use <toolchain version>`.\n"
+)
+
+
+class _SwiftlyHost:
+    """swiftly with one toolchain in use. `swiftly update` does what the incident
+    showed: it uninstalls the in-use toolchain, installs the newer one, and leaves
+    no global default selected. Only `swiftly use --global-default` selects one."""
+
+    def __init__(self):
+        self.selected: str | None = "6.3.2"
+        self.installed = {"6.3.2"}
+        self.calls: list[list[str]] = []
+        self.refuse_use = False
+
+    def run(self, cmd, timeout=60):
+        if cmd[:1] == ["swift"]:
+            if self.selected is None:
+                return runtimes._RunResult(True, SWIFT_NO_DEFAULT_ERR, 1)
+            return runtimes._RunResult(True, f"Swift version {self.selected} (swift-{self.selected}-RELEASE)\n", 0)
+        if cmd[:2] == ["swiftly", "list-available"]:
+            return runtimes._RunResult(True, "6.3.2\n6.4.1\n", 0)
+        if cmd[:2] == ["swiftly", "update"]:
+            self.calls.append(cmd)
+            self.installed, self.selected = {"6.4.1"}, None
+            return runtimes._RunResult(True, SWIFTLY_UPDATE_OUT, 0)
+        if cmd[:2] == ["swiftly", "use"]:
+            self.calls.append(cmd)
+            if not self.refuse_use and "--global-default" in cmd and cmd[-1] in self.installed:
+                self.selected = cmd[-1]
+                return runtimes._RunResult(True, "", 0)
+            return runtimes._RunResult(True, "", 1)
+        return runtimes._RunResult(False, "", None, f"{cmd[0]}: not found (simulated)")
+
+
+def _with_swiftly_only(host, body):
+    saved = (dict(runtimes._CHECKERS), runtimes._run, dict(runtimes.UPDATE_COMMANDS))
+    try:
+        runtimes._CHECKERS.clear()
+        runtimes._CHECKERS["swiftly"] = runtimes._check_swiftly
+        runtimes._run = host.run
+        body(host)
+    finally:
+        runtimes._CHECKERS.clear()
+        runtimes._CHECKERS.update(saved[0])
+        runtimes._run = saved[1]
+        runtimes.UPDATE_COMMANDS.clear()
+        runtimes.UPDATE_COMMANDS.update(saved[2])
+
+
+# Bug 1: `swiftly update` must leave a toolchain selected and status must read it.
+def _swift_update_reselects(host):
+    r = runtimes.update("swift", apply=True)
+    entry = (r.get("executed") or [{}])[0]
+    check("swiftly update: the run reports ok=True", entry.get("ok") is True, f"-> {entry}")
+    check("swiftly update: the new toolchain is re-selected as the global default",
+          ["swiftly", "use", "--global-default", "6.4.1"] in host.calls,
+          f"-> swiftly calls {host.calls}")
+    check("swiftly update: swift runs again (a default is selected)",
+          host.selected == "6.4.1", f"-> selected={host.selected!r}")
+    after = runtimes.status("swift")["languages"].get("swift", {})
+    check("swiftly update: status reports the new version, not '?'",
+          after.get("current") == "6.4.1", f"-> current={after.get('current')!r}")
+
+
+def _swift_update_reselect_failure_is_not_ok(host):
+    host.refuse_use = True
+    r = runtimes.update("swift", apply=True)
+    entry = (r.get("executed") or [{}])[0]
+    check("swiftly update: a failed re-select reports ok=False (no selected toolchain)",
+          r.get("ok") is False and entry.get("ok") is False, f"-> {r}")
+
+
+_with_swiftly_only(_SwiftlyHost(), _swift_update_reselects)
+_with_swiftly_only(_SwiftlyHost(), _swift_update_reselect_failure_is_not_ok)
+
+
+# Bug 4: bare `swiftly update` only moves to the latest patch of the in-use
+# minor. `latest` takes the newest stable (here a minor jump, 6.3.2 -> 6.4.1),
+# and --assume-yes keeps a headless run from blocking on a prompt.
+def _swift_update_reaches_latest(host):
+    upd = runtimes.status("swift")["languages"].get("swift", {}).get("update_command")
+    check("swiftly dry run: update_command is 'swiftly update latest --assume-yes'",
+          upd == "swiftly update latest --assume-yes", f"-> {upd!r}")
+    runtimes.update("swift", apply=True)
+    argv = next((c for c in host.calls if c[:2] == ["swiftly", "update"]), None)
+    check("swiftly update: the executed argv contains 'latest' and '--assume-yes'",
+          argv is not None and "latest" in argv and "--assume-yes" in argv, f"-> {host.calls}")
+    check("swiftly update: the executed argv is exactly swiftly update latest --assume-yes",
+          argv == ["swiftly", "update", "latest", "--assume-yes"], f"-> {argv}")
+
+
+_with_swiftly_only(_SwiftlyHost(), _swift_update_reaches_latest)
+
+
+# Bug 2: an apt language with no installed package and no executable on PATH is
+# NOT installed. The old checker answered "apt-managed" / "up to date" for it.
+APT_INSTALLED_HEADER = "Listing...\n"
+
+
+def _apt_host(installed_out: str):
+    def run(cmd, timeout=60):
+        if cmd[:3] == ["apt", "list", "--upgradable"]:
+            return runtimes._RunResult(True, "Listing...\n", 0)
+        if cmd[:3] == ["apt", "list", "--installed"]:
+            return runtimes._RunResult(True, APT_INSTALLED_HEADER + installed_out, 0)
+        return runtimes._RunResult(False, "", None, f"{cmd[0]}: not found (simulated)")
+    return run
+
+
+def _with_apt(installed_out: str, on_path, body):
+    saved = (runtimes._run, getattr(runtimes, "_on_path", None))
+    try:
+        runtimes._run = _apt_host(installed_out)
+        runtimes._on_path = on_path
+        body()
+    finally:
+        runtimes._run = saved[0]
+        if saved[1] is not None:
+            runtimes._on_path = saved[1]
+
+
+def _php_mcs_missing():
+    st = runtimes.status("php,csharp,c")
+    langs = st.get("languages", {})
+    for name in ("php", "csharp"):
+        info = langs.get(name, {})
+        check(f"{name}: not installed is reported as installed=False",
+              info.get("installed") is False, f"-> {info}")
+        check(f"{name}: not installed has current=None, not 'apt-managed'",
+              info.get("current") is None, f"-> current={info.get('current')!r}")
+        check(f"{name}: not installed does not claim 'up to date'",
+              info.get("latest") is None and info.get("updatable") is False, f"-> {info}")
+        check(f"{name}: nothing to update, so no update command is offered",
+              info.get("update_command") is None, f"-> {info.get('update_command')!r}")
+    c = langs.get("c", {})
+    check("c: an installed apt language still reports apt-managed",
+          c.get("installed") is True and c.get("current") == "apt-managed", f"-> {c}")
+    check("status: a missing apt language is counted in summary.not_installed",
+          (st.get("summary") or {}).get("not_installed") == 2, f"-> {st.get('summary')}")
+    check("status: missing apt languages are not a check failure",
+          st.get("ok") is True and not st.get("check_failed"), f"-> {st.get('check_failed')}")
+
+
+_with_apt("gcc/noble-updates,now 13.3.0-6ubuntu2~24.04 arm64 [installed]\n",
+          lambda exe: exe == "gcc", _php_mcs_missing)
+
+
+def _php_on_path_without_its_package():
+    # The php glob is php8.5-*; a PHP 8.3 install is not matched by it. Presence
+    # is decided by "any package installed OR the executable on PATH", so this
+    # must still read as installed rather than as the absent-runtime verdict.
+    st = runtimes.status("php")
+    info = st.get("languages", {}).get("php", {})
+    check("php: an 8.3 install (php on PATH, no php8.5-* package) is installed",
+          info.get("installed") is True and info.get("current") == "apt-managed", f"-> {info}")
+
+
+_with_apt("php8.3-cli/noble-updates,now 8.3.6-0ubuntu0.24.04.1 arm64 [installed]\n",
+          lambda exe: exe == "php", _php_on_path_without_its_package)
+
+
+# Bug 3: an apt "latest" is the newest in the configured apt sources, and says so.
+def _apt_entries_name_their_scope():
+    langs = runtimes.status("c,php").get("languages", {})
+    check("apt entries carry latest_scope='apt-sources' (installed and missing alike)",
+          bool(langs) and all(v.get("latest_scope") == "apt-sources" for v in langs.values()),
+          f"-> {langs}")
+
+
+_with_apt("gcc/noble-updates,now 13.3.0-6ubuntu2~24.04 arm64 [installed]\n",
+          lambda exe: exe == "gcc", _apt_entries_name_their_scope)
 
 print(f"\n=== {len(FAILS)} FAILURE(S) ===" if FAILS else "\n=== RUNTIME TOOLS OK (dry-run only) ===")
 sys.exit(1 if FAILS else 0)

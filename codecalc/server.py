@@ -2314,6 +2314,14 @@ def runtimes_status(languages: Annotated[str, Field(description="Comma-separated
     Reports current vs latest version per language, which package manager owns
     it (mise/rustup/swiftly/apt/npm/uv), and the exact command that would run.
 
+    APT ENTRIES: `latest` is the newest version in THIS machine's configured
+    apt sources, not upstream's release. `latest_scope` is always "apt-sources"
+    on an apt entry, so gcc 13.3 on Ubuntu 24.04 reading "up to date" means
+    current for those sources, not newest anywhere. `installed: false` means no
+    package of the language is installed and its executable is not on PATH;
+    that entry has `current: null` and `latest: null`, and `summary.not_installed`
+    counts them.
+
     Each entry also carries `tier` (registry.RELIABILITY_TIERS) — see
     list_languages for what `tested`/`best_effort`/`plan_only` mean. A
     current, up-to-date toolchain can still be `best_effort`: `tier` is
@@ -2334,7 +2342,7 @@ async def update_runtimes(languages: Annotated[str, Field(description="Comma-sep
     """Update language runtimes. SAFE BY DEFAULT: with apply=False this is a
     dry run — it returns the update commands that WOULD run without changing
     anything. Pass apply=True to actually execute them (mise up, rustup update,
-    swiftly update, apt-get upgrade of language packages, npm -g update, uv tool
+    swiftly update latest --assume-yes, apt-get upgrade of language packages, npm -g update, uv tool
     upgrade).
 
     apply=True asks the caller to confirm first (a protocol-level gate, not
