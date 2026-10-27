@@ -5,7 +5,7 @@ Read .entire/agent-guide.md for this repository's workflow, source inspection, a
 
 ## Boundaries
 
-- Do not edit `.entire/agent-guide.md` or anything between the `entire-agent` markers: `entire brain setup` regenerates them.
-- Never commit secrets, tokens, `.env` files or `.entire/settings.local.json`.
-- Never push Entire checkpoints or session transcripts to this repository's origin; they belong only in the private `The-40-Thieves/entire-checkpoints` repo.
-- Do not merge to `main`, force-push, or rewrite published history without the owner's approval.
+- Leave `.entire/agent-guide.md` and the `entire-agent` blocks to `entire brain setup`, which regenerates them; to change them, re-run it rather than editing by hand.
+- Don't commit secrets, tokens, `.env` files or `.entire/settings.local.json`. If one is committed by mistake, stop and tell the owner so it can be rotated.
+- Session transcripts and checkpoints go only to the private `The-40-Thieves/entire-checkpoints` repo, not this origin. If `entire status` shows another destination, stop and ask before pushing.
+- Merging to `main`, force-pushing or rewriting published history needs the owner's go-ahead in the current conversation.
