@@ -59,6 +59,12 @@ behind it.
 
 ### Fixed
 
+- **`<<` is bounded like `**`.** `1 << 10**10` built a 10-billion-bit integer
+  and never returned. A left shift whose result would exceed 50,000 bits (the
+  `**` limit) is now refused before it runs, with `resource_exhausted`. Zero
+  shifted by any count is still `0`. The `bits` and `radix_convert` tools use
+  no shift on a user count, and the symbolic path already refuses large shifts.
+
 - **`^`, `&`, `|` and `>>` no longer compute a left shift as well.** `exact`'s
   bitwise helper built all five results before choosing one, so
   `0xdeadbeef ^ 0xcafebabe` allocated a ~3.4-billion-bit integer (~425 MB) and

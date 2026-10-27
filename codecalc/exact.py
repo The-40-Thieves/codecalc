@@ -88,12 +88,24 @@ def _int_op(a: Fraction, b: Fraction, op: str) -> Fraction:
     ai, bi = int(a), int(b)
     if op in ("<<", ">>") and bi < 0:
         raise ValueError(f"negative shift count {bi}")
+    # `1 << 10**10` built a 10-billion-bit integer before anything could refuse
+    # it. A non-zero left operand's result has exactly ai.bit_length() + bi bits,
+    # so the same ceiling as `**` is checked on that prediction before the shift
+    # runs. `>>`, `&`, `|`, `^` cannot grow past their inputs and need no guard.
+    if op == "<<" and ai != 0:
+        predicted_bits = ai.bit_length() + bi
+        if predicted_bits > _MAX_POW_RESULT_BITS:
+            raise _CeilingExceeded(
+                f"{ai} << {bi} would need ~{predicted_bits} bits to represent, "
+                f"exceeding the limit ({_MAX_POW_RESULT_BITS}) for exact arithmetic"
+            )
     # Look up the one operator and call it once. A dict literal of results
     # here evaluated all five, so `^` also built `ai << bi` (PR #370).
     return Fraction(_INT_OPS[op](ai, bi))
 
 
-#: Exponent magnitude and predicted-result-size guards for `**`. Both are
+#: Exponent magnitude and predicted-result-size guards for `**`, and the
+#: predicted-result-size guard for `<<` (_int_op). Both are
 #: checked BEFORE the exponentiation runs, not after: `a ** b` on Fraction has
 #: no magnitude guard of its own, so `2**10**6` (the inner `10**6` evaluates
 #: first, then `2**1000000`) takes seconds and `2**10**7` does not return in

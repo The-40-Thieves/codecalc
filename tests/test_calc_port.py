@@ -46,6 +46,40 @@ for _expr, _want in (("0xdeadbeef ^ 0xcafebabe", 0xDEADBEEF ^ 0xCAFEBABE),
     check(f"bitwise {_expr!r} peak allocation under 8 MB",
           _peak < 8 * 1_000_000, f"-> peak={_peak / 1e6:.2f} MB")
 
+# A left shift's result size is bounded like `**` (_int_op, _MAX_POW_RESULT_BITS).
+# `1 << 10**10` used to build a 10-billion-bit integer and never returned. The
+# bound is checked before the shift runs. For a non-zero left operand the result
+# has exactly ai.bit_length() + bi bits, so the boundary is exact: `1 << 49999`
+# (50000 bits) fits and `1 << 50000` (50001 bits) does not.
+import time
+from fractions import Fraction
+
+_t0 = time.monotonic()
+r = exact._eval_exact("1 << 10**10")
+_elapsed = time.monotonic() - _t0
+check("1 << 10**10 refused as resource_exhausted, not a hang",
+      r["ok"] is False and r.get("code") == "resource_exhausted" and _elapsed < 2,
+      f"-> {r} in {_elapsed:.3f}s")
+r = exact._eval_exact("0 << 10**10")
+check("0 << 10**10 = 0 (a zero operand is never size-limited)",
+      r["ok"] and r["value"] == "0", f"-> {r}")
+r = exact._eval_exact("1 << -10**10")
+check("negative shift count still reported before the size ceiling",
+      r["ok"] is False and "negative shift count" in r.get("error", ""), f"-> {r}")
+for _expr, _want_ok in (("1 << 49999", True), ("1 << 50000", False),
+                        ("3 << 49998", True), ("3 << 49999", False)):
+    _a, _b = _expr.split(" << ")
+    try:
+        exact._int_op(Fraction(_a), Fraction(_b), "<<")
+        _ok = True
+    except exact._CeilingExceeded:
+        _ok = False
+    check(f"{_expr} {'computed' if _want_ok else 'refused'} at the 50000-bit boundary",
+          _ok is _want_ok)
+r = exact.bitop(1, "shl", 10 ** 10, 64)
+check("bitop shl by 10**10 at width 64 returns at once (count >= width, no shift)",
+      r.get("ok") and r["unsigned"] == 0 and "overflow" in r, f"-> {r}")
+
 # threshold
 r = exact.compare_threshold("1/25", ">", "0.05")
 check("cmp 1/25 > 0.05 false", r["ok"] and r["holds"] is False and r["shortfall"] == "1/100")
