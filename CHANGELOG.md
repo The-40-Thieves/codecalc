@@ -59,6 +59,12 @@ behind it.
 
 ### Fixed
 
+- **Unary `~` refuses a fraction instead of truncating it (#348).** `~(1/2)`
+  returned `-1` and `~(-3/2)` returned `0`, because the operand was silently
+  converted to an integer. `~` now takes the same integer check as `&`, `|`,
+  `^`, `<<` and `>>`: a non-integer operand is refused with
+  `bitwise ~ needs integers`. Integer operands are unchanged.
+
 - **`<<` is bounded like `**`.** `1 << 10**10` built a 10-billion-bit integer
   and never returned. A left shift whose result would exceed 50,000 bits (the
   `**` limit) is now refused before it runs, with `resource_exhausted`. Zero
