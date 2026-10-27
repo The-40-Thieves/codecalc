@@ -8,6 +8,7 @@ complexity analyser parses source with tree-sitter (the `parsing` extra).
 from __future__ import annotations
 
 import pytest
+from _helpers import expect
 
 from codecalc import complexity, providers, safe_expr, stats, units
 
@@ -42,7 +43,7 @@ def test_spec_hash(benchmark):
         return [s.spec_hash() for s in specs]
 
     hashes = benchmark(run)
-    assert len(set(hashes)) == len(specs)
+    expect(len(set(hashes)) == len(specs))
 
 
 PY_SOURCE = """
@@ -87,7 +88,7 @@ const walk = (n) => n <= 0 ? 0 : 1 + walk(n - 1);
 def test_analyze_complexity(benchmark, language, source):
     pytest.importorskip("tree_sitter_language_pack")
     result = benchmark(complexity.analyze, source, language)
-    assert result["ok"], result
+    expect(result["ok"], result)
 
 
 def test_unit_conversions(benchmark):
@@ -110,11 +111,11 @@ def test_mann_whitney_exact(benchmark):
     a = [1.1, 2.3, 3.2, 4.8, 5.0, 6.7, 7.1, 8.4, 9.9, 10.2]
     b = [2.0, 3.9, 5.5, 6.1, 7.7, 8.8, 9.3, 11.0, 12.4, 13.6]
     result = benchmark(stats.mann_whitney_u, a, b)
-    assert result["method"] == "exact"
+    expect(result["method"] == "exact")
 
 
 def test_mann_whitney_normal_approx(benchmark):
     a = [float((i * 37) % 101) for i in range(300)]
     b = [float((i * 53) % 103) + 2 for i in range(300)]
     result = benchmark(stats.mann_whitney_u, a, b, "two-sided")
-    assert result["method"] != "exact"
+    expect(result["method"] != "exact")

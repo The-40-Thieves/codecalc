@@ -13,6 +13,8 @@ import pytest
 pytest.importorskip("sympy")
 pytest.importorskip("z3")
 
+from _helpers import expect
+
 from codecalc import exact, linalg, logic, safe_expr
 
 PEDANTIC = {"rounds": 5, "warmup_rounds": 1}
@@ -27,7 +29,7 @@ def test_evaluate_expression(benchmark, clear_sympy_cache):
     result = benchmark.pedantic(
         logic._evaluate_expression, args=("(x + 1)**3 - x**3",), setup=clear_sympy_cache, **PEDANTIC
     )
-    assert result["ok"], result
+    expect(result["ok"], result)
 
 
 def test_simplify_trig(benchmark, clear_sympy_cache):
@@ -35,14 +37,14 @@ def test_simplify_trig(benchmark, clear_sympy_cache):
         exact._simplify_expression, args=("sin(x)**2 + cos(x)**2 + (x**2 - 1)/(x - 1)",),
         setup=clear_sympy_cache, **PEDANTIC,
     )
-    assert result["ok"], result
+    expect(result["ok"], result)
 
 
 def test_solve_cubic(benchmark, clear_sympy_cache):
     result = benchmark.pedantic(
         exact._solve_expression, args=("x**3 - 6*x**2 + 11*x - 6",), setup=clear_sympy_cache, **PEDANTIC
     )
-    assert result["solutions"] == ["1", "2", "3"], result
+    expect(result["solutions"] == ["1", "2", "3"], result)
 
 
 def test_algebraic_equiv(benchmark, clear_sympy_cache):
@@ -50,7 +52,7 @@ def test_algebraic_equiv(benchmark, clear_sympy_cache):
         exact._algebraic_equiv, args=("(x + y)**4", "x**4 + 4*x**3*y + 6*x**2*y**2 + 4*x*y**3 + y**4"),
         setup=clear_sympy_cache, **PEDANTIC,
     )
-    assert result["identical"], result
+    expect(result["identical"], result)
 
 
 def test_solve_linear_system(benchmark, clear_sympy_cache):
@@ -58,18 +60,18 @@ def test_solve_linear_system(benchmark, clear_sympy_cache):
         logic._solve_linear, args=("x + y + z = 6; 2*x - y + z = 3; x + 2*y - z = 2", "x,y,z"),
         setup=clear_sympy_cache, **PEDANTIC,
     )
-    assert result["ok"], result
+    expect(result["ok"], result)
 
 
 def test_matrix_inverse_4x4(benchmark, clear_sympy_cache):
     rows = [[4, 1, 0, 2], [1, 3, 1, 0], [0, 1, 4, 1], [2, 0, 1, 5]]
     result = benchmark.pedantic(linalg._matrix, args=(rows, "inverse"), setup=clear_sympy_cache, **PEDANTIC)
-    assert result["ok"], result
+    expect(result["ok"], result)
 
 
 def test_truth_table_5_vars(benchmark):
     result = benchmark(logic.truth_table, "(a and b) or (c xor d) and not e")
-    assert result["row_count"] == 32, result
+    expect(result["row_count"] == 32, result)
 
 
 def test_z3_check(benchmark):
@@ -83,4 +85,4 @@ def test_z3_check(benchmark):
     (check-sat)
     """
     result = benchmark(logic.z3_check, smt2)
-    assert result["result"] == "sat", result
+    expect(result["result"] == "sat", result)

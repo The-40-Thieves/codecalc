@@ -8,7 +8,7 @@ ad hoc with `uv run --with`, the same way the mutation lane does.
 Run locally:
 
     uv sync --locked --all-extras
-    uv run --no-sync --with pytest-codspeed pytest benchmarks/ --codspeed
+    PYTHONPATH=. uv run --no-sync --with pytest-codspeed pytest benchmarks/ --codspeed
 """
 
 from __future__ import annotations

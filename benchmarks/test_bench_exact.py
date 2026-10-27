@@ -8,6 +8,7 @@ evaluator itself rather than process-spawn overhead.
 from __future__ import annotations
 
 import pytest
+from _helpers import expect
 
 from codecalc import exact
 
@@ -22,7 +23,7 @@ EXACT_EXPRESSIONS = {
 @pytest.mark.parametrize("expr", EXACT_EXPRESSIONS.values(), ids=EXACT_EXPRESSIONS.keys())
 def test_eval_exact(benchmark, expr):
     result = benchmark(exact._eval_exact, expr)
-    assert result["ok"], result
+    expect(result["ok"], result)
 
 
 def test_percentage_and_change(benchmark):
@@ -41,7 +42,7 @@ def test_stats_and_percentiles_1k(benchmark):
         return exact.percentiles(nums)
 
     result = benchmark(run)
-    assert result["ok"]
+    expect(result["ok"])
 
 
 def test_radix_convert(benchmark):
@@ -51,7 +52,7 @@ def test_radix_convert(benchmark):
         return exact.radix_convert("0.1", 10, 2)
 
     result = benchmark(run)
-    assert result["ok"]
+    expect(result["ok"])
 
 
 def test_bit_tools(benchmark):
