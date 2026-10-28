@@ -20,7 +20,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use codecalc_exec::bounds::{cap_output, remaining_run_timeout_secs};
+use codecalc_exec::bounds::{keep_stream, remaining_run_timeout_secs, split_output_budget};
 use serde_json::json;
 
 mod platform;
@@ -850,7 +850,7 @@ struct StepResult {
     /// "your program printed 4 MB". A caller deciding whether to re-run with a
     /// higher `max_output_kb` cannot make that decision from a boolean.
     ///
-    /// Read from the file's metadata rather than from the buffer: `read_capped`
+    /// Read from the file's metadata rather than from the buffer: `read_capture`
     /// deliberately stops at `cap + 1` bytes so a program that fills stdout
     /// cannot make this process allocate proportionally to its output. The
     /// buffer length is therefore the CAPPED size and can never answer this
@@ -1109,8 +1109,12 @@ fn run_step(
         }
     }
 
-    let (stdout, out_trunc, out_err, out_bytes) = read_capped(&out_path, limits.max_output_kb);
-    let (stderr, err_trunc, err_err, err_bytes) = read_capped(&err_path, limits.max_output_kb);
+    // Both files are read first and split once, against one combined budget, so
+    // neither stream is cut before the other has been seen.
+    let cap = output_cap_bytes(limits.max_output_kb);
+    let (out_raw, out_err, out_bytes) = read_capture(&out_path, cap);
+    let (err_raw, err_err, err_bytes) = read_capture(&err_path, cap);
+    let (stdout, stderr, output_truncated) = settle_captures(&out_raw, &err_raw, cap);
     // Both are reported, and stdout's is named separately from stderr's: a
     // caller acting on the answer needs to know which stream it cannot trust.
     let output_error = match (out_err, err_err) {
@@ -1133,7 +1137,7 @@ fn run_step(
         timed_out: waited.timed_out,
         cpu_ms: waited.cpu_ms,
         peak_memory_kb: waited.peak_memory_kb,
-        output_truncated: out_trunc || err_trunc,
+        output_truncated,
         output_error,
         unenforced,
         stdout_bytes: out_bytes,
@@ -1160,7 +1164,7 @@ fn resolve_limits(limits: &Limits) -> ResolvedLimits {
         },
         // FSIZE must stay STRICTLY ABOVE the output cap. Setting it equal to
         // the cap made overflow undetectable: the child hit EFBIG/SIGXFSZ at
-        // exactly the cap, so `read_capped` never saw a file larger than the
+        // exactly the cap, so `settle_captures` never saw a file larger than the
         // cap, `output_truncated` was never true, and OLE could never fire.
         // Measured: `print("x"*200000)` gives verdict=OLE at the default cap and
         // verdict=OK with a 4 MB output silently cut to 8 KiB once the caller
@@ -1176,7 +1180,7 @@ fn resolve_limits(limits: &Limits) -> ResolvedLimits {
         // requested cap before SIGXFSZ ever intervened — silently, nothing in
         // `unenforced` said so. Measured before this fix: a 5 MB program
         // capped at 1 KiB still reported `stdout_bytes: 1048576`. The
-        // returned `stdout` text was always correctly capped (`read_capped`
+        // returned `stdout` text was always correctly capped (`settle_captures`
         // truncates it at the literal `max_output_kb * 1024`, no floor there)
         // — this floor governs only how much the child is ALLOWED TO WRITE
         // before being stopped, i.e. the resource ceiling `max_output_kb` is
@@ -1223,12 +1227,7 @@ fn resolve_limits(limits: &Limits) -> ResolvedLimits {
 /// and 32 (sharing violation) are documented, intermittent CI failures
 /// (rust-lang/rust#127883 measured ~15% of MSVC builds), and no one can tell
 /// which is happening here without the number.
-fn read_capped(path: &Path, max_output_kb: u64) -> (String, bool, Option<String>, Option<u64>) {
-    let cap = if max_output_kb > 0 {
-        max_output_kb * 1024
-    } else {
-        MAX_OUTPUT_BYTES
-    };
+fn read_capture(path: &Path, cap: u64) -> (Vec<u8>, Option<String>, Option<u64>) {
     // The true size, taken BEFORE the capped read and independently of it. This
     // is the only place the original length is still knowable: the read below
     // stops at cap+1 on purpose, so `buf.len()` answers a different question.
@@ -1248,7 +1247,7 @@ fn read_capped(path: &Path, max_output_kb: u64) -> (String, bool, Option<String>
             // most of it away — per execution, concurrently. The cap is now
             // applied at the source.
             //
-            // +1 so `buf.len() > cap` below still detects overflow: reading
+            // +1 so `settle_captures` still detects overflow: reading
             // exactly `cap` cannot distinguish "filled it" from "exceeded it".
             if let Err(e) = (&mut f).take(cap + 1).read_to_end(&mut buf) {
                 // `{e}` already renders as "<message> (os error N)", so the
@@ -1265,12 +1264,28 @@ fn read_capped(path: &Path, max_output_kb: u64) -> (String, bool, Option<String>
             error = Some(format!("open {} failed: {e}", path.display()));
         }
     }
-    let truncated = cap_output(&mut buf, cap);
+    (buf, error, original)
+}
+
+/// The combined cap in bytes: `max_output_kb` KiB, or the 64 KiB default when 0.
+fn output_cap_bytes(max_output_kb: u64) -> u64 {
+    if max_output_kb > 0 {
+        max_output_kb * 1024
+    } else {
+        MAX_OUTPUT_BYTES
+    }
+}
+
+/// Split the two captures against ONE combined budget and render them. Called
+/// once, after both files are read: stdout and stderr share `cap`, and
+/// `output_truncated` is true exactly when their combined length passes it.
+fn settle_captures(out: &[u8], err: &[u8], cap: u64) -> (String, String, bool) {
+    let (out_keep, err_keep, truncated) =
+        split_output_budget(cap, out.len() as u64, err.len() as u64);
     (
-        String::from_utf8_lossy(&buf).into_owned(),
+        keep_stream(out, out_keep as usize),
+        keep_stream(err, err_keep as usize),
         truncated,
-        error,
-        original,
     )
 }
 
@@ -2146,5 +2161,74 @@ mod tests {
     fn an_interpreted_language_with_no_compile_step_has_no_secondary_command() {
         let python3 = canonical("python3").expect("python3 is registered");
         assert_eq!(secondary_cmd(python3), None);
+    }
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+    use codecalc_exec::bounds::TRUNCATION_MARKER;
+
+    /// Write two capture files, then read and settle them exactly as the run
+    /// step does. Each test gets its own directory: tests run in parallel.
+    fn settle_on_disk(name: &str, out: &[u8], err: &[u8], cap: u64) -> (String, String, bool) {
+        let dir =
+            std::env::temp_dir().join(format!("codecalc-capture-{}-{name}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let (out_path, err_path) = (dir.join("out"), dir.join("err"));
+        fs::write(&out_path, out).unwrap();
+        fs::write(&err_path, err).unwrap();
+        let (out_raw, out_err, _) = read_capture(&out_path, cap);
+        let (err_raw, err_err, _) = read_capture(&err_path, cap);
+        fs::remove_dir_all(&dir).ok();
+        assert!(out_err.is_none() && err_err.is_none());
+        settle_captures(&out_raw, &err_raw, cap)
+    }
+
+    #[test]
+    fn each_stream_under_the_cap_but_combined_over_is_truncated_on_disk() {
+        let (out, err, truncated) =
+            settle_on_disk("combined-over", &[b'a'; 600], &[b'b'; 600], 1024);
+        assert!(truncated);
+        assert_eq!(out.len() + err.len() - 2 * TRUNCATION_MARKER.len(), 1024);
+    }
+
+    #[test]
+    fn exactly_the_cap_combined_is_not_truncated_on_disk() {
+        let (out, err, truncated) = settle_on_disk("exact", &[b'a'; 512], &[b'b'; 512], 1024);
+        assert!(!truncated);
+        assert_eq!((out.len(), err.len()), (512, 512));
+    }
+
+    #[test]
+    fn a_stdout_flood_keeps_a_short_stderr_traceback_whole_on_disk() {
+        let traceback = b"Traceback (most recent call last):\nValueError: boom\n";
+        let (out, err, truncated) = settle_on_disk("flood", &[b'x'; 10_240], traceback, 1024);
+        assert!(truncated);
+        assert_eq!(err.as_bytes(), traceback);
+        assert_eq!(
+            out,
+            format!("{}{TRUNCATION_MARKER}", "x".repeat(1024 - traceback.len()))
+        );
+    }
+
+    #[test]
+    fn a_flood_is_read_no_further_than_cap_plus_one() {
+        let dir =
+            std::env::temp_dir().join(format!("codecalc-capture-{}-bound", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("out");
+        fs::write(&path, vec![b'a'; 1 << 20]).unwrap();
+        let (buf, err, original) = read_capture(&path, 1024);
+        fs::remove_dir_all(&dir).ok();
+        assert!(err.is_none());
+        assert_eq!(buf.len(), 1025);
+        assert_eq!(original, Some(1 << 20));
+    }
+
+    #[test]
+    fn a_zero_cap_means_the_64_kib_default() {
+        assert_eq!(output_cap_bytes(0), 64 * 1024);
+        assert_eq!(output_cap_bytes(8), 8 * 1024);
     }
 }
