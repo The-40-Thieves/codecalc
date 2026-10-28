@@ -795,6 +795,35 @@ check("fallback e2e: multibyte cut lands on a character boundary (510 chars kept
       _r.get("stdout") == "é" * 510 + _MARKER and "�" not in (_r.get("stdout") or ""),
       f"-> stdout_chars={len(_r.get('stdout') or '')}")
 
+# Parity with the native executor (GH #354): both backends must apply the same
+# combined cap, so the same program gets the same verdict and output_truncated
+# whichever one answers. Skipped when no native binary is built, like every
+# "rust:" check, rather than comparing the fallback with itself.
+_PARITY_CASES = [
+    ("each stream under 1 KiB, combined over",
+     "import sys; sys.stdout.write('a' * 600); sys.stderr.write('b' * 600)"),
+    ("mixed streams exactly at the combined cap",
+     "import sys; sys.stdout.write('a' * 512); sys.stderr.write('b' * 512)"),
+    ("stdout flood, then a short stderr traceback",
+     ("import sys; sys.stdout.write('x' * 10000); sys.stdout.flush()"
+      f"; sys.stderr.buffer.write({_TB!r})")),
+]
+for _label, _code in _PARITY_CASES:
+    if EXE is None:
+        skip(f"parity: {_label}", "codecalc-exec not built")
+        continue
+    _rs = run_exec(_code, timeout=20, max_output_kb=1)
+    _fb = _fallback(_code, max_output_kb=1)
+    check(f"parity: {_label} — same verdict and output_truncated in both backends",
+          _rs.get("verdict") == _fb.get("verdict")
+          and _rs.get("output_truncated") == _fb.get("output_truncated"),
+          f"-> rust={_rs.get('verdict')}/{_rs.get('output_truncated')} "
+          f"fallback={_fb.get('verdict')}/{_fb.get('output_truncated')}")
+if EXE is not None:
+    _rs = run_exec(_PARITY_CASES[2][1], timeout=20, max_output_kb=1)
+    check("parity: the stderr traceback is kept whole by the native executor too",
+          _rs.get("stderr") == _TB.decode(), f"-> stderr={str(_rs.get('stderr'))[:60]!r}")
+
 # Compile-failure output is capped the same way. The compiler is stubbed so
 # the test needs no toolchain: the compile step reports both streams over the
 # combined cap, and both must come back marked.

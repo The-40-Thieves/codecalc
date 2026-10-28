@@ -100,10 +100,14 @@ behind it.
   no truncation. Both now share one budget, split fairly: each stream keeps up
   to half the cap, and what one stream leaves unused goes to the other, so a
   flood on one stream cannot push out a short stderr traceback. Each cut stream
-  ends in `\n…[truncated]`, outside the cap. The fallback keeps the program running to its exit or timeout past the cap rather than killing it, so a traceback printed after a flood is still returned. The Rust executor follows in a
-  later change; until then the native backend still applies the cap per stream,
-  so the backends disagree on mixed output. The result contract is unchanged
+  ends in `\n…[truncated]`, outside the cap. The fallback keeps the program running to its exit or timeout past the cap rather than killing it, so a traceback printed after a flood is still returned. The result contract is unchanged
   except for the `output_truncated` and `stdout_bytes` descriptions (PATCH).
+- **The native executor applies the same combined `max_output_kb` cap as the
+  fallback (#354).** Stdout and stderr were each capped separately, so a mix
+  that fit each stream but not the total came back `OK` natively and `OLE` on
+  the fallback. Both now use one fair split and give the same verdict and
+  `output_truncated`. The cut is marked `\n...[truncated]` (three dots) outside
+  the cap, and the program is not killed on combined overflow.
 
 - **Native streaming runs in the workdir it is given (#352).** `execute_code_stream`
   always ran the native executor in a fresh temp directory, so a dependency installed
