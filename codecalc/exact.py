@@ -710,7 +710,8 @@ def collision_prob(items: int, bits: int) -> dict:
         return {"ok": False, "error": "items >= 0 and bits >= 1"}
     if n < 2:
         return {"ok": True, "probability": 0.0, "items": n, "bits": b}
-    p = 1.0 - math.exp(-(n * n) / (2.0 * (2 ** b)))
+    # expm1, not 1 - exp: exp(-x) rounds to 1.0 for small x (#351).
+    p = -math.expm1(-(n * n) / (2.0 * (2 ** b)))
     # `probability` is the full, unrounded float; `percent` is derived and
     # rounded for display — `rounding` says which (#213c).
     return {"ok": True, "items": n, "bits": b, "probability": p,
