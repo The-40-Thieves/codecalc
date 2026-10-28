@@ -212,24 +212,79 @@ def _num(v) -> Fraction:
     raise TypeError(f"internal: expected an exact rational, got {type(v).__name__}")
 
 
-def _ev(node, src: str):
-    """Walk a closed set of AST nodes; anything else is refused. `src` is the
-    expression text the nodes were parsed from."""
+def _literal_text(node, lines: list[bytes]) -> str:
+    """The source text of `node`, sliced from the expression's UTF-8 lines. AST
+    column offsets are UTF-8 byte offsets, so the slice is taken on bytes and
+    decoded afterwards: a multibyte character earlier on the line shifts them."""
+    if node.end_lineno is None or node.end_col_offset is None:
+        raise ValueError("float literal has no source text")
+    if node.lineno == node.end_lineno:
+        return lines[node.lineno - 1][node.col_offset:node.end_col_offset].decode("utf-8")
+    # A literal spanning lines: join the lines it covers and cut the joined bytes.
+    span = b"".join(lines[node.lineno - 1:node.end_lineno])
+    end = len(span) - len(lines[node.end_lineno - 1]) + node.end_col_offset
+    return span[node.col_offset:end].decode("utf-8")
+
+
+def _ev_literal(node, lines: list[bytes]):
+    if isinstance(node.value, bool) or not isinstance(node.value, (int, float)):
+        raise TypeError(f"unsupported literal {node.value!r}")
+    if isinstance(node.value, float):
+        # Build the value from the digits the caller typed, not from the
+        # binary64 the parser rounded them to (#346). A float literal is
+        # decimal or scientific; `_` separators are the one thing Fraction
+        # cannot read.
+        return Fraction(_literal_text(node, lines).replace("_", ""))
+    return Fraction(str(node.value))
+
+
+def _ev_call(node, lines: list[bytes]):
+    if not isinstance(node.func, ast.Name) or node.func.id not in _FUNCS:
+        raise ValueError("only whitelisted math functions are callable")
+    args = [_num(_ev(a, lines)) for a in node.args]
+    fn = _FUNCS[node.func.id]
+    if node.func.id == "round" and len(args) == 2:
+        if args[1].denominator != 1:
+            raise TypeError("round() ndigits must be an integer")
+        # Fraction(10) ** n stays exact for negative n too. A plain `10 ** n`
+        # is an int here, and dividing an int by it falls through to float.
+        scale = Fraction(10) ** int(args[1])
+        return round(args[0] * scale) / scale
+    if node.func.id in _EXACT_FUNCS:
+        # Fraction supports these directly; keep the exact value.
+        return Fraction(fn(*args))
+    if node.func.id in _INT_FUNCS and all(a.denominator == 1 for a in args):
+        return Fraction(fn(*[int(a) for a in args]))
+    if node.func.id == "sqrt" and len(args) == 1:
+        root = _exact_sqrt(args[0])
+        if root is not None:
+            return root
+    _FLOAT_FUNCS_USED.append(node.func.id)
+    try:
+        result = fn(*[float(a) for a in args])
+    except (TypeError, ValueError, OverflowError):
+        # functions needing exact ints (comb, factorial, ...): coerce
+        coerced = []
+        for a in args:
+            if isinstance(a, Fraction) and a.denominator == 1:
+                coerced.append(int(a))
+            else:
+                coerced.append(a)
+        result = fn(*coerced)
+    if isinstance(result, float):
+        if not math.isfinite(result):
+            raise ValueError(f"{node.func.id} produced non-finite result")
+        return Fraction(str(result))
+    return Fraction(result)
+
+
+def _ev(node, lines: list[bytes]):
+    """Walk a closed set of AST nodes; anything else is refused. `lines` is the
+    expression's UTF-8 lines (see _eval_exact), which float literals are read from."""
     if isinstance(node, ast.Expression):
-        return _ev(node.body, src)
+        return _ev(node.body, lines)
     if isinstance(node, ast.Constant):
-        if isinstance(node.value, bool) or not isinstance(node.value, (int, float)):
-            raise TypeError(f"unsupported literal {node.value!r}")
-        if isinstance(node.value, float):
-            # Build the value from the digits the caller typed, not from the
-            # binary64 the parser rounded them to (#346). A float literal is
-            # decimal or scientific; `_` separators are the one thing Fraction
-            # cannot read.
-            text = ast.get_source_segment(src, node)
-            if text is None:
-                raise ValueError("float literal has no source text")
-            return Fraction(text.replace("_", ""))
-        return Fraction(str(node.value))
+        return _ev_literal(node, lines)
     if isinstance(node, ast.Name):
         if node.id in _CONSTS:
             _APPROX_CONSTS_USED.append(node.id)
@@ -237,62 +292,26 @@ def _ev(node, src: str):
         raise ValueError(f"unknown name {node.id!r}")
     if isinstance(node, ast.UnaryOp):
         if isinstance(node.op, ast.UAdd):
-            return _num(_ev(node.operand, src))
+            return _num(_ev(node.operand, lines))
         if isinstance(node.op, ast.USub):
-            return -_num(_ev(node.operand, src))
+            return -_num(_ev(node.operand, lines))
         if isinstance(node.op, ast.Invert):
-            return Fraction(~_as_int(_num(_ev(node.operand, src)), "~", "operand"))
+            return Fraction(~_as_int(_num(_ev(node.operand, lines)), "~", "operand"))
         raise ValueError("unsupported unary op")
     if isinstance(node, ast.BinOp):
         fn = _BIN.get(type(node.op))
         if fn is None:
             raise ValueError(f"unsupported operator {type(node.op).__name__}")
-        return fn(_num(_ev(node.left, src)), _num(_ev(node.right, src)))
+        return fn(_num(_ev(node.left, lines)), _num(_ev(node.right, lines)))
     if isinstance(node, ast.Compare):
         if len(node.ops) != 1:
             raise ValueError("chained comparisons not supported")
         fn = _CMP.get(type(node.ops[0]))
         if fn is None:
             raise ValueError(f"unsupported comparison {type(node.ops[0]).__name__}")
-        return fn(_ev(node.left, src), _ev(node.comparators[0], src))
+        return fn(_ev(node.left, lines), _ev(node.comparators[0], lines))
     if isinstance(node, ast.Call):
-        if not isinstance(node.func, ast.Name) or node.func.id not in _FUNCS:
-            raise ValueError("only whitelisted math functions are callable")
-        args = [_num(_ev(a, src)) for a in node.args]
-        fn = _FUNCS[node.func.id]
-        if node.func.id == "round" and len(args) == 2:
-            if args[1].denominator != 1:
-                raise TypeError("round() ndigits must be an integer")
-            # Fraction(10) ** n stays exact for negative n too. A plain `10 ** n`
-            # is an int here, and dividing an int by it falls through to float.
-            scale = Fraction(10) ** int(args[1])
-            return round(args[0] * scale) / scale
-        if node.func.id in _EXACT_FUNCS:
-            # Fraction supports these directly; keep the exact value.
-            return Fraction(fn(*args))
-        if node.func.id in _INT_FUNCS and all(a.denominator == 1 for a in args):
-            return Fraction(fn(*[int(a) for a in args]))
-        if node.func.id == "sqrt" and len(args) == 1:
-            root = _exact_sqrt(args[0])
-            if root is not None:
-                return root
-        _FLOAT_FUNCS_USED.append(node.func.id)
-        try:
-            result = fn(*[float(a) for a in args])
-        except (TypeError, ValueError, OverflowError):
-            # functions needing exact ints (comb, factorial, ...): coerce
-            coerced = []
-            for a in args:
-                if isinstance(a, Fraction) and a.denominator == 1:
-                    coerced.append(int(a))
-                else:
-                    coerced.append(a)
-            result = fn(*coerced)
-        if isinstance(result, float):
-            if not math.isfinite(result):
-                raise ValueError(f"{node.func.id} produced non-finite result")
-            return Fraction(str(result))
-        return Fraction(result)
+        return _ev_call(node, lines)
     raise ValueError(f"unsupported syntax: {type(node).__name__}")
 
 
@@ -377,10 +396,12 @@ def _eval_exact(expr: str) -> dict:
         tree = ast.parse(expr, mode="eval")
     except SyntaxError as exc:
         return {"ok": False, "error": f"parse error: {exc.msg}"}
+    # AST column offsets are UTF-8 byte offsets; encode once, not per literal.
+    lines = expr.encode("utf-8").splitlines(keepends=True)
     _APPROX_CONSTS_USED.clear()
     _FLOAT_FUNCS_USED.clear()
     try:
-        result = _ev(tree, expr)
+        result = _ev(tree, lines)
     except _CeilingExceeded as exc:
         # A ceiling is a ceiling: _pow_exact's own comment on
         # RESOURCE_EXHAUSTED is "memory, output or process ceiling hit", and

@@ -7,6 +7,7 @@ most of these are a failure, or an absence, encoded as a valid-looking result.
 
 from __future__ import annotations
 
+import ast
 import json
 import math
 import os
@@ -73,6 +74,19 @@ check("-(1.0000000000000001) keeps every digit",
       _prov_value("-(1.0000000000000001)") == "-10000000000000001/10000000000000000")
 check("(1.0000000000000001) * 1 keeps every digit",
       _prov_value("(1.0000000000000001) * 1") == "10000000000000001/10000000000000000")
+# AST column offsets are UTF-8 byte offsets: a 3-byte character before the literal
+# (U+FF45 normalises to the constant e, so the expression still evaluates) must
+# not shift the slice the digits are read from.
+check("float literal after a multibyte character keeps its digits",
+      _prov_value("ｅ - ｅ + 1.0000000000000001") == "10000000000000001/10000000000000000")
+check("float literal on line 2 of a multi-line expression keeps its digits",
+      _prov_value("(1 +\n1.0000000000000001)") == "20000000000000001/10000000000000000")
+# No Python token can span a line break inside a number, so the multi-line slice
+# is only reachable by calling it directly with a node that spans two lines.
+_span = ast.parse("x", mode="eval").body
+_span.lineno, _span.end_lineno, _span.col_offset, _span.end_col_offset = 1, 2, 4, 16
+check("multi-line literal slice joins the covered lines",
+      exact._literal_text(_span, [b"1 + 1.\n", b"0000000000000001\n"]) == "1.\n0000000000000001")
 check("underscore digit separators are stripped, digits kept",
       _prov_value("1_000.000_000_000_000_1") == str(Fraction("1000.0000000000001")))
 check("0.1 + 0.2 == 0.3 still true", _prov_value("0.1 + 0.2 == 0.3") is True)
