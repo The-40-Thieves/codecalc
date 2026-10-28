@@ -79,7 +79,7 @@ MAX_RESULT_SIZE_CHARS_TOOLS = {"execute_code", "execute_code_stream", "session_r
                                "compare_execution", "run_inspect",
     "trace_execution",  # events + stdout: same result-size shape as execute_code
 }
-# 240 KiB per stream: the largest static hint under Claude Code's documented
+# 240 KiB combined (stdout + stderr): the largest static hint under Claude Code's documented
 # hard maximum of 500,000 characters for `anthropic/maxResultSizeChars`
 # (code.claude.com/docs/en/mcp) that this file can compute from a round KiB
 # figure — see server.py's `_MAX_OUTPUT_KB_CEILING` for the full derivation.
@@ -115,7 +115,7 @@ async def main() -> None:
               set(has_cap) == MAX_RESULT_SIZE_CHARS_TOOLS, f"-> {sorted(has_cap)}")
         wrong_values = {n: v for n, v in has_cap.items() if v != EXPECTED_MAX_RESULT_SIZE_CHARS}
         check(f"every maxResultSizeChars equals {EXPECTED_MAX_RESULT_SIZE_CHARS} "
-              "(derived from the 240 KiB per-stream ceiling, not codecalc's 64 KiB default)",
+              "(derived from the 240 KiB combined output ceiling, not codecalc's 64 KiB default)",
               not wrong_values, f"-> {wrong_values}")
         check("maxResultSizeChars equals 2 * ceiling_bytes + 8_000",
               EXPECTED_MAX_RESULT_SIZE_CHARS == 2 * MAX_OUTPUT_KB_CEILING * 1024 + 8_000,

@@ -10,7 +10,7 @@ The backpressure boundary in this codebase is the executor's output capture,
 which both backends share the shape of:
 
   * rust  (production): `codecalc-exec` drains the child's stdout/stderr with a
-    bounded `read_capped` (issue #80) and emits capped JSON, so the Python
+    bounded `read_capture` (issue #80) and emits capped JSON, so the Python
     wrapper's `communicate()` never sees more than the cap.
   * python (fallback):  `_BoundedDrain` runs one reader thread per pipe, each
     reading to EOF while retaining only cap+1 bytes (issue #25) — so a child

@@ -761,7 +761,7 @@ check("  ...and refuses one past it",
       f"-> factorial({_CAP + 1})")
 
 # ── #80: an unreadable output stream must not read as an empty one ────────
-# read_capped() discarded both its open failure and its read failure, and the
+# read_capture() discarded both its open failure and its read failure, and the
 # Python fallback's _BoundedDrain swallowed OSError with a bare `pass`.
 # Different mechanisms, identical result: output that could not be read came
 # back as output that was simply empty, on a run reported as successful.

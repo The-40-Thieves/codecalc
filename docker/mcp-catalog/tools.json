@@ -50,7 +50,7 @@
       {
         "name": "max_output_kb",
         "type": "integer",
-        "desc": "Stdout/stderr capture cap in KiB per stream; 0 uses the 64 KiB default, hard-clamped to 240",
+        "desc": "Combined stdout+stderr cap in KiB, split fairly between the two streams; 0 uses the 64 KiB default, hard-clamped to 240. Output past the cap does not stop the program: it runs to exit or timeout, and the result is OLE with output_truncated true.",
         "optional": true
       },
       {
@@ -261,7 +261,7 @@
   },
   {
     "name": "execute_code_stream",
-    "description": "Execute code and STREAM progress + partial output as it runs. Use\nthis, not execute_code/run_submit/session_run, for the same run when you\nwant output while it runs, up to a 300s cap.\n\nReports progress notifications to the client while the program runs, so\nagents can see output before the process finishes. Returns the same\nresult shape and applies the SAME ceilings as execute_code: max_memory_mb,\nmax_output_kb and max_cpu are forwarded to the executor exactly as\nexecute_code forwards them, including the same 240 KiB per-stream clamp.\n\n`dependencies`: same as execute_code's (PEP 723 merge, `no_net`/policy\nrefusal, 120s budget, workdir quota) — installed before streaming\nstarts; a refusal/failed install is the stream's only event.\n",
+    "description": "Execute code and STREAM progress + partial output as it runs. Use\nthis, not execute_code/run_submit/session_run, for the same run when you\nwant output while it runs, up to a 300s cap.\n\nReports progress notifications to the client while the program runs, so\nagents can see output before the process finishes. Returns the same\nresult shape and applies the SAME ceilings as execute_code: max_memory_mb,\nmax_output_kb and max_cpu are forwarded to the executor exactly as\nexecute_code forwards them, including the same 240 KiB clamp.\n\n`dependencies`: same as execute_code's (PEP 723 merge, `no_net`/policy\nrefusal, 120s budget, workdir quota) — installed before streaming\nstarts; a refusal/failed install is the stream's only event.\n",
     "arguments": [
       {
         "name": "language",
@@ -294,7 +294,7 @@
       {
         "name": "max_output_kb",
         "type": "integer",
-        "desc": "Stdout/stderr capture cap in KiB per stream; 0 uses the 64 KiB default, hard-clamped to 240",
+        "desc": "Combined stdout+stderr cap in KiB, split fairly between the two streams; 0 uses the 64 KiB default, hard-clamped to 240. Output past the cap does not stop the program: it runs to exit or timeout, and the result is OLE with output_truncated true.",
         "optional": true
       },
       {
@@ -364,7 +364,7 @@
       {
         "name": "max_output_kb",
         "type": "integer",
-        "desc": "Stdout/stderr capture cap in KiB per stream; 0 uses the 64 KiB default, hard-clamped to 240",
+        "desc": "Combined stdout+stderr cap in KiB, split fairly between the two streams; 0 uses the 64 KiB default, hard-clamped to 240. Output past the cap does not stop the program: it runs to exit or timeout, and the result is OLE with output_truncated true.",
         "optional": true
       },
       {
@@ -456,7 +456,7 @@
       {
         "name": "max_output_kb",
         "type": "integer",
-        "desc": "Stdout/stderr capture cap in KiB per stream; 0 uses the 64 KiB default, hard-clamped to 240",
+        "desc": "Combined stdout+stderr cap in KiB, split fairly between the two streams; 0 uses the 64 KiB default, hard-clamped to 240. Output past the cap does not stop the program: it runs to exit or timeout, and the result is OLE with output_truncated true.",
         "optional": true
       },
       {
@@ -633,7 +633,7 @@
   },
   {
     "name": "runtimes_status",
-    "description": "Check every language runtime for available updates (NON-MUTATING).\n\nReports current vs latest version per language, which package manager owns\nit (mise/rustup/swiftly/apt/npm/uv), and the exact command that would run.\n\nEach entry also carries `tier` (registry.RELIABILITY_TIERS) — see\nlist_languages for what `tested`/`best_effort`/`plan_only` mean. A\ncurrent, up-to-date toolchain can still be `best_effort`: `tier` is\northogonal to whether the update check below found a newer version.\n\nNETWORK: yes. Non-mutating refers to this machine's runtimes, not to\ntraffic — each package manager is asked what the latest version is, and\nthey answer by contacting their own remote index.\n",
+    "description": "Check every language runtime for available updates (NON-MUTATING).\n\nReports current vs latest version per language, which package manager owns\nit (mise/rustup/swiftly/apt/npm/uv), and the exact command that would run.\n\nAPT ENTRIES: `latest` is the newest version in THIS machine's configured\napt sources, not upstream's release. `latest_scope` is always \"apt-sources\"\non an apt entry, so gcc 13.3 on Ubuntu 24.04 reading \"up to date\" means\ncurrent for those sources, not newest anywhere. `installed: false` means no\npackage of the language is installed and its executable is not on PATH;\nthat entry has `current: null` and `latest: null`, and `summary.not_installed`\ncounts them.\n\nEach entry also carries `tier` (registry.RELIABILITY_TIERS) — see\nlist_languages for what `tested`/`best_effort`/`plan_only` mean. A\ncurrent, up-to-date toolchain can still be `best_effort`: `tier` is\northogonal to whether the update check below found a newer version.\n\nNETWORK: yes. Non-mutating refers to this machine's runtimes, not to\ntraffic — each package manager is asked what the latest version is, and\nthey answer by contacting their own remote index.\n",
     "arguments": [
       {
         "name": "languages",
@@ -645,7 +645,7 @@
   },
   {
     "name": "update_runtimes",
-    "description": "Update language runtimes. SAFE BY DEFAULT: with apply=False this is a\ndry run — it returns the update commands that WOULD run without changing\nanything. Pass apply=True to actually execute them (mise up, rustup update,\nswiftly update, apt-get upgrade of language packages, npm -g update, uv tool\nupgrade).\n\napply=True asks the caller to confirm first (a protocol-level gate, not\njust the `anthropic/requiresUserInteraction` `_meta` hint — see\ncodecalc/confirmation.py); apply=False is never gated, since nothing runs.\n\nPRIVILEGE: the apt manager updates system packages and its command begins\nwith `sudo`. Those commands do NOT run unless the HOST has set\nCODECALC_ALLOW_RUNTIME_APPLY=1; without it they are reported as skipped\nwith `ok: false` and the variable named, and the rest still run. Every\nentry carries an `elevated` flag either way. mise/rustup/swiftly/npm/uv\ntouch user-owned toolchains and are never gated.\n\nNETWORK: yes, on both paths. apply=False still asks each manager what the\nlatest version is, which is a remote lookup; apply=True additionally\ndownloads and installs. \"Dry run\" bounds what changes on disk, not what is\nsent.\n",
+    "description": "Update language runtimes. SAFE BY DEFAULT: with apply=False this is a\ndry run — it returns the update commands that WOULD run without changing\nanything. Pass apply=True to actually execute them (mise up, rustup update,\nswiftly update latest --assume-yes, apt-get upgrade of language packages, npm -g update, uv tool\nupgrade).\n\napply=True asks the caller to confirm first (a protocol-level gate, not\njust the `anthropic/requiresUserInteraction` `_meta` hint — see\ncodecalc/confirmation.py); apply=False is never gated, since nothing runs.\n\nPRIVILEGE: the apt manager updates system packages and its command begins\nwith `sudo`. Those commands do NOT run unless the HOST has set\nCODECALC_ALLOW_RUNTIME_APPLY=1; without it they are reported as skipped\nwith `ok: false` and the variable named, and the rest still run. Every\nentry carries an `elevated` flag either way. mise/rustup/swiftly/npm/uv\ntouch user-owned toolchains and are never gated.\n\nNETWORK: yes, on both paths. apply=False still asks each manager what the\nlatest version is, which is a remote lookup; apply=True additionally\ndownloads and installs. \"Dry run\" bounds what changes on disk, not what is\nsent.\n",
     "arguments": [
       {
         "name": "languages",

@@ -121,6 +121,13 @@ behind it.
   the fallback. Both now use one fair split and give the same verdict and
   `output_truncated`. The cut is marked `\n...[truncated]` (three dots) outside
   the cap, and the program is not killed on combined overflow.
+- **The `max_output_kb` descriptions now say the cap is combined and that nothing
+  is killed at it (#354).** The tool descriptions, the README and the schema text
+  still said the cap was per stream. `trace_execution` also no longer adds
+  `exit_code: fallback backend may differ on output-limit kills` to `unenforced`
+  on an OLE result: neither backend kills on output any more, so the exit codes
+  agree. That `unenforced` entry is removed; a client matching on it should stop.
+  The `tools.json` catalog snapshot is regenerated from the live `tools/list`.
 
 - **Native streaming runs in the workdir it is given (#352).** `execute_code_stream`
   always ran the native executor in a fresh temp directory, so a dependency installed

@@ -356,7 +356,7 @@ check("_read_nofollow refuses a file over the cap",
 # The cap has to be applied BEFORE the content is read, not after. The old
 # implementation called `read_bytes()` and then compared `len(data)` to the
 # cap, so an oversized artifact was fully resident in memory before being
-# rejected — the same defect `read_capped` had on the Rust side (#103), and a
+# rejected — the same defect `read_capture` had on the Rust side (#103), and a
 # session can create the file that triggers it.
 #
 # Asserting `is None` does NOT distinguish the two: both return None. Timing a

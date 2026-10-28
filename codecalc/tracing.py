@@ -230,23 +230,6 @@ thread is traced"` into the result's own `unenforced` array — the same
 disclosure list `execute_code` already uses for a guarantee it could not
 apply.
 
-FALLBACK-BACKEND OLE RACE. Before #354 the pure-Python fallback's output-cap
-enforcement (`executor._run_step`) killed the child from a 20ms poll on an
-overflow flag, racing the child's own natural exit, so its `exit_code` on an OLE
-flipped between 0 and a negative signal. The fallback no longer kills at the cap,
-so that race is gone; the exit-code note below stays as the disclosure for the
-backends' remaining difference.runs at sizes near the cap). This module's extra per-event file I/O shifts
-that race's timing enough to change which side usually wins for a given
-program, so `trace_execution`'s `exit_code` on an OLE verdict, fallback
-backend only, is not reliably comparable to what `execute_code` reports for
-the identical program — `verdict` and `output_truncated` are unaffected and
-always agree. Not fixed here: the race lives in shared executor code every
-tool depends on, and this module works around its OWN sensitivity to it
-rather than changing that polling loop. `execute_trace` adds `"exit_code:
-fallback backend may differ on output-limit kills"` to `unenforced`
-whenever `backend == "python"` and `verdict == "OLE"`. The Rust backend's
-own cap enforcement is not timing-sensitive this way — confirmed
-deterministic across dozens of trials — so this note is fallback-only.
 """
 
 from __future__ import annotations
@@ -365,11 +348,8 @@ _MAX_STR_FIELD_LEN = 4096
 _MAX_LOCALS_ENTRIES = 200
 
 #: Copied into the result's own `unenforced` array — see the module
-#: docstring's "THREADS" / "FALLBACK-BACKEND OLE RACE" sections.
+#: docstring's "THREADS" section.
 THREADS_UNENFORCED_NOTE = "threads: only the main thread is traced"
-FALLBACK_OLE_EXIT_CODE_UNENFORCED_NOTE = (
-    "exit_code: fallback backend may differ on output-limit kills"
-)
 
 #: AST node types that are branch POINTS for the `branches` report — every
 #: line where control can diverge. `ast.Try`'s `lineno` is its `try:` line;
@@ -1058,13 +1038,6 @@ def execute_trace(language: str, code: str, stdin: str = "", timeout: int = 30,
             result["unenforced"] = unenforced
         if parsed["multithreaded"] and THREADS_UNENFORCED_NOTE not in unenforced:
             unenforced.append(THREADS_UNENFORCED_NOTE)
-        # See the module docstring's "FALLBACK-BACKEND OLE RACE" section —
-        # fallback-only and OLE-only, because that is exactly where the
-        # race is confirmed to live; the Rust backend's own cap enforcement
-        # is not timing-sensitive this way.
-        if (result.get("backend") == "python" and result.get("verdict") == "OLE"
-                and FALLBACK_OLE_EXIT_CODE_UNENFORCED_NOTE not in unenforced):
-            unenforced.append(FALLBACK_OLE_EXIT_CODE_UNENFORCED_NOTE)
         return result
     finally:
         executor._rmtree_checked(workdir, created_identity)
