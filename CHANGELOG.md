@@ -69,6 +69,22 @@ behind it.
   later change; until then the native backend still applies the cap per stream,
   so the backends disagree on mixed output. The result contract is unchanged
   except for the `output_truncated` and `stdout_bytes` descriptions (PATCH).
+
+- **Native streaming runs in the workdir it is given (#352).** `execute_code_stream`
+  always ran the native executor in a fresh temp directory, so a dependency installed
+  for the run (`dependencies=[...]`, or a PEP 723 block) could not be imported, and a
+  caller-supplied workdir was ignored. The native stream now runs in the supplied
+  workdir and leaves it in place; a directory it allocates itself is still removed on
+  success, failure and cancellation. The Python fallback already behaved this way.
+
+- **`convert_units` no longer returns 0 for small quantities (#349).** The
+  numeric `value` was rounded to six decimal places, so `1 nm → m` and
+  `1 byte → GB` came back as `0.0`, and the conversion was evaluated at ten
+  significant digits first. The non-temperature path now converts exactly
+  (the input's decimal, as a rational) and converts to float once at the end;
+  the temperature path does its offset arithmetic exactly, so `0 °C → K` is
+  `273.15` and `-40 °C → °F` is `-40.0`. Same key, same type; `value` is more
+  precise. Non-finite input (`inf`, `nan`) is now refused with `ok: false`.
 - **Unary `~` refuses a fraction instead of truncating it (#348).** `~(1/2)`
   returned `-1` and `~(-3/2)` returned `0`, because the operand was silently
   converted to an integer. `~` now takes the same integer check as `&`, `|`,
