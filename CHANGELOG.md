@@ -59,6 +59,41 @@ behind it.
 
 ### Fixed
 
+- **Decimal literals keep the digits you typed (#346).** The parser rounded a
+  decimal or scientific literal to binary64 before any exact arithmetic, so
+  `1.0000000000000001` evaluated to `1` with `exact: true`. The literal is now
+  read from its source text: `1.0000000000000001` is
+  `10000000000000001/10000000000000000`, `1.0000000000000001 == 1` is `false`,
+  and `1.0000000000000001e0` gives the same value. Two-argument `round` also no
+  longer falls through to binary64: `round(1/3, 4)` was `exact: true` at
+  `6004199023210345/18014398509481984` and is now `3333/10000`. A non-integer
+  `ndigits` is refused, as Python's `round` refuses it.
+
+- **`exact` reports how a result was computed, not its final denominator
+  (#347).** A call that ran on float now makes the result `exact: false` with
+  `approximated` set, even when the value is an integer: `sqrt(2) * 10**16` was
+  reported exact. The exact paths are `floor`, `ceil`, `round`, the integer
+  functions (`factorial`, `comb`, `gcd`, ...) on integer arguments, and `sqrt` of
+  a rational whose numerator and denominator are both perfect squares. So
+  `floor(9007199254740993)` is `9007199254740993` (it was `9007199254740992`),
+  and `sqrt(9/4)` is `3/2`. Behaviour changes to `exact`: integer-valued results
+  from float-path functions now report `exact: false` (`sin(0)`, `cos(0)`,
+  `log(1)`), and `factorial(5)/7` and `gcd(12, 18)/5` now report `exact: true`.
+  Fractional powers follow the same rule. `4**(1/2)` is `2` and `(1/4)**(1/2)`
+  is `1/2`, both exact; any other fractional power is binary64 and is disclosed
+  as `approximated: ["**"]` with `exact: false`, so `2**(1/2)` no longer
+  reports a bare float and `floor((9007199254740992**2 - 1)**(1/2))` is no
+  longer claimed exact. Its value is still the binary64-derived one, so read
+  the disclosure, not the number. `sqrt(4**(1/2))` and `factorial(25**(1/2))`
+  no longer fail with `internal`. A comparison over an approximated operand is
+  disclosed the same way: `sqrt(9007199254740992**2 + 1) > 9007199254740992`
+  is `exact: false` with `approximated: ["sqrt"]`, and its value is still the
+  binary64-derived `false`. A comparison of exact operands keeps its original
+  shape with no `exact` key. A comparison nested in arithmetic no longer drops
+  out of exact arithmetic: `((1<2)+(1<2))/((1<2)+(1<2)+(1<2))` is `2/3`, exact,
+  not a binary64 float, and `floor((((1<2)+(1<2))**53 + (1<2)) / (1<2))` is
+  `9007199254740993`, exact.
+
 - **`max_output_kb` is one combined stdout+stderr cap on the Python paths
   (#354).** The fallback executor and Piston gave stdout and stderr each the
   whole cap, so a mix that fit each stream but not the total came back OK with
