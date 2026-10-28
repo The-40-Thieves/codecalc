@@ -44,7 +44,11 @@ _FUNCS.update({"abs": abs, "min": min, "max": max, "round": round,
 #: 3333333333333333/10000000000000000. Worse, the loss was data-dependent:
 #: max(1/3, 1/2) came back as exactly 1/2 because 1/2 is binary-representable,
 #: so the bug looked absent about half the time.
-_EXACT_FUNCS = {"abs", "min", "max", "int"}
+_EXACT_FUNCS = {"abs", "min", "max", "int", "round", "floor", "ceil", "trunc"}
+#: Integer-only functions. Given integer arguments they are exact and never see
+#: a float; a non-integer argument falls through to the float path, which
+#: refuses it as before.
+_INT_FUNCS = {"factorial", "comb", "perm", "gcd", "lcm", "isqrt"}
 #: pi/e/tau are IRRATIONAL — no Fraction is equal to them. These are the exact
 #: rational value of the binary64 approximation, which is the best a rational
 #: evaluator can do, but a result computed from one is not exact and must not be
@@ -158,20 +162,42 @@ def _pow_exact(a: Fraction, b: Fraction) -> Fraction:
 
 #: Names consulted during the current eval_exact() call, reset per call.
 _APPROX_CONSTS_USED: list[str] = []
-#: math.* functions called during this eval. They must go through float — there
-#: is no exact rational sqrt — so a NON-INTEGER result from one is an
-#: approximation however exactly the Fraction prints. sqrt(144) -> 12 is still
-#: the true answer; sqrt(2) -> 1414.../1000... is not.
+#: math.* functions called during this eval that ran on float. Any such call
+#: makes the result approximate, whatever the final Fraction's denominator: an
+#: integer can come out of a binary64 value (sqrt(2) * 10**16), and sin(0) == 0
+#: is still a float-path answer. The exact exceptions never reach this list:
+#: _EXACT_FUNCS, _INT_FUNCS and a perfect-square sqrt (see _ev).
 _FLOAT_FUNCS_USED: list[str] = []
 
 
-def _ev(node):
-    """Walk a closed set of AST nodes; anything else is refused."""
+def _exact_sqrt(a: Fraction) -> Fraction | None:
+    """The exact square root of a rational whose numerator and denominator are
+    both perfect squares, else None (the caller then takes the float path)."""
+    if a < 0:
+        return None  # the float path raises the domain error
+    n, d = math.isqrt(a.numerator), math.isqrt(a.denominator)
+    if n * n == a.numerator and d * d == a.denominator:
+        return Fraction(n, d)
+    return None
+
+
+def _ev(node, src: str):
+    """Walk a closed set of AST nodes; anything else is refused. `src` is the
+    expression text the nodes were parsed from."""
     if isinstance(node, ast.Expression):
-        return _ev(node.body)
+        return _ev(node.body, src)
     if isinstance(node, ast.Constant):
         if isinstance(node.value, bool) or not isinstance(node.value, (int, float)):
             raise TypeError(f"unsupported literal {node.value!r}")
+        if isinstance(node.value, float):
+            # Build the value from the digits the caller typed, not from the
+            # binary64 the parser rounded them to (#346). A float literal is
+            # decimal or scientific; `_` separators are the one thing Fraction
+            # cannot read.
+            text = ast.get_source_segment(src, node)
+            if text is None:
+                raise ValueError("float literal has no source text")
+            return Fraction(text.replace("_", ""))
         return Fraction(str(node.value))
     if isinstance(node, ast.Name):
         if node.id in _CONSTS:
@@ -180,34 +206,45 @@ def _ev(node):
         raise ValueError(f"unknown name {node.id!r}")
     if isinstance(node, ast.UnaryOp):
         if isinstance(node.op, ast.UAdd):
-            return _ev(node.operand)
+            return _ev(node.operand, src)
         if isinstance(node.op, ast.USub):
-            return -_ev(node.operand)
+            return -_ev(node.operand, src)
         if isinstance(node.op, ast.Invert):
-            return Fraction(~int(_ev(node.operand)))
+            return Fraction(~int(_ev(node.operand, src)))
         raise ValueError("unsupported unary op")
     if isinstance(node, ast.BinOp):
         fn = _BIN.get(type(node.op))
         if fn is None:
             raise ValueError(f"unsupported operator {type(node.op).__name__}")
-        return fn(_ev(node.left), _ev(node.right))
+        return fn(_ev(node.left, src), _ev(node.right, src))
     if isinstance(node, ast.Compare):
         if len(node.ops) != 1:
             raise ValueError("chained comparisons not supported")
         fn = _CMP.get(type(node.ops[0]))
         if fn is None:
             raise ValueError(f"unsupported comparison {type(node.ops[0]).__name__}")
-        return fn(_ev(node.left), _ev(node.comparators[0]))
+        return fn(_ev(node.left, src), _ev(node.comparators[0], src))
     if isinstance(node, ast.Call):
         if not isinstance(node.func, ast.Name) or node.func.id not in _FUNCS:
             raise ValueError("only whitelisted math functions are callable")
-        args = [_ev(a) for a in node.args]
+        args = [_ev(a, src) for a in node.args]
         fn = _FUNCS[node.func.id]
         if node.func.id == "round" and len(args) == 2:
-            return Fraction(round(args[0] * 10 ** args[1]) / 10 ** args[1])
+            if args[1].denominator != 1:
+                raise TypeError("round() ndigits must be an integer")
+            # Fraction(10) ** n stays exact for negative n too. A plain `10 ** n`
+            # is an int here, and dividing an int by it falls through to float.
+            scale = Fraction(10) ** int(args[1])
+            return round(args[0] * scale) / scale
         if node.func.id in _EXACT_FUNCS:
             # Fraction supports these directly; keep the exact value.
             return Fraction(fn(*args))
+        if node.func.id in _INT_FUNCS and all(a.denominator == 1 for a in args):
+            return Fraction(fn(*[int(a) for a in args]))
+        if node.func.id == "sqrt" and len(args) == 1:
+            root = _exact_sqrt(args[0])
+            if root is not None:
+                return root
         _FLOAT_FUNCS_USED.append(node.func.id)
         try:
             result = fn(*[float(a) for a in args])
@@ -295,7 +332,7 @@ def _eval_exact(expr: str) -> dict:
     _APPROX_CONSTS_USED.clear()
     _FLOAT_FUNCS_USED.clear()
     try:
-        result = _ev(tree)
+        result = _ev(tree, expr)
     except _CeilingExceeded as exc:
         # A ceiling is a ceiling: _pow_exact's own comment on
         # RESOURCE_EXHAUSTED is "memory, output or process ceiling hit", and
@@ -364,13 +401,14 @@ def _eval_exact(expr: str) -> dict:
                # answer? An expression touching pi/e/tau is not, because those
                # are irrational and were substituted with the rational value of
                # their binary64 approximation.
-               # A float-path function that produced a non-integer gives a
-               # rational that merely PRINTS exactly. Integer results (sqrt(144))
-               # are still the true answer, so they stay exact.
-               "exact": not approx_consts and not (float_funcs and result.denominator != 1),
+               # Provenance, not the denominator (#347): any float-path call
+               # makes the result approximate, even when the Fraction is an
+               # integer. Exact paths (floor/ceil/round, perfect-square sqrt,
+               # integer functions) never reach _FLOAT_FUNCS_USED.
+               "exact": not approx_consts and not float_funcs,
                "differs_from_decimal": exact != approx,
                "type": "rational"}
-        if float_funcs and result.denominator != 1:
+        if float_funcs:
             out.setdefault("approximated", []).extend(float_funcs)
             out["note"] = (f"{', '.join(float_funcs)} has no exact rational form; "
                            "the value shown is the exact rational of a binary64 "

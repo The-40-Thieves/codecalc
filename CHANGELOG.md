@@ -59,6 +59,27 @@ behind it.
 
 ### Fixed
 
+- **Decimal literals keep the digits you typed (#346).** The parser rounded a
+  decimal or scientific literal to binary64 before any exact arithmetic, so
+  `1.0000000000000001` evaluated to `1` with `exact: true`. The literal is now
+  read from its source text: `1.0000000000000001` is
+  `10000000000000001/10000000000000000`, `1.0000000000000001 == 1` is `false`,
+  and `1.0000000000000001e0` gives the same value. Two-argument `round` also no
+  longer falls through to binary64: `round(1/3, 4)` was `exact: true` at
+  `6004199023210345/18014398509481984` and is now `3333/10000`. A non-integer
+  `ndigits` is refused, as Python's `round` refuses it.
+
+- **`exact` reports how a result was computed, not its final denominator
+  (#347).** A call that ran on float now makes the result `exact: false` with
+  `approximated` set, even when the value is an integer: `sqrt(2) * 10**16` was
+  reported exact. The exact paths are `floor`, `ceil`, `round`, the integer
+  functions (`factorial`, `comb`, `gcd`, ...) on integer arguments, and `sqrt` of
+  a rational whose numerator and denominator are both perfect squares. So
+  `floor(9007199254740993)` is `9007199254740993` (it was `9007199254740992`),
+  and `sqrt(9/4)` is `3/2`. Behaviour changes to `exact`: integer-valued results
+  from float-path functions now report `exact: false` (`sin(0)`, `cos(0)`,
+  `log(1)`), and `factorial(5)/7` and `gcd(12, 18)/5` now report `exact: true`.
+
 - **`<<` is bounded like `**`.** `1 << 10**10` built a 10-billion-bit integer
   and never returned. A left shift whose result would exceed 50,000 bits (the
   `**` limit) is now refused before it runs, with `resource_exhausted`. Zero

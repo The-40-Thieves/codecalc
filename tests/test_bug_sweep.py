@@ -14,6 +14,7 @@ import pathlib
 import re
 import sys
 import time
+from fractions import Fraction
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
@@ -53,6 +54,64 @@ for expr in ("pi", "2*pi", "e", "tau"):
 check("sqrt(2) is not claimed exact", exact.eval_exact("sqrt(2)")["exact"] is False)
 check("sqrt(144) IS exact (integer result)", exact.eval_exact("sqrt(144)")["exact"] is True)
 check("1/3 is still exact", exact.eval_exact("1/3")["exact"] is True)
+
+# ═══ decimal literals keep the digits the caller typed (#346) ═══════════════
+# ast.parse hands a decimal literal over as a binary64 float, so every digit
+# past ~17 significant places was gone before any arithmetic began.
+def _prov_value(expr):
+    return exact.eval_exact(expr).get("value")
+
+check("1.0000000000000001 keeps every digit",
+      _prov_value("1.0000000000000001") == "10000000000000001/10000000000000000")
+check("9007199254740993.0 - 9007199254740992 = 1",
+      _prov_value("9007199254740993.0 - 9007199254740992") == "1")
+check("1.0000000000000001 == 1 is false",
+      exact.eval_exact("1.0000000000000001 == 1").get("value") is False)
+check("1.0000000000000001e0 keeps every digit",
+      _prov_value("1.0000000000000001e0") == "10000000000000001/10000000000000000")
+check("-(1.0000000000000001) keeps every digit",
+      _prov_value("-(1.0000000000000001)") == "-10000000000000001/10000000000000000")
+check("(1.0000000000000001) * 1 keeps every digit",
+      _prov_value("(1.0000000000000001) * 1") == "10000000000000001/10000000000000000")
+check("underscore digit separators are stripped, digits kept",
+      _prov_value("1_000.000_000_000_000_1") == str(Fraction("1000.0000000000001")))
+check("0.1 + 0.2 == 0.3 still true", _prov_value("0.1 + 0.2 == 0.3") is True)
+check("hex literal unchanged", _prov_value("0x1F") == "31")
+check("binary literal unchanged", _prov_value("0b101") == "5")
+check("octal literal unchanged", _prov_value("0o17") == "15")
+check("integer arithmetic beyond 2**53 unchanged",
+      _prov_value("2**60 + 1") == "1152921504606846977")
+
+# ═══ exactness is tracked, not inferred from the final denominator (#347) ═══
+# An approximate intermediate that happens to become an integer is still
+# approximate; an exact operand passed through floor/ceil must not be rounded.
+_r = exact.eval_exact("sqrt(2) * 10000000000000000")
+check("sqrt(2) * 10**16 is not claimed exact", _r.get("exact") is False, f"-> {_r}")
+check("sqrt(2) * 10**16 discloses sqrt", "sqrt" in (_r.get("approximated") or []), f"-> {_r}")
+check("min(sqrt(2), 1) is not claimed exact",
+      exact.eval_exact("min(sqrt(2), 1)").get("exact") is False)
+check("sqrt(2) * sqrt(2) is not claimed exact",
+      exact.eval_exact("sqrt(2) * sqrt(2)").get("exact") is False)
+check("sin(0) is not claimed exact (float-path integer is still approximate)",
+      exact.eval_exact("sin(0)").get("exact") is False)
+for _expr, _want in [("floor(9007199254740993)", "9007199254740993"),
+                     ("ceil(9007199254740993)", "9007199254740993"),
+                     ("ceil(1/100000000000000000000)", "1"),
+                     ("floor(7/2)", "3"), ("ceil(7/2)", "4"),
+                     ("floor(-7/2)", "-4"), ("ceil(-7/2)", "-3"),
+                     ("sqrt(9/4)", "3/2"), ("sqrt(144)", "12"),
+                     ("factorial(5)/7", "120/7"), ("2**60 + 1", "1152921504606846977"),
+                     ("abs(-1/3)", "1/3"), ("min(1/3, 1/2)", "1/3"), ("1/3", "1/3")]:
+    _r = exact.eval_exact(_expr)
+    check(f"{_expr} = {_want}, exact", _r.get("value") == _want and _r.get("exact") is True,
+          f"-> {_r}")
+# two-argument round scales by 10**n; that power must stay a Fraction, not an int
+# whose division falls through to binary64.
+for _expr, _want in [("round(1/3, 4)", "3333/10000"), ("round(-1/3, 2)", "-33/100"),
+                     ("round(1/3, -1)", "0")]:
+    _r = exact.eval_exact(_expr)
+    check(f"{_expr} = {_want}, exact", _r.get("value") == _want and _r.get("exact") is True,
+          f"-> {_r}")
 
 # ═══ negative numbers fit no unsigned width ═════════════════════════════════
 # The test was `n <= uhi`, true for every negative n, so int_widths(-200)
