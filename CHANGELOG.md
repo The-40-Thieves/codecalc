@@ -59,6 +59,15 @@ behind it.
 
 ### Fixed
 
+- **`convert_units` no longer returns 0 for small quantities (#349).** The
+  numeric `value` was rounded to six decimal places, so `1 nm → m` and
+  `1 byte → GB` came back as `0.0`, and the conversion was evaluated at ten
+  significant digits first. The non-temperature path now converts exactly
+  (the input's decimal, as a rational) and converts to float once at the end;
+  the temperature path does its offset arithmetic exactly, so `0 °C → K` is
+  `273.15` and `-40 °C → °F` is `-40.0`. Same key, same type; `value` is more
+  precise. Non-finite input (`inf`, `nan`) is now refused with `ok: false`.
+
 - **Same-scale temperature conversions no longer fail (#350).** `convert_units`
   with both units on one scale, such as `25 celsius → celsius`, `25 degC → °C`,
   `300 K → kelvin` or `72 f → fahrenheit`, returned `ok: false` with "incompatible

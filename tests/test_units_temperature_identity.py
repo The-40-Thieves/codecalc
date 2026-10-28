@@ -21,6 +21,7 @@ Standalone runner (check()/FAILS/sys.exit), no pytest — the repo convention
 
 from __future__ import annotations
 
+import math
 import pathlib
 import sys
 from collections import defaultdict
@@ -99,6 +100,45 @@ for v, src, dst in [(25, "celsius", "meter"), (25, "meter", "k"),
     r = server.convert_units(v, src, dst)
     check(f"reject mixing {src} -> {dst}",
           r.get("ok") is False and "cannot mix temperature" in r.get("error", ""), f"-> {r}")
+
+# --- #349: the numeric value keeps full precision (no 6-dp rounding, no
+# 10-significant-digit cap). Relative tolerance only: abs_tol=0, so a zero
+# result can never pass as "close to 1e-9".
+def close(got, want, rel=1e-12):
+    return isinstance(got, float) and math.isclose(got, want, rel_tol=rel, abs_tol=0)
+
+
+r = server.convert_units(1, "nm", "m")
+check("349 1 nm -> m is ~1e-9, not 0", r.get("ok") is True and close(r.get("value"), 1e-9), f"-> {r}")
+r = server.convert_units(1, "byte", "gb")
+check("349 1 byte -> gb is ~1e-9, not 0", r.get("ok") is True and close(r.get("value"), 1e-9), f"-> {r}")
+
+for v, unit in [(0.123456789012345, "m"), (1234567890123, "m")]:
+    r = server.convert_units(v, unit, unit)
+    check(f"349 identity {v} {unit} -> {unit} is exact", r.get("ok") is True and r.get("value") == v, f"-> {r}")
+
+for v, a, b in [(1, "nm", "m"), (7.5, "nm", "m"), (1, "byte", "gb"), (12345, "byte", "gb")]:
+    fwd = server.convert_units(v, a, b)
+    back = server.convert_units(fwd.get("value", 0.0), b, a)
+    check(f"349 round trip {a}->{b}->{a} of {v} within rel 1e-15",
+          fwd.get("ok") is True and back.get("ok") is True and close(back.get("value"), float(v), rel=1e-15),
+          f"-> {fwd} {back}")
+
+r = server.convert_units(2.5, "km", "m")
+check("349 keep km -> m (2.5 km = 2500 m)", r.get("ok") is True and close(r.get("value"), 2500.0), f"-> {r}")
+r = server.convert_units(60, "mph", "km/h")
+check("349 keep mph -> km/h (60 mph = 96.56064 km/h)", r.get("ok") is True and close(r.get("value"), 96.56064), f"-> {r}")
+
+# Temperature: exact anchors, no 6-dp rounding on the offset arithmetic.
+for v, src, dst, want in [(0, "celsius", "kelvin", 273.15),
+                          (0, "celsius", "fahrenheit", 32.0),
+                          (-40, "celsius", "fahrenheit", -40.0),
+                          (-40, "fahrenheit", "celsius", -40.0),
+                          (0.1, "celsius", "kelvin", 273.25),
+                          (0.123456789, "celsius", "kelvin", 273.273456789)]:
+    r = server.convert_units(v, src, dst)
+    check(f"349 temperature {v} {src} -> {dst} == {want} exactly",
+          r.get("ok") is True and r.get("value") == want, f"-> {r}")
 
 print(f"\n=== {len(FAILS)} FAILURES ===" if FAILS else
       "\n=== ALL TEMPERATURE IDENTITY TESTS PASS ===")
