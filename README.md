@@ -1327,8 +1327,11 @@ resolved, unverified by codecalc, may be broken.
   SIGTERM to the executor — `PR_SET_PDEATHSIG` reaches only the direct child, so
   a group kill is what covers its descendants, and the executor is the only
   participant that knows the group id.
-- Output capped at 64KiB per stream, on every path including stateful sessions.
-  Exceeding it is reported as `OLE`, and the file-size rlimit is kept strictly
+- Output capped at 64KiB combined (stdout and stderr share one budget, split
+  fairly: each stream keeps up to half, and what one stream leaves unused goes
+  to the other), on every path including stateful sessions. Exceeding the
+  combined cap is reported as `OLE`, and the program is not killed for it: it
+  runs to its exit or timeout. The file-size rlimit is kept strictly
   above the cap so that overflow stays *detectable* — tying the two together
   turned a truncated 4MB output into a silent `verdict: OK`.
 - Fork-bomb guard via `RLIMIT_NPROC`, sized from the **measured** ambient task
