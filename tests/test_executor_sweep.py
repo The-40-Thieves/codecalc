@@ -746,12 +746,13 @@ check("fallback e2e: default cap 0 at exactly 64 KiB combined is not truncated",
 # traceback is still produced; the fair split keeps all of stderr and gives
 # stdout the rest of the budget. The sleep makes the old overflow kill (which
 # fires on the drain's first full 64 KiB read) land while the traceback is
-# still to come, so this case is deterministic rather than a race.
+# still to come, so this case is deterministic rather than a race. stderr is
+# written as bytes: Windows text mode would turn each \n into \r\n.
 _SENT = "SENTINEL-DONE\n"
 _CAP = 64 * 1024
 _r = _fallback("import sys, time; sys.stdout.write('x' * (10 * 65536)); sys.stdout.flush()"
                "; time.sleep(0.5)"
-               f"; sys.stderr.write({_TB.decode()!r}); sys.stderr.write({_SENT!r})")
+               f"; sys.stderr.buffer.write({_TB + _SENT.encode()!r})")
 _err_want = _TB.decode() + _SENT
 check("fallback e2e: stdout flood to 10x the cap, then a traceback: whole traceback retained, OLE, truncated",
       _r.get("verdict") == "OLE" and _r.get("output_truncated") is True
@@ -762,7 +763,7 @@ check("fallback e2e: stdout flood to 10x the cap, then a traceback: whole traceb
 check("fallback e2e: the program ran to completion past the cap (stdout_bytes = 10x cap)",
       _r.get("stdout_bytes") == 10 * 65536, f"-> stdout_bytes={_r.get('stdout_bytes')}")
 _r = _fallback("import sys, time; sys.stdout.write('a' * (50 * 65536)); sys.stdout.flush()"
-               f"; time.sleep(0.5); sys.stderr.write({_SENT!r})")
+               f"; time.sleep(0.5); sys.stderr.buffer.write({_SENT.encode()!r})")
 _kept = len((_r.get("stdout") or "").encode()) + len((_r.get("stderr") or "").encode())
 check("fallback e2e: 50x flood runs to completion, sentinel survives, retained bytes <= cap + markers",
       _r.get("verdict") == "OLE" and _r.get("stderr") == _SENT
