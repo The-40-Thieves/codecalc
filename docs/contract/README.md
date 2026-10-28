@@ -1,7 +1,17 @@
 # The codecalc result contract
 
-**Current version: `1.18.0`** · Schema: [`result-v1.schema.json`](result-v1.schema.json) ·
+**Current version: `1.19.0`** · Schema: [`result-v1.schema.json`](result-v1.schema.json) ·
 Source of truth: [`codecalc/contract.py`](../../codecalc/contract.py)
+
+`1.19.0` is a MINOR bump over `1.18.0`. It adds one value to `unenforced`,
+additively: **`timeout_enforced_after_provider_response`**, reported by the
+Piston provider for a compiled language (one with a `compile` stage). Piston
+takes a separate timeout for each phase, so compile plus run can total twice
+the caller's `timeout`; the provider cannot share one deadline across them. The
+adapter therefore checks the total after the response: past `timeout`, the
+verdict is `TLE` in phase `run` with `timed_out: true`, and the output Piston
+returned is kept as it was. Consumers that matched `unenforced` values by exact
+string keep working; a `1.18.0` client only sees a value it did not know before.
 
 `1.18.0` is a MINOR bump over `1.17.0`. It closes the rest of GH #321/THE-1086: `trace_execution`'s `events` items and its
 `truncated_reason` enum both gain a value, additively —

@@ -59,6 +59,19 @@ behind it.
 
 ### Fixed
 
+- **Piston's compile plus run time is checked against the caller's `timeout` (#353).**
+  The Piston adapter sent the full `timeout` as both `compile_timeout` and
+  `run_timeout`, so a compiled program could take up to twice the budget and
+  come back `OK`. Piston cannot share one deadline across its two phases, so
+  the adapter now checks the total after the response: past `timeout`, the
+  result is `TLE` in phase `run` with `timed_out: true`, and the output Piston
+  returned is kept. For a compiled language the result also names
+  `timeout_enforced_after_provider_response` in `unenforced`. Interpreted
+  languages are unchanged. Transport failures keep their
+  `provider_transport_failure` shape. The contract is bumped
+  `CONTRACT_VERSION` `1.18.0` -> `1.19.0`, MINOR, additive: one new
+  `unenforced` value.
+
 - **`max_output_kb` is one combined stdout+stderr cap on the Python paths
   (#354).** The fallback executor and Piston gave stdout and stderr each the
   whole cap, so a mix that fit each stream but not the total came back OK with
