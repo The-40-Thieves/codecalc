@@ -94,6 +94,13 @@ behind it.
   not a binary64 float, and `floor((((1<2)+(1<2))**53 + (1<2)) / (1<2))` is
   `9007199254740993`, exact.
 
+- **Native streaming runs in the workdir it is given (#352).** `execute_code_stream`
+  always ran the native executor in a fresh temp directory, so a dependency installed
+  for the run (`dependencies=[...]`, or a PEP 723 block) could not be imported, and a
+  caller-supplied workdir was ignored. The native stream now runs in the supplied
+  workdir and leaves it in place; a directory it allocates itself is still removed on
+  success, failure and cancellation. The Python fallback already behaved this way.
+
 - **`convert_units` no longer returns 0 for small quantities (#349).** The
   numeric `value` was rounded to six decimal places, so `1 nm → m` and
   `1 byte → GB` came back as `0.0`, and the conversion was evaluated at ten
