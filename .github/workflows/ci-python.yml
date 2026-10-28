@@ -247,6 +247,10 @@ jobs:
         run: |
           uv run --no-sync python tests/test_providers.py
           uv run --no-sync python tests/test_execution_service.py
+      # Native streaming runs in the caller's workdir (per-run dependencies, issue #352).
+      - name: streaming workdir (supplied vs owned directory, fallback, native dependency import)
+        shell: bash
+        run: uv run --no-sync --no-build python tests/test_stream_workdir.py
       - name: calc parity
         shell: bash
         run: uv run --no-sync python tests/test_calc_port.py

@@ -1878,8 +1878,14 @@ async def execute_stream(spec, on_progress=None) -> dict:
                           "Build it for progress updates.")
         return result
 
-    workdir = Path(tempfile.mkdtemp(prefix="codecalc-stream-"))
-    created_identity = _dir_identity(workdir)
+    # A supplied workdir (the execution service's per-run dependency directory,
+    # issue #352) is the one the program must run in, and its owner removes it.
+    # Only a directory allocated here is ours to delete. Same truthiness test as
+    # execute()'s fallback branch, so the two backends agree on "supplied".
+    owned = not spec.workdir
+    workdir = (Path(tempfile.mkdtemp(prefix="codecalc-stream-")) if owned
+               else Path(spec.workdir))
+    created_identity = _dir_identity(workdir) if owned else None
     stdin_path = None
     proc = None
     communicate_task = None
@@ -2000,7 +2006,8 @@ async def execute_stream(spec, on_progress=None) -> dict:
                 await asyncio.wait_for(proc.wait(), timeout=5)
         if stdin_path:
             Path(stdin_path).unlink(missing_ok=True)
-        _rmtree_checked(workdir, created_identity)
+        if owned:
+            _rmtree_checked(workdir, created_identity)
 
 
 def catalog() -> list[dict]:

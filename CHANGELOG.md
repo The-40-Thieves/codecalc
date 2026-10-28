@@ -59,6 +59,12 @@ behind it.
 
 ### Fixed
 
+- **Native streaming runs in the workdir it is given (#352).** `execute_code_stream`
+  always ran the native executor in a fresh temp directory, so a dependency installed
+  for the run (`dependencies=[...]`, or a PEP 723 block) could not be imported, and a
+  caller-supplied workdir was ignored. The native stream now runs in the supplied
+  workdir and leaves it in place; a directory it allocates itself is still removed on
+  success, failure and cancellation. The Python fallback already behaved this way.
 - **Unary `~` refuses a fraction instead of truncating it (#348).** `~(1/2)`
   returned `-1` and `~(-3/2)` returned `0`, because the operand was silently
   converted to an integer. `~` now takes the same integer check as `&`, `|`,
