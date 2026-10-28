@@ -599,7 +599,7 @@ class _BoundedDrain:
         #: Why the drain stopped early, if it did. The except clause below used
         #: to be a bare `pass`, so a pipe that failed mid-read returned whatever
         #: had arrived so far and nobody was told — output that looks complete
-        #: and is not. Same defect the Rust backend had in read_capped (#80),
+        #: and is not. Same defect the Rust backend had in read_capture (#80),
         #: which is why both were fixed together: check_parity.py gates that the
         #: two backends do not diverge on behaviour like this.
         self.error: str | None = None
@@ -750,7 +750,7 @@ def _run_step(argv: list[str], cwd: str, timeout: int, stdin: str,
             return (-1, b"", b"<killed: exceeded wall-clock timeout>", True, cpu_ms, None,
                     (_seen_of(out_reader, _out_thread), _seen_of(err_reader, _err_thread)))
         # The drains' failures ride out with their data. Same reasoning as the
-        # Rust backend's read_capped (#80): output that could not be fully read
+        # Rust backend's read_capture (#80): output that could not be fully read
         # is indistinguishable from output that was simply short, so the caller
         # has to be told which stream and why.
         drain_error = None

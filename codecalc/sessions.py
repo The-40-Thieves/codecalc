@@ -65,7 +65,7 @@ _SAFE_NAME = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 _MAX_JAIL_PATH_LEN = 4096
 _MAX_JAIL_PATH_SEGMENTS = 256
 
-#: Spill capture ceiling per stream: bounded, not unbounded. When a
+#: Spill capture ceiling, combined across stdout and stderr: bounded, not unbounded. When a
 #: session-scoped execution would otherwise truncate and drop the tail, the
 #: FULL stream is captured up to this cap (instead of the smaller default
 #: truncation cap) and, if it is still larger than what stays inline, written
@@ -92,7 +92,7 @@ _MAX_JAIL_PATH_SEGMENTS = 256
 #: mechanism specifically, kept well under FSIZE_LIMIT_BYTES's ceiling; the
 #: session-wide and cross-session totals are enforced separately, see
 #: `_disk_quota_refusal` and the `CODECALC_*_DISK_QUOTA_MB` accessors below.
-SPILL_CAPTURE_KB = 4096  # 4 MiB per stream
+SPILL_CAPTURE_KB = 4096  # 4 MiB, stdout and stderr combined
 
 #: Ceiling on a single session file served back as an MCP resource. Named
 #: rather than repeated as a literal because the SPILL write path is now
@@ -119,7 +119,7 @@ _SPILL_RETENTION = 20
 #: workspace during session_run/execute, and packages `install_package`
 #: fetches straight into it (packages.install — the LARGEST of the four:
 #: MB to GB, where every other vector here writes one call's worth at a
-#: time) — only the per-stream and per-file ceilings elsewhere in this
+#: time) — only the combined-output and per-file ceilings elsewhere in this
 #: module. A session (or a caller opening many of them) could fill the
 #: operator's disk one write at a time and nothing here would notice.
 #:
@@ -144,7 +144,7 @@ MIN_HOST_FREE_MB_ENV = "CODECALC_MIN_HOST_FREE_MB"
 #: Defaults are GENEROUS, not unlimited — "bounded by default" is the goal,
 #: not "unlimited by default with a knob nobody turns". 512 MiB/session and
 #: 8 GiB total are far above what a legitimate calculator session
-#: accumulates (the existing per-file/per-stream ceilings above already sit
+#: accumulates (the existing per-file and combined-output ceilings above already sit
 #: in the low single-digit MiB range) while still catching a runaway loop
 #: long before it threatens a shared host. 16 MiB/artifact and 500
 #: artifacts/session are deliberately generous relative to RESOURCE_MAX_BYTES
@@ -3302,7 +3302,7 @@ def _read_nofollow(target: Path, max_bytes: int) -> bytes | None:
     - The size is read from that same `fstat` and refused BEFORE any content is
       read. The previous code called `read_bytes()` and then compared `len(data)`
       to the cap, so an oversized artifact was fully loaded into memory before
-      being rejected. That is the defect `read_capped` had on the Rust side
+      being rejected. That is the defect `read_capture` had on the Rust side
       (#103) reproduced here in Python, and a session can create the file that
       triggers it.
 
@@ -3350,7 +3350,7 @@ def _read_nofollow(target: Path, max_bytes: int) -> bytes | None:
         #
         # One byte past the cap distinguishes "exactly at the limit" from
         # "longer than the limit" without reading the whole thing, which is the
-        # same shape as `read_capped`'s `take(cap + 1)` on the Rust side (#103).
+        # same shape as `read_capture`'s `take(cap + 1)` on the Rust side (#103).
         data = fh.read(max_bytes + 1)
         return None if len(data) > max_bytes else data
 

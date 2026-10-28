@@ -784,10 +784,10 @@ try:
           "trial budget (an existence floor for the assertion below)",
           _fallback_ole is not None, "-> got verdict(s) up to the budget")
     if _fallback_ole is not None:
-        check("python fallback: an OLE verdict discloses the fallback-only "
-              "exit_code race in unenforced",
-              "exit_code: fallback backend may differ on output-limit kills"
-              in (_fallback_ole.get("unenforced") or []),
+        check("python fallback: an OLE verdict does NOT disclose an exit_code "
+              "race in unenforced (neither backend kills on output any more)",
+              not any(str(u).startswith("exit_code:")
+                      for u in (_fallback_ole.get("unenforced") or [])),
               f"-> unenforced={_fallback_ole.get('unenforced')}")
         check("...verdict and output_truncated still agree with execute_code "
               "regardless of the exit_code race",

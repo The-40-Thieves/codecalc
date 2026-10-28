@@ -918,7 +918,7 @@ If you are paying too much for codecalc's definitions:
   approaches twice this hint. `session_run`'s inlined artifact content
   blocks (image/text/link, up to 8 within a 4 MiB encoded budget — see its
   own docstring) are likewise separate blocks outside this bound. 240 KiB
-  per stream is a hard CEILING `max_output_kb` is clamped to on every tool
+  combined (stdout and stderr together) is a hard CEILING `max_output_kb` is clamped to on every tool
   that accepts it (`execute_code`, `execute_code_stream`, `run_submit`),
   separate from the 64 KiB DEFAULT `0` selects — chosen as the largest
   round-KiB ceiling that keeps the TEXT-block hint under that 500,000-char
