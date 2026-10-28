@@ -157,12 +157,26 @@ def _pow_exact(a: Fraction, b: Fraction) -> Fraction:
                 f"{a}**{b} would need ~{predicted_bits} bits to represent, "
                 f"exceeding the limit ({_MAX_POW_RESULT_BITS}) for exact exponentiation"
             )
-    return a ** b
+    if b.denominator == 1:
+        return a ** b
+    # A non-integer exponent. A square root of a perfect square is exact, so
+    # 4**(1/2) = 2 and (1/4)**(1/2) = 1/2 stay exact; any other fractional power
+    # has no rational answer and goes through binary64. The float is converted
+    # to a Fraction here, the way _ev converts float-path results, so no caller
+    # ever sees a float, and the call is recorded as a float-path use so the
+    # result is disclosed as approximate.
+    if b.denominator == 2:
+        root = _exact_sqrt(a)
+        if root is not None:
+            return _pow_exact(root, Fraction(b.numerator))
+    _FLOAT_FUNCS_USED.append("**")
+    return Fraction(str(math.pow(float(a), float(b))))
 
 
 #: Names consulted during the current eval_exact() call, reset per call.
 _APPROX_CONSTS_USED: list[str] = []
-#: math.* functions called during this eval that ran on float. Any such call
+#: Float-path uses during this eval: math.* functions, and a non-integer `**`
+#: (_pow_exact), which is recorded as "**". Any such call
 #: makes the result approximate, whatever the final Fraction's denominator: an
 #: integer can come out of a binary64 value (sqrt(2) * 10**16), and sin(0) == 0
 #: is still a float-path answer. The exact exceptions never reach this list:
@@ -310,6 +324,23 @@ def eval_exact(expr: str) -> dict:
     return guarded_call(_eval_exact, expr)
 
 
+def _disclosure(approx_consts: list[str], float_funcs: list[str]) -> dict:
+    """The approximation fields for a result (rational or boolean) that depends
+    on an approximation. Empty when nothing was approximated."""
+    out: dict = {}
+    if float_funcs:
+        out.setdefault("approximated", []).extend(float_funcs)
+        out["note"] = (f"{', '.join(float_funcs)} has no exact rational form; "
+                       "the value shown is the exact rational of a binary64 "
+                       "approximation, so this result is NOT exact")
+    if approx_consts:
+        out.setdefault("approximated", []).extend(approx_consts)
+        out["note"] = (f"{', '.join(approx_consts)} is irrational; the value "
+                       "used is the exact rational form of its binary64 "
+                       "approximation, so this result is NOT exact")
+    return out
+
+
 def _eval_exact(expr: str) -> dict:
     """The evaluation itself. Runs inside the guard, never called directly."""
     if len(expr) > _MAX_EXPR_LEN:
@@ -361,7 +392,14 @@ def _eval_exact(expr: str) -> dict:
     float_funcs = sorted(set(_FLOAT_FUNCS_USED))
 
     if isinstance(result, bool):
-        return {"ok": True, "value": result, "type": "bool"}
+        # A comparison of approximated operands is itself approximate: say so
+        # with the same fields a rational result carries. An exact comparison
+        # keeps its original shape, with no new keys.
+        out = {"ok": True, "value": result, "type": "bool"}
+        if approx_consts or float_funcs:
+            out["exact"] = False
+            out.update(_disclosure(approx_consts, float_funcs))
+        return out
     if isinstance(result, Fraction):
         # The pow guard above bounds the CPU cost of exponentiation, but its
         # budget is looser than Python's own int->str conversion ceiling
@@ -408,16 +446,7 @@ def _eval_exact(expr: str) -> dict:
                "exact": not approx_consts and not float_funcs,
                "differs_from_decimal": exact != approx,
                "type": "rational"}
-        if float_funcs:
-            out.setdefault("approximated", []).extend(float_funcs)
-            out["note"] = (f"{', '.join(float_funcs)} has no exact rational form; "
-                           "the value shown is the exact rational of a binary64 "
-                           "approximation, so this result is NOT exact")
-        if approx_consts:
-            out.setdefault("approximated", []).extend(approx_consts)
-            out["note"] = (f"{', '.join(approx_consts)} is irrational; the value "
-                           "used is the exact rational form of its binary64 "
-                           "approximation, so this result is NOT exact")
+        out.update(_disclosure(approx_consts, float_funcs))
         return out
     return {"ok": True, "value": str(result), "type": type(result).__name__}
 

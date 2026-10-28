@@ -79,6 +79,17 @@ behind it.
   and `sqrt(9/4)` is `3/2`. Behaviour changes to `exact`: integer-valued results
   from float-path functions now report `exact: false` (`sin(0)`, `cos(0)`,
   `log(1)`), and `factorial(5)/7` and `gcd(12, 18)/5` now report `exact: true`.
+  Fractional powers follow the same rule. `4**(1/2)` is `2` and `(1/4)**(1/2)`
+  is `1/2`, both exact; any other fractional power is binary64 and is disclosed
+  as `approximated: ["**"]` with `exact: false`, so `2**(1/2)` no longer
+  reports a bare float and `floor((9007199254740992**2 - 1)**(1/2))` is no
+  longer claimed exact. Its value is still the binary64-derived one, so read
+  the disclosure, not the number. `sqrt(4**(1/2))` and `factorial(25**(1/2))`
+  no longer fail with `internal`. A comparison over an approximated operand is
+  disclosed the same way: `sqrt(9007199254740992**2 + 1) > 9007199254740992`
+  is `exact: false` with `approximated: ["sqrt"]`, and its value is still the
+  binary64-derived `false`. A comparison of exact operands keeps its original
+  shape with no `exact` key.
 
 - **`<<` is bounded like `**`.** `1 << 10**10` built a 10-billion-bit integer
   and never returned. A left shift whose result would exceed 50,000 bits (the

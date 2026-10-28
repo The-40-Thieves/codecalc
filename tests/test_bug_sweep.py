@@ -120,6 +120,48 @@ for n in (-1, -200, -(2 ** 70)):
     fits = exact.int_widths(n)["fits"]
     check(f"int_widths({n}): no unsigned width",
           not any(f.startswith("u") for f in fits), f"-> {fits}")
+# ═══ fractional powers and comparisons carry provenance (#347 review) ═══════
+# `**` with a non-integer exponent has no exact rational answer unless the base
+# is a perfect square. It returned a binary64 float that every caller assumed
+# was a Fraction: floor/ceil reported exact:true, sqrt and factorial crashed
+# with `internal`, and 2**(1/2) carried no disclosure. A comparison dropped its
+# operands' provenance, so a wrong boolean was returned with no warning.
+for _expr in ("floor((9007199254740992**2 - 1)**(1/2))",
+              "ceil((9007199254740992**2 + 1)**(1/2))",
+              "2**(1/2)"):
+    _r = exact.eval_exact(_expr)
+    check(f"{_expr} is a rational, not claimed exact",
+          _r.get("type") == "rational" and _r.get("exact") is False, f"-> {_r}")
+    check(f"{_expr} discloses ** as approximated",
+          "**" in (_r.get("approximated") or []), f"-> {_r}")
+_r = exact.eval_exact("sqrt(4**(1/2))")
+check("sqrt(4**(1/2)) does not crash and approximates sqrt(2)",
+      _r.get("ok") is True and _r.get("approx", "").startswith("1.41421356")
+      and _r.get("exact") is False and "sqrt" in (_r.get("approximated") or []), f"-> {_r}")
+_r = exact.eval_exact("factorial(25**(1/2))")
+check("factorial(25**(1/2)) = 120, exact (the power resolves to 5)",
+      _r.get("value") == "120" and _r.get("exact") is True, f"-> {_r}")
+check("4**(1/2) = 2, exact", exact.eval_exact("4**(1/2)").get("value") == "2"
+      and exact.eval_exact("4**(1/2)").get("exact") is True)
+check("(1/4)**(1/2) = 1/2, exact", exact.eval_exact("(1/4)**(1/2)").get("value") == "1/2"
+      and exact.eval_exact("(1/4)**(1/2)").get("exact") is True)
+check("4**(-1/2) = 1/2, exact", exact.eval_exact("4**(-1/2)").get("value") == "1/2"
+      and exact.eval_exact("4**(-1/2)").get("exact") is True)
+check("2**10 is still an exact int 1024",
+      exact.eval_exact("2**10").get("value") == "1024" and exact.eval_exact("2**10").get("exact") is True)
+_r = exact.eval_exact("sqrt(9007199254740992**2 + 1) > 9007199254740992")
+check("comparison over an approximated sqrt: bool, not claimed exact, sqrt disclosed",
+      _r.get("type") == "bool" and _r.get("exact") is False
+      and "sqrt" in (_r.get("approximated") or []), f"-> {_r}")
+_r = exact.eval_exact("sqrt(2) == 1.4142135623730951")
+check("sqrt(2) == literal discloses sqrt", _r.get("type") == "bool" and _r.get("exact") is False
+      and "sqrt" in (_r.get("approximated") or []), f"-> {_r}")
+_r = exact.eval_exact("pi > 3")
+check("pi > 3 discloses pi", _r.get("exact") is False and "pi" in (_r.get("approximated") or []),
+      f"-> {_r}")
+_r = exact.eval_exact("1 < 2")
+check("bool from exact operands is unchanged (no exact/approximated keys)",
+      _r == {"ok": True, "value": True, "type": "bool"}, f"-> {_r}")
 check("int_widths(200) still fits u8", "u8" in exact.int_widths(200)["fits"])
 check("int_widths(-200) still fits i16", "i16" in exact.int_widths(-200)["fits"])
 check("int_widths(-2**70) fits nothing", exact.int_widths(-(2 ** 70))["fits"] == [])
