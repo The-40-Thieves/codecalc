@@ -55,7 +55,7 @@ on:
         description: 'comma-separated model ids'
         required: false
         type: string
-        default: 'anthropic/claude-haiku-4-5-20251001,openai/gpt-4o-mini'
+        default: 'anthropic/claude-haiku-5-5,openai/gpt-4o-mini'
       groups:
         description: 'comma-separated --groups (full,dev,core)'
         required: false
@@ -243,6 +243,10 @@ jobs:
           version: '0.12.1'
       - run: uv sync --extra symbolic
       - run: uv run --no-sync python tests/test_tool_select_eval.py
+      # The model-driven script's own offline suite (a fake chat-completions
+      # server, no network, no token): request payload rules per provider,
+      # parsing, scoring and the advisory baseline compare (issue #355).
+      - run: uv run --no-sync --no-build python tests/test_tool_select_llm_eval.py
 
   tool-select-llm-eval:
     # scripts/tool_select_llm_eval.py: the MODEL-driven half of the
@@ -257,8 +261,8 @@ jobs:
     # property of this job instead of an implicit one.
     #
     # tests/test_tool_select_llm_eval.py is what actually gates the SCRIPT
-    # (offline, against a fake server, in the tool-select-eval-shaped job
-    # above's sibling suite) — this job is the live, opt-in run against a
+    # (offline, against a fake server, as a step of the tool-select-eval job
+    # above) — this job is the live, opt-in run against a
     # real gateway and real model accounts, reported as an uploaded artifact
     # rather than a pass/fail: an LLM's answer to the same prompt is not
     # bit-for-bit reproducible, so nothing here is a hard merge gate.

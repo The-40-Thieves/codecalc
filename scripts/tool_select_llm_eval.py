@@ -44,10 +44,13 @@ the FALLBACK top-1, and the record's `top1_source` says which mode won
 brief asks for, generalized to any tools-mode failure rather than a single
 model-name allowlist that would need maintaining.
 
-DETERMINISM, loosely. `temperature=0` and `seed=0` on every call — "loosely"
-because `seed` is an OpenAI-specific best-effort hint the gateway may pass
-through, drop, or ignore per-provider; nothing here depends on it being
-honored, and BM25's own tie-break is the only fully reproducible half of
+DETERMINISM, per provider. `temperature=0` and `seed=0` are sent only to
+providers that accept them — every model NOT prefixed `anthropic/`. Current
+Claude models 400 on a non-default `temperature`, `top_p` or `top_k`, and
+`seed` is not an Anthropic parameter at all, so `anthropic/` requests carry
+none of them (see `build_chat_payload`). `seed` is an OpenAI-side best-effort
+hint the gateway may pass through, drop, or ignore; nothing here depends on it
+being honored, and BM25's own tie-break is the only fully reproducible half of
 this comparison.
 
 CACHE. Resumable, keyed by `sha256(f"{model}\\x1f{group}\\x1f{prompt}")`,
@@ -86,7 +89,7 @@ behavior locally.
 USAGE
     # env: CODECALC_EVAL_BASE_URL, CODECALC_EVAL_API_KEY must both be set
     python scripts/tool_select_llm_eval.py
-    python scripts/tool_select_llm_eval.py --models anthropic/claude-haiku-4-5-20251001,openai/gpt-4o-mini
+    python scripts/tool_select_llm_eval.py --models anthropic/claude-haiku-5-5,openai/gpt-4o-mini
     python scripts/tool_select_llm_eval.py --groups full,dev,core --json report.json
     python scripts/tool_select_llm_eval.py --baseline scripts/data/tool_select_llm_baseline.json --strict
 """
@@ -126,7 +129,17 @@ ENV_API_KEY = "CODECALC_EVAL_API_KEY"
 #: — a private tailnet address in a tracked file fails that gate on sight, so
 #: `CODECALC_EVAL_BASE_URL` has NO default value in this file, only in the
 #: environment of whoever runs it).
-DEFAULT_MODELS = ("anthropic/claude-haiku-4-5-20251001", "openai/gpt-4o-mini")
+DEFAULT_MODELS = ("anthropic/claude-haiku-5-5", "openai/gpt-4o-mini")
+
+#: Anthropic models that 400 on a forced `tool_choice`. Tools mode sends
+#: `"auto"` to these instead of `"required"` (Haiku 5.5 still accepts a forced
+#: tool, so it is not listed). Their top-1 is therefore not forced to a call.
+NO_FORCED_TOOL_CHOICE = frozenset({
+    "anthropic/claude-opus-5-5",
+    "anthropic/claude-sonnet-5-5",
+    "anthropic/claude-fable-5-1",
+    "anthropic/claude-mythos-5-1",
+})
 
 DEFAULT_CACHE_DIR = REPO / "scripts" / "data" / ".llm_eval_cache"
 DEFAULT_LLM_BASELINE = REPO / "scripts" / "data" / "tool_select_llm_baseline.json"
@@ -303,20 +316,36 @@ def build_catalog_text(schemas: dict[str, dict]) -> str:
 
 # ── one chat-completions call, each mode ────────────────────────────────────
 
+def build_chat_payload(model: str, messages: list[dict], tools: list[dict] | None = None) -> dict:
+    """The ONE place the per-provider request rules live (both modes use it).
+
+    - `temperature`/`seed` = 0 only for providers that accept them: anything
+      not `anthropic/` (see the module docstring's DETERMINISM paragraph).
+    - Tools mode forces `tool_choice="required"`, except for the models in
+      `NO_FORCED_TOOL_CHOICE`, which get `"auto"` (they 400 on a forced choice).
+    - List mode sends no `tools` and no `tool_choice` at all.
+    """
+    payload: dict = {"model": model, "messages": messages}
+    if tools is not None:
+        payload["tools"] = tools
+        payload["tool_choice"] = "auto" if model in NO_FORCED_TOOL_CHOICE else "required"
+    if not model.startswith("anthropic/"):
+        payload["temperature"] = 0
+        payload["seed"] = 0
+    return payload
+
+
 def call_tool_mode(base_url: str, api_key: str, model: str, tools_payload: list[dict],
                     prompt: str, timeout: float, max_retries: int) -> dict:
     """Returns `{"top1": str|None, "error": str|None, "usage": dict|None}`."""
-    payload = {
-        "model": model,
-        "messages": [
+    payload = build_chat_payload(
+        model,
+        [
             {"role": "system", "content": TOOL_MODE_SYSTEM},
             {"role": "user", "content": prompt},
         ],
-        "tools": tools_payload,
-        "tool_choice": "required",
-        "temperature": 0,
-        "seed": 0,
-    }
+        tools=tools_payload,
+    )
     try:
         resp = _post_json(base_url, api_key, payload, timeout, max_retries)
     except LLMCallError as exc:
@@ -371,15 +400,13 @@ def call_list_mode(base_url: str, api_key: str, model: str, catalog_text: str,
                     schemas: dict[str, dict], prompt: str, timeout: float,
                     max_retries: int) -> dict:
     """Returns `{"top3": list[str], "error": str|None, "usage": dict|None}`."""
-    payload = {
-        "model": model,
-        "messages": [
+    payload = build_chat_payload(
+        model,
+        [
             {"role": "system", "content": LIST_MODE_SYSTEM_TEMPLATE.format(catalog=catalog_text)},
             {"role": "user", "content": prompt},
         ],
-        "temperature": 0,
-        "seed": 0,
-    }
+    )
     try:
         resp = _post_json(base_url, api_key, payload, timeout, max_retries)
     except LLMCallError as exc:

@@ -59,6 +59,16 @@ behind it.
 
 ### Fixed
 
+- **`tool_select_llm_eval.py` defaults to `anthropic/claude-haiku-5-5` and stops sending parameters Claude rejects (#355).**
+  Haiku 4.5 is retiring, so its id was replaced as the default. Requests to
+  `anthropic/` models no longer send `temperature`, `seed`, `top_p` or `top_k`,
+  which current Claude models reject with HTTP 400; `openai/` models still get
+  `temperature=0` and `seed=0`. Tools mode sends `tool_choice: "auto"` for Opus
+  5.5, Sonnet 5.5, Fable 5.1 and Mythos 5.1, which reject a forced choice. Both
+  modes build their payload in one helper, `build_chat_payload`. The checked-in
+  LLM baseline is unchanged, so the new default has no baseline entry yet and the
+  advisory compare says so.
+
 - **The Python fallback's compile and run share one wall-clock budget (#353).**
   A compiled language used to get the full `timeout` for compile and then the
   full `timeout` again for run, so a 10 s request could take about 20 s. Now
