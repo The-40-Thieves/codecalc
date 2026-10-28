@@ -84,12 +84,17 @@ _INT_OPS = {"<<": operator.lshift, ">>": operator.rshift,
             "&": operator.and_, "|": operator.or_, "^": operator.xor}
 
 
+def _as_int(v: Fraction, op: str, where: str) -> int:
+    """The integer check every bitwise operator shares: refuse, never truncate."""
+    if v.denominator != 1:
+        raise ValueError(f"bitwise {op} needs integers; {where} is {v}")
+    return int(v)
+
+
 def _int_op(a: Fraction, b: Fraction, op: str) -> Fraction:
     """Bitwise on exact rationals: legal only when both sides are integers."""
-    for side, v in (("left", a), ("right", b)):
-        if v.denominator != 1:
-            raise ValueError(f"bitwise {op} needs integers; {side} operand is {v}")
-    ai, bi = int(a), int(b)
+    ai = _as_int(a, op, "left operand")
+    bi = _as_int(b, op, "right operand")
     if op in ("<<", ">>") and bi < 0:
         raise ValueError(f"negative shift count {bi}")
     # `1 << 10**10` built a 10-billion-bit integer before anything could refuse
@@ -236,7 +241,7 @@ def _ev(node, src: str):
         if isinstance(node.op, ast.USub):
             return -_num(_ev(node.operand, src))
         if isinstance(node.op, ast.Invert):
-            return Fraction(~int(_ev(node.operand, src)))
+            return Fraction(~_as_int(_num(_ev(node.operand, src)), "~", "operand"))
         raise ValueError("unsupported unary op")
     if isinstance(node, ast.BinOp):
         fn = _BIN.get(type(node.op))
@@ -792,7 +797,8 @@ def collision_prob(items: int, bits: int) -> dict:
         return {"ok": False, "error": "items >= 0 and bits >= 1"}
     if n < 2:
         return {"ok": True, "probability": 0.0, "items": n, "bits": b}
-    p = 1.0 - math.exp(-(n * n) / (2.0 * (2 ** b)))
+    # expm1, not 1 - exp: exp(-x) rounds to 1.0 for small x (#351).
+    p = -math.expm1(-(n * n) / (2.0 * (2 ** b)))
     # `probability` is the full, unrounded float; `percent` is derived and
     # rounded for display — `rounding` says which (#213c).
     return {"ok": True, "items": n, "bits": b, "probability": p,
