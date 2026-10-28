@@ -195,6 +195,18 @@ def _exact_sqrt(a: Fraction) -> Fraction | None:
     return None
 
 
+def _num(v) -> Fraction:
+    """The one entry point from evaluated values into arithmetic. A comparison
+    returns a Python bool, and bool arithmetic yields int, whose `/` is binary64:
+    so a bool becomes its exact Fraction here, and anything else that is not a
+    Fraction is an internal error rather than a silent float."""
+    if isinstance(v, bool):
+        return Fraction(int(v))
+    if isinstance(v, Fraction):
+        return v
+    raise TypeError(f"internal: expected an exact rational, got {type(v).__name__}")
+
+
 def _ev(node, src: str):
     """Walk a closed set of AST nodes; anything else is refused. `src` is the
     expression text the nodes were parsed from."""
@@ -220,9 +232,9 @@ def _ev(node, src: str):
         raise ValueError(f"unknown name {node.id!r}")
     if isinstance(node, ast.UnaryOp):
         if isinstance(node.op, ast.UAdd):
-            return _ev(node.operand, src)
+            return _num(_ev(node.operand, src))
         if isinstance(node.op, ast.USub):
-            return -_ev(node.operand, src)
+            return -_num(_ev(node.operand, src))
         if isinstance(node.op, ast.Invert):
             return Fraction(~int(_ev(node.operand, src)))
         raise ValueError("unsupported unary op")
@@ -230,7 +242,7 @@ def _ev(node, src: str):
         fn = _BIN.get(type(node.op))
         if fn is None:
             raise ValueError(f"unsupported operator {type(node.op).__name__}")
-        return fn(_ev(node.left, src), _ev(node.right, src))
+        return fn(_num(_ev(node.left, src)), _num(_ev(node.right, src)))
     if isinstance(node, ast.Compare):
         if len(node.ops) != 1:
             raise ValueError("chained comparisons not supported")
@@ -241,7 +253,7 @@ def _ev(node, src: str):
     if isinstance(node, ast.Call):
         if not isinstance(node.func, ast.Name) or node.func.id not in _FUNCS:
             raise ValueError("only whitelisted math functions are callable")
-        args = [_ev(a, src) for a in node.args]
+        args = [_num(_ev(a, src)) for a in node.args]
         fn = _FUNCS[node.func.id]
         if node.func.id == "round" and len(args) == 2:
             if args[1].denominator != 1:
@@ -448,7 +460,10 @@ def _eval_exact(expr: str) -> dict:
                "type": "rational"}
         out.update(_disclosure(approx_consts, float_funcs))
         return out
-    return {"ok": True, "value": str(result), "type": type(result).__name__}
+    # Not reachable for a value _ev builds (every arithmetic input is a Fraction,
+    # and a top-level bool is handled above). If a float ever gets here it is
+    # binary64, so it must say so rather than claim nothing.
+    return {"ok": True, "value": str(result), "type": type(result).__name__, "exact": False}
 
 
 # ────────────────────────────── threshold cmp ──────────────────────────────

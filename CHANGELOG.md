@@ -89,7 +89,10 @@ behind it.
   disclosed the same way: `sqrt(9007199254740992**2 + 1) > 9007199254740992`
   is `exact: false` with `approximated: ["sqrt"]`, and its value is still the
   binary64-derived `false`. A comparison of exact operands keeps its original
-  shape with no `exact` key.
+  shape with no `exact` key. A comparison nested in arithmetic no longer drops
+  out of exact arithmetic: `((1<2)+(1<2))/((1<2)+(1<2)+(1<2))` is `2/3`, exact,
+  not a binary64 float, and `floor((((1<2)+(1<2))**53 + (1<2)) / (1<2))` is
+  `9007199254740993`, exact.
 
 - **`<<` is bounded like `**`.** `1 << 10**10` built a 10-billion-bit integer
   and never returned. A left shift whose result would exceed 50,000 bits (the

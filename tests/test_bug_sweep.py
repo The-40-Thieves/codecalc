@@ -165,6 +165,26 @@ check("bool from exact operands is unchanged (no exact/approximated keys)",
 check("int_widths(200) still fits u8", "u8" in exact.int_widths(200)["fits"])
 check("int_widths(-200) still fits i16", "i16" in exact.int_widths(-200)["fits"])
 check("int_widths(-2**70) fits nothing", exact.int_widths(-(2 ** 70))["fits"] == [])
+# ═══ a comparison's boolean must not leave the exact path (#347 review 2) ════
+# A comparison returns a Python bool, and bool arithmetic yields int: (1<2)+(1<2)
+# is 2, and int / int is Python's binary64 division. So a nested comparison
+# dropped out of exact arithmetic: 2/3 came back as a float, and the floor case
+# returned 9007199254740992 with exact:true (the true value is ...993). Every
+# operand entering arithmetic is now a Fraction (exact._num).
+_r = exact.eval_exact("floor((((1<2)+(1<2))**53 + (1<2)) / (1<2))")
+check("nested comparison: floor((((1<2)+(1<2))**53 + (1<2)) / (1<2)) = 9007199254740993, exact",
+      _r.get("value") == "9007199254740993" and _r.get("exact") is True, f"-> {_r}")
+_r = exact.eval_exact("((1<2)+(1<2))/((1<2)+(1<2)+(1<2))")
+check("nested comparison: ((1<2)+(1<2))/((1<2)+(1<2)+(1<2)) = 2/3, exact rational",
+      _r.get("value") == "2/3" and _r.get("exact") is True and _r.get("type") == "rational",
+      f"-> {_r}")
+for _expr, _want in (("(1<2) + (1<2)", "2"), ("-(1<2)", "-1"), ("sqrt((1<2))", "1")):
+    _r = exact.eval_exact(_expr)
+    check(f"nested comparison: {_expr} = {_want}, exact",
+          _r.get("value") == _want and _r.get("exact") is True, f"-> {_r}")
+_r = exact.eval_exact("(1<2) == 1")
+check("nested comparison: (1<2) == 1 is a true bool", _r.get("value") is True
+      and _r.get("type") == "bool", f"-> {_r}")
 
 # ═══ crashes on ordinary inputs ═════════════════════════════════════════════
 # float_repr(0.0) raised struct.error: prev_bits was -1. Zero is the likeliest
