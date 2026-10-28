@@ -65,6 +65,13 @@ behind it.
   `^`, `<<` and `>>`: a non-integer operand is refused with
   `bitwise ~ needs integers`. Integer operands are unchanged.
 
+- **Same-scale temperature conversions no longer fail (#350).** `convert_units`
+  with both units on one scale, such as `25 celsius → celsius`, `25 degC → °C`,
+  `300 K → kelvin` or `72 f → fahrenheit`, returned `ok: false` with "incompatible
+  temperature scales". Those pairs now return the value unchanged, for every
+  alias the normaliser accepts. Cross-scale conversions and the rejection of
+  temperature mixed with a non-temperature unit are unchanged.
+
 - **`collision_probability` no longer reports 0 for small collision odds (#351).**
   It computed `1 - exp(-x)`, and for `x` below about 1e-16 the `exp` rounds to
   1.0, so `1e6` items into 128 bits came back as `0` (now `1.4693679385e-27`)
