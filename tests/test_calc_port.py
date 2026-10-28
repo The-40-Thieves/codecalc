@@ -1,11 +1,13 @@
 """Parity tests: every ported calc feature vs known-good values."""
+import math
 import pathlib
 import re
 import sys
+from decimal import Decimal, localcontext
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
-from codecalc import exact, logic
+from codecalc import exact, logic, server
 
 FAILS = []
 
@@ -275,6 +277,52 @@ check("collision_prob discloses percent is rounded, probability is not",
       r.get("rounding") == {"percent": 6}, f"-> {r}")
 r = exact.collision_prob(1000000, 64)
 check("collide 1e6/64 ~2.7e-8", abs(r["probability"] - 2.71e-8) < 1e-9)
+# #351: 1 - exp(-x) rounds to 0.0 once x falls below ~1e-16, so small
+# collision probabilities (wide hashes, few items) came back as exactly 0.
+# The reference evaluates the same n^2 approximation at 200 digits.
+def _collision_ref(items, bits):
+    with localcontext() as ctx:
+        ctx.prec = 200
+        x = Decimal(items * items) / (2 * Decimal(2) ** bits)
+        return float(1 - (-x).exp())
+
+r = exact.collision_prob(1000000, 128)
+check("collide 1e6/128 ~1.4693679385e-27 (#351)",
+      math.isclose(r["probability"], 1.4693679385e-27, rel_tol=1e-9, abs_tol=0), f"-> {r['probability']!r}")
+r = exact.collision_prob(100, 64)
+check("collide 100/64 ~2.7105054312e-16 (#351)",
+      math.isclose(r["probability"], 2.7105054312e-16, rel_tol=1e-9, abs_tol=0), f"-> {r['probability']!r}")
+for n, b in [(1000000, 128), (100, 64), (1000, 96), (100000, 128), (10, 128), (3000, 80)]:
+    got = exact.collision_prob(n, b)["probability"]
+    want = _collision_ref(n, b)
+    check(f"collide {n}/{b} matches 200-digit reference (#351)",
+          got > 0 and math.isclose(got, want, rel_tol=1e-12, abs_tol=0), f"-> {got!r} vs {want!r}")
+for n in (0, 1):
+    r = exact.collision_prob(n, 64)
+    check(f"collide items={n} is exactly 0", r["ok"] and r["probability"] == 0.0, f"-> {r}")
+for n, b in [(-1, 64), (10, 0), (10, -3)]:
+    r = exact.collision_prob(n, b)
+    check(f"collide rejects items={n} bits={b}", r["ok"] is False and "error" in r, f"-> {r}")
+r = exact.collision_prob(10**12, 8)
+p = r["probability"]
+check("collide saturated is finite in [0,1] (#351)",
+      math.isfinite(p) and 0.0 <= p <= 1.0 and p == 1.0, f"-> {p!r}")
+r = exact.collision_prob(1000000, 64)
+check("collide percent still rounded to 6 dp from probability",
+      r["percent"] == round(r["probability"] * 100, 6) and r.get("rounding") == {"percent": 6}, f"-> {r}")
+# the public MCP wrapper must agree with the function it delegates to
+r = server.collision_probability(1000000, 128)
+check("server collision 1e6/128 matches reference (#351)",
+      r.get("ok") and math.isclose(r["probability"], _collision_ref(1000000, 128), rel_tol=1e-12, abs_tol=0),
+      f"-> {r}")
+r = server.collision_probability(100, 64)
+check("server collision 100/64 matches reference (#351)",
+      r.get("ok") and math.isclose(r["probability"], _collision_ref(100, 64), rel_tol=1e-12, abs_tol=0),
+      f"-> {r}")
+r = server.collision_probability(1, 64)
+check("server collision items=1 is exactly 0", r.get("ok") and r["probability"] == 0.0, f"-> {r}")
+r = server.collision_probability(10, 0)
+check("server collision rejects zero bits", r.get("ok") is False, f"-> {r}")
 
 # bytes / duration / epoch
 r = exact.data_sizes(291 * 1024 * 1024)

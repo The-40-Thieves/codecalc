@@ -65,6 +65,12 @@ behind it.
   `^`, `<<` and `>>`: a non-integer operand is refused with
   `bitwise ~ needs integers`. Integer operands are unchanged.
 
+- **`collision_probability` no longer reports 0 for small collision odds (#351).**
+  It computed `1 - exp(-x)`, and for `x` below about 1e-16 the `exp` rounds to
+  1.0, so `1e6` items into 128 bits came back as `0` (now `1.4693679385e-27`)
+  and `100` items into 64 bits came back as `2.2e-16` instead of `2.7105054312e-16`.
+  It now uses `-expm1(-x)`, which keeps the precision. The formula is unchanged.
+
 - **`<<` is bounded like `**`.** `1 << 10**10` built a 10-billion-bit integer
   and never returned. A left shift whose result would exceed 50,000 bits (the
   `**` limit) is now refused before it runs, with `resource_exhausted`. Zero
