@@ -7,6 +7,7 @@ most of these are a failure, or an absence, encoded as a valid-looking result.
 
 from __future__ import annotations
 
+import ast
 import json
 import math
 import os
@@ -14,6 +15,7 @@ import pathlib
 import re
 import sys
 import time
+from fractions import Fraction
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
@@ -54,6 +56,77 @@ check("sqrt(2) is not claimed exact", exact.eval_exact("sqrt(2)")["exact"] is Fa
 check("sqrt(144) IS exact (integer result)", exact.eval_exact("sqrt(144)")["exact"] is True)
 check("1/3 is still exact", exact.eval_exact("1/3")["exact"] is True)
 
+# ═══ decimal literals keep the digits the caller typed (#346) ═══════════════
+# ast.parse hands a decimal literal over as a binary64 float, so every digit
+# past ~17 significant places was gone before any arithmetic began.
+def _prov_value(expr):
+    return exact.eval_exact(expr).get("value")
+
+check("1.0000000000000001 keeps every digit",
+      _prov_value("1.0000000000000001") == "10000000000000001/10000000000000000")
+check("9007199254740993.0 - 9007199254740992 = 1",
+      _prov_value("9007199254740993.0 - 9007199254740992") == "1")
+check("1.0000000000000001 == 1 is false",
+      exact.eval_exact("1.0000000000000001 == 1").get("value") is False)
+check("1.0000000000000001e0 keeps every digit",
+      _prov_value("1.0000000000000001e0") == "10000000000000001/10000000000000000")
+check("-(1.0000000000000001) keeps every digit",
+      _prov_value("-(1.0000000000000001)") == "-10000000000000001/10000000000000000")
+check("(1.0000000000000001) * 1 keeps every digit",
+      _prov_value("(1.0000000000000001) * 1") == "10000000000000001/10000000000000000")
+# AST column offsets are UTF-8 byte offsets: a 3-byte character before the literal
+# (U+FF45 normalises to the constant e, so the expression still evaluates) must
+# not shift the slice the digits are read from.
+check("float literal after a multibyte character keeps its digits",
+      _prov_value("ｅ - ｅ + 1.0000000000000001") == "10000000000000001/10000000000000000")
+check("float literal on line 2 of a multi-line expression keeps its digits",
+      _prov_value("(1 +\n1.0000000000000001)") == "20000000000000001/10000000000000000")
+# No Python token can span a line break inside a number, so the multi-line slice
+# is only reachable by calling it directly with a node that spans two lines.
+_span = ast.parse("x", mode="eval").body
+_span.lineno, _span.end_lineno, _span.col_offset, _span.end_col_offset = 1, 2, 4, 16
+check("multi-line literal slice joins the covered lines",
+      exact._literal_text(_span, [b"1 + 1.\n", b"0000000000000001\n"]) == "1.\n0000000000000001")
+check("underscore digit separators are stripped, digits kept",
+      _prov_value("1_000.000_000_000_000_1") == str(Fraction("1000.0000000000001")))
+check("0.1 + 0.2 == 0.3 still true", _prov_value("0.1 + 0.2 == 0.3") is True)
+check("hex literal unchanged", _prov_value("0x1F") == "31")
+check("binary literal unchanged", _prov_value("0b101") == "5")
+check("octal literal unchanged", _prov_value("0o17") == "15")
+check("integer arithmetic beyond 2**53 unchanged",
+      _prov_value("2**60 + 1") == "1152921504606846977")
+
+# ═══ exactness is tracked, not inferred from the final denominator (#347) ═══
+# An approximate intermediate that happens to become an integer is still
+# approximate; an exact operand passed through floor/ceil must not be rounded.
+_r = exact.eval_exact("sqrt(2) * 10000000000000000")
+check("sqrt(2) * 10**16 is not claimed exact", _r.get("exact") is False, f"-> {_r}")
+check("sqrt(2) * 10**16 discloses sqrt", "sqrt" in (_r.get("approximated") or []), f"-> {_r}")
+check("min(sqrt(2), 1) is not claimed exact",
+      exact.eval_exact("min(sqrt(2), 1)").get("exact") is False)
+check("sqrt(2) * sqrt(2) is not claimed exact",
+      exact.eval_exact("sqrt(2) * sqrt(2)").get("exact") is False)
+check("sin(0) is not claimed exact (float-path integer is still approximate)",
+      exact.eval_exact("sin(0)").get("exact") is False)
+for _expr, _want in [("floor(9007199254740993)", "9007199254740993"),
+                     ("ceil(9007199254740993)", "9007199254740993"),
+                     ("ceil(1/100000000000000000000)", "1"),
+                     ("floor(7/2)", "3"), ("ceil(7/2)", "4"),
+                     ("floor(-7/2)", "-4"), ("ceil(-7/2)", "-3"),
+                     ("sqrt(9/4)", "3/2"), ("sqrt(144)", "12"),
+                     ("factorial(5)/7", "120/7"), ("2**60 + 1", "1152921504606846977"),
+                     ("abs(-1/3)", "1/3"), ("min(1/3, 1/2)", "1/3"), ("1/3", "1/3")]:
+    _r = exact.eval_exact(_expr)
+    check(f"{_expr} = {_want}, exact", _r.get("value") == _want and _r.get("exact") is True,
+          f"-> {_r}")
+# two-argument round scales by 10**n; that power must stay a Fraction, not an int
+# whose division falls through to binary64.
+for _expr, _want in [("round(1/3, 4)", "3333/10000"), ("round(-1/3, 2)", "-33/100"),
+                     ("round(1/3, -1)", "0")]:
+    _r = exact.eval_exact(_expr)
+    check(f"{_expr} = {_want}, exact", _r.get("value") == _want and _r.get("exact") is True,
+          f"-> {_r}")
+
 # ═══ negative numbers fit no unsigned width ═════════════════════════════════
 # The test was `n <= uhi`, true for every negative n, so int_widths(-200)
 # claimed u8 and int_widths(-2**70) claimed u8/u16/u32/u64.
@@ -61,9 +134,74 @@ for n in (-1, -200, -(2 ** 70)):
     fits = exact.int_widths(n)["fits"]
     check(f"int_widths({n}): no unsigned width",
           not any(f.startswith("u") for f in fits), f"-> {fits}")
+# ═══ fractional powers and comparisons carry provenance (#347 review) ═══════
+# `**` with a non-integer exponent has no exact rational answer unless the base
+# is a perfect square. It returned a binary64 float that every caller assumed
+# was a Fraction: floor/ceil reported exact:true, sqrt and factorial crashed
+# with `internal`, and 2**(1/2) carried no disclosure. A comparison dropped its
+# operands' provenance, so a wrong boolean was returned with no warning.
+for _expr in ("floor((9007199254740992**2 - 1)**(1/2))",
+              "ceil((9007199254740992**2 + 1)**(1/2))",
+              "2**(1/2)"):
+    _r = exact.eval_exact(_expr)
+    check(f"{_expr} is a rational, not claimed exact",
+          _r.get("type") == "rational" and _r.get("exact") is False, f"-> {_r}")
+    check(f"{_expr} discloses ** as approximated",
+          "**" in (_r.get("approximated") or []), f"-> {_r}")
+_r = exact.eval_exact("sqrt(4**(1/2))")
+check("sqrt(4**(1/2)) does not crash and approximates sqrt(2)",
+      _r.get("ok") is True and _r.get("approx", "").startswith("1.41421356")
+      and _r.get("exact") is False and "sqrt" in (_r.get("approximated") or []), f"-> {_r}")
+_r = exact.eval_exact("factorial(25**(1/2))")
+check("factorial(25**(1/2)) = 120, exact (the power resolves to 5)",
+      _r.get("value") == "120" and _r.get("exact") is True, f"-> {_r}")
+check("4**(1/2) = 2, exact", exact.eval_exact("4**(1/2)").get("value") == "2"
+      and exact.eval_exact("4**(1/2)").get("exact") is True)
+check("(1/4)**(1/2) = 1/2, exact", exact.eval_exact("(1/4)**(1/2)").get("value") == "1/2"
+      and exact.eval_exact("(1/4)**(1/2)").get("exact") is True)
+check("4**(-1/2) = 1/2, exact", exact.eval_exact("4**(-1/2)").get("value") == "1/2"
+      and exact.eval_exact("4**(-1/2)").get("exact") is True)
+check("2**10 is still an exact int 1024",
+      exact.eval_exact("2**10").get("value") == "1024" and exact.eval_exact("2**10").get("exact") is True)
+_r = exact.eval_exact("sqrt(9007199254740992**2 + 1) > 9007199254740992")
+check("comparison over an approximated sqrt: bool, not claimed exact, sqrt disclosed",
+      _r.get("type") == "bool" and _r.get("exact") is False
+      and "sqrt" in (_r.get("approximated") or []), f"-> {_r}")
+_r = exact.eval_exact("sqrt(2) == 1.4142135623730951")
+check("sqrt(2) == literal discloses sqrt", _r.get("type") == "bool" and _r.get("exact") is False
+      and "sqrt" in (_r.get("approximated") or []), f"-> {_r}")
+_r = exact.eval_exact("pi > 3")
+check("pi > 3 discloses pi", _r.get("exact") is False and "pi" in (_r.get("approximated") or []),
+      f"-> {_r}")
+_r = exact.eval_exact("1 < 2")
+# `unenforced` is platform-dependent (Windows has no fork for the expression
+# bound), so it is left out of the comparison.
+check("bool from exact operands is unchanged (no exact/approximated keys)",
+      {k: v for k, v in _r.items() if k != "unenforced"} == {"ok": True, "value": True, "type": "bool"},
+      f"-> {_r}")
 check("int_widths(200) still fits u8", "u8" in exact.int_widths(200)["fits"])
 check("int_widths(-200) still fits i16", "i16" in exact.int_widths(-200)["fits"])
 check("int_widths(-2**70) fits nothing", exact.int_widths(-(2 ** 70))["fits"] == [])
+# ═══ a comparison's boolean must not leave the exact path (#347 review 2) ════
+# A comparison returns a Python bool, and bool arithmetic yields int: (1<2)+(1<2)
+# is 2, and int / int is Python's binary64 division. So a nested comparison
+# dropped out of exact arithmetic: 2/3 came back as a float, and the floor case
+# returned 9007199254740992 with exact:true (the true value is ...993). Every
+# operand entering arithmetic is now a Fraction (exact._num).
+_r = exact.eval_exact("floor((((1<2)+(1<2))**53 + (1<2)) / (1<2))")
+check("nested comparison: floor((((1<2)+(1<2))**53 + (1<2)) / (1<2)) = 9007199254740993, exact",
+      _r.get("value") == "9007199254740993" and _r.get("exact") is True, f"-> {_r}")
+_r = exact.eval_exact("((1<2)+(1<2))/((1<2)+(1<2)+(1<2))")
+check("nested comparison: ((1<2)+(1<2))/((1<2)+(1<2)+(1<2)) = 2/3, exact rational",
+      _r.get("value") == "2/3" and _r.get("exact") is True and _r.get("type") == "rational",
+      f"-> {_r}")
+for _expr, _want in (("(1<2) + (1<2)", "2"), ("-(1<2)", "-1"), ("sqrt((1<2))", "1")):
+    _r = exact.eval_exact(_expr)
+    check(f"nested comparison: {_expr} = {_want}, exact",
+          _r.get("value") == _want and _r.get("exact") is True, f"-> {_r}")
+_r = exact.eval_exact("(1<2) == 1")
+check("nested comparison: (1<2) == 1 is a true bool", _r.get("value") is True
+      and _r.get("type") == "bool", f"-> {_r}")
 
 # ═══ crashes on ordinary inputs ═════════════════════════════════════════════
 # float_repr(0.0) raised struct.error: prev_bits was -1. Zero is the likeliest
