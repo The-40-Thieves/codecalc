@@ -685,15 +685,15 @@ _d2 = pathlib.Path(tempfile.mkdtemp(prefix="cc-deletable-"))
 check("_rmtree_checked still returns True on a real deletion",
       executor._rmtree_checked(_d2, executor._dir_identity(_d2)) is True and not _d2.exists())
 
-# (b) the overflow signal was `len(chunk) > room`, which is false at exactly
-#     cap+1 — the child was never killed at the boundary even though the
-#     output had crossed the cap. Decided on total bytes seen now.
-for _n, _cap, _want in ((5, 4, True), (4, 4, False), (6, 4, True), (1, 4, False)):
-    _fired = []
+# (b) the drain retains at most cap+1 bytes and reads to EOF past the cap. It
+#     never signals overflow: nothing is killed at the cap (owner decision
+#     2026-10-27), so a traceback printed after a flood is still produced.
+for _n, _cap in ((5, 4), (4, 4), (6, 4), (1, 4), (51200, 1024)):
     _dr = executor._BoundedDrain(io.BytesIO(b"z" * _n), _cap)
-    _dr.drain(lambda f=_fired: f.append(1))
-    check(f"drain: cap={_cap} bytes={_n} signals overflow={_want}",
-          bool(_fired) is _want, f"-> fired={bool(_fired)} retained={len(_dr.data())}")
+    _dr.drain()
+    check(f"drain: cap={_cap} bytes={_n} retains min(n, cap+1) and reads all of it",
+          len(_dr.data()) == min(_n, _cap + 1) and _dr.seen == _n,
+          f"-> retained={len(_dr.data())} seen={_dr.seen}")
 
 # (c) the COMPILE path called _trim() without the caller's cap, so it used the
 #     64 KiB default while the drain had already bounded at the caller's cap.

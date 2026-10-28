@@ -682,7 +682,7 @@ def test_piston_applies_the_requested_output_cap_to_remote_results() -> None:
     check("Piston adapter classifies client-side output overflow",
           result["verdict"] == "OLE" and result["output_truncated"] is True)
     check("Piston adapter caps normalized output bytes",
-          len(result["stdout"].encode()) <= 1024
+          len(result["stdout"].encode()) <= 1024 + len("\n…[truncated]".encode())
           and result["stdout_bytes"] == len(remote_stdout.encode()))
     check("Piston adapter discloses post-response output enforcement",
           "max_output_kb_enforced_after_provider_response" in result["unenforced"])
@@ -734,7 +734,8 @@ def test_piston_bounds_stderr_to_the_default_cap_when_max_output_kb_is_0() -> No
 
     check("Piston bounds stderr to the executor default (64 KiB) when "
           "max_output_kb is left at 0",
-          len(result["stderr"].encode()) <= executor.MAX_OUTPUT_BYTES)
+          len(result["stderr"].encode())
+          <= executor.MAX_OUTPUT_BYTES + len(executor.TRUNCATION_MARKER.encode()))
     check("...the true pre-cap size is still disclosed via stderr_bytes",
           result["stderr_bytes"] == len(huge_stderr.encode()))
     check("...classified OLE, not a silent pass-through of 1,000,000 bytes",
@@ -747,12 +748,57 @@ def test_piston_bounds_stderr_to_the_default_cap_when_max_output_kb_is_0() -> No
     compact = server.compact_result(result)
     check("compact_result keeps the now-bounded stderr (the run did not succeed)",
           "stderr" in compact
-          and len(compact["stderr"].encode()) <= executor.MAX_OUTPUT_BYTES)
+          and len(compact["stderr"].encode())
+          <= executor.MAX_OUTPUT_BYTES + len(executor.TRUNCATION_MARKER.encode()))
     check("...NOT the raw 1,000,000-byte stderr — bounding survives compaction",
           len(compact.get("stderr", "").encode()) < len(huge_stderr.encode()))
     check("...and keeps the disclosure that explains why it is not the full stream",
           "max_output_kb_enforced_after_provider_response"
           in compact.get("unenforced", []))
+
+
+def test_piston_splits_the_combined_cap_fairly_between_the_two_streams() -> None:
+    """#354: `max_output_kb` is ONE combined stdout+stderr ceiling. Piston used
+    to spend it stdout-first, so a 600-byte stdout left stderr 424 bytes and
+    no marker. The shared split gives each stream its fair half and marks each
+    stream it cut. Each stream is under the cap on its own; only the total is
+    over, which is the case the per-stream check used to miss."""
+    marker = "\n…[truncated]"
+
+    def transport(method: str, path: str, headers: dict[str, str],
+                  payload: dict | None, timeout: int) -> object:
+        del method, path, headers, payload, timeout
+        return {
+            "language": "python",
+            "version": "3.12.0",
+            "run": {
+                "stdout": "o" * 600,
+                "stderr": "e" * 600,
+                "output": "o" * 600 + "e" * 600,
+                "code": 1,
+                "signal": None,
+                "message": None,
+                "status": None,
+                "cpu_time": 1,
+                "wall_time": 2,
+                "memory": 1024,
+            },
+        }
+
+    result = providers.PistonExecutionProvider(
+        base_url="http://piston.test", transport=transport
+    ).execute(providers.ComputationSpec(
+        language="python3", code="raise SystemExit(1)", max_output_kb=1
+    ))
+
+    check("Piston: each stream under the cap but combined over is OLE",
+          result["verdict"] == "OLE" and result["output_truncated"] is True)
+    check("Piston: stderr keeps its fair 512-byte share, marked",
+          result["stderr"] == "e" * 512 + marker)
+    check("Piston: stdout keeps its fair 512-byte share, marked",
+          result["stdout"] == "o" * 512 + marker)
+    check("Piston: true per-stream byte counts are still reported",
+          result["stdout_bytes"] == 600 and result["stderr_bytes"] == 600)
 
 
 def test_configured_registry_enables_piston_without_disclosing_credentials() -> None:
@@ -1273,6 +1319,7 @@ if __name__ == "__main__":
     test_piston_provider_passes_the_shared_execution_conformance_suite()
     test_piston_applies_the_requested_output_cap_to_remote_results()
     test_piston_bounds_stderr_to_the_default_cap_when_max_output_kb_is_0()
+    test_piston_splits_the_combined_cap_fairly_between_the_two_streams()
     test_configured_registry_enables_piston_without_disclosing_credentials()
     test_piston_health_reports_redacted_transport_failure()
     test_piston_execution_returns_a_redacted_transport_error_contract()

@@ -783,7 +783,7 @@ try:
     # what comes back looks like the program's real output.
     _real_drain = _ex._BoundedDrain.drain
 
-    def _failing_drain(self, on_overflow):
+    def _failing_drain(self):
         chunk = self._stream.read(4)
         if chunk:
             self._buf.extend(chunk)

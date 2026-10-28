@@ -230,12 +230,12 @@ thread is traced"` into the result's own `unenforced` array — the same
 disclosure list `execute_code` already uses for a guarantee it could not
 apply.
 
-FALLBACK-BACKEND OLE RACE. The pure-Python fallback's own output-cap
-enforcement (`executor._run_step`) polls `overflow.is_set()` on a 20ms
-timer, racing the child's own natural exit — confirmed PRE-EXISTING and
-already nondeterministic for plain `execute_code` on this backend (the same
-program's `exit_code` flips between 0 and a negative signal across repeated
-runs at sizes near the cap). This module's extra per-event file I/O shifts
+FALLBACK-BACKEND OLE RACE. Before #354 the pure-Python fallback's output-cap
+enforcement (`executor._run_step`) killed the child from a 20ms poll on an
+overflow flag, racing the child's own natural exit, so its `exit_code` on an OLE
+flipped between 0 and a negative signal. The fallback no longer kills at the cap,
+so that race is gone; the exit-code note below stays as the disclosure for the
+backends' remaining difference.runs at sizes near the cap). This module's extra per-event file I/O shifts
 that race's timing enough to change which side usually wins for a given
 program, so `trace_execution`'s `exit_code` on an OLE verdict, fallback
 backend only, is not reliably comparable to what `execute_code` reports for
