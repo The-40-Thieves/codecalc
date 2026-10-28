@@ -22,6 +22,7 @@ enforced.
 from __future__ import annotations
 
 import json
+import math
 import os
 import platform
 import shutil
@@ -271,7 +272,7 @@ def nproc_limit() -> int:
     return tasks + headroom if tasks is not None else FALLBACK_NPROC_LIMIT
 
 
-def _limits(timeout: int, max_memory_mb: int = 0, max_cpu: int = 0):
+def _limits(timeout: float, max_memory_mb: int = 0, max_cpu: int = 0):
     """preexec_fn applying rlimits, or None where there are no rlimits to apply.
 
     Windows has no setrlimit and no fork, so there is nothing to hook: the
@@ -286,7 +287,10 @@ def _limits(timeout: int, max_memory_mb: int = 0, max_cpu: int = 0):
     # via preexec_fn, where walking /proc is not something to be doing.
     nproc = nproc_limit()
 
-    cpu = max_cpu if max_cpu > 0 else timeout + CPU_GRACE_SECONDS
+    # `timeout` is the budget left for this step, which can be fractional
+    # (#353). RLIMIT_CPU takes whole seconds, and the grace stays on top so the
+    # wall clock, not SIGXCPU, is what ends a program that merely spins.
+    cpu = max_cpu if max_cpu > 0 else math.ceil(timeout) + CPU_GRACE_SECONDS
     mem = max_memory_mb * 1024 * 1024 if max_memory_mb > 0 else AS_LIMIT_BYTES
 
     def _apply():
@@ -645,7 +649,18 @@ class _BoundedDrain:
         return None if self.error else self._seen
 
 
-def _run_step(argv: list[str], cwd: str, timeout: int, stdin: str,
+def _remaining_run_budget(deadline: float, now: float) -> float | None:
+    """Seconds left before `deadline`, or None when nothing is left (#353).
+
+    None, not 0.0, at the boundary: a phase that would start with no time to
+    run must not start at all, and a caller testing `if budget:` must not read
+    a zero as "no limit".
+    """
+    remaining = deadline - now
+    return remaining if remaining > 0 else None
+
+
+def _run_step(argv: list[str], cwd: str, timeout: float, stdin: str,
               max_memory_mb: int = 0, max_cpu: int = 0,
               max_output_bytes: int = MAX_OUTPUT_BYTES,
               pythonpath: str | None = None,
@@ -999,6 +1014,29 @@ def _fallback_compile_failure(name: str, *, stdout: str, stderr: str,
             "backend": "python"}
 
 
+def _fallback_budget_exhausted(name: str, *, compile_ms: int, total_ms: int,
+                               workdir: str, no_net: bool,
+                               max_memory_mb: int, max_cpu: int) -> dict:
+    """Compile finished with no wall-clock budget left, so run never started.
+
+    The same shape as the Rust executor's own return for this case (main.rs
+    ~1712-1767): phase "run", a timeout, and null exit code and byte counts,
+    because nothing was run to measure. duration_ms is 0 for the same reason.
+    """
+    return {"ok": False, "language": name, "phase": "run",
+            "stdout": "", "stderr": "<killed: exceeded wall-clock timeout>",
+            "exit_code": None, "duration_ms": 0, "workdir": workdir,
+            "compile_ms": compile_ms, "total_ms": total_ms,
+            "timed_out": True, "output_truncated": False,
+            "verdict": "TLE", "cpu_ms": 0, "peak_memory_kb": None,
+            "platform": sys.platform,
+            "unenforced": ([_NO_NET_NATIVE_MISSING] if no_net else []) +
+                          _unmeasured(max_memory_mb, max_cpu),
+            "output_error": None,
+            "stdout_bytes": None, "stderr_bytes": None,
+            "backend": "python"}
+
+
 def _runtime_unavailable_result(name: str, phase: str, argv: list[str], exc: OSError,
                                 workdir: str, started: float, no_net: bool) -> dict:
     """The documented result shape for a runtime/compiler that failed to spawn.
@@ -1322,6 +1360,9 @@ def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10
     created_identity = None if caller_workdir else _dir_identity(workdir)
     cap = max_output_kb * 1024 if max_output_kb > 0 else MAX_OUTPUT_BYTES
     started = time.monotonic()
+    # ONE wall-clock budget for compile and run together (#353). Computed once
+    # here; each phase is handed what is left of it, never the full `timeout`.
+    deadline = started + timeout
     try:
         try:
             run_dir = _reset_run_scratch_dir(workdir)
@@ -1417,6 +1458,15 @@ def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10
                     seen=compile_seen)
 
         argv = [a.format(**fmt) for a in entry["run"]]
+        # Mirrors the Rust executor: a run that has no budget left is reported
+        # as a timeout in phase "run" and never spawned (main.rs ~1712-1767).
+        run_budget = _remaining_run_budget(deadline, time.monotonic())
+        if run_budget is None:
+            return _fallback_budget_exhausted(
+                name, compile_ms=compile_ms,
+                total_ms=int((time.monotonic() - started) * 1000),
+                workdir=workdir, no_net=no_net,
+                max_memory_mb=max_memory_mb, max_cpu=max_cpu)
         run_started = time.monotonic()
         resolved = _resolve_argv0(argv[0])
         if resolved is None:
@@ -1433,7 +1483,7 @@ def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10
             # and a program's own relative file access must resolve where a
             # caller can see it (registry.RUN_SCRATCH_DIRNAME's docstring).
             rc, out, err, to, cpu_ms, drain_error, run_seen = _run_step(
-                argv, workdir, timeout, stdin, max_memory_mb, max_cpu, cap,
+                argv, workdir, run_budget, stdin, max_memory_mb, max_cpu, cap,
                 pythonpath=workdir, extra_env=node_extra_env)
         except OSError as exc:
             # The interpreter/runtime binary itself is missing or not

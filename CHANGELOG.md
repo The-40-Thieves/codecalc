@@ -59,6 +59,13 @@ behind it.
 
 ### Fixed
 
+- **The Python fallback's compile and run share one wall-clock budget (#353).**
+  A compiled language used to get the full `timeout` for compile and then the
+  full `timeout` again for run, so a 10 s request could take about 20 s. Now
+  `timeout` is one deadline: run gets only what compile left, and a compile
+  that uses up the budget reports a timeout in phase `run` without starting it,
+  matching the Rust executor. A compile failure still returns its diagnostics.
+
 - **Piston's compile plus run time is checked against the caller's `timeout` (#353).**
   The Piston adapter sent the full `timeout` as both `compile_timeout` and
   `run_timeout`, so a compiled program could take up to twice the budget and
@@ -106,7 +113,6 @@ behind it.
   out of exact arithmetic: `((1<2)+(1<2))/((1<2)+(1<2)+(1<2))` is `2/3`, exact,
   not a binary64 float, and `floor((((1<2)+(1<2))**53 + (1<2)) / (1<2))` is
   `9007199254740993`, exact.
-
 - **`max_output_kb` is one combined stdout+stderr cap on the Python paths
   (#354).** The fallback executor and Piston gave stdout and stderr each the
   whole cap, so a mix that fit each stream but not the total came back OK with
