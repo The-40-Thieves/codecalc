@@ -439,6 +439,105 @@ def test_piston_execution_maps_remote_statuses_to_common_verdicts() -> None:
               result["output_truncated"] is truncated)
 
 
+def _piston_stage(wall_ms: int, *, code: int = 0) -> dict:
+    return {
+        "stdout": "partial output\n",
+        "stderr": "",
+        "output": "partial output\n",
+        "code": code,
+        "signal": None,
+        "message": None,
+        "status": None,
+        "cpu_time": 1,
+        "wall_time": wall_ms,
+        "memory": 1024,
+    }
+
+
+def _piston_stages_transport(stages: dict) -> object:
+    def transport(method: str, path: str, headers: dict[str, str],
+                  payload: dict | None, timeout: int) -> object:
+        del method, path, headers, payload, timeout
+        return stages
+    return transport
+
+
+def test_piston_reports_compile_plus_run_past_the_budget_as_tle() -> None:
+    """#353: Piston gets a per-phase timeout each, so compile + run can total
+    twice the caller's budget, and Piston cannot share one deadline across
+    its phases. The sum is checked after the response instead: past the
+    budget it is a TLE in the run phase, and the output Piston returned is
+    kept as it was."""
+    result = providers.PistonExecutionProvider(
+        base_url="http://piston.test",
+        transport=_piston_stages_transport({
+            "compile": _piston_stage(6000),
+            "run": _piston_stage(5000),
+        }),
+    ).execute(providers.ComputationSpec(language="c", code="int main() {}", timeout=10))
+
+    check("Piston compile plus run past the budget is TLE, not OK",
+          result["verdict"] == "TLE" and result["ok"] is False)
+    check("Piston over-budget TLE reports the run phase and timed_out",
+          result["phase"] == "run" and result["timed_out"] is True)
+    check("Piston over-budget TLE keeps the output Piston returned",
+          result["stdout"] == "partial output\n" and result["total_ms"] == 11000)
+    check("Piston over-budget TLE discloses the after-the-fact timeout",
+          "timeout_enforced_after_provider_response" in result["unenforced"])
+
+
+def test_piston_compile_plus_run_within_the_budget_stays_ok() -> None:
+    under = providers.PistonExecutionProvider(
+        base_url="http://piston.test",
+        transport=_piston_stages_transport({
+            "compile": _piston_stage(4000),
+            "run": _piston_stage(5000),
+        }),
+    ).execute(providers.ComputationSpec(language="c", code="int main() {}", timeout=10))
+    at_budget = providers.PistonExecutionProvider(
+        base_url="http://piston.test",
+        transport=_piston_stages_transport({
+            "compile": _piston_stage(5000),
+            "run": _piston_stage(5000),
+        }),
+    ).execute(providers.ComputationSpec(language="c", code="int main() {}", timeout=10))
+
+    check("Piston compile plus run under the budget stays OK",
+          under["verdict"] == "OK" and under["timed_out"] is False)
+    check("Piston compile plus run exactly at the budget is not a TLE",
+          at_budget["verdict"] == "OK" and at_budget["timed_out"] is False)
+    check("Piston compiled run keeps the after-the-fact timeout disclosure",
+          "timeout_enforced_after_provider_response" in under["unenforced"])
+
+
+def test_piston_interpreted_run_adds_no_timeout_disclosure() -> None:
+    result = providers.PistonExecutionProvider(
+        base_url="http://piston.test",
+        transport=_piston_stages_transport({"run": _piston_stage(2000)}),
+    ).execute(providers.ComputationSpec(language="python3", code="pass", timeout=10))
+
+    check("Piston interpreted run under the budget is OK",
+          result["verdict"] == "OK")
+    check("Piston interpreted run (no compile stage) adds no timeout disclosure",
+          "timeout_enforced_after_provider_response" not in result["unenforced"])
+
+
+def test_piston_transport_failure_stays_distinct_from_tle() -> None:
+    def transport(method: str, path: str, headers: dict[str, str],
+                  payload: dict | None, timeout: int) -> object:
+        del method, path, headers, payload, timeout
+        raise TimeoutError("read timed out")
+
+    result = providers.PistonExecutionProvider(
+        base_url="http://piston.test", transport=transport
+    ).execute(providers.ComputationSpec(language="c", code="int main() {}", timeout=10))
+
+    check("Piston transport failure keeps provider_transport_failure",
+          result.get("provider_error") == "provider_transport_failure")
+    check("Piston transport failure is not reported as a TLE",
+          result.get("verdict") != "TLE" and not result.get("timed_out"))
+
+
 def test_piston_omits_unrequested_memory_limits() -> None:
     payloads: list[dict] = []
 
@@ -1310,6 +1409,10 @@ if __name__ == "__main__":
     test_piston_credentials_are_scoped_to_transport_headers()
     test_piston_execution_normalizes_the_v2_result_contract()
     test_piston_execution_maps_remote_statuses_to_common_verdicts()
+    test_piston_reports_compile_plus_run_past_the_budget_as_tle()
+    test_piston_compile_plus_run_within_the_budget_stays_ok()
+    test_piston_interpreted_run_adds_no_timeout_disclosure()
+    test_piston_transport_failure_stays_distinct_from_tle()
     test_piston_omits_unrequested_memory_limits()
     test_piston_preserves_compile_stage_failures()
     test_piston_provider_rejects_unavailable_capabilities_before_transport()

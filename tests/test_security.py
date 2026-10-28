@@ -157,7 +157,7 @@ check("output capped at 64KiB", len(r.get("stdout", "")) < 70_000)
 # child produce (and be measured as having produced) far more than requested.
 #
 # The RETURNED `stdout` text was already correctly capped at the literal
-# request before this fix — `read_capped` truncates it at
+# request before this fix — `read_capture` truncates it at
 # `max_output_kb * 1024`, no floor involved. What was wrong is the ceiling
 # that governs how much the child is actually ALLOWED TO WRITE before being
 # stopped (RLIMIT_FSIZE on the Rust executor): it had a 1 MiB floor

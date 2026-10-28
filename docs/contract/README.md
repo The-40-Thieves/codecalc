@@ -1,7 +1,17 @@
 # The codecalc result contract
 
-**Current version: `1.18.0`** · Schema: [`result-v1.schema.json`](result-v1.schema.json) ·
+**Current version: `1.19.0`** · Schema: [`result-v1.schema.json`](result-v1.schema.json) ·
 Source of truth: [`codecalc/contract.py`](../../codecalc/contract.py)
+
+`1.19.0` is a MINOR bump over `1.18.0`. It adds one value to `unenforced`,
+additively: **`timeout_enforced_after_provider_response`**, reported by the
+Piston provider for a compiled language (one with a `compile` stage). Piston
+takes a separate timeout for each phase, so compile plus run can total twice
+the caller's `timeout`; the provider cannot share one deadline across them. The
+adapter therefore checks the total after the response: past `timeout`, the
+verdict is `TLE` in phase `run` with `timed_out: true`, and the output Piston
+returned is kept as it was. Consumers that matched `unenforced` values by exact
+string keep working; a `1.18.0` client only sees a value it did not know before.
 
 `1.18.0` is a MINOR bump over `1.17.0`. It closes the rest of GH #321/THE-1086: `trace_execution`'s `events` items and its
 `truncated_reason` enum both gain a value, additively —
@@ -164,8 +174,8 @@ report computed from an AST parse of the submitted source —
   branch actually ran" view: every statically-detected executable line,
   split by whether a `line` event ever fired on it.
 
-Two more differences from `execute_code` are disclosed through the
-EXISTING `unenforced` array rather than a new field, because both describe
+One more difference from `execute_code` is disclosed through the
+EXISTING `unenforced` array rather than a new field, because it describes
 a guarantee this tool could not fully apply rather than new information
 about the traced program:
 
@@ -174,16 +184,6 @@ about the traced program:
   tracer never sees events for (that code still executes normally — only
   `events`' completeness is affected, never `stdout`/`exit_code`). Added
   whenever the harness observes more than one thread alive at any point.
-* **`"exit_code: fallback backend may differ on output-limit kills"`** —
-  the pure-Python fallback's own OLE enforcement polls a flag on a 20ms
-  timer, racing the child's natural exit; that race is PRE-EXISTING and
-  already nondeterministic for plain `execute_code` on this backend, and
-  this tool's extra per-event file I/O shifts its timing enough to make
-  `trace_execution`'s `exit_code` on an OLE verdict, fallback backend only,
-  unreliable to compare against `execute_code`'s for the same program —
-  `verdict`/`output_truncated` are unaffected. Added only when
-  `backend == "python"` and `verdict == "OLE"`; the Rust backend's own cap
-  enforcement is not timing-sensitive this way.
 
 All of it is additive: a `1.12.0` client reading `execute_code`'s own
 `execution_envelope` shape sees no change, because `trace_execution` is a

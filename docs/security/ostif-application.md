@@ -104,7 +104,7 @@ is partial — the honest gap rather than a claim the code cannot back up:
    agent's tool arguments can be shaped by content it read, not only by the
    operator. What codecalc mitigates: the 23-entry environment allowlist
    bounds what a running program can read out of its own process environment
-   (`codecalc/executor.py`); the 64 KiB per-stream output cap plus the
+   (`codecalc/executor.py`); the 64 KiB combined output cap plus the
    `OLE`/truncation-with-byte-count contract (README, "Sandbox guarantees")
    bounds how much can ride out through the result itself; and
    `docs/security/audit-2026-08-21.md`'s "Info leaks" surface review found no

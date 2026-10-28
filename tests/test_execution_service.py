@@ -863,7 +863,7 @@ def test_execute_code_stream_drains_output_larger_than_the_pipe_buffer() -> None
 
     Two shapes, both over the 64 KiB buffer and reported separately so a
     truncation-logic regression cannot hide behind a hang-logic one:
-      - 200 KiB: under the 240 KiB stream ceiling, so NOT truncated.
+      - 200 KiB: under the 240 KiB ceiling, so NOT truncated.
       - 983_040 bytes (960 KiB): the exact live-incident shape, well over the
         ceiling, so truncated.
     A watchdog bounds the whole call — see `_run_stream_with_watchdog` — so a
@@ -1739,7 +1739,7 @@ def test_max_output_kb_cannot_push_a_result_past_its_advertised_cap() -> None:
     past the `anthropic/maxResultSizeChars` it advertises in `_meta`
     (499_520 = 2 * 240 KiB + 8_000) — disclosed as a caveat in the
     docstring instead of enforced. `server._MAX_OUTPUT_KB_CEILING` (240 KiB
-    per stream, the largest ceiling that keeps the hint under Claude Code's
+    combined, the largest ceiling that keeps the hint under Claude Code's
     documented 500,000-char maximum) now clamps it at the MCP boundary on
     every tool that accepts it, including run_submit (whose value is what a
     terminal run_inspect eventually reports, and run_inspect now carries the

@@ -1007,10 +1007,11 @@ _ALWAYS_LOAD = frozenset({
 #: total wire payload for a typed large-result tool approaches TWICE
 #: `_MAX_RESULT_SIZE_CHARS` below, which bounds the text half only.
 #: `_MAX_RESULT_SIZE_CHARS` is the largest value under the 500,000-char text
-#: ceiling this file can compute from a round KiB figure: 240 KiB is applied
-#: independently to stdout AND stderr (executor.py:1027, 1089 —
-#: `truncated = len(out) > cap or len(err) > cap`), so two streams at the
-#: ceiling is 2 * 240 * 1024 = 491_520 bytes; +8_000 bytes of envelope
+#: ceiling this file can compute from a round KiB figure. 240 KiB is ONE
+#: combined budget for stdout and stderr together (executor.split_output_budget),
+#: so the kept text is at most 240 KiB plus two short truncation markers. The
+#: 2x term is headroom on that bound, not two full streams at the ceiling:
+#: 2 * 240 * 1024 = 491_520 bytes; +8_000 bytes of envelope
 #: (measured at ~500 bytes for the python-fallback backend's 21 fields with
 #: both streams empty, rounded up for the rust backend's larger
 #: receipt/determinism blocks and for JSON-escaping the exotic fraction of a
@@ -1023,6 +1024,15 @@ _ALWAYS_LOAD = frozenset({
 #: `codecalc://session/{sid}/files/...` resource, readable in full via
 #: session_read_file, with no 240 KiB ceiling of its own).
 _MAX_OUTPUT_KB_CEILING = 240
+#: The one `max_output_kb` description every tool that takes it serves. The cap
+#: is a single budget for stdout and stderr together, and nothing is killed at
+#: it: the program runs to exit or timeout (executor.split_output_budget).
+_MAX_OUTPUT_KB_FIELD_DOC = (
+    "Combined stdout+stderr cap in KiB, split fairly between the two streams; "
+    "0 uses the 64 KiB default, hard-clamped to 240. Output past the cap does "
+    "not stop the program: it runs to exit or timeout, and the result is OLE "
+    "with output_truncated true."
+)
 
 #: The character equivalent of the ceiling above (not codecalc's 64 KiB
 #: DEFAULT) — bounds the serialized TEXT `content` block only, per
@@ -1372,7 +1382,7 @@ def execute_code(
     timeout: Annotated[int, Field(description="Wall-clock seconds before the run is killed as TLE; clamped to a 120s ceiling")] = 10,
     session_id: Annotated[str | None, Field(description="Run inside this session's workspace (from session_start) instead of a throwaway sandbox")] = None,
     max_memory_mb: Annotated[int, Field(description="Per-call memory ceiling in MiB; 0 means no explicit limit is set")] = 0,
-    max_output_kb: Annotated[int, Field(description="Stdout/stderr capture cap in KiB per stream; 0 uses the 64 KiB default, hard-clamped to 240")] = 0,
+    max_output_kb: Annotated[int, Field(description=_MAX_OUTPUT_KB_FIELD_DOC)] = 0,
     max_cpu: Annotated[int, Field(description="Per-call CPU-time ceiling in seconds; 0 means no explicit limit is set")] = 0,
     no_net: Annotated[bool, Field(description="Block outbound network access for this run; best-effort on platforms without seccomp")] = False,
     compact: Annotated[bool, Field(description="Drop diagnostic fields (timings, workdir, platform) from the result; safety disclosures are always kept, and stderr is kept whenever the run did not succeed — dropped only on a clean successful run (ok=true, exit_code 0, verdict OK)")] = False,
@@ -1686,7 +1696,7 @@ async def execute_code_stream(
     stdin: Annotated[str, Field(description="Text piped to the program's standard input; empty means no input")] = "",
     timeout: Annotated[int, Field(description="Wall-clock seconds before the run is killed; clamped to a 300s ceiling (longer than execute_code's)")] = 30,
     max_memory_mb: Annotated[int, Field(description="Per-call memory ceiling in MiB; 0 means no explicit limit is set")] = 0,
-    max_output_kb: Annotated[int, Field(description="Stdout/stderr capture cap in KiB per stream; 0 uses the 64 KiB default, hard-clamped to 240")] = 0,
+    max_output_kb: Annotated[int, Field(description=_MAX_OUTPUT_KB_FIELD_DOC)] = 0,
     max_cpu: Annotated[int, Field(description="Per-call CPU-time ceiling in seconds; 0 means no explicit limit is set")] = 0,
     no_net: Annotated[bool, Field(description="Block outbound network access for this run; best-effort on platforms without seccomp")] = False,
     provider: Annotated[str | None, Field(description="Execution backend id to use (see list_execution_providers); default picks automatically")] = None,
@@ -1701,7 +1711,7 @@ async def execute_code_stream(
     agents can see output before the process finishes. Returns the same
     result shape and applies the SAME ceilings as execute_code: max_memory_mb,
     max_output_kb and max_cpu are forwarded to the executor exactly as
-    execute_code forwards them, including the same 240 KiB per-stream clamp.
+    execute_code forwards them, including the same 240 KiB clamp.
 
     `dependencies`: same as execute_code's (PEP 723 merge, `no_net`/policy
     refusal, 120s budget, workdir quota) — installed before streaming
@@ -1748,7 +1758,7 @@ def trace_execution(
     timeout: Annotated[int, Field(description="Wall-clock seconds before the run is killed; clamped to a 120s ceiling")] = 30,
     max_events: Annotated[int, Field(description="Max trace events to record before truncating; the run's own stdout/exit code are unaffected")] = 2000,
     max_memory_mb: Annotated[int, Field(description="Per-call memory ceiling in MiB; 0 means no explicit limit is set")] = 0,
-    max_output_kb: Annotated[int, Field(description="Stdout/stderr capture cap in KiB per stream; 0 uses the 64 KiB default, hard-clamped to 240")] = 0,
+    max_output_kb: Annotated[int, Field(description=_MAX_OUTPUT_KB_FIELD_DOC)] = 0,
     max_cpu: Annotated[int, Field(description="Per-call CPU-time ceiling in seconds; 0 means no explicit limit is set")] = 0,
     no_net: Annotated[bool, Field(description="Block outbound network access for this run; best-effort on platforms without seccomp")] = False,
     provider: Annotated[str | None, Field(description="Execution backend id; only 'local' (the default) is supported here")] = None,
@@ -1858,7 +1868,7 @@ def run_submit(
     stdin: Annotated[str, Field(description="Text piped to the program's standard input; empty means no input")] = "",
     timeout: Annotated[int, Field(description="Wall-clock seconds before the run is killed; clamped to a 120s ceiling, same as execute_code")] = 30,
     max_memory_mb: Annotated[int, Field(description="Per-call memory ceiling in MiB; 0 means no explicit limit is set")] = 0,
-    max_output_kb: Annotated[int, Field(description="Stdout/stderr capture cap in KiB per stream; 0 uses the 64 KiB default, hard-clamped to 240")] = 0,
+    max_output_kb: Annotated[int, Field(description=_MAX_OUTPUT_KB_FIELD_DOC)] = 0,
     max_cpu: Annotated[int, Field(description="Per-call CPU-time ceiling in seconds; 0 means no explicit limit is set")] = 0,
     no_net: Annotated[bool, Field(description="Block outbound network access for this run; best-effort on platforms without seccomp")] = False,
     provider: Annotated[str | None, Field(description="Execution backend id to use (see list_execution_providers); default picks automatically")] = None,

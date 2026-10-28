@@ -66,6 +66,19 @@ behind it.
   that uses up the budget reports a timeout in phase `run` without starting it,
   matching the Rust executor. A compile failure still returns its diagnostics.
 
+- **Piston's compile plus run time is checked against the caller's `timeout` (#353).**
+  The Piston adapter sent the full `timeout` as both `compile_timeout` and
+  `run_timeout`, so a compiled program could take up to twice the budget and
+  come back `OK`. Piston cannot share one deadline across its two phases, so
+  the adapter now checks the total after the response: past `timeout`, the
+  result is `TLE` in phase `run` with `timed_out: true`, and the output Piston
+  returned is kept. For a compiled language the result also names
+  `timeout_enforced_after_provider_response` in `unenforced`. Interpreted
+  languages are unchanged. Transport failures keep their
+  `provider_transport_failure` shape. The contract is bumped
+  `CONTRACT_VERSION` `1.18.0` -> `1.19.0`, MINOR, additive: one new
+  `unenforced` value.
+
 - **Decimal literals keep the digits you typed (#346).** The parser rounded a
   decimal or scientific literal to binary64 before any exact arithmetic, so
   `1.0000000000000001` evaluated to `1` with `exact: true`. The literal is now
@@ -114,6 +127,13 @@ behind it.
   the fallback. Both now use one fair split and give the same verdict and
   `output_truncated`. The cut is marked `\n...[truncated]` (three dots) outside
   the cap, and the program is not killed on combined overflow.
+- **The `max_output_kb` descriptions now say the cap is combined and that nothing
+  is killed at it (#354).** The tool descriptions, the README and the schema text
+  still said the cap was per stream. `trace_execution` also no longer adds
+  `exit_code: fallback backend may differ on output-limit kills` to `unenforced`
+  on an OLE result: neither backend kills on output any more, so the exit codes
+  agree. That `unenforced` entry is removed; a client matching on it should stop.
+  The `tools.json` catalog snapshot is regenerated from the live `tools/list`.
 
 - **Native streaming runs in the workdir it is given (#352).** `execute_code_stream`
   always ran the native executor in a fresh temp directory, so a dependency installed

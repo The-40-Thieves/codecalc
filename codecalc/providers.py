@@ -713,7 +713,14 @@ class PistonExecutionProvider:
         peak_memory_kb = (int(memory_bytes) // 1024
                           if isinstance(memory_bytes, int) else None)
         status = stage.get("status")
-        timed_out = status == "TO"
+        # #353: Piston takes one timeout per phase, so compile + run can total
+        # twice the caller's budget, and it cannot share one deadline across
+        # them. The total is checked here, after the response: past the budget
+        # it is a TLE, and the output Piston already returned is kept as is.
+        budget_ms = spec.timeout * 1000
+        if compile_stage:
+            unenforced.append("timeout_enforced_after_provider_response")
+        timed_out = status == "TO" or compile_ms + run_ms > budget_ms
         output_truncated = status in {"OL", "EL"} or client_output_overflow
         if timed_out:
             verdict = "TLE"
