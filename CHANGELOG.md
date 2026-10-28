@@ -59,6 +59,12 @@ behind it.
 
 ### Fixed
 
+- **The Python fallback's compile and run share one wall-clock budget (#353).**
+  A compiled language used to get the full `timeout` for compile and then the
+  full `timeout` again for run, so a 10 s request could take about 20 s. Now
+  `timeout` is one deadline: run gets only what compile left, and a compile
+  that uses up the budget reports a timeout in phase `run` without starting it,
+  matching the Rust executor. A compile failure still returns its diagnostics.
 - **`max_output_kb` is one combined stdout+stderr cap on the Python paths
   (#354).** The fallback executor and Piston gave stdout and stderr each the
   whole cap, so a mix that fit each stream but not the total came back OK with

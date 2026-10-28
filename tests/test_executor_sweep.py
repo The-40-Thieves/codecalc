@@ -820,6 +820,118 @@ check("compile failure: each stream is cut to its fair share and marked",
       f"-> stdout_len={len(_c.get('stdout') or '')} stderr_len={len(_c.get('stderr') or '')}")
 
 
+# Shared wall-clock budget (#353). The fallback used to give compile the full
+# timeout and then give run the full timeout again, so a 10 s request could take
+# ~20 s. Compile and run now share ONE deadline. The clock is faked and both
+# steps are stubbed, so the split is asserted exactly rather than measured.
+class _FakeClock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+_budget_clock = _FakeClock()
+_budget_calls: list[tuple[str, float]] = []
+
+
+def _budget_run(*, compile_secs: float, compile_rc: int = 0, compile_err: bytes = b"",
+                compile_timed_out: bool = False, run_secs: float = 0.0,
+                timeout: int = 10) -> dict:
+    """Drive _execute_python's compile + run with a fake clock and stub steps.
+
+    Each step advances the fake clock by its own seconds and records the budget
+    it was handed. The first recorded step is always the compile.
+    """
+    workdir = tempfile.mkdtemp(prefix="cc-budget-")
+    _budget_calls.clear()
+
+    def _step(argv, cwd, timeout_arg, stdin, *a, **k):
+        if not _budget_calls:
+            _budget_calls.append(("compile", timeout_arg))
+            _budget_clock.now += compile_secs
+            return (compile_rc, b"", compile_err, compile_timed_out, 0, None,
+                    (0, len(compile_err)))
+        _budget_calls.append(("run", timeout_arg))
+        _budget_clock.now += run_secs
+        return (0, b"ran", b"", False, 0, None, (3, 0))
+
+    saved = (executor._run_step, executor._resolve_argv0, time.monotonic)
+    executor._run_step = _step
+    executor._resolve_argv0 = lambda cmd: cmd
+    time.monotonic = _budget_clock
+    try:
+        return executor._execute_python("c", "int main(void) { return 0; }",
+                                        timeout=timeout, workdir=workdir)
+    finally:
+        executor._run_step, executor._resolve_argv0, time.monotonic = saved
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+_remaining_fn = getattr(executor, "_remaining_run_budget", None)
+check("budget: _remaining_run_budget is deadline - now, None once nothing is left",
+      _remaining_fn is not None and _remaining_fn(110.0, 104.0) == 6.0
+      and _remaining_fn(110.0, 110.0) is None and _remaining_fn(110.0, 111.0) is None,
+      f"-> {_remaining_fn}")
+
+_b = _budget_run(compile_secs=4.0)
+check("budget: compile is handed the whole timeout at the start",
+      _budget_calls[:1] == [("compile", 10)], f"-> {_budget_calls}")
+check("budget: run is handed only the 6 s left after a 4 s compile, not the full 10 s",
+      len(_budget_calls) == 2 and _budget_calls[1][0] == "run"
+      and abs(_budget_calls[1][1] - 6.0) < 1e-9 and _b.get("verdict") == "OK",
+      f"-> {_budget_calls} verdict={_b.get('verdict')}")
+
+_b = _budget_run(compile_secs=10.5)
+check("budget: compile over the whole budget -> TLE in phase run, run never started",
+      len(_budget_calls) == 1 and _b.get("verdict") == "TLE" and _b.get("phase") == "run",
+      f"-> calls={_budget_calls} verdict={_b.get('verdict')} phase={_b.get('phase')}")
+check("budget: exhausted-budget result has the Rust shape (timed_out, null exit and byte counts, marker)",
+      _b.get("ok") is False and _b.get("timed_out") is True and _b.get("exit_code") is None
+      and _b.get("duration_ms") == 0 and _b.get("stdout") == ""
+      and _b.get("stdout_bytes") is None and _b.get("stderr_bytes") is None
+      and _b.get("stderr") == "<killed: exceeded wall-clock timeout>"
+      and _b.get("output_truncated") is False,
+      f"-> {_b}")
+_b = _budget_run(compile_secs=10.0)
+check("budget: compile that ends exactly at the deadline leaves nothing, run not started",
+      len(_budget_calls) == 1 and _b.get("phase") == "run" and _b.get("verdict") == "TLE",
+      f"-> calls={_budget_calls} verdict={_b.get('verdict')}")
+
+_b = _budget_run(compile_secs=0.0, compile_timed_out=True)
+check("budget: compile killed by the timeout -> phase compile, verdict TLE, run not started",
+      _b.get("phase") == "compile" and _b.get("verdict") == "TLE"
+      and _b.get("timed_out") is True and len(_budget_calls) == 1,
+      f"-> calls={_budget_calls} phase={_b.get('phase')} verdict={_b.get('verdict')}")
+_b = _budget_run(compile_secs=1.0, compile_rc=1, compile_err=b"boom: syntax error")
+check("budget: compile failure keeps its diagnostics (phase compile, RTE, exit 1, stderr)",
+      _b.get("phase") == "compile" and _b.get("verdict") == "RTE"
+      and _b.get("exit_code") == 1 and "boom: syntax error" in (_b.get("stderr") or "")
+      and len(_budget_calls) == 1,
+      f"-> calls={_budget_calls} verdict={_b.get('verdict')} stderr={_b.get('stderr')!r}")
+
+# Real compile and run, no stubs: a spinning program must come back TLE from the
+# run phase. Sanity only: a compile this cheap cannot show the 2x overrun by
+# itself, so the fake-clock checks above carry the assertion.
+_gcc = shutil.which("gcc")
+if _gcc is None:
+    skip("fallback e2e: spinning C program under one budget", "no gcc on PATH")
+else:
+    _e2e_dir = tempfile.mkdtemp(prefix="cc-budget-e2e-")
+    try:
+        _t0 = time.monotonic()
+        _r = executor._execute_python("c", "int main(void) { for (;;) { } }",
+                                      timeout=2, workdir=_e2e_dir)
+        _elapsed = time.monotonic() - _t0
+    finally:
+        shutil.rmtree(_e2e_dir, ignore_errors=True)
+    check("fallback e2e: spinning C program is TLE in phase run, inside 2x the budget",
+          _r.get("verdict") == "TLE" and _r.get("phase") == "run"
+          and _r.get("timed_out") is True and _elapsed < 4.0,
+          f"-> verdict={_r.get('verdict')} phase={_r.get('phase')} elapsed={_elapsed:.2f}s")
+
+
 print(f"\n=== {len(FAILS)} FAILURE(S), {len(SKIPS)} skipped ===" if FAILS else
       f"\n=== EXECUTOR SWEEP REGRESSIONS FIXED ({len(SKIPS)} skipped) ===")
 sys.exit(1 if FAILS else 0)
