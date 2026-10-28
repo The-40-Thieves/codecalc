@@ -65,7 +65,7 @@ behind it.
   no truncation. Both now share one budget, split fairly: each stream keeps up
   to half the cap, and what one stream leaves unused goes to the other, so a
   flood on one stream cannot push out a short stderr traceback. Each cut stream
-  ends in `\n…[truncated]`, outside the cap. The Rust executor follows in a
+  ends in `\n…[truncated]`, outside the cap. The fallback keeps the program running to its exit or timeout past the cap rather than killing it, so a traceback printed after a flood is still returned. The Rust executor follows in a
   later change; until then the native backend still applies the cap per stream,
   so the backends disagree on mixed output. The result contract is unchanged
   except for the `output_truncated` and `stdout_bytes` descriptions (PATCH).

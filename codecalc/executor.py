@@ -399,11 +399,11 @@ def _reap_group(proc: subprocess.Popen) -> None:
     """SIGKILL the child's whole process group/job, unconditionally.
 
     Called after the payload has already finished, on EVERY exit path —
-    normal, overflow, or timeout — so a descendant it left running does not
+    normal or timeout — so a descendant it left running does not
     outlive the run (#207: `subprocess.Popen(['sleep', '1000'])` then
     `sys.exit(0)` used to leave `sleep` alive with no clock on it at all,
-    because `_kill_group` above was only ever reached from the timeout/
-    overflow branches, never after a normal exit).
+    because `_kill_group` above was only ever reached from the timeout
+    branch, never after a normal exit).
 
     `_kill_group` escalates from SIGTERM because it targets a still-RUNNING
     process it wants to shut down cleanly. By the time THIS runs there is
@@ -413,7 +413,7 @@ def _reap_group(proc: subprocess.Popen) -> None:
     regardless of whether the signal reached anything, so that escalation
     logic can never actually reach its own SIGKILL fallback here, and a
     descendant that ignored SIGTERM would survive. Calling this after
-    `_kill_group` already ran (the timeout/overflow paths) is a harmless
+    `_kill_group` already ran (the timeout path) is a harmless
     no-op: the group is already empty, and killpg on an empty group just
     raises ProcessLookupError, caught below.
 
@@ -565,22 +565,6 @@ def _feed_stdin(proc: subprocess.Popen, data: bytes) -> None:
             pass
 
 
-class _CombinedCount:
-    """Bytes read so far from BOTH pipes of one child. The two _BoundedDrain
-    threads of a child share one instance under a lock, so the overflow kill is
-    decided on the combined stdout+stderr total, the way max_output_kb is
-    defined, and not on either stream alone."""
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._total = 0
-
-    def add(self, n: int) -> int:
-        with self._lock:
-            self._total += n
-            return self._total
-
-
 class _BoundedDrain:
     """Reads one pipe, in a background thread, into a buffer capped at
     cap+1 bytes — never more, regardless of how much the child writes.
@@ -590,10 +574,9 @@ class _BoundedDrain:
     applied after the fact, not a ceiling — a child writing far more than the
     cap made THIS process allocate proportionally to total output before the
     result could even be classified OLE. Reading incrementally and refusing
-    to retain past the cap bounds that allocation to the cap itself, and
-    `on_overflow()` (set once the cap is first crossed) is what lets the
-    caller kill the child's process group promptly instead of waiting for it
-    to finish writing on its own.
+    to retain past the cap bounds that allocation to the cap itself, and nothing is killed at the cap: the child runs on to its exit or its
+    wall-clock timeout (owner decision 2026-10-27), as the Rust executor's
+    capture does, so output printed after a flood is still produced.
 
     +1, not `cap`: `split_output_budget()` detects a cut by checking
     `len(bytes) > budget`, and retaining one byte
@@ -607,16 +590,12 @@ class _BoundedDrain:
     reading at the cap would reintroduce it here.
     """
 
-    def __init__(self, stream, cap: int, combined: _CombinedCount | None = None):
+    def __init__(self, stream, cap: int):
         self._stream = stream
         self._cap = cap
-        # Shared with the child's other drain when there is one; a drain built
-        # alone counts its own stream, which is the single-stream reading.
-        self._combined = combined if combined is not None else _CombinedCount()
         self._retain = cap + 1
         self._buf = bytearray()
         self._seen = 0
-        self._signalled = False
         #: Why the drain stopped early, if it did. The except clause below used
         #: to be a bare `pass`, so a pipe that failed mid-read returned whatever
         #: had arrived so far and nobody was told — output that looks complete
@@ -625,28 +604,18 @@ class _BoundedDrain:
         #: two backends do not diverge on behaviour like this.
         self.error: str | None = None
 
-    def drain(self, on_overflow) -> None:
+    def drain(self) -> None:
         try:
             while True:
                 chunk = self._stream.read(65536)
                 if not chunk:
                     return
                 self._seen += len(chunk)
-                combined_total = self._combined.add(len(chunk))
                 room = self._retain - len(self._buf)
                 if room > 0:
                     self._buf.extend(chunk[:room])
-                # Overflow is decided on the COMBINED bytes both drains have
-                # seen, not on whether one chunk outran the remaining room. The latter
-                # was off by one at exactly the boundary: with cap=4 the buffer
-                # retains cap+1=5, so a single 5-byte chunk found room==5 and
-                # `5 > 5` was false — measured, retained=5 with the overflow
-                # never signalled. The output HAD crossed the cap, so the split
-                # marked it truncated downstream while the child was never
-                # killed and ran on to the wall-clock timeout.
-                if not self._signalled and combined_total > self._cap:
-                    self._signalled = True
-                    on_overflow()
+                # Past the cap the chunk is counted and discarded. Nothing is
+                # signalled: a flood alone never ends the run early.
         except (OSError, ValueError) as exc:
             # Recorded, not swallowed. A partial read is worse than an empty
             # one: it is indistinguishable from the program's real output.
@@ -660,7 +629,7 @@ class _BoundedDrain:
     def seen(self) -> int | None:
         """Bytes read from the pipe, INCLUDING those discarded past the cap.
 
-        Already tracked — the overflow decision is made on it — and now
+        Already tracked — the drain counts past the cap — and now
         exposed, because it is the only number in this process that answers
         "how much did the program print". `len(data())` cannot: the buffer stops
         at cap+1 by design, which is the whole point of this class.
@@ -712,10 +681,8 @@ def _run_step(argv: list[str], cwd: str, timeout: int, stdin: str,
         else:
             popen_kwargs["start_new_session"] = True
         proc = subprocess.Popen(argv, **popen_kwargs)
-        overflow = threading.Event()
-        combined = _CombinedCount()
-        out_reader = _BoundedDrain(proc.stdout, max_output_bytes, combined)
-        err_reader = _BoundedDrain(proc.stderr, max_output_bytes, combined)
+        out_reader = _BoundedDrain(proc.stdout, max_output_bytes)
+        err_reader = _BoundedDrain(proc.stderr, max_output_bytes)
         # The two drain threads are held separately as well as in `threads`.
         # Whether a stream's byte count is trustworthy depends on THAT stream's
         # reader having finished, and nothing else: the first version of this
@@ -724,24 +691,17 @@ def _run_step(argv: list[str], cwd: str, timeout: int, stdin: str,
         # while both drains had run cleanly to EOF.
         threads = [
             threading.Thread(target=_feed_stdin, args=(proc, stdin.encode()), daemon=True),
-            threading.Thread(target=out_reader.drain, args=(overflow.set,), daemon=True),
-            threading.Thread(target=err_reader.drain, args=(overflow.set,), daemon=True),
+            threading.Thread(target=out_reader.drain, daemon=True),
+            threading.Thread(target=err_reader.drain, daemon=True),
         ]
         for t in threads:
             t.start()
 
-        # Polled rather than one blocking proc.wait(timeout=timeout): the kill
-        # on overflow has to happen from THIS thread. Popen.wait() is not
-        # something this codebase calls from two threads on the same process
-        # at once, and a reader thread calling _kill_group the instant it sees
-        # overflow would do exactly that against the wait() below.
+        # Polled, so the wall clock is checked on a fixed tick. The only kill
+        # left in this loop is the wall-clock timeout.
         deadline = time.monotonic() + timeout
         timed_out = False
         while proc.poll() is None:
-            if overflow.is_set():
-                _kill_group(proc)
-                proc.wait()
-                break
             if time.monotonic() >= deadline:
                 timed_out = True
                 _kill_group(proc)
@@ -1482,8 +1442,8 @@ def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10
                                                workdir, started, no_net)
         duration_ms = int((time.monotonic() - run_started) * 1000)
         # out/err are already capped at cap+1 bytes by _run_step's incremental
-        # drain (see _BoundedDrain), and the combined kill fired during the
-        # read if the two streams together crossed the cap. This split applies
+        # drain (see _BoundedDrain), which reads to EOF and keeps at most
+        # cap+1 bytes per stream. This split applies
         # the combined cap once, to the finished buffers, and decides the
         # truncation flag and the markers.
         run_out, run_err, truncated = _capped_streams(cap, out, err)
@@ -1517,7 +1477,7 @@ def _execute_python(language: str, code: str, stdin: str = "", timeout: int = 10
                 "output_error": drain_error,
                 # What each stream actually produced, before the response cap.
                 # Taken from the drain's own running total, which it already
-                # kept to decide overflow — `len(out)` cannot answer this,
+                # kept past the cap — `len(out)` cannot answer this,
                 # because the buffer stops at cap+1 by design.
                 "stdout_bytes": run_seen[0],
                 "stderr_bytes": run_seen[1],

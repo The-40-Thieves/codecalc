@@ -15,7 +15,8 @@ which both backends share the shape of:
   * python (fallback):  `_BoundedDrain` runs one reader thread per pipe, each
     reading to EOF while retaining only cap+1 bytes (issue #25) — so a child
     that fills the ~64 KiB pipe buffer can always keep writing and the reader
-    can never deadlock it; overflow trips a prompt process-group kill.
+    can never deadlock it; output past the cap is counted and discarded, and the
+    child runs on to its exit or timeout.
 
 RunSupervisor (managed_runs=False for the local provider) runs each request in
 its ThreadPoolExecutor, so this suite drives the REAL path: RunSupervisor.start
@@ -130,7 +131,7 @@ def _supervisor(root: str, **kwargs) -> run_supervisor.RunSupervisor:
 def _measured_over_cap(result: dict, stream: str) -> bool:
     """The stream's produced size was MEASURED and exceeds the cap — proof the
     overflow was reported, not silently swallowed. Not `>= PRODUCER_BYTES`: a
-    prompt overflow-kill correctly stops the child before it writes the full
+    run cut short by the wall-clock timeout writes less than the full
     payload, so how much it managed is timing-dependent; that the measured size
     crossed the cap is the stable, backend-agnostic fact."""
     measured = result.get(f"{stream}_bytes")
@@ -201,11 +202,10 @@ def test_both_pipes_over_the_cap_do_not_deadlock() -> bool:
         return True
     check("stdout is bounded near the cap", len(result.get("stdout", "")) < CAP_BOUND)
     check("stderr is bounded near the cap", len(result.get("stderr", "")) < CAP_BOUND)
-    # The overflow-kill is prompt AND asymmetric: it fires the instant the FIRST
-    # stream crosses the cap, so the second may be cut short below it — that is
-    # the anti-deadlock behaviour, not a defect. What must hold is that the
-    # combined overflow was reported (output_truncated) and the stream that
-    # triggered it was measured over the cap; requiring BOTH to individually
+    # Nothing is killed at the cap, so both streams are read to EOF. The checks
+    # here are the stable facts: the combined overflow was reported
+    # (output_truncated), and at least one flooded stream was measured over the
+    # cap.
     # exceed the cap would assert a race the prompt kill deliberately loses.
     check("the two-pipe overflow is reported, not silently dropped",
           result.get("output_truncated") is True)

@@ -966,13 +966,12 @@ there was no way to size a retry. With them, a caller can decide whether raising
 `max_output_kb` is worth it or whether the program is the problem.
 
 > **When `output_truncated` is true, the count is a LOWER BOUND, and the two
-> backends can disagree.** They enforce the cap differently: the pure-Python
-> fallback kills the process as soon as the two streams together cross the cap, while the
-> native executor lets it run on under a separate file-size ceiling. Measured on
-> the same 200 KiB writer at `max_output_kb=1`: native and fallback both report
-> `204800` on this build. The fallback's count is whatever it read before the kill
-> landed, so it can be lower. Both are honest reports of what each observed before its own
-> enforcement stopped the program; neither is "what the program would have
+> backends can disagree.** They differ in what they stop: the native executor
+> lets the program run on under a separate file-size ceiling, while the pure-Python
+> fallback runs it to its exit or its timeout. Measured on the same 200 KiB writer
+> at `max_output_kb=1`: native and fallback both report `204800` on this build.
+> Each is an honest report of what it observed before the program ended or was
+> stopped by its own limit; neither is "what the program would have
 > printed", and no number available to either backend is.
 >
 > When `output_truncated` is **false**, the count is exact and both backends

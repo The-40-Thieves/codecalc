@@ -740,13 +740,54 @@ _r = _fallback("import sys; sys.stdout.write('a' * 32768); sys.stderr.write('b' 
 check("fallback e2e: default cap 0 at exactly 64 KiB combined is not truncated",
       _r.get("verdict") == "OK" and _r.get("output_truncated") is False,
       f"-> verdict={_r.get('verdict')}")
-_r = _fallback(f"import sys; sys.stderr.write({_TB.decode()!r}); sys.stderr.flush()"
-               "; sys.stdout.write('x' * 10240)", max_output_kb=1)
-check("fallback e2e: stdout flood keeps the stderr traceback whole",
-      _r.get("stderr") == _TB.decode() and _r.get("output_truncated") is True
-      and _r.get("stdout") == "x" * (1024 - len(_TB)) + _MARKER,
-      f"-> stderr_len={len(_r.get('stderr') or '')} "
+# The real scenario, at the DEFAULT cap (64 KiB): the program floods stdout to
+# 10x the cap, does a little more work, THEN writes a traceback and a sentinel
+# to stderr. Nothing is killed at the cap (owner decision 2026-10-27), so the
+# traceback is still produced; the fair split keeps all of stderr and gives
+# stdout the rest of the budget. The sleep makes the old overflow kill (which
+# fires on the drain's first full 64 KiB read) land while the traceback is
+# still to come, so this case is deterministic rather than a race.
+_SENT = "SENTINEL-DONE\n"
+_CAP = 64 * 1024
+_r = _fallback("import sys, time; sys.stdout.write('x' * (10 * 65536)); sys.stdout.flush()"
+               "; time.sleep(0.5)"
+               f"; sys.stderr.write({_TB.decode()!r}); sys.stderr.write({_SENT!r})")
+_err_want = _TB.decode() + _SENT
+check("fallback e2e: stdout flood to 10x the cap, then a traceback: whole traceback retained, OLE, truncated",
+      _r.get("verdict") == "OLE" and _r.get("output_truncated") is True
+      and _r.get("stderr") == _err_want
+      and _r.get("stdout") == "x" * (_CAP - len(_err_want)) + _MARKER,
+      f"-> verdict={_r.get('verdict')} stderr_ok={_r.get('stderr') == _err_want} "
       f"stdout_len={len(_r.get('stdout') or '')}")
+check("fallback e2e: the program ran to completion past the cap (stdout_bytes = 10x cap)",
+      _r.get("stdout_bytes") == 10 * 65536, f"-> stdout_bytes={_r.get('stdout_bytes')}")
+_r = _fallback("import sys, time; sys.stdout.write('a' * (50 * 65536)); sys.stdout.flush()"
+               f"; time.sleep(0.5); sys.stderr.write({_SENT!r})")
+_kept = len((_r.get("stdout") or "").encode()) + len((_r.get("stderr") or "").encode())
+check("fallback e2e: 50x flood runs to completion, sentinel survives, retained bytes <= cap + markers",
+      _r.get("verdict") == "OLE" and _r.get("stderr") == _SENT
+      and _r.get("stdout_bytes") == 50 * 65536 and _kept <= _CAP + 2 * len(_MARK),
+      f"-> verdict={_r.get('verdict')} stdout_bytes={_r.get('stdout_bytes')} kept={_kept}")
+_r = executor._execute_python(
+    "python3", "import sys, time; sys.stdout.write('a' * 5000); sys.stdout.flush(); time.sleep(30)",
+    timeout=3, max_output_kb=1)
+check("fallback e2e: flood past the cap, then the wall-clock timeout -> TLE (timeout still wins)",
+      _r.get("verdict") == "TLE" and _r.get("timed_out") is True,
+      f"-> verdict={_r.get('verdict')} timed_out={_r.get('timed_out')}")
+# Compile-timeout path: the compile step runs through the same _run_step. A
+# flood past the combined cap that then runs to the timeout must be reported as
+# timed out (its captured output is discarded by design), never as an overflow.
+_cwd = tempfile.mkdtemp(prefix="cc-compile-timeout-")
+try:
+    _rc, _o, _e, _to, *_ = executor._run_step(
+        [sys.executable, "-c", ("import sys, time; sys.stdout.write('o' * 200000); "
+         "sys.stderr.write('e' * 200000); sys.stdout.flush(); sys.stderr.flush(); time.sleep(30)")],
+        _cwd, 3, "", 0, 0, 65536)
+finally:
+    shutil.rmtree(_cwd, ignore_errors=True)
+check("compile step: a flood past the combined cap that hits the timeout is timed out, not OLE",
+      _to is True and _e == b"<killed: exceeded wall-clock timeout>",
+      f"-> timed_out={_to} stderr={_e[:40]!r}")
 _r = _fallback("import sys; sys.stderr.write('zzz'); sys.stderr.flush()"
                "; sys.stdout.buffer.write(('é' * 1000).encode())", max_output_kb=1)
 check("fallback e2e: multibyte cut lands on a character boundary (510 chars kept)",
