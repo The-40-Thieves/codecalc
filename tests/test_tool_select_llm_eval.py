@@ -474,5 +474,81 @@ with tempfile.TemporaryDirectory(prefix="llm_eval_baseline_test_") as _btmp:
           "changed (n mismatch), rather than silently scoring against a different corpus slice",
           len(warnings) == 1 and "n=999" in warnings[0] and "n=10" in warnings[0], f"-> {warnings}")
 
+# ── provider rules: default model, determinism params, forced tool_choice ───
+
+#: Anthropic models that 400 on a forced tool_choice — tools mode must send
+#: "auto" for these. Haiku 5.5 still accepts a forced tool, so it is not here.
+_NO_FORCED_TOOL_CHOICE = (
+    "anthropic/claude-opus-5-5",
+    "anthropic/claude-sonnet-5-5",
+    "anthropic/claude-fable-5-1",
+    "anthropic/claude-mythos-5-1",
+)
+_ANTHROPIC_REJECTED_SAMPLING = ("temperature", "seed", "top_p", "top_k")
+
+_schemas_core = tsle.load_tool_schemas("core")
+_tools_core = tsle.build_tools_payload(_schemas_core)
+_catalog_core = tsle.build_catalog_text(_schemas_core)
+
+
+def _sent_payload(model, mode):
+    """The exact body call_tool_mode / call_list_mode would POST for `model`.
+
+    Only the HTTP layer is stubbed; both real call sites build their payloads.
+    """
+    sent = []
+    real_post = tsle._post_json
+
+    def _capture(base_url, api_key, payload, timeout, max_retries):
+        sent.append(payload)
+        return {"choices": [{"message": {"content": "[]",
+                                         "tool_calls": [{"function": {"name": "calc_exact"}}]}}]}
+
+    tsle._post_json = _capture
+    try:
+        if mode == "tools":
+            tsle.call_tool_mode("http://stub/v1", FAKE_API_KEY, model, _tools_core, "x", 1.0, 0)
+        else:
+            tsle.call_list_mode("http://stub/v1", FAKE_API_KEY, model, _catalog_core,
+                                _schemas_core, "x", 1.0, 0)
+    finally:
+        tsle._post_json = real_post
+    return sent[0]
+
+
+check("DEFAULT_MODELS: the Anthropic default is anthropic/claude-haiku-5-5 (4.5 is retiring)",
+      tsle.DEFAULT_MODELS[0] == "anthropic/claude-haiku-5-5", f"-> {tsle.DEFAULT_MODELS}")
+
+for _mode in ("tools", "list"):
+    _p = _sent_payload("anthropic/claude-haiku-5-5", _mode)
+    check(f"anthropic/ payload ({_mode} mode) has no temperature, seed, top_p or top_k",
+          not [k for k in _ANTHROPIC_REJECTED_SAMPLING if k in _p], f"-> keys {sorted(_p)}")
+    _p = _sent_payload("openai/gpt-4o-mini", _mode)
+    check(f"openai/ payload ({_mode} mode) still sends temperature 0 and seed 0",
+          _p.get("temperature") == 0 and _p.get("seed") == 0,
+          f"-> temperature={_p.get('temperature')!r} seed={_p.get('seed')!r}")
+
+check("anthropic/claude-haiku-5-5 tools mode keeps tool_choice 'required' (accepts a forced tool)",
+      _sent_payload("anthropic/claude-haiku-5-5", "tools").get("tool_choice") == "required")
+for _m in _NO_FORCED_TOOL_CHOICE:
+    check(f"{_m} tools mode sends tool_choice 'auto' (a forced choice 400s on this model)",
+          _sent_payload(_m, "tools").get("tool_choice") == "auto",
+          f"-> {_sent_payload(_m, 'tools').get('tool_choice')!r}")
+
+with tempfile.TemporaryDirectory(prefix="llm_eval_default_baseline_test_") as _dtmp:
+    _dpath = pathlib.Path(_dtmp) / "baseline.json"
+    _dpath.write_text(json.dumps({
+        "prompt_set_sha256": "aaaa",
+        "models": {"openai/gpt-4o-mini": {"core": {"n": 10, "top1_hits": 5}}},
+    }), encoding="utf-8")
+    _dreport = {
+        "prompt_set_sha256": "aaaa",
+        "results": {tsle.DEFAULT_MODELS[0]: {"core": {"n": 10, "top1_hits": 5}}},
+    }
+    _warnings = tsle.compare_baseline(_dreport, _dpath, epsilon=2)
+    check("compare_baseline() warns, not raises, for the default model when the baseline has no entry for it",
+          len(_warnings) == 1 and "no baseline entry for" in _warnings[0]
+          and "claude-haiku-5-5" in _warnings[0], f"-> {_warnings}")
+
 print(f"\n=== {len(FAILS)} failures ===" if FAILS else "\n=== ALL TOOL-SELECT-LLM-EVAL TESTS PASS ===")
 sys.exit(1 if FAILS else 0)

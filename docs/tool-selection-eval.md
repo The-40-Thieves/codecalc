@@ -63,6 +63,11 @@ trusting the regression compare.
 
 ## Measured — 2026-09-08 (corrected 2026-09-08: `top-3` is now strict)
 
+The default Anthropic model is now `anthropic/claude-haiku-5-5` (Haiku 4.5 is
+retiring). The table below is the 2026-09-08 measurement of its predecessor,
+`anthropic/claude-haiku-4-5-20251001`; `claude-haiku-5-5` has NOT been measured
+yet, and its numbers must not be read into these rows.
+
 Models: `anthropic/claude-haiku-4-5-20251001` and `openai/gpt-4o-mini` — one
 Anthropic model, one non-Anthropic model, so the numbers below are not a
 single vendor's self-report. Both were live on the gateway's `GET /v1/models`

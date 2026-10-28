@@ -55,7 +55,7 @@ on:
         description: 'comma-separated model ids'
         required: false
         type: string
-        default: 'anthropic/claude-haiku-4-5-20251001,openai/gpt-4o-mini'
+        default: 'anthropic/claude-haiku-5-5,openai/gpt-4o-mini'
       groups:
         description: 'comma-separated --groups (full,dev,core)'
         required: false
