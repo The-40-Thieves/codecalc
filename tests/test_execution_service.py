@@ -1929,7 +1929,7 @@ def test_session_output_spill_is_faithful_to_the_pipelines_str_representation() 
     """NOT "binary-safe" (fix round, review Important #4):
     codecalc's WHOLE pipeline already decodes stdout/stderr with
     errors="replace" before spill_if_truncated's code ever sees a `str` —
-    both backends do this (executor.py's `_trim`, the Rust binary's own
+    both backends do this (executor.py's `_capped_streams`, the Rust binary's own
     JSON encoding), for every result, spill or not. So genuinely invalid
     UTF-8 is already lossy SYSTEM-WIDE, upstream of this feature entirely,
     and claiming the spill itself is "binary-safe" overstates what it can
