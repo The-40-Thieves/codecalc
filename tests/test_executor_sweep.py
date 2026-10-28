@@ -659,6 +659,125 @@ check("python fallback: ...classifies runtime_unavailable via ensure_code",
 shutil.rmtree(_kotlin_fixture_dir, ignore_errors=True)
 
 
+# ═══ 8. max_output_kb is ONE combined stdout+stderr cap (GH #354) ═════════
+# The contract says output past the cap is truncated, and the cap is the
+# combined size. The fallback gave each stream the whole cap to itself, so a
+# mix that fit each stream but not the total came back OK. The fix is one pure
+# split, applied once after both drains finish, and the drains share one byte
+# count so the overflow kill uses the same total. Marker spelling pinned here:
+# the Python backends append "\n…[truncated]" outside the budget.
+_MARKER = "\n…[truncated]"
+_MARK = _MARKER.encode()
+_split = getattr(executor, "split_output_budget", lambda *a: (None, None, None))
+
+_o, _e, _t = _split(10, b"a" * 15, b"")
+check("split: stdout alone over the cap keeps cap bytes + one marker",
+      _o == b"a" * 10 + _MARK and _e == b"" and _t is True, f"-> {_o!r} {_t}")
+_o, _e, _t = _split(10, b"", b"b" * 15)
+check("split: stderr alone over the cap keeps cap bytes + one marker",
+      _o == b"" and _e == b"b" * 10 + _MARK and _t is True, f"-> {_e!r} {_t}")
+_o, _e, _t = _split(10, b"aaaa", b"bbb")
+check("split: mixed streams under the cap are kept whole, not truncated",
+      (_o, _e, _t) == (b"aaaa", b"bbb", False), f"-> {(_o, _e, _t)!r}")
+_o, _e, _t = _split(10, b"a" * 6, b"b" * 6)
+check("split: each stream under the cap but combined over is truncated, "
+      "fair split, one marker per cut stream",
+      _o == b"a" * 5 + _MARK and _e == b"b" * 5 + _MARK and _t is True,
+      f"-> {_o!r} {_e!r} {_t}")
+_o, _e, _t = _split(10, b"a" * 5, b"b" * 5)
+check("split: exactly cap combined is NOT truncated (no off-by-one)",
+      (_o, _e, _t) == (b"a" * 5, b"b" * 5, False), f"-> {_t}")
+_o, _e, _t = _split(10, b"a" * 10, b"")
+check("split: exactly cap on one stream is NOT truncated",
+      (_o, _e, _t) == (b"a" * 10, b"", False), f"-> {_t}")
+_o, _e, _t = _split(10, b"a" * 6, b"b" * 5)
+check("split: one byte over the combined cap IS truncated",
+      _t is True, f"-> {_t}")
+_o, _e, _t = _split(5, ("é" * 10).encode(), b"")
+check("split: a multibyte character straddling the cut is not split (kept 'éé')",
+      _o == "éé".encode() + _MARK and _t is True, f"-> {_o!r}")
+_TB = b"Traceback (most recent call last):\n  File \"main.py\", line 2\nValueError: boom\n"
+_o, _e, _t = _split(1024, b"x" * 10240, _TB)
+check("split: a stdout flood keeps a short stderr traceback whole (fair split)",
+      _e == _TB and _o == b"x" * (1024 - len(_TB)) + _MARK and _t is True,
+      f"-> stderr_intact={_e == _TB} stdout_len={len(_o or b'')}")
+
+# End to end through the real fallback runner, with a real program writing to
+# both streams. Verdicts, not exit codes: the overflow kill races natural exit.
+def _fallback(code: str, **kw) -> dict:
+    return executor._execute_python("python3", code, timeout=20, **kw)
+
+
+_r = _fallback("import sys; sys.stdout.write('a' * 600); sys.stderr.write('b' * 600)",
+               max_output_kb=1)
+check("fallback e2e: each stream under 1 KiB, combined over -> OLE + output_truncated",
+      _r.get("verdict") == "OLE" and _r.get("output_truncated") is True,
+      f"-> verdict={_r.get('verdict')} truncated={_r.get('output_truncated')}")
+_r = _fallback("import sys; sys.stdout.write('a' * 300); sys.stderr.write('b' * 300)",
+               max_output_kb=1)
+check("fallback e2e: mixed streams under the combined cap are not truncated",
+      _r.get("verdict") == "OK" and _r.get("output_truncated") is False,
+      f"-> verdict={_r.get('verdict')}")
+_r = _fallback("import sys; sys.stdout.write('a' * 512); sys.stderr.write('b' * 512)",
+               max_output_kb=1)
+check("fallback e2e: exactly the combined cap is not truncated",
+      _r.get("verdict") == "OK" and _r.get("output_truncated") is False,
+      f"-> verdict={_r.get('verdict')}")
+_r = _fallback("import sys; sys.stdout.write('a' * 2000)", max_output_kb=1)
+check("fallback e2e: stdout alone over the cap -> OLE (unchanged)",
+      _r.get("verdict") == "OLE" and _r.get("output_truncated") is True,
+      f"-> verdict={_r.get('verdict')}")
+_r = _fallback("import sys; sys.stdout.write('b' * 10)"
+               "; sys.stderr.write('e' * 2000)", max_output_kb=1)
+check("fallback e2e: stderr alone over the cap -> OLE (unchanged)",
+      _r.get("verdict") == "OLE" and _r.get("output_truncated") is True,
+      f"-> verdict={_r.get('verdict')}")
+_r = _fallback("import sys; sys.stdout.write('a' * 40000); sys.stderr.write('b' * 40000)")
+check("fallback e2e: default cap 0 (64 KiB) applies to the COMBINED total",
+      _r.get("verdict") == "OLE" and _r.get("output_truncated") is True,
+      f"-> verdict={_r.get('verdict')}")
+_r = _fallback("import sys; sys.stdout.write('a' * 32768); sys.stderr.write('b' * 32768)")
+check("fallback e2e: default cap 0 at exactly 64 KiB combined is not truncated",
+      _r.get("verdict") == "OK" and _r.get("output_truncated") is False,
+      f"-> verdict={_r.get('verdict')}")
+_r = _fallback(f"import sys; sys.stderr.write({_TB.decode()!r}); sys.stderr.flush()"
+               "; sys.stdout.write('x' * 10240)", max_output_kb=1)
+check("fallback e2e: stdout flood keeps the stderr traceback whole",
+      _r.get("stderr") == _TB.decode() and _r.get("output_truncated") is True
+      and _r.get("stdout") == "x" * (1024 - len(_TB)) + _MARKER,
+      f"-> stderr_len={len(_r.get('stderr') or '')} "
+      f"stdout_len={len(_r.get('stdout') or '')}")
+_r = _fallback("import sys; sys.stderr.write('zzz'); sys.stderr.flush()"
+               "; sys.stdout.buffer.write(('é' * 1000).encode())", max_output_kb=1)
+check("fallback e2e: multibyte cut lands on a character boundary (510 chars kept)",
+      _r.get("stdout") == "é" * 510 + _MARKER and "�" not in (_r.get("stdout") or ""),
+      f"-> stdout_chars={len(_r.get('stdout') or '')}")
+
+# Compile-failure output is capped the same way. The compiler is stubbed so
+# the test needs no toolchain: the compile step reports both streams over the
+# combined cap, and both must come back marked.
+_saved_resolve, _saved_step = executor._resolve_argv0, executor._run_step
+
+
+def _fake_compile(argv, cwd, timeout, stdin, *a, **k):
+    return (1, b"o" * 600, b"e" * 600, False, 0, None, (600, 600))
+
+
+executor._resolve_argv0 = lambda cmd: cmd
+executor._run_step = _fake_compile
+try:
+    _c = executor._execute_python("c", "int main(void) { return 0; }", timeout=20,
+                                  max_output_kb=1)
+finally:
+    executor._resolve_argv0, executor._run_step = _saved_resolve, _saved_step
+check("compile failure: stdout+stderr over the combined cap is output_truncated",
+      _c.get("output_truncated") is True,
+      f"-> truncated={_c.get('output_truncated')} verdict={_c.get('verdict')}")
+check("compile failure: each stream is cut to its fair share and marked",
+      _c.get("stdout") == "o" * 512 + _MARKER and _c.get("stderr") == "e" * 512 + _MARKER,
+      f"-> stdout_len={len(_c.get('stdout') or '')} stderr_len={len(_c.get('stderr') or '')}")
+
+
 print(f"\n=== {len(FAILS)} FAILURE(S), {len(SKIPS)} skipped ===" if FAILS else
       f"\n=== EXECUTOR SWEEP REGRESSIONS FIXED ({len(SKIPS)} skipped) ===")
 sys.exit(1 if FAILS else 0)

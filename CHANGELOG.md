@@ -59,6 +59,16 @@ behind it.
 
 ### Fixed
 
+- **`max_output_kb` is one combined stdout+stderr cap on the Python paths
+  (#354).** The fallback executor and Piston gave stdout and stderr each the
+  whole cap, so a mix that fit each stream but not the total came back OK with
+  no truncation. Both now share one budget, split fairly: each stream keeps up
+  to half the cap, and what one stream leaves unused goes to the other, so a
+  flood on one stream cannot push out a short stderr traceback. Each cut stream
+  ends in `\n…[truncated]`, outside the cap. The Rust executor follows in a
+  later change; until then the native backend still applies the cap per stream,
+  so the backends disagree on mixed output. The result contract is unchanged
+  except for the `output_truncated` and `stdout_bytes` descriptions (PATCH).
 - **Unary `~` refuses a fraction instead of truncating it (#348).** `~(1/2)`
   returned `-1` and `~(-3/2)` returned `0`, because the operand was silently
   converted to an integer. `~` now takes the same integer check as `&`, `|`,

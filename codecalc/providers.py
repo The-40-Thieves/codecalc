@@ -46,10 +46,6 @@ def _redact_secrets(value: object, secrets: tuple[str, ...]) -> object:
     return value
 
 
-def _truncate_utf8(value: str, max_bytes: int) -> str:
-    return value.encode()[:max_bytes].decode(errors="ignore")
-
-
 @dataclass(frozen=True, slots=True)
 class ComputationSpec:
     """Canonical execution request shared by transports and providers.
@@ -700,10 +696,13 @@ class PistonExecutionProvider:
         # otherwise, which is what makes all three providers agree.
         output_cap = (spec.max_output_kb * 1024 if spec.max_output_kb > 0
                      else executor.MAX_OUTPUT_BYTES)
-        client_output_overflow = stdout_bytes + stderr_bytes > output_cap
-        stdout = _truncate_utf8(stdout, output_cap)
-        remaining = max(0, output_cap - len(stdout.encode()))
-        stderr = _truncate_utf8(stderr, remaining)
+        # One combined budget, split fairly, exactly as the local executors
+        # apply it (executor.split_output_budget). Piston's stdout-first cap
+        # left stderr with whatever stdout did not use, and no marker.
+        kept_stdout, kept_stderr, client_output_overflow = executor.split_output_budget(
+            output_cap, stdout.encode(), stderr.encode())
+        stdout = kept_stdout.decode(errors="replace")
+        stderr = kept_stderr.decode(errors="replace")
         unenforced.append("max_output_kb_enforced_after_provider_response")
         exit_code = stage.get("code")
         compile_ms = int(compile_stage.get("wall_time") or 0)

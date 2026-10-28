@@ -745,6 +745,11 @@ Two things a caller should know before reading anything else:
   `max_output_kb=1` returns 1 039 bytes of `stdout` and `stdout_bytes: 200001`,
   so a caller can size a retry instead of guessing. `null` there means not
   measured (nothing ran); a program that printed nothing reports `0`.
+  `max_output_kb` is one combined cap on stdout and stderr together, split
+  fairly: each stream keeps up to half of it, and what one stream leaves unused
+  goes to the other. A cut stream ends in a marker outside the cap:
+  `\n…[truncated]` from the Python backends (the fallback and Piston), or
+  `\n...[truncated]` (three dots) from the Rust executor.
 
 The schema is JSON Schema 2020-12 — the dialect MCP 2026-07-28 defaults tool
 `outputSchema` to — so a client can validate our results with it directly.

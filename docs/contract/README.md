@@ -952,16 +952,26 @@ max_output_kb=1, program prints 200 000 characters:
   stdout_bytes      200001      <- what it printed
 ```
 
+`max_output_kb` is one **combined** cap on stdout and stderr together. When the
+two together exceed it, each stream keeps up to half the cap, and whatever one
+stream leaves unused goes to the other, so a stream that prints a lot cannot
+push a short stderr traceback out of the result. A cut stream ends in a marker
+that sits outside the cap, one per stream that was cut: `\n…[truncated]`
+(horizontal ellipsis) from the Python backends, the fallback and Piston, and
+`\n...[truncated]` (three dots) from the Rust executor. The two spellings are not
+unified, so a client that matches on the marker must accept both.
+
 Without the counts, "printed 9 KiB" and "printed 4 MB" were the same answer, and
 there was no way to size a retry. With them, a caller can decide whether raising
 `max_output_kb` is worth it or whether the program is the problem.
 
 > **When `output_truncated` is true, the count is a LOWER BOUND, and the two
 > backends can disagree.** They enforce the cap differently: the pure-Python
-> fallback kills the process as soon as its drain crosses the cap, while the
+> fallback kills the process as soon as the two streams together cross the cap, while the
 > native executor lets it run on under a separate file-size ceiling. Measured on
-> the same 200 KiB writer at `max_output_kb=1`: native reports `204800`, the
-> fallback `65536`. Both are honest reports of what each observed before its own
+> the same 200 KiB writer at `max_output_kb=1`: native and fallback both report
+> `204800` on this build. The fallback's count is whatever it read before the kill
+> landed, so it can be lower. Both are honest reports of what each observed before its own
 > enforcement stopped the program; neither is "what the program would have
 > printed", and no number available to either backend is.
 >

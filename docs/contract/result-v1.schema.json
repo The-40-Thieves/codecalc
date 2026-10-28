@@ -144,7 +144,7 @@
         },
         "output_truncated": {
           "type": "boolean",
-          "description": "True when stdout/stderr was cut at the cap. Slice 1 (#120) exists because the Rust backend computed this, raised the OLE verdict from it, and did not emit it, while the fallback did."
+          "description": "True when stdout and stderr TOGETHER exceeded the cap (`max_output_kb`, or the 64 KiB default when 0). The cap is combined, not per stream: each stream keeps up to half of it, and what one stream leaves unused goes to the other. A cut stream ends in a marker outside the cap: \"\\n\u2026[truncated]\" from the Python backends, \"\\n...[truncated]\" from the Rust executor. Slice 1 (#120) exists because the Rust backend computed this, raised the OLE verdict from it, and did not emit it, while the fallback did."
         },
         "output_error": {
           "type": [
@@ -159,7 +159,7 @@
             "null"
           ],
           "minimum": 0,
-          "description": "Bytes of stdout OBSERVED before the response cap was applied. When `output_truncated` is false this is exact and both backends agree. When it is true this is a LOWER BOUND on what the program would have produced, and the two backends can differ: the fallback kills the process as soon as its drain crosses the cap, while the native executor lets it run on under a separate file-size ceiling. Measured on one 200 KiB writer at a 1 KiB cap: native 204800, fallback 65536. Useful for sizing a retry \u2014 raise `max_output_kb` above this \u2014 but not a promise about total output. null means not measured, never zero; a program that printed nothing reports 0."
+          "description": "Bytes of stdout OBSERVED before the response cap was applied. When `output_truncated` is false this is exact and both backends agree. When it is true this is a LOWER BOUND on what the program would have produced, and the two backends can differ: the fallback kills the process as soon as the two streams together cross the cap, while the native executor lets it run on under a separate file-size ceiling. Measured on one 200 KiB writer at a 1 KiB cap: native 204800, fallback 204800 on this build (its count is whatever it read before the kill landed, so it can be lower). Useful for sizing a retry \u2014 raise `max_output_kb` above this \u2014 but not a promise about total output. null means not measured, never zero; a program that printed nothing reports 0."
         },
         "stderr_bytes": {
           "type": [
@@ -363,7 +363,7 @@
         },
         "output_truncated": {
           "type": "boolean",
-          "description": "True when stdout/stderr was cut at the cap. Slice 1 (#120) exists because the Rust backend computed this, raised the OLE verdict from it, and did not emit it, while the fallback did."
+          "description": "True when stdout and stderr TOGETHER exceeded the cap (`max_output_kb`, or the 64 KiB default when 0). The cap is combined, not per stream: each stream keeps up to half of it, and what one stream leaves unused goes to the other. A cut stream ends in a marker outside the cap: \"\\n\u2026[truncated]\" from the Python backends, \"\\n...[truncated]\" from the Rust executor. Slice 1 (#120) exists because the Rust backend computed this, raised the OLE verdict from it, and did not emit it, while the fallback did."
         },
         "output_error": {
           "type": [
@@ -378,7 +378,7 @@
             "null"
           ],
           "minimum": 0,
-          "description": "Bytes of stdout OBSERVED before the response cap was applied. When `output_truncated` is false this is exact and both backends agree. When it is true this is a LOWER BOUND on what the program would have produced, and the two backends can differ: the fallback kills the process as soon as its drain crosses the cap, while the native executor lets it run on under a separate file-size ceiling. Measured on one 200 KiB writer at a 1 KiB cap: native 204800, fallback 65536. Useful for sizing a retry \u2014 raise `max_output_kb` above this \u2014 but not a promise about total output. null means not measured, never zero; a program that printed nothing reports 0."
+          "description": "Bytes of stdout OBSERVED before the response cap was applied. When `output_truncated` is false this is exact and both backends agree. When it is true this is a LOWER BOUND on what the program would have produced, and the two backends can differ: the fallback kills the process as soon as the two streams together cross the cap, while the native executor lets it run on under a separate file-size ceiling. Measured on one 200 KiB writer at a 1 KiB cap: native 204800, fallback 204800 on this build (its count is whatever it read before the kill landed, so it can be lower). Useful for sizing a retry \u2014 raise `max_output_kb` above this \u2014 but not a promise about total output. null means not measured, never zero; a program that printed nothing reports 0."
         },
         "stderr_bytes": {
           "type": [
