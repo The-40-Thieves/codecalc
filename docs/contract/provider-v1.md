@@ -205,6 +205,14 @@ CodeCalc applies a requested `max_output_kb` to the returned buffers, classifies
 overflow as `OLE`, and records
 `max_output_kb_enforced_after_provider_response` in `unenforced` so this
 post-response protection is never presented as remote resource enforcement.
+
+Piston's `timeout` is also applied per phase, so compile plus run can total
+twice the caller's budget. CodeCalc checks that total after the response: when
+`compile.wall_time + run.wall_time` exceeds `timeout * 1000`, the result is
+`TLE` in phase `run` with `timed_out: true`, keeping the output Piston returned.
+For a compiled language the adapter also records
+`timeout_enforced_after_provider_response` in `unenforced` (contract `1.19.0`),
+so the after-the-fact check is not presented as a remote deadline.
 Piston health converts connection/JSON failures into `ready: false`; execution
 converts them into a rejected result with
 `provider_error="provider_transport_failure"`. Both paths redact configured
