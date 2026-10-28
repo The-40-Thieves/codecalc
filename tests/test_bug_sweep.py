@@ -174,8 +174,11 @@ _r = exact.eval_exact("pi > 3")
 check("pi > 3 discloses pi", _r.get("exact") is False and "pi" in (_r.get("approximated") or []),
       f"-> {_r}")
 _r = exact.eval_exact("1 < 2")
+# `unenforced` is platform-dependent (Windows has no fork for the expression
+# bound), so it is left out of the comparison.
 check("bool from exact operands is unchanged (no exact/approximated keys)",
-      _r == {"ok": True, "value": True, "type": "bool"}, f"-> {_r}")
+      {k: v for k, v in _r.items() if k != "unenforced"} == {"ok": True, "value": True, "type": "bool"},
+      f"-> {_r}")
 check("int_widths(200) still fits u8", "u8" in exact.int_widths(200)["fits"])
 check("int_widths(-200) still fits i16", "i16" in exact.int_widths(-200)["fits"])
 check("int_widths(-2**70) fits nothing", exact.int_widths(-(2 ** 70))["fits"] == [])
