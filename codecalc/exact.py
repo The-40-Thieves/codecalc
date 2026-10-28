@@ -80,12 +80,17 @@ _INT_OPS = {"<<": operator.lshift, ">>": operator.rshift,
             "&": operator.and_, "|": operator.or_, "^": operator.xor}
 
 
+def _as_int(v: Fraction, op: str, where: str) -> int:
+    """The integer check every bitwise operator shares: refuse, never truncate."""
+    if v.denominator != 1:
+        raise ValueError(f"bitwise {op} needs integers; {where} is {v}")
+    return int(v)
+
+
 def _int_op(a: Fraction, b: Fraction, op: str) -> Fraction:
     """Bitwise on exact rationals: legal only when both sides are integers."""
-    for side, v in (("left", a), ("right", b)):
-        if v.denominator != 1:
-            raise ValueError(f"bitwise {op} needs integers; {side} operand is {v}")
-    ai, bi = int(a), int(b)
+    ai = _as_int(a, op, "left operand")
+    bi = _as_int(b, op, "right operand")
     if op in ("<<", ">>") and bi < 0:
         raise ValueError(f"negative shift count {bi}")
     # `1 << 10**10` built a 10-billion-bit integer before anything could refuse
@@ -184,7 +189,7 @@ def _ev(node):
         if isinstance(node.op, ast.USub):
             return -_ev(node.operand)
         if isinstance(node.op, ast.Invert):
-            return Fraction(~int(_ev(node.operand)))
+            return Fraction(~_as_int(_ev(node.operand), "~", "operand"))
         raise ValueError("unsupported unary op")
     if isinstance(node, ast.BinOp):
         fn = _BIN.get(type(node.op))
