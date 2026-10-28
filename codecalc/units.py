@@ -8,7 +8,9 @@ treats Celsius as an offset scale.
 
 from __future__ import annotations
 
+import math
 import re
+from fractions import Fraction
 
 from .optional import require
 
@@ -186,23 +188,40 @@ _CONSTANTS: dict[str, tuple[str, str, str, float | None]] = {
     "wien": ("wien_displacement_constant", "b = 2.897771955e-3 m·K", "meter*kelvin", 2.897771955e-3),
 }
 
-#: temperature conversions (sympy treats Celsius as an offset — handle manually)
-def _temp_convert(value: float, src: str, dst: str) -> float:
+def _exact(value: float) -> Fraction:
+    """The decimal the caller wrote (the float's shortest repr), as an exact
+    rational. Never the binary float's full expansion."""
+    return Fraction(str(value))
+
+
+#: temperature conversions (sympy treats Celsius as an offset — handle manually).
+#: Exact Fractions throughout; the caller converts to float once, at the end.
+def _temp_convert(value: Fraction, src: str, dst: str) -> Fraction:
     if src == dst:
         return value
+    k = Fraction("273.15")
     if src == "kelvin" and dst == "celsius":
-        return value - 273.15
+        return value - k
     if src == "celsius" and dst == "kelvin":
-        return value + 273.15
+        return value + k
     if src == "kelvin" and dst == "fahrenheit":
-        return (value - 273.15) * 9 / 5 + 32
+        return (value - k) * Fraction(9, 5) + 32
     if src == "fahrenheit" and dst == "kelvin":
-        return (value - 32) * 5 / 9 + 273.15
+        return (value - 32) * Fraction(5, 9) + k
     if src == "celsius" and dst == "fahrenheit":
-        return value * 9 / 5 + 32
+        return value * Fraction(9, 5) + 32
     if src == "fahrenheit" and dst == "celsius":
-        return (value - 32) * 5 / 9
+        return (value - 32) * Fraction(5, 9)
     raise ValueError("incompatible temperature scales")
+
+
+def _to_float(ratio) -> float:
+    """Correctly rounded float of a sympy ratio. An exact rational is converted
+    from its fraction; an irrational factor (a unit defined with pi) is first
+    evaluated to 30 digits, so no 10-digit cap applies anywhere."""
+    if ratio.is_Rational:
+        return float(Fraction(int(ratio.p), int(ratio.q)))
+    return float(ratio.evalf(30))
 
 
 def convert(value: float, from_unit: str, to_unit: str) -> dict:
@@ -211,6 +230,8 @@ def convert(value: float, from_unit: str, to_unit: str) -> dict:
         value = float(value)
     except (TypeError, ValueError):
         return {"ok": False, "error": f"value must be numeric, got {value!r}"}
+    if not math.isfinite(value):
+        return {"ok": False, "error": f"value must be finite, got {value!r}"}
 
     fu = from_unit.strip().lower().replace(" ", "")
     tu = to_unit.strip().lower().replace(" ", "")
@@ -226,22 +247,23 @@ def convert(value: float, from_unit: str, to_unit: str) -> dict:
         if not (fsrc[1] and tsrc[1]):
             return {"ok": False, "error": "cannot mix temperature and non-temperature units"}
         try:
-            result = _temp_convert(value, fsrc[0], tsrc[0])
+            result = _temp_convert(_exact(value), fsrc[0], tsrc[0])
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}
-        return {"ok": True, "value": round(result, 6), "unit": to_unit.strip(),
+        return {"ok": True, "value": float(result), "unit": to_unit.strip(),
                 "from": f"{value} {from_unit.strip()}"}
 
-    # sympy dimensional conversion
+    # sympy dimensional conversion, exact until the final float()
     try:
-        from_expr = value * _parse_unit(fsrc[0])
+        s, u = _sympy()
+        exact = _exact(value)
+        from_expr = s.Rational(exact.numerator, exact.denominator) * _parse_unit(fsrc[0])
         to_expr = _parse_unit(tsrc[0])
-        _, u = _sympy()
-        result = u.convert_to(from_expr, to_expr)
-        numeric = float(result.evalf(10) / to_expr.evalf(10))
+        ratio = s.simplify(u.convert_to(from_expr, to_expr) / to_expr)
+        numeric = _to_float(ratio)
     except Exception as exc:
         return {"ok": False, "error": f"conversion failed: {exc}"}
-    return {"ok": True, "value": round(numeric, 6), "unit": to_unit.strip(),
+    return {"ok": True, "value": numeric, "unit": to_unit.strip(),
             "from": f"{value} {from_unit.strip()}"}
 
 
