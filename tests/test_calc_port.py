@@ -424,6 +424,23 @@ check("bitop rol 0x0F<<4", r["unsigned"] == 0xF0)
 r = exact.bitop(0xF0, "ror", 4, 8)
 check("bitop ror 0xF0>>4", r["unsigned"] == 0x0F)
 
+# Unary `~` takes the same integer check as the binary bitwise ops (_int_op). It
+# used to int() its operand, so `~(1/2)` returned -1 and `~(-3/2)` returned 0.
+# Public path (eval_exact is what calc_exact calls): a structured ok=false result.
+for _expr in ("~(1/2)", "~(-3/2)", "~1.5"):
+    r = exact.eval_exact(_expr)
+    check(f"{_expr} refused, not truncated",
+          r["ok"] is False and "bitwise ~ needs integers" in r.get("error", ""), f"-> {r}")
+# Integer operands keep working, and the issue's binary regression cases hold.
+for _expr, _want in (("~0", "-1"), ("~(-1)", "0"), ("~(4/2)", "-3"),
+                     ("5 & -1", "5"), ("5 | -1", "-1"), ("5 ^ -1", "-6"),
+                     ("-5 & -3", "-7"), ("8 >> 1", "4"), ("1 << 3", "8")):
+    r = exact.eval_exact(_expr)
+    check(f"{_expr} = {_want}", r.get("ok") is True and r.get("value") == _want, f"-> {r}")
+r = exact.eval_exact("1 << -1")
+check("1 << -1 still refused", r["ok"] is False and "negative shift count" in r.get("error", ""),
+      f"-> {r}")
+
 # symbolic
 r = exact.algebraic_equiv("(a*b)/c", "a*(b/c)")
 check("eq identity", r["identical"] is True)

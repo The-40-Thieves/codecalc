@@ -59,6 +59,12 @@ behind it.
 
 ### Fixed
 
+- **Unary `~` refuses a fraction instead of truncating it (#348).** `~(1/2)`
+  returned `-1` and `~(-3/2)` returned `0`, because the operand was silently
+  converted to an integer. `~` now takes the same integer check as `&`, `|`,
+  `^`, `<<` and `>>`: a non-integer operand is refused with
+  `bitwise ~ needs integers`. Integer operands are unchanged.
+
 - **Same-scale temperature conversions no longer fail (#350).** `convert_units`
   with both units on one scale, such as `25 celsius → celsius`, `25 degC → °C`,
   `300 K → kelvin` or `72 f → fahrenheit`, returned `ok: false` with "incompatible
