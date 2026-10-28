@@ -246,7 +246,7 @@ jobs:
       # The model-driven script's own offline suite (a fake chat-completions
       # server, no network, no token): request payload rules per provider,
       # parsing, scoring and the advisory baseline compare (issue #355).
-      - run: uv run --no-sync python tests/test_tool_select_llm_eval.py
+      - run: uv run --no-sync --no-build python tests/test_tool_select_llm_eval.py
 
   tool-select-llm-eval:
     # scripts/tool_select_llm_eval.py: the MODEL-driven half of the
