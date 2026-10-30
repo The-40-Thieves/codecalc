@@ -1,39 +1,39 @@
 {
-  "prompt_set_sha256": "b7a425b364531476cf89ab95132f049080d293b4f10b167121d3ba1ca4137ef2",
-  "generated_at": "2026-09-08T22:56:07Z",
+  "prompt_set_sha256": "bddf4f17c76904411c7426cc82f45ca239b8da32514566e34a69b167a52308ee",
+  "generated_at": "2026-10-30T00:14:53Z",
   "models": {
-    "anthropic/claude-haiku-4-5-20251001": {
+    "anthropic/claude-haiku-5-5": {
       "full": {
-        "n": 196,
-        "top1_hits": 164,
-        "top3_hits": 134
+        "n": 241,
+        "top1_hits": 233,
+        "top3_hits": 241
       },
       "dev": {
-        "n": 153,
-        "top1_hits": 147,
-        "top3_hits": 106
+        "n": 188,
+        "top1_hits": 187,
+        "top3_hits": 188
       },
       "core": {
-        "n": 100,
-        "top1_hits": 98,
-        "top3_hits": 78
+        "n": 120,
+        "top1_hits": 119,
+        "top3_hits": 120
       }
     },
     "openai/gpt-4o-mini": {
       "full": {
-        "n": 196,
-        "top1_hits": 179,
-        "top3_hits": 193
+        "n": 241,
+        "top1_hits": 223,
+        "top3_hits": 239
       },
       "dev": {
-        "n": 153,
-        "top1_hits": 147,
-        "top3_hits": 151
+        "n": 188,
+        "top1_hits": 185,
+        "top3_hits": 187
       },
       "core": {
-        "n": 100,
-        "top1_hits": 98,
-        "top3_hits": 100
+        "n": 120,
+        "top1_hits": 118,
+        "top3_hits": 119
       }
     }
   }

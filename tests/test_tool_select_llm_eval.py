@@ -550,5 +550,33 @@ with tempfile.TemporaryDirectory(prefix="llm_eval_default_baseline_test_") as _d
           len(_warnings) == 1 and "no baseline entry for" in _warnings[0]
           and "claude-haiku-5-5" in _warnings[0], f"-> {_warnings}")
 
+# ── a call that FAILED is never cached ──────────────────────────────────────
+# Incident (2026-10-29, re-baselining on Haiku 5.5): a rerun with a wrong
+# gateway key wrote 1,098 records like
+#   {"tool_top1": null, "tool_error": "HTTP 401: {\"error\":{\"message\":
+#    \"LiteLLM Virtual Key expected. ...\"}}", "list_top3": [], ...}
+# into the cache, and the next run with a GOOD key would have replayed every
+# one of them as a cache hit scoring 0/n. A transport failure is a fact about
+# this run, not about the model's answer, so it must never be cached; a
+# genuine model decline in LIST mode (empty list, no error) still is.
+with fake_server() as _srv, tempfile.TemporaryDirectory(prefix="llm_eval_err_cache_") as _etmp:
+    _ecache = pathlib.Path(_etmp) / "cache"
+    _ehash = tsle.tools_payload_hash(_tools_core)
+    _eargs = (base_url_for(_srv), DISAGREE_MODEL, "core", "add two numbers exactly",
+              _tools_core, _ehash, _catalog_core, _schemas_core, 5.0, 0, _ecache, True)
+    _bad, _ = tsle.evaluate_prompt(_eargs[0], "wrong-key", *_eargs[1:])
+    check("a 401 from the gateway yields a record with tool_error set and no top-1",
+          _bad["tool_top1"] is None and (_bad["tool_error"] or "").startswith("HTTP 401"),
+          f"-> {_bad}")
+    check("that failed record is NOT written to the cache",
+          not _ecache.exists() or not any(_ecache.iterdir()),
+          f"-> {sorted(p.name for p in _ecache.iterdir()) if _ecache.exists() else []}")
+    _good, _good_hit = tsle.evaluate_prompt(_eargs[0], FAKE_API_KEY, *_eargs[1:])
+    check("the next call with a good key is a real call (not a replayed failure) and succeeds",
+          not _good_hit and _good["tool_error"] is None and _good["tool_top1"] is not None,
+          f"-> from_cache={_good_hit} {_good}")
+    check("a successful record IS cached",
+          _ecache.exists() and len(list(_ecache.iterdir())) == 1)
+
 print(f"\n=== {len(FAILS)} failures ===" if FAILS else "\n=== ALL TOOL-SELECT-LLM-EVAL TESTS PASS ===")
 sys.exit(1 if FAILS else 0)

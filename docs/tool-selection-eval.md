@@ -1,7 +1,7 @@
 # Tool-selection eval — BM25 vs. real models
 
 Two scripts answer two different questions about the same labeled corpus
-(`scripts/data/tool_select_prompts.jsonl`, 196 hand-labeled prompts, none
+(`scripts/data/tool_select_prompts.jsonl`, 241 hand-labeled prompts, none
 containing their own target tool's name):
 
 | | `scripts/tool_select_eval.py` | `scripts/tool_select_llm_eval.py` |
@@ -61,25 +61,66 @@ shape means either the catalog changed since the baseline was measured or
 the cache directory was cleared — either way, worth a human noticing before
 trusting the regression compare.
 
-## Measured — 2026-09-08 (corrected 2026-09-08: `top-3` is now strict)
+## Measured — 2026-10-29 (Haiku 5.5 generation, 241 prompts)
 
-The default Anthropic model is now `anthropic/claude-haiku-5-5` (Haiku 4.5 is
-retiring). The table below is the 2026-09-08 measurement of its predecessor,
-`anthropic/claude-haiku-4-5-20251001`; `claude-haiku-5-5` has NOT been measured
-yet, and its numbers must not be read into these rows.
+Models: `anthropic/claude-haiku-5-5` (the script's default since Haiku 4.5's
+retirement) and `openai/gpt-4o-mini` — one Anthropic model, one
+non-Anthropic model, so the numbers below are not a single vendor's
+self-report. Both were live on the gateway's `GET /v1/models` at the time of
+this run. The corpus is the 241-prompt set (`prompt_set_sha256`
+`bddf4f17…`), 45 prompts larger than the 2026-09-08 run's, because the tools
+added since then (`percent_change`, `session_delete_file`, the
+`solve_linear`/`diff`/`integrate`/`series` surfacing) each brought labeled
+prompts with them. Hit counts are therefore NOT comparable to the history
+table below; the checked-in baseline was regenerated from this run, and the
+table was generated from the run's `--json` report, not hand-edited.
 
-Models: `anthropic/claude-haiku-4-5-20251001` and `openai/gpt-4o-mini` — one
-Anthropic model, one non-Anthropic model, so the numbers below are not a
-single vendor's self-report. Both were live on the gateway's `GET /v1/models`
-at the time of this run; see `scripts/tool_select_llm_eval.py --models` to
-substitute others.
+**Which generation these numbers are from:** Haiku 5.5 and gpt-4o-mini, one
+live run on 2026-10-29, with the tool descriptions as a Python 3.12
+interpreter serves them. Python 3.13+ strips the common indentation from
+docstrings at compile time, so the exact `tools=[...]` payload (and with it
+every cache key) differs between a 3.12 and a 3.14 server; the hit counts
+are not expected to move on whitespace, but that was not measured. The next
+model bump is a rerun of the command under "Reproducing this" plus a
+regenerated baseline, not a hunt.
 
-These numbers come from the SAME live run as the first cut of this eval —
-the `tool_top1`/`list_top3` data itself did not change, only how `top-3` is
-computed from it (see "Method" above) — reprocessed from the on-disk cache
-with **zero new network calls** (verified: a rerun against a deliberately
-wrong API key completed instantly, 898/898 cache hits, since a real call
-would have failed authentication rather than succeeding).
+| Model | Group | n | Model top-1 | Model top-3 (strict) | Model top-1-or-list-top-3 | BM25 top-1 | BM25 top-3 | Disagreements | Tokens |
+|---|---|---|---|---|---|---|---|---|---|
+| `anthropic/claude-haiku-5-5` | full | 241 | 96.7% (233/241) | 100.0% (241/241) | 100.0% (241/241) | 64.7% (156/241) | 77.6% (187/241) | 91 | 13,346,556 |
+| `anthropic/claude-haiku-5-5` | dev | 188 | 99.5% (187/188) | 100.0% (188/188) | 100.0% (188/188) | 70.7% (133/188) | 82.4% (155/188) | 58 | 7,535,296 |
+| `anthropic/claude-haiku-5-5` | core | 120 | 99.2% (119/120) | 100.0% (120/120) | 100.0% (120/120) | 68.3% (82/120) | 86.7% (104/120) | 41 | 2,047,308 |
+| `openai/gpt-4o-mini` | full | 241 | 92.5% (223/241) | 99.2% (239/241) | 99.2% (239/241) | 64.7% (156/241) | 77.6% (187/241) | 94 | 8,101,185 |
+| `openai/gpt-4o-mini` | dev | 188 | 98.4% (185/188) | 99.5% (187/188) | 100.0% (188/188) | 70.7% (133/188) | 82.4% (155/188) | 60 | 4,568,737 |
+| `openai/gpt-4o-mini` | core | 120 | 98.3% (118/120) | 99.2% (119/120) | 100.0% (120/120) | 68.3% (82/120) | 86.7% (104/120) | 42 | 1,214,987 |
+
+**Total tokens across the whole run: 36,814,069** (prompt + completion, both
+modes, both models, all three groups; the gateway's own `usage` field,
+summed — no live pricing feed exists here, so this is tokens, not dollars).
+Haiku 5.5 spends roughly 1.6x the tokens of gpt-4o-mini on the same prompts
+(its tool-call responses are longer). TOOLS mode was **100% reliable for
+both models** (`top1_source` is `{"tool": n}` for every model/group — zero
+`list_fallback`, zero `none`), so every top-1 number above came from a real
+tool call, never the list-mode fallback.
+
+Both models beat BM25's top-1 by a wide margin on every surface, and top-1's
+score gets better as the surface shrinks, the same "less headroom to lose on
+`full`, more on `core`" shape `tool_select_eval.py`'s own self-check
+documents for BM25. Haiku 5.5 now leads gpt-4o-mini on top-1 on every
+surface (96.7% vs 92.5% on `full`).
+
+**The strict top-3 gap that defined the Haiku 4.5 run is gone.** Haiku 5.5's
+LIST-mode ranking contained the expected tool in its top three on every one
+of the 549 prompts across the three groups (100.0% strict top-3), where Haiku
+4.5 scored 68.4-78.0% because LIST mode sometimes declined outright (see "A
+finding from the first live run" below) and sometimes ranked the right tool
+outside its own top three. gpt-4o-mini is unchanged in shape: strict top-3
+within a point of its top-1-or-list-top-3 column.
+
+### History — 2026-09-08 (Haiku 4.5 generation, 196 prompts)
+
+Kept for comparison; superseded by the table above. Corpus: the 196-prompt
+set (`prompt_set_sha256` `b7a425b3…`). `anthropic/claude-haiku-4-5-20251001`
+was the script's default until 2026-10-28.
 
 | Model | Group | n | Model top-1 | Model top-3 (strict) | Model top-1-or-list-top-3 | BM25 top-1 | BM25 top-3 | Disagreements | Tokens |
 |---|---|---|---|---|---|---|---|---|---|
@@ -90,31 +131,12 @@ would have failed authentication rather than succeeding).
 | `openai/gpt-4o-mini` | dev | 153 | 96.1% (147/153) | 98.7% (151/153) | 100.0% (153/153) | 65.4% (100/153) | 81.7% (125/153) | 59 | 2,275,477 |
 | `openai/gpt-4o-mini` | core | 100 | 98.0% (98/100) | 100.0% (100/100) | 100.0% (100/100) | 68.0% (68/100) | 83.0% (83/100) | 35 | 645,957 |
 
-**Total tokens across the whole run: 16,563,555** (prompt + completion, both
-modes, both models, all three groups; the gateway's own `usage` field, summed
-— no live pricing feed exists here, so this is tokens, not dollars). TOOLS
-mode was **100% reliable for both models** (`top1_source` is `{"tool": n}`
-for every model/group — zero `list_fallback`, zero `none`), so every top-1
-number above came from a real tool call, never the list-mode fallback.
-
-Both models beat BM25's top-1 by a wide margin on every surface, and top-1's
-score gets BETTER as the surface shrinks — `core`'s 25-tool catalog scores
-~98% for both models against a distractor set 1/2 the size of `full`'s — the
-same "less headroom to lose on `full`, more on `core`" shape
-`tool_select_eval.py`'s own self-check documents for BM25.
-
-**Strict top-3 is where the two models genuinely diverge, and it is not
-close.** `openai/gpt-4o-mini`'s LIST-mode ranking is excellent on its own
-(98.5-100% strict top-3, matching its `top1_or_list_top3` numbers almost
-exactly — its ranked list nearly always contains its own top-1 pick).
-`anthropic/claude-haiku-4-5-20251001`'s strict top-3 is markedly worse
-(68.4-78.0%) despite a strong top-1 (83.7-98.0%) — the ~15-30pp gap between
-its top-1 and its own top-1-or-list-top-3 column is exactly the set of
-prompts where LIST mode's three picks did not include what TOOLS mode
-correctly called directly. This is a real, measured difference in how the
-two models rank under a plain-text ask with no forced schema, not an
-artifact of this eval's method (see the LIST-mode caveat below for the
-separate, smaller effect of LIST mode sometimes declining outright).
+Total tokens for that run: 16,563,555. Strict top-3 was where the two models
+genuinely diverged: gpt-4o-mini's LIST-mode ranking nearly always contained
+its own top-1 pick, while Haiku 4.5's strict top-3 (68.4-78.0%) sat 15-30pp
+below its own top-1-or-list-top-3 column, exactly the set of prompts where
+LIST mode's three picks did not include what TOOLS mode correctly called
+directly.
 
 The **disagreements** column counts prompts where BM25's own top-1 pick and
 the model's effective top-1 pick differ — most of these are not the model
@@ -151,7 +173,9 @@ does cost the STRICT `top-3` metric directly: a decline means `list_top3` is
 empty, so strict top-3 is a guaranteed miss on that prompt regardless of
 whether TOOLS mode got it right — one contributor (alongside genuinely
 ranking a correct tool outside its own top three) to the top-1 vs. strict
-top-3 gap the table above shows for `anthropic/claude-haiku-4-5-20251001`.
+top-3 gap the 2026-09-08 history table shows for
+`anthropic/claude-haiku-4-5-20251001`. Haiku 5.5 did not decline once in
+the 2026-10-29 run (strict top-3 100.0% on every group).
 `top1_or_list_top3` recovers a decline the same way it recovers any other
 list_top3 miss, since it unions in `effective_top1` regardless of why LIST
 mode came back empty — which is exactly why that column is reported

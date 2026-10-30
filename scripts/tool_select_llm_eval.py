@@ -492,7 +492,14 @@ def evaluate_prompt(base_url: str, api_key: str, model: str, group: str, prompt:
         "list_error": _scrub(list_result["error"], api_key) if list_result["error"] else None,
         "list_usage": list_result["usage"],
     }
-    if use_cache:
+    # A transport failure (HTTP error, connection error, retries exhausted)
+    # is a fact about THIS run, not about the model's answer, so it is never
+    # cached: a rerun with a bad key once wrote 1,098 `HTTP 401` records that
+    # the next good-key run would have replayed as cache hits scoring 0/n. A
+    # genuine LIST-mode decline (empty `list_top3`, no error) is still cached;
+    # that is the model's answer. `tests/test_tool_select_llm_eval.py` holds
+    # the 401 case.
+    if use_cache and record["tool_error"] is None and record["list_error"] is None:
         cache_save(cache_dir, key, record)
     return record, False
 
