@@ -65,9 +65,11 @@ behind it.
   whole pass. One budget now covers every probe and hello-world run in a pass.
   Runtimes it cuts short stay `installed` and are reported as not probed, never
   `unhealthy`. The report says so in `deep_budget_s`, `deep_elapsed_ms`,
-  `deep_budget_exhausted` and `deep_skipped`, and the text output gets one line
+  `deep_budget_exhausted` and `deep_skipped` (contract `1.19.0` -> `1.20.0`,
+  MINOR, additive, on the doctor schema), and the text output gets one line
   under `--deep`. A timed-out first version probe followed by a failed second
-  one now says so in `probe_error`.
+  one now says so in `probe_error`. The gVisor prerequisite canary that
+  `--deep` also runs is outside this budget.
 - **`tool_select_llm_eval.py` defaults to `anthropic/claude-haiku-5-5` and stops sending parameters Claude rejects (#355).**
   Haiku 4.5 is retiring, so its id was replaced as the default. Requests to
   `anthropic/` models no longer send `temperature`, `seed`, `top_p` or `top_k`,

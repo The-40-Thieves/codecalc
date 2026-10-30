@@ -1,7 +1,20 @@
 # The codecalc result contract
 
-**Current version: `1.19.0`** · Schema: [`result-v1.schema.json`](result-v1.schema.json) ·
+**Current version: `1.20.0`** · Schema: [`result-v1.schema.json`](result-v1.schema.json) ·
 Source of truth: [`codecalc/contract.py`](../../codecalc/contract.py)
+
+`1.20.0` is a MINOR bump over `1.19.0`, on the **doctor** schema
+(`doctor-v1.schema.json`), additively. `codecalc doctor --deep` is now bounded
+by one wall-clock budget for the whole pass (180 s by default), where before
+the per-probe deadlines and the warm retry could multiply to 710 s on a host
+where every version probe hangs. The report says what the budget did in four
+new top-level keys, always present: `deep_budget_s` and `deep_elapsed_ms`
+(null without `--deep`), `deep_budget_exhausted` (boolean) and `deep_skipped`
+(integer). A runtime the budget cut short stays `installed` with a
+`probe_error` saying it was not probed; the budget running out is not evidence
+about any runtime, so it never demotes one or flips `healthy`, the same rule
+`1.13.0` set for a single probe's timeout. A `1.19.0` client sees keys it did
+not know before and nothing else changes.
 
 `1.19.0` is a MINOR bump over `1.18.0`. It adds one value to `unenforced`,
 additively: **`timeout_enforced_after_provider_response`**, reported by the
