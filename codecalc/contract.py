@@ -51,7 +51,7 @@ from . import errors, grades
 #: each component is allowed to change — the short form is that MAJOR is the
 #: only one that may break a reader, and it carries a twelve-month deprecation
 #: window before anything is removed.
-CONTRACT_VERSION = "1.19.0"
+CONTRACT_VERSION = "1.20.0"
 
 # THE `$schema` AND `$id` URIs ARE NOT HERE ON PURPOSE.
 #
@@ -2228,6 +2228,40 @@ def build_doctor_schema(dialect: str | None = None, schema_id: str | None = None
             },
             "skill_file": {"type": ["string", "null"]},
             "remedies": {"type": "array", "items": {"type": "string"}},
+            # The --deep wall-clock budget (contract 1.20.0). All four keys are
+            # always present so a reader never branches on existence; the first
+            # two are null without --deep.
+            "deep_budget_s": {
+                "type": ["number", "null"],
+                "description": (
+                    "The wall-clock budget, in seconds, that bounded this "
+                    "`--deep` pass (every version probe and hello-world run "
+                    "together; `doctor.DEEP_BUDGET_S`, 180 by default). null "
+                    "without --deep."
+                ),
+            },
+            "deep_elapsed_ms": {
+                "type": ["number", "null"],
+                "description": "Wall-clock time the --deep pass took. null without --deep.",
+            },
+            "deep_budget_exhausted": {
+                "type": "boolean",
+                "description": (
+                    "true when the budget ran out before every probe and "
+                    "hello-world run had been made. The runtimes cut short "
+                    "stay `installed` with `probe_error` saying they were not "
+                    "probed; an exhausted budget is NOT evidence about any "
+                    "runtime and never demotes one or flips `healthy`."
+                ),
+            },
+            "deep_skipped": {
+                "type": "integer",
+                "minimum": 0,
+                "description": (
+                    "How many runtime checks (version probes or hello-world "
+                    "runs) the budget skipped. 0 without --deep."
+                ),
+            },
         },
     }
 

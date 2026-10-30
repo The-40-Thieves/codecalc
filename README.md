@@ -272,8 +272,13 @@ reported `available`, because nothing was executed, and claiming otherwise for a
 binary that was merely found on `PATH` would be a stronger measurement than was
 taken.
 
-Under `--deep`, a runtime whose version probe never gets an answer (a spawn
-failure or a timeout) is `unhealthy` too; a nonzero exit alone only counts
+`--deep` is capped by one 180 s wall-clock budget shared across every runtime
+probe and hello-world run; runtimes the budget cuts short stay `installed` and
+are reported as not probed, never `unhealthy`.
+
+Under `--deep`, a runtime whose version probe fails to spawn is `unhealthy`;
+a version probe that times out is reported as not measured, not broken. A
+nonzero exit alone only counts
 when the flag used is one confirmed correct for that command (`go version`,
 `lua -v`, `zig version` — none of them speak GNU `--version`, so a bare
 nonzero exit there is reported as merely unmeasured, not broken). A captured
