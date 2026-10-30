@@ -3326,6 +3326,15 @@ def _doctor(as_json: bool = False, deep: bool = False) -> int:
     resolved = total - summary["supported"]
     print(f"  runtimes          {resolved}/{total} resolved "
           f"({rep['status_basis']})")
+    if deep:
+        # One line, and only under --deep: the budget is what makes a timed-out
+        # or skipped probe mean "not measured", so a reader has to see it.
+        if rep["deep_budget_exhausted"]:
+            print(f"    deep budget EXHAUSTED after {rep['deep_budget_s']:g}s: "
+                  f"{rep['deep_skipped']} runtime checks not probed")
+        else:
+            print(f"    deep budget       {rep['deep_budget_s']:g}s, "
+                  f"used {rep['deep_elapsed_ms'] / 1000:.1f}s")
     for state in ("available", "unhealthy", "supported"):
         names = sorted(r["name"] for r in rep["runtimes"] if r["status"] == state)
         if names:
