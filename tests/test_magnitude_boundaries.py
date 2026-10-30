@@ -1120,7 +1120,8 @@ check("unbounded exponent: (x+1)**(x*re(3125)) still skipped, a free symbol surv
 check("hidden constant: (x+1)**(3125+x**0) refused by the cap (H1)", says(explode("(x+1)**(3125+x**0)"), CAP_TEXT))
 # H1, value level: terms that cancel only under evaluation (`x - x`, `y*x - x*y`). The
 # first measured 10.05 s end to end before this pass existed (2026-10-29).
-for _expr in ("(x+1)**(3125+x-x)", "(x+1)**(3125+x**2-x**2)", "(x+1)**(3125+y*x-x*y)"):
+for _expr in ("(x+1)**(3125+x-x)", "(x+1)**(3125+x**2-x**2)", "(x+1)**(3125+y*x-x*y)",
+              "(x+1)**(3125+(x-x)**2)", "(x+1)**(3125+(y*x-x*y)**3)", "(x+1)**(3125+x/x)"):
     check(f"hidden constant: {_expr} refused by the cap, cancels under evaluation (H1)", says(explode(_expr), CAP_TEXT))
 for _expr in ("(x+1)**(x+3125)", "(x+1)**(3125*y)", "(x+1)**(200+x-x)"):
     check(f"hidden constant: {_expr} accepted, genuinely symbolic or at the cap (H1)", explode(_expr) is None)

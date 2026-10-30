@@ -8723,17 +8723,23 @@ def _collapse_exponent_arithmetic(node):
     both come back as the integer 3125. The syntactic strip above cannot see
     those; this is the value-level second pass behind it.
 
-    `Pow` nodes are NEVER rebuilt: `Pow(10, 10**6)` under evaluation would
-    compute a million-digit integer, and a Pow is exactly the node the power
-    tower and digit ceilings have already judged. Add/Mul evaluation is
-    flatten-and-collect, linear in the argument count, with the only
-    arithmetic being the coefficients' own (already under the numeric
-    ceiling). Deferred stand-in calls have no `eval`, so they stay inert.
+    A `Pow` node is recursed INTO but never itself evaluated: its base and
+    exponent get the same collapse (`(x-x)**2` becomes `0**2`, and that has
+    no free symbol), then the Pow is rebuilt with `evaluate=False`, because
+    `Pow(10, 10**6)` under evaluation would compute a million-digit integer,
+    and a Pow is exactly the node the power tower and digit ceilings have
+    already judged. Add/Mul evaluation is flatten-and-collect, linear in the
+    argument count, with the only arithmetic being the coefficients' own
+    (already under the numeric ceiling). Deferred stand-in calls have no
+    `eval`, so they stay inert.
     """
-    from sympy import Add, Mul
+    from sympy import Add, Mul, Pow
 
     if isinstance(node, (Add, Mul)):
         return node.func(*(_collapse_exponent_arithmetic(arg) for arg in node.args))
+    if isinstance(node, Pow):
+        return Pow(_collapse_exponent_arithmetic(node.base),
+                   _collapse_exponent_arithmetic(node.exp), evaluate=False)
     return node
 
 
