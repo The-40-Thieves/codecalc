@@ -8680,6 +8680,69 @@ def _bare_class_violation(tree) -> str | None:
     return None
 
 
+def _strip_zero_symbolic_parts(node):
+    """`node` with its trivially-zero symbolic parts removed, as a residual.
+
+    The exponent `3125 + 0*x` is the integer 3125 for every value of `x`, so a
+    free symbol in it does not make it symbolic. Two shapes are zero whatever
+    their symbols are: a `Mul` carrying an `Integer(0)` factor (dropped from an
+    `Add`, and zero outright anywhere else), and a `Pow` whose exponent is 0
+    (`x**0` is 1, so it becomes 1 inside a `Mul`). Recurses through nested
+    `Add`/`Mul`; any other node is returned as it is.
+
+    Works on the tree as built (`evaluate=False`): no `evaluate=True`, no
+    `simplify`, no `evalf`, because that arithmetic is what the deferred tree
+    exists to avoid. The caller judges the residual: one with no free symbols
+    is a constant and gets the cap; one that still has a free symbol is
+    genuinely symbolic and keeps the skip.
+    """
+    from sympy import Add, Integer, Mul, Pow, S
+
+    def has_zero_factor(arg):
+        return isinstance(arg, Mul) and any(isinstance(f, Integer) and f == 0 for f in arg.args)
+
+    if isinstance(node, Add):
+        kept = [
+            S.One if isinstance(arg, Pow) and arg.exp == 0 else _strip_zero_symbolic_parts(arg)
+            for arg in node.args if not has_zero_factor(arg)
+        ]
+        return Add(*kept, evaluate=False) if kept else S.Zero
+    if isinstance(node, Mul):
+        if has_zero_factor(node):
+            return S.Zero
+        factors = [
+            S.One if isinstance(arg, Pow) and arg.exp == 0 else _strip_zero_symbolic_parts(arg) for arg in node.args
+        ]
+        return Mul(*factors, evaluate=False)
+    return node
+
+
+def _collapse_exponent_arithmetic(node):
+    """`node` with its `Add`/`Mul` layers rebuilt under SymPy's ordinary
+    evaluation, so like terms cancel: `3125 + x - x` and `3125 + y*x - x*y`
+    both come back as the integer 3125. The syntactic strip above cannot see
+    those; this is the value-level second pass behind it.
+
+    A `Pow` node is recursed INTO but never itself evaluated: its base and
+    exponent get the same collapse (`(x-x)**2` becomes `0**2`, and that has
+    no free symbol), then the Pow is rebuilt with `evaluate=False`, because
+    `Pow(10, 10**6)` under evaluation would compute a million-digit integer,
+    and a Pow is exactly the node the power tower and digit ceilings have
+    already judged. Add/Mul evaluation is flatten-and-collect, linear in the
+    argument count, with the only arithmetic being the coefficients' own
+    (already under the numeric ceiling). Deferred stand-in calls have no
+    `eval`, so they stay inert.
+    """
+    from sympy import Add, Mul, Pow
+
+    if isinstance(node, (Add, Mul)):
+        return node.func(*(_collapse_exponent_arithmetic(arg) for arg in node.args))
+    if isinstance(node, Pow):
+        return Pow(_collapse_exponent_arithmetic(node.base),
+                   _collapse_exponent_arithmetic(node.exp), evaluate=False)
+    return node
+
+
 def reject_explosive(tree) -> str | None:
     """Reason this PARSED expression must not be evaluated, or None.
 
@@ -8731,7 +8794,7 @@ def reject_explosive(tree) -> str | None:
     either alone as sufficient. See `tests/test_bug_sweep.py`'s block
     for the assertion that the backstop actually holds for this shape.
     """
-    from sympy import Function, Integer, Pow, Rational
+    from sympy import Add, Function, Integer, Pow, Rational
 
     # #326 (THE-1091): a SEPARATE pass, before the Pow-only walk below,
     # covers a numeric-only Integer/Mul/Add/Pow that the Pow-loop's own
@@ -8861,10 +8924,36 @@ def reject_explosive(tree) -> str | None:
                 return ("a power tower (an exponent that is itself a power) is not "
                         "evaluated: the result grows faster than any useful bound")
 
+            # H1: decide on the VALUE of the exponent, not its syntax. `3125+0*x` is the
+            # integer 3125; once its trivially-zero parts are stripped, only a residual that
+            # still has a free symbol is genuinely symbolic.
             if exponent.free_symbols:
-                continue  # symbolic exponent, e.g. x**n — nothing to expand
+                exponent = _strip_zero_symbolic_parts(exponent)
+                if exponent.free_symbols:
+                    # `3125 + x - x` survives the syntactic strip; let Add/Mul
+                    # evaluation cancel what cancels (never Pow, see the helper).
+                    exponent = _collapse_exponent_arithmetic(exponent)
+                if exponent.free_symbols:
+                    # Genuinely symbolic (`x**n`, `(x+1)**(x+3125)`): SymPy does not
+                    # binomially expand a power whose exponent carries a symbol
+                    # (measured 2026-10-29: `(x+1)**(x+3125)` evaluates in 0.04 s).
+                    continue
 
-            if not base.free_symbols:
+            # H4: an UNRESOLVED numeric base (`pi+1`, `E+2`) expands exactly like a symbolic
+            # one, so it is not handled by this numeric branch: it falls through to the
+            # symbolic-base cap below. A fractional exponent keeps the numeric branch, as before.
+            # An irrational SUM base (`pi+1`, `sqrt(2)+1`) is routed to the cap for EVERY
+            # exponent shape, not only a bare Integer: `(pi+1)**(10**5/2**5)` is
+            # `(pi+1)**3125` and binomially expands the same. An irrational ATOM base is
+            # not: `pi**1464` (what `polygamma(1463, 1)` evaluates to) has no sum to
+            # expand and costs nothing, so it keeps the numeric branch as before.
+            # `has(Add)`, not `isinstance`: `(2*(pi+1))**3125` wraps the sum in a Mul and
+            # expands just the same (measured 2026-10-29: 10.65 s). `is_rational is not
+            # True` so an undetermined base (a stand-in call next to a sum) is routed to
+            # the cap too, the conservative side.
+            irrational_sum_base = base.is_rational is not True and base.has(Add)
+            numeric_base = not base.free_symbols and not irrational_sum_base
+            if numeric_base:
                 if not isinstance(exponent, Integer):
                     # A UNIT-FRACTION exponent (1/2, 1/3, ... 1/n for an
                     # integer n >= 2) is exactly the shape `sqrt`/`cbrt`/
@@ -9011,7 +9100,10 @@ def reject_explosive(tree) -> str | None:
                     continue
                 base_num, base_den, base_res = _log10_num_den(base, memo)
                 if not base_res:
-                    continue  # inconclusive -- a Function call, irrational constant, ...
+                    # Inconclusive: a stand-in call, or an irrational ATOM (`pi**1464`).
+                    # Nothing sound to scale, and no sum to expand. The irrational SUM
+                    # case never reaches here (see `irrational_sum_base`).
+                    continue
                 # UNSWAPPED regardless of `exponent`'s sign, and always
                 # scaled by `abs_exp`, not `exp_int` directly: the genuine
                 # computational work for `base**exp_int`, POSITIVE or
@@ -9041,8 +9133,8 @@ def reject_explosive(tree) -> str | None:
             # symbolic, or gets partially EXPANDED), but a CPU-cost ceiling
             # (`MAX_SYMBOLIC_EXPONENT`; see its own definition above for the
             # measured superlinear cost of `sp.expand`/`sp.factor` on a
-            # large symbolic power). Needs the exponent's sign and an
-            # UPPER BOUND on its magnitude, WITHOUT ever materializing the
+            # large symbolic power). Needs an UPPER BOUND on the exponent's
+            # magnitude, for either sign, WITHOUT ever materializing the
             # exponent's actual value (#326 finding 3, round 4, and finding
             # 1, round 5: an exact `Mul.flatten`-based reconstruction, and
             # later an exact-multiset-or-nothing requirement, both left an
@@ -9056,13 +9148,8 @@ def reject_explosive(tree) -> str | None:
             # back to `_log10_num_den`'s general (possibly-upper-bound)
             # magnitude for anything `_factor_multiset` cannot decompose
             # (an `Add` exponent, most commonly) — sign-agnostic by
-            # design (see `_safe_scale_log10`'s own docstring), so sign
-            # comes from SymPy's own assumption system instead
-            # (`.is_negative`, cheap — no evaluation, just the expression's
-            # own cached/derivable assumptions) with the SAFE default
-            # (assume positive, i.e. do not skip the check) when even that
-            # is undetermined, matching this ceiling's own "a false
-            # refusal is far cheaper than an unbounded `sp.expand`" trade.
+            # design (see `_safe_scale_log10`'s own docstring). The cap
+            # bounds the magnitude for either sign, so no sign is needed.
             multiset = _factor_multiset(exponent, memo.setdefault("__multiset__", {}))
             if _table_multiset_trusted(multiset):
                 terms, exp_sign = multiset
@@ -9093,18 +9180,30 @@ def reject_explosive(tree) -> str | None:
                 # OTHER `_log10_num_den` call site in this same loop (the
                 # `sqrt`/`cbrt` base check, above) already switched to it.
                 exp_log_num, exp_log_den, exp_res = _resolved_table_aware_magnitude(exponent, memo)
+                if not exp_res and exponent.is_integer is False:
+                    # SymPy's own assumptions prove the exponent is NOT an integer (`pi`,
+                    # `E`, `I`, `log(2)`, `cos(1)`, `1/2`): `sp.expand` never binomially
+                    # expands a non-integer power of a symbolic base, so there is no
+                    # superlinear cost to bound, whatever the exponent's size.
+                    continue
                 if not exp_res:
-                    continue  # inconclusive -- a Function call, irrational constant, ...
+                    # H2: inconclusive is not safe. The exponent has no free symbol here (the skip
+                    # above), so nothing in it can stay symbolic. A constant whose size cannot be
+                    # bounded and that SymPy cannot prove non-integer (`re(3125)`, `3125*I**4`,
+                    # `bell(7)*I`) fails closed. Accepted cost: a benign constant of that kind,
+                    # `(x+1)**EulerGamma` (`is_integer` is None for it), is refused too -- a false
+                    # refusal is far cheaper than an unbounded expansion.
+                    return (f"a symbolic power whose exponent could not be bounded is treated as "
+                            f"over the limit of {MAX_SYMBOLIC_EXPONENT}: its size cannot be "
+                            "checked before expanding it")
                 exp_magnitude = exp_log_num - exp_log_den
-                exp_sign = -1 if exponent.is_negative or _table_product_is_negative(exponent) else 1
 
-            # abs(), because the danger is the MAGNITUDE — a large negative
-            # exponent on a symbolic base is not expanded the same way a
-            # large positive one is, so only the positive side is bounded
-            # below, matching this loop's behavior since #214.
+            # The MAGNITUDE is capped for BOTH signs. `evaluate_expression` expands
+            # `(x+1)**-3125` as expensively as `(x+1)**3125` (measured 2026-10-22: both hit
+            # the 10 s CPU budget), so a negative exponent is no cheaper to refuse.
             if exp_magnitude <= 0:  # |value| <= 1 (or exactly 0) -- trivial
                 continue
-            if exp_sign > 0 and exp_magnitude > math.log10(MAX_SYMBOLIC_EXPONENT):
+            if exp_magnitude > math.log10(MAX_SYMBOLIC_EXPONENT):
                 # NEVER interpolate the exponent's own value: report the
                 # (cheap, bounded) digit count instead — see
                 # `_approx_decimal_digits`'s own docstring for why
