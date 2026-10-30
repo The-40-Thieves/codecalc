@@ -8717,6 +8717,26 @@ def _strip_zero_symbolic_parts(node):
     return node
 
 
+def _collapse_exponent_arithmetic(node):
+    """`node` with its `Add`/`Mul` layers rebuilt under SymPy's ordinary
+    evaluation, so like terms cancel: `3125 + x - x` and `3125 + y*x - x*y`
+    both come back as the integer 3125. The syntactic strip above cannot see
+    those; this is the value-level second pass behind it.
+
+    `Pow` nodes are NEVER rebuilt: `Pow(10, 10**6)` under evaluation would
+    compute a million-digit integer, and a Pow is exactly the node the power
+    tower and digit ceilings have already judged. Add/Mul evaluation is
+    flatten-and-collect, linear in the argument count, with the only
+    arithmetic being the coefficients' own (already under the numeric
+    ceiling). Deferred stand-in calls have no `eval`, so they stay inert.
+    """
+    from sympy import Add, Mul
+
+    if isinstance(node, (Add, Mul)):
+        return node.func(*(_collapse_exponent_arithmetic(arg) for arg in node.args))
+    return node
+
+
 def reject_explosive(tree) -> str | None:
     """Reason this PARSED expression must not be evaluated, or None.
 
@@ -8904,7 +8924,14 @@ def reject_explosive(tree) -> str | None:
             if exponent.free_symbols:
                 exponent = _strip_zero_symbolic_parts(exponent)
                 if exponent.free_symbols:
-                    continue  # symbolic exponent, e.g. x**n — nothing to expand
+                    # `3125 + x - x` survives the syntactic strip; let Add/Mul
+                    # evaluation cancel what cancels (never Pow, see the helper).
+                    exponent = _collapse_exponent_arithmetic(exponent)
+                if exponent.free_symbols:
+                    # Genuinely symbolic (`x**n`, `(x+1)**(x+3125)`): SymPy does not
+                    # binomially expand a power whose exponent carries a symbol
+                    # (measured 2026-10-29: `(x+1)**(x+3125)` evaluates in 0.04 s).
+                    continue
 
             # H4: an UNRESOLVED numeric base (`pi+1`, `E+2`) expands exactly like a symbolic
             # one, so it is not handled by this numeric branch: it falls through to the
@@ -8914,7 +8941,11 @@ def reject_explosive(tree) -> str | None:
             # `(pi+1)**3125` and binomially expands the same. An irrational ATOM base is
             # not: `pi**1464` (what `polygamma(1463, 1)` evaluates to) has no sum to
             # expand and costs nothing, so it keeps the numeric branch as before.
-            irrational_sum_base = base.is_rational is False and isinstance(base, Add)
+            # `has(Add)`, not `isinstance`: `(2*(pi+1))**3125` wraps the sum in a Mul and
+            # expands just the same (measured 2026-10-29: 10.65 s). `is_rational is not
+            # True` so an undetermined base (a stand-in call next to a sum) is routed to
+            # the cap too, the conservative side.
+            irrational_sum_base = base.is_rational is not True and base.has(Add)
             numeric_base = not base.free_symbols and not irrational_sum_base
             if numeric_base:
                 if not isinstance(exponent, Integer):

@@ -1118,6 +1118,12 @@ check("unbounded exponent: x**EulerGamma refused, the accepted false refusal (H2
 check("unbounded exponent: (x+1)**(x*re(3125)) still skipped, a free symbol survives (H2)", explode("(x+1)**(x*re(3125))") is None)
 # H1 again: a bare `x**0` term inside the sum is 1, so `3125+x**0` is the constant 3126.
 check("hidden constant: (x+1)**(3125+x**0) refused by the cap (H1)", says(explode("(x+1)**(3125+x**0)"), CAP_TEXT))
+# H1, value level: terms that cancel only under evaluation (`x - x`, `y*x - x*y`). The
+# first measured 10.05 s end to end before this pass existed (2026-10-29).
+for _expr in ("(x+1)**(3125+x-x)", "(x+1)**(3125+x**2-x**2)", "(x+1)**(3125+y*x-x*y)"):
+    check(f"hidden constant: {_expr} refused by the cap, cancels under evaluation (H1)", says(explode(_expr), CAP_TEXT))
+for _expr in ("(x+1)**(x+3125)", "(x+1)**(3125*y)", "(x+1)**(200+x-x)"):
+    check(f"hidden constant: {_expr} accepted, genuinely symbolic or at the cap (H1)", explode(_expr) is None)
 
 # H3: negative exponents are capped on MAGNITUDE, the same as positive ones.
 for _expr in ("(x+1)**(-3125)", "(x+1)**(-10**5/2**5)", "(x+1)**(-factorial(7)/factorial(3))"):
@@ -1141,6 +1147,10 @@ for _expr in ("(pi+1)**(1/2)", "(pi+1)**(3/2)", "(pi+1)**(-1)"):
 # this fix refused it. Only an irrational SUM base is routed to the cap.
 for _expr in ("pi**1464", "(2*pi)**3125", "E**3125"):
     check(f"irrational base: {_expr} accepted, an atom or product base does not expand (H4)", explode(_expr) is None)
+# A sum NESTED in the base expands the same: `(2*(pi+1))**3125` measured 10.65 s (2026-10-29).
+for _expr in ("(2*(pi+1))**3125", "(-(pi+1))**3125", "((pi+1)/2)**201"):
+    check(f"irrational base: {_expr} refused by the cap, the sum is nested in the base (H4)", says(explode(_expr), CAP_TEXT))
+check("irrational base: (2*(pi+1))**200 accepted at the cap (H4)", explode("(2*(pi+1))**200") is None)
 check(
     "irrational base: 10**5000 still refused by the digit ceiling, not the cap (H4)",
     explode("10**5000") is not None and not says(explode("10**5000"), CAP_TEXT),
