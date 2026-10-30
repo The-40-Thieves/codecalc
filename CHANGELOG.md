@@ -59,6 +59,22 @@ behind it.
 
 ### Fixed
 
+- **The model-driven tool-selection eval is re-baselined on Haiku 5.5.**
+  `scripts/data/tool_select_llm_baseline.json` is regenerated from a 2026-10-29
+  live run of `anthropic/claude-haiku-5-5` and `openai/gpt-4o-mini` over the
+  current 241-prompt corpus (the previous baseline was Haiku 4.5 over 196
+  prompts, so the advisory compare had been reporting "corpus changed" and
+  "no baseline entry" since #355). `docs/tool-selection-eval.md`'s results
+  table is rebuilt from that run's report, names the model generation it
+  measures, and keeps the 2026-09-08 Haiku 4.5 table as labelled history.
+  Measured: Haiku 5.5 top-1 96.7% / 99.5% / 99.2% on full / dev / core, strict
+  top-3 100% on all three; the Haiku 4.5 strict top-3 gap does not recur.
+  Found on the way and fixed: the script cached a call that FAILED (an HTTP
+  401 or a connection error) exactly like a model answer, so one rerun with a
+  bad key poisoned the cache for every later run. A record carrying
+  `tool_error` or `list_error` is no longer written to the cache; a genuine
+  LIST-mode decline (empty list, no error) still is.
+
 - **`doctor --deep` is now bounded by a 180 s wall-clock budget.** Before, the
   per-probe deadlines and the warm retry multiplied: a host where every version
   probe hung could spend 710 s in `doctor --deep`, because nothing bounded the
@@ -70,6 +86,7 @@ behind it.
   under `--deep`. A timed-out first version probe followed by a failed second
   one now says so in `probe_error`. The gVisor prerequisite canary that
   `--deep` also runs is outside this budget.
+
 - **`tool_select_llm_eval.py` defaults to `anthropic/claude-haiku-5-5` and stops sending parameters Claude rejects (#355).**
   Haiku 4.5 is retiring, so its id was replaced as the default. Requests to
   `anthropic/` models no longer send `temperature`, `seed`, `top_p` or `top_k`,
