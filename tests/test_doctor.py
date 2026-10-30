@@ -25,6 +25,7 @@ import os
 import pathlib
 import subprocess
 import sys
+import time
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
@@ -817,6 +818,99 @@ for _r in _real_tested:
 check("--deep against the real host's own tested-tier toolchains stays healthy",
       _real_deep["healthy"] is True,
       f"-> {[(r['name'], r['status'], r.get('probe_error')) for r in _real_tested]}")
+
+
+# ── THE --deep WALL-CLOCK BUDGET BOUNDS THE WHOLE PASS ─────────────────────
+#
+# Before the budget, a host where every version probe hung spent
+# 5x2x25 + 23x2x10 = 710 s in `doctor --deep` (280 s single-attempt): each
+# probe got one warm retry and nothing bounded the total. `doctor` is a CLI
+# subcommand, not an MCP tool, so TOOL_TIMEOUTS never saw it.
+#
+# Every fixture here is an unconditional busy-loop (see the version-probe
+# timeout section above for why not `sleep N`), so only a deadline ends a probe.
+if os.name == "nt":
+    print("SKIP deep-budget fixtures (needs a POSIX shell script)")
+else:
+    _budget_dir = pathlib.Path(_tf.mkdtemp(prefix="codecalc-doctor-test-"))
+    for _cmd in sorted({doctor.primary_command(registry.LANGUAGES[_n], _n)
+                        for _n in registry.LANGUAGES}):
+        (_budget_dir / _cmd).write_text("#!/bin/sh\nwhile true; do :; done\n", encoding="utf-8")
+        (_budget_dir / _cmd).chmod(0o755)
+    registry.runtime_path = lambda: str(_budget_dir)
+    _t0 = time.monotonic()
+    try:
+        budgeted = doctor.report(deep=True, deep_budget_s=3.0)
+    except Exception as exc:  # the red state: no `deep_budget_s` keyword yet
+        budgeted = {"runtimes": [], "error": repr(exc)}
+    finally:
+        registry.runtime_path = _saved_path
+    _wall = time.monotonic() - _t0
+    _brows = budgeted.get("runtimes", [])
+
+    # R1: one shared budget bounds the total, not each probe.
+    check("R1 a 3 s budget bounds a pass where every probe hangs (was 710 s)",
+          _wall < 10.0 and "error" not in budgeted,
+          f"-> {_wall:.1f}s {budgeted.get('error', '')}")
+    check("R1 ...the exhausted budget is disclosed in the report",
+          budgeted.get("deep_budget_exhausted") is True,
+          f"-> {budgeted.get('deep_budget_exhausted')!r}")
+    check("R1 ...and the runtimes it did not probe are counted",
+          budgeted.get("deep_skipped", 0) >= 1, f"-> {budgeted.get('deep_skipped')!r}")
+    _capped = [r for r in _brows if "budget exhausted" in (r.get("probe_error") or "")]
+    check("R1 ...every budget-skipped row stays `installed`, with the budget text",
+          bool(_capped) and all(r["status"] == "installed" for r in _capped),
+          f"-> {[(r['name'], r['status']) for r in _capped][:5]}")
+    check("R1 ...and an exhausted budget costs no `unhealthy` and no `healthy`",
+          budgeted.get("healthy") is True
+          and not any(r["status"] == "unhealthy" for r in _brows),
+          f"-> healthy={budgeted.get('healthy')!r}")
+
+    # R2: a `tested` hello language that the budget skipped is not demoted.
+    _thello = [r for r in _brows if r.get("tier") == "tested" and r["name"] in doctor._HELLO]
+    check("R2 a `tested` hello-world language is present to check", bool(_thello),
+          f"-> {[r['name'] for r in _brows if r.get('tier') == 'tested']}")
+    check("R2 ...and the budget skipping its hello run leaves it `installed`",
+          bool(_thello) and all(r["status"] == "installed" for r in _thello),
+          f"-> {[(r['name'], r['status'], r.get('probe_error')) for r in _thello]}")
+
+    _shutil_budget = __import__("shutil")
+    _shutil_budget.rmtree(_budget_dir, ignore_errors=True)
+
+    # R3: a timed-out first attempt followed by a non-zero second attempt says
+    # so, because a reader would otherwise take the second message for the
+    # whole story.
+    _suffix_dir = pathlib.Path(_tf.mkdtemp(prefix="codecalc-doctor-test-"))
+    _suffix_marker = _suffix_dir / ".called"
+    _fake_java_retry = _suffix_dir / "java"
+    _fake_java_retry.write_text(
+        f'#!/bin/sh\n'
+        f'if [ ! -f "{_suffix_marker}" ]; then\n'
+        f'  /usr/bin/touch "{_suffix_marker}"\n'
+        f'  while true; do :; done\n'
+        f'fi\n'
+        f'echo "Unable to locate a Java Runtime." >&2\nexit 1\n', encoding="utf-8")
+    _fake_java_retry.chmod(0o755)
+    _prev_probe_timeouts = doctor._PROBE_TIMEOUT_S
+    doctor._PROBE_TIMEOUT_S = {**_prev_probe_timeouts, "java": 1.0}
+    try:
+        _v, _e, _h, _t, _ms = doctor._probe_version("java", str(_fake_java_retry))
+    finally:
+        doctor._PROBE_TIMEOUT_S = _prev_probe_timeouts
+    check("R3 a timed-out first attempt then a non-zero second says so in probe_error",
+          bool(_e) and _e.endswith("(after a timed-out first attempt)"),
+          f"-> {_e!r}")
+    _shutil_budget.rmtree(_suffix_dir, ignore_errors=True)
+
+# R4: the default path is unchanged: the budget is the documented 180 s, and the
+# real host's own --deep pass fits inside it.
+check("R4 the default deep budget is 180 s", doctor.DEEP_BUDGET_S == 180.0,
+      f"-> {doctor.DEEP_BUDGET_S!r}")
+check("R4 the real-host --deep pass is not budget-limited",
+      _real_deep.get("deep_budget_exhausted") is False
+      and _real_deep.get("deep_budget_s") == 180.0,
+      f"-> exhausted={_real_deep.get('deep_budget_exhausted')!r} "
+      f"budget={_real_deep.get('deep_budget_s')!r}")
 
 
 # ── UNWRITABLE WORKSPACE — the one failure that IS unhealthy ───────────────

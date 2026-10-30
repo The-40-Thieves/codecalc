@@ -45,7 +45,9 @@ A version probe that merely TIMED OUT is deliberately NOT folded into that
 same claim, and this is true of EVERY command, not a rustc-specific carve-
 out: `report()`'s trust rule stopped treating a timeout as evidence for any
 `_VERSION_FLAG` entry, and `_probe_version`'s retry runs for every command it
-probes. Four separate hosted-runner failures on 2026-09-08 (cold
+probes, and the whole `--deep` pass is capped by `DEEP_BUDGET_S` (180 s),
+shared across all of them, so the retry cannot multiply into an unbounded
+wait. Four separate hosted-runner failures on 2026-09-08 (cold
 `windows-latest` images, main among them) prove exactly that breadth: three
 were `rustc --version` exceeding the probe's own deadline because the FIRST
 invocation on such a host goes through the rustup proxy — an arg-forwarding
@@ -392,12 +394,30 @@ def _disk_quota() -> dict:
     }
 
 
-def report(deep: bool = False) -> dict:
+def _budget_spent(deadline: float | None) -> bool:
+    return deadline is not None and time.monotonic() >= deadline
+
+
+def _hello_timeout(deadline: float | None) -> int:
+    """The hello-world run's own 20 s ceiling, cut to what the budget has left."""
+    if deadline is None:
+        return 20
+    return min(20, max(1, int(deadline - time.monotonic())))
+
+
+def report(deep: bool = False, deep_budget_s: float | None = None) -> dict:
     """Everything `doctor` knows, as data.
 
     `deep=True` executes each resolved runtime to promote it to `available` or
     demote it to `unhealthy`. Off by default: 31 runtimes is not a diagnostic,
     it is a build.
+
+    `deep=True` is bounded by ONE wall-clock budget for the whole pass,
+    `deep_budget_s` (default `DEEP_BUDGET_S`), not per probe. Once it is spent,
+    the remaining probes and hello-world runs are skipped and reported as not
+    probed: they stay `installed` and are never demoted for it, because a
+    skipped check is not evidence about the runtime. `deep_budget_exhausted`
+    and `deep_skipped` say when that happened.
     """
     backend = executor.backend()
     abi = landlock.abi_version()
@@ -415,6 +435,10 @@ def report(deep: bool = False) -> dict:
         })
 
     langs = [name for name in sorted(registry.LANGUAGES) if name not in ALIAS_ENTRIES]
+    budget_s = DEEP_BUDGET_S if deep_budget_s is None else deep_budget_s
+    deep_start = time.monotonic()
+    deadline = deep_start + budget_s if deep else None
+    budget_skipped = 0
     runtimes = []
     for name in langs:
         cmd = primary_command(registry.LANGUAGES[name], name)
@@ -465,10 +489,12 @@ def report(deep: bool = False) -> dict:
         # `tier: best_effort` (no CI job checks it) — that combination is
         # exactly "works here, but nothing stops it silently breaking".
         version, probe_error, probe_hard_failure, probe_timed_out, probe_ms = (
-            _probe_version(cmd, path) if deep and status == "installed"
+            _probe_version(cmd, path, deadline=deadline) if deep and status == "installed"
             else (None, None, False, False, None))
         row = {"name": name, "command": cmd, "status": status, "path": path,
                "tier": tier, "version": version}
+        if probe_error and _BUDGET_TAG in probe_error:
+            budget_skipped += 1
         if missing_secondary:
             row["detail"] = (f"{cmd!r} resolves, but {name}'s run step also "
                              f"needs {missing_secondary!r}, which was not "
@@ -502,8 +528,12 @@ def report(deep: bool = False) -> dict:
             # is what makes a TIMED-OUT version probe safe below: a hello
             # language's status never even reads `probe_timed_out` — its own
             # run is the only thing that can demote it.
-            if name in _HELLO:
-                probe = executor.execute(name, _HELLO[name], timeout=20)
+            if name in _HELLO and _budget_spent(deadline):
+                # Skipped, not run, and not demoted: `status` stays `installed`.
+                budget_skipped += 1
+                row.setdefault("probe_error", f"{name} hello-world run: not run, {_BUDGET_TAG}")
+            elif name in _HELLO:
+                probe = executor.execute(name, _HELLO[name], timeout=_hello_timeout(deadline))
                 ran = probe.get("ok") is True and "codecalc" in (probe.get("stdout") or "")
                 row["status"] = "available" if ran else "unhealthy"
                 if not ran:
@@ -563,6 +593,7 @@ def report(deep: bool = False) -> dict:
                 # human to see WHY, without it driving `status` on a guess.
         runtimes.append(row)
 
+    deep_elapsed_ms = (time.monotonic() - deep_start) * 1000 if deep else None
     summary = {state: sum(1 for r in runtimes if r["status"] == state)
                for state in RUNTIME_STATES}
     # the reliability-tier mirror of `summary` above. Same shape,
@@ -672,6 +703,13 @@ def report(deep: bool = False) -> dict:
         "workspace": workspace,
         "skill_file": _skill_path(),
         "remedies": _remedies(backend, extras, runtimes, workspace),
+        # The --deep budget, disclosed. `deep_budget_s` is None unless --deep
+        # ran; the other three are always present so a reader never branches
+        # on a key's existence.
+        "deep_budget_s": budget_s if deep else None,
+        "deep_elapsed_ms": deep_elapsed_ms,
+        "deep_budget_exhausted": budget_skipped > 0,
+        "deep_skipped": budget_skipped,
     }
 
 
@@ -817,6 +855,19 @@ _NO_VERSION = frozenset({"escript", "tclsh"})
 #: commands in `_PROBE_TIMEOUT_S` below on a cold host.
 _DEFAULT_PROBE_TIMEOUT_S = 10.0
 
+#: The wall-clock budget for one `report(deep=True)` pass, shared by every
+#: version probe and hello-world run in it. Without it the worst case is
+#: 5x2x25 + 23x2x10 = 710 s on a host where every probe hangs (280 s with one
+#: attempt each): the per-probe deadlines and the warm retry multiply, and
+#: nothing bounded the total. When the budget runs out, the rest of the pass
+#: is reported as not probed, never as broken; `report()` says how much was
+#: skipped in `deep_skipped`. `report(deep_budget_s=...)` overrides it for a
+#: caller that needs a different bound; there is no env var or CLI flag.
+DEEP_BUDGET_S = 180.0
+
+#: The text a probe skipped by an exhausted budget carries in `probe_error`.
+_BUDGET_TAG = "doctor --deep budget exhausted"
+
 #: Per-command override of `_DEFAULT_PROBE_TIMEOUT_S`, for commands whose
 #: FIRST invocation on a cold host routes through a slow-start proxy rather
 #: than the real binary — the 10s default is a real deadline for a warm
@@ -859,7 +910,7 @@ _PROBE_TIMEOUT_S: dict[str, float] = {
 }
 
 
-def _probe_version(command: str, path: str | None) -> (
+def _probe_version(command: str, path: str | None, deadline: float | None = None) -> (
         tuple[str | None, str | None, bool, bool, float | None]):
     """`(version, probe_error, hard_failure, timed_out, probe_ms)`.
 
@@ -923,6 +974,13 @@ def _probe_version(command: str, path: str | None) -> (
     human re-running `--deep` by hand); it is `None` only when no attempt was
     made at all (no path, or `command` has no version flag worth calling).
 
+    `deadline` is a `time.monotonic()` instant: `report()`'s shared --deep
+    budget. Each attempt gets `min(its timeout, time left)`, and no attempt
+    starts once the budget is spent. A probe stopped that way returns
+    `timed_out=True` with `_BUDGET_TAG` in `probe_error`, so it is not evidence
+    against the runtime, exactly like a timeout. The retry needs at least a
+    second of budget left, or it is skipped.
+
     Runs under the executor's 23-entry env allowlist rather than the doctor
     process's own environment. This is a diagnostic, but it is still spawning
     host binaries, and there is no reason for `gcc --version` to see an API key.
@@ -933,22 +991,38 @@ def _probe_version(command: str, path: str | None) -> (
     timeout_s = _PROBE_TIMEOUT_S.get(command, _DEFAULT_PROBE_TIMEOUT_S)
     start = time.monotonic()
     proc = None
+    attempts = 0
+    first_timed_out = False
     for attempt in range(2):
+        left = None if deadline is None else deadline - time.monotonic()
+        if left is not None and left <= 0:
+            # The shared --deep budget is spent: never spawn, and never blame
+            # the runtime. `timed_out` is True so report()'s rule applies: a
+            # timeout is not evidence, so no row is demoted for the budget.
+            probe_ms = (time.monotonic() - start) * 1000 if attempts else None
+            return None, f"{command} {flag}: not probed, {_BUDGET_TAG}", False, True, probe_ms
+        attempt_timeout = timeout_s if left is None else min(timeout_s, left)
+        attempts += 1
         try:
             proc = subprocess.run(
                 [path, flag],
-                capture_output=True, timeout=timeout_s, env=executor._env(), check=False,
+                capture_output=True, timeout=attempt_timeout, env=executor._env(), check=False,
             )
             break
         except subprocess.TimeoutExpired:
-            if attempt == 0:
-                # One retry only: a slow-start proxy is warm by its second
-                # call, and a third attempt would only double the cost paid
-                # by a command that is genuinely hung.
+            left = None if deadline is None else deadline - time.monotonic()
+            # One retry only, and only with a second of budget to spend on it:
+            # a slow-start proxy is warm by its second call, and a third
+            # attempt would only double the cost paid by a command that is
+            # genuinely hung.
+            if attempt == 0 and (left is None or left >= 1.0):
+                first_timed_out = True
                 continue
             probe_ms = (time.monotonic() - start) * 1000
+            plural = "s" if attempts > 1 else ""
             return (None,
-                    f"{command} {flag} timed out after {timeout_s:g}s (2 attempts)",
+                    (f"{command} {flag} timed out after {attempt_timeout:g}s "
+                     f"({attempts} attempt{plural})"),
                     False, True, probe_ms)
         except (OSError, subprocess.SubprocessError) as exc:
             # A resolved path that fails to even SPAWN (permission revoked,
@@ -978,7 +1052,12 @@ def _probe_version(command: str, path: str | None) -> (
         # is a SOFT failure (it ran); `hard_failure=False` regardless of
         # `command` — the caller is the one that knows whether this
         # `command`'s flag is trusted, not this function.
-        return None, text or f"{command} {flag} exited {proc.returncode}", False, False, probe_ms
+        # After a timed-out first attempt, the second attempt's exit is what
+        # the reader sees; say that the first attempt hung, or it reads as a
+        # plain failure of a warm runtime.
+        suffix = " (after a timed-out first attempt)" if first_timed_out else ""
+        return (None, (text or f"{command} {flag} exited {proc.returncode}") + suffix,
+                False, False, probe_ms)
     # First non-empty line, capped. Some runtimes print a paragraph (gcc
     # prints its licence), and the report is a diagnostic, not a transcript.
     return (text[:120] or None), None, False, False, probe_ms
