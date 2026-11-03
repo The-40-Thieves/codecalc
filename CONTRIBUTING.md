@@ -220,3 +220,7 @@ artifacts.
 ## Reporting security issues
 
 Do not open a public issue. See [SECURITY.md](SECURITY.md).
+
+## Releases
+
+Tags, GitHub Releases and what the product page at <https://the40thieves.dev/codecalc/> reads: see [RELEASING.md](RELEASING.md).
