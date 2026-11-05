@@ -1,0 +1,26 @@
+# Publishes docs/ to https://the40thieves.dev/codecalc/docs/ through the org's reusable workflow
+# (The-40-Thieves/.github, docs-template). Pinned to a commit of that repository; bump the sha to
+# pick up template changes.
+name: docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - docs/**
+      - .github/workflows/docs.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  docs:
+    uses: The-40-Thieves/.github/.github/workflows/docs-deploy.yml@6d4a57828adedee615ccffb8c94eba0154dbffe3 # 6d4a578
+    with:
+      project: codecalc
+      docs-path: docs
+      title: codecalc
+    secrets:
+      cloudflare-api-token: ${{ secrets.CLOUDFLARE_DOCS_API_TOKEN }}
+      cloudflare-account-id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

@@ -1,0 +1,18 @@
+{
+  "$schema": "https://the40thieves.dev/schemas/hub.json",
+  "tagline": "A calculator, a code runner and a logic checker for AI agents: 51 MCP tools across 31 languages, sandboxed in Rust, no LLM in the loop.",
+  "claim": {
+    "text": "51 MCP tools across 31 language runtimes, enforced against the README by check_claims.py in CI.",
+    "source": "https://github.com/The-40-Thieves/codecalc/blob/main/docker/mcp-catalog/tools.json",
+    "measured_on": "2026-11-02"
+  },
+  "install": {
+    "shell": "uvx 'codecalc[full]' setup --write",
+    "claude-code": "claude mcp add codecalc -- uvx 'codecalc[full]'",
+    "cursor": "{ \"mcpServers\": { \"codecalc\": { \"command\": \"uvx\", \"args\": [\"codecalc[full]\"] } } }",
+    "vscode": "{ \"servers\": { \"codecalc\": { \"command\": \"uvx\", \"args\": [\"codecalc[full]\"] } } }"
+  },
+  "docs": "docs/",
+  "docs_site": true,
+  "listed": true
+}
