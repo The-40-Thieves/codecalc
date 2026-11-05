@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   docs:
-    uses: The-40-Thieves/.github/.github/workflows/docs-deploy.yml@5f7a78dab447c9b11cf0c7b2ea8d41e3304cb628 # 5f7a78d
+    uses: The-40-Thieves/.github/.github/workflows/docs-deploy.yml@6d4a57828adedee615ccffb8c94eba0154dbffe3 # 6d4a578
     with:
       project: codecalc
       docs-path: docs
