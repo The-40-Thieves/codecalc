@@ -13,5 +13,6 @@
     "vscode": "{ \"servers\": { \"codecalc\": { \"command\": \"uvx\", \"args\": [\"codecalc[full]\"] } } }"
   },
   "docs": "docs/",
+  "docs_site": true,
   "listed": true
 }
