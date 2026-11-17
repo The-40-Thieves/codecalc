@@ -1,6 +1,7 @@
-# Publishes docs/ to https://the40thieves.dev/codecalc/docs/ through the org's reusable workflow
-# (The-40-Thieves/.github, docs-template). Pinned to a commit of that repository; bump the sha to
-# pick up template changes.
+# Publishes docs/ as a Mintlify site to this repository's `docs-site` branch through the org's
+# reusable workflow (The-40-Thieves/.github, docs-template). The docs hub pulls that branch in
+# under https://docs.the40thieves.dev/codecalc/. Pinned to a commit of that repository; bump the
+# sha to pick up template changes. docs/superpowers is left out by the template's default.
 name: docs
 
 on:
@@ -16,11 +17,15 @@ permissions:
 
 jobs:
   docs:
-    uses: The-40-Thieves/.github/.github/workflows/docs-deploy.yml@0ecf2ca9a6c7a4d7ea7ce79723b60bfd5a75229d # 0ecf2ca
+    # The reusable workflow's publish job pushes the docs-site branch.
+    permissions:
+      contents: write
+    uses: The-40-Thieves/.github/.github/workflows/docs-mintlify.yml@c2474e9bc3d12b747148c35d030f3075ae28607e # c2474e9
     with:
       project: codecalc
       docs-path: docs
       title: codecalc
+      description: A calculator, a code runner and a logic checker for AI agents.
     secrets:
-      cloudflare-api-token: ${{ secrets.CLOUDFLARE_DOCS_API_TOKEN }}
-      cloudflare-account-id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      # Optional: starts the docs hub sync at once. Without it the hub syncs hourly.
+      docs-hub-dispatch-token: ${{ secrets.DOCS_HUB_DISPATCH_TOKEN }}
