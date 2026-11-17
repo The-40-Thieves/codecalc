@@ -1,0 +1,65 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "codecalc",
+  "description": "A calculator, a code runner and a logic checker for AI agents.",
+  "colors": {
+    "primary": "#7C3AED",
+    "light": "#A78BFA",
+    "dark": "#6D28D9"
+  },
+  "navigation": {
+    "groups": [
+      {
+        "group": "Overview",
+        "pages": [
+          "index"
+        ]
+      },
+      {
+        "group": "Guides",
+        "pages": [
+          "distribution",
+          "embedding",
+          "tool-selection-eval"
+        ]
+      },
+      {
+        "group": "Contract",
+        "pages": [
+          "contract/index",
+          "contract/provider-v1"
+        ]
+      },
+      {
+        "group": "Deployment",
+        "pages": [
+          "deployment/index"
+        ]
+      },
+      {
+        "group": "Design",
+        "pages": [
+          "design/2026-08-10-tool-facade",
+          "design/2026-08-19-extension-sdk",
+          "design/2026-09-08-branch-reachability",
+          "design/2026-09-08-mcp-apps-verification-views",
+          "design/2026-10-27-self-updating-runtimes"
+        ]
+      },
+      {
+        "group": "Extensions",
+        "pages": [
+          "extensions/index"
+        ]
+      },
+      {
+        "group": "Security",
+        "pages": [
+          "security/audit-2026-08-21",
+          "security/ostif-application"
+        ]
+      }
+    ]
+  }
+}
