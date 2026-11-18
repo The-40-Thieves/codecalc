@@ -35,6 +35,29 @@ behind it.
 
 ### Security
 
+- **Four more ways past the symbolic exponent cap (200) are closed.** Each
+  shape below used to burn `evaluate_expression`'s whole 10 s CPU budget and
+  is now refused in well under a second. (1) A constant hidden behind a free
+  symbol: `(x+1)**(3125+0*x)`, `(x+1)**(10**5/2**5*x**0)`, `(x+1)**(3125+x**0)`.
+  The trivially-zero parts (`0*x`, `x**0`) are stripped first, then the
+  exponent's `Add`/`Mul` layers are re-evaluated so `3125+x-x` and
+  `3125+y*x-x*y` cancel (never `Pow`), and the residual is capped on its
+  value; an exponent that still carries a free symbol (`(x+1)**(x+3125)`) is
+  genuinely symbolic and stays accepted. (2) An exponent
+  the screen cannot bound: `(x+1)**(re(3125))`, `(x+1)**(3125*I**4)`,
+  `(x+1)**(bell(7)*I)`. "Inconclusive" no longer means "safe": unless SymPy's
+  own assumptions prove the exponent non-integer (`x**pi`, `x**E`, `x**I`,
+  `x**cos(1)`, `x**(1/2)` all stay accepted, since a non-integer power is never
+  binomially expanded), it fails closed with a new message, "a symbolic power
+  whose exponent could not be bounded is treated as over the limit of 200".
+  Accepted cost: `x**EulerGamma` is refused too. (3) A large negative exponent:
+  `(x+1)**(-3125)`, `(x+1)**(-201)`, `(x+1)**(-bell(7))`. The cap now bounds the
+  magnitude for either sign; `(x+1)**(-200)` is still accepted. (4) An
+  irrational numeric base, which expands exactly like a symbolic one:
+  `(pi+1)**3125`, `(E+2)**201`, `(sqrt(2)+1)**201`, `(pi+1)**(10**5/2**5)`,
+  and with the sum nested, `(2*(pi+1))**3125`; `(pi+1)**200`, `(pi+1)**(3/2)`
+  and an atom base such as `pi**1464` stay accepted.
+
 - **A symbolic power whose exponent cancels to an integer over 200 is now
   refused.** `(x+1)**(10**5/2**5)`, which is `(x+1)**3125`, used to get past the
   200 symbolic exponent cap and run `evaluate_expression` to its 10 s CPU limit;

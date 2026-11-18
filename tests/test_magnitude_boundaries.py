@@ -25,6 +25,7 @@ from fractions import Fraction
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
+from codecalc import logic
 from codecalc import safe_expr as se
 
 FAILS = []
@@ -888,7 +889,13 @@ check(
     == f"a symbolic power with an exponent of about 3 digits exceeds the limit of {se.MAX_SYMBOLIC_EXPONENT}: "
     "expanding it is superlinear in the exponent",
 )
-check("reject2: (x+1)**(-201) accepted: a negative exponent is not expanded", explode("(x+1)**(-201)") is None)
+# Flipped 2026-10-29: `evaluate_expression` expands `(x+1)**(-201)` as expensively as
+# `(x+1)**201` (both measured at the 10 s CPU limit), so the cap now bounds the magnitude
+# for either sign. See the "negative exponent" block below for the boundary itself.
+check(
+    "reject2: (x+1)**(-201) refused: a negative exponent is expanded just the same",
+    says(explode("(x+1)**(-201)"), f"exceeds the limit of {se.MAX_SYMBOLIC_EXPONENT}"),
+)
 
 
 # A benign node visited before the symbolic power must not end the walk: each of
@@ -913,8 +920,15 @@ _benign = {
     "2**1": "2**1",
     "(x+1)**(1/10**300)": "(x+1)**(1/10**300)",
     "(x+1)**(-1)": "(x+1)**(-1)",
-    "(x+1)**(bell(3)*I)": "(x+1)**(bell(3)*I)",
+    "(x+1)**(pi/2)": "(x+1)**(pi/2)",
 }
+# `(x+1)**(bell(3)*I)` used to sit in this benign list: an inconclusive exponent was skipped.
+# Since 2026-10-29 an exponent that cannot be bounded and is not provably non-integer fails
+# closed, so it is refused on its own before the walk reaches anything else.
+check(
+    "reject2: (x+1)**(bell(3)*I) refused on its own: an unbounded exponent is no longer skipped",
+    says(explode("(x+1)**(bell(3)*I)"), "could not be bounded"),
+)
 for _label, _expr in _benign.items():
     check(
         f"reject2: {_label} before a symbolic power: the walk still reaches the power",
@@ -927,8 +941,16 @@ check(
     "reject2: (x+1)**bell(7) refused on the untrusted-multiset path",
     says(explode("(x+1)**bell(7)"), "a symbolic power with an exponent of about"),
 )
-check("reject2: (x+1)**(-bell(7)) accepted: the sign is negative", explode("(x+1)**(-bell(7))") is None)
-check("reject2: (x+1)**(bell(7)*I) skipped: an inconclusive exponent", explode("(x+1)**(bell(7)*I)") is None)
+# Both flipped 2026-10-29: the cap bounds the magnitude for either sign, and an exponent
+# that cannot be bounded (and is not provably non-integer) fails closed instead of skipping.
+check(
+    "reject2: (x+1)**(-bell(7)) refused: the negative sign no longer exempts it",
+    says(explode("(x+1)**(-bell(7))"), "a symbolic power with an exponent of about"),
+)
+check(
+    "reject2: (x+1)**(bell(7)*I) refused: an inconclusive exponent fails closed",
+    says(explode("(x+1)**(bell(7)*I)"), "could not be bounded"),
+)
 
 # ---------------------------------------------------------------- coprime refinement: cost, property, rounds
 
@@ -1055,6 +1077,121 @@ check(
     "table sign: -bell(7) reads as negative, bell(7) does not",
     se._table_product_is_negative(tree("-bell(7)")) and not se._table_product_is_negative(tree("bell(7)")),
 )
+
+# ---------------------------------------------------------------- symbolic-exponent cap: four bypasses
+
+# Each shape burned the full 10 s CPU budget in `logic.evaluate_expression` before the fix
+# (measured 2026-10-22). Refused on the deferred tree, which is the tree `safe_parse` runs first.
+UNBOUNDED_TEXT = f"exponent could not be bounded is treated as over the limit of {se.MAX_SYMBOLIC_EXPONENT}"
+
+# H1: a constant exponent hidden behind zero-valued symbolic terms. Judged on its VALUE: the zero
+# parts are stripped, and a residual that still has a free symbol stays on the symbolic skip.
+for _expr in ("(x+1)**(3125+0*x)", "(x+1)**(10**5/2**5*x**0)"):
+    check(f"hidden constant: {_expr} refused by the cap (H1)", says(explode(_expr), CAP_TEXT))
+check("hidden constant: (x+1)**(200+0*x) accepted at the cap (H1)", explode("(x+1)**(200+0*x)") is None)
+check(
+    "hidden constant: (x+1)**(201+0*x) refused just past the cap (H1)",
+    says(explode("(x+1)**(201+0*x)"), CAP_TEXT),
+)
+for _expr in ("(x+1)**(x+3125)", "(x+1)**(3125*y)"):
+    check(f"hidden constant: {_expr} still skipped, a free symbol survives (H1)", explode(_expr) is None)
+
+# H2: an exponent that cannot be bounded and has no free symbol is refused, not skipped.
+for _expr in (
+    "(x+1)**(re(3125))",
+    "(x+1)**(3125*I**4)",
+):
+    check(f"unbounded exponent: {_expr} refused with the H2 message (H2)", says(explode(_expr), UNBOUNDED_TEXT))
+# These three resolve to 3125 through the cap's own bound (the cap text, not the H2 message), so the
+# assertion is the refusal itself: with the fix they are no longer accepted.
+for _expr in ("(x+1)**(exp(0)*3125)", "(x+1)**(log(E)*3125)", "(x+1)**(Abs(-3125)*1)"):
+    check(f"unbounded exponent: {_expr} refused (H2)", explode(_expr) is not None)
+check(
+    "unbounded exponent: (x+1)**(3125*cos(0)) stays refused by the cap, cos(0) resolves to 1 (H2)",
+    says(explode("(x+1)**(3125*cos(0))"), CAP_TEXT),
+)
+# An exponent SymPy can prove non-integer is cheap whatever its size: no binomial expansion.
+for _expr in ("x**pi", "x**E", "(x+1)**I", "x**(log(2))", "(x+1)**cos(1)", "x**(pi/2)"):
+    check(f"unbounded exponent: {_expr} accepted, provably non-integer (H2)", explode(_expr) is None)
+# Accepted cost: a benign constant that is neither boundable nor provably non-integer.
+check("unbounded exponent: x**EulerGamma refused, the accepted false refusal (H2)", says(explode("x**EulerGamma"), UNBOUNDED_TEXT))
+check("unbounded exponent: (x+1)**(x*re(3125)) still skipped, a free symbol survives (H2)", explode("(x+1)**(x*re(3125))") is None)
+# H1 again: a bare `x**0` term inside the sum is 1, so `3125+x**0` is the constant 3126.
+check("hidden constant: (x+1)**(3125+x**0) refused by the cap (H1)", says(explode("(x+1)**(3125+x**0)"), CAP_TEXT))
+# H1, value level: terms that cancel only under evaluation (`x - x`, `y*x - x*y`). The
+# first measured 10.05 s end to end before this pass existed (2026-10-29).
+for _expr in ("(x+1)**(3125+x-x)", "(x+1)**(3125+x**2-x**2)", "(x+1)**(3125+y*x-x*y)",
+              "(x+1)**(3125+(x-x)**2)", "(x+1)**(3125+(y*x-x*y)**3)", "(x+1)**(3125+x/x)"):
+    check(f"hidden constant: {_expr} refused by the cap, cancels under evaluation (H1)", says(explode(_expr), CAP_TEXT))
+for _expr in ("(x+1)**(x+3125)", "(x+1)**(3125*y)", "(x+1)**(200+x-x)"):
+    check(f"hidden constant: {_expr} accepted, genuinely symbolic or at the cap (H1)", explode(_expr) is None)
+
+# H3: negative exponents are capped on MAGNITUDE, the same as positive ones.
+for _expr in ("(x+1)**(-3125)", "(x+1)**(-10**5/2**5)", "(x+1)**(-factorial(7)/factorial(3))"):
+    check(f"negative exponent: {_expr} refused by the cap (H3)", says(explode(_expr), CAP_TEXT))
+check("negative exponent: (x+1)**(-200) accepted at the cap (H3)", explode("(x+1)**(-200)") is None)
+check("negative exponent: (x+1)**(-201) refused just past the cap (H3)", says(explode("(x+1)**(-201)"), CAP_TEXT))
+
+# H4: an irrational numeric base is a symbolic base as far as expansion cost goes.
+for _expr in ("(pi+1)**3125", "(E+2)**201", "(sqrt(2)+1)**201"):
+    check(f"irrational base: {_expr} refused by the cap (H4)", says(explode(_expr), CAP_TEXT))
+for _expr in ("(pi+1)**200", "(E+2)**200", "(sqrt(2)+1)**200"):
+    check(f"irrational base: {_expr} accepted at the cap (H4)", explode(_expr) is None)
+check("irrational base: resolved numeric base 2**1000 still accepted (H4)", explode("2**1000") is None)
+# The irrational base is routed to the cap for a COMPOUND exponent too, not only a bare Integer.
+for _expr in ("(pi+1)**(10**5/2**5)", "(sqrt(2)+1)**(201/1)", "(pi+1)**(-201)"):
+    check(f"irrational base: {_expr} refused by the cap, compound or negative exponent (H4)", says(explode(_expr), CAP_TEXT))
+for _expr in ("(pi+1)**(1/2)", "(pi+1)**(3/2)", "(pi+1)**(-1)"):
+    check(f"irrational base: {_expr} accepted, a fractional or trivial exponent is cheap (H4)", explode(_expr) is None)
+# An irrational ATOM base has no sum to expand: `pi**1464` is what `polygamma(1463, 1)`
+# evaluates to (tests/test_bug_sweep.py keeps that end-to-end case), and a first cut of
+# this fix refused it. Only an irrational SUM base is routed to the cap.
+for _expr in ("pi**1464", "(2*pi)**3125", "E**3125"):
+    check(f"irrational base: {_expr} accepted, an atom or product base does not expand (H4)", explode(_expr) is None)
+# A sum NESTED in the base expands the same: `(2*(pi+1))**3125` measured 10.65 s (2026-10-29).
+for _expr in ("(2*(pi+1))**3125", "(-(pi+1))**3125", "((pi+1)/2)**201"):
+    check(f"irrational base: {_expr} refused by the cap, the sum is nested in the base (H4)", says(explode(_expr), CAP_TEXT))
+check("irrational base: (2*(pi+1))**200 accepted at the cap (H4)", explode("(2*(pi+1))**200") is None)
+check(
+    "irrational base: 10**5000 still refused by the digit ceiling, not the cap (H4)",
+    explode("10**5000") is not None and not says(explode("10**5000"), CAP_TEXT),
+)
+
+# Both trees: `safe_parse` runs the deferred pass first, then the real-tree pass. One case per hole.
+for _expr, _text in (
+    ("(x+1)**(3125+0*x)", CAP_TEXT),
+    ("(x+1)**(re(3125))", UNBOUNDED_TEXT),
+    ("(x+1)**(-3125)", CAP_TEXT),
+    ("(pi+1)**3125", CAP_TEXT),
+):
+    _got = se.safe_parse(_expr)
+    check(
+        f"public path: safe_parse refuses {_expr} (both trees)",
+        _got[0] is None and _got[1] is not None and says(_got[1][1], _text),
+        f"-> {_got[1]}",
+    )
+
+
+def timed_evaluate(expr):
+    """Wall seconds and the result of `logic.evaluate_expression` on `expr`."""
+    _t0 = time.perf_counter()
+    _r = logic.evaluate_expression(expr)
+    return time.perf_counter() - _t0, _r
+
+
+# End to end, through the guarded child process: a refusal, and a fast one.
+for _expr, _text in (
+    ("(x+1)**(3125+0*x)", CAP_TEXT),
+    ("(x+1)**(re(3125))", UNBOUNDED_TEXT),
+    ("(x+1)**(-3125)", CAP_TEXT),
+    ("(pi+1)**3125", CAP_TEXT),
+):
+    _secs, _r = timed_evaluate(_expr)
+    check(
+        f"end-to-end: {_expr} refused in under 1.0 s",
+        _r.get("ok") is False and _text in str(_r.get("error", "")) and _secs < 1.0,
+        f"-> {_secs:.2f}s ok={_r.get('ok')} code={_r.get('code')}",
+    )
 
 # ---------------------------------------------------------------- output and timing
 
